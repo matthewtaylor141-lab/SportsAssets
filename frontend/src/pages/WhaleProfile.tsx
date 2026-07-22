@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { EmptyState } from '../components/EmptyState'
 import { EquityCurve } from '../components/EquityCurve'
+import { PnlCalendar } from '../components/PnlCalendar'
 import { SportDonut } from '../components/SportDonut'
 import { TradeRow } from '../components/TradeRow'
-import { api } from '../lib/api'
+import { API_BASE, api } from '../lib/api'
 import { fmtPct, fmtSignedUsd, fmtUsd, shortAddr } from '../lib/format'
 import type { WhaleProfile as Profile } from '../lib/types'
 
@@ -24,20 +25,29 @@ export function WhaleProfile() {
   if (error) return <EmptyState>Whale not found.</EmptyState>
   if (!profile) return <EmptyState>Loading profile…</EmptyState>
 
-  const { whale, stats, open_positions, recent_trades, equity_curve, sport_mix } = profile
+  const { whale, stats, summary, open_positions, recent_trades, equity_curve, daily, sport_mix } =
+    profile
   const rows = stats.filter((s) => s.window === win)
-  const allTime = stats.filter((s) => s.window === 'all')
-  const totalRealized = allTime.reduce((a, s) => a + s.realized_pnl, 0)
-  const totalExposure = allTime.reduce((a, s) => a + s.open_exposure, 0)
+  const openValue = open_positions.reduce((a, p) => a + (p.exposure || 0), 0)
+  const reportUrl = (period: string) => `${API_BASE}/api/whales/${whale.id}/report.pdf?period=${period}`
 
   return (
     <>
-      <h1>
-        {whale.username || 'anonymous'}{' '}
-        <span className="mono" style={{ fontWeight: 400, color: 'var(--muted)' }}>
-          {shortAddr(whale.address)}
-        </span>
-      </h1>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+        <h1 style={{ marginBottom: 0 }}>
+          {whale.username || 'anonymous'}{' '}
+          <span className="mono" style={{ fontWeight: 400, color: 'var(--muted)' }}>
+            {shortAddr(whale.address)}
+          </span>
+        </h1>
+        <span style={{ flex: 1 }} />
+        <a className="btn" href={reportUrl('weekly')}>
+          ⤓ Weekly PDF
+        </a>
+        <a className="btn" href={reportUrl('monthly')}>
+          ⤓ Monthly PDF
+        </a>
+      </div>
       <p className="sub">
         Leaderboard rank #{whale.source_rank ?? '—'} · tracked since{' '}
         {new Date(whale.added_at).toLocaleDateString()}
@@ -46,17 +56,46 @@ export function WhaleProfile() {
 
       <div className="statgrid" style={{ marginBottom: 12 }}>
         <div className="stat">
-          <div className="label">Realized P&L (tracked)</div>
-          <div className={`value ${totalRealized >= 0 ? 'pos' : 'neg'}`}>{fmtSignedUsd(totalRealized)}</div>
+          <div className="label">Realized P&L</div>
+          <div className={`value ${summary.realized_pnl >= 0 ? 'pos' : 'neg'}`}>
+            {fmtSignedUsd(summary.realized_pnl)}
+          </div>
         </div>
         <div className="stat">
-          <div className="label">Open exposure</div>
-          <div className="value">{fmtUsd(totalExposure)}</div>
+          <div className="label">% earned</div>
+          <div className={`value ${(summary.pct_earned ?? 0) >= 0 ? 'pos' : 'neg'}`}>
+            {fmtPct(summary.pct_earned)}
+          </div>
+        </div>
+        <div className="stat">
+          <div className="label">Volume traded</div>
+          <div className="value">{fmtUsd(summary.volume_traded)}</div>
+        </div>
+        <div className="stat">
+          <div className="label">Max drawdown</div>
+          <div className="value neg">{summary.max_drawdown ? fmtUsd(summary.max_drawdown) : '—'}</div>
+        </div>
+        <div className="stat">
+          <div className="label">Trades</div>
+          <div className="value">{summary.trade_count.toLocaleString()}</div>
+        </div>
+        <div className="stat">
+          <div className="label">Open positions value</div>
+          <div className="value">{fmtUsd(openValue)}</div>
         </div>
         <div className="stat">
           <div className="label">Leaderboard all-time</div>
           <div className="value">{fmtUsd(whale.sports_profit_alltime)}</div>
         </div>
+      </div>
+
+      <div className="card">
+        <h2 style={{ marginTop: 0 }}>P&L calendar</h2>
+        {daily.length > 0 ? (
+          <PnlCalendar days={daily} />
+        ) : (
+          <EmptyState>Daily P&L appears once trades settle.</EmptyState>
+        )}
       </div>
 
       <div className="grid2">

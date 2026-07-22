@@ -129,6 +129,33 @@ async def api_whale(whale_id: int) -> dict:
     return profile
 
 
+@app.get("/api/whales/{whale_id}/report.pdf")
+async def api_whale_report(
+    whale_id: int,
+    period: str = Query("monthly", pattern="^(weekly|monthly)$"),
+    end: str | None = None,
+):
+    from datetime import date as _date
+
+    from .reports import build_report
+
+    try:
+        end_date = _date.fromisoformat(end) if end else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="end must be YYYY-MM-DD") from None
+    try:
+        pdf, filename = await build_report(whale_id, period, end_date)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="unknown whale") from None
+    from fastapi.responses import Response
+
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/api/matrix")
 async def api_matrix(window: str = Query("all", pattern="^(7d|30d|all)$")) -> dict:
     return await queries.matrix(window)

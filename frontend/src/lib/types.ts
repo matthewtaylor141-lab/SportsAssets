@@ -57,12 +57,30 @@ export interface MatrixCell extends SportStats {
   address: string
 }
 
+export interface WhaleSummary {
+  realized_pnl: number
+  volume_traded: number
+  buy_notional: number
+  pct_earned: number | null
+  max_drawdown: number
+  trade_count: number
+  max_drawdown_detail?: {
+    max_drawdown: number
+    peak: number
+    trough: number
+    peak_ts: string | null
+    trough_ts: string | null
+  }
+}
+
 export interface WhaleProfile {
   whale: Whale
   stats: SportStats[]
+  summary: WhaleSummary
   open_positions: OpenPosition[]
   recent_trades: Trade[]
   equity_curve: { ts: string; cumulative_pnl: number }[]
+  daily: { date: string; pnl: number; volume: number; trades: number }[]
   sport_mix: { sport: string; notional: number }[]
 }
 

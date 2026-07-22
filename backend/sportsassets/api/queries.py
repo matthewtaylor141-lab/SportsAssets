@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from ..analytics import perf
 from ..analytics.positions import Fill, Position
 from ..db import get_pool
 
@@ -111,7 +112,10 @@ async def whale_profile(whale_id: int) -> dict | None:
             whale_id,
         )
     recent = await feed(limit=25, whale_id=whale_id)
-    curve = await equity_curve(whale_id)
+    replay = await whale_replay(whale_id)
+    curve = await equity_curve(whale_id, replay)
+    summary = perf.summarize(replay["realizations"], replay["trade_events"], replay["buy_notional"])
+    summary["max_drawdown_detail"] = perf.max_drawdown(replay["realizations"])
     mix = await pool.fetch(
         """
         SELECT sport, sum(notional)::float8 AS notional
@@ -122,9 +126,11 @@ async def whale_profile(whale_id: int) -> dict | None:
     return {
         "whale": dict(whale),
         "stats": [_stats_row(r) for r in stats],
+        "summary": summary,
         "open_positions": [dict(r) for r in open_positions],
         "recent_trades": recent,
         "equity_curve": curve,
+        "daily": perf.group_daily(replay["realizations"], replay["trade_events"]),
         "sport_mix": [dict(r) for r in mix],
     }
 
@@ -141,14 +147,18 @@ def _stats_row(r: Any) -> dict:
     return d
 
 
-async def equity_curve(whale_id: int) -> list[dict]:
-    """Cumulative realized P&L over time: replay this whale's ledger with the
-    same average-cost engine, emitting a point per realization event."""
+async def whale_replay(whale_id: int) -> dict:
+    """Replay this whale's full ledger with the average-cost engine.
+
+    Returns {realizations: [(ts, amount)], trade_events: [(ts, notional)],
+    buy_notional: float} — the shared basis for equity curve, daily calendar,
+    drawdown, summary stats, and PDF reports.
+    """
     pool = await get_pool()
     trades = await pool.fetch(
         """
         SELECT asset, condition_id, outcome_index, side, size::float8 AS size,
-               price::float8 AS price, ts
+               price::float8 AS price, notional::float8 AS notional, ts
         FROM trades WHERE whale_id=$1 ORDER BY ts, id
         """,
         whale_id,
@@ -167,6 +177,8 @@ async def equity_curve(whale_id: int) -> list[dict]:
     positions: dict[str, Position] = {}
     meta: dict[str, tuple[str | None, int | None]] = {}
     events: list[tuple[datetime, float]] = []
+    trade_events: list[tuple[datetime, float]] = []
+    buy_notional = 0.0
     for t in trades:
         pos = positions.setdefault(t["asset"], Position())
         meta.setdefault(t["asset"], (t["condition_id"], t["outcome_index"]))
@@ -174,6 +186,9 @@ async def equity_curve(whale_id: int) -> list[dict]:
         pos.apply(Fill(side=t["side"], size=t["size"], price=t["price"]))
         if abs(pos.realized_pnl - before) > 1e-9:
             events.append((t["ts"], pos.realized_pnl - before))
+        trade_events.append((t["ts"], t["notional"]))
+        if t["side"] == "BUY":
+            buy_notional += t["notional"]
     for asset, pos in positions.items():
         cid, idx = meta.get(asset, (None, None))
         if cid in resolutions and not pos.resolved and idx is not None:
@@ -186,8 +201,14 @@ async def equity_curve(whale_id: int) -> list[dict]:
                                    pos.realized_pnl - before))
 
     events.sort(key=lambda e: e[0])
+    return {"realizations": events, "trade_events": trade_events, "buy_notional": buy_notional}
+
+
+async def equity_curve(whale_id: int, replay: dict | None = None) -> list[dict]:
+    """Cumulative realized P&L over time, one point per realization event."""
+    replay = replay or await whale_replay(whale_id)
     cum, out = 0.0, []
-    for ts, amount in events:
+    for ts, amount in replay["realizations"]:
         cum += amount
         out.append({"ts": ts.isoformat(), "cumulative_pnl": round(cum, 2)})
     return out
