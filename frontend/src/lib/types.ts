@@ -72,7 +72,8 @@ export interface OpenPosition {
   outcome: string | null
   net_shares: number
   avg_cost: number
-  realized_pnl: number
+  cur_price: number | null
+  cash_pnl: number | null
   exposure: number
   market_title: string | null
   event_title: string | null
@@ -92,7 +93,7 @@ export interface EventView {
     outcome: string | null
     net_shares: number
     exposure: number
-    realized_pnl: number
+    pnl: number
   }[]
 }
 

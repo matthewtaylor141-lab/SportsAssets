@@ -75,8 +75,12 @@ def _feed_payload(trade_id: int, ev: TradeEvent, detected_at: datetime, enriched
     }
 
 
-async def ingest_trade(ev: TradeEvent) -> int | None:
-    """Insert + fan out one detected fill. Returns trade id if new, None if dup."""
+async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
+    """Insert + fan out one detected fill. Returns trade id if new, None if dup.
+
+    notify=False inserts silently (no publish, no outbox) — used by the deep
+    history backfill so importing thousands of past trades can't page anyone.
+    """
     pool = await get_pool()
     detected_at = datetime.now(tz=timezone.utc)
     ts = datetime.fromtimestamp(ev.ts_epoch, tz=timezone.utc)
@@ -115,6 +119,9 @@ async def ingest_trade(ev: TradeEvent) -> int | None:
     if row is None:
         return None  # duplicate — the other path saw it first
     trade_id = row["id"]
+
+    if not notify:
+        return trade_id
 
     payload = _feed_payload(trade_id, ev, detected_at, pre_enriched)
 

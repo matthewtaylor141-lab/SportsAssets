@@ -45,8 +45,8 @@ export function Markets() {
                     <th>Whale</th>
                     <th>Outcome</th>
                     <th className="num">Net shares</th>
-                    <th className="num">Exposure</th>
-                    <th className="num">Realized P&L</th>
+                    <th className="num">Live value</th>
+                    <th className="num">Unrealized P&L</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -60,8 +60,8 @@ export function Markets() {
                           {p.net_shares.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                         </td>
                         <td className="num">{fmtUsd(p.exposure)}</td>
-                        <td className={`num ${p.realized_pnl >= 0 ? 'pos' : 'neg'}`}>
-                          {fmtSignedUsd(p.realized_pnl)}
+                        <td className={`num ${p.pnl >= 0 ? 'pos' : 'neg'}`}>
+                          {fmtSignedUsd(p.pnl)}
                         </td>
                       </tr>
                     ))}

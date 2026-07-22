@@ -86,6 +86,8 @@ class Poller:
         return new
 
     async def run(self) -> None:
+        from .history import backfill_pending  # late import to avoid cycle
+
         log.info("Path B poller starting (interval=%ss)", self._interval)
         while True:
             whales = await self.tracked_whales()
@@ -93,6 +95,14 @@ class Poller:
                 await heartbeat("poller", "idle", {"reason": "empty roster"})
                 await asyncio.sleep(self._interval)
                 continue
+            # One-time deep history import for any newly added whale, so
+            # settled metrics are complete from the start (silent inserts).
+            try:
+                imported = await backfill_pending()
+                if imported:
+                    log.info("deep history backfill imported %s trades", imported)
+            except Exception:  # noqa: BLE001
+                log.exception("history backfill pass failed; continuing with live polling")
             stagger = self._interval / len(whales)
             for whale in whales:
                 try:

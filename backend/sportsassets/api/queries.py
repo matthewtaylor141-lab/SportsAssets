@@ -78,18 +78,38 @@ async def whale_profile(whale_id: int) -> dict | None:
     stats = await pool.fetch(
         "SELECT * FROM whale_sport_stats WHERE whale_id=$1 ORDER BY sport, time_window", whale_id
     )
+    # Live book: the Data-API snapshot covers the whale's FULL current
+    # holdings (including positions opened before tracking began).
     open_positions = await pool.fetch(
         """
-        SELECT p.condition_id, p.token_id, p.outcome, p.net_shares::float8 AS net_shares,
-               p.avg_cost::float8 AS avg_cost, p.realized_pnl::float8 AS realized_pnl,
-               (p.net_shares * p.avg_cost)::float8 AS exposure,
-               m.title AS market_title, m.event_title, m.sport, p.last_trade_ts
-        FROM positions p LEFT JOIN markets m USING (condition_id)
-        WHERE p.whale_id=$1 AND p.net_shares > 0 AND NOT p.resolved
-        ORDER BY exposure DESC LIMIT 100
+        SELECT ap.condition_id, ap.asset AS token_id, ap.outcome,
+               ap.size::float8 AS net_shares, ap.avg_price::float8 AS avg_cost,
+               ap.cur_price::float8 AS cur_price, ap.cash_pnl::float8 AS cash_pnl,
+               COALESCE(ap.current_value, ap.size * ap.avg_price)::float8 AS exposure,
+               COALESCE(m.title, ap.title) AS market_title,
+               COALESCE(m.event_title, ap.title) AS event_title,
+               COALESCE(m.sport, 'unclassified') AS sport, ap.fetched_at AS last_trade_ts
+        FROM api_positions ap LEFT JOIN markets m USING (condition_id)
+        WHERE ap.whale_id=$1 AND ap.size > 0
+        ORDER BY exposure DESC LIMIT 200
         """,
         whale_id,
     )
+    if not open_positions:
+        # Snapshot not synced yet — fall back to ledger-derived positions.
+        open_positions = await pool.fetch(
+            """
+            SELECT p.condition_id, p.token_id, p.outcome, p.net_shares::float8 AS net_shares,
+                   p.avg_cost::float8 AS avg_cost, NULL::float8 AS cur_price,
+                   NULL::float8 AS cash_pnl,
+                   (p.net_shares * p.avg_cost)::float8 AS exposure,
+                   m.title AS market_title, m.event_title, m.sport, p.last_trade_ts
+            FROM positions p LEFT JOIN markets m USING (condition_id)
+            WHERE p.whale_id=$1 AND p.net_shares > 0 AND NOT p.resolved
+            ORDER BY exposure DESC LIMIT 100
+            """,
+            whale_id,
+        )
     recent = await feed(limit=25, whale_id=whale_id)
     curve = await equity_curve(whale_id)
     mix = await pool.fetch(
@@ -194,24 +214,32 @@ async def matrix(window: str = "all") -> dict:
 
 
 async def events_view(limit: int = 50) -> list[dict]:
-    """Per-event aggregation of tracked whales' net positions (agreement signal)."""
+    """Per-event aggregation of tracked whales' live positions (agreement signal).
+
+    Reads the Data-API snapshot (full current book per whale); pnl is the
+    API-reported unrealized cash P&L per position.
+    """
     pool = await get_pool()
     rows = await pool.fetch(
         """
-        SELECT m.event_slug, m.event_title, m.sport,
-               p.whale_id, w.username, p.outcome,
-               sum(p.net_shares)::float8 AS net_shares,
-               sum(p.net_shares * p.avg_cost)::float8 AS exposure,
-               sum(p.realized_pnl)::float8 AS realized_pnl
-        FROM positions p
-        JOIN markets m USING (condition_id)
-        JOIN whales w ON w.id = p.whale_id
-        WHERE m.event_slug IS NOT NULL AND (p.net_shares > 0 OR p.realized_pnl <> 0)
-        GROUP BY m.event_slug, m.event_title, m.sport, p.whale_id, w.username, p.outcome
+        SELECT COALESCE(m.event_slug, ap.event_slug, ap.slug) AS event_slug,
+               COALESCE(m.event_title, ap.title) AS event_title,
+               COALESCE(m.sport, 'unclassified') AS sport,
+               ap.whale_id, w.username, ap.outcome,
+               sum(ap.size)::float8 AS net_shares,
+               sum(COALESCE(ap.current_value, ap.size * ap.avg_price))::float8 AS exposure,
+               sum(COALESCE(ap.cash_pnl, 0))::float8 AS pnl
+        FROM api_positions ap
+        LEFT JOIN markets m USING (condition_id)
+        JOIN whales w ON w.id = ap.whale_id
+        WHERE ap.size > 0
+        GROUP BY 1, 2, 3, ap.whale_id, w.username, ap.outcome
         """
     )
     events: dict[str, dict] = {}
     for r in rows:
+        if not r["event_slug"]:
+            continue
         ev = events.setdefault(
             r["event_slug"],
             {"event_slug": r["event_slug"], "event_title": r["event_title"],
@@ -220,7 +248,7 @@ async def events_view(limit: int = 50) -> list[dict]:
         ev["positions"].append(
             {"whale_id": r["whale_id"], "username": r["username"], "outcome": r["outcome"],
              "net_shares": r["net_shares"], "exposure": r["exposure"] or 0.0,
-             "realized_pnl": r["realized_pnl"] or 0.0}
+             "pnl": r["pnl"] or 0.0}
         )
         ev["total_exposure"] += r["exposure"] or 0.0
     ranked = sorted(events.values(), key=lambda e: e["total_exposure"], reverse=True)[:limit]

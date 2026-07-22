@@ -144,7 +144,9 @@ export function WhaleProfile() {
                   <th>Outcome</th>
                   <th className="num">Shares</th>
                   <th className="num">Avg cost</th>
-                  <th className="num">Exposure</th>
+                  <th className="num">Now</th>
+                  <th className="num">Live value</th>
+                  <th className="num">Unrealized P&L</th>
                 </tr>
               </thead>
               <tbody>
@@ -153,8 +155,12 @@ export function WhaleProfile() {
                     <td>{p.event_title || p.market_title || p.condition_id}</td>
                     <td>{p.outcome || '—'}</td>
                     <td className="num">{p.net_shares.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
-                    <td className="num">{Math.round(p.avg_cost * 100)}¢</td>
+                    <td className="num">{p.avg_cost != null ? `${Math.round(p.avg_cost * 100)}¢` : '—'}</td>
+                    <td className="num">{p.cur_price != null ? `${Math.round(p.cur_price * 100)}¢` : '—'}</td>
                     <td className="num">{fmtUsd(p.exposure)}</td>
+                    <td className={`num ${(p.cash_pnl ?? 0) >= 0 ? 'pos' : 'neg'}`}>
+                      {p.cash_pnl != null ? fmtSignedUsd(p.cash_pnl) : '—'}
+                    </td>
                   </tr>
                 ))}
               </tbody>

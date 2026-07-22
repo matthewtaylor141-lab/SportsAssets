@@ -20,7 +20,7 @@ from ..db import get_pool
 log = logging.getLogger(__name__)
 
 
-async def unresolved_traded_condition_ids(limit: int = 200) -> list[str]:
+async def unresolved_traded_condition_ids(limit: int = 500) -> list[str]:
     pool = await get_pool()
     rows = await pool.fetch(
         """
