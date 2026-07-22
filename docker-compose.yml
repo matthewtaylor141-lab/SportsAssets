@@ -1,0 +1,106 @@
+version: "3.9"
+
+x-backend: &backend
+  build: ./backend
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql://sportsassets:sportsassets@postgres:5432/sportsassets
+    REDIS_URL: redis://redis:6379/0
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_started
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sportsassets
+      POSTGRES_PASSWORD: sportsassets
+      POSTGRES_DB: sportsassets
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sportsassets"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  migrate:
+    <<: *backend
+    restart: "no"
+    command: python -m sportsassets.scripts.migrate
+
+  api:
+    <<: *backend
+    command: uvicorn sportsassets.api.app:app --host 0.0.0.0 --port 8000
+    ports: ["8000:8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  poller:
+    <<: *backend
+    command: python -m sportsassets.workers.poller
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  chain-listener:
+    <<: *backend
+    command: python -m sportsassets.workers.chain_listener
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  metadata-cache:
+    <<: *backend
+    command: python -m sportsassets.workers.metadata_refresher
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  analytics:
+    <<: *backend
+    command: python -m sportsassets.workers.analytics
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  dispatcher:
+    <<: *backend
+    command: python -m sportsassets.workers.dispatcher
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  roster:
+    <<: *backend
+    command: python -m sportsassets.workers.roster
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  reconciler:
+    <<: *backend
+    command: python -m sportsassets.workers.reconciler
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  frontend:
+    build: ./frontend
+    ports: ["5173:5173"]
+    environment:
+      VITE_API_BASE: http://localhost:8000
+    depends_on: [api]
+
+volumes:
+  pgdata:
