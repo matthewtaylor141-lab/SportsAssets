@@ -32,6 +32,8 @@ class Settings(BaseSettings):
 
     # Ingestion
     poll_interval_seconds: float = 5.0
+    data_api_max_rps: float = 4.0  # combined ceiling across all Data-API callers
+    positions_sync_interval_seconds: int = 300
     history_max_trades: int = 200_000  # deep-backfill cap per wallet
     # If the Data API caps offset paging, set this to its timestamp-filter
     # param name (discovered via /api/admin/diag, e.g. "before") and the

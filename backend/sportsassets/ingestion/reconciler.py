@@ -15,6 +15,7 @@ import httpx
 
 from ..config import settings
 from ..db import get_pool, heartbeat
+from ..ratelimit import polite_get
 from .pipeline import ingest_trade
 from .poller import _sport_for_condition, parse_data_api_trade
 
@@ -35,8 +36,8 @@ async def reconcile_once(depth: int = 500) -> dict:
             wallet_missed = 0
             offset = 0
             while offset < depth:
-                resp = await http.get(
-                    "/trades",
+                resp = await polite_get(
+                    http, "/trades",
                     params={
                         "user": whale["address"],
                         "limit": 100,

@@ -14,6 +14,7 @@ Design constraints (learned in production):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -21,6 +22,7 @@ import httpx
 
 from ..config import settings
 from ..db import get_pool, heartbeat
+from ..ratelimit import polite_get
 from .dedupe import make_dedupe_key
 from .poller import parse_data_api_trade
 
@@ -51,8 +53,8 @@ async def backfill_whale_history(http: httpx.AsyncClient, whale: dict) -> int:
     offset = 0
     max_trades = settings().history_max_trades
     while offset < max_trades:
-        resp = await http.get(
-            "/trades",
+        resp = await polite_get(
+            http, "/trades",
             params={"user": whale["address"], "limit": 100, "offset": offset, "takerOnly": "false"},
         )
         resp.raise_for_status()
@@ -95,8 +97,8 @@ async def backfill_whale_history(http: httpx.AsyncClient, whale: dict) -> int:
             whale["id"],
         )
         while oldest and scanned < max_trades:
-            resp = await http.get(
-                "/trades",
+            resp = await polite_get(
+                http, "/trades",
                 params={"user": whale["address"], "limit": 100, "takerOnly": "false",
                         time_param: int(oldest) - 1},
             )
@@ -143,8 +145,23 @@ async def backfill_whale_history(http: httpx.AsyncClient, whale: dict) -> int:
     return scanned
 
 
+_BACKFILL_LOCK = asyncio.Lock()
+
+
 async def backfill_pending() -> int:
-    """Backfill every active whale that hasn't had a history import yet."""
+    """Backfill every active whale that hasn't had a history import yet.
+
+    Single-flight: if a pass is already running in this process (e.g. a
+    supervisor restarted the poller and spawned a second history loop),
+    additional callers return immediately instead of doubling API traffic.
+    """
+    if _BACKFILL_LOCK.locked():
+        return 0
+    async with _BACKFILL_LOCK:
+        return await _backfill_pending_inner()
+
+
+async def _backfill_pending_inner() -> int:
     pool = await get_pool()
     whales = await pool.fetch(
         "SELECT id, address, username FROM whales "

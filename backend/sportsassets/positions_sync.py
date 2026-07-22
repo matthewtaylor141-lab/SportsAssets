@@ -15,6 +15,7 @@ import httpx
 
 from .config import settings
 from .db import get_pool
+from .ratelimit import polite_get
 
 log = logging.getLogger(__name__)
 
@@ -65,8 +66,8 @@ async def sync_whale_positions(http: httpx.AsyncClient, whale: dict) -> int:
     parsed: list[dict] = []
     offset = 0
     while offset < MAX_POSITIONS_PER_WALLET:
-        resp = await http.get(
-            "/positions", params={"user": whale["address"], "limit": 100, "offset": offset}
+        resp = await polite_get(
+            http, "/positions", params={"user": whale["address"], "limit": 100, "offset": offset}
         )
         resp.raise_for_status()
         batch = resp.json()
@@ -106,8 +107,22 @@ async def sync_whale_positions(http: httpx.AsyncClient, whale: dict) -> int:
     return len(parsed)
 
 
-async def sync_all_positions() -> dict[str, int]:
-    """One snapshot pass over every tracked whale."""
+_last_sync: float = 0.0
+
+
+async def sync_all_positions(force: bool = False) -> dict[str, int]:
+    """One snapshot pass over every tracked whale.
+
+    Rate-limited to every POSITIONS_SYNC_INTERVAL_SECONDS (default 5 min) —
+    open-position freshness is worth minutes, not a rate-limit ban.
+    """
+    global _last_sync
+    import time as _time
+
+    now = _time.monotonic()
+    if not force and _last_sync and now - _last_sync < settings().positions_sync_interval_seconds:
+        return {}
+    _last_sync = now
     pool = await get_pool()
     whales = await pool.fetch("SELECT id, address, username FROM whales WHERE active AND NOT banned")
     counts: dict[str, int] = {}

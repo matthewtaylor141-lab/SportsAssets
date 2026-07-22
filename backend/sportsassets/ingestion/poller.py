@@ -68,7 +68,10 @@ class Poller:
 
     async def poll_wallet(self, whale: dict) -> int:
         """One poll cycle for one wallet. Returns count of NEW trades ingested."""
-        resp = await self._http.get(
+        from ..ratelimit import polite_get
+
+        resp = await polite_get(
+            self._http,
             "/trades",
             params={"user": whale["address"], "limit": 100, "takerOnly": "false"},
         )
@@ -114,7 +117,8 @@ class Poller:
                     new = await self.poll_wallet(whale)
                     self._consecutive_failures = 0
                     await heartbeat("poller", "ok", {"last_wallet": whale["address"], "new": new})
-                except (httpx.HTTPError, OSError) as exc:
+                except Exception as exc:  # noqa: BLE001 — one bad wallet/payload
+                    # must never kill live detection for the others
                     self._consecutive_failures += 1
                     log.warning("poll failed for %s: %s", whale["address"], exc)
                     await heartbeat(
