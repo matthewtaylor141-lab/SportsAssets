@@ -10,7 +10,13 @@ export interface DayStat {
 
 /** Monthly calendar of daily realized P&L — green/red intensity per day,
  * month navigation, per-day tooltip with P&L / volume / trade count. */
-export function PnlCalendar({ days }: { days: DayStat[] }) {
+export function PnlCalendar({
+  days,
+  onSelect,
+}: {
+  days: DayStat[]
+  onSelect?: (date: string) => void
+}) {
   const byDate = useMemo(() => new Map(days.map((d) => [d.date, d])), [days])
   const latest = days.length ? days[days.length - 1].date : new Date().toISOString().slice(0, 10)
   const [cursor, setCursor] = useState(() => latest.slice(0, 7)) // YYYY-MM
@@ -76,10 +82,13 @@ export function PnlCalendar({ days }: { days: DayStat[] }) {
           return (
             <div
               key={i}
-              className="cal-cell"
+              className={`cal-cell${onSelect ? ' clickable' : ''}`}
               style={cellStyle(c)}
               onMouseMove={(e) => setHover({ d: c, x: e.clientX, y: e.clientY })}
               onMouseLeave={() => setHover(null)}
+              onClick={() => onSelect?.(c.date)}
+              role={onSelect ? 'button' : undefined}
+              title={onSelect ? 'Click for the day report' : undefined}
             >
               <span className="cal-day">{day}</span>
               <span className="cal-pnl">{fmtSignedUsd(c.pnl)}</span>

@@ -84,6 +84,59 @@ async def backfill_whale_history(http: httpx.AsyncClient, whale: dict) -> int:
         if len(batch) < 100:
             break
 
+    # Some Data API deployments cap offset paging (empty results past ~10k).
+    # If a time-filter param is configured, keep walking back in time from the
+    # oldest trade we have; otherwise flag the suspected cap for the admin.
+    time_param = settings().history_time_param
+    hit_cap = scanned > 0 and scanned % 100 == 0 and offset >= 9_900
+    if hit_cap and time_param:
+        oldest = await pool.fetchval(
+            "SELECT EXTRACT(EPOCH FROM min(ts))::bigint FROM trades WHERE whale_id=$1",
+            whale["id"],
+        )
+        while oldest and scanned < max_trades:
+            resp = await http.get(
+                "/trades",
+                params={"user": whale["address"], "limit": 100, "takerOnly": "false",
+                        time_param: int(oldest) - 1},
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            if not isinstance(batch, list) or not batch:
+                break
+            rows = []
+            batch_oldest = oldest
+            for raw in batch:
+                ev = parse_data_api_trade(raw, whale["id"], whale["username"])
+                if not ev.tx_hash or ev.size <= 0:
+                    continue
+                batch_oldest = min(batch_oldest, ev.ts_epoch)
+                rows.append((
+                    ev.whale_id, ev.tx_hash, str(ev.asset), ev.condition_id, ev.side,
+                    ev.outcome, ev.outcome_index, ev.size, ev.price, ev.notional,
+                    ev.market_title, ev.market_slug, ev.event_slug,
+                    sports.get(ev.condition_id or "", "unclassified"),
+                    datetime.fromtimestamp(ev.ts_epoch, tz=timezone.utc), now, ev.dedupe_key,
+                ))
+            if rows:
+                async with pool.acquire() as conn:
+                    await conn.executemany(_INSERT, rows)
+            scanned += len(batch)
+            await heartbeat("backfill", "running",
+                            {"whale": whale["username"] or whale["address"],
+                             "scanned": scanned, "mode": "time-cursor"})
+            if batch_oldest >= oldest:
+                break  # no progress — stop rather than loop
+            oldest = batch_oldest
+    elif hit_cap:
+        log.warning("backfill for %s stopped at offset %s with full batches — likely an "
+                    "API offset cap; set HISTORY_TIME_PARAM (see /api/admin/diag)",
+                    whale["address"], offset)
+        await heartbeat("backfill", "capped",
+                        {"whale": whale["username"] or whale["address"], "scanned": scanned,
+                         "hint": "probable offset cap — run /api/admin/diag, set HISTORY_TIME_PARAM, "
+                                 "then reset: UPDATE whales SET history_backfilled=false"})
+
     await pool.execute("UPDATE whales SET history_backfilled=TRUE WHERE id=$1", whale["id"])
     log.info("history backfill for %s: %s trades scanned",
              whale["username"] or whale["address"], scanned)

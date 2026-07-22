@@ -129,6 +129,98 @@ async def api_whale(whale_id: int) -> dict:
     return profile
 
 
+@app.get("/api/whales/{whale_id}/day/{day}")
+async def api_whale_day(whale_id: int, day: str) -> dict:
+    """Day drill-down for the P&L calendar: every bet settled that day,
+    sportsbook-labeled and grouped by sport, plus the day's activity."""
+    from datetime import date as _date
+
+    from .reports import settled_bets
+
+    try:
+        d = _date.fromisoformat(day)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD") from None
+    bets = [b for b in await settled_bets(whale_id) if b["settled_at"].date() == d]
+    pool = await get_pool()
+    activity = await pool.fetchrow(
+        "SELECT count(*)::int AS trades, COALESCE(sum(notional),0)::float8 AS volume "
+        "FROM trades WHERE whale_id=$1 AND ts::date = $2",
+        whale_id, d,
+    )
+    by_sport: dict[str, dict] = {}
+    for b in bets:
+        s = by_sport.setdefault(
+            b["sport"] or "unclassified",
+            {"sport": b["sport"] or "unclassified", "pnl": 0.0, "stake": 0.0,
+             "wins": 0, "losses": 0, "bets": []},
+        )
+        s["pnl"] += b["pnl"]
+        s["stake"] += b["stake"]
+        s["wins"] += 1 if b["pnl"] > 0.01 else 0
+        s["losses"] += 1 if b["pnl"] < -0.01 else 0
+        s["bets"].append(b)
+    sports = sorted(by_sport.values(), key=lambda s: s["pnl"], reverse=True)
+    for s in sports:
+        s["bets"].sort(key=lambda b: b["pnl"], reverse=True)
+    return {
+        "date": day,
+        "pnl": round(sum(b["pnl"] for b in bets), 2),
+        "stake": round(sum(b["stake"] for b in bets), 2),
+        "wins": sum(1 for b in bets if b["pnl"] > 0.01),
+        "losses": sum(1 for b in bets if b["pnl"] < -0.01),
+        "settled_count": len(bets),
+        "trades_placed": activity["trades"],
+        "volume_placed": activity["volume"],
+        "sports": sports,
+    }
+
+
+@app.get("/api/admin/diag", dependencies=[Depends(require_admin)])
+async def admin_diag() -> dict:
+    """Live probes of every upstream API, with response snippets — run this
+    when data looks wrong; it shows exactly what production sees."""
+    import time as _time
+
+    import httpx
+
+    from ..gamma import _OPEN_MARKET_PARAM_VARIANTS
+
+    cfg = settings()
+    pool = await get_pool()
+    out: dict = {}
+
+    async def probe(client: httpx.AsyncClient, key: str, url: str, params: dict | None = None):
+        try:
+            resp = await client.get(url, params=params)
+            body = resp.text[:220]
+            out[key] = {"status": resp.status_code, "body": body}
+        except Exception as exc:  # noqa: BLE001
+            out[key] = {"status": "error", "body": str(exc)[:220]}
+
+    sample_cid = await pool.fetchval(
+        "SELECT condition_id FROM trades WHERE condition_id IS NOT NULL LIMIT 1"
+    )
+    sample_addr = await pool.fetchval("SELECT address FROM whales WHERE active LIMIT 1")
+
+    async with httpx.AsyncClient(timeout=10) as http:
+        for i, variant in enumerate(_OPEN_MARKET_PARAM_VARIANTS):
+            await probe(http, f"gamma_open_v{i}", f"{cfg.gamma_api_base}/markets",
+                        {**variant, "limit": 1, "offset": 0})
+        if sample_cid:
+            await probe(http, "gamma_condition_ids", f"{cfg.gamma_api_base}/markets",
+                        {"condition_ids": sample_cid})
+            await probe(http, "clob_market", f"{cfg.clob_api_base}/markets/{sample_cid}")
+        if sample_addr:
+            now = int(_time.time())
+            await probe(http, "dataapi_offset_10k", f"{cfg.data_api_base}/trades",
+                        {"user": sample_addr, "limit": 1, "offset": 10_000})
+            for pname in ("before", "endTs", "to", "max_ts"):
+                await probe(http, f"dataapi_timeparam_{pname}", f"{cfg.data_api_base}/trades",
+                            {"user": sample_addr, "limit": 1, pname: now - 86400 * 30})
+    return out
+
+
 @app.get("/api/whales/{whale_id}/settled-report.pdf")
 async def api_whale_settled_report(whale_id: int):
     from fastapi.responses import Response

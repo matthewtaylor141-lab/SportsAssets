@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { DayReportModal } from '../components/DayReportModal'
 import { EmptyState } from '../components/EmptyState'
 import { EquityCurve } from '../components/EquityCurve'
 import { PnlCalendar } from '../components/PnlCalendar'
@@ -16,6 +17,7 @@ export function WhaleProfile() {
   const [profile, setProfile] = useState<Profile | null>(null)
   const [win, setWin] = useState<(typeof WINDOWS)[number]>('all')
   const [error, setError] = useState(false)
+  const [selectedDay, setSelectedDay] = useState<string | null>(null)
 
   useEffect(() => {
     setProfile(null)
@@ -94,12 +96,18 @@ export function WhaleProfile() {
 
       <div className="card">
         <h2 style={{ marginTop: 0 }}>P&L calendar</h2>
+        <p style={{ color: 'var(--muted)', fontSize: 12, margin: '0 0 8px' }}>
+          Click any day for its full report — every settled bet, by sport.
+        </p>
         {daily.length > 0 ? (
-          <PnlCalendar days={daily} />
+          <PnlCalendar days={daily} onSelect={setSelectedDay} />
         ) : (
           <EmptyState>Daily P&L appears once trades settle.</EmptyState>
         )}
       </div>
+      {selectedDay && (
+        <DayReportModal whaleId={whale.id} day={selectedDay} onClose={() => setSelectedDay(null)} />
+      )}
 
       <div className="grid2">
         <div className="card">

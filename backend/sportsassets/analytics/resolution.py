@@ -35,18 +35,40 @@ async def unresolved_traded_condition_ids(limit: int = 500) -> list[str]:
     return [r["condition_id"] for r in rows]
 
 
-async def sweep_resolutions(client: gamma.GammaClient) -> int:
-    """Fetch metadata for unresolved traded markets; return count newly resolved."""
+async def sweep_resolutions(client: gamma.GammaClient, clob_batch: int = 300) -> int:
+    """Fetch metadata for unresolved traded markets; return count newly resolved.
+
+    Two independent sources: Gamma (batch) first, then the CLOB API per-market
+    for whatever Gamma didn't cover — settlement must not hinge on one endpoint.
+    """
+    import httpx
+
+    from ..clob import fetch_clob_market
+    from ..config import settings
+
     condition_ids = await unresolved_traded_condition_ids()
     if not condition_ids:
         return 0
     pool = await get_pool()
     before = await pool.fetchval("SELECT count(*) FROM markets WHERE resolved")
-    raws = await client.fetch_by_condition_ids(condition_ids)
-    for raw in raws:
-        meta = gamma.parse_market(raw)
-        if meta:
-            await gamma.upsert_market(meta)
+
+    try:
+        raws = await client.fetch_by_condition_ids(condition_ids)
+        for raw in raws:
+            meta = gamma.parse_market(raw)
+            if meta:
+                await gamma.upsert_market(meta)
+    except Exception as exc:  # noqa: BLE001 — CLOB fallback still runs
+        log.warning("gamma resolution batch failed: %s", exc)
+
+    remaining = await unresolved_traded_condition_ids(limit=clob_batch)
+    if remaining:
+        async with httpx.AsyncClient(base_url=settings().clob_api_base, timeout=10) as http:
+            for cid in remaining:
+                meta = await fetch_clob_market(http, cid)
+                if meta:
+                    await gamma.upsert_market(meta)
+
     after = await pool.fetchval("SELECT count(*) FROM markets WHERE resolved")
     newly = after - before
     if newly:

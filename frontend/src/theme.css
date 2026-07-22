@@ -241,3 +241,25 @@ table.data td.num, table.data th.num { text-align: right; }
 .legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
 
 .notice { font-size: 12px; color: var(--muted); border-top: 1px solid var(--grid); margin-top: 36px; padding-top: 14px; }
+
+/* ── Modal (day report) ── */
+.cal-cell.clickable { cursor: pointer; transition: transform 0.08s, outline 0.08s; }
+.cal-cell.clickable:hover { outline: 2px solid var(--ink-2); transform: scale(1.03); }
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(5, 6, 8, 0.7); backdrop-filter: blur(3px);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 6vh 16px 16px; overflow-y: auto;
+}
+.modal {
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: 12px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  width: 100%; max-width: 780px; max-height: 84vh;
+  display: flex; flex-direction: column;
+}
+.modal-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+}
+.modal-pnl { font-size: 20px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.modal-body { padding: 12px 16px 16px; overflow-y: auto; }

@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     data_api_base: str = "https://data-api.polymarket.com"
     gamma_api_base: str = "https://gamma-api.polymarket.com"
     leaderboard_api_base: str = "https://lb-api.polymarket.com"
+    clob_api_base: str = "https://clob.polymarket.com"
 
     # Roster
     roster_size: int = 5
@@ -32,6 +33,10 @@ class Settings(BaseSettings):
     # Ingestion
     poll_interval_seconds: float = 5.0
     history_max_trades: int = 200_000  # deep-backfill cap per wallet
+    # If the Data API caps offset paging, set this to its timestamp-filter
+    # param name (discovered via /api/admin/diag, e.g. "before") and the
+    # backfill continues past the cap with time-cursor paging.
+    history_time_param: str = ""
     poll_failure_alert_threshold: int = 3
     ws_down_alert_seconds: int = 30
     reconcile_interval_seconds: int = 3600

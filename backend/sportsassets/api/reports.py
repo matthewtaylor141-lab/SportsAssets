@@ -280,6 +280,62 @@ def _calendar_flowables(daily: list[dict]) -> list:
     return out
 
 
+def _sport_ranking(bets: list[dict]) -> list[dict]:
+    by_sport: dict[str, list[dict]] = {}
+    for b in bets:
+        by_sport.setdefault(b["sport"] or "unclassified", []).append(b)
+    rows = []
+    for sport, items in by_sport.items():
+        pnl = sum(b["pnl"] for b in items)
+        stake = sum(b["stake"] for b in items)
+        rows.append({
+            "sport": sport, "bets": len(items),
+            "wins": sum(1 for b in items if b["pnl"] > 0.01),
+            "losses": sum(1 for b in items if b["pnl"] < -0.01),
+            "stake": stake, "pnl": pnl, "roi": pnl / stake if stake > 0 else None,
+            "items": items,
+        })
+    rows.sort(key=lambda r: r["pnl"], reverse=True)
+    return rows
+
+
+def _settled_sections(bets: list[dict], daily: list[dict]) -> list:
+    """Shared report body: sport ranking → P&L calendars → every bet by sport."""
+    if not bets:
+        return [Paragraph(
+            "No settled bets in this period yet. If history was recently imported, "
+            "market resolutions may still be syncing — check Admin → Ingestion health "
+            "(backfill / metadata / analytics rows).", SUB)]
+    sport_rows = _sport_ranking(bets)
+    story: list = [
+        Paragraph("P&amp;L by sport — most to least profitable", H2),
+        _table(
+            ["Sport", "Bets", "Record", "Staked", "ROI", "P&L"],
+            [[r["sport"], f"{r['bets']:,}", f"{r['wins']}-{r['losses']}", _usd(r["stake"]),
+              _pct(r["roi"]), _signed(r["pnl"])] for r in sport_rows],
+            [1.6, 0.9, 1.0, 1.3, 0.9, 1.4],
+            color_col=5, raw_values=[r["pnl"] for r in sport_rows],
+        ),
+        Paragraph("Daily P&amp;L calendar", H2),
+    ]
+    story.extend(_calendar_flowables(daily))
+    for r in sport_rows:
+        rows = sorted(r["items"], key=lambda b: b["settled_at"])
+        story.append(Paragraph(
+            _esc(f"{r['sport']} — {_signed(r['pnl'])} ({r['wins']}-{r['losses']}, "
+                 f"{len(rows):,} bets)"), H2))
+        for i in range(0, len(rows), 400):
+            chunk = rows[i : i + 400]
+            story.append(_table(
+                ["Settled", "Bet", "Odds", "Stake", "Result", "P&L"],
+                [[b["settled_at"].strftime("%Y-%m-%d"), b["label"][:52], b["odds"],
+                  _usd(b["stake"]), b["result"], _signed(b["pnl"])] for b in chunk],
+                [0.85, 2.9, 0.6, 0.85, 1.0, 0.95],
+                color_col=5, raw_values=[b["pnl"] for b in chunk],
+            ))
+    return story
+
+
 async def build_settled_report(whale_id: int) -> tuple[bytes, str]:
     """Complete settled-history report: sport ranking, P&L calendars, and
     EVERY settled bet grouped by sport — for management analysis."""
@@ -292,22 +348,6 @@ async def build_settled_report(whale_id: int) -> tuple[bytes, str]:
     replay = await queries.whale_replay(whale_id)
     daily = perf.group_daily(replay["realizations"], [])
     dd = perf.max_drawdown(replay["realizations"])
-
-    # Per-sport aggregates from the settled bets themselves.
-    by_sport: dict[str, list[dict]] = {}
-    for b in bets:
-        by_sport.setdefault(b["sport"] or "unclassified", []).append(b)
-    sport_rows = []
-    for sport, rows in by_sport.items():
-        pnl = sum(b["pnl"] for b in rows)
-        stake = sum(b["stake"] for b in rows)
-        wins = sum(1 for b in rows if b["pnl"] > 0.01)
-        losses = sum(1 for b in rows if b["pnl"] < -0.01)
-        sport_rows.append({
-            "sport": sport, "bets": len(rows), "wins": wins, "losses": losses,
-            "stake": stake, "pnl": pnl, "roi": pnl / stake if stake > 0 else None,
-        })
-    sport_rows.sort(key=lambda r: r["pnl"], reverse=True)
 
     total_pnl = sum(b["pnl"] for b in bets)
     total_stake = sum(b["stake"] for b in bets)
@@ -322,7 +362,7 @@ async def build_settled_report(whale_id: int) -> tuple[bytes, str]:
     )
     name = whale["username"] or f"{whale['address'][:10]}…"
     story: list = [
-        Paragraph(f"{name} — Complete Settled History", H1),
+        Paragraph(_esc(f"{name} — Complete Settled History"), H1),
         Paragraph(
             f"All imported settled bets &nbsp;·&nbsp; wallet {whale['address']} &nbsp;·&nbsp; "
             f"generated {datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} — "
@@ -336,33 +376,8 @@ async def build_settled_report(whale_id: int) -> tuple[bytes, str]:
             ("Settled bets", f"{len(bets):,}", None),
             ("Max drawdown", _usd(dd["max_drawdown"]), BAD if dd["max_drawdown"] else None),
         ]),
-        Paragraph("P&amp;L by sport — most to least profitable", H2),
-        _table(
-            ["Sport", "Bets", "Record", "Staked", "ROI", "P&L"],
-            [[r["sport"], f"{r['bets']:,}", f"{r['wins']}-{r['losses']}", _usd(r["stake"]),
-              _pct(r["roi"]), _signed(r["pnl"])] for r in sport_rows],
-            [1.6, 0.9, 1.0, 1.3, 0.9, 1.4],
-            color_col=5, raw_values=[r["pnl"] for r in sport_rows],
-        ),
-        Paragraph("Daily P&amp;L calendar", H2),
     ]
-    story.extend(_calendar_flowables(daily))
-
-    for r in sport_rows:
-        rows = sorted(by_sport[r["sport"]], key=lambda b: b["settled_at"])
-        story.append(Paragraph(
-            f"{r['sport']} — {_signed(r['pnl'])} ({r['wins']}-{r['losses']}, "
-            f"{len(rows):,} bets)", H2))
-        # Chunk long tables so layout stays fast and splits cleanly.
-        for i in range(0, len(rows), 400):
-            chunk = rows[i : i + 400]
-            story.append(_table(
-                ["Settled", "Bet", "Odds", "Stake", "Result", "P&L"],
-                [[b["settled_at"].strftime("%Y-%m-%d"), b["label"][:52], b["odds"],
-                  _usd(b["stake"]), b["result"], _signed(b["pnl"])] for b in chunk],
-                [0.85, 2.9, 0.6, 0.85, 1.0, 0.95],
-                color_col=5, raw_values=[b["pnl"] for b in chunk],
-            ))
+    story.extend(_settled_sections(bets, daily))
 
     story.append(Spacer(1, 18))
     story.append(Paragraph(
@@ -374,91 +389,77 @@ async def build_settled_report(whale_id: int) -> tuple[bytes, str]:
 
 
 async def build_report(whale_id: int, period: str, end: date | None = None) -> tuple[bytes, str]:
+    """Weekly/monthly report — same settled-bet organization as the full
+    history report, scoped to the period, plus the period's largest trades."""
     pool = await get_pool()
     whale = await pool.fetchrow("SELECT * FROM whales WHERE id=$1", whale_id)
     if whale is None:
         raise LookupError("unknown whale")
     start_dt, end_dt, label = period_bounds(period, end)
 
+    bets = [b for b in await settled_bets(whale_id) if start_dt <= b["settled_at"] <= end_dt]
     replay = await queries.whale_replay(whale_id)
-    in_period = lambda ts: start_dt <= ts <= end_dt  # noqa: E731
-    p_real = [(ts, a) for ts, a in replay["realizations"] if in_period(ts)]
-    p_trades = [(ts, n) for ts, n in replay["trade_events"] if in_period(ts)]
-
-    trade_rows = await pool.fetch(
-        """
-        SELECT ts, side, outcome, market_title, sport, size::float8 AS size,
-               price::float8 AS price, notional::float8 AS notional
-        FROM trades WHERE whale_id=$1 AND ts BETWEEN $2 AND $3
-        ORDER BY notional DESC LIMIT 15
-        """,
-        whale_id, start_dt, end_dt,
-    )
-    sport_rows = await pool.fetch(
-        """
-        SELECT sport, count(*)::int AS trades, sum(notional)::float8 AS volume
-        FROM trades WHERE whale_id=$1 AND ts BETWEEN $2 AND $3
-        GROUP BY sport ORDER BY volume DESC
-        """,
-        whale_id, start_dt, end_dt,
-    )
-    daily = perf.group_daily(p_real, p_trades)
-    summary = perf.summarize(p_real, p_trades, sum(n for _, n in p_trades if n) or 0.0)
+    p_real = [(ts, a) for ts, a in replay["realizations"] if start_dt <= ts <= end_dt]
+    daily = perf.group_daily(p_real, [])
     dd = perf.max_drawdown(p_real)
+
+    activity = await pool.fetchrow(
+        "SELECT count(*)::int AS trades, COALESCE(sum(notional), 0)::float8 AS volume "
+        "FROM trades WHERE whale_id=$1 AND ts BETWEEN $2 AND $3",
+        whale_id, start_dt, end_dt,
+    )
+    largest = await pool.fetch(
+        """
+        SELECT t.ts, t.side, t.outcome, t.price::float8 AS price,
+               t.notional::float8 AS notional,
+               COALESCE(m.title, t.market_title) AS title, m.event_title
+        FROM trades t LEFT JOIN markets m USING (condition_id)
+        WHERE t.whale_id=$1 AND t.ts BETWEEN $2 AND $3
+        ORDER BY t.notional DESC LIMIT 15
+        """,
+        whale_id, start_dt, end_dt,
+    )
+
+    total_pnl = sum(b["pnl"] for b in bets)
+    total_stake = sum(b["stake"] for b in bets)
+    wins = sum(1 for b in bets if b["pnl"] > 0.01)
+    losses = sum(1 for b in bets if b["pnl"] < -0.01)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
-        buf, pagesize=LETTER, leftMargin=0.7 * inch, rightMargin=0.7 * inch,
+        buf, pagesize=LETTER, leftMargin=0.65 * inch, rightMargin=0.65 * inch,
         topMargin=0.6 * inch, bottomMargin=0.6 * inch,
         title=f"Trader report — {whale['username'] or whale['address']}",
     )
     name = whale["username"] or f"{whale['address'][:10]}…"
-    story = [
-        Paragraph(f"{name} — Trader Performance", H1),
+    story: list = [
+        Paragraph(_esc(f"{name} — Trader Performance"), H1),
         Paragraph(
-            f"{label} &nbsp;·&nbsp; wallet {whale['address']} &nbsp;·&nbsp; "
-            f"generated {datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} — SportsAssets Hub",
-            SUB,
-        ),
+            f"{_esc(label)} &nbsp;·&nbsp; wallet {whale['address']} &nbsp;·&nbsp; "
+            f"generated {datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} — "
+            f"SportsAssets Hub", SUB),
         _stat_grid([
-            ("Realized P&L", _signed(summary["realized_pnl"]),
-             GOOD if summary["realized_pnl"] >= 0 else BAD),
-            ("Volume traded", _usd(summary["volume_traded"]), None),
-            ("% earned", _pct(summary["pct_earned"]),
-             GOOD if (summary["pct_earned"] or 0) >= 0 else BAD),
+            ("Settled P&L", _signed(total_pnl), GOOD if total_pnl >= 0 else BAD),
+            ("Total staked", _usd(total_stake), None),
+            ("Record", f"{wins}-{losses}", None),
+            ("ROI", _pct(total_pnl / total_stake if total_stake else None),
+             GOOD if total_pnl >= 0 else BAD),
+            ("Settled bets", f"{len(bets):,}", None),
             ("Max drawdown", _usd(dd["max_drawdown"]), BAD if dd["max_drawdown"] else None),
-            ("Trades", f"{summary['trade_count']:,}", None),
-            ("Active days", f"{len(daily)}", None),
-            ("Best day", _signed(max((d['pnl'] for d in daily), default=None)), GOOD),
-            ("Worst day", _signed(min((d['pnl'] for d in daily), default=None)), BAD),
+            ("Trades placed", f"{activity['trades']:,}", None),
+            ("Volume traded", _usd(activity["volume"]), None),
         ]),
     ]
+    story.extend(_settled_sections(bets, daily))
 
-    if sport_rows:
-        story.append(Paragraph("Activity by sport", H2))
+    if largest:
+        story.append(Paragraph("Largest trades placed in period", H2))
         story.append(_table(
-            ["Sport", "Trades", "Volume"],
-            [[r["sport"], f"{r['trades']:,}", _usd(r["volume"])] for r in sport_rows],
-            [2.4, 1.4, 1.8],
-        ))
-
-    if daily:
-        story.append(Paragraph("Daily P&amp;L", H2))
-        story.append(_table(
-            ["Date", "Trades", "Volume", "Realized P&L"],
-            [[d["date"], f"{d['trades']:,}", _usd(d["volume"]), _signed(d["pnl"])] for d in daily],
-            [1.6, 1.2, 1.6, 1.8],
-            color_col=3, raw_values=[d["pnl"] for d in daily],
-        ))
-
-    if trade_rows:
-        story.append(Paragraph("Largest trades", H2))
-        story.append(_table(
-            ["Date", "Side", "Outcome", "Market", "Price", "Notional"],
-            [[r["ts"].strftime("%m-%d %H:%M"), r["side"], (r["outcome"] or "—")[:18],
-              (r["market_title"] or "—")[:38], f"{round(r['price'] * 100)}¢", _usd(r["notional"])]
-             for r in trade_rows],
-            [1.0, 0.55, 1.3, 2.7, 0.6, 1.0],
+            ["Date", "Side", "Bet", "Price", "Notional"],
+            [[r["ts"].strftime("%m-%d %H:%M"), r["side"],
+              bet_label(r["outcome"], r["title"], r["event_title"])[:46],
+              f"{round(r['price'] * 100)}¢", _usd(r["notional"])] for r in largest],
+            [1.0, 0.6, 3.3, 0.7, 1.0],
         ))
 
     story.append(Spacer(1, 18))
