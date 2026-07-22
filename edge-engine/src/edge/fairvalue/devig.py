@@ -29,8 +29,20 @@ def devig_power(decimal_odds: list[float]) -> list[float]:
 
     def f(k):
         return sum(x ** k for x in q) - 1.0
-    k = brentq(f, 0.25, 4.0)
-    return [x ** k for x in q]
+
+    # brentq needs a sign change across the bracket. Real feed data includes
+    # heavy-vig and underround sets whose root lies outside [0.25, 4] — widen
+    # adaptively, and if no bracket exists (degenerate odds), fall back to
+    # multiplicative rather than crashing the cycle.
+    lo, hi = 0.25, 4.0
+    for _ in range(12):
+        if f(lo) * f(hi) < 0:
+            k = brentq(f, lo, hi)
+            return [x ** k for x in q]
+        lo, hi = lo / 2, hi * 2
+        if lo < 1e-4 or hi > 512:
+            break
+    return devig_multiplicative(decimal_odds)
 
 
 def fair_value(decimal_odds: list[float], method: str = "power") -> list[float]:

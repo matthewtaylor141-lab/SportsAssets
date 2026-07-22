@@ -142,7 +142,14 @@ def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) ->
         if len(ev.h2h) < 2:
             continue
         names = list(ev.h2h)
-        fairs = dict(zip(names, fair_value([ev.h2h[n] for n in names])))
+        try:
+            fairs = dict(zip(names, fair_value([ev.h2h[n] for n in names])))
+        except Exception as exc:  # noqa: BLE001 — one pathological odds set
+            # must never kill the whole cycle
+            log.warning("fair value failed for %s vs %s (%s): %s",
+                        ev.home, ev.away, ev.h2h, exc)
+            funnel["rejects"]["fair_error"] = funnel["rejects"].get("fair_error", 0) + 1
+            continue
         for adapter, candidates in venue_candidates.values():
             match = match_event(ev.home, ev.away, ev.league_code, candidates)
             if match is None:
