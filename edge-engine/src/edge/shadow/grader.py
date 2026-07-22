@@ -70,7 +70,18 @@ def grade() -> dict:
     fills = load_fills()
     if not fills:
         return {"error": "no shadow fills logged yet"}
-    resolutions = fetch_resolutions(sorted({f["market_id"] for f in fills}))
+    pm_ids = sorted({f["market_id"] for f in fills if f["venue"] == "polymarket"})
+    resolutions = fetch_resolutions(pm_ids) if pm_ids else {}
+    # Kalshi settlements: outcome_id is the market ticker; result yes/no.
+    kalshi_tickers = sorted({f["outcome_id"] for f in fills if f["venue"] == "kalshi"})
+    if kalshi_tickers:
+        from edge.venues.kalshi import KalshiAdapter
+
+        results = KalshiAdapter().fetch_results(kalshi_tickers)
+        for f in fills:
+            if f["venue"] == "kalshi" and f["outcome_id"] in results:
+                resolutions.setdefault(f["market_id"], {})[f["outcome_id"]] = \
+                    results[f["outcome_id"]]
 
     per_venue: dict[str, dict] = defaultdict(
         lambda: {"fills": 0, "settled": 0, "staked": 0.0, "pnl": 0.0,

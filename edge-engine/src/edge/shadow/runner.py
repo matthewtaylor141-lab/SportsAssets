@@ -46,8 +46,10 @@ def log_shadow_fill(intent, book, feed_snapshot, would_fill: bool):
 # ── The decision loop (orders replaced by logging) ─────────────────────
 
 
-def run_cycle(adapter, feed_client, policy, exposure, sport_keys: list[str]) -> int:
-    """One sweep: feed → map → de-vig → book → decide → log. Returns fills logged."""
+def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) -> int:
+    """One sweep across all venues: feed → map → de-vig → book → decide → log.
+    Returns fills logged. Both venues are judged against the SAME fair values
+    (dual-venue shadow is the spec's venue-choice experiment)."""
     from edge.execution.engine import decide
     from edge.fairvalue.devig import fair_value
     from edge.venues.base import FillIntent
@@ -56,22 +58,33 @@ def run_cycle(adapter, feed_client, policy, exposure, sport_keys: list[str]) -> 
     league_codes = set()
     for group in (policy.leagues.get("allowlist") or {}).values():
         league_codes.update(group)
-    candidates = adapter.discover_markets(league_codes)
-    log.info("discovered %s venue markets across allowlist leagues", len(candidates))
+    venue_candidates = {}
+    for adapter in adapters:
+        try:
+            venue_candidates[adapter.name] = (adapter, adapter.discover_markets(league_codes))
+            log.info("%s: %s candidate markets", adapter.name,
+                     len(venue_candidates[adapter.name][1]))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("%s discovery failed: %s", adapter.name, exc)
 
-    logged = 0
+    # Fetch feed once; evaluate every venue against it.
+    events = []
     for sport_key in sport_keys:
         try:
-            events = feed_client.fetch_events(sport_key)
+            events.extend(feed_client.fetch_events(sport_key))
         except Exception as exc:  # noqa: BLE001 — one sport must not kill the sweep
             log.warning("feed fetch failed for %s: %s", sport_key, exc)
+
+    logged = 0
+    for ev in events:
+        if len(ev.h2h) < 2:
             continue
-        for ev in events:
+        names = list(ev.h2h)
+        fairs = dict(zip(names, fair_value([ev.h2h[n] for n in names])))
+        for adapter, candidates in venue_candidates.values():
             match = match_event(ev.home, ev.away, ev.league_code, candidates)
-            if match is None or len(ev.h2h) < 2:
+            if match is None:
                 continue
-            names = list(ev.h2h)
-            fairs = dict(zip(names, fair_value([ev.h2h[n] for n in names])))
             for side_name, oc_name in (
                 (ev.home, match.home_outcome), (ev.away, match.away_outcome)
             ):
@@ -109,21 +122,24 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     from edge.execution.engine import ExposureBook, Policy
     from edge.fairvalue.feed import SPORT_KEY_LEAGUE, TheOddsAPIClient
+    from edge.venues.kalshi import KalshiAdapter
     from edge.venues.polymarket import PolymarketAdapter
 
     SHADOW_LOG.parent.mkdir(parents=True, exist_ok=True)
     policy = Policy.load()
-    adapter = PolymarketAdapter()
+    adapters = [PolymarketAdapter()]
+    if os.environ.get("EDGE_KALSHI", "1") != "0":
+        adapters.append(KalshiAdapter())
     feed = TheOddsAPIClient()
     sport_keys = [k for k in os.environ.get(
         "EDGE_SPORT_KEYS", ",".join(SPORT_KEY_LEAGUE)).split(",") if k]
     cycle_seconds = int(os.environ.get("EDGE_CYCLE_SECONDS", "120"))
-    log.info("shadow runner starting: %s sports, %ss cycle — NO ORDERS, logging only",
-             len(sport_keys), cycle_seconds)
+    log.info("shadow runner starting: venues=%s, %s sports, %ss cycle — NO ORDERS, logging only",
+             [a.name for a in adapters], len(sport_keys), cycle_seconds)
     while True:
         exposure = ExposureBook()  # caps reset per cycle-day granularity v1
         try:
-            n = run_cycle(adapter, feed, policy, exposure, sport_keys)
+            n = run_cycle(adapters, feed, policy, exposure, sport_keys)
             log.info("cycle complete: %s shadow fills logged", n)
         except Exception:  # noqa: BLE001
             log.exception("cycle failed; continuing")

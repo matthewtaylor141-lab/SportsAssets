@@ -97,22 +97,3 @@ class PolymarketAdapter(VenueAdapter):
 
     async def settlements(self):
         raise NotImplementedError("grader pulls settlements in batch; see shadow/grader.py")
-
-
-class KalshiAdapter(VenueAdapter):
-    """Skeleton (build spec step 5): maker-first semantics, fee model wired.
-    Auth + market discovery to be implemented before Kalshi shadow logging."""
-
-    name = "kalshi"
-
-    def taker_fee(self, price: float) -> float:
-        return 0.07 * price * (1.0 - price)
-
-    async def subscribe_books(self, market_ids: list[str]):
-        raise NotImplementedError("kalshi adapter pending (spec step 5)")
-
-    async def place(self, intent: FillIntent):
-        raise RuntimeError("kalshi adapter is in shadow mode — placing orders is disabled")
-
-    async def settlements(self):
-        raise NotImplementedError("kalshi adapter pending (spec step 5)")

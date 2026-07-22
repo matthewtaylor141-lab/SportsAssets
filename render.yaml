@@ -62,3 +62,19 @@ services:
     dockerfilePath: ./Dockerfile
     dockerCommand: python -m sportsassets.workers.all
     envVars: *backend_env
+
+  # Edge-engine shadow runner (logs would-be fills; never places orders).
+  # Requires EDGE_ODDS_API_KEY. Suspend this service to pause shadow logging.
+  - type: worker
+    name: edge-shadow
+    runtime: docker
+    plan: starter
+    rootDir: edge-engine
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: EDGE_ODDS_API_KEY
+        sync: false
+      - key: EDGE_CYCLE_SECONDS
+        value: "120"
+      - key: EDGE_KALSHI
+        value: "1"
