@@ -45,6 +45,24 @@ def log_shadow_fill(intent, book, feed_snapshot, would_fill: bool, whale_alignme
     _record_to_platform(rec)
 
 
+def _post_status(status: str, detail: dict) -> None:
+    """Cycle telemetry -> platform Admin panel (service row 'edge_engine').
+    This is how an empty Engine tab becomes diagnosable: the funnel shows
+    feed events, venue matches, and rejection reasons per cycle."""
+    base = os.environ.get("EDGE_PLATFORM_API", "")
+    token = os.environ.get("EDGE_INGEST_TOKEN", "")
+    if not base or not token:
+        return
+    try:
+        import requests
+
+        requests.post(f"{base}/api/engine/status",
+                      json={"status": status, "detail": detail},
+                      headers={"X-Engine-Token": token}, timeout=5)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("status post failed (non-fatal): %s", exc)
+
+
 def _record_to_platform(rec: dict) -> None:
     """Mirror the shadow fill into the platform's internal database
     (POST /api/engine/fills) so the Engine tab shows it. Fail-soft: the
@@ -106,6 +124,8 @@ def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) ->
         except Exception as exc:  # noqa: BLE001 — one sport must not kill the sweep
             log.warning("feed fetch failed for %s: %s", sport_key, exc)
 
+    funnel = {"feed_events": len(events), "matched": 0, "books_checked": 0,
+              "logged": 0, "rejects": {}}
     logged = 0
     for ev in events:
         if len(ev.h2h) < 2:
@@ -116,6 +136,7 @@ def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) ->
             match = match_event(ev.home, ev.away, ev.league_code, candidates)
             if match is None:
                 continue
+            funnel["matched"] += 1
             for side_name, oc_name in (
                 (ev.home, match.home_outcome), (ev.away, match.away_outcome)
             ):
@@ -128,12 +149,16 @@ def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) ->
                 token = match.market.outcome_tokens[oc_name]
                 book = adapter.get_book(match.market.market_id, token)
                 if book is None or not book.asks:
+                    funnel["rejects"]["no_book"] = funnel["rejects"].get("no_book", 0) + 1
                     continue
+                funnel["books_checked"] += 1
                 ask = book.asks[0]
                 decision = decide(policy, exposure, match.market.market_id,
                                   ev.league_code, ask.price, fair,
                                   venue_fee=adapter.taker_fee(ask.price))
                 if not decision.trade:
+                    bucket = decision.reason.split()[0]
+                    funnel["rejects"][bucket] = funnel["rejects"].get(bucket, 0) + 1
                     continue
                 intent = FillIntent(
                     market_id=match.market.market_id, outcome_id=token,
@@ -148,7 +173,13 @@ def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) ->
                                 would_fill, whale_alignment=alignment)
                 exposure.add(match.market.market_id, decision.size_usd)
                 logged += 1
-    return logged
+                funnel["logged"] = logged
+    funnel["candidates"] = {name: len(c) for name, (_, c) in venue_candidates.items()}
+    for _, (adapter, _c) in venue_candidates.items():
+        census = getattr(adapter, "last_census", None)
+        if census:
+            funnel[f"{adapter.name}_league_census"] = census
+    return funnel
 
 
 def whale_alignment(condition_id: str, outcome_name: str):
@@ -191,18 +222,20 @@ def main() -> None:
     if os.environ.get("EDGE_KALSHI", "1") != "0":
         adapters.append(KalshiAdapter())
     feed = TheOddsAPIClient()
-    sport_keys = [k for k in os.environ.get(
-        "EDGE_SPORT_KEYS", ",".join(SPORT_KEY_LEAGUE)).split(",") if k]
+    env_keys = os.environ.get("EDGE_SPORT_KEYS", "")
+    sport_keys = [k for k in env_keys.split(",") if k] if env_keys else feed.resolve_sport_keys()
     cycle_seconds = int(os.environ.get("EDGE_CYCLE_SECONDS", "120"))
     log.info("shadow runner starting: venues=%s, %s sports, %ss cycle — NO ORDERS, logging only",
              [a.name for a in adapters], len(sport_keys), cycle_seconds)
     while True:
         exposure = ExposureBook()  # caps reset per cycle-day granularity v1
         try:
-            n = run_cycle(adapters, feed, policy, exposure, sport_keys)
-            log.info("cycle complete: %s shadow fills logged", n)
-        except Exception:  # noqa: BLE001
+            funnel = run_cycle(adapters, feed, policy, exposure, sport_keys)
+            log.info("cycle complete: %s", funnel)
+            _post_status("ok", funnel)
+        except Exception as exc:  # noqa: BLE001
             log.exception("cycle failed; continuing")
+            _post_status("error", {"error": str(exc)[:200]})
         time.sleep(cycle_seconds)
 
 

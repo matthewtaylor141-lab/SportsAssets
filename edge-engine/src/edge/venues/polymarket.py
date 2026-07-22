@@ -29,10 +29,14 @@ class PolymarketAdapter(VenueAdapter):
 
     def __init__(self) -> None:
         self._sess = requests.Session()
+        self.last_census: dict[str, int] = {}  # slug prefix -> open markets seen
 
     # ── discovery ────────────────────────────────────────────────────
     def discover_markets(self, league_codes: set[str], pages: int = 30) -> list[VenueMarket]:
-        """Open game markets whose event slug starts with an allowlisted league code."""
+        """Open game markets whose event slug starts with an allowlisted league
+        code. Records a census of ALL prefixes seen so the telemetry shows
+        what leagues exist on the venue right now vs. what we allow."""
+        census: dict[str, int] = {}
         out: list[VenueMarket] = []
         for page in range(pages):
             resp = self._sess.get(
@@ -50,6 +54,8 @@ class PolymarketAdapter(VenueAdapter):
                 slug = (events[0].get("slug") if events else m.get("eventSlug")) or m.get("slug") or ""
                 match = _PREFIX.match(slug.lower())
                 code = match.group(1) if match else None
+                if code:
+                    census[code] = census.get(code, 0) + 1
                 if code not in league_codes:
                     continue
                 tokens = m.get("clobTokenIds") or "[]"
@@ -69,6 +75,7 @@ class PolymarketAdapter(VenueAdapter):
                 ))
             if len(batch) < 100:
                 break
+        self.last_census = dict(sorted(census.items(), key=lambda kv: -kv[1])[:20])
         return out
 
     # ── books ────────────────────────────────────────────────────────

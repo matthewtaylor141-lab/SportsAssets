@@ -227,6 +227,36 @@ async def engine_fill_ingest(body: EngineFillBody, x_engine_token: str = Header(
     return {"ok": True, "id": row["id"] if row else None, "duplicate": row is None}
 
 
+class EngineStatusBody(BaseModel):
+    status: str = "ok"
+    detail: dict = {}
+
+
+@app.post("/api/engine/status")
+async def engine_status_ingest(
+    body: EngineStatusBody, x_engine_token: str = Header(default="")
+) -> dict:
+    cfg = settings()
+    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
+        raise HTTPException(status_code=401, detail="engine token required")
+    from ..db import heartbeat
+
+    await heartbeat("edge_engine", body.status, body.detail)
+    return {"ok": True}
+
+
+@app.get("/api/engine/status")
+async def engine_status() -> dict:
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT * FROM service_heartbeats WHERE service='edge_engine'")
+    if row is None:
+        return {"status": "never_reported"}
+    d = dict(row)
+    if isinstance(d.get("detail"), str):
+        d["detail"] = json.loads(d["detail"])
+    return d
+
+
 @app.get("/api/engine/summary")
 async def engine_summary() -> dict:
     pool = await get_pool()

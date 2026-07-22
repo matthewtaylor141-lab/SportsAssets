@@ -51,6 +51,37 @@ class FeedClient(ABC):
 
 
 class TheOddsAPIClient(FeedClient):
+    def resolve_sport_keys(self) -> list[str]:
+        """Live sport keys from the feed intersected with our league map.
+        The Odds API uses per-tournament tennis keys (tennis_wta_*), so a
+        hardcoded list goes stale — resolve from /sports each run."""
+        try:
+            resp = self._sess.get(f"{self.BASE}/sports", params={"apiKey": self._key}, timeout=15)
+            resp.raise_for_status()
+            keys = []
+            for s in resp.json():
+                k = s.get("key", "")
+                if not s.get("active"):
+                    continue
+                if k in SPORT_KEY_LEAGUE:
+                    keys.append(k)
+                elif k.startswith("tennis_wta"):
+                    keys.append(k)  # maps to league 'wta' (allowlisted)
+                # tennis_atp_* deliberately skipped: blocklisted (measured flat)
+            if keys:
+                return keys
+        except (requests.RequestException, ValueError) as exc:
+            log.warning("sport-key discovery failed (%s); using static map", exc)
+        return list(SPORT_KEY_LEAGUE)
+
+    @staticmethod
+    def league_of(sport_key: str) -> str:
+        if sport_key in SPORT_KEY_LEAGUE:
+            return SPORT_KEY_LEAGUE[sport_key]
+        if sport_key.startswith("tennis_wta"):
+            return "wta"
+        return sport_key
+
     BASE = "https://api.the-odds-api.com/v4"
 
     def __init__(self, api_key: str | None = None) -> None:
@@ -71,7 +102,7 @@ class TheOddsAPIClient(FeedClient):
         for raw in resp.json():
             ev = FeedEvent(
                 sport_key=sport_key,
-                league_code=SPORT_KEY_LEAGUE.get(sport_key, sport_key),
+                league_code=self.league_of(sport_key),
                 home=raw.get("home_team", ""),
                 away=raw.get("away_team", ""),
                 commence_ts=_iso_ts(raw.get("commence_time")),

@@ -44,13 +44,29 @@ interface EngineFill {
 /** OUR model's recommendations — strictly separate from whale data. Every row
  * is a shadow fill the engine would have taken, recorded internally and
  * settled by our own resolution pipeline. */
+interface EngineStatus {
+  status: string
+  beat_at?: string
+  detail?: {
+    feed_events?: number
+    matched?: number
+    books_checked?: number
+    logged?: number
+    rejects?: Record<string, number>
+    candidates?: Record<string, number>
+    error?: string
+  }
+}
+
 export function Engine() {
   const [summary, setSummary] = useState<EngineSummary | null>(null)
   const [fills, setFills] = useState<EngineFill[] | null>(null)
+  const [status, setStatus] = useState<EngineStatus | null>(null)
   const [venue, setVenue] = useState('')
 
   const refresh = () => {
     api<EngineSummary>('/api/engine/summary').then(setSummary).catch(() => {})
+    api<EngineStatus>('/api/engine/status').then(setStatus).catch(() => {})
     api<EngineFill[]>(`/api/engine/fills?limit=100${venue ? `&venue=${venue}` : ''}`)
       .then(setFills)
       .catch(() => setFills([]))
@@ -75,8 +91,41 @@ export function Engine() {
       </div>
       <p className="sub">
         Our internal model's recommendations, recorded and settled in our own database. Separate
-        from whale data — this is what <strong>we</strong> would have traded.
+        from whale data — this is what <strong>we</strong> would have traded, when sharp-book fair
+        value beats the venue price by the measured threshold.
       </p>
+
+      <div className="card" style={{ padding: '10px 14px' }}>
+        {!status || status.status === 'never_reported' ? (
+          <span style={{ color: 'var(--warning)' }}>
+            ⚠ Engine has never reported in. Check that the edge-shadow worker is deployed with
+            EDGE_ODDS_API_KEY set, and that EDGE_INGEST_TOKEN (worker) matches ENGINE_INGEST_TOKEN
+            (API).
+          </span>
+        ) : status.status === 'error' ? (
+          <span style={{ color: 'var(--critical)' }}>
+            ✗ Last cycle failed {status.beat_at ? fmtAgo(status.beat_at) : ''}:{' '}
+            <span className="mono">{status.detail?.error}</span>
+          </span>
+        ) : (
+          <span style={{ color: 'var(--ink-2)', fontSize: 13 }}>
+            <span style={{ color: 'var(--good)' }}>●</span> Last cycle{' '}
+            {status.beat_at ? fmtAgo(status.beat_at) : '—'} · {status.detail?.feed_events ?? 0} feed
+            events · {status.detail?.matched ?? 0} venue matches ·{' '}
+            {status.detail?.books_checked ?? 0} books checked · {status.detail?.logged ?? 0} logged
+            {status.detail?.candidates && (
+              <> · candidates: {Object.entries(status.detail.candidates)
+                .map(([v, n]) => `${v} ${n}`).join(', ')}</>
+            )}
+            {status.detail?.rejects && Object.keys(status.detail.rejects).length > 0 && (
+              <span style={{ color: 'var(--muted)' }}>
+                {' '}· rejected: {Object.entries(status.detail.rejects)
+                  .map(([k, n]) => `${k} ×${n}`).join(', ')}
+              </span>
+            )}
+          </span>
+        )}
+      </div>
 
       <div className="statgrid" style={{ marginBottom: 12 }}>
         <div className="stat">
@@ -136,8 +185,11 @@ export function Engine() {
           <EmptyState>Loading…</EmptyState>
         ) : fills.length === 0 ? (
           <EmptyState>
-            No engine recommendations recorded yet. They appear here as the shadow runner finds
-            qualifying edges (requires the edge-shadow worker + odds feed key).
+            No recommendations recorded yet. Note this tab is NOT a copy of whale trades — the
+            engine only logs when its own edge threshold is met on an allowlisted league and band.
+            The status strip above shows each cycle's funnel: if feed events are 0, the odds key or
+            sport coverage is the issue; if matches are 0, no venue markets line up with today's
+            feed events; if everything is rejected, the thresholds are doing their job.
           </EmptyState>
         ) : (
           <div className="scroll-x">
