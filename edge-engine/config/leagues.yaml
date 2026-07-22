@@ -1,0 +1,7 @@
+# League policy. Source: calib_league.csv. Codes = Polymarket slug prefixes.
+allowlist:
+  soccer: [fifwc, epl, lal, fl1, uel, acn, lib, bra, spl, bl2, fif, sea, bra2, arg, mex, nor, swe, den, kor, j1100, j2100]
+  basketball: [nba, cbb, wnba]
+  tennis: [wta]   # ATP measured flat - excluded
+blocklist: [ucl, bun, elc, tur, por, ere, atp, mlb]   # measured negative/flat
+unknown_league_policy: shadow_only

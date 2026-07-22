@@ -1,0 +1,7 @@
+# Size discipline. Source: capacity_sizebuckets.csv (ROI negative > $50K/fill).
+per_fill_usd_default: 5000
+per_fill_usd_max: 10000
+per_market_exposure_usd: 25000
+per_day_deployment_usd: 250000
+working_capital_usd: 0   # set only after shadow gate passes
+shadow_gate: {min_days: 60, min_fills_per_venue: 5000, min_net_roi: 0.015}

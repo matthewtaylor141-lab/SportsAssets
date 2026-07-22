@@ -1,0 +1,14 @@
+venues:
+  polymarket:
+    mode: shadow
+    fees_taker: 0.0
+    clob_ws: "wss://ws-subscriptions-clob.polymarket.com"
+    gamma: "https://gamma-api.polymarket.com"
+    data_api: "https://data-api.polymarket.com"
+    notes: "reference account active here; expect queue competition"
+  kalshi:
+    mode: shadow
+    fees_taker_formula: "0.07 * p * (1-p)"
+    fees_maker: 0.0
+    execution_style: maker_first
+    notes: "majors-only coverage; uncontested by reference account"

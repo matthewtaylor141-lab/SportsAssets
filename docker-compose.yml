@@ -102,5 +102,13 @@ services:
       VITE_API_BASE: http://localhost:8000
     depends_on: [api]
 
+  # Edge engine shadow runner (opt-in): docker compose --profile edge up
+  # Logs would-be fills only — never places orders (see edge-engine/CLAUDE.md).
+  edge-shadow:
+    profiles: ["edge"]
+    build: ./edge-engine
+    env_file: .env
+    restart: unless-stopped
+
 volumes:
   pgdata:

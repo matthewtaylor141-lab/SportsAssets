@@ -97,6 +97,16 @@ and `OrderFilled` decoding (maker/taker perspectives).
 5. 100 SSE clients + 50-trade burst — Redis pub/sub fan-out; collapse policy in `notifications/collapse.py` (unit-tested).
 6. Real p50/p95 latency dashboard — `/api/admin/latency` from `detected_at − ts`, rendered on the Admin page.
 
+## Edge engine (sibling project)
+
+`edge-engine/` is the shadow-mode trading engine built to its own spec
+(`edge-engine/CLAUDE.md`) and calibration data. It shares this repo but runs
+independently: `docker compose --profile edge up edge-shadow` (requires
+`EDGE_ODDS_API_KEY`). It logs would-be fills only — the capital gate lives in
+`edge-engine/config/risk.yaml` and is judged solely by
+`python -m edge.shadow.grader`. The whale platform remains the live
+cross-account validation layer for the engine's assumptions.
+
 ## Legal / ToS hygiene
 
 The platform displays public on-chain data and public-API data with
