@@ -76,7 +76,7 @@ async def whale_profile(whale_id: int) -> dict | None:
     if whale is None:
         return None
     stats = await pool.fetch(
-        "SELECT * FROM whale_sport_stats WHERE whale_id=$1 ORDER BY sport, window", whale_id
+        "SELECT * FROM whale_sport_stats WHERE whale_id=$1 ORDER BY sport, time_window", whale_id
     )
     open_positions = await pool.fetch(
         """
@@ -111,6 +111,10 @@ async def whale_profile(whale_id: int) -> dict | None:
 
 def _stats_row(r: Any) -> dict:
     d = dict(r)
+    # DB column is time_window ("window" is a Postgres reserved word);
+    # the API contract stays `window`.
+    if "time_window" in d:
+        d["window"] = d.pop("time_window")
     for k in ("win_pct", "realized_pnl", "notional", "roi", "avg_position", "open_exposure"):
         if d.get(k) is not None:
             d[k] = float(d[k])
@@ -179,7 +183,7 @@ async def matrix(window: str = "all") -> dict:
                s.notional::float8 AS notional, s.roi::float8 AS roi,
                s.open_exposure::float8 AS open_exposure
         FROM whale_sport_stats s JOIN whales w ON w.id = s.whale_id
-        WHERE s.window = $1 AND w.active
+        WHERE s.time_window = $1 AND w.active
         ORDER BY w.source_rank NULLS LAST, w.id, s.sport
         """,
         window,

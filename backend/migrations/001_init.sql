@@ -109,7 +109,7 @@ CREATE INDEX IF NOT EXISTS positions_open_idx  ON positions (whale_id) WHERE net
 CREATE TABLE IF NOT EXISTS whale_sport_stats (
     whale_id        BIGINT NOT NULL REFERENCES whales (id),
     sport           TEXT NOT NULL,
-    window          TEXT NOT NULL CHECK (window IN ('7d', '30d', 'all')),
+    time_window     TEXT NOT NULL CHECK (time_window IN ('7d', '30d', 'all')),
     markets_traded  INTEGER NOT NULL DEFAULT 0,
     wins            INTEGER NOT NULL DEFAULT 0,
     losses          INTEGER NOT NULL DEFAULT 0,
@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS whale_sport_stats (
     avg_position    NUMERIC(24, 6),
     open_exposure   NUMERIC(24, 6) NOT NULL DEFAULT 0,
     computed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (whale_id, sport, window)
+    PRIMARY KEY (whale_id, sport, time_window)
 );
 
 -- ── Notifications ───────────────────────────────────────────────────

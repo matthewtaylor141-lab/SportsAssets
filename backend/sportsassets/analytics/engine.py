@@ -236,7 +236,7 @@ async def persist_rollups(rollups: list[dict]) -> None:
                 await conn.execute(
                     """
                     INSERT INTO whale_sport_stats
-                        (whale_id, sport, window, markets_traded, wins, losses, scratches,
+                        (whale_id, sport, time_window, markets_traded, wins, losses, scratches,
                          win_pct, realized_pnl, notional, roi, avg_position, open_exposure, computed_at)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
                     """,
