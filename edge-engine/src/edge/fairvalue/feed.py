@@ -76,24 +76,32 @@ class TheOddsAPIClient(FeedClient):
                 away=raw.get("away_team", ""),
                 commence_ts=_iso_ts(raw.get("commence_time")),
             )
+            # Consensus across ALL sharp books: median decimal odds per outcome.
+            samples: dict[str, dict[str, list[float]]] = {"h2h": {}, "totals": {}, "spreads": {}}
             for book in raw.get("bookmakers", []):
                 if book.get("key") not in SHARP_BOOKS:
                     continue
                 for mkt in book.get("markets", []):
+                    if mkt["key"] not in samples:
+                        continue
                     for oc in mkt.get("outcomes", []):
                         name, price = oc.get("name", ""), float(oc.get("price", 0) or 0)
                         if price <= 1.0:
                             continue
-                        if mkt["key"] == "h2h":
-                            ev.h2h.setdefault(name, price)
-                        elif mkt["key"] == "totals":
-                            ev.totals.setdefault(f"{name} {oc.get('point')}", price)
-                        elif mkt["key"] == "spreads":
-                            ev.spreads.setdefault(f"{name} {oc.get('point')}", price)
-                break  # first sharp book wins; refine to consensus later
+                        key = name if mkt["key"] == "h2h" else f"{name} {oc.get('point')}"
+                        samples[mkt["key"]].setdefault(key, []).append(price)
+            ev.h2h = {k: _median(v) for k, v in samples["h2h"].items()}
+            ev.totals = {k: _median(v) for k, v in samples["totals"].items()}
+            ev.spreads = {k: _median(v) for k, v in samples["spreads"].items()}
             if ev.h2h:
                 out.append(ev)
         return out
+
+
+def _median(values: list[float]) -> float:
+    s = sorted(values)
+    mid = len(s) // 2
+    return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
 
 
 def _iso_ts(iso: str | None) -> float:

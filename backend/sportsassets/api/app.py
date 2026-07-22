@@ -176,6 +176,48 @@ async def api_whale_day(whale_id: int, day: str) -> dict:
     }
 
 
+@app.get("/api/signal/{condition_id}")
+async def api_signal(condition_id: str) -> dict:
+    """Live whale positioning for one market — the edge engine's alignment
+    feature: are the tracked top traders on this outcome right now?"""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT w.username, w.id AS whale_id, ap.outcome, ap.size::float8 AS size,
+               ap.avg_price::float8 AS avg_price,
+               COALESCE(ap.current_value, ap.size * ap.avg_price)::float8 AS value
+        FROM api_positions ap JOIN whales w ON w.id = ap.whale_id
+        WHERE ap.condition_id = $1 AND ap.size > 0 AND w.active
+        ORDER BY value DESC
+        """,
+        condition_id,
+    )
+    recent = await pool.fetch(
+        """
+        SELECT w.username, t.side, t.outcome, t.price::float8 AS price,
+               t.notional::float8 AS notional, t.ts
+        FROM trades t JOIN whales w ON w.id = t.whale_id
+        WHERE t.condition_id = $1 AND t.ts > now() - interval '48 hours'
+        ORDER BY t.ts DESC LIMIT 20
+        """,
+        condition_id,
+    )
+    return {
+        "condition_id": condition_id,
+        "positions": [dict(r) for r in rows],
+        "recent_trades": [dict(r) for r in recent],
+    }
+
+
+@app.get("/api/admin/calibration", dependencies=[Depends(require_admin)])
+async def admin_calibration(window_days: int = Query(90, le=730)) -> dict:
+    """Rolling recalibration of the edge-engine's measured tables from the
+    live whale ledger — band/league/size edges, Phase-1 methodology."""
+    from ..analytics.calibration import full_report
+
+    return await full_report(window_days)
+
+
 @app.get("/api/admin/diag", dependencies=[Depends(require_admin)])
 async def admin_diag() -> dict:
     """Live probes of every upstream API, with response snippets — run this

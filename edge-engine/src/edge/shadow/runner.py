@@ -22,10 +22,11 @@ log = logging.getLogger(__name__)
 SHADOW_LOG = Path(__file__).resolve().parents[3] / "data" / "shadow_fills.jsonl"
 
 
-def log_shadow_fill(intent, book, feed_snapshot, would_fill: bool):
+def log_shadow_fill(intent, book, feed_snapshot, would_fill: bool, whale_alignment=None):
     rec = {
         "ts": time.time(),
         "venue": book.venue,
+        "whale_alignment": whale_alignment,
         "market_id": intent.market_id,
         "outcome_id": intent.outcome_id,
         "league": intent.league,
@@ -111,11 +112,40 @@ def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) ->
                     league=ev.league_code, band=decision.band,
                 )
                 would_fill = ask.size * ask.price >= decision.size_usd
+                alignment = whale_alignment(match.market.market_id, oc_name) \
+                    if adapter.name == "polymarket" else None
                 log_shadow_fill(intent, book, {"h2h": ev.h2h, "home": ev.home, "away": ev.away},
-                                would_fill)
+                                would_fill, whale_alignment=alignment)
                 exposure.add(match.market.market_id, decision.size_usd)
                 logged += 1
     return logged
+
+
+def whale_alignment(condition_id: str, outcome_name: str):
+    """Live whale positioning from the SportsAssets platform (top-6 tracker):
+    do the measured top traders hold this outcome right now? Fail-soft —
+    alignment is a logged feature, never a blocker."""
+    base = os.environ.get("EDGE_PLATFORM_API", "")
+    if not base:
+        return None
+    try:
+        import requests
+
+        resp = requests.get(f"{base}/api/signal/{condition_id}", timeout=5)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        same_side, opposed = [], []
+        for p in data.get("positions", []):
+            entry = {"whale": p.get("username"), "value": p.get("value")}
+            if (p.get("outcome") or "").lower() == outcome_name.lower():
+                same_side.append(entry)
+            else:
+                opposed.append(entry)
+        return {"same_side": same_side, "opposed": opposed,
+                "recent_trades_48h": len(data.get("recent_trades", []))}
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def main() -> None:

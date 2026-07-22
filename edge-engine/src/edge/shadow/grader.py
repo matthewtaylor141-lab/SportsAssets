@@ -85,7 +85,8 @@ def grade() -> dict:
 
     per_venue: dict[str, dict] = defaultdict(
         lambda: {"fills": 0, "settled": 0, "staked": 0.0, "pnl": 0.0,
-                 "by_band": defaultdict(float), "by_league": defaultdict(float)})
+                 "by_band": defaultdict(float), "by_league": defaultdict(float),
+                 "by_alignment": defaultdict(lambda: {"staked": 0.0, "pnl": 0.0})})
     first_ts = min(f["ts"] for f in fills)
     for f in fills:
         v = per_venue[f["venue"]]
@@ -103,6 +104,11 @@ def grade() -> dict:
         v["pnl"] += pnl
         v["by_band"][f.get("band", "?")] += pnl
         v["by_league"][f.get("league", "?")] += pnl
+        align = f.get("whale_alignment") or {}
+        bucket = "whale_aligned" if align.get("same_side") else (
+            "whale_opposed" if align.get("opposed") else "solo")
+        v["by_alignment"][bucket]["staked"] += float(f["size_usd"])
+        v["by_alignment"][bucket]["pnl"] += pnl
 
     gate = Policy.load().risk.get("shadow_gate", {})
     days = (time.time() - first_ts) / 86400
@@ -117,6 +123,11 @@ def grade() -> dict:
             "by_band": {k: round(x, 2) for k, x in sorted(v["by_band"].items())},
             "by_league": {k: round(x, 2) for k, x in
                           sorted(v["by_league"].items(), key=lambda kv: -kv[1])},
+            "by_alignment": {
+                k: {"staked": round(x["staked"], 2), "pnl": round(x["pnl"], 2),
+                    "roi": round(x["pnl"] / x["staked"], 4) if x["staked"] else None}
+                for k, x in v["by_alignment"].items()
+            },
             "gate": {
                 "min_days": days >= float(gate.get("min_days", 60)),
                 "min_fills": v["fills"] >= int(gate.get("min_fills_per_venue", 5000)),

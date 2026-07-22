@@ -78,3 +78,5 @@ services:
         value: "120"
       - key: EDGE_KALSHI
         value: "1"
+      - key: EDGE_PLATFORM_API   # whale-alignment signal source
+        value: "https://sportsassets-api.onrender.com"
