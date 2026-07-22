@@ -286,7 +286,9 @@ async def latency_stats(hours: int = 24) -> dict:
     rows = await pool.fetch(
         """
         SELECT source, EXTRACT(EPOCH FROM (detected_at - ts))::float8 AS lat
-        FROM trades WHERE detected_at > now() - make_interval(hours => $1)
+        FROM trades
+        WHERE detected_at > now() - make_interval(hours => $1)
+          AND source IN ('chain', 'poll')  -- imported history is not a detection
         """,
         hours,
     )

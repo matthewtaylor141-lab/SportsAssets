@@ -17,7 +17,7 @@ export interface Trade {
   event_title?: string | null
   sport: string
   ts: string
-  source: 'chain' | 'poll'
+  source: 'chain' | 'poll' | 'backfill'
   detected_at: string
   latency_s: number | null
   enriched?: boolean

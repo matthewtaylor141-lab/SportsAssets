@@ -122,13 +122,23 @@ class GammaClient:
     async def fetch_active_sports_markets(
         self, page_size: int = 100, max_pages: int = 50
     ) -> list[dict[str, Any]]:
-        """All open markets, paged (bounded); classification filters non-sports later."""
+        """All open markets, paged (bounded); classification filters non-sports later.
+
+        A failure on a later page keeps the pages already fetched — a partial
+        cache refresh beats aborting the whole metadata cycle.
+        """
         base = await self._resolve_open_params()
         out: list[dict[str, Any]] = []
         for page in range(max_pages):
-            batch = await self.fetch_markets(
-                {**base, "limit": page_size, "offset": page * page_size}
-            )
+            try:
+                batch = await self.fetch_markets(
+                    {**base, "limit": page_size, "offset": page * page_size}
+                )
+            except httpx.HTTPStatusError as exc:
+                log.warning("open-market paging stopped at page %s (%s); keeping %s markets",
+                            page, exc, len(out))
+                self._open_params = None  # re-probe variants next cycle
+                return out
             out.extend(batch)
             if len(batch) < page_size:
                 return out

@@ -18,9 +18,14 @@ log = logging.getLogger(__name__)
 
 
 async def main() -> None:
+    """Each stage runs independently — a Gamma hiccup must never block the
+    position snapshots (which come from a different API), and vice versa."""
     cfg = settings()
     client = gamma.GammaClient()
     while True:
+        detail: dict = {}
+        errors: dict = {}
+
         try:
             markets = await client.fetch_active_sports_markets()
             kept = 0
@@ -33,7 +38,13 @@ async def main() -> None:
                 if is_sport(meta["sport"]):
                     await gamma.upsert_market(meta)
                     kept += 1
-            fixed = await backfill_unenriched()
+            detail["active_sports_markets"] = kept
+        except Exception as exc:  # noqa: BLE001
+            log.warning("gamma markets refresh failed: %s", exc)
+            errors["markets"] = str(exc)[:180]
+
+        try:
+            detail["re_enriched"] = await backfill_unenriched()
             # Backfilled historical trades arrive before their markets are in
             # our metadata store; stamp their sport once the market lands.
             pool = await get_pool()
@@ -45,22 +56,22 @@ async def main() -> None:
                   AND t.sport = 'unclassified' AND m.sport <> 'unclassified'
                 """
             )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("enrichment/reclassify failed: %s", exc)
+            errors["enrich"] = str(exc)[:180]
+
+        try:
             # Live book snapshots: every open position each whale holds right
             # now, including ones opened before we started tracking.
             pos_counts = await sync_all_positions()
-            await heartbeat(
-                "metadata",
-                "ok",
-                {"active_sports_markets": kept, "re_enriched": fixed,
-                 "open_positions": sum(pos_counts.values())},
-            )
-            log.info(
-                "metadata refresh: %s sports markets cached, %s trades re-enriched, "
-                "%s open positions snapshotted", kept, fixed, sum(pos_counts.values()),
-            )
+            detail["open_positions"] = sum(pos_counts.values())
         except Exception as exc:  # noqa: BLE001
-            log.warning("metadata refresh failed: %s", exc)
-            await heartbeat("metadata", "error", {"error": str(exc)})
+            log.warning("position snapshot sync failed: %s", exc)
+            errors["positions"] = str(exc)[:180]
+
+        status = "ok" if not errors else ("degraded" if detail else "error")
+        await heartbeat("metadata", status, {**detail, **({"errors": errors} if errors else {})})
+        log.info("metadata cycle %s: %s%s", status, detail, f" errors={errors}" if errors else "")
         await asyncio.sleep(cfg.metadata_refresh_seconds)
 
 
