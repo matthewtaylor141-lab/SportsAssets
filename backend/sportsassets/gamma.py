@@ -67,7 +67,12 @@ def parse_market(raw: dict[str, Any]) -> dict[str, Any] | None:
         "slug": raw.get("slug"),
         "event_slug": event.get("slug") or raw.get("eventSlug"),
         "event_title": event.get("title"),
-        "sport": classify(tag_labels, raw.get("slug") or "", raw.get("question") or ""),
+        "sport": classify(
+            tag_labels,
+            raw.get("slug") or "",
+            raw.get("question") or "",
+            event_slug=event.get("slug") or raw.get("eventSlug") or "",
+        ),
         "tags": tag_labels,
         "closed": bool(raw.get("closed")),
         "resolved": resolved_prices is not None,

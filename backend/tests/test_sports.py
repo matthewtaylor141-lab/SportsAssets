@@ -38,3 +38,14 @@ def test_deterministic_and_rerunnable():
 def test_priority_league_over_generic():
     # A market tagged both Sports and MLB must land in MLB, not Other-Sports.
     assert classify(["Sports", "MLB"], "", "") == "MLB"
+
+
+def test_slug_prefix_classification():
+    # No tags, opaque titles — the league lives in the slug prefix.
+    assert classify([], "", "Hamburg European Open: Korpatsch vs Bondar",
+                    event_slug="atp-hamburg-2026") == "Tennis"
+    assert classify([], "wta-prague-open-r1", "Aksu vs Snigur") == "Tennis"
+    assert classify([], "mlb-nyy-bos-2026-07-22", "Yankees vs. Red Sox") == "MLB"
+    assert classify([], "", "Will CF Cruz Azul win on 2026-07-21?",
+                    event_slug="ligamx-cruz-azul-2026") == "Soccer"
+    assert classify([], "cfb-osu-mich", "Ohio State vs Michigan") == "NFL"

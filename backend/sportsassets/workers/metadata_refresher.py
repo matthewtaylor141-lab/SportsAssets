@@ -12,9 +12,36 @@ from ..config import settings
 from ..db import get_pool, heartbeat
 from ..ingestion.pipeline import backfill_unenriched
 from ..positions_sync import sync_all_positions
-from ..sports import is_sport
+from ..sports import classify, is_sport
 
 log = logging.getLogger(__name__)
+
+
+async def reclassify_markets(pool, batch: int = 5000) -> int:
+    """Re-run classification for markets stuck without a sport. Returns changes."""
+    import json as _json
+
+    rows = await pool.fetch(
+        """
+        SELECT condition_id, tags, slug, event_slug, title
+        FROM markets WHERE sport IN ('unclassified', 'Non-Sports') LIMIT $1
+        """,
+        batch,
+    )
+    changed = 0
+    for r in rows:
+        tags = r["tags"]
+        if isinstance(tags, str):
+            tags = _json.loads(tags)
+        new_sport = classify(tags or [], r["slug"] or "", r["title"] or "",
+                             event_slug=r["event_slug"] or "")
+        if new_sport not in ("unclassified", "Non-Sports"):
+            await pool.execute(
+                "UPDATE markets SET sport=$2, updated_at=now() WHERE condition_id=$1",
+                r["condition_id"], new_sport,
+            )
+            changed += 1
+    return changed
 
 
 async def main() -> None:
@@ -45,17 +72,22 @@ async def main() -> None:
 
         try:
             detail["re_enriched"] = await backfill_unenriched()
-            # Backfilled historical trades arrive before their markets are in
-            # our metadata store; stamp their sport once the market lands.
             pool = await get_pool()
-            await pool.execute(
+            # Retroactive market reclassification: classification is
+            # deterministic and re-runnable, so classifier improvements apply
+            # to already-stored markets without re-fetching anything.
+            detail["markets_reclassified"] = await reclassify_markets(pool)
+            # Trades always follow their market's current classification.
+            status_msg = await pool.execute(
                 """
                 UPDATE trades t SET sport = m.sport
                 FROM markets m
                 WHERE t.condition_id = m.condition_id
-                  AND t.sport = 'unclassified' AND m.sport <> 'unclassified'
+                  AND m.sport <> 'unclassified'
+                  AND t.sport IS DISTINCT FROM m.sport
                 """
             )
+            detail["trades_resynced"] = int(status_msg.split()[-1]) if status_msg else 0
         except Exception as exc:  # noqa: BLE001
             log.warning("enrichment/reclassify failed: %s", exc)
             errors["enrich"] = str(exc)[:180]

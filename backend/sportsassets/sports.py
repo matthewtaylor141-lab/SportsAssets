@@ -73,7 +73,38 @@ _RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
-def classify(tags: list[str] | None, slug: str = "", title: str = "") -> str:
+# Event/market slug prefixes — Polymarket sports slugs lead with the league
+# ("mlb-nyy-bos-2026-07-10", "atp-hamburg-…"). Deterministic, checked first
+# after tags. Keys are the first dash-separated token, lowercased.
+_SLUG_PREFIX: dict[str, str] = {
+    "mlb": "MLB",
+    "nba": "NBA", "wnba": "NBA", "ncaab": "NBA", "cbb": "NBA",
+    "nfl": "NFL", "cfb": "NFL", "ncaaf": "NFL",
+    "nhl": "NHL", "khl": "NHL",
+    "epl": "Soccer", "ucl": "Soccer", "uel": "Soccer", "mls": "Soccer",
+    "laliga": "Soccer", "la": "Soccer", "seriea": "Soccer", "bundesliga": "Soccer",
+    "ligue1": "Soccer", "fifa": "Soccer", "uefa": "Soccer", "copa": "Soccer",
+    "concacaf": "Soccer", "libertadores": "Soccer", "ligamx": "Soccer",
+    "atp": "Tennis", "wta": "Tennis", "itf": "Tennis", "tennis": "Tennis",
+    "challenger": "Tennis",
+    "ufc": "MMA", "mma": "MMA", "boxing": "MMA", "pfl": "MMA",
+    "pga": "Golf", "golf": "Golf", "lpga": "Golf", "liv": "Golf",
+    "f1": "Other-Sports", "nascar": "Other-Sports", "cricket": "Other-Sports",
+    "darts": "Other-Sports", "rugby": "Other-Sports", "cs2": "Other-Sports",
+    "lol": "Other-Sports", "dota2": "Other-Sports", "valorant": "Other-Sports",
+}
+
+
+def _slug_sport(slug: str) -> str | None:
+    if not slug:
+        return None
+    head = slug.strip().lower().split("-", 1)[0]
+    return _SLUG_PREFIX.get(head)
+
+
+def classify(
+    tags: list[str] | None, slug: str = "", title: str = "", event_slug: str = ""
+) -> str:
     """Classify a market into a sport bucket.
 
     `tags` are Gamma tag labels/slugs; `slug` and `title` are fallbacks.
@@ -94,7 +125,14 @@ def classify(tags: list[str] | None, slug: str = "", title: str = "") -> str:
             for kw in keywords:
                 if kw in hay:
                     return sport
-    return "Non-Sports" if haystacks else UNCLASSIFIED
+
+    # League slug prefix — decisive when tags/keywords are silent.
+    for s in (event_slug, slug):
+        found = _slug_sport(s)
+        if found:
+            return found
+
+    return "Non-Sports" if haystacks or event_slug else UNCLASSIFIED
 
 
 def is_sport(sport: str) -> bool:

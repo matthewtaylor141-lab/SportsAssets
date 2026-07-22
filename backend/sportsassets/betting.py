@@ -99,6 +99,27 @@ def bet_label(outcome: str | None, market_title: str | None, event_title: str | 
     return o or _clean_prop(title)
 
 
+def bet_type(outcome: str | None, market_title: str | None, event_title: str | None = None) -> str:
+    """Bet-type bucket for per-type P&L analysis:
+    Moneyline / Spread / Total / Prop (Yes-No) / Futures."""
+    o = (outcome or "").strip()
+    low = o.lower()
+    title = (market_title or "").strip()
+    if low in ("over", "under") or re.search(r"\bo/u\b|\btotal\b|over/under", title, re.IGNORECASE):
+        return "Total"
+    if _SIGNED_NUM.search(o) or re.search(r"\bspread\b|\bhandicap\b", title, re.IGNORECASE):
+        return "Spread"
+    if low in ("yes", "no"):
+        # Yes/No on a specific game reads as ML-equivalent; otherwise a prop.
+        parts = [p for p in _VS.split(event_title or title) if p.strip()]
+        return "Moneyline" if len(parts) == 2 else "Prop"
+    if opponent_of(o, event_title):
+        return "Moneyline"
+    if re.search(r"\bwin\b|champion|series|cup|title|mvp", title, re.IGNORECASE):
+        return "Futures"
+    return "Moneyline" if len([p for p in _VS.split(title) if p.strip()]) == 2 else "Prop"
+
+
 def result_word(pnl: float, resolved: bool, tolerance: float = 0.01) -> str:
     if pnl > tolerance:
         return "Win" if resolved else "Cash-out (profit)"

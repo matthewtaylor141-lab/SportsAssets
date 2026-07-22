@@ -26,7 +26,7 @@ import json
 
 from ..analytics import perf
 from ..analytics.positions import EPS, Fill, Position
-from ..betting import american_odds, bet_label, result_word
+from ..betting import american_odds, bet_label, bet_type, result_word
 from ..db import get_pool
 from . import queries
 
@@ -201,6 +201,7 @@ async def settled_bets(whale_id: int) -> list[dict]:
             "sport": (t["m_sport"] if t["m_sport"] and t["m_sport"] != "unclassified"
                       else t["t_sport"]),
             "label": bet_label(t["outcome"], t["m_title"] or t["t_title"], t["event_title"]),
+            "bet_type": bet_type(t["outcome"], t["m_title"] or t["t_title"], t["event_title"]),
             "odds": american_odds(avg_price),
             "stake": round(stake, 2),
             "result": result_word(a.pos.realized_pnl, a.pos.resolved),
@@ -280,10 +281,10 @@ def _calendar_flowables(daily: list[dict]) -> list:
     return out
 
 
-def _sport_ranking(bets: list[dict]) -> list[dict]:
+def _sport_ranking(bets: list[dict], key: str = "sport") -> list[dict]:
     by_sport: dict[str, list[dict]] = {}
     for b in bets:
-        by_sport.setdefault(b["sport"] or "unclassified", []).append(b)
+        by_sport.setdefault(b.get(key) or "unclassified", []).append(b)
     rows = []
     for sport, items in by_sport.items():
         pnl = sum(b["pnl"] for b in items)
@@ -316,8 +317,17 @@ def _settled_sections(bets: list[dict], daily: list[dict]) -> list:
             [1.6, 0.9, 1.0, 1.3, 0.9, 1.4],
             color_col=5, raw_values=[r["pnl"] for r in sport_rows],
         ),
-        Paragraph("Daily P&amp;L calendar", H2),
     ]
+    type_rows = _sport_ranking(bets, key="bet_type")
+    story.append(Paragraph("P&amp;L by bet type", H2))
+    story.append(_table(
+        ["Bet type", "Bets", "Record", "Staked", "ROI", "P&L"],
+        [[r["sport"], f"{r['bets']:,}", f"{r['wins']}-{r['losses']}", _usd(r["stake"]),
+          _pct(r["roi"]), _signed(r["pnl"])] for r in type_rows],
+        [1.6, 0.9, 1.0, 1.3, 0.9, 1.4],
+        color_col=5, raw_values=[r["pnl"] for r in type_rows],
+    ))
+    story.append(Paragraph("Daily P&amp;L calendar", H2))
     story.extend(_calendar_flowables(daily))
     for r in sport_rows:
         rows = sorted(r["items"], key=lambda b: b["settled_at"])

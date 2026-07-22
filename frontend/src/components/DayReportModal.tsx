@@ -6,6 +6,7 @@ interface DayBet {
   settled_at: string
   sport: string
   label: string
+  bet_type?: string
   odds: string
   stake: number
   result: string
@@ -113,7 +114,10 @@ export function DayReportModal({
                     <tbody>
                       {s.bets.map((b, i) => (
                         <tr key={i}>
-                          <td>{b.label}</td>
+                          <td>
+                            {b.label}{' '}
+                            {b.bet_type && <span className="chip">{b.bet_type}</span>}
+                          </td>
                           <td className="num">{b.odds}</td>
                           <td className="num">{fmtUsd(b.stake)}</td>
                           <td>{b.result}</td>

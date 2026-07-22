@@ -60,3 +60,14 @@ def test_result_word():
     assert result_word(-500, True) == "Loss"
     assert result_word(0.0, True) == "Push"
     assert result_word(120, False) == "Cash-out (profit)"
+
+
+def test_bet_type_buckets():
+    from sportsassets.betting import bet_type
+
+    assert bet_type("Over", "Total Runs 8.5", "Yankees vs. Red Sox") == "Total"
+    assert bet_type("Chiefs -3.5", "Chiefs vs. Bills", "Chiefs vs. Bills") == "Spread"
+    assert bet_type("Yankees", "Yankees vs. Red Sox", "Yankees vs. Red Sox") == "Moneyline"
+    assert bet_type("No", "Will the Yankees beat the Red Sox?", "Yankees vs. Red Sox") == "Moneyline"
+    assert bet_type("Yes", "Will there be a grand slam this season?", None) == "Prop"
+    assert bet_type("Lakers", "Which team will win the NBA Championship?", None) == "Futures"
