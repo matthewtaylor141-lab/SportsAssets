@@ -48,6 +48,8 @@ _RULES: list[tuple[str, tuple[str, ...]]] = [
             "copa",
             "fifa",
             "uefa",
+            "end in a draw",
+            "both teams to score",
         ),
     ),
     ("Tennis", ("tennis", "wimbledon", "us open tennis", "atp", "wta", "roland garros")),
@@ -76,15 +78,24 @@ _RULES: list[tuple[str, tuple[str, ...]]] = [
 # Event/market slug prefixes — Polymarket sports slugs lead with the league
 # ("mlb-nyy-bos-2026-07-10", "atp-hamburg-…"). Deterministic, checked first
 # after tags. Keys are the first dash-separated token, lowercased.
+_SOCCER_CODES = [
+    # Recovered from the audited full-history study (146K markets) — league/
+    # competition slug codes observed on real Polymarket sports events.
+    "epl", "ucl", "uel", "uef", "mls", "laliga", "lal", "seriea", "sea",
+    "bundesliga", "bun", "bl2", "ligue1", "fl1", "fr2", "fifa", "fif", "fifwc",
+    "uefa", "copa", "concacaf", "libertadores", "lib", "ligamx", "mex", "elc",
+    "es2", "bra", "bra2", "brco", "arg", "j2100", "j1100", "chi", "chi1",
+    "itsb", "ere", "spl", "tur", "por", "nor", "col", "col1", "kor", "mar1",
+    "egy1", "sud", "rou1", "scop", "aus", "per1", "swe", "rus", "cze1", "den",
+    "efa", "el1", "el2", "nwsl", "enl", "ukr1", "hr1", "cde", "gtm", "isp",
+    "acn", "svk1", "cdr", "sga",
+]
+
 _SLUG_PREFIX: dict[str, str] = {
-    "mlb": "MLB",
-    "nba": "NBA", "wnba": "NBA", "ncaab": "NBA", "cbb": "NBA",
+    "mlb": "MLB", "kbo": "MLB",
+    "nba": "NBA", "wnba": "NBA", "ncaab": "NBA", "cbb": "NBA", "bkcba": "NBA",
     "nfl": "NFL", "cfb": "NFL", "ncaaf": "NFL",
     "nhl": "NHL", "khl": "NHL",
-    "epl": "Soccer", "ucl": "Soccer", "uel": "Soccer", "mls": "Soccer",
-    "laliga": "Soccer", "la": "Soccer", "seriea": "Soccer", "bundesliga": "Soccer",
-    "ligue1": "Soccer", "fifa": "Soccer", "uefa": "Soccer", "copa": "Soccer",
-    "concacaf": "Soccer", "libertadores": "Soccer", "ligamx": "Soccer",
     "atp": "Tennis", "wta": "Tennis", "itf": "Tennis", "tennis": "Tennis",
     "challenger": "Tennis",
     "ufc": "MMA", "mma": "MMA", "boxing": "MMA", "pfl": "MMA",
@@ -92,6 +103,7 @@ _SLUG_PREFIX: dict[str, str] = {
     "f1": "Other-Sports", "nascar": "Other-Sports", "cricket": "Other-Sports",
     "darts": "Other-Sports", "rugby": "Other-Sports", "cs2": "Other-Sports",
     "lol": "Other-Sports", "dota2": "Other-Sports", "valorant": "Other-Sports",
+    **{code: "Soccer" for code in _SOCCER_CODES},
 }
 
 

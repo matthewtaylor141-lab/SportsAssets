@@ -49,3 +49,11 @@ def test_slug_prefix_classification():
     assert classify([], "", "Will CF Cruz Azul win on 2026-07-21?",
                     event_slug="ligamx-cruz-azul-2026") == "Soccer"
     assert classify([], "cfb-osu-mich", "Ohio State vs Michigan") == "NFL"
+
+
+def test_recovered_soccer_slug_codes():
+    assert classify([], "bra-cor-pal-2026-07-20", "Corinthians vs Palmeiras") == "Soccer"
+    assert classify([], "lal-rma-bar-2026-03-01", "Real Madrid vs Barcelona") == "Soccer"
+    assert classify([], "fifwc-arg-fra-final", "Argentina vs France") == "Soccer"
+    assert classify([], "kbo-doosan-lg", "Doosan vs LG") == "MLB"
+    assert classify([], "", "Will the match end in a draw?", event_slug="") == "Soccer"

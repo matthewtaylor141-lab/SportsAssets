@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -61,6 +62,22 @@ def parse_market(raw: dict[str, Any]) -> dict[str, Any] | None:
         except (ValueError, TypeError):
             resolved_prices = None
 
+    # Settlement date: actual resolution time (closedTime), else scheduled
+    # end date clamped to now — realizations must land on the real settle
+    # date, never on "whenever we happened to fetch it".
+    resolved_time = None
+    for key in ("closedTime", "closed_time", "endDate", "end_date_iso"):
+        val = raw.get(key)
+        if val and isinstance(val, str):
+            try:
+                parsed = datetime.fromisoformat(val.replace("Z", "+00:00").replace(" ", "T"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                resolved_time = min(parsed, datetime.now(tz=timezone.utc))
+                break
+            except ValueError:
+                continue
+
     return {
         "condition_id": condition_id,
         "title": raw.get("question") or raw.get("title"),
@@ -76,6 +93,7 @@ def parse_market(raw: dict[str, Any]) -> dict[str, Any] | None:
         "tags": tag_labels,
         "closed": bool(raw.get("closed")),
         "resolved": resolved_prices is not None,
+        "resolved_time": resolved_time,
         "resolved_prices": resolved_prices,
         "tokens": [
             {"token_id": str(t), "outcome": outcomes[i] if i < len(outcomes) else None, "outcome_index": i}
@@ -151,15 +169,39 @@ class GammaClient:
         return out
 
     async def fetch_by_condition_ids(self, condition_ids: list[str]) -> list[dict[str, Any]]:
+        """Batch metadata lookup. Gamma drift facts (measured, July 2026):
+        condition_ids must be REPEATED params with an explicit limit (the API
+        silently caps at 20 rows otherwise), and closed markets are excluded
+        unless closed=true — so query closed=true first, then retry the
+        remainder with the default filter for still-open markets."""
         out: list[dict[str, Any]] = []
-        for i in range(0, len(condition_ids), 20):
-            chunk = condition_ids[i : i + 20]
+        for i in range(0, len(condition_ids), 40):
+            chunk = condition_ids[i : i + 40]
             try:
-                batch = await self.fetch_markets({"condition_ids": ",".join(chunk)})
-            except httpx.HTTPStatusError:
-                batch = await self.fetch_markets({"conditionIds": ",".join(chunk)})
-            out.extend(batch)
+                params = [("condition_ids", c) for c in chunk]
+                closed_batch = await self._fetch_markets_params(
+                    params + [("limit", str(len(chunk))), ("closed", "true")]
+                )
+                out.extend(closed_batch)
+                got = {m.get("conditionId") or m.get("condition_id") for m in closed_batch}
+                rest = [c for c in chunk if c not in got]
+                if rest:
+                    out.extend(await self._fetch_markets_params(
+                        [("condition_ids", c) for c in rest] + [("limit", str(len(rest)))]
+                    ))
+            except httpx.HTTPStatusError as exc:
+                log.warning("gamma condition_ids chunk failed: %s", exc)
         return out
+
+    async def _fetch_markets_params(self, params: list[tuple[str, str]]) -> list[dict[str, Any]]:
+        resp = await self._http.get("/markets", params=params)
+        if resp.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {resp.status_code} for /markets: {resp.text[:200]}",
+                request=resp.request, response=resp,
+            )
+        data = resp.json()
+        return data if isinstance(data, list) else data.get("data", [])
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -174,7 +216,7 @@ async def upsert_market(meta: dict[str, Any]) -> None:
             INSERT INTO markets (condition_id, title, slug, event_slug, event_title, sport,
                                  tags, closed, resolved, resolved_prices, resolved_at, updated_at)
             VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb,
-                    CASE WHEN $9 THEN now() ELSE NULL END, now())
+                    CASE WHEN $9 THEN COALESCE($11, now()) ELSE NULL END, now())
             ON CONFLICT (condition_id) DO UPDATE SET
                 title = EXCLUDED.title, slug = EXCLUDED.slug,
                 event_slug = EXCLUDED.event_slug, event_title = EXCLUDED.event_title,
@@ -195,6 +237,7 @@ async def upsert_market(meta: dict[str, Any]) -> None:
             meta["closed"],
             meta["resolved"],
             json.dumps(meta["resolved_prices"]) if meta["resolved_prices"] is not None else None,
+            meta.get("resolved_time"),
         )
         for tok in meta["tokens"]:
             await conn.execute(

@@ -100,22 +100,38 @@ def bet_label(outcome: str | None, market_title: str | None, event_title: str | 
 
 
 def bet_type(outcome: str | None, market_title: str | None, event_title: str | None = None) -> str:
-    """Bet-type bucket for per-type P&L analysis:
-    Moneyline / Spread / Total / Prop (Yes-No) / Futures."""
+    """Bet-type bucket for per-type P&L analysis. Categories and patterns
+    follow the audited reference methodology: Exact Score / Spread / Total /
+    Futures / Moneyline / Prop."""
     o = (outcome or "").strip()
     low = o.lower()
     title = (market_title or "").strip()
-    if low in ("over", "under") or re.search(r"\bo/u\b|\btotal\b|over/under", title, re.IGNORECASE):
+    t = title.lower()
+    if "exact score" in t:
+        return "Exact Score"
+    if low in ("over", "under") or re.search(
+        r"\bo/u\b|over/under|total (goals|points|runs)|\btotal\b", t
+    ):
         return "Total"
-    if _SIGNED_NUM.search(o) or re.search(r"\bspread\b|\bhandicap\b", title, re.IGNORECASE):
+    if _SIGNED_NUM.search(o) or re.search(r"\bspread\b|\bhandicap\b|\(\s*[-+]\d+(\.\d+)?\s*\)", t):
         return "Spread"
+    if re.search(
+        r"win the|champion|winner of the|to win .*(cup|league|title|series|tournament)|\bmvp\b", t
+    ) and not opponent_of(o, event_title):
+        return "Futures"
     if low in ("yes", "no"):
         # Yes/No on a specific game reads as ML-equivalent; otherwise a prop.
         parts = [p for p in _VS.split(event_title or title) if p.strip()]
-        return "Moneyline" if len(parts) == 2 else "Prop"
+        if len(parts) == 2:
+            return "Moneyline"
+        return "Prop"
     if opponent_of(o, event_title):
         return "Moneyline"
-    if re.search(r"\bwin\b|champion|series|cup|title|mvp", title, re.IGNORECASE):
+    if re.search(
+        r"both teams|first (goal|touchdown|basket)|scorer|cards|corners|assists", t
+    ):
+        return "Prop"
+    if re.search(r"\bwin\b|\bbeat\b|series|cup|title", t):
         return "Futures"
     return "Moneyline" if len([p for p in _VS.split(title) if p.strip()]) == 2 else "Prop"
 

@@ -385,6 +385,8 @@ async def build_settled_report(whale_id: int) -> tuple[bytes, str]:
              GOOD if total_pnl >= 0 else BAD),
             ("Settled bets", f"{len(bets):,}", None),
             ("Max drawdown", _usd(dd["max_drawdown"]), BAD if dd["max_drawdown"] else None),
+            ("Green days", f"{sum(1 for d in daily if d['pnl'] > 0):,}", GOOD),
+            ("Red days", f"{sum(1 for d in daily if d['pnl'] < 0):,}", BAD),
         ]),
     ]
     story.extend(_settled_sections(bets, daily))

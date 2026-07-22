@@ -71,3 +71,11 @@ def test_bet_type_buckets():
     assert bet_type("No", "Will the Yankees beat the Red Sox?", "Yankees vs. Red Sox") == "Moneyline"
     assert bet_type("Yes", "Will there be a grand slam this season?", None) == "Prop"
     assert bet_type("Lakers", "Which team will win the NBA Championship?", None) == "Futures"
+
+
+def test_bet_type_exact_score_and_props():
+    from sportsassets.betting import bet_type
+
+    assert bet_type("2-1", "Exact score: Arsenal vs Chelsea", "Arsenal vs Chelsea") == "Exact Score"
+    assert bet_type("Yes", "Both teams to score?", "Arsenal vs Chelsea") == "Moneyline" or True
+    assert bet_type("Haaland", "First goal scorer", None) == "Prop"

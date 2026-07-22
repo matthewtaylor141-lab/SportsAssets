@@ -9,6 +9,7 @@ single upstream endpoint.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -29,9 +30,22 @@ def parse_clob_market(raw: dict[str, Any]) -> dict[str, Any] | None:
     tags = [str(t) for t in (raw.get("tags") or [])]
     title = raw.get("question") or ""
     slug = raw.get("market_slug") or ""
+    resolved_time = None
+    for key in ("end_date_iso", "game_start_time"):
+        val = raw.get(key)
+        if val and isinstance(val, str):
+            try:
+                parsed = datetime.fromisoformat(val.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                resolved_time = min(parsed, datetime.now(tz=timezone.utc))
+                break
+            except ValueError:
+                continue
     return {
         "condition_id": condition_id,
         "title": title or None,
+        "resolved_time": resolved_time,
         "slug": slug or None,
         "event_slug": None,   # CLOB payloads don't carry the event grouping
         "event_title": None,

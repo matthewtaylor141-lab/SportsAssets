@@ -77,6 +77,21 @@ async def main() -> None:
             # deterministic and re-runnable, so classifier improvements apply
             # to already-stored markets without re-fetching anything.
             detail["markets_reclassified"] = await reclassify_markets(pool)
+            # outcomeIndex sentinel repair (API drift: 999/missing) — rebuild
+            # from the market's outcome labels; unrepaired sentinels never
+            # match a winning index, so they stay excluded rather than being
+            # silently scored as $0 losers (audited-methodology rule).
+            repaired = await pool.execute(
+                """
+                UPDATE trades t SET outcome_index = mt.outcome_index
+                FROM market_tokens mt
+                WHERE t.condition_id = mt.condition_id
+                  AND t.outcome IS NOT NULL
+                  AND lower(t.outcome) = lower(mt.outcome)
+                  AND t.outcome_index IS DISTINCT FROM mt.outcome_index
+                """
+            )
+            detail["outcome_idx_repaired"] = int(repaired.split()[-1]) if repaired else 0
             # Trades always follow their market's current classification.
             status_msg = await pool.execute(
                 """

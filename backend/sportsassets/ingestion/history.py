@@ -1,21 +1,26 @@
-"""Deep trade-history backfill.
+"""Deep trade-history backfill via /activity time-window cursor pagination.
 
-When a whale joins the roster, import their ENTIRE past trade ledger from the
-Data API (paged, bounded) so settled performance metrics — per-sport P&L,
-W-L records, equity curve, trade/price history — are complete immediately.
+Method ported from the audited edge-engine reference pipeline (July 2026 API
+constraints, measured on a 5.35M-fill account):
+  - /trades caps offset at ~10,500 and ignores time params — unusable for
+    full history. /activity (type=TRADE) honors start/end unix-second
+    filters with limit up to 500.
+  - History is split into ~4-day windows; within each window we cursor-
+    paginate newest→oldest (end = oldest seen; when a full page yields no
+    fresh rows, end = oldest - 1). Boundary duplicates collapse on the DB
+    dedupe key.
 
-Design constraints (learned in production):
-- Runs as a BACKGROUND task — must never block live polling.
-- Bulk inserts (one executemany per page) — 100k rows can't be row-at-a-time.
-- Heartbeats progress per page so the admin panel shows it working.
-- Rows are marked source='backfill': excluded from latency metrics, and no
-  notifications are emitted. Idempotent via the standard dedupe key.
+Operational constraints (unchanged):
+  - Background task, never blocks live polling; single-flight lock.
+  - Bulk page inserts; progress heartbeats; rows marked source='backfill'
+    (no notifications, excluded from latency metrics).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time
 from datetime import datetime, timezone
 
 import httpx
@@ -23,11 +28,12 @@ import httpx
 from ..config import settings
 from ..db import get_pool, heartbeat
 from ..ratelimit import polite_get
-from .dedupe import make_dedupe_key
 from .poller import parse_data_api_trade
 
 log = logging.getLogger(__name__)
 
+PAGE_SIZE = 500
+WINDOW_SECONDS = 4 * 86400
 
 _INSERT = """
 INSERT INTO trades (whale_id, tx_hash, asset, condition_id, side, outcome, outcome_index,
@@ -44,103 +50,101 @@ async def _sport_map() -> dict[str, str]:
     return {r["condition_id"]: r["sport"] for r in rows}
 
 
+def _history_start_epoch() -> int:
+    raw = settings().history_start_date
+    try:
+        return int(datetime.fromisoformat(raw).replace(tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        log.warning("bad HISTORY_START_DATE %r; defaulting to 2025-07-01", raw)
+        return int(datetime(2025, 7, 1, tzinfo=timezone.utc).timestamp())
+
+
+def _fill_key(ev) -> tuple:
+    return (ev.tx_hash, ev.asset, ev.side, ev.price, ev.size, ev.ts_epoch)
+
+
+async def _insert_page(pool, rows: list[tuple]) -> None:
+    if rows:
+        async with pool.acquire() as conn:
+            await conn.executemany(_INSERT, rows)
+
+
 async def backfill_whale_history(http: httpx.AsyncClient, whale: dict) -> int:
-    """Page the wallet's full trade history into the ledger. Returns rows scanned."""
+    """Import the wallet's full history over time windows. Returns fills scanned."""
     pool = await get_pool()
     sports = await _sport_map()
-    now = datetime.now(tz=timezone.utc)
-    scanned = 0
-    offset = 0
+    now_dt = datetime.now(tz=timezone.utc)
     max_trades = settings().history_max_trades
-    while offset < max_trades:
-        resp = await polite_get(
-            http, "/trades",
-            params={"user": whale["address"], "limit": 100, "offset": offset, "takerOnly": "false"},
-        )
-        resp.raise_for_status()
-        batch = resp.json()
-        if not isinstance(batch, list) or not batch:
-            break
+    start_epoch = _history_start_epoch()
+    now_epoch = int(_time.time()) + 3600
 
-        rows = []
-        for raw in batch:
-            ev = parse_data_api_trade(raw, whale["id"], whale["username"])
-            if not ev.tx_hash or ev.size <= 0:
-                continue
-            rows.append((
-                ev.whale_id, ev.tx_hash, str(ev.asset), ev.condition_id, ev.side,
-                ev.outcome, ev.outcome_index, ev.size, ev.price, ev.notional,
-                ev.market_title, ev.market_slug, ev.event_slug,
-                sports.get(ev.condition_id or "", "unclassified"),
-                datetime.fromtimestamp(ev.ts_epoch, tz=timezone.utc), now, ev.dedupe_key,
-            ))
-        if rows:
-            async with pool.acquire() as conn:
-                await conn.executemany(_INSERT, rows)
-        scanned += len(batch)
-        offset += 100
-        await heartbeat(
-            "backfill", "running",
-            {"whale": whale["username"] or whale["address"], "scanned": scanned},
-        )
-        if len(batch) < 100:
-            break
-
-    # Some Data API deployments cap offset paging (empty results past ~10k).
-    # If a time-filter param is configured, keep walking back in time from the
-    # oldest trade we have; otherwise flag the suspected cap for the admin.
-    time_param = settings().history_time_param
-    hit_cap = scanned > 0 and scanned % 100 == 0 and offset >= 9_900
-    if hit_cap and time_param:
-        oldest = await pool.fetchval(
-            "SELECT EXTRACT(EPOCH FROM min(ts))::bigint FROM trades WHERE whale_id=$1",
-            whale["id"],
-        )
-        while oldest and scanned < max_trades:
+    scanned = 0
+    window_start = start_epoch
+    while window_start < now_epoch and scanned < max_trades:
+        window_end = min(window_start + WINDOW_SECONDS, now_epoch)
+        end_cursor = window_end
+        boundary: set[tuple] = set()
+        while scanned < max_trades:
             resp = await polite_get(
-                http, "/trades",
-                params={"user": whale["address"], "limit": 100, "takerOnly": "false",
-                        time_param: int(oldest) - 1},
+                http, "/activity",
+                params={"user": whale["address"], "type": "TRADE", "limit": PAGE_SIZE,
+                        "start": window_start, "end": end_cursor},
             )
             resp.raise_for_status()
             batch = resp.json()
             if not isinstance(batch, list) or not batch:
                 break
-            rows = []
-            batch_oldest = oldest
+
+            rows: list[tuple] = []
+            fresh = 0
+            oldest = None
             for raw in batch:
                 ev = parse_data_api_trade(raw, whale["id"], whale["username"])
                 if not ev.tx_hash or ev.size <= 0:
                     continue
-                batch_oldest = min(batch_oldest, ev.ts_epoch)
+                oldest = ev.ts_epoch if oldest is None else min(oldest, ev.ts_epoch)
+                if _fill_key(ev) in boundary:
+                    continue
+                fresh += 1
                 rows.append((
                     ev.whale_id, ev.tx_hash, str(ev.asset), ev.condition_id, ev.side,
                     ev.outcome, ev.outcome_index, ev.size, ev.price, ev.notional,
                     ev.market_title, ev.market_slug, ev.event_slug,
                     sports.get(ev.condition_id or "", "unclassified"),
-                    datetime.fromtimestamp(ev.ts_epoch, tz=timezone.utc), now, ev.dedupe_key,
+                    datetime.fromtimestamp(ev.ts_epoch, tz=timezone.utc), now_dt, ev.dedupe_key,
                 ))
-            if rows:
-                async with pool.acquire() as conn:
-                    await conn.executemany(_INSERT, rows)
-            scanned += len(batch)
-            await heartbeat("backfill", "running",
-                            {"whale": whale["username"] or whale["address"],
-                             "scanned": scanned, "mode": "time-cursor"})
-            if batch_oldest >= oldest:
-                break  # no progress — stop rather than loop
-            oldest = batch_oldest
-    elif hit_cap:
-        log.warning("backfill for %s stopped at offset %s with full batches — likely an "
-                    "API offset cap; set HISTORY_TIME_PARAM (see /api/admin/diag)",
-                    whale["address"], offset)
+            await _insert_page(pool, rows)
+            scanned += fresh
+            await heartbeat(
+                "backfill", "running",
+                {"whale": whale["username"] or whale["address"], "scanned": scanned,
+                 "window": datetime.fromtimestamp(window_start, tz=timezone.utc).date().isoformat()},
+            )
+            if len(batch) < PAGE_SIZE or oldest is None:
+                break
+            if fresh == 0:
+                end_cursor = oldest - 1  # >500 fills in one second — step past it
+                boundary = set()
+            else:
+                end_cursor = oldest
+                boundary = {
+                    _fill_key(parse_data_api_trade(r, whale["id"], whale["username"]))
+                    for r in batch
+                    if int(r.get("timestamp", 0)) == oldest
+                }
+            if end_cursor <= window_start:
+                break
+        window_start += WINDOW_SECONDS
+
+    if scanned >= max_trades:
+        log.warning("backfill for %s hit HISTORY_MAX_TRADES=%s — raise it (and the DB plan) "
+                    "for complete history", whale["address"], max_trades)
         await heartbeat("backfill", "capped",
                         {"whale": whale["username"] or whale["address"], "scanned": scanned,
-                         "hint": "probable offset cap — run /api/admin/diag, set HISTORY_TIME_PARAM, "
-                                 "then reset: UPDATE whales SET history_backfilled=false"})
+                         "hint": f"HISTORY_MAX_TRADES={max_trades} reached"})
 
     await pool.execute("UPDATE whales SET history_backfilled=TRUE WHERE id=$1", whale["id"])
-    log.info("history backfill for %s: %s trades scanned",
+    log.info("history backfill for %s: %s fills imported",
              whale["username"] or whale["address"], scanned)
     return scanned
 
@@ -151,9 +155,8 @@ _BACKFILL_LOCK = asyncio.Lock()
 async def backfill_pending() -> int:
     """Backfill every active whale that hasn't had a history import yet.
 
-    Single-flight: if a pass is already running in this process (e.g. a
-    supervisor restarted the poller and spawned a second history loop),
-    additional callers return immediately instead of doubling API traffic.
+    Single-flight: if a pass is already running in this process, additional
+    callers return immediately instead of doubling API traffic.
     """
     if _BACKFILL_LOCK.locked():
         return 0
