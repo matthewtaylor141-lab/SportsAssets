@@ -285,10 +285,37 @@ async def validate_against_leaderboard(states: list[PositionState]) -> list[dict
     return alerts
 
 
+async def settle_engine_fills() -> int:
+    """Settle OUR internal engine fills (Polymarket) from the same resolution
+    data that settles whale positions. pnl = (payout - price) * shares."""
+    pool = await get_pool()
+    status = await pool.execute(
+        """
+        UPDATE engine_fills ef
+        SET settled = TRUE,
+            payout = p.payout,
+            pnl = (p.payout - ef.limit_price) * (ef.size_usd / NULLIF(ef.limit_price, 0)),
+            settled_at = COALESCE(p.resolved_at, now())
+        FROM (
+            SELECT mt.token_id, ((m.resolved_prices -> mt.outcome_index)::text)::float8 AS payout,
+                   m.resolved_at
+            FROM market_tokens mt
+            JOIN markets m USING (condition_id)
+            WHERE m.resolved AND mt.outcome_index IS NOT NULL
+              AND jsonb_array_length(m.resolved_prices) > mt.outcome_index
+        ) p
+        WHERE NOT ef.settled AND ef.venue = 'polymarket' AND ef.outcome_id = p.token_id
+        """
+    )
+    return int(status.split()[-1]) if status else 0
+
+
 async def run_cycle() -> dict:
-    """One full analytics pass: rebuild → rollups → drift check."""
+    """One full analytics pass: rebuild → rollups → drift check → engine settle."""
     states = await rebuild_positions()
     rollups = compute_rollups(states)
     await persist_rollups(rollups)
     alerts = await validate_against_leaderboard(states)
-    return {"positions": len(states), "rollup_rows": len(rollups), "drift_alerts": alerts}
+    engine_settled = await settle_engine_fills()
+    return {"positions": len(states), "rollup_rows": len(rollups), "drift_alerts": alerts,
+            "engine_settled": engine_settled}

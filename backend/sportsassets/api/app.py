@@ -176,6 +176,138 @@ async def api_whale_day(whale_id: int, day: str) -> dict:
     }
 
 
+# ── Engine (internal model) fills: record + read ────────────────────
+
+
+class EngineFillBody(BaseModel):
+    ts: float
+    venue: str
+    market_id: str
+    outcome_id: str
+    league: str | None = None
+    band: str | None = None
+    limit_price: float
+    size_usd: float
+    fair_value: float | None = None
+    edge: float | None = None
+    would_fill: bool = True
+    whale_alignment: dict | None = None
+    book_asks: list | None = None
+    book_bids: list | None = None
+
+
+@app.post("/api/engine/fills")
+async def engine_fill_ingest(body: EngineFillBody, x_engine_token: str = Header(default="")) -> dict:
+    cfg = settings()
+    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
+        raise HTTPException(status_code=401, detail="engine token required")
+    import hashlib
+
+    from datetime import datetime, timezone
+
+    dedupe = hashlib.sha256(
+        f"{body.venue}|{body.outcome_id}|{int(body.ts)}|{body.limit_price}".encode()
+    ).hexdigest()
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO engine_fills (ts, venue, market_id, outcome_id, league, band, limit_price,
+                                  size_usd, fair_value, edge, would_fill, whale_alignment,
+                                  book, dedupe_key)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14)
+        ON CONFLICT (dedupe_key) DO NOTHING RETURNING id
+        """,
+        datetime.fromtimestamp(body.ts, tz=timezone.utc), body.venue, body.market_id,
+        body.outcome_id, body.league, body.band, body.limit_price, body.size_usd,
+        body.fair_value, body.edge, body.would_fill,
+        json.dumps(body.whale_alignment) if body.whale_alignment is not None else None,
+        json.dumps({"asks": body.book_asks or [], "bids": body.book_bids or []}),
+        dedupe,
+    )
+    return {"ok": True, "id": row["id"] if row else None, "duplicate": row is None}
+
+
+@app.get("/api/engine/summary")
+async def engine_summary() -> dict:
+    pool = await get_pool()
+    totals = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS fills,
+               count(*) FILTER (WHERE settled)::int AS settled,
+               COALESCE(sum(size_usd), 0)::float8 AS staked,
+               COALESCE(sum(size_usd) FILTER (WHERE settled), 0)::float8 AS settled_staked,
+               COALESCE(sum(pnl) FILTER (WHERE settled), 0)::float8 AS pnl,
+               min(ts) AS first_ts
+        FROM engine_fills
+        """
+    )
+    by_venue = await pool.fetch(
+        """
+        SELECT venue, count(*)::int AS fills,
+               COALESCE(sum(size_usd) FILTER (WHERE settled), 0)::float8 AS settled_staked,
+               COALESCE(sum(pnl) FILTER (WHERE settled), 0)::float8 AS pnl
+        FROM engine_fills GROUP BY venue ORDER BY venue
+        """
+    )
+    by_league = await pool.fetch(
+        """
+        SELECT league, count(*)::int AS fills,
+               COALESCE(sum(pnl) FILTER (WHERE settled), 0)::float8 AS pnl
+        FROM engine_fills GROUP BY league ORDER BY pnl DESC NULLS LAST LIMIT 20
+        """
+    )
+    daily = await pool.fetch(
+        """
+        SELECT settled_at::date AS date, sum(pnl)::float8 AS pnl, count(*)::int AS settled
+        FROM engine_fills WHERE settled AND settled_at IS NOT NULL
+        GROUP BY 1 ORDER BY 1
+        """
+    )
+    d = dict(totals)
+    d["roi"] = d["pnl"] / d["settled_staked"] if d["settled_staked"] else None
+    return {
+        "totals": d,
+        "by_venue": [dict(r) for r in by_venue],
+        "by_league": [dict(r) for r in by_league],
+        "daily": [{"date": r["date"].isoformat(), "pnl": round(r["pnl"], 2),
+                   "volume": 0, "trades": r["settled"]} for r in daily],
+    }
+
+
+@app.get("/api/engine/fills")
+async def engine_fills(limit: int = Query(100, le=500), venue: str | None = None) -> list[dict]:
+    pool = await get_pool()
+    args: list = []
+    where = ""
+    if venue:
+        args.append(venue)
+        where = "WHERE ef.venue = $1"
+    args.append(limit)
+    rows = await pool.fetch(
+        f"""
+        SELECT ef.id, ef.ts, ef.venue, ef.market_id, ef.outcome_id, ef.league, ef.band,
+               ef.limit_price::float8 AS limit_price, ef.size_usd::float8 AS size_usd,
+               ef.fair_value::float8 AS fair_value, ef.edge::float8 AS edge,
+               ef.would_fill, ef.whale_alignment, ef.settled,
+               ef.payout::float8 AS payout, ef.pnl::float8 AS pnl, ef.settled_at,
+               COALESCE(m.event_title, m.title) AS market_title, m.sport, mt.outcome
+        FROM engine_fills ef
+        LEFT JOIN market_tokens mt ON mt.token_id = ef.outcome_id
+        LEFT JOIN markets m ON m.condition_id = COALESCE(mt.condition_id, ef.market_id)
+        {where}
+        ORDER BY ef.ts DESC LIMIT ${len(args)}
+        """,
+        *args,
+    )
+    out = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d.get("whale_alignment"), str):
+            d["whale_alignment"] = json.loads(d["whale_alignment"])
+        out.append(d)
+    return out
+
+
 @app.get("/api/signal/{condition_id}")
 async def api_signal(condition_id: str) -> dict:
     """Live whale positioning for one market — the edge engine's alignment

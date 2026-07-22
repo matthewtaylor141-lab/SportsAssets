@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     admin_token: str = "change-me"
+    # Shared secret the edge-engine uses to record its shadow fills here.
+    engine_ingest_token: str = ""
     # "*" = accept any origin (fine while testing; set to your site URL(s),
     # comma-separated, to lock down for production).
     cors_origins: str = "*"

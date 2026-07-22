@@ -42,6 +42,36 @@ def log_shadow_fill(intent, book, feed_snapshot, would_fill: bool, whale_alignme
     }
     with open(SHADOW_LOG, "a") as f:
         f.write(json.dumps(rec) + "\n")
+    _record_to_platform(rec)
+
+
+def _record_to_platform(rec: dict) -> None:
+    """Mirror the shadow fill into the platform's internal database
+    (POST /api/engine/fills) so the Engine tab shows it. Fail-soft: the
+    JSONL log remains the grader's source of truth."""
+    base = os.environ.get("EDGE_PLATFORM_API", "")
+    token = os.environ.get("EDGE_INGEST_TOKEN", "")
+    if not base or not token:
+        return
+    try:
+        import requests
+
+        requests.post(
+            f"{base}/api/engine/fills",
+            json={
+                "ts": rec["ts"], "venue": rec["venue"], "market_id": rec["market_id"],
+                "outcome_id": rec["outcome_id"], "league": rec.get("league"),
+                "band": rec.get("band"), "limit_price": rec["limit_price"],
+                "size_usd": rec["size_usd"], "fair_value": rec.get("fair_value"),
+                "edge": rec.get("edge"), "would_fill": rec.get("would_fill", True),
+                "whale_alignment": rec.get("whale_alignment"),
+                "book_asks": rec.get("book_asks"), "book_bids": rec.get("book_bids"),
+            },
+            headers={"X-Engine-Token": token},
+            timeout=5,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.debug("platform mirror failed (non-fatal): %s", exc)
 
 
 # ── The decision loop (orders replaced by logging) ─────────────────────
