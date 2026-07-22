@@ -5,7 +5,8 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY sportsassets ./sportsassets
 COPY migrations ./migrations
+COPY start.sh ./
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . && chmod +x start.sh
 
-CMD ["uvicorn", "sportsassets.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "start.sh"]
