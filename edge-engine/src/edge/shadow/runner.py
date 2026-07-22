@@ -19,7 +19,18 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-SHADOW_LOG = Path(__file__).resolve().parents[3] / "data" / "shadow_fills.jsonl"
+def _data_dir() -> Path:
+    for c in (os.environ.get("EDGE_DATA_DIR"),
+              Path(__file__).resolve().parents[3] / "data",
+              Path.cwd() / "data"):
+        if c and Path(c).is_dir():
+            return Path(c)
+    fallback = Path.cwd() / "data"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
+SHADOW_LOG = _data_dir() / "shadow_fills.jsonl"
 
 
 def log_shadow_fill(intent, book, feed_snapshot, would_fill: bool, whale_alignment=None):

@@ -6,16 +6,31 @@ execution call the SAME code path, so shadow evidence transfers.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
-CONFIG_DIR = Path(__file__).resolve().parents[3] / "config"
+
+def _config_dir() -> Path:
+    """Locate config/: env override, repo layout, then cwd — the package may
+    run from the source tree or as an installed distribution."""
+    candidates = [
+        os.environ.get("EDGE_CONFIG_DIR"),
+        Path(__file__).resolve().parents[3] / "config",
+        Path.cwd() / "config",
+    ]
+    for c in candidates:
+        if c and Path(c).is_dir():
+            return Path(c)
+    raise FileNotFoundError(
+        "edge-engine config directory not found; set EDGE_CONFIG_DIR"
+    )
 
 
 def load_yaml(name: str) -> dict:
-    with open(CONFIG_DIR / name) as f:
+    with open(_config_dir() / name) as f:
         return yaml.safe_load(f)
 
 
