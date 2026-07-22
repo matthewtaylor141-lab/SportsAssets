@@ -1,11 +1,14 @@
 # Netlify config — deploys the React frontend from /frontend.
-# Set VITE_API_BASE in the Netlify UI (Site configuration → Environment variables)
-# to your backend URL, e.g. https://sportsassets-api.onrender.com
+# VITE_API_BASE is baked in here at build time; a variable with the same name
+# set in the Netlify UI takes precedence if you ever need to override it.
 
 [build]
   base = "frontend"
   command = "npm run build"
   publish = "dist"
+
+[build.environment]
+  VITE_API_BASE = "https://sportsassets-api.onrender.com"
 
 # SPA fallback: real files (sw.js, assets) are served as-is; everything else
 # routes to index.html so react-router deep links work.
