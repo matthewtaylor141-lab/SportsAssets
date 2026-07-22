@@ -57,32 +57,53 @@ def parse_leaderboard(raw: Any) -> list[dict]:
 
 
 async def fetch_sports_leaderboard(window: str = "all", limit: int = 50) -> list[dict]:
-    """Fetch the sports-category profit leaderboard (same API behind
-    polymarket.com/leaderboard). Tries the documented param spellings."""
+    """Fetch the profit leaderboard (same API behind polymarket.com/leaderboard).
+
+    The exact path/params have changed over time, so try known variants in
+    order and use the first that returns parseable entries. Sports-category
+    filtering is applied when the API supports it; otherwise we fall back to
+    the overall profit board (activity requirements still filter candidates)
+    and log the degradation.
+    """
     cfg = settings()
-    params_variants = [
-        {"window": window, "limit": limit, "category": "sports", "rankType": "profit"},
-        {"window": window, "limit": limit, "category": "Sports"},
-        {"timePeriod": window, "limit": limit, "category": "sports"},
+    candidates: list[tuple[str, dict]] = [
+        # Category-aware spellings (newer API surface):
+        ("/leaderboard", {"window": window, "limit": limit, "category": "sports", "rankType": "profit"}),
+        ("/leaderboard", {"window": window, "limit": limit, "category": "Sports"}),
+        # Classic lb-api paths (long-lived; power the original leaderboard):
+        ("/profit", {"window": window, "limit": limit, "category": "sports"}),
+        ("/profit", {"window": window, "limit": limit}),
     ]
+    failures: list[str] = []
     async with httpx.AsyncClient(base_url=cfg.leaderboard_api_base, timeout=20) as http:
-        last_error: Exception | None = None
-        for params in params_variants:
+        for path, params in candidates:
             try:
-                resp = await http.get("/leaderboard", params=params)
+                resp = await http.get(path, params=params)
                 resp.raise_for_status()
                 parsed = parse_leaderboard(resp.json())
                 if parsed:
+                    if "category" not in params:
+                        log.warning(
+                            "leaderboard: category filter unavailable — using overall "
+                            "profit board via %s (roster may include non-sports whales)",
+                            path,
+                        )
+                    log.info("leaderboard resolved via %s %s (%s entries)", path, params, len(parsed))
                     return parsed
+                failures.append(f"{path}{params} -> empty/unparseable")
+            except httpx.HTTPStatusError as exc:
+                body = exc.response.text[:120] if exc.response is not None else ""
+                failures.append(f"{path} -> HTTP {exc.response.status_code} {body}")
             except (httpx.HTTPError, ValueError) as exc:
-                last_error = exc
-        if last_error:
-            raise last_error
-    return []
+                failures.append(f"{path} -> {exc}")
+    raise RuntimeError("all leaderboard endpoints failed: " + " | ".join(failures))
 
 
 async def _meets_activity_requirements(http: httpx.AsyncClient, address: str) -> bool:
-    """≥ MIN resolved sports positions and traded within MAX_INACTIVE_DAYS."""
+    """Recency is decisive: traded within MAX_INACTIVE_DAYS (drops dormant
+    one-hit wallets). The min-resolved-positions bar is enforced when the
+    positions endpoint cooperates, and advisory (pass + log) when its shape
+    doesn't match — a candidate must never be dropped by OUR endpoint guess."""
     cfg = settings()
     try:
         resp = await http.get(
@@ -95,18 +116,24 @@ async def _meets_activity_requirements(http: httpx.AsyncClient, address: str) ->
         last_ts = datetime.fromtimestamp(int(trades[0]["timestamp"]), tz=timezone.utc)
         if datetime.now(tz=timezone.utc) - last_ts > timedelta(days=cfg.roster_max_inactive_days):
             return False
-        # Resolved-position count: /positions supports sizeThreshold+limit paging;
-        # we only need to know whether the count clears the bar.
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        log.warning("recency check failed for %s: %s (treating as inactive)", address, exc)
+        return False
+
+    # Advisory depth check: does a position exist at offset MIN-1?
+    try:
         resp = await http.get(
             "/positions",
-            params={"user": address, "limit": cfg.roster_min_resolved_positions, "redeemable": "false"},
+            params={"user": address, "limit": 1,
+                    "offset": cfg.roster_min_resolved_positions - 1},
         )
         if resp.status_code == 200 and isinstance(resp.json(), list):
-            return len(resp.json()) >= cfg.roster_min_resolved_positions
-        return True  # endpoint variant mismatch — don't block selection on it
+            if not resp.json():
+                log.info("%s below %s-position bar", address, cfg.roster_min_resolved_positions)
+                return False
     except httpx.HTTPError as exc:
-        log.warning("activity check failed for %s: %s (treating as inactive)", address, exc)
-        return False
+        log.info("positions depth check unavailable for %s (%s) — passing on recency", address, exc)
+    return True
 
 
 async def select_roster() -> list[dict]:

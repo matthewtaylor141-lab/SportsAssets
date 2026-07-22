@@ -79,34 +79,70 @@ def parse_market(raw: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+# Param spellings for "open markets", tried in order; the first that the API
+# accepts is cached for the session. (The Gamma API 422s on params it no
+# longer recognizes, so we self-discover instead of hardcoding one guess.)
+_OPEN_MARKET_PARAM_VARIANTS: list[dict[str, str]] = [
+    {"closed": "false", "active": "true"},
+    {"closed": "false"},
+    {"active": "true"},
+]
+
+
 class GammaClient:
     def __init__(self) -> None:
         self._http = httpx.AsyncClient(base_url=settings().gamma_api_base, timeout=15)
+        self._open_params: dict[str, str] | None = None
 
     async def fetch_markets(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         resp = await self._http.get("/markets", params=params)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {resp.status_code} for /markets {params}: {resp.text[:200]}",
+                request=resp.request,
+                response=resp,
+            )
         data = resp.json()
         return data if isinstance(data, list) else data.get("data", [])
 
-    async def fetch_active_sports_markets(self, page_size: int = 100) -> list[dict[str, Any]]:
-        """All active markets, paged; classification filters non-sports later."""
+    async def _resolve_open_params(self) -> dict[str, str]:
+        if self._open_params is not None:
+            return self._open_params
+        failures = []
+        for variant in _OPEN_MARKET_PARAM_VARIANTS:
+            try:
+                await self.fetch_markets({**variant, "limit": 1, "offset": 0})
+                self._open_params = variant
+                log.info("gamma open-markets params resolved: %s", variant)
+                return variant
+            except httpx.HTTPStatusError as exc:
+                failures.append(str(exc))
+        raise RuntimeError("no gamma param variant accepted: " + " | ".join(failures))
+
+    async def fetch_active_sports_markets(
+        self, page_size: int = 100, max_pages: int = 50
+    ) -> list[dict[str, Any]]:
+        """All open markets, paged (bounded); classification filters non-sports later."""
+        base = await self._resolve_open_params()
         out: list[dict[str, Any]] = []
-        offset = 0
-        while True:
+        for page in range(max_pages):
             batch = await self.fetch_markets(
-                {"active": "true", "closed": "false", "limit": page_size, "offset": offset}
+                {**base, "limit": page_size, "offset": page * page_size}
             )
             out.extend(batch)
             if len(batch) < page_size:
                 return out
-            offset += page_size
+        log.warning("open-market paging hit the %s-page cap; cache may be partial", max_pages)
+        return out
 
     async def fetch_by_condition_ids(self, condition_ids: list[str]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for i in range(0, len(condition_ids), 20):
             chunk = condition_ids[i : i + 20]
-            batch = await self.fetch_markets({"condition_ids": ",".join(chunk)})
+            try:
+                batch = await self.fetch_markets({"condition_ids": ",".join(chunk)})
+            except httpx.HTTPStatusError:
+                batch = await self.fetch_markets({"conditionIds": ",".join(chunk)})
             out.extend(batch)
         return out
 
