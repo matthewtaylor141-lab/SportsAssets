@@ -51,7 +51,9 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     admin_token: str = "change-me"
-    cors_origins: str = "http://localhost:5173"
+    # "*" = accept any origin (fine while testing; set to your site URL(s),
+    # comma-separated, to lock down for production).
+    cors_origins: str = "*"
 
 
 @lru_cache

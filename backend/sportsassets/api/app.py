@@ -29,9 +29,10 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="SportsAssets Hub API", lifespan=lifespan)
 
+_origins = [o.strip() for o in settings().cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in settings().cors_origins.split(",") if o.strip()],
+    allow_origins=_origins or ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
