@@ -31,6 +31,7 @@ class Settings(BaseSettings):
 
     # Ingestion
     poll_interval_seconds: float = 5.0
+    history_max_trades: int = 200_000  # deep-backfill cap per wallet
     poll_failure_alert_threshold: int = 3
     ws_down_alert_seconds: int = 30
     reconcile_interval_seconds: int = 3600

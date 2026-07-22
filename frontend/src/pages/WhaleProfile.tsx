@@ -47,6 +47,9 @@ export function WhaleProfile() {
         <a className="btn" href={reportUrl('monthly')}>
           ⤓ Monthly PDF
         </a>
+        <a className="btn primary" href={`${API_BASE}/api/whales/${whale.id}/settled-report.pdf`}>
+          ⤓ Full settled history
+        </a>
       </div>
       <p className="sub">
         Leaderboard rank #{whale.source_rank ?? '—'} · tracked since{' '}

@@ -129,6 +129,23 @@ async def api_whale(whale_id: int) -> dict:
     return profile
 
 
+@app.get("/api/whales/{whale_id}/settled-report.pdf")
+async def api_whale_settled_report(whale_id: int):
+    from fastapi.responses import Response
+
+    from .reports import build_settled_report
+
+    try:
+        pdf, filename = await build_settled_report(whale_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="unknown whale") from None
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/api/whales/{whale_id}/report.pdf")
 async def api_whale_report(
     whale_id: int,

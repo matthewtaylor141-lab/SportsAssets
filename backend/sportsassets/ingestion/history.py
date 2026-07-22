@@ -26,7 +26,6 @@ from .poller import parse_data_api_trade
 
 log = logging.getLogger(__name__)
 
-MAX_HISTORY_TRADES = 20_000  # per wallet, safety bound
 
 _INSERT = """
 INSERT INTO trades (whale_id, tx_hash, asset, condition_id, side, outcome, outcome_index,
@@ -50,7 +49,8 @@ async def backfill_whale_history(http: httpx.AsyncClient, whale: dict) -> int:
     now = datetime.now(tz=timezone.utc)
     scanned = 0
     offset = 0
-    while offset < MAX_HISTORY_TRADES:
+    max_trades = settings().history_max_trades
+    while offset < max_trades:
         resp = await http.get(
             "/trades",
             params={"user": whale["address"], "limit": 100, "offset": offset, "takerOnly": "false"},
