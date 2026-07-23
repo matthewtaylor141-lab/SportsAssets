@@ -70,6 +70,19 @@ class Settings(BaseSettings):
     ai_trader_enabled: bool = True
     ai_trader_source: str = "swisstony"
     ai_trader_ratio: float = 0.10
+
+    # ── LIVE trading beta (REAL MONEY — disabled by default) ────────────
+    # Requires an eligible, funded Polymarket account and a dedicated wallet
+    # holding ONLY the beta bankroll. FOK limit orders only, buy-only,
+    # triple-capped. Kill switch: POST /api/admin/live/pause.
+    live_trading_enabled: bool = False
+    pm_private_key: str = ""       # dedicated wallet key (export from PM settings)
+    pm_funder: str = ""            # your Polymarket profile (proxy) address
+    pm_signature_type: int = 1     # 1/2 = web-account proxy, 0 = raw EOA
+    live_max_per_fill_usd: float = 25.0
+    live_max_daily_usd: float = 200.0
+    live_max_total_usd: float = 1000.0
+    live_max_slippage_cents: float = 1.0
     # "*" = accept any origin (fine while testing; set to your site URL(s),
     # comma-separated, to lock down for production).
     cors_origins: str = "*"

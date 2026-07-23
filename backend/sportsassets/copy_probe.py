@@ -153,6 +153,10 @@ async def probe_trade(payload: dict) -> None:
             # AI TRADER paper account: copy the source whale at the size ratio,
             # filled from this exact residual book snapshot.
             await _place_ai_trade(payload, asks, his_price, reaction)
+            # LIVE beta (off by default; multiple guards inside).
+            from .live_executor import maybe_execute
+
+            await maybe_execute(payload, reaction)
     except Exception:  # noqa: BLE001 — probing must never disturb ingestion
         log.exception("copy probe failed for trade %s", payload.get("id"))
 

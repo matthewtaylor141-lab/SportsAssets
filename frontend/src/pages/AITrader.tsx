@@ -44,6 +44,163 @@ interface AIReport {
   }[]
 }
 
+interface LiveStatus {
+  enabled: boolean
+  paused: boolean
+  caps: { per_fill: number; daily: number; total: number; max_slippage_cents: number }
+  summary: {
+    orders: number
+    fills: number
+    unfilled: number
+    errors: number
+    deployed: number
+    deployed_24h: number
+    realized_pnl: number
+    live_slippage_p50: number | null
+  }
+  recent: {
+    placed_at: string
+    status: string
+    his_price: number
+    limit_price: number
+    fill_price: number | null
+    filled_usd: number
+    requested_usd: number
+    reaction_s: number | null
+    pnl: number | null
+    error: string | null
+    market_title: string | null
+    outcome: string | null
+  }[]
+}
+
+/** LIVE beta: real Polymarket orders (FOK limit, triple-capped). Only renders
+ * meaningfully once LIVE_TRADING_ENABLED + credentials are configured. */
+function LiveBeta() {
+  const [status, setStatus] = useState<LiveStatus | null>(null)
+
+  useEffect(() => {
+    const load = () => api<LiveStatus>('/api/live-status').then(setStatus).catch(() => {})
+    load()
+    const t = setInterval(load, 30000)
+    return () => clearInterval(t)
+  }, [])
+
+  if (!status) return null
+  const s = status.summary
+  if (!status.enabled && s.orders === 0) {
+    return (
+      <div className="card" style={{ borderColor: 'rgba(224,82,82,0.35)' }}>
+        <h2 style={{ marginTop: 0 }}>🔴 Live beta (real money) — not armed</h2>
+        <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>
+          To arm: fund a dedicated Polymarket wallet with the beta bankroll only, then set
+          LIVE_TRADING_ENABLED=1, PM_PRIVATE_KEY, PM_FUNDER on both backend services. FOK limit
+          orders only, buy-only, capped per-fill/daily/total. Kill switch lives on the Admin page
+          contract: POST /api/admin/live/pause.
+        </p>
+      </div>
+    )
+  }
+  return (
+    <div className="card" style={{ borderColor: status.paused ? 'var(--warning)' : 'rgba(224,82,82,0.5)' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <h2 style={{ margin: 0 }}>🔴 Live beta — REAL MONEY</h2>
+        {status.paused ? (
+          <span className="chip" style={{ color: 'var(--warning)', borderColor: 'var(--warning)' }}>
+            PAUSED (kill switch)
+          </span>
+        ) : (
+          <span className="chip" style={{ color: 'var(--critical)', borderColor: 'var(--critical)' }}>
+            ARMED
+          </span>
+        )}
+        <span style={{ color: 'var(--muted)', fontSize: 12 }}>
+          caps: {fmtUsd(status.caps.per_fill)}/fill · {fmtUsd(status.caps.daily)}/day ·{' '}
+          {fmtUsd(status.caps.total)} total · +{status.caps.max_slippage_cents}¢ max slip (FOK)
+        </span>
+      </div>
+      <div className="statgrid" style={{ margin: '10px 0' }}>
+        <div className="stat">
+          <div className="label">Orders</div>
+          <div className="value">{s.orders}</div>
+        </div>
+        <div className="stat">
+          <div className="label">Fills</div>
+          <div className="value">{s.fills}</div>
+        </div>
+        <div className="stat">
+          <div className="label">Unfilled (FOK)</div>
+          <div className="value">{s.unfilled}</div>
+        </div>
+        <div className="stat">
+          <div className="label">Deployed</div>
+          <div className="value">{fmtUsd(s.deployed)}</div>
+        </div>
+        <div className="stat">
+          <div className="label">Realized P&L</div>
+          <div className={`value ${s.realized_pnl >= 0 ? 'pos' : 'neg'}`}>
+            {fmtSignedUsd(s.realized_pnl)}
+          </div>
+        </div>
+        <div className="stat">
+          <div className="label">Real slippage p50</div>
+          <div className="value">
+            {s.live_slippage_p50 != null ? `${s.live_slippage_p50.toFixed(1)}¢` : '—'}
+          </div>
+        </div>
+      </div>
+      {status.recent.length > 0 && (
+        <div className="scroll-x">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Market</th>
+                <th className="num">His</th>
+                <th className="num">Limit</th>
+                <th className="num">Fill</th>
+                <th className="num">$</th>
+                <th>Status</th>
+                <th className="num">P&L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {status.recent.map((o, i) => (
+                <tr key={i}>
+                  <td style={{ whiteSpace: 'nowrap' }}>{fmtAgo(o.placed_at)}</td>
+                  <td>
+                    {o.outcome && <strong>{o.outcome}</strong>}
+                    {o.market_title && (
+                      <span style={{ color: 'var(--muted)' }}> — {o.market_title}</span>
+                    )}
+                    {o.error && (
+                      <span className="chip" style={{ color: 'var(--critical)', marginLeft: 6 }}>
+                        {o.error.slice(0, 40)}
+                      </span>
+                    )}
+                  </td>
+                  <td className="num">{fmtCents(o.his_price)}</td>
+                  <td className="num">{fmtCents(o.limit_price)}</td>
+                  <td className="num">{o.fill_price != null ? fmtCents(o.fill_price) : '—'}</td>
+                  <td className="num">{fmtUsd(o.filled_usd || o.requested_usd)}</td>
+                  <td>
+                    {o.status === 'settled' ? ((o.pnl ?? 0) >= 0 ? '✓ Win' : '✗ Loss')
+                      : o.status === 'filled' ? 'open'
+                      : o.status}
+                  </td>
+                  <td className={`num ${(o.pnl ?? 0) >= 0 ? 'pos' : 'neg'}`}>
+                    {o.pnl != null ? fmtSignedUsd(o.pnl) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** AI TRADER: paper account copying the reference whale at a size ratio.
  * Fills come from REAL residual order books at our real reaction time —
  * the 7-day P&L vs the counterfactual answers whether his own market
@@ -143,6 +300,8 @@ export function AITrader() {
           <div className="value">{s?.slippage_p50 != null ? `${s.slippage_p50.toFixed(1)}¢` : '—'}</div>
         </div>
       </div>
+
+      <LiveBeta />
 
       {report && report.daily.length > 0 && (
         <div className="card">

@@ -344,6 +344,71 @@ async def engine_fills(limit: int = Query(100, le=500), venue: str | None = None
     return out
 
 
+@app.post("/api/admin/live/{action}", dependencies=[Depends(require_admin)])
+async def admin_live_switch(action: str) -> dict:
+    """Kill switch for the LIVE beta. pause = no further orders; resume = re-arm."""
+    if action not in ("pause", "resume"):
+        raise HTTPException(status_code=400, detail="action must be pause|resume")
+    from .live_executor_state import set_paused  # thin helper below
+
+    await set_paused(action == "pause")
+    return {"ok": True, "paused": action == "pause"}
+
+
+@app.get("/api/live-status")
+async def live_status() -> dict:
+    """LIVE beta account state: config, kill switch, bankroll usage, orders."""
+    from ..live_executor import PAUSE_KEY
+
+    cfg = settings()
+    pool = await get_pool()
+    paused_val = await pool.fetchval("SELECT value FROM ingestion_state WHERE key=$1", PAUSE_KEY)
+    paused = bool(json.loads(paused_val) if isinstance(paused_val, str) else paused_val) \
+        if paused_val is not None else False
+    agg = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS orders,
+               count(*) FILTER (WHERE status IN ('filled', 'settled'))::int AS fills,
+               count(*) FILTER (WHERE status = 'unfilled')::int AS unfilled,
+               count(*) FILTER (WHERE status = 'error')::int AS errors,
+               COALESCE(sum(filled_usd), 0)::float8 AS deployed,
+               COALESCE(sum(filled_usd) FILTER
+                   (WHERE placed_at > now() - interval '24 hours'), 0)::float8 AS deployed_24h,
+               COALESCE(sum(pnl) FILTER (WHERE status = 'settled'), 0)::float8 AS realized_pnl,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY (fill_price - his_price) * 100)
+                   FILTER (WHERE fill_price IS NOT NULL) AS live_slippage_p50
+        FROM live_orders
+        """
+    )
+    recent = await pool.fetch(
+        """
+        SELECT lo.placed_at, lo.status, lo.his_price::float8 AS his_price,
+               lo.limit_price::float8 AS limit_price, lo.fill_price::float8 AS fill_price,
+               lo.filled_usd::float8 AS filled_usd, lo.requested_usd::float8 AS requested_usd,
+               lo.reaction_s::float8 AS reaction_s, lo.pnl::float8 AS pnl, lo.error,
+               COALESCE(m.event_title, m.title, t.market_title) AS market_title,
+               COALESCE(mt.outcome, t.outcome) AS outcome
+        FROM live_orders lo
+        LEFT JOIN trades t ON t.id = lo.trade_id
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = COALESCE(mt.condition_id, lo.condition_id)
+        ORDER BY lo.placed_at DESC LIMIT 25
+        """
+    )
+    d = dict(agg)
+    if d.get("live_slippage_p50") is not None:
+        d["live_slippage_p50"] = round(float(d["live_slippage_p50"]), 3)
+    return {
+        "enabled": cfg.live_trading_enabled and bool(cfg.pm_private_key),
+        "paused": paused,
+        "caps": {"per_fill": cfg.live_max_per_fill_usd, "daily": cfg.live_max_daily_usd,
+                 "total": cfg.live_max_total_usd,
+                 "max_slippage_cents": cfg.live_max_slippage_cents},
+        "summary": d,
+        "recent": [dict(r) for r in recent],
+    }
+
+
 @app.get("/api/ai-trader")
 async def ai_trader_report(days: int = Query(7, le=90)) -> dict:
     """AI TRADER paper account: live P&L of copying the source whale at the

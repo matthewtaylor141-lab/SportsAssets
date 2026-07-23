@@ -35,6 +35,12 @@ services:
         generateValue: true
       - key: ENGINE_INGEST_TOKEN   # must equal EDGE_INGEST_TOKEN on edge-shadow
         sync: false
+      - key: LIVE_TRADING_ENABLED  # REAL MONEY switch — leave unset/0 until armed
+        sync: false
+      - key: PM_PRIVATE_KEY        # dedicated beta wallet ONLY
+        sync: false
+      - key: PM_FUNDER
+        sync: false
       - key: CORS_ORIGINS        # set to your Netlify URL after the first frontend deploy
         sync: false
       - key: POLYGON_WS_URL      # Alchemy/QuickNode Polygon WS (Path A); optional at first

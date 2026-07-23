@@ -352,6 +352,29 @@ async def settle_ai_trades() -> int:
     return settled
 
 
+async def pool_settle_live() -> int:
+    """Settle LIVE beta fills: pnl = (payout - fill_price) * filled_shares."""
+    pool = await get_pool()
+    status = await pool.execute(
+        """
+        UPDATE live_orders a
+        SET status = 'settled', payout = p.payout,
+            pnl = (p.payout - a.fill_price) * a.filled_shares,
+            settled_at = COALESCE(p.resolved_at, now())
+        FROM (
+            SELECT mt.token_id, ((m.resolved_prices -> mt.outcome_index)::text)::float8 AS payout,
+                   m.resolved_at
+            FROM market_tokens mt
+            JOIN markets m USING (condition_id)
+            WHERE m.resolved AND mt.outcome_index IS NOT NULL
+              AND jsonb_array_length(m.resolved_prices) > mt.outcome_index
+        ) p
+        WHERE a.status = 'filled' AND a.asset = p.token_id
+        """
+    )
+    return int(status.split()[-1]) if status else 0
+
+
 async def run_cycle() -> dict:
     """One full analytics pass: rebuild → rollups → drift check → engine settle."""
     states = await rebuild_positions()
@@ -360,5 +383,7 @@ async def run_cycle() -> dict:
     alerts = await validate_against_leaderboard(states)
     engine_settled = await settle_engine_fills()
     ai_settled = await settle_ai_trades()
+    # LIVE beta orders settle with the same resolution data.
+    await pool_settle_live()
     return {"positions": len(states), "rollup_rows": len(rollups), "drift_alerts": alerts,
             "engine_settled": engine_settled, "ai_settled": ai_settled}
