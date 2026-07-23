@@ -54,9 +54,29 @@ def require_admin(x_admin_token: str = Header(default="")) -> None:
 
 @app.get("/healthz")
 async def healthz() -> dict:
+    import os
+
     pool = await get_pool()
     await pool.fetchval("SELECT 1")
-    return {"ok": True}
+    # Render injects the deployed commit — lets anyone confirm which build is live.
+    return {"ok": True, "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7]}
+
+
+@app.post("/api/admin/ping")
+async def admin_ping(x_admin_token: str = Header(default="")) -> dict:
+    """Unlock diagnostic. Reveals nothing about the token's value — only
+    whether a non-default token is configured on the server and whether this
+    attempt matched, so the UI can say 'wrong token' vs 'env not applied'
+    instead of one ambiguous failure message."""
+    import hmac
+
+    supplied = (x_admin_token or "").strip()
+    expected = (settings().admin_token or "").strip()
+    return {
+        "received_chars": len(supplied),
+        "configured": bool(expected) and expected != "change-me",
+        "match": bool(expected) and hmac.compare_digest(supplied, expected),
+    }
 
 
 @app.get("/api/config")
