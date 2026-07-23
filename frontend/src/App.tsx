@@ -1,6 +1,7 @@
 import { NavLink, Route, Routes } from 'react-router-dom'
 import { useLiveFeed } from './lib/sse'
 import { Admin } from './pages/Admin'
+import { AITrader } from './pages/AITrader'
 import { Alerts } from './pages/Alerts'
 import { Engine } from './pages/Engine'
 import { LiveFeed } from './pages/LiveFeed'
@@ -15,6 +16,7 @@ const TABS = [
   { to: '/matrix', label: 'Sport Matrix' },
   { to: '/markets', label: 'Markets' },
   { to: '/engine', label: '⚡ Engine' },
+  { to: '/ai-trader', label: '🤖 AI Trader' },
   { to: '/alerts', label: 'Alerts' },
   { to: '/admin', label: 'Admin' },
 ]
@@ -47,6 +49,7 @@ export default function App() {
           <Route path="/matrix" element={<Matrix />} />
           <Route path="/markets" element={<Markets />} />
           <Route path="/engine" element={<Engine />} />
+          <Route path="/ai-trader" element={<AITrader />} />
           <Route path="/alerts" element={<Alerts />} />
           <Route path="/admin" element={<Admin />} />
         </Routes>

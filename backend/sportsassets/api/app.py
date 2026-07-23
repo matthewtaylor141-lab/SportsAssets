@@ -39,7 +39,13 @@ app.add_middleware(
 
 
 def require_admin(x_admin_token: str = Header(default="")) -> None:
-    if x_admin_token != settings().admin_token:
+    import hmac
+
+    # Whitespace-tolerant compare: mobile keyboards append spaces/newlines,
+    # and env-var values sometimes carry a trailing newline.
+    supplied = (x_admin_token or "").strip()
+    expected = (settings().admin_token or "").strip()
+    if not expected or not hmac.compare_digest(supplied, expected):
         raise HTTPException(status_code=401, detail="admin token required")
 
 
@@ -336,6 +342,83 @@ async def engine_fills(limit: int = Query(100, le=500), venue: str | None = None
             d["whale_alignment"] = json.loads(d["whale_alignment"])
         out.append(d)
     return out
+
+
+@app.get("/api/ai-trader")
+async def ai_trader_report(days: int = Query(7, le=90)) -> dict:
+    """AI TRADER paper account: live P&L of copying the source whale at the
+    configured ratio, filled from real residual books, settled by our own
+    resolution pipeline. counterfactual = same clips at HIS prices — the
+    delta is the measured profitability impact of his own market impact."""
+    pool = await get_pool()
+    cfg = settings()
+    summary = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS copies,
+               count(*) FILTER (WHERE status = 'missed')::int AS missed,
+               count(*) FILTER (WHERE status = 'open')::int AS open,
+               count(*) FILTER (WHERE status = 'settled')::int AS settled,
+               COALESCE(sum(filled_notional), 0)::float8 AS staked,
+               COALESCE(sum(filled_notional) FILTER (WHERE status = 'open'), 0)::float8
+                   AS open_exposure,
+               COALESCE(sum(pnl) FILTER (WHERE status = 'settled'), 0)::float8 AS realized_pnl,
+               COALESCE(sum(filled_notional) FILTER (WHERE status = 'settled'), 0)::float8
+                   AS settled_staked,
+               COALESCE(sum(counterfactual_pnl) FILTER (WHERE status = 'settled'), 0)::float8
+                   AS counterfactual_pnl,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY reaction_s) AS reaction_p50,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY slippage_cents)
+                   FILTER (WHERE fill_vwap IS NOT NULL) AS slippage_p50,
+               min(placed_at) AS first_trade
+        FROM ai_trades WHERE placed_at > now() - make_interval(days => $1)
+        """,
+        days,
+    )
+    daily = await pool.fetch(
+        """
+        SELECT settled_at::date AS date, sum(pnl)::float8 AS pnl,
+               sum(counterfactual_pnl)::float8 AS counterfactual,
+               count(*)::int AS trades, COALESCE(sum(filled_notional), 0)::float8 AS volume
+        FROM ai_trades
+        WHERE status = 'settled' AND settled_at > now() - make_interval(days => $1)
+        GROUP BY 1 ORDER BY 1
+        """,
+        days,
+    )
+    recent = await pool.fetch(
+        """
+        SELECT a.id, a.placed_at, a.reaction_s::float8 AS reaction_s, a.status,
+               a.his_price::float8 AS his_price, a.fill_vwap::float8 AS fill_vwap,
+               a.slippage_cents::float8 AS slippage_cents,
+               a.clip_target::float8 AS clip_target,
+               a.filled_notional::float8 AS filled_notional,
+               a.pnl::float8 AS pnl, a.counterfactual_pnl::float8 AS counterfactual_pnl,
+               a.payout::float8 AS payout,
+               COALESCE(m.event_title, m.title, t.market_title) AS market_title,
+               COALESCE(mt.outcome, t.outcome) AS outcome, m.sport
+        FROM ai_trades a
+        LEFT JOIN trades t ON t.id = a.trade_id
+        LEFT JOIN market_tokens mt ON mt.token_id = a.asset
+        LEFT JOIN markets m ON m.condition_id = COALESCE(mt.condition_id, a.condition_id)
+        ORDER BY a.placed_at DESC LIMIT 50
+        """
+    )
+    d = dict(summary)
+    d["roi"] = d["realized_pnl"] / d["settled_staked"] if d["settled_staked"] else None
+    d["slippage_cost"] = round(d["counterfactual_pnl"] - d["realized_pnl"], 2)
+    for k in ("reaction_p50", "slippage_p50"):
+        if d.get(k) is not None:
+            d[k] = round(float(d[k]), 3)
+    return {
+        "source": cfg.ai_trader_source,
+        "ratio": cfg.ai_trader_ratio,
+        "days": days,
+        "summary": d,
+        "daily": [{"date": r["date"].isoformat(), "pnl": round(r["pnl"] or 0, 2),
+                   "volume": round(r["volume"] or 0, 2), "trades": r["trades"],
+                   "counterfactual": round(r["counterfactual"] or 0, 2)} for r in daily],
+        "recent": [dict(r) for r in recent],
+    }
 
 
 @app.get("/api/copy-report")

@@ -310,6 +310,48 @@ async def settle_engine_fills() -> int:
     return int(status.split()[-1]) if status else 0
 
 
+async def settle_ai_trades() -> int:
+    """Settle AI TRADER paper fills from the same resolution data.
+    pnl = (payout - fill_vwap) * shares; counterfactual = the same clip at
+    HIS price — the difference is the measured cost of copying late."""
+    pool = await get_pool()
+    resolved_sub = """
+        SELECT mt.token_id, ((m.resolved_prices -> mt.outcome_index)::text)::float8 AS payout,
+               m.resolved_at
+        FROM market_tokens mt
+        JOIN markets m USING (condition_id)
+        WHERE m.resolved AND mt.outcome_index IS NOT NULL
+          AND jsonb_array_length(m.resolved_prices) > mt.outcome_index
+    """
+    status = await pool.execute(
+        f"""
+        UPDATE ai_trades a
+        SET status = 'settled', payout = p.payout,
+            pnl = (p.payout - a.fill_vwap) * a.shares,
+            counterfactual_pnl = (p.payout - a.his_price)
+                                 * (a.clip_target / NULLIF(a.his_price, 0)),
+            settled_at = COALESCE(p.resolved_at, now())
+        FROM ({resolved_sub}) p
+        WHERE a.status = 'open' AND a.asset = p.token_id
+        """
+    )
+    settled = int(status.split()[-1]) if status else 0
+    # Missed copies still get the counterfactual at resolution — that IS the
+    # opportunity cost of an empty book.
+    await pool.execute(
+        f"""
+        UPDATE ai_trades a
+        SET payout = p.payout,
+            counterfactual_pnl = (p.payout - a.his_price)
+                                 * (a.clip_target / NULLIF(a.his_price, 0)),
+            settled_at = COALESCE(p.resolved_at, now())
+        FROM ({resolved_sub}) p
+        WHERE a.status = 'missed' AND a.payout IS NULL AND a.asset = p.token_id
+        """
+    )
+    return settled
+
+
 async def run_cycle() -> dict:
     """One full analytics pass: rebuild → rollups → drift check → engine settle."""
     states = await rebuild_positions()
@@ -317,5 +359,6 @@ async def run_cycle() -> dict:
     await persist_rollups(rollups)
     alerts = await validate_against_leaderboard(states)
     engine_settled = await settle_engine_fills()
+    ai_settled = await settle_ai_trades()
     return {"positions": len(states), "rollup_rows": len(rollups), "drift_alerts": alerts,
-            "engine_settled": engine_settled}
+            "engine_settled": engine_settled, "ai_settled": ai_settled}

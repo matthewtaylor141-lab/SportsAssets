@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     # whale's measured profit-per-dollar (swisstony ≈ 2.3%).
     copy_probe_enabled: bool = True
     copy_probe_assumed_edge: float = 0.023
+
+    # AI TRADER paper account: copy the source whale's BUYs at ratio * his
+    # notional, filled from the live residual book at our reaction time.
+    ai_trader_enabled: bool = True
+    ai_trader_source: str = "swisstony"
+    ai_trader_ratio: float = 0.10
     # "*" = accept any origin (fine while testing; set to your site URL(s),
     # comma-separated, to lock down for production).
     cors_origins: str = "*"

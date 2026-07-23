@@ -34,6 +34,27 @@ CLIPS = (1_000.0, 5_000.0)
 MAX_REACTION_S = 120.0  # older detections (reconciler catch-ups) measure nothing
 
 
+def fill_from_asks(
+    asks: list[tuple[float, float]], target_notional: float
+) -> tuple[float | None, float, float]:
+    """Walk ask levels for a target clip. Returns (vwap, filled_notional, shares).
+    Partial fills take whatever depth exists — real executor behavior."""
+    remaining = target_notional
+    cost = 0.0
+    shares = 0.0
+    for price, size in asks:
+        usd = price * size
+        take = min(usd, remaining)
+        if price > 0:
+            shares += take / price
+        cost += take
+        remaining -= take
+        if remaining <= 1e-9:
+            break
+    vwap = cost / shares if shares > 0 else None
+    return (round(vwap, 6) if vwap else None, round(cost, 2), round(shares, 4))
+
+
 def compute_book_metrics(
     asks: list[tuple[float, float]], his_price: float, assumed_edge: float
 ) -> dict:
@@ -129,5 +150,39 @@ async def probe_trade(payload: dict) -> None:
                 metrics.get("residual_roi_1k"), metrics.get("residual_roi_5k"),
                 json.dumps(asks[:8]), error,
             )
+            # AI TRADER paper account: copy the source whale at the size ratio,
+            # filled from this exact residual book snapshot.
+            await _place_ai_trade(payload, asks, his_price, reaction)
     except Exception:  # noqa: BLE001 — probing must never disturb ingestion
         log.exception("copy probe failed for trade %s", payload.get("id"))
+
+
+async def _place_ai_trade(
+    payload: dict, asks: list[tuple[float, float]], his_price: float,
+    reaction: float | None,
+) -> None:
+    cfg = settings()
+    username = (payload.get("whale_username") or "").lower()
+    if not cfg.ai_trader_enabled or username != cfg.ai_trader_source.lower():
+        return
+    his_notional = float(payload.get("notional") or 0)
+    if his_notional <= 0:
+        return
+    clip = round(cfg.ai_trader_ratio * his_notional, 2)
+    vwap, filled, shares = fill_from_asks(asks, clip)
+    status = "open" if filled > 0 else "missed"
+    slippage = round((vwap - his_price) * 100, 4) if vwap else None
+    pool = await get_pool()
+    await pool.execute(
+        """
+        INSERT INTO ai_trades (trade_id, whale_username, asset, condition_id, side,
+                               his_price, his_notional, reaction_s, clip_target,
+                               filled_notional, fill_vwap, shares, slippage_cents,
+                               status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        ON CONFLICT (trade_id) DO NOTHING
+        """,
+        payload.get("id"), payload.get("whale_username"), str(payload["asset"]),
+        payload.get("condition_id"), payload["side"], his_price, his_notional,
+        reaction, clip, filled, vwap, shares, slippage, status,
+    )

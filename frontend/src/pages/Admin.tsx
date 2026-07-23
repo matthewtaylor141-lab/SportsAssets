@@ -60,11 +60,15 @@ export function Admin() {
             className="input"
             type="password"
             value={token}
-            onChange={(e) => setToken(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && refresh(token)}
+            autoCapitalize="none"
+            autoCorrect="off"
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(e) => setToken(e.target.value.trim())}
+            onKeyDown={(e) => e.key === 'Enter' && refresh(token.trim())}
             aria-label="Admin token"
           />{' '}
-          <button className="btn primary" onClick={() => refresh(token)}>
+          <button className="btn primary" onClick={() => refresh(token.trim())}>
             Unlock
           </button>
           {err && <p style={{ color: 'var(--critical)' }}>⚠ {err}</p>}
