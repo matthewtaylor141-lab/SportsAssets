@@ -362,6 +362,22 @@ async def admin_sms_test() -> dict:
             "results": results}
 
 
+@app.post("/api/admin/ntfy-test", dependencies=[Depends(require_admin)])
+async def admin_ntfy_test() -> dict:
+    """Publish a test notification to the configured ntfy topic."""
+    from ..notifications import ntfy
+
+    if not ntfy.enabled():
+        return {"ok": False, "configured": False,
+                "error": "ntfy not configured: set NTFY_TOPIC on both backend services"}
+    result = await ntfy.publish(
+        "SportsAssets alerts are live",
+        "You'll get a notification within seconds of every watched trade.")
+    cfg = settings()
+    return {**result, "configured": True, "topic": cfg.ntfy_topic,
+            "watch_addresses": sorted(ntfy.watch_addresses()) or "all whales"}
+
+
 @app.post("/api/admin/live/{action}", dependencies=[Depends(require_admin)])
 async def admin_live_switch(action: str) -> dict:
     """Kill switch for the LIVE beta. pause = no further orders; resume = re-arm."""

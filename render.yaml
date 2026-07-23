@@ -57,6 +57,10 @@ services:
         sync: false
       - key: VAPID_CLAIMS_EMAIL
         sync: false
+      - key: NTFY_TOPIC           # free phone push via the ntfy app — use a long
+        sync: false               # random topic name; subscribe to it in the app
+      - key: NTFY_WATCH_ADDRESSES # comma-separated wallets; empty = all whales
+        sync: false
       - key: TWILIO_ACCOUNT_SID   # SMS trade alerts (twilio.com console)
         sync: false
       - key: TWILIO_AUTH_TOKEN

@@ -19,7 +19,7 @@ from collections import defaultdict, deque
 
 from ..config import settings
 from ..db import get_pool, heartbeat
-from . import sms, telegram
+from . import ntfy, sms, telegram
 from .collapse import passes_prefs, plan_deliveries
 from .webpush import broadcast
 
@@ -128,42 +128,62 @@ class Dispatcher:
         for t in trades:
             self._record("__telegram_channel__", int(t["whale_id"]))
 
-    async def _sms_watched_ids(self) -> set[int] | None:
-        """whale ids matching SMS_WATCH_ADDRESSES (cached 60s); None = all."""
-        addrs = sms.watch_addresses()
+    async def _watched_ids(self, cache_key: str, addrs: set[str]) -> set[int] | None:
+        """whale ids for a channel's wallet watch list (cached 60s); None = all."""
         if not addrs:
             return None
         now = time.time()
-        cached = getattr(self, "_sms_watch_cache", None)
-        if cached and now - cached[0] < 60:
-            return cached[1]
+        cache = getattr(self, "_watch_cache", None) or {}
+        hit = cache.get(cache_key)
+        if hit and now - hit[0] < 60:
+            return hit[1]
         pool = await get_pool()
         rows = await pool.fetch(
             "SELECT id FROM whales WHERE lower(address) = ANY($1::text[])", list(addrs)
         )
         ids = {r["id"] for r in rows}
-        self._sms_watch_cache = (now, ids)
+        cache[cache_key] = (now, ids)
+        self._watch_cache = cache
         return ids
 
-    async def _dispatch_sms(self) -> None:
-        if not sms.enabled():
-            return
-        trades = await self._claim("sms")
+    async def _drain_watched_channel(self, kind: str, addrs: set[str], send) -> None:
+        """Shared drain for wallet-scoped channels (sms, ntfy): claim, filter
+        by watch list, collapse bursts, deliver."""
+        trades = await self._claim(kind)
         if not trades:
             return
-        watched = await self._sms_watched_ids()
+        watched = await self._watched_ids(kind, addrs)
         allowed = [t for t in trades
                    if watched is None or int(t["whale_id"]) in watched]
         if not allowed:
             return
+        user_key = f"__{kind}__"
         deliveries = plan_deliveries(
-            allowed, self._recent_counts("__sms__"), threshold=self._threshold
+            allowed, self._recent_counts(user_key), threshold=self._threshold
         )
         for d in deliveries:
+            await send(d)
+        for t in allowed:
+            self._record(user_key, int(t["whale_id"]))
+
+    async def _dispatch_sms(self) -> None:
+        if not sms.enabled():
+            return
+
+        async def send(d):
             text = d.title if d.kind == "summary" else f"{d.title} — {d.body}"
             await sms.broadcast(text)
-        for t in allowed:
-            self._record("__sms__", int(t["whale_id"]))
+
+        await self._drain_watched_channel("sms", sms.watch_addresses(), send)
+
+    async def _dispatch_ntfy(self) -> None:
+        if not ntfy.enabled():
+            return
+
+        async def send(d):
+            await ntfy.publish(d.title, d.body)
+
+        await self._drain_watched_channel("ntfy", ntfy.watch_addresses(), send)
 
     # ── ops monitor (spec §8) ──────────────────────────────────────────
     async def _monitor_health(self) -> None:
@@ -208,6 +228,7 @@ class Dispatcher:
                 await self._dispatch_webpush()
                 await self._dispatch_telegram()
                 await self._dispatch_sms()
+                await self._dispatch_ntfy()
                 if time.time() - last_monitor > 10:
                     await self._monitor_health()
                     await heartbeat("dispatcher")

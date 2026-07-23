@@ -243,28 +243,33 @@ export function Admin() {
 
 function SmsTest({ token }: { token: string }) {
   const [result, setResult] = useState<string>('')
-  const [busy, setBusy] = useState(false)
-  const test = async () => {
-    setBusy(true)
+  const [busy, setBusy] = useState('')
+  const test = async (channel: 'sms' | 'ntfy') => {
+    setBusy(channel)
     setResult('')
     try {
-      const r = await adminApi<any>('/api/admin/sms-test', token, { method: 'POST', body: '{}' })
-      if (r.ok) setResult('✓ Test text sent — check your phone.')
+      const r = await adminApi<any>(`/api/admin/${channel}-test`, token, { method: 'POST', body: '{}' })
+      if (r.ok) setResult('✓ Test sent — check your phone.')
       else if (r.configured === false) setResult(`✗ ${r.error}`)
-      else setResult(`✗ ${r.results?.filter((x: any) => !x.ok).map((x: any) => `${x.to}: ${x.error}`).join('; ')}`)
+      else if (channel === 'sms')
+        setResult(`✗ ${r.results?.filter((x: any) => !x.ok).map((x: any) => `${x.to}: ${x.error}`).join('; ')}`)
+      else setResult(`✗ ${r.error}`)
     } catch {
       setResult('✗ Request failed.')
     } finally {
-      setBusy(false)
+      setBusy('')
     }
   }
   return (
-    <div style={{ marginTop: 10 }}>
-      <button className="btn" onClick={test} disabled={busy}>
-        {busy ? 'Sending…' : '📱 Send test SMS'}
+    <div style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+      <button className="btn" onClick={() => test('ntfy')} disabled={busy !== ''}>
+        {busy === 'ntfy' ? 'Sending…' : '🔔 Test ntfy push'}
+      </button>
+      <button className="btn" onClick={() => test('sms')} disabled={busy !== ''}>
+        {busy === 'sms' ? 'Sending…' : '📱 Test SMS'}
       </button>
       {result && (
-        <span style={{ marginLeft: 8, fontSize: 13, color: result.startsWith('✓') ? 'var(--good)' : 'var(--critical)' }}>
+        <span style={{ fontSize: 13, color: result.startsWith('✓') ? 'var(--good)' : 'var(--critical)' }}>
           {result}
         </span>
       )}

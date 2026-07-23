@@ -142,10 +142,14 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
 
 
 async def _write_outbox(trade_id: int, payload: dict) -> None:
-    from ..notifications import sms
+    from ..notifications import ntfy, sms
 
     pool = await get_pool()
-    kinds = ("webpush", "telegram", "sms") if sms.enabled() else ("webpush", "telegram")
+    kinds = ["webpush", "telegram"]
+    if sms.enabled():
+        kinds.append("sms")
+    if ntfy.enabled():
+        kinds.append("ntfy")
     for kind in kinds:
         await pool.execute(
             """

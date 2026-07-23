@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     vapid_public_key: str = ""
     vapid_private_key: str = ""
     vapid_claims_email: str = "mailto:admin@example.com"
+    # ntfy push alerts — free, no account: recipient subscribes to the secret
+    # topic in the ntfy app; we POST each fresh detection to it (~1-2s).
+    ntfy_server: str = "https://ntfy.sh"
+    ntfy_topic: str = ""            # long random topic name = the only secret
+    ntfy_watch_addresses: str = ""  # comma-separated wallets; empty = all whales
     # SMS alerts (Twilio). Texts fire on fresh detections only (never backfill),
     # scoped to sms_watch_addresses when set, burst-collapsed like push.
     twilio_account_sid: str = ""
