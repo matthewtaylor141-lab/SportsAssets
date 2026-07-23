@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     admin_token: str = "change-me"
     # Shared secret the edge-engine uses to record its shadow fills here.
     engine_ingest_token: str = ""
+
+    # Copy-trade feasibility probes: on each fresh whale BUY, snapshot the
+    # residual order book and compute achievable prices. assumed_edge is the
+    # whale's measured profit-per-dollar (swisstony ≈ 2.3%).
+    copy_probe_enabled: bool = True
+    copy_probe_assumed_edge: float = 0.023
     # "*" = accept any origin (fine while testing; set to your site URL(s),
     # comma-separated, to lock down for production).
     cors_origins: str = "*"

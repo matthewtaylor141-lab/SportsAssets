@@ -129,6 +129,12 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
     await publish(CH_TRADES_NEW, payload)
     await _write_outbox(trade_id, payload)
 
+    # Copy-trade feasibility: snapshot the residual book at exactly the moment
+    # an executor would react. Fire-and-forget; never delays ingestion.
+    from ..copy_probe import probe_trade
+
+    asyncio.get_running_loop().create_task(probe_trade(payload))
+
     if not pre_enriched:
         # Enrich off the hot path; never blocks the next detection.
         asyncio.get_running_loop().create_task(_enrich(trade_id, ev, detected_at))

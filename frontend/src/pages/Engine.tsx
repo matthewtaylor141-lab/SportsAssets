@@ -60,6 +60,166 @@ interface EngineStatus {
   }
 }
 
+interface CopyReport {
+  whale: string
+  hours: number
+  summary: {
+    probes: number
+    with_book: number
+    reaction_p50: number | null
+    reaction_p95: number | null
+    slippage_p50: number | null
+    slippage_p90: number | null
+    fillable_1k: number
+    fillable_5k: number
+    avg_roi_1k: number | null
+    avg_roi_5k: number | null
+    positive_1k: number
+    positive_5k: number
+    assumed_edge: number
+  }
+  recent: {
+    probe_at: string
+    reaction_s: number | null
+    his_price: number
+    best_ask: number | null
+    slippage_cents: number | null
+    his_notional: number | null
+    fillable_5k: boolean | null
+    residual_roi_1k: number | null
+    residual_roi_5k: number | null
+    book_ok: boolean
+    error: string | null
+    market_title: string | null
+    outcome: string | null
+  }[]
+}
+
+/** Measured copy-trade feasibility: for every fresh swisstony BUY we detect,
+ * the residual order book is snapshotted at our real reaction time. */
+function CopyFeasibility() {
+  const [report, setReport] = useState<CopyReport | null>(null)
+
+  useEffect(() => {
+    const load = () =>
+      api<CopyReport>('/api/copy-report?whale=swisstony').then(setReport).catch(() => {})
+    load()
+    const t = setInterval(load, 30000)
+    return () => clearInterval(t)
+  }, [])
+
+  const s = report?.summary
+  return (
+    <div className="card">
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <h2 style={{ margin: 0 }}>Copy-trade feasibility — swisstony (24h)</h2>
+        <span style={{ color: 'var(--muted)', fontSize: 12 }}>
+          residual book at our reaction time · assumes{' '}
+          {s ? (s.assumed_edge * 100).toFixed(1) : '2.3'}% edge at his price
+        </span>
+      </div>
+      {!s || s.probes === 0 ? (
+        <EmptyState>
+          No probes yet — rows appear seconds after each fresh swisstony BUY is detected.
+        </EmptyState>
+      ) : (
+        <>
+          <div className="statgrid" style={{ margin: '10px 0' }}>
+            <div className="stat">
+              <div className="label">Probes</div>
+              <div className="value">{s.probes.toLocaleString()}</div>
+            </div>
+            <div className="stat">
+              <div className="label">Reaction p50</div>
+              <div className="value">
+                {s.reaction_p50 != null ? `${s.reaction_p50.toFixed(1)}s` : '—'}
+              </div>
+            </div>
+            <div className="stat">
+              <div className="label">Book available</div>
+              <div className="value">{((s.with_book / s.probes) * 100).toFixed(0)}%</div>
+            </div>
+            <div className="stat">
+              <div className="label">Slippage p50</div>
+              <div className="value">
+                {s.slippage_p50 != null ? `${s.slippage_p50.toFixed(1)}¢` : '—'}
+              </div>
+            </div>
+            <div className="stat">
+              <div className="label">Fillable $5k</div>
+              <div className="value">
+                {s.probes ? `${((s.fillable_5k / s.probes) * 100).toFixed(0)}%` : '—'}
+              </div>
+            </div>
+            <div className="stat">
+              <div className="label">Residual ROI @$1k</div>
+              <div className={`value ${(s.avg_roi_1k ?? 0) >= 0 ? 'pos' : 'neg'}`}>
+                {s.avg_roi_1k != null ? fmtPct(s.avg_roi_1k) : '—'}
+              </div>
+            </div>
+            <div className="stat">
+              <div className="label">Residual ROI @$5k</div>
+              <div className={`value ${(s.avg_roi_5k ?? 0) >= 0 ? 'pos' : 'neg'}`}>
+                {s.avg_roi_5k != null ? fmtPct(s.avg_roi_5k) : '—'}
+              </div>
+            </div>
+            <div className="stat">
+              <div className="label">Still +EV @$1k</div>
+              <div className="value">
+                {s.fillable_1k ? `${((s.positive_1k / s.fillable_1k) * 100).toFixed(0)}%` : '—'}
+              </div>
+            </div>
+          </div>
+          <div className="scroll-x">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>Market</th>
+                  <th className="num">His price</th>
+                  <th className="num">Our ask</th>
+                  <th className="num">Slip</th>
+                  <th className="num">React</th>
+                  <th className="num">ROI @$1k</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report!.recent.map((p, i) => (
+                  <tr key={i}>
+                    <td style={{ whiteSpace: 'nowrap' }}>{fmtAgo(p.probe_at)}</td>
+                    <td>
+                      {p.outcome && <strong>{p.outcome}</strong>}
+                      {p.market_title && (
+                        <span style={{ color: 'var(--muted)' }}> — {p.market_title}</span>
+                      )}
+                      {!p.book_ok && (
+                        <span className="chip" style={{ color: 'var(--warning)', marginLeft: 6 }}>
+                          {p.error || 'no book'}
+                        </span>
+                      )}
+                    </td>
+                    <td className="num">{fmtCents(p.his_price)}</td>
+                    <td className="num">{p.best_ask != null ? fmtCents(p.best_ask) : '—'}</td>
+                    <td className="num">
+                      {p.slippage_cents != null ? `${p.slippage_cents.toFixed(1)}¢` : '—'}
+                    </td>
+                    <td className="num">
+                      {p.reaction_s != null ? `${p.reaction_s.toFixed(1)}s` : '—'}
+                    </td>
+                    <td className={`num ${(p.residual_roi_1k ?? 0) >= 0 ? 'pos' : 'neg'}`}>
+                      {p.residual_roi_1k != null ? fmtPct(p.residual_roi_1k) : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 export function Engine() {
   const [summary, setSummary] = useState<EngineSummary | null>(null)
   const [fills, setFills] = useState<EngineFill[] | null>(null)
@@ -181,6 +341,8 @@ export function Engine() {
           <PnlCalendar days={summary.daily} />
         </div>
       )}
+
+      <CopyFeasibility />
 
       <div className="card" style={{ padding: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 12px 4px' }}>

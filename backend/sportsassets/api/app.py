@@ -338,6 +338,63 @@ async def engine_fills(limit: int = Query(100, le=500), venue: str | None = None
     return out
 
 
+@app.get("/api/copy-report")
+async def copy_report(whale: str | None = "swisstony", hours: int = Query(24, le=24 * 30)) -> dict:
+    """Copy-trade feasibility: measured residual books at our real reaction
+    time, for every fresh whale BUY. Answers: does the edge survive copying?"""
+    pool = await get_pool()
+    where_user = "AND lower(username) = lower($2)" if whale else ""
+    args: list = [hours] + ([whale] if whale else [])
+    agg = await pool.fetchrow(
+        f"""
+        SELECT count(*)::int AS probes,
+               count(*) FILTER (WHERE book_ok)::int AS with_book,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY reaction_s) AS reaction_p50,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY reaction_s) AS reaction_p95,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY slippage_cents)
+                   FILTER (WHERE book_ok) AS slippage_p50,
+               percentile_cont(0.9) WITHIN GROUP (ORDER BY slippage_cents)
+                   FILTER (WHERE book_ok) AS slippage_p90,
+               count(*) FILTER (WHERE fillable_1k)::int AS fillable_1k,
+               count(*) FILTER (WHERE fillable_5k)::int AS fillable_5k,
+               avg(residual_roi_1k) FILTER (WHERE fillable_1k) AS avg_roi_1k,
+               avg(residual_roi_5k) FILTER (WHERE fillable_5k) AS avg_roi_5k,
+               count(*) FILTER (WHERE residual_roi_1k > 0)::int AS positive_1k,
+               count(*) FILTER (WHERE residual_roi_5k > 0)::int AS positive_5k
+        FROM copy_probes
+        WHERE probe_at > now() - make_interval(hours => $1) {where_user}
+        """,
+        *args,
+    )
+    recent = await pool.fetch(
+        f"""
+        SELECT cp.probe_at, cp.reaction_s::float8 AS reaction_s,
+               cp.his_price::float8 AS his_price, cp.best_ask::float8 AS best_ask,
+               cp.slippage_cents::float8 AS slippage_cents,
+               cp.his_notional::float8 AS his_notional,
+               cp.fillable_5k, cp.residual_roi_1k::float8 AS residual_roi_1k,
+               cp.residual_roi_5k::float8 AS residual_roi_5k, cp.book_ok, cp.error,
+               COALESCE(m.event_title, m.title, t.market_title) AS market_title,
+               COALESCE(mt.outcome, t.outcome) AS outcome
+        FROM copy_probes cp
+        LEFT JOIN trades t ON t.id = cp.trade_id
+        LEFT JOIN market_tokens mt ON mt.token_id = cp.asset
+        LEFT JOIN markets m ON m.condition_id = COALESCE(mt.condition_id, t.condition_id)
+        WHERE cp.probe_at > now() - make_interval(hours => $1) {where_user}
+        ORDER BY cp.probe_at DESC LIMIT 15
+        """,
+        *args,
+    )
+    d = dict(agg)
+    for k in ("reaction_p50", "reaction_p95", "slippage_p50", "slippage_p90",
+              "avg_roi_1k", "avg_roi_5k"):
+        if d.get(k) is not None:
+            d[k] = round(float(d[k]), 4)
+    d["assumed_edge"] = settings().copy_probe_assumed_edge
+    return {"whale": whale, "hours": hours, "summary": d,
+            "recent": [dict(r) for r in recent]}
+
+
 @app.get("/api/signal/{condition_id}")
 async def api_signal(condition_id: str) -> dict:
     """Live whale positioning for one market — the edge engine's alignment
