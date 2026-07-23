@@ -166,6 +166,7 @@ export function Admin() {
               <div className="value">{health?.outbox?.collapsed ?? 0}</div>
             </div>
           </div>
+          <SmsTest token={token} />
           <h2>Reconciliation (last runs)</h2>
           {health?.reconciliation?.length ? (
             <table className="data">
@@ -237,6 +238,37 @@ export function Admin() {
         <PinForm onPin={(address, username) => action('pin', { address, username })} />
       </div>
     </>
+  )
+}
+
+function SmsTest({ token }: { token: string }) {
+  const [result, setResult] = useState<string>('')
+  const [busy, setBusy] = useState(false)
+  const test = async () => {
+    setBusy(true)
+    setResult('')
+    try {
+      const r = await adminApi<any>('/api/admin/sms-test', token, { method: 'POST', body: '{}' })
+      if (r.ok) setResult('✓ Test text sent — check your phone.')
+      else if (r.configured === false) setResult(`✗ ${r.error}`)
+      else setResult(`✗ ${r.results?.filter((x: any) => !x.ok).map((x: any) => `${x.to}: ${x.error}`).join('; ')}`)
+    } catch {
+      setResult('✗ Request failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div style={{ marginTop: 10 }}>
+      <button className="btn" onClick={test} disabled={busy}>
+        {busy ? 'Sending…' : '📱 Send test SMS'}
+      </button>
+      {result && (
+        <span style={{ marginLeft: 8, fontSize: 13, color: result.startsWith('✓') ? 'var(--good)' : 'var(--critical)' }}>
+          {result}
+        </span>
+      )}
+    </div>
   )
 }
 

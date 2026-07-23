@@ -57,6 +57,16 @@ services:
         sync: false
       - key: VAPID_CLAIMS_EMAIL
         sync: false
+      - key: TWILIO_ACCOUNT_SID   # SMS trade alerts (twilio.com console)
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER   # your Twilio number, E.164 (+1...)
+        sync: false
+      - key: SMS_TO_NUMBERS       # comma-separated recipients, E.164
+        sync: false
+      - key: SMS_WATCH_ADDRESSES  # comma-separated wallets; empty = all whales
+        sync: false
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHANNEL_ID

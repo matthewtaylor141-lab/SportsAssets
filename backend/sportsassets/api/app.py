@@ -344,6 +344,24 @@ async def engine_fills(limit: int = Query(100, le=500), venue: str | None = None
     return out
 
 
+@app.post("/api/admin/sms-test", dependencies=[Depends(require_admin)])
+async def admin_sms_test() -> dict:
+    """Send a test text to every configured SMS recipient and report per-number
+    results — the arming check for trade SMS alerts."""
+    from ..notifications import sms
+
+    if not sms.enabled():
+        return {"ok": False, "configured": False,
+                "error": "SMS not configured: set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, "
+                         "TWILIO_FROM_NUMBER, SMS_TO_NUMBERS on both backend services"}
+    results = await sms.broadcast(
+        "SportsAssets: SMS alerts are live. You'll get a text within seconds of "
+        "every watched trade.")
+    return {"ok": all(r["ok"] for r in results), "configured": True,
+            "watch_addresses": sorted(sms.watch_addresses()) or "all whales",
+            "results": results}
+
+
 @app.post("/api/admin/live/{action}", dependencies=[Depends(require_admin)])
 async def admin_live_switch(action: str) -> dict:
     """Kill switch for the LIVE beta. pause = no further orders; resume = re-arm."""

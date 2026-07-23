@@ -142,8 +142,11 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
 
 
 async def _write_outbox(trade_id: int, payload: dict) -> None:
+    from ..notifications import sms
+
     pool = await get_pool()
-    for kind in ("webpush", "telegram"):
+    kinds = ("webpush", "telegram", "sms") if sms.enabled() else ("webpush", "telegram")
+    for kind in kinds:
         await pool.execute(
             """
             INSERT INTO notification_outbox (trade_id, kind, payload)

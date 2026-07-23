@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     vapid_public_key: str = ""
     vapid_private_key: str = ""
     vapid_claims_email: str = "mailto:admin@example.com"
+    # SMS alerts (Twilio). Texts fire on fresh detections only (never backfill),
+    # scoped to sms_watch_addresses when set, burst-collapsed like push.
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from_number: str = ""   # your Twilio number, E.164 (+1...)
+    sms_to_numbers: str = ""       # comma-separated recipients, E.164
+    sms_watch_addresses: str = ""  # comma-separated wallets; empty = all whales
     telegram_bot_token: str = ""
     telegram_channel_id: str = ""
     telegram_admin_chat_id: str = ""

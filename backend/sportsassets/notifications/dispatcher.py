@@ -19,7 +19,7 @@ from collections import defaultdict, deque
 
 from ..config import settings
 from ..db import get_pool, heartbeat
-from . import telegram
+from . import sms, telegram
 from .collapse import passes_prefs, plan_deliveries
 from .webpush import broadcast
 
@@ -128,6 +128,43 @@ class Dispatcher:
         for t in trades:
             self._record("__telegram_channel__", int(t["whale_id"]))
 
+    async def _sms_watched_ids(self) -> set[int] | None:
+        """whale ids matching SMS_WATCH_ADDRESSES (cached 60s); None = all."""
+        addrs = sms.watch_addresses()
+        if not addrs:
+            return None
+        now = time.time()
+        cached = getattr(self, "_sms_watch_cache", None)
+        if cached and now - cached[0] < 60:
+            return cached[1]
+        pool = await get_pool()
+        rows = await pool.fetch(
+            "SELECT id FROM whales WHERE lower(address) = ANY($1::text[])", list(addrs)
+        )
+        ids = {r["id"] for r in rows}
+        self._sms_watch_cache = (now, ids)
+        return ids
+
+    async def _dispatch_sms(self) -> None:
+        if not sms.enabled():
+            return
+        trades = await self._claim("sms")
+        if not trades:
+            return
+        watched = await self._sms_watched_ids()
+        allowed = [t for t in trades
+                   if watched is None or int(t["whale_id"]) in watched]
+        if not allowed:
+            return
+        deliveries = plan_deliveries(
+            allowed, self._recent_counts("__sms__"), threshold=self._threshold
+        )
+        for d in deliveries:
+            text = d.title if d.kind == "summary" else f"{d.title} — {d.body}"
+            await sms.broadcast(text)
+        for t in allowed:
+            self._record("__sms__", int(t["whale_id"]))
+
     # ── ops monitor (spec §8) ──────────────────────────────────────────
     async def _monitor_health(self) -> None:
         cfg = settings()
@@ -170,6 +207,7 @@ class Dispatcher:
             try:
                 await self._dispatch_webpush()
                 await self._dispatch_telegram()
+                await self._dispatch_sms()
                 if time.time() - last_monitor > 10:
                     await self._monitor_health()
                     await heartbeat("dispatcher")
