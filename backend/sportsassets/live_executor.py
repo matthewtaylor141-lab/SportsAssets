@@ -136,7 +136,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         return
 
     limit, usd, shares = plan_order(
-        his_price, his_notional, cfg.ai_trader_ratio,
+        his_price, his_notional, cfg.live_copy_ratio,
         min(cfg.live_max_per_fill_usd, day_room, total_room),
         cfg.live_max_slippage_cents,
     )

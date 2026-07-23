@@ -79,9 +79,10 @@ class Settings(BaseSettings):
     pm_private_key: str = ""       # dedicated wallet key (export from PM settings)
     pm_funder: str = ""            # your Polymarket profile (proxy) address
     pm_signature_type: int = 1     # 1/2 = web-account proxy, 0 = raw EOA
+    live_copy_ratio: float = 0.001  # $1 per $1k the source whale trades
     live_max_per_fill_usd: float = 25.0
-    live_max_daily_usd: float = 200.0
-    live_max_total_usd: float = 1000.0
+    live_max_daily_usd: float = 250.0
+    live_max_total_usd: float = 500.0
     live_max_slippage_cents: float = 1.0
     # "*" = accept any origin (fine while testing; set to your site URL(s),
     # comma-separated, to lock down for production).
