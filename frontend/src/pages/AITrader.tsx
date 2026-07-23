@@ -46,12 +46,14 @@ interface AIReport {
 
 interface LiveStatus {
   enabled: boolean
+  venue: string | null
   paused: boolean
   caps: { per_fill: number; daily: number; total: number; max_slippage_cents: number }
   summary: {
     orders: number
     fills: number
     unfilled: number
+    unmapped: number
     errors: number
     deployed: number
     deployed_24h: number
@@ -93,10 +95,11 @@ function LiveBeta() {
       <div className="card" style={{ borderColor: 'rgba(224,82,82,0.35)' }}>
         <h2 style={{ marginTop: 0 }}>🔴 Live beta (real money) — not armed</h2>
         <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>
-          To arm: fund a dedicated Polymarket wallet with the beta bankroll only, then set
-          LIVE_TRADING_ENABLED=1, PM_PRIVATE_KEY, PM_FUNDER on both backend services. FOK limit
-          orders only, buy-only, capped per-fill/daily/total. Kill switch lives on the Admin page
-          contract: POST /api/admin/live/pause.
+          To arm with a Polymarket US account: sign in at polymarket.us/developer (same login as
+          the app, KYC complete), create an API key, then set PMUS_KEY_ID, PMUS_SECRET_KEY and
+          LIVE_TRADING_ENABLED=1 on both backend services (Render → Environment). FOK limit orders
+          only, buy-only, preview-verified, capped per-fill/daily/total. Kill switch:
+          POST /api/admin/live/pause.
         </p>
       </div>
     )
@@ -112,6 +115,11 @@ function LiveBeta() {
         ) : (
           <span className="chip" style={{ color: 'var(--critical)', borderColor: 'var(--critical)' }}>
             ARMED
+          </span>
+        )}
+        {status.venue && (
+          <span className="chip">
+            {status.venue === 'polymarket-us' ? 'Polymarket US (regulated)' : 'Global CLOB'}
           </span>
         )}
         <span style={{ color: 'var(--muted)', fontSize: 12 }}>
@@ -132,6 +140,12 @@ function LiveBeta() {
           <div className="label">Unfilled (FOK)</div>
           <div className="value">{s.unfilled}</div>
         </div>
+        {(s.unmapped ?? 0) > 0 && (
+          <div className="stat">
+            <div className="label">No US market</div>
+            <div className="value">{s.unmapped}</div>
+          </div>
+        )}
         <div className="stat">
           <div className="label">Deployed</div>
           <div className="value">{fmtUsd(s.deployed)}</div>

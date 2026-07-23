@@ -1,0 +1,226 @@
+"""Polymarket US venue adapter (the regulated DCM behind the US mobile app).
+
+The US exchange is a separate venue from the global CLOB: its own order books,
+per-outcome markets (one market per team/outcome, grouped by eventSlug), its
+own identifiers, and Ed25519 API-key auth (keys minted at polymarket.us/developer
+with the same login as the mobile app). The source whale trades on the global
+CLOB, so every copy needs a mapping step from the global market/outcome to a
+US market slug — a copy is only placed when that mapping is verified.
+
+Safety on top of the executor's caps/kill-switch:
+  * LONG-side orders only. If the whale's outcome only exists as the other
+    team's market, we skip — short-contract price semantics are not assumed.
+  * orders.preview() first: the venue's own costing must agree with ours
+    (within 2%) before any real order is created.
+  * FOK limit orders only, integer contracts, whole-cent prices.
+
+All functions here are sync (the SDK is httpx-based); callers run them in a
+thread. No function is reachable unless PMUS_KEY_ID/PMUS_SECRET_KEY are set.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import unicodedata
+from difflib import SequenceMatcher
+from typing import Any
+
+from .config import settings
+
+log = logging.getLogger(__name__)
+
+_client = None
+MATCH_FLOOR = 0.85  # minimum similarity for a verified outcome match
+PREVIEW_COST_TOLERANCE = 1.02  # venue-computed cost may exceed ours by ≤2%
+
+
+def _get_client():
+    global _client
+    if _client is not None:
+        return _client
+    from polymarket_us import PolymarketUS
+
+    cfg = settings()
+    if cfg.pmus_key_id and cfg.pmus_secret_key:
+        _client = PolymarketUS(key_id=cfg.pmus_key_id, secret_key=cfg.pmus_secret_key)
+    else:
+        _client = PolymarketUS()  # public endpoints only (market data, mapping)
+    return _client
+
+
+def _norm(s: str | None) -> str:
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9 ]+", " ", s.lower()).strip()
+
+
+def _sim(a: str | None, b: str | None) -> float:
+    na, nb = _norm(a), _norm(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb or na in nb or nb in na:
+        return 1.0
+    return SequenceMatcher(None, na, nb).ratio()
+
+
+def _outcome_score(us_market: dict, outcome: str | None) -> float:
+    """How well a US per-outcome market matches the whale's bought outcome."""
+    team = us_market.get("team") or {}
+    candidates = [us_market.get("outcome"), team.get("name"), team.get("alias"),
+                  team.get("safeName"), team.get("abbreviation")]
+    return max((_sim(c, outcome) for c in candidates if c), default=0.0)
+
+
+def _amount(price: float) -> dict:
+    return {"value": f"{price:.2f}", "currency": "USD"}
+
+
+def resolve_market(market_slug: str | None, event_slug: str | None,
+                   market_title: str | None, event_title: str | None,
+                   outcome: str | None) -> dict | None:
+    """Map a global-CLOB trade to a US market. Returns
+    {"market_slug", "title", "outcome", "matched_by", "score"} or None.
+
+    Order of attempts (cheapest/most exact first):
+      1. same market slug on the US venue
+      2. markets list filtered by the same event slug
+      3. full-text search on the event/market title
+    Every hit must still pass the outcome-similarity floor.
+    """
+    client = _get_client()
+
+    # 1) direct slug parity
+    if market_slug:
+        try:
+            m = (client.markets.retrieve_by_slug(market_slug) or {}).get("market") or {}
+            score = _outcome_score(m, outcome)
+            if m.get("slug") and score >= MATCH_FLOOR and not m.get("closed"):
+                return {"market_slug": m["slug"], "title": m.get("title"),
+                        "outcome": m.get("outcome"), "matched_by": "slug", "score": score}
+        except Exception as exc:  # noqa: BLE001 — 404 is expected; fall through
+            log.debug("pmus slug lookup miss (%s): %s", market_slug, exc)
+
+    # 2) shared event slug → per-outcome siblings
+    candidates: list[dict] = []
+    if event_slug:
+        try:
+            resp = client.markets.list({"eventSlug": [event_slug], "active": True})
+            candidates = list((resp or {}).get("markets") or [])
+        except Exception:  # noqa: BLE001 — fall through to search
+            candidates = []
+
+    # 3) title search → events with nested markets
+    if not candidates and (event_title or market_title):
+        try:
+            resp = client.search.query(
+                {"query": event_title or market_title, "limit": 5, "status": "active"})
+            for ev in (resp or {}).get("events") or []:
+                ev_score = max(_sim(ev.get("title"), event_title),
+                               _sim(ev.get("title"), market_title))
+                if ev_score >= MATCH_FLOOR:
+                    candidates.extend(ev.get("markets") or [])
+        except Exception:  # noqa: BLE001
+            candidates = []
+
+    best, best_score = None, 0.0
+    for m in candidates:
+        if m.get("closed") or not m.get("slug"):
+            continue
+        score = _outcome_score(m, outcome)
+        if score > best_score:
+            best, best_score = m, score
+    if best is not None and best_score >= MATCH_FLOOR:
+        return {"market_slug": best["slug"], "title": best.get("title"),
+                "outcome": best.get("outcome"),
+                "matched_by": "event" if event_slug else "search", "score": best_score}
+    return None
+
+
+def submit_fok(us_market_slug: str, limit_price: float, quantity: int) -> dict:
+    """Preview then place a BUY_LONG FOK limit order. Returns the same
+    normalized shape the global executor uses:
+    {ok, order_id, status, fill_price, filled_shares, raw}."""
+    client = _get_client()
+    params = {
+        "marketSlug": us_market_slug,
+        "intent": "ORDER_INTENT_BUY_LONG",
+        "type": "ORDER_TYPE_LIMIT",
+        "price": _amount(limit_price),
+        "quantity": int(quantity),
+        "tif": "TIME_IN_FORCE_FILL_OR_KILL",
+        "synchronousExecution": True,
+    }
+
+    # The venue's own cost calculation must agree with ours before we commit.
+    expected_cost = limit_price * quantity
+    preview = client.orders.preview({"request": {k: v for k, v in params.items()
+                                                 if k != "synchronousExecution"}})
+    prev_order = (preview or {}).get("order") or {}
+    prev_cost = _order_cost(prev_order, default=expected_cost)
+    if prev_cost > expected_cost * PREVIEW_COST_TOLERANCE:
+        return {"ok": False, "order_id": None, "status": "preview_mismatch",
+                "fill_price": None, "filled_shares": 0.0,
+                "raw": {"preview": preview, "expected_cost": expected_cost}}
+
+    resp = client.orders.create(params)
+    order_id = (resp or {}).get("id")
+    executions = (resp or {}).get("executions") or []
+    filled, notional = 0.0, 0.0
+    state = ""
+    for ex in executions:
+        state = (ex.get("order") or {}).get("state") or state
+        px = _amount_value((ex.get("lastPx") or {}))
+        sh = float(ex.get("lastShares") or 0)
+        if ex.get("type") in ("EXECUTION_TYPE_FILL", "EXECUTION_TYPE_PARTIAL_FILL") and px:
+            filled += sh
+            notional += sh * px
+    ok = filled > 0 and state in ("ORDER_STATE_FILLED", "ORDER_STATE_PARTIALLY_FILLED")
+    fill_price = round(notional / filled, 4) if filled > 0 else None
+    return {"ok": ok, "order_id": order_id,
+            "status": state.replace("ORDER_STATE_", "").lower() or "unknown",
+            "fill_price": fill_price, "filled_shares": filled,
+            "raw": {"preview": prev_order, "response": resp}}
+
+
+def _amount_value(a: Any) -> float:
+    try:
+        return float((a or {}).get("value") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _order_cost(order: dict, default: float) -> float:
+    cash = _amount_value(order.get("cashOrderQty"))
+    if cash > 0:
+        return cash
+    px = _amount_value(order.get("price"))
+    qty = float(order.get("quantity") or 0)
+    return px * qty if px and qty else default
+
+
+def probe() -> dict:
+    """Connectivity/diag probe usable from the deployed API (admin panel):
+    unauthenticated market list + whether creds are configured. Never orders."""
+    from polymarket_us import PolymarketUS
+
+    cfg = settings()
+    out: dict[str, Any] = {"creds_configured": bool(cfg.pmus_key_id and cfg.pmus_secret_key)}
+    try:
+        pub = PolymarketUS()
+        resp = pub.markets.list({"limit": 3, "active": True})
+        markets = (resp or {}).get("markets") or []
+        out["gateway_ok"] = True
+        out["sample_markets"] = [{"slug": m.get("slug"), "title": m.get("title"),
+                                  "outcome": m.get("outcome")} for m in markets]
+    except Exception as exc:  # noqa: BLE001
+        out["gateway_ok"] = False
+        out["gateway_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+    if out["creds_configured"]:
+        try:
+            bal = _get_client().account.balances()
+            out["auth_ok"] = True
+            out["balances"] = bal
+        except Exception as exc:  # noqa: BLE001
+            out["auth_ok"] = False
+            out["auth_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+    return out

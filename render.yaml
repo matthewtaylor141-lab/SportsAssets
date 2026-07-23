@@ -37,7 +37,11 @@ services:
         sync: false
       - key: LIVE_TRADING_ENABLED  # REAL MONEY switch — leave unset/0 until armed
         sync: false
-      - key: PM_PRIVATE_KEY        # dedicated beta wallet ONLY
+      - key: PMUS_KEY_ID           # Polymarket US API key (polymarket.us/developer)
+        sync: false
+      - key: PMUS_SECRET_KEY       # shown once at key creation — store it here
+        sync: false
+      - key: PM_PRIVATE_KEY        # global CLOB only (non-US) — leave empty for US accounts
         sync: false
       - key: PM_FUNDER
         sync: false

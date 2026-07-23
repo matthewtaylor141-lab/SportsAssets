@@ -358,7 +358,7 @@ async def admin_live_switch(action: str) -> dict:
 @app.get("/api/live-status")
 async def live_status() -> dict:
     """LIVE beta account state: config, kill switch, bankroll usage, orders."""
-    from ..live_executor import PAUSE_KEY
+    from ..live_executor import PAUSE_KEY, active_venue
 
     cfg = settings()
     pool = await get_pool()
@@ -370,6 +370,7 @@ async def live_status() -> dict:
         SELECT count(*)::int AS orders,
                count(*) FILTER (WHERE status IN ('filled', 'settled'))::int AS fills,
                count(*) FILTER (WHERE status = 'unfilled')::int AS unfilled,
+               count(*) FILTER (WHERE status = 'rejected')::int AS unmapped,
                count(*) FILTER (WHERE status = 'error')::int AS errors,
                COALESCE(sum(filled_usd), 0)::float8 AS deployed,
                COALESCE(sum(filled_usd) FILTER
@@ -386,6 +387,7 @@ async def live_status() -> dict:
                lo.limit_price::float8 AS limit_price, lo.fill_price::float8 AS fill_price,
                lo.filled_usd::float8 AS filled_usd, lo.requested_usd::float8 AS requested_usd,
                lo.reaction_s::float8 AS reaction_s, lo.pnl::float8 AS pnl, lo.error,
+               lo.venue, lo.us_market_slug,
                COALESCE(m.event_title, m.title, t.market_title) AS market_title,
                COALESCE(mt.outcome, t.outcome) AS outcome
         FROM live_orders lo
@@ -398,8 +400,10 @@ async def live_status() -> dict:
     d = dict(agg)
     if d.get("live_slippage_p50") is not None:
         d["live_slippage_p50"] = round(float(d["live_slippage_p50"]), 3)
+    venue = active_venue()
     return {
-        "enabled": cfg.live_trading_enabled and bool(cfg.pm_private_key),
+        "enabled": venue is not None,
+        "venue": venue,
         "paused": paused,
         "caps": {"per_fill": cfg.live_max_per_fill_usd, "daily": cfg.live_max_daily_usd,
                  "total": cfg.live_max_total_usd,
@@ -627,6 +631,38 @@ async def admin_diag() -> dict:
             for pname in ("before", "endTs", "to", "max_ts"):
                 await probe(http, f"dataapi_timeparam_{pname}", f"{cfg.data_api_base}/trades",
                             {"user": sample_addr, "limit": 1, pname: now - 86400 * 30})
+
+    # Polymarket US venue (regulated exchange behind the mobile app): gateway
+    # reachability, credential validity, and slug-mapping spot check against a
+    # recent open market from our own metadata.
+    import asyncio as _asyncio
+
+    from .. import pmus
+
+    try:
+        out["pmus"] = await _asyncio.wait_for(_asyncio.to_thread(pmus.probe), timeout=15)
+        sample = await pool.fetchrow(
+            """
+            SELECT m.slug, m.event_slug, m.title, m.event_title, mt.outcome
+            FROM markets m JOIN market_tokens mt ON mt.condition_id = m.condition_id
+            WHERE NOT m.closed AND m.slug IS NOT NULL AND m.sport <> 'unclassified'
+            ORDER BY m.updated_at DESC LIMIT 1
+            """
+        )
+        if sample and out["pmus"].get("gateway_ok"):
+            mapping = await _asyncio.wait_for(
+                _asyncio.to_thread(
+                    pmus.resolve_market, sample["slug"], sample["event_slug"],
+                    sample["title"], sample["event_title"], sample["outcome"],
+                ),
+                timeout=15,
+            )
+            out["pmus"]["mapping_check"] = {
+                "global": {"slug": sample["slug"], "outcome": sample["outcome"]},
+                "mapped": mapping,
+            }
+    except Exception as exc:  # noqa: BLE001
+        out["pmus"] = {"status": "error", "body": str(exc)[:220]}
     return out
 
 

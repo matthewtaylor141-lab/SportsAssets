@@ -1,4 +1,12 @@
-"""LIVE trading beta — real Polymarket CLOB orders (REAL MONEY).
+"""LIVE trading beta — real-money orders (REAL MONEY).
+
+Two venues, picked by which credentials are configured:
+  * Polymarket US (PMUS_KEY_ID/PMUS_SECRET_KEY) — the regulated exchange
+    behind the US mobile app. Separate order books from the global CLOB the
+    source whale trades on, so each copy is mapped to a verified US market
+    first (see pmus.resolve_market); unmappable trades are recorded, not
+    guessed. This is the supported path for US accounts.
+  * Global CLOB (PM_PRIVATE_KEY) — non-US accounts only.
 
 Trigger: identical to the paper AI TRADER (fresh source-whale BUY), so live
 fills and paper fills are directly comparable per trade.
@@ -9,6 +17,7 @@ Safety model (every layer must pass, in order):
   3. Buy-only, source-whale-only, fresh detections only
   4. Price protection: FOK LIMIT at his_price + max_slippage — fills at our
      price or not at all; no market orders, no resting orders, no chasing
+     (on the US venue the order is additionally preview-verified first)
   5. Triple caps: per-fill / daily / total bankroll (SQL-enforced)
 Every order and its raw API response is stored in live_orders (audit trail).
 Settlement runs through the platform's resolution pipeline.
@@ -34,8 +43,18 @@ PAUSE_KEY = "live_trading_paused"
 def plan_order(
     his_price: float, his_notional: float, ratio: float,
     max_per_fill: float, max_slippage_cents: float,
+    whole_units: bool = False,
 ) -> tuple[float, float, float]:
-    """Pure sizing/pricing: (limit_price, requested_usd, requested_shares)."""
+    """Pure sizing/pricing: (limit_price, requested_usd, requested_shares).
+
+    whole_units=True (Polymarket US): whole-cent limit price and integer
+    contract count, rounding down so the cost never exceeds the budget."""
+    if whole_units:
+        limit = round(min(his_price + max_slippage_cents / 100.0, 0.99), 2)
+        usd_budget = min(ratio * his_notional, max_per_fill)
+        shares = float(int(usd_budget / limit)) if limit > 0 else 0.0
+        usd = round(shares * limit, 2)
+        return limit, usd, shares
     limit = round(min(his_price + max_slippage_cents / 100.0, 0.99), 3)
     usd = round(min(ratio * his_notional, max_per_fill), 2)
     shares = round(usd / limit, 2) if limit > 0 else 0.0
@@ -112,11 +131,46 @@ def _submit_fok(token_id: str, price: float, shares: float) -> dict:
             "raw": resp if isinstance(resp, dict) else {"raw": str(resp)}}
 
 
+def active_venue() -> str | None:
+    """Which live venue is armed: 'polymarket-us' wins when its keys are set."""
+    cfg = settings()
+    if not cfg.live_trading_enabled:
+        return None
+    if cfg.pmus_key_id and cfg.pmus_secret_key:
+        return "polymarket-us"
+    if cfg.pm_private_key:
+        return "polymarket-clob"
+    return None
+
+
+async def _market_context(pool, payload: dict) -> dict:
+    """Slug/title/outcome for US mapping — from the payload when enriched,
+    otherwise from the metadata tables."""
+    keys = ("market_slug", "event_slug", "market_title", "event_title", "outcome")
+    ctx = {k: payload.get(k) for k in keys}
+    if all(ctx.get(k) for k in ("market_slug", "outcome")):
+        return ctx
+    row = await pool.fetchrow(
+        """
+        SELECT m.slug AS market_slug, m.event_slug, m.title AS market_title,
+               m.event_title, mt.outcome
+        FROM market_tokens mt JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE mt.token_id = $1
+        """,
+        str(payload.get("asset")),
+    )
+    if row:
+        for k in keys:
+            ctx[k] = ctx.get(k) or row[k]
+    return ctx
+
+
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
     """Called on every fresh detection (after the paper trade). All guards
     re-checked here; failure of any guard is a silent no-op or logged skip."""
     cfg = settings()
-    if not cfg.live_trading_enabled or not cfg.pm_private_key:
+    venue = active_venue()
+    if venue is None:
         return
     username = (payload.get("whale_username") or "").lower()
     if payload.get("side") != "BUY" or username != cfg.ai_trader_source.lower():
@@ -139,6 +193,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         his_price, his_notional, cfg.live_copy_ratio,
         min(cfg.live_max_per_fill_usd, day_room, total_room),
         cfg.live_max_slippage_cents,
+        whole_units=(venue == "polymarket-us"),
     )
     if usd < 1 or shares <= 0:
         return
@@ -147,18 +202,43 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         """
         INSERT INTO live_orders (trade_id, whale_username, asset, condition_id, side,
                                  his_price, reaction_s, limit_price, requested_usd,
-                                 requested_shares, status)
-        VALUES ($1,$2,$3,$4,'BUY',$5,$6,$7,$8,$9,'submitting')
+                                 requested_shares, status, venue)
+        VALUES ($1,$2,$3,$4,'BUY',$5,$6,$7,$8,$9,'submitting',$10)
         ON CONFLICT (trade_id) DO NOTHING RETURNING id
         """,
         payload.get("id"), payload.get("whale_username"), str(payload["asset"]),
-        payload.get("condition_id"), his_price, reaction, limit, usd, shares,
+        payload.get("condition_id"), his_price, reaction, limit, usd, shares, venue,
     )
     if row_id is None:
         return  # duplicate detection — never double-order one source trade
 
     try:
-        result = await asyncio.to_thread(_submit_fok, str(payload["asset"]), limit, shares)
+        if venue == "polymarket-us":
+            from . import pmus
+
+            ctx = await _market_context(pool, payload)
+            mapping = await asyncio.to_thread(
+                pmus.resolve_market, ctx.get("market_slug"), ctx.get("event_slug"),
+                ctx.get("market_title"), ctx.get("event_title"), ctx.get("outcome"),
+            )
+            if mapping is None:
+                await pool.execute(
+                    "UPDATE live_orders SET status='rejected', error=$2 WHERE id=$1",
+                    row_id, "no verified Polymarket US market for this outcome",
+                )
+                log.info("LIVE (US) unmapped: %s / %s", ctx.get("market_title"),
+                         ctx.get("outcome"))
+                return
+            await pool.execute(
+                "UPDATE live_orders SET us_market_slug=$2 WHERE id=$1",
+                row_id, mapping["market_slug"],
+            )
+            result = await asyncio.to_thread(
+                pmus.submit_fok, mapping["market_slug"], limit, int(shares))
+        else:
+            result = await asyncio.to_thread(
+                _submit_fok, str(payload["asset"]), limit, shares)
+
         filled = float(result["filled_shares"]) if result["ok"] else 0.0
         fill_price = float(result["fill_price"]) if result["ok"] else None
         await pool.execute(
@@ -175,8 +255,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             json.dumps(result.get("raw"), default=str),
             None if result["ok"] else str(result.get("raw"))[:300],
         )
-        log.info("LIVE order %s: %s %.2f shares @ %.3f (his %.3f)",
-                 "FILLED" if result["ok"] and filled > 0 else "unfilled",
+        log.info("LIVE order [%s] %s: %s %.2f shares @ %.3f (his %.3f)",
+                 venue, "FILLED" if result["ok"] and filled > 0 else "unfilled",
                  payload.get("whale_username"), filled, fill_price or limit, his_price)
     except Exception as exc:  # noqa: BLE001 — record, never crash ingestion
         log.exception("live order failed for trade %s", payload.get("id"))

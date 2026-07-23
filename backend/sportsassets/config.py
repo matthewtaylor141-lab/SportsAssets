@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     # holding ONLY the beta bankroll. FOK limit orders only, buy-only,
     # triple-capped. Kill switch: POST /api/admin/live/pause.
     live_trading_enabled: bool = False
+    # Polymarket US (regulated app) — Ed25519 API keys from polymarket.us/developer.
+    # When set, live orders route to the US venue. This is the supported path
+    # for US-based accounts.
+    pmus_key_id: str = ""
+    pmus_secret_key: str = ""
+    # Global CLOB (non-US accounts only) — unused when PMUS keys are set.
     pm_private_key: str = ""       # dedicated wallet key (export from PM settings)
     pm_funder: str = ""            # your Polymarket profile (proxy) address
     pm_signature_type: int = 1     # 1/2 = web-account proxy, 0 = raw EOA
