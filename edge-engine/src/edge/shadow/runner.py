@@ -196,7 +196,12 @@ def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) ->
     for _, (adapter, _c) in venue_candidates.items():
         census = getattr(adapter, "last_census", None)
         if census:
-            funnel[f"{adapter.name}_league_census"] = census
+            funnel["census"] = {**funnel.get("census", {}),
+                                **{f"{k}": v for k, v in list(census.items())[:10]}}
+        errors = getattr(adapter, "book_errors", None)
+        if errors:
+            funnel.setdefault("book_errors", {})[adapter.name] = dict(errors)
+            adapter.book_errors = {}
     return funnel
 
 

@@ -30,6 +30,7 @@ class PolymarketAdapter(VenueAdapter):
     def __init__(self) -> None:
         self._sess = requests.Session()
         self.last_census: dict[str, int] = {}  # slug prefix -> open markets seen
+        self.book_errors: dict[str, int] = {}  # failure cause -> count (per cycle)
 
     # ── discovery ────────────────────────────────────────────────────
     def discover_markets(self, league_codes: set[str], pages: int = 30) -> list[VenueMarket]:
@@ -79,17 +80,34 @@ class PolymarketAdapter(VenueAdapter):
         return out
 
     # ── books ────────────────────────────────────────────────────────
+    def _book_err(self, cause: str) -> None:
+        self.book_errors[cause] = self.book_errors.get(cause, 0) + 1
+
     def get_book(self, market_id: str, token_id: str) -> MarketBook | None:
-        resp = self._sess.get(f"{CLOB}/book", params={"token_id": token_id}, timeout=10)
-        if resp.status_code != 200:
+        try:
+            resp = self._sess.get(f"{CLOB}/book", params={"token_id": token_id}, timeout=10)
+        except requests.RequestException as exc:
+            self._book_err(f"exc_{type(exc).__name__}")
             return None
-        d = resp.json()
+        if resp.status_code != 200:
+            self._book_err(f"http_{resp.status_code}")
+            log.info("clob book %s for token %s: %s", resp.status_code, token_id[:16],
+                     resp.text[:120])
+            return None
+        try:
+            d = resp.json()
+        except ValueError:
+            self._book_err("bad_json")
+            return None
         parse = lambda side: sorted(  # noqa: E731
             (BookLevel(float(level["price"]), float(level["size"])) for level in d.get(side) or []),
             key=lambda level: level.price,
         )
         asks = parse("asks")
         bids = sorted(parse("bids"), key=lambda level: -level.price)
+        if not asks:
+            self._book_err("empty_asks")
+            log.info("clob empty asks for token %s: keys=%s", token_id[:16], list(d)[:6])
         return MarketBook(venue=self.name, market_id=market_id, outcome_id=token_id,
                           bids=bids, asks=asks, ts=time.time())
 

@@ -46,6 +46,10 @@ class KalshiAdapter(VenueAdapter):
 
     def __init__(self) -> None:
         self._sess = requests.Session()
+        self.book_errors: dict[str, int] = {}
+
+    def _book_err(self, cause: str) -> None:
+        self.book_errors[cause] = self.book_errors.get(cause, 0) + 1
 
     def discover_markets(self, league_codes: set[str]) -> list[VenueMarket]:
         out: list[VenueMarket] = []
@@ -91,11 +95,22 @@ class KalshiAdapter(VenueAdapter):
     def get_book(self, market_id: str, market_ticker: str) -> MarketBook | None:
         try:
             resp = self._sess.get(f"{BASE}/markets/{market_ticker}/orderbook", timeout=10)
-            if resp.status_code != 200:
-                return None
-            ob = (resp.json() or {}).get("orderbook") or {}
-        except (requests.RequestException, ValueError):
+        except requests.RequestException as exc:
+            self._book_err(f"exc_{type(exc).__name__}")
             return None
+        if resp.status_code != 200:
+            self._book_err(f"http_{resp.status_code}")
+            log.info("kalshi book %s for %s: %s", resp.status_code, market_ticker,
+                     resp.text[:120])
+            return None
+        try:
+            ob = (resp.json() or {}).get("orderbook") or {}
+        except ValueError:
+            self._book_err("bad_json")
+            return None
+        if not ob.get("no"):
+            self._book_err("empty_no_side")
+            log.info("kalshi empty book for %s: %s", market_ticker, str(ob)[:160])
         yes_bids = sorted(
             (BookLevel(p / 100.0, float(q)) for p, q in (ob.get("yes") or [])),
             key=lambda level: -level.price,

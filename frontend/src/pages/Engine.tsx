@@ -54,6 +54,8 @@ interface EngineStatus {
     logged?: number
     rejects?: Record<string, number>
     candidates?: Record<string, number>
+    book_errors?: Record<string, Record<string, number>>
+    census?: Record<string, number>
     error?: string
   }
 }
@@ -121,6 +123,19 @@ export function Engine() {
               <span style={{ color: 'var(--muted)' }}>
                 {' '}· rejected: {Object.entries(status.detail.rejects)
                   .map(([k, n]) => `${k} ×${n}`).join(', ')}
+              </span>
+            )}
+            {status.detail?.book_errors && (
+              <span style={{ color: 'var(--warning)' }}>
+                {' '}· book errors: {Object.entries(status.detail.book_errors)
+                  .map(([v, errs]) => `${v}(${Object.entries(errs)
+                    .map(([k, n]) => `${k} ×${n}`).join(', ')})`).join(' ')}
+              </span>
+            )}
+            {status.detail?.census && (
+              <span style={{ color: 'var(--muted)' }}>
+                {' '}· venue leagues: {Object.entries(status.detail.census)
+                  .slice(0, 8).map(([k, n]) => `${k} ${n}`).join(', ')}
               </span>
             )}
           </span>
