@@ -143,6 +143,40 @@ def canonical_outcome(market_title: str, outcome_name: str) -> str:
     return outcome_name.strip()
 
 
+# Venue slugs encode the handicap when the outcome field does not, e.g.
+# "asc-lmx-san-atl-2026-07-25-neg-2pt5" (-2.5), "...-f5-pos-1pt5" (+1.5).
+# Measured from live Polymarket US slugs, 2026-07-24.
+_SLUG_LINE = re.compile(r"-(neg|pos)-(\d+)pt(\d+)(?:-|$)", re.IGNORECASE)
+
+
+def slug_point(slug: str) -> float | None:
+    """Signed handicap parsed from a venue market slug, or None."""
+    m = _SLUG_LINE.search(slug or "")
+    if not m:
+        return None
+    value = float(f"{m.group(2)}.{m.group(3)}")
+    return -value if m.group(1).lower() == "neg" else value
+
+
+def apply_slug_line(outcome_key: str, slug: str) -> str:
+    """Attach the slug's handicap to an outcome that doesn't carry one.
+
+    Without this a spread market whose outcome field is just the team name
+    gets priced against the MONEYLINE fair value — comparing 'wins by 3+'
+    against 'wins', which manufactures enormous phantom edges. With it, the
+    outcome is line-explicit and only pairs with the sharp book's quote at
+    the same point (or matches nothing, which is the correct outcome)."""
+    point = slug_point(slug)
+    if point is None:
+        return outcome_key
+    parsed = parse_outcome_line(outcome_key)
+    if parsed.point is not None:
+        return outcome_key  # already line-explicit
+    if parsed.kind == "total" and parsed.side:
+        return f"{parsed.side.capitalize()} {abs(point):g}"
+    return f"{outcome_key.strip()} {point:+g}"
+
+
 def title_point(title: str) -> float | None:
     """Extract a line from a market title, e.g. 'Mets vs. Tigers: O/U 8.5'
     -> 8.5, 'Spread: Eagles (-7.5)' -> -7.5. None when absent."""

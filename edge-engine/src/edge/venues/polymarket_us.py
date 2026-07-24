@@ -109,7 +109,7 @@ class PolymarketUSAdapter(VenueAdapter):
         happens at match time (mapper league filter passes None here).
         Every skip reason is counted in last_census — the funnel shows WHY
         discovery found nothing instead of just '0 candidates'."""
-        from edge.fairvalue.lines import canonical_outcome
+        from edge.fairvalue.lines import apply_slug_line, canonical_outcome
 
         census: dict[str, Any] = {"events_seen": 0, "skipped_no_title": 0,
                                   "skipped_lt2_outcomes": 0, "markets_seen": 0,
@@ -160,8 +160,12 @@ class PolymarketUSAdapter(VenueAdapter):
                             continue
                         # Canonical key carries the line ("Over 8.5",
                         # "Eagles -7.5") so ML/spread/total outcomes of one
-                        # event never collide.
-                        key = canonical_outcome(m.get("title") or "", oc)
+                        # event never collide. The venue often exposes the
+                        # handicap ONLY in the slug (…-neg-2pt5), so apply
+                        # that too — otherwise a spread market gets priced
+                        # against the moneyline fair value.
+                        key = apply_slug_line(
+                            canonical_outcome(m.get("title") or "", oc), m["slug"])
                         outcomes[key] = m["slug"]
                     if not ev.get("title"):
                         census["skipped_no_title"] += 1

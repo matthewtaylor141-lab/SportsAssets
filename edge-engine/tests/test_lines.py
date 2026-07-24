@@ -182,3 +182,34 @@ def test_implausible_edge_never_trades():
     # Healthy edges still clear.
     v2 = strategy_filter(POLICY, "epl", 0.47, 0.51, category="moneyline")
     assert v2.ok
+
+
+# ── venue slugs carry the handicap (measured live 2026-07-24) ──────────
+
+def test_slug_point_parses_real_venue_slugs():
+    from edge.fairvalue.lines import slug_point
+
+    assert slug_point("asc-lmx-san-atl-2026-07-25-neg-2pt5") == -2.5
+    assert slug_point("asc-mlb-nyy-phi-2026-07-24-f5-pos-1pt5") == 1.5
+    assert slug_point("asc-lpa-rac-gim-2026-07-24-pos-2pt5") == 2.5
+    assert slug_point("nba-lal-bos-2026-07-24") is None
+
+
+def test_apply_slug_line_prevents_moneyline_mispricing():
+    from edge.fairvalue.lines import apply_slug_line
+
+    # THE BUG: outcome field is just the team, line only in the slug ->
+    # priced against the moneyline. Now it's line-explicit.
+    key = apply_slug_line("Club Santos Laguna", "asc-lmx-san-atl-2026-07-25-neg-2pt5")
+    assert key == "Club Santos Laguna -2.5"
+    p = parse_outcome_line(key)
+    assert p.kind == "spread" and p.point == -2.5
+    # A moneyline sharp quote can no longer match this market.
+    [pair] = pair_quotes({"Club Santos Laguna -2.5": 1.9,
+                          "Atlas FC +2.5": 1.9}, "spread")
+    assert outcome_matches(key, pair.a_parsed)
+    # Already-explicit outcomes and line-free slugs are untouched.
+    assert apply_slug_line("Eagles -7.5", "x-neg-2pt5") == "Eagles -7.5"
+    assert apply_slug_line("Red Sox", "mlb-bos-nyy-2026-07-24") == "Red Sox"
+    # Totals take the unsigned point.
+    assert apply_slug_line("Over", "tot-x-pos-8pt5") == "Over 8.5"
