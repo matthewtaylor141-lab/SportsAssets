@@ -103,14 +103,17 @@ def _record_to_platform(rec: dict) -> None:
         log.debug("platform mirror failed (non-fatal): %s", exc)
 
 
-# ── The decision loop (orders replaced by logging) ─────────────────────
+# ── The decision loop (mode-aware; orders only via the executor) ────────
 
 
-def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) -> int:
-    """One sweep across all venues: feed → map → de-vig → book → decide → log.
-    Returns fills logged. Both venues are judged against the SAME fair values
-    (dual-venue shadow is the spec's venue-choice experiment)."""
-    from edge.execution.engine import decide
+def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]) -> dict:
+    """One sweep across all venues: feed → map (0.95 gate) → de-vig → book →
+    strategy filter → risk approve → execute (paper-log or place, by mode).
+    Both venues are judged against the SAME fair values."""
+    from datetime import datetime, timezone
+
+    from edge.execution.engine import strategy_filter
+    from edge.execution.executor import build_decision_record, execute, market_key
     from edge.fairvalue.devig import fair_value
     from edge.venues.base import FillIntent
     from edge.venues.mapper import match_event
@@ -127,7 +130,6 @@ def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) ->
         except Exception as exc:  # noqa: BLE001
             log.warning("%s discovery failed: %s", adapter.name, exc)
 
-    # Fetch feed once; evaluate every venue against it.
     events = []
     for sport_key in sport_keys:
         try:
@@ -135,9 +137,15 @@ def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) ->
         except Exception as exc:  # noqa: BLE001 — one sport must not kill the sweep
             log.warning("feed fetch failed for %s: %s", sport_key, exc)
 
-    funnel = {"feed_events": len(events), "matched": 0, "books_checked": 0,
-              "logged": 0, "rejects": {}}
-    logged = 0
+    now = time.time()
+    day = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    funnel = {"mode": risk.mode, "feed_events": len(events), "matched": 0,
+              "tradeable": 0, "books_checked": 0, "logged": 0, "rejects": {}}
+    marks: dict[str, float] = {}   # market_key -> best bid (circuit-breaker marks)
+
+    def reject(bucket: str) -> None:
+        funnel["rejects"][bucket] = funnel["rejects"].get(bucket, 0) + 1
+
     for ev in events:
         if len(ev.h2h) < 2:
             continue
@@ -145,16 +153,22 @@ def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) ->
         try:
             fairs = dict(zip(names, fair_value([ev.h2h[n] for n in names])))
         except Exception as exc:  # noqa: BLE001 — one pathological odds set
-            # must never kill the whole cycle
             log.warning("fair value failed for %s vs %s (%s): %s",
                         ev.home, ev.away, ev.h2h, exc)
-            funnel["rejects"]["fair_error"] = funnel["rejects"].get("fair_error", 0) + 1
+            reject("fair_error")
             continue
         for adapter, candidates in venue_candidates.values():
             match = match_event(ev.home, ev.away, ev.league_code, candidates)
+            ledger.record_match_stat(day, adapter.name, ev.league_code or "?",
+                                     mapped=match is not None,
+                                     tradeable=bool(match and match.tradeable))
             if match is None:
                 continue
             funnel["matched"] += 1
+            if not match.tradeable:  # hard rule: <0.95 confidence = UNMAPPED
+                reject("unmapped_low_confidence")
+                continue
+            funnel["tradeable"] += 1
             for side_name, oc_name in (
                 (ev.home, match.home_outcome), (ev.away, match.away_outcome)
             ):
@@ -164,34 +178,80 @@ def run_cycle(adapters, feed_client, policy, exposure, sport_keys: list[str]) ->
                              or side_name.lower() in n.lower()), None)
                 if fair is None:
                     continue
+                if not ev.is_fresh(30, now=time.time()):  # hard rule: fresh quote only
+                    reject("stale_quote")
+                    continue
                 token = match.market.outcome_tokens[oc_name]
                 book = adapter.get_book(match.market.market_id, token)
                 if book is None or not book.asks:
-                    funnel["rejects"]["no_book"] = funnel["rejects"].get("no_book", 0) + 1
+                    reject("no_book")
                     continue
                 funnel["books_checked"] += 1
                 ask = book.asks[0]
-                decision = decide(policy, exposure, match.market.market_id,
-                                  ev.league_code, ask.price, fair,
-                                  venue_fee=adapter.taker_fee(ask.price))
-                if not decision.trade:
-                    bucket = decision.reason.split()[0]
-                    funnel["rejects"][bucket] = funnel["rejects"].get(bucket, 0) + 1
+                mkey = market_key(adapter.name, token)
+                if book.bids:
+                    marks[mkey] = book.bids[0].price
+                verdict = strategy_filter(policy, ev.league_code, ask.price, fair,
+                                          venue_fee=adapter.taker_fee(ask.price))
+                if not verdict.ok:
+                    reject(verdict.reason.split()[0])
                     continue
+                approved, why = risk.approve(adapter.name, mkey, ev.event_key(),
+                                             risk.caps.per_fill_default, now=now)
+                if approved <= 0:
+                    reject(why.split(":")[0].split()[0])
+                    continue
+                decision = build_decision_record(
+                    fair=fair, edge=verdict.edge, threshold=verdict.threshold,
+                    band=verdict.band, book=book,
+                    feed_snapshot={"h2h": ev.h2h, "home": ev.home, "away": ev.away,
+                                   "fetched_at": ev.fetched_at},
+                    approved_usd=approved, guard_reason=why,
+                )
+                result = execute(adapter=adapter, ledger=ledger, mode=risk.mode,
+                                 mkey=mkey, league=ev.league_code,
+                                 ask_price=ask.price, ask_size=ask.size,
+                                 size_usd=approved, edge=verdict.edge,
+                                 threshold=verdict.threshold, decision=decision,
+                                 ts=time.time())
+                funnel["logged"] += int(result["placed"])
+                if not result["placed"]:
+                    reject(result["status"].split(":")[0])
+                # Legacy shadow JSONL + platform mirror (kept: grader history).
                 intent = FillIntent(
                     market_id=match.market.market_id, outcome_id=token,
-                    limit_price=ask.price, size_usd=decision.size_usd,
+                    limit_price=ask.price, size_usd=approved,
                     fair_value=round(fair, 4), edge=round(fair - ask.price, 4),
-                    league=ev.league_code, band=decision.band,
+                    league=ev.league_code, band=verdict.band,
                 )
-                would_fill = ask.size * ask.price >= decision.size_usd
-                alignment = whale_alignment(match.market.market_id, oc_name) \
-                    if adapter.name == "polymarket" else None
-                log_shadow_fill(intent, book, {"h2h": ev.h2h, "home": ev.home, "away": ev.away},
-                                would_fill, whale_alignment=alignment)
-                exposure.add(match.market.market_id, decision.size_usd)
-                logged += 1
-                funnel["logged"] = logged
+                would_fill = ask.size * ask.price >= approved
+                log_shadow_fill(intent, book,
+                                {"h2h": ev.h2h, "home": ev.home, "away": ev.away},
+                                would_fill, whale_alignment=None)
+
+    # Cycle health: marks for the circuit breaker, watchdog inputs.
+    marked_delta = 0.0
+    for pos in ledger.open_positions():
+        bid = marks.get(pos["market_key"])
+        if bid is not None:
+            marked_delta += (bid - pos["avg_cost"]) * pos["shares"]
+    halted = risk.check_circuit_breaker(marked_delta_usd=marked_delta, now=time.time())
+
+    venue_errors = sum(sum((getattr(a, "book_errors", {}) or {}).values())
+                       for a, _ in venue_candidates.values())
+    feed_age = time.time() - max((ev.fetched_at for ev in events), default=0)
+    skew = getattr(feed_client, "server_clock_skew_s", lambda: None)()
+    n_matches = funnel["matched"] or 1
+    tripped, wd_reason = risk.watchdog(
+        feed_age_s=feed_age if events else 0.0,
+        clock_skew_s=skew, venue_errors=venue_errors,
+        tradeable_rate=(funnel["tradeable"] / n_matches) if funnel["matched"] else None,
+        now=time.time(),
+    )
+    funnel["marked_delta"] = round(marked_delta, 2)
+    funnel["halted"] = halted
+    if tripped:
+        funnel["watchdog"] = wd_reason
     funnel["candidates"] = {name: len(c) for name, (_, c) in venue_candidates.items()}
     for _, (adapter, _c) in venue_candidates.items():
         census = getattr(adapter, "last_census", None)
@@ -232,30 +292,109 @@ def whale_alignment(condition_id: str, outcome_name: str):
         return None
 
 
+def settle_cycle(adapters, ledger) -> int:
+    """Resolve open ledger positions from venue settlement endpoints — the
+    same accounting that graded $21.45M of reference history."""
+    settled = 0
+    by_venue: dict[str, list] = {}
+    for pos in ledger.open_positions():
+        venue, _, outcome_id = pos["market_key"].partition(":")
+        by_venue.setdefault(venue, []).append((pos["market_key"], outcome_id))
+    for adapter in adapters:
+        rows = by_venue.get(adapter.name) or []
+        if not rows or not hasattr(adapter, "fetch_results"):
+            continue
+        try:
+            results = adapter.fetch_results([oid for _, oid in rows])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("%s settlement fetch failed: %s", adapter.name, exc)
+            continue
+        for mkey, oid in rows:
+            if oid in results:
+                r = ledger.record_resolution(mkey, results[oid])
+                settled += int(r["applied"])
+    return settled
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    from edge.execution.engine import ExposureBook, Policy
-    from edge.fairvalue.feed import SPORT_KEY_LEAGUE, TheOddsAPIClient
+    from datetime import datetime, timezone
+
+    from edge.execution.engine import Policy
+    from edge.execution.executor import sync_kalshi_fills
+    from edge.execution.risk import RiskManager
+    from edge.fairvalue.feed import TheOddsAPIClient
+    from edge.ledger.service import Ledger
     from edge.venues.kalshi import KalshiAdapter
-    from edge.venues.polymarket import PolymarketAdapter
+    from edge.venues.polymarket_us import PolymarketUSAdapter
 
     SHADOW_LOG.parent.mkdir(parents=True, exist_ok=True)
     policy = Policy.load()
-    adapters = [PolymarketAdapter()]
+    ledger = Ledger(db_path=os.environ.get(
+        "EDGE_LEDGER_DB", str(_data_dir() / "edge_ledger.sqlite3")))
+    risk = RiskManager(ledger, policy.risk)
+
+    # LIVE_BETA refuses to start unless the go-live checklist exits clean.
+    if risk.mode != "PAPER":
+        from edge.cli import run_checklist
+
+        clean, items = run_checklist(ledger, policy, risk)
+        if not clean:
+            log.error("check-live NOT clean — refusing %s, running PAPER:\n%s",
+                      risk.mode, "\n".join(f"  ✗ {i}" for i in items))
+            risk.force_paper()
+            ledger.log_mode("PAPER", f"forced: checklist failed ({'; '.join(items)[:200]})")
+        else:
+            ledger.log_mode(risk.mode, "checklist clean")
+    else:
+        ledger.log_mode("PAPER", "startup")
+
+    adapters = []
     if os.environ.get("EDGE_KALSHI", "1") != "0":
         adapters.append(KalshiAdapter())
+    if os.environ.get("EDGE_PMUS", "1") != "0":
+        try:
+            adapters.append(PolymarketUSAdapter())
+        except Exception as exc:  # noqa: BLE001 — SDK missing, run kalshi-only
+            log.warning("polymarket-us adapter unavailable: %s", exc)
+    if os.environ.get("EDGE_GLOBAL_PM", "0") == "1":
+        # Optional: the global-CLOB reader, for calibration comparison only
+        # (the reference account's venue; we never trade it from the US).
+        from edge.venues.polymarket import PolymarketAdapter
+
+        adapters.append(PolymarketAdapter())
+
     feed = TheOddsAPIClient()
     env_keys = os.environ.get("EDGE_SPORT_KEYS", "")
     sport_keys = [k for k in env_keys.split(",") if k] if env_keys else feed.resolve_sport_keys()
     cycle_seconds = int(os.environ.get("EDGE_CYCLE_SECONDS", "120"))
-    log.info("shadow runner starting: venues=%s, %s sports, %ss cycle — NO ORDERS, logging only",
-             [a.name for a in adapters], len(sport_keys), cycle_seconds)
+    log.info("edge runner starting: mode=%s venues=%s, %s sports, %ss cycle",
+             risk.mode, [a.name for a in adapters], len(sport_keys), cycle_seconds)
+
+    last_report_day = ""
     while True:
-        exposure = ExposureBook()  # caps reset per cycle-day granularity v1
         try:
-            funnel = run_cycle(adapters, feed, policy, exposure, sport_keys)
+            funnel = run_cycle(adapters, feed, policy, risk, ledger, sport_keys)
+            funnel["settled"] = settle_cycle(adapters, ledger)
+            if risk.is_live:
+                for a in adapters:
+                    if a.name == "kalshi" and a.has_credentials():
+                        funnel["kalshi_fill_sync"] = sync_kalshi_fills(a, ledger, risk.mode)
             log.info("cycle complete: %s", funnel)
             _post_status("ok", funnel)
+
+            # Nightly report on day rollover (build step 7).
+            today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+            if today != last_report_day:
+                if last_report_day:
+                    from edge.shadow.report import nightly_report
+
+                    rep = nightly_report(ledger, policy)
+                    log.info("nightly report: %s", {k: rep[k] for k in
+                                                    ("summary", "alerts") if k in rep})
+                    _post_status("report", {"report": {"date": rep.get("date"),
+                                                       "alerts": rep.get("alerts", [])}})
+                last_report_day = today
         except Exception as exc:  # noqa: BLE001
             log.exception("cycle failed; continuing")
             _post_status("error", {"error": str(exc)[:200]})

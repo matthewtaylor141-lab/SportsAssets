@@ -82,6 +82,36 @@ class Decision:
 
 
 @dataclass
+class StrategyVerdict:
+    """Pure strategy filter output (sizing/caps live in execution.risk)."""
+
+    ok: bool
+    reason: str
+    band: str
+    threshold: float | None
+    edge: float
+
+
+def strategy_filter(
+    policy: Policy, league_code: str | None, price: float, fair: float,
+    venue_fee: float = 0.0,
+) -> StrategyVerdict:
+    """The entry rule alone: fair - price - fee >= threshold(band), plus band
+    dead zones and league allow/block. Sizing is RiskManager.approve()'s job."""
+    band = policy.band_of(price)
+    edge = fair - price - venue_fee
+    if policy.league_allowed(league_code) == "block":
+        return StrategyVerdict(False, f"league {league_code} blocked", band, None, edge)
+    threshold = policy.band_threshold(price)
+    if threshold is None:
+        return StrategyVerdict(False, f"band {band} dead/unproven", band, None, edge)
+    if edge < threshold:
+        return StrategyVerdict(
+            False, f"edge {edge:.3f} < threshold {threshold:.3f}", band, threshold, edge)
+    return StrategyVerdict(True, "ok", band, threshold, edge)
+
+
+@dataclass
 class ExposureBook:
     """Running per-market/day exposure for cap enforcement."""
 
