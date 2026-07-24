@@ -31,6 +31,20 @@ profiles:
     halt_hours: 72                    # then auto-resume; NO manual override
     venue_bankroll_split: 1.0         # single-venue beta (Kalshi disabled)
 
+  # PAPER sampling profile: paper dollars are free — evidence velocity is
+  # the point. Wide day budget so every qualifying opportunity is graded;
+  # per-fill kept at the measured sweet spot; one-per-event still applies
+  # PER VENUE (independent samples + venue comparison).
+  paper:
+    per_fill_usd_default: 10
+    per_fill_usd_max: 10
+    per_market_exposure_usd: 50
+    per_day_deployment_usd: 5000
+    one_position_per_event: true
+    daily_loss_halt_usd: 1000000   # breaker is a live-money protection
+    halt_hours: 72
+    venue_bankroll_split: 1.0
+
 # Watchdog: any breach halts live trading until inputs are healthy again.
 watchdog:
   max_feed_age_s: 60

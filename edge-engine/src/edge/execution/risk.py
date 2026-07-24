@@ -50,14 +50,16 @@ class Caps:
 
 
 def caps_for_mode(risk_cfg: dict, mode: str) -> Caps:
-    """LIVE uses the measured top-level caps; PAPER and LIVE_BETA use the
-    beta profile so paper evidence reflects exactly what live would do."""
+    """LIVE uses the measured top-level caps; LIVE_BETA the beta profile;
+    PAPER the sampling profile (falls back to beta) — paper dollars are
+    free, so evidence velocity is capped only by opportunity supply."""
+    profiles = risk_cfg.get("profiles") or {}
     if mode == "LIVE":
         src = risk_cfg
-        beta = {}
+    elif mode == "PAPER":
+        src = {**risk_cfg, **(profiles.get("paper") or profiles.get("live_beta") or {})}
     else:
-        beta = (risk_cfg.get("profiles") or {}).get("live_beta") or {}
-        src = {**risk_cfg, **beta}
+        src = {**risk_cfg, **(profiles.get("live_beta") or {})}
     return Caps(
         per_fill_default=float(src.get("per_fill_usd_default", 10)),
         per_fill_max=float(src.get("per_fill_usd_max", 25)),
@@ -163,12 +165,13 @@ class RiskManager:
 
     # ── exposure accounting (from the ledger, not in-memory) ────────────
 
-    def day_deployed(self, venue: str | None = None, now: float | None = None) -> float:
+    def day_deployed(self, venue: str | None = None, now: float | None = None,
+                     mode: str | None = None) -> float:
         now = now or time.time()
         with self.ledger._conn() as conn:  # noqa: SLF001 — same package
             q = ("SELECT COALESCE(sum(qty * price), 0) FROM fills "
                  "WHERE side='BUY' AND ts >= ? AND mode = ?")
-            args: list = [now - 86_400, self.mode]
+            args: list = [now - 86_400, mode or self.mode]
             if venue:
                 q += " AND venue = ?"
                 args.append(venue)
@@ -184,26 +187,37 @@ class RiskManager:
     # ── the single order gate ───────────────────────────────────────────
 
     def approve(self, venue: str, market_key: str, event_key: str,
-                requested_usd: float, now: float | None = None) -> tuple[float, str]:
+                requested_usd: float, now: float | None = None,
+                mode: str | None = None) -> tuple[float, str]:
         """Returns (approved_usd, reason). approved_usd == 0 means no order.
         Every cap is applied here; property tests assert no sequence of calls
         can exceed any cap. NOTE: approval CLAIMS the event — call only when
-        an order will actually be logged/placed on approval."""
+        an order will actually be logged/placed on approval.
+
+        mode: effective mode for THIS order (a live engine still paper-logs
+        venues outside EDGE_LIVE_VENUES; their caps and day-budget are the
+        PAPER profile's, accounted separately by fill mode)."""
         now = now or time.time()
+        mode = mode or self.mode
+        caps = self.caps if mode == self.mode else caps_for_mode(self.risk_cfg, mode)
         ok, why = self.guard(now)
         if not ok:
             return 0.0, why
 
-        size = min(requested_usd, self.caps.per_fill_default, self.caps.per_fill_max)
-        market_room = self.caps.per_market - self.market_open_cost(market_key)
-        venue_day_cap = self.caps.per_day * self.caps.venue_bankroll_split
-        day_room = min(self.caps.per_day - self.day_deployed(now=now),
-                       venue_day_cap - self.day_deployed(venue=venue, now=now))
+        size = min(requested_usd, caps.per_fill_default, caps.per_fill_max)
+        market_room = caps.per_market - self.market_open_cost(market_key)
+        venue_day_cap = caps.per_day * caps.venue_bankroll_split
+        day_room = min(caps.per_day - self.day_deployed(now=now, mode=mode),
+                       venue_day_cap - self.day_deployed(venue=venue, now=now, mode=mode))
         size = round(min(size, market_room, day_room), 2)
         if size < 1.0:
             return 0.0, "caps: no room (per-market/day/venue)"
 
-        if self.caps.one_per_event:
-            if not self.ledger.claim_event(event_key, market_key, venue, ts=now):
+        if caps.one_per_event:
+            # PAPER claims per (venue, event): both venues grade the same
+            # game independently (the spec's venue-choice experiment).
+            # LIVE claims the event globally: one real position, ever.
+            key = event_key if mode != "PAPER" else f"paper:{venue}:{event_key}"
+            if not self.ledger.claim_event(key, market_key, venue, ts=now):
                 return 0.0, "one-per-event: already positioned"
         return size, "ok"

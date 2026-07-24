@@ -147,8 +147,16 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
 
     now = time.time()
     day = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    # Venues eligible for REAL orders when the engine is live; everything
+    # else paper-logs even in LIVE_* modes (e.g. Kalshi evidence-gathering
+    # with no Kalshi account).
+    live_venues = {v.strip() for v in
+                   os.environ.get("EDGE_LIVE_VENUES", "polymarket-us").split(",")
+                   if v.strip()}
     funnel = {"mode": risk.mode, "feed_events": len(events), "matched": 0,
               "tradeable": 0, "books_checked": 0, "logged": 0, "rejects": {}}
+    if risk.is_live:
+        funnel["live_venues"] = sorted(live_venues)
     marks: dict[str, float] = {}   # market_key -> best bid (circuit-breaker marks)
 
     def reject(bucket: str) -> None:
@@ -223,14 +231,22 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     mkey = market_key(adapter.name, token)
                     if book.bids:
                         marks[mkey] = book.bids[0].price
+                    effective_mode = risk.mode if (
+                        risk.is_live and adapter.name in live_venues) else "PAPER"
                     verdict = strategy_filter(policy, ev.league_code, ask.price, fair,
                                               venue_fee=adapter.taker_fee(ask.price),
                                               category=category)
                     if not verdict.ok:
                         reject(verdict.reason.split()[0])
                         continue
+                    if effective_mode != "PAPER" and \
+                            policy.league_allowed(ev.league_code) != "allow":
+                        # Hard rule: real money only on MEASURED leagues;
+                        # shadow-only leagues keep paper-logging.
+                        effective_mode = "PAPER"
                     approved, why = risk.approve(adapter.name, mkey, ev.event_key(),
-                                                 risk.caps.per_fill_default, now=now)
+                                                 requested_usd=1e9, now=now,
+                                                 mode=effective_mode)
                     if approved <= 0:
                         reject(why.split(":")[0].split()[0])
                         continue
@@ -243,7 +259,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     )
                     decision["category"] = category
                     decision["outcome"] = oc_name
-                    result = execute(adapter=adapter, ledger=ledger, mode=risk.mode,
+                    result = execute(adapter=adapter, ledger=ledger, mode=effective_mode,
                                      mkey=mkey, league=ev.league_code,
                                      ask_price=ask.price, ask_size=ask.size,
                                      size_usd=approved, edge=verdict.edge,

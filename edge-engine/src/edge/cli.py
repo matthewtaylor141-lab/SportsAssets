@@ -65,11 +65,14 @@ def run_checklist(ledger, policy, risk) -> tuple[bool, list[str]]:
         check("feed quota headroom", False, "feed unreachable")
         check("clocks synced", False, "feed unreachable")
 
-    # 2. Venue credentials valid and funded — only for ENABLED venues
-    # (EDGE_KALSHI=0 / EDGE_PMUS=0 disable a venue and skip its checks);
-    # at least one venue must be enabled with valid credentials.
+    # 2. Venue credentials valid and funded — only for venues that will carry
+    # REAL orders (EDGE_LIVE_VENUES, default polymarket-us). Enabled venues
+    # outside that set paper-log and need no credentials.
+    live_venues = {v.strip() for v in
+                   os.environ.get("EDGE_LIVE_VENUES", "polymarket-us").split(",")
+                   if v.strip()}
     venues_ok = 0
-    if os.environ.get("EDGE_KALSHI", "1") != "0":
+    if os.environ.get("EDGE_KALSHI", "1") != "0" and "kalshi" in live_venues:
         from edge.venues.kalshi import KalshiAdapter
 
         kalshi = KalshiAdapter()
@@ -83,7 +86,7 @@ def run_checklist(ledger, policy, risk) -> tuple[bool, list[str]]:
         else:
             check("kalshi keys valid", False,
                   "EDGE_KALSHI_KEY_ID/PRIVATE_KEY absent (or set EDGE_KALSHI=0)")
-    if os.environ.get("EDGE_PMUS", "1") != "0":
+    if os.environ.get("EDGE_PMUS", "1") != "0" and "polymarket-us" in live_venues:
         try:
             from edge.venues.polymarket_us import PolymarketUSAdapter
 

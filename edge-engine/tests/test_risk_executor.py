@@ -67,9 +67,10 @@ def test_property_no_sequence_exceeds_any_cap(rig):
         assert approved <= caps.per_fill_max + 1e-9
         assert approved <= requested + 1e-9
         if approved > 0:
-            # a cap-approved order implies the event was free — record the fill
-            assert event not in events_filled, "one-per-event violated"
-            events_filled.add(event)
+            # PAPER claims are per (venue, event): each venue samples a game
+            # once, never twice. (LIVE claims globally — separate test.)
+            assert (venue, event) not in events_filled, "one-per-event violated"
+            events_filled.add((venue, event))
             _paper_fill(ledger, venue, mkey, approved, ts=now)
             filled_by_market[mkey] = filled_by_market.get(mkey, 0) + approved
             filled_by_venue[venue] = filled_by_venue.get(venue, 0) + approved
@@ -95,13 +96,16 @@ def test_per_market_cap_counts_open_positions(rig):
     assert a3 == 0 and "caps" in why
 
 
-def test_approve_claims_event_exactly_once(rig):
+def test_approve_claims_event_exactly_once_per_venue_in_paper(rig):
     _, risk = rig
     now = time.time()
     a1, _ = risk.approve("kalshi", "kalshi:m1", "event-1", 10, now=now)
-    a2, why = risk.approve("polymarket-us", "polymarket-us:m2", "event-1", 10, now=now)
-    assert a1 > 0 and a2 == 0
-    assert "one-per-event" in why
+    # Same venue, same event: never twice.
+    a2, why = risk.approve("kalshi", "kalshi:m1b", "event-1", 10, now=now)
+    assert a1 > 0 and a2 == 0 and "one-per-event" in why
+    # Other venue samples the same game independently (PAPER experiment).
+    a3, _ = risk.approve("polymarket-us", "polymarket-us:m2", "event-1", 10, now=now)
+    assert a3 > 0
 
 
 # ── circuit breaker ────────────────────────────────────────────────────
@@ -257,3 +261,32 @@ def test_paper_and_beta_share_the_beta_profile_live_uses_measured():
     live = caps_for_mode(RISK_CFG, "LIVE")
     assert beta.per_fill_max == paper.per_fill_max == 25
     assert live.per_fill_max == 10000 and live.per_market == 25000
+
+
+# ── paper sampling decoupled from live dollars ─────────────────────────
+
+def test_paper_profile_decouples_sampling_caps():
+    from edge.execution.engine import Policy
+
+    risk_cfg = Policy.load().risk
+    paper = caps_for_mode(risk_cfg, "PAPER")
+    beta = caps_for_mode(risk_cfg, "LIVE_BETA")
+    assert paper.per_day == 5000 and paper.per_fill_max == 10
+    assert beta.per_day == 25 and beta.per_fill_max == 1  # micro live tier
+    assert paper.one_per_event and beta.one_per_event
+
+
+def test_paper_claims_per_venue_live_claims_global(rig):
+    ledger, risk = rig
+    now = time.time()
+    # PAPER: both venues sample the same event independently.
+    a1, _ = risk.approve("kalshi", "kalshi:m1", "ev-x", 10, now=now, mode="PAPER")
+    a2, _ = risk.approve("polymarket-us", "polymarket-us:m2", "ev-x", 10,
+                         now=now, mode="PAPER")
+    assert a1 > 0 and a2 > 0
+    # LIVE: the event is claimed globally, once, across venues.
+    a3, _ = risk.approve("polymarket-us", "polymarket-us:m2", "ev-x", 10,
+                         now=now, mode="LIVE_BETA")
+    a4, why = risk.approve("kalshi", "kalshi:m1", "ev-x", 10,
+                           now=now, mode="LIVE_BETA")
+    assert a3 > 0 and a4 == 0 and "one-per-event" in why
