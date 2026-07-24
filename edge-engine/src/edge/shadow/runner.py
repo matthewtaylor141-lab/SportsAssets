@@ -115,8 +115,9 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     from edge.execution.engine import strategy_filter
     from edge.execution.executor import build_decision_record, execute, market_key
     from edge.fairvalue.devig import fair_value
+    from edge.fairvalue.lines import outcome_matches, pair_quotes, parse_outcome_line
     from edge.venues.base import FillIntent
-    from edge.venues.mapper import match_event
+    from edge.venues.mapper import match_events_all, team_score
 
     league_codes = set()
     for group in (policy.leagues.get("allowlist") or {}).values():
@@ -152,82 +153,111 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         names = list(ev.h2h)
         try:
             fairs = dict(zip(names, fair_value([ev.h2h[n] for n in names])))
+            # Derivative sides: de-vig each two-sided line at its exact point.
+            deriv_sides: list[tuple] = []  # (ParsedLine, fair)
+            for kind, quotes in (("total", ev.totals), ("spread", ev.spreads)):
+                for pq in pair_quotes(quotes, kind):
+                    fa, fb = fair_value([pq.a_odds, pq.b_odds])
+                    deriv_sides.append((pq.a_parsed, fa))
+                    deriv_sides.append((pq.b_parsed, fb))
         except Exception as exc:  # noqa: BLE001 — one pathological odds set
             log.warning("fair value failed for %s vs %s (%s): %s",
                         ev.home, ev.away, ev.h2h, exc)
             reject("fair_error")
             continue
+
+        def fair_for(oc_name: str):
+            """(fair, category) for a canonical venue outcome, or None."""
+            p = parse_outcome_line(oc_name)
+            if p.kind in ("total", "spread"):
+                for side, f in deriv_sides:
+                    if side.kind == p.kind and outcome_matches(oc_name, side):
+                        return f, p.kind
+                return None
+            for team_name, f in fairs.items():
+                if team_score(team_name, oc_name) >= 0.95:
+                    return f, "moneyline"
+            return None
+
         for adapter, candidates in venue_candidates.values():
-            match = match_event(ev.home, ev.away, ev.league_code, candidates)
+            matches = match_events_all(ev.home, ev.away, ev.league_code, candidates)
+            best = matches[0] if matches else None
             ledger.record_match_stat(day, adapter.name, ev.league_code or "?",
-                                     mapped=match is not None,
-                                     tradeable=bool(match and match.tradeable))
-            if match is None:
+                                     mapped=best is not None,
+                                     tradeable=bool(best and best.tradeable))
+            if best is None:
                 continue
             funnel["matched"] += 1
-            if not match.tradeable:  # hard rule: <0.95 confidence = UNMAPPED
+            if not best.tradeable:  # hard rule: <0.95 confidence = UNMAPPED
                 reject("unmapped_low_confidence")
                 continue
             funnel["tradeable"] += 1
-            for side_name, oc_name in (
-                (ev.home, match.home_outcome), (ev.away, match.away_outcome)
-            ):
-                if oc_name is None:
+            seen_tokens: set[str] = set()
+            for match in matches:
+                if not match.tradeable:
                     continue
-                fair = next((f for n, f in fairs.items() if n.lower() in side_name.lower()
-                             or side_name.lower() in n.lower()), None)
-                if fair is None:
-                    continue
-                if not ev.is_fresh(30, now=time.time()):  # hard rule: fresh quote only
-                    reject("stale_quote")
-                    continue
-                token = match.market.outcome_tokens[oc_name]
-                book = adapter.get_book(match.market.market_id, token)
-                if book is None or not book.asks:
-                    reject("no_book")
-                    continue
-                funnel["books_checked"] += 1
-                ask = book.asks[0]
-                mkey = market_key(adapter.name, token)
-                if book.bids:
-                    marks[mkey] = book.bids[0].price
-                verdict = strategy_filter(policy, ev.league_code, ask.price, fair,
-                                          venue_fee=adapter.taker_fee(ask.price))
-                if not verdict.ok:
-                    reject(verdict.reason.split()[0])
-                    continue
-                approved, why = risk.approve(adapter.name, mkey, ev.event_key(),
-                                             risk.caps.per_fill_default, now=now)
-                if approved <= 0:
-                    reject(why.split(":")[0].split()[0])
-                    continue
-                decision = build_decision_record(
-                    fair=fair, edge=verdict.edge, threshold=verdict.threshold,
-                    band=verdict.band, book=book,
-                    feed_snapshot={"h2h": ev.h2h, "home": ev.home, "away": ev.away,
-                                   "fetched_at": ev.fetched_at},
-                    approved_usd=approved, guard_reason=why,
-                )
-                result = execute(adapter=adapter, ledger=ledger, mode=risk.mode,
-                                 mkey=mkey, league=ev.league_code,
-                                 ask_price=ask.price, ask_size=ask.size,
-                                 size_usd=approved, edge=verdict.edge,
-                                 threshold=verdict.threshold, decision=decision,
-                                 ts=time.time())
-                funnel["logged"] += int(result["placed"])
-                if not result["placed"]:
-                    reject(result["status"].split(":")[0])
-                # Legacy shadow JSONL + platform mirror (kept: grader history).
-                intent = FillIntent(
-                    market_id=match.market.market_id, outcome_id=token,
-                    limit_price=ask.price, size_usd=approved,
-                    fair_value=round(fair, 4), edge=round(fair - ask.price, 4),
-                    league=ev.league_code, band=verdict.band,
-                )
-                would_fill = ask.size * ask.price >= approved
-                log_shadow_fill(intent, book,
-                                {"h2h": ev.h2h, "home": ev.home, "away": ev.away},
-                                would_fill, whale_alignment=None)
+                for oc_name, token in match.market.outcome_tokens.items():
+                    if token in seen_tokens:
+                        continue
+                    seen_tokens.add(token)
+                    fv = fair_for(oc_name)
+                    if fv is None:
+                        continue
+                    fair, category = fv
+                    if not ev.is_fresh(30, now=time.time()):  # hard rule: fresh only
+                        reject("stale_quote")
+                        continue
+                    book = adapter.get_book(match.market.market_id, token)
+                    if book is None or not book.asks:
+                        reject("no_book")
+                        continue
+                    funnel["books_checked"] += 1
+                    ask = book.asks[0]
+                    mkey = market_key(adapter.name, token)
+                    if book.bids:
+                        marks[mkey] = book.bids[0].price
+                    verdict = strategy_filter(policy, ev.league_code, ask.price, fair,
+                                              venue_fee=adapter.taker_fee(ask.price),
+                                              category=category)
+                    if not verdict.ok:
+                        reject(verdict.reason.split()[0])
+                        continue
+                    approved, why = risk.approve(adapter.name, mkey, ev.event_key(),
+                                                 risk.caps.per_fill_default, now=now)
+                    if approved <= 0:
+                        reject(why.split(":")[0].split()[0])
+                        continue
+                    decision = build_decision_record(
+                        fair=fair, edge=verdict.edge, threshold=verdict.threshold,
+                        band=verdict.band, book=book,
+                        feed_snapshot={"h2h": ev.h2h, "home": ev.home,
+                                       "away": ev.away, "fetched_at": ev.fetched_at},
+                        approved_usd=approved, guard_reason=why,
+                    )
+                    decision["category"] = category
+                    decision["outcome"] = oc_name
+                    result = execute(adapter=adapter, ledger=ledger, mode=risk.mode,
+                                     mkey=mkey, league=ev.league_code,
+                                     ask_price=ask.price, ask_size=ask.size,
+                                     size_usd=approved, edge=verdict.edge,
+                                     threshold=verdict.threshold, decision=decision,
+                                     ts=time.time())
+                    funnel["logged"] += int(result["placed"])
+                    funnel.setdefault("by_category", {}).setdefault(category, 0)
+                    funnel["by_category"][category] += int(result["placed"])
+                    if not result["placed"]:
+                        reject(result["status"].split(":")[0])
+                    # Legacy shadow JSONL + platform mirror (grader history).
+                    intent = FillIntent(
+                        market_id=match.market.market_id, outcome_id=token,
+                        limit_price=ask.price, size_usd=approved,
+                        fair_value=round(fair, 4), edge=round(fair - ask.price, 4),
+                        league=ev.league_code, band=verdict.band,
+                    )
+                    would_fill = ask.size * ask.price >= approved
+                    log_shadow_fill(intent, book,
+                                    {"h2h": ev.h2h, "home": ev.home, "away": ev.away},
+                                    would_fill, whale_alignment=None)
 
     # Cycle health: marks for the circuit breaker, watchdog inputs.
     marked_delta = 0.0

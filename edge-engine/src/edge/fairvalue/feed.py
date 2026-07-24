@@ -30,6 +30,8 @@ SPORT_KEY_LEAGUE = {
     "soccer_mexico_ligamx": "mex", "soccer_japan_j_league": "j1100",
     "basketball_nba": "nba", "basketball_wnba": "wnba", "basketball_ncaab": "cbb",
     "tennis_wta": "wta",
+    # US majors for the derivative (spread/total) edge — kch123 evidence.
+    "icehockey_nhl": "nhl", "americanfootball_nfl": "nfl",
 }
 
 

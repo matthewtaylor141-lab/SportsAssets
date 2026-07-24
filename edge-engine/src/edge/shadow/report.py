@@ -68,11 +68,14 @@ def _first_fill_meta(ledger) -> dict[str, dict]:
     meta: dict[str, dict] = {}
     for r in rows:
         m = meta.setdefault(r["market_key"], {
-            "venue": r["venue"], "league": r["league"], "staked": 0.0, "band": None})
+            "venue": r["venue"], "league": r["league"], "staked": 0.0,
+            "band": None, "category": None})
         m["staked"] += float(r["staked"])
         if m["band"] is None and r["decision"]:
             try:
-                m["band"] = (json.loads(r["decision"]) or {}).get("band")
+                d = json.loads(r["decision"]) or {}
+                m["band"] = d.get("band")
+                m["category"] = d.get("category", "moneyline")
             except ValueError:
                 pass
     return meta
@@ -98,7 +101,7 @@ def nightly_report(ledger, policy) -> dict:
     ref_league = _load_calib("calib_league.csv", "prefix", "edge_cents")
     meta = _first_fill_meta(ledger)
 
-    by = {"band": {}, "league": {}, "venue": {}}
+    by = {"band": {}, "league": {}, "venue": {}, "category": {}}
     with ledger._conn() as conn:  # noqa: SLF001
         pos_rows = conn.execute(
             "SELECT market_key, realized_pnl, fees_paid, resolved FROM positions"
@@ -108,8 +111,14 @@ def nightly_report(ledger, policy) -> dict:
         if m is None or not p["resolved"]:
             continue
         net = float(p["realized_pnl"]) - float(p["fees_paid"])
-        for dim, key in (("band", m["band"] or "?"), ("league", m["league"] or "?"),
-                         ("venue", m["venue"])):
+        cat = m.get("category") or "moneyline"
+        # Band reference curves are MONEYLINE-only (swisstony); derivative
+        # bands are labeled with their category so they never get compared
+        # against a moneyline reference.
+        band_key = (m["band"] or "?") if cat == "moneyline" \
+            else f"{cat} {m['band'] or '?'}"
+        for dim, key in (("band", band_key), ("league", m["league"] or "?"),
+                         ("venue", m["venue"]), ("category", cat)):
             row = by[dim].setdefault(key, {"staked": 0.0, "net_pnl": 0.0, "markets": 0})
             row["staked"] += m["staked"]
             row["net_pnl"] += net
@@ -138,6 +147,7 @@ def nightly_report(ledger, policy) -> dict:
         "date": date, "generated_ts": time.time(),
         "summary": ledger.summary(),
         "by_band": by["band"], "by_league": by["league"], "by_venue": by["venue"],
+        "by_category": by["category"],
         "match_rate_24h": ledger.match_rate_report(days=1),
         "alerts": alerts,
         "attribution_note": "market PnL attributed to first-fill band; exact "

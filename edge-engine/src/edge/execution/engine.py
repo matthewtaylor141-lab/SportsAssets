@@ -48,18 +48,33 @@ class Policy:
         lo = int(price * 20) * 5 / 100  # 5-cent bands
         return f"{lo:.2f}-{lo + 0.05:.2f}"
 
-    def band_threshold(self, price: float) -> float | None:
-        """Min edge for this entry price; None = band not tradeable."""
-        band = self.band_of(price)
-        for dz in self.bands.get("dead_zones", []):
+    def band_threshold(self, price: float, category: str = "moneyline") -> float | None:
+        """Min edge for this entry price in this trade category; None = not
+        tradeable. Moneyline uses the measured swisstony bands; spread/total
+        use their own windows (config `categories`) — the 40-45c dead zone
+        is a moneyline phenomenon and does NOT apply to derivatives."""
+        if category != "moneyline":
+            cfg = (self.bands.get("categories") or {}).get(category)
+            if cfg is None:
+                return None  # unknown category — never tradeable
+            src = cfg
+        else:
+            src = self.bands
+        for dz in src.get("dead_zones", []) or []:
             lo, hi = (float(x) for x in dz.split("-"))
             if lo <= price < hi:
                 return None
-        for key, cfg in self.bands.get("tradeable", {}).items():
+        for key, c in (src.get("tradeable") or {}).items():
             lo, hi = (float(x) for x in key.split("-"))
             if lo <= price < hi:
-                return float(cfg["min_edge_threshold"])
+                return float(c["min_edge_threshold"])
         return None  # unlisted band — not proven, don't trade
+
+    def category_blocked(self, league_code: str | None, category: str) -> bool:
+        """League x category blocks (e.g. NFL moneyline: specialist-measured
+        negative even while NFL spreads are strongly positive)."""
+        blocks = self.leagues.get("category_blocks") or {}
+        return category in (blocks.get(league_code or "") or [])
 
     def league_allowed(self, code: str | None) -> str:
         """'allow' | 'block' | 'shadow_only' (unknown)."""
@@ -94,17 +109,22 @@ class StrategyVerdict:
 
 def strategy_filter(
     policy: Policy, league_code: str | None, price: float, fair: float,
-    venue_fee: float = 0.0,
+    venue_fee: float = 0.0, category: str = "moneyline",
 ) -> StrategyVerdict:
-    """The entry rule alone: fair - price - fee >= threshold(band), plus band
-    dead zones and league allow/block. Sizing is RiskManager.approve()'s job."""
+    """The entry rule alone: fair - price - fee >= threshold(band, category),
+    plus dead zones, league allow/block, and league x category blocks.
+    Sizing is RiskManager.approve()'s job."""
     band = policy.band_of(price)
     edge = fair - price - venue_fee
     if policy.league_allowed(league_code) == "block":
         return StrategyVerdict(False, f"league {league_code} blocked", band, None, edge)
-    threshold = policy.band_threshold(price)
+    if policy.category_blocked(league_code, category):
+        return StrategyVerdict(
+            False, f"category {category} blocked for {league_code}", band, None, edge)
+    threshold = policy.band_threshold(price, category)
     if threshold is None:
-        return StrategyVerdict(False, f"band {band} dead/unproven", band, None, edge)
+        return StrategyVerdict(
+            False, f"band {band} dead/unproven ({category})", band, None, edge)
     if edge < threshold:
         return StrategyVerdict(
             False, f"edge {edge:.3f} < threshold {threshold:.3f}", band, threshold, edge)

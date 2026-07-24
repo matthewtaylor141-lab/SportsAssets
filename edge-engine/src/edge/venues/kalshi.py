@@ -24,21 +24,26 @@ log = logging.getLogger(__name__)
 
 BASE = os.environ.get("EDGE_KALSHI_BASE", "https://api.elections.kalshi.com/trade-api/v2")
 
-# league code -> Kalshi series ticker, env-overridable:
-#   EDGE_KALSHI_SERIES="nba:KXNBAGAME,epl:KXEPLGAME"
-_DEFAULT_SERIES = {"nba": "KXNBAGAME", "wnba": "KXWNBAGAME", "epl": "KXEPLGAME"}
+# league code -> Kalshi series tickers ("+"-separated: game/spread/total
+# series are distinct on Kalshi), env-overridable:
+#   EDGE_KALSHI_SERIES="nba:KXNBAGAME+KXNBASPREAD,epl:KXEPLGAME"
+_DEFAULT_SERIES = {
+    "nba": "KXNBAGAME", "wnba": "KXWNBAGAME", "epl": "KXEPLGAME",
+    "nhl": "KXNHLGAME", "nfl": "KXNFLGAME",
+}
 
 
-def _series_map() -> dict[str, str]:
+def _series_map() -> dict[str, list[str]]:
     raw = os.environ.get("EDGE_KALSHI_SERIES", "")
+    base = {k: v.split("+") for k, v in _DEFAULT_SERIES.items()}
     if not raw:
-        return dict(_DEFAULT_SERIES)
-    out = {}
+        return base
+    out: dict[str, list[str]] = {}
     for pair in raw.split(","):
         if ":" in pair:
             code, series = pair.split(":", 1)
-            out[code.strip()] = series.strip()
-    return out or dict(_DEFAULT_SERIES)
+            out[code.strip()] = [s.strip() for s in series.split("+") if s.strip()]
+    return out or base
 
 
 class KalshiAdapter(VenueAdapter):
@@ -53,44 +58,54 @@ class KalshiAdapter(VenueAdapter):
 
     def discover_markets(self, league_codes: set[str]) -> list[VenueMarket]:
         out: list[VenueMarket] = []
-        for code, series in _series_map().items():
+        for code, series_list in _series_map().items():
             if code not in league_codes:
                 continue
-            cursor = ""
-            for _ in range(10):  # bounded paging
-                try:
-                    resp = self._sess.get(
-                        f"{BASE}/events",
-                        params={"series_ticker": series, "status": "open",
-                                "with_nested_markets": "true", "limit": 100,
-                                **({"cursor": cursor} if cursor else {})},
-                        timeout=15,
-                    )
-                    if resp.status_code != 200:
-                        log.info("kalshi discovery %s -> HTTP %s (series unavailable?)",
-                                 series, resp.status_code)
-                        break
-                    data = resp.json()
-                except (requests.RequestException, ValueError) as exc:
-                    log.warning("kalshi discovery failed for %s: %s", series, exc)
-                    break
-                for ev in data.get("events") or []:
-                    outcomes = {}
-                    for m in ev.get("markets") or []:
-                        team = m.get("yes_sub_title") or m.get("subtitle") or m.get("ticker", "")
-                        if team and m.get("ticker"):
-                            outcomes[team] = m["ticker"]
-                    if len(outcomes) >= 2:
-                        out.append(VenueMarket(
-                            market_id=ev.get("event_ticker", ""),
-                            title=ev.get("title", ""),
-                            league_code=code,
-                            outcome_tokens=outcomes,
-                        ))
-                cursor = data.get("cursor") or ""
-                if not cursor:
-                    break
+            for series in series_list:
+                self._discover_series(out, code, series)
         return out
+
+    def _discover_series(self, out: list[VenueMarket], code: str, series: str) -> None:
+        from edge.fairvalue.lines import canonical_outcome
+
+        cursor = ""
+        for _ in range(10):  # bounded paging
+            try:
+                resp = self._sess.get(
+                    f"{BASE}/events",
+                    params={"series_ticker": series, "status": "open",
+                            "with_nested_markets": "true", "limit": 100,
+                            **({"cursor": cursor} if cursor else {})},
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    log.info("kalshi discovery %s -> HTTP %s (series unavailable?)",
+                             series, resp.status_code)
+                    break
+                data = resp.json()
+            except (requests.RequestException, ValueError) as exc:
+                log.warning("kalshi discovery failed for %s: %s", series, exc)
+                break
+            for ev in data.get("events") or []:
+                outcomes = {}
+                for m in ev.get("markets") or []:
+                    raw_name = m.get("yes_sub_title") or m.get("subtitle") or m.get("ticker", "")
+                    if raw_name and m.get("ticker"):
+                        # Canonical form carries the line: "Over 45.5",
+                        # "Eagles -7.5", or a plain team for moneyline.
+                        key = canonical_outcome(m.get("title") or ev.get("title", ""),
+                                                raw_name)
+                        outcomes[key] = m["ticker"]
+                if len(outcomes) >= 2:
+                    out.append(VenueMarket(
+                        market_id=ev.get("event_ticker", ""),
+                        title=ev.get("title", ""),
+                        league_code=code,
+                        outcome_tokens=outcomes,
+                    ))
+            cursor = data.get("cursor") or ""
+            if not cursor:
+                break
 
     def get_book(self, market_id: str, market_ticker: str) -> MarketBook | None:
         try:

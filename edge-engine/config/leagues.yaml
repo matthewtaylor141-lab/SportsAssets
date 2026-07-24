@@ -3,5 +3,13 @@ allowlist:
   soccer: [fifwc, epl, lal, fl1, uel, acn, lib, bra, spl, bl2, fif, sea, bra2, arg, mex, nor, swe, den, kor, j1100, j2100]
   basketball: [nba, cbb, wnba]
   tennis: [wta]   # ATP measured flat - excluded
+  # US majors for the derivative (spread/total) edge — kch123 evidence.
+  # NFL moneyline blocked by category below (specialist measured -2.9%);
+  # NHL moneyline allowed (+6.6% on 104,779 fills).
+  majors: [nhl, nfl]
 blocklist: [ucl, bun, elc, tur, por, ere, atp, mlb]   # measured negative/flat
 unknown_league_policy: shadow_only
+# category_blocks: league -> categories never traded there.
+category_blocks:
+  nfl: [moneyline]
+  cfb: [moneyline]

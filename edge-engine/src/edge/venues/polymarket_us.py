@@ -80,12 +80,18 @@ class PolymarketUSAdapter(VenueAdapter):
                 resp = self._pub.events.list({"limit": 100, "offset": offset,
                                               "active": True}) or {}
                 events = resp.get("events") or []
+                from edge.fairvalue.lines import canonical_outcome
+
                 for ev in events:
                     outcomes = {}
                     for m in ev.get("markets") or []:
                         oc = m.get("outcome") or (m.get("team") or {}).get("name")
                         if oc and m.get("slug") and not m.get("closed"):
-                            outcomes[oc] = m["slug"]
+                            # Canonical key carries the line ("Over 8.5",
+                            # "Eagles -7.5") so ML/spread/total outcomes of
+                            # one event never collide.
+                            key = canonical_outcome(m.get("title") or "", oc)
+                            outcomes[key] = m["slug"]
                     if len(outcomes) >= 2 and ev.get("title"):
                         out.append(VenueMarket(
                             market_id=ev.get("slug") or ev["title"],

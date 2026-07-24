@@ -21,7 +21,7 @@ _NOISE = re.compile(
     r"\b(fc|cf|sc|afc|cd|ac|as|ss|club|de|the|los|las|el|city|town|united|utd)\b"
 )
 _NON_ALNUM = re.compile(r"[^a-z0-9 ]+")
-_VS = re.compile(r"\s+vs\.?\s+|\s+@\s+", re.IGNORECASE)
+_VS = re.compile(r"\s+vs\.?\s+|\s+@\s+|\s+at\s+", re.IGNORECASE)
 
 
 def norm_team(name: str) -> str:
@@ -75,6 +75,36 @@ def parse_matchup(title: str) -> tuple[str, str] | None:
         return None
     # Trim trailing qualifiers ("Chelsea: winner" etc.)
     return parts[0], re.split(r"[:—]", parts[1])[0].strip()
+
+
+def match_events_all(
+    home: str, away: str, league_code: str | None, candidates: list[VenueMarket]
+) -> list[MarketMatch]:
+    """ALL venue markets for one real-world event (a game can have separate
+    moneyline / spread / total listings, e.g. Kalshi series). Sorted best
+    first; each match still carries its own tradeable flag."""
+    out: list[MarketMatch] = []
+    for mkt in candidates:
+        if league_code and mkt.league_code and mkt.league_code != league_code:
+            continue
+        pair = parse_matchup(mkt.title)
+        if not pair:
+            continue
+        a, b = pair
+        straight = min(team_score(home, a), team_score(away, b))
+        flipped = min(team_score(home, b), team_score(away, a))
+        score = max(straight, flipped)
+        if score < MIN_SCORE:
+            continue
+        home_oc = away_oc = None
+        for oc_name in mkt.outcome_tokens:
+            if team_score(home, oc_name) >= MIN_SCORE:
+                home_oc = oc_name
+            elif team_score(away, oc_name) >= MIN_SCORE:
+                away_oc = oc_name
+        out.append(MarketMatch(market=mkt, score=score,
+                               home_outcome=home_oc, away_outcome=away_oc))
+    return sorted(out, key=lambda m: -m.score)
 
 
 def match_event(

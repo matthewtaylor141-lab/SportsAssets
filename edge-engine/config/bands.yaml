@@ -10,3 +10,19 @@ tradeable:
   "0.85-0.90": {edge_cents: 1.36, min_edge_threshold: 0.012}
 dead_zones: ["0.40-0.45", "0.65-0.70", "0.90-1.00"]
 kalshi_fee_adjustment: true
+
+# Per-category band policy (kch123 extension). Moneyline keeps the measured
+# swisstony bands above — its 40-45c dead zone is a MONEYLINE phenomenon.
+# Spread/total markets are engineered coin-flips: the kch123 statement
+# ($50M settled derivative positions) shows the spread edge lives at
+# 0.40-0.55 (19.5-22.5% ROI) and totals cheap-side 0.40-0.50, NEGATIVE
+# above 0.55. Thresholds set conservative; paper mode is the judge.
+categories:
+  spread:
+    tradeable:
+      "0.40-0.55": {min_edge_threshold: 0.025}
+    dead_zones: []
+  total:
+    tradeable:
+      "0.40-0.50": {min_edge_threshold: 0.025}
+    dead_zones: ["0.55-1.00"]
