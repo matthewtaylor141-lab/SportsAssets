@@ -116,6 +116,8 @@ services:
         value: "https://sportsassets-api.onrender.com"
       - key: EDGE_INGEST_TOKEN   # must equal ENGINE_INGEST_TOKEN on the api service
         sync: false
+      - key: EDGE_SKIP_MAPPER_GATE  # "1" = owner override: arm without 24h
+        sync: false                 # mapper history (per-trade 0.95 gate stays)
       # LIVE_* credentials — leave unset while mode: PAPER (config/risk.yaml).
       - key: EDGE_KALSHI_KEY_ID
         sync: false

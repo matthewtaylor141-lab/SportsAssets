@@ -115,10 +115,18 @@ def run_checklist(ledger, policy, risk) -> tuple[bool, list[str]]:
     mapped = sum(r["mapped"] for r in rows)
     tradeable = sum(r["tradeable"] for r in rows)
     accuracy = tradeable / mapped if mapped else 0.0
-    check("mapper accuracy >95% on allowlist (24h)",
-          mapped >= 20 and accuracy > 0.95,
-          f"accuracy={accuracy:.1%} on {mapped} mapped "
-          f"(venue coverage {mapped}/{feed_total} feed events)")
+    if os.environ.get("EDGE_SKIP_MAPPER_GATE", "0") == "1":
+        # Owner override (2026-07-24): arm without the 24h mapper-history
+        # accumulation. Per-order protection is unchanged — every individual
+        # trade still requires a >=0.95-confidence match. Current accuracy is
+        # reported for the record.
+        check("mapper history gate SKIPPED (owner override)", True,
+              f"live accuracy so far {accuracy:.1%} on {mapped} mapped")
+    else:
+        check("mapper accuracy >95% on allowlist (24h)",
+              mapped >= 20 and accuracy > 0.95,
+              f"accuracy={accuracy:.1%} on {mapped} mapped "
+              f"(venue coverage {mapped}/{feed_total} feed events)")
 
     # 4. Circuit breaker armed; kill switch released; no active halt.
     check("circuit breaker armed",
