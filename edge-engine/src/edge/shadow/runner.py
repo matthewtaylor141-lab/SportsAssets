@@ -165,6 +165,20 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         funnel["rejects"][bucket] = funnel["rejects"].get(bucket, 0) + 1
 
     for ev in events:
+        # Long cycles age early-fetched quotes past the 30s freshness rule
+        # before late events are processed. Refresh THIS event's sport at the
+        # top of its processing (feed TTL cache turns intra-cycle refreshes
+        # into at most one HTTP call per sport per ~25s, quota-tracked).
+        if not ev.is_fresh(25, now=time.time()):
+            try:
+                for fresh_ev in feed_client.fetch_events(ev.sport_key):
+                    if fresh_ev.home == ev.home and fresh_ev.away == ev.away:
+                        ev.h2h, ev.totals, ev.spreads = (
+                            fresh_ev.h2h, fresh_ev.totals, fresh_ev.spreads)
+                        ev.fetched_at = fresh_ev.fetched_at
+                        break
+            except Exception as exc:  # noqa: BLE001 — stale check below still guards
+                log.debug("event refresh failed for %s: %s", ev.sport_key, exc)
         if len(ev.h2h) < 2:
             continue
         names = list(ev.h2h)

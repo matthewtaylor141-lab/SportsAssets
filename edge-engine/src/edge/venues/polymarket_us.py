@@ -192,8 +192,13 @@ class PolymarketUSAdapter(VenueAdapter):
                     out.append(BookLevel(px, qty))
             return sorted(out, key=lambda x: -x.price if reverse else x.price)
 
-        # The book may nest under a key; accept both shapes.
-        body = raw.get("book") if isinstance(raw.get("book"), dict) else raw
+        # Measured venue shape (funnel book-sample 2026-07-24): the payload
+        # nests under "marketData". Accept that, "book", or top-level.
+        body = raw
+        for key in ("marketData", "book"):
+            if isinstance(raw.get(key), dict):
+                body = raw[key]
+                break
         bids = levels(body.get("bids"), reverse=True)
         asks = levels(body.get("offers") or body.get("asks"), reverse=False)
 
