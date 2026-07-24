@@ -1,0 +1,290 @@
+"""Live ledger service — SQLite positions/settlement/PnL (build step 1).
+
+This is the audited average-cost pipeline (positions.Position — ported from
+the $21.45M reference history, do not rewrite) wrapped in a durable store.
+Every mutation loads the position row into the audited dataclass, applies the
+fill/resolution through THAT code path, and writes the result back — the
+methodology has exactly one implementation.
+
+Semantics preserved exactly:
+  BUY:  position grows at cost; average re-weights.
+  SELL: realizes (price - avg_cost) * size on the sale date; oversells clamp.
+  RESOLVE: remaining shares realize (payout - avg_cost) * size on settle date.
+  Open unresolved inventory is excluded from realized P&L, never zeroed.
+
+Additions the live engine needs on top (none of which touch the math):
+  * Idempotency: fills carry a unique fill_uid (INSERT OR IGNORE); a
+    resolution applies once. Replaying a journal is always safe.
+  * Fees: stored per fill and reported as a separate line (net = gross -
+    fees). The audited methodology is fee-free (Polymarket taker fee = 0);
+    Kalshi maker fills pass fee=0, taker fills pass the 0.07*p*(1-p) charge.
+    Fees never enter avg_cost — gross stays comparable to the reference.
+  * Decision record: every fill stores its full decision JSON (feed snapshot,
+    fair value, book, threshold, caps state). If we lose, we can see why.
+  * Realization journal: every SELL/RESOLVE writes a dated realization row so
+    daily PnL and the grader read measured events, not reconstructions.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import threading
+import time
+from typing import Any
+
+from .positions import EPS, Fill, Position
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS fills (
+    id          INTEGER PRIMARY KEY,
+    fill_uid    TEXT NOT NULL UNIQUE,     -- idempotency key (venue order/fill id)
+    venue       TEXT NOT NULL,
+    market_key  TEXT NOT NULL,            -- venue-qualified market/outcome id
+    league      TEXT,
+    mode        TEXT NOT NULL DEFAULT 'PAPER'
+                CHECK (mode IN ('PAPER', 'LIVE_BETA', 'LIVE')),
+    side        TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+    qty         REAL NOT NULL CHECK (qty > 0),
+    price       REAL NOT NULL CHECK (price >= 0 AND price <= 1),
+    fee         REAL NOT NULL DEFAULT 0 CHECK (fee >= 0),
+    ts          REAL NOT NULL,
+    decision    TEXT                      -- full decision record JSON
+);
+CREATE INDEX IF NOT EXISTS fills_market_idx ON fills (market_key);
+CREATE INDEX IF NOT EXISTS fills_ts_idx ON fills (ts);
+
+CREATE TABLE IF NOT EXISTS positions (
+    market_key   TEXT PRIMARY KEY,
+    venue        TEXT NOT NULL,
+    league       TEXT,
+    shares       REAL NOT NULL DEFAULT 0,
+    avg_cost     REAL NOT NULL DEFAULT 0,
+    cost_in      REAL NOT NULL DEFAULT 0,
+    realized_pnl REAL NOT NULL DEFAULT 0,
+    fees_paid    REAL NOT NULL DEFAULT 0,
+    resolved     INTEGER NOT NULL DEFAULT 0,
+    payout       REAL,
+    resolved_ts  REAL
+);
+
+CREATE TABLE IF NOT EXISTS realizations (
+    id          INTEGER PRIMARY KEY,
+    market_key  TEXT NOT NULL,
+    venue       TEXT NOT NULL,
+    league      TEXT,
+    kind        TEXT NOT NULL CHECK (kind IN ('sell', 'resolution')),
+    qty         REAL NOT NULL,
+    pnl         REAL NOT NULL,            -- gross (methodology) realization
+    ts          REAL NOT NULL             -- sale date / settle date
+);
+CREATE INDEX IF NOT EXISTS realizations_ts_idx ON realizations (ts);
+"""
+
+
+class Ledger:
+    """Thread-safe SQLite ledger. One instance per process; connections are
+    per-call cheap (SQLite handles its own locking, WAL mode)."""
+
+    def __init__(self, db_path: str | None = None) -> None:
+        self.db_path = db_path or os.environ.get("EDGE_LEDGER_DB", "edge_ledger.sqlite3")
+        self._lock = threading.Lock()
+        with self._conn() as conn:
+            conn.executescript(_SCHEMA)
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    # ── position load/store through the audited dataclass ──────────────
+
+    @staticmethod
+    def _to_position(row: sqlite3.Row | None) -> Position:
+        if row is None:
+            return Position()
+        return Position(
+            shares=row["shares"], avg_cost=row["avg_cost"],
+            realized_pnl=row["realized_pnl"], cost_in=row["cost_in"],
+            resolved=bool(row["resolved"]),
+        )
+
+    # ── writes ──────────────────────────────────────────────────────────
+
+    def record_fill(
+        self,
+        fill_uid: str,
+        venue: str,
+        market_key: str,
+        side: str,
+        qty: float,
+        price: float,
+        ts: float | None = None,
+        fee: float = 0.0,
+        league: str | None = None,
+        mode: str = "PAPER",
+        decision: dict[str, Any] | None = None,
+    ) -> dict:
+        """Apply one fill. Returns {applied, realized} — applied=False means
+        the fill_uid was already recorded (idempotent replay)."""
+        ts = time.time() if ts is None else ts
+        with self._lock, self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO fills
+                    (fill_uid, venue, market_key, league, mode, side, qty, price,
+                     fee, ts, decision)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (fill_uid, venue, market_key, league, mode, side.upper(), qty,
+                 price, fee, ts, json.dumps(decision) if decision else None),
+            )
+            if cur.rowcount == 0:
+                return {"applied": False, "realized": 0.0}
+
+            row = conn.execute(
+                "SELECT * FROM positions WHERE market_key=?", (market_key,)
+            ).fetchone()
+            pos = self._to_position(row)
+            shares_before = pos.shares
+            realized = pos.apply(Fill(side.upper(), qty, price, ts))
+            sold = shares_before - pos.shares if side.upper() == "SELL" else 0.0
+            conn.execute(
+                """
+                INSERT INTO positions (market_key, venue, league, shares, avg_cost,
+                                       cost_in, realized_pnl, fees_paid, resolved)
+                VALUES (?,?,?,?,?,?,?,?,?)
+                ON CONFLICT (market_key) DO UPDATE SET
+                    shares=excluded.shares, avg_cost=excluded.avg_cost,
+                    cost_in=excluded.cost_in, realized_pnl=excluded.realized_pnl,
+                    fees_paid=positions.fees_paid + ?,
+                    league=COALESCE(positions.league, excluded.league)
+                """,
+                (market_key, venue, league, pos.shares, pos.avg_cost, pos.cost_in,
+                 pos.realized_pnl, fee, int(pos.resolved), fee),
+            )
+            if sold > EPS:  # a real sale — even a $0 realization is an event
+                conn.execute(
+                    "INSERT INTO realizations (market_key, venue, league, kind, qty, pnl, ts) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (market_key, venue, league, "sell", sold, realized, ts),
+                )
+            return {"applied": True, "realized": realized}
+
+    def record_resolution(
+        self, market_key: str, payout: float, ts: float | None = None
+    ) -> dict:
+        """Settle a market at payout (1.0 / 0.0). Idempotent: applies once."""
+        ts = time.time() if ts is None else ts
+        with self._lock, self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM positions WHERE market_key=?", (market_key,)
+            ).fetchone()
+            if row is None or row["resolved"]:
+                return {"applied": False, "realized": 0.0}
+            pos = self._to_position(row)
+            realized = pos.resolve(payout)
+            conn.execute(
+                """
+                UPDATE positions SET shares=?, avg_cost=?, realized_pnl=?,
+                       resolved=1, payout=?, resolved_ts=?
+                WHERE market_key=?
+                """,
+                (pos.shares, pos.avg_cost, pos.realized_pnl, payout, ts, market_key),
+            )
+            # Always journal the settlement (qty = shares outstanding at resolve;
+            # zero-remainder settles are legitimate 0-PnL events).
+            conn.execute(
+                "INSERT INTO realizations (market_key, venue, league, kind, qty, pnl, ts) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (market_key, row["venue"], row["league"], "resolution",
+                 row["shares"], realized, ts),
+            )
+            return {"applied": True, "realized": realized}
+
+    # ── reads ───────────────────────────────────────────────────────────
+
+    def position(self, market_key: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM positions WHERE market_key=?", (market_key,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def open_positions(self) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM positions WHERE resolved=0 AND shares > ? "
+                "ORDER BY market_key", (EPS,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def summary(self) -> dict:
+        """Headline accounting: staked, gross/net realized, open exposure."""
+        with self._conn() as conn:
+            agg = conn.execute(
+                """
+                SELECT COALESCE(sum(realized_pnl), 0) AS gross,
+                       COALESCE(sum(fees_paid), 0) AS fees,
+                       COALESCE(sum(CASE WHEN resolved=0 THEN shares * avg_cost END), 0)
+                           AS open_cost,
+                       count(*) FILTER (WHERE resolved=1) AS resolved_markets,
+                       count(*) FILTER (WHERE resolved=0 AND shares > 1e-9)
+                           AS open_markets
+                FROM positions
+                """
+            ).fetchone()
+            staked = conn.execute(
+                "SELECT COALESCE(sum(qty * price), 0) AS staked, count(*) AS fills "
+                "FROM fills WHERE side='BUY'"
+            ).fetchone()
+        gross, fees = agg["gross"], agg["fees"]
+        return {
+            "fills": staked["fills"],
+            "staked": staked["staked"],
+            "gross_realized": gross,
+            "fees": fees,
+            "net_realized": gross - fees,
+            "roi_net": (gross - fees) / staked["staked"] if staked["staked"] > 0 else 0.0,
+            "open_markets": agg["open_markets"],
+            "open_cost": agg["open_cost"],
+            "resolved_markets": agg["resolved_markets"],
+        }
+
+    def daily_pnl(self) -> list[dict]:
+        """Gross realized PnL per UTC day, from the realization journal."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT date(ts, 'unixepoch') AS day,
+                       sum(pnl) AS pnl, count(*) AS events
+                FROM realizations GROUP BY day ORDER BY day
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def by_league(self) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT COALESCE(league, '?') AS league,
+                       sum(realized_pnl) AS gross, sum(fees_paid) AS fees,
+                       count(*) AS markets
+                FROM positions GROUP BY league ORDER BY gross DESC
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def decision_record(self, fill_uid: str) -> dict | None:
+        """Full audit trail for one fill — why we traded."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM fills WHERE fill_uid=?", (fill_uid,)
+            ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["decision"] = json.loads(d["decision"]) if d["decision"] else None
+        return d
