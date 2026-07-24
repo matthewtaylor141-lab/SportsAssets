@@ -40,9 +40,11 @@ def _shadow_log_path() -> Path:
 SHADOW_LOG = _shadow_log_path()
 
 
-def log_shadow_fill(intent, book, feed_snapshot, would_fill: bool, whale_alignment=None):
+def log_shadow_fill(intent, book, feed_snapshot, would_fill: bool, whale_alignment=None,
+                    tag: str | None = None):
     rec = {
         "ts": time.time(),
+        "tag": tag,  # None = threshold-clearing; 'exploration' = below-threshold study
         "venue": book.venue,
         "whale_alignment": whale_alignment,
         "market_id": intent.market_id,
@@ -236,7 +238,42 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     verdict = strategy_filter(policy, ev.league_code, ask.price, fair,
                                               venue_fee=adapter.taker_fee(ask.price),
                                               category=category)
+                    # Mispricing-distribution telemetry: every completed
+                    # fair-vs-ask comparison is counted, with the best edge
+                    # seen and near-misses — so "are there mispricings?" is
+                    # answered with numbers, not vibes.
+                    if verdict.threshold is not None or verdict.ok:
+                        es = funnel.setdefault("edges", {"evaluated": 0,
+                                                         "best_cents": -99.0,
+                                                         "near_miss_1c": 0,
+                                                         "explored": 0})
+                        es["evaluated"] += 1
+                        es["best_cents"] = max(es["best_cents"],
+                                               round(verdict.edge * 100, 2))
+                        if (not verdict.ok and verdict.threshold is not None
+                                and 0 < verdict.threshold - verdict.edge <= 0.01):
+                            es["near_miss_1c"] += 1
                     if not verdict.ok:
+                        # Below-threshold STUDY (paper evidence only, never the
+                        # ledger): positive edges above half-threshold are
+                        # logged tagged 'exploration' so the grader measures
+                        # whether small mispricings actually pay on these
+                        # venues — evidence-driven threshold tuning.
+                        if (verdict.threshold is not None
+                                and verdict.edge >= verdict.threshold / 2):
+                            funnel.setdefault("edges", {}).setdefault("explored", 0)
+                            funnel["edges"]["explored"] += 1
+                            explore_intent = FillIntent(
+                                market_id=match.market.market_id, outcome_id=token,
+                                limit_price=ask.price, size_usd=10.0,
+                                fair_value=round(fair, 4),
+                                edge=round(fair - ask.price, 4),
+                                league=ev.league_code, band=verdict.band,
+                            )
+                            log_shadow_fill(
+                                explore_intent, book,
+                                {"h2h": ev.h2h, "home": ev.home, "away": ev.away},
+                                ask.size * ask.price >= 10.0, tag="exploration")
                         reject(verdict.reason.split()[0])
                         continue
                     if effective_mode != "PAPER" and \

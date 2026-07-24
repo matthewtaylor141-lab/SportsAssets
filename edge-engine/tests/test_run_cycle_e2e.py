@@ -5,6 +5,8 @@ dead zones, one-per-event) in one pass."""
 
 import time
 
+import pytest
+
 from edge.execution.engine import Policy
 from edge.execution.risk import RiskManager
 from edge.fairvalue.feed import FeedEvent
@@ -111,3 +113,25 @@ def test_one_per_event_across_cycles(tmp_path, monkeypatch):
                         POLICY, risk, ledger, ["soccer_epl"])
     assert ledger.summary()["fills"] == fills_after_first  # never adds
     assert funnel2["rejects"].get("one-per-event", 0) >= 1
+
+
+def test_edge_telemetry_and_exploration_logging(tmp_path, monkeypatch):
+    """A near-threshold edge (1.5c vs 2.0c needed) must NOT trade, but must
+    be counted (evaluated/near-miss) and logged tagged 'exploration'."""
+    import json as _json
+    from pathlib import Path
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    # fair 0.50 (2.0/2.0 odds), ask 0.485 -> edge 1.5c < 2.0c threshold
+    funnel = run_cycle([StubVenue(ask_price=0.485)], StubFeed([_event()]),
+                       POLICY, risk, ledger, ["soccer_epl"])
+    assert ledger.summary()["fills"] == 0            # discipline held
+    edges = funnel["edges"]
+    assert edges["evaluated"] >= 1
+    assert edges["best_cents"] == pytest.approx(1.5, abs=0.1)
+    assert edges["near_miss_1c"] >= 1
+    assert edges["explored"] >= 1
+    log = Path(str(tmp_path)) / "shadow_fills.jsonl"
+    recs = [_json.loads(line) for line in log.read_text().splitlines()]
+    assert any(r.get("tag") == "exploration" for r in recs)

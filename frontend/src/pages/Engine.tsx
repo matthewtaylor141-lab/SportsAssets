@@ -58,6 +58,8 @@ interface EngineStatus {
     census?: Record<string, unknown>
     mode?: string
     account_link?: Record<string, boolean>
+    edges?: { evaluated: number; best_cents: number; near_miss_1c: number; explored: number }
+    book_sample?: Record<string, unknown>
     error?: string
   }
 }
@@ -292,6 +294,16 @@ export function Engine() {
                 {' '}· book errors: {Object.entries(status.detail.book_errors)
                   .map(([v, errs]) => `${v}(${Object.entries(errs)
                     .map(([k, n]) => `${k} ×${n}`).join(', ')})`).join(' ')}
+              </span>
+            )}
+            {status.detail?.edges && (
+              <> · <b>edges: {status.detail.edges.evaluated} priced, best{' '}
+                {status.detail.edges.best_cents > -99 ? `${status.detail.edges.best_cents.toFixed(1)}¢` : '—'},{' '}
+                {status.detail.edges.near_miss_1c} near-miss, {status.detail.edges.explored} explored</b></>
+            )}
+            {status.detail?.book_sample && (
+              <span style={{ color: 'var(--warning)' }}>
+                {' '}· book sample: {JSON.stringify(status.detail.book_sample).slice(0, 200)}
               </span>
             )}
             {status.detail?.mode && <> · mode: <b>{status.detail.mode}</b></>}
