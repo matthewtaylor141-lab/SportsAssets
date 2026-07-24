@@ -164,12 +164,15 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     def reject(bucket: str) -> None:
         funnel["rejects"][bucket] = funnel["rejects"].get(bucket, 0) + 1
 
+    refreshed_sports: set[str] = set()
     for ev in events:
         # Long cycles age early-fetched quotes past the 30s freshness rule
-        # before late events are processed. Refresh THIS event's sport at the
-        # top of its processing (feed TTL cache turns intra-cycle refreshes
-        # into at most one HTTP call per sport per ~25s, quota-tracked).
-        if not ev.is_fresh(25, now=time.time()):
+        # before late events are processed. Refresh a sport AT MOST ONCE per
+        # cycle (quota discipline — the per-25s TTL alone burned the odds
+        # budget); events still stale after one refresh are dropped by the
+        # 30s hard rule rather than re-fetched.
+        if not ev.is_fresh(25, now=time.time()) and ev.sport_key not in refreshed_sports:
+            refreshed_sports.add(ev.sport_key)
             try:
                 for fresh_ev in feed_client.fetch_events(ev.sport_key):
                     if fresh_ev.home == ev.home and fresh_ev.away == ev.away:
@@ -354,6 +357,9 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     )
     funnel["marked_delta"] = round(marked_delta, 2)
     funnel["halted"] = halted
+    quota = getattr(feed_client, "quota", lambda: {})()
+    if quota:
+        funnel["feed_quota"] = quota  # odds-API budget, visible every cycle
     if tripped:
         funnel["watchdog"] = wd_reason
     funnel["candidates"] = {name: len(c) for name, (_, c) in venue_candidates.items()}

@@ -26,3 +26,8 @@ categories:
     tradeable:
       "0.40-0.50": {min_edge_threshold: 0.025}
     dead_zones: ["0.55-1.00"]
+
+# Implausibility guard: real measured edges run 1-4c. Anything above this
+# is near-certainly a mapping/model error, not free money — logged for
+# study (tagged), never traded, in ANY mode.
+max_believable_edge: 0.08

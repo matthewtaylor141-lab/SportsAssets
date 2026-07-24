@@ -128,6 +128,13 @@ def strategy_filter(
     if edge < threshold:
         return StrategyVerdict(
             False, f"edge {edge:.3f} < threshold {threshold:.3f}", band, threshold, edge)
+    # Implausibility guard: measured real edges are 1-4c. A "20c edge" is a
+    # mapping/model error wearing a costume — log it, never trade it.
+    max_edge = float(policy.bands.get("max_believable_edge", 0.08))
+    if edge > max_edge:
+        return StrategyVerdict(
+            False, f"implausible edge {edge:.3f} > {max_edge:.2f} (mapping/model suspect)",
+            band, threshold, edge)
     return StrategyVerdict(True, "ok", band, threshold, edge)
 
 

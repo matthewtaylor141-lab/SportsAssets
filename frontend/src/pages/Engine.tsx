@@ -59,6 +59,7 @@ interface EngineStatus {
     mode?: string
     account_link?: Record<string, boolean>
     edges?: { evaluated: number; best_cents: number; near_miss_1c: number; explored: number }
+    feed_quota?: { remaining?: number; used?: number }
     book_sample?: Record<string, unknown>
     error?: string
   }
@@ -304,6 +305,11 @@ export function Engine() {
             {status.detail?.book_sample && (
               <span style={{ color: 'var(--warning)' }}>
                 {' '}· book sample: {JSON.stringify(status.detail.book_sample).slice(0, 200)}
+              </span>
+            )}
+            {status.detail?.feed_quota?.remaining != null && (
+              <span style={{ color: status.detail.feed_quota.remaining < 500 ? 'var(--critical)' : 'var(--muted)' }}>
+                {' '}· odds quota: {status.detail.feed_quota.remaining} left
               </span>
             )}
             {status.detail?.mode && <> · mode: <b>{status.detail.mode}</b></>}

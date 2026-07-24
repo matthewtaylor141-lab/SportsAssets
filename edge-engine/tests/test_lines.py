@@ -173,3 +173,12 @@ def test_ml_dead_zone_still_dead_in_same_cycle_as_spread(tmp_path, monkeypatch):
     v_sp = strategy_filter(POLICY, "nba", 0.43, 0.50, category="spread")
     assert not v_ml.ok and "dead" in v_ml.reason
     assert v_sp.ok and v_sp.edge == pytest.approx(0.07)
+
+
+def test_implausible_edge_never_trades():
+    # A "45c edge" is a mapping error wearing a costume — reject in any mode.
+    v = strategy_filter(POLICY, "epl", 0.09, 0.54, category="moneyline")
+    assert not v.ok and "implausible" in v.reason
+    # Healthy edges still clear.
+    v2 = strategy_filter(POLICY, "epl", 0.47, 0.51, category="moneyline")
+    assert v2.ok
