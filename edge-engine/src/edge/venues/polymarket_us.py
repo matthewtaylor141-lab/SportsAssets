@@ -69,30 +69,68 @@ class PolymarketUSAdapter(VenueAdapter):
 
     # ── discovery / books ──────────────────────────────────────────────
 
+    # Param variants tried in order until one yields events — the gateway's
+    # exact filter semantics are verified empirically via the census below.
+    _LIST_VARIANTS = (
+        {"active": True, "closed": False, "categories": ["sports"]},
+        {"active": True, "closed": False},
+        {"active": True},
+        {},
+    )
+
     def discover_markets(self, league_codes: set[str]) -> list[VenueMarket]:
-        """Active events with nested per-outcome markets. The gateway's
-        event categories don't carry our league codes, so league assignment
-        happens at match time (mapper league filter passes None here)."""
+        """Active events with nested per-outcome markets. League assignment
+        happens at match time (mapper league filter passes None here).
+        Every skip reason is counted in last_census — the funnel shows WHY
+        discovery found nothing instead of just '0 candidates'."""
+        from edge.fairvalue.lines import canonical_outcome
+
+        census: dict[str, Any] = {"events_seen": 0, "skipped_no_title": 0,
+                                  "skipped_lt2_outcomes": 0, "markets_seen": 0,
+                                  "markets_closed": 0, "markets_no_outcome": 0,
+                                  "samples": []}
         out: list[VenueMarket] = []
         try:
+            variant_used = None
+            for variant in self._LIST_VARIANTS:
+                probe = self._pub.events.list({"limit": 100, **variant}) or {}
+                if probe.get("events"):
+                    variant_used = variant
+                    break
+            census["params"] = variant_used if variant_used is not None else "all_empty"
+            if variant_used is None:
+                self.last_census = census
+                return out
+
             offset = 0
             for _ in range(10):  # bounded paging
-                resp = self._pub.events.list({"limit": 100, "offset": offset,
-                                              "active": True}) or {}
+                resp = self._pub.events.list(
+                    {"limit": 100, "offset": offset, **variant_used}) or {}
                 events = resp.get("events") or []
-                from edge.fairvalue.lines import canonical_outcome
-
+                census["events_seen"] += len(events)
                 for ev in events:
+                    if len(census["samples"]) < 3 and ev.get("title"):
+                        census["samples"].append(ev["title"][:60])
                     outcomes = {}
                     for m in ev.get("markets") or []:
+                        census["markets_seen"] += 1
                         oc = m.get("outcome") or (m.get("team") or {}).get("name")
-                        if oc and m.get("slug") and not m.get("closed"):
-                            # Canonical key carries the line ("Over 8.5",
-                            # "Eagles -7.5") so ML/spread/total outcomes of
-                            # one event never collide.
-                            key = canonical_outcome(m.get("title") or "", oc)
-                            outcomes[key] = m["slug"]
-                    if len(outcomes) >= 2 and ev.get("title"):
+                        if m.get("closed"):
+                            census["markets_closed"] += 1
+                            continue
+                        if not (oc and m.get("slug")):
+                            census["markets_no_outcome"] += 1
+                            continue
+                        # Canonical key carries the line ("Over 8.5",
+                        # "Eagles -7.5") so ML/spread/total outcomes of one
+                        # event never collide.
+                        key = canonical_outcome(m.get("title") or "", oc)
+                        outcomes[key] = m["slug"]
+                    if not ev.get("title"):
+                        census["skipped_no_title"] += 1
+                    elif len(outcomes) < 2:
+                        census["skipped_lt2_outcomes"] += 1
+                    else:
                         out.append(VenueMarket(
                             market_id=ev.get("slug") or ev["title"],
                             title=ev["title"],
@@ -104,7 +142,9 @@ class PolymarketUSAdapter(VenueAdapter):
                 offset += 100
         except Exception as exc:  # noqa: BLE001
             self._book_err(f"discovery_{type(exc).__name__}")
+            census["error"] = f"{type(exc).__name__}: {str(exc)[:150]}"
             log.warning("polymarket-us discovery failed: %s", exc)
+        self.last_census = census
         return out
 
     def _book_err(self, cause: str) -> None:

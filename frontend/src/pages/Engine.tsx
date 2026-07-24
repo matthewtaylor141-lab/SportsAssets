@@ -55,7 +55,9 @@ interface EngineStatus {
     rejects?: Record<string, number>
     candidates?: Record<string, number>
     book_errors?: Record<string, Record<string, number>>
-    census?: Record<string, number>
+    census?: Record<string, unknown>
+    mode?: string
+    account_link?: Record<string, boolean>
     error?: string
   }
 }
@@ -292,10 +294,17 @@ export function Engine() {
                     .map(([k, n]) => `${k} ×${n}`).join(', ')})`).join(' ')}
               </span>
             )}
+            {status.detail?.mode && <> · mode: <b>{status.detail.mode}</b></>}
+            {status.detail?.account_link && (
+              <> · account: {Object.entries(status.detail.account_link)
+                .map(([v, ok]) => `${v} ${ok ? '✓ linked' : '✗ not linked'}`).join(', ')}</>
+            )}
             {status.detail?.census && (
               <span style={{ color: 'var(--muted)' }}>
-                {' '}· venue leagues: {Object.entries(status.detail.census)
-                  .slice(0, 8).map(([k, n]) => `${k} ${n}`).join(', ')}
+                {' '}· discovery: {Object.entries(status.detail.census)
+                  .slice(0, 10)
+                  .map(([k, n]) => `${k}=${typeof n === 'object' ? JSON.stringify(n) : String(n)}`)
+                  .join(' · ')}
               </span>
             )}
           </span>
