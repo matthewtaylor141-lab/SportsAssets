@@ -80,6 +80,40 @@ CREATE TABLE IF NOT EXISTS realizations (
     ts          REAL NOT NULL             -- sale date / settle date
 );
 CREATE INDEX IF NOT EXISTS realizations_ts_idx ON realizations (ts);
+
+-- Engine state hub (kill switch, circuit-breaker halt, watchdog trips).
+CREATE TABLE IF NOT EXISTS state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,             -- JSON
+    updated_at REAL NOT NULL
+);
+
+-- Mapper match-rate accounting (build step 4: daily report, >95% gate).
+CREATE TABLE IF NOT EXISTS match_stats (
+    day         TEXT NOT NULL,            -- UTC date
+    venue       TEXT NOT NULL,
+    league      TEXT NOT NULL,
+    feed_events INTEGER NOT NULL DEFAULT 0,
+    mapped      INTEGER NOT NULL DEFAULT 0,   -- candidate found (>=0.85)
+    tradeable   INTEGER NOT NULL DEFAULT 0,   -- confidence >=0.95
+    PRIMARY KEY (day, venue, league)
+);
+
+-- One-position-per-event registry (beta hard rule: never add to an event).
+CREATE TABLE IF NOT EXISTS events_traded (
+    event_key  TEXT PRIMARY KEY,
+    market_key TEXT NOT NULL,
+    venue      TEXT NOT NULL,
+    ts         REAL NOT NULL
+);
+
+-- Mode transitions are audit events (PAPER -> LIVE_BETA -> LIVE).
+CREATE TABLE IF NOT EXISTS mode_log (
+    id   INTEGER PRIMARY KEY,
+    ts   REAL NOT NULL,
+    mode TEXT NOT NULL,
+    note TEXT
+);
 """
 
 
@@ -276,6 +310,102 @@ class Ledger:
                 """
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def realized_pnl_since(self, ts: float) -> float:
+        """Gross realized PnL since ts (circuit-breaker input)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(sum(pnl), 0) FROM realizations WHERE ts >= ?", (ts,)
+            ).fetchone()
+        return float(row[0])
+
+    # ── engine state hub ────────────────────────────────────────────────
+
+    def set_state(self, key: str, value: Any) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "INSERT INTO state (key, value, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT (key) DO UPDATE SET value=excluded.value, "
+                "updated_at=excluded.updated_at",
+                (key, json.dumps(value), time.time()),
+            )
+
+    def get_state(self, key: str, default: Any = None) -> Any:
+        with self._conn() as conn:
+            row = conn.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
+        return json.loads(row["value"]) if row else default
+
+    def log_mode(self, mode: str, note: str = "") -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute("INSERT INTO mode_log (ts, mode, note) VALUES (?,?,?)",
+                         (time.time(), mode, note))
+
+    def mode_transitions(self, limit: int = 20) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT ts, mode, note FROM mode_log ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── one-position-per-event registry ─────────────────────────────────
+
+    def claim_event(self, event_key: str, market_key: str, venue: str,
+                    ts: float | None = None) -> bool:
+        """Atomically claim an event. False = already traded (never add)."""
+        with self._lock, self._conn() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO events_traded (event_key, market_key, venue, ts) "
+                "VALUES (?,?,?,?)",
+                (event_key, market_key, venue, ts if ts is not None else time.time()),
+            )
+            return cur.rowcount > 0
+
+    def event_traded(self, event_key: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM events_traded WHERE event_key=?", (event_key,)
+            ).fetchone()
+        return row is not None
+
+    # ── mapper match-rate accounting ────────────────────────────────────
+
+    def record_match_stat(self, day: str, venue: str, league: str,
+                          mapped: bool, tradeable: bool) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO match_stats (day, venue, league, feed_events, mapped, tradeable)
+                VALUES (?,?,?,1,?,?)
+                ON CONFLICT (day, venue, league) DO UPDATE SET
+                    feed_events = feed_events + 1,
+                    mapped = mapped + excluded.mapped,
+                    tradeable = tradeable + excluded.tradeable
+                """,
+                (day, venue, league, int(mapped), int(tradeable)),
+            )
+
+    def match_rate_report(self, days: int = 1) -> list[dict]:
+        """Per-venue/league match rates over the last N days (step 4 report;
+        check-live requires tradeable_rate > 0.95 on allowlisted leagues)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT venue, league, sum(feed_events) AS feed_events,
+                       sum(mapped) AS mapped, sum(tradeable) AS tradeable
+                FROM match_stats
+                WHERE day >= date('now', ?)
+                GROUP BY venue, league ORDER BY venue, league
+                """,
+                (f"-{days} day",),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            n = d["feed_events"] or 1
+            d["mapped_rate"] = round(d["mapped"] / n, 4)
+            d["tradeable_rate"] = round(d["tradeable"] / n, 4)
+            out.append(d)
+        return out
 
     def decision_record(self, fill_uid: str) -> dict | None:
         """Full audit trail for one fill — why we traded."""

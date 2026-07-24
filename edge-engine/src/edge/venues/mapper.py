@@ -14,7 +14,8 @@ import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
-MIN_SCORE = 0.85
+MIN_SCORE = 0.85        # candidate floor: below this a market isn't even considered
+TRADEABLE_SCORE = 0.95  # hard rule: <0.95 confidence is UNMAPPED and untradeable
 
 _NOISE = re.compile(
     r"\b(fc|cf|sc|afc|cd|ac|as|ss|club|de|the|los|las|el|city|town|united|utd)\b"
@@ -59,6 +60,13 @@ class MarketMatch:
     score: float
     home_outcome: str | None
     away_outcome: str | None
+
+    @property
+    def tradeable(self) -> bool:
+        """Only >=0.95-confidence matches may carry orders (hard rule);
+        0.85-0.95 matches are logged for the match-rate report but UNMAPPED
+        for trading purposes."""
+        return self.score >= TRADEABLE_SCORE
 
 
 def parse_matchup(title: str) -> tuple[str, str] | None:
