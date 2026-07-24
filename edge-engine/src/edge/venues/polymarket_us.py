@@ -186,16 +186,41 @@ class PolymarketUSAdapter(VenueAdapter):
                 try:
                     px = float((lvl.get("px") or {}).get("value") or 0)
                     qty = float(lvl.get("qty") or 0)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, AttributeError):
                     continue
                 if 0 < px < 1 and qty > 0:
                     out.append(BookLevel(px, qty))
             return sorted(out, key=lambda x: -x.price if reverse else x.price)
 
-        bids = levels(raw.get("bids"), reverse=True)
-        asks = levels(raw.get("offers"), reverse=False)
+        # The book may nest under a key; accept both shapes.
+        body = raw.get("book") if isinstance(raw.get("book"), dict) else raw
+        bids = levels(body.get("bids"), reverse=True)
+        asks = levels(body.get("offers") or body.get("asks"), reverse=False)
+
+        if not asks:
+            # Depth book empty — fall back to the venue's BBO endpoint
+            # (thin markets often quote a best ask without visible depth).
+            try:
+                bbo = self._pub.markets.bbo(market_slug) or {}
+                best_ask = float((bbo.get("bestAsk") or {}).get("value") or 0)
+                ask_qty = float(bbo.get("askDepth") or 0)
+                if 0 < best_ask < 1 and ask_qty > 0:
+                    asks = [BookLevel(best_ask, ask_qty)]
+                    self._book_err("asks_from_bbo")
+                best_bid = float((bbo.get("bestBid") or {}).get("value") or 0)
+                bid_qty = float(bbo.get("bidDepth") or 0)
+                if not bids and 0 < best_bid < 1 and bid_qty > 0:
+                    bids = [BookLevel(best_bid, bid_qty)]
+            except Exception:  # noqa: BLE001
+                pass
         if not asks:
             self._book_err("no_asks")
+            # Keep ONE raw sample per cycle so telemetry shows the actual
+            # response shape instead of just a counter.
+            if not getattr(self, "last_book_sample", None):
+                self.last_book_sample = {"slug": market_slug,
+                                         "keys": sorted(raw.keys()),
+                                         "snippet": str(raw)[:220]}
         return MarketBook(venue=self.name, market_id=market_id,
                           outcome_id=market_slug, bids=bids, asks=asks,
                           ts=time.time())

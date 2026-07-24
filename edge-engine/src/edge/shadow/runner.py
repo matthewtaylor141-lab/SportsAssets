@@ -315,6 +315,10 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         if errors:
             funnel.setdefault("book_errors", {})[adapter.name] = dict(errors)
             adapter.book_errors = {}
+        sample = getattr(adapter, "last_book_sample", None)
+        if sample:
+            funnel.setdefault("book_sample", {})[adapter.name] = sample
+            adapter.last_book_sample = None
     return funnel
 
 
