@@ -313,6 +313,11 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     )
                     decision["category"] = category
                     decision["outcome"] = oc_name
+                    # Mapping provenance — makes 'why this fair value?'
+                    # answerable from the record alone.
+                    decision["venue_market"] = {"title": match.market.title,
+                                                "id": match.market.market_id,
+                                                "match_score": round(match.score, 3)}
                     result = execute(adapter=adapter, ledger=ledger, mode=effective_mode,
                                      mkey=mkey, league=ev.league_code,
                                      ask_price=ask.price, ask_size=ask.size,
