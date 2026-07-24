@@ -102,16 +102,23 @@ def run_checklist(ledger, policy, risk) -> tuple[bool, list[str]]:
             check("polymarket-us keys valid", False, str(exc)[:120])
     check("at least one live venue enabled+authed", venues_ok > 0)
 
-    # 3. Mapper match rate >95% on allowlisted leagues (last 24h of PAPER).
+    # 3. Mapper ACCURACY >95% on allowlisted leagues (last 24h of PAPER):
+    # of the events the venue actually lists (mapped >=0.85), the share we
+    # match at trade-grade confidence (>=0.95). Venue coverage — feed games
+    # the venue simply doesn't list — is not a mapper failure and is
+    # reported separately.
     allow = set()
     for group in (policy.leagues.get("allowlist") or {}).values():
         allow.update(group)
     rows = [r for r in ledger.match_rate_report(days=1) if r["league"] in allow]
-    total = sum(r["feed_events"] for r in rows)
+    feed_total = sum(r["feed_events"] for r in rows)
+    mapped = sum(r["mapped"] for r in rows)
     tradeable = sum(r["tradeable"] for r in rows)
-    rate = tradeable / total if total else 0.0
-    check("mapper >95% on allowlist (24h)", total >= 20 and rate > 0.95,
-          f"rate={rate:.1%} on {total} events")
+    accuracy = tradeable / mapped if mapped else 0.0
+    check("mapper accuracy >95% on allowlist (24h)",
+          mapped >= 20 and accuracy > 0.95,
+          f"accuracy={accuracy:.1%} on {mapped} mapped "
+          f"(venue coverage {mapped}/{feed_total} feed events)")
 
     # 4. Circuit breaker armed; kill switch released; no active halt.
     check("circuit breaker armed",
