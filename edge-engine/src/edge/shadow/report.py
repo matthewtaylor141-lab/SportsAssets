@@ -39,8 +39,12 @@ def _data_dir() -> Path:
 
 
 def _load_calib(name: str, key_field: str, value_field: str) -> dict[str, float]:
-    path = _data_dir() / name
-    if not path.exists():
+    """Reference CSVs ship with the repo/image; writable state may live on a
+    separate mounted disk — search both."""
+    candidates = [_data_dir() / name,
+                  Path(__file__).resolve().parents[3] / "data" / name]
+    path = next((p for p in candidates if p.exists()), None)
+    if path is None:
         return {}
     out: dict[str, float] = {}
     with open(path) as f:

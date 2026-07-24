@@ -97,6 +97,10 @@ services:
     plan: starter
     rootDir: edge-engine
     dockerfilePath: ./Dockerfile
+    disk:                        # persistent — the SQLite ledger + reports live here
+      name: edge-data
+      mountPath: /var/edge-data
+      sizeGB: 1
     envVars:
       - key: EDGE_ODDS_API_KEY
         sync: false
@@ -104,7 +108,20 @@ services:
         value: "120"
       - key: EDGE_KALSHI
         value: "1"
+      - key: EDGE_DATA_DIR       # writable state (ledger, shadow log, reports)
+        value: "/var/edge-data"
+      - key: EDGE_LEDGER_DB      # ledger survives deploys on the mounted disk
+        value: "/var/edge-data/edge_ledger.sqlite3"
       - key: EDGE_PLATFORM_API   # whale-alignment signal + fill recording
         value: "https://sportsassets-api.onrender.com"
       - key: EDGE_INGEST_TOKEN   # must equal ENGINE_INGEST_TOKEN on the api service
+        sync: false
+      # LIVE_* credentials — leave unset while mode: PAPER (config/risk.yaml).
+      - key: EDGE_KALSHI_KEY_ID
+        sync: false
+      - key: EDGE_KALSHI_PRIVATE_KEY
+        sync: false
+      - key: EDGE_PMUS_KEY_ID
+        sync: false
+      - key: EDGE_PMUS_SECRET_KEY
         sync: false
