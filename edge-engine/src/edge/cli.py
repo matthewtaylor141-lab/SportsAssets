@@ -1,6 +1,7 @@
 """edge CLI (build step 8): runbook commands + the go-live checklist.
 
     python -m edge.cli status       engine state, summary, guards
+    python -m edge.cli census [N]   N-day venue market census + estimate
     python -m edge.cli report       generate the nightly report now
     python -m edge.cli match-rate   mapper match rates (24h)
     python -m edge.cli check-live   go-live checklist; exit 0 iff clean
@@ -179,6 +180,8 @@ def main() -> None:
 
         rep = nightly_report(ledger, policy)
         print(json.dumps(rep, indent=2))
+    elif cmd == "census":
+        _cmd_census(int(sys.argv[2]) if len(sys.argv) > 2 else 30)
     elif cmd == "match-rate":
         print(json.dumps(ledger.match_rate_report(days=1), indent=2))
     elif cmd == "check-live":
@@ -207,3 +210,24 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def _cmd_census(days: int) -> None:
+    """30-day venue census + measured-funnel fill estimate."""
+    from polymarket_us import PolymarketUS
+
+    from edge.analysis.venue_census import census, estimate_fills_per_day
+
+    ledger, policy, risk = _boot()
+    result = census(PolymarketUS(), days=days)
+
+    # Measured conversion rates from our own live telemetry.
+    rows = ledger.match_rate_report(days=min(days, 7))
+    mapped = sum(r["mapped"] for r in rows)
+    tradeable = sum(r["tradeable"] for r in rows)
+    tradeable_rate = (tradeable / mapped) if mapped else 0.0
+    result["estimate"] = estimate_fills_per_day(
+        result, tradeable_rate=tradeable_rate or 0.0,
+        clear_rate=float(os.environ.get("EDGE_MEASURED_CLEAR_RATE", "0") or 0),
+    )
+    print(json.dumps(result, indent=2, default=str))

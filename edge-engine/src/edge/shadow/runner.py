@@ -14,6 +14,7 @@ Gate (config/risk.yaml): >= 60 days, >= 5,000 shadow fills per venue,
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -584,6 +585,36 @@ def main() -> None:
     _post_status("startup", {"mode": risk.mode, "account_link": account_link,
                              "venues": [a.name for a in adapters],
                              "sports": len(sport_keys)})
+
+    # One-shot venue census (EDGE_CENSUS_DAYS=0 disables): how many sports
+    # markets the venue actually listed per day over the trailing window —
+    # the opportunity universe behind any volume estimate. Runs in a thread
+    # so it never delays the first trading cycle.
+    census_days = int(os.environ.get("EDGE_CENSUS_DAYS", "30"))
+    if census_days > 0:
+        def _run_census() -> None:
+            try:
+                from polymarket_us import PolymarketUS
+
+                from edge.analysis.venue_census import census
+
+                result = census(PolymarketUS(), days=census_days)
+                log.warning("venue census (%sd): %s markets/day, %s liquid/day, "
+                            "categories %s", census_days,
+                            result["per_day_avg"]["markets"],
+                            result["per_day_avg"]["liquid_markets"],
+                            result["by_category"])
+                ledger.set_state("venue_census", result)
+                _post_status("census", {"census": {
+                    "days": census_days,
+                    "per_day_avg": result["per_day_avg"],
+                    "by_category": result["by_category"],
+                    "top_leagues": dict(list(result["by_league"].items())[:8]),
+                }})
+            except Exception as exc:  # noqa: BLE001 — diagnostics must never
+                log.warning("venue census failed: %s", exc)  # break trading
+
+        threading.Thread(target=_run_census, daemon=True, name="census").start()
 
     last_report_day = ""
     last_recheck = time.time()
