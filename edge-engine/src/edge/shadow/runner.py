@@ -566,9 +566,11 @@ def main() -> None:
     last_settle = 0.0
     while True:
         try:
-            # Deferred live mode: re-run the checklist every 5 min (env
-            # EDGE_CHECKLIST_RECHECK_S); arm on the first clean pass.
-            recheck_s = int(os.environ.get("EDGE_CHECKLIST_RECHECK_S", "300"))
+            # Deferred live mode: re-run the checklist every 2 min (env
+            # EDGE_CHECKLIST_RECHECK_S; floor ~60s — the probes are live API
+            # calls); arm on the first clean pass. This clock only governs
+            # recovery-to-armed, never trading frequency (that's the cycle).
+            recheck_s = max(int(os.environ.get("EDGE_CHECKLIST_RECHECK_S", "120")), 30)
             if configured_mode != risk.mode and time.time() - last_recheck > recheck_s:
                 from edge.cli import run_checklist
 
