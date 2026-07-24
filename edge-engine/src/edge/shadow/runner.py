@@ -115,10 +115,32 @@ def _record_to_platform(rec: dict) -> None:
 # ── The decision loop (mode-aware; orders only via the executor) ────────
 
 
-def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]) -> dict:
+def discover_all(adapters, policy) -> dict:
+    """Venue market discovery — heavier REST sweep, run on its own clock
+    (EDGE_DISCOVERY_SECONDS), not per pricing cycle."""
+    league_codes = set()
+    for group in (policy.leagues.get("allowlist") or {}).values():
+        league_codes.update(group)
+    out = {}
+    for adapter in adapters:
+        try:
+            out[adapter.name] = (adapter, adapter.discover_markets(league_codes))
+            log.info("%s: %s candidate markets", adapter.name,
+                     len(out[adapter.name][1]))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("%s discovery failed: %s", adapter.name, exc)
+    return out
+
+
+def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str],
+              candidates: dict | None = None) -> dict:
     """One sweep across all venues: feed → map (0.95 gate) → de-vig → book →
     strategy filter → risk approve → execute (paper-log or place, by mode).
-    Both venues are judged against the SAME fair values."""
+    Both venues are judged against the SAME fair values.
+
+    candidates: pre-discovered {venue: (adapter, [VenueMarket])} — pass this
+    on fast cycles so discovery runs on its own slow clock; None = discover
+    inline (tests, first cycle)."""
     from datetime import datetime, timezone
 
     from edge.execution.engine import strategy_filter
@@ -128,17 +150,10 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     from edge.venues.base import FillIntent
     from edge.venues.mapper import match_events_all, team_score
 
-    league_codes = set()
-    for group in (policy.leagues.get("allowlist") or {}).values():
-        league_codes.update(group)
-    venue_candidates = {}
-    for adapter in adapters:
-        try:
-            venue_candidates[adapter.name] = (adapter, adapter.discover_markets(league_codes))
-            log.info("%s: %s candidate markets", adapter.name,
-                     len(venue_candidates[adapter.name][1]))
-        except Exception as exc:  # noqa: BLE001
-            log.warning("%s discovery failed: %s", adapter.name, exc)
+    if candidates is not None:
+        venue_candidates = candidates
+    else:
+        venue_candidates = discover_all(adapters, policy)
 
     events = []
     for sport_key in sport_keys:
@@ -529,6 +544,13 @@ def main() -> None:
 
     last_report_day = ""
     last_recheck = time.time()
+    # Fast pricing cycles; discovery + settlement on their own slow clocks
+    # (10s cycles must not re-list every venue market or re-poll settlements).
+    discovery_s = int(os.environ.get("EDGE_DISCOVERY_SECONDS", "300"))
+    settle_s = int(os.environ.get("EDGE_SETTLE_SECONDS", "300"))
+    candidates: dict = {}
+    last_discovery = 0.0
+    last_settle = 0.0
     while True:
         try:
             # Deferred live mode: re-run the checklist every 30 min; arm on
@@ -548,9 +570,15 @@ def main() -> None:
                 else:
                     _post_status("checklist_pending", {"unchecked": items[:8]})
 
-            funnel = run_cycle(adapters, feed, policy, risk, ledger, sport_keys)
+            if not candidates or time.time() - last_discovery > discovery_s:
+                candidates = discover_all(adapters, policy)
+                last_discovery = time.time()
+            funnel = run_cycle(adapters, feed, policy, risk, ledger, sport_keys,
+                               candidates=candidates)
             funnel["account_link"] = {k: v["ok"] for k, v in account_link.items()}
-            funnel["settled"] = settle_cycle(adapters, ledger)
+            if time.time() - last_settle > settle_s:
+                funnel["settled"] = settle_cycle(adapters, ledger)
+                last_settle = time.time()
             if risk.is_live:
                 for a in adapters:
                     if a.name == "kalshi" and a.has_credentials():
