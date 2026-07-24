@@ -65,30 +65,39 @@ def run_checklist(ledger, policy, risk) -> tuple[bool, list[str]]:
         check("feed quota headroom", False, "feed unreachable")
         check("clocks synced", False, "feed unreachable")
 
-    # 2. Venue credentials valid and funded.
-    from edge.venues.kalshi import KalshiAdapter
+    # 2. Venue credentials valid and funded — only for ENABLED venues
+    # (EDGE_KALSHI=0 / EDGE_PMUS=0 disable a venue and skip its checks);
+    # at least one venue must be enabled with valid credentials.
+    venues_ok = 0
+    if os.environ.get("EDGE_KALSHI", "1") != "0":
+        from edge.venues.kalshi import KalshiAdapter
 
-    kalshi = KalshiAdapter()
-    if kalshi.has_credentials():
-        auth = kalshi.check_auth()
-        check("kalshi keys valid", auth.get("ok", False), auth.get("error", ""))
-        check("kalshi funded", auth.get("ok", False) and auth.get("balance_usd", 0) > 0,
-              f"balance=${auth.get('balance_usd', 0):.2f}")
-    else:
-        check("kalshi keys valid", False, "EDGE_KALSHI_KEY_ID/PRIVATE_KEY absent")
-        check("kalshi funded", False, "no credentials")
-    try:
-        from edge.venues.polymarket_us import PolymarketUSAdapter
-
-        if PolymarketUSAdapter.has_credentials():
-            auth = PolymarketUSAdapter().check_auth()
-            check("polymarket-us keys valid", auth.get("ok", False),
-                  auth.get("error", ""))
+        kalshi = KalshiAdapter()
+        if kalshi.has_credentials():
+            auth = kalshi.check_auth()
+            check("kalshi keys valid", auth.get("ok", False), auth.get("error", ""))
+            check("kalshi funded",
+                  auth.get("ok", False) and auth.get("balance_usd", 0) > 0,
+                  f"balance=${auth.get('balance_usd', 0):.2f}")
+            venues_ok += int(auth.get("ok", False))
         else:
-            check("polymarket-us keys valid", False,
-                  "EDGE_PMUS_KEY_ID/SECRET_KEY absent")
-    except Exception as exc:  # noqa: BLE001
-        check("polymarket-us keys valid", False, str(exc)[:120])
+            check("kalshi keys valid", False,
+                  "EDGE_KALSHI_KEY_ID/PRIVATE_KEY absent (or set EDGE_KALSHI=0)")
+    if os.environ.get("EDGE_PMUS", "1") != "0":
+        try:
+            from edge.venues.polymarket_us import PolymarketUSAdapter
+
+            if PolymarketUSAdapter.has_credentials():
+                auth = PolymarketUSAdapter().check_auth()
+                check("polymarket-us keys valid", auth.get("ok", False),
+                      auth.get("error", ""))
+                venues_ok += int(auth.get("ok", False))
+            else:
+                check("polymarket-us keys valid", False,
+                      "EDGE_PMUS_KEY_ID/SECRET_KEY absent (or set EDGE_PMUS=0)")
+        except Exception as exc:  # noqa: BLE001
+            check("polymarket-us keys valid", False, str(exc)[:120])
+    check("at least one live venue enabled+authed", venues_ok > 0)
 
     # 3. Mapper match rate >95% on allowlisted leagues (last 24h of PAPER).
     allow = set()
