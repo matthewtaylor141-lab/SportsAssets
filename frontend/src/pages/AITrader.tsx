@@ -76,6 +76,131 @@ interface LiveStatus {
   }[]
 }
 
+interface PmusAccount {
+  configured: boolean
+  hint?: string
+  error?: string
+  account_value?: number
+  cash?: number
+  buying_power?: number
+  open_value?: number
+  realized_pnl?: number
+  open_count?: number
+  settled_count?: number
+  open_positions?: { title: string; outcome: string | null; qty: number; cost: number; value: number }[]
+  recent_trades?: { time: string | null; title: string; qty: number; price: number; realized_pnl: number }[]
+}
+
+/** The REAL Polymarket US account, straight from the venue's portfolio API. */
+function PmusAccountCard() {
+  const [acct, setAcct] = useState<PmusAccount | null>(null)
+
+  useEffect(() => {
+    const load = () => api<PmusAccount>('/api/pmus-account').then(setAcct).catch(() => {})
+    load()
+    const t = setInterval(load, 30000)
+    return () => clearInterval(t)
+  }, [])
+
+  if (!acct) return null
+  if (!acct.configured) {
+    return (
+      <div className="card">
+        <h2 style={{ marginTop: 0 }}>💵 Polymarket US account</h2>
+        <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>
+          Not linked yet: add PMUS_KEY_ID and PMUS_SECRET_KEY (same values as on
+          edge-shadow) to the sportsassets-api service in Render.
+        </p>
+      </div>
+    )
+  }
+  if (acct.error) {
+    return (
+      <div className="card">
+        <h2 style={{ marginTop: 0 }}>💵 Polymarket US account</h2>
+        <p style={{ color: 'var(--critical)', fontSize: 13, margin: 0 }}>⚠ {acct.error}</p>
+      </div>
+    )
+  }
+  return (
+    <div className="card">
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <h2 style={{ margin: 0 }}>💵 Polymarket US account</h2>
+        <span className="chip" style={{ color: 'var(--good)', borderColor: 'var(--good)' }}>LIVE</span>
+        <span style={{ color: 'var(--muted)', fontSize: 12 }}>
+          straight from the venue · refreshes every 30s
+        </span>
+      </div>
+      <div className="statgrid" style={{ margin: '10px 0' }}>
+        <div className="stat">
+          <div className="label">Account value</div>
+          <div className="value">{fmtUsd(acct.account_value ?? 0)}</div>
+        </div>
+        <div className="stat">
+          <div className="label">Cash</div>
+          <div className="value">{fmtUsd(acct.cash ?? 0)}</div>
+        </div>
+        <div className="stat">
+          <div className="label">In open positions</div>
+          <div className="value">{fmtUsd(acct.open_value ?? 0)}</div>
+        </div>
+        <div className="stat">
+          <div className="label">Realized P&L</div>
+          <div className={`value ${(acct.realized_pnl ?? 0) >= 0 ? 'pos' : 'neg'}`}>
+            {fmtSignedUsd(acct.realized_pnl ?? 0)}
+          </div>
+        </div>
+        <div className="stat">
+          <div className="label">Open / settled</div>
+          <div className="value">{acct.open_count ?? 0} / {acct.settled_count ?? 0}</div>
+        </div>
+      </div>
+      {(acct.open_positions?.length ?? 0) > 0 && (
+        <div className="scroll-x">
+          <table className="data">
+            <thead>
+              <tr><th>Open position</th><th className="num">Qty</th><th className="num">Cost</th><th className="num">Value</th></tr>
+            </thead>
+            <tbody>
+              {acct.open_positions!.map((p, i) => (
+                <tr key={i}>
+                  <td>{p.title}{p.outcome ? ` — ${p.outcome}` : ''}</td>
+                  <td className="num">{p.qty}</td>
+                  <td className="num">{fmtUsd(p.cost)}</td>
+                  <td className={`num ${p.value >= p.cost ? 'pos' : 'neg'}`}>{fmtUsd(p.value)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {(acct.recent_trades?.length ?? 0) > 0 && (
+        <>
+          <h3 style={{ marginBottom: 4 }}>Recent trades</h3>
+          <div className="scroll-x">
+            <table className="data">
+              <thead>
+                <tr><th>When</th><th>Market</th><th className="num">Qty</th><th className="num">Price</th><th className="num">P&L</th></tr>
+              </thead>
+              <tbody>
+                {acct.recent_trades!.map((t, i) => (
+                  <tr key={i}>
+                    <td>{t.time ? new Date(t.time).toLocaleString() : '—'}</td>
+                    <td>{t.title}</td>
+                    <td className="num">{t.qty}</td>
+                    <td className="num">{(t.price * 100).toFixed(0)}¢</td>
+                    <td className={`num ${t.realized_pnl >= 0 ? 'pos' : 'neg'}`}>{fmtSignedUsd(t.realized_pnl)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 /** LIVE beta: real Polymarket orders (FOK limit, triple-capped). Only renders
  * meaningfully once LIVE_TRADING_ENABLED + credentials are configured. */
 function LiveBeta() {
@@ -314,6 +439,8 @@ export function AITrader() {
           <div className="value">{s?.slippage_p50 != null ? `${s.slippage_p50.toFixed(1)}¢` : '—'}</div>
         </div>
       </div>
+
+      <PmusAccountCard />
 
       <LiveBeta />
 

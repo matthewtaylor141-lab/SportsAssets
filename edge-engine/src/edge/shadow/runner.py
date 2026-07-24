@@ -408,10 +408,37 @@ def main() -> None:
     log.info("edge runner starting: mode=%s venues=%s, %s sports, %ss cycle",
              risk.mode, [a.name for a in adapters], len(sport_keys), cycle_seconds)
 
+    # Account-link self check: verify venue credentials at startup and surface
+    # the result in cycle telemetry (Engine tab) — the operator's confirmation
+    # that live keys are valid and the account is reachable. Never logs keys.
+    account_link: dict = {}
+    for a in adapters:
+        if not hasattr(a, "has_credentials"):
+            continue
+        if not a.has_credentials():
+            account_link[a.name] = {"ok": False, "detail": "no credentials set"}
+            continue
+        try:
+            auth = a.check_auth()
+            account_link[a.name] = {
+                "ok": bool(auth.get("ok")),
+                "detail": auth.get("error")
+                or (f"balance ${auth['balance_usd']:.2f}" if "balance_usd" in auth
+                    else "authenticated"),
+            }
+        except Exception as exc:  # noqa: BLE001
+            account_link[a.name] = {"ok": False,
+                                    "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}
+        log.info("account link %s: %s", a.name, account_link[a.name])
+    _post_status("startup", {"mode": risk.mode, "account_link": account_link,
+                             "venues": [a.name for a in adapters],
+                             "sports": len(sport_keys)})
+
     last_report_day = ""
     while True:
         try:
             funnel = run_cycle(adapters, feed, policy, risk, ledger, sport_keys)
+            funnel["account_link"] = {k: v["ok"] for k, v in account_link.items()}
             funnel["settled"] = settle_cycle(adapters, ledger)
             if risk.is_live:
                 for a in adapters:

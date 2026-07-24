@@ -467,6 +467,15 @@ async def live_status() -> dict:
     }
 
 
+@app.get("/api/pmus-account")
+async def api_pmus_account() -> dict:
+    """The REAL Polymarket US account, live from the venue's portfolio API:
+    value, cash, open positions, realized PnL, recent trades. 30s cache."""
+    from .pmus_account import account_snapshot
+
+    return await account_snapshot()
+
+
 @app.get("/api/ai-trader")
 async def ai_trader_report(days: int = Query(7, le=90)) -> dict:
     """AI TRADER paper account: live P&L of copying the source whale at the
