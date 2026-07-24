@@ -21,17 +21,17 @@ from pathlib import Path
 import requests
 
 from edge.execution.engine import Policy
-from edge.shadow.runner import SHADOW_LOG
+from edge.shadow.runner import _shadow_log_path
 
 GAMMA = "https://gamma-api.polymarket.com"
-GRADE_OUT = SHADOW_LOG.parent / "shadow_grade.json"
+GRADE_OUT = _shadow_log_path().parent / "shadow_grade.json"
 
 
 def load_fills() -> list[dict]:
-    if not SHADOW_LOG.exists():
+    if not _shadow_log_path().exists():
         return []
     out = []
-    with open(SHADOW_LOG) as f:
+    with open(_shadow_log_path()) as f:
         for line in f:
             line = line.strip()
             if line:

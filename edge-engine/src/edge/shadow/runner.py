@@ -30,7 +30,14 @@ def _data_dir() -> Path:
     return fallback
 
 
-SHADOW_LOG = _data_dir() / "shadow_fills.jsonl"
+def _shadow_log_path() -> Path:
+    """Resolved at call time (not import) so EDGE_DATA_DIR redirection —
+    tests, mounted disks — always wins."""
+    return _data_dir() / "shadow_fills.jsonl"
+
+
+# Back-compat name; prefer _shadow_log_path() for current value.
+SHADOW_LOG = _shadow_log_path()
 
 
 def log_shadow_fill(intent, book, feed_snapshot, would_fill: bool, whale_alignment=None):
@@ -51,7 +58,7 @@ def log_shadow_fill(intent, book, feed_snapshot, would_fill: bool, whale_alignme
         "feed": feed_snapshot,
         "would_fill": would_fill,
     }
-    with open(SHADOW_LOG, "a") as f:
+    with open(_shadow_log_path(), "a") as f:
         f.write(json.dumps(rec) + "\n")
     _record_to_platform(rec)
 
@@ -358,7 +365,7 @@ def main() -> None:
     from edge.venues.kalshi import KalshiAdapter
     from edge.venues.polymarket_us import PolymarketUSAdapter
 
-    SHADOW_LOG.parent.mkdir(parents=True, exist_ok=True)
+    _shadow_log_path().parent.mkdir(parents=True, exist_ok=True)
     policy = Policy.load()
     ledger = Ledger(db_path=os.environ.get(
         "EDGE_LEDGER_DB", str(_data_dir() / "edge_ledger.sqlite3")))
