@@ -356,9 +356,10 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                     {"h2h": ev.h2h, "home": ev.home, "away": ev.away},
                                     would_fill, whale_alignment=None)
 
-    # Cycle health: marks for the circuit breaker, watchdog inputs.
+    # Cycle health: marks for the circuit breaker (LIVE positions only —
+    # paper marks must never halt real trading), watchdog inputs.
     marked_delta = 0.0
-    for pos in ledger.open_positions():
+    for pos in ledger.open_positions(live_only=True):
         bid = marks.get(pos["market_key"])
         if bid is not None:
             marked_delta += (bid - pos["avg_cost"]) * pos["shares"]
@@ -479,6 +480,18 @@ def main() -> None:
     # (the human authorization already happened via the config edit; every
     # transition is logged and reported).
     configured_mode = risk.mode
+    # Bogus-halt repair: a circuit-breaker halt recorded with ZERO live fills
+    # in its window can only have come from paper numbers (fixed bug class) —
+    # clear it so a fake loss can never block real trading. Halts backed by
+    # actual live fills are untouched and keep their full 72h (no override).
+    halt = ledger.get_state("halt_until")
+    if halt and time.time() < float(halt.get("until", 0)):
+        if ledger.live_fill_count_since(float(halt.get("tripped_at", 0)) - 86_400) == 0:
+            ledger.set_state("halt_until", {"until": 0, "reason": "cleared",
+                                            "cleared": "bogus (no live fills in window)"})
+            ledger.log_mode(risk.mode, "halt cleared: tripped by paper marks, "
+                                       "zero live fills — bug, not a loss")
+            log.warning("cleared bogus circuit-breaker halt (no live fills in window)")
     if risk.mode != "PAPER":
         from edge.cli import run_checklist
 
@@ -553,9 +566,10 @@ def main() -> None:
     last_settle = 0.0
     while True:
         try:
-            # Deferred live mode: re-run the checklist every 30 min; arm on
-            # the first clean pass.
-            if configured_mode != risk.mode and time.time() - last_recheck > 1800:
+            # Deferred live mode: re-run the checklist every 5 min (env
+            # EDGE_CHECKLIST_RECHECK_S); arm on the first clean pass.
+            recheck_s = int(os.environ.get("EDGE_CHECKLIST_RECHECK_S", "300"))
+            if configured_mode != risk.mode and time.time() - last_recheck > recheck_s:
                 from edge.cli import run_checklist
 
                 last_recheck = time.time()

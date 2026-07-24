@@ -124,7 +124,10 @@ class RiskManager:
         halt = self.ledger.get_state(HALT_UNTIL)
         if halt and now < float(halt.get("until", 0)):
             return True
-        day_pnl = self.ledger.realized_pnl_since(now - 86_400) + marked_delta_usd
+        # LIVE-money numbers only: paper marks/realizations must never halt
+        # real trading (bug class: junk paper fills tripping the breaker).
+        day_pnl = self.ledger.realized_pnl_since(now - 86_400, live_only=True) \
+            + marked_delta_usd
         if day_pnl <= -self.caps.daily_loss_halt:
             until = now + self.caps.halt_hours * 3600
             self.ledger.set_state(HALT_UNTIL, {

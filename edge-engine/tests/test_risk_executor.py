@@ -113,10 +113,11 @@ def test_approve_claims_event_exactly_once_per_venue_in_paper(rig):
 def test_circuit_breaker_trips_and_auto_resumes(rig):
     ledger, risk = rig
     now = time.time()
-    # Realize a -$120 day via a resolved losing position.
+    # Realize a -$120 day via a resolved losing LIVE position (paper losses
+    # are excluded by design — see test_breaker_ignores_paper_losses).
     ledger.record_fill(fill_uid="cb1", venue="kalshi", market_key="kalshi:cb",
-                       side="BUY", qty=240, price=0.50, ts=now - 100, mode="PAPER")
-    ledger.record_resolution("kalshi:cb", 0.0, ts=now - 50)  # -$120
+                       side="BUY", qty=240, price=0.50, ts=now - 100, mode="LIVE_BETA")
+    ledger.record_resolution("kalshi:cb", 0.0, ts=now - 50)  # -$120 REAL
     assert risk.check_circuit_breaker(now=now) is True
     ok, why = risk.guard(now=now)
     assert not ok and "circuit_breaker" in why
@@ -290,3 +291,36 @@ def test_paper_claims_per_venue_live_claims_global(rig):
     a4, why = risk.approve("kalshi", "kalshi:m1", "ev-x", 10,
                            now=now, mode="LIVE_BETA")
     assert a3 > 0 and a4 == 0 and "one-per-event" in why
+
+
+# ── paper numbers must never halt live trading ─────────────────────────
+
+def test_breaker_ignores_paper_losses(rig):
+    ledger, risk = rig
+    now = time.time()
+    # A catastrophic PAPER day: -$500 realized on paper fills.
+    ledger.record_fill(fill_uid="pb", venue="kalshi", market_key="kalshi:pb",
+                       side="BUY", qty=1000, price=0.50, ts=now - 100, mode="PAPER")
+    ledger.record_resolution("kalshi:pb", 0.0, ts=now - 50)
+    assert risk.check_circuit_breaker(now=now) is False  # live book is clean
+    assert risk.guard(now=now)[0] is True
+
+
+def test_breaker_still_trips_on_live_losses(rig):
+    ledger, risk = rig
+    now = time.time()
+    ledger.record_fill(fill_uid="lb", venue="polymarket-us", market_key="polymarket-us:lb",
+                       side="BUY", qty=240, price=0.50, ts=now - 100, mode="LIVE_BETA")
+    ledger.record_resolution("polymarket-us:lb", 0.0, ts=now - 50)  # -$120 REAL
+    assert risk.check_circuit_breaker(now=now) is True
+
+
+def test_live_fill_count_distinguishes_bogus_halts(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    led.record_fill(fill_uid="p1", venue="kalshi", market_key="kalshi:p1",
+                    side="BUY", qty=10, price=0.5, ts=now, mode="PAPER")
+    assert led.live_fill_count_since(now - 3600) == 0  # paper-only => bogus halt
+    led.record_fill(fill_uid="l1", venue="polymarket-us", market_key="polymarket-us:l1",
+                    side="BUY", qty=2, price=0.5, ts=now, mode="LIVE_BETA")
+    assert led.live_fill_count_since(now - 3600) == 1

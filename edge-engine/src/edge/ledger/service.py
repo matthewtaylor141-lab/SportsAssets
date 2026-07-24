@@ -126,6 +126,15 @@ class Ledger:
         self._lock = threading.Lock()
         with self._conn() as conn:
             conn.executescript(_SCHEMA)
+            # In-place upgrades for existing ledgers: positions/realizations
+            # carry the fill mode so live-money risk controls (circuit
+            # breaker) never ingest paper numbers.
+            for table in ("positions", "realizations"):
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN mode TEXT "
+                                 f"NOT NULL DEFAULT 'PAPER'")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -188,22 +197,25 @@ class Ledger:
             conn.execute(
                 """
                 INSERT INTO positions (market_key, venue, league, shares, avg_cost,
-                                       cost_in, realized_pnl, fees_paid, resolved)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                                       cost_in, realized_pnl, fees_paid, resolved, mode)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT (market_key) DO UPDATE SET
                     shares=excluded.shares, avg_cost=excluded.avg_cost,
                     cost_in=excluded.cost_in, realized_pnl=excluded.realized_pnl,
                     fees_paid=positions.fees_paid + ?,
-                    league=COALESCE(positions.league, excluded.league)
+                    league=COALESCE(positions.league, excluded.league),
+                    -- a live fill promotes the position to live risk-tracking
+                    mode=CASE WHEN excluded.mode != 'PAPER' THEN excluded.mode
+                              ELSE positions.mode END
                 """,
                 (market_key, venue, league, pos.shares, pos.avg_cost, pos.cost_in,
-                 pos.realized_pnl, fee, int(pos.resolved), fee),
+                 pos.realized_pnl, fee, int(pos.resolved), mode, fee),
             )
             if sold > EPS:  # a real sale — even a $0 realization is an event
                 conn.execute(
-                    "INSERT INTO realizations (market_key, venue, league, kind, qty, pnl, ts) "
-                    "VALUES (?,?,?,?,?,?,?)",
-                    (market_key, venue, league, "sell", sold, realized, ts),
+                    "INSERT INTO realizations (market_key, venue, league, kind, qty, "
+                    "pnl, ts, mode) VALUES (?,?,?,?,?,?,?,?)",
+                    (market_key, venue, league, "sell", sold, realized, ts, mode),
                 )
             return {"applied": True, "realized": realized}
 
@@ -230,11 +242,12 @@ class Ledger:
             )
             # Always journal the settlement (qty = shares outstanding at resolve;
             # zero-remainder settles are legitimate 0-PnL events).
+            row_mode = row["mode"] if "mode" in row.keys() else "PAPER"
             conn.execute(
-                "INSERT INTO realizations (market_key, venue, league, kind, qty, pnl, ts) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO realizations (market_key, venue, league, kind, qty, "
+                "pnl, ts, mode) VALUES (?,?,?,?,?,?,?,?)",
                 (market_key, row["venue"], row["league"], "resolution",
-                 row["shares"], realized, ts),
+                 row["shares"], realized, ts, row_mode),
             )
             return {"applied": True, "realized": realized}
 
@@ -247,12 +260,12 @@ class Ledger:
             ).fetchone()
         return dict(row) if row else None
 
-    def open_positions(self) -> list[dict]:
+    def open_positions(self, live_only: bool = False) -> list[dict]:
+        q = "SELECT * FROM positions WHERE resolved=0 AND shares > ?"
+        if live_only:
+            q += " AND mode != 'PAPER'"
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM positions WHERE resolved=0 AND shares > ? "
-                "ORDER BY market_key", (EPS,)
-            ).fetchall()
+            rows = conn.execute(q + " ORDER BY market_key", (EPS,)).fetchall()
         return [dict(r) for r in rows]
 
     def summary(self) -> dict:
@@ -311,13 +324,24 @@ class Ledger:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def realized_pnl_since(self, ts: float) -> float:
-        """Gross realized PnL since ts (circuit-breaker input)."""
+    def realized_pnl_since(self, ts: float, live_only: bool = False) -> float:
+        """Gross realized PnL since ts. live_only=True restricts to
+        live-money realizations — the ONLY correct circuit-breaker input
+        (paper marks must never halt real trading)."""
+        q = "SELECT COALESCE(sum(pnl), 0) FROM realizations WHERE ts >= ?"
+        if live_only:
+            q += " AND mode != 'PAPER'"
+        with self._conn() as conn:
+            row = conn.execute(q, (ts,)).fetchone()
+        return float(row[0])
+
+    def live_fill_count_since(self, ts: float) -> int:
+        """Real-money fills in the window (bogus-halt detection input)."""
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT COALESCE(sum(pnl), 0) FROM realizations WHERE ts >= ?", (ts,)
+                "SELECT count(*) FROM fills WHERE ts >= ? AND mode != 'PAPER'", (ts,)
             ).fetchone()
-        return float(row[0])
+        return int(row[0])
 
     # ── engine state hub ────────────────────────────────────────────────
 
