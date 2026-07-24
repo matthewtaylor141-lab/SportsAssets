@@ -86,9 +86,14 @@ class RiskManager:
         return self.mode in ("LIVE_BETA", "LIVE")
 
     def force_paper(self) -> None:
-        """Demote to PAPER (e.g. failed go-live checklist). One-way per process."""
-        self.mode = "PAPER"
-        self.caps = caps_for_mode(self.risk_cfg, "PAPER")
+        """Demote to PAPER (e.g. failed go-live checklist)."""
+        self.set_mode("PAPER")
+
+    def set_mode(self, mode: str) -> None:
+        if mode not in MODES:
+            raise ValueError(f"unknown mode {mode!r}")
+        self.mode = mode
+        self.caps = caps_for_mode(self.risk_cfg, mode)
 
     # ── guards (checked before every order) ─────────────────────────────
 

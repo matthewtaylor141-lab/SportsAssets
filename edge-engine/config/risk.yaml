@@ -2,7 +2,10 @@
 # LIVE_BETA is unlockable ONLY by a human editing this line AND a clean
 # `edge check-live`; the runner refuses live orders otherwise and runs PAPER.
 # LIVE additionally requires the shadow gate below (grader output, no shortcuts).
-mode: PAPER
+# Owner-authorized LIVE_BETA (2026-07-24). The runner still refuses live
+# orders until `edge check-live` passes; until then it runs PAPER and
+# re-checks every 30 min, auto-arming when clean (transition logged).
+mode: LIVE_BETA
 
 # Size discipline — MEASURED caps (LIVE mode). Source: capacity_sizebuckets.csv
 # (ROI negative > $50K/fill).

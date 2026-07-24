@@ -61,7 +61,7 @@ def _event(fresh=True, home_odds=2.00):
 
 def _rig(tmp_path):
     ledger = Ledger(db_path=str(tmp_path / "l.sqlite3"))
-    return ledger, RiskManager(ledger, POLICY.risk)
+    return ledger, RiskManager(ledger, {**POLICY.risk, "mode": "PAPER"})
 
 
 def test_paper_cycle_records_fill_and_stats(tmp_path, monkeypatch):

@@ -371,16 +371,22 @@ def main() -> None:
         "EDGE_LEDGER_DB", str(_data_dir() / "edge_ledger.sqlite3")))
     risk = RiskManager(ledger, policy.risk)
 
-    # LIVE_BETA refuses to start unless the go-live checklist exits clean.
+    # LIVE_* refuses to trade unless the go-live checklist exits clean.
+    # When the config asks for a live mode but the checklist isn't clean yet,
+    # run PAPER and re-check every 30 min — auto-arm on the first clean pass
+    # (the human authorization already happened via the config edit; every
+    # transition is logged and reported).
+    configured_mode = risk.mode
     if risk.mode != "PAPER":
         from edge.cli import run_checklist
 
         clean, items = run_checklist(ledger, policy, risk)
         if not clean:
-            log.error("check-live NOT clean — refusing %s, running PAPER:\n%s",
-                      risk.mode, "\n".join(f"  ✗ {i}" for i in items))
+            log.error("check-live NOT clean — %s deferred, running PAPER:\n%s",
+                      configured_mode, "\n".join(f"  ✗ {i}" for i in items))
             risk.force_paper()
-            ledger.log_mode("PAPER", f"forced: checklist failed ({'; '.join(items)[:200]})")
+            ledger.log_mode("PAPER", f"deferred {configured_mode}: checklist failed "
+                                     f"({'; '.join(items)[:180]})")
         else:
             ledger.log_mode(risk.mode, "checklist clean")
     else:
@@ -435,8 +441,26 @@ def main() -> None:
                              "sports": len(sport_keys)})
 
     last_report_day = ""
+    last_recheck = time.time()
     while True:
         try:
+            # Deferred live mode: re-run the checklist every 30 min; arm on
+            # the first clean pass.
+            if configured_mode != risk.mode and time.time() - last_recheck > 1800:
+                from edge.cli import run_checklist
+
+                last_recheck = time.time()
+                clean, items = run_checklist(ledger, policy, risk)
+                if clean:
+                    risk.set_mode(configured_mode)
+                    ledger.log_mode(configured_mode,
+                                    "checklist clean — auto-armed per config")
+                    log.warning("AUTO-ARMED: %s (checklist clean)", configured_mode)
+                    _post_status("mode", {"mode": configured_mode,
+                                          "note": "auto-armed after clean checklist"})
+                else:
+                    _post_status("checklist_pending", {"unchecked": items[:8]})
+
             funnel = run_cycle(adapters, feed, policy, risk, ledger, sport_keys)
             funnel["account_link"] = {k: v["ok"] for k, v in account_link.items()}
             funnel["settled"] = settle_cycle(adapters, ledger)

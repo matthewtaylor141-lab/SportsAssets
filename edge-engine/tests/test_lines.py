@@ -148,7 +148,7 @@ def test_paper_cycle_trades_a_total(tmp_path, monkeypatch):
             return 0.0
 
     ledger = Ledger(db_path=str(tmp_path / "l.sqlite3"))
-    risk = RiskManager(ledger, POLICY.risk)
+    risk = RiskManager(ledger, {**POLICY.risk, "mode": "PAPER"})
     funnel = run_cycle([Venue()], Feed(), POLICY, risk, ledger, ["icehockey_nhl"])
     # Over fair ≈0.49 vs ask 0.43 -> ~6c edge in the totals 0.40-0.50 window.
     assert funnel["by_category"].get("total", 0) >= 1
