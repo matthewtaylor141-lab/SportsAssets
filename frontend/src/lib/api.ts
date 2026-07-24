@@ -2,6 +2,9 @@ export const API_BASE: string = import.meta.env.VITE_API_BASE || 'http://localho
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(`${API_BASE}${path}`, {
+    // 20s ceiling: a hung request fails fast instead of freezing the UI
+    // (callers catch and show their own placeholder/error states).
+    signal: init?.signal ?? AbortSignal.timeout(20000),
     headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
     ...init,
   })

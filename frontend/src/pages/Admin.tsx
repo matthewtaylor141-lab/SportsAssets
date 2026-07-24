@@ -20,34 +20,33 @@ export function Admin() {
   const [err, setErr] = useState('')
 
   const refresh = useCallback(async (tok: string) => {
+    // 1) Cheap auth check first (no heavy queries) — unlock is instant and
+    //    never blocked by a slow dashboard panel.
     try {
-      const [h, l, r] = await Promise.all([
-        adminApi<Health>('/api/admin/health', tok),
-        adminApi<any>('/api/admin/latency', tok),
-        adminApi<{ whales: Whale[] }>('/api/admin/roster', tok),
-      ])
-      setHealth(h)
-      setLatency(l)
-      setRoster(r)
-      setAuthed(true)
-      setErr('')
-      sessionStorage.setItem('sa_admin_token', tok)
-    } catch {
-      setAuthed(false)
-      // Disambiguate the failure so debugging doesn't need guesswork.
-      try {
-        const ping = await adminApi<{ received_chars: number; configured: boolean; match: boolean }>(
-          '/api/admin/ping', tok, { method: 'POST', body: '{}' },
-        )
-        if (ping.match) setErr('Token OK but an admin call failed — pull to refresh and retry.')
-        else if (!ping.configured)
+      const ping = await adminApi<{ received_chars: number; configured: boolean; match: boolean }>(
+        '/api/admin/ping', tok, { method: 'POST', body: '{}' },
+      )
+      if (!ping.match) {
+        setAuthed(false)
+        if (!ping.configured)
           setErr('Server is still running the DEFAULT token — your ADMIN_TOKEN change has not applied. In Render: check it was saved on sportsassets-api and that the latest deploy succeeded.')
         else
           setErr(`Wrong token: server has a custom token set; it received ${ping.received_chars} character(s) from you. Check the exact value saved in Render.`)
-      } catch {
-        setErr('API unreachable — the sportsassets-api service is down or still deploying. Check its status in Render.')
+        return
       }
+    } catch {
+      setAuthed(false)
+      setErr('API unreachable — the sportsassets-api service is down or still deploying. Check its status in Render.')
+      return
     }
+    setAuthed(true)
+    setErr('')
+    sessionStorage.setItem('sa_admin_token', tok)
+    // 2) Panels load independently; a slow one shows its own placeholder
+    //    instead of holding the whole page hostage.
+    adminApi<Health>('/api/admin/health', tok).then(setHealth).catch(() => {})
+    adminApi<any>('/api/admin/latency', tok).then(setLatency).catch(() => {})
+    adminApi<{ whales: Whale[] }>('/api/admin/roster', tok).then(setRoster).catch(() => {})
   }, [])
 
   useEffect(() => {
