@@ -217,12 +217,19 @@ def test_alternate_lines_fold_into_spread_total_buckets(monkeypatch):
 
 def test_games_aware_ttl(monkeypatch):
     client = TheOddsAPIClient(api_key="k", cache_ttl_s=10)
-    # No games within the live/imminent window -> slow TTL.
+    # No games within the live/imminent window.
     idle = dict(_raw_event(), commence_time="2026-12-01T15:00:00Z")
     monkeypatch.setattr(client._sess, "get", lambda *a, **k: _FakeResp([idle]))
     client.fetch_events("soccer_epl")
     assert client._sport_active["soccer_epl"] is False
+    # Plentiful quota: stay fast everywhere (a slow TTL would make quotes
+    # fail the 30s freshness rule and silently disable the sport).
+    assert client._ttl_for("soccer_epl") == 10
+    # Only conserve when the budget is actually low.
+    client._quota["remaining"] = 1000.0
     assert client._ttl_for("soccer_epl") >= 300
+    client._quota["remaining"] = 4_500_000.0
+    assert client._ttl_for("soccer_epl") == 10
     # Imminent game -> fast TTL.
     import datetime as dt
 

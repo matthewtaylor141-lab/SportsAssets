@@ -60,6 +60,7 @@ interface EngineStatus {
     account_link?: Record<string, boolean>
     edges?: { evaluated: number; best_cents: number; near_miss_1c: number; explored: number }
     feed_quota?: { remaining?: number; used?: number }
+    not_armed?: { want: string; blocked_by: string[] }
     stream?: Record<string, { connected: boolean; subscribed: number; cached: number; updates: number }>
     book_sample?: Record<string, unknown>
     error?: string
@@ -319,6 +320,12 @@ export function Engine() {
               </span>
             ))}
             {status.detail?.mode && <> · mode: <b>{status.detail.mode}</b></>}
+            {status.detail?.not_armed && (
+              <span style={{ color: 'var(--critical)' }}>
+                {' '}· NOT ARMED (want {status.detail.not_armed.want}) — blocked by:{' '}
+                {status.detail.not_armed.blocked_by.join('; ')}
+              </span>
+            )}
             {status.detail?.account_link && (
               <> · account: {Object.entries(status.detail.account_link)
                 .map(([v, ok]) => `${v} ${ok ? '✓ linked' : '✗ not linked'}`).join(', ')}</>

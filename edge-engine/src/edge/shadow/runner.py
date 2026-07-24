@@ -133,7 +133,8 @@ def discover_all(adapters, policy) -> dict:
 
 
 def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str],
-              candidates: dict | None = None, match_cache: dict | None = None) -> dict:
+              candidates: dict | None = None, match_cache: dict | None = None,
+              explored_seen: set | None = None) -> dict:
     """One sweep across all venues: feed → map (0.95 gate) → de-vig → book →
     strategy filter → risk approve → execute (paper-log or place, by mode).
     Both venues are judged against the SAME fair values.
@@ -154,6 +155,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         venue_candidates = candidates
     else:
         venue_candidates = discover_all(adapters, policy)
+    if explored_seen is None:
+        explored_seen = set()  # standalone call: dedupe within this cycle
 
     events = []
     for sport_key in sport_keys:
@@ -295,13 +298,19 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                 and 0 < verdict.threshold - verdict.edge <= 0.01):
                             es["near_miss_1c"] += 1
                     if not verdict.ok:
-                        # Below-threshold STUDY (paper evidence only, never the
-                        # ledger): positive edges above half-threshold are
-                        # logged tagged 'exploration' so the grader measures
-                        # whether small mispricings actually pay on these
-                        # venues — evidence-driven threshold tuning.
+                        # Below-threshold STUDY (JSONL only — never the ledger,
+                        # never orders): edges between half-threshold and
+                        # threshold are logged tagged 'exploration' so the
+                        # grader can measure whether small mispricings pay on
+                        # these venues. Implausible edges are mapping errors,
+                        # not study data, and are excluded. One record per
+                        # market per discovery window (not once per 10s cycle).
+                        max_edge = float(policy.bands.get("max_believable_edge", 0.08))
                         if (verdict.threshold is not None
-                                and verdict.edge >= verdict.threshold / 2):
+                                and verdict.threshold / 2 <= verdict.edge <= max_edge
+                                and explored_seen is not None
+                                and mkey not in explored_seen):
+                            explored_seen.add(mkey)
                             funnel.setdefault("edges", {}).setdefault("explored", 0)
                             funnel["edges"]["explored"] += 1
                             explore_intent = FillIntent(
@@ -508,6 +517,7 @@ def main() -> None:
         if not clean:
             log.error("check-live NOT clean — %s deferred, running PAPER:\n%s",
                       configured_mode, "\n".join(f"  ✗ {i}" for i in items))
+            last_checklist_items = items
             risk.force_paper()
             ledger.log_mode("PAPER", f"deferred {configured_mode}: checklist failed "
                                      f"({'; '.join(items)[:180]})")
@@ -572,6 +582,8 @@ def main() -> None:
     settle_s = int(os.environ.get("EDGE_SETTLE_SECONDS", "300"))
     candidates: dict = {}
     match_cache: dict = {}
+    explored_seen: set = set()
+    last_checklist_items: list[str] = []
     last_discovery = 0.0
     last_settle = 0.0
     while True:
@@ -588,21 +600,27 @@ def main() -> None:
                 clean, items = run_checklist(ledger, policy, risk)
                 if clean:
                     risk.set_mode(configured_mode)
+                    last_checklist_items = []
                     ledger.log_mode(configured_mode,
                                     "checklist clean — auto-armed per config")
                     log.warning("AUTO-ARMED: %s (checklist clean)", configured_mode)
-                    _post_status("mode", {"mode": configured_mode,
-                                          "note": "auto-armed after clean checklist"})
                 else:
-                    _post_status("checklist_pending", {"unchecked": items[:8]})
+                    last_checklist_items = items
 
             if not candidates or time.time() - last_discovery > discovery_s:
                 candidates = discover_all(adapters, policy)
-                match_cache = {}  # mappings only change with discovery
+                match_cache = {}    # mappings only change with discovery
+                explored_seen = set()  # one study record per market per window
                 last_discovery = time.time()
             funnel = run_cycle(adapters, feed, policy, risk, ledger, sport_keys,
-                               candidates=candidates, match_cache=match_cache)
+                               candidates=candidates, match_cache=match_cache,
+                               explored_seen=explored_seen)
             funnel["account_link"] = {k: v["ok"] for k, v in account_link.items()}
+            if configured_mode != risk.mode:
+                # Not armed: say WHY, every cycle, on the Engine tab.
+                funnel["not_armed"] = {"want": configured_mode,
+                                       "blocked_by": last_checklist_items[:6]
+                                       or ["awaiting first recheck"]}
             if time.time() - last_settle > settle_s:
                 funnel["settled"] = settle_cycle(adapters, ledger)
                 last_settle = time.time()

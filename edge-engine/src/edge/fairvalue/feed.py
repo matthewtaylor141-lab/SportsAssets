@@ -160,10 +160,16 @@ class TheOddsAPIClient(OddsFeed):
     ALT_LINE_SPORTS = {"basketball_nba", "americanfootball_nfl",
                        "icehockey_nhl", "basketball_wnba"}
 
+    # Below this many remaining credits, start conserving; above it, keep
+    # every sport fresh (a slow TTL makes quotes fail the 30s freshness
+    # rule, which silently disables trading on that sport).
+    QUOTA_CONSERVE_BELOW = 50_000
+
     def _ttl_for(self, sport_key: str) -> float:
-        """Games-aware quota allocation: sports with live/imminent games get
-        the fast TTL; idle sports coast on a slow one. Same total budget,
-        freshness concentrated where edges actually appear."""
+        """Fast TTL for everything while quota is plentiful. Only when the
+        budget runs low do idle sports (no game within -6h..+4h) coast."""
+        if self._quota.get("remaining", float("inf")) > self.QUOTA_CONSERVE_BELOW:
+            return self._cache_ttl
         return self._cache_ttl if self._sport_active.get(sport_key, True) \
             else max(self._cache_ttl, 300.0)
 

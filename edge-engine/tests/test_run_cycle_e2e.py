@@ -135,3 +135,31 @@ def test_edge_telemetry_and_exploration_logging(tmp_path, monkeypatch):
     log = Path(str(tmp_path)) / "shadow_fills.jsonl"
     recs = [_json.loads(line) for line in log.read_text().splitlines()]
     assert any(r.get("tag") == "exploration" for r in recs)
+
+
+def test_exploration_excludes_implausible_and_dedupes(tmp_path, monkeypatch):
+    """Implausible 'edges' are mapping errors, not study data; and a market
+    is studied once per discovery window, not once per 10s cycle."""
+    import json as _json
+    from pathlib import Path
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    log = Path(str(tmp_path)) / "shadow_fills.jsonl"
+
+    # Implausible: fair 0.50 vs ask 0.09 -> 41c "edge". Never studied.
+    run_cycle([StubVenue(ask_price=0.09)], StubFeed([_event()]),
+              POLICY, risk, ledger, ["soccer_epl"])
+    recs = [_json.loads(x) for x in log.read_text().splitlines()] if log.exists() else []
+    assert not any(r.get("tag") == "exploration" for r in recs)
+
+    # Near-miss (1.5c vs 2.0c needed): each of the event's two outcome
+    # markets is studied ONCE across repeated cycles (2 records, not 6).
+    log.write_text("")
+    seen: set = set()
+    for _ in range(3):
+        run_cycle([StubVenue(ask_price=0.485)], StubFeed([_event()]),
+                  POLICY, risk, ledger, ["soccer_epl"], explored_seen=seen)
+    recs = [_json.loads(x) for x in log.read_text().splitlines()]
+    assert sum(1 for r in recs if r.get("tag") == "exploration") == 2
+    assert len(seen) == 2  # one entry per outcome market
