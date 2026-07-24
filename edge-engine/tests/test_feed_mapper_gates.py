@@ -137,3 +137,52 @@ def test_state_hub_round_trip(tmp_path):
     led.log_mode("LIVE_BETA", "checklist clean")
     modes = led.mode_transitions()
     assert modes[0]["mode"] == "LIVE_BETA" and modes[1]["mode"] == "PAPER"
+
+
+# ── PM-US live book stream (build: WS integration) ─────────────────────
+
+def test_stream_cache_serves_and_expires():
+    from edge.venues.pmus_stream import BookStreamer
+
+    s = BookStreamer("k", "s", autostart=False)
+    s._on_market_data({"marketData": {"marketSlug": "m1",
+                                      "offers": [{"px": {"value": "0.47"}, "qty": "100"}]}})
+    assert s.get("m1")["offers"][0]["qty"] == "100"
+    assert s.get("m2") is None
+    s._cache["m1"] = (time.time() - 120, s._cache["m1"][1])
+    assert s.get("m1", max_age_s=90) is None  # stale entries never serve
+    st = s.stats()
+    assert st["updates"] == 1 and st["connected"] is False
+
+
+def test_stream_ensure_dedupes_and_bounds():
+    from edge.venues.pmus_stream import BookStreamer
+
+    s = BookStreamer("k", "s", autostart=False)
+    s.ensure(["a", "b", "a", ""])
+    s.ensure(["b", "c"])
+    assert s._subscribed == {"a", "b", "c"}
+    assert sorted(s._pending) == ["a", "b", "c"]
+
+
+def test_adapter_serves_book_from_stream_without_rest():
+    import types
+
+    from edge.venues.polymarket_us import PolymarketUSAdapter
+    from edge.venues.pmus_stream import BookStreamer
+
+    a = PolymarketUSAdapter.__new__(PolymarketUSAdapter)
+    a.book_errors = {}
+    a._stream = BookStreamer("k", "s", autostart=False)
+    a._stream._on_market_data({"marketData": {"marketSlug": "slug-x",
+        "bids": [{"px": {"value": "0.45"}, "qty": "50"}],
+        "offers": [{"px": {"value": "0.47"}, "qty": "80"}]}})
+
+    class ExplodingMarkets:  # REST must not be touched on a cache hit
+        def book(self, slug):
+            raise AssertionError("REST called despite stream cache hit")
+
+    a._pub = types.SimpleNamespace(markets=ExplodingMarkets())
+    book = a.get_book("evt", "slug-x")
+    assert book.asks[0].price == 0.47 and book.asks[0].size == 80
+    assert book.bids[0].price == 0.45

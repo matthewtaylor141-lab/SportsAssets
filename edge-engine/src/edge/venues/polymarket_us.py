@@ -39,6 +39,20 @@ class PolymarketUSAdapter(VenueAdapter):
         self._auth = None
         self.book_errors: dict[str, int] = {}
         self._taker_fee = float(os.environ.get("EDGE_PMUS_TAKER_FEE", "0.0"))
+        # Live book stream (push-latency books). Needs API keys for the WS
+        # handshake; fail-soft — REST remains the fallback path.
+        self._stream = None
+        if self.has_credentials() and os.environ.get("EDGE_PMUS_WS", "1") != "0":
+            try:
+                from .pmus_stream import BookStreamer
+
+                self._stream = BookStreamer(os.environ["EDGE_PMUS_KEY_ID"],
+                                            os.environ["EDGE_PMUS_SECRET_KEY"])
+            except Exception as exc:  # noqa: BLE001
+                log.warning("book stream unavailable, using REST: %s", exc)
+
+    def stream_stats(self) -> dict | None:
+        return self._stream.stats() if self._stream else None
 
     # ── credentials / auth ─────────────────────────────────────────────
 
@@ -168,18 +182,18 @@ class PolymarketUSAdapter(VenueAdapter):
             census["error"] = f"{type(exc).__name__}: {str(exc)[:150]}"
             log.warning("polymarket-us discovery failed: %s", exc)
         self.last_census = census
+        # Stream every discovered outcome book — books arrive by push before
+        # the pricing loop ever asks for them.
+        if self._stream is not None and out:
+            self._stream.ensure([slug for m in out
+                                 for slug in m.outcome_tokens.values()])
         return out
 
     def _book_err(self, cause: str) -> None:
         self.book_errors[cause] = self.book_errors.get(cause, 0) + 1
 
-    def get_book(self, market_id: str, market_slug: str) -> MarketBook | None:
-        try:
-            raw = self._pub.markets.book(market_slug) or {}
-        except Exception as exc:  # noqa: BLE001
-            self._book_err(f"exc_{type(exc).__name__}")
-            return None
-
+    @staticmethod
+    def _parse_levels(body: dict) -> tuple[list[BookLevel], list[BookLevel]]:
         def levels(rows, reverse):
             out = []
             for lvl in rows or []:
@@ -192,6 +206,28 @@ class PolymarketUSAdapter(VenueAdapter):
                     out.append(BookLevel(px, qty))
             return sorted(out, key=lambda x: -x.price if reverse else x.price)
 
+        return (levels(body.get("bids"), reverse=True),
+                levels(body.get("offers") or body.get("asks"), reverse=False))
+
+    def get_book(self, market_id: str, market_slug: str) -> MarketBook | None:
+        # Push-latency path: serve from the live stream cache when current.
+        if self._stream is not None:
+            md = self._stream.get(market_slug)
+            if md is not None:
+                bids, asks = self._parse_levels(md)
+                if asks:
+                    return MarketBook(venue=self.name, market_id=market_id,
+                                      outcome_id=market_slug, bids=bids,
+                                      asks=asks, ts=time.time())
+            else:
+                self._stream.ensure([market_slug])  # stream it from now on
+
+        try:
+            raw = self._pub.markets.book(market_slug) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._book_err(f"exc_{type(exc).__name__}")
+            return None
+
         # Measured venue shape (funnel book-sample 2026-07-24): the payload
         # nests under "marketData". Accept that, "book", or top-level.
         body = raw
@@ -199,8 +235,7 @@ class PolymarketUSAdapter(VenueAdapter):
             if isinstance(raw.get(key), dict):
                 body = raw[key]
                 break
-        bids = levels(body.get("bids"), reverse=True)
-        asks = levels(body.get("offers") or body.get("asks"), reverse=False)
+        bids, asks = self._parse_levels(body)
 
         if not asks:
             # Depth book empty — fall back to the venue's BBO endpoint

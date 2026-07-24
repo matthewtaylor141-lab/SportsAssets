@@ -381,6 +381,11 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         if sample:
             funnel.setdefault("book_sample", {})[adapter.name] = sample
             adapter.last_book_sample = None
+        stream_stats = getattr(adapter, "stream_stats", None)
+        if callable(stream_stats):
+            stats = stream_stats()
+            if stats:
+                funnel.setdefault("stream", {})[adapter.name] = stats
     return funnel
 
 

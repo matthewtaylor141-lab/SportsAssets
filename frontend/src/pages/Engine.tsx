@@ -60,6 +60,7 @@ interface EngineStatus {
     account_link?: Record<string, boolean>
     edges?: { evaluated: number; best_cents: number; near_miss_1c: number; explored: number }
     feed_quota?: { remaining?: number; used?: number }
+    stream?: Record<string, { connected: boolean; subscribed: number; cached: number; updates: number }>
     book_sample?: Record<string, unknown>
     error?: string
   }
@@ -312,6 +313,11 @@ export function Engine() {
                 {' '}· odds quota: {status.detail.feed_quota.remaining} left
               </span>
             )}
+            {status.detail?.stream && Object.entries(status.detail.stream).map(([v, s]) => (
+              <span key={v} style={{ color: s.connected ? 'var(--good)' : 'var(--warning)' }}>
+                {' '}· {v} stream: {s.connected ? '⚡ live' : 'reconnecting'} ({s.cached} books, {s.updates} updates)
+              </span>
+            ))}
             {status.detail?.mode && <> · mode: <b>{status.detail.mode}</b></>}
             {status.detail?.account_link && (
               <> · account: {Object.entries(status.detail.account_link)
