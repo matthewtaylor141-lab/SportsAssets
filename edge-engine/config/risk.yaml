@@ -13,18 +13,20 @@ per_day_deployment_usd: 250000
 working_capital_usd: 0   # set only after shadow gate passes
 shadow_gate: {min_days: 60, min_fills_per_venue: 5000, min_net_roi: 0.015}
 
-# Beta risk profile (bankroll $500-$1,000): measured caps scaled down.
+# Beta risk profile — MICRO tier (owner request 2026-07-24): smallest
+# executable size while the venue sells whole contracts (1-2 contracts
+# ~= $1 at our 40-55c entry windows; $0.10/trade is physically impossible).
 # Used by BOTH LIVE_BETA and PAPER so paper evidence reflects live behavior.
 profiles:
   live_beta:
-    per_fill_usd_default: 10
-    per_fill_usd_max: 25
-    per_market_exposure_usd: 50
-    per_day_deployment_usd: 250
+    per_fill_usd_default: 1
+    per_fill_usd_max: 1
+    per_market_exposure_usd: 5
+    per_day_deployment_usd: 25
     one_position_per_event: true      # ever; no adds after first fill
-    daily_loss_halt_usd: 100          # realized+marked -> halt all trading
+    daily_loss_halt_usd: 15           # realized+marked -> halt all trading
     halt_hours: 72                    # then auto-resume; NO manual override
-    venue_bankroll_split: 0.5         # Kalshi / Polymarket US halves
+    venue_bankroll_split: 1.0         # single-venue beta (Kalshi disabled)
 
 # Watchdog: any breach halts live trading until inputs are healthy again.
 watchdog:
