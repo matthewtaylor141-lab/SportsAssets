@@ -186,3 +186,51 @@ def test_adapter_serves_book_from_stream_without_rest():
     book = a.get_book("evt", "slug-x")
     assert book.asks[0].price == 0.47 and book.asks[0].size == 80
     assert book.bids[0].price == 0.45
+
+
+# ── free-tier speedups: alternates, games-aware TTL ────────────────────
+
+def test_alternate_lines_fold_into_spread_total_buckets(monkeypatch):
+    client = TheOddsAPIClient(api_key="k")
+    raw = {
+        "home_team": "Lakers", "away_team": "Celtics",
+        "commence_time": "2026-08-01T15:00:00Z",
+        "bookmakers": [{"key": "pinnacle", "markets": [
+            {"key": "h2h", "outcomes": [
+                {"name": "Lakers", "price": 1.9}, {"name": "Celtics", "price": 1.9}]},
+            {"key": "spreads", "outcomes": [
+                {"name": "Lakers", "price": 1.9, "point": -5.5},
+                {"name": "Celtics", "price": 1.9, "point": 5.5}]},
+            {"key": "alternate_spreads", "outcomes": [
+                {"name": "Lakers", "price": 2.4, "point": -8.5},
+                {"name": "Celtics", "price": 1.55, "point": 8.5}]},
+            {"key": "alternate_totals", "outcomes": [
+                {"name": "Over", "price": 2.1, "point": 215.5},
+                {"name": "Under", "price": 1.75, "point": 215.5}]},
+        ]}],
+    }
+    monkeypatch.setattr(client._sess, "get", lambda *a, **k: _FakeResp([raw]))
+    [ev] = client.fetch_events("basketball_nba")
+    assert "Lakers -5.5" in ev.spreads and "Lakers -8.5" in ev.spreads
+    assert "Over 215.5" in ev.totals
+
+
+def test_games_aware_ttl(monkeypatch):
+    client = TheOddsAPIClient(api_key="k", cache_ttl_s=10)
+    # No games within the live/imminent window -> slow TTL.
+    idle = dict(_raw_event(), commence_time="2026-12-01T15:00:00Z")
+    monkeypatch.setattr(client._sess, "get", lambda *a, **k: _FakeResp([idle]))
+    client.fetch_events("soccer_epl")
+    assert client._sport_active["soccer_epl"] is False
+    assert client._ttl_for("soccer_epl") >= 300
+    # Imminent game -> fast TTL.
+    import datetime as dt
+
+    soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    live = dict(_raw_event(), commence_time=soon)
+    client._cache.clear()
+    monkeypatch.setattr(client._sess, "get", lambda *a, **k: _FakeResp([live]))
+    client.fetch_events("soccer_epl")
+    assert client._sport_active["soccer_epl"] is True
+    assert client._ttl_for("soccer_epl") == 10

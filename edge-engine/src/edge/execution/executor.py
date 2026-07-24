@@ -85,7 +85,10 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
         qty = int(size_usd / ask_price)
         if qty < 1:
             return {"placed": False, "filled_usd": 0.0, "status": "sub_contract"}
-        result = adapter.place_order(outcome_id, round(ask_price, 2), qty)
+        # Micro orders skip the preview round-trip (FOK limit already bounds
+        # cost); larger sizes keep the venue cost pre-check.
+        result = adapter.place_order(outcome_id, round(ask_price, 2), qty,
+                                     preview=size_usd > 25)
         if result["ok"]:
             filled = float(result["count"])
             px = float(result["price"])

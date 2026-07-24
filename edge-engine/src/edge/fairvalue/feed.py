@@ -125,6 +125,8 @@ class TheOddsAPIClient(OddsFeed):
         self._quota_reserve = quota_reserve
         self._quota: dict[str, float] = {}
         self._server_skew_s: float | None = None  # local - server clock, from Date header
+        # sport_key -> has live/imminent games (drives per-sport TTL)
+        self._sport_active: dict[str, bool] = {}
 
     def quota(self) -> dict:
         return dict(self._quota)
@@ -152,19 +154,36 @@ class TheOddsAPIClient(OddsFeed):
             except (TypeError, ValueError):
                 pass
 
+    # Alternate spread/total lines multiply line-exact venue matches on the
+    # majors (the kch123 hunting ground). Costs more credits per call, so
+    # scoped to majors only; EDGE_ALT_LINES=0 disables.
+    ALT_LINE_SPORTS = {"basketball_nba", "americanfootball_nfl",
+                       "icehockey_nhl", "basketball_wnba"}
+
+    def _ttl_for(self, sport_key: str) -> float:
+        """Games-aware quota allocation: sports with live/imminent games get
+        the fast TTL; idle sports coast on a slow one. Same total budget,
+        freshness concentrated where edges actually appear."""
+        return self._cache_ttl if self._sport_active.get(sport_key, True) \
+            else max(self._cache_ttl, 300.0)
+
     def fetch_events(self, sport_key: str) -> list[FeedEvent]:
         now = time.time()
         cached = self._cache.get(sport_key)
-        if cached and now - cached[0] < self._cache_ttl:
+        if cached and now - cached[0] < self._ttl_for(sport_key):
             return cached[1]
         if self._quota.get("remaining", float("inf")) <= self._quota_reserve:
             log.warning("odds quota at reserve floor (%s left) — serving stale cache",
                         self._quota.get("remaining"))
             return cached[1] if cached else []
+        markets = "h2h,totals,spreads"
+        if (sport_key in self.ALT_LINE_SPORTS
+                and os.environ.get("EDGE_ALT_LINES", "1") != "0"):
+            markets += ",alternate_spreads,alternate_totals"
         resp = self._sess.get(
             f"{self.BASE}/sports/{sport_key}/odds",
             params={"apiKey": self._key, "regions": "eu",
-                    "markets": "h2h,totals,spreads", "oddsFormat": "decimal"},
+                    "markets": markets, "oddsFormat": "decimal"},
             timeout=20,
         )
         self._track_response(resp)
@@ -181,24 +200,32 @@ class TheOddsAPIClient(OddsFeed):
             )
             # Consensus across ALL sharp books: median decimal odds per outcome.
             samples: dict[str, dict[str, list[float]]] = {"h2h": {}, "totals": {}, "spreads": {}}
+            # Alternate lines fold into the same buckets — downstream pairing
+            # is point-exact, so extra lines just mean more pairable points.
+            bucket_of = {"h2h": "h2h", "totals": "totals", "spreads": "spreads",
+                         "alternate_totals": "totals", "alternate_spreads": "spreads"}
             for book in raw.get("bookmakers", []):
                 if book.get("key") not in SHARP_BOOKS:
                     continue
                 for mkt in book.get("markets", []):
-                    if mkt["key"] not in samples:
+                    bucket = bucket_of.get(mkt["key"])
+                    if bucket is None:
                         continue
                     for oc in mkt.get("outcomes", []):
                         name, price = oc.get("name", ""), float(oc.get("price", 0) or 0)
                         if price <= 1.0:
                             continue
-                        key = name if mkt["key"] == "h2h" else f"{name} {oc.get('point')}"
-                        samples[mkt["key"]].setdefault(key, []).append(price)
+                        key = name if bucket == "h2h" else f"{name} {oc.get('point')}"
+                        samples[bucket].setdefault(key, []).append(price)
             ev.h2h = {k: _median(v) for k, v in samples["h2h"].items()}
             ev.totals = {k: _median(v) for k, v in samples["totals"].items()}
             ev.spreads = {k: _median(v) for k, v in samples["spreads"].items()}
             if ev.h2h:
                 out.append(ev)
         self._cache[sport_key] = (now, out)
+        # Live/imminent window: any game from 6h ago (in-play) to 4h ahead.
+        self._sport_active[sport_key] = any(
+            now - 6 * 3600 < e.commence_ts < now + 4 * 3600 for e in out)
         return out
 
 

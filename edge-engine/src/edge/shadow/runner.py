@@ -133,7 +133,7 @@ def discover_all(adapters, policy) -> dict:
 
 
 def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str],
-              candidates: dict | None = None) -> dict:
+              candidates: dict | None = None, match_cache: dict | None = None) -> dict:
     """One sweep across all venues: feed → map (0.95 gate) → de-vig → book →
     strategy filter → risk approve → execute (paper-log or place, by mode).
     Both venues are judged against the SAME fair values.
@@ -229,7 +229,16 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             return None
 
         for adapter, candidates in venue_candidates.values():
-            matches = match_events_all(ev.home, ev.away, ev.league_code, candidates)
+            # Fuzzy matching is CPU-heavy at 10s cadence; results only change
+            # when discovery changes, so memoize per (venue, event) between
+            # rediscoveries (main resets the cache on each discovery pass).
+            mkey_cache = (adapter.name, ev.event_key())
+            if match_cache is not None and mkey_cache in match_cache:
+                matches = match_cache[mkey_cache]
+            else:
+                matches = match_events_all(ev.home, ev.away, ev.league_code, candidates)
+                if match_cache is not None:
+                    match_cache[mkey_cache] = matches
             best = matches[0] if matches else None
             ledger.record_match_stat(day, adapter.name, ev.league_code or "?",
                                      mapped=best is not None,
@@ -562,6 +571,7 @@ def main() -> None:
     discovery_s = int(os.environ.get("EDGE_DISCOVERY_SECONDS", "300"))
     settle_s = int(os.environ.get("EDGE_SETTLE_SECONDS", "300"))
     candidates: dict = {}
+    match_cache: dict = {}
     last_discovery = 0.0
     last_settle = 0.0
     while True:
@@ -588,9 +598,10 @@ def main() -> None:
 
             if not candidates or time.time() - last_discovery > discovery_s:
                 candidates = discover_all(adapters, policy)
+                match_cache = {}  # mappings only change with discovery
                 last_discovery = time.time()
             funnel = run_cycle(adapters, feed, policy, risk, ledger, sport_keys,
-                               candidates=candidates)
+                               candidates=candidates, match_cache=match_cache)
             funnel["account_link"] = {k: v["ok"] for k, v in account_link.items()}
             if time.time() - last_settle > settle_s:
                 funnel["settled"] = settle_cycle(adapters, ledger)

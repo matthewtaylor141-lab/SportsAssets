@@ -270,9 +270,12 @@ class PolymarketUSAdapter(VenueAdapter):
 
     # ── live orders (FOK limit, preview-verified) ──────────────────────
 
-    def place_order(self, market_slug: str, price: float, quantity: int) -> dict:
-        """BUY_LONG FOK limit at whole-cent price. Preview must agree with
-        our costing within 2% before the real order goes out."""
+    def place_order(self, market_slug: str, price: float, quantity: int,
+                    preview: bool = True) -> dict:
+        """BUY_LONG FOK limit at whole-cent price. preview=False skips the
+        venue cost pre-check round-trip — safe for micro orders because the
+        FOK LIMIT price already hard-bounds cost at price*quantity; the
+        executor keeps the preview for larger sizes."""
         client = self._client()
         params = {
             "marketSlug": market_slug,
@@ -283,16 +286,17 @@ class PolymarketUSAdapter(VenueAdapter):
             "tif": "TIME_IN_FORCE_FILL_OR_KILL",
         }
         expected = price * quantity
-        preview = client.orders.preview({"request": params}) or {}
-        prev = preview.get("order") or {}
-        try:
-            prev_cost = float((prev.get("cashOrderQty") or {}).get("value") or 0)
-        except (TypeError, ValueError):
-            prev_cost = 0.0
-        if prev_cost and prev_cost > expected * 1.02:
-            return {"ok": False, "status": "preview_mismatch", "order_id": None,
-                    "price": price, "count": quantity, "taker": True,
-                    "raw": {"preview": prev, "expected": expected}}
+        prev = {}
+        if preview:
+            prev = (client.orders.preview({"request": params}) or {}).get("order") or {}
+            try:
+                prev_cost = float((prev.get("cashOrderQty") or {}).get("value") or 0)
+            except (TypeError, ValueError):
+                prev_cost = 0.0
+            if prev_cost and prev_cost > expected * 1.02:
+                return {"ok": False, "status": "preview_mismatch", "order_id": None,
+                        "price": price, "count": quantity, "taker": True,
+                        "raw": {"preview": prev, "expected": expected}}
 
         resp = client.orders.create({**params, "synchronousExecution": True}) or {}
         filled, notional, state = 0.0, 0.0, ""
