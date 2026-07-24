@@ -324,3 +324,19 @@ def test_live_fill_count_distinguishes_bogus_halts(tmp_path):
     led.record_fill(fill_uid="l1", venue="polymarket-us", market_key="polymarket-us:l1",
                     side="BUY", qty=2, price=0.5, ts=now, mode="LIVE_BETA")
     assert led.live_fill_count_since(now - 3600) == 1
+
+
+def test_live_staked_bounds_bogus_halt_detection(tmp_path):
+    """A halt recording a loss larger than all live money ever staked is
+    provably paper contamination — even when live fills exist."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    led.record_fill(fill_uid="live1", venue="polymarket-us",
+                    market_key="polymarket-us:m", side="BUY", qty=14, price=0.07,
+                    ts=now, mode="LIVE_BETA")           # ~$1 at risk
+    led.record_fill(fill_uid="paper1", venue="kalshi", market_key="kalshi:p",
+                    side="BUY", qty=100, price=0.50, ts=now, mode="PAPER")
+    assert led.live_fill_count_since(now - 3600) == 1   # a live fill DOES exist
+    assert led.live_staked_since(now - 3600) == pytest.approx(0.98, abs=0.01)
+    # -$15 could not have come from $0.98 of live exposure.
+    assert 15.0 > led.live_staked_since(now - 3600) + 0.01

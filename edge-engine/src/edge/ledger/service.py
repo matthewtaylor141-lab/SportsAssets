@@ -343,6 +343,16 @@ class Ledger:
             ).fetchone()
         return int(row[0])
 
+    def live_staked_since(self, ts: float) -> float:
+        """Real money actually put at risk in the window. A live loss can
+        never exceed this — the bound that identifies bogus halts."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(sum(qty * price), 0) FROM fills "
+                "WHERE ts >= ? AND side='BUY' AND mode != 'PAPER'", (ts,)
+            ).fetchone()
+        return float(row[0])
+
     # ── engine state hub ────────────────────────────────────────────────
 
     def set_state(self, key: str, value: Any) -> None:

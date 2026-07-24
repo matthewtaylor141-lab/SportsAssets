@@ -504,12 +504,23 @@ def main() -> None:
     # actual live fills are untouched and keep their full 72h (no override).
     halt = ledger.get_state("halt_until")
     if halt and time.time() < float(halt.get("until", 0)):
-        if ledger.live_fill_count_since(float(halt.get("tripped_at", 0)) - 86_400) == 0:
-            ledger.set_state("halt_until", {"until": 0, "reason": "cleared",
-                                            "cleared": "bogus (no live fills in window)"})
-            ledger.log_mode(risk.mode, "halt cleared: tripped by paper marks, "
-                                       "zero live fills — bug, not a loss")
-            log.warning("cleared bogus circuit-breaker halt (no live fills in window)")
+        window_start = float(halt.get("tripped_at", 0)) - 86_400
+        live_fills = ledger.live_fill_count_since(window_start)
+        live_staked = ledger.live_staked_since(window_start)
+        recorded_loss = abs(float(halt.get("day_pnl", 0) or 0))
+        # A real loss is bounded by real money staked. If the recorded loss
+        # exceeds what was ever put at risk live (or there were no live
+        # fills at all), the halt provably came from paper numbers.
+        bogus = live_fills == 0 or recorded_loss > live_staked + 0.01
+        if bogus:
+            ledger.set_state("halt_until", {
+                "until": 0, "reason": "cleared",
+                "cleared": f"bogus: recorded loss {recorded_loss:.2f} vs live "
+                           f"staked {live_staked:.2f} ({live_fills} live fills)"})
+            ledger.log_mode(risk.mode, "halt cleared: loss exceeds live money "
+                                       "ever staked — paper contamination, not a loss")
+            log.warning("cleared bogus circuit-breaker halt: recorded %.2f > "
+                        "live staked %.2f", recorded_loss, live_staked)
     if risk.mode != "PAPER":
         from edge.cli import run_checklist
 

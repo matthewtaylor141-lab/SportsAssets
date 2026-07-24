@@ -127,6 +127,8 @@ class TheOddsAPIClient(OddsFeed):
         self._server_skew_s: float | None = None  # local - server clock, from Date header
         # sport_key -> has live/imminent games (drives per-sport TTL)
         self._sport_active: dict[str, bool] = {}
+        # sports whose alternate-line request the provider rejects (422)
+        self._no_alt_lines: set[str] = set()
 
     def quota(self) -> dict:
         return dict(self._quota)
@@ -184,15 +186,29 @@ class TheOddsAPIClient(OddsFeed):
             return cached[1] if cached else []
         markets = "h2h,totals,spreads"
         if (sport_key in self.ALT_LINE_SPORTS
-                and os.environ.get("EDGE_ALT_LINES", "1") != "0"):
+                and os.environ.get("EDGE_ALT_LINES", "1") != "0"
+                and sport_key not in self._no_alt_lines):
             markets += ",alternate_spreads,alternate_totals"
-        resp = self._sess.get(
-            f"{self.BASE}/sports/{sport_key}/odds",
-            params={"apiKey": self._key, "regions": "eu",
-                    "markets": markets, "oddsFormat": "decimal"},
-            timeout=20,
-        )
-        self._track_response(resp)
+
+        def _get(mkts: str):
+            r = self._sess.get(
+                f"{self.BASE}/sports/{sport_key}/odds",
+                params={"apiKey": self._key, "regions": "eu",
+                        "markets": mkts, "oddsFormat": "decimal"},
+                timeout=20,
+            )
+            self._track_response(r)
+            return r
+
+        resp = _get(markets)
+        if resp.status_code == 422 and "alternate" in markets:
+            # Provider rejects alternate markets for this sport (commonly
+            # out-of-season or plan-scoped). Remember and fall back to the
+            # base markets rather than losing the sport entirely.
+            log.info("%s: alternate lines unavailable (422) — base markets only",
+                     sport_key)
+            self._no_alt_lines.add(sport_key)
+            resp = _get("h2h,totals,spreads")
         resp.raise_for_status()
         out: list[FeedEvent] = []
         for raw in resp.json():

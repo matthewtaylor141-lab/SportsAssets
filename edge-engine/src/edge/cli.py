@@ -49,21 +49,29 @@ def run_checklist(ledger, policy, risk) -> tuple[bool, list[str]]:
 
     # 1. Feed key valid + quota headroom + clock sync (same probe).
     feed = TheOddsAPIClient()
+    keys, ok_key, last_err = [], False, ""
     try:
         keys = feed.resolve_sport_keys()
-        events = feed.fetch_events(keys[0]) if keys else []
-        quota = feed.quota()
-        check("feed key valid", bool(keys) and events is not None,
-              f"{len(keys)} sports, quota {quota or 'unreported'}")
-        check("feed quota headroom", quota.get("remaining", 1e9) > 100,
-              f"remaining={quota.get('remaining')}")
-        skew = feed.server_clock_skew_s()
-        check("clocks synced", skew is not None and abs(skew) <= 5,
-              f"skew={skew if skew is None else round(skew, 2)}s")
+        # Try several sports: an out-of-season sport can legitimately 422,
+        # which must not read as "the feed is down".
+        for sk in keys[:5]:
+            try:
+                feed.fetch_events(sk)
+                ok_key = True
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_err = f"{sk}: {type(exc).__name__}: {str(exc)[:160]}"
     except Exception as exc:  # noqa: BLE001
-        check("feed key valid", False, f"{type(exc).__name__}: {str(exc)[:120]}")
-        check("feed quota headroom", False, "feed unreachable")
-        check("clocks synced", False, "feed unreachable")
+        last_err = f"resolve_sport_keys: {type(exc).__name__}: {str(exc)[:160]}"
+    quota = feed.quota()
+    check("feed key valid", ok_key,
+          f"{len(keys)} sports; last error: {last_err}" if not ok_key
+          else f"{len(keys)} sports, quota {quota.get('remaining', '?')}")
+    check("feed quota headroom", quota.get("remaining", 0) > 100,
+          f"remaining={quota.get('remaining')}")
+    skew = feed.server_clock_skew_s()
+    check("clocks synced", skew is not None and abs(skew) <= 5,
+          f"skew={skew if skew is None else round(skew, 2)}s")
 
     # 2. Venue credentials valid and funded — only for venues that will carry
     # REAL orders (EDGE_LIVE_VENUES, default polymarket-us). Enabled venues
