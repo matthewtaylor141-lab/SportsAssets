@@ -91,8 +91,7 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
         INSERT INTO trades (whale_id, tx_hash, asset, condition_id, side, outcome, outcome_index,
                             size, price, notional, market_title, market_slug, event_slug, sport,
                             ts, source, detected_at, enriched_at, dedupe_key)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-                CASE WHEN $18 THEN $17 ELSE NULL END, $19)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
         ON CONFLICT (dedupe_key) DO NOTHING
         RETURNING id
         """,
@@ -113,7 +112,9 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
         ts,
         ev.source,
         detected_at,
-        pre_enriched,
+        detected_at if pre_enriched else None,  # enriched_at — no param reuse:
+        # a parameter appearing in two SQL contexts (value + CASE) makes
+        # Postgres deduce conflicting types ("text versus timestamptz").
         ev.dedupe_key,
     )
     if row is None:

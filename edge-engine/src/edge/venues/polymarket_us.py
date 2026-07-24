@@ -70,13 +70,25 @@ class PolymarketUSAdapter(VenueAdapter):
     # ── discovery / books ──────────────────────────────────────────────
 
     # Param variants tried in order until one yields events — the gateway's
-    # exact filter semantics are verified empirically via the census below.
-    _LIST_VARIANTS = (
-        {"active": True, "closed": False, "categories": ["sports"]},
-        {"active": True, "closed": False},
-        {"active": True},
-        {},
-    )
+    # exact filter semantics are verified empirically via the census.
+    # Primary variant adds a 72h start-time window: census showed the
+    # unwindowed sports listing leads with season-long futures ("World
+    # Series Champion"), starving the 1,000-event page budget of games.
+    @staticmethod
+    def _list_variants() -> tuple:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        iso = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+        window = {"startTimeMin": iso(now - timedelta(hours=6)),
+                  "startTimeMax": iso(now + timedelta(hours=72))}
+        return (
+            {"active": True, "closed": False, "categories": ["sports"], **window},
+            {"active": True, "closed": False, "categories": ["sports"]},
+            {"active": True, "closed": False},
+            {"active": True},
+            {},
+        )
 
     def discover_markets(self, league_codes: set[str]) -> list[VenueMarket]:
         """Active events with nested per-outcome markets. League assignment
@@ -88,11 +100,12 @@ class PolymarketUSAdapter(VenueAdapter):
         census: dict[str, Any] = {"events_seen": 0, "skipped_no_title": 0,
                                   "skipped_lt2_outcomes": 0, "markets_seen": 0,
                                   "markets_closed": 0, "markets_no_outcome": 0,
-                                  "samples": []}
+                                  "outcome_from_title": 0, "samples": [],
+                                  "market_samples": []}
         out: list[VenueMarket] = []
         try:
             variant_used = None
-            for variant in self._LIST_VARIANTS:
+            for variant in self._list_variants():
                 probe = self._pub.events.list({"limit": 100, **variant}) or {}
                 if probe.get("events"):
                     variant_used = variant
@@ -114,10 +127,20 @@ class PolymarketUSAdapter(VenueAdapter):
                     outcomes = {}
                     for m in ev.get("markets") or []:
                         census["markets_seen"] += 1
+                        if len(census["market_samples"]) < 3 and m.get("title"):
+                            census["market_samples"].append(m["title"][:50])
                         oc = m.get("outcome") or (m.get("team") or {}).get("name")
                         if m.get("closed"):
                             census["markets_closed"] += 1
                             continue
+                        if not oc and m.get("title"):
+                            # Census finding (2026-07-24): event listings carry
+                            # no `outcome` field — the market TITLE names the
+                            # side ("Mets", "Spread: Eagles (-7.5)"). Use it;
+                            # the mapper's 0.95 team gate and the line parser
+                            # discard anything that isn't actually a side.
+                            oc = m["title"].strip()
+                            census["outcome_from_title"] += 1
                         if not (oc and m.get("slug")):
                             census["markets_no_outcome"] += 1
                             continue
