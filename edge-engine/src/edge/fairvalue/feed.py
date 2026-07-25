@@ -156,11 +156,12 @@ class TheOddsAPIClient(OddsFeed):
             except (TypeError, ValueError):
                 pass
 
-    # Alternate spread/total lines multiply line-exact venue matches on the
-    # majors (the kch123 hunting ground). Costs more credits per call, so
-    # scoped to majors only; EDGE_ALT_LINES=0 disables.
-    ALT_LINE_SPORTS = {"basketball_nba", "americanfootball_nfl",
-                       "icehockey_nhl", "basketball_wnba"}
+    # Alternate spread/total lines are requested for EVERY sport: venues list
+    # handicaps (soccer -2.5, etc.) that a book's standard line never quotes,
+    # and without the alternate ladder those markets can never be priced at
+    # all. Sports that reject the request are remembered and fall back.
+    # EDGE_ALT_LINES=0 disables entirely.
+    ALT_LINE_SPORTS: set[str] | None = None  # None = all sports
 
     # Below this many remaining credits, start conserving; above it, keep
     # every sport fresh (a slow TTL makes quotes fail the 30s freshness
@@ -185,8 +186,9 @@ class TheOddsAPIClient(OddsFeed):
                         self._quota.get("remaining"))
             return cached[1] if cached else []
         markets = "h2h,totals,spreads"
-        if (sport_key in self.ALT_LINE_SPORTS
-                and os.environ.get("EDGE_ALT_LINES", "1") != "0"
+        if (os.environ.get("EDGE_ALT_LINES", "1") != "0"
+                and (self.ALT_LINE_SPORTS is None
+                     or sport_key in self.ALT_LINE_SPORTS)
                 and sport_key not in self._no_alt_lines):
             markets += ",alternate_spreads,alternate_totals"
 

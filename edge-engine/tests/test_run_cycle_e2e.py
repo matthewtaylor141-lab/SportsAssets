@@ -163,3 +163,34 @@ def test_exploration_excludes_implausible_and_dedupes(tmp_path, monkeypatch):
     recs = [_json.loads(x) for x in log.read_text().splitlines()]
     assert sum(1 for r in recs if r.get("tag") == "exploration") == 2
     assert len(seen) == 2  # one entry per outcome market
+
+
+def test_unpriced_outcomes_are_counted_not_silently_dropped(tmp_path, monkeypatch):
+    """A venue line the sharp book doesn't quote must produce a NAMED reject
+    with the mismatch visible — the blind spot behind '0 trades, no reason'."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+
+    class SpreadVenue(StubVenue):
+        def discover_markets(self, league_codes):
+            return [VenueMarket(
+                market_id="EVT", title="Arsenal vs. Chelsea", league_code="epl",
+                # Venue lists a -2.5 handicap...
+                outcome_tokens={"Arsenal -2.5": "T-A", "Chelsea +2.5": "T-C"},
+            )]
+
+    class Feed(StubFeed):
+        def fetch_events(self, sport_key):
+            ev = _event()
+            # ...but the sharp book only quotes -0.5 and -1.5.
+            ev.spreads = {"Arsenal -0.5": 1.9, "Chelsea +0.5": 1.9,
+                          "Arsenal -1.5": 2.6, "Chelsea +1.5": 1.5}
+            return [ev]
+
+    funnel = run_cycle([SpreadVenue(ask_price=0.30)], Feed([]),
+                       POLICY, risk, ledger, ["soccer_epl"])
+    assert ledger.summary()["fills"] == 0
+    assert funnel["rejects"].get("no_sharp_quote_spread", 0) >= 1
+    ex = funnel["unpriced_examples"]["no_sharp_quote_spread"]
+    assert ex["venue_line"] == -2.5
+    assert -1.5 in ex["sharp_lines"] and -0.5 in ex["sharp_lines"]

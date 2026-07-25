@@ -220,17 +220,25 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             continue
 
         def fair_for(oc_name: str):
-            """(fair, category) for a canonical venue outcome, or None."""
+            """(fair, category, reason) — reason names WHY no fair value was
+            found, so the funnel can distinguish 'venue lists a line our
+            sharp book doesn't quote' from 'we couldn't identify the side'."""
             p = parse_outcome_line(oc_name)
             if p.kind in ("total", "spread"):
                 for side, f in deriv_sides:
                     if side.kind == p.kind and outcome_matches(oc_name, side):
-                        return f, p.kind
-                return None
+                        return f, p.kind, None
+                have = sorted({s.point for s, _ in deriv_sides
+                               if s.kind == p.kind and s.point is not None})
+                return None, p.kind, {
+                    "reason": f"no_sharp_quote_{p.kind}",
+                    "venue_line": p.point, "sharp_lines": have[:8],
+                }
             for team_name, f in fairs.items():
                 if team_score(team_name, oc_name) >= 0.95:
-                    return f, "moneyline"
-            return None
+                    return f, "moneyline", None
+            return None, "moneyline", {"reason": "no_side_match_moneyline",
+                                       "outcome": oc_name[:40]}
 
         for adapter, candidates in venue_candidates.values():
             # Fuzzy matching is CPU-heavy at 10s cadence; results only change
@@ -262,10 +270,15 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     if token in seen_tokens:
                         continue
                     seen_tokens.add(token)
-                    fv = fair_for(oc_name)
-                    if fv is None:
+                    fair, category, miss = fair_for(oc_name)
+                    if fair is None:
+                        # Previously a silent skip — the single biggest blind
+                        # spot in the funnel. Count it and keep one example.
+                        reject(miss["reason"])
+                        ex = funnel.setdefault("unpriced_examples", {})
+                        if miss["reason"] not in ex:
+                            ex[miss["reason"]] = miss
                         continue
-                    fair, category = fv
                     if not ev.is_fresh(30, now=time.time()):  # hard rule: fresh only
                         reject("stale_quote")
                         continue

@@ -61,6 +61,7 @@ interface EngineStatus {
     edges?: { evaluated: number; best_cents: number; near_miss_1c: number; explored: number }
     feed_quota?: { remaining?: number; used?: number }
     not_armed?: { want: string; blocked_by: string[] }
+    unpriced_examples?: Record<string, { venue_line?: number; sharp_lines?: number[]; outcome?: string }>
     stream?: Record<string, { connected: boolean; subscribed: number; cached: number; updates: number }>
     book_sample?: Record<string, unknown>
     error?: string
@@ -319,6 +320,14 @@ export function Engine() {
                 {' '}· {v} stream: {s.connected ? '⚡ live' : 'reconnecting'} ({s.cached} books, {s.updates} updates)
               </span>
             ))}
+            {status.detail?.unpriced_examples && (
+              <span style={{ color: 'var(--warning)' }}>
+                {' '}· unpriced: {Object.entries(status.detail.unpriced_examples).map(([k, v]) =>
+                  v.venue_line != null
+                    ? `${k} (venue ${v.venue_line}, sharp has ${(v.sharp_lines || []).join('/') || 'none'})`
+                    : `${k} (${v.outcome || ''})`).join(' · ')}
+              </span>
+            )}
             {status.detail?.mode && <> · mode: <b>{status.detail.mode}</b></>}
             {status.detail?.not_armed && (
               <span style={{ color: 'var(--critical)' }}>
