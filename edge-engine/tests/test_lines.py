@@ -213,3 +213,45 @@ def test_apply_slug_line_prevents_moneyline_mispricing():
     assert apply_slug_line("Red Sox", "mlb-bos-nyy-2026-07-24") == "Red Sox"
     # Totals take the unsigned point.
     assert apply_slug_line("Over", "tot-x-pos-8pt5") == "Over 8.5"
+
+
+# ── structural defence: bet identity must agree across signals ─────────
+
+def test_bet_identity_agrees_across_slug_title_outcome():
+    from edge.fairvalue.lines import bet_identity
+
+    b = bet_identity("asc-lmx-san-atl-2026-07-25-neg-2pt5",
+                     "Club Santos Laguna vs. Atlas FC", "Club Santos Laguna")
+    assert b.category == "spread" and b.point == -2.5 and b.tradeable
+    assert "slug" in b.sources
+
+
+def test_bet_identity_conflict_is_untradeable():
+    from edge.fairvalue.lines import bet_identity
+
+    # Slug says -2.5, title says -7.5: we do NOT get to pick one.
+    b = bet_identity("game-neg-2pt5", "Spread: Eagles (-7.5)", "Eagles")
+    assert b.conflict and not b.tradeable
+
+
+def test_spread_market_with_unreadable_line_never_trades_as_moneyline():
+    from edge.fairvalue.lines import bet_identity
+
+    # THE ORIGINAL BUG: a spread market whose handicap we can't read must
+    # not silently become a moneyline.
+    b = bet_identity("some-slug", "Spread: Eagles", "Eagles")
+    assert b.category == "spread" and b.point is None and not b.tradeable
+
+
+def test_plain_moneyline_still_tradeable():
+    from edge.fairvalue.lines import bet_identity
+
+    b = bet_identity("mlb-bos-nyy-2026-07-24", "Red Sox vs. Angels", "Red Sox")
+    assert b.category == "moneyline" and b.tradeable
+
+
+def test_totals_compare_unsigned_without_false_conflict():
+    from edge.fairvalue.lines import bet_identity
+
+    b = bet_identity("tot-x-pos-8pt5", "Mets vs. Tigers: O/U 8.5", "Over")
+    assert b.category == "total" and b.point == 8.5 and b.tradeable

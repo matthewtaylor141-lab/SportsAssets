@@ -107,6 +107,23 @@ CREATE TABLE IF NOT EXISTS events_traded (
     ts         REAL NOT NULL
 );
 
+-- Pricing-integrity surveillance. For every outcome we price, record how
+-- far our fair value sits from the venue's own mid. A correctly mapped
+-- market disagrees by cents; a MIS-mapped one (our price describes a
+-- different bet) disagrees by tens of cents, systematically. When a
+-- (venue, league, category) slice is mostly wild, it is quarantined — no
+-- trading from it — regardless of what caused the mismatch.
+CREATE TABLE IF NOT EXISTS pricing_divergence (
+    day       TEXT NOT NULL,
+    venue     TEXT NOT NULL,
+    league    TEXT NOT NULL,
+    category  TEXT NOT NULL,
+    n         INTEGER NOT NULL DEFAULT 0,
+    n_wild    INTEGER NOT NULL DEFAULT 0,   -- |fair - venue mid| > wild threshold
+    sum_abs   REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, venue, league, category)
+);
+
 -- Mode transitions are audit events (PAPER -> LIVE_BETA -> LIVE).
 CREATE TABLE IF NOT EXISTS mode_log (
     id   INTEGER PRIMARY KEY,
@@ -440,6 +457,57 @@ class Ledger:
             d["tradeable_rate"] = round(d["tradeable"] / n, 4)
             out.append(d)
         return out
+
+    # ── pricing-integrity surveillance ──────────────────────────────────
+
+    WILD_DIVERGENCE = 0.10       # |fair - venue mid| beyond this is "wild"
+    QUARANTINE_MIN_N = 25        # need a real sample before judging a slice
+    QUARANTINE_WILD_SHARE = 0.5  # majority wild = the slice is mis-mapped
+
+    def record_divergence(self, day: str, venue: str, league: str,
+                          category: str, abs_div: float) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO pricing_divergence (day, venue, league, category,
+                                                n, n_wild, sum_abs)
+                VALUES (?,?,?,?,1,?,?)
+                ON CONFLICT (day, venue, league, category) DO UPDATE SET
+                    n = n + 1,
+                    n_wild = n_wild + excluded.n_wild,
+                    sum_abs = sum_abs + excluded.sum_abs
+                """,
+                (day, venue, league or "?", category,
+                 int(abs_div > self.WILD_DIVERGENCE), abs_div),
+            )
+
+    def divergence_report(self, days: int = 1) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT venue, league, category, sum(n) AS n,
+                       sum(n_wild) AS n_wild, sum(sum_abs) AS sum_abs
+                FROM pricing_divergence WHERE day >= date('now', ?)
+                GROUP BY venue, league, category ORDER BY n_wild DESC
+                """,
+                (f"-{days} day",),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            n = d["n"] or 1
+            d["wild_share"] = round(d["n_wild"] / n, 3)
+            d["mean_abs_div"] = round(d["sum_abs"] / n, 4)
+            d["quarantined"] = (d["n"] >= self.QUARANTINE_MIN_N
+                                and d["wild_share"] > self.QUARANTINE_WILD_SHARE)
+            out.append(d)
+        return out
+
+    def quarantined_slices(self, days: int = 1) -> set[tuple[str, str, str]]:
+        """(venue, league, category) triples currently barred from trading
+        because our prices systematically disagree with the venue's own."""
+        return {(r["venue"], r["league"], r["category"])
+                for r in self.divergence_report(days) if r["quarantined"]}
 
     def decision_record(self, fill_uid: str) -> dict | None:
         """Full audit trail for one fill — why we traded."""

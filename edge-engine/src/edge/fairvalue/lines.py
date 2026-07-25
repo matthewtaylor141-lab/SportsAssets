@@ -177,6 +177,80 @@ def apply_slug_line(outcome_key: str, slug: str) -> str:
     return f"{outcome_key.strip()} {point:+g}"
 
 
+@dataclass(frozen=True)
+class BetIdentity:
+    """What bet a venue market actually represents, derived from EVERY
+    available signal with cross-agreement required.
+
+    The failure mode this exists to prevent: one signal is missing or
+    misread, we silently fall back to a different bet (a spread priced as a
+    moneyline), and the resulting 'edge' is a comparison of two unrelated
+    propositions. Any disagreement between signals makes the market
+    untradeable rather than guessed."""
+
+    category: str            # moneyline | spread | total
+    point: float | None
+    side: str | None         # team text, or over/under
+    sources: tuple[str, ...]  # signals that contributed the point
+    conflict: str | None      # populated when signals disagree
+
+    @property
+    def tradeable(self) -> bool:
+        if self.conflict:
+            return False
+        if self.category in ("spread", "total"):
+            return self.point is not None
+        return bool(self.side)
+
+
+def bet_identity(slug: str, title: str, outcome: str) -> BetIdentity:
+    """Cross-check the handicap across slug, market title, and outcome text."""
+    from_outcome = parse_outcome_line(outcome)
+    t_point = title_point(title)
+    s_point = slug_point(slug)
+
+    points: dict[str, float] = {}
+    if from_outcome.point is not None:
+        points["outcome"] = from_outcome.point
+    if t_point is not None:
+        points["title"] = t_point
+    if s_point is not None:
+        points["slug"] = s_point
+
+    # Totals carry an unsigned number; spreads a signed one. Compare on the
+    # appropriate footing so "+2.5 in the title, 2.5 in the slug" isn't a
+    # false conflict.
+    is_total = (from_outcome.kind == "total"
+                or bool(_TITLE_TOTAL.search(title or "")))
+    def norm(v: float) -> float:
+        return abs(v) if is_total else v
+
+    conflict = None
+    if len(points) >= 2:
+        vals = {round(norm(v), 3) for v in points.values()}
+        if len(vals) > 1:
+            conflict = "point mismatch " + ", ".join(
+                f"{k}={v:+g}" for k, v in sorted(points.items()))
+
+    if is_total:
+        point = abs(next(iter(points.values()))) if points else None
+        side = from_outcome.side
+        return BetIdentity("total", point, side, tuple(sorted(points)), conflict)
+
+    if points:
+        point = next(iter(points.values()))
+        team = from_outcome.team or (outcome or "").strip() or None
+        return BetIdentity("spread", point, team, tuple(sorted(points)), conflict)
+
+    # No handicap anywhere: a plain moneyline — but only if nothing hints
+    # otherwise. A spread-flavoured title with no parsable number is a
+    # signal we failed to read, not a moneyline.
+    if _TITLE_SPREAD_TEAM.search(title or "") or "spread" in (title or "").lower():
+        return BetIdentity("spread", None, (outcome or "").strip() or None, (),
+                           "spread market with unreadable line")
+    return BetIdentity("moneyline", None, (outcome or "").strip() or None, (), None)
+
+
 def title_point(title: str) -> float | None:
     """Extract a line from a market title, e.g. 'Mets vs. Tigers: O/U 8.5'
     -> 8.5, 'Spread: Eagles (-7.5)' -> -7.5. None when absent."""

@@ -340,3 +340,32 @@ def test_live_staked_bounds_bogus_halt_detection(tmp_path):
     assert led.live_staked_since(now - 3600) == pytest.approx(0.98, abs=0.01)
     # -$15 could not have come from $0.98 of live exposure.
     assert 15.0 > led.live_staked_since(now - 3600) + 0.01
+
+
+# ── pricing-integrity quarantine (immune system) ───────────────────────
+
+def test_systematic_divergence_quarantines_a_slice(tmp_path):
+    """Whatever the cause, a slice whose fair values mostly disagree wildly
+    with the venue's own mid stops trading."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    day = "2026-07-25"
+    for _ in range(30):                      # our 37c vs venue 8c: 29c apart
+        led.record_divergence(day, "polymarket-us", "mex", "spread", 0.29)
+    for _ in range(30):                      # healthy slice: cents apart
+        led.record_divergence(day, "polymarket-us", "epl", "moneyline", 0.012)
+
+    rows = {(r["league"], r["category"]): r for r in led.divergence_report(days=2)}
+    bad = rows[("mex", "spread")]
+    good = rows[("epl", "moneyline")]
+    assert bad["quarantined"] is True and bad["wild_share"] == 1.0
+    assert good["quarantined"] is False and good["mean_abs_div"] < 0.02
+    q = led.quarantined_slices(days=2)
+    assert ("polymarket-us", "mex", "spread") in q
+    assert ("polymarket-us", "epl", "moneyline") not in q
+
+
+def test_quarantine_needs_a_real_sample(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    for _ in range(5):  # below QUARANTINE_MIN_N — noisy, not judged
+        led.record_divergence("2026-07-25", "kalshi", "nba", "total", 0.40)
+    assert led.quarantined_slices(days=2) == set()

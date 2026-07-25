@@ -179,6 +179,11 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     if risk.is_live:
         funnel["live_venues"] = sorted(live_venues)
     marks: dict[str, float] = {}   # market_key -> best bid (circuit-breaker marks)
+    # Slices whose prices systematically disagree with the venue's own —
+    # barred from trading until the disagreement clears, whatever caused it.
+    quarantined = ledger.quarantined_slices(days=1)
+    if quarantined:
+        funnel["quarantined"] = sorted("/".join(q) for q in quarantined)[:8]
 
     def reject(bucket: str) -> None:
         funnel["rejects"][bucket] = funnel["rejects"].get(bucket, 0) + 1
@@ -291,6 +296,21 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     mkey = market_key(adapter.name, token)
                     if book.bids:
                         marks[mkey] = book.bids[0].price
+
+                    # Pricing-integrity surveillance: how far is our fair
+                    # value from the venue's own mid? Cents = agreement;
+                    # tens of cents, systematically = we are pricing a
+                    # different bet than the one listed.
+                    if book.bids:
+                        venue_mid = (book.bids[0].price + ask.price) / 2
+                        divergence = abs(fair - venue_mid)
+                        ledger.record_divergence(day, adapter.name,
+                                                 ev.league_code or "?", category,
+                                                 divergence)
+                        if (adapter.name, ev.league_code or "?",
+                                category) in quarantined:
+                            reject("quarantined_slice")
+                            continue
                     effective_mode = risk.mode if (
                         risk.is_live and adapter.name in live_venues) else "PAPER"
                     verdict = strategy_filter(policy, ev.league_code, ask.price, fair,
