@@ -135,7 +135,7 @@ def discover_all(adapters, policy) -> dict:
 
 def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str],
               candidates: dict | None = None, match_cache: dict | None = None,
-              explored_seen: set | None = None) -> dict:
+              explored_seen: set | None = None, study_seen: set | None = None) -> dict:
     """One sweep across all venues: feed → map (0.95 gate) → de-vig → book →
     strategy filter → risk approve → execute (paper-log or place, by mode).
     Both venues are judged against the SAME fair values.
@@ -158,6 +158,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         venue_candidates = discover_all(adapters, policy)
     if explored_seen is None:
         explored_seen = set()  # standalone call: dedupe within this cycle
+    if study_seen is None and os.environ.get("EDGE_STUDY_ALL", "1") != "0":
+        study_seen = set()
 
     events = []
     for sport_key in sport_keys:
@@ -316,6 +318,51 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     verdict = strategy_filter(policy, ev.league_code, ask.price, fair,
                                               venue_fee=adapter.taker_fee(ask.price),
                                               category=category)
+
+                    # ── STUDY RECORD ──────────────────────────────────
+                    # Every priced outcome is observed, whether or not it
+                    # clears the trading bar. The narrow rules protect
+                    # CAPITAL; they must never decide what we get to LEARN.
+                    # Sampled once per market per hour so the record tracks
+                    # price evolution without flooding.
+                    if study_seen is not None:
+                        sbucket = f"{mkey}:{int(time.time() // 3600)}"
+                        if sbucket not in study_seen:
+                            study_seen.add(sbucket)
+                            funnel["studied"] = funnel.get("studied", 0) + 1
+                            study_intent = FillIntent(
+                                market_id=match.market.market_id, outcome_id=token,
+                                limit_price=ask.price, size_usd=10.0,
+                                fair_value=round(fair, 4),
+                                edge=round(verdict.edge, 4),
+                                league=ev.league_code, band=verdict.band,
+                            )
+                            log_shadow_fill(
+                                study_intent, book,
+                                {"h2h": ev.h2h, "home": ev.home, "away": ev.away,
+                                 "category": category, "outcome": oc_name,
+                                 "threshold": verdict.threshold,
+                                 "would_clear": verdict.ok,
+                                 "blocked_by": None if verdict.ok else verdict.reason},
+                                ask.size * ask.price >= 10.0, tag="study")
+
+                    # Constraint attribution: which single rule is doing the
+                    # blocking? This is what tells us where the funnel dies.
+                    if not verdict.ok:
+                        blocker = ("league" if "blocked" in verdict.reason
+                                   else "band" if "dead/unproven" in verdict.reason
+                                   else "implausible" if "implausible" in verdict.reason
+                                   else "threshold")
+                        att = funnel.setdefault("blockers", {})
+                        att[blocker] = att.get(blocker, 0) + 1
+                        if blocker == "threshold":
+                            # How close? Bucketed so we can see the shape of
+                            # the miss distribution, not just the count.
+                            gap = (verdict.threshold or 0) - verdict.edge
+                            b = ("<0.5c" if gap < 0.005 else "0.5-1c" if gap < 0.01
+                                 else "1-2c" if gap < 0.02 else ">2c")
+                            gaps = funnel.setdefault("threshold_gap", {})
+                            gaps[b] = gaps.get(b, 0) + 1
                     # Mispricing-distribution telemetry: every completed
                     # fair-vs-ask comparison is counted, with the best edge
                     # seen and near-misses — so "are there mispricings?" is
@@ -658,6 +705,7 @@ def main() -> None:
     candidates: dict = {}
     match_cache: dict = {}
     explored_seen: set = set()
+    study_seen: set = set()
     last_checklist_items: list[str] = []
     last_discovery = 0.0
     last_settle = 0.0
@@ -689,7 +737,7 @@ def main() -> None:
                 last_discovery = time.time()
             funnel = run_cycle(adapters, feed, policy, risk, ledger, sport_keys,
                                candidates=candidates, match_cache=match_cache,
-                               explored_seen=explored_seen)
+                               explored_seen=explored_seen, study_seen=study_seen)
             funnel["account_link"] = {k: v["ok"] for k, v in account_link.items()}
             if configured_mode != risk.mode:
                 # Not armed: say WHY, every cycle, on the Engine tab.

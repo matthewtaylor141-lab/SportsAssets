@@ -194,3 +194,43 @@ def test_unpriced_outcomes_are_counted_not_silently_dropped(tmp_path, monkeypatc
     ex = funnel["unpriced_examples"]["no_sharp_quote_spread"]
     assert ex["venue_line"] == -2.5
     assert -1.5 in ex["sharp_lines"] and -0.5 in ex["sharp_lines"]
+
+
+def test_study_records_every_priced_outcome_even_when_nothing_trades(tmp_path, monkeypatch):
+    """The evidence stream must NOT be gated by the trading rules: a slate
+    that trades nothing must still produce study data and name the blocker."""
+    import json as _json
+    from pathlib import Path
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    # 0.43 ask in a dead zone: zero trades by design.
+    funnel = run_cycle([StubVenue(ask_price=0.43)], StubFeed([_event(home_odds=1.60)]),
+                       POLICY, risk, ledger, ["soccer_epl"])
+    assert ledger.summary()["fills"] == 0          # nothing traded, as intended
+    assert funnel["studied"] >= 1                  # ...but we still learned
+    assert funnel["blockers"].get("band", 0) >= 1  # and we know why
+
+    recs = [_json.loads(x) for x in
+            (Path(str(tmp_path)) / "shadow_fills.jsonl").read_text().splitlines()]
+    study = [r for r in recs if r.get("tag") == "study"]
+    assert study, "priced outcomes must be recorded for calibration"
+    assert study[0]["feed"]["would_clear"] is False
+    assert "dead" in study[0]["feed"]["blocked_by"]
+    assert study[0]["fair_value"] > 0 and study[0]["limit_price"] == 0.43
+
+
+def test_threshold_gap_distribution_is_reported(tmp_path, monkeypatch):
+    """Near-misses are bucketed so we can see how close the market is to
+    clearing — the number that says whether thresholds need tuning."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    # fair 0.50 vs ask 0.485 -> 1.5c edge, 2.0c needed: a 0.5-1c gap.
+    funnel = run_cycle([StubVenue(ask_price=0.485)], StubFeed([_event()]),
+                       POLICY, risk, ledger, ["soccer_epl"])
+    assert funnel["blockers"]["threshold"] >= 1
+    gaps = funnel["threshold_gap"]
+    # 1.5c edge against a 2.0c bar: a sub-cent miss, and every threshold
+    # rejection lands in exactly one bucket.
+    assert gaps.get("<0.5c", 0) + gaps.get("0.5-1c", 0) >= 1
+    assert sum(gaps.values()) == funnel["blockers"]["threshold"]

@@ -61,6 +61,9 @@ interface EngineStatus {
     edges?: { evaluated: number; best_cents: number; near_miss_1c: number; explored: number }
     feed_quota?: { remaining?: number; used?: number }
     not_armed?: { want: string; blocked_by: string[] }
+    studied?: number
+    blockers?: Record<string, number>
+    threshold_gap?: Record<string, number>
     unpriced_examples?: Record<string, { venue_line?: number; sharp_lines?: number[]; outcome?: string }>
     stream?: Record<string, { connected: boolean; subscribed: number; cached: number; updates: number }>
     book_sample?: Record<string, unknown>
@@ -327,6 +330,17 @@ export function Engine() {
                     ? `${k} (venue ${v.venue_line}, sharp has ${(v.sharp_lines || []).join('/') || 'none'})`
                     : `${k} (${v.outcome || ''})`).join(' · ')}
               </span>
+            )}
+            {status.detail?.studied != null && (
+              <> · <b>studied {status.detail.studied}</b></>
+            )}
+            {status.detail?.blockers && (
+              <> · blocked by: {Object.entries(status.detail.blockers)
+                .sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ×${n}`).join(', ')}</>
+            )}
+            {status.detail?.threshold_gap && (
+              <> · miss by: {Object.entries(status.detail.threshold_gap)
+                .map(([k, n]) => `${k} ×${n}`).join(', ')}</>
             )}
             {status.detail?.mode && <> · mode: <b>{status.detail.mode}</b></>}
             {status.detail?.not_armed && (
