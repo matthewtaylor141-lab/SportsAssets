@@ -50,6 +50,12 @@ class StubVenue:
     def taker_fee(self, price):
         return 0.0  # keep the arithmetic transparent in the assertions
 
+    def maker_fee(self, price):
+        return 0.0
+
+    def plan_entry(self, book):
+        return (book.asks[0].price, True) if book.asks else (0.0, True)
+
 
 def _event(fresh=True, home_odds=2.00):
     # Fair (2-way, equal-vig): Arsenal = 0.50; ask 0.47 -> edge > threshold.

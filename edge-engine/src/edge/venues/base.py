@@ -54,5 +54,19 @@ class VenueAdapter(ABC):
     async def settlements(self):
         """Yield (market_id, winning_outcome_ids) at resolution."""
 
+    def maker_fee(self, price: float) -> float:
+        """Fee for a RESTING order. Both venues price maker liquidity at or
+        below taker; adapters that charge differently override this."""
+        return 0.0
+
+    def plan_entry(self, book: MarketBook) -> tuple[float, bool]:
+        """(entry_price, taker) — the price this venue would actually enter
+        at, given the book. The default is to cross the spread and pay the
+        ask; adapters that can rest an order override this to quote a better
+        price. The engine evaluates its threshold at whatever comes back, so
+        a venue that prices better also qualifies more opportunities."""
+        return (book.asks[0].price, True) if book.asks else (0.0, True)
+
     def net_edge(self, intent: FillIntent, taker: bool) -> float:
-        return intent.edge - (self.taker_fee(intent.limit_price) if taker else 0.0)
+        return intent.edge - (self.taker_fee(intent.limit_price) if taker
+                              else self.maker_fee(intent.limit_price))

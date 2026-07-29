@@ -133,16 +133,38 @@ def discover_all(adapters, policy) -> dict:
     return out
 
 
+_QUARANTINE_CACHE: dict = {"ts": 0.0, "value": set()}
+_QUARANTINE_TTL_S = 60.0
+
+
+def _quarantined(ledger) -> set:
+    """Quarantine list, memoized for a minute. It changes on the scale of
+    hours; a reactor firing several times a second must not re-query it."""
+    now = time.time()
+    if now - _QUARANTINE_CACHE["ts"] > _QUARANTINE_TTL_S:
+        _QUARANTINE_CACHE["value"] = ledger.quarantined_slices(days=1)
+        _QUARANTINE_CACHE["ts"] = now
+    return _QUARANTINE_CACHE["value"]
+
+
 def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str],
               candidates: dict | None = None, match_cache: dict | None = None,
-              explored_seen: set | None = None, study_seen: set | None = None) -> dict:
+              explored_seen: set | None = None, study_seen: set | None = None,
+              only_slugs: set | None = None) -> dict:
     """One sweep across all venues: feed → map (0.95 gate) → de-vig → book →
     strategy filter → risk approve → execute (paper-log or place, by mode).
     Both venues are judged against the SAME fair values.
 
     candidates: pre-discovered {venue: (adapter, [VenueMarket])} — pass this
     on fast cycles so discovery runs on its own slow clock; None = discover
-    inline (tests, first cycle)."""
+    inline (tests, first cycle).
+
+    only_slugs: REACTIVE pass — re-price just these outcome tokens (books the
+    venue stream said changed) and nothing else. Same decision code path, so
+    a reactive fill is indistinguishable from a swept one; but the pass is a
+    partial view of the world, so whole-cycle accounting (match-rate stats,
+    divergence surveillance, circuit-breaker marks, watchdog) is left to the
+    full sweeps — computing them from a handful of markets would be wrong."""
     from datetime import datetime, timezone
 
     from edge.execution.engine import strategy_filter
@@ -152,6 +174,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     from edge.venues.base import FillIntent
     from edge.venues.mapper import match_events_all, team_score
 
+    reactive = only_slugs is not None
     if candidates is not None:
         venue_candidates = candidates
     else:
@@ -178,12 +201,14 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                    if v.strip()}
     funnel = {"mode": risk.mode, "feed_events": len(events), "matched": 0,
               "tradeable": 0, "books_checked": 0, "logged": 0, "rejects": {}}
+    if reactive:
+        funnel["reactive"] = len(only_slugs)
     if risk.is_live:
         funnel["live_venues"] = sorted(live_venues)
     marks: dict[str, float] = {}   # market_key -> best bid (circuit-breaker marks)
     # Slices whose prices systematically disagree with the venue's own —
     # barred from trading until the disagreement clears, whatever caused it.
-    quarantined = ledger.quarantined_slices(days=1)
+    quarantined = _quarantined(ledger)
     if quarantined:
         funnel["quarantined"] = sorted("/".join(q) for q in quarantined)[:8]
 
@@ -210,26 +235,40 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                 log.debug("event refresh failed for %s: %s", ev.sport_key, exc)
         if len(ev.h2h) < 2:
             continue
-        names = list(ev.h2h)
-        try:
-            fairs = dict(zip(names, fair_value([ev.h2h[n] for n in names])))
-            # Derivative sides: de-vig each two-sided line at its exact point.
-            deriv_sides: list[tuple] = []  # (ParsedLine, fair)
-            for kind, quotes in (("total", ev.totals), ("spread", ev.spreads)):
-                for pq in pair_quotes(quotes, kind):
-                    fa, fb = fair_value([pq.a_odds, pq.b_odds])
-                    deriv_sides.append((pq.a_parsed, fa))
-                    deriv_sides.append((pq.b_parsed, fb))
-        except Exception as exc:  # noqa: BLE001 — one pathological odds set
-            log.warning("fair value failed for %s vs %s (%s): %s",
-                        ev.home, ev.away, ev.h2h, exc)
-            reject("fair_error")
-            continue
+        # De-vigging is the per-event arithmetic (moneyline + every paired
+        # spread/total line). Computed ON DEMAND and memoized: a reactive
+        # pass that touches none of this event's outcomes never pays for it,
+        # which is what makes sub-second re-pricing affordable.
+        priced: dict = {}
+
+        def _price_event(ev=ev) -> bool:
+            if priced:
+                return priced["ok"]
+            names = list(ev.h2h)
+            try:
+                priced["fairs"] = dict(
+                    zip(names, fair_value([ev.h2h[n] for n in names])))
+                sides: list[tuple] = []  # (ParsedLine, fair)
+                for kind, quotes in (("total", ev.totals), ("spread", ev.spreads)):
+                    for pq in pair_quotes(quotes, kind):
+                        fa, fb = fair_value([pq.a_odds, pq.b_odds])
+                        sides.append((pq.a_parsed, fa))
+                        sides.append((pq.b_parsed, fb))
+                priced["deriv_sides"] = sides
+                priced["ok"] = True
+            except Exception as exc:  # noqa: BLE001 — one pathological odds set
+                log.warning("fair value failed for %s vs %s (%s): %s",
+                            ev.home, ev.away, ev.h2h, exc)
+                priced["ok"] = False
+            return priced["ok"]
 
         def fair_for(oc_name: str):
             """(fair, category, reason) — reason names WHY no fair value was
             found, so the funnel can distinguish 'venue lists a line our
             sharp book doesn't quote' from 'we couldn't identify the side'."""
+            if not _price_event():
+                return None, "moneyline", {"reason": "fair_error"}
+            fairs, deriv_sides = priced["fairs"], priced["deriv_sides"]
             p = parse_outcome_line(oc_name)
             if p.kind in ("total", "spread"):
                 for side, f in deriv_sides:
@@ -259,9 +298,10 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                 if match_cache is not None:
                     match_cache[mkey_cache] = matches
             best = matches[0] if matches else None
-            ledger.record_match_stat(day, adapter.name, ev.league_code or "?",
-                                     mapped=best is not None,
-                                     tradeable=bool(best and best.tradeable))
+            if not reactive:  # partial passes must not skew the match-rate
+                ledger.record_match_stat(day, adapter.name, ev.league_code or "?",
+                                         mapped=best is not None,
+                                         tradeable=bool(best and best.tradeable))
             if best is None:
                 continue
             funnel["matched"] += 1
@@ -274,6 +314,11 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                 if not match.tradeable:
                     continue
                 for oc_name, token in match.market.outcome_tokens.items():
+                    # Reactive pass: only the books that actually moved. This
+                    # is the whole speed win — everything else is skipped
+                    # before any pricing work happens.
+                    if reactive and token not in only_slugs:
+                        continue
                     if token in seen_tokens:
                         continue
                     seen_tokens.add(token)
@@ -304,20 +349,32 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     # tens of cents, systematically = we are pricing a
                     # different bet than the one listed.
                     if book.bids:
-                        venue_mid = (book.bids[0].price + ask.price) / 2
-                        divergence = abs(fair - venue_mid)
-                        ledger.record_divergence(day, adapter.name,
-                                                 ev.league_code or "?", category,
-                                                 divergence)
+                        if not reactive:  # sampled on sweeps, not per tick
+                            venue_mid = (book.bids[0].price + ask.price) / 2
+                            ledger.record_divergence(day, adapter.name,
+                                                     ev.league_code or "?",
+                                                     category,
+                                                     abs(fair - venue_mid))
+                        # The BAN, unlike the sampling, always applies.
                         if (adapter.name, ev.league_code or "?",
                                 category) in quarantined:
                             reject("quarantined_slice")
                             continue
                     effective_mode = risk.mode if (
                         risk.is_live and adapter.name in live_venues) else "PAPER"
-                    verdict = strategy_filter(policy, ev.league_code, ask.price, fair,
-                                              venue_fee=adapter.taker_fee(ask.price),
-                                              category=category)
+                    # Ask the venue where it would actually buy. A venue that
+                    # can rest an order quotes inside the spread, so the
+                    # threshold is judged at the price we'd really pay —
+                    # which qualifies trades the ask alone would have killed.
+                    # PAPER always crosses: a paper "fill" at a resting price
+                    # assumes a queue we never actually joined, and inventing
+                    # fills is how a shadow record starts lying about ROI.
+                    entry_px, taker = (adapter.plan_entry(book)
+                                       if effective_mode != "PAPER"
+                                       else (ask.price, True))
+                    fee = (adapter.taker_fee if taker else adapter.maker_fee)(entry_px)
+                    verdict = strategy_filter(policy, ev.league_code, entry_px, fair,
+                                              venue_fee=fee, category=category)
 
                     # ── STUDY RECORD ──────────────────────────────────
                     # Every priced outcome is observed, whether or not it
@@ -427,6 +484,10 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     )
                     decision["category"] = category
                     decision["outcome"] = oc_name
+                    # Maker vs taker entry, recorded per fill so the nightly
+                    # report can measure whether resting actually paid.
+                    decision["entry"] = {"price": entry_px, "taker": taker,
+                                         "ask": ask.price}
                     # Mapping provenance — makes 'why this fair value?'
                     # answerable from the record alone.
                     decision["venue_market"] = {"title": match.market.title,
@@ -437,7 +498,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                      ask_price=ask.price, ask_size=ask.size,
                                      size_usd=approved, edge=verdict.edge,
                                      threshold=verdict.threshold, decision=decision,
-                                     ts=time.time())
+                                     ts=time.time(), entry_price=entry_px,
+                                     taker=taker, event_key=ev.event_key())
                     funnel["logged"] += int(result["placed"])
                     funnel.setdefault("by_category", {}).setdefault(category, 0)
                     funnel["by_category"][category] += int(result["placed"])
@@ -446,14 +508,21 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     # Legacy shadow JSONL + platform mirror (grader history).
                     intent = FillIntent(
                         market_id=match.market.market_id, outcome_id=token,
-                        limit_price=ask.price, size_usd=approved,
-                        fair_value=round(fair, 4), edge=round(fair - ask.price, 4),
+                        limit_price=entry_px, size_usd=approved,
+                        fair_value=round(fair, 4), edge=round(fair - entry_px, 4),
                         league=ev.league_code, band=verdict.band,
                     )
                     would_fill = ask.size * ask.price >= approved
                     log_shadow_fill(intent, book,
                                     {"h2h": ev.h2h, "home": ev.home, "away": ev.away},
                                     would_fill, whale_alignment=None)
+
+    if reactive:
+        # A reactive pass saw a handful of markets. Marking the book from
+        # that sample would report a portfolio-wide loss that isn't real, and
+        # the watchdog's mapper-confidence ratio would be computed from a
+        # slice. Health is a whole-sweep measurement; return the decisions.
+        return funnel
 
     # Cycle health: marks for the circuit breaker (LIVE positions only —
     # paper marks must never halt real trading), watchdog inputs.
@@ -560,7 +629,11 @@ def main() -> None:
     from datetime import datetime, timezone
 
     from edge.execution.engine import Policy
-    from edge.execution.executor import sync_kalshi_fills
+    from edge.execution.executor import (
+        reap_pmus_makers,
+        sync_kalshi_fills,
+        sync_pmus_fills,
+    )
     from edge.execution.risk import RiskManager
     from edge.fairvalue.feed import TheOddsAPIClient
     from edge.ledger.service import Ledger
@@ -696,12 +769,34 @@ def main() -> None:
 
         threading.Thread(target=_run_census, daemon=True, name="census").start()
 
+    # Event-driven reactor: the venue's book stream wakes the loop the moment
+    # a subscribed book moves, and only the moved books get re-priced. The
+    # full sweep below still runs on its own clock (discovery, health,
+    # accounting); the reactor is what closes the gap BETWEEN sweeps.
+    reactor = None
+    if os.environ.get("EDGE_REACTOR", "1") != "0":
+        from edge.shadow.reactor import Reactor
+
+        reactor = Reactor(debounce_s=float(os.environ.get("EDGE_REACT_DEBOUNCE_S", "0.25")))
+        hooked = [a.name for a in adapters
+                  if hasattr(a, "add_book_listener") and a.add_book_listener(reactor.mark)]
+        if hooked:
+            log.warning("reactor armed on %s — repricing on book updates", hooked)
+        else:
+            reactor = None  # no stream to react to; plain polling
+            log.info("no streaming venue available — polling only")
+    reacted = {"passes": 0, "logged": 0}
+
     last_report_day = ""
     last_recheck = time.time()
     # Fast pricing cycles; discovery + settlement on their own slow clocks
     # (10s cycles must not re-list every venue market or re-poll settlements).
     discovery_s = int(os.environ.get("EDGE_DISCOVERY_SECONDS", "300"))
     settle_s = int(os.environ.get("EDGE_SETTLE_SECONDS", "300"))
+    # How long a resting maker order gets to fill before we pull it and
+    # re-decide on a fresh book. Short enough that a quote can't sit through
+    # a move it no longer likes (the adverse-selection risk of resting).
+    maker_ttl_s = float(os.environ.get("EDGE_PMUS_MAKER_TTL_S", "90"))
     candidates: dict = {}
     match_cache: dict = {}
     explored_seen: set = set()
@@ -739,6 +834,13 @@ def main() -> None:
                                candidates=candidates, match_cache=match_cache,
                                explored_seen=explored_seen, study_seen=study_seen)
             funnel["account_link"] = {k: v["ok"] for k, v in account_link.items()}
+            if reactor is not None:
+                # Since the last sweep: how many book pushes arrived, how many
+                # re-pricings they triggered, how fast we answered them, and
+                # what those reactions actually placed.
+                funnel["reactor"] = {**reactor.stats(), **reacted}
+                reactor.reset_window()
+                reacted = {"passes": 0, "logged": 0}
             if configured_mode != risk.mode:
                 # Not armed: say WHY, every cycle, on the Engine tab.
                 funnel["not_armed"] = {"want": configured_mode,
@@ -749,8 +851,16 @@ def main() -> None:
                 last_settle = time.time()
             if risk.is_live:
                 for a in adapters:
-                    if a.name == "kalshi" and a.has_credentials():
+                    if not a.has_credentials():
+                        continue
+                    if a.name == "kalshi":
                         funnel["kalshi_fill_sync"] = sync_kalshi_fills(a, ledger, risk.mode)
+                    elif a.name == "polymarket-us":
+                        # Fills FIRST, then reap: the reaper only returns an
+                        # event claim when the market holds no position, so
+                        # it must see this cycle's fills before deciding.
+                        funnel["pmus_fill_sync"] = sync_pmus_fills(a, ledger, risk.mode)
+                        funnel["makers"] = reap_pmus_makers(a, ledger, maker_ttl_s)
             log.info("cycle complete: %s", funnel)
             _post_status("ok", funnel)
 
@@ -769,7 +879,34 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             log.exception("cycle failed; continuing")
             _post_status("error", {"error": str(exc)[:200]})
-        time.sleep(cycle_seconds)
+
+        # ── inter-sweep window: react, or sleep it out ──────────────────
+        next_sweep = time.time() + cycle_seconds
+        if reactor is None:
+            time.sleep(max(next_sweep - time.time(), 0.0))
+            continue
+        while True:
+            remaining = next_sweep - time.time()
+            if remaining <= 0:
+                break
+            dirty = reactor.take(timeout=min(remaining, 1.0))
+            if not dirty:
+                continue
+            try:
+                rf = run_cycle(adapters, feed, policy, risk, ledger, sport_keys,
+                               candidates=candidates, match_cache=match_cache,
+                               explored_seen=explored_seen, study_seen=study_seen,
+                               only_slugs=dirty)
+                reacted["passes"] += 1
+                reacted["logged"] += rf.get("logged", 0)
+                if rf.get("logged"):
+                    # A reaction that traded is news — report it immediately
+                    # rather than waiting for the next sweep's status post.
+                    log.warning("reactive fill: %s book updates -> %s placed",
+                                len(dirty), rf["logged"])
+                    _post_status("ok", {**rf, "trigger": "book_update"})
+            except Exception:  # noqa: BLE001 — a bad reaction must not end
+                log.exception("reactive pass failed; continuing")  # the loop
 
 
 if __name__ == "__main__":

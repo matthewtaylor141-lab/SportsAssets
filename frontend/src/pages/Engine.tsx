@@ -66,6 +66,10 @@ interface EngineStatus {
     threshold_gap?: Record<string, number>
     unpriced_examples?: Record<string, { venue_line?: number; sharp_lines?: number[]; outcome?: string }>
     stream?: Record<string, { connected: boolean; subscribed: number; cached: number; updates: number }>
+    reactor?: { ticks: number; reactions: number; queued: number; deferred: number
+      avg_latency_ms: number; max_latency_ms: number; passes: number; logged: number }
+    makers?: { cancelled: number; closed: number; released: number }
+    pmus_fill_sync?: number
     book_sample?: Record<string, unknown>
     error?: string
   }
@@ -323,6 +327,23 @@ export function Engine() {
                 {' '}· {v} stream: {s.connected ? '⚡ live' : 'reconnecting'} ({s.cached} books, {s.updates} updates)
               </span>
             ))}
+            {status.detail?.reactor && (
+              <span style={{ color: status.detail.reactor.ticks > 0 ? 'var(--good)' : 'var(--muted)' }}>
+                {' '}· reactor: {status.detail.reactor.ticks} ticks →{' '}
+                {status.detail.reactor.passes} repricings ({status.detail.reactor.avg_latency_ms}ms avg
+                {status.detail.reactor.logged > 0 && `, ${status.detail.reactor.logged} placed`})
+              </span>
+            )}
+            {status.detail?.makers && (status.detail.makers.cancelled > 0
+              || status.detail.makers.closed > 0) && (
+              <> · resting orders: {status.detail.makers.cancelled} pulled,{' '}
+                {status.detail.makers.closed} closed, {status.detail.makers.released} events freed</>
+            )}
+            {status.detail?.pmus_fill_sync ? (
+              <span style={{ color: 'var(--good)' }}>
+                {' '}· <b>{status.detail.pmus_fill_sync} maker fill(s)</b>
+              </span>
+            ) : null}
             {status.detail?.unpriced_examples && (
               <span style={{ color: 'var(--warning)' }}>
                 {' '}· unpriced: {Object.entries(status.detail.unpriced_examples).map(([k, v]) =>

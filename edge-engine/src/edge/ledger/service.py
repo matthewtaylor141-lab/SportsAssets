@@ -386,6 +386,19 @@ class Ledger:
             row = conn.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
         return json.loads(row["value"]) if row else default
 
+    def clear_state(self, key: str) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute("DELETE FROM state WHERE key=?", (key,))
+
+    def list_state(self, prefix: str) -> dict[str, Any]:
+        """All state entries under a prefix — how the maker reaper finds the
+        orders it parked without keeping an in-memory registry that a restart
+        would lose."""
+        with self._conn() as conn:
+            rows = conn.execute("SELECT key, value FROM state WHERE key LIKE ?",
+                                (prefix + "%",)).fetchall()
+        return {r["key"]: json.loads(r["value"]) for r in rows}
+
     def log_mode(self, mode: str, note: str = "") -> None:
         with self._lock, self._conn() as conn:
             conn.execute("INSERT INTO mode_log (ts, mode, note) VALUES (?,?,?)",
@@ -409,6 +422,16 @@ class Ledger:
                 "VALUES (?,?,?,?)",
                 (event_key, market_key, venue, ts if ts is not None else time.time()),
             )
+            return cur.rowcount > 0
+
+    def release_event(self, event_key: str) -> bool:
+        """Give a claim back. A claim exists to stop us ADDING to an event we
+        already hold; an order that rested and never filled left us holding
+        nothing, so keeping its claim would silently retire the event for the
+        rest of the day. Callers must confirm no position exists first."""
+        with self._lock, self._conn() as conn:
+            cur = conn.execute("DELETE FROM events_traded WHERE event_key=?",
+                               (event_key,))
             return cur.rowcount > 0
 
     def event_traded(self, event_key: str) -> bool:

@@ -21,11 +21,26 @@ marked ASSUMPTION and must be validated in shadow mode before capital.
    `fair(O) - p >= threshold(venue, band)`. Polymarket taker fee = 0;
    Kalshi taker fee ≈ 0.07*p*(1-p) per contract → on Kalshi either execute
    MAKER-side (fee-free) or add the fee into the threshold.
-4. **Band filter (measured).** Trade bands with proven edge; skip dead zones.
-   Edge by entry band (stake-weighted, cents): 05-10c:+2.7, 15-20c:+2.3,
-   30-35c:+3.6, 45-50c:+2.9, 55-60c:+0.8, 75-80c:+2.6, 80-85c:+2.2,
-   85-90c:+1.4. DEAD ZONES (do not trade): 40-45c (-0.4), 65-70c (0.0),
-   90-95c (0.0). Config: `config/bands.yaml`.
+   p is whatever `adapter.plan_entry(book)` returns, NOT automatically the
+   ask: Polymarket US rests one tick inside the spread (GTC + post-only), so
+   the threshold is judged at the price we would actually pay. Resting orders
+   are reaped on a TTL and give their one-per-event claim back unfilled; a
+   market that fails to fill as maker crosses on the next look. PAPER always
+   crosses — a paper fill at a resting price invents a queue position we
+   never held, and that is how a shadow record starts lying about ROI.
+4. **Band filter (measured).** Trade every band with proven edge; skip only
+   the measured dead zones. `config/bands.yaml` is GENERATED, never hand-
+   written — `scripts/gen_bands.py` reads `data/calib_price.csv` (moneyline)
+   and `scripts/gen_category_bands.py` writes the spread/total windows. The
+   cents figures below are the STRONGEST bands, not the tradeable ones;
+   transcribing this list into the config once cost ~45% of the tradeable
+   price space, so regenerate rather than retype.
+   Strongest bands (stake-weighted, cents): 05-10c:+2.7, 15-20c:+2.3,
+   30-35c:+3.6, 45-50c:+2.9, 75-80c:+2.6, 80-85c:+2.2, 85-90c:+1.4.
+   DEAD ZONES (do not trade): 40-45c (-0.4), 65-70c (0.0), 90-95c (0.0).
+   Derivatives (spread/total) do NOT inherit the moneyline dead zones and are
+   priced symmetrically about the line — see the header of
+   `scripts/gen_category_bands.py` for why.
 5. **League filter (measured).** Positive-ROI leagues (allowlist) and
    negative/flat leagues (blocklist) in `config/leagues.yaml`, keyed by the
    Polymarket slug-prefix map recovered from the data. Highlights —

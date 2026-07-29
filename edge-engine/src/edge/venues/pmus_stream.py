@@ -17,6 +17,7 @@ import asyncio
 import logging
 import threading
 import time
+from collections.abc import Callable
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class BookStreamer:
         self._cache: dict[str, tuple[float, dict]] = {}   # slug -> (ts, marketData)
         self._subscribed: set[str] = set()
         self._pending: list[str] = []
+        self._listeners: list[Callable[[str], None]] = []
         self.connected = False
         self.updates = 0
         self.reconnects = 0
@@ -41,6 +43,14 @@ class BookStreamer:
                              name="pmus-book-stream").start()
 
     # ── thread-safe API (called from the sync engine) ───────────────────
+
+    def add_listener(self, fn: Callable[[str], None]) -> None:
+        """Called with the slug on every book update. This is what turns a
+        polling engine into a reacting one: the listener runs on the stream
+        thread, so it must be cheap and non-blocking (the reactor just sets
+        a flag). A raising listener is logged and never propagates."""
+        with self._lock:
+            self._listeners.append(fn)
 
     def ensure(self, slugs: list[str]) -> None:
         """Queue subscriptions for slugs we haven't subscribed to yet."""
@@ -73,10 +83,19 @@ class BookStreamer:
     def _on_market_data(self, message: dict) -> None:
         md = (message or {}).get("marketData") or {}
         slug = md.get("marketSlug")
-        if slug:
-            with self._lock:
-                self._cache[slug] = (time.time(), md)
-                self.updates += 1
+        if not slug:
+            return
+        with self._lock:
+            self._cache[slug] = (time.time(), md)
+            self.updates += 1
+            listeners = list(self._listeners)
+        # Notify OUTSIDE the lock: a listener must never be able to deadlock
+        # the stream thread against a reader calling get()/stats().
+        for fn in listeners:
+            try:
+                fn(slug)
+            except Exception as exc:  # noqa: BLE001 — a bad listener must
+                log.debug("book listener failed: %s", exc)  # not stop the feed
 
     def _run(self) -> None:
         try:

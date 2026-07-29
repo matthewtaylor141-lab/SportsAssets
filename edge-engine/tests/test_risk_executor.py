@@ -203,6 +203,10 @@ class _StubAdapter:
     def taker_fee(price):
         return 0.07 * price * (1 - price)
 
+    @staticmethod
+    def maker_fee(price):
+        return 0.0
+
 
 def test_paper_execute_records_ledger_fill_with_decision(tmp_path):
     ledger = Ledger(db_path=str(tmp_path / "l.sqlite3"))

@@ -77,15 +77,20 @@ def test_outcome_matches_enforces_exact_point_and_team():
 
 def test_moneyline_dead_zone_does_not_apply_to_spreads():
     assert POLICY.band_threshold(0.42, "moneyline") is None       # dead zone
-    assert POLICY.band_threshold(0.42, "spread") == 0.025          # kch123 window
+    assert POLICY.band_threshold(0.42, "spread") == 0.025          # kch123 core
     assert POLICY.band_threshold(0.52, "spread") == 0.025
-    assert POLICY.band_threshold(0.57, "spread") is None           # outside window
+    # Outside the measured core the window stays open but the bar goes UP —
+    # see tests/test_category_bands.py for the reasoning.
+    assert POLICY.band_threshold(0.75, "spread") == 0.030
 
 
-def test_totals_cheap_side_only():
+def test_totals_are_priced_symmetrically_around_the_line():
+    """Over and Under come from one de-vig, so both sides trade on the same
+    terms; the expensive side is not a different bet."""
     assert POLICY.band_threshold(0.45, "total") == 0.025
-    assert POLICY.band_threshold(0.60, "total") is None            # negative zone
-    assert POLICY.band_threshold(0.75, "total") is None
+    assert POLICY.band_threshold(0.55, "total") == 0.025
+    assert POLICY.band_threshold(0.75, "total") == 0.030
+    assert POLICY.band_threshold(0.95, "total") is None            # tail, excluded
 
 
 def test_unknown_category_never_tradeable():
@@ -133,6 +138,12 @@ def test_paper_cycle_trades_a_total(tmp_path, monkeypatch):
 
         def taker_fee(self, price):
             return 0.0
+
+        def maker_fee(self, price):
+            return 0.0
+
+        def plan_entry(self, book):
+            return book.asks[0].price, True
 
     class Feed:
         def fetch_events(self, sport_key):

@@ -29,6 +29,9 @@ from .mapper import VenueMarket
 log = logging.getLogger(__name__)
 
 
+TICK = 0.01   # venue prices are whole cents
+
+
 class PolymarketUSAdapter(VenueAdapter):
     name = "polymarket-us"
 
@@ -39,6 +42,9 @@ class PolymarketUSAdapter(VenueAdapter):
         self._auth = None
         self.book_errors: dict[str, int] = {}
         self._taker_fee = float(os.environ.get("EDGE_PMUS_TAKER_FEE", "0.0"))
+        self._maker_fee_rate = float(os.environ.get("EDGE_PMUS_MAKER_FEE", "0.0"))
+        self._maker_first = os.environ.get("EDGE_PMUS_MAKER_FIRST", "1") != "0"
+        self._force_taker: dict[str, float] = {}   # slug -> cross-until ts
         # Live book stream (push-latency books). Needs API keys for the WS
         # handshake; fail-soft — REST remains the fallback path.
         self._stream = None
@@ -53,6 +59,14 @@ class PolymarketUSAdapter(VenueAdapter):
 
     def stream_stats(self) -> dict | None:
         return self._stream.stats() if self._stream else None
+
+    def add_book_listener(self, fn) -> bool:
+        """Subscribe to book-change notifications (slug per update). Returns
+        False when there is no live stream — the caller then keeps polling."""
+        if self._stream is None:
+            return False
+        self._stream.add_listener(fn)
+        return True
 
     # ── credentials / auth ─────────────────────────────────────────────
 
@@ -281,14 +295,69 @@ class PolymarketUSAdapter(VenueAdapter):
     def taker_fee(self, price: float) -> float:
         return self._taker_fee
 
+    def maker_fee(self, price: float) -> float:
+        return self._maker_fee_rate
+
+    # ── maker-first entry pricing ──────────────────────────────────────
+
+    def plan_entry(self, book: MarketBook) -> tuple[float, bool]:
+        """(entry_price, taker) — where we try to buy.
+
+        Crossing the spread means paying the ask, and an ask only two ticks
+        rich of fair kills an otherwise-good trade. Resting one tick inside
+        the spread buys at a better price, which BOTH widens the edge on
+        trades we were already taking and qualifies trades that could not
+        clear the threshold at the ask. The cost is fill probability, which
+        the reaper bounds: an order that hasn't filled by its TTL is pulled
+        and the decision is made again on a fresh book.
+
+        Never crosses (that would make us the taker at a worse price than we
+        asked for) and never prices below the best bid (there is no reason to
+        queue behind the whole book when joining the front is free)."""
+        if not book.asks:
+            return 0.0, True
+        ask = round(book.asks[0].price, 2)
+        if not self._maker_first or self._crossing(book.outcome_id):
+            return ask, True
+        bid = round(book.bids[0].price, 2) if book.bids else 0.0
+        px = round(max(ask - TICK, bid), 2)
+        if px <= 0 or px >= ask:      # one-tick market: no room to rest
+            return ask, True
+        return px, False
+
+    def mark_force_taker(self, market_slug: str) -> None:
+        """Cross on this market for a while — its queue didn't come to us.
+
+        Without this, a market we can never get filled on as maker would be
+        quoted, reaped, quoted, reaped, forever, and traded never. Resting is
+        supposed to buy a better price on trades we'd take anyway, not to
+        replace taking. One failed attempt and we go back to crossing."""
+        self._force_taker[market_slug] = time.time() + float(
+            os.environ.get("EDGE_PMUS_FORCE_TAKER_S", "600"))
+
+    def _crossing(self, market_slug: str) -> bool:
+        until = self._force_taker.get(market_slug)
+        if until is None:
+            return False
+        if time.time() >= until:      # cool-off elapsed: try resting again
+            self._force_taker.pop(market_slug, None)
+            return False
+        return True
+
     # ── live orders (FOK limit, preview-verified) ──────────────────────
 
     def place_order(self, market_slug: str, price: float, quantity: int,
-                    preview: bool = True) -> dict:
-        """BUY_LONG FOK limit at whole-cent price. preview=False skips the
-        venue cost pre-check round-trip — safe for micro orders because the
-        FOK LIMIT price already hard-bounds cost at price*quantity; the
-        executor keeps the preview for larger sizes."""
+                    preview: bool = True, tif: str = "TIME_IN_FORCE_FILL_OR_KILL",
+                    post_only: bool = False) -> dict:
+        """BUY_LONG limit at whole-cent price. preview=False skips the venue
+        cost pre-check round-trip — safe for micro orders because the LIMIT
+        price already hard-bounds cost at price*quantity; the executor keeps
+        the preview for larger sizes.
+
+        tif=TIME_IN_FORCE_GOOD_TILL_CANCEL with post_only=True is the maker
+        path: the venue's participateDontInitiate flag makes it reject rather
+        than cross, so a resting order can never turn into a taker fill at a
+        price we never approved."""
         client = self._client()
         params = {
             "marketSlug": market_slug,
@@ -296,8 +365,10 @@ class PolymarketUSAdapter(VenueAdapter):
             "type": "ORDER_TYPE_LIMIT",
             "price": {"value": f"{price:.2f}", "currency": "USD"},
             "quantity": int(quantity),
-            "tif": "TIME_IN_FORCE_FILL_OR_KILL",
+            "tif": tif,
         }
+        if post_only:
+            params["participateDontInitiate"] = True
         expected = price * quantity
         prev = {}
         if preview:
@@ -311,7 +382,9 @@ class PolymarketUSAdapter(VenueAdapter):
                         "price": price, "count": quantity, "taker": True,
                         "raw": {"preview": prev, "expected": expected}}
 
-        resp = client.orders.create({**params, "synchronousExecution": True}) or {}
+        resting = tif == "TIME_IN_FORCE_GOOD_TILL_CANCEL"
+        resp = client.orders.create(
+            {**params, "synchronousExecution": not resting}) or {}
         filled, notional, state = 0.0, 0.0, ""
         for ex in resp.get("executions") or []:
             state = (ex.get("order") or {}).get("state") or state
@@ -323,12 +396,48 @@ class PolymarketUSAdapter(VenueAdapter):
             if ex.get("type") in ("EXECUTION_TYPE_FILL", "EXECUTION_TYPE_PARTIAL_FILL") and px:
                 filled += sh
                 notional += sh * px
-        ok = filled > 0
+        status = state.replace("ORDER_STATE_", "").lower() or "unknown"
+        # A resting order succeeds by EXISTING, not by filling — its fills
+        # arrive later and are reconciled from the activity feed.
+        accepted = resp.get("id") and state not in ("ORDER_STATE_REJECTED",
+                                                    "ORDER_STATE_EXPIRED")
+        ok = bool(accepted) if resting else filled > 0
         return {"ok": ok, "order_id": resp.get("id"),
-                "status": state.replace("ORDER_STATE_", "").lower() or "unknown",
+                "status": ("resting" if resting and accepted else status),
+                "resting": bool(resting and accepted),
                 "price": round(notional / filled, 4) if filled else price,
-                "count": filled, "taker": True,
+                "count": filled, "taker": not resting,
                 "raw": {"preview": prev, "response": resp}}
+
+    # ── resting-order lifecycle ────────────────────────────────────────
+
+    def cancel_order(self, order_id: str, market_slug: str) -> bool:
+        try:
+            self._client().orders.cancel(order_id, {"marketSlug": market_slug})
+            return True
+        except Exception as exc:  # noqa: BLE001 — already gone counts as done
+            log.info("cancel %s failed (treating as closed): %s", order_id, exc)
+            return False
+
+    def open_orders(self) -> list[dict]:
+        try:
+            return list((self._client().orders.list() or {}).get("orders") or [])
+        except Exception as exc:  # noqa: BLE001
+            self._book_err(f"open_orders_{type(exc).__name__}")
+            return []
+
+    def recent_trades(self, limit: int = 100) -> list[dict]:
+        """Executed trades, newest first — the reconciliation source for
+        resting orders (there is no fills endpoint; trades live in the
+        activity feed)."""
+        try:
+            resp = self._client().portfolio.activities({
+                "limit": int(limit), "types": ["ACTIVITY_TYPE_TRADE"],
+                "sortOrder": "SORT_ORDER_DESCENDING"}) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._book_err(f"activities_{type(exc).__name__}")
+            return []
+        return [a["trade"] for a in (resp.get("activities") or []) if a.get("trade")]
 
     async def subscribe_books(self, market_ids: list[str]):
         raise NotImplementedError("v1 uses REST polling")
