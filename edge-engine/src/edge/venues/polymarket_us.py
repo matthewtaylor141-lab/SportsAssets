@@ -43,7 +43,13 @@ class PolymarketUSAdapter(VenueAdapter):
         self.book_errors: dict[str, int] = {}
         self._taker_fee = float(os.environ.get("EDGE_PMUS_TAKER_FEE", "0.0"))
         self._maker_fee_rate = float(os.environ.get("EDGE_PMUS_MAKER_FEE", "0.0"))
-        self._maker_first = os.environ.get("EDGE_PMUS_MAKER_FIRST", "1") != "0"
+        # Maker-first is OPT-IN. It was shipped default-on without ever being
+        # exercised against the live venue, which made an unverified order
+        # type the only path real money could take: if the venue refuses GTC
+        # post-only, every order fails and the engine goes quiet while its
+        # telemetry still reports orders "placed". Prove it with
+        # EDGE_PMUS_MAKER_FIRST=1 and watch the maker fill count first.
+        self._maker_first = os.environ.get("EDGE_PMUS_MAKER_FIRST", "0") == "1"
         self._force_taker: dict[str, float] = {}   # slug -> cross-until ts
         # Live book stream (push-latency books). Needs API keys for the WS
         # handshake; fail-soft — REST remains the fallback path.

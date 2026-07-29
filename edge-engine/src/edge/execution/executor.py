@@ -103,14 +103,28 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
                 outcome_id, round(entry_price, 2), qty, preview=False,
                 tif="TIME_IN_FORCE_GOOD_TILL_CANCEL", post_only=True)
             if not result["ok"]:
-                return {"placed": False, "filled_usd": 0.0,
-                        "status": f"maker_rejected:{result.get('status')}"}
-            ledger.set_state(f"{PMUS_ORDER_PREFIX}{outcome_id}", {
-                **decision, "order_id": result.get("order_id"),
-                "px": round(entry_price, 2), "count": qty, "taker": False,
-                "market_key": mkey, "league": league, "event_key": event_key,
-                "mode": mode, "ts": ts})
-            return {"placed": True, "filled_usd": 0.0, "status": "resting_maker"}
+                # Price improvement is an optimisation, never a precondition.
+                # If the venue won't rest the order, cross — provided the
+                # edge still clears at the ask, which is the bar we would
+                # have used had we never tried to do better.
+                ask_edge = edge - (ask_price - entry_price)
+                if ask_edge < threshold:
+                    return {"placed": False, "filled_usd": 0.0,
+                            "status": f"maker_rejected:{result.get('status')}"}
+                log.info("maker order refused (%s) — crossing at %.2f",
+                         result.get("status"), ask_price)
+                adapter.mark_force_taker(outcome_id)
+                entry_price, taker, qty = ask_price, True, int(size_usd / ask_price)
+                if qty < 1:
+                    return {"placed": False, "filled_usd": 0.0,
+                            "status": "sub_contract"}
+            else:
+                ledger.set_state(f"{PMUS_ORDER_PREFIX}{outcome_id}", {
+                    **decision, "order_id": result.get("order_id"),
+                    "px": round(entry_price, 2), "count": qty, "taker": False,
+                    "market_key": mkey, "league": league, "event_key": event_key,
+                    "mode": mode, "ts": ts})
+                return {"placed": True, "filled_usd": 0.0, "status": "resting_maker"}
 
         # Taker path. Clear any stale maker context for this market first, or
         # the reconciler would record this fill a second time from the

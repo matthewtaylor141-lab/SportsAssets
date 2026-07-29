@@ -14,8 +14,10 @@ Gate (config/risk.yaml): >= 60 days, >= 5,000 shadow fills per venue,
 import json
 import logging
 import os
+import queue
 import threading
 import time
+import zlib
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -84,33 +86,68 @@ def _post_status(status: str, detail: dict) -> None:
         log.debug("status post failed (non-fatal): %s", exc)
 
 
-def _record_to_platform(rec: dict) -> None:
-    """Mirror the shadow fill into the platform's internal database
-    (POST /api/engine/fills) so the Engine tab shows it. Fail-soft: the
-    JSONL log remains the grader's source of truth."""
+# ── platform mirror: OFF the pricing loop ───────────────────────────────
+#
+# This used to be a synchronous POST per record, called from inside the
+# per-outcome loop. At 18 sports that was survivable. Once coverage became
+# every active sport with full spread/total ladders it became thousands of
+# blocking round-trips per cycle — a pricing loop that spends its time
+# waiting on an HTTP call is not pricing, and the symptom is exactly what it
+# looked like: an engine that reports healthy and trades once a day.
+#
+# Now: bounded queue, one background sender. If the platform is slow or
+# down, records are DROPPED (counted, reported) — the JSONL log is the
+# grader's source of truth and telemetry must never be able to stall trading.
+
+_MIRROR_Q: "queue.Queue[dict]" = queue.Queue(maxsize=20_000)
+_MIRROR = {"started": False, "sent": 0, "dropped": 0, "failed": 0}
+
+
+def mirror_stats() -> dict:
+    return {**{k: v for k, v in _MIRROR.items() if k != "started"},
+            "queued": _MIRROR_Q.qsize()}
+
+
+def _mirror_loop() -> None:
+    import requests
+
+    sess = requests.Session()
     base = os.environ.get("EDGE_PLATFORM_API", "")
     token = os.environ.get("EDGE_INGEST_TOKEN", "")
-    if not base or not token:
-        return
-    try:
-        import requests
+    while True:
+        rec = _MIRROR_Q.get()
+        try:
+            sess.post(
+                f"{base}/api/engine/fills",
+                json={
+                    "ts": rec["ts"], "venue": rec["venue"], "market_id": rec["market_id"],
+                    "outcome_id": rec["outcome_id"], "league": rec.get("league"),
+                    "band": rec.get("band"), "limit_price": rec["limit_price"],
+                    "size_usd": rec["size_usd"], "fair_value": rec.get("fair_value"),
+                    "edge": rec.get("edge"), "would_fill": rec.get("would_fill", True),
+                    "whale_alignment": rec.get("whale_alignment"),
+                    "book_asks": rec.get("book_asks"), "book_bids": rec.get("book_bids"),
+                },
+                headers={"X-Engine-Token": token}, timeout=10)
+            _MIRROR["sent"] += 1
+        except Exception as exc:  # noqa: BLE001
+            _MIRROR["failed"] += 1
+            log.debug("platform mirror failed (non-fatal): %s", exc)
 
-        requests.post(
-            f"{base}/api/engine/fills",
-            json={
-                "ts": rec["ts"], "venue": rec["venue"], "market_id": rec["market_id"],
-                "outcome_id": rec["outcome_id"], "league": rec.get("league"),
-                "band": rec.get("band"), "limit_price": rec["limit_price"],
-                "size_usd": rec["size_usd"], "fair_value": rec.get("fair_value"),
-                "edge": rec.get("edge"), "would_fill": rec.get("would_fill", True),
-                "whale_alignment": rec.get("whale_alignment"),
-                "book_asks": rec.get("book_asks"), "book_bids": rec.get("book_bids"),
-            },
-            headers={"X-Engine-Token": token},
-            timeout=5,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.debug("platform mirror failed (non-fatal): %s", exc)
+
+def _record_to_platform(rec: dict) -> None:
+    """Hand the record to the background sender. Never blocks, never raises,
+    never waits on the network — this is called from the hot path."""
+    if not os.environ.get("EDGE_PLATFORM_API") or not os.environ.get("EDGE_INGEST_TOKEN"):
+        return
+    if not _MIRROR["started"]:
+        _MIRROR["started"] = True
+        threading.Thread(target=_mirror_loop, daemon=True,
+                         name="platform-mirror").start()
+    try:
+        _MIRROR_Q.put_nowait(rec)
+    except queue.Full:
+        _MIRROR["dropped"] += 1
 
 
 # ── The decision loop (mode-aware; orders only via the executor) ────────
@@ -131,6 +168,62 @@ def discover_all(adapters, policy) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("%s discovery failed: %s", adapter.name, exc)
     return out
+
+
+def volume_verdict(funnel: dict, risk) -> str:
+    """One sentence naming the single biggest thing standing between the
+    engine and more trades.
+
+    Every low-volume investigation in this project has cost days because the
+    funnel reports twenty numbers and none of them says which one matters.
+    The checks are ordered by what would have to be true first: a loop that
+    cannot finish, then a mode that cannot trade, then a budget that is
+    spent, then a universe that is empty, then — only then — the price rules
+    doing their job."""
+    if funnel.get("truncated"):
+        t = funnel["truncated"]
+        return (f"CYCLE OVERRUN: only {t['reached']} of {t['of']} events "
+                f"priced in {funnel.get('cycle_s')}s — the loop is the limit, "
+                f"not the edge")
+    if funnel.get("halted"):
+        return "HALTED: circuit breaker is live — trading resumes on its timer"
+    if funnel.get("watchdog"):
+        return f"WATCHDOG: {funnel['watchdog']} — inputs unhealthy, orders held"
+    if funnel.get("not_armed"):
+        return (f"NOT ARMED: running PAPER, want "
+                f"{funnel['not_armed'].get('want')} — live orders are off")
+    budget = funnel.get("budget") or {}
+    if budget.get("fills_left") == 0:
+        return (f"BUDGET SPENT: ${budget.get('spent')} of ${budget.get('day_cap')} "
+                f"deployed today — fund the account to raise the ceiling")
+    if not funnel.get("feed_events"):
+        return "NO FEED EVENTS: the odds feed returned nothing for every sport"
+    if not funnel.get("tradeable"):
+        return (f"NOTHING MAPPED: {funnel['feed_events']} feed events, "
+                f"0 matched to a venue market at the 0.95 gate")
+    if not funnel.get("books_checked"):
+        return "NO BOOKS: venue markets matched but none quoted an ask"
+    if funnel.get("logged"):
+        return f"TRADING: {funnel['logged']} order(s) placed this cycle"
+    blockers = funnel.get("blockers") or {}
+    if blockers:
+        top, n = max(blockers.items(), key=lambda kv: kv[1])
+        gaps = funnel.get("threshold_gap") or {}
+        near = gaps.get("<0.5c", 0) + gaps.get("0.5-1c", 0)
+        detail = f", {near} within 1c of clearing" if near else ""
+        return (f"NO QUALIFYING EDGE: {funnel['books_checked']} books priced, "
+                f"top blocker '{top}' x{n}{detail}")
+    return (f"NO QUALIFYING EDGE: {funnel['books_checked']} books priced, "
+            f"nothing cleared its threshold")
+
+
+_ROTATION = {"i": 0}
+
+
+def _phase(market_key: str) -> int:
+    """Stable per-market offset in [0, 3600) — spreads periodic work evenly
+    over the hour instead of bunching it on the clock boundary."""
+    return zlib.crc32(market_key.encode()) % 3600
 
 
 _QUARANTINE_CACHE: dict = {"ts": 0.0, "value": set()}
@@ -199,8 +292,17 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     live_venues = {v.strip() for v in
                    os.environ.get("EDGE_LIVE_VENUES", "polymarket-us").split(",")
                    if v.strip()}
+    cycle_started = time.time()
+    # A cycle that cannot finish is indistinguishable from a cycle that finds
+    # nothing — both report zero trades. The budget bounds the sweep and says
+    # so out loud; the rotation stops the same tail of the slate being the
+    # part that always gets cut.
+    budget_s = float(os.environ.get("EDGE_CYCLE_BUDGET_S", "0")) or None
     funnel = {"mode": risk.mode, "feed_events": len(events), "matched": 0,
               "tradeable": 0, "books_checked": 0, "logged": 0, "rejects": {}}
+    if events and not reactive:
+        _ROTATION["i"] = (_ROTATION["i"] + 1) % max(len(events), 1)
+        events = events[_ROTATION["i"]:] + events[:_ROTATION["i"]]
     if reactive:
         funnel["reactive"] = len(only_slugs)
     if risk.is_live:
@@ -216,7 +318,13 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         funnel["rejects"][bucket] = funnel["rejects"].get(bucket, 0) + 1
 
     refreshed_sports: set[str] = set()
-    for ev in events:
+    for seen_events, ev in enumerate(events):
+        if budget_s and time.time() - cycle_started > budget_s:
+            funnel["truncated"] = {"reached": seen_events, "of": len(events)}
+            log.warning("cycle budget %.0fs exhausted after %s/%s events — "
+                        "the rest run next cycle", budget_s, seen_events,
+                        len(events))
+            break
         # Long cycles age early-fetched quotes past the 30s freshness rule
         # before late events are processed. Refresh a sport AT MOST ONCE per
         # cycle (quota discipline — the per-25s TTL alone burned the odds
@@ -383,7 +491,13 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     # Sampled once per market per hour so the record tracks
                     # price evolution without flooding.
                     if study_seen is not None:
-                        sbucket = f"{mkey}:{int(time.time() // 3600)}"
+                        # Phase the hourly bucket per market. A shared
+                        # boundary means EVERY market studies in the same
+                        # cycle — a thundering herd that grew with coverage
+                        # until one cycle could no longer finish. Spreading
+                        # them evenly across the hour keeps the per-cycle
+                        # cost flat no matter how many markets there are.
+                        sbucket = f"{mkey}:{int((time.time() + _phase(mkey)) // 3600)}"
                         if sbucket not in study_seen:
                             study_seen.add(sbucket)
                             funnel["studied"] = funnel.get("studied", 0) + 1
@@ -507,6 +621,16 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     funnel["by_category"][category] += int(result["placed"])
                     if not result["placed"]:
                         reject(result["status"].split(":")[0])
+                        # approve() CLAIMED this market before the order was
+                        # attempted. If the attempt produced nothing, holding
+                        # the claim retires the bet permanently — every
+                        # sub-contract, rejection or unfilled order silently
+                        # subtracted one market from the tradeable universe,
+                        # forever. We took this claim moments ago and nothing
+                        # filled against it, so it is ours to give back.
+                        if claim:
+                            ledger.release_event(claim)
+                            funnel["reclaimed"] = funnel.get("reclaimed", 0) + 1
                     # Legacy shadow JSONL + platform mirror (grader history).
                     intent = FillIntent(
                         market_id=match.market.market_id, outcome_id=token,
@@ -519,7 +643,11 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                     {"h2h": ev.h2h, "home": ev.home, "away": ev.away},
                                     would_fill, whale_alignment=None)
 
+    mirror = mirror_stats()
+    if mirror["sent"] or mirror["queued"] or mirror["dropped"]:
+        funnel["mirror"] = mirror
     if reactive:
+        funnel["cycle_s"] = round(time.time() - cycle_started, 1)
         # A reactive pass saw a handful of markets. Marking the book from
         # that sample would report a portfolio-wide loss that isn't real, and
         # the watchdog's mapper-confidence ratio would be computed from a
@@ -587,6 +715,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             stats = stream_stats()
             if stats:
                 funnel.setdefault("stream", {})[adapter.name] = stats
+    funnel["cycle_s"] = round(time.time() - cycle_started, 1)
+    funnel["verdict"] = volume_verdict(funnel, risk)
     return funnel
 
 
@@ -876,6 +1006,8 @@ def main() -> None:
                 funnel["not_armed"] = {"want": configured_mode,
                                        "blocked_by": last_checklist_items[:6]
                                        or ["awaiting first recheck"]}
+                funnel["verdict"] = volume_verdict(funnel, risk)   # outranks
+            log.warning("VERDICT: %s", funnel["verdict"])
             if time.time() - last_settle > settle_s:
                 funnel["settled"] = settle_cycle(adapters, ledger)
                 last_settle = time.time()

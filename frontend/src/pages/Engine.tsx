@@ -73,6 +73,11 @@ interface EngineStatus {
     budget?: { bankroll: number; day_cap: number; spent: number
       fills_left: number; halt_at: number }
     parked_sports?: string[]
+    verdict?: string
+    cycle_s?: number
+    truncated?: { reached: number; of: number }
+    reclaimed?: number
+    mirror?: { sent: number; queued: number; dropped: number; failed: number }
     book_sample?: Record<string, unknown>
     error?: string
   }
@@ -289,6 +294,26 @@ export function Engine() {
           </span>
         ) : (
           <span style={{ color: 'var(--ink-2)', fontSize: 13 }}>
+            {status.detail?.verdict && (
+              <div style={{
+                marginBottom: 10, padding: '8px 12px', borderRadius: 6,
+                fontSize: 14, fontWeight: 600,
+                background: status.detail.verdict.startsWith('TRADING')
+                  ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)',
+                color: status.detail.verdict.startsWith('TRADING')
+                  ? 'var(--good)' : 'var(--critical)',
+              }}>
+                {status.detail.verdict}
+                {status.detail.cycle_s != null
+                  && <span style={{ opacity: 0.7, fontWeight: 400 }}>
+                    {'  '}· cycle {status.detail.cycle_s}s
+                    {status.detail.mirror && status.detail.mirror.queued > 0
+                      && ` · ${status.detail.mirror.queued} telemetry queued`}
+                    {status.detail.reclaimed
+                      ? ` · ${status.detail.reclaimed} markets reclaimed` : ''}
+                  </span>}
+              </div>
+            )}
             <span style={{ color: 'var(--good)' }}>●</span> Last cycle{' '}
             {status.beat_at ? fmtAgo(status.beat_at) : '—'} · {status.detail?.feed_events ?? 0} feed
             events · {status.detail?.matched ?? 0} venue matches ·{' '}
