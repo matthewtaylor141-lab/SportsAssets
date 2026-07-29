@@ -388,11 +388,24 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     "reason": f"no_sharp_quote_{p.kind}",
                     "venue_line": p.point, "sharp_lines": have[:8],
                 }
+            best_name, best_score = "", 0.0
             for team_name, f in fairs.items():
-                if team_score(team_name, oc_name) >= 0.95:
+                s = team_score(team_name, oc_name)
+                if s >= 0.95:
                     return f, "moneyline", None
-            return None, "moneyline", {"reason": "no_side_match_moneyline",
-                                       "outcome": oc_name[:40]}
+                if s > best_score:
+                    best_name, best_score = team_name, s
+            # Name the NEAR MISS. "208 outcomes didn't match a side" is a
+            # count; "'Guadalajara' scored 0.71 against 'CD Guadalajara'" is
+            # a fix. Mapping is now the funnel's biggest single loss, so the
+            # example has to carry enough to act on.
+            return None, "moneyline", {
+                "reason": "no_side_match_moneyline",
+                "venue_outcome": oc_name[:48],
+                "closest_feed_team": best_name[:32],
+                "score": round(best_score, 3),
+                "feed_teams": [t[:24] for t in list(fairs)[:4]],
+            }
 
         for adapter, candidates in venue_candidates.values():
             # Fuzzy matching is CPU-heavy at 10s cadence; results only change
@@ -435,9 +448,13 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                         # Previously a silent skip — the single biggest blind
                         # spot in the funnel. Count it and keep one example.
                         reject(miss["reason"])
+                        # Keep SEVERAL examples per reason, not one. A single
+                        # sample of a 200-a-cycle failure shows a symptom; a
+                        # handful shows the pattern.
                         ex = funnel.setdefault("unpriced_examples", {})
-                        if miss["reason"] not in ex:
-                            ex[miss["reason"]] = miss
+                        bucket = ex.setdefault(miss["reason"], [])
+                        if isinstance(bucket, list) and len(bucket) < 5:
+                            bucket.append(miss)
                         continue
                     if not ev.is_fresh(30, now=time.time()):  # hard rule: fresh only
                         reject("stale_quote")

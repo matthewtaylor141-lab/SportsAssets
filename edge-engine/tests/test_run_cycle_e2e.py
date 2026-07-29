@@ -211,9 +211,30 @@ def test_unpriced_outcomes_are_counted_not_silently_dropped(tmp_path, monkeypatc
                        POLICY, risk, ledger, ["soccer_epl"])
     assert ledger.summary()["fills"] == 0
     assert funnel["rejects"].get("no_sharp_quote_spread", 0) >= 1
-    ex = funnel["unpriced_examples"]["no_sharp_quote_spread"]
+    ex = funnel["unpriced_examples"]["no_sharp_quote_spread"][0]
     assert ex["venue_line"] == -2.5
     assert -1.5 in ex["sharp_lines"] and -0.5 in ex["sharp_lines"]
+
+
+def test_a_moneyline_mapping_miss_names_what_it_nearly_matched(tmp_path, monkeypatch):
+    """Mapping is now the funnel's biggest single loss. A count is not
+    actionable; the venue string, the closest feed team and the score are."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+
+    class OddNames(StubVenue):
+        def discover_markets(self, league_codes):
+            return [VenueMarket(
+                market_id="EVT", title="Arsenal vs. Chelsea", league_code="epl",
+                outcome_tokens={"Arsenal": "T-A", "Draw No Bet": "T-D"})]
+
+    funnel = run_cycle([OddNames(ask_price=0.47)], StubFeed([_event()]),
+                       POLICY, risk, ledger, ["soccer_epl"])
+    [ex] = funnel["unpriced_examples"]["no_side_match_moneyline"]
+    assert ex["venue_outcome"] == "Draw No Bet"
+    assert ex["closest_feed_team"] in ("Arsenal", "Chelsea")
+    assert 0.0 <= ex["score"] < 0.95
+    assert "Arsenal" in ex["feed_teams"]
 
 
 def test_study_records_every_priced_outcome_even_when_nothing_trades(tmp_path, monkeypatch):

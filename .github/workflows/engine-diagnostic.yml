@@ -130,3 +130,8 @@ jobs:
           echo "rejects   :"; jq -r '.detail.rejects  // {} | to_entries[] | "  \(.key) x\(.value)"' /tmp/status.json 2>/dev/null || true
           echo "gap       :"; jq -r '.detail.threshold_gap // {} | to_entries[] | "  \(.key) x\(.value)"' /tmp/status.json 2>/dev/null || true
           echo "budget    :"; jq -r '.detail.budget // {} | to_entries[] | "  \(.key)=\(.value)"' /tmp/status.json 2>/dev/null || true
+          echo ""
+          echo "MAPPING MISSES (the funnel's biggest single loss):"
+          jq -r '.detail.unpriced_examples // {} | to_entries[]
+                 | "  [\(.key)]", (.value | if type=="array" then .[] else . end
+                   | "     \(.)")' /tmp/status.json 2>/dev/null || true
