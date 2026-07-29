@@ -263,7 +263,12 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     from edge.execution.engine import strategy_filter
     from edge.execution.executor import build_decision_record, execute, market_key
     from edge.fairvalue.devig import fair_value
-    from edge.fairvalue.lines import outcome_matches, pair_quotes, parse_outcome_line
+    from edge.fairvalue.lines import (
+        outcome_matches,
+        pair_quotes,
+        parse_outcome_line,
+        split_segment,
+    )
     from edge.venues.base import FillIntent
     from edge.venues.mapper import match_events_all, team_score
 
@@ -354,15 +359,26 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                 return priced["ok"]
             names = list(ev.h2h)
             try:
-                priced["fairs"] = dict(
-                    zip(names, fair_value([ev.h2h[n] for n in names])))
-                sides: list[tuple] = []  # (ParsedLine, fair)
-                for kind, quotes in (("total", ev.totals), ("spread", ev.spreads)):
-                    for pq in pair_quotes(quotes, kind):
-                        fa, fb = fair_value([pq.a_odds, pq.b_odds])
-                        sides.append((pq.a_parsed, fa))
-                        sides.append((pq.b_parsed, fb))
-                priced["deriv_sides"] = sides
+                def _pool(h2h, totals, spreads):
+                    fairs = dict(zip(list(h2h), fair_value(
+                        [h2h[n] for n in h2h]))) if len(h2h) >= 2 else {}
+                    sides: list[tuple] = []  # (ParsedLine, fair)
+                    for kind, quotes in (("total", totals), ("spread", spreads)):
+                        for pq in pair_quotes(quotes, kind):
+                            fa, fb = fair_value([pq.a_odds, pq.b_odds])
+                            sides.append((pq.a_parsed, fa))
+                            sides.append((pq.b_parsed, fb))
+                    return fairs, sides
+
+                priced["fairs"], priced["deriv_sides"] = _pool(
+                    ev.h2h, ev.totals, ev.spreads)
+                # Each partial-game segment gets its OWN de-vigged pool. A
+                # first-five-innings run line is priced against the sharp
+                # first-five quote or not at all.
+                priced["seg"] = {
+                    seg: _pool(q.get("h2h") or {}, q.get("totals") or {},
+                               q.get("spreads") or {})
+                    for seg, q in (getattr(ev, "segments", None) or {}).items()}
                 priced["ok"] = True
             except Exception as exc:  # noqa: BLE001 — one pathological odds set
                 log.warning("fair value failed for %s vs %s (%s): %s",
@@ -376,7 +392,21 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             sharp book doesn't quote' from 'we couldn't identify the side'."""
             if not _price_event():
                 return None, "moneyline", {"reason": "fair_error"}
-            fairs, deriv_sides = priced["fairs"], priced["deriv_sides"]
+            segment, oc_name = split_segment(oc_name)
+            if segment is None:
+                fairs, deriv_sides = priced["fairs"], priced["deriv_sides"]
+            else:
+                pool = priced["seg"].get(segment)
+                if not pool:
+                    # We have no sharp quote for this part of the game. The
+                    # full-game line is NOT a substitute — that is a different
+                    # bet, and pricing one against the other is how phantom
+                    # edges are manufactured.
+                    return None, "segment", {
+                        "reason": f"no_sharp_quote_segment_{segment}",
+                        "venue_outcome": oc_name[:48],
+                        "segments_priced": sorted(priced["seg"]) or ["none"]}
+                fairs, deriv_sides = pool
             p = parse_outcome_line(oc_name)
             if p.kind in ("total", "spread"):
                 for side, f in deriv_sides:

@@ -283,9 +283,9 @@ def _sports_payload():
         {"key": "soccer_epl", "active": True},
         {"key": "soccer_norway_eliteserien", "active": True},   # unmapped
         {"key": "americanfootball_ncaaf", "active": True},      # unmapped
-        {"key": "baseball_mlb", "active": True},                # BLOCKED
+        {"key": "baseball_mlb", "active": True},                # allowed (ML blocked)
         {"key": "soccer_uefa_champs_league", "active": True},   # BLOCKED
-        {"key": "tennis_atp_wimbledon", "active": True},        # BLOCKED
+        {"key": "tennis_atp_wimbledon", "active": True},        # allowed (ML blocked)
         {"key": "soccer_epl_winner", "active": False},          # not active
     ]
 
@@ -313,17 +313,18 @@ def test_measured_negative_leagues_stay_blocked_under_full_coverage(monkeypatch)
     monkeypatch.setattr(client._sess, "get",
                         lambda *a, **k: _FakeResp(_sports_payload()))
     keys = client.resolve_sport_keys(Policy.load())
-    for blocked in ("baseball_mlb", "soccer_uefa_champs_league",
-                    "tennis_atp_wimbledon"):
-        assert blocked not in keys
+    assert "soccer_uefa_champs_league" not in keys   # -1.13% on 170,922 fills
+    # Flat-but-not-negative sports are FETCHED; their moneyline is shut by
+    # category_blocks while run lines and totals trade.
+    assert "baseball_mlb" in keys and "tennis_atp_wimbledon" in keys
     assert "soccer_epl_winner" not in keys        # inactive
 
 
 def test_unmapped_sport_keys_still_get_a_league_code():
     c = TheOddsAPIClient(api_key="k")
     assert c.league_of("soccer_epl") == "epl"
-    assert c.league_of("baseball_mlb") == "mlb"          # reaches the blocklist
-    assert c.league_of("tennis_atp_wimbledon") == "atp"  # reaches the blocklist
+    assert c.league_of("baseball_mlb") == "mlb"          # reaches category_blocks
+    assert c.league_of("tennis_atp_wimbledon") == "atp"  # reaches category_blocks
     assert c.league_of("soccer_norway_eliteserien") == "soccer_norway_eliteserien"
 
 
@@ -334,5 +335,12 @@ def test_an_unmeasured_league_is_allowed_not_shadowed():
 
     p = Policy.load()
     assert p.league_allowed("soccer_norway_eliteserien") == "allow"
-    assert p.league_allowed("mlb") == "block"
+    assert p.league_allowed("ucl") == "block"        # measured -1.13%
+    # MLB was blocked for being FLAT (-0.14c over 203,317 fills, ~1.3 SE from
+    # zero). That is "unmeasured", not "disproven" — and it was measured on
+    # moneyline bets, which is the only category still shut.
+    assert p.league_allowed("mlb") == "allow"
+    assert p.category_blocked("mlb", "moneyline")
+    assert not p.category_blocked("mlb", "spread")
+    assert not p.category_blocked("mlb", "total")
     assert p.league_allowed("epl") == "allow"

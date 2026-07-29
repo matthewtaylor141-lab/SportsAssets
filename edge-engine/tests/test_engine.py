@@ -9,7 +9,7 @@ def test_dead_zone_rejected():
 
 
 def test_blocked_league_rejected():
-    d = decide(POLICY, ExposureBook(), "m1", "atp", price=0.47, fair=0.60)
+    d = decide(POLICY, ExposureBook(), "m1", "ucl", price=0.47, fair=0.60)
     assert not d.trade and "blocked" in d.reason
 
 

@@ -157,7 +157,12 @@ class PolymarketUSAdapter(VenueAdapter):
         happens at match time (mapper league filter passes None here).
         Every skip reason is counted in last_census — the funnel shows WHY
         discovery found nothing instead of just '0 candidates'."""
-        from edge.fairvalue.lines import apply_slug_line, bet_identity, canonical_outcome
+        from edge.fairvalue.lines import (
+            apply_slug_line,
+            bet_identity,
+            canonical_outcome,
+            tag_segment,
+        )
 
         census: dict[str, Any] = {"events_seen": 0, "skipped_no_title": 0,
                                   "skipped_lt2_outcomes": 0, "markets_seen": 0,
@@ -221,8 +226,18 @@ class PolymarketUSAdapter(VenueAdapter):
                                     "slug": m["slug"][:60],
                                     "why": ident.conflict[:80]}
                             continue  # never guess which bet this is
-                        key = apply_slug_line(
-                            canonical_outcome(m.get("title") or "", oc), m["slug"])
+                        # Segment tag keeps a first-five-innings run line from
+                        # ever colliding with — or being priced against — the
+                        # full-game line of the same game.
+                        key = tag_segment(
+                            apply_slug_line(
+                                canonical_outcome(m.get("title") or "", oc),
+                                m["slug"]),
+                            ident.segment)
+                        if ident.segment:
+                            census["segments"] = census.get("segments", {})
+                            census["segments"][ident.segment] = census[
+                                "segments"].get(ident.segment, 0) + 1
                         outcomes[key] = m["slug"]
                     if not ev.get("title"):
                         census["skipped_no_title"] += 1

@@ -158,6 +158,70 @@ def slug_point(slug: str) -> float | None:
     return -value if m.group(1).lower() == "neg" else value
 
 
+# ── game segments (partial-game markets) ────────────────────────────────
+#
+# "asc-mlb-nyy-phi-2026-07-24-f5-pos-1pt5" is a FIRST FIVE INNINGS run line,
+# not a full-game one. Read only for its handicap it looks identical to the
+# full-game +1.5, and pricing it against the full-game fair value compares
+# two different propositions — the same failure bet_identity was built to
+# stop, one level up. Segment markets are a large share of what this venue
+# lists, so they have to be identified, not ignored.
+#
+# Tokens are matched as whole dash-delimited slug components, and only ones
+# that cannot plausibly be a team code are listed.
+_SEGMENT_TOKENS = {
+    "f5": "f5", "f3": "f3", "f7": "f7",          # baseball innings
+    "1h": "h1", "h1": "h1", "fh": "h1",          # halves
+    "2h": "h2", "h2": "h2",
+    "1q": "q1", "q1": "q1", "2q": "q2", "q2": "q2",
+    "3q": "q3", "q3": "q3", "4q": "q4", "q4": "q4",
+    "1p": "p1", "p1": "p1", "2p": "p2", "p2": "p2", "3p": "p3", "p3": "p3",
+}
+_TITLE_SEGMENT = (
+    (re.compile(r"first\s*(5|five)\s*innings?", re.I), "f5"),
+    (re.compile(r"first\s*(3|three)\s*innings?", re.I), "f3"),
+    (re.compile(r"first\s*(7|seven)\s*innings?", re.I), "f7"),
+    (re.compile(r"\b(1st|first)\s*half\b", re.I), "h1"),
+    (re.compile(r"\b(2nd|second)\s*half\b", re.I), "h2"),
+    (re.compile(r"\b(1st|first)\s*quarter\b", re.I), "q1"),
+    (re.compile(r"\b(1st|first)\s*period\b", re.I), "p1"),
+)
+
+
+def slug_segment(slug: str) -> str | None:
+    """Game segment encoded in a venue slug ('f5', 'h1', ...), or None for a
+    full-game market."""
+    for part in (slug or "").lower().split("-"):
+        seg = _SEGMENT_TOKENS.get(part)
+        if seg:
+            return seg
+    return None
+
+
+def title_segment(title: str) -> str | None:
+    for pattern, seg in _TITLE_SEGMENT:
+        if pattern.search(title or ""):
+            return seg
+    return None
+
+
+def tag_segment(outcome_key: str, segment: str | None) -> str:
+    """Prefix a segment marker so a partial-game outcome can never collide
+    with — or be matched against — its full-game namesake."""
+    return f"[{segment}] {outcome_key}" if segment else outcome_key
+
+
+_SEG_PREFIX = re.compile(r"^\[([a-z0-9]+)\]\s*")
+
+
+def split_segment(outcome_key: str) -> tuple[str | None, str]:
+    """(segment, bare outcome). Inverse of tag_segment."""
+    m = _SEG_PREFIX.match(outcome_key or "")
+    if not m:
+        return None, (outcome_key or "")
+    return m.group(1), outcome_key[m.end():]
+
+
 def apply_slug_line(outcome_key: str, slug: str) -> str:
     """Attach the slug's handicap to an outcome that doesn't carry one.
 
@@ -193,6 +257,7 @@ class BetIdentity:
     side: str | None         # team text, or over/under
     sources: tuple[str, ...]  # signals that contributed the point
     conflict: str | None      # populated when signals disagree
+    segment: str | None = None  # 'f5', 'h1', ... ; None = full game
 
     @property
     def tradeable(self) -> bool:
@@ -208,6 +273,12 @@ def bet_identity(slug: str, title: str, outcome: str) -> BetIdentity:
     from_outcome = parse_outcome_line(outcome)
     t_point = title_point(title)
     s_point = slug_point(slug)
+    # Segment first: a partial-game market is a different bet from its
+    # full-game namesake even when every handicap signal agrees.
+    seg_slug, seg_title = slug_segment(slug), title_segment(title)
+    segment = seg_slug or seg_title
+    seg_conflict = ("segment mismatch slug=%s title=%s" % (seg_slug, seg_title)
+                    if seg_slug and seg_title and seg_slug != seg_title else None)
 
     points: dict[str, float] = {}
     if from_outcome.point is not None:
@@ -235,20 +306,23 @@ def bet_identity(slug: str, title: str, outcome: str) -> BetIdentity:
     if is_total:
         point = abs(next(iter(points.values()))) if points else None
         side = from_outcome.side
-        return BetIdentity("total", point, side, tuple(sorted(points)), conflict)
+        return BetIdentity("total", point, side, tuple(sorted(points)),
+                           conflict or seg_conflict, segment)
 
     if points:
         point = next(iter(points.values()))
         team = from_outcome.team or (outcome or "").strip() or None
-        return BetIdentity("spread", point, team, tuple(sorted(points)), conflict)
+        return BetIdentity("spread", point, team, tuple(sorted(points)),
+                           conflict or seg_conflict, segment)
 
     # No handicap anywhere: a plain moneyline — but only if nothing hints
     # otherwise. A spread-flavoured title with no parsable number is a
     # signal we failed to read, not a moneyline.
     if _TITLE_SPREAD_TEAM.search(title or "") or "spread" in (title or "").lower():
         return BetIdentity("spread", None, (outcome or "").strip() or None, (),
-                           "spread market with unreadable line")
-    return BetIdentity("moneyline", None, (outcome or "").strip() or None, (), None)
+                           "spread market with unreadable line", segment)
+    return BetIdentity("moneyline", None, (outcome or "").strip() or None, (),
+                       seg_conflict, segment)
 
 
 def title_point(title: str) -> float | None:

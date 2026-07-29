@@ -42,8 +42,10 @@ SPORT_KEY_LEAGUE = {
     "baseball_mlb": "mlb",
 }
 
-# Sports we never ask for: no two-sided line to de-vig, or no venue market.
-SPORT_KEY_SKIP_PREFIXES = ("tennis_atp",)   # measured flat -> blocklisted 'atp'
+# Sports we never ask for at all. Empty: leagues are excluded by POLICY
+# (blocklist / category_blocks), which is measurement-driven and visible in
+# config, rather than by a hardcoded prefix nobody thinks to revisit.
+SPORT_KEY_SKIP_PREFIXES: tuple[str, ...] = ()
 
 
 @dataclass
@@ -56,6 +58,10 @@ class FeedEvent:
     h2h: dict[str, float] = field(default_factory=dict)      # name -> decimal odds
     totals: dict[str, float] = field(default_factory=dict)   # "Over 2.5" -> odds
     spreads: dict[str, float] = field(default_factory=dict)  # "Home -1.5" -> odds
+    # Partial-game quotes, keyed by segment ('f5', 'h1', ...). A venue market
+    # for a segment we have no quotes for must be REFUSED, never priced off
+    # the full-game line — those are different bets.
+    segments: dict = field(default_factory=dict)   # seg -> {h2h,totals,spreads}
     fetched_at: float = 0.0   # staleness stamp — set at fetch, checked pre-order
 
     def is_fresh(self, max_age_s: float = 30.0, now: float | None = None) -> bool:
@@ -161,6 +167,8 @@ class TheOddsAPIClient(OddsFeed):
         self._quota_used0: float | None = None
         # sports whose alternate-line request the provider rejects (422)
         self._no_alt_lines: set[str] = set()
+        # sports whose partial-game markets the provider rejects (422)
+        self._no_segments: set[str] = set()
 
     def quota(self) -> dict:
         q = dict(self._quota)
@@ -244,6 +252,36 @@ class TheOddsAPIClient(OddsFeed):
             except (TypeError, ValueError):
                 pass
 
+    # Partial-game markets the provider exposes, by sport family. These are
+    # a large share of what the venue lists (MLB first-5-innings run lines
+    # and totals especially), and without the matching sharp quote they can
+    # only ever be refused.
+    SEGMENT_MARKETS = {
+        "baseball": ["h2h_1st_5_innings", "spreads_1st_5_innings",
+                     "totals_1st_5_innings"],
+        "soccer": ["h2h_h1", "totals_h1"],
+        "basketball": ["h2h_h1", "spreads_h1", "totals_h1"],
+        "americanfootball": ["h2h_h1", "spreads_h1", "totals_h1"],
+        "icehockey": ["h2h_p1", "totals_p1"],
+    }
+    # provider market key -> (segment, bucket)
+    SEGMENT_KEYS = {
+        "h2h_1st_5_innings": ("f5", "h2h"),
+        "spreads_1st_5_innings": ("f5", "spreads"),
+        "totals_1st_5_innings": ("f5", "totals"),
+        "h2h_h1": ("h1", "h2h"), "spreads_h1": ("h1", "spreads"),
+        "totals_h1": ("h1", "totals"),
+        "h2h_p1": ("p1", "h2h"), "totals_p1": ("p1", "totals"),
+        "h2h_q1": ("q1", "h2h"), "spreads_q1": ("q1", "spreads"),
+        "totals_q1": ("q1", "totals"),
+    }
+
+    def _segment_markets(self, sport_key: str) -> list[str]:
+        if os.environ.get("EDGE_SEGMENT_MARKETS", "1") == "0":
+            return []
+        family = sport_key.split("_", 1)[0]
+        return self.SEGMENT_MARKETS.get(family, [])
+
     # Alternate spread/total lines are requested for EVERY sport: venues list
     # handicaps (soccer -2.5, etc.) that a book's standard line never quotes,
     # and without the alternate ladder those markets can never be priced at
@@ -290,6 +328,10 @@ class TheOddsAPIClient(OddsFeed):
                      or sport_key in self.ALT_LINE_SPORTS)
                 and sport_key not in self._no_alt_lines):
             markets += ",alternate_spreads,alternate_totals"
+        seg_markets = [m for m in self._segment_markets(sport_key)
+                       if sport_key not in self._no_segments]
+        if seg_markets:
+            markets += "," + ",".join(seg_markets)
 
         def _get(mkts: str):
             r = self._sess.get(
@@ -302,6 +344,14 @@ class TheOddsAPIClient(OddsFeed):
             return r
 
         resp = _get(markets)
+        if resp.status_code == 422 and seg_markets:
+            # Provider rejects partial-game markets for this sport. Remember
+            # and retry without them rather than losing the sport entirely.
+            log.info("%s: segment markets unavailable (422) — full game only",
+                     sport_key)
+            self._no_segments.add(sport_key)
+            markets = markets.replace("," + ",".join(seg_markets), "")
+            resp = _get(markets)
         if resp.status_code == 422 and "alternate" in markets:
             # Provider rejects alternate markets for this sport (commonly
             # out-of-season or plan-scoped). Remember and fall back to the
@@ -327,22 +377,34 @@ class TheOddsAPIClient(OddsFeed):
             # is point-exact, so extra lines just mean more pairable points.
             bucket_of = {"h2h": "h2h", "totals": "totals", "spreads": "spreads",
                          "alternate_totals": "totals", "alternate_spreads": "spreads"}
+            seg_samples: dict = {}   # segment -> bucket -> key -> [odds]
             for book in raw.get("bookmakers", []):
                 if book.get("key") not in SHARP_BOOKS:
                     continue
                 for mkt in book.get("markets", []):
-                    bucket = bucket_of.get(mkt["key"])
+                    seg, bucket = None, bucket_of.get(mkt["key"])
                     if bucket is None:
-                        continue
+                        seg_bucket = self.SEGMENT_KEYS.get(mkt["key"])
+                        if seg_bucket is None:
+                            continue
+                        seg, bucket = seg_bucket
                     for oc in mkt.get("outcomes", []):
                         name, price = oc.get("name", ""), float(oc.get("price", 0) or 0)
                         if price <= 1.0:
                             continue
                         key = name if bucket == "h2h" else f"{name} {oc.get('point')}"
-                        samples[bucket].setdefault(key, []).append(price)
+                        if seg is None:
+                            samples[bucket].setdefault(key, []).append(price)
+                        else:
+                            seg_samples.setdefault(seg, {}).setdefault(
+                                bucket, {}).setdefault(key, []).append(price)
             ev.h2h = {k: _median(v) for k, v in samples["h2h"].items()}
             ev.totals = {k: _median(v) for k, v in samples["totals"].items()}
             ev.spreads = {k: _median(v) for k, v in samples["spreads"].items()}
+            ev.segments = {
+                seg: {b: {k: _median(v) for k, v in keyed.items()}
+                      for b, keyed in buckets.items()}
+                for seg, buckets in seg_samples.items()}
             if ev.h2h:
                 out.append(ev)
         self._cache[sport_key] = (now, out)

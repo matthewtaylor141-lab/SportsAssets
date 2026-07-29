@@ -308,3 +308,49 @@ def test_fat_middle_now_tradeable():
     # ...and the genuinely dead zones stay dead.
     for price in (0.42, 0.67, 0.92, 0.97):
         assert POLICY.band_threshold(price, "moneyline") is None
+
+
+# ── game segments: a partial-game market is a DIFFERENT BET ─────────────
+
+def test_first_five_innings_is_not_the_full_game():
+    """'asc-mlb-nyy-phi-2026-07-24-f5-pos-1pt5' is a FIRST FIVE INNINGS run
+    line. Read only for its handicap it is indistinguishable from the
+    full-game +1.5, and pricing it against the full-game fair value compares
+    two different propositions."""
+    from edge.fairvalue.lines import bet_identity
+
+    f5 = bet_identity("asc-mlb-nyy-phi-2026-07-24-f5-pos-1pt5", "", "Phillies")
+    full = bet_identity("asc-mlb-nyy-phi-2026-07-24-pos-1pt5", "", "Phillies")
+    assert f5.point == full.point == 1.5      # identical handicap...
+    assert f5.segment == "f5" and full.segment is None   # ...different bets
+
+
+def test_segments_are_read_from_slug_and_title():
+    from edge.fairvalue.lines import slug_segment, title_segment
+
+    assert slug_segment("asc-mlb-nyy-phi-2026-07-24-f5-pos-1pt5") == "f5"
+    assert slug_segment("atc-epl-ars-che-2026-08-01-1h-ars") == "h1"
+    assert slug_segment("atc-nhl-bos-mtl-2026-08-01-1p-bos") == "p1"
+    assert slug_segment("atc-bra-vit-pal-2026-07-29-pal") is None
+    assert title_segment("Yankees vs Phillies (First 5 Innings)") == "f5"
+    assert title_segment("Arsenal vs Chelsea - 1st Half") == "h1"
+    assert title_segment("Arsenal vs. Chelsea") is None
+
+
+def test_disagreeing_segment_signals_make_a_market_untradeable():
+    """Same rule as a handicap mismatch: when signals disagree we do not
+    guess which bet this is."""
+    from edge.fairvalue.lines import bet_identity
+
+    i = bet_identity("asc-mlb-nyy-phi-2026-07-24-f5-pos-1pt5",
+                     "Yankees vs Phillies - 1st Half", "Phillies")
+    assert not i.tradeable and "segment mismatch" in i.conflict
+
+
+def test_segment_tagging_round_trips_and_cannot_collide():
+    from edge.fairvalue.lines import split_segment, tag_segment
+
+    full, f5 = tag_segment("Phillies +1.5", None), tag_segment("Phillies +1.5", "f5")
+    assert full != f5                       # never the same dict key
+    assert split_segment(f5) == ("f5", "Phillies +1.5")
+    assert split_segment(full) == (None, "Phillies +1.5")

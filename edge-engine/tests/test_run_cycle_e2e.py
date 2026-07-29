@@ -275,3 +275,54 @@ def test_threshold_gap_distribution_is_reported(tmp_path, monkeypatch):
     # rejection lands in exactly one bucket.
     assert gaps.get("<0.5c", 0) + gaps.get("0.5-1c", 0) >= 1
     assert sum(gaps.values()) == funnel["blockers"]["threshold"]
+
+
+def test_a_segment_market_is_never_priced_off_the_full_game_line(tmp_path, monkeypatch):
+    """The money-losing version of this bug: the venue lists a first-five-
+    innings run line, we have no first-five quote, and we price it against
+    the FULL GAME line — manufacturing a large phantom edge on a bet nobody
+    evaluated. It must be refused, by name."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+
+    class F5Venue(StubVenue):
+        def discover_markets(self, league_codes):
+            return [VenueMarket(
+                market_id="EVT", title="Arsenal vs. Chelsea", league_code="epl",
+                outcome_tokens={"[f5] Arsenal -1.5": "T-A"})]
+
+    class Feed(StubFeed):
+        def fetch_events(self, sport_key):
+            ev = _event()
+            # Full-game -1.5 IS quoted. The first-five line is not.
+            ev.spreads = {"Arsenal -1.5": 2.6, "Chelsea +1.5": 1.5}
+            return [ev]
+
+    funnel = run_cycle([F5Venue(ask_price=0.30)], Feed([]), POLICY, risk,
+                       ledger, ["soccer_epl"])
+    assert ledger.summary()["fills"] == 0
+    assert funnel["rejects"].get("no_sharp_quote_segment_f5", 0) >= 1
+
+
+def test_a_segment_market_trades_off_its_OWN_quote(tmp_path, monkeypatch):
+    """And when the sharp book does quote the segment, it prices normally —
+    the point of pulling first-5-innings markets from the feed at all."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+
+    class F5Venue(StubVenue):
+        def discover_markets(self, league_codes):
+            return [VenueMarket(
+                market_id="EVT", title="Arsenal vs. Chelsea", league_code="epl",
+                outcome_tokens={"[f5] Arsenal": "T-A"})]
+
+    class Feed(StubFeed):
+        def fetch_events(self, sport_key):
+            ev = _event()
+            ev.segments = {"f5": {"h2h": {"Arsenal": 2.0, "Chelsea": 2.0}}}
+            return [ev]
+
+    funnel = run_cycle([F5Venue(ask_price=0.47)], Feed([]), POLICY, risk,
+                       ledger, ["soccer_epl"])
+    assert funnel["logged"] == 1          # fair 0.50 vs 0.47: 3c, clears
+    assert ledger.position("kalshi:T-A")["shares"] > 0

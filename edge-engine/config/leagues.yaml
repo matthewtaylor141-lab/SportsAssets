@@ -7,7 +7,9 @@ allowlist:
   # NFL moneyline blocked by category below (specialist measured -2.9%);
   # NHL moneyline allowed (+6.6% on 104,779 fills).
   majors: [nhl, nfl]
-blocklist: [ucl, bun, elc, tur, por, ere, atp, mlb]   # measured negative/flat
+# MEASURED NEGATIVE — real, sizeable, consistent losses (edge -0.7c to
+# -1.6c on 60k-170k fills each). These stay shut.
+blocklist: [ucl, bun, elc, tur, por]
 # Unlisted leagues TRADE. The allowlist is not a list of leagues that work —
 # it is the list the reference account happened to trade, and an absent
 # league is unmeasured, not disproven. The edge comes from de-vigging a sharp
@@ -21,3 +23,17 @@ unknown_league_policy: allow
 category_blocks:
   nfl: [moneyline]
   cfb: [moneyline]
+  # FLAT, not negative. The blocklist conflated two different findings.
+  # mlb: -0.14c over 203,317 fills (SE ~0.11c) — about 1.3 standard errors
+  # from zero, i.e. indistinguishable from no edge. atp: -0.03c over 348,339
+  # (SE ~0.08c). ere: -0.09c over 66,142. Compare the genuinely negative
+  # leagues above at -0.7c to -1.6c, 6+ SE from zero. "We could not measure
+  # an edge in this account's MONEYLINE bets" is not "no edge exists in this
+  # sport" — the reference account's MLB was overwhelmingly moneyline, and
+  # kch123 showed the derivative book is a separate business (the same
+  # reasoning already applied to NFL above). So: moneyline stays shut on the
+  # measurement we have; run lines, totals and their first-5-innings
+  # equivalents trade and are graded per league nightly.
+  mlb: [moneyline]
+  atp: [moneyline]
+  ere: [moneyline]
