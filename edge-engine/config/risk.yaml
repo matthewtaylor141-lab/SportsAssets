@@ -59,6 +59,31 @@ profiles:
     halt_hours: 72
     venue_bankroll_split: 1.0
 
+# ── exploration tier: small edges, at scale, on a leash ────────────────
+#
+# The band thresholds are not a profit target — they are a NOISE FLOOR. Our
+# fair value is a de-vigged median of a handful of sharp books; that estimate
+# carries error, so a 0.5c "edge" is mostly estimation noise. Noise has zero
+# mean, and adverse selection (we only get filled when someone wants to sell)
+# makes trading it slightly negative. That is why a lower bar is not free
+# volume — it is a bet that the sub-threshold zone is real.
+#
+# So we measure instead of assuming. Edges between explore_min_edge and the
+# band threshold DO trade, tagged 'exploration', capped at a share of the
+# day's budget and graded separately by the nightly report. If they settle
+# positive the threshold drops everywhere and volume multiplies; if they
+# don't, the loss is bounded by the cap and we learn it in days.
+#
+# min_consensus_books is the safety that makes small edges meaningful: a 1c
+# edge agreed by 6 sharp books is a signal, the same 1c from a single book
+# is a rounding error. Smaller edge => deeper agreement required.
+exploration:
+  enabled: true
+  min_edge: 0.008          # below this is inside de-vig error at any depth
+  min_consensus_books: 3   # small edges need agreement, not a lone quote
+  budget_share: 0.25       # never more than a quarter of the day's deployment
+  max_fills_per_day: 250
+
 # Watchdog: any breach halts live trading until inputs are healthy again.
 watchdog:
   max_feed_age_s: 60

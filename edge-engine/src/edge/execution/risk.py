@@ -262,9 +262,38 @@ class RiskManager:
 
     # ── the single order gate ───────────────────────────────────────────
 
+    def exploration_room(self, now: float | None = None,
+                         mode: str | None = None) -> tuple[float, int]:
+        """(usd left, fills left) in today's exploration budget.
+
+        Exploration is a MEASUREMENT, not a strategy: it buys the data that
+        tells us whether sub-threshold edges pay. Capping it is what makes
+        that measurement affordable to be wrong about."""
+        exp = self.risk_cfg.get("exploration") or {}
+        if not exp.get("enabled"):
+            return 0.0, 0
+        mode = mode or self.mode
+        caps = (self.caps if mode == self.mode
+                else caps_for_mode(self.risk_cfg, mode, self.bankroll))
+        budget = caps.per_day * float(exp.get("budget_share", 0.25))
+        spent = self.explored_today(now=now, mode=mode)
+        max_fills = int(exp.get("max_fills_per_day", 250))
+        return max(budget - spent["usd"], 0.0), max(max_fills - spent["fills"], 0)
+
+    def explored_today(self, now: float | None = None,
+                       mode: str | None = None) -> dict:
+        now = now or time.time()
+        with self.ledger._conn() as conn:  # noqa: SLF001 — same package
+            row = conn.execute(
+                "SELECT COALESCE(sum(qty * price), 0), count(*) FROM fills "
+                "WHERE side='BUY' AND ts >= ? AND mode = ? "
+                "AND json_extract(decision, '$.tier') = 'exploration'",
+                (now - 86_400, mode or self.mode)).fetchone()
+        return {"usd": float(row[0]), "fills": int(row[1])}
+
     def approve(self, venue: str, market_key: str, event_key: str,
                 requested_usd: float, now: float | None = None,
-                mode: str | None = None) -> tuple[float, str]:
+                mode: str | None = None, tier: str = "core") -> tuple[float, str]:
         """Returns (approved_usd, reason). approved_usd == 0 means no order.
         Every cap is applied here; property tests assert no sequence of calls
         can exceed any cap. NOTE: approval CLAIMS the event — call only when
@@ -281,6 +310,11 @@ class RiskManager:
         if not ok:
             return 0.0, why
 
+        if tier == "exploration":
+            usd_left, fills_left = self.exploration_room(now=now, mode=mode)
+            if usd_left <= 0 or fills_left <= 0:
+                return 0.0, "exploration_budget: day's learning spend used"
+            requested_usd = min(requested_usd, usd_left)
         size = min(requested_usd, caps.per_fill_default, caps.per_fill_max)
         market_room = caps.per_market - self.market_open_cost(market_key)
         venue_day_cap = caps.per_day * caps.venue_bankroll_split

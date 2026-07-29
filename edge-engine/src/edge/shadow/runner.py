@@ -529,7 +529,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                        else (ask.price, True))
                     fee = (adapter.taker_fee if taker else adapter.maker_fee)(entry_px)
                     verdict = strategy_filter(policy, ev.league_code, entry_px, fair,
-                                              venue_fee=fee, category=category)
+                                              venue_fee=fee, category=category,
+                                              consensus_books=getattr(ev, "books", None))
 
                     # ── STUDY RECORD ──────────────────────────────────
                     # Every priced outcome is observed, whether or not it
@@ -632,7 +633,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                         effective_mode = "PAPER"
                     approved, why = risk.approve(adapter.name, mkey, ev.event_key(),
                                                  requested_usd=1e9, now=now,
-                                                 mode=effective_mode)
+                                                 mode=effective_mode,
+                                                 tier=verdict.tier)
                     if approved <= 0:
                         reject(why.split(":")[0].split()[0])
                         continue
@@ -651,6 +653,12 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     # report can measure whether resting actually paid.
                     decision["entry"] = {"price": entry_px, "taker": taker,
                                          "ask": ask.price}
+                    # Tier rides on every fill so the grader can score the
+                    # exploration bet separately from the measured core.
+                    decision["tier"] = verdict.tier
+                    decision["consensus_books"] = getattr(ev, "books", None)
+                    funnel.setdefault("by_tier", {}).setdefault(verdict.tier, 0)
+                    funnel["by_tier"][verdict.tier] += 1
                     # Mapping provenance — makes 'why this fair value?'
                     # answerable from the record alone.
                     decision["venue_market"] = {"title": match.market.title,

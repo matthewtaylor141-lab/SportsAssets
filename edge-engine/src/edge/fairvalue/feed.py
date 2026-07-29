@@ -19,7 +19,11 @@ import requests
 
 log = logging.getLogger(__name__)
 
-SHARP_BOOKS = {"pinnacle", "betfair_ex_eu", "betfair_ex_uk", "smarkets"}
+# Low-margin / exchange books only. Adding SOFT books would bias the median
+# toward the soft side and manufacture edges that are really just our own
+# fair value being wrong, so this list stays sharp-only on purpose.
+SHARP_BOOKS = {"pinnacle", "betfair_ex_eu", "betfair_ex_uk", "betfair_ex_au",
+               "smarkets", "matchbook", "betanysports", "lowvig"}
 
 # The Odds API sport keys -> our league slug codes (subset; extend as mapped).
 SPORT_KEY_LEAGUE = {
@@ -62,6 +66,10 @@ class FeedEvent:
     # for a segment we have no quotes for must be REFUSED, never priced off
     # the full-game line — those are different bets.
     segments: dict = field(default_factory=dict)   # seg -> {h2h,totals,spreads}
+    # Distinct sharp books behind the consensus. A 1c edge agreed by six
+    # books is a signal; the same 1c from one book is a rounding error, so
+    # the exploration tier requires depth before it trusts a small number.
+    books: int = 0
     fetched_at: float = 0.0   # staleness stamp — set at fetch, checked pre-order
 
     def is_fresh(self, max_age_s: float = 30.0, now: float | None = None) -> bool:
@@ -336,7 +344,8 @@ class TheOddsAPIClient(OddsFeed):
         def _get(mkts: str):
             r = self._sess.get(
                 f"{self.BASE}/sports/{sport_key}/odds",
-                params={"apiKey": self._key, "regions": "eu",
+                params={"apiKey": self._key,
+                        "regions": os.environ.get("EDGE_ODDS_REGIONS", "eu,uk,us"),
                         "markets": mkts, "oddsFormat": "decimal"},
                 timeout=20,
             )
@@ -378,9 +387,11 @@ class TheOddsAPIClient(OddsFeed):
             bucket_of = {"h2h": "h2h", "totals": "totals", "spreads": "spreads",
                          "alternate_totals": "totals", "alternate_spreads": "spreads"}
             seg_samples: dict = {}   # segment -> bucket -> key -> [odds]
+            contributing: set[str] = set()
             for book in raw.get("bookmakers", []):
                 if book.get("key") not in SHARP_BOOKS:
                     continue
+                contributing.add(book["key"])
                 for mkt in book.get("markets", []):
                     seg, bucket = None, bucket_of.get(mkt["key"])
                     if bucket is None:
@@ -405,6 +416,7 @@ class TheOddsAPIClient(OddsFeed):
                 seg: {b: {k: _median(v) for k, v in keyed.items()}
                       for b, keyed in buckets.items()}
                 for seg, buckets in seg_samples.items()}
+            ev.books = len(contributing)
             if ev.h2h:
                 out.append(ev)
         self._cache[sport_key] = (now, out)

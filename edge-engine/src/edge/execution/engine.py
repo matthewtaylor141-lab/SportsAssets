@@ -105,11 +105,15 @@ class StrategyVerdict:
     band: str
     threshold: float | None
     edge: float
+    tier: str = "core"       # 'core' = above the band bar; 'exploration' =
+                             # below it, traded on a capped budget to MEASURE
+                             # whether small edges pay.
 
 
 def strategy_filter(
     policy: Policy, league_code: str | None, price: float, fair: float,
     venue_fee: float = 0.0, category: str = "moneyline",
+    consensus_books: int | None = None,
 ) -> StrategyVerdict:
     """The entry rule alone: fair - price - fee >= threshold(band, category),
     plus dead zones, league allow/block, and league x category blocks.
@@ -126,6 +130,29 @@ def strategy_filter(
         return StrategyVerdict(
             False, f"band {band} dead/unproven ({category})", band, None, edge)
     if edge < threshold:
+        # Exploration: below the band bar but still a positive, non-trivial
+        # edge backed by enough books to not be a single quote's noise. These
+        # trade on a separate, capped budget so the threshold becomes a
+        # measurement rather than an assumption.
+        exp = policy.risk.get("exploration") or {}
+        if exp.get("enabled"):
+            min_edge = float(exp.get("min_edge", 0.008))
+            min_books = int(exp.get("min_consensus_books", 3))
+            # Fail CLOSED. An unknown consensus depth is not permission — if
+            # we cannot say how many books back this number, we are not
+            # trading a fraction of a cent on it.
+            enough_books = (consensus_books is not None
+                            and consensus_books >= min_books)
+            if edge >= min_edge and enough_books:
+                max_edge = float(policy.bands.get("max_believable_edge", 0.08))
+                if edge <= max_edge + 1e-9:
+                    return StrategyVerdict(
+                        True, "exploration", band, threshold, edge,
+                        tier="exploration")
+            if edge >= min_edge and not enough_books:
+                return StrategyVerdict(
+                    False, f"thin_consensus {consensus_books} books for "
+                           f"{edge:.3f} edge", band, threshold, edge)
         return StrategyVerdict(
             False, f"edge {edge:.3f} < threshold {threshold:.3f}", band, threshold, edge)
     # Implausibility guard: measured real edges are 1-4c. A "20c edge" is a
