@@ -309,3 +309,88 @@ def test_every_cycle_carries_a_verdict(tmp_path, monkeypatch):
                        POLICY, risk, ledger, ["soccer_epl"])
     assert funnel["verdict"].startswith("TRADING")
     assert funnel["cycle_s"] >= 0
+
+
+# ── away-mode phone alerts ──────────────────────────────────────────────
+
+def test_only_verdict_CHANGES_are_pushed(monkeypatch):
+    """A per-cycle heartbeat gets the channel muted, and a muted channel is
+    the same as no channel."""
+    from edge import notify
+
+    sent = []
+    monkeypatch.setattr(notify, "push",
+                        lambda t, b, priority="default": sent.append((t, b)))
+    w = notify.VerdictWatcher()
+    assert w.observe("NO QUALIFYING EDGE: 900 books priced, top blocker 'threshold' x700")
+    # Same class of verdict, different counts: not news.
+    assert not w.observe("NO QUALIFYING EDGE: 902 books priced, top blocker 'threshold' x711")
+    assert not w.observe("NO QUALIFYING EDGE: 880 books priced, top blocker 'band' x12")
+    # A different class IS news.
+    assert w.observe("TRADING: 4 order(s) placed this cycle")
+    assert w.observe("CYCLE OVERRUN: only 12 of 900 events priced in 310s")
+    assert len(sent) == 3
+
+
+def test_a_persistent_stall_reminds_instead_of_going_quiet(monkeypatch):
+    from edge import notify
+
+    sent = []
+    monkeypatch.setattr(notify, "push",
+                        lambda t, b, priority="default": sent.append(priority))
+    w = notify.VerdictWatcher(remind_after_s=3600)
+    t = 1_000_000.0
+    assert w.observe("BUDGET SPENT: $400 of $400", now=t)
+    assert not w.observe("BUDGET SPENT: $400 of $400", now=t + 60)
+    assert w.observe("BUDGET SPENT: $400 of $400", now=t + 3700)  # still stuck
+    assert sent == ["high", "high"]      # not-trading verdicts are high priority
+
+
+def test_a_healthy_verdict_does_not_nag(monkeypatch):
+    from edge import notify
+
+    sent = []
+    monkeypatch.setattr(notify, "push",
+                        lambda t, b, priority="default": sent.append(priority))
+    w = notify.VerdictWatcher(remind_after_s=60)
+    t = 1_000_000.0
+    w.observe("TRADING: 4 order(s) placed this cycle", now=t)
+    for i in range(1, 20):
+        w.observe("TRADING: 9 order(s) placed this cycle", now=t + i * 600)
+    assert sent == ["default"]
+
+
+def test_alerts_are_off_without_a_topic(monkeypatch):
+    from edge import notify
+
+    monkeypatch.delenv("EDGE_NTFY_TOPIC", raising=False)
+    assert notify.enabled() is False
+    notify.push("t", "b")            # must be a silent no-op, not an error
+
+
+def test_push_never_blocks_or_raises(monkeypatch):
+    from edge import notify
+
+    monkeypatch.setenv("EDGE_NTFY_TOPIC", "topic-x")
+    monkeypatch.setattr(notify, "_STATE", {"started": True, "sent": 0, "dropped": 0})
+    import queue as _q
+
+    monkeypatch.setattr(notify, "_Q", _q.Queue(maxsize=1))
+    for _ in range(5):
+        notify.push("t", "b")        # no worker draining it
+    assert notify._STATE["dropped"] == 4
+
+
+def test_daily_summary_reports_live_money_only(tmp_path):
+    from edge import notify
+
+    ledger, risk = _rig(tmp_path, mode="LIVE_BETA")
+    now = time.time()
+    ledger.record_fill(fill_uid="live1", venue="polymarket-us",
+                       market_key="polymarket-us:m", side="BUY", qty=2,
+                       price=0.50, ts=now - 60, mode="LIVE_BETA")
+    ledger.record_fill(fill_uid="paper1", venue="kalshi", market_key="kalshi:m",
+                       side="BUY", qty=99, price=0.50, ts=now - 60, mode="PAPER")
+    msg = notify.daily_summary(ledger, risk)
+    assert "1 live fills" in msg and "$1.00 staked" in msg
+    assert "mode LIVE_BETA" in msg

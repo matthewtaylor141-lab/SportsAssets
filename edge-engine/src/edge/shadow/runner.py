@@ -938,6 +938,18 @@ def main() -> None:
             log.info("no streaming venue available — polling only")
     reacted = {"passes": 0, "logged": 0}
 
+    # Away-mode: the phone learns about a stall instead of the owner finding
+    # it days later. Only transitions push; a per-cycle heartbeat would get
+    # the channel muted, and a muted channel is no channel.
+    from edge import notify
+
+    verdict_watcher = notify.VerdictWatcher()
+    if notify.enabled():
+        notify.push("Edge engine started",
+                    f"mode {risk.mode}, {len(sport_keys)} sports, "
+                    f"venues {[a.name for a in adapters]}")
+        log.info("phone alerts armed (ntfy)")
+
     last_report_day = ""
     last_recheck = time.time()
     # Fast pricing cycles; discovery + settlement on their own slow clocks
@@ -1008,6 +1020,7 @@ def main() -> None:
                                        or ["awaiting first recheck"]}
                 funnel["verdict"] = volume_verdict(funnel, risk)   # outranks
             log.warning("VERDICT: %s", funnel["verdict"])
+            verdict_watcher.observe(funnel["verdict"])
             if time.time() - last_settle > settle_s:
                 funnel["settled"] = settle_cycle(adapters, ledger)
                 last_settle = time.time()
@@ -1037,6 +1050,8 @@ def main() -> None:
                                                     ("summary", "alerts") if k in rep})
                     _post_status("report", {"report": {"date": rep.get("date"),
                                                        "alerts": rep.get("alerts", [])}})
+                    notify.push(f"Edge engine — daily {last_report_day}",
+                                notify.daily_summary(ledger, risk))
                 last_report_day = today
         except Exception as exc:  # noqa: BLE001
             log.exception("cycle failed; continuing")

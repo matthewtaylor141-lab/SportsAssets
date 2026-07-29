@@ -68,6 +68,65 @@ jobs:
           echo "==========================================================="
 
           probe /api/engine/summary
-          probe "/api/engine/fills?limit=25"
           probe /api/pmus-account
           probe /healthz 30
+
+          # ── the decisive number ────────────────────────────────────
+          # Whether volume is low because the engine is broken or because
+          # the venue simply is not offering edge is answered by ONE thing:
+          # the distribution of (fair - ask) across everything we priced.
+          # Printed last and compactly, because log tails are what survive.
+          curl -sS --max-time 120 -o /tmp/fills.json \
+               "$BASE/api/engine/fills?limit=500" || true
+          curl -sS --max-time 120 -o /tmp/status.json \
+               "$BASE/api/engine/status" || true
+
+          echo ""
+          echo "###########################################################"
+          echo "#                 EDGE DISTRIBUTION                       #"
+          echo "###########################################################"
+          jq -r '
+            [.[] | select(.edge != null) | .edge] as $e
+            | ($e | length) as $n
+            | if $n == 0 then "no priced records"
+              else
+                "sample: \($n) priced outcomes",
+                "positive edge:      \([$e[] | select(. > 0)] | length)",
+                "  ...>= 2c (would clear a typical bar): \([$e[] | select(. >= 0.02)] | length)",
+                "  ...>= 8c (implausible, mapping error): \([$e[] | select(. >= 0.08)] | length)",
+                "negative edge:      \([$e[] | select(. <= 0)] | length)",
+                "median:             \(($e | sort)[$n/2|floor])",
+                "",
+                "histogram (edge in cents):",
+                ( [$e[] | (. * 100) | floor] | group_by(.) | sort_by(-length)
+                  | .[:14][] | "  \(.[0])c : \(length)" )
+              end' /tmp/fills.json 2>/dev/null || echo "(no fills payload)"
+
+          echo ""
+          echo "worst 6 (mapping suspects — a real edge is never this big):"
+          jq -r 'sort_by(.edge) | .[:6][]
+                 | "  \(.edge|tostring|.[0:7])  ask \(.limit_price)  fair \(.fair_value)  \(.outcome_id)"' \
+             /tmp/fills.json 2>/dev/null || true
+          echo "best 6:"
+          jq -r 'sort_by(-.edge) | .[:6][]
+                 | "  \(.edge|tostring|.[0:7])  ask \(.limit_price)  fair \(.fair_value)  \(.outcome_id)"' \
+             /tmp/fills.json 2>/dev/null || true
+
+          echo ""
+          echo "###########################################################"
+          echo "#                      VERDICT                            #"
+          echo "###########################################################"
+          jq -r '.detail.verdict // "(engine predates the verdict build)"' /tmp/status.json
+          jq -r '"cycle_s   : \(.detail.cycle_s // "?")",
+                 "mode      : \(.detail.mode // "?")",
+                 "logged    : \(.detail.logged // "?")",
+                 "feed      : \(.detail.feed_events // "?") events",
+                 "matched   : \(.detail.matched // "?")   tradeable: \(.detail.tradeable // "?")",
+                 "books     : \(.detail.books_checked // "?")",
+                 "studied   : \(.detail.studied // "?")",
+                 "reclaimed : \(.detail.reclaimed // 0)",
+                 "heartbeat : \(.beat_at // "?")"' /tmp/status.json 2>/dev/null || true
+          echo "blockers  :"; jq -r '.detail.blockers // {} | to_entries[] | "  \(.key) x\(.value)"' /tmp/status.json 2>/dev/null || true
+          echo "rejects   :"; jq -r '.detail.rejects  // {} | to_entries[] | "  \(.key) x\(.value)"' /tmp/status.json 2>/dev/null || true
+          echo "gap       :"; jq -r '.detail.threshold_gap // {} | to_entries[] | "  \(.key) x\(.value)"' /tmp/status.json 2>/dev/null || true
+          echo "budget    :"; jq -r '.detail.budget // {} | to_entries[] | "  \(.key)=\(.value)"' /tmp/status.json 2>/dev/null || true
