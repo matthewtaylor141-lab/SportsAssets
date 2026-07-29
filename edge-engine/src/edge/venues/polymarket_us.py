@@ -163,6 +163,7 @@ class PolymarketUSAdapter(VenueAdapter):
             canonical_outcome,
             tag_segment,
         )
+        from edge.venues.pmus_slug import CODE_PREFIX, looks_like_a_slug, parse_slug
 
         census: dict[str, Any] = {"events_seen": 0, "skipped_no_title": 0,
                                   "skipped_lt2_outcomes": 0, "markets_seen": 0,
@@ -200,7 +201,10 @@ class PolymarketUSAdapter(VenueAdapter):
                         if m.get("closed"):
                             census["markets_closed"] += 1
                             continue
-                        if not oc and m.get("title"):
+                        if oc and looks_like_a_slug(oc):
+                            oc = None      # the "outcome" is the slug again
+                        if not oc and m.get("title") and not looks_like_a_slug(
+                                m["title"]):
                             # Census finding (2026-07-24): event listings carry
                             # no `outcome` field — the market TITLE names the
                             # side ("Mets", "Spread: Eagles (-7.5)"). Use it;
@@ -208,6 +212,17 @@ class PolymarketUSAdapter(VenueAdapter):
                             # discard anything that isn't actually a side.
                             oc = m["title"].strip()
                             census["outcome_from_title"] += 1
+                        if not oc and m.get("slug"):
+                            # No usable prose. Read the side STRUCTURALLY from
+                            # the slug and let the runner resolve the code
+                            # against the event's actual teams. Guessing from
+                            # a slug string is how a market gets priced as its
+                            # own opposite.
+                            parsed = parse_slug(m["slug"])
+                            if parsed.side:
+                                oc = f"{CODE_PREFIX}{parsed.side}"
+                                census["outcome_from_slug_code"] = census.get(
+                                    "outcome_from_slug_code", 0) + 1
                         if not (oc and m.get("slug")):
                             census["markets_no_outcome"] += 1
                             continue
@@ -229,11 +244,9 @@ class PolymarketUSAdapter(VenueAdapter):
                         # Segment tag keeps a first-five-innings run line from
                         # ever colliding with — or being priced against — the
                         # full-game line of the same game.
-                        key = tag_segment(
-                            apply_slug_line(
-                                canonical_outcome(m.get("title") or "", oc),
-                                m["slug"]),
-                            ident.segment)
+                        base = oc if oc.startswith(CODE_PREFIX) else apply_slug_line(
+                            canonical_outcome(m.get("title") or "", oc), m["slug"])
+                        key = tag_segment(base, ident.segment)
                         if ident.segment:
                             census["segments"] = census.get("segments", {})
                             census["segments"][ident.segment] = census[

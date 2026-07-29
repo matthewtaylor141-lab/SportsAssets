@@ -271,6 +271,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     )
     from edge.venues.base import FillIntent
     from edge.venues.mapper import match_events_all, team_score
+    from edge.venues.pmus_slug import CODE_PREFIX, resolve_side
 
     reactive = only_slugs is not None
     if candidates is not None:
@@ -407,6 +408,17 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                         "venue_outcome": oc_name[:48],
                         "segments_priced": sorted(priced["seg"]) or ["none"]}
                 fairs, deriv_sides = pool
+            # Slug-code side marker: pick between the event's two teams by
+            # code, or refuse. This is discrimination between two known
+            # candidates, not open-ended identification.
+            if oc_name.startswith(CODE_PREFIX):
+                code = oc_name[len(CODE_PREFIX):]
+                side = resolve_side(code, ev.home, ev.away)
+                if side is None:
+                    return None, "moneyline", {
+                        "reason": "unresolved_slug_code",
+                        "code": code, "home": ev.home[:24], "away": ev.away[:24]}
+                oc_name = side
             p = parse_outcome_line(oc_name)
             if p.kind in ("total", "spread"):
                 for side, f in deriv_sides:
