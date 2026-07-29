@@ -347,8 +347,10 @@ def test_live_staked_bounds_bogus_halt_detection(tmp_path):
 def test_systematic_divergence_quarantines_a_slice(tmp_path):
     """Whatever the cause, a slice whose fair values mostly disagree wildly
     with the venue's own mid stops trading."""
+    from datetime import datetime, timezone
+
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
-    day = "2026-07-25"
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     for _ in range(30):                      # our 37c vs venue 8c: 29c apart
         led.record_divergence(day, "polymarket-us", "mex", "spread", 0.29)
     for _ in range(30):                      # healthy slice: cents apart
@@ -366,6 +368,9 @@ def test_systematic_divergence_quarantines_a_slice(tmp_path):
 
 def test_quarantine_needs_a_real_sample(tmp_path):
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     for _ in range(5):  # below QUARANTINE_MIN_N — noisy, not judged
-        led.record_divergence("2026-07-25", "kalshi", "nba", "total", 0.40)
+        led.record_divergence(today, "kalshi", "nba", "total", 0.40)
     assert led.quarantined_slices(days=2) == set()

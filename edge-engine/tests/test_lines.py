@@ -255,3 +255,45 @@ def test_totals_compare_unsigned_without_false_conflict():
 
     b = bet_identity("tot-x-pos-8pt5", "Mets vs. Tigers: O/U 8.5", "Over")
     assert b.category == "total" and b.point == 8.5 and b.tradeable
+
+
+# ── band policy regenerated from measured calibration ─────────────────
+
+def test_every_measured_positive_band_is_tradeable():
+    """Volume regression guard: a band with measured positive edge must not
+    be silently blocked (the transcription error that cost ~45% of the
+    reference account's staked volume)."""
+    import csv
+    import re
+    from pathlib import Path
+
+    csv_path = Path(__file__).resolve().parents[1] / "data" / "calib_price.csv"
+    for row in csv.DictReader(open(csv_path)):
+        m = re.match(r"\[([\d.]+), ([\d.]+)\)", row["bin"])
+        if not m:
+            continue
+        lo, edge = float(m.group(1)), float(row["edge_cents"])
+        mid = lo + 0.025
+        th = POLICY.band_threshold(mid, "moneyline")
+        if edge > 0.2 and lo < 0.90:
+            assert th is not None, f"band at {lo:.2f} measures +{edge}c but is blocked"
+        else:
+            assert th is None, f"band at {lo:.2f} measures {edge}c but is tradeable"
+
+
+def test_existing_thresholds_unchanged_by_regeneration():
+    """The expansion is purely additive — previously tradeable bands keep
+    their exact thresholds."""
+    for price, expected in ((0.07, 0.030), (0.17, 0.025), (0.32, 0.025),
+                            (0.37, 0.025), (0.47, 0.020), (0.77, 0.015),
+                            (0.82, 0.015), (0.87, 0.012)):
+        assert POLICY.band_threshold(price, "moneyline") == expected
+
+
+def test_fat_middle_now_tradeable():
+    # 0.50-0.65: where most sports prices live, +0.5 to +1.2c measured.
+    for price in (0.52, 0.57, 0.62):
+        assert POLICY.band_threshold(price, "moneyline") == 0.020
+    # ...and the genuinely dead zones stay dead.
+    for price in (0.42, 0.67, 0.92, 0.97):
+        assert POLICY.band_threshold(price, "moneyline") is None

@@ -106,8 +106,10 @@ def test_fuzzy_but_below_95_is_mapped_not_tradeable():
 
 
 def test_match_rate_report_gate(tmp_path):
+    from datetime import datetime, timezone
+
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
-    day = "2026-07-24"
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # relative: never ages out
     for _ in range(96):
         led.record_match_stat(day, "kalshi", "epl", mapped=True, tradeable=True)
     for _ in range(4):
