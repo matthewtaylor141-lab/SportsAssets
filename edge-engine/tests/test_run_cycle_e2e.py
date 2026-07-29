@@ -108,7 +108,21 @@ def test_dead_zone_ask_never_trades(tmp_path, monkeypatch):
     assert funnel["rejects"].get("band", 0) >= 1
 
 
-def test_one_per_event_across_cycles(tmp_path, monkeypatch):
+def test_every_priced_side_of_a_game_is_tradeable(tmp_path, monkeypatch):
+    """One position per BET, not per game. Both sides of this event carry
+    edge; claiming the event took one and abandoned the other, which is the
+    single biggest reason the fill count never resembled the reference
+    account's ~36 fills per market."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    funnel = run_cycle([StubVenue(ask_price=0.47)], StubFeed([_event()]),
+                       POLICY, risk, ledger, ["soccer_epl"])
+    assert funnel["logged"] == 2                       # Arsenal AND Chelsea
+    assert ledger.position("kalshi:T-ARS") and ledger.position("kalshi:T-CHE")
+
+
+def test_never_adds_to_a_market_across_cycles(tmp_path, monkeypatch):
+    """The rule that survives: a bet is entered once and never topped up."""
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     ledger, risk = _rig(tmp_path)
     run_cycle([StubVenue(ask_price=0.47)], StubFeed([_event()]),
@@ -118,7 +132,7 @@ def test_one_per_event_across_cycles(tmp_path, monkeypatch):
     funnel2 = run_cycle([StubVenue(ask_price=0.47)], StubFeed([_event()]),
                         POLICY, risk, ledger, ["soccer_epl"])
     assert ledger.summary()["fills"] == fills_after_first  # never adds
-    assert funnel2["rejects"].get("one-per-event", 0) >= 1
+    assert funnel2["rejects"], "re-entry must be refused with a named reason"
 
 
 def test_edge_telemetry_and_exploration_logging(tmp_path, monkeypatch):

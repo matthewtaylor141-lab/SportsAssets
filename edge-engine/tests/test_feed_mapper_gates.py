@@ -78,7 +78,8 @@ def test_quota_headers_tracked(monkeypatch):
             "x-requests-remaining": "123", "x-requests-used": "877"}),
     )
     client.fetch_events("soccer_epl")
-    assert client.quota() == {"remaining": 123.0, "used": 877.0}
+    q = client.quota()
+    assert q["remaining"] == 123.0 and q["used"] == 877.0
 
 
 def test_opticodds_is_an_explicit_stub():
@@ -217,29 +218,121 @@ def test_alternate_lines_fold_into_spread_total_buckets(monkeypatch):
     assert "Over 215.5" in ev.totals
 
 
-def test_games_aware_ttl(monkeypatch):
-    client = TheOddsAPIClient(api_key="k", cache_ttl_s=10)
-    # No games within the live/imminent window.
-    idle = dict(_raw_event(), commence_time="2026-12-01T15:00:00Z")
-    monkeypatch.setattr(client._sess, "get", lambda *a, **k: _FakeResp([idle]))
-    client.fetch_events("soccer_epl")
-    assert client._sport_active["soccer_epl"] is False
-    # Plentiful quota: stay fast everywhere (a slow TTL would make quotes
-    # fail the 30s freshness rule and silently disable the sport).
-    assert client._ttl_for("soccer_epl") == 10
-    # Only conserve when the budget is actually low.
-    client._quota["remaining"] = 1000.0
-    assert client._ttl_for("soccer_epl") >= 300
-    client._quota["remaining"] = 4_500_000.0
-    assert client._ttl_for("soccer_epl") == 10
-    # Imminent game -> fast TTL.
+def _soon(hours):
     import datetime as dt
 
-    soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
+    return (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=hours)
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    live = dict(_raw_event(), commence_time=soon)
-    client._cache.clear()
-    monkeypatch.setattr(client._sess, "get", lambda *a, **k: _FakeResp([live]))
+
+
+def test_a_sport_with_games_in_the_window_is_always_polled_fast(monkeypatch):
+    """The freshness rule is 30s, so slowing a sport down is the same as
+    switching it off. Anything with tradeable games stays fast, full stop."""
+    client = TheOddsAPIClient(api_key="k", cache_ttl_s=10)
+    monkeypatch.setattr(client._sess, "get",
+                        lambda *a, **k: _FakeResp([dict(_raw_event(),
+                                                        commence_time=_soon(48))]))
     client.fetch_events("soccer_epl")
-    assert client._sport_active["soccer_epl"] is True
+    assert client._sport_events["soccer_epl"] == 1
     assert client._ttl_for("soccer_epl") == 10
+    client._quota["remaining"] = 1000.0      # even when credits run low
+    assert client._ttl_for("soccer_epl") == 10
+
+
+def test_a_sport_with_nothing_in_the_window_coasts(monkeypatch):
+    """Covering every sport means most of them are out of season at any time.
+    They cost credits and can never trade — there is nothing to be stale
+    about, so they get a long TTL instead of a share of the budget."""
+    client = TheOddsAPIClient(api_key="k", cache_ttl_s=10)
+    idle = dict(_raw_event(), commence_time="2027-12-01T15:00:00Z")
+    monkeypatch.setattr(client._sess, "get", lambda *a, **k: _FakeResp([idle]))
+    client.fetch_events("soccer_epl")
+    assert client._sport_events["soccer_epl"] == 0
+    assert client._ttl_for("soccer_epl") >= 900
+
+
+def test_governor_parks_the_quietest_sports_when_credits_would_run_out():
+    client = TheOddsAPIClient(api_key="k", cache_ttl_s=10)
+    sports = ["busy", "medium", "quiet", "empty"]
+    client._sport_events = {"busy": 40, "medium": 20, "quiet": 5, "empty": 0}
+    # 10 days of runway against a 30-day target -> afford a third of them.
+    client._quota = {"remaining": 10_000.0, "used": 5_000.0}
+    client._quota_t0, client._quota_used0 = time.time() - 86_400, 4_000.0
+    parked = client.rebalance_budget(sports)
+    assert "busy" not in parked and "empty" in parked
+    assert client.quota()["parked_sports"] == len(parked)
+
+    # Credits recover -> everything comes back. A park is never permanent.
+    client._quota["remaining"] = 10_000_000.0
+    assert client.rebalance_budget(sports) == set()
+
+
+def test_governor_does_nothing_without_a_burn_rate():
+    client = TheOddsAPIClient(api_key="k")
+    assert client.rebalance_budget(["a", "b"]) == set()
+
+
+# ── coverage: ask for every sport, block only what's measured negative ──
+
+class _SportsResp(_FakeResp):
+    pass
+
+
+def _sports_payload():
+    return [
+        {"key": "soccer_epl", "active": True},
+        {"key": "soccer_norway_eliteserien", "active": True},   # unmapped
+        {"key": "americanfootball_ncaaf", "active": True},      # unmapped
+        {"key": "baseball_mlb", "active": True},                # BLOCKED
+        {"key": "soccer_uefa_champs_league", "active": True},   # BLOCKED
+        {"key": "tennis_atp_wimbledon", "active": True},        # BLOCKED
+        {"key": "soccer_epl_winner", "active": False},          # not active
+    ]
+
+
+def test_coverage_is_every_active_sport_not_a_hardcoded_list(monkeypatch):
+    """The static map capped the top of the funnel: a market we never ask
+    about can never be traded, however good its price."""
+    from edge.execution.engine import Policy
+
+    client = TheOddsAPIClient(api_key="k")
+    monkeypatch.setattr(client._sess, "get",
+                        lambda *a, **k: _FakeResp(_sports_payload()))
+    keys = client.resolve_sport_keys(Policy.load())
+    assert "soccer_norway_eliteserien" in keys    # unmeasured, still traded
+    assert "americanfootball_ncaaf" in keys
+    assert "soccer_epl" in keys
+
+
+def test_measured_negative_leagues_stay_blocked_under_full_coverage(monkeypatch):
+    """Widening coverage must not quietly re-admit leagues that lost money.
+    These keys were mapped precisely so the blocklist can reach them."""
+    from edge.execution.engine import Policy
+
+    client = TheOddsAPIClient(api_key="k")
+    monkeypatch.setattr(client._sess, "get",
+                        lambda *a, **k: _FakeResp(_sports_payload()))
+    keys = client.resolve_sport_keys(Policy.load())
+    for blocked in ("baseball_mlb", "soccer_uefa_champs_league",
+                    "tennis_atp_wimbledon"):
+        assert blocked not in keys
+    assert "soccer_epl_winner" not in keys        # inactive
+
+
+def test_unmapped_sport_keys_still_get_a_league_code():
+    c = TheOddsAPIClient(api_key="k")
+    assert c.league_of("soccer_epl") == "epl"
+    assert c.league_of("baseball_mlb") == "mlb"          # reaches the blocklist
+    assert c.league_of("tennis_atp_wimbledon") == "atp"  # reaches the blocklist
+    assert c.league_of("soccer_norway_eliteserien") == "soccer_norway_eliteserien"
+
+
+def test_an_unmeasured_league_is_allowed_not_shadowed():
+    """An absent league is unmeasured, not disproven — and the de-vig that
+    produces the edge is the same arithmetic in every league."""
+    from edge.execution.engine import Policy
+
+    p = Policy.load()
+    assert p.league_allowed("soccer_norway_eliteserien") == "allow"
+    assert p.league_allowed("mlb") == "block"
+    assert p.league_allowed("epl") == "allow"

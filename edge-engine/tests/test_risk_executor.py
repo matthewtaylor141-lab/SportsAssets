@@ -25,7 +25,7 @@ RISK_CFG = {
     "profiles": {"live_beta": {
         "per_fill_usd_default": 10, "per_fill_usd_max": 25,
         "per_market_exposure_usd": 50, "per_day_deployment_usd": 250,
-        "one_position_per_event": True, "daily_loss_halt_usd": 100,
+        "one_position_per_market": True, "daily_loss_halt_usd": 100,
         "halt_hours": 72, "venue_bankroll_split": 0.5,
     }},
     "watchdog": {"max_feed_age_s": 60, "max_clock_skew_s": 5,
@@ -67,10 +67,11 @@ def test_property_no_sequence_exceeds_any_cap(rig):
         assert approved <= caps.per_fill_max + 1e-9
         assert approved <= requested + 1e-9
         if approved > 0:
-            # PAPER claims are per (venue, event): each venue samples a game
-            # once, never twice. (LIVE claims globally — separate test.)
-            assert (venue, event) not in events_filled, "one-per-event violated"
-            events_filled.add((venue, event))
+            # One position per BET: a market is entered once, never added to.
+            # (Sibling markets of the same game are separate bets — that is
+            # the point of claiming the market rather than the event.)
+            assert mkey not in events_filled, "one-per-market violated"
+            events_filled.add(mkey)
             _paper_fill(ledger, venue, mkey, approved, ts=now)
             filled_by_market[mkey] = filled_by_market.get(mkey, 0) + approved
             filled_by_venue[venue] = filled_by_venue.get(venue, 0) + approved
@@ -84,28 +85,38 @@ def test_property_no_sequence_exceeds_any_cap(rig):
 
 
 def test_per_market_cap_counts_open_positions(rig):
+    """LIVE mode: no one-per-market claim, so the exposure cap is what stops
+    a market being loaded up. (In the beta profile the claim stops it first.)"""
     ledger, risk = rig
     now = time.time()
-    a1, _ = risk.approve("kalshi", "kalshi:mX", "ev-a", 25, now=now)
+    a1, _ = risk.approve("kalshi", "kalshi:mX", "ev-a", 25_000, now=now, mode="LIVE")
     assert a1 > 0
-    _paper_fill(ledger, "kalshi", "kalshi:mX", 45, price=0.5, ts=now)  # near $50 cap
-    a2, _ = risk.approve("kalshi", "kalshi:mX", "ev-b", 25, now=now)
-    assert a2 == pytest.approx(5.0)  # clamped to remaining market room
-    _paper_fill(ledger, "kalshi", "kalshi:mX", 5, price=0.5, ts=now)   # cap reached
-    a3, why = risk.approve("kalshi", "kalshi:mX", "ev-c", 25, now=now)
+    _paper_fill(ledger, "kalshi", "kalshi:mX", 22_000, price=0.5, ts=now)
+    a2, _ = risk.approve("kalshi", "kalshi:mX", "ev-b", 25_000, now=now, mode="LIVE")
+    assert a2 == pytest.approx(3_000.0)   # clamped to remaining market room
+    _paper_fill(ledger, "kalshi", "kalshi:mX", 3_000, price=0.5, ts=now)
+    a3, why = risk.approve("kalshi", "kalshi:mX", "ev-c", 25_000, now=now, mode="LIVE")
     assert a3 == 0 and "caps" in why
 
 
-def test_approve_claims_event_exactly_once_per_venue_in_paper(rig):
+def test_approve_claims_each_market_once_not_the_whole_game(rig):
+    """The volume rule: a game lists a moneyline plus a ladder of spreads and
+    totals, each independently priced. Entering one must not retire the rest
+    — but re-entering the SAME bet is still forbidden."""
     _, risk = rig
     now = time.time()
-    a1, _ = risk.approve("kalshi", "kalshi:m1", "event-1", 10, now=now)
-    # Same venue, same event: never twice.
-    a2, why = risk.approve("kalshi", "kalshi:m1b", "event-1", 10, now=now)
-    assert a1 > 0 and a2 == 0 and "one-per-event" in why
-    # Other venue samples the same game independently (PAPER experiment).
-    a3, _ = risk.approve("polymarket-us", "polymarket-us:m2", "event-1", 10, now=now)
-    assert a3 > 0
+    a1, _ = risk.approve("kalshi", "kalshi:ars-ml", "event-1", 10, now=now)
+    # A different bet on the same game: allowed, it is a different bet.
+    a2, _ = risk.approve("kalshi", "kalshi:over-2.5", "event-1", 10, now=now)
+    a3, _ = risk.approve("kalshi", "kalshi:ars-1.5", "event-1", 10, now=now)
+    assert a1 > 0 and a2 > 0 and a3 > 0
+    # The same bet twice: never.
+    a4, why = risk.approve("kalshi", "kalshi:ars-ml", "event-1", 10, now=now)
+    assert a4 == 0 and "one-per-market" in why
+    # Other venue samples the same market independently (PAPER experiment).
+    a5, _ = risk.approve("polymarket-us", "polymarket-us:ars-ml", "event-1",
+                         10, now=now)
+    assert a5 > 0
 
 
 # ── circuit breaker ────────────────────────────────────────────────────
@@ -276,25 +287,72 @@ def test_paper_profile_decouples_sampling_caps():
     risk_cfg = Policy.load().risk
     paper = caps_for_mode(risk_cfg, "PAPER")
     beta = caps_for_mode(risk_cfg, "LIVE_BETA")
-    assert paper.per_day == 5000 and paper.per_fill_max == 10
-    assert beta.per_day == 25 and beta.per_fill_max == 1  # micro live tier
-    assert paper.one_per_event and beta.one_per_event
+    assert paper.per_fill_max == 10
+    assert beta.per_fill_max == 1                      # micro live tier
+    assert paper.one_per_market and beta.one_per_market
+    assert not paper.one_per_event and not beta.one_per_event
+
+
+def test_day_budget_follows_the_account_balance():
+    """A fixed daily cap is a trade-count cap in disguise: at $1 a fill, a
+    $25 budget is '25 trades a day' regardless of how many edges exist."""
+    from edge.execution.engine import Policy
+
+    risk_cfg = Policy.load().risk
+    unfunded = caps_for_mode(risk_cfg, "LIVE_BETA")
+    funded = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=400.0)
+    grown = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=5000.0)
+    assert unfunded.per_day == 25                       # floor before we know
+    assert funded.per_day == 400                        # 400 tickets a day
+    assert grown.per_day == 5000                        # scales with funding
+    # A balance reading can never SHRINK the budget below the configured floor.
+    assert caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=1.0).per_day == 25
+
+
+def test_the_breaker_scales_with_the_trade_count():
+    """Daily P&L noise on N independent $1 bets is ~sqrt(N) dollars. A fixed
+    $15 halt is meaningful at 25 trades and pure coin-flip at 1,000 — it
+    would lock the engine out for 72h on an ordinary day."""
+    from edge.execution.engine import Policy
+
+    risk_cfg = Policy.load().risk
+    small = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=100.0)
+    big = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=4000.0)
+    assert small.daily_loss_halt == 40                   # 4 sigma of 100 bets
+    assert big.daily_loss_halt == 600                    # 15% of $4,000
+    # Comfortably outside 3 sigma of the day's noise in both cases.
+    for caps in (small, big):
+        n = caps.per_day / caps.per_fill_default
+        assert caps.daily_loss_halt > 3 * (n ** 0.5) * caps.per_fill_default
+
+
+def test_bankroll_updates_resize_the_caps(tmp_path):
+    from edge.execution.engine import Policy
+
+    ledger = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    risk = RiskManager(ledger, Policy.load().risk)
+    risk.set_mode("LIVE_BETA")
+    assert risk.caps.per_day == 25
+    risk.set_bankroll(800.0)
+    assert risk.caps.per_day == 800
+    risk.set_bankroll(None)          # venue unreachable: keep what we knew
+    assert risk.caps.per_day == 800
 
 
 def test_paper_claims_per_venue_live_claims_global(rig):
     ledger, risk = rig
     now = time.time()
-    # PAPER: both venues sample the same event independently.
+    # PAPER: both venues sample the same market independently.
     a1, _ = risk.approve("kalshi", "kalshi:m1", "ev-x", 10, now=now, mode="PAPER")
-    a2, _ = risk.approve("polymarket-us", "polymarket-us:m2", "ev-x", 10,
+    a2, _ = risk.approve("polymarket-us", "polymarket-us:m1", "ev-x", 10,
                          now=now, mode="PAPER")
     assert a1 > 0 and a2 > 0
-    # LIVE: the event is claimed globally, once, across venues.
-    a3, _ = risk.approve("polymarket-us", "polymarket-us:m2", "ev-x", 10,
+    # LIVE: the market is claimed globally, once, across venues.
+    a3, _ = risk.approve("polymarket-us", "pm:m2", "ev-x", 10,
                          now=now, mode="LIVE_BETA")
-    a4, why = risk.approve("kalshi", "kalshi:m1", "ev-x", 10,
+    a4, why = risk.approve("kalshi", "pm:m2", "ev-x", 10,
                            now=now, mode="LIVE_BETA")
-    assert a3 > 0 and a4 == 0 and "one-per-event" in why
+    assert a3 > 0 and a4 == 0 and "one-per-market" in why
 
 
 # ── paper numbers must never halt live trading ─────────────────────────

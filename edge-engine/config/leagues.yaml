@@ -8,7 +8,15 @@ allowlist:
   # NHL moneyline allowed (+6.6% on 104,779 fills).
   majors: [nhl, nfl]
 blocklist: [ucl, bun, elc, tur, por, ere, atp, mlb]   # measured negative/flat
-unknown_league_policy: shadow_only
+# Unlisted leagues TRADE. The allowlist is not a list of leagues that work —
+# it is the list the reference account happened to trade, and an absent
+# league is unmeasured, not disproven. The edge comes from de-vigging a sharp
+# two-sided quote against the venue's price, and that arithmetic is the same
+# in the Norwegian second tier as in the Premier League. What IS measured is
+# the blocklist above: those leagues lost money and stay shut, as do the
+# dead price bands and the league x category blocks below. Every unlisted
+# league is graded per league nightly and gets blocklisted if it doesn't pay.
+unknown_league_policy: allow
 # category_blocks: league -> categories never traded there.
 category_blocks:
   nfl: [moneyline]

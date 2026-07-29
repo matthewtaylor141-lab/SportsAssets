@@ -41,14 +41,27 @@ marked ASSUMPTION and must be validated in shadow mode before capital.
    Derivatives (spread/total) do NOT inherit the moneyline dead zones and are
    priced symmetrically about the line — see the header of
    `scripts/gen_category_bands.py` for why.
-5. **League filter (measured).** Positive-ROI leagues (allowlist) and
-   negative/flat leagues (blocklist) in `config/leagues.yaml`, keyed by the
-   Polymarket slug-prefix map recovered from the data. Highlights —
-   allow: fifwc, epl, lal, fl1, uel, cbb, acn, lib, bra, spl, bl2, wta, nba.
-   BLOCK: ucl, bun, elc, tur, por (all measured net-negative), atp, mlb (flat).
+5. **League filter (measured, blocklist-shaped).** The BLOCKLIST is the
+   measured artefact and it is authoritative: ucl, bun, elc, tur, por, ere
+   (net-negative), atp, mlb (flat) never trade. The allowlist is a record of
+   what the reference account traded, NOT a whitelist — an unlisted league is
+   unmeasured, not disproven, and the de-vig that produces the edge is the
+   same arithmetic everywhere, so `unknown_league_policy: allow`. Coverage is
+   every active sport the feed carries; the nightly report grades per league
+   and anything that doesn't pay gets blocklisted. Blocked sport keys must
+   appear in `SPORT_KEY_LEAGUE` or the blocklist cannot reach them.
 6. **Size discipline (measured).** ROI by fill size: +2.5–3.1% up to $10K,
    +1.1% at $10–50K, NEGATIVE above $50K. Hard caps: per-fill $5K default
    ($10K max), per-market exposure $25K, slice large intents into small fills.
+   The DAY budget is not a hard-coded number — it is a share of live buying
+   power (`per_day_deployment_pct_of_bankroll`). A fixed daily cap is a
+   trade-count cap in disguise: at $1 a fill, "$25/day" means "25 trades a
+   day" no matter how many edges exist. One position per MARKET (each spread
+   line and total is its own bet), never per event; the never-add rule is
+   what the claim protects. The circuit breaker scales with the trade count
+   (`daily_loss_halt_sigmas`) — a fixed halt that is 4σ at 25 trades is
+   coin-flip noise at 1,000 and would lock the engine out for 72h on an
+   ordinary day.
 7. **Ramp expectation (measured).** Reference account: months 1–2 negative,
    profitable at scale from month 4. Shadow mode (60–90 days, zero capital)
    replaces this burn-in.

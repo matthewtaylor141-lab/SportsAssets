@@ -44,15 +44,22 @@ class Caps:
     per_market: float
     per_day: float
     one_per_event: bool
+    one_per_market: bool
     daily_loss_halt: float          # positive number; halt at -this
     halt_hours: float
     venue_bankroll_split: float     # fraction of per_day each venue may use
 
 
-def caps_for_mode(risk_cfg: dict, mode: str) -> Caps:
+def caps_for_mode(risk_cfg: dict, mode: str, bankroll: float | None = None) -> Caps:
     """LIVE uses the measured top-level caps; LIVE_BETA the beta profile;
     PAPER the sampling profile (falls back to beta) — paper dollars are
-    free, so evidence velocity is capped only by opportunity supply."""
+    free, so evidence velocity is capped only by opportunity supply.
+
+    bankroll: live deployable cash. When a profile sets
+    per_day_deployment_pct_of_bankroll, the day budget is computed from the
+    actual account instead of a fixed number — a hardcoded daily cap is a
+    trade-count cap in disguise (at $1 a fill, a $25 budget IS '25 trades a
+    day'), and it goes stale the moment the account is funded."""
     profiles = risk_cfg.get("profiles") or {}
     if mode == "LIVE":
         src = risk_cfg
@@ -60,27 +67,54 @@ def caps_for_mode(risk_cfg: dict, mode: str) -> Caps:
         src = {**risk_cfg, **(profiles.get("paper") or profiles.get("live_beta") or {})}
     else:
         src = {**risk_cfg, **(profiles.get("live_beta") or {})}
+
+    per_day = float(src.get("per_day_deployment_usd", 250))
+    pct = float(src.get("per_day_deployment_pct_of_bankroll", 0) or 0)
+    if bankroll and pct > 0:
+        per_day = max(per_day, bankroll * pct)
+
+    # The circuit breaker has to scale with the trade count or it stops being
+    # a breaker and becomes a coin-flip. Daily P&L noise on N independent $1
+    # bets is roughly sqrt(N) dollars: at 25 trades that is ±$5 and a $15 halt
+    # means something; at 1,000 trades it is ±$32 and a $15 halt fires on an
+    # ordinary Tuesday, locking the engine out for 72 hours for no reason.
+    # So the halt is the widest of: a fixed floor, k sigma of the day's own
+    # noise, and a share of the day's deployment. The sigma term governs at
+    # low volume, the percentage at high volume.
+    per_fill = float(src.get("per_fill_usd_default", 10))
+    halt = float(src.get("daily_loss_halt_usd", 100))
+    halt_pct = float(src.get("daily_loss_halt_pct_of_day", 0) or 0)
+    sigmas = float(src.get("daily_loss_halt_sigmas", 0) or 0)
+    if halt_pct > 0:
+        halt = max(halt, per_day * halt_pct)
+    if sigmas > 0 and per_fill > 0:
+        n_fills = per_day / per_fill
+        halt = max(halt, sigmas * (n_fills ** 0.5) * per_fill)
+
     return Caps(
         per_fill_default=float(src.get("per_fill_usd_default", 10)),
         per_fill_max=float(src.get("per_fill_usd_max", 25)),
         per_market=float(src.get("per_market_exposure_usd", 50)),
-        per_day=float(src.get("per_day_deployment_usd", 250)),
-        one_per_event=bool(src.get("one_position_per_event", mode != "LIVE")),
-        daily_loss_halt=float(src.get("daily_loss_halt_usd", 100)),
+        per_day=per_day,
+        one_per_event=bool(src.get("one_position_per_event", False)),
+        one_per_market=bool(src.get("one_position_per_market", False)),
+        daily_loss_halt=halt,
         halt_hours=float(src.get("halt_hours", 72)),
         venue_bankroll_split=float(src.get("venue_bankroll_split", 0.5)),
     )
 
 
 class RiskManager:
-    def __init__(self, ledger: Ledger, risk_cfg: dict) -> None:
+    def __init__(self, ledger: Ledger, risk_cfg: dict,
+                 bankroll: float | None = None) -> None:
         self.ledger = ledger
         mode = str(risk_cfg.get("mode", "PAPER")).upper()
         if mode not in MODES:
             log.warning("unknown mode %r — forcing PAPER", mode)
             mode = "PAPER"
         self.mode = mode
-        self.caps = caps_for_mode(risk_cfg, mode)
+        self.bankroll = bankroll
+        self.caps = caps_for_mode(risk_cfg, mode, bankroll)
         self.risk_cfg = risk_cfg
 
     @property
@@ -95,7 +129,46 @@ class RiskManager:
         if mode not in MODES:
             raise ValueError(f"unknown mode {mode!r}")
         self.mode = mode
-        self.caps = caps_for_mode(self.risk_cfg, mode)
+        self.caps = caps_for_mode(self.risk_cfg, mode, self.bankroll)
+
+    def set_bankroll(self, usd: float | None) -> None:
+        """Point the percentage-based caps at the live account. Called every
+        cycle from the venue's buying power; a None reading (venue briefly
+        unreachable) keeps the last known figure rather than collapsing the
+        day budget to its floor."""
+        if usd is None or usd <= 0:
+            return
+        if self.bankroll is not None and abs(usd - self.bankroll) < 0.01:
+            return
+        self.bankroll = usd
+        self.caps = caps_for_mode(self.risk_cfg, self.mode, usd)
+
+    def claim_key(self, mode: str, venue: str, market_key: str,
+                  event_key: str) -> str | None:
+        """Which registry key this order claims, or None if unclaimed.
+
+        one_per_market is the setting that matters for volume. A single game
+        exposes a moneyline plus a ladder of spreads and totals — 20-40
+        distinct bets, each with its own independently de-vigged fair value.
+        Claiming the whole EVENT means taking one of them and walking away
+        from the rest, which is why the reference account's 5.35M fills over
+        146,508 markets (~36 per market) was never reproducible here.
+        Claiming the MARKET keeps the rule that actually protects capital —
+        never add to a position you already hold.
+
+        Caps are resolved for the ORDER's mode, not the manager's: a live
+        engine paper-logs venues outside EDGE_LIVE_VENUES, and those orders
+        must claim under the paper profile's rule, not the live one."""
+        caps = (self.caps if mode == self.mode
+                else caps_for_mode(self.risk_cfg, mode, self.bankroll))
+        if caps.one_per_market:
+            return market_key if mode != "PAPER" else f"paper:{market_key}"
+        if caps.one_per_event:
+            # PAPER claims per (venue, event): both venues grade the same
+            # game independently (the spec's venue-choice experiment).
+            # LIVE claims the event globally: one real position, ever.
+            return event_key if mode != "PAPER" else f"paper:{venue}:{event_key}"
+        return None
 
     # ── guards (checked before every order) ─────────────────────────────
 
@@ -202,7 +275,8 @@ class RiskManager:
         PAPER profile's, accounted separately by fill mode)."""
         now = now or time.time()
         mode = mode or self.mode
-        caps = self.caps if mode == self.mode else caps_for_mode(self.risk_cfg, mode)
+        caps = (self.caps if mode == self.mode
+                else caps_for_mode(self.risk_cfg, mode, self.bankroll))
         ok, why = self.guard(now)
         if not ok:
             return 0.0, why
@@ -216,11 +290,9 @@ class RiskManager:
         if size < 1.0:
             return 0.0, "caps: no room (per-market/day/venue)"
 
-        if caps.one_per_event:
-            # PAPER claims per (venue, event): both venues grade the same
-            # game independently (the spec's venue-choice experiment).
-            # LIVE claims the event globally: one real position, ever.
-            key = event_key if mode != "PAPER" else f"paper:{venue}:{event_key}"
-            if not self.ledger.claim_event(key, market_key, venue, ts=now):
-                return 0.0, "one-per-event: already positioned"
+        key = self.claim_key(mode, venue, market_key, event_key)
+        if key is not None and not self.ledger.claim_event(key, market_key,
+                                                           venue, ts=now):
+            scope = "market" if caps.one_per_market else "event"
+            return 0.0, f"one-per-{scope}: already positioned"
         return size, "ok"

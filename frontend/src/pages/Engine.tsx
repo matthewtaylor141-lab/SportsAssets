@@ -70,6 +70,9 @@ interface EngineStatus {
       avg_latency_ms: number; max_latency_ms: number; passes: number; logged: number }
     makers?: { cancelled: number; closed: number; released: number }
     pmus_fill_sync?: number
+    budget?: { bankroll: number; day_cap: number; spent: number
+      fills_left: number; halt_at: number }
+    parked_sports?: string[]
     book_sample?: Record<string, unknown>
     error?: string
   }
@@ -327,6 +330,22 @@ export function Engine() {
                 {' '}· {v} stream: {s.connected ? '⚡ live' : 'reconnecting'} ({s.cached} books, {s.updates} updates)
               </span>
             ))}
+            {status.detail?.budget && (
+              <span style={{ color: status.detail.budget.fills_left === 0
+                ? 'var(--critical)' : 'var(--muted)' }}>
+                {' '}· budget: ${status.detail.budget.spent.toFixed(0)}/$
+                {status.detail.budget.day_cap.toFixed(0)} today —{' '}
+                <b>{status.detail.budget.fills_left} more trades</b> available
+                {status.detail.budget.bankroll > 0
+                  && ` (bankroll $${status.detail.budget.bankroll.toFixed(0)},`
+                     + ` halt at -$${status.detail.budget.halt_at.toFixed(0)})`}
+              </span>
+            )}
+            {status.detail?.parked_sports?.length ? (
+              <span style={{ color: 'var(--warning)' }}>
+                {' '}· parked for credits: {status.detail.parked_sports.join(', ')}
+              </span>
+            ) : null}
             {status.detail?.reactor && (
               <span style={{ color: status.detail.reactor.ticks > 0 ? 'var(--good)' : 'var(--muted)' }}>
                 {' '}· reactor: {status.detail.reactor.ticks} ticks →{' '}

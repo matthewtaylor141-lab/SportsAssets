@@ -91,9 +91,37 @@ class PolymarketUSAdapter(VenueAdapter):
         """check-live probe: balances call proves key validity + funding."""
         try:
             bal = self._client().account.balances()
-            return {"ok": True, "balances": bal}
+            out = {"ok": True, "balances": bal}
+            bp = self._buying_power_from(bal)
+            if bp is not None:
+                out["balance_usd"] = bp
+            return out
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:150]}"}
+
+    @staticmethod
+    def _buying_power_from(payload: dict) -> float | None:
+        """Cash actually available to deploy — buyingPower when the venue
+        reports it, else the current balance. Unsettled funds and money
+        already committed to resting orders are excluded by the venue."""
+        for b in (payload or {}).get("balances") or []:
+            for field in ("buyingPower", "currentBalance"):
+                if b.get(field) is not None:
+                    try:
+                        return float(b[field])
+                    except (TypeError, ValueError):
+                        continue
+        return None
+
+    def buying_power(self) -> float | None:
+        """Live deployable cash, or None if the venue can't be reached. The
+        day budget is sized from this, so 'how much can we trade' answers
+        itself as the account grows or shrinks — no config edit."""
+        try:
+            return self._buying_power_from(self._client().account.balances())
+        except Exception as exc:  # noqa: BLE001
+            log.info("buying power unavailable (keeping last known): %s", exc)
+            return None
 
     # ── discovery / books ──────────────────────────────────────────────
 

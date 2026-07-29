@@ -475,6 +475,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     if approved <= 0:
                         reject(why.split(":")[0].split()[0])
                         continue
+                    claim = risk.claim_key(effective_mode, adapter.name, mkey,
+                                           ev.event_key())
                     decision = build_decision_record(
                         fair=fair, edge=verdict.edge, threshold=verdict.threshold,
                         band=verdict.band, book=book,
@@ -499,7 +501,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                      size_usd=approved, edge=verdict.edge,
                                      threshold=verdict.threshold, decision=decision,
                                      ts=time.time(), entry_price=entry_px,
-                                     taker=taker, event_key=ev.event_key())
+                                     taker=taker, event_key=claim)
                     funnel["logged"] += int(result["placed"])
                     funnel.setdefault("by_category", {}).setdefault(category, 0)
                     funnel["by_category"][category] += int(result["placed"])
@@ -549,6 +551,21 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     quota = getattr(feed_client, "quota", lambda: {})()
     if quota:
         funnel["feed_quota"] = quota  # odds-API budget, visible every cycle
+    parked = getattr(feed_client, "parked_sports", lambda: [])()
+    if parked:
+        funnel["parked_sports"] = parked[:12]
+    # Budget headroom: how much of today's deployment is left, and therefore
+    # how many more $1 tickets can still be written today.
+    spent_today = risk.day_deployed(now=time.time(),
+                                    mode=risk.mode if risk.is_live else "PAPER")
+    funnel["budget"] = {
+        "bankroll": round(risk.bankroll or 0, 2),
+        "day_cap": round(risk.caps.per_day, 2),
+        "spent": round(spent_today, 2),
+        "fills_left": int(max(risk.caps.per_day - spent_today, 0)
+                          / max(risk.caps.per_fill_default, 0.01)),
+        "halt_at": round(risk.caps.daily_loss_halt, 2),
+    }
     if tripped:
         funnel["watchdog"] = wd_reason
     funnel["candidates"] = {name: len(c) for name, (_, c) in venue_candidates.items()}
@@ -708,8 +725,12 @@ def main() -> None:
 
     feed = TheOddsAPIClient()
     env_keys = os.environ.get("EDGE_SPORT_KEYS", "")
-    sport_keys = [k for k in env_keys.split(",") if k] if env_keys else feed.resolve_sport_keys()
+    sport_keys = ([k for k in env_keys.split(",") if k] if env_keys
+                  else feed.resolve_sport_keys(policy))
     cycle_seconds = int(os.environ.get("EDGE_CYCLE_SECONDS", "120"))
+    live_venue_names = {v.strip() for v in
+                        os.environ.get("EDGE_LIVE_VENUES", "polymarket-us").split(",")
+                        if v.strip()}
     log.info("edge runner starting: mode=%s venues=%s, %s sports, %ss cycle",
              risk.mode, [a.name for a in adapters], len(sport_keys), cycle_seconds)
 
@@ -825,7 +846,16 @@ def main() -> None:
                 else:
                     last_checklist_items = items
 
+            # Size the day budget from the live account, and keep the credit
+            # budget solvent across the widened sport list. Both run on the
+            # discovery clock — neither changes fast enough to be worth a
+            # round-trip every 10s.
             if not candidates or time.time() - last_discovery > discovery_s:
+                for a in adapters:
+                    bp = getattr(a, "buying_power", lambda: None)()
+                    if bp is not None and a.name in live_venue_names:
+                        risk.set_bankroll(bp)
+                feed.rebalance_budget(sport_keys)
                 candidates = discover_all(adapters, policy)
                 match_cache = {}    # mappings only change with discovery
                 explored_seen = set()  # one study record per market per window

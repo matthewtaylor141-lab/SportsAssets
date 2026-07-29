@@ -24,10 +24,23 @@ profiles:
   live_beta:
     per_fill_usd_default: 1
     per_fill_usd_max: 1
-    per_market_exposure_usd: 5
-    per_day_deployment_usd: 25
-    one_position_per_event: true      # ever; no adds after first fill
-    daily_loss_halt_usd: 15           # realized+marked -> halt all trading
+    per_market_exposure_usd: 1        # one $1 ticket per bet; never add
+    # Day budget tracks the ACCOUNT, not a number typed here. A fixed daily
+    # cap is a trade-count cap wearing a disguise: at $1 a fill, "$25/day"
+    # means "25 trades a day" no matter how many edges exist. 1.0 = deploy up
+    # to the full buying power each day; positions release cash as they
+    # settle, so the real ceiling is settlement speed, not this line.
+    per_day_deployment_usd: 25        # floor, used before the balance is read
+    per_day_deployment_pct_of_bankroll: 1.0
+    # One position per BET, not per game. A single game lists a moneyline
+    # plus a ladder of spreads and totals — 20-40 separately priced bets.
+    # Claiming the whole event took one and abandoned the rest.
+    one_position_per_event: false
+    one_position_per_market: true     # ever; no adds after first fill
+    daily_loss_halt_usd: 15           # floor
+    daily_loss_halt_pct_of_day: 0.15  # governs at high volume
+    daily_loss_halt_sigmas: 4         # governs at low volume (4 sigma of the
+                                      # day's own noise; a false halt costs 72h)
     halt_hours: 72                    # then auto-resume; NO manual override
     venue_bankroll_split: 1.0         # single-venue beta (Kalshi disabled)
 
@@ -38,9 +51,10 @@ profiles:
   paper:
     per_fill_usd_default: 10
     per_fill_usd_max: 10
-    per_market_exposure_usd: 50
-    per_day_deployment_usd: 5000
-    one_position_per_event: true
+    per_market_exposure_usd: 10
+    per_day_deployment_usd: 500000
+    one_position_per_event: false
+    one_position_per_market: true   # per venue in PAPER (independent samples)
     daily_loss_halt_usd: 1000000   # breaker is a live-money protection
     halt_hours: 72
     venue_bankroll_split: 1.0

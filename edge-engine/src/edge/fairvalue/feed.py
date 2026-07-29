@@ -32,7 +32,18 @@ SPORT_KEY_LEAGUE = {
     "tennis_wta": "wta",
     # US majors for the derivative (spread/total) edge — kch123 evidence.
     "icehockey_nhl": "nhl", "americanfootball_nfl": "nfl",
+    # MEASURED-NEGATIVE leagues, mapped so the blocklist can actually reach
+    # them. Coverage is now "every active sport the feed carries", which means
+    # these keys WOULD arrive unmapped and be treated as unknown-but-allowed.
+    # Naming them here is what keeps them blocked.
+    "soccer_uefa_champs_league": "ucl", "soccer_germany_bundesliga": "bun",
+    "soccer_efl_champ": "elc", "soccer_turkey_super_league": "tur",
+    "soccer_portugal_primeira_liga": "por", "soccer_netherlands_eredivisie": "ere",
+    "baseball_mlb": "mlb",
 }
+
+# Sports we never ask for: no two-sided line to de-vig, or no venue market.
+SPORT_KEY_SKIP_PREFIXES = ("tennis_atp",)   # measured flat -> blocklisted 'atp'
 
 
 @dataclass
@@ -78,24 +89,35 @@ FeedClient = OddsFeed  # back-compat alias for existing imports
 
 
 class TheOddsAPIClient(OddsFeed):
-    def resolve_sport_keys(self) -> list[str]:
-        """Live sport keys from the feed intersected with our league map.
-        The Odds API uses per-tournament tennis keys (tennis_wta_*), so a
-        hardcoded list goes stale — resolve from /sports each run."""
+    def resolve_sport_keys(self, policy=None) -> list[str]:
+        """EVERY active sport the feed carries, minus the ones policy blocks.
+
+        This used to return only the 18 keys in the static map, which capped
+        the top of the funnel at whatever that hand-written list happened to
+        contain — markets we never asked about could never be traded, however
+        good the price. The edge comes from de-vigging a sharp two-sided
+        quote, and that arithmetic does not care which league it is; the
+        league filter exists to exclude leagues MEASURED negative, and those
+        are named in the blocklist. So: ask for everything, exclude what is
+        blocked, let the strategy filter judge the rest on price."""
         try:
             resp = self._sess.get(f"{self.BASE}/sports", params={"apiKey": self._key}, timeout=15)
             resp.raise_for_status()
-            keys = []
+            keys, blocked = [], []
             for s in resp.json():
                 k = s.get("key", "")
-                if not s.get("active"):
+                if not s.get("active") or not k:
                     continue
-                if k in SPORT_KEY_LEAGUE:
-                    keys.append(k)
-                elif k.startswith("tennis_wta"):
-                    keys.append(k)  # maps to league 'wta' (allowlisted)
-                # tennis_atp_* deliberately skipped: blocklisted (measured flat)
+                if k.startswith(SPORT_KEY_SKIP_PREFIXES):
+                    blocked.append(k)
+                    continue
+                if policy is not None and policy.league_allowed(self.league_of(k)) == "block":
+                    blocked.append(k)
+                    continue
+                keys.append(k)
             if keys:
+                log.info("sport coverage: %s active sports (%s blocked)",
+                         len(keys), len(blocked))
                 return keys
         except (requests.RequestException, ValueError) as exc:
             log.warning("sport-key discovery failed (%s); using static map", exc)
@@ -107,6 +129,8 @@ class TheOddsAPIClient(OddsFeed):
             return SPORT_KEY_LEAGUE[sport_key]
         if sport_key.startswith("tennis_wta"):
             return "wta"
+        if sport_key.startswith("tennis_atp"):
+            return "atp"
         return sport_key
 
     BASE = "https://api.the-odds-api.com/v4"
@@ -127,11 +151,75 @@ class TheOddsAPIClient(OddsFeed):
         self._server_skew_s: float | None = None  # local - server clock, from Date header
         # sport_key -> has live/imminent games (drives per-sport TTL)
         self._sport_active: dict[str, bool] = {}
+        # sport_key -> events inside the trading window (drives the governor)
+        self._sport_events: dict[str, int] = {}
+        # Sports parked by the credit governor: polled rarely, so effectively
+        # not traded. Named in telemetry — a silently disabled sport is the
+        # exact failure this engine has already had once.
+        self._parked: set[str] = set()
+        self._quota_t0: float | None = None
+        self._quota_used0: float | None = None
         # sports whose alternate-line request the provider rejects (422)
         self._no_alt_lines: set[str] = set()
 
     def quota(self) -> dict:
-        return dict(self._quota)
+        q = dict(self._quota)
+        if self._parked:
+            q["parked_sports"] = len(self._parked)
+        q["burn_per_day"] = round(self._burn_per_day() or 0.0)
+        return q
+
+    # ── credit governor ─────────────────────────────────────────────────
+    #
+    # Covering every active sport multiplies credit burn by the number of
+    # sports. Running dry mid-month is worse than covering fewer sports, and
+    # slowing EVERY sport down is worst of all — the 30s freshness rule means
+    # a slow quote is an untradeable one, so a uniform slowdown silently
+    # stops all trading. The governor therefore spends the budget where the
+    # games are: sports are ranked by how many events they actually have in
+    # the trading window, and the tail is parked until credits recover.
+
+    TRADING_WINDOW_H = 72
+    QUOTA_TARGET_DAYS = 30      # the budget should outlast the billing month
+
+    def _burn_per_day(self) -> float | None:
+        used, t0 = self._quota.get("used"), self._quota_t0
+        if used is None or t0 is None or self._quota_used0 is None:
+            return None
+        elapsed = time.time() - t0
+        spent = used - self._quota_used0
+        if elapsed < 120 or spent <= 0:
+            return None
+        return spent / elapsed * 86_400
+
+    def rebalance_budget(self, sport_keys: list[str]) -> set[str]:
+        """Park the least-active sports if the current burn rate would exhaust
+        the credit budget before QUOTA_TARGET_DAYS. Returns the parked set."""
+        remaining = self._quota.get("remaining")
+        burn = self._burn_per_day()
+        target = float(os.environ.get("EDGE_QUOTA_TARGET_DAYS",
+                                      self.QUOTA_TARGET_DAYS))
+        if remaining is None or burn is None or burn <= 0 or target <= 0:
+            return self._parked
+        runway = remaining / burn
+        if runway >= target:
+            if self._parked:
+                log.info("credit runway %.0fd — unparking %s sports",
+                         runway, len(self._parked))
+            self._parked = set()
+            return self._parked
+        # Keep the share of sports the budget can actually afford, richest
+        # first. Sports with no events in the window cost nothing to drop.
+        keep_n = max(1, int(len(sport_keys) * runway / target))
+        ranked = sorted(sport_keys, key=lambda k: -self._sport_events.get(k, 0))
+        self._parked = set(ranked[keep_n:])
+        log.warning("credit runway %.0fd < %.0fd target — parking %s of %s "
+                    "sports (fewest events first)", runway, target,
+                    len(self._parked), len(sport_keys))
+        return self._parked
+
+    def parked_sports(self) -> list[str]:
+        return sorted(self._parked)
 
     def server_clock_skew_s(self) -> float | None:
         """|local - feed server| seconds, from the last response's Date header
@@ -168,13 +256,24 @@ class TheOddsAPIClient(OddsFeed):
     # rule, which silently disables trading on that sport).
     QUOTA_CONSERVE_BELOW = 50_000
 
+    IDLE_TTL_S = 900.0   # nothing to trade: just re-check now and then
+
     def _ttl_for(self, sport_key: str) -> float:
-        """Fast TTL for everything while quota is plentiful. Only when the
-        budget runs low do idle sports (no game within -6h..+4h) coast."""
-        if self._quota.get("remaining", float("inf")) > self.QUOTA_CONSERVE_BELOW:
-            return self._cache_ttl
-        return self._cache_ttl if self._sport_active.get(sport_key, True) \
-            else max(self._cache_ttl, 300.0)
+        """Fast TTL for any sport with something to trade; long TTL only for
+        sports that have NO events in the trading window (nothing to be stale
+        about) or that the governor has parked.
+
+        Never slow down a sport that has tradeable games: the 30s freshness
+        rule turns a slow quote into a permanent reject, which reads as 'the
+        engine found nothing' rather than 'the engine stopped looking'."""
+        if self._sport_events.get(sport_key, 1) == 0:
+            return max(self._cache_ttl, self.IDLE_TTL_S)
+        if sport_key in self._parked:
+            return max(self._cache_ttl, self.IDLE_TTL_S)
+        # Low credits used to quietly stretch the TTL of non-imminent sports.
+        # That is the same silent-disable in a different costume, and the
+        # governor now handles scarcity by parking named sports instead.
+        return self._cache_ttl
 
     def fetch_events(self, sport_key: str) -> list[FeedEvent]:
         now = time.time()
@@ -250,6 +349,12 @@ class TheOddsAPIClient(OddsFeed):
         # Live/imminent window: any game from 6h ago (in-play) to 4h ahead.
         self._sport_active[sport_key] = any(
             now - 6 * 3600 < e.commence_ts < now + 4 * 3600 for e in out)
+        # Trading window (matches venue discovery): what the governor ranks on.
+        horizon = now + self.TRADING_WINDOW_H * 3600
+        self._sport_events[sport_key] = sum(
+            1 for e in out if now - 6 * 3600 < e.commence_ts < horizon)
+        if self._quota_t0 is None and "used" in self._quota:
+            self._quota_t0, self._quota_used0 = time.time(), self._quota["used"]
         return out
 
 
