@@ -1,5 +1,7 @@
 """Live PM-US account normalizer: venue payload shapes -> platform card."""
 
+import pytest
+
 from sportsassets.api.pmus_account import normalize
 
 
@@ -46,3 +48,88 @@ def test_normalize_empty_account():
     assert out["account_value"] == 0.0
     assert out["open_count"] == 0 and out["settled_count"] == 0
     assert out["recent_trades"] == []
+
+
+# ── system vs manual: the only performance split that means anything ────
+
+def _pos(cost, realized=0.0, qty=0.0, expired=True, title="t"):
+    return {"netPosition": str(qty), "cost": {"value": str(cost)},
+            "cashValue": {"value": "0"}, "realized": {"value": str(realized)},
+            "expired": expired, "marketMetadata": {"title": title}}
+
+
+def _bal(cash=1008.4):
+    return {"balances": [{"currentBalance": cash, "buyingPower": cash,
+                          "assetNotional": 0}]}
+
+
+def test_one_manual_bet_cannot_swamp_a_hundred_system_fills():
+    """A single $200 manual position dwarfs every $1 ticket the engine has
+    ever placed. Reporting them together answers no question at all."""
+    from sportsassets.api.pmus_account import normalize
+
+    positions = {f"sys-{i}": _pos(1.0, realized=0.10) for i in range(100)}
+    positions["manual-1"] = _pos(200.0, realized=-40.0)
+    out = normalize(_bal(), positions, [])
+
+    assert out["system"]["positions"] == 100
+    assert out["system"]["realized"] == pytest.approx(10.0)
+    assert out["system"]["roi"] == pytest.approx(0.10)
+    assert out["manual"]["positions"] == 1
+    assert out["manual"]["realized"] == pytest.approx(-40.0)
+    # Blended, the system's +$10 would read as a $30 loss.
+    assert out["system"]["realized"] > 0 > (out["system"]["realized"]
+                                            + out["manual"]["realized"])
+
+
+def test_win_rate_and_roi_count_only_settled_money():
+    """An open position has not paid out. Charging its cost against zero
+    return reports a loss that has not happened."""
+    from sportsassets.api.pmus_account import normalize
+
+    out = normalize(_bal(), {
+        "won": _pos(1.0, realized=1.10),
+        "lost": _pos(1.0, realized=-1.00),
+        "still-open": _pos(1.0, qty=2, expired=False),
+    }, [])
+    s = out["system"]
+    assert (s["settled"], s["wins"], s["losses"]) == (2, 1, 1)
+    assert s["win_rate"] == 0.5
+    assert s["open"] == 1 and s["open_cost"] == pytest.approx(1.0)
+    assert s["roi"] == pytest.approx(0.05)      # +0.10 on $2 settled, not $3
+
+
+def test_no_settled_positions_reports_unknown_not_zero():
+    """Zero would read as 'breaking even'. The honest answer to 'how is it
+    doing' before anything resolves is that we do not know yet."""
+    from sportsassets.api.pmus_account import normalize
+
+    out = normalize(_bal(), {"open": _pos(1.0, qty=2, expired=False)}, [])
+    assert out["system"]["settled"] == 0
+    assert out["system"]["win_rate"] is None and out["system"]["roi"] is None
+
+
+def test_settlements_come_from_resolution_activities_not_trades():
+    """A buy-and-hold book realizes nothing until resolution, so a trade feed
+    alone shows every position as perpetually pending."""
+    from sportsassets.api.pmus_account import normalize
+
+    acts = [{"type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+             "positionResolution": {"marketSlug": "sys-1",
+                                    "beforePosition": {"cost": {"value": "0.97"}},
+                                    "afterPosition": {"realized": {"value": "1.03"}}}}]
+    out = normalize(_bal(), {"sys-1": _pos(0.97, qty=2, expired=False)}, acts)
+    s = out["system"]
+    assert s["settled"] == 1 and s["wins"] == 1
+    assert s["realized"] == pytest.approx(1.03)
+    assert s["open"] == 0
+
+
+def test_the_size_boundary_is_explicit_and_reported():
+    from sportsassets.api.pmus_account import normalize
+
+    out = normalize(_bal(), {"a": _pos(5.0, realized=1.0),
+                             "b": _pos(5.01, realized=1.0)}, [],
+                    system_max_cost=5.0)
+    assert out["system_max_cost"] == 5.0
+    assert out["system"]["positions"] == 1 and out["manual"]["positions"] == 1

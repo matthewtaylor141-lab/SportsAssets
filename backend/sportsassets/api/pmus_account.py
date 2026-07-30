@@ -29,8 +29,41 @@ def _amt(a: Any) -> float:
         return 0.0
 
 
+# The engine trades $1 tickets; the owner trades in tens-to-hundreds. Any
+# performance number that mixes them is meaningless — a single $200 manual
+# position swamps a hundred $1 system fills. Split on position cost.
+SYSTEM_MAX_COST = 5.0
+
+
+def _scorecard(rows: list[dict], label: str) -> dict:
+    """Win/loss and money for one cohort of positions."""
+    settled = [r for r in rows if r["settled"]]
+    wins = [r for r in settled if r["realized"] > 0]
+    losses = [r for r in settled if r["realized"] < 0]
+    staked = sum(r["cost"] for r in rows)
+    realized = sum(r["realized"] for r in settled)
+    open_rows = [r for r in rows if not r["settled"]]
+    return {
+        "cohort": label,
+        "positions": len(rows),
+        "staked": round(staked, 2),
+        "settled": len(settled),
+        "open": len(open_rows),
+        "open_cost": round(sum(r["cost"] for r in open_rows), 2),
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate": round(len(wins) / len(settled), 4) if settled else None,
+        "realized": round(realized, 2),
+        # ROI on SETTLED money only — open positions have not paid out yet and
+        # counting their cost against zero return reads as a fake loss.
+        "roi": (round(realized / sum(r["cost"] for r in settled), 4)
+                if settled and sum(r["cost"] for r in settled) else None),
+    }
+
+
 def normalize(balances_resp: dict, positions: dict[str, dict],
-              activities: list[dict]) -> dict:
+              activities: list[dict],
+              system_max_cost: float = SYSTEM_MAX_COST) -> dict:
     """Pure normalizer (unit-tested): venue payloads -> platform card."""
     bal_rows = (balances_resp or {}).get("balances") or []
     bal = bal_rows[0] if bal_rows else {}
@@ -60,6 +93,44 @@ def normalize(balances_resp: dict, positions: dict[str, dict],
     open_rows.sort(key=lambda r: -r["cost"])
     settled_rows.sort(key=lambda r: -abs(r["realized"]))
 
+    # Settlements arrive as their OWN activity type, not on the trade. A
+    # buy-and-hold book has no realized PnL until resolution, so without
+    # these every position looks perpetually pending.
+    for act in activities or []:
+        if act.get("type") != "ACTIVITY_TYPE_POSITION_RESOLUTION":
+            continue
+        res = act.get("positionResolution") or {}
+        slug = res.get("marketSlug")
+        after = res.get("afterPosition") or {}
+        before = res.get("beforePosition") or {}
+        if not slug:
+            continue
+        row = next((r for r in open_rows + settled_rows
+                    if r["market_slug"] == slug), None)
+        realized = _amt(after.get("realized")) or _amt(before.get("realized"))
+        if row is None:
+            settled_rows.append({
+                "market_slug": slug,
+                "title": (after.get("marketMetadata") or {}).get("title") or slug,
+                "outcome": None, "qty": 0.0,
+                "cost": _amt(before.get("cost")), "value": 0.0,
+                "realized": realized,
+            })
+        else:
+            row["realized"] = realized or row["realized"]
+            if row in open_rows:
+                open_rows.remove(row)
+                settled_rows.append(row)
+
+    for r in open_rows:
+        r["settled"] = False
+    for r in settled_rows:
+        r["settled"] = True
+    every = open_rows + settled_rows
+    system = [r for r in every if r["cost"] <= system_max_cost]
+    manual = [r for r in every if r["cost"] > system_max_cost]
+    realized_total = sum(r["realized"] for r in settled_rows)
+
     trades = []
     for act in activities or []:
         t = act.get("trade") or {}
@@ -88,6 +159,12 @@ def normalize(balances_resp: dict, positions: dict[str, dict],
         "settled_count": len(settled_rows),
         "recent_trades": trades[:25],
         "trade_count_recent": len(trades),
+        # The question that matters: is the SYSTEM making money, separately
+        # from the owner's own (much larger) manual bets?
+        "system_max_cost": system_max_cost,
+        "system": _scorecard(system, "system"),
+        "manual": _scorecard(manual, "manual"),
+        "system_positions": sorted(system, key=lambda r: r["market_slug"])[:60],
     }
 
 
@@ -106,9 +183,17 @@ def _fetch_sync() -> dict:
         cursor = resp.get("nextCursor") or ""
         if resp.get("eof") or not cursor:
             break
-    acts = (client.portfolio.activities(
-        {"limit": 50, "types": ["ACTIVITY_TYPE_TRADE"],
-         "sortOrder": "SORT_ORDER_DESCENDING"}) or {}).get("activities") or []
+    acts: list[dict] = []
+    cursor = ""
+    for _ in range(6):  # bounded paging; trades AND settlements
+        resp = client.portfolio.activities(
+            {"limit": 100, "sortOrder": "SORT_ORDER_DESCENDING",
+             "types": ["ACTIVITY_TYPE_TRADE", "ACTIVITY_TYPE_POSITION_RESOLUTION"],
+             **({"cursor": cursor} if cursor else {})}) or {}
+        acts.extend(resp.get("activities") or [])
+        cursor = resp.get("nextCursor") or ""
+        if resp.get("eof") or not cursor:
+            break
     return normalize(balances, positions, acts)
 
 

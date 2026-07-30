@@ -131,6 +131,21 @@ jobs:
           echo "gap       :"; jq -r '.detail.threshold_gap // {} | to_entries[] | "  \(.key) x\(.value)"' /tmp/status.json 2>/dev/null || true
           echo "budget    :"; jq -r '.detail.budget // {} | to_entries[] | "  \(.key)=\(.value)"' /tmp/status.json 2>/dev/null || true
           echo ""
+          echo "###########################################################"
+          echo "#     SYSTEM vs MANUAL  (is the ENGINE making money?)      #"
+          echo "###########################################################"
+          curl -sS --max-time 120 -o /tmp/acct.json "$BASE/api/pmus-account" || true
+          jq -r '"boundary: system = positions costing <= $\(.system_max_cost)",
+                 "",
+                 (.system, .manual | "[\(.cohort)]  \(.positions) positions, $\(.staked) staked",
+                   "   settled \(.settled)  (W \(.wins) / L \(.losses))  win rate \(.win_rate // "n/a")",
+                   "   realized $\(.realized)   ROI \(.roi // "n/a")",
+                   "   open \(.open) worth $\(.open_cost)", "")' /tmp/acct.json 2>/dev/null || true
+          echo "system positions in detail:"
+          jq -r '.system_positions // [] | .[]
+                 | "  \(if .settled then "settled" else "OPEN   " end)  cost $\(.cost)  realized \(.realized)  \(.market_slug)"'              /tmp/acct.json 2>/dev/null || true
+
+          echo ""
           echo "MAPPING MISSES (the funnel's biggest single loss):"
           jq -r '.detail.unpriced_examples // {} | to_entries[]
                  | "  [\(.key)]", (.value | if type=="array" then .[] else . end
