@@ -140,6 +140,12 @@ jobs:
                    "settled \(.settled)  (W \(.wins) / L \(.losses))  win rate \(.win_rate // "n/a")",
                    "realized $\(.realized)   ROI \(.roi // "n/a — nothing settled")"
                  else "(engine predates the scorecard build)" end' /tmp/status.json 2>/dev/null || true
+          jq -r '.detail.edge_drift // {} | if .n and .n > 0 then
+                   "",
+                   "ADVERSE SELECTION: \(.n) entries re-observed",
+                   "  edge retention \(.retention)   (1.0 = edge was real, ~0 = we bought stale quotes)",
+                   "  mean drift \(.mean_drift_c)c   held \(.held)/\(.n)"
+                 else "", "adverse selection: nothing matured yet" end' /tmp/status.json 2>/dev/null || true
           echo "refreshed this cycle: $(jq -r '.detail.refreshed // 0' /tmp/status.json 2>/dev/null)"
 
           echo ""

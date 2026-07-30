@@ -317,6 +317,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     marks: dict[str, float] = {}   # market_key -> best bid (circuit-breaker marks)
     # Slices whose prices systematically disagree with the venue's own —
     # barred from trading until the disagreement clears, whatever caused it.
+    drift_due = set() if reactive else ledger.awaiting_drift()
     quarantined = _quarantined(ledger)
     if quarantined:
         funnel["quarantined"] = sorted("/".join(q) for q in quarantined)[:8]
@@ -539,6 +540,11 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     funnel["books_checked"] += 1
                     ask = book.asks[0]
                     mkey = market_key(adapter.name, token)
+                    # Second observation for the adverse-selection detector.
+                    # Free: this fair value was computed anyway.
+                    if mkey in drift_due:
+                        ledger.record_drift_later(mkey, round(fair, 4))
+                        drift_due.discard(mkey)
                     if book.bids:
                         marks[mkey] = book.bids[0].price
 
@@ -714,6 +720,9 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                      threshold=verdict.threshold, decision=decision,
                                      ts=time.time(), entry_price=entry_px,
                                      taker=taker, event_key=claim)
+                    if result["placed"]:
+                        ledger.record_entry_fair(mkey, round(entry_px, 4),
+                                                 round(fair, 4))
                     funnel["logged"] += int(result["placed"])
                     funnel.setdefault("by_category", {}).setdefault(category, 0)
                     funnel["by_category"][category] += int(result["placed"])
@@ -819,6 +828,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     # waiting on a separate service to redeploy.
     try:
         funnel["performance"] = ledger.performance(days=7, live_only=risk.is_live)
+        funnel["edge_drift"] = ledger.drift_report(days=7)
     except Exception as exc:  # noqa: BLE001 — reporting must never break trading
         log.debug("performance snapshot failed: %s", exc)
     funnel["verdict"] = volume_verdict(funnel, risk)

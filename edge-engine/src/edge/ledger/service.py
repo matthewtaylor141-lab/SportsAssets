@@ -124,6 +124,25 @@ CREATE TABLE IF NOT EXISTS pricing_divergence (
     PRIMARY KEY (day, venue, league, category)
 );
 
+-- Adverse-selection detector. Our fair value can be up to 30s old; the
+-- venue's book is live. If the venue moves with the sharp books, then "the
+-- ask is below our fair" often just means our fair is STALE and the price
+-- already moved away from us — we would be systematically buying the side
+-- the market just left. That produces an engine which looks like it has
+-- edge and never profits, and settlement takes days to reveal it.
+--
+-- So: record the fair value at entry, then the fair value for the SAME
+-- market a minute later. Edge that survives is real; edge that evaporates
+-- was a stale quote. Continuous, and available within minutes.
+CREATE TABLE IF NOT EXISTS edge_drift (
+    market_key TEXT PRIMARY KEY,
+    price      REAL NOT NULL,      -- what we paid
+    fair_entry REAL NOT NULL,      -- fair value when we bought
+    ts_entry   REAL NOT NULL,
+    fair_later REAL,               -- fair value one observation later
+    ts_later   REAL
+);
+
 -- Mode transitions are audit events (PAPER -> LIVE_BETA -> LIVE).
 CREATE TABLE IF NOT EXISTS mode_log (
     id   INTEGER PRIMARY KEY,
@@ -363,6 +382,63 @@ class Ledger:
             "realized": round(realized, 2),
             "roi": round(realized / settled_stake, 4) if settled_stake else None,
             "open_cost": round(float(open_cost), 2),
+        }
+
+    # ── adverse selection: does the edge survive the next observation? ──
+
+    DRIFT_MIN_AGE_S = 60.0
+
+    def record_entry_fair(self, market_key: str, price: float, fair: float,
+                          ts: float | None = None) -> None:
+        """Stamp the fair value we bought against. First write wins — a
+        market is entered once, and re-stamping would reset the clock."""
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO edge_drift "
+                "(market_key, price, fair_entry, ts_entry) VALUES (?,?,?,?)",
+                (market_key, price, fair, ts if ts is not None else time.time()))
+
+    def awaiting_drift(self, now: float | None = None) -> set[str]:
+        """Markets bought long enough ago to be worth re-observing."""
+        cutoff = (now or time.time()) - self.DRIFT_MIN_AGE_S
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT market_key FROM edge_drift "
+                "WHERE fair_later IS NULL AND ts_entry <= ?", (cutoff,)).fetchall()
+        return {r["market_key"] for r in rows}
+
+    def record_drift_later(self, market_key: str, fair_later: float,
+                           ts: float | None = None) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "UPDATE edge_drift SET fair_later=?, ts_later=? "
+                "WHERE market_key=? AND fair_later IS NULL",
+                (fair_later, ts if ts is not None else time.time(), market_key))
+
+    def drift_report(self, days: int = 7) -> dict:
+        """How much of the edge we thought we had was still there a minute
+        later. retention ~1.0 = the edge was real; ~0 or negative = we were
+        buying quotes that had already moved."""
+        since = time.time() - days * 86_400
+        with self._conn() as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT price, fair_entry, fair_later FROM edge_drift "
+                "WHERE fair_later IS NOT NULL AND ts_entry >= ?",
+                (since,)).fetchall()]
+        if not rows:
+            return {"n": 0, "retention": None, "mean_drift_c": None}
+        entry = [r["fair_entry"] - r["price"] for r in rows]
+        later = [r["fair_later"] - r["price"] for r in rows]
+        gross = sum(entry)
+        return {
+            "n": len(rows),
+            # Edge remaining as a share of edge claimed. Summed rather than
+            # averaged per-trade so a near-zero entry edge cannot blow up the
+            # ratio.
+            "retention": round(sum(later) / gross, 3) if abs(gross) > 1e-9 else None,
+            "mean_drift_c": round(
+                sum(l - e for l, e in zip(later, entry)) / len(rows) * 100, 2),
+            "held": sum(1 for l, e in zip(later, entry) if l >= e * 0.5),
         }
 
     def daily_pnl(self) -> list[dict]:

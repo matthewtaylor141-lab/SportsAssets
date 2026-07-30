@@ -522,3 +522,78 @@ def test_every_cycle_carries_the_scorecard(tmp_path, monkeypatch):
     funnel = run_cycle([StubVenue(ask_price=0.47)], StubFeed([_event()]),
                        POLICY, risk, ledger, ["soccer_epl"])
     assert "performance" in funnel and funnel["performance"]["days"] == 7
+
+
+# ── adverse selection: does the edge survive the next observation? ──────
+
+def test_edge_that_evaporates_is_measured_as_evaporated(tmp_path):
+    """The failure this exists to catch: our fair value can be 30s old while
+    the venue's book is live, so 'the ask is below our fair' can just mean
+    the price already moved away from us. An engine buying stale quotes looks
+    identical to one with edge until the settlements arrive days later."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    # Two trades whose edge held, two where it vanished.
+    for i, (price, f0, f1) in enumerate([(0.47, 0.50, 0.505), (0.30, 0.33, 0.331),
+                                         (0.47, 0.50, 0.468), (0.60, 0.63, 0.598)]):
+        led.record_entry_fair(f"m{i}", price, f0, ts=now - 120)
+        led.record_drift_later(f"m{i}", f1)
+    rep = led.drift_report(days=7)
+    assert rep["n"] == 4 and rep["held"] == 2
+    assert rep["retention"] == pytest.approx(0.517, abs=0.01)
+    assert rep["mean_drift_c"] < 0            # edge decayed on average
+
+
+def test_edge_that_holds_reports_full_retention(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    for i in range(5):
+        led.record_entry_fair(f"m{i}", 0.47, 0.50, ts=now - 120)
+        led.record_drift_later(f"m{i}", 0.50)
+    rep = led.drift_report(days=7)
+    assert rep["retention"] == pytest.approx(1.0)
+    assert rep["held"] == 5 and rep["mean_drift_c"] == pytest.approx(0.0)
+
+
+def test_only_markets_old_enough_are_re_observed(tmp_path):
+    """Re-reading a second later measures nothing — the quote has not had a
+    chance to move."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    led.record_entry_fair("fresh", 0.47, 0.50, ts=now)
+    led.record_entry_fair("ripe", 0.47, 0.50, ts=now - 120)
+    assert led.awaiting_drift(now=now) == {"ripe"}
+
+
+def test_entry_fair_is_stamped_once_and_never_reset(tmp_path):
+    """Re-stamping would restart the clock and the drift would never mature."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    led.record_entry_fair("m", 0.47, 0.50, ts=now - 120)
+    led.record_entry_fair("m", 0.49, 0.60, ts=now)      # ignored
+    assert led.awaiting_drift(now=now) == {"m"}
+    led.record_drift_later("m", 0.50)
+    assert led.drift_report()["retention"] == pytest.approx(1.0)
+
+
+def test_nothing_measured_reports_unknown(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    assert led.drift_report() == {"n": 0, "retention": None, "mean_drift_c": None}
+
+
+def test_a_live_cycle_stamps_entries_and_closes_them_out(tmp_path, monkeypatch):
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    run_cycle([StubVenue(ask_price=0.47)], StubFeed([_event()]), POLICY, risk,
+              ledger, ["soccer_epl"])
+    assert ledger.awaiting_drift(now=time.time() + 120) == {
+        "kalshi:T-ARS", "kalshi:T-CHE"}
+
+    # A later cycle re-prices the same markets and closes the observation.
+    run_cycle([StubVenue(ask_price=0.47)], StubFeed([_event()]), POLICY, risk,
+              ledger, ["soccer_epl"])
+    # Nothing matured yet (entries are seconds old), so still pending...
+    assert ledger.drift_report()["n"] == 0
+    # ...but once they are old enough the next pass records them.
+    ledger.record_drift_later("kalshi:T-ARS", 0.50)
+    assert ledger.drift_report()["n"] == 1
