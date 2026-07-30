@@ -354,3 +354,102 @@ def test_segment_tagging_round_trips_and_cannot_collide():
     assert full != f5                       # never the same dict key
     assert split_segment(f5) == ("f5", "Phillies +1.5")
     assert split_segment(full) == (None, "Phillies +1.5")
+
+
+# ── the draw, and per-inning markets: found live 2026-07-30 ─────────────
+
+@pytest.mark.parametrize("text,want", [
+    ("Tie (Reg. Time)", True),      # how the VENUE writes it
+    ("Draw", True),                 # how the FEED writes it
+    ("The Draw", True),
+    ("Draw (Full Time)", True),
+    ("FC Lahti", False),
+    ("Sligo Rovers", False),
+    ("Over 2.5", False),            # a different bet entirely
+    ("Tie in first 5 innings", False),
+    # A club merely CONTAINING the word must not be classified as the draw —
+    # that would price a team against the draw's fair value.
+    ("Tie Break FC United", False),
+    ("Drawbridge City", False),
+])
+def test_draw_synonyms(text, want):
+    from edge.fairvalue.lines import is_draw
+
+    assert is_draw(text) is want
+
+
+def test_per_inning_markets_are_segments_not_full_games():
+    """'atc-mlb-tex-tb-2026-07-29-i9-tex' is INNING 9. Priced against the
+    full-game line it produced a -96c 'edge' (ask 0.98 vs a 0.02 fair value)
+    and, more dangerously, several in the 2-8c range that the implausibility
+    guard would have passed through to a real order."""
+    from edge.fairvalue.lines import bet_identity, slug_segment
+
+    assert slug_segment("atc-mlb-tex-tb-2026-07-29-i9-tex") == "i9"
+    assert slug_segment("atc-mlb-cle-cin-2026-07-29-i3-cin") == "i3"
+    assert slug_segment("atc-bra-vit-pal-2026-07-29-pal") is None
+    ident = bet_identity("atc-mlb-tex-tb-2026-07-29-i9-tex", "", "Rangers")
+    assert ident.segment == "i9"
+
+
+def test_an_inning_number_is_never_read_as_a_team_code():
+    from edge.venues.pmus_slug import parse_slug
+
+    p = parse_slug("atc-mlb-tex-tb-2026-07-29-i9-tex")
+    assert p.side == "tex" and p.codes == ("tex", "tb")
+
+
+def test_a_three_way_soccer_market_prices_all_three_outcomes(tmp_path, monkeypatch):
+    """The venue's 'Tie (Reg. Time)' scored 0.24 against the feed's 'Draw',
+    so every three-way soccer market silently lost its third outcome — 2,989
+    rejections in one live cycle, the largest single loss in the funnel."""
+    from edge.execution.risk import RiskManager
+    from edge.fairvalue.feed import FeedEvent
+    from edge.ledger.service import Ledger
+    from edge.shadow.runner import run_cycle
+    from edge.venues.base import BookLevel, MarketBook
+    from edge.venues.mapper import VenueMarket
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+
+    class Venue:
+        name = "kalshi"
+        book_errors: dict = {}
+
+        def discover_markets(self, league_codes):
+            return [VenueMarket(
+                market_id="EVT", title="Dundalk vs. Sligo Rovers",
+                league_code="epl",
+                outcome_tokens={"Dundalk": "T-DUN", "Sligo Rovers": "T-SLR",
+                                "Tie (Reg. Time)": "T-DRAW"})]
+
+        def get_book(self, market_id, token):
+            return MarketBook(venue=self.name, market_id=market_id,
+                              outcome_id=token, bids=[BookLevel(0.26, 400)],
+                              asks=[BookLevel(0.28, 400)], ts=time.time())
+
+        def taker_fee(self, price):
+            return 0.0
+
+        def maker_fee(self, price):
+            return 0.0
+
+        def plan_entry(self, book):
+            return book.asks[0].price, True
+
+    class Feed:
+        def fetch_events(self, sport_key):
+            return [FeedEvent(
+                sport_key="soccer_epl", league_code="epl", home="Dundalk",
+                away="Sligo Rovers", commence_ts=time.time() + 3600,
+                h2h={"Dundalk": 3.0, "Sligo Rovers": 3.0, "Draw": 3.0},
+                books=6, fetched_at=time.time())]
+
+        def server_clock_skew_s(self):
+            return 0.0
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    risk = RiskManager(led, {**POLICY.risk, "mode": "PAPER"})
+    funnel = run_cycle([Venue()], Feed(), POLICY, risk, led, ["soccer_epl"])
+    assert funnel["rejects"].get("no_side_match_moneyline", 0) == 0
+    assert led.position("kalshi:T-DRAW") is not None   # the draw traded

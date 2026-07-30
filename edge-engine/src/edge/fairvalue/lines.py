@@ -177,8 +177,23 @@ _SEGMENT_TOKENS = {
     "3q": "q3", "q3": "q3", "4q": "q4", "q4": "q4",
     "1p": "p1", "p1": "p1", "2p": "p2", "p2": "p2", "3p": "p3", "p3": "p3",
 }
+# Per-inning / per-period markets: "…-i9-tex" is INNING 9, not the game.
+# Found live 2026-07-30 producing a -96c "edge" (ask 0.98 against a 0.02
+# full-game fair value) and, far more dangerously, several in the 2-8c range
+# that the implausibility guard would have passed straight through to a real
+# order.
+_NUMBERED_SEGMENT = re.compile(r"^(i|inn|q|p|h|s)(\d{1,2})$", re.IGNORECASE)
+
+
+def _numbered(part: str) -> str | None:
+    m = _NUMBERED_SEGMENT.match(part or "")
+    return f"{m.group(1).lower()}{int(m.group(2))}" if m else None
+
+
 _TITLE_SEGMENT = (
+    (re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)\s*inning\b", re.I), None),
     (re.compile(r"first\s*(5|five)\s*innings?", re.I), "f5"),
+    (re.compile(r"\bin(?:ning)?\s*(\d{1,2})\b", re.I), None),
     (re.compile(r"first\s*(3|three)\s*innings?", re.I), "f3"),
     (re.compile(r"first\s*(7|seven)\s*innings?", re.I), "f7"),
     (re.compile(r"\b(1st|first)\s*half\b", re.I), "h1"),
@@ -189,10 +204,10 @@ _TITLE_SEGMENT = (
 
 
 def slug_segment(slug: str) -> str | None:
-    """Game segment encoded in a venue slug ('f5', 'h1', ...), or None for a
-    full-game market."""
+    """Game segment encoded in a venue slug ('f5', 'i9', 'h1', ...), or None
+    for a full-game market."""
     for part in (slug or "").lower().split("-"):
-        seg = _SEGMENT_TOKENS.get(part)
+        seg = _SEGMENT_TOKENS.get(part) or _numbered(part)
         if seg:
             return seg
     return None
@@ -200,8 +215,10 @@ def slug_segment(slug: str) -> str | None:
 
 def title_segment(title: str) -> str | None:
     for pattern, seg in _TITLE_SEGMENT:
-        if pattern.search(title or ""):
-            return seg
+        m = pattern.search(title or "")
+        if m:
+            # seg None => the pattern captured the period NUMBER itself.
+            return seg if seg else f"i{int(m.group(1))}"
     return None
 
 
@@ -336,3 +353,34 @@ def title_point(title: str) -> float | None:
     if m:
         return float(m.group(1))
     return None
+
+
+# The venue writes the soccer draw as "Tie (Reg. Time)"; the feed writes
+# "Draw". Ordinary similarity scores that pair at 0.24, so EVERY three-way
+# soccer market lost its third outcome — measured live at 2,989
+# no_side_match_moneyline rejections in a single cycle, the largest single
+# loss in the funnel.
+_DRAW_WORDS = {"draw", "tie", "empate", "nul", "x"}
+# Qualifiers the venue hangs off the draw, all of which carry no team.
+_DRAW_FILLER = {"the", "reg", "regular", "time", "match", "result", "90",
+                "90min", "ft", "fulltime", "full", "in"}
+
+
+def is_draw(name: str) -> bool:
+    """Does this outcome mean 'neither side wins'?
+
+    "Tie (Reg. Time)", "The Draw" and "Draw" all agree; a club merely
+    CONTAINING the word does not. Substring or word-search matching would
+    classify a side called "Tie Break FC United" as the draw and then price
+    a team against the draw's fair value, so the test is that EVERY token is
+    either a draw word or a known qualifier — nothing left over to be a team
+    name. An outcome carrying a handicap or an over/under is a different bet
+    and never a draw.
+    """
+    t = (name or "").strip()
+    if not t or parse_outcome_line(t).kind != "moneyline":
+        return False
+    tokens = [w for w in re.split(r"[^a-z0-9]+", t.lower()) if w]
+    if not tokens or not any(w in _DRAW_WORDS for w in tokens):
+        return False
+    return all(w in _DRAW_WORDS or w in _DRAW_FILLER for w in tokens)

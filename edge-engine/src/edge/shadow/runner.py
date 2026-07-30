@@ -264,6 +264,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     from edge.execution.executor import build_decision_record, execute, market_key
     from edge.fairvalue.devig import fair_value
     from edge.fairvalue.lines import (
+        is_draw,
         outcome_matches,
         pair_quotes,
         parse_outcome_line,
@@ -430,8 +431,23 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     "reason": f"no_sharp_quote_{p.kind}",
                     "venue_line": p.point, "sharp_lines": have[:8],
                 }
+            # The draw, before any team matching. The venue writes it as
+            # "Tie (Reg. Time)" and the feed as "Draw"; string similarity
+            # puts that pair at 0.24, so every three-way soccer market was
+            # silently losing its third outcome — 2,989 rejections in one
+            # live cycle, the single largest loss in the funnel.
+            if is_draw(oc_name):
+                for team_name, f in fairs.items():
+                    if is_draw(team_name):
+                        return f, "moneyline", None
+                return None, "moneyline", {
+                    "reason": "no_draw_quote",
+                    "venue_outcome": oc_name[:48],
+                    "feed_teams": [t[:24] for t in list(fairs)[:4]]}
             best_name, best_score = "", 0.0
             for team_name, f in fairs.items():
+                if is_draw(team_name):
+                    continue      # a team is never the draw, and vice versa
                 s = team_score(team_name, oc_name)
                 if s >= 0.95:
                     return f, "moneyline", None

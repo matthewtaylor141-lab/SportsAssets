@@ -31,6 +31,8 @@ from dataclasses import dataclass
 
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Trailing decorations that are never a team code.
+# Period markers are never a team code — 'i9' is inning nine, not a club.
+_PERIOD = re.compile(r"^(i|inn|q|p|h|s)\d{1,2}$", re.IGNORECASE)
 _NOT_A_CODE = {"neg", "pos", "f5", "f3", "f7", "1h", "2h", "h1", "h2",
                "1q", "2q", "3q", "4q", "q1", "q2", "q3", "q4",
                "1p", "2p", "3p", "p1", "p2", "p3", "over", "under",
@@ -71,7 +73,7 @@ def parse_slug(slug: str) -> PmusSlug:
     codes = tuple(head[2:])
     side = next((p for p in reversed(tail)
                  if p not in _NOT_A_CODE and not p.isdigit()
-                 and "pt" not in p), None)
+                 and "pt" not in p and not _PERIOD.match(p)), None)
     return PmusSlug(kind, league, codes, side, parts[date_i])
 
 
