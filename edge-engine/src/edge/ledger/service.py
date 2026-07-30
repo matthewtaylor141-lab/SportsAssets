@@ -317,6 +317,54 @@ class Ledger:
             "resolved_markets": agg["resolved_markets"],
         }
 
+    def performance(self, days: int = 7, live_only: bool = True) -> dict:
+        """Settled scorecard straight from the engine's OWN ledger.
+
+        This exists because the platform API — the usual place to read
+        results — can lag the engine by a deploy, and 'is this making money'
+        should never be blocked on unrelated infrastructure. The engine
+        settles its own positions (settle_cycle) and can therefore answer for
+        itself, in the same telemetry that already reaches the operator.
+
+        Wins and losses are counted per RESOLUTION, not per fill: buy-and-hold
+        means one settlement per market, and that is the unit that either paid
+        or did not. ROI is over settled stake only — charging an open
+        position's cost against a zero return reports a loss that has not
+        happened yet.
+        """
+        since = time.time() - days * 86_400
+        mode_clause = "AND f.mode != 'PAPER'" if live_only else ""
+        with self._conn() as conn:
+            res = conn.execute(
+                f"""
+                SELECT r.pnl AS pnl,
+                       (SELECT COALESCE(sum(qty * price), 0) FROM fills f
+                         WHERE f.market_key = r.market_key AND f.side='BUY'
+                         {mode_clause}) AS staked
+                FROM realizations r
+                WHERE r.ts >= ? AND r.kind = 'resolution'
+                """, (since,)).fetchall()
+            rows = [dict(x) for x in res if x["staked"] > 0]
+            fills = conn.execute(
+                f"SELECT count(*) n, COALESCE(sum(qty*price),0) s FROM fills f "
+                f"WHERE side='BUY' AND ts >= ? {mode_clause}", (since,)).fetchone()
+            open_cost = conn.execute(
+                """SELECT COALESCE(sum(shares * avg_cost), 0) FROM positions
+                   WHERE resolved = 0 AND shares > 1e-9""").fetchone()[0]
+        wins = [r for r in rows if r["pnl"] > 0]
+        settled_stake = sum(r["staked"] for r in rows)
+        realized = sum(r["pnl"] for r in rows)
+        return {
+            "days": days, "live_only": live_only,
+            "fills": int(fills["n"]), "staked": round(float(fills["s"]), 2),
+            "settled": len(rows), "wins": len(wins),
+            "losses": len(rows) - len(wins),
+            "win_rate": round(len(wins) / len(rows), 4) if rows else None,
+            "realized": round(realized, 2),
+            "roi": round(realized / settled_stake, 4) if settled_stake else None,
+            "open_cost": round(float(open_cost), 2),
+        }
+
     def daily_pnl(self) -> list[dict]:
         """Gross realized PnL per UTC day, from the realization journal."""
         with self._conn() as conn:

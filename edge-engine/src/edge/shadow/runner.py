@@ -334,18 +334,33 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             break
         # Long cycles age early-fetched quotes past the 30s freshness rule
         # before late events are processed. Refresh a sport AT MOST ONCE per
-        # cycle (quota discipline — the per-25s TTL alone burned the odds
-        # budget); events still stale after one refresh are dropped by the
-        # 30s hard rule rather than re-fetched.
+        # cycle (quota discipline), but when we DO pay for that fetch, apply
+        # it to EVERY event of that sport still in this sweep — not just the
+        # one that happened to trigger it.
+        #
+        # Refreshing only the triggering event was costing 525 stale_quote
+        # rejections per cycle: a sport with 30 games would rescue one and
+        # abandon 29, having already marked itself refreshed. Same HTTP call,
+        # same credit, thirty times the rescued markets.
         if not ev.is_fresh(25, now=time.time()) and ev.sport_key not in refreshed_sports:
             refreshed_sports.add(ev.sport_key)
             try:
-                for fresh_ev in feed_client.fetch_events(ev.sport_key):
-                    if fresh_ev.home == ev.home and fresh_ev.away == ev.away:
-                        ev.h2h, ev.totals, ev.spreads = (
-                            fresh_ev.h2h, fresh_ev.totals, fresh_ev.spreads)
-                        ev.fetched_at = fresh_ev.fetched_at
-                        break
+                fresh = {(f.home, f.away): f
+                         for f in feed_client.fetch_events(ev.sport_key)}
+                rescued = 0
+                for stale in events:
+                    if stale.sport_key != ev.sport_key:
+                        continue
+                    f = fresh.get((stale.home, stale.away))
+                    if f is None or f.fetched_at <= stale.fetched_at:
+                        continue
+                    (stale.h2h, stale.totals, stale.spreads, stale.segments,
+                     stale.books, stale.fetched_at) = (
+                        f.h2h, f.totals, f.spreads, f.segments, f.books,
+                        f.fetched_at)
+                    rescued += 1
+                if rescued:
+                    funnel["refreshed"] = funnel.get("refreshed", 0) + rescued
             except Exception as exc:  # noqa: BLE001 — stale check below still guards
                 log.debug("event refresh failed for %s: %s", ev.sport_key, exc)
         if len(ev.h2h) < 2:
@@ -799,6 +814,13 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             if stats:
                 funnel.setdefault("stream", {})[adapter.name] = stats
     funnel["cycle_s"] = round(time.time() - cycle_started, 1)
+    # The scorecard, from the engine's own books. Reported every cycle so
+    # "is this making money" is answerable from telemetry alone, without
+    # waiting on a separate service to redeploy.
+    try:
+        funnel["performance"] = ledger.performance(days=7, live_only=risk.is_live)
+    except Exception as exc:  # noqa: BLE001 — reporting must never break trading
+        log.debug("performance snapshot failed: %s", exc)
     funnel["verdict"] = volume_verdict(funnel, risk)
     return funnel
 

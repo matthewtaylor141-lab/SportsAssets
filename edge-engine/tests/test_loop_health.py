@@ -394,3 +394,131 @@ def test_daily_summary_reports_live_money_only(tmp_path):
     msg = notify.daily_summary(ledger, risk)
     assert "1 live fills" in msg and "$1.00 staked" in msg
     assert "mode LIVE_BETA" in msg
+
+
+# ── stale quotes: one fetch must rescue the whole sport ─────────────────
+
+def test_a_refresh_rescues_every_event_of_that_sport(tmp_path, monkeypatch):
+    """The refresh updated only the event that triggered it, then marked the
+    sport done — so a sport with 30 games rescued one and abandoned 29. That
+    was 525 stale_quote rejections per cycle: markets we had priced, had a
+    fair value for, and threw away over quote age."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+
+    stale_at = time.time() - 40      # past the 30s freshness rule
+    events = []
+    for i in range(6):
+        ev = _event()
+        ev.home, ev.away = f"H{i}", f"A{i}"
+        ev.h2h = {f"H{i}": 2.0, f"A{i}": 2.0}
+        ev.fetched_at = stale_at
+        events.append(ev)
+
+    class Feed(StubFeed):
+        fetches = 0
+
+        def fetch_events(self, sport_key):
+            # First call is the sweep and returns the STALE slate; the second
+            # is the in-cycle refresh and returns current quotes.
+            Feed.fetches += 1
+            if Feed.fetches == 1:
+                return events
+            out = []
+            for i in range(6):
+                fresh = _event()
+                fresh.home, fresh.away = f"H{i}", f"A{i}"
+                fresh.h2h = {f"H{i}": 2.0, f"A{i}": 2.0}
+                fresh.fetched_at = time.time()
+                out.append(fresh)
+            return out
+
+    class Venue(StubVenue):
+        def discover_markets(self, league_codes):
+            return []
+
+    funnel = run_cycle([Venue(ask_price=0.47)], Feed(events), POLICY, risk,
+                       ledger, ["soccer_epl"])
+    # One HTTP fetch (plus the initial sweep), every event rescued.
+    assert funnel["refreshed"] == 6
+    assert funnel["rejects"].get("stale_quote", 0) == 0
+
+
+def test_a_refresh_is_still_paid_for_only_once_per_sport(tmp_path, monkeypatch):
+    """Rescuing more events must not mean spending more credits."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    calls = {"n": 0}
+
+    events = []
+    for i in range(4):
+        ev = _event()
+        ev.home, ev.away = f"H{i}", f"A{i}"
+        ev.h2h = {f"H{i}": 2.0, f"A{i}": 2.0}
+        ev.fetched_at = time.time() - 40
+        events.append(ev)
+
+    class Feed(StubFeed):
+        def fetch_events(self, sport_key):
+            calls["n"] += 1
+            return events if calls["n"] == 1 else []
+
+    class Venue(StubVenue):
+        def discover_markets(self, league_codes):
+            return []
+
+    run_cycle([Venue(ask_price=0.47)], Feed(events), POLICY, risk, ledger,
+              ["soccer_epl"])
+    assert calls["n"] == 2      # the sweep, then ONE refresh
+
+
+# ── the engine can answer "is this profitable" from its own books ───────
+
+def test_performance_counts_settled_money_only(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    for i, (price, payout) in enumerate([(0.50, 1.0), (0.50, 0.0), (0.40, 1.0)]):
+        led.record_fill(fill_uid=f"f{i}", venue="polymarket-us",
+                        market_key=f"m{i}", side="BUY", qty=2, price=price,
+                        ts=now - 3600, mode="LIVE_BETA")
+        led.record_resolution(f"m{i}", payout, ts=now - 60)
+    # An open position must not be charged against a zero return.
+    led.record_fill(fill_uid="open", venue="polymarket-us", market_key="m-open",
+                    side="BUY", qty=2, price=0.50, ts=now - 60, mode="LIVE_BETA")
+
+    perf = led.performance(days=7)
+    assert perf["settled"] == 3 and perf["wins"] == 2 and perf["losses"] == 1
+    assert perf["win_rate"] == pytest.approx(2 / 3, abs=0.01)
+    assert perf["fills"] == 4                      # includes the open one
+    assert perf["open_cost"] == pytest.approx(1.0)
+    # Settled: staked 1.00 + 1.00 + 0.80; returned 2.00 + 0 + 2.00.
+    assert perf["realized"] == pytest.approx(1.20, abs=0.01)
+    assert perf["roi"] == pytest.approx(1.20 / 2.80, abs=0.01)
+
+
+def test_performance_reports_unknown_before_anything_settles(tmp_path):
+    """Zero would read as 'breaking even'."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    led.record_fill(fill_uid="a", venue="polymarket-us", market_key="m",
+                    side="BUY", qty=2, price=0.5, ts=time.time(), mode="LIVE_BETA")
+    perf = led.performance(days=7)
+    assert perf["settled"] == 0
+    assert perf["win_rate"] is None and perf["roi"] is None
+
+
+def test_performance_excludes_paper_from_the_live_scorecard(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    led.record_fill(fill_uid="p", venue="kalshi", market_key="mp", side="BUY",
+                    qty=100, price=0.5, ts=now - 3600, mode="PAPER")
+    led.record_resolution("mp", 0.0, ts=now - 60)
+    assert led.performance(days=7, live_only=True)["fills"] == 0
+    assert led.performance(days=7, live_only=False)["fills"] == 1
+
+
+def test_every_cycle_carries_the_scorecard(tmp_path, monkeypatch):
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    funnel = run_cycle([StubVenue(ask_price=0.47)], StubFeed([_event()]),
+                       POLICY, risk, ledger, ["soccer_epl"])
+    assert "performance" in funnel and funnel["performance"]["days"] == 7
