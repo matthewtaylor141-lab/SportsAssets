@@ -69,53 +69,74 @@ jobs:
           )
           echo "engine asks for: $ALL"
 
+          # Credits are charged per request x per market x per region, so
+          # "does it work" is only half the question — "what does it cost"
+          # decides whether we can afford it every cycle.
+          used () { grep -i '^x-requests-used' /tmp/h2 | tr -d '\r' | awk '{print $2}'; }
+
           for SPORT in ${SPORTS//,/ }; do
             echo ""
             echo "───────────────────────────────────────────────"
             echo "$SPORT"
             echo "───────────────────────────────────────────────"
-            code=$(curl -sS -o /tmp/ev.json -w '%{http_code}' \
-              "$BASE/sports/$SPORT/odds/?apiKey=$EDGE_ODDS_API_KEY&regions=eu,uk,us&markets=$ALL&oddsFormat=decimal" \
-              2>/tmp/err || true)
-            echo "HTTP ${code:-000}"
-            if [ "$code" != "200" ]; then
-              # A 422 here is the ANSWER, not a failure: the provider names
-              # the market key it will not serve on this plan.
-              head -c 600 /tmp/ev.json; echo; continue
+
+            # (1) Featured markets, bulk endpoint — what we get today.
+            code=$(curl -sS -o /tmp/ev.json -D /tmp/h2 -w '%{http_code}' \
+              "$BASE/sports/$SPORT/odds/?apiKey=$EDGE_ODDS_API_KEY&regions=eu,uk,us&markets=h2h,spreads,totals&oddsFormat=decimal" || true)
+            U1=$(used)
+            echo "[featured, bulk]  HTTP $code   credits_used_total=$U1"
+            if [ "$code" = "200" ]; then
+              echo "  events: $(jq 'length' /tmp/ev.json)"
+              echo "  sharp books quoting this sport:"
+              jq -r '[.[] | .bookmakers[]?.key] | group_by(.) | map({k: .[0], n: length})
+                     | map(select(.k as $k | ["pinnacle","betfair_ex_eu","betfair_ex_uk",
+                         "betfair_ex_au","smarkets","matchbook","betanysports","lowvig"]
+                         | index($k)))
+                     | if length == 0 then "     NONE — no anchor for this sport at all"
+                       else sort_by(-.n)[] | "     \(.k): \(.n) events" end' /tmp/ev.json
+              EVID=$(jq -r '.[0].id // empty' /tmp/ev.json)
+            else
+              head -c 300 /tmp/ev.json; echo; EVID=""
             fi
-            jq -r '
-              (length) as $events
-              | "events: \($events)",
-                "markets actually returned (key: events carrying it):",
-                ( [.[] | .bookmakers[]?.markets[]?.key ]
-                  | group_by(.) | sort_by(-length)
-                  | .[] | "   \(.[0]): \(length)" )
-            ' /tmp/ev.json 2>/dev/null || head -c 400 /tmp/ev.json
-            # Which sharp books actually quote this sport. Fair value is a
-            # weighted median over these, so a sport where Pinnacle and the
-            # exchanges are absent is one where our number is a consensus of
-            # followers — worth knowing per sport, not just in aggregate.
-            echo "sharp books present (of the 8 we weight):"
-            jq -r '[.[] | .bookmakers[]?.key] | group_by(.) | map({k: .[0], n: length})
-                   | map(select(.k as $k | ["pinnacle","betfair_ex_eu","betfair_ex_uk",
-                       "betfair_ex_au","smarkets","matchbook","betanysports","lowvig"]
-                       | index($k)))
-                   | if length == 0 then "   NONE — no anchor for this sport at all"
-                     else sort_by(-.n)[] | "   \(.k): \(.n) events" end' \
-               /tmp/ev.json 2>/dev/null || true
-            echo "requested but ABSENT:"
-            jq -r --arg all "$ALL" '
-              ([.[] | .bookmakers[]?.markets[]?.key] | unique) as $got
-              | ($all | split(",")) - $got
-              | if length == 0 then "   (none — everything we asked for came back)"
-                else .[] | "   \(.)" end' /tmp/ev.json 2>/dev/null || true
+
+            # (2) Segments on the PER-EVENT endpoint — the actual question.
+            if [ -n "$EVID" ]; then
+              case "$SPORT" in
+                baseball*)         SEG=h2h_1st_5_innings,spreads_1st_5_innings,totals_1st_5_innings ;;
+                soccer*)           SEG=h2h_h1,totals_h1 ;;
+                basketball*)       SEG=h2h_h1,spreads_h1,totals_h1 ;;
+                americanfootball*) SEG=h2h_h1,spreads_h1,totals_h1 ;;
+                icehockey*)        SEG=h2h_p1,totals_p1 ;;
+                *)                 SEG="" ;;
+              esac
+              if [ -n "$SEG" ]; then
+                code=$(curl -sS -o /tmp/one.json -D /tmp/h2 -w '%{http_code}' \
+                  "$BASE/sports/$SPORT/events/$EVID/odds/?apiKey=$EDGE_ODDS_API_KEY&regions=eu,uk,us&markets=$SEG&oddsFormat=decimal" || true)
+                U2=$(used)
+                echo "[segments, per-event]  HTTP $code   credits_used_total=$U2   COST=$((U2 - U1))"
+                if [ "$code" = "200" ]; then
+                  echo "  segment markets returned:"
+                  jq -r '[.bookmakers[]?.markets[]?.key] | group_by(.) | sort_by(-length)
+                         | if length == 0 then "     (none — endpoint OK but no quotes)"
+                           else .[] | "     \(.[0]): \(length) books" end' /tmp/one.json
+                  echo "  sharp books on segments:"
+                  jq -r '[.bookmakers[] | select(.markets | length > 0) | .key]
+                         | map(select(. as $k | ["pinnacle","betfair_ex_eu","betfair_ex_uk",
+                             "betfair_ex_au","smarkets","matchbook","betanysports","lowvig"]
+                             | index($k)))
+                         | if length == 0 then "     NONE" else join(", ") end' /tmp/one.json
+                else
+                  head -c 400 /tmp/one.json; echo
+                fi
+              fi
+            fi
           done
 
           echo ""
           echo "==========================================================="
           echo "READ THIS AS:"
-          echo "  absent + HTTP 200  -> plan does not carry it (upgrade//add-on)"
-          echo "  absent + HTTP 422  -> provider rejects the key (our request is wrong)"
-          echo "  present            -> we ask correctly and it IS carried;"
-          echo "                        the gap is in our parsing, not the feed"
+          echo "  per-event 200 + markets  -> FREE FIX: move segments to that endpoint"
+          echo "  per-event 200 + none     -> books do not quote it; nothing to buy either"
+          echo "  per-event 422/404        -> not on this plan; an upgrade would be needed"
+          echo "  COST is credits per EVENT — multiply by the slate to size the bill"
           echo "==========================================================="
