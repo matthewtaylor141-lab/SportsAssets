@@ -765,3 +765,98 @@ def test_one_sample_per_market_per_hour(tmp_path):
     led.record_price_observation("mkt:100", "mkt", 0.47, 0.50)
     led.record_price_observation("mkt:100", "mkt", 0.49, 0.55)   # same bucket
     assert len(led.awaiting_price_drift(now=time.time() + 120)) == 1
+
+
+# ── shrinkage: charge the claim, not every trade ────────────────────────
+#
+# Free samples said fair value does NOT drift on its own (0.0c across
+# hundreds). Our fills drift -1.33c. Same feed, same minute — so the move is
+# not staleness, it is selection: we buy where fair - price is largest, which
+# preferentially picks the moments our own estimate is most wrong, and those
+# revert. The correct correction is proportional to the size of the claim,
+# not a flat tax on every trade.
+
+def _reverting(tmp_path, n=400, keep=0.3):
+    """n samples where a fraction (1-keep) of each apparent edge reverts."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    for i in range(n):
+        claim = 0.001 + (i % 40) * 0.001        # 0.1c..4c of apparent edge
+        price, fair = 0.50, 0.50 + claim
+        led.record_price_observation(f"o{i}", f"m{i}", price, fair,
+                                     category="moneyline", edge=claim)
+        led.record_price_drift_later(f"o{i}", fair - claim * (1 - keep))
+    return led
+
+
+def test_reversion_recovers_the_surviving_fraction(tmp_path):
+    led = _reverting(tmp_path, keep=0.3)
+    rev = led.reversion()
+    assert rev["n"] == 400
+    assert rev["keep"] == pytest.approx(0.3, abs=0.02)
+    assert rev["slope"] == pytest.approx(-0.7, abs=0.02)
+
+
+def test_no_reversion_means_no_shrinkage(tmp_path):
+    """If apparent edge holds, shrinkage must be a no-op — the correction
+    has to disappear when the problem does."""
+    led = _reverting(tmp_path, keep=1.0)
+    assert led.reversion()["keep"] == pytest.approx(1.0, abs=0.02)
+
+
+def test_growing_edge_never_pays_us_a_bonus(tmp_path):
+    """A positive slope would mean apparent edge grows after we look. We do
+    not get to bank that as a lower bar — keep caps at 1."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    for i in range(400):
+        claim = 0.001 + (i % 40) * 0.001
+        led.record_price_observation(f"o{i}", f"m{i}", 0.50, 0.50 + claim,
+                                     edge=claim)
+        led.record_price_drift_later(f"o{i}", 0.50 + claim * 2)
+    assert led.reversion()["keep"] == 1.0
+
+
+def test_reversion_withholds_judgement_until_it_can_judge(tmp_path):
+    # Too few samples.
+    assert _reverting(tmp_path, n=50).reversion()["keep"] is None
+    # Enough samples, but every claim identical — a slope through one point
+    # in x is meaningless however many rows sit on it.
+    led = Ledger(db_path=str(tmp_path / "flat.sqlite3"))
+    for i in range(400):
+        led.record_price_observation(f"o{i}", f"m{i}", 0.50, 0.52, edge=0.02)
+        led.record_price_drift_later(f"o{i}", 0.51)
+    assert led.reversion()["keep"] is None
+    assert led.reversion()["n"] == 400
+
+
+def test_shrinkage_scales_with_the_claim(tmp_path):
+    """A 10c claim is charged ten times what a 1c claim is — that is where
+    the estimation error actually lives. A flat surcharge cannot do this."""
+    from edge.execution.engine import strategy_filter
+    small = strategy_filter(POLICY, "mls", 0.50, 0.51, keep=0.3)
+    big = strategy_filter(POLICY, "mls", 0.50, 0.60, keep=0.3)
+    assert small.raw_edge == pytest.approx(0.01)
+    assert small.edge == pytest.approx(0.003)
+    assert big.raw_edge == pytest.approx(0.10)
+    assert big.edge == pytest.approx(0.030)
+    # ...and the charge itself is 10x, not equal.
+    assert (big.raw_edge - big.edge) == pytest.approx(
+        10 * (small.raw_edge - small.edge))
+
+
+def test_shrinkage_and_surcharge_never_both_apply(tmp_path):
+    """Both correct the same error. Charging both would double-count."""
+    from edge.execution.engine import strategy_filter
+    v = strategy_filter(POLICY, "mls", 0.50, 0.56, keep=0.3, drift_penalty=0.02)
+    assert v.drift_penalty == 0.0
+    base = strategy_filter(POLICY, "mls", 0.50, 0.56)
+    assert v.threshold == pytest.approx(base.threshold)
+    assert v.edge == pytest.approx(0.06 * 0.3)
+
+
+def test_no_measurement_leaves_the_surcharge_in_charge(tmp_path):
+    """Until reversion is measurable, the blunt instrument still governs."""
+    from edge.execution.engine import strategy_filter
+    v = strategy_filter(POLICY, "mls", 0.50, 0.56, keep=None, drift_penalty=0.02)
+    assert v.keep == 1.0
+    assert v.drift_penalty == pytest.approx(0.02)
+    assert v.edge == pytest.approx(v.raw_edge)

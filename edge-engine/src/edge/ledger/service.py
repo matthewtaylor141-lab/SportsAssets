@@ -171,7 +171,12 @@ CREATE TABLE IF NOT EXISTS price_drift (
     fair_entry REAL NOT NULL,
     ts_entry   REAL NOT NULL,
     fair_later REAL,
-    ts_later   REAL
+    ts_later   REAL,
+    -- Apparent edge at sample time (fair_entry - price, before fees). Kept
+    -- so reversion can be measured AGAINST the size of the claim: the
+    -- winner's-curse question is not "does fair move" but "does it move
+    -- more where we thought we had the most edge".
+    edge_entry REAL
 );
 CREATE INDEX IF NOT EXISTS ix_price_drift_open
     ON price_drift(market_key) WHERE fair_later IS NULL;
@@ -208,6 +213,10 @@ class Ledger:
             # are reported under '?' rather than being silently reclassified.
             try:
                 conn.execute("ALTER TABLE edge_drift ADD COLUMN category TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            try:
+                conn.execute("ALTER TABLE price_drift ADD COLUMN edge_entry REAL")
             except sqlite3.OperationalError:
                 pass  # column already exists
 
@@ -513,14 +522,17 @@ class Ledger:
     def record_price_observation(self, obs_id: str, market_key: str,
                                  price: float, fair: float,
                                  category: str | None = None,
+                                 edge: float | None = None,
                                  ts: float | None = None) -> None:
         """A free drift sample from an outcome we priced but did not buy."""
         with self._lock, self._conn() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO price_drift (obs_id, market_key, "
-                "category, price, fair_entry, ts_entry) VALUES (?,?,?,?,?,?)",
+                "category, price, fair_entry, ts_entry, edge_entry) "
+                "VALUES (?,?,?,?,?,?,?)",
                 (obs_id, market_key, category, price, fair,
-                 ts if ts is not None else time.time()))
+                 ts if ts is not None else time.time(),
+                 fair - price if edge is None else edge))
 
     def awaiting_price_drift(self, now: float | None = None) -> dict[str, str]:
         """{market_key: obs_id} for samples old enough to re-observe. One
@@ -556,6 +568,59 @@ class Ledger:
         report["by_category"] = {
             k: self._drift_stats(v) for k, v in sorted(buckets.items())}
         return report
+
+    # Reversion needs a real spread of claim sizes before a slope means
+    # anything, and far more samples than a mean does.
+    REVERSION_MIN_N = 200
+    REVERSION_MIN_SPREAD = 0.005   # sd of apparent edge, in probability
+
+    def reversion(self, days: int = 7, category: str | None = None) -> dict:
+        """How much of an APPARENT edge gives itself back.
+
+        The winner's-curse question is not "does fair value move" — we have
+        measured that it does not, 0.0c across hundreds of free samples. It
+        is whether fair moves back further where we claimed the most edge.
+        We buy where fair - price is largest, which preferentially selects
+        the moments our own estimate is most wrong; those revert.
+
+        Regress the later move on the claim:  (fair_later - fair_entry)
+        against (fair_entry - price). A slope of -0.7 says 70% of any
+        apparent edge is our own noise and hands itself back.
+
+        Returned as `keep` — the fraction of an apparent edge that is real —
+        so it multiplies the edge directly. `keep` is None until there are
+        enough samples across a wide enough range of claims to mean
+        anything; callers must treat None as "no opinion", not as 1.0.
+        """
+        since = time.time() - days * 86_400
+        sql = ("SELECT price, fair_entry, fair_later, edge_entry FROM price_drift "
+               "WHERE fair_later IS NOT NULL AND ts_entry >= ?")
+        params: list = [since]
+        if category is not None:
+            sql += " AND COALESCE(category, '?') = ?"
+            params.append(category)
+        with self._conn() as conn:
+            rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+        n = len(rows)
+        out = {"n": n, "slope": None, "keep": None, "spread": None}
+        if n < self.REVERSION_MIN_N:
+            return out
+        xs = [(r["edge_entry"] if r["edge_entry"] is not None
+               else r["fair_entry"] - r["price"]) for r in rows]
+        ys = [r["fair_later"] - r["fair_entry"] for r in rows]
+        mx, my = sum(xs) / n, sum(ys) / n
+        sxx = sum((x - mx) ** 2 for x in xs)
+        spread = (sxx / n) ** 0.5
+        out["spread"] = round(spread, 5)
+        if spread < self.REVERSION_MIN_SPREAD or sxx <= 0:
+            return out       # every claim the same size: slope is meaningless
+        sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        slope = sxy / sxx
+        out["slope"] = round(slope, 4)
+        # Reversion is a NEGATIVE slope. A positive slope means apparent edge
+        # keeps growing, which we refuse to pay ourselves for: keep caps at 1.
+        out["keep"] = round(min(1.0, max(0.0, 1.0 + slope)), 4)
+        return out
 
     def drift_penalties(self, days: int = 7) -> dict[str, float]:
         """Measured adverse drift, as an edge surcharge per category.

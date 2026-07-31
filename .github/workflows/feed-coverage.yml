@@ -1,0 +1,109 @@
+# What does our odds plan ACTUALLY return?
+#
+# The engine refuses ~780 segment outcomes per cycle with
+# `no_sharp_quote_segment_*` and every one reports `segments_priced: none`.
+# Two explanations fit that equally well from the inside: the provider does
+# not carry these markets on our plan, or we are asking for them wrongly.
+# Nobody has ever asked the provider directly, because the assistant's
+# session cannot reach the internet and the engine only reports what it got,
+# never what it asked for.
+#
+# A runner can reach it. This asks, per sport, exactly which of our requested
+# market keys come back with quotes — the difference between "buy a bigger
+# plan" and "fix our request", which is a four-figure decision.
+#
+# SECRET REQUIRED: ODDS_API_KEY (repo Settings -> Secrets -> Actions).
+# The key is never printed; GitHub masks registered secrets in logs, and the
+# script only ever emits market keys and counts.
+
+name: feed-coverage
+
+on:
+  workflow_dispatch:
+    inputs:
+      sports:
+        description: "Comma-separated sport keys (blank = probe the defaults)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ask the provider what it carries
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          SPORTS_IN: ${{ github.event.inputs.sports }}
+        run: |
+          if [ -z "$ODDS_API_KEY" ]; then
+            echo "::error::ODDS_API_KEY secret is not set."
+            echo "Add it at Settings -> Secrets and variables -> Actions."
+            echo "Without it this probe cannot ask the provider anything."
+            exit 1
+          fi
+
+          BASE=https://api.the-odds-api.com/v4
+          SPORTS="${SPORTS_IN:-baseball_mlb,soccer_epl,soccer_mexico_ligamx,basketball_nba,icehockey_nhl}"
+
+          echo "==================== QUOTA ===================="
+          curl -sS "$BASE/sports/?apiKey=$ODDS_API_KEY" -D /tmp/h -o /tmp/sports.json >/dev/null || true
+          grep -i '^x-requests-' /tmp/h || echo "(no quota headers returned)"
+          echo "sports carried by this plan: $(jq 'length' /tmp/sports.json 2>/dev/null || echo '?')"
+
+          # The market keys the engine asks for, straight from the source so
+          # this probe cannot drift away from what the engine actually sends.
+          ALL=$(python3 - <<'PY'
+          import re, pathlib
+          src = pathlib.Path("edge-engine/src/edge/fairvalue/feed.py").read_text()
+          block = re.search(r"SEGMENT_MARKETS\s*=\s*\{(.*?)\n    \}", src, re.S).group(1)
+          keys = sorted(set(re.findall(r'"([a-z0-9_]+)"', block)) - {
+              "baseball", "soccer", "basketball", "americanfootball", "icehockey"})
+          print(",".join(["h2h", "spreads", "totals"] + keys))
+          PY
+          )
+          echo "engine asks for: $ALL"
+
+          for SPORT in ${SPORTS//,/ }; do
+            echo ""
+            echo "───────────────────────────────────────────────"
+            echo "$SPORT"
+            echo "───────────────────────────────────────────────"
+            code=$(curl -sS -o /tmp/ev.json -w '%{http_code}' \
+              "$BASE/sports/$SPORT/odds/?apiKey=$ODDS_API_KEY&regions=eu,uk,us&markets=$ALL&oddsFormat=decimal" \
+              2>/tmp/err || true)
+            echo "HTTP ${code:-000}"
+            if [ "$code" != "200" ]; then
+              # A 422 here is the ANSWER, not a failure: the provider names
+              # the market key it will not serve on this plan.
+              head -c 600 /tmp/ev.json; echo; continue
+            fi
+            jq -r '
+              (length) as $events
+              | "events: \($events)",
+                "markets actually returned (key: events carrying it):",
+                ( [.[] | .bookmakers[]?.markets[]?.key ]
+                  | group_by(.) | sort_by(-length)
+                  | .[] | "   \(.[0]): \(length)" )
+            ' /tmp/ev.json 2>/dev/null || head -c 400 /tmp/ev.json
+            echo "requested but ABSENT:"
+            jq -r --arg all "$ALL" '
+              ([.[] | .bookmakers[]?.markets[]?.key] | unique) as $got
+              | ($all | split(",")) - $got
+              | if length == 0 then "   (none — everything we asked for came back)"
+                else .[] | "   \(.)" end' /tmp/ev.json 2>/dev/null || true
+          done
+
+          echo ""
+          echo "==========================================================="
+          echo "READ THIS AS:"
+          echo "  absent + HTTP 200  -> plan does not carry it (upgrade//add-on)"
+          echo "  absent + HTTP 422  -> provider rejects the key (our request is wrong)"
+          echo "  present            -> we ask correctly and it IS carried;"
+          echo "                        the gap is in our parsing, not the feed"
+          echo "==========================================================="

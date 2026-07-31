@@ -109,32 +109,53 @@ class StrategyVerdict:
                              # below it, traded on a capped budget to MEASURE
                              # whether small edges pay.
     drift_penalty: float = 0.0   # measured adverse drift folded into the bar
+    raw_edge: float = 0.0        # apparent edge before shrinkage
+    keep: float = 1.0            # fraction of the apparent edge believed real
 
 
 def strategy_filter(
     policy: Policy, league_code: str | None, price: float, fair: float,
     venue_fee: float = 0.0, category: str = "moneyline",
     consensus_books: int | None = None, drift_penalty: float = 0.0,
+    keep: float | None = None,
 ) -> StrategyVerdict:
     """The entry rule alone: fair - price - fee >= threshold(band, category),
     plus dead zones, league allow/block, and league x category blocks.
     Sizing is RiskManager.approve()'s job.
 
-    `drift_penalty` is the measured adverse move in fair value after entry
-    (see LedgerService.drift_penalties). It is added to the band threshold
-    rather than subtracted from the edge, so the reported edge stays the raw
-    estimate and the bar is visibly the thing that moved."""
+    Two corrections for the fact that our fair value is an ESTIMATE, and only
+    ever one of them applies:
+
+    `keep` is the measured fraction of an apparent edge that survives (see
+    LedgerService.reversion). We buy where fair - price is largest, which
+    preferentially selects the moments our own estimate is most wrong — the
+    winner's curse — so the apparent edge is shrunk toward the market price
+    by exactly the measured amount. This is proportional: it costs a 10c
+    claim ten times what it costs a 1c claim, because that is where the
+    error actually lives.
+
+    `drift_penalty` is the blunt fallback for when reversion is not yet
+    measurable: a flat surcharge on the bar (see drift_penalties). It taxes
+    every trade equally, which is wrong in detail but safe.
+
+    Passing both would charge for the same error twice, so shrinkage wins
+    when it is available and the surcharge is ignored."""
     band = policy.band_of(price)
-    edge = fair - price - venue_fee
+    raw_edge = fair - price - venue_fee
+    if keep is not None:
+        keep = min(1.0, max(0.0, float(keep)))
+        edge, drift_penalty = raw_edge * keep, 0.0
+    else:
+        keep, edge = 1.0, raw_edge
     if policy.league_allowed(league_code) == "block":
-        return StrategyVerdict(False, f"league {league_code} blocked", band, None, edge)
+        return StrategyVerdict(False, f"league {league_code} blocked", band, None, edge, raw_edge=raw_edge, keep=keep)
     if policy.category_blocked(league_code, category):
         return StrategyVerdict(
-            False, f"category {category} blocked for {league_code}", band, None, edge)
+            False, f"category {category} blocked for {league_code}", band, None, edge, raw_edge=raw_edge, keep=keep)
     base_threshold = policy.band_threshold(price, category)
     if base_threshold is None:
         return StrategyVerdict(
-            False, f"band {band} dead/unproven ({category})", band, None, edge)
+            False, f"band {band} dead/unproven ({category})", band, None, edge, raw_edge=raw_edge, keep=keep)
     drift_penalty = max(0.0, float(drift_penalty or 0.0))
     threshold = base_threshold + drift_penalty
     if edge < threshold:
@@ -160,24 +181,28 @@ def strategy_filter(
                 if edge <= max_edge + 1e-9:
                     return StrategyVerdict(
                         True, "exploration", band, threshold, edge,
-                        tier="exploration", drift_penalty=drift_penalty)
+                        tier="exploration", drift_penalty=drift_penalty,
+                        raw_edge=raw_edge, keep=keep)
             if edge >= min_edge and not enough_books:
                 return StrategyVerdict(
                     False, f"thin_consensus {consensus_books} books for "
                            f"{edge:.3f} edge", band, threshold, edge,
-                           drift_penalty=drift_penalty)
+                           drift_penalty=drift_penalty, raw_edge=raw_edge,
+                           keep=keep)
         return StrategyVerdict(
             False, f"edge {edge:.3f} < threshold {threshold:.3f}", band, threshold,
-            edge, drift_penalty=drift_penalty)
+            edge, drift_penalty=drift_penalty, raw_edge=raw_edge, keep=keep)
     # Implausibility guard: measured real edges are 1-4c. A "20c edge" is a
     # mapping/model error wearing a costume — log it, never trade it.
     max_edge = float(policy.bands.get("max_believable_edge", 0.08))
     if edge > max_edge + 1e-9:
         return StrategyVerdict(
             False, f"implausible edge {edge:.3f} > {max_edge:.2f} (mapping/model suspect)",
-            band, threshold, edge, drift_penalty=drift_penalty)
+            band, threshold, edge, drift_penalty=drift_penalty,
+            raw_edge=raw_edge, keep=keep)
     return StrategyVerdict(True, "ok", band, threshold, edge,
-                           drift_penalty=drift_penalty)
+                           drift_penalty=drift_penalty, raw_edge=raw_edge,
+                           keep=keep)
 
 
 @dataclass

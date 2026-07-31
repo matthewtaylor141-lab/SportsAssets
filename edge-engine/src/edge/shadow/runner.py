@@ -328,6 +328,13 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     # enough that nothing trades — which is exactly when a fills-only meter
     # goes blind and the bar can never come back down.
     px_due = {} if reactive else ledger.awaiting_price_drift()
+    # How much of an apparent edge is real, measured from those free samples.
+    # None until there are enough of them across a wide enough range of
+    # claims — until then the flat surcharge governs instead.
+    rev = ledger.reversion(days=7)
+    keep = rev.get("keep")
+    if keep is not None:
+        funnel["shrink"] = {"keep": keep, "slope": rev["slope"], "n": rev["n"]}
     if any(v > 0 for v in drift_pen.values()):
         funnel["drift_penalty"] = {k: v for k, v in drift_pen.items() if v > 0}
     quarantined = _quarantined(ledger)
@@ -602,7 +609,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                               venue_fee=fee, category=category,
                                               consensus_books=getattr(ev, "books", None),
                                               drift_penalty=drift_pen.get(
-                                                  drift_cat, drift_pen.get("*", 0.0)))
+                                                  drift_cat, drift_pen.get("*", 0.0)),
+                                              keep=keep)
                     # Second look at a free sample taken a minute or more ago.
                     # Closed out on the PRICING path, not the study path: the
                     # study bucket only comes round once an hour, which is far
@@ -634,7 +642,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                             # so it doubles as the sample's identity.
                             ledger.record_price_observation(
                                 sbucket, mkey, round(entry_px, 4),
-                                round(fair, 4), category=drift_cat)
+                                round(fair, 4), category=drift_cat,
+                                edge=round(verdict.raw_edge, 4))
                             study_intent = FillIntent(
                                 market_id=match.market.market_id, outcome_id=token,
                                 limit_price=ask.price, size_usd=10.0,
@@ -867,6 +876,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         funnel["performance"] = ledger.performance(days=7, live_only=risk.is_live)
         funnel["edge_drift"] = ledger.drift_report(days=7)
         funnel["price_drift"] = ledger.price_drift_report(days=7)
+        funnel["reversion"] = rev
     except Exception as exc:  # noqa: BLE001 — reporting must never break trading
         log.debug("performance snapshot failed: %s", exc)
     funnel["verdict"] = volume_verdict(funnel, risk)

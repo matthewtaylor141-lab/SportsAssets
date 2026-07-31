@@ -205,6 +205,14 @@ jobs:
           jq -r '.detail.price_drift.by_category // {} | to_entries[]
                  | "   \(.key): n=\(.value.n)  \(.value.mean_drift_c)c"' \
              /tmp/status.json 2>/dev/null || true
+          # Reversion: does apparent edge give itself back in proportion to
+          # how big the claim was? That is the winner's-curse test, and it
+          # decides whether the flat surcharge or proportional shrinkage is
+          # the correct instrument.
+          jq -r '.detail.reversion // {} | if .keep != null then
+                   "reversion : keep \(.keep)  (slope \(.slope), n=\(.n)) -> SHRINKAGE ACTIVE"
+                 elif .n then "reversion : n=\(.n), not yet decidable (need n>=200 and spread)"
+                 else "reversion : no samples" end' /tmp/status.json 2>/dev/null || true
           echo "surcharge :"
           jq -r '.detail.drift_penalty // {} | to_entries[]
                  | "   \(.key): +\(.value * 100 | .*100|round|./100)c"' /tmp/status.json 2>/dev/null || true
