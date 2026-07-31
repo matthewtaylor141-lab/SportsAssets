@@ -436,3 +436,75 @@ def test_quarantine_needs_a_real_sample(tmp_path):
     for _ in range(5):  # below QUARANTINE_MIN_N — noisy, not judged
         led.record_divergence(today, "kalshi", "nba", "total", 0.40)
     assert led.quarantined_slices(days=2) == set()
+
+
+# ── per-event concentration (found live 2026-07-31) ────────────────────
+
+def _live_rig(tmp_path):
+    from edge.execution.engine import Policy
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    return led, RiskManager(led, Policy.load().risk, bankroll=1000.0)
+
+
+def _event_fill(led, event_key, market, usd, mode="LIVE_BETA"):
+    led.record_fill(fill_uid=f"{market}-{random.random()}", venue="polymarket-us",
+                    market_key=market, side="BUY", qty=usd / 0.5, price=0.5,
+                    ts=time.time(), mode=mode,
+                    decision={"event_key": event_key})
+
+
+def test_one_game_cannot_absorb_a_ticket_per_listed_outcome(tmp_path):
+    """Sides of one game are not independent bets — exactly one pays. The
+    per-MARKET cap bounded each bet at $1 and silently permitted a ticket on
+    every outcome the venue lists: three on a soccer match, twenty on a game
+    carrying a full spread and totals ladder. Seen live: home, away AND draw
+    bought on the same match, three times over."""
+    led, risk = _live_rig(tmp_path)
+    for i in range(5):
+        approved, _ = risk.approve("polymarket-us", f"pm:m{i}", "game-1", 1.0,
+                                   mode="LIVE_BETA")
+        assert approved == 1.0
+        _event_fill(led, "game-1", f"pm:m{i}", approved)
+
+    blocked, why = risk.approve("polymarket-us", "pm:m6", "game-1", 1.0,
+                                mode="LIVE_BETA")
+    assert blocked == 0 and "caps" in why
+    # ...and a DIFFERENT game is unaffected.
+    assert risk.approve("polymarket-us", "pm:other", "game-2", 1.0,
+                        mode="LIVE_BETA")[0] == 1.0
+
+
+def test_event_exposure_counts_only_that_game_and_that_mode(tmp_path):
+    led, risk = _live_rig(tmp_path)
+    _event_fill(led, "game-1", "pm:a", 1.0)
+    _event_fill(led, "game-1", "pm:b", 1.0)
+    _event_fill(led, "game-2", "pm:c", 1.0)
+    _event_fill(led, "game-1", "pm:paper", 50.0, mode="PAPER")
+
+    live = led.event_exposure("game-1", "LIVE_BETA")
+    assert live == {"cost": pytest.approx(2.0), "markets": 2}
+    assert led.event_exposure("game-2", "LIVE_BETA")["cost"] == pytest.approx(1.0)
+    assert led.event_exposure("nope", "LIVE_BETA") == {"cost": 0.0, "markets": 0}
+
+
+def test_the_cap_is_opt_in_so_LIVE_keeps_its_measured_behaviour(tmp_path):
+    from edge.execution.engine import Policy
+
+    cfg = Policy.load().risk
+    assert caps_for_mode(cfg, "LIVE_BETA").per_event == 5
+    assert caps_for_mode(cfg, "LIVE").per_event == 0        # 0 = unbounded
+
+
+def test_a_fill_records_the_game_it_belongs_to(tmp_path):
+    """Without this the cap has nothing to count."""
+    from edge.venues.base import BookLevel, MarketBook
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    book = MarketBook(venue="kalshi", market_id="e", outcome_id="t",
+                      bids=[BookLevel(0.45, 100)], asks=[BookLevel(0.47, 100)], ts=1.0)
+    execute(adapter=_StubAdapter(), ledger=led, mode="PAPER",
+            mkey=market_key("kalshi", "t"), league="epl", ask_price=0.47,
+            ask_size=100, size_usd=10.0, edge=0.03, threshold=0.02,
+            decision={}, ts=1000.0, event_key="game-9")
+    assert led.event_exposure("game-9", "PAPER")["markets"] == 1

@@ -42,6 +42,7 @@ class Caps:
     per_fill_default: float
     per_fill_max: float
     per_market: float
+    per_event: float
     per_day: float
     one_per_event: bool
     one_per_market: bool
@@ -95,6 +96,8 @@ def caps_for_mode(risk_cfg: dict, mode: str, bankroll: float | None = None) -> C
         per_fill_default=float(src.get("per_fill_usd_default", 10)),
         per_fill_max=float(src.get("per_fill_usd_max", 25)),
         per_market=float(src.get("per_market_exposure_usd", 50)),
+        # 0 = unbounded (LIVE keeps the measured behaviour).
+        per_event=float(src.get("per_event_exposure_usd", 0) or 0),
         per_day=per_day,
         one_per_event=bool(src.get("one_position_per_event", False)),
         one_per_market=bool(src.get("one_position_per_market", False)),
@@ -317,12 +320,18 @@ class RiskManager:
             requested_usd = min(requested_usd, usd_left)
         size = min(requested_usd, caps.per_fill_default, caps.per_fill_max)
         market_room = caps.per_market - self.market_open_cost(market_key)
+        if caps.per_event > 0:
+            # Sides of one game are not independent bets — exactly one pays.
+            # Without this, one-position-per-MARKET lets a single result
+            # carry as many dollars as the venue lists outcomes.
+            spent = self.ledger.event_exposure(event_key, mode)["cost"]
+            size = min(size, caps.per_event - spent)
         venue_day_cap = caps.per_day * caps.venue_bankroll_split
         day_room = min(caps.per_day - self.day_deployed(now=now, mode=mode),
                        venue_day_cap - self.day_deployed(venue=venue, now=now, mode=mode))
         size = round(min(size, market_room, day_room), 2)
         if size < 1.0:
-            return 0.0, "caps: no room (per-market/day/venue)"
+            return 0.0, "caps: no room (per-market/event/day/venue)"
 
         key = self.claim_key(mode, venue, market_key, event_key)
         if key is not None and not self.ledger.claim_event(key, market_key,

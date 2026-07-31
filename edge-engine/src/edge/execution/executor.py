@@ -61,7 +61,8 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
             fill_uid=f"paper-{mkey}-{int(ts)}", venue=adapter.name,
             market_key=mkey, side="BUY", qty=qty, price=entry_price, ts=ts,
             fee=round(fee, 4), league=league, mode="PAPER",
-            decision={**decision, "entry_taker": taker, "ask_price": ask_price},
+            decision={**decision, "entry_taker": taker, "ask_price": ask_price,
+                      "event_key": event_key},
         )
         return {"placed": True, "filled_usd": round(usd, 2), "status": "paper"}
 
@@ -141,8 +142,9 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
                 fill_uid=f"pmus-{result.get('order_id')}", venue=adapter.name,
                 market_key=mkey, side="BUY", qty=filled, price=px, ts=ts,
                 fee=adapter.taker_fee(px) * filled, league=league, mode=mode,
-                decision={**decision, "order": {k: v for k, v in result.items()
-                                                if k != "raw"},
+                decision={**decision, "event_key": event_key,
+                          "order": {k: v for k, v in result.items()
+                                    if k != "raw"},
                           "commissions_raw": (result.get("raw") or {}).get("response", {})},
             )
             return {"placed": True, "filled_usd": round(filled * px, 2),

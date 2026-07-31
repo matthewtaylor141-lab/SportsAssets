@@ -441,6 +441,24 @@ class Ledger:
             "held": sum(1 for l, e in zip(later, entry) if l >= e * 0.5),
         }
 
+    def event_exposure(self, event_key: str, mode: str) -> dict:
+        """Everything we hold on ONE real-world game.
+
+        per_market_exposure bounds a single bet; nothing bounded the EVENT.
+        A three-way soccer match is three markets, and a game carrying a
+        moneyline plus a spread ladder plus a totals ladder is twenty or
+        more — so a $1 per-market cap quietly permits $20 of correlated
+        exposure on one result. The per-market cap gave false comfort.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(sum(qty * price), 0) AS cost, "
+                "       count(DISTINCT market_key) AS markets "
+                "FROM fills WHERE side='BUY' AND mode = ? "
+                "AND json_extract(decision, '$.event_key') = ?",
+                (mode, event_key)).fetchone()
+        return {"cost": float(row["cost"]), "markets": int(row["markets"])}
+
     def daily_pnl(self) -> list[dict]:
         """Gross realized PnL per UTC day, from the realization journal."""
         with self._conn() as conn:
