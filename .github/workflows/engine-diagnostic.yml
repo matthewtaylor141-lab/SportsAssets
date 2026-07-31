@@ -132,7 +132,7 @@ jobs:
           echo "budget    :"; jq -r '.detail.budget // {} | to_entries[] | "  \(.key)=\(.value)"' /tmp/status.json 2>/dev/null || true
           echo ""
           echo "###########################################################"
-          echo "#   ENGINE'"'"'S OWN BOOKS (independent of the API deploy)      #"
+          echo "#   ENGINE OWN BOOKS (independent of the API deploy)       #"
           echo "###########################################################"
           jq -r '.detail.performance // {} | if .days then
                    "last \(.days)d, live only: \(.live_only)",
