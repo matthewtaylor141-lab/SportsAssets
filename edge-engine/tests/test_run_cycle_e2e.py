@@ -64,6 +64,15 @@ def _event(fresh=True, home_odds=2.00):
         commence_ts=time.time() + 3600,
         h2h={"Arsenal": home_odds, "Chelsea": home_odds},
         fetched_at=time.time() - (0 if fresh else 60),
+        # NOTE: `books` is deliberately left at 0 here. Setting it makes the
+        # event eligible for the exploration tier, which silently converts
+        # "blocked by threshold" into "traded as exploration" and guts every
+        # threshold test in this file. Only the anchor is set.
+        # A reference-class book (Pinnacle / an exchange) stands behind this
+        # number. Without one the runner refuses to price at all, so the
+        # default fixture is an ANCHORED event; the unanchored case is its
+        # own test rather than an accident of every other one.
+        anchors=1,
     )
 
 

@@ -152,7 +152,7 @@ def test_paper_cycle_trades_a_total(tmp_path, monkeypatch):
                 home="Mets", away="Tigers", commence_ts=time.time() + 3600,
                 h2h={"Mets": 2.0, "Tigers": 2.0},
                 totals={"Over 8.5": 2.04, "Under 8.5": 1.96},  # fair Over ≈ 0.49
-                fetched_at=time.time(),
+                books=5, anchors=1, fetched_at=time.time(),
             )]
 
         def server_clock_skew_s(self):
@@ -443,7 +443,7 @@ def test_a_three_way_soccer_market_prices_all_three_outcomes(tmp_path, monkeypat
                 sport_key="soccer_epl", league_code="epl", home="Dundalk",
                 away="Sligo Rovers", commence_ts=time.time() + 3600,
                 h2h={"Dundalk": 3.0, "Sligo Rovers": 3.0, "Draw": 3.0},
-                books=6, fetched_at=time.time())]
+                books=6, anchors=1, fetched_at=time.time())]
 
         def server_clock_skew_s(self):
             return 0.0

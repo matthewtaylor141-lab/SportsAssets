@@ -331,6 +331,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     # How much of an apparent edge is real, measured from those free samples.
     # None until there are enough of them across a wide enough range of
     # claims — until then the flat surcharge governs instead.
+    min_anchors = int((policy.risk.get("min_anchor_books")
+                       if policy.risk.get("min_anchor_books") is not None else 1))
     rev = ledger.reversion(days=7)
     keep = rev.get("keep")
     if keep is not None:
@@ -605,6 +607,26 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     # hides it inside the average it is dragging down.
                     drift_cat = ("draw" if category == "moneyline"
                                  and is_draw(oc_name) else category)
+                    # No reference-class book, no trade.
+                    #
+                    # Measured 2026-07-31: MLB props carry Pinnacle across 440
+                    # outcomes a game; Liga MX props carry 191 outcomes and NOT
+                    # ONE sharp book, and NHL is lowvig alone on 5 of 31 events.
+                    # A fair value with no anchor is a weighted median of books
+                    # that are themselves following someone else, and the
+                    # largest apparent edges come from the thinnest consensus —
+                    # so this is where fake edge is manufactured, and we hold
+                    # open positions in exactly those leagues.
+                    if getattr(ev, "anchors", 0) < min_anchors:
+                        reject("no_sharp_anchor")
+                        ex = funnel.setdefault("unpriced_examples", {})
+                        bucket = ex.setdefault("no_sharp_anchor", [])
+                        if isinstance(bucket, list) and len(bucket) < 5:
+                            bucket.append({"reason": "no_sharp_anchor",
+                                           "league": ev.league_code,
+                                           "books": getattr(ev, "books", 0),
+                                           "anchors": getattr(ev, "anchors", 0)})
+                        continue
                     verdict = strategy_filter(policy, ev.league_code, entry_px, fair,
                                               venue_fee=fee, category=category,
                                               consensus_books=getattr(ev, "books", None),

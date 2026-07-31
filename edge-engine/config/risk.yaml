@@ -89,6 +89,19 @@ exploration:
   budget_share: 0.25       # never more than a quarter of the day's deployment
   max_fills_per_day: 250
 
+# Reference-class books required behind a fair value before it may be traded.
+#
+# Measured 2026-07-31 against the live feed: MLB player props carry Pinnacle
+# across 440 outcomes a game. Liga MX props carry 191 outcomes and not one
+# sharp book. NHL is lowvig alone on 5 of 31 events. Same provider, same
+# plan, same request — the anchor is a per-league fact, not a global one.
+#
+# Without an anchor the "sharp consensus" is a median of books that are
+# themselves following someone else with a lag, and the biggest apparent
+# edges come from the thinnest consensus. That is the winner's curse with a
+# supply chain. 0 disables the gate; 1 is the evidence-backed default.
+min_anchor_books: 1
+
 # Watchdog: any breach halts live trading until inputs are healthy again.
 watchdog:
   max_feed_age_s: 60

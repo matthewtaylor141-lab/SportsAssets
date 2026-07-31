@@ -897,3 +897,55 @@ def test_weighting_stays_a_median_not_a_mean():
 def test_a_lone_quote_is_still_its_own_answer():
     from edge.fairvalue.feed import _weighted_median
     assert _weighted_median([(1.91, 1.0)]) == 1.91
+
+
+# ── no reference book, no trade ─────────────────────────────────────────
+#
+# Measured against the live feed on 2026-07-31: MLB player props carry
+# Pinnacle across 440 outcomes a game. Liga MX props carry 191 outcomes and
+# NOT ONE sharp book. NHL is lowvig alone on 5 of 31 events. Same provider,
+# same plan, same request — so "is there an anchor" is a per-league fact and
+# cannot be assumed. Without one, fair value is a median of books that are
+# themselves following someone else with a lag, and the largest apparent
+# edges come from the thinnest consensus.
+
+def _unanchored(ev):
+    ev.anchors = 0
+    return ev
+
+
+def test_an_unanchored_event_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    funnel = run_cycle([StubVenue(ask_price=0.47)],
+                       StubFeed([_unanchored(_event())]),
+                       POLICY, risk, ledger, ["soccer_epl"])
+    assert funnel["logged"] == 0
+    assert funnel["rejects"].get("no_sharp_anchor", 0) >= 1
+    # ...and it says which league and how thin, so the refusal is diagnosable
+    # rather than just a count that goes up.
+    ex = funnel["unpriced_examples"]["no_sharp_anchor"][0]
+    assert ex["league"] == "epl" and ex["anchors"] == 0
+
+
+def test_an_anchored_event_still_trades(tmp_path, monkeypatch):
+    """The gate must cost nothing where the anchor exists."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    funnel = run_cycle([StubVenue(ask_price=0.47)], StubFeed([_event()]),
+                       POLICY, risk, ledger, ["soccer_epl"])
+    assert funnel["logged"] >= 1
+    assert "no_sharp_anchor" not in funnel["rejects"]
+
+
+def test_the_gate_can_be_disabled_by_config(tmp_path, monkeypatch):
+    """0 means off — the gate is evidence-backed, not sacred, and turning it
+    off must not require a code change."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    from edge.execution.engine import Policy as P
+    policy = P(POLICY.bands, POLICY.leagues, {**POLICY.risk, "min_anchor_books": 0})
+    ledger, risk = _rig(tmp_path)
+    funnel = run_cycle([StubVenue(ask_price=0.47)],
+                       StubFeed([_unanchored(_event())]),
+                       policy, risk, ledger, ["soccer_epl"])
+    assert funnel["logged"] >= 1
