@@ -177,3 +177,31 @@ jobs:
           jq -r '.detail.unpriced_examples // {} | to_entries[]
                  | "  [\(.key)]", (.value | if type=="array" then .[] else . end
                    | "     \(.)")' /tmp/status.json 2>/dev/null || true
+
+          # ── headline, printed LAST ─────────────────────────────────
+          # Everything above is diagnosis; these six lines are the state.
+          # The mapping-miss dump above runs to ~90 lines, which is enough
+          # to push the numbers that matter out of a log tail — so they go
+          # here, where a tail always reaches them.
+          echo ""
+          echo "###########################################################"
+          echo "#                      HEADLINE                           #"
+          echo "###########################################################"
+          jq -r '"verdict   : \(.detail.verdict // "?")",
+                 "mode      : \(.detail.mode // "?")   cycle \(.detail.cycle_s // "?")s   logged \(.detail.logged // "?")"' \
+             /tmp/status.json 2>/dev/null || true
+          jq -r '.detail.edge_drift // {} | if .n and .n > 0 then
+                   "drift     : n=\(.n)  retention \(.retention)  mean \(.mean_drift_c)c"
+                 else "drift     : nothing matured yet" end' /tmp/status.json 2>/dev/null || true
+          jq -r '.detail.edge_drift.by_category // {} | to_entries[]
+                 | "   \(.key): n=\(.value.n)  \(.value.mean_drift_c)c  ret \(.value.retention)"' \
+             /tmp/status.json 2>/dev/null || true
+          echo "surcharge :"
+          jq -r '.detail.drift_penalty // {} | to_entries[]
+                 | "   \(.key): +\(.value * 100 | .*100|round|./100)c"' /tmp/status.json 2>/dev/null || true
+          jq -r '.detail.drift_penalty // {} | if length == 0 then
+                   "   (none — below the observation floor)" else empty end' \
+             /tmp/status.json 2>/dev/null || true
+          jq -r '.system | "system    : \(.settled) settled  W\(.wins)/L\(.losses)  realized $\(.realized)  ROI \(.roi // "n/a")",
+                           "            open \(.open) worth $\(.open_cost)"' \
+             /tmp/acct.json 2>/dev/null || true
