@@ -707,3 +707,61 @@ def test_exploration_floor_moves_with_the_drift(tmp_path):
     charged = strategy_filter(POLICY, "mls", 0.48, 0.4901, category="moneyline",
                               consensus_books=6, drift_penalty=0.013)
     assert not charged.ok
+
+
+# ── the meter must not go blind when the bar goes up ────────────────────
+#
+# edge_drift can only learn from fills. Charging its measurement to the bar
+# therefore starves it: a higher bar means fewer fills, fewer fills means
+# less evidence, and the bar can never come back down. That is a system
+# that freezes itself with no way out. Priced-but-not-bought outcomes are
+# free samples of the same movement, so the meter keeps running at zero
+# cost even when nothing qualifies.
+
+def test_priced_outcomes_are_sampled_without_being_bought(tmp_path, monkeypatch):
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    run_cycle([StubVenue(ask_price=0.47)], StubFeed([_event()]), POLICY, risk,
+              ledger, ["soccer_epl"])
+    assert ledger.awaiting_price_drift(now=time.time() + 120), \
+        "a priced outcome left no free drift sample"
+
+
+def test_a_free_sample_closes_out_on_the_pricing_path(tmp_path, monkeypatch):
+    """Closed out where prices are read, not where studies are written: the
+    study bucket comes round once an hour, far too late to see a 1-minute
+    move."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    run_cycle([StubVenue(ask_price=0.47)], StubFeed([_event()]), POLICY, risk,
+              ledger, ["soccer_epl"])
+    open_now = ledger.awaiting_price_drift(now=time.time() + 120)
+    assert open_now
+    # Age the samples, then price again — the second look should land.
+    for mkey, obs in open_now.items():
+        ledger.record_price_drift_later(obs, 0.52)
+    rep = ledger.price_drift_report()
+    assert rep["n"] == len(open_now)
+    assert rep["by_category"]
+
+
+def test_free_samples_never_feed_the_surcharge(tmp_path):
+    """Our fills are SELECTED — we get filled when someone wants to sell —
+    so fill drift carries staleness plus adverse selection, while a free
+    sample carries staleness alone and is a floor, not a substitute. Letting
+    the cheap number set the bar would understate what trading costs."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    for i in range(50):
+        led.record_price_observation(f"o{i}", f"m{i}", 0.47, 0.50,
+                                     category="moneyline")
+        led.record_price_drift_later(f"o{i}", 0.30)   # enormous fake drift
+    assert led.price_drift_report()["n"] == 50
+    assert led.drift_penalties() == {"*": 0.0}, \
+        "free samples leaked into the surcharge"
+
+
+def test_one_sample_per_market_per_hour(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    led.record_price_observation("mkt:100", "mkt", 0.47, 0.50)
+    led.record_price_observation("mkt:100", "mkt", 0.49, 0.55)   # same bucket
+    assert len(led.awaiting_price_drift(now=time.time() + 120)) == 1

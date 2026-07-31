@@ -196,6 +196,15 @@ jobs:
           jq -r '.detail.edge_drift.by_category // {} | to_entries[]
                  | "   \(.key): n=\(.value.n)  \(.value.mean_drift_c)c  ret \(.value.retention)"' \
              /tmp/status.json 2>/dev/null || true
+          # Free samples: staleness measured on outcomes we priced but did
+          # not buy. A floor on the fill number, never a substitute for it,
+          # but it keeps measuring when the bar is too high to trade.
+          jq -r '.detail.price_drift // {} | if .n and .n > 0 then
+                   "free      : n=\(.n)  mean \(.mean_drift_c)c  (staleness only, no selection)"
+                 else "free      : no second looks yet" end' /tmp/status.json 2>/dev/null || true
+          jq -r '.detail.price_drift.by_category // {} | to_entries[]
+                 | "   \(.key): n=\(.value.n)  \(.value.mean_drift_c)c"' \
+             /tmp/status.json 2>/dev/null || true
           echo "surcharge :"
           jq -r '.detail.drift_penalty // {} | to_entries[]
                  | "   \(.key): +\(.value * 100 | .*100|round|./100)c"' /tmp/status.json 2>/dev/null || true

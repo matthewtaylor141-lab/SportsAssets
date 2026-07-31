@@ -150,6 +150,32 @@ CREATE TABLE IF NOT EXISTS edge_drift (
     category   TEXT
 );
 
+-- The same measurement, taken on outcomes we PRICED but did not buy.
+--
+-- edge_drift can only learn from fills, so raising the bar on what it
+-- measures starves it: fewer fills, less evidence, a bar that can never
+-- come back down. This table breaks that loop. Every priced outcome is a
+-- free observation of how fast fair value moves, at thousands per hour
+-- across every category, costing nothing.
+--
+-- It is NOT the same quantity and must never be substituted for it. Our
+-- fills are selected — we get filled when someone wants to sell — so
+-- edge_drift carries staleness AND adverse selection, while this carries
+-- staleness alone and is therefore a floor. Its job is to say which
+-- categories move fastest, not what trading costs us.
+CREATE TABLE IF NOT EXISTS price_drift (
+    obs_id     TEXT PRIMARY KEY,   -- market + hour bucket (one sample/hour)
+    market_key TEXT NOT NULL,
+    category   TEXT,
+    price      REAL NOT NULL,
+    fair_entry REAL NOT NULL,
+    ts_entry   REAL NOT NULL,
+    fair_later REAL,
+    ts_later   REAL
+);
+CREATE INDEX IF NOT EXISTS ix_price_drift_open
+    ON price_drift(market_key) WHERE fair_later IS NULL;
+
 -- Mode transitions are audit events (PAPER -> LIVE_BETA -> LIVE).
 CREATE TABLE IF NOT EXISTS mode_log (
     id   INTEGER PRIMARY KEY,
@@ -482,6 +508,53 @@ class Ledger:
                 buckets.setdefault(r.get("category") or "?", []).append(r)
             report["by_category"] = {
                 k: self._drift_stats(v) for k, v in sorted(buckets.items())}
+        return report
+
+    def record_price_observation(self, obs_id: str, market_key: str,
+                                 price: float, fair: float,
+                                 category: str | None = None,
+                                 ts: float | None = None) -> None:
+        """A free drift sample from an outcome we priced but did not buy."""
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO price_drift (obs_id, market_key, "
+                "category, price, fair_entry, ts_entry) VALUES (?,?,?,?,?,?)",
+                (obs_id, market_key, category, price, fair,
+                 ts if ts is not None else time.time()))
+
+    def awaiting_price_drift(self, now: float | None = None) -> dict[str, str]:
+        """{market_key: obs_id} for samples old enough to re-observe. One
+        open sample per market — the newest wins if somehow several exist."""
+        cutoff = (now or time.time()) - self.DRIFT_MIN_AGE_S
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT obs_id, market_key FROM price_drift "
+                "WHERE fair_later IS NULL AND ts_entry <= ? ORDER BY ts_entry",
+                (cutoff,)).fetchall()
+        return {r["market_key"]: r["obs_id"] for r in rows}
+
+    def record_price_drift_later(self, obs_id: str, fair_later: float,
+                                 ts: float | None = None) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "UPDATE price_drift SET fair_later=?, ts_later=? "
+                "WHERE obs_id=? AND fair_later IS NULL",
+                (fair_later, ts if ts is not None else time.time(), obs_id))
+
+    def price_drift_report(self, days: int = 7) -> dict:
+        """Staleness by category, measured without spending anything."""
+        since = time.time() - days * 86_400
+        with self._conn() as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT price, fair_entry, fair_later, category FROM price_drift "
+                "WHERE fair_later IS NOT NULL AND ts_entry >= ?",
+                (since,)).fetchall()]
+        report = self._drift_stats(rows)
+        buckets: dict[str, list[dict]] = {}
+        for r in rows:
+            buckets.setdefault(r.get("category") or "?", []).append(r)
+        report["by_category"] = {
+            k: self._drift_stats(v) for k, v in sorted(buckets.items())}
         return report
 
     def drift_penalties(self, days: int = 7) -> dict[str, float]:
