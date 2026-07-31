@@ -114,6 +114,10 @@ class FeedEvent:
     # exchanges) are among them. Zero means our fair value is a consensus of
     # followers with nothing anchoring it.
     anchors: int = 0
+    # The provider's own event id. Segment and player-prop markets are only
+    # served per-event (the bulk endpoint answers 422 for them), so without
+    # this we cannot ask for them at all.
+    event_id: str = ""
     fetched_at: float = 0.0   # staleness stamp — set at fetch, checked pre-order
 
     def is_fresh(self, max_age_s: float = 30.0, now: float | None = None) -> bool:
@@ -215,6 +219,8 @@ class TheOddsAPIClient(OddsFeed):
         # not traded. Named in telemetry — a silently disabled sport is the
         # exact failure this engine has already had once.
         self._parked: set[str] = set()
+        # Per-event payloads (segments/props), cached hard — see EVENT_TTL_S.
+        self._event_cache: dict[str, tuple[float, dict]] = {}
         self._quota_t0: float | None = None
         self._quota_used0: float | None = None
         # sports whose alternate-line request the provider rejects (422)
@@ -365,6 +371,102 @@ class TheOddsAPIClient(OddsFeed):
         # governor now handles scarcity by parking named sports instead.
         return self._cache_ttl
 
+    # Segment and player-prop markets are served ONLY per event; the bulk
+    # endpoint answers 422 and names every one of them. Measured 2026-07-31.
+    EVENT_TTL_S = 1800          # partial-game lines move far slower than h2h
+    EVENT_MAX_PER_SPORT = 40    # bound the fan-out; nearest games first
+
+    def _absorb(self, raw: dict, bucket_of: dict, samples: dict,
+                seg_samples: dict, contributing: set) -> None:
+        """Fold one provider payload's sharp-book quotes into the sample
+        pools. Shared by the bulk and per-event paths so a market parsed one
+        way is parsed the same way the other."""
+        for book in raw.get("bookmakers", []):
+            if book.get("key") not in SHARP_BOOKS:
+                continue
+            contributing.add(book["key"])
+            for mkt in book.get("markets", []):
+                seg, bucket = None, bucket_of.get(mkt["key"])
+                if bucket is None:
+                    seg_bucket = self.SEGMENT_KEYS.get(mkt["key"])
+                    if seg_bucket is None:
+                        continue
+                    seg, bucket = seg_bucket
+                for oc in mkt.get("outcomes", []):
+                    name, price = oc.get("name", ""), float(oc.get("price", 0) or 0)
+                    if price <= 1.0:
+                        continue
+                    key = name if bucket == "h2h" else f"{name} {oc.get('point')}"
+                    wq = (price, BOOK_WEIGHTS.get(book["key"], 1.0))
+                    if seg is None:
+                        samples[bucket].setdefault(key, []).append(wq)
+                    else:
+                        seg_samples.setdefault(seg, {}).setdefault(
+                            bucket, {}).setdefault(key, []).append(wq)
+
+    def _enrich_segments(self, sport_key: str, events: list, now: float) -> int:
+        """Fetch partial-game markets per event and merge them in.
+
+        Cached hard (EVENT_TTL_S) because these lines move slowly and each
+        call is billed per market per region — a per-cycle refresh would cost
+        more than the whole rest of the feed and tell us nothing new.
+        """
+        if os.environ.get("EDGE_EVENT_MARKETS", "1") == "0":
+            return 0
+        seg_markets = self._segment_markets(sport_key)
+        if not seg_markets or sport_key in self._no_segments:
+            return 0
+        if self._quota.get("remaining", float("inf")) <= self._quota_reserve:
+            return 0
+        bucket_of: dict = {}
+        enriched = 0
+        # Nearest games first: those are the ones a venue actually lists.
+        for ev in sorted(events, key=lambda e: e.commence_ts)[:self.EVENT_MAX_PER_SPORT]:
+            if not ev.event_id:
+                continue
+            hit = self._event_cache.get(ev.event_id)
+            if hit and now - hit[0] < self.EVENT_TTL_S:
+                raw = hit[1]
+            else:
+                try:
+                    r = self._sess.get(
+                        f"{self.BASE}/sports/{sport_key}/events/{ev.event_id}/odds",
+                        params={"apiKey": self._key,
+                                "regions": os.environ.get("EDGE_ODDS_REGIONS", "eu,uk,us"),
+                                "markets": ",".join(seg_markets),
+                                "oddsFormat": "decimal"},
+                        timeout=20)
+                    self._track_response(r)
+                    if r.status_code == 422:
+                        # The provider does not carry these for this sport.
+                        # Remember it: retrying every cycle burns credits to
+                        # be told the same thing.
+                        self._no_segments.add(sport_key)
+                        return enriched
+                    if r.status_code != 200:
+                        continue
+                    raw = r.json()
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("segment fetch failed for %s: %s", ev.event_id, exc)
+                    continue
+                self._event_cache[ev.event_id] = (now, raw)
+
+            seg_samples: dict = {}
+            contributing: set[str] = set()
+            self._absorb(raw, bucket_of, {"h2h": {}, "totals": {}, "spreads": {}},
+                         seg_samples, contributing)
+            if not seg_samples:
+                continue
+            ev.segments = {
+                seg: {b: {k: _weighted_median(v) for k, v in keyed.items()}
+                      for b, keyed in buckets.items()}
+                for seg, buckets in seg_samples.items()}
+            # A segment quote from books that never quoted the full game still
+            # counts toward the anchor: it is the segment we are pricing.
+            ev.anchors = max(ev.anchors, len(contributing & ANCHOR_BOOKS))
+            enriched += 1
+        return enriched
+
     def fetch_events(self, sport_key: str) -> list[FeedEvent]:
         now = time.time()
         cached = self._cache.get(sport_key)
@@ -380,10 +482,10 @@ class TheOddsAPIClient(OddsFeed):
                      or sport_key in self.ALT_LINE_SPORTS)
                 and sport_key not in self._no_alt_lines):
             markets += ",alternate_spreads,alternate_totals"
-        seg_markets = [m for m in self._segment_markets(sport_key)
-                       if sport_key not in self._no_segments]
-        if seg_markets:
-            markets += "," + ",".join(seg_markets)
+        # Segments are NOT requested here. The bulk endpoint answers 422 and
+        # names every one of them ("Markets not supported by this endpoint");
+        # they are served per event and fetched below in _enrich_segments.
+        seg_markets: list[str] = []
 
         def _get(mkts: str):
             r = self._sess.get(
@@ -422,6 +524,7 @@ class TheOddsAPIClient(OddsFeed):
                 home=raw.get("home_team", ""),
                 away=raw.get("away_team", ""),
                 commence_ts=_iso_ts(raw.get("commence_time")),
+                event_id=raw.get("id", "") or "",
                 fetched_at=now,
             )
             # Consensus across ALL sharp books: median decimal odds per outcome.
@@ -432,28 +535,7 @@ class TheOddsAPIClient(OddsFeed):
                          "alternate_totals": "totals", "alternate_spreads": "spreads"}
             seg_samples: dict = {}   # segment -> bucket -> key -> [odds]
             contributing: set[str] = set()
-            for book in raw.get("bookmakers", []):
-                if book.get("key") not in SHARP_BOOKS:
-                    continue
-                contributing.add(book["key"])
-                for mkt in book.get("markets", []):
-                    seg, bucket = None, bucket_of.get(mkt["key"])
-                    if bucket is None:
-                        seg_bucket = self.SEGMENT_KEYS.get(mkt["key"])
-                        if seg_bucket is None:
-                            continue
-                        seg, bucket = seg_bucket
-                    for oc in mkt.get("outcomes", []):
-                        name, price = oc.get("name", ""), float(oc.get("price", 0) or 0)
-                        if price <= 1.0:
-                            continue
-                        key = name if bucket == "h2h" else f"{name} {oc.get('point')}"
-                        wq = (price, BOOK_WEIGHTS.get(book["key"], 1.0))
-                        if seg is None:
-                            samples[bucket].setdefault(key, []).append(wq)
-                        else:
-                            seg_samples.setdefault(seg, {}).setdefault(
-                                bucket, {}).setdefault(key, []).append(wq)
+            self._absorb(raw, bucket_of, samples, seg_samples, contributing)
             ev.h2h = {k: _weighted_median(v) for k, v in samples["h2h"].items()}
             ev.totals = {k: _weighted_median(v) for k, v in samples["totals"].items()}
             ev.spreads = {k: _weighted_median(v) for k, v in samples["spreads"].items()}
@@ -468,6 +550,16 @@ class TheOddsAPIClient(OddsFeed):
             ev.anchors = len(contributing & ANCHOR_BOOKS)
             if ev.h2h:
                 out.append(ev)
+        # Partial-game markets, per event, off the endpoint that serves them.
+        try:
+            n = self._enrich_segments(sport_key, out, now)
+            if n:
+                log.info("%s: segments enriched on %s events", sport_key, n)
+        except Exception as exc:  # noqa: BLE001
+            # Enrichment is additive. A failure here must cost us the extra
+            # markets, never the full-game slate we already have in hand.
+            log.warning("%s: segment enrichment failed (non-fatal): %s",
+                        sport_key, exc)
         self._cache[sport_key] = (now, out)
         # Live/imminent window: any game from 6h ago (in-play) to 4h ahead.
         self._sport_active[sport_key] = any(
