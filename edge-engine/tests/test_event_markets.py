@@ -33,7 +33,7 @@ def _client(handler):
     c = TheOddsAPIClient.__new__(TheOddsAPIClient)
     c._key, c.BASE = "k", "https://api.example/v4"
     c._quota, c._quota_reserve = {}, 50
-    c._no_segments, c._event_cache = set(), {}
+    c._no_segments, c._no_props, c._event_cache = set(), set(), {}
     c.calls = []
 
     class Sess:
@@ -147,3 +147,88 @@ def test_a_transport_failure_costs_the_extras_not_the_slate():
     ev = _ev()
     assert c._enrich_segments("baseball_mlb", [ev], time.time()) == 0
     assert ev.h2h == {"Cubs": 2.0, "Yankees": 2.0}   # full game untouched
+
+
+# ── props ride the same call ────────────────────────────────────────────
+
+_PROPS = {"bookmakers": [
+    {"key": "pinnacle", "markets": [
+        {"key": "pitcher_strikeouts",
+         "outcomes": [
+             {"name": "Over", "description": "Shota Imanaga", "point": 4.5,
+              "price": 1.80},
+             {"name": "Under", "description": "Shota Imanaga", "point": 4.5,
+              "price": 2.10}]}]}]}
+
+
+def test_props_and_segments_share_one_request():
+    """Credits are billed per market per region either way, so asking for
+    both in one round trip is strictly cheaper than two calls."""
+    c = _client(lambda url, p: _Resp(_PROPS))
+    c._enrich_segments("baseball_mlb", [_ev()], time.time())
+    assert len(c.calls) == 1
+    asked = c.calls[0][1]
+    assert "h2h_1st_5_innings" in asked          # segment
+    assert "pitcher_strikeouts" in asked         # prop
+
+
+def test_a_422_drops_only_what_the_provider_named():
+    """Losing props because a SEGMENT key is unsupported would throw away
+    the larger half of the universe for an unrelated reason."""
+    def handler(url, p):
+        return _Resp({"message": "Markets not supported by this endpoint: "
+                                 "h2h_1st_5_innings"}, status=422)
+
+    c = _client(handler)
+    c._enrich_segments("baseball_mlb", [_ev()], time.time())
+    assert "baseball_mlb" in c._no_segments
+    assert "baseball_mlb" not in c._no_props     # props survive
+
+
+def test_props_can_be_switched_off_independently(monkeypatch):
+    monkeypatch.setenv("EDGE_PROP_MARKETS", "0")
+    c = _client(lambda url, p: _Resp(_F5))
+    c._enrich_segments("baseball_mlb", [_ev()], time.time())
+    assert "pitcher_strikeouts" not in (c.calls[0][1] or "")
+    assert "h2h_1st_5_innings" in c.calls[0][1]
+
+
+def test_the_player_comes_from_description_not_name():
+    """`name` carries Over/Under; the player is in `description`. Reading
+    `name` as the player — the obvious mistake, since every other market
+    puts the subject there — collapses every player in the game onto one key
+    and prices them all off whichever outcome landed last."""
+    two_players = {"bookmakers": [{"key": "pinnacle", "markets": [
+        {"key": "pitcher_strikeouts", "outcomes": [
+            {"name": "Over", "description": "Shota Imanaga", "point": 4.5,
+             "price": 1.80},
+            {"name": "Under", "description": "Shota Imanaga", "point": 4.5,
+             "price": 2.10},
+            {"name": "Over", "description": "Will Warren", "point": 5.5,
+             "price": 2.00},
+            {"name": "Under", "description": "Will Warren", "point": 5.5,
+             "price": 1.90}]}]}]}
+    c = _client(lambda url, p: _Resp(two_players))
+    ev = _ev()
+    c._enrich_segments("baseball_mlb", [ev], time.time())
+    assert ("pitcher_strikeouts", "shota imanaga", 4.5) in ev.props
+    assert ("pitcher_strikeouts", "will warren", 5.5) in ev.props
+    assert ev.props[("pitcher_strikeouts", "shota imanaga", 4.5)] == {
+        "Over": 1.80, "Under": 2.10}
+
+
+def test_props_alone_are_enough_to_enrich_an_event():
+    """A sport can carry props without carrying segments. Requiring both
+    would silently discard the larger half."""
+    c = _client(lambda url, p: _Resp(_PROPS))
+    ev = _ev()
+    assert c._enrich_segments("baseball_mlb", [ev], time.time()) == 1
+    assert ev.props and not ev.segments
+
+
+def test_a_prop_quote_supplies_the_anchor():
+    c = _client(lambda url, p: _Resp(_PROPS))
+    ev = _ev()
+    ev.anchors = 0
+    c._enrich_segments("baseball_mlb", [ev], time.time())
+    assert ev.anchors == 1

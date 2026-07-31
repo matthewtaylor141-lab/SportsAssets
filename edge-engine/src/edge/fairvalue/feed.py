@@ -117,6 +117,10 @@ class FeedEvent:
     # The provider's own event id. Segment and player-prop markets are only
     # served per-event (the bulk endpoint answers 422 for them), so without
     # this we cannot ask for them at all.
+    # Player props: (market_key, normalised player, point) -> {"Over": odds,
+    # "Under": odds}. Keyed on the EXACT point because a prop paired against
+    # the wrong line is a different bet that still prices cleanly.
+    props: dict = field(default_factory=dict)
     event_id: str = ""
     fetched_at: float = 0.0   # staleness stamp — set at fetch, checked pre-order
 
@@ -221,6 +225,7 @@ class TheOddsAPIClient(OddsFeed):
         self._parked: set[str] = set()
         # Per-event payloads (segments/props), cached hard — see EVENT_TTL_S.
         self._event_cache: dict[str, tuple[float, dict]] = {}
+        self._no_props: set[str] = set()
         self._quota_t0: float | None = None
         self._quota_used0: float | None = None
         # sports whose alternate-line request the provider rejects (422)
@@ -376,6 +381,26 @@ class TheOddsAPIClient(OddsFeed):
     EVENT_TTL_S = 1800          # partial-game lines move far slower than h2h
     EVENT_MAX_PER_SPORT = 40    # bound the fan-out; nearest games first
 
+    # Player props, per sport family. Measured 2026-07-31: one MLB game
+    # returns 440 prop outcomes with Pinnacle among the books — roughly the
+    # entire tradeable universe we had before, from a single fixture.
+    PROP_MARKETS = {
+        "baseball": ["pitcher_strikeouts", "pitcher_outs", "pitcher_earned_runs",
+                     "pitcher_hits_allowed", "batter_home_runs", "batter_hits",
+                     "batter_total_bases", "batter_rbis", "batter_runs_scored"],
+        "basketball": ["player_points", "player_rebounds", "player_assists"],
+        "icehockey": ["player_points", "player_shots_on_goal"],
+        "soccer": ["player_shots_on_target"],
+    }
+
+    def _prop_markets(self, sport_key: str) -> list[str]:
+        if os.environ.get("EDGE_PROP_MARKETS", "1") == "0":
+            return []
+        if sport_key in self._no_props:
+            return []
+        family = sport_key.split("_")[0]
+        return self.PROP_MARKETS.get(family, [])
+
     def _absorb(self, raw: dict, bucket_of: dict, samples: dict,
                 seg_samples: dict, contributing: set) -> None:
         """Fold one provider payload's sharp-book quotes into the sample
@@ -404,6 +429,41 @@ class TheOddsAPIClient(OddsFeed):
                         seg_samples.setdefault(seg, {}).setdefault(
                             bucket, {}).setdefault(key, []).append(wq)
 
+    def _absorb_props(self, raw: dict, prop_markets: list, contributing: set) -> dict:
+        """Provider prop outcomes -> {(market, player, point): {side: [(odds,
+        weight)]}}.
+
+        Props name the player in `description`, not `name` — `name` carries
+        Over/Under. Reading `name` as the player (the obvious mistake, since
+        every other market puts the subject there) would collapse every
+        player in a game onto one key and price them all off whichever
+        outcome happened to land last.
+        """
+        from edge.fairvalue.props import norm_player
+
+        wanted = set(prop_markets)
+        out: dict = {}
+        for book in raw.get("bookmakers", []):
+            key = book.get("key")
+            if key not in SHARP_BOOKS:
+                continue
+            for mkt in book.get("markets", []):
+                if mkt.get("key") not in wanted:
+                    continue
+                for oc in mkt.get("outcomes", []):
+                    side = (oc.get("name") or "").strip().title()
+                    player = norm_player(oc.get("description") or "")
+                    point, price = oc.get("point"), float(oc.get("price", 0) or 0)
+                    if side not in ("Over", "Under") or not player:
+                        continue
+                    if point is None or price <= 1.0:
+                        continue
+                    contributing.add(key)
+                    out.setdefault((mkt["key"], player, float(point)), {}) \
+                       .setdefault(side, []).append(
+                           (price, BOOK_WEIGHTS.get(key, 1.0)))
+        return out
+
     def _enrich_segments(self, sport_key: str, events: list, now: float) -> int:
         """Fetch partial-game markets per event and merge them in.
 
@@ -414,7 +474,11 @@ class TheOddsAPIClient(OddsFeed):
         if os.environ.get("EDGE_EVENT_MARKETS", "1") == "0":
             return 0
         seg_markets = self._segment_markets(sport_key)
-        if not seg_markets or sport_key in self._no_segments:
+        if sport_key in self._no_segments:
+            seg_markets = []
+        prop_markets = self._prop_markets(sport_key)
+        wanted = seg_markets + prop_markets
+        if not wanted:
             return 0
         if self._quota.get("remaining", float("inf")) <= self._quota_reserve:
             return 0
@@ -433,15 +497,26 @@ class TheOddsAPIClient(OddsFeed):
                         f"{self.BASE}/sports/{sport_key}/events/{ev.event_id}/odds",
                         params={"apiKey": self._key,
                                 "regions": os.environ.get("EDGE_ODDS_REGIONS", "eu,uk,us"),
-                                "markets": ",".join(seg_markets),
+                                "markets": ",".join(wanted),
                                 "oddsFormat": "decimal"},
                         timeout=20)
                     self._track_response(r)
                     if r.status_code == 422:
-                        # The provider does not carry these for this sport.
-                        # Remember it: retrying every cycle burns credits to
-                        # be told the same thing.
-                        self._no_segments.add(sport_key)
+                        # The provider does not carry some of these for this
+                        # sport, and names which. Drop only what it named:
+                        # losing props because a segment key is unsupported
+                        # (or the reverse) would throw away the larger half.
+                        named = (r.json() or {}).get("message", "")
+                        dropped = False
+                        if any(m in named for m in seg_markets):
+                            self._no_segments.add(sport_key)
+                            dropped = True
+                        if any(m in named for m in prop_markets):
+                            self._no_props.add(sport_key)
+                            dropped = True
+                        if not dropped:
+                            self._no_segments.add(sport_key)
+                            self._no_props.add(sport_key)
                         return enriched
                     if r.status_code != 200:
                         continue
@@ -455,13 +530,19 @@ class TheOddsAPIClient(OddsFeed):
             contributing: set[str] = set()
             self._absorb(raw, bucket_of, {"h2h": {}, "totals": {}, "spreads": {}},
                          seg_samples, contributing)
-            if not seg_samples:
+            prop_samples = self._absorb_props(raw, prop_markets, contributing)
+            if not seg_samples and not prop_samples:
                 continue
-            ev.segments = {
-                seg: {b: {k: _weighted_median(v) for k, v in keyed.items()}
-                      for b, keyed in buckets.items()}
-                for seg, buckets in seg_samples.items()}
-            # A segment quote from books that never quoted the full game still
+            if seg_samples:
+                ev.segments = {
+                    seg: {b: {k: _weighted_median(v) for k, v in keyed.items()}
+                          for b, keyed in buckets.items()}
+                    for seg, buckets in seg_samples.items()}
+            if prop_samples:
+                ev.props = {k: {side: _weighted_median(v)
+                                for side, v in sides.items()}
+                            for k, sides in prop_samples.items()}
+            # A segment or prop quote from books that never quoted the full game
             # counts toward the anchor: it is the segment we are pricing.
             ev.anchors = max(ev.anchors, len(contributing & ANCHOR_BOOKS))
             enriched += 1

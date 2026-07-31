@@ -49,10 +49,27 @@ import re
 CORE_CENTS = {     # kch123-measured, direct evidence
     "spread": (40, 55),
     "total": (40, 50),
+    # Player props have NO measured core — the calibration dataset carries no
+    # prop history at all. Structurally a prop is the same object as a total
+    # (a two-sided line de-vigged from an Over/Under pair), so it inherits
+    # the total's shape, and every one of its bands is priced as UNMEASURED.
+    "prop": (40, 50),
 }
 CORE_THRESHOLD = 0.025
 EXT_THRESHOLD = 0.030      # unmeasured: must clear a higher bar than the core
 EXT_LO_C, EXT_HI_C = 10, 90
+
+# Props pay a surcharge over the equivalent total, for two reasons that are
+# specific to props rather than to line bets in general:
+#   - the books are thinner and move on single-player news; a late scratch
+#     moves a strikeout line far more than it moves a game total
+#   - the player-and-stat mapping is new, and mapping error surfaces as fake
+#     edge, so the bar absorbs some of it until the nightly report has graded
+#     a few hundred settlements
+# It also trades a WIDER price range: "3+ home runs" is a genuine 5c bet,
+# whereas a game line almost never sits there.
+CATEGORY_SURCHARGE = {"prop": 0.010}
+CATEGORY_SPAN_C = {"prop": (5, 95)}
 
 
 def windows_for(category: str) -> list[tuple[int, float, str]]:
@@ -62,9 +79,17 @@ def windows_for(category: str) -> list[tuple[int, float, str]]:
     # The de-vig prices both sides of a line together, so the mirror of the
     # measured window carries exactly the same evidence as the window itself.
     mirror = {100 - c for c in core}
+    bump = CATEGORY_SURCHARGE.get(category, 0.0)
+    lo_c, hi_c = CATEGORY_SPAN_C.get(category, (EXT_LO_C, EXT_HI_C))
     out = []
-    for c in range(EXT_LO_C, EXT_HI_C + 1):
-        if c in core:
+    for c in range(lo_c, hi_c + 1):
+        if bump:
+            # A category with a surcharge has no measured core of its own —
+            # it is borrowing another category's SHAPE, not its evidence, so
+            # every band is labelled unmeasured however the shape arose.
+            out.append((c, (CORE_THRESHOLD if c in core or c in mirror
+                            else EXT_THRESHOLD) + bump, "unmeasured"))
+        elif c in core:
             out.append((c, CORE_THRESHOLD, "measured"))
         elif c in mirror:
             out.append((c, CORE_THRESHOLD, "mirror"))
@@ -105,7 +130,7 @@ def render() -> str:
         "# tradeable price, which is what makes the window mirror-symmetric.",
         "categories:",
     ]
-    for category in ("spread", "total"):
+    for category in ("spread", "total", "prop"):
         rows = _merge(windows_for(category))
         out.append(f"  {category}:")
         out.append("    tradeable:")
@@ -128,7 +153,7 @@ def main() -> None:
     open(path, "w").write(
         existing[:marker.start()] + render() + "\n" + existing[tail.start():])
 
-    for category in ("spread", "total"):
+    for category in ("spread", "total", "prop"):
         rows = _merge(windows_for(category))
         span = sum(hi - lo for lo, hi, _, _ in rows)
         lo_c, hi_c = CORE_CENTS[category]

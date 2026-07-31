@@ -263,6 +263,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     from edge.execution.engine import strategy_filter
     from edge.execution.executor import build_decision_record, execute, market_key
     from edge.fairvalue.devig import fair_value
+    from edge.fairvalue.props import fair_for_prop, parse_prop
     from edge.fairvalue.lines import (
         is_draw,
         outcome_matches,
@@ -431,6 +432,23 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             sharp book doesn't quote' from 'we couldn't identify the side'."""
             if not _price_event():
                 return None, "moneyline", {"reason": "fair_error"}
+            # Player props first: they are per-PLAYER, not per-team, so the
+            # team matcher below would either fail or — worse — match a
+            # player's surname against a club and price a strikeout market
+            # off a moneyline. Tried before any team logic sees the text.
+            if getattr(ev, "props", None):
+                bet, why = parse_prop(oc_name)
+                if bet is not None:
+                    fair, miss = fair_for_prop(bet, ev.props)
+                    if fair is None:
+                        return None, "prop", miss
+                    return fair, "prop", None
+                if why in ("no_threshold", "ambiguous_stat"):
+                    # It named a stat we know but we could not pin the line.
+                    # That is a refusal worth counting, not a silent fall
+                    # through to team matching.
+                    return None, "prop", {"reason": f"prop_{why}",
+                                          "venue_outcome": oc_name[:48]}
             segment, oc_name = split_segment(oc_name)
             if segment is None:
                 fairs, deriv_sides = priced["fairs"], priced["deriv_sides"]

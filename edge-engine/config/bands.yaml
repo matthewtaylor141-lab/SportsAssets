@@ -49,6 +49,12 @@ categories:
       "0.40-0.61": {min_edge_threshold: 0.025}   # measured
       "0.61-0.91": {min_edge_threshold: 0.030}   # extension
     dead_zones: []
+  prop:
+    tradeable:
+      "0.05-0.40": {min_edge_threshold: 0.040}   # unmeasured
+      "0.40-0.61": {min_edge_threshold: 0.035}   # unmeasured
+      "0.61-0.96": {min_edge_threshold: 0.040}   # unmeasured
+    dead_zones: []
 
 # Implausibility guard: real measured edges run 1-4c. Anything above this
 # is near-certainly a mapping/model error, not free money — logged for
