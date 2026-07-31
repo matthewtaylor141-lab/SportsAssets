@@ -12,7 +12,7 @@
 # market keys come back with quotes — the difference between "buy a bigger
 # plan" and "fix our request", which is a four-figure decision.
 #
-# SECRET REQUIRED: ODDS_API_KEY (repo Settings -> Secrets -> Actions).
+# SECRET REQUIRED: EDGE_ODDS_API_KEY (repo Settings -> Secrets -> Actions).
 # The key is never printed; GitHub masks registered secrets in logs, and the
 # script only ever emits market keys and counts.
 
@@ -38,11 +38,11 @@ jobs:
 
       - name: Ask the provider what it carries
         env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          EDGE_ODDS_API_KEY: ${{ secrets.EDGE_ODDS_API_KEY }}
           SPORTS_IN: ${{ github.event.inputs.sports }}
         run: |
-          if [ -z "$ODDS_API_KEY" ]; then
-            echo "::error::ODDS_API_KEY secret is not set."
+          if [ -z "$EDGE_ODDS_API_KEY" ]; then
+            echo "::error::EDGE_ODDS_API_KEY secret is not set."
             echo "Add it at Settings -> Secrets and variables -> Actions."
             echo "Without it this probe cannot ask the provider anything."
             exit 1
@@ -52,7 +52,7 @@ jobs:
           SPORTS="${SPORTS_IN:-baseball_mlb,soccer_epl,soccer_mexico_ligamx,basketball_nba,icehockey_nhl}"
 
           echo "==================== QUOTA ===================="
-          curl -sS "$BASE/sports/?apiKey=$ODDS_API_KEY" -D /tmp/h -o /tmp/sports.json >/dev/null || true
+          curl -sS "$BASE/sports/?apiKey=$EDGE_ODDS_API_KEY" -D /tmp/h -o /tmp/sports.json >/dev/null || true
           grep -i '^x-requests-' /tmp/h || echo "(no quota headers returned)"
           echo "sports carried by this plan: $(jq 'length' /tmp/sports.json 2>/dev/null || echo '?')"
 
@@ -75,7 +75,7 @@ jobs:
             echo "$SPORT"
             echo "───────────────────────────────────────────────"
             code=$(curl -sS -o /tmp/ev.json -w '%{http_code}' \
-              "$BASE/sports/$SPORT/odds/?apiKey=$ODDS_API_KEY&regions=eu,uk,us&markets=$ALL&oddsFormat=decimal" \
+              "$BASE/sports/$SPORT/odds/?apiKey=$EDGE_ODDS_API_KEY&regions=eu,uk,us&markets=$ALL&oddsFormat=decimal" \
               2>/tmp/err || true)
             echo "HTTP ${code:-000}"
             if [ "$code" != "200" ]; then
@@ -91,6 +91,18 @@ jobs:
                   | group_by(.) | sort_by(-length)
                   | .[] | "   \(.[0]): \(length)" )
             ' /tmp/ev.json 2>/dev/null || head -c 400 /tmp/ev.json
+            # Which sharp books actually quote this sport. Fair value is a
+            # weighted median over these, so a sport where Pinnacle and the
+            # exchanges are absent is one where our number is a consensus of
+            # followers — worth knowing per sport, not just in aggregate.
+            echo "sharp books present (of the 8 we weight):"
+            jq -r '[.[] | .bookmakers[]?.key] | group_by(.) | map({k: .[0], n: length})
+                   | map(select(.k as $k | ["pinnacle","betfair_ex_eu","betfair_ex_uk",
+                       "betfair_ex_au","smarkets","matchbook","betanysports","lowvig"]
+                       | index($k)))
+                   | if length == 0 then "   NONE — no anchor for this sport at all"
+                     else sort_by(-.n)[] | "   \(.k): \(.n) events" end' \
+               /tmp/ev.json 2>/dev/null || true
             echo "requested but ABSENT:"
             jq -r --arg all "$ALL" '
               ([.[] | .bookmakers[]?.markets[]?.key] | unique) as $got
