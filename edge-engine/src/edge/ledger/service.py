@@ -134,13 +134,20 @@ CREATE TABLE IF NOT EXISTS pricing_divergence (
 -- So: record the fair value at entry, then the fair value for the SAME
 -- market a minute later. Edge that survives is real; edge that evaporates
 -- was a stale quote. Continuous, and available within minutes.
+--
+-- Recorded PER CATEGORY, because drift is not one number. A three-way
+-- match's draw leg is the longshot, which is exactly where book margin
+-- concentrates and where de-vig methods disagree most; averaging it into
+-- the moneyline figure hides the leg doing the damage. The category here
+-- is the pricing category, with draws split out from the two-way sides.
 CREATE TABLE IF NOT EXISTS edge_drift (
     market_key TEXT PRIMARY KEY,
     price      REAL NOT NULL,      -- what we paid
     fair_entry REAL NOT NULL,      -- fair value when we bought
     ts_entry   REAL NOT NULL,
     fair_later REAL,               -- fair value one observation later
-    ts_later   REAL
+    ts_later   REAL,
+    category   TEXT
 );
 
 -- Mode transitions are audit events (PAPER -> LIVE_BETA -> LIVE).
@@ -171,6 +178,12 @@ class Ledger:
                                  f"NOT NULL DEFAULT 'PAPER'")
                 except sqlite3.OperationalError:
                     pass  # column already exists
+            # Drift gained a category dimension; existing rows stay NULL and
+            # are reported under '?' rather than being silently reclassified.
+            try:
+                conn.execute("ALTER TABLE edge_drift ADD COLUMN category TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -389,14 +402,17 @@ class Ledger:
     DRIFT_MIN_AGE_S = 60.0
 
     def record_entry_fair(self, market_key: str, price: float, fair: float,
+                          category: str | None = None,
                           ts: float | None = None) -> None:
         """Stamp the fair value we bought against. First write wins — a
         market is entered once, and re-stamping would reset the clock."""
         with self._lock, self._conn() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO edge_drift "
-                "(market_key, price, fair_entry, ts_entry) VALUES (?,?,?,?)",
-                (market_key, price, fair, ts if ts is not None else time.time()))
+                "(market_key, price, fair_entry, ts_entry, category) "
+                "VALUES (?,?,?,?,?)",
+                (market_key, price, fair,
+                 ts if ts is not None else time.time(), category))
 
     def awaiting_drift(self, now: float | None = None) -> set[str]:
         """Markets bought long enough ago to be worth re-observing."""
@@ -415,31 +431,89 @@ class Ledger:
                 "WHERE market_key=? AND fair_later IS NULL",
                 (fair_later, ts if ts is not None else time.time(), market_key))
 
-    def drift_report(self, days: int = 7) -> dict:
-        """How much of the edge we thought we had was still there a minute
-        later. retention ~1.0 = the edge was real; ~0 or negative = we were
-        buying quotes that had already moved."""
-        since = time.time() - days * 86_400
-        with self._conn() as conn:
-            rows = [dict(r) for r in conn.execute(
-                "SELECT price, fair_entry, fair_later FROM edge_drift "
-                "WHERE fair_later IS NOT NULL AND ts_entry >= ?",
-                (since,)).fetchall()]
+    # A drift estimate needs enough observations to be worth acting on, and
+    # a ceiling so one noisy week cannot silently halt all trading.
+    DRIFT_MIN_N = 12
+    DRIFT_MAX_PENALTY = 0.03
+
+    @staticmethod
+    def _drift_stats(rows: list[dict]) -> dict:
         if not rows:
-            return {"n": 0, "retention": None, "mean_drift_c": None}
+            return {"n": 0, "retention": None, "mean_drift_c": None,
+                    "mean_drift": None, "held": 0}
         entry = [r["fair_entry"] - r["price"] for r in rows]
         later = [r["fair_later"] - r["price"] for r in rows]
         gross = sum(entry)
+        mean_drift = sum(l - e for l, e in zip(later, entry)) / len(rows)
         return {
             "n": len(rows),
             # Edge remaining as a share of edge claimed. Summed rather than
             # averaged per-trade so a near-zero entry edge cannot blow up the
             # ratio.
             "retention": round(sum(later) / gross, 3) if abs(gross) > 1e-9 else None,
-            "mean_drift_c": round(
-                sum(l - e for l, e in zip(later, entry)) / len(rows) * 100, 2),
+            "mean_drift": mean_drift,
+            "mean_drift_c": round(mean_drift * 100, 2),
             "held": sum(1 for l, e in zip(later, entry) if l >= e * 0.5),
         }
+
+    def _drift_rows(self, days: int, category: str | None = None) -> list[dict]:
+        since = time.time() - days * 86_400
+        sql = ("SELECT price, fair_entry, fair_later, category FROM edge_drift "
+               "WHERE fair_later IS NOT NULL AND ts_entry >= ?")
+        params: list = [since]
+        if category is not None:
+            sql += " AND COALESCE(category, '?') = ?"
+            params.append(category)
+        with self._conn() as conn:
+            return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+    def drift_report(self, days: int = 7, category: str | None = None) -> dict:
+        """How much of the edge we thought we had was still there a minute
+        later. retention ~1.0 = the edge was real; ~0 or negative = we were
+        buying quotes that had already moved.
+
+        Reported per category as well as overall: a single blended number
+        hides the one leg that is doing the damage."""
+        rows = self._drift_rows(days, category)
+        report = self._drift_stats(rows)
+        if category is None:
+            buckets: dict[str, list[dict]] = {}
+            for r in rows:
+                buckets.setdefault(r.get("category") or "?", []).append(r)
+            report["by_category"] = {
+                k: self._drift_stats(v) for k, v in sorted(buckets.items())}
+        return report
+
+    def drift_penalties(self, days: int = 7) -> dict[str, float]:
+        """Measured adverse drift, as an edge surcharge per category.
+
+        The entry threshold is a bar our ESTIMATE must clear. If fair value
+        systematically moves against us right after we buy, the estimate is
+        optimistic by exactly that much, and a bar that ignores it is a bar
+        set below the real cost of trading. So the surcharge is the measured
+        adverse drift itself.
+
+        Only adverse drift is charged — favourable drift does not lower the
+        bar, because being early is not a licence to be looser. Categories
+        with too few observations inherit the overall number rather than
+        trading free; if nothing is measured yet the surcharge is zero and
+        the bands govern alone, as they did before this existed.
+
+        Keys are categories plus '*' for the fallback.
+        """
+        overall = self._drift_stats(self._drift_rows(days))
+
+        def surcharge(stats: dict) -> float | None:
+            if stats["n"] < self.DRIFT_MIN_N or stats["mean_drift"] is None:
+                return None
+            return round(min(max(0.0, -stats["mean_drift"]),
+                             self.DRIFT_MAX_PENALTY), 4)
+
+        base = surcharge(overall) or 0.0
+        out: dict[str, float] = {"*": base}
+        for cat, stats in (self.drift_report(days).get("by_category") or {}).items():
+            out[cat] = surcharge(stats) if surcharge(stats) is not None else base
+        return out
 
     def event_exposure(self, event_key: str, mode: str) -> dict:
         """Everything we hold on ONE real-world game.

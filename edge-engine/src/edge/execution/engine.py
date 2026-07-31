@@ -108,16 +108,22 @@ class StrategyVerdict:
     tier: str = "core"       # 'core' = above the band bar; 'exploration' =
                              # below it, traded on a capped budget to MEASURE
                              # whether small edges pay.
+    drift_penalty: float = 0.0   # measured adverse drift folded into the bar
 
 
 def strategy_filter(
     policy: Policy, league_code: str | None, price: float, fair: float,
     venue_fee: float = 0.0, category: str = "moneyline",
-    consensus_books: int | None = None,
+    consensus_books: int | None = None, drift_penalty: float = 0.0,
 ) -> StrategyVerdict:
     """The entry rule alone: fair - price - fee >= threshold(band, category),
     plus dead zones, league allow/block, and league x category blocks.
-    Sizing is RiskManager.approve()'s job."""
+    Sizing is RiskManager.approve()'s job.
+
+    `drift_penalty` is the measured adverse move in fair value after entry
+    (see LedgerService.drift_penalties). It is added to the band threshold
+    rather than subtracted from the edge, so the reported edge stays the raw
+    estimate and the bar is visibly the thing that moved."""
     band = policy.band_of(price)
     edge = fair - price - venue_fee
     if policy.league_allowed(league_code) == "block":
@@ -125,10 +131,12 @@ def strategy_filter(
     if policy.category_blocked(league_code, category):
         return StrategyVerdict(
             False, f"category {category} blocked for {league_code}", band, None, edge)
-    threshold = policy.band_threshold(price, category)
-    if threshold is None:
+    base_threshold = policy.band_threshold(price, category)
+    if base_threshold is None:
         return StrategyVerdict(
             False, f"band {band} dead/unproven ({category})", band, None, edge)
+    drift_penalty = max(0.0, float(drift_penalty or 0.0))
+    threshold = base_threshold + drift_penalty
     if edge < threshold:
         # Exploration: below the band bar but still a positive, non-trivial
         # edge backed by enough books to not be a single quote's noise. These
@@ -136,7 +144,11 @@ def strategy_filter(
         # measurement rather than an assumption.
         exp = policy.risk.get("exploration") or {}
         if exp.get("enabled"):
-            min_edge = float(exp.get("min_edge", 0.008))
+            # Exploration exists to test whether SMALL edges pay. An edge
+            # smaller than the measured adverse drift is not an open question
+            # — it is a measured loser — so the floor moves with the drift
+            # too, or the study budget just funds the thing we disproved.
+            min_edge = float(exp.get("min_edge", 0.008)) + drift_penalty
             min_books = int(exp.get("min_consensus_books", 3))
             # Fail CLOSED. An unknown consensus depth is not permission — if
             # we cannot say how many books back this number, we are not
@@ -148,21 +160,24 @@ def strategy_filter(
                 if edge <= max_edge + 1e-9:
                     return StrategyVerdict(
                         True, "exploration", band, threshold, edge,
-                        tier="exploration")
+                        tier="exploration", drift_penalty=drift_penalty)
             if edge >= min_edge and not enough_books:
                 return StrategyVerdict(
                     False, f"thin_consensus {consensus_books} books for "
-                           f"{edge:.3f} edge", band, threshold, edge)
+                           f"{edge:.3f} edge", band, threshold, edge,
+                           drift_penalty=drift_penalty)
         return StrategyVerdict(
-            False, f"edge {edge:.3f} < threshold {threshold:.3f}", band, threshold, edge)
+            False, f"edge {edge:.3f} < threshold {threshold:.3f}", band, threshold,
+            edge, drift_penalty=drift_penalty)
     # Implausibility guard: measured real edges are 1-4c. A "20c edge" is a
     # mapping/model error wearing a costume — log it, never trade it.
     max_edge = float(policy.bands.get("max_believable_edge", 0.08))
     if edge > max_edge + 1e-9:
         return StrategyVerdict(
             False, f"implausible edge {edge:.3f} > {max_edge:.2f} (mapping/model suspect)",
-            band, threshold, edge)
-    return StrategyVerdict(True, "ok", band, threshold, edge)
+            band, threshold, edge, drift_penalty=drift_penalty)
+    return StrategyVerdict(True, "ok", band, threshold, edge,
+                           drift_penalty=drift_penalty)
 
 
 @dataclass

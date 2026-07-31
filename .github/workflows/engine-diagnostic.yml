@@ -146,6 +146,15 @@ jobs:
                    "  edge retention \(.retention)   (1.0 = edge was real, ~0 = we bought stale quotes)",
                    "  mean drift \(.mean_drift_c)c   held \(.held)/\(.n)"
                  else "", "adverse selection: nothing matured yet" end' /tmp/status.json 2>/dev/null || true
+          # Per category — a blended drift number hides the one leg doing
+          # the damage, which is the whole reason the split exists.
+          jq -r '.detail.edge_drift.by_category // {} | to_entries[]
+                 | "    \(.key): n=\(.value.n)  drift \(.value.mean_drift_c)c  retention \(.value.retention)"' \
+             /tmp/status.json 2>/dev/null || true
+          echo "drift surcharge now added to each bar:"
+          jq -r '.detail.drift_penalty // {} | to_entries[]
+                 | "    \(.key): +\((.value * 100))c"' /tmp/status.json 2>/dev/null \
+             || echo "    (none — nothing measured yet)"
           echo "refreshed this cycle: $(jq -r '.detail.refreshed // 0' /tmp/status.json 2>/dev/null)"
 
           echo ""

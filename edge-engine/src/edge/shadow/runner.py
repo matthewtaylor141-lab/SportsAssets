@@ -318,6 +318,13 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     # Slices whose prices systematically disagree with the venue's own —
     # barred from trading until the disagreement clears, whatever caused it.
     drift_due = set() if reactive else ledger.awaiting_drift()
+    # What our own fills have already proved about the cost of being the
+    # one who gets filled. Read once per cycle: the bar must move with the
+    # evidence, but not mid-sweep, or two identical outcomes seen seconds
+    # apart get judged by different rules.
+    drift_pen = ledger.drift_penalties(days=7)
+    if any(v > 0 for v in drift_pen.values()):
+        funnel["drift_penalty"] = {k: v for k, v in drift_pen.items() if v > 0}
     quarantined = _quarantined(ledger)
     if quarantined:
         funnel["quarantined"] = sorted("/".join(q) for q in quarantined)[:8]
@@ -577,9 +584,20 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                        if effective_mode != "PAPER"
                                        else (ask.price, True))
                     fee = (adapter.taker_fee if taker else adapter.maker_fee)(entry_px)
+                    # The bar this outcome must clear is its band threshold
+                    # PLUS whatever adverse drift we have measured for its
+                    # kind. Draws are scored apart from the two-way sides:
+                    # the draw is the longshot leg of a three-way, which is
+                    # where book margin concentrates and where de-vig methods
+                    # disagree most, so blending it into the moneyline number
+                    # hides it inside the average it is dragging down.
+                    drift_cat = ("draw" if category == "moneyline"
+                                 and is_draw(oc_name) else category)
                     verdict = strategy_filter(policy, ev.league_code, entry_px, fair,
                                               venue_fee=fee, category=category,
-                                              consensus_books=getattr(ev, "books", None))
+                                              consensus_books=getattr(ev, "books", None),
+                                              drift_penalty=drift_pen.get(
+                                                  drift_cat, drift_pen.get("*", 0.0)))
 
                     # ── STUDY RECORD ──────────────────────────────────
                     # Every priced outcome is observed, whether or not it
@@ -722,7 +740,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                      taker=taker, event_key=claim)
                     if result["placed"]:
                         ledger.record_entry_fair(mkey, round(entry_px, 4),
-                                                 round(fair, 4))
+                                                 round(fair, 4), category=drift_cat)
                     funnel["logged"] += int(result["placed"])
                     funnel.setdefault("by_category", {}).setdefault(category, 0)
                     funnel["by_category"][category] += int(result["placed"])

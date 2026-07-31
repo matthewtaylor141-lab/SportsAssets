@@ -578,7 +578,13 @@ def test_entry_fair_is_stamped_once_and_never_reset(tmp_path):
 
 def test_nothing_measured_reports_unknown(tmp_path):
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
-    assert led.drift_report() == {"n": 0, "retention": None, "mean_drift_c": None}
+    rep = led.drift_report()
+    assert rep["n"] == 0
+    assert rep["retention"] is None and rep["mean_drift_c"] is None
+    assert rep["by_category"] == {}
+    # No measurement means no surcharge — the bands govern alone, exactly as
+    # they did before drift existed. Unknown is not an excuse to charge.
+    assert led.drift_penalties() == {"*": 0.0}
 
 
 def test_a_live_cycle_stamps_entries_and_closes_them_out(tmp_path, monkeypatch):
@@ -597,3 +603,107 @@ def test_a_live_cycle_stamps_entries_and_closes_them_out(tmp_path, monkeypatch):
     # ...but once they are old enough the next pass records them.
     ledger.record_drift_later("kalshi:T-ARS", 0.50)
     assert ledger.drift_report()["n"] == 1
+
+
+# ── the bar must move with measured adverse selection ──────────────────
+#
+# The engine ran for a week at a 2c bar and settled -21% ROI while its own
+# drift meter read: retention 0.318, mean drift -1.33c. Those two facts are
+# the same fact. A threshold is a bar our ESTIMATE has to clear, and if fair
+# value reliably moves against us right after we buy, the estimate is
+# optimistic by exactly that much — so a 2c bar was really a 0.7c bar, and
+# 0.7c does not survive crossing a spread. Trading more at that bar just
+# loses faster. These pin the correction.
+
+def _drifted(tmp_path, n, drift, category=None, price=0.47, fair=0.50):
+    """n matured entries whose fair moved by `drift` after we bought."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    for i in range(n):
+        key = f"m{i}"
+        led.record_entry_fair(key, price, fair, category=category)
+        led.record_drift_later(key, fair + drift)
+    return led
+
+
+def test_measured_adverse_drift_raises_the_bar(tmp_path):
+    led = _drifted(tmp_path, 20, -0.013)
+    pen = led.drift_penalties()
+    assert pen["*"] == pytest.approx(0.013, abs=1e-4)
+
+    # A 2c edge that used to clear a 2c bar no longer clears 2c + 1.3c.
+    from edge.execution.engine import strategy_filter
+    clean = strategy_filter(POLICY, "mls", 0.48, 0.50, category="moneyline")
+    charged = strategy_filter(POLICY, "mls", 0.48, 0.50, category="moneyline",
+                              drift_penalty=pen["*"])
+    assert clean.threshold is not None
+    assert charged.threshold == pytest.approx(clean.threshold + 0.013)
+    assert charged.edge == pytest.approx(clean.edge)   # the EDGE is untouched
+    assert not charged.ok
+
+
+def test_favourable_drift_never_lowers_the_bar(tmp_path):
+    """Being early is not a licence to be looser. Drift in our favour is
+    clamped to zero, or a lucky week would quietly buy a lower threshold."""
+    led = _drifted(tmp_path, 20, +0.02)
+    assert led.drift_penalties()["*"] == 0.0
+
+    from edge.execution.engine import strategy_filter
+    v = strategy_filter(POLICY, "mls", 0.48, 0.50, drift_penalty=-0.05)
+    base = strategy_filter(POLICY, "mls", 0.48, 0.50)
+    assert v.threshold == pytest.approx(base.threshold)
+
+
+def test_penalty_is_capped_so_one_noisy_week_cannot_halt_everything(tmp_path):
+    led = _drifted(tmp_path, 20, -0.40)
+    assert led.drift_penalties()["*"] == pytest.approx(Ledger.DRIFT_MAX_PENALTY)
+
+
+def test_thin_evidence_charges_nothing_extra(tmp_path):
+    """Below the observation floor there is no estimate to act on."""
+    led = _drifted(tmp_path, Ledger.DRIFT_MIN_N - 1, -0.05)
+    assert led.drift_penalties()["*"] == 0.0
+
+
+def test_draws_are_measured_apart_from_the_two_way_sides(tmp_path):
+    """The draw is the longshot leg of a three-way — where book margin
+    concentrates and de-vig methods disagree most. Blended into the
+    moneyline average it hides inside the number it is dragging down."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    for i in range(20):
+        led.record_entry_fair(f"ml{i}", 0.47, 0.50, category="moneyline")
+        led.record_drift_later(f"ml{i}", 0.500)          # clean
+        led.record_entry_fair(f"dr{i}", 0.28, 0.31, category="draw")
+        led.record_drift_later(f"dr{i}", 0.290)          # -2c against us
+
+    pen = led.drift_penalties()
+    assert pen["moneyline"] == 0.0
+    assert pen["draw"] == pytest.approx(0.02, abs=1e-4)
+
+    rep = led.drift_report()
+    assert rep["by_category"]["draw"]["n"] == 20
+    assert rep["by_category"]["moneyline"]["mean_drift_c"] == pytest.approx(0.0)
+    # And the blend really would have hidden it: overall is half the draw's.
+    assert 0 < pen["*"] < pen["draw"]
+
+
+def test_unmeasured_category_inherits_the_overall_charge(tmp_path):
+    """A brand-new category is unproven, not exempt."""
+    led = _drifted(tmp_path, 20, -0.013, category="moneyline")
+    pen = led.drift_penalties()
+    assert pen.get("total", pen["*"]) == pytest.approx(pen["*"])
+    assert pen["*"] > 0
+
+
+def test_exploration_floor_moves_with_the_drift(tmp_path):
+    """Exploration exists to test whether SMALL edges pay. An edge smaller
+    than the measured drift is not an open question — it is a measured
+    loser — so the study budget must stop funding it."""
+    from edge.execution.engine import strategy_filter
+    # 1c edge, plenty of book agreement: explorable at a 0c drift...
+    free = strategy_filter(POLICY, "mls", 0.48, 0.4901, category="moneyline",
+                           consensus_books=6)
+    assert free.ok and free.tier == "exploration"
+    # ...and not explorable once drift is measured at 1.3c.
+    charged = strategy_filter(POLICY, "mls", 0.48, 0.4901, category="moneyline",
+                              consensus_books=6, drift_penalty=0.013)
+    assert not charged.ok
