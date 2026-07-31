@@ -130,6 +130,41 @@ jobs:
                 fi
               fi
             fi
+            # (3) PLAYER PROPS. Polymarket lists dozens per game
+            # ("Shota Imanaga 5+ strikeouts") and every one currently lands
+            # in no_side_match_moneyline because we have nothing to price it
+            # against. This is the biggest untapped universe by far, so the
+            # question is whether the plan carries it and what it costs.
+            if [ -n "$EVID" ]; then
+              case "$SPORT" in
+                baseball*)   PROPS=pitcher_strikeouts,pitcher_outs,batter_home_runs,batter_hits,batter_total_bases ;;
+                soccer*)     PROPS=player_goal_scorer_anytime,player_shots_on_target ;;
+                basketball*) PROPS=player_points,player_rebounds,player_assists ;;
+                icehockey*)  PROPS=player_points,player_shots_on_goal ;;
+                *)           PROPS="" ;;
+              esac
+              if [ -n "$PROPS" ]; then
+                U3=$(used)
+                code=$(curl -sS -o /tmp/pr.json -D /tmp/h2 -w '%{http_code}' \
+                  "$BASE/sports/$SPORT/events/$EVID/odds/?apiKey=$EDGE_ODDS_API_KEY&regions=eu,uk,us&markets=$PROPS&oddsFormat=decimal" || true)
+                U4=$(used)
+                echo "[props, per-event]  HTTP $code   COST=$((U4 - U3))"
+                if [ "$code" = "200" ]; then
+                  jq -r '[.bookmakers[]?.markets[]?.key] | group_by(.) | sort_by(-length)
+                         | if length == 0 then "     (none returned)"
+                           else .[] | "     \(.[0]): \(length) books" end' /tmp/pr.json
+                  echo "     outcomes available: $(jq '[.bookmakers[]?.markets[]?.outcomes[]?] | length' /tmp/pr.json)"
+                  echo "     sharp books on props:"
+                  jq -r '[.bookmakers[] | select(.markets | length > 0) | .key]
+                         | map(select(. as $k | ["pinnacle","betfair_ex_eu","betfair_ex_uk",
+                             "betfair_ex_au","smarkets","matchbook","betanysports","lowvig"]
+                             | index($k)))
+                         | if length == 0 then "        NONE" else "        " + join(", ") end' /tmp/pr.json
+                else
+                  head -c 300 /tmp/pr.json; echo
+                fi
+              fi
+            fi
           done
 
           echo ""
