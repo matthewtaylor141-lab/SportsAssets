@@ -25,6 +25,46 @@ log = logging.getLogger(__name__)
 SHARP_BOOKS = {"pinnacle", "betfair_ex_eu", "betfair_ex_uk", "betfair_ex_au",
                "smarkets", "matchbook", "betanysports", "lowvig"}
 
+# Not all sharp books are equally sharp, and a plain median pretends they are.
+#
+# Pinnacle is the line the rest of the market prices against, and a betting
+# EXCHANGE is not an opinion at all — it is a real market clearing real money
+# at a few percent commission, with no vig to remove. Those belong in a
+# different class from a small low-margin sportsbook that is itself mostly
+# copying Pinnacle with a lag.
+#
+# This matters most exactly where it hurts most. When only two or three books
+# quote a market, an unweighted median can BE the softest book's opinion —
+# and thin-consensus markets are where the largest apparent edges appear.
+# That is a mechanism for manufacturing fake edge precisely where we are
+# least equipped to check it, which is the winner's curse in one sentence.
+ANCHOR_BOOKS = {"pinnacle", "betfair_ex_eu", "betfair_ex_uk", "betfair_ex_au"}
+BOOK_WEIGHTS = {
+    "pinnacle": 3.0,
+    "betfair_ex_eu": 3.0, "betfair_ex_uk": 3.0, "betfair_ex_au": 2.0,
+    "smarkets": 2.0, "matchbook": 2.0,
+    "betanysports": 1.0, "lowvig": 1.0,
+}
+
+
+def _weighted_median(pairs: list[tuple[float, float]]) -> float:
+    """Median that counts sharper books more, and stays a MEDIAN.
+
+    A weighted mean would let one wild quote drag the estimate; the whole
+    reason to use a median on book prices is robustness to exactly that.
+    So weights move the halfway point rather than the arithmetic.
+    """
+    if not pairs:
+        raise ValueError("no quotes")
+    ordered = sorted(pairs)
+    total = sum(w for _, w in ordered)
+    half, run = total / 2.0, 0.0
+    for price, w in ordered:
+        run += w
+        if run >= half:
+            return price
+    return ordered[-1][0]
+
 # The Odds API sport keys -> our league slug codes (subset; extend as mapped).
 SPORT_KEY_LEAGUE = {
     "soccer_epl": "epl", "soccer_spain_la_liga": "lal", "soccer_france_ligue_one": "fl1",
@@ -70,6 +110,10 @@ class FeedEvent:
     # books is a signal; the same 1c from one book is a rounding error, so
     # the exploration tier requires depth before it trusts a small number.
     books: int = 0
+    # How many REFERENCE-class books (Pinnacle, Betfair/Smarkets-style
+    # exchanges) are among them. Zero means our fair value is a consensus of
+    # followers with nothing anchoring it.
+    anchors: int = 0
     fetched_at: float = 0.0   # staleness stamp — set at fetch, checked pre-order
 
     def is_fresh(self, max_age_s: float = 30.0, now: float | None = None) -> bool:
@@ -404,19 +448,24 @@ class TheOddsAPIClient(OddsFeed):
                         if price <= 1.0:
                             continue
                         key = name if bucket == "h2h" else f"{name} {oc.get('point')}"
+                        wq = (price, BOOK_WEIGHTS.get(book["key"], 1.0))
                         if seg is None:
-                            samples[bucket].setdefault(key, []).append(price)
+                            samples[bucket].setdefault(key, []).append(wq)
                         else:
                             seg_samples.setdefault(seg, {}).setdefault(
-                                bucket, {}).setdefault(key, []).append(price)
-            ev.h2h = {k: _median(v) for k, v in samples["h2h"].items()}
-            ev.totals = {k: _median(v) for k, v in samples["totals"].items()}
-            ev.spreads = {k: _median(v) for k, v in samples["spreads"].items()}
+                                bucket, {}).setdefault(key, []).append(wq)
+            ev.h2h = {k: _weighted_median(v) for k, v in samples["h2h"].items()}
+            ev.totals = {k: _weighted_median(v) for k, v in samples["totals"].items()}
+            ev.spreads = {k: _weighted_median(v) for k, v in samples["spreads"].items()}
             ev.segments = {
-                seg: {b: {k: _median(v) for k, v in keyed.items()}
+                seg: {b: {k: _weighted_median(v) for k, v in keyed.items()}
                       for b, keyed in buckets.items()}
                 for seg, buckets in seg_samples.items()}
             ev.books = len(contributing)
+            # Whether a reference-class book quoted this event at all. An
+            # estimate with no anchor is a consensus of followers, and the
+            # prediction worth testing is that those revert hardest.
+            ev.anchors = len(contributing & ANCHOR_BOOKS)
             if ev.h2h:
                 out.append(ev)
         self._cache[sport_key] = (now, out)

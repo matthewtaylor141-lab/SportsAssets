@@ -860,3 +860,40 @@ def test_no_measurement_leaves_the_surcharge_in_charge(tmp_path):
     assert v.keep == 1.0
     assert v.drift_penalty == pytest.approx(0.02)
     assert v.edge == pytest.approx(v.raw_edge)
+
+
+# ── not all sharp books are equally sharp ───────────────────────────────
+#
+# A plain median across the sharp list gave Pinnacle and an exchange exactly
+# the same vote as a small low-margin book that is itself copying Pinnacle
+# with a lag. Where six books quote, that is merely imprecise. Where two or
+# three quote, the median can BE the softest book's opinion — and thin
+# consensus is where the largest apparent edges appear. That manufactures
+# fake edge precisely where we are least able to check it.
+
+def test_the_reference_book_outvotes_the_followers():
+    from edge.fairvalue.feed import _weighted_median
+    # Pinnacle says 2.00; two followers say 2.20. A plain median takes 2.20.
+    quotes = [(2.00, 3.0), (2.20, 1.0), (2.20, 1.0)]
+    assert _weighted_median(quotes) == 2.00
+    import statistics
+    assert statistics.median([q for q, _ in quotes]) == 2.20   # the old answer
+
+
+def test_followers_still_win_when_there_are_enough_of_them():
+    """Weighting is not a veto. Pinnacle is 3 votes, not infinite ones."""
+    from edge.fairvalue.feed import _weighted_median
+    assert _weighted_median([(2.00, 3.0)] + [(2.20, 1.0)] * 4) == 2.20
+
+
+def test_weighting_stays_a_median_not_a_mean():
+    """One wild quote must not drag the estimate — robustness to outliers is
+    the entire reason a median is used on book prices."""
+    from edge.fairvalue.feed import _weighted_median
+    sane = [(2.00, 3.0), (2.02, 1.0), (2.01, 1.0)]
+    assert _weighted_median(sane + [(50.0, 1.0)]) < 2.10
+
+
+def test_a_lone_quote_is_still_its_own_answer():
+    from edge.fairvalue.feed import _weighted_median
+    assert _weighted_median([(1.91, 1.0)]) == 1.91
