@@ -121,6 +121,7 @@ def test_a_prop_market_prices_off_its_own_line(tmp_path, monkeypatch):
 
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     POLICY = Policy.load()
+    POLICY.leagues = {**POLICY.leagues, "blocked_categories": []}
     ev = _event()
     ev.props = {("pitcher_strikeouts", "shota imanaga", 4.5):
                 {"Over": 1.80, "Under": 2.10}}
@@ -152,6 +153,7 @@ def test_a_prop_with_no_matching_line_is_refused_not_guessed(tmp_path, monkeypat
 
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     POLICY = Policy.load()
+    POLICY.leagues = {**POLICY.leagues, "blocked_categories": []}
     ev = _event()
     # The book quotes 5.5; the venue asks about 5+ (which is 4.5). Different
     # bets — this must refuse rather than pair them.

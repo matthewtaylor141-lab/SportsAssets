@@ -222,6 +222,17 @@ jobs:
           jq -r '.system | "system    : \(.settled) settled  W\(.wins)/L\(.losses)  realized $\(.realized)  ROI \(.roi // "n/a")",
                            "            open \(.open) worth $\(.open_cost)"' \
              /tmp/acct.json 2>/dev/null || true
+          # What crossing the spread costs, against what we claimed to win.
+          # net_c below zero means we were losing at the moment of entry,
+          # whatever the model said about the price.
+          echo "SPREAD COST (per fill, cents):"
+          jq -r '.detail.spread_cost // {} | if length == 0 then "   (no book snapshots yet)"
+                 else to_entries[] | "   \(.key): n=\(.value.n)  spread \(.value.spread_c)c  paid over mid \(.value.paid_over_mid_c)c  claimed edge \(.value.edge_c)c  NET \(.value.net_c)c" end' \
+             /tmp/status.json 2>/dev/null || true
+          echo "settled by BAND (our own fills, not the inherited calibration):"
+          jq -r '.detail.by_band // {} | if length == 0 then "   (nothing settled yet)"
+                 else to_entries[] | "   \(.key): \(.value.settled) settled  $\(.value.realized)  ROI \(.value.roi // "n/a")" end' \
+             /tmp/status.json 2>/dev/null || true
           echo "settled by CATEGORY (engine ledger, live only):"
           jq -r '.detail.by_cat_performance // {} | if length == 0 then
                    "   (nothing settled yet)"

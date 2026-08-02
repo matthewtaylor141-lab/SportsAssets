@@ -104,6 +104,8 @@ def test_an_unresolvable_side_is_refused_by_name(tmp_path, monkeypatch):
 
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     policy = Policy.load()
+    # mechanics test: lift the measured moneyline quarantine
+    policy.leagues = {**policy.leagues, "blocked_categories": []}
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     risk = RiskManager(led, {**policy.risk, "mode": "PAPER"})
 
@@ -133,6 +135,8 @@ def test_a_resolvable_side_prices_and_trades(tmp_path, monkeypatch):
 
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     policy = Policy.load()
+    # mechanics test: lift the measured moneyline quarantine
+    policy.leagues = {**policy.leagues, "blocked_categories": []}
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     risk = RiskManager(led, {**policy.risk, "mode": "PAPER"})
 

@@ -37,3 +37,29 @@ category_blocks:
   mlb: [moneyline]
   atp: [moneyline]
   ere: [moneyline]
+
+# ── global category quarantine (measured on OUR fills) ─────────────────
+#
+# Same instrument as the league blocklist, applied to bet type. Measured on
+# Polymarket US over ~126 fills, 2026-08-02:
+#
+#   moneyline  n=95  drift -2.34c  retention 0.239
+#   draw       n=31  drift -2.54c  retention 0.146
+#
+# Three-quarters of the claimed edge on a game line evaporates within a
+# minute of entry, consistently and in one direction. That is adverse
+# selection, not noise: the free-sample pool shows 0.01c of drift on the
+# same categories when we DON'T buy, across 12,000+ observations.
+#
+# The drift surcharge already taxes these (+2.34c / +2.54c on top of the
+# band), but a tax on a bet that is losing at entry only reduces how often
+# we take it. Quarantine removes the cohort instead.
+#
+# Props are deliberately NOT here: 0.01c drift, retention 1.002 on n=196.
+# Note that retention CANNOT detect a prop mapping error (a stably-wrong
+# number does not move), so props are on probation, not endorsed — the
+# per-category settled scorecard is what will decide.
+#
+# Reversible: empty this list to resume. 'moneyline' covers draws, which are
+# priced as the third leg of a moneyline market.
+blocked_categories: [moneyline]

@@ -20,7 +20,13 @@ from edge.shadow.runner import run_cycle
 from edge.venues.base import BookLevel, MarketBook
 from tests.test_run_cycle_e2e import StubFeed, StubVenue, _event
 
+# Most tests here exercise loop and pricing MECHANICS, not trading policy.
+# `blocked_categories` globally quarantines moneyline (measured -2.34c drift,
+# retention 0.239 on our own fills), which would otherwise make every
+# moneyline fixture untradeable and turn these into vacuous passes. The
+# quarantine itself is pinned by its own tests in test_loop_health.py.
 POLICY = Policy.load()
+POLICY.leagues = {**POLICY.leagues, "blocked_categories": []}
 
 
 def _rig(tmp_path, mode="PAPER"):
@@ -991,3 +997,75 @@ def test_a_fill_without_a_category_is_reported_as_unknown(tmp_path):
                     qty=1.0, price=0.5, ts=now, mode="LIVE_BETA")
     led.record_resolution("m", payout=0.0, ts=now)
     assert "unknown" in led.performance_by_category(days=7, live_only=True)
+
+
+# ── the four changes of 2026-08-02 ──────────────────────────────────────
+
+def test_moneyline_is_globally_quarantined_by_config():
+    """Measured on our own fills: moneyline -2.34c drift at retention 0.239,
+    draw -2.54c at 0.146, across ~126 entries. The free-sample pool shows
+    0.01c on the same categories when we DON'T buy, over 12,000+
+    observations — so this is adverse selection, not noise, and a surcharge
+    only makes us take a losing bet less often."""
+    live = Policy.load()                      # the real config, not the rig's
+    assert live.category_blocked("epl", "moneyline") is True
+    assert live.category_blocked("mlb", "moneyline") is True
+    # Props are on probation, NOT quarantined — retention cannot detect a
+    # prop mapping error, so the settled scorecard decides, not this list.
+    assert live.category_blocked("mlb", "prop") is False
+
+
+def test_the_quarantine_is_reversible_by_config():
+    p = Policy.load()
+    p.leagues = {**p.leagues, "blocked_categories": []}
+    assert p.category_blocked("epl", "moneyline") is False
+
+
+def test_spread_cost_is_measured_against_claimed_edge(tmp_path):
+    """The venue quotes in whole cents: at 50c one tick is 2% of stake, the
+    same size as our entire claimed edge. If crossing eats it, a negative
+    result needs no model error to explain it."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    # bid 0.48 / ask 0.52 -> mid 0.50. We pay the ask: 2c over mid, against
+    # a claimed 3c edge, so only 1c of it was ever real.
+    decision = {"edge": 0.03, "book_asks": [[0.52, 100]], "book_bids": [[0.48, 100]]}
+    led.record_fill(fill_uid="f1", venue="v", market_key="m1", side="BUY",
+                    qty=1.0, price=0.52, ts=now, mode="LIVE_BETA",
+                    category="prop", decision=decision)
+    rep = led.spread_report(days=7, live_only=True)
+    assert rep["prop"]["n"] == 1
+    assert rep["prop"]["spread_c"] == 4.0
+    assert rep["prop"]["paid_over_mid_c"] == 2.0
+    assert rep["prop"]["edge_c"] == 3.0
+    assert rep["prop"]["net_c"] == 1.0
+
+
+def test_a_fill_with_no_book_snapshot_is_skipped_not_counted_as_free():
+    """A missing snapshot must not read as zero spread — that would flatter
+    the average in exactly the direction we are testing for."""
+    import tempfile
+
+    led = Ledger(db_path=str(tempfile.mkdtemp() + "/l.sqlite3"))
+    led.record_fill(fill_uid="f", venue="v", market_key="m", side="BUY",
+                    qty=1.0, price=0.52, ts=time.time(), mode="LIVE_BETA",
+                    category="prop", decision={"edge": 0.03})
+    assert led.spread_report(days=7, live_only=True) == {}
+
+
+def test_bands_are_graded_on_our_own_fills(tmp_path):
+    """bands.yaml is calibrated from the reference account's GLOBAL
+    Polymarket history. We trade Polymarket US. That transfer has never been
+    validated, and this is how it eventually gets validated."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    for i, (price, payout) in enumerate([(0.22, 1.0), (0.23, 0.0), (0.51, 0.0)]):
+        led.record_fill(fill_uid=f"f{i}", venue="v", market_key=f"m{i}",
+                        side="BUY", qty=1.0, price=price, ts=now,
+                        mode="LIVE_BETA", category="prop")
+        led.record_resolution(f"m{i}", payout=payout, ts=now)
+    by_band = led.performance_by_band(days=7, live_only=True)
+    assert "0.20-0.25" in by_band and "0.50-0.55" in by_band
+    assert by_band["0.20-0.25"]["settled"] == 2
+    assert by_band["0.50-0.55"]["settled"] == 1
+    assert by_band["0.50-0.55"]["roi"] == -1.0

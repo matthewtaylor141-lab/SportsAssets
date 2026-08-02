@@ -336,6 +336,8 @@ def test_maker_pricing_qualifies_a_trade_the_ask_would_have_killed():
     from edge.execution.engine import Policy, strategy_filter
 
     policy = Policy.load()
+    # mechanics test: lift the measured moneyline quarantine
+    policy.leagues = {**policy.leagues, "blocked_categories": []}
     at_ask = strategy_filter(policy, "epl", 0.49, 0.50)
     at_maker = strategy_filter(policy, "epl", 0.48, 0.50)
     assert at_ask.ok is False and "edge" in at_ask.reason
@@ -393,6 +395,8 @@ def test_live_cycle_rests_inside_the_spread_instead_of_crossing(tmp_path, monkey
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("EDGE_LIVE_VENUES", "polymarket-us")
     policy = Policy.load()
+    # mechanics test: lift the measured moneyline quarantine
+    policy.leagues = {**policy.leagues, "blocked_categories": []}
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     risk = RiskManager(led, {**policy.risk, "mode": "LIVE_BETA"})
     venue = _PmusStub(ask=0.49, bid=0.40)
@@ -419,6 +423,8 @@ def test_paper_never_invents_a_maker_fill(tmp_path, monkeypatch):
 
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     policy = Policy.load()
+    # mechanics test: lift the measured moneyline quarantine
+    policy.leagues = {**policy.leagues, "blocked_categories": []}
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     risk = RiskManager(led, {**policy.risk, "mode": "PAPER"})
     venue = _PmusStub(ask=0.47, bid=0.40)   # 3c edge: clears either way

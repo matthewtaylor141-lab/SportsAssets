@@ -15,7 +15,13 @@ import pytest
 
 from edge.execution.engine import Policy, strategy_filter
 
+# Most tests here exercise loop and pricing MECHANICS, not trading policy.
+# `blocked_categories` globally quarantines moneyline (measured -2.34c drift,
+# retention 0.239 on our own fills), which would otherwise make every
+# moneyline fixture untradeable and turn these into vacuous passes. The
+# quarantine itself is pinned by its own tests in test_loop_health.py.
 POLICY = Policy.load()
+POLICY.leagues = {**POLICY.leagues, "blocked_categories": []}
 DERIVATIVES = ("spread", "total")
 REPO = Path(__file__).resolve().parents[1]
 

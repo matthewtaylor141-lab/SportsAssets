@@ -919,6 +919,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         funnel["price_drift"] = ledger.price_drift_report(days=7)
         funnel["by_cat_performance"] = ledger.performance_by_category(
             days=7, live_only=risk.is_live)
+        funnel["spread_cost"] = ledger.spread_report(days=7, live_only=risk.is_live)
+        funnel["by_band"] = ledger.performance_by_band(days=7, live_only=risk.is_live)
         funnel["reversion"] = rev
     except Exception as exc:  # noqa: BLE001 — reporting must never break trading
         log.debug("performance snapshot failed: %s", exc)

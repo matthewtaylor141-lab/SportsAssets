@@ -71,8 +71,16 @@ class Policy:
         return None  # unlisted band — not proven, don't trade
 
     def category_blocked(self, league_code: str | None, category: str) -> bool:
-        """League x category blocks (e.g. NFL moneyline: specialist-measured
-        negative even while NFL spreads are strongly positive)."""
+        """League x category blocks, plus GLOBAL category quarantines.
+
+        The global list is the same instrument as the league blocklist,
+        applied to bet type instead of competition: a category our own fills
+        have measured negative stops trading everywhere, not just where it
+        was noticed. Reversible by config — it is a quarantine pending
+        evidence, not a verdict.
+        """
+        if category in (self.leagues.get("blocked_categories") or []):
+            return True
         blocks = self.leagues.get("category_blocks") or {}
         return category in (blocks.get(league_code or "") or [])
 

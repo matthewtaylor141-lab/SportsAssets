@@ -395,6 +395,99 @@ class Ledger:
             "resolved_markets": agg["resolved_markets"],
         }
 
+    def spread_report(self, days: int = 7, live_only: bool = True) -> dict:
+        """What crossing the spread costs us, against what we claimed to win.
+
+        The venue quotes in whole cents. At a 50c contract one tick is 2% of
+        stake, and our claimed edge is 2-3c — so the spread is not a detail
+        around the edge, it is the same size as the edge. If we pay most of
+        it to cross, a negative result needs no model error to explain it.
+
+        Every fill stored its book snapshot, so this is answerable from data
+        already on disk rather than by waiting for new fills.
+
+        `paid_over_mid` is the honest cost: mid is the best two-sided
+        estimate of the market's own price, and anything above it is what we
+        gave up for immediacy.
+        """
+        since = time.time() - days * 86_400
+        mode_clause = "AND mode != 'PAPER'" if live_only else ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT price, category, decision FROM fills "
+                f"WHERE side='BUY' AND ts >= ? AND decision IS NOT NULL "
+                f"{mode_clause}", (since,)).fetchall()
+
+        out: dict[str, dict] = {}
+        for r in rows:
+            try:
+                d = json.loads(r["decision"])
+            except (TypeError, ValueError):
+                continue
+            asks, bids = d.get("book_asks") or [], d.get("book_bids") or []
+            if not asks or not bids:
+                continue
+            best_ask, best_bid = float(asks[0][0]), float(bids[0][0])
+            if not (0 < best_bid < best_ask < 1):
+                continue
+            mid = (best_ask + best_bid) / 2.0
+            cat = r["category"] or "unknown"
+            b = out.setdefault(cat, {"n": 0, "spread": 0.0, "paid_over_mid": 0.0,
+                                     "edge": 0.0})
+            b["n"] += 1
+            b["spread"] += best_ask - best_bid
+            b["paid_over_mid"] += float(r["price"]) - mid
+            b["edge"] += float(d.get("edge") or 0.0)
+
+        for b in out.values():
+            n = b["n"]
+            b["spread_c"] = round(b.pop("spread") / n * 100, 2)
+            b["paid_over_mid_c"] = round(b.pop("paid_over_mid") / n * 100, 2)
+            b["edge_c"] = round(b.pop("edge") / n * 100, 2)
+            # What is left of the claimed edge after paying to cross. If this
+            # is negative we were losing at the moment of entry, whatever the
+            # model said.
+            b["net_c"] = round(b["edge_c"] - b["paid_over_mid_c"], 2)
+        return out
+
+    def performance_by_band(self, days: int = 7, live_only: bool = True) -> dict:
+        """Settled P&L by entry price band, graded on OUR OWN fills.
+
+        config/bands.yaml is calibrated from the reference account's history
+        on GLOBAL Polymarket. We trade Polymarket US — different venue,
+        different flow — and that transfer has never been validated. This is
+        how it gets validated, eventually: with enough settlements per band
+        to say anything. It is a REPORT, not an auto-blocker; at a few
+        hundred settlements across twenty bands there is nothing to act on.
+        """
+        since = time.time() - days * 86_400
+        mode_clause = "AND f.mode != 'PAPER'" if live_only else ""
+        with self._conn() as conn:
+            rows = [dict(x) for x in conn.execute(
+                f"""
+                SELECT f.price AS price, r.pnl AS pnl,
+                       COALESCE(sum(f.qty * f.price), 0) AS staked
+                FROM realizations r
+                JOIN fills f ON f.market_key = r.market_key AND f.side = 'BUY'
+                WHERE r.ts >= ? AND r.kind = 'resolution' {mode_clause}
+                GROUP BY r.id
+                """, (since,)).fetchall()]
+        out: dict[str, dict] = {}
+        for r in rows:
+            if r["staked"] <= 0:
+                continue
+            lo = int(float(r["price"]) * 20) * 5 / 100
+            key = f"{lo:.2f}-{lo + 0.05:.2f}"
+            b = out.setdefault(key, {"settled": 0, "staked": 0.0, "realized": 0.0})
+            b["settled"] += 1
+            b["staked"] += r["staked"]
+            b["realized"] += r["pnl"]
+        for b in out.values():
+            b["staked"] = round(b["staked"], 2)
+            b["realized"] = round(b["realized"], 2)
+            b["roi"] = round(b["realized"] / b["staked"], 4) if b["staked"] else None
+        return dict(sorted(out.items()))
+
     def performance_by_category(self, days: int = 7,
                                 live_only: bool = True) -> dict:
         """Settled scorecard split by what KIND of bet it was.
