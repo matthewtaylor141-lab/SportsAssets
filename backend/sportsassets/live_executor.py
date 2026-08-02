@@ -165,24 +165,29 @@ async def _market_context(pool, payload: dict) -> dict:
     return ctx
 
 
-# HARD OFF — not env-gated, not config-gated (2026-08-02). This copy-trader
-# shares the trading account with the edge engine, and with
-# LIVE_TRADING_ENABLED set on the platform services it spent 2026-08-02
-# placing real whale-copy orders that read as unauthorized activity:
-# $7-$18 fills on ATP (a league the edge engine blocks), paired tennis
-# ML+total, and future-dated MLB — 5-12x the engine's per-market cap,
-# polluting its published track record and defeating its risk caps. Two
-# uncoordinated traders on one account means neither's risk model is
-# real. A code default cannot beat a set env var, so the kill is code:
-# flip LIVE_COPY_TRADING_BUILT_OUT to re-enable ONLY once copy-trading
-# has its own venue account and its own published record.
-LIVE_COPY_TRADING_BUILT_OUT = False
+# COPY MODE (2026-08-02, owner-directed). History, because it earns the
+# design: on 2026-08-02 this executor was first suspected of being the
+# day's "unauthorized trader" and hard-killed; the data exonerated it
+# (dormant — zero probes in 30d) and convicted the edge engine's arb
+# path instead. The same day, a public-tape decay study measured the
+# source whale's edge surviving a copier's 15-60s latency at 1.3-1.5c
+# of his 2.3c — positive enough that the owner directed a live trial at
+# the venue MINIMUM: ONE CONTRACT per fresh source-whale BUY. Penny
+# scale, real money, hard daily ceiling — the adverse-selection haircut
+# the tape cannot measure (we fill preferentially on his mediocre
+# entries) gets measured by settled dollars instead.
+#   "off"         — places nothing, regardless of env or config
+#   "penny_trial" — 1 contract per copy, PENNY_TRIAL_DAILY_USD ceiling
+#   "full"        — ratio sizing per config; requires the trial cohort
+#                   to have cleared the promotion gate first
+COPY_MODE = "penny_trial"
+PENNY_TRIAL_DAILY_USD = 50.0
 
 
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
     """Called on every fresh detection (after the paper trade). All guards
     re-checked here; failure of any guard is a silent no-op or logged skip."""
-    if not LIVE_COPY_TRADING_BUILT_OUT:
+    if COPY_MODE == "off":
         return
     cfg = settings()
     venue = active_venue()
@@ -200,19 +205,34 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     if await _is_paused(pool):
         return
     day_room, total_room = await _caps_room(pool)
-    if day_room <= 1 or total_room <= 1:
+    if COPY_MODE == "penny_trial":
+        # The trial ceiling binds tighter than the config caps: the day's
+        # copy spend never exceeds PENNY_TRIAL_DAILY_USD no matter what
+        # live_max_daily_usd says.
+        day_spent = cfg.live_max_daily_usd - day_room
+        day_room = min(day_room, PENNY_TRIAL_DAILY_USD - day_spent)
+    if day_room <= 0 or total_room <= 1:
         log.warning("live caps exhausted (day room %.2f, total room %.2f) — skipping",
                     day_room, total_room)
         return
 
-    limit, usd, shares = plan_order(
-        his_price, his_notional, cfg.live_copy_ratio,
-        min(cfg.live_max_per_fill_usd, day_room, total_room),
-        cfg.live_max_slippage_cents,
-        whole_units=(venue == "polymarket-us"),
-    )
-    if usd < 1 or shares <= 0:
-        return
+    if COPY_MODE == "penny_trial":
+        # One contract at his price + slippage: the venue's true minimum.
+        # A whole-unit FOK either fills the single contract or kills.
+        limit = round(min(his_price + cfg.live_max_slippage_cents / 100.0, 0.99), 2)
+        shares = 1.0
+        usd = limit
+        if usd > day_room:
+            return
+    else:
+        limit, usd, shares = plan_order(
+            his_price, his_notional, cfg.live_copy_ratio,
+            min(cfg.live_max_per_fill_usd, day_room, total_room),
+            cfg.live_max_slippage_cents,
+            whole_units=(venue == "polymarket-us"),
+        )
+        if usd < 1 or shares <= 0:
+            return
 
     row_id = await pool.fetchval(
         """

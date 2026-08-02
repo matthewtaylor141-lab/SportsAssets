@@ -66,7 +66,9 @@ def classify_slug(slug: str) -> dict:
 
 
 def build(positions: dict[str, dict], activities: list[dict],
-          since_ts: float, max_stake: float | None = None) -> dict:
+          since_ts: float, max_stake: float | None = None,
+          attributed: set[str] | None = None,
+          copy_slugs: set[str] | None = None) -> dict:
     """Pure builder (unit-tested): venue payloads -> the track record.
 
     `max_stake` caps what the RECORD presents: positions whose cost exceeds
@@ -125,6 +127,25 @@ def build(positions: dict[str, dict], activities: list[dict],
     rows = []
     undatable = 0
     over_limit = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
+    # Provenance (2026-08-02): a size cap alone let every non-engine fill
+    # under $100 wear the AI's record — the arb-bug cohort did exactly
+    # that. When the caller supplies the engine's own claimed slugs
+    # (`attributed`, from its mirrored fills) the record requires POSITIVE
+    # attribution; the copy sleeve's slugs (`copy_slugs`, from its audit
+    # table) are its own cohort and excluded first. Both exclusions are
+    # disclosed with the same honesty contract as the size cap.
+    unattributed = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
+    copy_sleeve = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
+
+    def _excluded_bucket(slug: str, stake_now: float):
+        if copy_slugs is not None and slug in copy_slugs:
+            return copy_sleeve
+        if attributed is not None and slug not in attributed:
+            return unattributed
+        if max_stake is not None and stake_now > max_stake:
+            return over_limit
+        return None
+
     seen: set[str] = set()
     for slug, p in (positions or {}).items():
         seen.add(slug)
@@ -152,13 +173,14 @@ def build(positions: dict[str, dict], activities: list[dict],
             realized = res["realized"] or realized
             cost = cost or res["cost"]
         stake_now = cost if cost > 0 else e.get("notional", 0.0)
-        if max_stake is not None and stake_now > max_stake:
-            over_limit["count"] += 1
-            over_limit["stake"] += stake_now
+        bucket = _excluded_bucket(slug, stake_now)
+        if bucket is not None:
+            bucket["count"] += 1
+            bucket["stake"] += stake_now
             if settled:
-                over_limit["net_pnl"] += realized
+                bucket["net_pnl"] += realized
             else:
-                over_limit["open"] += 1
+                bucket["open"] += 1
             continue
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
@@ -193,10 +215,11 @@ def build(positions: dict[str, dict], activities: list[dict],
         if entry_ts < since_ts:
             continue
         cost = res["cost"] or e.get("notional", 0.0)
-        if max_stake is not None and cost > max_stake:
-            over_limit["count"] += 1
-            over_limit["stake"] += cost
-            over_limit["net_pnl"] += res["realized"]
+        bucket = _excluded_bucket(slug, cost)
+        if bucket is not None:
+            bucket["count"] += 1
+            bucket["stake"] += cost
+            bucket["net_pnl"] += res["realized"]
             continue
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
@@ -287,6 +310,23 @@ def build(positions: dict[str, dict], activities: list[dict],
              "stake": round(over_limit["stake"], 2),
              "net_pnl": round(over_limit["net_pnl"], 2)}
             if max_stake is not None else None),
+        # Positions the engine's own mirror does not claim. When attribution
+        # is active this is where non-engine activity (the arb-bug cohort,
+        # anything unexplained) lands — visible, never blended in.
+        "excluded_unattributed": (
+            {"count": unattributed["count"],
+             "open": unattributed["open"],
+             "stake": round(unattributed["stake"], 2),
+             "net_pnl": round(unattributed["net_pnl"], 2)}
+            if attributed is not None else None),
+        # The whale-copy sleeve's positions: its own strategy, its own
+        # cohort, never counted as the engine's.
+        "excluded_copy_sleeve": (
+            {"count": copy_sleeve["count"],
+             "open": copy_sleeve["open"],
+             "stake": round(copy_sleeve["stake"], 2),
+             "net_pnl": round(copy_sleeve["net_pnl"], 2)}
+            if copy_slugs is not None else None),
         "daily": sorted(daily.values(), key=lambda d: d["date"]),
         "trades": rows,
     }
@@ -396,6 +436,26 @@ async def track_record(since: str | None = None,
         # Serve the live window rather than 500 if the DB hiccups; the
         # next successful request re-archives everything it sees.
         pass
+    attributed = copy_slugs = None
+    try:
+        from ..db import get_pool
+
+        pool = await get_pool()
+        eng = await pool.fetch(
+            "SELECT DISTINCT outcome_id FROM engine_fills "
+            "WHERE venue LIKE 'polymarket%'")
+        # An EMPTY mirror means attribution is unavailable (mirror down or
+        # never ran), not that the engine placed nothing — filtering on it
+        # would zero the whole record. None disables the filter; the old
+        # size-cap behavior stands until the mirror speaks.
+        attributed = {r["outcome_id"] for r in eng} or None
+        cp = await pool.fetch(
+            "SELECT DISTINCT us_market_slug FROM live_orders "
+            "WHERE us_market_slug IS NOT NULL")
+        copy_slugs = {r["us_market_slug"] for r in cp}
+    except Exception:  # noqa: BLE001 — provenance is an upgrade, not a gate
+        attributed = copy_slugs = None
     return {"configured": True,
             **build(raw["positions"], acts, since_ts,
-                    max_stake=max_stake)}
+                    max_stake=max_stake, attributed=attributed,
+                    copy_slugs=copy_slugs)}

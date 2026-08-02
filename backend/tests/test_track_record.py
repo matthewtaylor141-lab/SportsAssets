@@ -170,3 +170,42 @@ def test_zero_realized_settlements_are_pushes_not_losses():
     out = build(positions, acts, TS_AUG1)
     s = out["summary"]
     assert s["settled"] == 3 and s["wins"] == 0 and s["losses"] == 0
+
+
+def test_positive_attribution_excludes_what_the_engine_never_claimed():
+    """A size cap alone let every non-engine fill under $100 wear the AI's
+    record — the 2026-08-02 arb-bug cohort did exactly that. With the
+    engine's own claimed slugs supplied, unclaimed positions are excluded
+    AND disclosed, never blended in."""
+    positions = {"aec-mlb-ours-2026-08-02": _pos(2, 1.0, 1.1),
+                 "aec-atp-rogue-2026-08-02": _pos(30, 17.55, 16.0)}
+    acts = [_trade("aec-mlb-ours-2026-08-02", TS_AUG2, 2, 0.5),
+            _trade("aec-atp-rogue-2026-08-02", TS_AUG2, 30, 0.585)]
+    out = build(positions, acts, TS_AUG1,
+                attributed={"aec-mlb-ours-2026-08-02"})
+    assert [r["market_slug"] for r in out["trades"]] == ["aec-mlb-ours-2026-08-02"]
+    ex = out["excluded_unattributed"]
+    assert ex["count"] == 1 and ex["open"] == 1
+    assert ex["stake"] == 17.55
+
+
+def test_copy_sleeve_positions_are_their_own_cohort_not_the_engines():
+    """Copy-sleeve fills are excluded FIRST — even if the engine's mirror
+    also touched the market, the copy trade never inflates the AI record."""
+    positions = {"aec-mlb-shared-2026-08-02": _pos(2, 0.45, 0.5)}
+    acts = [_trade("aec-mlb-shared-2026-08-02", TS_AUG2, 2, 0.225)]
+    out = build(positions, acts, TS_AUG1,
+                attributed={"aec-mlb-shared-2026-08-02"},
+                copy_slugs={"aec-mlb-shared-2026-08-02"})
+    assert out["trades"] == []
+    assert out["excluded_copy_sleeve"]["count"] == 1
+    assert out["excluded_unattributed"]["count"] == 0
+
+
+def test_no_attribution_sets_means_the_old_behavior_exactly():
+    positions = {"aec-mlb-x-2026-08-02": _pos(2, 1.0, 1.1)}
+    acts = [_trade("aec-mlb-x-2026-08-02", TS_AUG2, 2, 0.5)]
+    out = build(positions, acts, TS_AUG1)
+    assert len(out["trades"]) == 1
+    assert out["excluded_unattributed"] is None
+    assert out["excluded_copy_sleeve"] is None
