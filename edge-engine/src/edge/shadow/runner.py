@@ -356,6 +356,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     from edge.fairvalue.props import fair_for_prop, parse_prop
     from edge.fairvalue.lines import (
         is_draw,
+        margin_to_spread,
         outcome_matches,
         pair_quotes,
         parse_outcome_line,
@@ -566,6 +567,9 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     return None, "prop", {"reason": f"prop_{why}",
                                           "venue_outcome": oc_name[:48]}
             segment, oc_name = split_segment(oc_name)
+            # Margin prose -> the run-line spread it actually is, so it can
+            # pair against the sharp spread quote for the SAME segment.
+            oc_name = margin_to_spread(oc_name) or oc_name
             if segment is None:
                 fairs, deriv_sides = priced["fairs"], priced["deriv_sides"]
             else:
@@ -917,6 +921,33 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                         # Hard rule: real money only on MEASURED leagues;
                         # shadow-only leagues keep paper-logging.
                         effective_mode = "PAPER"
+                    # PER-FILL net-margin gate. The band threshold prices the
+                    # EDGE; nothing until now priced the BOOK. Entry margin
+                    # measured live 2026-08-02: exploration props entered at
+                    # -0.92% net — paying 2.13c over mid for 1.86c of claimed
+                    # edge on 4.3c-wide books. The band floor works on
+                    # category averages; this is the same arithmetic applied
+                    # to the fill actually in front of us:
+                    #     (edge - paid_over_mid) / price >= floor
+                    # Maker entries price BELOW mid and pass more easily —
+                    # correctly, since not crossing is the whole point of
+                    # resting. A book with no bid has no measurable mid:
+                    # core fills proceed on the band floor alone (which
+                    # already embeds average crossing cost), exploration
+                    # refuses — the study tier never buys unmeasurable.
+                    net_floor = float(policy.risk.get("net_margin_floor", 0.02))
+                    best_bid = book.bids[0].price if book.bids else None
+                    if best_bid is not None and 0 < best_bid < ask.price:
+                        paid_over_mid = entry_px - (ask.price + best_bid) / 2
+                        net = (verdict.edge - paid_over_mid) / max(entry_px, 1e-6)
+                        if net < net_floor:
+                            reject("net_margin")
+                            nm = funnel.setdefault("net_margin_refused", {})
+                            nm[category] = nm.get(category, 0) + 1
+                            continue
+                    elif verdict.tier == "exploration":
+                        reject("net_margin_unmeasurable")
+                        continue
                     # Stake in proportion to how far the edge clears its
                     # bar: a flat ticket pays the same for a 2c edge as a
                     # 6c one. Bounded by the same caps either way — this

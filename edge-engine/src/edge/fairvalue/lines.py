@@ -269,6 +269,35 @@ def tag_segment(outcome_key: str, segment: str | None) -> str:
 _SEG_PREFIX = re.compile(r"^\[([a-z0-9]+)\]\s*")
 
 
+# "TEAM wins by over 1.5 runs" is a RUN-LINE SPREAD wearing prose: margin
+# > 1.5 is exactly TEAM -1.5, a market the sharp books quote directly
+# (including per-segment: f5 spreads are requested). Before this it was
+# parsed as a player prop with player "atlanta braves wins by" (and refused)
+# or fell into the team matcher (and refused) — hundreds of mappable
+# markets a cycle thrown away. "N+ runs" means margin >= N, which is the
+# -(N - 0.5) line; "over X" means the -X line.
+_MARGIN_RE = re.compile(
+    r"^(?P<team>.+?)\s+wins?\s+by\s+"
+    r"(?:(?:over\s+)(?P<over>\d+(?:\.\d+)?)|(?P<plus>\d+(?:\.\d+)?)\+)"
+    r"\s*(?:runs?|goals?|points?)?(?:\s+in\s+.*)?$",
+    re.IGNORECASE)
+
+
+def margin_to_spread(text: str) -> str | None:
+    """'Baltimore Orioles wins by over 1.5 runs in first…' -> 'Baltimore
+    Orioles -1.5', or None when the text is not a margin market. Any
+    segment context was already split off by split_segment; the textual
+    tail ('in first…') describes that same segment and is dropped."""
+    m = _MARGIN_RE.match((text or "").strip())
+    if not m:
+        return None
+    line = (float(m.group("over")) if m.group("over")
+            else float(m.group("plus")) - 0.5)
+    if line <= 0:
+        return None
+    return f"{m.group('team').strip()} -{line:g}"
+
+
 _SET_WINNER = re.compile(
     r"^\s*set\s*(\d)\s*winner\s*$|^\s*(\d)(?:st|nd|rd|th)\s+set\s+winner\s*$",
     re.IGNORECASE)

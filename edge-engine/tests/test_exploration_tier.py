@@ -147,7 +147,19 @@ def test_yesterdays_exploration_does_not_count_against_today(tmp_path):
 
 def test_every_fill_records_which_tier_bought_it(tmp_path, monkeypatch):
     from edge.shadow.runner import run_cycle
+    from edge.venues.base import BookLevel, MarketBook
     from tests.test_run_cycle_e2e import StubFeed, StubVenue, _event
+
+    # A 1c-wide book: the exploration tier pays the SAME per-fill
+    # net-margin floor as core — the study budget measures small edges, it
+    # does not fund entries that are negative at the moment of purchase.
+    # 1.5c edge minus 0.5c over mid, over 48.5c, is 2.06%: just inside.
+    class TightVenue(StubVenue):
+        def get_book(self, market_id, token):
+            return MarketBook(venue=self.name, market_id=market_id,
+                              outcome_id=token,
+                              bids=[BookLevel(self._ask.price - 0.01, 500)],
+                              asks=[self._ask], ts=time.time())
 
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
@@ -155,7 +167,7 @@ def test_every_fill_records_which_tier_bought_it(tmp_path, monkeypatch):
     ev = _event()
     ev.books = DEEP
     # fair 0.50 vs ask 0.485 -> 1.5c: exploration, not core.
-    funnel = run_cycle([StubVenue(ask_price=0.485)], StubFeed([ev]),
+    funnel = run_cycle([TightVenue(ask_price=0.485)], StubFeed([ev]),
                        POLICY, risk, led, ["soccer_epl"])
     assert funnel["by_tier"]["exploration"] >= 1
     assert "core" not in funnel.get("by_tier", {})

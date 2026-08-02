@@ -122,6 +122,12 @@ def parse_prop(text: str) -> tuple[PropBet | None, str | None]:
     """
     if not text or not text.strip():
         return None, "empty"
+    # Team margin markets ("TEAM wins by over 1.5 runs") contain stat words
+    # ("runs") and an N+ shape, so the prop parser would happily read them
+    # as batter_runs_scored for a player named "atlanta braves wins by".
+    # They are run-line spreads and are handled by the line matcher.
+    if re.search(r"\bwins?\s+by\b", text, re.IGNORECASE):
+        return None, "team_margin_not_prop"
     market_key, why = _match_stat(text)
     if market_key is None:
         return None, why

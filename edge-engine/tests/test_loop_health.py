@@ -1207,3 +1207,42 @@ def test_exploration_respects_the_relative_guard_too():
     # deep consensus — and 60% of the price. Refused.
     v = strategy_filter(POLICY, "epl", 0.04, 0.064, consensus_books=6)
     assert not v.ok
+
+
+# ── the per-fill net-margin gate ────────────────────────────────────────
+
+def test_a_wide_spread_eats_the_edge_and_the_fill_is_refused(tmp_path, monkeypatch):
+    """3c of edge on a 10c-wide book pays ~5c to cross: negative at entry,
+    whatever settlement says later. Measured live 2026-08-02: exploration
+    props entered at -0.92% net. The band threshold prices the edge; this
+    gate prices the BOOK actually in front of us."""
+    from edge.shadow.runner import run_cycle
+    from edge.venues.base import BookLevel, MarketBook
+
+    class WideVenue(StubVenue):
+        def get_book(self, market_id, token):
+            return MarketBook(venue=self.name, market_id=market_id,
+                              outcome_id=token,
+                              bids=[BookLevel(self._ask.price - 0.10, 500)],
+                              asks=[self._ask], ts=time.time())
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    funnel = run_cycle([WideVenue(ask_price=0.47)], StubFeed([_event()]),
+                       POLICY, risk, ledger, ["soccer_epl"])
+    assert funnel["logged"] == 0
+    assert funnel["rejects"].get("net_margin", 0) >= 1
+    assert funnel.get("net_margin_refused", {})
+
+
+def test_a_tight_spread_passes_the_same_fill(tmp_path, monkeypatch):
+    """Identical edge, 2c book: (3c - 1c) / 47c = 4.3% net — well over the
+    floor. The gate charges for the book, not for existing."""
+    from edge.shadow.runner import run_cycle
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    funnel = run_cycle([StubVenue(ask_price=0.47)], StubFeed([_event()]),
+                       POLICY, risk, ledger, ["soccer_epl"])
+    assert funnel["logged"] >= 1
+    assert funnel["rejects"].get("net_margin", 0) == 0

@@ -487,7 +487,11 @@ def test_live_cycle_rests_inside_the_spread_instead_of_crossing(tmp_path, monkey
     policy.leagues = {**policy.leagues, "blocked_categories": []}
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     risk = RiskManager(led, {**policy.risk, "mode": "LIVE_BETA"})
-    venue = _PmusStub(ask=0.49, bid=0.40)
+    # bid 0.45: resting at 0.48 pays 1c over the 0.47 mid for 2c of edge —
+    # 2.1% net, inside the per-fill net-margin floor. (The old 0.40 bid made
+    # even the maker price pay 3.5c over mid for 2c of edge, which the gate
+    # now correctly refuses: a wide book eats the edge whoever quotes it.)
+    venue = _PmusStub(ask=0.49, bid=0.45)
 
     funnel = run_cycle([venue], StubFeed([_event()]), policy, risk, led,
                        ["soccer_epl"])
@@ -515,7 +519,7 @@ def test_paper_never_invents_a_maker_fill(tmp_path, monkeypatch):
     policy.leagues = {**policy.leagues, "blocked_categories": []}
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     risk = RiskManager(led, {**policy.risk, "mode": "PAPER"})
-    venue = _PmusStub(ask=0.47, bid=0.40)   # 3c edge: clears either way
+    venue = _PmusStub(ask=0.47, bid=0.45)   # 3c edge, 1c over mid: clears
 
     run_cycle([venue], StubFeed([_event()]), policy, risk, led, ["soccer_epl"])
     assert venue.orders == []                            # no venue contact

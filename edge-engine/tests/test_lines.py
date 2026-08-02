@@ -606,3 +606,30 @@ def test_tennis_games_total_prices_end_to_end(tmp_path, monkeypatch):
     assert funnel["logged"] == 1, funnel["rejects"]
     assert funnel["rejects"].get("total_unit_mismatch", 0) >= 1
     assert funnel["rejects"].get("no_side_match_moneyline", 0) == 0
+
+
+# ── margin prose is a run-line spread, priced or refused as one ─────────
+
+def test_margin_prose_becomes_the_spread_it_is():
+    from edge.fairvalue.lines import margin_to_spread, parse_outcome_line
+
+    assert margin_to_spread("Baltimore Orioles wins by over 1.5 runs in first 5 innings") \
+        == "Baltimore Orioles -1.5"
+    # "N+ runs" is margin >= N: the -(N - 0.5) line, same half-point logic
+    # as props.
+    assert margin_to_spread("Atlanta Braves wins by 2+ runs") == "Atlanta Braves -1.5"
+    assert margin_to_spread("Arsenal wins by over 2.5 goals") == "Arsenal -2.5"
+    assert margin_to_spread("Atlanta Braves") is None
+    assert margin_to_spread("Over 8.5") is None
+    p = parse_outcome_line(margin_to_spread("Atlanta Braves wins by 2+ runs"))
+    assert (p.kind, p.team, p.point) == ("spread", "Atlanta Braves", -1.5)
+
+
+def test_margin_prose_never_parses_as_a_player_prop():
+    """'wins by over 2.5 runs' contains 'runs' and a number, so the prop
+    parser would read it as batter_runs_scored for a player named
+    'atlanta braves wins by' — observed live. It refuses by name."""
+    from edge.fairvalue.props import parse_prop
+
+    bet, why = parse_prop("Atlanta Braves wins by over 2.5 runs")
+    assert bet is None and why == "team_margin_not_prop"
