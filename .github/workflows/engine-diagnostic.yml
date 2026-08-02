@@ -117,6 +117,10 @@ jobs:
           echo "#                      VERDICT                            #"
           echo "###########################################################"
           jq -r '.detail.verdict // "(engine predates the verdict build)"' /tmp/status.json
+          # Liveness first. A blank funnel reads identically whether the
+          # engine is idle or dead; the heartbeat age is what separates them.
+          jq -r '"heartbeat : \(.beat_at // "NONE — engine has not reported")"' \
+             /tmp/status.json 2>/dev/null || true
           jq -r '"cycle_s   : \(.detail.cycle_s // "?")",
                  "mode      : \(.detail.mode // "?")",
                  "logged    : \(.detail.logged // "?")",
@@ -225,6 +229,11 @@ jobs:
           # What crossing the spread costs, against what we claimed to win.
           # net_c below zero means we were losing at the moment of entry,
           # whatever the model said about the price.
+          jq -r '"heartbeat : \(.beat_at // "NONE — engine has not reported")"' \
+             /tmp/status.json 2>/dev/null || true
+          jq -r '.detail.reconciled // {} | if .trades_seen then
+                   "reconciled: \(.fills_added) fills restored, $\(.cost_restored) of cost the ledger had forgotten"
+                 else empty end' /tmp/status.json 2>/dev/null || true
           echo "ARBITRAGE:"
           jq -r '"   books found: \(.detail.arb_found // 0)   profit booked $\(.detail.arb_profit // 0)"' \
              /tmp/status.json 2>/dev/null || true

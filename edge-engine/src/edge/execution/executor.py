@@ -193,6 +193,63 @@ def sync_pmus_fills(adapter, ledger: Ledger, mode: str) -> int:
     return n
 
 
+def reconcile_positions(adapter, ledger: Ledger, mode: str,
+                        limit: int = 300) -> dict:
+    """Rebuild what we already own from the venue's own trade history.
+
+    THE BUG THIS FIXES. Every per-market cap and the never-add rule are
+    enforced against the ENGINE's ledger — `market_open_cost()` reads
+    ledger.position(). The ledger is SQLite at EDGE_LEDGER_DB, which on an
+    ephemeral filesystem is destroyed on every deploy. A fresh ledger
+    therefore believes it owns nothing, re-grants the full $1.50 of
+    per-market room, and buys the same market again. Six deploys in a day
+    turns a $1.50 cap into a $5.00 position.
+
+    Observed 2026-08-02, all of them prop or segment markets added that day:
+        $5.00  astatc-mlb-sf-sd-2026-08-02-k-mickin-gte6
+        $4.72  astatc-mlb-az-cle-2026-08-02-k-merkel-gte4
+        $4.23  atc-mlb-min-sea-2026-08-02-f5-sea
+
+    The same wipe is why the drift surcharge and the reversion estimate read
+    empty after a deploy: they are derived from the same store.
+
+    Reconciliation is idempotent by fill_uid and only ever ADDS what the
+    ledger is missing, so running it repeatedly is safe. It writes a fill
+    per venue trade rather than a synthetic aggregate, which keeps the
+    audited average-cost pipeline as the single implementation of the maths.
+
+    The durable fix is a persistent disk for EDGE_LEDGER_DB. This makes a
+    fresh ledger safe in the meantime, which matters because "the caps are
+    only correct if the disk survived" is not a risk control.
+    """
+    seen, added, cost = 0, 0, 0.0
+    for trade in adapter.recent_trades(limit=limit):
+        slug = trade.get("marketSlug")
+        if not slug:
+            continue
+        seen += 1
+        try:
+            qty = float(trade.get("qty") or 0)
+            price = float((trade.get("price") or {}).get("value") or 0)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0 or not (0 < price < 1):
+            continue
+        if (trade.get("side") or "BUY").upper() != "BUY":
+            continue
+        r = ledger.record_fill(
+            fill_uid=f"recon-{trade.get('id')}", venue=adapter.name,
+            market_key=market_key(adapter.name, slug), side="BUY",
+            qty=qty, price=price, ts=None, fee=0.0, mode=mode,
+            category="reconciled",
+            decision={"source": "position_reconciliation", "raw": trade})
+        if r["applied"]:
+            added += 1
+            cost += qty * price
+    return {"trades_seen": seen, "fills_added": added,
+            "cost_restored": round(cost, 2)}
+
+
 def reap_pmus_makers(adapter, ledger: Ledger, ttl_s: float,
                      now: float | None = None) -> dict:
     """Close out resting orders: cancel anything past its TTL, and drop the

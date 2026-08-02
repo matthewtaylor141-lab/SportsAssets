@@ -219,6 +219,10 @@ def volume_verdict(funnel: dict, risk) -> str:
 
 _ROTATION = {"i": 0}
 
+# Position reconciliation runs once per process: a restart is exactly when
+# the ledger may have been wiped, and exactly when the caps need rebuilding.
+_RECONCILED: dict = {}
+
 
 def _phase(market_key: str) -> int:
     """Stable per-market offset in [0, 3600) — spreads periodic work evenly
@@ -1105,6 +1109,7 @@ def main() -> None:
     from edge.execution.engine import Policy
     from edge.execution.executor import (
         reap_pmus_makers,
+        reconcile_positions,
         sync_kalshi_fills,
         sync_pmus_fills,
     )
@@ -1361,6 +1366,15 @@ def main() -> None:
                         # Fills FIRST, then reap: the reaper only returns an
                         # event claim when the market holds no position, so
                         # it must see this cycle's fills before deciding.
+                        # Rebuild what we already own BEFORE anything reads
+                        # a cap. Caps are enforced against the ledger, the
+                        # ledger is ephemeral, and a ledger that has
+                        # forgotten a position re-grants its full room —
+                        # which is how a $1.50 cap became a $5.00 holding.
+                        if not _RECONCILED.get(a.name):
+                            funnel["reconciled"] = reconcile_positions(
+                                a, ledger, risk.mode)
+                            _RECONCILED[a.name] = True
                         funnel["pmus_fill_sync"] = sync_pmus_fills(a, ledger, risk.mode)
                         funnel["makers"] = reap_pmus_makers(a, ledger, maker_ttl_s)
             log.info("cycle complete: %s", funnel)
