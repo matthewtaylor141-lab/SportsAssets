@@ -278,6 +278,43 @@ def test_a_sport_with_games_in_the_window_is_always_polled_fast(monkeypatch):
     assert client._ttl_for("soccer_epl") == 10
 
 
+def _rich_client(remaining, used=10_000.0, elapsed_s=86_400.0):
+    """A client whose measured burn rate gives `remaining / (used/day)` of
+    runway — the input the speed scaler actually reads."""
+    c = TheOddsAPIClient(api_key="k", cache_ttl_s=25)
+    c._sport_events["baseball_mlb"] = 3
+    c._quota = {"remaining": remaining, "used": used}
+    c._quota_t0, c._quota_used0 = time.time() - elapsed_s, 0.0
+    return c
+
+
+def test_a_rich_quota_buys_freshness_automatically():
+    """Staleness is the measured edge leak (retention 0.72), and freshness
+    is bought with credits. A plan upgrade must speed the engine up on its
+    own — no config edit, no redeploy: runway >= 2x the billing target
+    drops active sports to the fast TTL and props to the fast event TTL."""
+    c = _rich_client(remaining=10_000.0 * 90)   # ~90 days of runway
+    assert c._credits_rich() is True
+    assert c._ttl_for("baseball_mlb") == c.FAST_TTL_S
+    assert c._event_ttl_s() == c.FAST_EVENT_TTL_S
+    assert c.quota()["fast_mode"] is True
+
+
+def test_a_thin_or_unknown_quota_never_speeds_up():
+    """The same knob must fail SAFE: a runway under twice the target keeps
+    the base clocks (the governor handles real scarcity by parking sports),
+    and an unmeasured quota is not permission to burn it."""
+    thin = _rich_client(remaining=10_000.0 * 40)   # 40d < 2x30d target
+    assert thin._credits_rich() is False
+    assert thin._ttl_for("baseball_mlb") == 25
+    assert thin._event_ttl_s() == thin.EVENT_TTL_S
+
+    unknown = TheOddsAPIClient(api_key="k", cache_ttl_s=25)
+    unknown._sport_events["baseball_mlb"] = 3
+    assert unknown._credits_rich() is False
+    assert unknown._ttl_for("baseball_mlb") == 25
+
+
 def test_a_sport_with_nothing_in_the_window_coasts(monkeypatch):
     """Covering every sport means most of them are out of season at any time.
     They cost credits and can never trade — there is nothing to be stale

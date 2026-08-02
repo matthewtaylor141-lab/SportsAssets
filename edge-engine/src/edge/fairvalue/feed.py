@@ -268,7 +268,32 @@ class TheOddsAPIClient(OddsFeed):
         if self._parked:
             q["parked_sports"] = len(self._parked)
         q["burn_per_day"] = round(self._burn_per_day() or 0.0)
+        q["fast_mode"] = self._credits_rich()
         return q
+
+    # ── adaptive speed: spend a rich quota on freshness ─────────────────
+    #
+    # Staleness is the engine's measured edge leak (retention 0.72: about a
+    # quarter of claimed edge evaporates between quote and decision), and
+    # freshness is bought with credits. These knobs scale with the ACCOUNT,
+    # not a config constant: when the measured runway comfortably outlasts
+    # the billing month, quotes refresh on FAST_TTL_S and per-event payloads
+    # on FAST_EVENT_TTL_S; when it thins, both fall back and the governor
+    # parks the tail sports. A plan upgrade speeds the engine up on its own,
+    # and a downgrade cannot silently run the account dry.
+
+    FAST_TTL_S = 10.0          # sharp-line refresh when credits are rich
+    FAST_EVENT_TTL_S = 600.0   # props/segments refresh when credits are rich
+    RICH_RUNWAY_FACTOR = 2.0   # runway must be twice the billing target
+
+    def _credits_rich(self) -> bool:
+        remaining = self._quota.get("remaining")
+        burn = self._burn_per_day()
+        if remaining is None or burn is None or burn <= 0:
+            return False               # unknown quota is not permission
+        target = float(os.environ.get("EDGE_QUOTA_TARGET_DAYS",
+                                      self.QUOTA_TARGET_DAYS))
+        return remaining / burn >= self.RICH_RUNWAY_FACTOR * target
 
     # ── credit governor ─────────────────────────────────────────────────
     #
@@ -284,8 +309,8 @@ class TheOddsAPIClient(OddsFeed):
     QUOTA_TARGET_DAYS = 30      # the budget should outlast the billing month
 
     def _burn_per_day(self) -> float | None:
-        used, t0 = self._quota.get("used"), self._quota_t0
-        if used is None or t0 is None or self._quota_used0 is None:
+        used, t0 = self._quota.get("used"), getattr(self, "_quota_t0", None)
+        if used is None or t0 is None or getattr(self, "_quota_used0", None) is None:
             return None
         elapsed = time.time() - t0
         spent = used - self._quota_used0
@@ -404,7 +429,20 @@ class TheOddsAPIClient(OddsFeed):
         # Low credits used to quietly stretch the TTL of non-imminent sports.
         # That is the same silent-disable in a different costume, and the
         # governor now handles scarcity by parking named sports instead.
+        # Rich credits do the opposite: freshness is the one thing the
+        # budget can buy that the strategy measurably lacks.
+        if self._credits_rich():
+            return min(self._cache_ttl, self.FAST_TTL_S)
         return self._cache_ttl
+
+    def _event_ttl_s(self) -> float:
+        """Per-event payloads are the billing hot spot (markets x regions,
+        per event) — but a 30-minute prop cache is also 30 minutes of
+        staleness on the markets that make up most of our volume. Refresh
+        them on the fast clock whenever the measured runway allows."""
+        if self._credits_rich():
+            return self.FAST_EVENT_TTL_S
+        return self.EVENT_TTL_S
 
     # Segment and player-prop markets are served ONLY per event; the bulk
     # endpoint answers 422 and names every one of them. Measured 2026-07-31.
@@ -562,13 +600,13 @@ class TheOddsAPIClient(OddsFeed):
         # never deletes them accumulates every game of the day. That is the
         # OOM the worker kept restarting on (observed 2026-08-02).
         self._event_cache = {k: v for k, v in self._event_cache.items()
-                             if now - v[0] < self.EVENT_TTL_S}
+                             if now - v[0] < self._event_ttl_s()}
         # Nearest games first: those are the ones a venue actually lists.
         for ev in sorted(events, key=lambda e: e.commence_ts)[:self.EVENT_MAX_PER_SPORT]:
             if not ev.event_id:
                 continue
             hit = self._event_cache.get(ev.event_id)
-            if hit and now - hit[0] < self.EVENT_TTL_S:
+            if hit and now - hit[0] < self._event_ttl_s():
                 raw = hit[1]
             else:
                 try:
