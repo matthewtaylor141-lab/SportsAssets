@@ -287,10 +287,32 @@ def cancel_orphan_orders(adapter, ledger: Ledger) -> dict:
     actively tracking are spared. With a freshly wiped ledger that means
     cancel-all, which is exactly right: cancel-on-restart is standard
     exchange hygiene we should have had from the first maker order.
+
+    SECOND ACT (observed live 2026-08-02 20:06Z). The list-and-cancel
+    version above was not enough: with the sweep running every cycle, the
+    over-cap cohort still grew $320.22 -> $324.92 in 16 minutes — both
+    growths on one in-play tennis match. Cancel-by-id can only kill what
+    /orders/open returns, and something (in-play markets, pagination, an
+    erroring listing that reads as an empty book) was keeping those
+    orders out of the list. So while the engine tracks NO resting orders
+    of its own — maker is hard off, FOK taker orders never rest — the
+    sweep now leads with the venue's CANCEL-ALL endpoint, which needs no
+    listing to be complete. The selective path survives only as the
+    fallback for the day maker pricing returns and contexts exist again.
+
+    Telemetry is honest now, too: a failed per-id cancel counts as
+    cancel_failed (it used to count as cancelled), and the post-sweep
+    listing size is reported so a listing that hides orders at least
+    shows up as a contradiction against the account's position growth.
     """
     contexts = ledger.list_state(PMUS_ORDER_PREFIX)
     tracked = {(c or {}).get("order_id") for c in contexts.values()}
-    out = {"open": 0, "orphans_cancelled": 0}
+    out = {"open": 0, "orphans_cancelled": 0, "cancel_failed": 0,
+           "cancel_all": None}
+    if not contexts and hasattr(adapter, "cancel_all_orders"):
+        # Nothing tracked -> every open order is an orphan by definition,
+        # and the blanket cancel reaches orders the listing hides.
+        out["cancel_all"] = bool(adapter.cancel_all_orders())
     try:
         open_orders = adapter.open_orders()
     except Exception as exc:  # noqa: BLE001 — sweep must never kill the loop
@@ -305,11 +327,14 @@ def cancel_orphan_orders(adapter, ledger: Ledger) -> dict:
             continue
         slug = (o.get("marketSlug")
                 or (o.get("market") or {}).get("slug") or "")
-        adapter.cancel_order(oid, slug)
-        out["orphans_cancelled"] += 1
-    if out["orphans_cancelled"]:
-        log.error("ORPHAN SWEEP: cancelled %d untracked resting orders "
-                  "(%d open total)", out["orphans_cancelled"], out["open"])
+        if adapter.cancel_order(oid, slug):
+            out["orphans_cancelled"] += 1
+        else:
+            out["cancel_failed"] += 1
+    if out["orphans_cancelled"] or out["cancel_failed"]:
+        log.error("ORPHAN SWEEP: cancelled %d untracked resting orders, "
+                  "%d cancels FAILED (%d open total)",
+                  out["orphans_cancelled"], out["cancel_failed"], out["open"])
     return out
 
 

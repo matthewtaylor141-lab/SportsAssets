@@ -67,7 +67,25 @@
 # This deploy also ships the per-fill net-margin gate (2df08fb): no entry
 # unless (edge - paid_over_mid)/price >= 2%, judged on the live book at
 # decision time. First live cycles are watched by a scheduled probe.
-mode: LIVE_BETA
+#
+# HALTED AGAIN 2026-08-02 20:1x — the stasis above was FALSIFIED by the
+# very next probe: over-cap cohort $320.22 -> $324.92 between 19:50Z and
+# 20:06Z, both growths on the one in-play tennis match of the evening
+# (Uchijima/Bucsa: tsc $8.00 -> $10.45, aec $7.28 -> $9.53). The earlier
+# quiet window was the match not trading, not the sweep working. The
+# per-id sweep only cancels what /orders/open returns, and those orders
+# were not in it. Fixed in this commit: the sweep leads with the venue's
+# account-wide CANCEL-ALL endpoint (no listing required to be complete),
+# and per-id cancel failures are now counted instead of reported as
+# cancellations.
+#
+# Restore LIVE_BETA when, with the cancel-all sweep deployed:
+# (1) the operator confirms ZERO open orders in the Polymarket US UI
+#     (the UI sees what the API listing may not), and
+# (2) the over-cap OPEN cohort is byte-static across two probes that
+#     bracket live in-play trading on any market it holds — quiet
+#     markets prove nothing, as 19:16Z->19:50Z just demonstrated.
+mode: PAPER
 
 # Size discipline — MEASURED caps (LIVE mode). Source: capacity_sizebuckets.csv
 # (ROI negative > $50K/fill).

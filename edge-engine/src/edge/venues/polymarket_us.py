@@ -493,6 +493,25 @@ class PolymarketUSAdapter(VenueAdapter):
             log.info("cancel %s failed (treating as closed): %s", order_id, exc)
             return False
 
+    def cancel_all_orders(self) -> bool:
+        """Venue-side cancel of EVERY open order on the account.
+
+        This is the only cancel that does not depend on our own listing:
+        cancel-by-id can only kill what /orders/open returns, and the
+        2026-08-02 incident's second act proved that is not everything —
+        orders on the in-play Uchijima/Bucsa markets kept filling
+        ($320.22 -> $324.92 across two probes) while the sweep read a
+        clean book. Failure here is loud, not "treated as closed": a
+        cancel-all that silently no-ops is how a halt stops halting.
+        """
+        try:
+            self._client().orders.cancel_all()
+            return True
+        except Exception as exc:  # noqa: BLE001 — caller counts the failure
+            self._book_err(f"cancel_all_{type(exc).__name__}")
+            log.error("cancel_all failed: %s", exc)
+            return False
+
     def open_orders(self) -> list[dict]:
         try:
             return list((self._client().orders.list() or {}).get("orders") or [])

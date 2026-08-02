@@ -588,7 +588,8 @@ def test_orphan_orders_are_cancelled_and_tracked_ones_spared(tmp_path):
         {"id": "o-orphan-2", "marketSlug": "slug-gone"},
     ])
     out = cancel_orphan_orders(a, led)
-    assert out == {"open": 3, "orphans_cancelled": 2}
+    assert out["open"] == 3 and out["orphans_cancelled"] == 2
+    assert out["cancel_failed"] == 0
     assert ("o-orphan-1", "slug-dead") in a.cancelled
     assert ("o-orphan-2", "slug-gone") in a.cancelled
     assert ("o1", "slug-x") not in a.cancelled
@@ -617,7 +618,52 @@ def test_the_sweep_survives_a_venue_error(tmp_path):
 
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     out = cancel_orphan_orders(Exploding([]), led)
-    assert out == {"open": 0, "orphans_cancelled": 0}
+    assert out["open"] == 0 and out["orphans_cancelled"] == 0
+
+
+def test_an_untracked_book_gets_the_venue_side_cancel_all(tmp_path):
+    """Second act of the incident: with the per-id sweep running every
+    cycle, positions on an in-play match still grew — the orders were not
+    in the /orders/open listing, so cancel-by-id could never reach them.
+    When the ledger tracks nothing, the sweep must fire the account-wide
+    cancel-all, which needs no listing to be complete."""
+    from edge.execution.executor import cancel_orphan_orders
+
+    class CancelAllAdapter(_TradeAdapter):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.cancel_all_calls = 0
+
+        def cancel_all_orders(self):
+            self.cancel_all_calls += 1
+            return True
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))    # tracks nothing
+    a = CancelAllAdapter([], open_orders=[])             # listing sees nothing
+    out = cancel_orphan_orders(a, led)
+    assert a.cancel_all_calls == 1                       # ...but we cancel anyway
+    assert out["cancel_all"] is True
+
+    # A tracked maker context suppresses the blanket cancel: the day
+    # resting orders return, the sweep must not shoot our own quotes.
+    led.set_state(f"{PMUS_ORDER_PREFIX}slug-x", _ctx())
+    cancel_orphan_orders(a, led)
+    assert a.cancel_all_calls == 1
+
+
+def test_a_failed_cancel_is_counted_not_claimed(tmp_path):
+    """The old sweep counted every attempt as a cancellation, so a venue
+    rejecting the cancel read as a clean book. Honesty or nothing."""
+    from edge.execution.executor import cancel_orphan_orders
+
+    class RefusingAdapter(_TradeAdapter):
+        def cancel_order(self, order_id, slug):
+            return False
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    a = RefusingAdapter([], open_orders=[{"id": "o-stuck", "marketSlug": "s"}])
+    out = cancel_orphan_orders(a, led)
+    assert out["orphans_cancelled"] == 0 and out["cancel_failed"] == 1
 
 
 def test_maker_first_is_hard_off_even_with_the_env_set(monkeypatch):
