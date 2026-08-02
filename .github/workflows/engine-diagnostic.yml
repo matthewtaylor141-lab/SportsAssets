@@ -69,6 +69,14 @@ jobs:
 
           probe /api/engine/summary
           probe /api/pmus-account
+          # The public track record's own summary — what the SITE shows.
+          echo ""
+          echo "TRACK RECORD (site payload summary):"
+          curl -sS --max-time 60 -o /tmp/tr.json \
+               "$BASE/api/track-record?since=2026-08-01&max_stake=100" || true
+          jq -r '.summary // {} | "  settled \(.settled) (\(.wins)W-\(.losses)L)  net $\(.net_pnl)  deployed $\(.deployed)  roi \(.roi // "n/a")"' /tmp/tr.json 2>/dev/null || true
+          jq -r '.excluded_over_limit // {} | "  excluded>limit: \(.count // 0) (net $\(.net_pnl // 0))"' /tmp/tr.json 2>/dev/null || true
+          jq -r '"  undatable: \(.excluded_undatable // 0)"' /tmp/tr.json 2>/dev/null || true
           probe /healthz 30
 
           # ── the decisive number ────────────────────────────────────

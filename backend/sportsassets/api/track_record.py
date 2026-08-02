@@ -97,18 +97,35 @@ def build(positions: dict[str, dict], activities: list[dict],
             e["notional"] += qty * price
             e["fills"] += 1
 
-    resolutions: dict[str, float] = {}
+    # Resolutions carry the settlement FACTS, not just the timestamp: the
+    # venue REMOVES resolved markets from the positions payload, so for a
+    # settled trade the resolution activity is often the only record of its
+    # cost and realized P&L. Missing this is how a record shows "$0 settled"
+    # while the account has realized money — observed live 2026-08-02.
+    resolutions: dict[str, dict] = {}
     for act in activities or []:
         if act.get("type") != "ACTIVITY_TYPE_POSITION_RESOLUTION":
             continue
-        slug = (act.get("positionResolution") or {}).get("marketSlug")
-        if slug:
-            resolutions[slug] = _act_ts(act)
+        res = act.get("positionResolution") or {}
+        slug = res.get("marketSlug")
+        if not slug:
+            continue
+        after = res.get("afterPosition") or {}
+        before = res.get("beforePosition") or {}
+        resolutions[slug] = {
+            "ts": _act_ts(act),
+            "realized": _amt(after.get("realized")) or _amt(before.get("realized")),
+            "cost": _amt(before.get("cost")),
+            "title": (after.get("marketMetadata") or {}).get("title")
+                     or (before.get("marketMetadata") or {}).get("title"),
+        }
 
     rows = []
     undatable = 0
     over_limit = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
+    seen: set[str] = set()
     for slug, p in (positions or {}).items():
+        seen.add(slug)
         meta = p.get("marketMetadata") or {}
         qty = _amt(p.get("netPosition"))
         settled = bool(p.get("expired")) or qty <= 0
@@ -125,6 +142,13 @@ def build(positions: dict[str, dict], activities: list[dict],
         cost = _amt(p.get("cost"))
         value = _amt(p.get("cashValue"))
         realized = _amt(p.get("realized"))
+        res = resolutions.get(slug)
+        if res:
+            # The resolution activity is the settlement record; the position
+            # row can lag it (realized still 0 after the market resolves).
+            settled = True
+            realized = res["realized"] or realized
+            cost = cost or res["cost"]
         stake_now = cost if cost > 0 else e.get("notional", 0.0)
         if max_stake is not None and stake_now > max_stake:
             over_limit["count"] += 1
@@ -149,14 +173,53 @@ def build(positions: dict[str, dict], activities: list[dict],
             "stake": round(cost if cost > 0 else e.get("notional", 0.0), 4),
             "value": round(value, 4),
             "settled": settled,
-            "settled_ts": resolutions.get(slug),
+            "settled_ts": res["ts"] if res else None,
             "pnl": round(realized, 4) if settled else None,
             "unrealized": round(value - cost, 4) if not settled else None,
+        })
+
+    # Settled markets the positions payload no longer carries at all: build
+    # their rows from the resolution + their own entry trades.
+    for slug, res in resolutions.items():
+        if slug in seen:
+            continue
+        e = entries.get(slug) or {}
+        entry_ts = e.get("first_ts") or 0.0
+        if not entry_ts:
+            undatable += 1
+            continue
+        if entry_ts < since_ts:
+            continue
+        cost = res["cost"] or e.get("notional", 0.0)
+        if max_stake is not None and cost > max_stake:
+            over_limit["count"] += 1
+            over_limit["stake"] += cost
+            over_limit["net_pnl"] += res["realized"]
+            continue
+        vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
+        rows.append({
+            "market_slug": slug,
+            "title": res.get("title") or slug,
+            "outcome": None,
+            **classify_slug(slug),
+            "entry_ts": entry_ts,
+            "entry_date": datetime.fromtimestamp(entry_ts, timezone.utc)
+                          .strftime("%Y-%m-%d"),
+            "entry_price": round(vwap, 4) if vwap else None,
+            "fills": e.get("fills", 0),
+            "qty": e.get("qty", 0.0),
+            "stake": round(cost, 4),
+            "value": 0.0,
+            "settled": True,
+            "settled_ts": res["ts"] or None,
+            "pnl": round(res["realized"], 4),
+            "unrealized": None,
         })
     rows.sort(key=lambda r: -(r["entry_ts"] or 0))
 
     settled_rows = [r for r in rows if r["settled"]]
     wins = [r for r in settled_rows if (r["pnl"] or 0) > 0]
+    losses = [r for r in settled_rows if (r["pnl"] or 0) < 0]
     deployed = sum(r["stake"] for r in rows)
     settled_stake = sum(r["stake"] for r in settled_rows)
     net = sum(r["pnl"] or 0 for r in settled_rows)
@@ -201,7 +264,8 @@ def build(positions: dict[str, dict], activities: list[dict],
             "open": len(rows) - len(settled_rows),
             "settled": len(settled_rows),
             "wins": len(wins),
-            "losses": len(settled_rows) - len(wins),
+            # zero-realized settlements are pushes/voids, not losses
+            "losses": len(losses),
             "deployed": round(deployed, 2),
             "open_value": round(sum(r["value"] for r in rows
                                     if not r["settled"]), 2),

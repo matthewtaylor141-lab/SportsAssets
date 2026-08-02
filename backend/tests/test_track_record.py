@@ -121,3 +121,52 @@ def test_a_cap_with_nothing_over_it_still_shows_the_rule():
     out = build(positions, [_trade("small", TS_AUG2, 2, 0.5)], TS_AUG1,
                 max_stake=100.0)
     assert out["excluded_over_limit"]["count"] == 0
+
+
+def test_a_resolved_market_absent_from_positions_still_settles_the_record():
+    """The venue REMOVES resolved markets from the positions payload — the
+    resolution activity is often the only record a settled trade leaves.
+    Missing it is how the live site showed $0 P&L on 10 'settled' dust rows
+    while the account had realized money."""
+    positions = {}      # resolved market: gone from the payload entirely
+    acts = [
+        _trade("atc-alsv-aik-org-2026-08-02-org", TS_AUG2, 2, 0.5),
+        {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION", "timestamp": (TS_AUG2 + 7200) * 1000,
+         "positionResolution": {
+             "marketSlug": "atc-alsv-aik-org-2026-08-02-org",
+             "beforePosition": {"cost": 1.01, "realized": 0.0},
+             "afterPosition": {"realized": 5.04,
+                               "marketMetadata": {"title": "AIK vs Örgryte"}}}},
+    ]
+    out = build(positions, acts, TS_AUG1)
+    assert len(out["trades"]) == 1
+    row = out["trades"][0]
+    assert row["settled"] and row["pnl"] == 5.04 and row["stake"] == 1.01
+    assert out["summary"]["net_pnl"] == 5.04
+    assert out["summary"]["wins"] == 1
+
+
+def test_a_resolution_overrides_a_lagging_position_row():
+    """The position row can still read realized=0 after the market resolves;
+    the resolution activity is the settlement record and wins."""
+    positions = {"m": _pos(2, 1.0, 0.0, realized=0.0, expired=True)}
+    acts = [
+        _trade("m", TS_AUG2, 2, 0.5),
+        {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION", "timestamp": (TS_AUG2 + 60) * 1000,
+         "positionResolution": {"marketSlug": "m",
+                                "beforePosition": {"cost": 1.0},
+                                "afterPosition": {"realized": -1.0}}},
+    ]
+    out = build(positions, acts, TS_AUG1)
+    assert out["trades"][0]["pnl"] == -1.0
+    assert out["summary"]["losses"] == 1 and out["summary"]["wins"] == 0
+
+
+def test_zero_realized_settlements_are_pushes_not_losses():
+    """Ten dust rows realizing exactly zero must not render as 0W-10L."""
+    positions = {f"d{i}": _pos(0, 0.03, 0.0, realized=0.0, expired=True)
+                 for i in range(3)}
+    acts = [_trade(f"d{i}", TS_AUG2, 1, 0.03) for i in range(3)]
+    out = build(positions, acts, TS_AUG1)
+    s = out["summary"]
+    assert s["settled"] == 3 and s["wins"] == 0 and s["losses"] == 0
