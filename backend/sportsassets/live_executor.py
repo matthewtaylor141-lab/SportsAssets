@@ -165,9 +165,25 @@ async def _market_context(pool, payload: dict) -> dict:
     return ctx
 
 
+# HARD OFF — not env-gated, not config-gated (2026-08-02). This copy-trader
+# shares the trading account with the edge engine, and with
+# LIVE_TRADING_ENABLED set on the platform services it spent 2026-08-02
+# placing real whale-copy orders that read as unauthorized activity:
+# $7-$18 fills on ATP (a league the edge engine blocks), paired tennis
+# ML+total, and future-dated MLB — 5-12x the engine's per-market cap,
+# polluting its published track record and defeating its risk caps. Two
+# uncoordinated traders on one account means neither's risk model is
+# real. A code default cannot beat a set env var, so the kill is code:
+# flip LIVE_COPY_TRADING_BUILT_OUT to re-enable ONLY once copy-trading
+# has its own venue account and its own published record.
+LIVE_COPY_TRADING_BUILT_OUT = False
+
+
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
     """Called on every fresh detection (after the paper trade). All guards
     re-checked here; failure of any guard is a silent no-op or logged skip."""
+    if not LIVE_COPY_TRADING_BUILT_OUT:
+        return
     cfg = settings()
     venue = active_venue()
     if venue is None:

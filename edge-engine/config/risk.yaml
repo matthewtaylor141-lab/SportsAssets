@@ -103,12 +103,26 @@
 # cost creep — is this engine's own maker-era footprint, not a human's
 # and not a rational attacker's). Key rotation kills it either way.
 #
-# Restore LIVE_BETA only after ALL of: (1) the owner rotates the
-# Polymarket US API credentials and installs the new ones on the ONE
-# intended service; (2) the Render dashboard shows exactly one worker
-# instance on the current build, and EDGE_PMUS_MAKER_FIRST is deleted
-# from every service's env; (3) a probe after rotation shows the
-# over-cap OPEN cohort static through a live in-play window.
+# ACTOR IDENTIFIED 2026-08-02 21:5x — it was OUR OWN PLATFORM. The
+# whale-tracking pipeline's live copy-trader (backend live_executor,
+# armed by LIVE_TRADING_ENABLED + the PMUS credentials present on the
+# platform services per render.yaml) has been placing real FOK copies
+# of source-whale trades on the SAME account this engine trades:
+# per-fill cap $25/daily $250, which matches every "unauthorized"
+# fill — ATP pairs, future-dated MLB, tennis ML+total, and
+# retroactively the sub-$1 3c fills from the original incident. There
+# were never unreachable resting orders; there was a second trader.
+# KILLED IN CODE this commit: live_executor.maybe_execute is hard-off
+# (LIVE_COPY_TRADING_BUILT_OUT = False; env cannot re-enable it).
+#
+# Restore LIVE_BETA after: (1) this commit is deployed on the platform
+# workers, and (2) a probe shows ZERO new over-cap positions through a
+# live trading window (whale copies arrived roughly hourly, so one
+# quiet hour of slate is signal). Operator hygiene, recommended not
+# blocking: unset LIVE_TRADING_ENABLED on the platform services and
+# remove PMUS credentials from services that only need to READ
+# (track record needs portfolio reads on the api service; the workers
+# service needs no venue credentials at all now).
 mode: PAPER
 
 # Size discipline — MEASURED caps (LIVE mode). Source: capacity_sizebuckets.csv
