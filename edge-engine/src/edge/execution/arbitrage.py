@@ -109,6 +109,9 @@ def execute_dutch_book(*, adapter, book, sets: int, dry_run: bool = True,
     for i, leg in enumerate(legs):
         r = adapter.place_order(leg.token, leg.price, sets, preview=False,
                                 tif="TIME_IN_FORCE_FILL_OR_KILL")
+        # Tag the result with its leg so the caller can ledger-record every
+        # fill — including the ones from books that never completed.
+        r = {**(r or {}), "token": leg.token}
         res.orders.append(r)
         # Fill-or-kill means a leg fills completely or not at all. A partial
         # here would be the venue violating its own contract; treat anything
@@ -146,6 +149,7 @@ def execute_dutch_book(*, adapter, book, sets: int, dry_run: bool = True,
         r = adapter.place_order(leg.token, min(ceiling, 0.99), sets,
                                 preview=False,
                                 tif="TIME_IN_FORCE_FILL_OR_KILL")
+        r = {**(r or {}), "token": leg.token}
         res.orders.append(r)
         if r.get("ok") and float(r.get("count") or 0) >= sets:
             filled.append(leg)

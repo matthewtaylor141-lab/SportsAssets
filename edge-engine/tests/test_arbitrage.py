@@ -199,6 +199,87 @@ def test_the_runner_fires_on_a_dutch_book(tmp_path, monkeypatch):
     assert book["profit_per_set"] == pytest.approx(0.08)
 
 
+def test_a_moneyline_plus_a_total_is_never_a_partition(tmp_path, monkeypatch):
+    """THE 2026-08-02 INCIDENT, reproduced. The venue groups every side of
+    an event under one market_id, and legs used to pool per event with only
+    a count check — so a cheap match-winner plus a cheap totals side summed
+    under $1 and was bought as a 'riskless set', one set per qualifying
+    cycle, on leagues the strategy filter never saw. Exactly one outcome of
+    a PARTITION pays $1; a winner and an Over can BOTH pay, or neither.
+    Legs must pool by bet family, and families never mix."""
+    from edge.execution.engine import Policy
+    from edge.execution.risk import RiskManager
+    from edge.fairvalue.feed import FeedEvent
+    from edge.ledger.service import Ledger
+    from edge.shadow.runner import run_cycle
+    from edge.venues.base import BookLevel, MarketBook
+    from edge.venues.mapper import VenueMarket
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    policy = Policy.load()
+    policy.leagues = {**policy.leagues, "blocked_categories": []}
+    policy.risk = {**policy.risk, "mode": "LIVE_BETA",
+                   "arbitrage": {"enabled": True, "max_sets": 1,
+                                 "max_books_per_cycle": 3}}
+
+    class EventGroupedVenue:
+        """PMUS-style: ONE VenueMarket per event, ML + total sides mixed.
+        Uchijima 0.45 + Over 21.5 at 0.45 'sums under $1' — the fake set."""
+        name = "polymarket-us"
+
+        def discover_markets(self, league_codes=None):
+            return [VenueMarket(
+                market_id="EVT-WTA", title="Uchijima vs. Bucsa",
+                league_code="wta",
+                outcome_tokens={"Moyuka Uchijima": "T-ML",
+                                "Over 21.5": "T-TOT"})]
+
+        def get_book(self, market_id, token):
+            return MarketBook(venue=self.name, market_id=market_id,
+                              outcome_id=token,
+                              bids=[BookLevel(0.43, 50)],
+                              asks=[BookLevel(0.45, 50)], ts=time.time())
+
+        def taker_fee(self, price):
+            return 0.0
+
+        def maker_fee(self, price):
+            return 0.0
+
+        def plan_entry(self, book):
+            return (book.asks[0].price, True) if book.asks else (0.0, True)
+
+        def place_order(self, *a, **k):
+            # The ORDINARY pricing path may legitimately try the ML side
+            # (it has real edge in this fixture) — refuse the fill rather
+            # than assert; the arb check is arb_found == 0 below.
+            return {"ok": False, "status": "killed", "count": 0}
+
+    class Feed:
+        def sport_keys(self):
+            return ["tennis_wta_x"]
+
+        def server_clock_skew_s(self):
+            return 0.0
+
+        def fetch_events(self, sport_key):
+            return [FeedEvent(
+                sport_key="tennis_wta_x", league_code="wta",
+                home="Moyuka Uchijima", away="Cristina Bucsa",
+                commence_ts=time.time() + 3600,
+                h2h={"Moyuka Uchijima": 2.0, "Cristina Bucsa": 2.0},
+                totals={"Over 21.5": 2.1, "Under 21.5": 1.8},
+                fetched_at=time.time(), anchors=1)]
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    risk = RiskManager(led, policy.risk)
+    funnel = run_cycle([EventGroupedVenue()], Feed(), policy, risk, led,
+                       ["tennis_wta_x"])
+    # Both outcomes priced, both cheap — and NO dutch book was assembled:
+    # the ML leg and the total leg live in different families.
+    assert funnel.get("arb_found", 0) == 0
+
+
 def test_no_dutch_book_when_the_set_costs_more_than_it_pays(tmp_path, monkeypatch):
     from edge.execution.engine import Policy
     from edge.execution.risk import RiskManager

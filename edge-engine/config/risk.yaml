@@ -251,7 +251,19 @@ min_anchor_books: 1
 # error: if a mapping bug makes every event look arbitrageable, we place
 # three, not three hundred.
 arbitrage:
-  enabled: true
+  # DISABLED 2026-08-02 22:0x — THIS was the "unauthorized" trader. The
+  # leg collector pooled every priced outcome of an EVENT (moneyline
+  # sides, totals, anything with a book) and the detector only checked
+  # len(legs) == the event's outcome count — so a cheap ML + a cheap
+  # total on the same tennis match read as a "riskless partition" and
+  # both got bought. Legs were collected before the league/category
+  # filters (blocked ATP qualified), the path bypassed approve() (no
+  # one-per-market claim -> re-bought every qualifying cycle -> the
+  # $0.50-0.99/cycle creep to $14-18), and partial books placed REAL
+  # venue orders that were never ledger-recorded (why the positions had
+  # no provenance). The collector is now same-market-only in code; this
+  # stays false until that rebuild has shadow evidence behind it.
+  enabled: false
   max_sets: 1                 # contracts per leg, per opportunity
   max_books_per_cycle: 3
 

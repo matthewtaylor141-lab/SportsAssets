@@ -285,23 +285,52 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
 
     Returns True if a book was attempted (so the caller can count it against
     the per-cycle budget).
+
+    THE BUG THIS VERSION FIXES (observed live 2026-08-02, the day's real
+    "unauthorized trader"). Legs used to be pooled per EVENT, and the only
+    partition check was len(legs) == the event's outcome count — so any two
+    cheap outcomes of a tennis match (a moneyline side plus a totals side)
+    summed under $1 and were bought as a "riskless set", one set per
+    qualifying cycle, with no per-market claim, on leagues the strategy
+    filter would have blocked (legs are collected before it runs), and with
+    partial fills placed at the venue but never ledger-recorded. Now: a
+    dutch book may only be assembled from the outcome set of ONE venue
+    market; every filled leg is ledger-recorded whether or not the set
+    completed; and an attempted market is claimed so it is tried once.
     """
     from edge.analysis.consistency import find_dutch_book
     from edge.execution.arbitrage import execute_dutch_book
+    from edge.fairvalue.lines import parse_outcome_line, split_segment
+    from edge.fairvalue.props import parse_prop
 
-    if expected < 2:
-        return False
-    by_venue: dict = {}
-    for adapter, leg in venue_legs:
-        by_venue.setdefault(adapter, []).append(leg)
-    adapter, legs, book = None, None, None
-    for a, ls in by_venue.items():
-        if len(ls) < 2:
+    # Legs pool by BET FAMILY — (market, segment, kind, |line|) — because a
+    # partition is the outcome set of one PROPOSITION. The venue groups a
+    # whole event's sides (ML, totals, spreads, props) under one market_id,
+    # so market_id alone is not a partition boundary. Prop-shaped outcomes
+    # never qualify: two cheap player props are not sides of anything.
+    pools: dict = {}
+    for adapter, market_id, leg in venue_legs:
+        bet, why = parse_prop(leg.outcome)
+        if bet is not None or why in ("no_threshold", "ambiguous_stat"):
             continue
-        b = find_dutch_book(event=ev.event_key(), kind="moneyline", legs=ls,
-                            expected_outcomes=expected, fee_per_contract=0.0)
+        seg, name = split_segment(leg.outcome)
+        p = parse_outcome_line(name)
+        if p.kind in ("total", "spread") and p.point is not None:
+            family, need = (seg, p.kind, abs(p.point)), 2
+        else:
+            family, need = (seg, "moneyline", None), expected
+        pools.setdefault((adapter, market_id, family), (need, []))[1].append(leg)
+    adapter, book = None, None
+    for (a, market_id, family), (need, ls) in pools.items():
+        if need < 2 or len(ls) != need:
+            continue                     # a side is missing its book
+        claim = f"arb_tried:{market_id}:{family}"
+        if ledger.get_state(claim):
+            continue                     # one attempt per proposition, ever
+        b = find_dutch_book(event=claim, kind=str(family[1]), legs=ls,
+                            expected_outcomes=need, fee_per_contract=0.0)
         if b is not None:
-            adapter, legs, book = a, ls, b
+            adapter, book = a, b
             break
     if book is None:
         return False
@@ -311,6 +340,9 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
          "profit_per_set": book.profit_per_set, "legs": len(book.legs),
          "depth_sets": book.sets})
     take = min(sets, book.sets)
+    if not dry_run:
+        # book.event IS the claim key (arb_tried:market:family).
+        ledger.set_state(book.event, {"ts": time.time()})
     res = execute_dutch_book(adapter=adapter, book=book, sets=take,
                              dry_run=dry_run)
     funnel.setdefault("arb_status", {}).setdefault(res.status, 0)
@@ -319,18 +351,31 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
         # Loudest possible: a position nobody decided to take.
         funnel.setdefault("arb_exposed", []).append(
             {"event": f"{ev.home} v {ev.away}", "holding": res.exposed})
-    if res.ok and not dry_run and res.complete:
-        funnel["arb_profit"] = round(
-            funnel.get("arb_profit", 0.0) + res.profit, 4)
-        for leg in book.legs:
+    if not dry_run:
+        # EVERY filled leg reaches the ledger — complete sets and naked
+        # rescues alike. Venue money moved; a ledger that only records the
+        # flattering case is how today's positions appeared from nowhere.
+        filled_orders = [o for o in res.orders
+                         if o.get("ok") and float(o.get("count") or 0) > 0]
+        legs_by_token = {l.token: l for l in book.legs}
+        for o in filled_orders:
+            token = o.get("token") or ""
+            leg = legs_by_token.get(token)
+            if leg is None:
+                continue
             ledger.record_fill(
-                fill_uid=f"arb-{ev.event_key()}-{leg.token}-{int(time.time())}",
+                fill_uid=f"arb-{book.event}-{leg.token}-{int(time.time())}",
                 venue=adapter.name, market_key=f"{adapter.name}:{leg.token}",
-                side="BUY", qty=float(take), price=leg.price,
+                side="BUY", qty=float(take),
+                price=float(o.get("price") or leg.price),
                 league=ev.league_code, mode="LIVE_BETA", category="arb",
                 decision={"arb": True, "cost_per_set": book.cost,
                           "profit_per_set": book.profit_per_set,
+                          "status": res.status,
                           "legs": [l.outcome for l in book.legs]})
+        if res.ok and res.complete:
+            funnel["arb_profit"] = round(
+                funnel.get("arb_profit", 0.0) + res.profit, 4)
     return True
 
 def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str],
@@ -732,12 +777,18 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     funnel["books_checked"] += 1
                     ask = book.asks[0]
                     if arb_on and ask.size >= 1:
-                        # Carry the venue with the leg. A dutch book must be
-                        # assembled from ONE venue's books — across venues the
-                        # outcomes can settle on different criteria, so the
-                        # set is not a partition at all and the "guarantee"
-                        # is fiction.
-                        arb_legs.append((adapter, _ArbLeg(
+                        # Carry the venue AND THE MARKET with the leg. A dutch
+                        # book is the outcome set of ONE market: across venues
+                        # the outcomes settle on different criteria, and across
+                        # MARKETS of one event they are not a partition at all
+                        # — a cheap moneyline plus a cheap total summed under
+                        # $1 and was bought as "riskless" for most of
+                        # 2026-08-02, one fake set per qualifying cycle, on
+                        # leagues the strategy filter would have refused. Legs
+                        # are pooled per market_id and a book may only be
+                        # assembled inside one pool.
+                        arb_legs.append((adapter, match.market.market_id,
+                                         _ArbLeg(
                             outcome=oc_name, token=token, price=ask.price,
                             size=float(ask.size))))
                     mkey = market_key(adapter.name, token)
