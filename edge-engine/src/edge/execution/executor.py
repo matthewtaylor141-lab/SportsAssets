@@ -267,6 +267,52 @@ def reconcile_positions(adapter, ledger: Ledger, mode: str,
 REAP_GRACE_S = 300.0
 
 
+def cancel_orphan_orders(adapter, ledger: Ledger) -> dict:
+    """Cancel every venue open order that no ledger context claims.
+
+    THE BUG THIS FIXES (observed live 2026-08-02 18:36Z). The reaper can
+    only cancel orders it has contexts for, and the contexts live in the
+    ledger's state table — which was wiped by every deploy. Each deploy
+    therefore ORPHANED every resting GTC order: still live at the venue,
+    invisible to the engine, filling on their own as game prices crossed
+    them. Positions grew $271 -> $316 in an hour that included a PAPER
+    window in which the engine placed nothing at all, and sub-$1 partial
+    fills (3-15c) appeared that approve()'s $1 floor makes impossible as
+    taker orders. An order nobody is tracking is not a position waiting to
+    happen — it is a standing instruction to buy at a stale price forever.
+
+    So: anything open at the venue without a matching context is cancelled,
+    every cycle, in EVERY mode — PAPER especially, because a halt that
+    leaves resting orders live is not a halt. Orders the engine is
+    actively tracking are spared. With a freshly wiped ledger that means
+    cancel-all, which is exactly right: cancel-on-restart is standard
+    exchange hygiene we should have had from the first maker order.
+    """
+    contexts = ledger.list_state(PMUS_ORDER_PREFIX)
+    tracked = {(c or {}).get("order_id") for c in contexts.values()}
+    out = {"open": 0, "orphans_cancelled": 0}
+    try:
+        open_orders = adapter.open_orders()
+    except Exception as exc:  # noqa: BLE001 — sweep must never kill the loop
+        log.warning("orphan sweep could not list orders: %s", exc)
+        return out
+    for o in open_orders:
+        oid = o.get("id")
+        if not oid:
+            continue
+        out["open"] += 1
+        if oid in tracked:
+            continue
+        slug = (o.get("marketSlug")
+                or (o.get("market") or {}).get("slug") or "")
+        adapter.cancel_order(oid, slug)
+        out["orphans_cancelled"] += 1
+    if out["orphans_cancelled"]:
+        log.error("ORPHAN SWEEP: cancelled %d untracked resting orders "
+                  "(%d open total)", out["orphans_cancelled"], out["open"])
+    return out
+
+
 def reap_pmus_makers(adapter, ledger: Ledger, ttl_s: float,
                      now: float | None = None) -> dict:
     """Close out resting orders: cancel anything past its TTL, and drop the

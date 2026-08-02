@@ -1165,6 +1165,7 @@ def main() -> None:
 
     from edge.execution.engine import Policy
     from edge.execution.executor import (
+        cancel_orphan_orders,
         reap_pmus_makers,
         reconcile_positions,
         sync_kalshi_fills,
@@ -1433,17 +1434,30 @@ def main() -> None:
             if time.time() - last_settle > settle_s:
                 funnel["settled"] = settle_cycle(adapters, ledger)
                 last_settle = time.time()
-            if risk.is_live:
-                for a in adapters:
-                    if not a.has_credentials():
-                        continue
-                    if a.name == "kalshi":
+            # Account maintenance runs in EVERY mode, not just live ones.
+            # It was gated on risk.is_live, which meant the PAPER halt left
+            # resting GTC orders alive at the venue with nothing cancelling
+            # them — they kept filling through the halt (observed live
+            # 2026-08-02: positions grew $271 -> $316 during a PAPER
+            # window). A halt that does not also stand down the venue's
+            # standing orders is not a halt.
+            for a in adapters:
+                if not a.has_credentials():
+                    continue
+                if a.name == "kalshi":
+                    if risk.is_live:
                         funnel["kalshi_fill_sync"] = sync_kalshi_fills(a, ledger, risk.mode)
-                    elif a.name == "polymarket-us":
+                elif a.name == "polymarket-us":
                         # Order matters, and getting it wrong cost us four
                         # runaway positions on 2026-08-02.
                         #
-                        # Reconcile FIRST: rebuild what the venue says we own
+                        # ORPHAN SWEEP FIRST: cancel anything resting at the
+                        # venue that no ledger context tracks. The contexts
+                        # die with the ledger on every deploy, and an
+                        # untracked GTC order is a standing instruction to
+                        # buy at a stale price forever.
+                        funnel["orphans"] = cancel_orphan_orders(a, ledger)
+                        # Reconcile SECOND: rebuild what the venue says we own
                         # before anything reads a cap. Caps are enforced
                         # against the ledger, so a ledger missing a position
                         # re-grants that market's full room.

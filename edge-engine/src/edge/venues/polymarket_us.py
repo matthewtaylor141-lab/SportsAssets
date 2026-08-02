@@ -49,10 +49,16 @@ class PolymarketUSAdapter(VenueAdapter):
         # post-only, every order fails and the engine goes quiet while its
         # telemetry still reports orders "placed". Prove it with
         # EDGE_PMUS_MAKER_FIRST=1 and watch the maker fill count first.
-        # Default OFF again pending the repeated-entry investigation: a
-        # resting order that is reaped before its fill is synced hands the
-        # one-per-market claim back while we still hold the position.
-        self._maker_first = os.environ.get("EDGE_PMUS_MAKER_FIRST", "0") == "1"
+        # HARD OFF — not env-controlled, deliberately. The env default was
+        # flipped to "0" on 2026-08-02, but the deployed service can carry
+        # EDGE_PMUS_MAKER_FIRST=1 from the earlier experiment, and a code
+        # default never beats a set env var. Maker orders are what became
+        # the orphaned-GTC incident: contexts die with the ledger on
+        # deploy, the venue keeps the orders, and they fill on their own
+        # through a halt. Resting orders return only when the orphan sweep
+        # has run clean in production for a while and order state survives
+        # restarts — then this becomes env-controlled again, opt-in.
+        self._maker_first = False
         self._force_taker: dict[str, float] = {}   # slug -> cross-until ts
         # Live book stream (push-latency books). Needs API keys for the WS
         # handshake; fail-soft — REST remains the fallback path.

@@ -564,3 +564,66 @@ def test_list_state_survives_a_restart(tmp_path):
         f"{PMUS_ORDER_PREFIX}slug-x"]
     reopened.clear_state(f"{PMUS_ORDER_PREFIX}slug-x")
     assert reopened.list_state(PMUS_ORDER_PREFIX) == {}
+
+
+# ── the orphan sweep: no order survives untracked ───────────────────────
+
+def test_orphan_orders_are_cancelled_and_tracked_ones_spared(tmp_path):
+    """An untracked resting order is a standing instruction to buy at a
+    stale price forever. Contexts die with the ledger on deploy (observed
+    live 2026-08-02: four deploys orphaned every resting GTC order, and
+    they filled through a PAPER halt). Anything the ledger does not track
+    gets cancelled; anything it does track is left to the reaper."""
+    from edge.execution.executor import cancel_orphan_orders
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    led.set_state(f"{PMUS_ORDER_PREFIX}slug-x", _ctx())   # tracked: o1
+    a = _TradeAdapter([], open_orders=[
+        {"id": "o1", "marketSlug": "slug-x"},
+        {"id": "o-orphan-1", "marketSlug": "slug-dead"},
+        {"id": "o-orphan-2", "marketSlug": "slug-gone"},
+    ])
+    out = cancel_orphan_orders(a, led)
+    assert out == {"open": 3, "orphans_cancelled": 2}
+    assert ("o-orphan-1", "slug-dead") in a.cancelled
+    assert ("o-orphan-2", "slug-gone") in a.cancelled
+    assert ("o1", "slug-x") not in a.cancelled
+
+
+def test_a_fresh_ledger_means_cancel_everything(tmp_path):
+    """Cancel-on-restart. A wiped ledger tracks nothing, so everything
+    open at the venue is an orphan by definition — which is exactly the
+    deploy scenario that caused the incident."""
+    from edge.execution.executor import cancel_orphan_orders
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))     # fresh: no state
+    a = _TradeAdapter([], open_orders=[{"id": "a", "marketSlug": "s1"},
+                                       {"id": "b", "marketSlug": "s2"}])
+    out = cancel_orphan_orders(a, led)
+    assert out["orphans_cancelled"] == 2
+
+
+def test_the_sweep_survives_a_venue_error(tmp_path):
+    """The sweep must never kill the loop that runs it."""
+    from edge.execution.executor import cancel_orphan_orders
+
+    class Exploding(_TradeAdapter):
+        def open_orders(self):
+            raise RuntimeError("venue down")
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    out = cancel_orphan_orders(Exploding([]), led)
+    assert out == {"open": 0, "orphans_cancelled": 0}
+
+
+def test_maker_first_is_hard_off_even_with_the_env_set(monkeypatch):
+    """The deployed service may still carry EDGE_PMUS_MAKER_FIRST=1 from
+    the earlier experiment, and a code DEFAULT cannot beat a set env var.
+    After the orphaned-GTC incident the switch is code-level off: resting
+    orders return only when order state survives restarts."""
+    monkeypatch.setenv("EDGE_PMUS_MAKER_FIRST", "1")
+    from edge.venues.polymarket_us import PolymarketUSAdapter
+
+    a = PolymarketUSAdapter.__new__(PolymarketUSAdapter)
+    PolymarketUSAdapter.__init__(a)
+    assert a._maker_first is False

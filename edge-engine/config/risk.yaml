@@ -24,10 +24,30 @@
 # twice. Reproduced by
 # test_a_fill_landing_after_the_reap_still_blocks_a_second_entry.
 #
-# WHAT TO WATCH on the first cycles after this deploys: per-market exposure
-# must stay inside $1.50. If any market exceeds it, halt here again — that
-# is the only signal that matters, and it shows up within minutes.
-mode: LIVE_BETA
+# HALTED AGAIN 2026-08-02 18:4x — the watch condition fired. Over-cap
+# exposure grew $271 -> $316 across the re-arm window, INCLUDING a stretch
+# in PAPER when the engine placed nothing. Root cause this time: orphaned
+# resting GTC maker orders. Their contexts lived in the ledger state
+# table, the deployed service's ledger does not survive deploys, so four
+# deploys today orphaned every resting order — still live at the venue,
+# filling on their own as game prices crossed them (sub-$1 partial fills
+# prove it: approve()'s $1 floor cannot place a 3c order). The reaper only
+# cancels what it has contexts for, and the maintenance block only ran in
+# live modes, so the PAPER halt left them standing.
+#
+# Fixed in this commit: cancel_orphan_orders() sweeps every untracked
+# venue order, every cycle, in EVERY mode; account maintenance no longer
+# gates on is_live; maker-first is HARD off in code (the service env may
+# still carry EDGE_PMUS_MAKER_FIRST=1, and a code default cannot beat a
+# set env var).
+#
+# Restore LIVE_BETA when: (1) a diagnostic probe shows orphans_cancelled
+# > 0 followed by open orders == 0 and STATIC over-cap cohort across two
+# probes an hour apart, and (2) the operator confirms EDGE_LEDGER_DB
+# points at a mounted persistent disk on the deployed service — every
+# control in this engine assumes the ledger survives a deploy, and today
+# proved the deployed one does not.
+mode: PAPER
 
 # Size discipline — MEASURED caps (LIVE mode). Source: capacity_sizebuckets.csv
 # (ROI negative > $50K/fill).
