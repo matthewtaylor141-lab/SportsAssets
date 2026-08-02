@@ -7,6 +7,8 @@ guarantee inverts: a naked directional position at a price nobody judged.
 Every test here is a way that could happen.
 """
 
+import time
+
 import pytest
 
 from edge.analysis.consistency import DutchBook, Leg
@@ -156,3 +158,90 @@ def test_a_partial_fill_counts_as_a_failed_leg():
     # t0 never counts as filled, so it is completed or reported exposed —
     # never silently treated as owned.
     assert r.status in ("completed_with_slip", "INCOMPLETE_EXPOSED")
+
+
+# ── wiring: the loop must find and fire on a real partition ─────────────
+
+def test_the_runner_fires_on_a_dutch_book(tmp_path, monkeypatch):
+    """End to end: two outcomes of one event priced under $1 together, so
+    buying both is guaranteed profit at resolution."""
+    from edge.execution.engine import Policy
+    from edge.execution.risk import RiskManager
+    from edge.ledger.service import Ledger
+    from edge.shadow.runner import run_cycle
+    from edge.venues.base import BookLevel, MarketBook
+    from tests.test_run_cycle_e2e import StubFeed, StubVenue, _event
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    policy = Policy.load()
+    policy.leagues = {**policy.leagues, "blocked_categories": []}
+    policy.risk = {**policy.risk, "mode": "LIVE_BETA",
+                   "arbitrage": {"enabled": True, "max_sets": 1,
+                                 "max_books_per_cycle": 3}}
+
+    class ArbVenue(StubVenue):
+        """Arsenal 0.46 + Chelsea 0.46 = 0.92 for a set that pays 1.00."""
+
+        def get_book(self, market_id, token):
+            return MarketBook(venue=self.name, market_id=market_id,
+                              outcome_id=token,
+                              bids=[BookLevel(0.44, 50)],
+                              asks=[BookLevel(0.46, 50)], ts=time.time())
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    risk = RiskManager(led, policy.risk)
+    funnel = run_cycle([ArbVenue(ask_price=0.46)], StubFeed([_event()]),
+                       policy, risk, led, ["soccer_epl"])
+    assert funnel.get("arb_found", 0) >= 1
+    book = funnel["arb_books"][0]
+    assert book["legs"] == 2
+    assert book["cost"] == pytest.approx(0.92)
+    assert book["profit_per_set"] == pytest.approx(0.08)
+
+
+def test_no_dutch_book_when_the_set_costs_more_than_it_pays(tmp_path, monkeypatch):
+    from edge.execution.engine import Policy
+    from edge.execution.risk import RiskManager
+    from edge.ledger.service import Ledger
+    from edge.shadow.runner import run_cycle
+    from tests.test_run_cycle_e2e import StubFeed, StubVenue, _event
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    policy = Policy.load()
+    policy.leagues = {**policy.leagues, "blocked_categories": []}
+    policy.risk = {**policy.risk, "mode": "LIVE_BETA",
+                   "arbitrage": {"enabled": True, "max_sets": 1,
+                                 "max_books_per_cycle": 3}}
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    risk = RiskManager(led, policy.risk)
+    # 0.53 + 0.53 = 1.06 > 1.00: the normal state of a healthy book.
+    funnel = run_cycle([StubVenue(ask_price=0.53)], StubFeed([_event()]),
+                       policy, risk, led, ["soccer_epl"])
+    assert funnel.get("arb_found", 0) == 0
+
+
+def test_arbitrage_is_off_unless_config_says_otherwise(tmp_path, monkeypatch):
+    from edge.execution.engine import Policy
+    from edge.execution.risk import RiskManager
+    from edge.ledger.service import Ledger
+    from edge.shadow.runner import run_cycle
+    from edge.venues.base import BookLevel, MarketBook
+    from tests.test_run_cycle_e2e import StubFeed, StubVenue, _event
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    policy = Policy.load()
+    policy.leagues = {**policy.leagues, "blocked_categories": []}
+    policy.risk = {**policy.risk, "mode": "LIVE_BETA",
+                   "arbitrage": {"enabled": False}}
+
+    class ArbVenue(StubVenue):
+        def get_book(self, market_id, token):
+            return MarketBook(venue=self.name, market_id=market_id,
+                              outcome_id=token, bids=[BookLevel(0.44, 50)],
+                              asks=[BookLevel(0.46, 50)], ts=time.time())
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    risk = RiskManager(led, policy.risk)
+    funnel = run_cycle([ArbVenue(ask_price=0.46)], StubFeed([_event()]),
+                       policy, risk, led, ["soccer_epl"])
+    assert "arb_found" not in funnel

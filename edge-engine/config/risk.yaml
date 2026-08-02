@@ -102,6 +102,30 @@ exploration:
 # supply chain. 0 disables the gate; 1 is the evidence-backed default.
 min_anchor_books: 1
 
+# ── arbitrage (dutch book) ─────────────────────────────────────────────
+#
+# ARMED. Buys a complete outcome set priced under $1: exactly one leg
+# resolves true and pays $1, so the profit is arithmetic rather than a view.
+#
+# The guarantee holds only when EVERY leg is owned — three legs of four is
+# a naked directional position, not an arbitrage. execution/arbitrage.py is
+# built around that: thinnest leg first, abort the sequence on any failure,
+# and if legs are already held when one fails, complete at market up to a
+# bounded slip rather than hold a partial set.
+#
+# Sizing is deliberately tiny. The venue's fill-or-kill mechanics have NOT
+# been verified against the live API — the SDK documents them, nobody has
+# watched them behave. At one set per book the cost of that assumption being
+# wrong is cents, and we learn the real semantics immediately.
+#
+# max_books_per_cycle bounds the blast radius of a systematic detector
+# error: if a mapping bug makes every event look arbitrageable, we place
+# three, not three hundred.
+arbitrage:
+  enabled: true
+  max_sets: 1                 # contracts per leg, per opportunity
+  max_books_per_cycle: 3
+
 # Watchdog: any breach halts live trading until inputs are healthy again.
 watchdog:
   max_feed_age_s: 60

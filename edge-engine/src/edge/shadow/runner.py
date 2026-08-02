@@ -240,6 +240,61 @@ def _quarantined(ledger) -> set:
     return _QUARANTINE_CACHE["value"]
 
 
+
+def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
+                   funnel) -> bool:
+    """Look for a complete outcome set priced under $1 and buy all of it.
+
+    Returns True if a book was attempted (so the caller can count it against
+    the per-cycle budget).
+    """
+    from edge.analysis.consistency import find_dutch_book
+    from edge.execution.arbitrage import execute_dutch_book
+
+    if expected < 2:
+        return False
+    by_venue: dict = {}
+    for adapter, leg in venue_legs:
+        by_venue.setdefault(adapter, []).append(leg)
+    adapter, legs, book = None, None, None
+    for a, ls in by_venue.items():
+        if len(ls) < 2:
+            continue
+        b = find_dutch_book(event=ev.event_key(), kind="moneyline", legs=ls,
+                            expected_outcomes=expected, fee_per_contract=0.0)
+        if b is not None:
+            adapter, legs, book = a, ls, b
+            break
+    if book is None:
+        return False
+    funnel["arb_found"] = funnel.get("arb_found", 0) + 1
+    funnel.setdefault("arb_books", []).append(
+        {"event": f"{ev.home} v {ev.away}", "cost": round(book.cost, 4),
+         "profit_per_set": book.profit_per_set, "legs": len(book.legs),
+         "depth_sets": book.sets})
+    take = min(sets, book.sets)
+    res = execute_dutch_book(adapter=adapter, book=book, sets=take,
+                             dry_run=dry_run)
+    funnel.setdefault("arb_status", {}).setdefault(res.status, 0)
+    funnel["arb_status"][res.status] += 1
+    if res.status == "INCOMPLETE_EXPOSED":
+        # Loudest possible: a position nobody decided to take.
+        funnel.setdefault("arb_exposed", []).append(
+            {"event": f"{ev.home} v {ev.away}", "holding": res.exposed})
+    if res.ok and not dry_run and res.complete:
+        funnel["arb_profit"] = round(
+            funnel.get("arb_profit", 0.0) + res.profit, 4)
+        for leg in book.legs:
+            ledger.record_fill(
+                fill_uid=f"arb-{ev.event_key()}-{leg.token}-{int(time.time())}",
+                venue=adapter.name, market_key=f"{adapter.name}:{leg.token}",
+                side="BUY", qty=float(take), price=leg.price,
+                league=ev.league_code, mode="LIVE_BETA", category="arb",
+                decision={"arb": True, "cost_per_set": book.cost,
+                          "profit_per_set": book.profit_per_set,
+                          "legs": [l.outcome for l in book.legs]})
+    return True
+
 def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str],
               candidates: dict | None = None, match_cache: dict | None = None,
               explored_seen: set | None = None, study_seen: set | None = None,
@@ -262,6 +317,9 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
 
     from edge.execution.engine import strategy_filter
     from edge.execution.executor import build_decision_record, execute, market_key
+    from edge.analysis.consistency import Leg as _ArbLeg
+    from edge.analysis.consistency import find_dutch_book
+    from edge.execution.arbitrage import execute_dutch_book
     from edge.fairvalue.devig import fair_value
     from edge.fairvalue.props import fair_for_prop, parse_prop
     from edge.fairvalue.lines import (
@@ -334,6 +392,11 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     # claims — until then the flat surcharge governs instead.
     min_anchors = int((policy.risk.get("min_anchor_books")
                        if policy.risk.get("min_anchor_books") is not None else 1))
+    arb_cfg = policy.risk.get("arbitrage") or {}
+    arb_on = bool(arb_cfg.get("enabled")) and risk.is_live
+    arb_sets = int(arb_cfg.get("max_sets", 1))
+    arb_budget = int(arb_cfg.get("max_books_per_cycle", 3))
+    arb_done = 0
     rev = ledger.reversion(days=7)
     keep = rev.get("keep")
     if keep is not None:
@@ -544,6 +607,10 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                 continue
             funnel["tradeable"] += 1
             seen_tokens: set[str] = set()
+            # Dutch-book legs for THIS event. Polymarket US lists one market
+            # per outcome, so a complete partition spans several markets and
+            # can only be assembled at the event level.
+            arb_legs: list = []
             for match in matches:
                 if not match.tradeable:
                     continue
@@ -578,6 +645,15 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                         continue
                     funnel["books_checked"] += 1
                     ask = book.asks[0]
+                    if arb_on and ask.size >= 1:
+                        # Carry the venue with the leg. A dutch book must be
+                        # assembled from ONE venue's books — across venues the
+                        # outcomes can settle on different criteria, so the
+                        # set is not a partition at all and the "guarantee"
+                        # is fiction.
+                        arb_legs.append((adapter, _ArbLeg(
+                            outcome=oc_name, token=token, price=ask.price,
+                            size=float(ask.size))))
                     mkey = market_key(adapter.name, token)
                     # Second observation for the adverse-selection detector.
                     # Free: this fair value was computed anyway.
@@ -837,6 +913,23 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                     {"h2h": ev.h2h, "home": ev.home, "away": ev.away},
                                     would_fill, whale_alignment=None)
 
+
+            # Every market of this event is now priced, so the complete
+            # outcome set — which spans markets on a per-outcome venue — can
+            # finally be assembled and checked for a dutch book.
+            if arb_on and arb_done < arb_budget and len(arb_legs) >= 2:
+                try:
+                    if _try_arbitrage(ledger=ledger, ev=ev,
+                                      venue_legs=arb_legs,
+                                      expected=len(ev.h2h),
+                                      sets=arb_sets, dry_run=not risk.is_live,
+                                      funnel=funnel):
+                        arb_done += 1
+                except Exception as exc:  # noqa: BLE001
+                    # Arbitrage is additive. A failure here must never cost
+                    # the ordinary pricing pass that already ran.
+                    log.warning('arb scan failed for %s: %s', ev.home, exc)
+                    funnel['arb_errors'] = funnel.get('arb_errors', 0) + 1
     mirror = mirror_stats()
     if mirror["sent"] or mirror["queued"] or mirror["dropped"]:
         funnel["mirror"] = mirror
