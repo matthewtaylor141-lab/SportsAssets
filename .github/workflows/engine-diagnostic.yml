@@ -112,6 +112,12 @@ jobs:
              /tmp/ai.json 2>/dev/null | head -20 || echo "  (unavailable)"
 
           echo ""
+          echo "#   SERVICE HEARTBEATS (which worker is dead, and why)       #"
+          curl -sS --max-time 60 "$BASE/api/health/services" 2>&1 | \
+            jq -r '.[] | "  \(.service): \(.status)  \(.beat_at)  \(.error // "")"' \
+            2>/dev/null | head -15 || echo "  (endpoint not deployed yet)"
+
+          echo ""
           echo "#   WHALE INGESTION RAW (shape + freshness, no jq guessing) #"
           echo "  -- /api/feed?limit=2 --"
           curl -sS --max-time 60 "$BASE/api/feed?limit=2" 2>&1 | head -c 700; echo

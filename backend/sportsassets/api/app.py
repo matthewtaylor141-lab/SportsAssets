@@ -64,6 +64,32 @@ async def healthz() -> dict:
     return {"ok": True, "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7]}
 
 
+@app.get("/api/health/services")
+async def health_services() -> list[dict]:
+    """Sanitized service heartbeats — status and age only, plus a short
+    error hint. The whale poller failed silently for six days (Jul 27 -
+    Aug 2, 2026) because its error heartbeats were admin-gated and nobody
+    was looking; a pipeline's liveness must be publicly checkable. No
+    payloads, no tokens: service name, status, age, truncated error."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT service, status, beat_at, detail FROM service_heartbeats "
+        "ORDER BY service")
+    out = []
+    for r in rows:
+        detail = r["detail"]
+        if isinstance(detail, str):
+            try:
+                detail = json.loads(detail)
+            except ValueError:
+                detail = {}
+        err = str((detail or {}).get("error") or "")[:160]
+        out.append({"service": r["service"], "status": r["status"],
+                    "beat_at": r["beat_at"],
+                    **({"error": err} if err else {})})
+    return out
+
+
 @app.post("/api/admin/ping")
 async def admin_ping(x_admin_token: str = Header(default="")) -> dict:
     """Unlock diagnostic. Reveals nothing about the token's value — only
