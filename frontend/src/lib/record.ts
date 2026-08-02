@@ -58,9 +58,22 @@ export interface TrackRecordData {
   daily: TRDaily[]
   trades: TRRow[]
   excluded_undatable: number
+  excluded_over_limit: {
+    limit: number
+    count: number
+    open: number
+    stake: number
+    net_pnl: number
+  } | null
 }
 
 export const SINCE = '2026-08-01'
+// The record presents strategy-sized positions. Anything costing more than
+// this is an execution incident or a non-strategy trade, not the $1-$5
+// strategy — excluded from every figure and ALWAYS disclosed on the page
+// (count + net P&L), because a record that hides its exclusions is not a
+// record.
+export const MAX_STAKE = 100
 
 export function useTrackRecord(refreshMs = 30_000) {
   const [data, setData] = useState<TrackRecordData | null>(null)
@@ -68,7 +81,7 @@ export function useTrackRecord(refreshMs = 30_000) {
   useEffect(() => {
     let dead = false
     const load = () =>
-      api<TrackRecordData>(`/api/track-record?since=${SINCE}`)
+      api<TrackRecordData>(`/api/track-record?since=${SINCE}&max_stake=${MAX_STAKE}`)
         .then((d) => {
           if (dead) return
           if (d.error) setErr(d.error)

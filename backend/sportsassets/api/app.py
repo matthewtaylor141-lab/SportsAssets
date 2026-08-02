@@ -518,12 +518,18 @@ async def live_status() -> dict:
 
 
 @app.get("/api/track-record")
-async def api_track_record(since: str | None = Query(None)) -> dict:
+async def api_track_record(since: str | None = Query(None),
+                           max_stake: float | None = Query(None)) -> dict:
     """The AI trader's record from the ACTUAL venue account, windowed on
-    entry time (default 2026-08-01). The shadow mirror is not a record."""
+    entry time (default 2026-08-01). The shadow mirror is not a record.
+
+    `max_stake` excludes positions costing more than it — and the payload
+    then carries `excluded_over_limit` (count, stake, net P&L) so any
+    consumer can, and the site does, disclose what the view leaves out.
+    The unfiltered record remains the default."""
     from .track_record import track_record
 
-    return await track_record(since)
+    return await track_record(since, max_stake=max_stake)
 
 
 @app.get("/api/pmus-account")

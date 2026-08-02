@@ -82,3 +82,42 @@ def test_a_settlement_without_a_venue_timestamp_is_flagged_estimated():
     out = build(positions, acts, TS_AUG1)
     day = next(d for d in out["daily"] if d["settled"])
     assert day["pnl_estimated"] is True
+
+
+def test_over_limit_positions_are_excluded_and_always_disclosed():
+    """The record may present a capped view; it may never hide the cap.
+    Excluded rows leave every figure AND arrive in the payload as a count,
+    their stake, and their net P&L — so the page can say what it omits."""
+    positions = {
+        "small-won": _pos(0, 1.0, 0.0, realized=1.1, expired=True),
+        "big-lost": _pos(0, 150.0, 0.0, realized=-150.0, expired=True),
+        "big-open": _pos(100, 120.0, 118.0),
+    }
+    acts = [_trade("small-won", TS_AUG2, 2, 0.5),
+            _resolution("small-won", TS_AUG2 + 3600),
+            _trade("big-lost", TS_AUG2, 300, 0.5),
+            _resolution("big-lost", TS_AUG2 + 3600),
+            _trade("big-open", TS_AUG2, 240, 0.5)]
+    out = build(positions, acts, TS_AUG1, max_stake=100.0)
+    assert [r["market_slug"] for r in out["trades"]] == ["small-won"]
+    assert out["summary"]["net_pnl"] == 1.1          # the big loss is OUT...
+    ex = out["excluded_over_limit"]                  # ...and DISCLOSED
+    assert ex == {"limit": 100.0, "count": 2, "open": 1,
+                  "stake": 270.0, "net_pnl": -150.0}
+
+
+def test_no_cap_means_no_exclusion_and_a_null_disclosure():
+    positions = {"big": _pos(0, 150.0, 0.0, realized=-150.0, expired=True)}
+    acts = [_trade("big", TS_AUG2, 300, 0.5), _resolution("big", TS_AUG2 + 60)]
+    out = build(positions, acts, TS_AUG1)
+    assert len(out["trades"]) == 1
+    assert out["excluded_over_limit"] is None
+
+
+def test_a_cap_with_nothing_over_it_still_shows_the_rule():
+    """Zero exclusions is information too: the reader sees the rule exists
+    and that nothing currently trips it."""
+    positions = {"small": _pos(2, 1.0, 1.1)}
+    out = build(positions, [_trade("small", TS_AUG2, 2, 0.5)], TS_AUG1,
+                max_stake=100.0)
+    assert out["excluded_over_limit"]["count"] == 0

@@ -64,8 +64,18 @@ def classify_slug(slug: str) -> dict:
 
 
 def build(positions: dict[str, dict], activities: list[dict],
-          since_ts: float) -> dict:
-    """Pure builder (unit-tested): venue payloads -> the track record."""
+          since_ts: float, max_stake: float | None = None) -> dict:
+    """Pure builder (unit-tested): venue payloads -> the track record.
+
+    `max_stake` caps what the RECORD presents: positions whose cost exceeds
+    it are excluded from every figure — and DISCLOSED, as a count and a net
+    P&L, in the payload. The site's whole credibility claim is "read from
+    the account, nothing edited by hand"; an exclusion the reader cannot
+    see would make that claim a lie, so the exclusion always travels with
+    the record it modifies. Rationale for having the cap at all: the
+    strategy trades $1-$5 tickets, and anything far above that is an
+    execution incident or a non-strategy trade, not the strategy.
+    """
     # Entry facts come from the venue's TRADE activities: first trade time,
     # volume-weighted entry price, buy count.
     entries: dict[str, dict] = {}
@@ -97,6 +107,7 @@ def build(positions: dict[str, dict], activities: list[dict],
 
     rows = []
     undatable = 0
+    over_limit = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
     for slug, p in (positions or {}).items():
         meta = p.get("marketMetadata") or {}
         qty = _amt(p.get("netPosition"))
@@ -114,6 +125,15 @@ def build(positions: dict[str, dict], activities: list[dict],
         cost = _amt(p.get("cost"))
         value = _amt(p.get("cashValue"))
         realized = _amt(p.get("realized"))
+        stake_now = cost if cost > 0 else e.get("notional", 0.0)
+        if max_stake is not None and stake_now > max_stake:
+            over_limit["count"] += 1
+            over_limit["stake"] += stake_now
+            if settled:
+                over_limit["net_pnl"] += realized
+            else:
+                over_limit["open"] += 1
+            continue
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
             "market_slug": slug,
@@ -192,6 +212,15 @@ def build(positions: dict[str, dict], activities: list[dict],
                          if settled_rows else None),
         },
         "excluded_undatable": undatable,
+        # Always present when a cap was applied, even at zero exclusions —
+        # the reader can see the rule itself, not only its effects.
+        "excluded_over_limit": (
+            {"limit": max_stake,
+             "count": over_limit["count"],
+             "open": over_limit["open"],
+             "stake": round(over_limit["stake"], 2),
+             "net_pnl": round(over_limit["net_pnl"], 2)}
+            if max_stake is not None else None),
         "daily": sorted(daily.values(), key=lambda d: d["date"]),
         "trades": rows,
     }
@@ -226,7 +255,8 @@ def _fetch_raw() -> dict:
     return {"positions": positions, "activities": acts}
 
 
-async def track_record(since: str | None = None) -> dict:
+async def track_record(since: str | None = None,
+                       max_stake: float | None = None) -> dict:
     cfg = settings()
     if not (cfg.pmus_key_id and cfg.pmus_secret_key):
         return {"configured": False}
@@ -248,4 +278,5 @@ async def track_record(since: str | None = None) -> dict:
                         "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
     raw = _raw_cache["data"]
     return {"configured": True,
-            **build(raw["positions"], raw["activities"], since_ts)}
+            **build(raw["positions"], raw["activities"], since_ts,
+                    max_stake=max_stake)}

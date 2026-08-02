@@ -245,6 +245,15 @@ export function TrackRecord() {
           </div>
         </div>
 
+        {data.excluded_over_limit && data.excluded_over_limit.count > 0 && (
+          <div className="tr-honesty">
+            ⓘ {data.excluded_over_limit.count} position(s) over{' '}
+            {fmtUsd(data.excluded_over_limit.limit)} are excluded from this record
+            (combined stake {fmtUsd(data.excluded_over_limit.stake, 2)}, settled net{' '}
+            {fmtSignedUsd(data.excluded_over_limit.net_pnl)}) — outside the
+            strategy's ticket size. The full account remains the full account.
+          </div>
+        )}
         {early && (
           <div className="tr-honesty">
             ⚖️ EARLY SAMPLE — {s.settled} of the {MIN_SETTLED} settlements this record
@@ -357,7 +366,15 @@ export function TrackRecord() {
         <div className="tr-foot muted">
           Source: the live venue account (positions + its own trade activities),
           window {SINCE} → today, refreshed every 30s. Entry prices are the venue's
-          own VWAP. {data.excluded_undatable > 0 &&
+          own VWAP. This record shows strategy-sized positions (≤{' '}
+          {fmtUsd(data.excluded_over_limit?.limit ?? 100)} at cost).
+          {data.excluded_over_limit && data.excluded_over_limit.count > 0 && (
+            <> {data.excluded_over_limit.count} larger position(s) are excluded from
+            every figure above — combined stake{' '}
+            {fmtUsd(data.excluded_over_limit.stake, 2)}, settled net{' '}
+            {fmtSignedUsd(data.excluded_over_limit.net_pnl)}.</>
+          )}
+          {' '}{data.excluded_undatable > 0 &&
             `${data.excluded_undatable} position(s) excluded: the venue reported no datable entry.`}
         </div>
       </div>
