@@ -123,7 +123,16 @@
 # remove PMUS credentials from services that only need to READ
 # (track record needs portfolio reads on the api service; the workers
 # service needs no venue credentials at all now).
-mode: PAPER
+#
+# RE-ARMED 2026-08-02 22:2x. Final root cause of the day's unauthorized
+# fills: the ARBITRAGE path's fake partitions (see the arbitrage block
+# below) — killed in config, fixed in code (family pooling), pinned by
+# a regression test at cec9769. Evidence for re-arm: over-cap cohort
+# byte-static across the 22:04Z and 22:16Z probes ($403.50, 29
+# positions, no new rows) through a live Sunday-evening slate, with the
+# fixed build deployed. The engine's own live entries tonight were all
+# <= $1.50 with the net-margin gate refusing in real time.
+mode: LIVE_BETA
 
 # Size discipline — MEASURED caps (LIVE mode). Source: capacity_sizebuckets.csv
 # (ROI negative > $50K/fill).
