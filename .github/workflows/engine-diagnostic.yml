@@ -222,3 +222,7 @@ jobs:
           jq -r '.system | "system    : \(.settled) settled  W\(.wins)/L\(.losses)  realized $\(.realized)  ROI \(.roi // "n/a")",
                            "            open \(.open) worth $\(.open_cost)"' \
              /tmp/acct.json 2>/dev/null || true
+          echo "per day  (system cohort, settled only):"
+          jq -r '.system_daily // [] | if length == 0 then "   (no settlements in window)"
+                 else .[] | "   \(.day)  \(.settled) settled  W\(.wins)/L\(.losses)  staked $\(.staked)  realized $\(.realized)  ROI \(.roi // "n/a")" end' \
+             /tmp/acct.json 2>/dev/null || true
