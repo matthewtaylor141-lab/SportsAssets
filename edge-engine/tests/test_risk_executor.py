@@ -288,11 +288,11 @@ def test_paper_profile_decouples_sampling_caps():
     paper = caps_for_mode(risk_cfg, "PAPER")
     beta = caps_for_mode(risk_cfg, "LIVE_BETA")
     assert paper.per_fill_max == 10
-    # Micro live tier. The ceiling is 2, not 1, so edge-proportional sizing
-    # has somewhere to ramp — the DEFAULT stake is still $1 and only a bet
-    # clearing 3x its bar reaches the top.
+    # Micro live tier. The ceiling is 1.5, not 1, so the size ladder has a
+    # top rung — the DEFAULT stake is still $1 and only a bet clearing
+    # twice its bar reaches $1.50.
     assert beta.per_fill_default == 1
-    assert beta.per_fill_max == 2
+    assert beta.per_fill_max == 1.5
     assert paper.one_per_market and beta.one_per_market
     assert not paper.one_per_event and not beta.one_per_event
 
@@ -514,50 +514,51 @@ def test_a_fill_records_the_game_it_belongs_to(tmp_path):
     assert led.event_exposure("game-9", "PAPER")["markets"] == 1
 
 
-# ── stake in proportion to how far the edge clears its bar ──────────────
+# ── the size ladder ─────────────────────────────────────────────────────
 
-def test_size_scales_with_edge_over_threshold():
-    """A flat ticket stakes the same on a 2c edge as a 6c one — it leaves
-    money on the better bet and overpays for the marginal one."""
-    from edge.execution.engine import Policy
-    from edge.ledger.service import Ledger
+def _beta_risk():
     import tempfile
 
-    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
-    risk = RiskManager(led, {**Policy.load().risk, "mode": "LIVE_BETA"})
-
-    at_bar = risk.size_for_edge(0.02, 0.02)          # exactly the bar
-    double = risk.size_for_edge(0.04, 0.02)          # 2x
-    triple = risk.size_for_edge(0.06, 0.02)          # 3x
-    absurd = risk.size_for_edge(0.50, 0.02)          # far beyond
-
-    assert at_bar == 1.0
-    assert 1.0 < double < triple
-    assert triple == 2.0
-    assert absurd == 2.0, "the ramp is capped, not unbounded"
-
-
-def test_sizing_never_exceeds_the_cap_however_big_the_claim():
-    """Kelly sizes on the edge you BELIEVE you have, so it amplifies
-    estimation error as readily as edge. Ours is the thing under suspicion,
-    so the ramp is linear and hard-capped."""
     from edge.execution.engine import Policy
     from edge.ledger.service import Ledger
-    import tempfile
 
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
-    risk = RiskManager(led, {**Policy.load().risk, "mode": "LIVE_BETA"})
-    caps = risk.caps
+    return RiskManager(led, {**Policy.load().risk, "mode": "LIVE_BETA"})
+
+
+def test_the_ladder_stakes_more_only_on_the_better_priced_bets():
+    """A flat ticket pays the same for a 2c edge as a 6c one. The rungs put
+    money where the price is better and nothing extra where it is not."""
+    risk = _beta_risk()
+    bar = 0.02
+    assert risk.size_for_edge(bar, bar) == 1.00           # exactly the bar
+    assert risk.size_for_edge(bar * 1.9, bar) == 1.00     # not yet 2x
+    assert risk.size_for_edge(bar * 2.0, bar) == 1.50     # the larger ticket
+    assert risk.size_for_edge(bar * 10, bar) == 1.50      # top rung, capped
+
+
+def test_the_trigger_is_a_MULTIPLE_of_the_bar_not_a_cent_figure():
+    """The bar already varies by band, by category and by measured drift.
+    A fixed cent trigger would mean something different in every market —
+    generous where the bar is low, unreachable where it is high."""
+    risk = _beta_risk()
+    # Same 4c edge, two different bars: only one is twice its bar.
+    assert risk.size_for_edge(0.04, 0.02) == 1.50
+    assert risk.size_for_edge(0.04, 0.035) == 1.00
+
+
+def test_an_unknown_bar_takes_the_STANDARD_ticket_not_the_top_rung():
+    """A missing threshold must never be read as an infinite edge. Getting
+    this backwards would stake the maximum on precisely the markets we
+    understand least."""
+    risk = _beta_risk()
+    assert risk.size_for_edge(0.05, None) == 1.00
+    assert risk.size_for_edge(0.05, 0.0) == 1.00
+    assert risk.size_for_edge(None, 0.02) == 1.00
+
+
+def test_the_ladder_can_never_exceed_the_per_fill_cap():
+    risk = _beta_risk()
     for edge in (0.0, 0.01, 0.1, 1.0, 99.0):
-        assert caps.per_fill_default <= risk.size_for_edge(edge, 0.02) <= caps.per_fill_max
-
-
-def test_a_missing_threshold_falls_back_to_the_default_stake():
-    from edge.execution.engine import Policy
-    from edge.ledger.service import Ledger
-    import tempfile
-
-    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
-    risk = RiskManager(led, {**Policy.load().risk, "mode": "LIVE_BETA"})
-    assert risk.size_for_edge(0.05, None) == risk.caps.per_fill_default
-    assert risk.size_for_edge(0.05, 0.0) == risk.caps.per_fill_default
+        s = risk.size_for_edge(edge, 0.02)
+        assert risk.caps.per_fill_default <= s <= risk.caps.per_fill_max

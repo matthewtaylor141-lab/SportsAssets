@@ -294,29 +294,50 @@ class RiskManager:
                 (now - 86_400, mode or self.mode)).fetchone()
         return {"usd": float(row[0]), "fills": int(row[1])}
 
+    def size_ladder(self, mode: str | None = None) -> list[tuple[float, float]]:
+        """[(edge multiple of the bar, stake)] ascending, from config."""
+        src = self.risk_cfg
+        prof = (src.get("profiles") or {}).get(
+            (mode or self.mode).lower(), {})
+        rungs = prof.get("size_ladder") or src.get("size_ladder") or []
+        out = []
+        for r in rungs:
+            try:
+                out.append((float(r["at"]), float(r["usd"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return sorted(out)
+
     def size_for_edge(self, edge: float, threshold: float,
                       mode: str | None = None) -> float:
-        """Stake in proportion to how far the edge clears its bar.
+        """Stake by how far the edge clears its bar, in discrete rungs.
 
         A flat ticket stakes the same on a 2c edge as on a 6c one, which
         leaves money on the better bet and overpays for the marginal one.
-        Scaling between per_fill_usd_default and per_fill_usd_max recovers
-        that, bounded by both.
 
-        Deliberately linear and capped rather than Kelly. Kelly sizes on the
-        edge you BELIEVE you have, so it amplifies estimation error as
-        readily as edge — and our estimate is the thing currently under
-        suspicion. A bounded linear ramp gains most of the benefit and
-        cannot blow up on a wrong number.
+        Discrete rungs rather than a continuous ramp, and deliberately not
+        Kelly. Kelly sizes on the edge you BELIEVE you have, so it amplifies
+        estimation error exactly as readily as edge — and our estimate is
+        the thing currently under suspicion. Two rungs capture most of the
+        benefit, are legible in the fill record, and cannot run away on a
+        wrong number.
+
+        Falls back to the flat default whenever the multiple cannot be
+        computed: an unknown threshold must never be read as an infinite
+        edge and promoted to the top rung.
         """
         caps = (self.caps if mode in (None, self.mode)
                 else caps_for_mode(self.risk_cfg, mode, self.bankroll))
         base, top = caps.per_fill_default, caps.per_fill_max
-        if top <= base or threshold is None or threshold <= 0:
+        rungs = self.size_ladder(mode)
+        if not rungs or not threshold or threshold <= 0 or edge is None:
             return base
-        # 1x the bar -> base stake; 3x the bar or better -> full size.
-        ratio = max(0.0, (edge / threshold) - 1.0) / 2.0
-        return round(min(top, base + (top - base) * min(1.0, ratio)), 2)
+        multiple = edge / threshold
+        stake = base
+        for at, usd in rungs:
+            if multiple >= at:
+                stake = usd
+        return round(min(stake, top), 2)
 
     def approve(self, venue: str, market_key: str, event_key: str,
                 requested_usd: float, now: float | None = None,

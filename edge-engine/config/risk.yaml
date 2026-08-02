@@ -22,15 +22,20 @@ shadow_gate: {min_days: 60, min_fills_per_venue: 5000, min_net_roi: 0.015}
 # Used by BOTH LIVE_BETA and PAPER so paper evidence reflects live behavior.
 profiles:
   live_beta:
-    # Sizing now scales with how far an edge clears its bar (see
-    # RiskManager.size_for_edge): 1x the bar stakes the default, 3x or
-    # better stakes the max. The ceiling moves from $1 to $2 so that ramp
-    # has somewhere to go — a bounded doubling on the best-priced bets
-    # only, not a general size increase. per_market_exposure_usd rises with
-    # it, or the cap would silently clip every scaled fill back to $1.
+    # Stake by how far the edge clears its bar, in discrete rungs (see
+    # RiskManager.size_for_edge). A flat ticket pays the same for a 2c edge
+    # as a 6c one; the ladder puts more money on the better-priced bets
+    # only, and nothing at all on the marginal ones.
+    #
+    # `at` is a MULTIPLE of the band threshold, not a cent figure — the bar
+    # already varies by band, by category and by measured drift, so a fixed
+    # cent trigger would mean something different in every market.
+    size_ladder:
+      - {at: 1.0, usd: 1.00}    # clears the bar: standard ticket
+      - {at: 2.0, usd: 1.50}    # twice the bar: the larger ticket
     per_fill_usd_default: 1
-    per_fill_usd_max: 2
-    per_market_exposure_usd: 2        # one ticket per bet; never add
+    per_fill_usd_max: 1.5
+    per_market_exposure_usd: 1.5      # one ticket per bet; never add
     # Sides of one game are not independent bets — exactly one of them pays.
     # A three-way soccer match is three markets and a full ladder is twenty,
     # so a per-market cap alone permits that much correlated exposure on a
