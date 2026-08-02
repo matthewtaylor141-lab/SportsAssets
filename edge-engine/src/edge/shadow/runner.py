@@ -367,8 +367,28 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     funnel = {"mode": risk.mode, "feed_events": len(events), "matched": 0,
               "tradeable": 0, "books_checked": 0, "logged": 0, "rejects": {}}
     if events and not reactive:
-        _ROTATION["i"] = (_ROTATION["i"] + 1) % max(len(events), 1)
-        events = events[_ROTATION["i"]:] + events[:_ROTATION["i"]]
+        # Capital, not opportunity, is what binds a small book. We buy and
+        # hold to resolution, so every dollar is locked until its game
+        # settles: a bet on tonight's game can be recycled tomorrow, one on
+        # next Sunday's cannot. Pricing the nearest kick-offs first therefore
+        # turns the same bankroll over several times more often, at no extra
+        # risk per trade — and if the cycle has to truncate, the games it
+        # drops are the ones that would have tied money up longest.
+        #
+        # This replaces blind rotation, which existed to stop the same tail
+        # being cut every cycle. Under settlement priority the cut is
+        # deliberate rather than arbitrary, so fairness is no longer the
+        # property we want. Rotation stays available for the case where
+        # settlement times are unknown or identical.
+        if os.environ.get("EDGE_SETTLEMENT_PRIORITY", "1") != "0" and any(
+                getattr(e, "commence_ts", 0) for e in events):
+            events = sorted(events, key=lambda e: getattr(e, "commence_ts", 0)
+                            or float("inf"))
+            funnel["order"] = "settlement"
+        else:
+            _ROTATION["i"] = (_ROTATION["i"] + 1) % max(len(events), 1)
+            events = events[_ROTATION["i"]:] + events[:_ROTATION["i"]]
+            funnel["order"] = "rotation"
     if reactive:
         funnel["reactive"] = len(only_slugs)
     if risk.is_live:
@@ -842,8 +862,14 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                         # Hard rule: real money only on MEASURED leagues;
                         # shadow-only leagues keep paper-logging.
                         effective_mode = "PAPER"
+                    # Stake in proportion to how far the edge clears its
+                    # bar: a flat ticket pays the same for a 2c edge as a
+                    # 6c one. Bounded by the same caps either way — this
+                    # asks for more, it does not raise the ceiling.
+                    want = risk.size_for_edge(verdict.edge, verdict.threshold,
+                                              mode=effective_mode)
                     approved, why = risk.approve(adapter.name, mkey, ev.event_key(),
-                                                 requested_usd=1e9, now=now,
+                                                 requested_usd=want, now=now,
                                                  mode=effective_mode,
                                                  tier=verdict.tier)
                     if approved <= 0:

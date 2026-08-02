@@ -294,6 +294,30 @@ class RiskManager:
                 (now - 86_400, mode or self.mode)).fetchone()
         return {"usd": float(row[0]), "fills": int(row[1])}
 
+    def size_for_edge(self, edge: float, threshold: float,
+                      mode: str | None = None) -> float:
+        """Stake in proportion to how far the edge clears its bar.
+
+        A flat ticket stakes the same on a 2c edge as on a 6c one, which
+        leaves money on the better bet and overpays for the marginal one.
+        Scaling between per_fill_usd_default and per_fill_usd_max recovers
+        that, bounded by both.
+
+        Deliberately linear and capped rather than Kelly. Kelly sizes on the
+        edge you BELIEVE you have, so it amplifies estimation error as
+        readily as edge — and our estimate is the thing currently under
+        suspicion. A bounded linear ramp gains most of the benefit and
+        cannot blow up on a wrong number.
+        """
+        caps = (self.caps if mode in (None, self.mode)
+                else caps_for_mode(self.risk_cfg, mode, self.bankroll))
+        base, top = caps.per_fill_default, caps.per_fill_max
+        if top <= base or threshold is None or threshold <= 0:
+            return base
+        # 1x the bar -> base stake; 3x the bar or better -> full size.
+        ratio = max(0.0, (edge / threshold) - 1.0) / 2.0
+        return round(min(top, base + (top - base) * min(1.0, ratio)), 2)
+
     def approve(self, venue: str, market_key: str, event_key: str,
                 requested_usd: float, now: float | None = None,
                 mode: str | None = None, tier: str = "core") -> tuple[float, str]:

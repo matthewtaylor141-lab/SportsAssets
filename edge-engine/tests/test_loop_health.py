@@ -112,8 +112,12 @@ def test_an_overrunning_cycle_says_so_instead_of_looking_empty(tmp_path, monkeyp
     assert funnel["logged"] == 0
 
 
-def test_the_slate_rotates_so_the_same_tail_is_not_always_cut(tmp_path, monkeypatch):
+def test_the_slate_rotates_when_settlement_times_cannot_order_it(tmp_path, monkeypatch):
+    """Rotation is now the FALLBACK. Settlement priority orders the slate
+    when kick-off times are known; rotation covers the case where they are
+    not, and still must not cut the same tail every cycle."""
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("EDGE_SETTLEMENT_PRIORITY", "0")
     monkeypatch.setattr(R, "_ROTATION", {"i": 0})
     ledger, risk = _rig(tmp_path)
     seen = []
@@ -1069,3 +1073,63 @@ def test_bands_are_graded_on_our_own_fills(tmp_path):
     assert by_band["0.20-0.25"]["settled"] == 2
     assert by_band["0.50-0.55"]["settled"] == 1
     assert by_band["0.50-0.55"]["roi"] == -1.0
+
+
+
+def test_the_nearest_kick_off_is_priced_first(tmp_path, monkeypatch):
+    """Capital, not opportunity, binds a small book. We hold to resolution,
+    so a bet on tonight's game recycles tomorrow and one on next Sunday's
+    does not — pricing nearest-first turns the same bankroll over more
+    often, and any truncation drops the games that would have locked money
+    up longest."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    seen = []
+
+    class Feed(StubFeed):
+        def fetch_events(self, sport_key):
+            return list(self._events)
+
+    events = []
+    for i, hours in enumerate([200, 2, 50]):        # deliberately unsorted
+        ev = _event()
+        ev.home, ev.away = f"H{i}", f"A{i}"
+        ev.h2h = {f"H{i}": 2.0, f"A{i}": 2.0}
+        ev.commence_ts = time.time() + hours * 3600
+        events.append(ev)
+
+    class Venue(StubVenue):
+        def discover_markets(self, league_codes):
+            seen.append(None)                        # one call per event
+            return []
+
+    funnel = run_cycle([Venue(ask_price=0.47)], Feed(events), POLICY, risk,
+                       ledger, ["soccer_epl"])
+    assert funnel["order"] == "settlement"
+
+
+def test_settlement_priority_survives_events_with_no_kick_off_time(tmp_path, monkeypatch):
+    """An unknown kick-off must sort LAST, not first — a missing timestamp
+    read as zero would put the least-known games at the front of the queue."""
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+
+    class Feed(StubFeed):
+        def fetch_events(self, sport_key):
+            return list(self._events)
+
+    near, unknown = _event(), _event()
+    near.home, near.away = "Near", "B"
+    near.h2h = {"Near": 2.0, "B": 2.0}
+    near.commence_ts = time.time() + 3600
+    unknown.home, unknown.away = "Unknown", "C"
+    unknown.h2h = {"Unknown": 2.0, "C": 2.0}
+    unknown.commence_ts = 0
+
+    class Venue(StubVenue):
+        def discover_markets(self, league_codes):
+            return []
+
+    funnel = run_cycle([Venue(ask_price=0.47)], Feed([unknown, near]), POLICY,
+                       risk, ledger, ["soccer_epl"])
+    assert funnel["order"] == "settlement"
