@@ -276,7 +276,7 @@ def test_stale_order_is_cancelled_and_the_event_released(tmp_path):
     led.set_state(f"{PMUS_ORDER_PREFIX}slug-x", _ctx(ts=time.time() - 300))
     a = _TradeAdapter([], open_orders=[{"id": "o1"}])
     out = reap_pmus_makers(a, led, ttl_s=90)
-    assert out == {"cancelled": 1, "closed": 0, "released": 1}
+    assert out == {"cancelled": 1, "closed": 0, "released": 1, "held": 0}
     assert a.cancelled == [("o1", "slug-x")]
     assert not led.event_traded("ev1")        # the game is tradeable again
     assert led.get_state(f"{PMUS_ORDER_PREFIX}slug-x") is None
@@ -288,7 +288,7 @@ def test_young_order_is_left_alone(tmp_path):
     led.set_state(f"{PMUS_ORDER_PREFIX}slug-x", _ctx())
     a = _TradeAdapter([], open_orders=[{"id": "o1"}])
     assert reap_pmus_makers(a, led, ttl_s=90) == {"cancelled": 0, "closed": 0,
-                                                  "released": 0}
+                                                  "released": 0, "held": 0}
     assert a.cancelled == [] and led.event_traded("ev1")
 
 
@@ -306,14 +306,102 @@ def test_a_filled_order_keeps_its_event_claim(tmp_path):
     assert led.event_traded("ev1")
 
 
-def test_order_gone_from_the_venue_is_closed_without_a_cancel(tmp_path):
+def test_order_gone_from_the_venue_is_held_not_released(tmp_path):
+    """An order that vanished without a confirmed cancel most likely FILLED.
+
+    This is the exact shape of the 2026-08-02 runaway. The venue's activity
+    feed lags its matching engine, so for a few seconds a real fill is
+    invisible: the order is off the book, `recent_trades()` does not list it
+    yet, and the ledger therefore shows no position. Treating that as "never
+    filled" released the claim and re-opened the market for another buy — on
+    a cap computed from a ledger that did not know we already owned it.
+    """
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     led.claim_event("ev1", "polymarket-us:slug-x", "polymarket-us")
     led.set_state(f"{PMUS_ORDER_PREFIX}slug-x", _ctx())   # young, but not open
     a = _TradeAdapter([], open_orders=[])
     out = reap_pmus_makers(a, led, ttl_s=90)
-    assert out == {"cancelled": 0, "closed": 1, "released": 1}
+    assert out == {"cancelled": 0, "closed": 1, "released": 0, "held": 1}
     assert a.cancelled == []
+    assert led.event_traded("ev1")            # claim retained — fail closed
+    # The context MUST survive, or sync_pmus_fills can never attribute the
+    # trade when it finally shows up: it only considers parked markets.
+    assert led.get_state(f"{PMUS_ORDER_PREFIX}slug-x") is not None
+
+
+def test_a_vanished_order_is_released_once_the_grace_window_expires(tmp_path):
+    """Held is not held forever — an order that truly never filled has to
+    give the market back, or one silent rejection retires it for the day."""
+    from edge.execution.executor import REAP_GRACE_S
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    led.claim_event("ev1", "polymarket-us:slug-x", "polymarket-us")
+    led.set_state(f"{PMUS_ORDER_PREFIX}slug-x", _ctx())
+    a = _TradeAdapter([], open_orders=[])
+    reap_pmus_makers(a, led, ttl_s=90)                    # starts the clock
+    assert led.event_traded("ev1")
+    out = reap_pmus_makers(a, led, ttl_s=90,
+                           now=time.time() + REAP_GRACE_S + 1)
+    assert out["released"] == 1
+    assert not led.event_traded("ev1")
+
+
+def test_a_fill_landing_after_the_reap_still_blocks_a_second_entry(tmp_path):
+    """The regression test for the runaway itself.
+
+    Sequence: order rests, leaves the book, the reaper runs BEFORE the trade
+    appears in the activity feed, and only then does the fill surface. The
+    old reaper cleared the context and released the claim at step three,
+    which both stranded the fill (unattributable forever) and re-opened the
+    market. Repeated once per cycle, that is how a $1.50 per-market cap
+    became a $26.60 position.
+
+    What must hold: the claim never comes back, and the fill lands.
+    """
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    led.claim_event("ev1", "polymarket-us:slug-x", "polymarket-us")
+    led.set_state(f"{PMUS_ORDER_PREFIX}slug-x", _ctx())
+
+    # 1. the order is off the book, but the venue is not reporting the trade.
+    a = _TradeAdapter([], open_orders=[])
+    reap_pmus_makers(a, led, ttl_s=90)
+    assert led.event_traded("ev1"), "claim released on an unproven fill"
+
+    # 2. the trade surfaces a moment later.
+    a = _TradeAdapter([{"id": "t1", "marketSlug": "slug-x", "qty": "2",
+                        "price": {"value": "0.49"}}], open_orders=[])
+    assert sync_pmus_fills(a, led, "LIVE_BETA") == 1, \
+        "context was dropped, so the fill could never be attributed"
+
+    # 3. we now hold the market, and it stays claimed however often we reap.
+    for _ in range(3):
+        reap_pmus_makers(a, led, ttl_s=90)
+    assert led.event_traded("ev1")
+    pos = led.position("polymarket-us:slug-x")
+    assert pos and float(pos["shares"]) == 2.0
+
+
+def test_the_two_fill_paths_cannot_double_count_one_trade(tmp_path):
+    """sync_pmus_fills and reconcile_positions both read the venue's trades.
+
+    They used different fill_uid prefixes for the same trade id, so a trade
+    seen by both was recorded twice — doubling the position and, with it, the
+    per-market exposure every cap is measured against.
+    """
+    from edge.execution.executor import reconcile_positions
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    led.set_state(f"{PMUS_ORDER_PREFIX}slug-x", _ctx())
+    trade = {"id": "t1", "marketSlug": "slug-x", "qty": "2",
+             "price": {"value": "0.49"}}
+    a = _TradeAdapter([trade], open_orders=[])
+
+    sync_pmus_fills(a, led, "LIVE_BETA")
+    reconcile_positions(a, led, "LIVE_BETA")
+    reconcile_positions(a, led, "LIVE_BETA")      # idempotent under repetition
+
+    pos = led.position("polymarket-us:slug-x")
+    assert float(pos["shares"]) == 2.0, "one venue trade became two fills"
 
 
 def test_reaper_is_a_no_op_with_nothing_resting(tmp_path):

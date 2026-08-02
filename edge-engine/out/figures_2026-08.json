@@ -41,7 +41,7 @@
       "source_file": "src/edge/ledger/service.py",
       "source_function": "performance",
       "computed_at": "2026-08-02T16:22:07Z",
-      "null_reason": "no_absolute_window_filter: the implementing function takes a rolling `days: int`, not an absolute `since`; days=7 from the window end reaches back to 2026-07-26"
+      "null_reason": "store_unreachable_pending_deploy: the `since` parameter now exists on all eight report functions (commit adding ledger.window_start), so this figure is computable \u2014 but only where the data lives, on the edge-shadow worker. It needs a deploy plus an export path before it can be read from here"
     },
     "net": {
       "value": null,
@@ -50,7 +50,7 @@
       "source_file": "src/edge/ledger/service.py",
       "source_function": "performance",
       "computed_at": "2026-08-02T16:22:07Z",
-      "null_reason": "no_absolute_window_filter: the implementing function takes a rolling `days: int`, not an absolute `since`; days=7 from the window end reaches back to 2026-07-26",
+      "null_reason": "store_unreachable_pending_deploy: the `since` parameter now exists on all eight report functions (commit adding ledger.window_start), so this figure is computable \u2014 but only where the data lives, on the edge-shadow worker. It needs a deploy plus an export path before it can be read from here",
       "note": "Step 6 asked for two independent computations. Neither is possible: there are no in-window position rows to sum, and no ledger balance series is exposed. Three separate accounting paths disagree about today's stake \u2014 engine ledger $583.08, platform cohort $311.71, risk day-counter $390.22"
     },
     "return_pct": {
@@ -173,7 +173,7 @@
       "source_function": "drift_penalties",
       "computed_at": "2026-08-02T16:22:07Z",
       "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
-      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+      "note": "A thin category does NOT recut to 0.00c: drift_penalties() already makes under-DRIFT_MIN_N categories inherit the overall surcharge rather than trade free. Zero is reached only when nothing at all is measured, which is the documented pre-existing behaviour (the bands govern alone). Correcting an earlier note of mine that called this a defect \u2014 it is not"
     },
     "draw": {
       "value": null,
@@ -183,7 +183,7 @@
       "source_function": "drift_penalties",
       "computed_at": "2026-08-02T16:22:07Z",
       "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
-      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+      "note": "A thin category does NOT recut to 0.00c: drift_penalties() already makes under-DRIFT_MIN_N categories inherit the overall surcharge rather than trade free. Zero is reached only when nothing at all is measured, which is the documented pre-existing behaviour (the bands govern alone). Correcting an earlier note of mine that called this a defect \u2014 it is not"
     },
     "spread": {
       "value": null,
@@ -193,7 +193,7 @@
       "source_function": "drift_penalties",
       "computed_at": "2026-08-02T16:22:07Z",
       "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
-      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+      "note": "A thin category does NOT recut to 0.00c: drift_penalties() already makes under-DRIFT_MIN_N categories inherit the overall surcharge rather than trade free. Zero is reached only when nothing at all is measured, which is the documented pre-existing behaviour (the bands govern alone). Correcting an earlier note of mine that called this a defect \u2014 it is not"
     },
     "total": {
       "value": null,
@@ -203,7 +203,7 @@
       "source_function": "drift_penalties",
       "computed_at": "2026-08-02T16:22:07Z",
       "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
-      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+      "note": "A thin category does NOT recut to 0.00c: drift_penalties() already makes under-DRIFT_MIN_N categories inherit the overall surcharge rather than trade free. Zero is reached only when nothing at all is measured, which is the documented pre-existing behaviour (the bands govern alone). Correcting an earlier note of mine that called this a defect \u2014 it is not"
     },
     "prop": {
       "value": null,
@@ -213,7 +213,7 @@
       "source_function": "drift_penalties",
       "computed_at": "2026-08-02T16:22:07Z",
       "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
-      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+      "note": "A thin category does NOT recut to 0.00c: drift_penalties() already makes under-DRIFT_MIN_N categories inherit the overall surcharge rather than trade free. Zero is reached only when nothing at all is measured, which is the documented pre-existing behaviour (the bands govern alone). Correcting an earlier note of mine that called this a defect \u2014 it is not"
     },
     "segment": {
       "value": null,
@@ -223,7 +223,7 @@
       "source_function": "drift_penalties",
       "computed_at": "2026-08-02T16:22:07Z",
       "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
-      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+      "note": "A thin category does NOT recut to 0.00c: drift_penalties() already makes under-DRIFT_MIN_N categories inherit the overall surcharge rather than trade free. Zero is reached only when nothing at all is measured, which is the documented pre-existing behaviour (the bands govern alone). Correcting an earlier note of mine that called this a defect \u2014 it is not"
     },
     "overall": {
       "value": null,
@@ -233,7 +233,7 @@
       "source_function": "drift_penalties",
       "computed_at": "2026-08-02T16:22:07Z",
       "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
-      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+      "note": "A thin category does NOT recut to 0.00c: drift_penalties() already makes under-DRIFT_MIN_N categories inherit the overall surcharge rather than trade free. Zero is reached only when nothing at all is measured, which is the documented pre-existing behaviour (the bands govern alone). Correcting an earlier note of mine that called this a defect \u2014 it is not"
     }
   },
   "retention": {
@@ -316,7 +316,7 @@
       "source_file": "src/edge/ledger/service.py",
       "source_function": "price_drift_report",
       "computed_at": "2026-08-02T16:22:07Z",
-      "null_reason": "no_absolute_window_filter: the implementing function takes a rolling `days: int`, not an absolute `since`; days=7 from the window end reaches back to 2026-07-26"
+      "null_reason": "store_unreachable_pending_deploy: the `since` parameter now exists on all eight report functions (commit adding ledger.window_start), so this figure is computable \u2014 but only where the data lives, on the edge-shadow worker. It needs a deploy plus an export path before it can be read from here"
     },
     "mean_drift_cents": {
       "value": null,
@@ -325,7 +325,7 @@
       "source_file": "src/edge/ledger/service.py",
       "source_function": "price_drift_report",
       "computed_at": "2026-08-02T16:22:07Z",
-      "null_reason": "no_absolute_window_filter: the implementing function takes a rolling `days: int`, not an absolute `since`; days=7 from the window end reaches back to 2026-07-26"
+      "null_reason": "store_unreachable_pending_deploy: the `since` parameter now exists on all eight report functions (commit adding ledger.window_start), so this figure is computable \u2014 but only where the data lives, on the edge-shadow worker. It needs a deploy plus an export path before it can be read from here"
     }
   },
   "reversion_keep": {
@@ -336,7 +336,7 @@
       "source_file": "src/edge/ledger/service.py",
       "source_function": "reversion",
       "computed_at": "2026-08-02T16:22:07Z",
-      "null_reason": "no_absolute_window_filter: the implementing function takes a rolling `days: int`, not an absolute `since`; days=7 from the window end reaches back to 2026-07-26"
+      "null_reason": "store_unreachable_pending_deploy: the `since` parameter now exists on all eight report functions (commit adding ledger.window_start), so this figure is computable \u2014 but only where the data lives, on the edge-shadow worker. It needs a deploy plus an export path before it can be read from here"
     },
     "keep": {
       "value": null,
@@ -345,7 +345,7 @@
       "source_file": "src/edge/ledger/service.py",
       "source_function": "reversion",
       "computed_at": "2026-08-02T16:22:07Z",
-      "null_reason": "no_absolute_window_filter: the implementing function takes a rolling `days: int`, not an absolute `since`; days=7 from the window end reaches back to 2026-07-26",
+      "null_reason": "store_unreachable_pending_deploy: the `since` parameter now exists on all eight report functions (commit adding ledger.window_start), so this figure is computable \u2014 but only where the data lives, on the edge-shadow worker. It needs a deploy plus an export path before it can be read from here",
       "note": "REVERSION_MIN_N = 200. Determines whether shrinkage applies INSTEAD of the surcharge; the two must never both apply"
     },
     "r_squared": {

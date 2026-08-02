@@ -196,6 +196,21 @@ CREATE TABLE IF NOT EXISTS mode_log (
 """
 
 
+def window_start(days: int, since: float | None = None) -> float:
+    """Start of a report window, as a Unix timestamp.
+
+    `days` is a ROLLING window ending now, which is the right default for a
+    live dashboard and the wrong thing entirely for a re-baseline: "since
+    2026-08-01" is inexpressible as a rolling count, and days=7 asked on
+    2026-08-02 silently reaches back to 2026-07-26. Every measured figure
+    computed that way is labelled in-window and is not.
+
+    `since` overrides it with an absolute instant. Ledger timestamps are
+    zone-free Unix epoch seconds, so the boundary is unambiguous.
+    """
+    return float(since) if since is not None else time.time() - days * 86_400
+
+
 class Ledger:
     """Thread-safe SQLite ledger. One instance per process; connections are
     per-call cheap (SQLite handles its own locking, WAL mode)."""
@@ -395,7 +410,8 @@ class Ledger:
             "resolved_markets": agg["resolved_markets"],
         }
 
-    def spread_report(self, days: int = 7, live_only: bool = True) -> dict:
+    def spread_report(self, days: int = 7, live_only: bool = True,
+                      since: float | None = None) -> dict:
         """What crossing the spread costs us, against what we claimed to win.
 
         The venue quotes in whole cents. At a 50c contract one tick is 2% of
@@ -410,7 +426,7 @@ class Ledger:
         estimate of the market's own price, and anything above it is what we
         gave up for immediacy.
         """
-        since = time.time() - days * 86_400
+        since = window_start(days, since)
         mode_clause = "AND mode != 'PAPER'" if live_only else ""
         with self._conn() as conn:
             rows = conn.execute(
@@ -450,7 +466,8 @@ class Ledger:
             b["net_c"] = round(b["edge_c"] - b["paid_over_mid_c"], 2)
         return out
 
-    def performance_by_band(self, days: int = 7, live_only: bool = True) -> dict:
+    def performance_by_band(self, days: int = 7, live_only: bool = True,
+                            since: float | None = None) -> dict:
         """Settled P&L by entry price band, graded on OUR OWN fills.
 
         config/bands.yaml is calibrated from the reference account's history
@@ -460,7 +477,7 @@ class Ledger:
         to say anything. It is a REPORT, not an auto-blocker; at a few
         hundred settlements across twenty bands there is nothing to act on.
         """
-        since = time.time() - days * 86_400
+        since = window_start(days, since)
         mode_clause = "AND f.mode != 'PAPER'" if live_only else ""
         with self._conn() as conn:
             rows = [dict(x) for x in conn.execute(
@@ -489,7 +506,8 @@ class Ledger:
         return dict(sorted(out.items()))
 
     def performance_by_category(self, days: int = 7,
-                                live_only: bool = True) -> dict:
+                                live_only: bool = True,
+                                since: float | None = None) -> dict:
         """Settled scorecard split by what KIND of bet it was.
 
         The blended number cannot answer the only question that matters right
@@ -498,7 +516,7 @@ class Ledger:
         a mapping error. If a prop is mapped to the wrong line, drift reads
         perfectly clean and settlement is where it shows up. This is that.
         """
-        since = time.time() - days * 86_400
+        since = window_start(days, since)
         mode_clause = "AND f.mode != 'PAPER'" if live_only else ""
         with self._conn() as conn:
             rows = [dict(x) for x in conn.execute(
@@ -531,7 +549,8 @@ class Ledger:
                              if b["settled"] else None)
         return out
 
-    def performance(self, days: int = 7, live_only: bool = True) -> dict:
+    def performance(self, days: int = 7, live_only: bool = True,
+                    since: float | None = None) -> dict:
         """Settled scorecard straight from the engine's OWN ledger.
 
         This exists because the platform API — the usual place to read
@@ -546,7 +565,7 @@ class Ledger:
         position's cost against a zero return reports a loss that has not
         happened yet.
         """
-        since = time.time() - days * 86_400
+        since = window_start(days, since)
         mode_clause = "AND f.mode != 'PAPER'" if live_only else ""
         with self._conn() as conn:
             res = conn.execute(
@@ -638,8 +657,9 @@ class Ledger:
             "held": sum(1 for l, e in zip(later, entry) if l >= e * 0.5),
         }
 
-    def _drift_rows(self, days: int, category: str | None = None) -> list[dict]:
-        since = time.time() - days * 86_400
+    def _drift_rows(self, days: int, category: str | None = None,
+                    since: float | None = None) -> list[dict]:
+        since = window_start(days, since)
         sql = ("SELECT price, fair_entry, fair_later, category FROM edge_drift "
                "WHERE fair_later IS NOT NULL AND ts_entry >= ?")
         params: list = [since]
@@ -649,14 +669,15 @@ class Ledger:
         with self._conn() as conn:
             return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
-    def drift_report(self, days: int = 7, category: str | None = None) -> dict:
+    def drift_report(self, days: int = 7, category: str | None = None,
+                     since: float | None = None) -> dict:
         """How much of the edge we thought we had was still there a minute
         later. retention ~1.0 = the edge was real; ~0 or negative = we were
         buying quotes that had already moved.
 
         Reported per category as well as overall: a single blended number
         hides the one leg that is doing the damage."""
-        rows = self._drift_rows(days, category)
+        rows = self._drift_rows(days, category, since)
         report = self._drift_stats(rows)
         if category is None:
             buckets: dict[str, list[dict]] = {}
@@ -700,9 +721,10 @@ class Ledger:
                 "WHERE obs_id=? AND fair_later IS NULL",
                 (fair_later, ts if ts is not None else time.time(), obs_id))
 
-    def price_drift_report(self, days: int = 7) -> dict:
+    def price_drift_report(self, days: int = 7,
+                           since: float | None = None) -> dict:
         """Staleness by category, measured without spending anything."""
-        since = time.time() - days * 86_400
+        since = window_start(days, since)
         with self._conn() as conn:
             rows = [dict(r) for r in conn.execute(
                 "SELECT price, fair_entry, fair_later, category FROM price_drift "
@@ -721,7 +743,8 @@ class Ledger:
     REVERSION_MIN_N = 200
     REVERSION_MIN_SPREAD = 0.005   # sd of apparent edge, in probability
 
-    def reversion(self, days: int = 7, category: str | None = None) -> dict:
+    def reversion(self, days: int = 7, category: str | None = None,
+                  since: float | None = None) -> dict:
         """How much of an APPARENT edge gives itself back.
 
         The winner's-curse question is not "does fair value move" — we have
@@ -739,7 +762,7 @@ class Ledger:
         enough samples across a wide enough range of claims to mean
         anything; callers must treat None as "no opinion", not as 1.0.
         """
-        since = time.time() - days * 86_400
+        since = window_start(days, since)
         sql = ("SELECT price, fair_entry, fair_later, edge_entry FROM price_drift "
                "WHERE fair_later IS NOT NULL AND ts_entry >= ?")
         params: list = [since]
@@ -769,7 +792,8 @@ class Ledger:
         out["keep"] = round(min(1.0, max(0.0, 1.0 + slope)), 4)
         return out
 
-    def drift_penalties(self, days: int = 7) -> dict[str, float]:
+    def drift_penalties(self, days: int = 7,
+                        since: float | None = None) -> dict[str, float]:
         """Measured adverse drift, as an edge surcharge per category.
 
         The entry threshold is a bar our ESTIMATE must clear. If fair value
@@ -786,7 +810,7 @@ class Ledger:
 
         Keys are categories plus '*' for the fallback.
         """
-        overall = self._drift_stats(self._drift_rows(days))
+        overall = self._drift_stats(self._drift_rows(days, since=since))
 
         def surcharge(stats: dict) -> float | None:
             if stats["n"] < self.DRIFT_MIN_N or stats["mean_drift"] is None:
@@ -796,7 +820,8 @@ class Ledger:
 
         base = surcharge(overall) or 0.0
         out: dict[str, float] = {"*": base}
-        for cat, stats in (self.drift_report(days).get("by_category") or {}).items():
+        for cat, stats in (self.drift_report(days, since=since)
+                           .get("by_category") or {}).items():
             out[cat] = surcharge(stats) if surcharge(stats) is not None else base
         return out
 

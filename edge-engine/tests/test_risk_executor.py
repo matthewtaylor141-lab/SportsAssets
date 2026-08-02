@@ -343,6 +343,35 @@ def test_bankroll_updates_resize_the_caps(tmp_path):
     assert risk.caps.per_day == 800
 
 
+def test_the_day_budget_does_not_shrink_as_it_is_spent(tmp_path):
+    """The denominator is start-of-day buying power, not cash remaining.
+
+    `set_bankroll` is fed the venue's CASH, which falls a dollar for every
+    dollar deployed. Sizing the day budget off it directly makes the budget
+    chase its own spend: at 100% of bankroll, room runs out once spend
+    reaches remaining cash — i.e. after deploying HALF the starting bankroll
+    — and the engine reports "BUDGET SPENT: $390.22 of $232.78", which reads
+    as a breach and is really a cap that shrank underneath a cumulative
+    number. Observed live 2026-08-02; 390.22 + 232.78 = $623.00 exactly.
+    """
+    from edge.execution.engine import Policy
+
+    ledger = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    risk = RiskManager(ledger, Policy.load().risk)
+    risk.set_mode("LIVE_BETA")
+
+    risk.set_bankroll(623.0)                 # start of day, nothing deployed
+    assert risk.caps.per_day == pytest.approx(623.0)
+
+    # Deploy $390.22 of it. Cash is now $232.78; the budget must not follow.
+    ledger.record_fill(fill_uid="f1", venue="polymarket-us",
+                       market_key="polymarket-us:m1", side="BUY",
+                       qty=390.22, price=1.0, ts=time.time(), mode="LIVE_BETA")
+    risk.set_bankroll(232.78)
+    assert risk.caps.per_day == pytest.approx(623.0)
+    assert risk.day_deployed() == pytest.approx(390.22)
+
+
 def test_paper_claims_per_venue_live_claims_global(rig):
     ledger, risk = rig
     now = time.time()

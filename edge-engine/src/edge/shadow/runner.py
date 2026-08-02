@@ -1363,19 +1363,30 @@ def main() -> None:
                     if a.name == "kalshi":
                         funnel["kalshi_fill_sync"] = sync_kalshi_fills(a, ledger, risk.mode)
                     elif a.name == "polymarket-us":
-                        # Fills FIRST, then reap: the reaper only returns an
-                        # event claim when the market holds no position, so
-                        # it must see this cycle's fills before deciding.
-                        # Rebuild what we already own BEFORE anything reads
-                        # a cap. Caps are enforced against the ledger, the
-                        # ledger is ephemeral, and a ledger that has
-                        # forgotten a position re-grants its full room —
-                        # which is how a $1.50 cap became a $5.00 holding.
-                        if not _RECONCILED.get(a.name):
-                            funnel["reconciled"] = reconcile_positions(
-                                a, ledger, risk.mode)
-                            _RECONCILED[a.name] = True
+                        # Order matters, and getting it wrong cost us four
+                        # runaway positions on 2026-08-02.
+                        #
+                        # Reconcile FIRST: rebuild what the venue says we own
+                        # before anything reads a cap. Caps are enforced
+                        # against the ledger, so a ledger missing a position
+                        # re-grants that market's full room.
+                        #
+                        # EVERY CYCLE, not once per process. This was gated on
+                        # a per-process flag, which made it a start-up repair
+                        # rather than a control. The hole it is meant to
+                        # cover — a fill the engine never learned about —
+                        # opens continuously, so the cover has to be
+                        # continuous too. It is idempotent (fill_uid dedupe)
+                        # and bounded by `limit`, so the cost is one venue
+                        # call per cycle.
+                        funnel["reconciled"] = reconcile_positions(
+                            a, ledger, risk.mode)
+                        # Then attribute what we can to its decision record.
                         funnel["pmus_fill_sync"] = sync_pmus_fills(a, ledger, risk.mode)
+                        # Reap LAST: it decides whether to hand a claim back,
+                        # and that decision is only sound once the two steps
+                        # above have told the ledger everything the venue
+                        # knows.
                         funnel["makers"] = reap_pmus_makers(a, ledger, maker_ttl_s)
             log.info("cycle complete: %s", funnel)
             _post_status("ok", funnel)

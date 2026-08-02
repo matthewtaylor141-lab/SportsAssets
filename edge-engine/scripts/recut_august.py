@@ -11,10 +11,13 @@ line references in `out/RECUT_NOTES.md`:
   1. `edge_drift` is keyed by market_key, not fill_uid — fair-value-at-+60s is
      not persisted per fill, so drift/retention/surcharge/shrinkage cannot be
      computed at position level at all.
-  2. Every report in ledger/service.py takes a ROLLING `days: int`. There is no
-     absolute `since`, so "since 2026-08-01" is inexpressible. days=7 from
-     2026-08-02 reaches back to 2026-07-26 and would drag five and a half days
-     of pre-window data into a figure labelled in-window.
+  2. FIXED. Every report in ledger/service.py took a ROLLING `days: int` with
+     no absolute `since`, so "since 2026-08-01" was inexpressible and days=7
+     asked on 2026-08-02 dragged five and a half pre-window days into a figure
+     labelled in-window. All eight now accept `since` (see
+     ledger.window_start). The figures remain null only because the store is
+     still on the worker (blocker 3) — the arithmetic is no longer the
+     obstacle.
   3. The store lives on the edge-shadow worker's mounted disk and is not
      reachable from a checkout. Only worker-computed aggregates surface, inside
      the /api/engine/status heartbeat.
@@ -46,9 +49,11 @@ WINDOW_END = datetime(2026, 8, 2, 16, 22, 7, tzinfo=timezone.utc)
 # Why a given figure is null. Distinguishing these matters: "we measured zero"
 # and "we could not measure" are the same number to a naive reader and must
 # never be the same number to the engine.
-NO_WINDOW = ("no_absolute_window_filter: the implementing function takes a "
-             "rolling `days: int`, not an absolute `since`; days=7 from the "
-             "window end reaches back to 2026-07-26")
+NO_WINDOW = ("store_unreachable_pending_deploy: the `since` parameter now "
+             "exists on all eight report functions (commit adding "
+             "ledger.window_start), so this figure is computable — but only "
+             "where the data lives, on the edge-shadow worker. It needs a "
+             "deploy plus an export path before it can be read from here")
 UNREACHABLE = ("store_unreachable: lives in SQLite on the edge-shadow Render "
                "worker at /var/edge-data/edge_ledger.sqlite3; no copy exists "
                "in a checkout")
@@ -135,11 +140,12 @@ figures: dict = {
                     for c in CATEGORIES},
     "drift_surcharge_cents": {
         c: fig("cents", LEDGER, "drift_penalties", NOT_PER_FILL, note=(
-            "CRITICAL: a naive recut emits 0.00c here, and the engine cannot "
-            "tell that apart from a measured absence of adverse selection — "
-            "strategy_filter defaults drift_penalty=0.0. On the moneyline "
-            "cohort, last measured at -2.3c, that is the most expensive "
-            "possible misreading"))
+            "A thin category does NOT recut to 0.00c: drift_penalties() "
+            "already makes under-DRIFT_MIN_N categories inherit the overall "
+            "surcharge rather than trade free. Zero is reached only when "
+            "nothing at all is measured, which is the documented pre-existing "
+            "behaviour (the bands govern alone). Correcting an earlier note "
+            "of mine that called this a defect — it is not"))
         for c in CATEGORIES},
     "retention": {
         c: fig("fraction", LEDGER, "drift_report", NOT_PER_FILL, note=(

@@ -328,6 +328,37 @@ def test_unmapped_sport_keys_still_get_a_league_code():
     assert c.league_of("soccer_norway_eliteserien") == "soccer_norway_eliteserien"
 
 
+def test_a_competitions_qualifying_rounds_inherit_its_league_code():
+    """Otherwise the blocklist cannot reach them.
+
+    The feed carries qualifying and playoff rounds under keys that EXTEND the
+    parent key. Only the parent was mapped, so
+    `soccer_uefa_champs_league_qualification` resolved to its raw sport key,
+    never matched the `ucl` blocklist entry, and was waved through by
+    `unknown_league_policy: allow`. Caught live 2026-08-02 holding two open
+    positions in a league measured net-negative and deliberately shut.
+    """
+    c = TheOddsAPIClient(api_key="k")
+    assert c.league_of("soccer_uefa_champs_league_qualification") == "ucl"
+    assert c.league_of("soccer_germany_bundesliga_playoffs") == "bun"
+    # The exact key still wins over any prefix.
+    assert c.league_of("soccer_uefa_champs_league") == "ucl"
+    # A different competition is not swallowed by a shared stem: the match
+    # requires a full segment boundary, not a character prefix.
+    assert c.league_of("soccer_eplx") == "soccer_eplx"
+
+
+def test_the_blocklist_actually_reaches_a_qualifying_round():
+    """The mapping above only matters if policy then refuses the trade."""
+    from edge.execution.engine import Policy, strategy_filter
+
+    c = TheOddsAPIClient(api_key="k")
+    league = c.league_of("soccer_uefa_champs_league_qualification")
+    p = Policy.load()
+    p.leagues = {**p.leagues, "blocked_categories": []}   # isolate the league gate
+    assert not strategy_filter(p, league, 0.50, 0.55, consensus_books=6).ok
+
+
 def test_an_unmeasured_league_is_allowed_not_shadowed():
     """An absent league is unmeasured, not disproven — and the de-vig that
     produces the edge is the same arithmetic in every league."""

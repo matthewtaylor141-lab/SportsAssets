@@ -163,21 +163,32 @@ jobs:
 
           echo ""
           echo "###########################################################"
-          echo "#     SYSTEM vs MANUAL  (is the ENGINE making money?)      #"
+          echo "#   POSITIONS BY SIZE  (cap-breach detector)               #"
           echo "###########################################################"
+          # This split is by COST, nothing else. It was previously labelled
+          # "system vs manual", which asserted something the boundary cannot
+          # know: every position over $5 was reported as hand-placed. On
+          # 2026-08-02 all twenty of them were the engine's own runaway
+          # entries, and the label hid the incident behind a plausible
+          # explanation. The heuristic is also circular — it assumes the caps
+          # held in order to decide who placed a trade.
+          #
+          # Read the over-cap cohort as a BREACH LIST. With per_market at
+          # $1.50, anything above it is the engine entering a market it
+          # already held.
           curl -sS --max-time 120 -o /tmp/acct.json "$BASE/api/pmus-account" || true
-          jq -r '"boundary: system = positions costing <= $\(.system_max_cost)",
+          jq -r '"boundary: cost <= $\(.system_max_cost)  (SIZE only — says nothing about who placed it)",
                  "",
-                 (.system, .manual | "[\(.cohort)]  \(.positions) positions, $\(.staked) staked",
+                 (.system, .manual | "[\(if .cohort == "manual" then "OVER $5 — investigate" else "within $5" end)]  \(.positions) positions, $\(.staked) staked",
                    "   settled \(.settled)  (W \(.wins) / L \(.losses))  win rate \(.win_rate // "n/a")",
                    "   realized $\(.realized)   ROI \(.roi // "n/a")",
                    "   open \(.open) worth $\(.open_cost)", "")' /tmp/acct.json 2>/dev/null || true
-          echo "MANUAL cohort in detail (cost > $5 — verify these are yours):"
+          echo "OVER-CAP cohort in detail (cost > \$5 against a \$1.50 per-market cap):"
           jq -r '.manual_positions // [] | if length == 0 then "   (none)"
                  else .[] | "  \(if .settled then "settled" else "OPEN   " end)  cost $\(.cost)  realized \(.realized)  \(.market_slug)" end' \
              /tmp/acct.json 2>/dev/null || true
           echo ""
-          echo "system positions in detail:"
+          echo "within-cap positions in detail:"
           jq -r '.system_positions // [] | .[]
                  | "  \(if .settled then "settled" else "OPEN   " end)  cost $\(.cost)  realized \(.realized)  \(.market_slug)"'              /tmp/acct.json 2>/dev/null || true
 

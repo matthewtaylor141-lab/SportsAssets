@@ -68,7 +68,7 @@ A second, independent blocker compounds it — see §1.
 database — `find . -name '*.sqlite3'` returns nothing. The repository was
 cloned fresh; the data lives only on the worker's mounted disk.
 
-### 1.1 The report functions cannot express this window
+### 1.1 The report functions could not express this window — now fixed
 
 Every report in `src/edge/ledger/service.py` takes a **rolling** `days: int`,
 never an absolute instant:
@@ -80,22 +80,30 @@ drift_report(days=7)             price_drift_report(days=7)
 reversion(days=7)                drift_penalties(days=7)
 ```
 
-`days=7` from 2026-08-02 reaches back to 2026-07-26 and therefore includes
+`days=7` from 2026-08-02 reaches back to 2026-07-26 and therefore included
 **five and a half days of pre-window data**. Per integrity rule 4 I have not
 carried any of those values forward as a window figure, including the ones that
 look unlikely to have changed.
 
-Making the recut computable requires, in this order:
+**Fixed.** All eight now take an optional absolute `since`, resolved by a
+shared `ledger.window_start(days, since)`; `days` remains the default for the
+live dashboard, where a rolling window is the right thing. The figures below
+are still `null`, but the reason has narrowed to one: the store is on the
+worker.
 
-1. add a `since: float | None` parameter to the eight functions above
-   (extend the existing implementations — do **not** write second versions);
-2. add a CSV export command that reads them;
+Making the recut computable takes four steps. The first is done:
+
+1. ~~add a `since: float | None` parameter to the eight functions above~~ —
+   **done**, by extending the existing implementations. A second version of
+   these metrics that disagreed with the engine's own would be worse than no
+   recut at all;
+2. add a CSV export command that reads them at position level;
 3. expose it, or run it on the worker;
 4. deploy, and re-probe.
 
-That is a code change plus a deploy. I have not made it in this pass because
-you asked for figures and a diff report, not a schema change, and because the
-deploy interacts with the live incident in §4.1.
+Steps 2–4 are outstanding. They need a deploy, which is sequenced behind the
+live incident in §4.1 — the fill population a recut would measure is
+contaminated until that fix is running.
 
 ### 1.2 What the API does and does not carry
 
@@ -285,18 +293,22 @@ after this re-baseline the document would assert it with **no supporting
 evidence inside the window**. It should be relabelled as *policy carried
 forward from a pre-window measurement, pending re-measurement*.
 
-### 4.3 Drift surcharges read 0.00¢ — because unmeasured, not because absent
+### 4.3 Drift surcharges recut to `null` — but the engine already fails safe
 
-`DRIFT_MIN_N = 12`. In-window, per-category counts are unobtainable, so every
-surcharge recuts to `null`. If the recut were run naively it would emit
-**0.00¢**, and the engine would read that as *"no adverse selection, trade at
-the base bar"* — the most expensive possible misreading, on the exact cohort
-measured at −2.3¢.
+`DRIFT_MIN_N = 12`, and in-window per-category counts are unobtainable, so
+every surcharge recuts to `null`.
 
-This is not hypothetical: `strategy_filter` takes `drift_penalty=0.0` as its
-default. **An unmeasured surcharge and a measured-zero surcharge are the same
-value to the engine and must not be.** That is a defect worth fixing whether or
-not you proceed with the re-baseline.
+**Correcting my earlier note on this.** I flagged it as a defect — that an
+unmeasured surcharge and a measured-zero surcharge look identical to the
+engine. They do not. `drift_penalties()` makes a category with fewer than 12
+observations **inherit the overall surcharge** rather than trade free; zero is
+reached only when nothing at all is measured, which is the documented
+pre-existing behaviour (the bands govern alone). The design is already right
+and I have not changed it.
+
+The reporting caveat still stands: a **`null`** surcharge in this artifact must
+not be read as **0.00¢** by a human. That distinction is why every figure here
+carries a `null_reason`.
 
 ### 4.4 The stopping rule cannot be evaluated
 

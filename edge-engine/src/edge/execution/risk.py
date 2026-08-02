@@ -138,13 +138,28 @@ class RiskManager:
         """Point the percentage-based caps at the live account. Called every
         cycle from the venue's buying power; a None reading (venue briefly
         unreachable) keeps the last known figure rather than collapsing the
-        day budget to its floor."""
+        day budget to its floor.
+
+        `usd` is CASH REMAINING, which falls by a dollar for every dollar
+        deployed. Sizing the day budget off it directly makes the budget
+        chase its own spend: with `per_day_deployment_pct_of_bankroll: 1.0`,
+        room runs out at `spent >= cash`, i.e. after deploying half the
+        starting bankroll — and the engine then reports "BUDGET SPENT:
+        $390.22 of $232.78", which reads like a breach and is really a cap
+        that shrank underneath a cumulative number. (Observed live
+        2026-08-02: 390.22 + 232.78 = $623.00, the exact start-of-day
+        figure.)
+
+        The budget is a share of what we STARTED the day with, so the
+        denominator is cash plus what today's deployment already converted
+        into positions."""
         if usd is None or usd <= 0:
             return
-        if self.bankroll is not None and abs(usd - self.bankroll) < 0.01:
+        start_of_day = usd + self.day_deployed()
+        if self.bankroll is not None and abs(start_of_day - self.bankroll) < 0.01:
             return
-        self.bankroll = usd
-        self.caps = caps_for_mode(self.risk_cfg, self.mode, usd)
+        self.bankroll = start_of_day
+        self.caps = caps_for_mode(self.risk_cfg, self.mode, start_of_day)
 
     def claim_key(self, mode: str, venue: str, market_key: str,
                   event_key: str) -> str | None:

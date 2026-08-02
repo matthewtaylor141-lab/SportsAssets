@@ -191,8 +191,38 @@ class TheOddsAPIClient(OddsFeed):
 
     @staticmethod
     def league_of(sport_key: str) -> str:
+        """Resolve a feed sport key to our league code.
+
+        Exact match first, then LONGEST-PREFIX match against the same table.
+
+        The prefix pass is what keeps the blocklist reachable. The feed
+        carries a competition's qualifying and playoff rounds under keys that
+        extend the parent key — `soccer_uefa_champs_league_qualification`
+        alongside `soccer_uefa_champs_league`. Only the parent was mapped, so
+        qualifiers resolved to their raw sport key, missed the `ucl` entry on
+        the blocklist entirely, and were admitted by
+        `unknown_league_policy: allow`. Found live 2026-08-02 holding
+        `atc-ucl-din-kau-2026-08-04-din` and `atc-ucl-mja-sba-2026-08-04-draw`
+        — two open positions in a league measured net-negative and shut.
+
+        Longest prefix rather than any prefix, so a genuinely distinct
+        competition that happens to share an ancestor's stem still resolves
+        to its own entry when one exists.
+
+        This is exactly the failure CLAUDE.md warns about: "Blocked sport keys
+        must appear in SPORT_KEY_LEAGUE or the blocklist cannot reach them."
+        Naming every variant by hand is the same trap one level down — there
+        is always another round nobody thought to add — so the matching rule
+        absorbs the variants instead.
+        """
         if sport_key in SPORT_KEY_LEAGUE:
             return SPORT_KEY_LEAGUE[sport_key]
+        best = ""
+        for key in SPORT_KEY_LEAGUE:
+            if sport_key.startswith(key + "_") and len(key) > len(best):
+                best = key
+        if best:
+            return SPORT_KEY_LEAGUE[best]
         if sport_key.startswith("tennis_wta"):
             return "wta"
         if sport_key.startswith("tennis_atp"):

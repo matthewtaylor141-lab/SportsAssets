@@ -124,7 +124,7 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
                     **decision, "order_id": result.get("order_id"),
                     "px": round(entry_price, 2), "count": qty, "taker": False,
                     "market_key": mkey, "league": league, "event_key": event_key,
-                    "mode": mode, "ts": ts})
+                    "mode": mode, "ts": ts, "category": category})
                 return {"placed": True, "filled_usd": 0.0, "status": "resting_maker"}
 
         # Taker path. Clear any stale maker context for this market first, or
@@ -187,6 +187,10 @@ def sync_pmus_fills(adapter, ledger: Ledger, mode: str) -> int:
             market_key=ctx.get("market_key") or market_key(adapter.name, slug),
             side="BUY", qty=qty, price=price, ts=None, fee=round(fee, 4),
             league=ctx.get("league"), mode=ctx.get("mode") or mode,
+            # Carried from the parked context: a maker fill with no category
+            # lands in the drift report's "?" bucket, which is why that
+            # bucket exists at n=40 with its own distinct drift.
+            category=ctx.get("category"),
             decision={**ctx, "source": "maker_fill_sync", "raw": trade},
         )
         n += int(r["applied"])
@@ -237,8 +241,14 @@ def reconcile_positions(adapter, ledger: Ledger, mode: str,
             continue
         if (trade.get("side") or "BUY").upper() != "BUY":
             continue
+        # SAME fill_uid as sync_pmus_fills. These two paths see the same
+        # venue trades, and giving them different keys meant one trade could
+        # be recorded twice — once per path — inflating a position and the
+        # per-market exposure computed from it. Sharing the key makes
+        # whichever path arrives first the writer and the other a no-op; the
+        # ledger's own uid dedupe does the rest.
         r = ledger.record_fill(
-            fill_uid=f"recon-{trade.get('id')}", venue=adapter.name,
+            fill_uid=f"pmus-trade-{trade.get('id')}", venue=adapter.name,
             market_key=market_key(adapter.name, slug), side="BUY",
             qty=qty, price=price, ts=None, fee=0.0, mode=mode,
             category="reconciled",
@@ -250,43 +260,112 @@ def reconcile_positions(adapter, ledger: Ledger, mode: str,
             "cost_restored": round(cost, 2)}
 
 
+# How long a reaped context is kept around after its order leaves the book.
+# The venue's activity feed lags its own matching engine, so a trade can be
+# real for seconds before recent_trades() will admit it. Dropping the context
+# at TTL is what let a filled order look unfilled — see below.
+REAP_GRACE_S = 300.0
+
+
 def reap_pmus_makers(adapter, ledger: Ledger, ttl_s: float,
                      now: float | None = None) -> dict:
     """Close out resting orders: cancel anything past its TTL, and drop the
     context of anything the venue no longer lists as open.
 
-    A resting order that never filled must also give back its one-per-event
-    claim — otherwise a single unfilled quote retires that game for good,
-    which would cost far more volume than maker pricing wins. The claim is
-    only released when the market genuinely holds no position."""
+    A resting order that never filled must give back its one-per-market claim
+    — otherwise a single unfilled quote retires that market for good, which
+    costs far more volume than maker pricing wins.
+
+    THE BUG THIS FIXES (observed live 2026-08-02). The old version did, in
+    order: clear the context, look up the position, and release the claim if
+    the position was empty. Every step of that is wrong when a resting order
+    fills near its TTL:
+
+      1. clearing the context first means sync_pmus_fills — which only
+         considers markets carrying a parked context — can NEVER attribute
+         that trade. The fill is real at the venue and invisible to us,
+         permanently;
+      2. so the position lookup finds nothing, because the fill it is looking
+         for is the one step 1 just made unreachable;
+      3. so the claim goes back, and the next cycle buys the same market
+         again — against a per-market cap computed from a ledger that does
+         not know we already own it.
+
+    Nothing in that loop is self-limiting. It ran ~25-28 times each into four
+    MLB markets, turning a $1.50 per-market cap into positions of $25-$28.
+
+    Three changes close it:
+
+      * the context survives until REAP_GRACE_S past the order leaving the
+        book, so a late trade can still be attributed to it;
+      * the claim is released only when the venue CONFIRMS the cancel — a
+        cancel that fails because the order already filled is evidence we
+        hold something, not evidence we don't;
+      * the position check runs against a ledger that reconcile_positions()
+        has already refreshed this cycle (see runner.py), so "no position"
+        means the venue agrees, not merely that we have not looked.
+
+    Fail-closed throughout: when we cannot prove the order died unfilled, we
+    keep the claim. The cost of being wrong that way is one missed bet. The
+    cost of being wrong the other way is the paragraph above.
+    """
     import time as _time
 
     now = now or _time.time()
     contexts = ledger.list_state(PMUS_ORDER_PREFIX)
     if not contexts:
-        return {"cancelled": 0, "closed": 0, "released": 0}
+        return {"cancelled": 0, "closed": 0, "released": 0, "held": 0}
     open_ids = {o.get("id") for o in adapter.open_orders() if o.get("id")}
-    out = {"cancelled": 0, "closed": 0, "released": 0}
+    out = {"cancelled": 0, "closed": 0, "released": 0, "held": 0}
     for key, ctx in contexts.items():
         slug = key[len(PMUS_ORDER_PREFIX):]
         still_open = ctx.get("order_id") in open_ids
         if still_open and now - float(ctx.get("ts") or 0) <= ttl_s:
             continue                       # young and working: leave it be
+
+        cancel_confirmed = False
         if still_open:
-            adapter.cancel_order(ctx["order_id"], slug)
+            # True = the venue pulled a live order, so it had not filled.
+            # False = it was already gone, which usually means it traded.
+            cancel_confirmed = bool(adapter.cancel_order(ctx["order_id"], slug))
             out["cancelled"] += 1
+            ctx = {**ctx, "reaped_ts": now, "cancel_confirmed": cancel_confirmed}
+            ledger.set_state(key, ctx)
         else:
             out["closed"] += 1
-        ledger.clear_state(key)
+            if "reaped_ts" not in ctx:
+                # First time we have seen it gone. Start the grace clock and
+                # come back next cycle — the fill may still be in flight.
+                ledger.set_state(key, {**ctx, "reaped_ts": now})
+                out["held"] += 1
+                continue
+
         pos = ledger.position(ctx.get("market_key") or "")
-        if not pos or float(pos.get("shares") or 0) <= 0:
-            # Nothing filled: free the event AND stop resting on this market
-            # for a cool-off, so the next look crosses instead of quoting into
-            # a queue that has already proven it won't reach us.
-            if hasattr(adapter, "mark_force_taker"):
-                adapter.mark_force_taker(slug)
-            if ctx.get("event_key") and ledger.release_event(ctx["event_key"]):
-                out["released"] += 1
+        held = pos and float(pos.get("shares") or 0) > 0
+        aged_out = now - float(ctx.get("reaped_ts") or now) >= REAP_GRACE_S
+
+        if held:
+            # It filled. Keep the claim (we own this market) and drop the
+            # context — the position is now the record.
+            ledger.clear_state(key)
+            continue
+        if not cancel_confirmed and not aged_out:
+            # Unproven: the order is gone, we hold nothing yet, and the venue
+            # did not confirm a cancel. That is exactly the fill-in-flight
+            # case. Hold everything and re-check next cycle.
+            out["held"] += 1
+            continue
+
+        # Proven unfilled: cancel confirmed, or the grace window elapsed with
+        # nothing ever arriving. Safe to release.
+        ledger.clear_state(key)
+        if hasattr(adapter, "mark_force_taker"):
+            # Stop resting on this market for a cool-off, so the next look
+            # crosses instead of quoting into a queue that has already proven
+            # it won't reach us.
+            adapter.mark_force_taker(slug)
+        if ctx.get("event_key") and ledger.release_event(ctx["event_key"]):
+            out["released"] += 1
     return out
 
 
