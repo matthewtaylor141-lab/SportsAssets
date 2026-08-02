@@ -102,9 +102,17 @@ class Poller:
                 log.exception("history backfill pass failed; will retry")
             await asyncio.sleep(60)
 
-    async def run(self) -> None:
+    async def run(self, history: bool = True) -> None:
+        """history=False: LIVE detection only — no deep-history backfill.
+
+        The backfill pages a whale's full lifetime trades (millions for the
+        reference account) and belongs on a worker with room to breathe.
+        Run inside the API service's memory limit it OOM-cycled the whole
+        API every ~10 minutes (observed 2026-08-02 23:30Z, minutes after
+        the ingestion fallback first deployed with it enabled)."""
         log.info("Path B poller starting (interval=%ss)", self._interval)
-        asyncio.get_running_loop().create_task(self._history_loop())
+        if history:
+            asyncio.get_running_loop().create_task(self._history_loop())
         while True:
             whales = await self.tracked_whales()
             if not whales:

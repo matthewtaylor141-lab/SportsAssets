@@ -40,9 +40,13 @@ async def lifespan(_: FastAPI):
     if _os.getenv("API_INGESTION_FALLBACK", "1") != "0":
         from ..ingestion.poller import Poller
 
-        poller_task = asyncio.get_running_loop().create_task(Poller().run())
+        # history=False: live detection only. The deep-history backfill
+        # pages millions of trades and OOM-cycled this service when the
+        # fallback first shipped with it on.
+        poller_task = asyncio.get_running_loop().create_task(
+            Poller().run(history=False))
         logging.getLogger(__name__).warning(
-            "ingestion fallback: poller running inside the API service")
+            "ingestion fallback: poller (live-only) inside the API service")
     yield
     if poller_task is not None:
         poller_task.cancel()

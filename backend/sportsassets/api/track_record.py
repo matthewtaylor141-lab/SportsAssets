@@ -362,6 +362,7 @@ def _fetch_raw() -> dict:
 
 
 _archive_ready = False
+_archive_cache: dict[str, Any] = {"ts": 0.0, "data": None}
 
 
 async def _archive_and_union(acts: list[dict]) -> list[dict]:
@@ -399,12 +400,18 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
         await pool.executemany(
             "INSERT INTO pmus_activity_archive (id, ts, payload) "
             "VALUES ($1, $2, $3::jsonb) ON CONFLICT (id) DO NOTHING", rows)
-    stored = await pool.fetch("SELECT payload FROM pmus_activity_archive")
-    out: list[dict] = []
-    for r in stored:
-        p = r["payload"]
-        out.append(json.loads(p) if isinstance(p, str) else p)
-    return out
+    # The archive only grows; re-reading and re-parsing all of it on every
+    # page request is pure allocation churn on a memory-capped service.
+    # One parsed copy, refreshed at most once a minute.
+    now = time.time()
+    if _archive_cache["data"] is None or now - _archive_cache["ts"] > 60:
+        stored = await pool.fetch("SELECT payload FROM pmus_activity_archive")
+        out: list[dict] = []
+        for r in stored:
+            p = r["payload"]
+            out.append(json.loads(p) if isinstance(p, str) else p)
+        _archive_cache["data"], _archive_cache["ts"] = out, now
+    return _archive_cache["data"]
 
 
 async def track_record(since: str | None = None,
