@@ -89,7 +89,27 @@
 # OPEN cohort static while its markets trade in-play. Renewed growth
 # after the cancel-all deploy means the endpoint cannot reach those
 # orders either -> halt again and escalate to the operator.
-mode: LIVE_BETA
+#
+# HALTED 2026-08-02 21:4x — UNAUTHORIZED ACTIVITY. $72 of new over-cap
+# positions appeared 20:33Z->21:21Z in markets this engine cannot trade
+# (ATP is league-blocked; tennis moneylines are category-quarantined;
+# sizes 5-12x the per-market cap), and the owner has confirmed IN
+# WRITING that none of them are his. Something holding this account's
+# API credentials is trading it. Leading hypothesis: a zombie deploy —
+# an old worker instance still running pre-fix code with
+# EDGE_PMUS_MAKER_FIRST=1 from its era's env, placing resting orders
+# with the old reaper's repeat-entry bug (the fill pattern — paired
+# tennis ML+total, future-dated MLB within the 72h feed window, gradual
+# cost creep — is this engine's own maker-era footprint, not a human's
+# and not a rational attacker's). Key rotation kills it either way.
+#
+# Restore LIVE_BETA only after ALL of: (1) the owner rotates the
+# Polymarket US API credentials and installs the new ones on the ONE
+# intended service; (2) the Render dashboard shows exactly one worker
+# instance on the current build, and EDGE_PMUS_MAKER_FIRST is deleted
+# from every service's env; (3) a probe after rotation shows the
+# over-cap OPEN cohort static through a live in-play window.
+mode: PAPER
 
 # Size discipline — MEASURED caps (LIVE mode). Source: capacity_sizebuckets.csv
 # (ROI negative > $50K/fill).
