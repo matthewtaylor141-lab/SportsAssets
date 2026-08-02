@@ -91,6 +91,26 @@ jobs:
 
           echo ""
           echo "###########################################################"
+          echo "#   WHALE COPY FEASIBILITY (copy_probes, 30d)              #"
+          echo "###########################################################"
+          # Does the source whale's edge survive our copy latency? Residual
+          # ROI is measured against the REAL book at our REAL reaction time
+          # for every fresh whale BUY — the empirical answer to whether
+          # copy-trading deserves its own strategy sleeve.
+          curl -sS --max-time 60 -o /tmp/copy.json \
+               "$BASE/api/copy-report?hours=720" || true
+          jq -r '.summary // . | to_entries[] | "  \(.key): \(.value)"' \
+             /tmp/copy.json 2>/dev/null | head -30 || echo "  (unavailable)"
+
+          echo ""
+          echo "#   PAPER AI TRADER (whale copy, paper account, 30d)        #"
+          curl -sS --max-time 60 -o /tmp/ai.json \
+               "$BASE/api/ai-trader?days=30" || true
+          jq -r '.summary // {} | to_entries[] | "  \(.key): \(.value)"' \
+             /tmp/ai.json 2>/dev/null | head -20 || echo "  (unavailable)"
+
+          echo ""
+          echo "###########################################################"
           echo "#                 EDGE DISTRIBUTION                       #"
           echo "###########################################################"
           jq -r '
