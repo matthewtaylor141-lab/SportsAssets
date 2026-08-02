@@ -949,3 +949,45 @@ def test_the_gate_can_be_disabled_by_config(tmp_path, monkeypatch):
                        StubFeed([_unanchored(_event())]),
                        policy, risk, ledger, ["soccer_epl"])
     assert funnel["logged"] >= 1
+
+
+# ── which KIND of bet is paying ─────────────────────────────────────────
+#
+# Props showed 0.01c drift and retention 1.00 while game lines showed
+# -2.5c. But drift compares our own fair value against ITSELF a minute
+# later, so a prop mapped to the wrong line reads perfectly clean: a
+# stably-wrong number does not move. Settlement is the only place that
+# error surfaces, and a blended scorecard cannot show it.
+
+def test_settled_pnl_splits_by_category(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    for i, (cat, pnl) in enumerate([("prop", 2.0), ("prop", -1.0),
+                                    ("moneyline", -1.0), ("moneyline", -1.0)]):
+        mkey = f"m{i}"
+        # price 0.5: a win realizes +0.5, a loss -0.5. Buying at 1.0 would
+        # make every outcome realize zero and the assertion meaningless.
+        led.record_fill(fill_uid=f"f{i}", venue="v", market_key=mkey, side="BUY",
+                        qty=1.0, price=0.5, ts=now, league="mlb",
+                        mode="LIVE_BETA", category=cat)
+        led.record_resolution(mkey, payout=1.0 if pnl > 0 else 0.0, ts=now)
+
+    by_cat = led.performance_by_category(days=7, live_only=True)
+    assert set(by_cat) == {"prop", "moneyline"}
+    assert by_cat["prop"]["settled"] == 2
+    assert by_cat["prop"]["wins"] == 1 and by_cat["prop"]["losses"] == 1
+    assert by_cat["moneyline"]["settled"] == 2
+    assert by_cat["moneyline"]["wins"] == 0
+    # The blend would have shown one number; the split shows which half hurt.
+    assert by_cat["moneyline"]["roi"] < by_cat["prop"]["roi"]
+
+
+def test_a_fill_without_a_category_is_reported_as_unknown(tmp_path):
+    """Fills predating the column must not vanish from the scorecard, and
+    must not be quietly counted as whatever category is being examined."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    led.record_fill(fill_uid="f", venue="v", market_key="m", side="BUY",
+                    qty=1.0, price=0.5, ts=now, mode="LIVE_BETA")
+    led.record_resolution("m", payout=0.0, ts=now)
+    assert "unknown" in led.performance_by_category(days=7, live_only=True)

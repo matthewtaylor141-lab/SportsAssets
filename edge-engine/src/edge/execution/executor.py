@@ -43,7 +43,7 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
             ask_price: float, ask_size: float, size_usd: float,
             edge: float, threshold: float, decision: dict,
             ts: float, entry_price: float | None = None, taker: bool = True,
-            event_key: str | None = None) -> dict:
+            event_key: str | None = None, category: str | None = None) -> dict:
     """Returns {placed, filled_usd, status}. Paper fills always 'fill' up to
     displayed depth (conservative: no fill beyond what the book showed).
 
@@ -60,7 +60,7 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
         ledger.record_fill(
             fill_uid=f"paper-{mkey}-{int(ts)}", venue=adapter.name,
             market_key=mkey, side="BUY", qty=qty, price=entry_price, ts=ts,
-            fee=round(fee, 4), league=league, mode="PAPER",
+            fee=round(fee, 4), league=league, mode="PAPER", category=category,
             decision={**decision, "entry_taker": taker, "ask_price": ask_price,
                       "event_key": event_key},
         )
@@ -142,6 +142,7 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
                 fill_uid=f"pmus-{result.get('order_id')}", venue=adapter.name,
                 market_key=mkey, side="BUY", qty=filled, price=px, ts=ts,
                 fee=adapter.taker_fee(px) * filled, league=league, mode=mode,
+                category=category,
                 decision={**decision, "event_key": event_key,
                           "order": {k: v for k, v in result.items()
                                     if k != "raw"},

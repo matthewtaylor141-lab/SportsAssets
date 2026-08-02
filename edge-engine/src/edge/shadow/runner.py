@@ -805,7 +805,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                      size_usd=approved, edge=verdict.edge,
                                      threshold=verdict.threshold, decision=decision,
                                      ts=time.time(), entry_price=entry_px,
-                                     taker=taker, event_key=claim)
+                                     taker=taker, event_key=claim,
+                                     category=drift_cat)
                     if result["placed"]:
                         ledger.record_entry_fair(mkey, round(entry_px, 4),
                                                  round(fair, 4), category=drift_cat)
@@ -916,6 +917,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         funnel["performance"] = ledger.performance(days=7, live_only=risk.is_live)
         funnel["edge_drift"] = ledger.drift_report(days=7)
         funnel["price_drift"] = ledger.price_drift_report(days=7)
+        funnel["by_cat_performance"] = ledger.performance_by_category(
+            days=7, live_only=risk.is_live)
         funnel["reversion"] = rev
     except Exception as exc:  # noqa: BLE001 — reporting must never break trading
         log.debug("performance snapshot failed: %s", exc)

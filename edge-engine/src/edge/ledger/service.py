@@ -50,6 +50,11 @@ CREATE TABLE IF NOT EXISTS fills (
     price       REAL NOT NULL CHECK (price >= 0 AND price <= 1),
     fee         REAL NOT NULL DEFAULT 0 CHECK (fee >= 0),
     ts          REAL NOT NULL,
+    -- What KIND of bet this was (moneyline / draw / spread / total / prop).
+    -- Recorded at decision time rather than inferred later from a slug: the
+    -- engine knows exactly what it priced, and a scorecard that cannot
+    -- separate props from game lines cannot tell us which one is paying.
+    category    TEXT,
     decision    TEXT                      -- full decision record JSON
 );
 CREATE INDEX IF NOT EXISTS fills_market_idx ON fills (market_key);
@@ -219,6 +224,10 @@ class Ledger:
                 conn.execute("ALTER TABLE price_drift ADD COLUMN edge_entry REAL")
             except sqlite3.OperationalError:
                 pass  # column already exists
+            try:
+                conn.execute("ALTER TABLE fills ADD COLUMN category TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -253,6 +262,7 @@ class Ledger:
         league: str | None = None,
         mode: str = "PAPER",
         decision: dict[str, Any] | None = None,
+        category: str | None = None,
     ) -> dict:
         """Apply one fill. Returns {applied, realized} — applied=False means
         the fill_uid was already recorded (idempotent replay)."""
@@ -262,11 +272,12 @@ class Ledger:
                 """
                 INSERT OR IGNORE INTO fills
                     (fill_uid, venue, market_key, league, mode, side, qty, price,
-                     fee, ts, decision)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                     fee, ts, category, decision)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (fill_uid, venue, market_key, league, mode, side.upper(), qty,
-                 price, fee, ts, json.dumps(decision) if decision else None),
+                 price, fee, ts, category,
+                 json.dumps(decision) if decision else None),
             )
             if cur.rowcount == 0:
                 return {"applied": False, "realized": 0.0}
@@ -383,6 +394,49 @@ class Ledger:
             "open_cost": agg["open_cost"],
             "resolved_markets": agg["resolved_markets"],
         }
+
+    def performance_by_category(self, days: int = 7,
+                                live_only: bool = True) -> dict:
+        """Settled scorecard split by what KIND of bet it was.
+
+        The blended number cannot answer the only question that matters right
+        now: props showed zero adverse drift while game lines showed -2.5c,
+        but drift compares our own fair value against itself and is blind to
+        a mapping error. If a prop is mapped to the wrong line, drift reads
+        perfectly clean and settlement is where it shows up. This is that.
+        """
+        since = time.time() - days * 86_400
+        mode_clause = "AND f.mode != 'PAPER'" if live_only else ""
+        with self._conn() as conn:
+            rows = [dict(x) for x in conn.execute(
+                f"""
+                SELECT COALESCE(f.category, 'unknown') AS category,
+                       r.pnl AS pnl,
+                       COALESCE(sum(f.qty * f.price), 0) AS staked
+                FROM realizations r
+                JOIN fills f ON f.market_key = r.market_key AND f.side = 'BUY'
+                WHERE r.ts >= ? AND r.kind = 'resolution' {mode_clause}
+                GROUP BY r.id
+                """, (since,)).fetchall()]
+        out: dict[str, dict] = {}
+        for r in rows:
+            if r["staked"] <= 0:
+                continue
+            b = out.setdefault(r["category"], {
+                "settled": 0, "wins": 0, "losses": 0,
+                "staked": 0.0, "realized": 0.0})
+            b["settled"] += 1
+            b["wins"] += 1 if r["pnl"] > 0 else 0
+            b["losses"] += 1 if r["pnl"] < 0 else 0
+            b["staked"] += r["staked"]
+            b["realized"] += r["pnl"]
+        for b in out.values():
+            b["staked"] = round(b["staked"], 2)
+            b["realized"] = round(b["realized"], 2)
+            b["roi"] = round(b["realized"] / b["staked"], 4) if b["staked"] else None
+            b["win_rate"] = (round(b["wins"] / b["settled"], 4)
+                             if b["settled"] else None)
+        return out
 
     def performance(self, days: int = 7, live_only: bool = True) -> dict:
         """Settled scorecard straight from the engine's OWN ledger.

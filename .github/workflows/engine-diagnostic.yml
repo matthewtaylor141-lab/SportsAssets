@@ -222,6 +222,11 @@ jobs:
           jq -r '.system | "system    : \(.settled) settled  W\(.wins)/L\(.losses)  realized $\(.realized)  ROI \(.roi // "n/a")",
                            "            open \(.open) worth $\(.open_cost)"' \
              /tmp/acct.json 2>/dev/null || true
+          echo "settled by CATEGORY (engine ledger, live only):"
+          jq -r '.detail.by_cat_performance // {} | if length == 0 then
+                   "   (nothing settled yet)"
+                 else to_entries[] | "   \(.key): \(.value.settled) settled  W\(.value.wins)/L\(.value.losses)  staked $\(.value.staked)  realized $\(.value.realized)  ROI \(.value.roi // "n/a")" end' \
+             /tmp/status.json 2>/dev/null || true
           echo "per day  (system cohort, settled only):"
           jq -r '.system_daily // [] | if length == 0 then "   (no settlements in window)"
                  else .[] | "   \(.day)  \(.settled) settled  W\(.wins)/L\(.losses)  staked $\(.staked)  realized $\(.realized)  ROI \(.roi // "n/a")" end' \
