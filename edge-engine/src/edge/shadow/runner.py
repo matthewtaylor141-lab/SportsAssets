@@ -552,20 +552,33 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             # Player props first: they are per-PLAYER, not per-team, so the
             # team matcher below would either fail or — worse — match a
             # player's surname against a club and price a strikeout market
-            # off a moneyline. Tried before any team logic sees the text.
-            if getattr(ev, "props", None):
-                bet, why = parse_prop(oc_name)
-                if bet is not None:
-                    fair, miss = fair_for_prop(bet, ev.props)
-                    if fair is None:
-                        return None, "prop", miss
-                    return fair, "prop", None
-                if why in ("no_threshold", "ambiguous_stat"):
-                    # It named a stat we know but we could not pin the line.
-                    # That is a refusal worth counting, not a silent fall
-                    # through to team matching.
-                    return None, "prop", {"reason": f"prop_{why}",
+            # off a moneyline. Tried before any team logic sees the text —
+            # UNCONDITIONALLY. This used to run only when the event carried
+            # prop quotes, which sent every prop-shaped outcome on a
+            # quoteless event to the TEAM matcher: ~914 no_side_match
+            # rejects a cycle filed under moneyline, and one real hazard —
+            # "Cardinals over 4.5 runs" is a team total whose number sits
+            # inside the alternate GAME-total ladder, so the totals matcher
+            # could pair it against a different proposition and hand back a
+            # confident price for the wrong bet. Prop-shaped text is the
+            # prop parser's to price or to refuse, never anyone else's.
+            bet, why = parse_prop(oc_name)
+            if bet is not None:
+                props = getattr(ev, "props", None)
+                if not props:
+                    return None, "prop", {"reason": "prop_no_feed_quotes",
+                                          "market": bet.market_key,
                                           "venue_outcome": oc_name[:48]}
+                fair, miss = fair_for_prop(bet, props)
+                if fair is None:
+                    return None, "prop", miss
+                return fair, "prop", None
+            if why in ("no_threshold", "ambiguous_stat"):
+                # It named a stat we know but we could not pin the line.
+                # That is a refusal worth counting, not a silent fall
+                # through to team matching.
+                return None, "prop", {"reason": f"prop_{why}",
+                                      "venue_outcome": oc_name[:48]}
             segment, oc_name = split_segment(oc_name)
             # Margin prose -> the run-line spread it actually is, so it can
             # pair against the sharp spread quote for the SAME segment.

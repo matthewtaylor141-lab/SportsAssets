@@ -633,3 +633,78 @@ def test_margin_prose_never_parses_as_a_player_prop():
 
     bet, why = parse_prop("Atlanta Braves wins by over 2.5 runs")
     assert bet is None and why == "team_margin_not_prop"
+
+
+# ── prop-shaped text is the prop parser's, even with no prop quotes ─────
+
+def test_prop_text_on_a_quoteless_event_never_reaches_the_team_matcher(
+        tmp_path, monkeypatch):
+    """The prop gate used to be `if ev.props:` — so on events where the
+    feed carried no prop quotes, every prop-shaped outcome fell through to
+    the TEAM matcher (~914 no_side_match rejects a cycle filed under
+    moneyline), and a team-total like 'over 4.5 runs' — whose number sits
+    inside the alternate GAME-total ladder — could pair against a
+    different proposition and price the wrong bet. Prop-shaped text is
+    priced by the prop parser or refused by name; it never falls through."""
+    from edge.fairvalue.feed import FeedEvent
+    from edge.ledger.service import Ledger
+    from edge.execution.risk import RiskManager
+    from edge.shadow.runner import run_cycle
+    from edge.venues.base import BookLevel, MarketBook
+    from edge.venues.mapper import VenueMarket
+
+    class PropVenue:
+        name = "polymarket-us"
+
+        def discover_markets(self, league_codes=None):
+            return [VenueMarket(
+                market_id="EVT-MLB", title="Cardinals vs. Blue Jays",
+                league_code="mlb",
+                outcome_tokens={
+                    "Alec Bohm 2+ hits + runs + RBIs": "T-PROP",
+                    "St. Louis Cardinals over 4.5 runs": "T-TEAMTOTAL"})]
+
+        def get_book(self, market_id, token):
+            return MarketBook(venue=self.name, market_id=market_id,
+                              outcome_id=token,
+                              bids=[BookLevel(0.38, 500)],
+                              asks=[BookLevel(0.40, 1000)], ts=time.time())
+
+        def taker_fee(self, price):
+            return 0.0
+
+        def maker_fee(self, price):
+            return 0.0
+
+        def plan_entry(self, book):
+            return (book.asks[0].price, True) if book.asks else (0.0, True)
+
+    class Feed:
+        def sport_keys(self):
+            return ["baseball_mlb_x"]
+
+        def server_clock_skew_s(self):
+            return 0.0
+
+        def fetch_events(self, sport_key):
+            # NO ev.props — and a game-total quote whose alternate ladder
+            # includes 4.5, the exact number the team total wears.
+            return [FeedEvent(
+                sport_key="baseball_mlb_x", league_code="mlb",
+                home="St. Louis Cardinals", away="Toronto Blue Jays",
+                commence_ts=time.time() + 3600,
+                h2h={"St. Louis Cardinals": 2.0, "Toronto Blue Jays": 2.0},
+                totals={"Over 4.5": 2.2, "Under 4.5": 1.7},
+                fetched_at=time.time(), anchors=1)]
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    risk = RiskManager(ledger, {**POLICY.risk, "mode": "PAPER"})
+    funnel = run_cycle([PropVenue()], Feed(), POLICY, risk, ledger,
+                       ["baseball_mlb_x"])
+    # Both outcomes are refused as PROPS — not mis-filed as moneyline
+    # no-matches, and above all not priced off the game-total quote.
+    assert funnel["rejects"].get("prop_no_feed_quotes", 0) == 2, \
+        funnel["rejects"]
+    assert funnel["rejects"].get("no_side_match_moneyline", 0) == 0
+    assert funnel["logged"] == 0
