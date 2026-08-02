@@ -28,9 +28,14 @@ DEEP = 6      # a well-covered event
 THIN = 1      # one book
 
 
+# The leash tests pin mode explicitly rather than inheriting `config/risk.yaml`.
+# Exploration spend is accounted per mode (a PAPER manager cannot see LIVE_BETA
+# fills), so a config-level halt would silently zero the spend these tests are
+# measuring and turn every assertion into a vacuous pass.
 def _rig(tmp_path, mode="LIVE_BETA", bankroll=1000.0):
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
-    return led, RiskManager(led, POLICY.risk, bankroll=bankroll)
+    return led, RiskManager(led, {**POLICY.risk, "mode": mode},
+                            bankroll=bankroll)
 
 
 def _fill(led, usd, tier, ts=None, mode="LIVE_BETA"):
@@ -126,7 +131,8 @@ def test_exploration_spend_is_tracked_from_the_ledger_not_memory(tmp_path):
     for _ in range(5):
         _fill(led, 2.0, "exploration")
     reopened = Ledger(db_path=path)
-    risk = RiskManager(reopened, POLICY.risk, bankroll=1000.0)
+    risk = RiskManager(reopened, {**POLICY.risk, "mode": "LIVE_BETA"},
+                       bankroll=1000.0)
     assert risk.explored_today() == {"usd": pytest.approx(10.0), "fills": 5}
 
 

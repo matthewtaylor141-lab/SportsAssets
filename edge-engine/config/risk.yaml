@@ -5,7 +5,15 @@
 # Owner-authorized LIVE_BETA (2026-07-24). The runner still refuses live
 # orders until `edge check-live` passes; until then it runs PAPER and
 # re-checks every 30 min, auto-arming when clean (transition logged).
-mode: LIVE_BETA
+# HALTED 2026-08-02. The per-market cap is not holding: STL moneyline
+# reached $26.60 and STL first-5-innings $25.20 against a $1.50 cap — about
+# 28 separate fills into one market. A single fill sizes correctly, so this
+# is repeated ENTRY, not oversized orders. Root cause not yet confirmed;
+# leading suspects are the maker-order reaper handing the one-per-market
+# claim back before the resting order's fill is synced, and the ephemeral
+# ledger losing the claim on every deploy. Restore to LIVE_BETA only when a
+# test reproduces the loop and fails on it.
+mode: PAPER
 
 # Size discipline — MEASURED caps (LIVE mode). Source: capacity_sizebuckets.csv
 # (ROI negative > $50K/fill).

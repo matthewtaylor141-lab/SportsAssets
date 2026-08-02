@@ -49,7 +49,10 @@ class PolymarketUSAdapter(VenueAdapter):
         # post-only, every order fails and the engine goes quiet while its
         # telemetry still reports orders "placed". Prove it with
         # EDGE_PMUS_MAKER_FIRST=1 and watch the maker fill count first.
-        self._maker_first = os.environ.get("EDGE_PMUS_MAKER_FIRST", "1") == "1"
+        # Default OFF again pending the repeated-entry investigation: a
+        # resting order that is reaped before its fill is synced hands the
+        # one-per-market claim back while we still hold the position.
+        self._maker_first = os.environ.get("EDGE_PMUS_MAKER_FIRST", "0") == "1"
         self._force_taker: dict[str, float] = {}   # slug -> cross-until ts
         # Live book stream (push-latency books). Needs API keys for the WS
         # handshake; fail-soft — REST remains the fallback path.
