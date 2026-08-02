@@ -182,6 +182,14 @@ async def _market_context(pool, payload: dict) -> dict:
 #                   to have cleared the promotion gate first
 COPY_MODE = "penny_trial"
 PENNY_TRIAL_DAILY_USD = 50.0
+# Owner directive 2026-08-02: $0.10 per copy trade. The venue sells whole
+# contracts, so this is expressed as its only physical form — one contract,
+# and only when the contract costs <= $0.10 (his sub-10c fills; measured as
+# his strongest band, +2.7c, in the Phase-1 calibration). His mid-price
+# fills are SKIPPED under this ceiling: the copy cohort reads the longshot
+# band only. Widen by raising this ceiling (1.00 ~= "one contract at any
+# price", the venue minimum for full-band coverage).
+PENNY_TRIAL_PER_FILL_USD = 0.10
 
 
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
@@ -222,6 +230,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         limit = round(min(his_price + cfg.live_max_slippage_cents / 100.0, 0.99), 2)
         shares = 1.0
         usd = limit
+        if usd > PENNY_TRIAL_PER_FILL_USD:
+            return          # over the per-trade ceiling: not copied
         if usd > day_room:
             return
     else:
