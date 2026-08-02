@@ -5,15 +5,29 @@
 # Owner-authorized LIVE_BETA (2026-07-24). The runner still refuses live
 # orders until `edge check-live` passes; until then it runs PAPER and
 # re-checks every 30 min, auto-arming when clean (transition logged).
-# HALTED 2026-08-02. The per-market cap is not holding: STL moneyline
-# reached $26.60 and STL first-5-innings $25.20 against a $1.50 cap — about
-# 28 separate fills into one market. A single fill sizes correctly, so this
-# is repeated ENTRY, not oversized orders. Root cause not yet confirmed;
-# leading suspects are the maker-order reaper handing the one-per-market
-# claim back before the resting order's fill is synced, and the ephemeral
-# ledger losing the claim on every deploy. Restore to LIVE_BETA only when a
-# test reproduces the loop and fails on it.
-mode: PAPER
+# HALTED 2026-08-02 16:21, RE-ARMED 2026-08-02 17:4x in the same commit as
+# the fix, so there is no deploy in which this is live and the cap is not
+# holding.
+#
+# What was wrong: reap_pmus_makers() cleared a resting order's context
+# before the venue's activity feed reported its fill, which both stranded
+# the fill permanently (only parked markets are searched for trades) and
+# handed the one-per-market claim back. The next cycle bought the same
+# market again, against a cap computed from a ledger that did not know we
+# already owned it. It reached $30.21 against a $1.50 cap — 20x — across 20
+# markets and $271 of exposure.
+#
+# What holds it now (commit 1861cc4): the reaper fails closed — it releases
+# a claim only on a venue-CONFIRMED cancel or after a grace window with no
+# fill; reconcile_positions() runs every cycle rather than once per process;
+# and both fill paths share a fill_uid so one venue trade cannot be counted
+# twice. Reproduced by
+# test_a_fill_landing_after_the_reap_still_blocks_a_second_entry.
+#
+# WHAT TO WATCH on the first cycles after this deploys: per-market exposure
+# must stay inside $1.50. If any market exceeds it, halt here again — that
+# is the only signal that matters, and it shows up within minutes.
+mode: LIVE_BETA
 
 # Size discipline — MEASURED caps (LIVE mode). Source: capacity_sizebuckets.csv
 # (ROI negative > $50K/fill).

@@ -31,6 +31,15 @@ from dataclasses import dataclass
 # Venue phrase -> provider market key. Ordered longest-phrase-first at match
 # time so "hits allowed" can never be swallowed by "hits".
 PROP_STATS: dict[str, str] = {
+    # COMBO STATS FIRST — and they must stay ahead of their own components.
+    # "1+ hits + runs + RBIs" contains "hits", "runs" and "rbis" as
+    # substrings, so any shorter match would silently price a three-way
+    # combo off a single-component line. Longest-phrase-first ordering makes
+    # that safe, but the ordering is load-bearing, not cosmetic. This one
+    # market was ~495 refusals a cycle before it was mapped.
+    "hits + runs + rbis": "batter_hits_runs_rbis",
+    "hits + runs + rbi": "batter_hits_runs_rbis",
+    "hits runs rbis": "batter_hits_runs_rbis",
     "strikeouts": "pitcher_strikeouts",
     "strike outs": "pitcher_strikeouts",
     "ks": "pitcher_strikeouts",

@@ -415,13 +415,44 @@ class TheOddsAPIClient(OddsFeed):
     # returns 440 prop outcomes with Pinnacle among the books — roughly the
     # entire tradeable universe we had before, from a single fixture.
     PROP_MARKETS = {
+        # Must stay a SUPERSET of the provider keys named in props.PROP_STATS.
+        # `pitcher_walks` and `batter_stolen_bases` were parseable but never
+        # requested, so every venue market that resolved to them was refused
+        # `no_prop_quote_at_point` with an empty `points_offered` — forever,
+        # and silently. `tests/test_props.py` now pins the two lists together.
         "baseball": ["pitcher_strikeouts", "pitcher_outs", "pitcher_earned_runs",
-                     "pitcher_hits_allowed", "batter_home_runs", "batter_hits",
-                     "batter_total_bases", "batter_rbis", "batter_runs_scored"],
+                     "pitcher_hits_allowed", "pitcher_walks",
+                     "batter_home_runs", "batter_hits", "batter_total_bases",
+                     "batter_rbis", "batter_runs_scored",
+                     "batter_stolen_bases", "batter_hits_runs_rbis"],
         "basketball": ["player_points", "player_rebounds", "player_assists"],
         "icehockey": ["player_points", "player_shots_on_goal"],
         "soccer": ["player_shots_on_target"],
     }
+
+    # ALTERNATE LINES. The provider quotes one "standard" point per player
+    # per market; the venue lists a whole ladder (2+, 3+, 4+ strikeouts off
+    # the same pitcher). Every rung except the one the provider happened to
+    # pick was refused `no_prop_quote_at_point` — the single largest loss in
+    # the funnel, ~1,085 candidates a cycle, and none of them for a reason
+    # that has anything to do with edge.
+    #
+    # Requesting the alternate ladder is billed per market, so only the
+    # highest-volume markets carry one. EDGE_PROP_ALT_LINES=0 disables.
+    PROP_ALT_MARKETS = {
+        "pitcher_strikeouts", "batter_hits", "batter_total_bases",
+        "batter_home_runs", "batter_rbis", "player_points", "player_rebounds",
+        "player_assists",
+    }
+
+    @staticmethod
+    def base_prop_market(key: str) -> str:
+        """`pitcher_strikeouts_alternate` -> `pitcher_strikeouts`.
+
+        Alternate outcomes describe the SAME proposition at a different
+        point, so they must land under the base key or `fair_for_prop` will
+        never find them."""
+        return key[:-len("_alternate")] if key.endswith("_alternate") else key
 
     def _prop_markets(self, sport_key: str) -> list[str]:
         if os.environ.get("EDGE_PROP_MARKETS", "1") == "0":
@@ -429,7 +460,11 @@ class TheOddsAPIClient(OddsFeed):
         if sport_key in self._no_props:
             return []
         family = sport_key.split("_")[0]
-        return self.PROP_MARKETS.get(family, [])
+        base = self.PROP_MARKETS.get(family, [])
+        if os.environ.get("EDGE_PROP_ALT_LINES", "1") == "0":
+            return base
+        return base + [f"{m}_alternate" for m in base
+                       if m in self.PROP_ALT_MARKETS]
 
     def _absorb(self, raw: dict, bucket_of: dict, samples: dict,
                 seg_samples: dict, contributing: set) -> None:
@@ -489,7 +524,14 @@ class TheOddsAPIClient(OddsFeed):
                     if point is None or price <= 1.0:
                         continue
                     contributing.add(key)
-                    out.setdefault((mkt["key"], player, float(point)), {}) \
+                    # Fold `*_alternate` onto the base market: same
+                    # proposition, different point. Two books quoting the
+                    # same rung — one from the standard market, one from the
+                    # ladder — merge into one sample rather than two
+                    # single-book estimates that each fail the anchor gate.
+                    out.setdefault(
+                        (self.base_prop_market(mkt["key"]), player,
+                         float(point)), {}) \
                        .setdefault(side, []).append(
                            (price, BOOK_WEIGHTS.get(key, 1.0)))
         return out

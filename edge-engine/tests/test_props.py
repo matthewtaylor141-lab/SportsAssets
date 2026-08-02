@@ -173,3 +173,90 @@ def test_a_prop_with_no_matching_line_is_refused_not_guessed(tmp_path, monkeypat
                        led, ["soccer_epl"])
     assert funnel["logged"] == 0
     assert funnel["rejects"].get("no_prop_quote_at_point", 0) >= 1
+
+
+# ── coverage: parseable and requested must stay the same set ────────────
+
+def test_every_stat_we_can_parse_is_a_stat_we_actually_request():
+    """The silent-refusal bug class, pinned.
+
+    `pitcher_walks` and `batter_stolen_bases` were in PROP_STATS — the
+    engine knew exactly what those venue markets meant — but neither was in
+    the provider request list, so every one of them was refused
+    `no_prop_quote_at_point` with an empty `points_offered`. Not a bad
+    trade, not a close call: a market we understood, priced by books we
+    trust, thrown away every cycle because nobody asked for the quote.
+
+    Nothing in the funnel distinguishes "no quote exists" from "we never
+    asked", which is why this ran unnoticed. This test is the distinction.
+    """
+    from edge.fairvalue.feed import TheOddsAPIClient
+    from edge.fairvalue.props import BINARY_MARKETS, PROP_STATS
+
+    requested = {m for markets in TheOddsAPIClient.PROP_MARKETS.values()
+                 for m in markets}
+    parseable = set(PROP_STATS.values()) - BINARY_MARKETS
+    missing = parseable - requested
+    assert not missing, (
+        f"parseable but never requested — guaranteed silent refusals: "
+        f"{sorted(missing)}")
+
+
+def test_alternate_lines_are_requested_and_fold_onto_the_base_market():
+    """Alternate rungs are the SAME proposition at a different point.
+
+    The provider quotes one standard point per player; the venue lists the
+    whole ladder. Landing alternates under their own key would leave every
+    non-standard rung unpriced — which was ~1,085 refusals a cycle, the
+    largest single loss in the funnel.
+    """
+    from edge.fairvalue.feed import TheOddsAPIClient
+
+    c = TheOddsAPIClient(api_key="k")
+    markets = c._prop_markets("baseball_mlb")
+    assert "pitcher_strikeouts" in markets
+    assert "pitcher_strikeouts_alternate" in markets
+    assert c.base_prop_market("pitcher_strikeouts_alternate") == \
+        "pitcher_strikeouts"
+    assert c.base_prop_market("pitcher_strikeouts") == "pitcher_strikeouts"
+    # A market with no ladder must not gain a phantom alternate request.
+    assert "pitcher_outs_alternate" not in markets
+
+
+def test_alternate_outcomes_merge_into_the_base_markets_samples():
+    from edge.fairvalue.feed import TheOddsAPIClient
+
+    c = TheOddsAPIClient(api_key="k")
+    raw = {"bookmakers": [{"key": "pinnacle", "markets": [
+        {"key": "pitcher_strikeouts", "outcomes": [
+            {"name": "Over", "description": "Shota Imanaga", "point": 5.5,
+             "price": 1.9}]},
+        {"key": "pitcher_strikeouts_alternate", "outcomes": [
+            {"name": "Over", "description": "Shota Imanaga", "point": 3.5,
+             "price": 1.4},
+            {"name": "Over", "description": "Shota Imanaga", "point": 5.5,
+             "price": 1.91}]},
+    ]}]}
+    got = c._absorb_props(
+        raw, ["pitcher_strikeouts", "pitcher_strikeouts_alternate"], set())
+    # every rung lands under the BASE key...
+    assert all(k[0] == "pitcher_strikeouts" for k in got), sorted(got)
+    # ...the ladder rung the standard market never offered is now priced...
+    assert ("pitcher_strikeouts", "shota imanaga", 3.5) in got
+    # ...and a rung quoted by both sources merges rather than splitting.
+    assert len(got[("pitcher_strikeouts", "shota imanaga", 5.5)]["Over"]) == 2
+
+
+def test_a_combo_stat_never_resolves_to_one_of_its_components():
+    """'1+ hits + runs + RBIs' contains 'hits', 'runs' and 'rbis'. Pricing
+    a three-way combo off a single-component line would look like a large,
+    confident, entirely fictional edge."""
+    from edge.fairvalue.props import parse_prop
+
+    bet, why = parse_prop("Ronald Acuna Jr. 1+ hits + runs + RBIs")
+    assert bet is not None, f"combo stat still unmapped: {why}"
+    assert bet.market_key == "batter_hits_runs_rbis"
+    assert bet.side == "Over" and bet.point == 0.5
+    # And the components still resolve to themselves.
+    assert parse_prop("Aaron Judge 2+ hits")[0].market_key == "batter_hits"
+    assert parse_prop("Aaron Judge 2+ RBIs")[0].market_key == "batter_rbis"
