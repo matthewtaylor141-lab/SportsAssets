@@ -32,7 +32,7 @@
   --accent: var(--s1);
   --radius: 10px;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.25);
-  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -415,3 +415,100 @@ table.data td.num, table.data th.num { text-align: right; }
 .an-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
 .an-table tr.thin td { opacity: 0.55; }
 .an-cell-bar { width: 30%; min-width: 120px; }
+
+/* ── Visual system v2: display type, glass, motion ────────────────────── */
+.tr-name, .tr-stat-value, .card-title, .an-row-title > span:first-child {
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+}
+.mono, .tr-slip-nums, .an-table td.mono, .tr-curve-tip {
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+.tr-page > * { animation: tr-rise 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.tr-page > *:nth-child(2) { animation-delay: 0.06s; }
+.tr-page > *:nth-child(3) { animation-delay: 0.12s; }
+.tr-page > *:nth-child(4) { animation-delay: 0.18s; }
+@keyframes tr-rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tr-page > *, .tk-track, .tr-pulse { animation: none !important; }
+}
+
+.tr-hero {
+  position: relative; overflow: hidden;
+  background:
+    radial-gradient(700px 260px at 15% -80px, rgba(57, 135, 229, 0.22), transparent 70%),
+    radial-gradient(500px 240px at 85% -60px, rgba(25, 158, 112, 0.12), transparent 70%),
+    linear-gradient(165deg, #1a1e24, #121417 60%);
+}
+.tr-hero::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(600px 300px at 30% 0%, black, transparent);
+}
+.tr-stat {
+  backdrop-filter: blur(8px);
+  background: rgba(10, 12, 14, 0.45);
+  transition: transform 0.15s, border-color 0.15s;
+}
+.tr-stat:hover { transform: translateY(-2px); border-color: var(--border-strong); }
+.tr-grad.pos {
+  background: linear-gradient(100deg, #34d05e, #21b021 60%, #7ee2a0);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.tr-grad.neg {
+  background: linear-gradient(100deg, #ff7a7a, #e05252 70%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+
+/* results ticker */
+.tk-wrap {
+  overflow: hidden; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--surface); padding: 8px 0; position: relative;
+}
+.tk-wrap::before, .tk-wrap::after {
+  content: ''; position: absolute; top: 0; bottom: 0; width: 60px; z-index: 1;
+  pointer-events: none;
+}
+.tk-wrap::before { left: 0; background: linear-gradient(90deg, var(--surface), transparent); }
+.tk-wrap::after { right: 0; background: linear-gradient(-90deg, var(--surface), transparent); }
+.tk-track {
+  display: flex; gap: 28px; width: max-content;
+  animation: tk-scroll 48s linear infinite;
+}
+.tk-wrap:hover .tk-track { animation-play-state: paused; }
+@keyframes tk-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.tk-item { display: flex; gap: 8px; align-items: center; font-size: 12.5px; white-space: nowrap; }
+.tk-title { color: var(--ink-2); max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+
+/* ledger v2 */
+.tr-search {
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--ink);
+  border-radius: 8px; padding: 6px 12px; font-size: 12.5px; width: 210px;
+}
+.tr-search:focus { outline: none; border-color: var(--accent); }
+.tr-more {
+  margin-top: 10px; width: 100%; padding: 9px; border-radius: 8px; cursor: pointer;
+  background: var(--surface-2); border: 1px dashed var(--border-strong);
+  color: var(--ink-2); font-size: 12.5px; font-weight: 600;
+}
+.tr-more:hover { color: var(--ink); border-color: var(--accent); }
+
+/* skeleton shimmer */
+.tr-skel {
+  position: relative; overflow: hidden; border-radius: 14px;
+  background: var(--surface); border: 1px solid var(--border);
+}
+.tr-skel::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(100deg, transparent 30%, rgba(255,255,255,0.05) 50%, transparent 70%);
+  animation: tr-shimmer 1.4s infinite;
+}
+@keyframes tr-shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+.an-cols-up .an-col-base { display: none; }
+.an-col-acc { background: var(--s1); }

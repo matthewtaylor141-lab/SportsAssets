@@ -44,7 +44,8 @@ def _act_ts(act: dict) -> float:
     """
     from datetime import datetime, timezone
 
-    for key in ("timestamp", "createdAt", "created_at", "settledAt", "time"):
+    for key in ("timestamp", "createTime", "createdAt", "created_at",
+                "settledAt", "time"):
         v = act.get(key)
         if v is None:
             continue

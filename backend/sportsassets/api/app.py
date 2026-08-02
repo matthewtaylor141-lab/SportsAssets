@@ -517,6 +517,15 @@ async def live_status() -> dict:
     }
 
 
+@app.get("/api/track-record")
+async def api_track_record(since: str | None = Query(None)) -> dict:
+    """The AI trader's record from the ACTUAL venue account, windowed on
+    entry time (default 2026-08-01). The shadow mirror is not a record."""
+    from .track_record import track_record
+
+    return await track_record(since)
+
+
 @app.get("/api/pmus-account")
 async def api_pmus_account() -> dict:
     """The REAL Polymarket US account, live from the venue's portfolio API:

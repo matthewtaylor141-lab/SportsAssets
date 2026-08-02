@@ -1,0 +1,84 @@
+"""The track record must come from the venue account, windowed honestly."""
+
+from sportsassets.api.track_record import build, classify_slug
+
+TS_AUG1 = 1785542400.0     # 2026-08-01T00:00:00Z
+TS_JUL30 = TS_AUG1 - 2 * 86_400
+TS_AUG2 = TS_AUG1 + 86_400
+
+
+def _trade(slug, ts, qty, price):
+    return {"type": "ACTIVITY_TYPE_TRADE",
+            "trade": {"marketSlug": slug, "qty": qty,
+                      "price": {"value": price}, "createTime": ts * 1000}}
+
+
+def _resolution(slug, ts):
+    return {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION", "timestamp": ts * 1000,
+            "positionResolution": {"marketSlug": slug}}
+
+
+def _pos(qty, cost, value, realized=0.0, expired=False, title="T"):
+    return {"netPosition": qty, "cost": cost, "cashValue": value,
+            "realized": realized, "expired": expired,
+            "marketMetadata": {"title": title, "outcome": "Yes"}}
+
+
+def test_slug_classification_names_the_bet():
+    assert classify_slug("astatc-mlb-sf-sd-2026-08-02-k-mickin-gte6")["category"] == "Player Prop"
+    assert classify_slug("astatc-mlb-x")["sport"] == "Baseball"
+    assert classify_slug("atc-mlb-min-sea-2026-08-02-f5-sea")["category"] == "Segment"
+    assert classify_slug("tsc-wta-a-b-2026-08-02-tg-21pt5")["category"] == "Total"
+    assert classify_slug("tsc-wta-a-b-2026-08-02-tg-21pt5")["sport"] == "Tennis"
+    assert classify_slug("aec-mlb-det-ath-2026-08-02")["category"] == "Moneyline"
+    assert classify_slug("atc-ekst-kat-rad-2026-08-02-draw")["sport"] == "Soccer"
+
+
+def test_pre_window_entries_are_excluded_not_redated():
+    positions = {"aec-mlb-old-x-2026-07-30": _pos(2, 1.0, 1.1),
+                 "aec-mlb-new-y-2026-08-02": _pos(2, 1.0, 1.1)}
+    acts = [_trade("aec-mlb-old-x-2026-07-30", TS_JUL30, 2, 0.5),
+            _trade("aec-mlb-new-y-2026-08-02", TS_AUG2, 2, 0.5)]
+    out = build(positions, acts, TS_AUG1)
+    slugs = [r["market_slug"] for r in out["trades"]]
+    assert slugs == ["aec-mlb-new-y-2026-08-02"]
+
+
+def test_a_position_with_no_venue_trades_is_excluded_not_guessed():
+    out = build({"aec-mlb-mystery-2026-08-02": _pos(2, 1.0, 1.1)}, [], TS_AUG1)
+    assert out["trades"] == []
+
+
+def test_entry_price_is_the_venues_own_vwap():
+    positions = {"s": _pos(5, 1.6, 1.7)}
+    acts = [_trade("s", TS_AUG2, 2, 0.30), _trade("s", TS_AUG2 + 60, 3, 0.34)]
+    out = build(positions, acts, TS_AUG1)
+    row = out["trades"][0]
+    assert row["entry_price"] == round((2 * 0.30 + 3 * 0.34) / 5, 4)
+    assert row["fills"] == 2
+
+
+def test_summary_and_daily_come_from_settled_money_only():
+    positions = {
+        "won": _pos(0, 1.0, 0.0, realized=1.2, expired=True),
+        "lost": _pos(0, 1.0, 0.0, realized=-1.0, expired=True),
+        "open": _pos(2, 1.0, 1.15),
+    }
+    acts = [_trade("won", TS_AUG2, 2, 0.5), _resolution("won", TS_AUG2 + 3600),
+            _trade("lost", TS_AUG2, 2, 0.5), _resolution("lost", TS_AUG2 + 3600),
+            _trade("open", TS_AUG2, 2, 0.5)]
+    out = build(positions, acts, TS_AUG1)
+    s = out["summary"]
+    assert (s["trades"], s["settled"], s["open"]) == (3, 2, 1)
+    assert s["net_pnl"] == 0.2 and s["settled_stake"] == 2.0
+    assert s["roi"] == 0.1 and s["win_rate"] == 0.5
+    day = next(d for d in out["daily"] if d["settled"])
+    assert day["pnl"] == 0.2 and day["pnl_estimated"] is False
+
+
+def test_a_settlement_without_a_venue_timestamp_is_flagged_estimated():
+    positions = {"won": _pos(0, 1.0, 0.0, realized=1.2, expired=True)}
+    acts = [_trade("won", TS_AUG2, 2, 0.5)]     # no resolution activity
+    out = build(positions, acts, TS_AUG1)
+    day = next(d for d in out["daily"] if d["settled"])
+    assert day["pnl_estimated"] is True
