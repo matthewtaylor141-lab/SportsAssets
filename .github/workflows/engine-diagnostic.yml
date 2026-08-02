@@ -97,8 +97,10 @@ jobs:
           # ROI is measured against the REAL book at our REAL reaction time
           # for every fresh whale BUY — the empirical answer to whether
           # copy-trading deserves its own strategy sleeve.
+          # whale= (empty) drops the username filter: the panel must count
+          # every source whale, or a renamed handle reads as "no probes".
           curl -sS --max-time 60 -o /tmp/copy.json \
-               "$BASE/api/copy-report?hours=720" || true
+               "$BASE/api/copy-report?hours=720&whale=" || true
           jq -r '.summary // . | to_entries[] | "  \(.key): \(.value)"' \
              /tmp/copy.json 2>/dev/null | head -30 || echo "  (unavailable)"
 
