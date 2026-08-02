@@ -1,0 +1,2 @@
+reason_code,gate,count,share_of_candidates
+# EMPTY BY DESIGN. Refusal counts are per-cycle funnel counters and are never persisted, so no window can be aggregated. A single ~22s cycle is visible at a time. See out/RECUT_NOTES.md section 3.

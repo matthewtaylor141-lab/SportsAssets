@@ -1,0 +1,528 @@
+{
+  "_window": {
+    "start_utc": "2026-08-01T00:00:00Z",
+    "end_utc": "2026-08-02T16:22:07Z",
+    "hours": 40.37,
+    "basis_note": "Entry-basis and settlement-basis populations were both requested. Both are null: entry-basis is blocked by the rolling-window limitation, settlement-basis additionally by the missing resolution timestamp (RECUT_NOTES section 4.3). The >5% divergence flag could not be evaluated.",
+    "source_probe": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/30756459863"
+  },
+  "headline": {
+    "n_settled": {
+      "value": null,
+      "n": 3,
+      "unit": "count",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "performance",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "n_below_threshold: the two stores disagree \u2014 platform cohort reports 3 settled, engine ledger reports 0 over the same period. Neither supports a statistic, and the disagreement is itself unresolved"
+    },
+    "wins": {
+      "value": null,
+      "n": 3,
+      "unit": "count",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "performance",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "n_below_threshold"
+    },
+    "losses": {
+      "value": null,
+      "n": 3,
+      "unit": "count",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "performance",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "n_below_threshold"
+    },
+    "staked": {
+      "value": null,
+      "n": null,
+      "unit": "usd",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "performance",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "no_absolute_window_filter: the implementing function takes a rolling `days: int`, not an absolute `since`; days=7 from the window end reaches back to 2026-07-26"
+    },
+    "net": {
+      "value": null,
+      "n": null,
+      "unit": "usd",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "performance",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "no_absolute_window_filter: the implementing function takes a rolling `days: int`, not an absolute `since`; days=7 from the window end reaches back to 2026-07-26",
+      "note": "Step 6 asked for two independent computations. Neither is possible: there are no in-window position rows to sum, and no ledger balance series is exposed. Three separate accounting paths disagree about today's stake \u2014 engine ledger $583.08, platform cohort $311.71, risk day-counter $390.22"
+    },
+    "return_pct": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "performance",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "n_below_threshold"
+    },
+    "sd_per_trade": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": null,
+      "source_function": null,
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "n_below_threshold (n=3)"
+    },
+    "se": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": null,
+      "source_function": null,
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "n_below_threshold (n=3)"
+    },
+    "sigma_from_zero": {
+      "value": null,
+      "n": null,
+      "unit": "sigma",
+      "source_file": null,
+      "source_function": null,
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "n_below_threshold (n=3). No arrangement of 3 settlements is distinguishable from zero. The cumulative figure is 0.23 sigma; in-window there is no evidence of anything in either direction"
+    },
+    "daily_series": {
+      "value": null,
+      "n": null,
+      "unit": "rows",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "performance",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "resolution activities carry no timestamp in any field the settlement parser reads, so every settlement buckets as 'undated' \u2014 confirmed live: 'undated 3 settled W1/L2'"
+    }
+  },
+  "drift_cents": {
+    "moneyline": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+    },
+    "draw": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+    },
+    "spread": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+    },
+    "total": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+    },
+    "prop": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+    },
+    "segment": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+    },
+    "overall": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+    }
+  },
+  "drift_surcharge_cents": {
+    "moneyline": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_penalties",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+    },
+    "draw": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_penalties",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+    },
+    "spread": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_penalties",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+    },
+    "total": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_penalties",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+    },
+    "prop": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_penalties",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+    },
+    "segment": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_penalties",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+    },
+    "overall": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_penalties",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "CRITICAL: a naive recut emits 0.00c here, and the engine cannot tell that apart from a measured absence of adverse selection \u2014 strategy_filter defaults drift_penalty=0.0. On the moneyline cohort, last measured at -2.3c, that is the most expensive possible misreading"
+    }
+  },
+  "retention": {
+    "moneyline": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "excluded-denominator count (|fair_entry - price| < 0.005) is also unobtainable"
+    },
+    "draw": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "excluded-denominator count (|fair_entry - price| < 0.005) is also unobtainable"
+    },
+    "spread": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "excluded-denominator count (|fair_entry - price| < 0.005) is also unobtainable"
+    },
+    "total": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "excluded-denominator count (|fair_entry - price| < 0.005) is also unobtainable"
+    },
+    "prop": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "excluded-denominator count (|fair_entry - price| < 0.005) is also unobtainable"
+    },
+    "segment": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "excluded-denominator count (|fair_entry - price| < 0.005) is also unobtainable"
+    },
+    "overall": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it",
+      "note": "excluded-denominator count (|fair_entry - price| < 0.005) is also unobtainable"
+    }
+  },
+  "free_samples": {
+    "n_observations": {
+      "value": null,
+      "n": null,
+      "unit": "count",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "price_drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "no_absolute_window_filter: the implementing function takes a rolling `days: int`, not an absolute `since`; days=7 from the window end reaches back to 2026-07-26"
+    },
+    "mean_drift_cents": {
+      "value": null,
+      "n": null,
+      "unit": "cents",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "price_drift_report",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "no_absolute_window_filter: the implementing function takes a rolling `days: int`, not an absolute `since`; days=7 from the window end reaches back to 2026-07-26"
+    }
+  },
+  "reversion_keep": {
+    "slope": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "reversion",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "no_absolute_window_filter: the implementing function takes a rolling `days: int`, not an absolute `since`; days=7 from the window end reaches back to 2026-07-26"
+    },
+    "keep": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "reversion",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "no_absolute_window_filter: the implementing function takes a rolling `days: int`, not an absolute `since`; days=7 from the window end reaches back to 2026-07-26",
+      "note": "REVERSION_MIN_N = 200. Determines whether shrinkage applies INSTEAD of the surcharge; the two must never both apply"
+    },
+    "r_squared": {
+      "value": null,
+      "n": null,
+      "unit": "fraction",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "reversion",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "not_computed: reversion() returns slope and n but does not compute R^2. Adding it is a change to the existing function, not a second implementation"
+    }
+  },
+  "gate3_quarantine_cohorts": {
+    "moneyline": {
+      "n": {
+        "value": null,
+        "n": null,
+        "unit": "count",
+        "source_file": "src/edge/ledger/service.py",
+        "source_function": "drift_report",
+        "computed_at": "2026-08-02T16:22:07Z",
+        "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+      },
+      "drift_cents": {
+        "value": null,
+        "n": null,
+        "unit": "cents",
+        "source_file": "src/edge/ledger/service.py",
+        "source_function": "drift_report",
+        "computed_at": "2026-08-02T16:22:07Z",
+        "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+      },
+      "retention": {
+        "value": null,
+        "n": null,
+        "unit": "fraction",
+        "source_file": "src/edge/ledger/service.py",
+        "source_function": "drift_report",
+        "computed_at": "2026-08-02T16:22:07Z",
+        "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+      }
+    },
+    "draw": {
+      "n": {
+        "value": null,
+        "n": null,
+        "unit": "count",
+        "source_file": "src/edge/ledger/service.py",
+        "source_function": "drift_report",
+        "computed_at": "2026-08-02T16:22:07Z",
+        "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+      },
+      "drift_cents": {
+        "value": null,
+        "n": null,
+        "unit": "cents",
+        "source_file": "src/edge/ledger/service.py",
+        "source_function": "drift_report",
+        "computed_at": "2026-08-02T16:22:07Z",
+        "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+      },
+      "retention": {
+        "value": null,
+        "n": null,
+        "unit": "fraction",
+        "source_file": "src/edge/ledger/service.py",
+        "source_function": "drift_report",
+        "computed_at": "2026-08-02T16:22:07Z",
+        "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+      }
+    },
+    "free_pool": {
+      "n": {
+        "value": null,
+        "n": null,
+        "unit": "count",
+        "source_file": "src/edge/ledger/service.py",
+        "source_function": "drift_report",
+        "computed_at": "2026-08-02T16:22:07Z",
+        "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+      },
+      "drift_cents": {
+        "value": null,
+        "n": null,
+        "unit": "cents",
+        "source_file": "src/edge/ledger/service.py",
+        "source_function": "drift_report",
+        "computed_at": "2026-08-02T16:22:07Z",
+        "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+      },
+      "retention": {
+        "value": null,
+        "n": null,
+        "unit": "fraction",
+        "source_file": "src/edge/ledger/service.py",
+        "source_function": "drift_report",
+        "computed_at": "2026-08-02T16:22:07Z",
+        "null_reason": "not_persisted_per_fill: edge_drift is keyed by market_key (service.py:148), so there is one drift observation per market regardless of how many times we entered it"
+      }
+    }
+  },
+  "refusals": {
+    "value": null,
+    "n": null,
+    "unit": "rows",
+    "source_file": "src/edge/shadow/runner.py",
+    "source_function": "run_cycle",
+    "computed_at": "2026-08-02T16:22:07Z",
+    "null_reason": "not_persisted: refusal counters are per-CYCLE funnel counters, discarded at the end of each cycle. Only a single ~22s cycle is ever visible. There is no windowed store to aggregate"
+  },
+  "untraced_document_claims": {
+    "philosophy_11_record_313_settled": {
+      "value": null,
+      "n": null,
+      "unit": "usd",
+      "source_file": null,
+      "source_function": null,
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "source_untraced: see RECUT_NOTES.md section 2, UNTRACED",
+      "note": "PHILOSOPHY.md section 11 asserts 313 settled, 85W/227L, -$5.02 on $227.57. No reachable store reproduces it. Should not appear in the document until it can be"
+    },
+    "philosophy_11_settlements_per_day": {
+      "value": null,
+      "n": null,
+      "unit": "count_per_day",
+      "source_file": null,
+      "source_function": null,
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "source_untraced: see RECUT_NOTES.md section 2, UNTRACED",
+      "note": "'~150/day vs ~10/day' has no source in any report"
+    },
+    "philosophy_4_daily_loss_halt": {
+      "value": null,
+      "n": null,
+      "unit": "usd",
+      "source_file": "config/risk.yaml",
+      "source_function": null,
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "source_untraced: see RECUT_NOTES.md section 2, UNTRACED",
+      "note": "documented as '$15, or 15% of the day, or 4 sigma'; engine reports halt_at=61.03, which is neither $15 nor 15% of the $232.78 day cap ($34.92)"
+    }
+  },
+  "stopping_rule": {
+    "settlements_in_window": {
+      "value": null,
+      "n": 3,
+      "unit": "count",
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "performance",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "n_below_threshold"
+    },
+    "target": {
+      "value": 500,
+      "unit": "settlements",
+      "source_file": "PHILOSOPHY.md",
+      "source_function": null,
+      "n": null,
+      "computed_at": "2026-08-02T16:22:07Z"
+    },
+    "pct_complete": {
+      "value": 0.6,
+      "unit": "percent",
+      "n": 3,
+      "source_file": "src/edge/ledger/service.py",
+      "source_function": "performance",
+      "computed_at": "2026-08-02T16:22:07Z",
+      "note": "3 of 500, on the platform cohort"
+    },
+    "projected_completion_date": {
+      "value": null,
+      "n": null,
+      "unit": "date",
+      "source_file": null,
+      "source_function": null,
+      "computed_at": "2026-08-02T16:22:07Z",
+      "null_reason": "refuse_to_extrapolate: 3 settlements over 40 hours is not a rate, and the population is contaminated by the repeated-entry defect. The engine is also PAPER as of commit ae436c6, so the live settlement rate is currently zero and the clock is stopped"
+    }
+  }
+}

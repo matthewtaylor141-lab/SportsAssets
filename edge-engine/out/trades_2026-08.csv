@@ -1,0 +1,2 @@
+entry_ts_utc,settle_ts_utc,league,category,market_id,event_id,outcome,entry_price,executable_price,fair_at_entry,fair_at_plus_60s,stake,resolution,payout,pnl,threshold_required,edge_claimed,ladder_rung
+# EMPTY BY DESIGN, not by failure. No in-window position rows are obtainable: the ledger lives on the edge-shadow worker disk, and 6 of these 18 columns (category, fair_at_plus_60s per position, threshold_required, ladder_rung, executable_price, event_id) have no source in any store. See out/RECUT_NOTES.md sections 0 and 1.
