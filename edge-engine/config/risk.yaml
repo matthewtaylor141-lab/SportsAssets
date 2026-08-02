@@ -79,13 +79,17 @@
 # and per-id cancel failures are now counted instead of reported as
 # cancellations.
 #
-# Restore LIVE_BETA when, with the cancel-all sweep deployed:
-# (1) the operator confirms ZERO open orders in the Polymarket US UI
-#     (the UI sees what the API listing may not), and
-# (2) the over-cap OPEN cohort is byte-static across two probes that
-#     bracket live in-play trading on any market it holds — quiet
-#     markets prove nothing, as 19:16Z->19:50Z just demonstrated.
-mode: PAPER
+# RE-ARMED 2026-08-02 20:2x — OWNER DIRECTIVE. Matt declined the manual
+# UI cancel ("let them ride") and ordered live firing at the $1.00-$1.50
+# ladder. Existing positions ride to settlement either way (buy-only,
+# no exit logic); the operative control against further orphan fills is
+# now the venue-side CANCEL-ALL the sweep fires every cycle, which needs
+# no listing to be complete. The scheduled probes verify two things on
+# the first live cycles: every NEW position <= $1.50, and the over-cap
+# OPEN cohort static while its markets trade in-play. Renewed growth
+# after the cancel-all deploy means the endpoint cannot reach those
+# orders either -> halt again and escalate to the operator.
+mode: LIVE_BETA
 
 # Size discipline — MEASURED caps (LIVE mode). Source: capacity_sizebuckets.csv
 # (ROI negative > $50K/fill).
