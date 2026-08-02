@@ -16,6 +16,8 @@ guessed into it.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -319,6 +321,52 @@ def _fetch_raw() -> dict:
     return {"positions": positions, "activities": acts}
 
 
+_archive_ready = False
+
+
+async def _archive_and_union(acts: list[dict]) -> list[dict]:
+    """Persist every venue activity ever seen; return the full archive.
+
+    The venue's activity feed is a sliding window (we page ~1,200 rows,
+    newest first). As trading accelerates, older TRADE and RESOLUTION
+    activities scroll out of it — which made settled rows fall off the
+    public record (181 -> 92 in one evening) and stripped entry timestamps
+    from rows that were then excluded as undatable. A track record whose
+    evidence DECAYS is not a track record. So every activity is archived
+    on first sight, keyed by the venue's own id, and the record is built
+    from the archive: it can only ever grow.
+    """
+    global _archive_ready
+    from ..db import get_pool
+
+    pool = await get_pool()
+    if not _archive_ready:
+        await pool.execute(
+            """CREATE TABLE IF NOT EXISTS pmus_activity_archive (
+                   id text PRIMARY KEY,
+                   ts double precision,
+                   payload jsonb NOT NULL)""")
+        _archive_ready = True
+    rows = []
+    for a in acts or []:
+        aid = str(a.get("id") or "")
+        if not aid:
+            aid = hashlib.sha256(json.dumps(a, sort_keys=True, default=str)
+                                 .encode()).hexdigest()
+        rows.append((aid, float(_act_ts(a) or 0.0),
+                     json.dumps(a, default=str)))
+    if rows:
+        await pool.executemany(
+            "INSERT INTO pmus_activity_archive (id, ts, payload) "
+            "VALUES ($1, $2, $3::jsonb) ON CONFLICT (id) DO NOTHING", rows)
+    stored = await pool.fetch("SELECT payload FROM pmus_activity_archive")
+    out: list[dict] = []
+    for r in stored:
+        p = r["payload"]
+        out.append(json.loads(p) if isinstance(p, str) else p)
+    return out
+
+
 async def track_record(since: str | None = None,
                        max_stake: float | None = None) -> dict:
     cfg = settings()
@@ -341,6 +389,13 @@ async def track_record(since: str | None = None,
                 return {"configured": True,
                         "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
     raw = _raw_cache["data"]
+    acts = raw["activities"]
+    try:
+        acts = await _archive_and_union(acts)
+    except Exception:  # noqa: BLE001 — archive is an upgrade, not a gate
+        # Serve the live window rather than 500 if the DB hiccups; the
+        # next successful request re-archives everything it sees.
+        pass
     return {"configured": True,
-            **build(raw["positions"], raw["activities"], since_ts,
+            **build(raw["positions"], acts, since_ts,
                     max_stake=max_stake)}

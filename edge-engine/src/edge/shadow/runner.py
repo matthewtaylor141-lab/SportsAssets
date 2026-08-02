@@ -99,12 +99,18 @@ def _post_methodology(markdown: str, figures: dict) -> None:
     try:
         import requests
 
-        requests.post(f"{base}/api/engine/methodology",
-                      json={"markdown": markdown, "figures": figures,
-                            "generated_ts": time.time()},
-                      headers={"X-Engine-Token": token}, timeout=15)
+        r = requests.post(f"{base}/api/engine/methodology",
+                          json={"markdown": markdown, "figures": figures,
+                                "generated_ts": time.time()},
+                          headers={"X-Engine-Token": token}, timeout=15)
+        if r.status_code != 200:
+            # A rejected publish must be loud: this exact failure hid for
+            # hours behind a debug-level log while the probe read "never
+            # published".
+            log.warning("methodology publish HTTP %s: %s",
+                        r.status_code, r.text[:200])
     except Exception as exc:  # noqa: BLE001
-        log.debug("methodology post failed (non-fatal): %s", exc)
+        log.warning("methodology post failed (non-fatal): %s", exc)
 
 
 # ── platform mirror: OFF the pricing loop ───────────────────────────────

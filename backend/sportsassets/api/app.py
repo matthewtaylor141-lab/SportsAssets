@@ -319,7 +319,10 @@ async def engine_methodology(format: str = Query("json")) -> Any:
     if format == "md":
         return PlainTextResponse(detail.get("markdown", ""),
                                  media_type="text/markdown")
-    return {"updated_at": row["updated_at"], **detail}
+    # The heartbeats table timestamps with beat_at; reading the wrong key
+    # here turned every publish into an HTTP 500 that read exactly like
+    # "never published" — the worker had been publishing all along.
+    return {"updated_at": row["beat_at"], **detail}
 
 
 @app.get("/api/engine/status")
