@@ -112,6 +112,13 @@ jobs:
              /tmp/ai.json 2>/dev/null | head -20 || echo "  (unavailable)"
 
           echo ""
+          echo "#   WHALE INGESTION RAW (shape + freshness, no jq guessing) #"
+          echo "  -- /api/feed?limit=2 --"
+          curl -sS --max-time 60 "$BASE/api/feed?limit=2" 2>&1 | head -c 700; echo
+          echo "  -- /api/whales --"
+          curl -sS --max-time 60 "$BASE/api/whales" 2>&1 | head -c 700; echo
+
+          echo ""
           echo "#   WHALE INGESTION FRESHNESS (is the pipeline alive?)      #"
           # Zero copy probes in 30d means either no fresh detections or a
           # dead listener. The newest ingested trade timestamp settles it —
