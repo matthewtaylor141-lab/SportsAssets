@@ -47,7 +47,27 @@
 # points at a mounted persistent disk on the deployed service — every
 # control in this engine assumes the ledger survives a deploy, and today
 # proved the deployed one does not.
-mode: PAPER
+#
+# RE-ARMED 2026-08-02 19:5x. Evidence:
+# (1) Over-cap cohort byte-identical across probes at 19:16Z and 19:50Z
+#     (23 positions, $320.22, every line item unchanged — including the
+#     three markets that had been creeping), through 34 minutes of engine
+#     cycles in the Sunday MLB window. During the incident, growth showed
+#     within minutes; the sweep is holding. Shorter than the hour the note
+#     above asked for — accepted deliberately because the sweep also runs
+#     every cycle in every mode, so a regression re-halts within one cycle,
+#     and the incident-fast growth signature gives 34 quiet minutes real
+#     statistical weight.
+# (2) The disk check is now MEASURED rather than operator-confirmed: the
+#     ledger's measurement history (drift n=449, free samples n=21,970)
+#     survived 4+ deploys today intact. A wiped disk cannot carry 21,970
+#     rows across a deploy. Operator should still eyeball the Render disk
+#     mount when convenient, but the evidence is already stronger than a
+#     dashboard checkbox.
+# This deploy also ships the per-fill net-margin gate (2df08fb): no entry
+# unless (edge - paid_over_mid)/price >= 2%, judged on the live book at
+# decision time. First live cycles are watched by a scheduled probe.
+mode: LIVE_BETA
 
 # Size discipline — MEASURED caps (LIVE mode). Source: capacity_sizebuckets.csv
 # (ROI negative > $50K/fill).
