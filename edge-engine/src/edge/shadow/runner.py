@@ -360,6 +360,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         pair_quotes,
         parse_outcome_line,
         split_segment,
+        unit_conflicts,
     )
     from edge.venues.base import FillIntent
     from edge.venues.mapper import match_events_all, team_score
@@ -592,6 +593,16 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                 oc_name = side
             p = parse_outcome_line(oc_name)
             if p.kind in ("total", "spread"):
+                # A stated unit must be the one the sharp quote counts in.
+                # "Over 23.5 games" IS the tennis totals market; "Over 2.5
+                # sets" merely looks like it — same shape, different
+                # proposition — and pairing them would price sets off a
+                # games line. Unknown units fail closed.
+                if unit_conflicts(p.unit, ev.sport_key):
+                    return None, p.kind, {
+                        "reason": f"{p.kind}_unit_mismatch",
+                        "unit": p.unit, "sport": ev.sport_key,
+                        "venue_outcome": oc_name[:48]}
                 for side, f in deriv_sides:
                     if side.kind == p.kind and outcome_matches(oc_name, side):
                         return f, p.kind, None
@@ -1085,6 +1096,12 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         funnel["spread_cost"] = ledger.spread_report(days=7, live_only=risk.is_live)
         funnel["by_band"] = ledger.performance_by_band(days=7, live_only=risk.is_live)
         funnel["reversion"] = rev
+        # Profit per dollar of turnover at entry — the steering number.
+        # Settled P&L takes thousands of resolutions to speak; this is the
+        # same quantity predicted from every fill's own book snapshot and
+        # the minute-later drift, and it converges in hundreds.
+        funnel["entry_margin"] = ledger.entry_margin(days=7,
+                                                     live_only=risk.is_live)
     except Exception as exc:  # noqa: BLE001 — reporting must never break trading
         log.debug("performance snapshot failed: %s", exc)
     funnel["verdict"] = volume_verdict(funnel, risk)

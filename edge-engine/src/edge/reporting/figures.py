@@ -24,6 +24,13 @@ MIN_SETTLED_FOR_RETURN = 30
 # Sigma below which we decline to call a result distinguishable from zero.
 SIGMA_MEANINGFUL = 2.0
 
+# A category earns a bigger ticket only on its own settled record: this far
+# from zero, on at least this many settlements, positive. The thresholds are
+# deliberately the slow, boring kind — the reference account's top-500
+# LARGEST fills lost $1.07M, and size discipline is the strategy.
+PROMOTION_SIGMA = 2.0
+PROMOTION_MIN_N = 200
+
 
 def fig(value: Any, *, n: int | None = None, unit: str = "",
         source: str = "", null_reason: str | None = None,
@@ -68,6 +75,7 @@ def compute_figures(ledger, policy, *, days: int = 7,
     rev = ledger.reversion(days=days, since=since)
     by_cat = ledger.performance_by_category(days=days, since=since,
                                             live_only=live_only)
+    margin = ledger.entry_margin(days=days, since=since, live_only=live_only)
     by_band = ledger.performance_by_band(days=days, since=since,
                                          live_only=live_only)
     spread = ledger.spread_report(days=days, since=since, live_only=live_only)
@@ -168,6 +176,38 @@ def compute_figures(ledger, policy, *, days: int = 7,
         "by_category": by_cat,
         "by_band": by_band,
         "spread_cost": spread,
+        # Profit per dollar of turnover measured AT ENTRY — the fast,
+        # continuous predictor of the settled result. Converges in
+        # hundreds of fills; blind to stable mapping errors, which is why
+        # settlement still outranks it.
+        "entry_margin": {
+            cat: {
+                "gross_margin": fig(m["gross_margin"], n=m["n_fills"],
+                                    unit="fraction",
+                                    source="ledger.entry_margin"),
+                "net_margin": fig(m["net_margin"], n=m["n_fills"],
+                                  unit="fraction",
+                                  source="ledger.entry_margin",
+                                  null_reason=(None if m["net_margin"]
+                                               is not None else
+                                               "retention_unmeasured: "
+                                               f"n={m['retention_n']} < "
+                                               f"{ledger.DRIFT_MIN_N}")),
+            } for cat, m in margin.items()},
+        # Which categories have EARNED a bigger ticket, on their own settled
+        # record. Report-only on purpose: approve() clamps every order to
+        # the config caps, so acting on readiness is a reviewed config
+        # edit, never an automatic path that can run away on a hot streak.
+        "promotion_readiness": {
+            cat: {
+                "settled": b.get("settled"),
+                "roi": b.get("roi"),
+                "sigma": b.get("sigma"),
+                "ready": bool(b.get("sigma") is not None
+                              and b["sigma"] >= PROMOTION_SIGMA
+                              and (b.get("settled") or 0) >= PROMOTION_MIN_N
+                              and (b.get("roi") or 0) > 0),
+            } for cat, b in by_cat.items()},
     }
 
 

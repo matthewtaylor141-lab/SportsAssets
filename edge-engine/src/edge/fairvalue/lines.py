@@ -16,10 +16,45 @@ from dataclasses import dataclass
 
 from edge.venues.mapper import team_score
 
-TOTAL_RE = re.compile(r"^\s*(over|under)\s*\(?([+-]?\d+(?:\.\d+)?)?\)?\s*$", re.IGNORECASE)
-# Team spread: any text ending with a signed number, e.g. "Chiefs -3.5",
-# "Kansas City Chiefs (+3.5)".
-SPREAD_RE = re.compile(r"^(?P<team>.+?)\s*\(?(?P<point>[+-]\d+(?:\.\d+)?)\)?\s*$")
+# A trailing unit word ("Over 23.5 games", "Munar +3.5 games") is part of
+# the BET, not decoration. Tennis venues write game totals as
+# "Over 23.5 games" and set totals as "Over 2.5 sets" — same shape, wildly
+# different propositions — and the old anchored-at-the-number regex sent
+# BOTH to the team matcher, where they died as no_side_match_moneyline
+# (858 refusals in one measured cycle). The unit is captured so the caller
+# can refuse a mismatched one instead of pricing sets off a games line.
+_UNIT_WORDS = r"games?|sets?|points?|goals?|runs?|maps?|rounds?|corners?|cards?|aces?"
+TOTAL_RE = re.compile(
+    r"^\s*(over|under)\s*\(?([+-]?\d+(?:\.\d+)?)?\)?"
+    r"(?:\s+(" + _UNIT_WORDS + r"))?\s*$", re.IGNORECASE)
+# Team spread: text ending with a signed number, optionally unit-suffixed:
+# "Chiefs -3.5", "Kansas City Chiefs (+3.5)", "Jaume Munar +3.5 games".
+SPREAD_RE = re.compile(
+    r"^(?P<team>.+?)\s*\(?(?P<point>[+-]\d+(?:\.\d+)?)\)?"
+    r"(?:\s+(?P<unit>" + _UNIT_WORDS + r"))?\s*$")
+
+# The unit a sport's PRIMARY totals/spreads market is denominated in — what
+# the feed's unit-less "Over 22.5" means for that sport. A venue outcome
+# stating any OTHER unit is a different bet and must refuse rather than
+# pair: an unknown unit fails closed.
+PRIMARY_TOTAL_UNIT = {
+    "tennis": "game", "soccer": "goal", "basketball": "point",
+    "americanfootball": "point", "icehockey": "goal", "baseball": "run",
+}
+
+
+def unit_conflicts(unit: str | None, sport_key: str | None) -> bool:
+    """Does a stated unit disagree with what the sharp quote denominates?
+
+    None (no unit stated) never conflicts — the overwhelmingly common venue
+    form. A stated unit must equal the sport family's primary unit; a
+    stated unit on an UNKNOWN family also conflicts, because we cannot say
+    what the feed's number counts there."""
+    if not unit:
+        return False
+    family = (sport_key or "").split("_", 1)[0]
+    primary = PRIMARY_TOTAL_UNIT.get(family)
+    return primary is None or unit.rstrip("s").lower() != primary
 
 
 @dataclass(frozen=True)
@@ -28,6 +63,7 @@ class ParsedLine:
     team: str | None     # spread/moneyline: team text; total: None
     side: str | None     # total: 'over'|'under'
     point: float | None  # line value (spread signed, total unsigned)
+    unit: str | None = None   # stated denomination ("games", "sets"), if any
 
 
 def parse_outcome_line(name: str) -> ParsedLine:
@@ -36,11 +72,13 @@ def parse_outcome_line(name: str) -> ParsedLine:
     m = TOTAL_RE.match(s)
     if m:
         pt = float(m.group(2)) if m.group(2) is not None else None
-        return ParsedLine("total", None, m.group(1).lower(), pt)
+        return ParsedLine("total", None, m.group(1).lower(), pt,
+                          unit=(m.group(3) or None))
     m = SPREAD_RE.match(s)
     if m:
         return ParsedLine("spread", m.group("team").strip(), None,
-                          float(m.group("point")))
+                          float(m.group("point")),
+                          unit=(m.group("unit") or None))
     return ParsedLine("moneyline", s or None, None, None)
 
 
@@ -231,8 +269,24 @@ def tag_segment(outcome_key: str, segment: str | None) -> str:
 _SEG_PREFIX = re.compile(r"^\[([a-z0-9]+)\]\s*")
 
 
+_SET_WINNER = re.compile(
+    r"^\s*set\s*(\d)\s*winner\s*$|^\s*(\d)(?:st|nd|rd|th)\s+set\s+winner\s*$",
+    re.IGNORECASE)
+
+
 def split_segment(outcome_key: str) -> tuple[str | None, str]:
-    """(segment, bare outcome). Inverse of tag_segment."""
+    """(segment, bare outcome). Inverse of tag_segment.
+
+    Tennis set winners ("Set 1 Winner") are PARTIAL-match bets — the same
+    relationship a first-half line has to a football game. Left
+    unrecognized they fell through to the team matcher and died as
+    no_side_match_moneyline; as segments they refuse cleanly as
+    no_sharp_quote_segment_s1 until a sharp per-set quote exists to pair
+    them against. Never priced off the full-match line."""
+    m = _SET_WINNER.match(outcome_key or "")
+    if m:
+        n = m.group(1) or m.group(2)
+        return f"s{n}", (outcome_key or "")
     m = _SEG_PREFIX.match(outcome_key or "")
     if not m:
         return None, (outcome_key or "")

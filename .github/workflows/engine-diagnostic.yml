@@ -286,6 +286,15 @@ jobs:
           jq -r '.detail.spread_cost // {} | if length == 0 then "   (no book snapshots yet)"
                  else to_entries[] | "   \(.key): n=\(.value.n)  spread \(.value.spread_c)c  paid over mid \(.value.paid_over_mid_c)c  claimed edge \(.value.edge_c)c  NET \(.value.net_c)c" end' \
              /tmp/status.json 2>/dev/null || true
+          # THE STEERING NUMBER. Profit per dollar of turnover, measured at
+          # entry: (claimed edge x retention - paid over mid) / price. It
+          # converges in hundreds of fills where settled P&L needs
+          # thousands of resolutions; positive here and negative at
+          # settlement means the MAP is wrong, not the economics.
+          echo "ENTRY MARGIN (profit per $ of turnover, at entry):"
+          jq -r '.detail.entry_margin // {} | if length == 0 then "   (no fills measured yet)"
+                 else to_entries[] | "   \(.key): n=\(.value.n_fills)  gross \((.value.gross_margin * 100 * 100 | round) / 100)%  net \(if .value.net_margin != null then "\((.value.net_margin * 100 * 100 | round) / 100)%" else "unmeasured (retention n=\(.value.retention_n))" end)" end' \
+             /tmp/status.json 2>/dev/null || true
           echo "settled by BAND (our own fills, not the inherited calibration):"
           jq -r '.detail.by_band // {} | if length == 0 then "   (nothing settled yet)"
                  else to_entries[] | "   \(.key): \(.value.settled) settled  $\(.value.realized)  ROI \(.value.roi // "n/a")" end' \

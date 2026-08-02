@@ -482,3 +482,127 @@ def test_a_three_way_soccer_market_prices_all_three_outcomes(tmp_path, monkeypat
     funnel = run_cycle([Venue()], Feed(), POLICY, risk, led, ["soccer_epl"])
     assert funnel["rejects"].get("no_side_match_moneyline", 0) == 0
     assert led.position("kalshi:T-DRAW") is not None   # the draw traded
+
+
+# ── unit-aware totals/spreads: tennis and friends ───────────────────────
+#
+# "Over 23.5 games" IS the tennis totals market the feed already carries;
+# "Over 2.5 sets" merely looks like it. The old regex anchored at the
+# number, so BOTH fell through to the team matcher and died as
+# no_side_match_moneyline — 858 refusals in one measured cycle, none of
+# them about edge.
+
+def test_unit_suffixed_totals_parse_as_totals():
+    from edge.fairvalue.lines import parse_outcome_line
+
+    p = parse_outcome_line("Over 23.5 games")
+    assert (p.kind, p.side, p.point, p.unit) == ("total", "over", 23.5, "games")
+    q = parse_outcome_line("Under 21.5 games")
+    assert (q.kind, q.side, q.point) == ("total", "under", 21.5)
+    # The unit-less form stays exactly as it was.
+    r = parse_outcome_line("Over 8.5")
+    assert (r.kind, r.point, r.unit) == ("total", 8.5, None)
+
+
+def test_unit_suffixed_spreads_parse_as_spreads():
+    from edge.fairvalue.lines import parse_outcome_line
+
+    p = parse_outcome_line("Jaume Munar +3.5 games")
+    assert (p.kind, p.team, p.point, p.unit) == ("spread", "Jaume Munar", 3.5,
+                                                 "games")
+
+
+def test_a_stated_unit_must_match_what_the_sharp_quote_counts():
+    """Pairing 'Over 2.5 sets' against a games total at the same number
+    would manufacture a fair value for a different proposition. Stated
+    units must equal the sport's primary unit; unknown families fail
+    closed."""
+    from edge.fairvalue.lines import unit_conflicts
+
+    assert not unit_conflicts("games", "tennis_atp")
+    assert not unit_conflicts(None, "tennis_atp")        # common venue form
+    assert unit_conflicts("sets", "tennis_atp")
+    assert not unit_conflicts("goals", "soccer_epl")
+    assert unit_conflicts("corners", "soccer_epl")
+    assert unit_conflicts("games", "dartsport_x")        # unknown family
+
+
+def test_set_winners_are_segments_not_moneylines():
+    """'Set 1 Winner' is a partial-match bet — the tennis analogue of a
+    first-half line. It must refuse as a missing SEGMENT quote, never be
+    scored against the players' names as a moneyline."""
+    from edge.fairvalue.lines import split_segment
+
+    assert split_segment("Set 1 Winner")[0] == "s1"
+    assert split_segment("2nd Set Winner")[0] == "s2"
+    assert split_segment("Arsenal")[0] is None
+
+
+def test_tennis_games_total_prices_end_to_end(tmp_path, monkeypatch):
+    """The whole point of the unit work: a venue 'Over 22.5 games' pairs
+    against the feed's tennis totals and TRADES, while 'Over 2.5 sets'
+    at the same event refuses on the unit."""
+    from edge.execution.risk import RiskManager
+    from edge.fairvalue.feed import FeedEvent
+    from edge.ledger.service import Ledger
+    from edge.shadow.runner import run_cycle
+    from edge.venues.base import BookLevel, MarketBook
+    from edge.venues.mapper import VenueMarket
+
+    class TennisVenue:
+        name = "kalshi"
+        book_errors = {}
+
+        def __init__(self):
+            self.asks = {"T-OVER": 0.30, "T-SETS": 0.30}
+
+        def discover_markets(self, league_codes):
+            return [VenueMarket(
+                market_id="EVT-TEN", title="Munar vs. Hijikata",
+                league_code="wta",
+                outcome_tokens={"Over 22.5 games": "T-OVER",
+                                "Over 2.5 sets": "T-SETS"})]
+
+        def get_book(self, market_id, token):
+            ask = self.asks[token]
+            return MarketBook(venue=self.name, market_id=market_id,
+                              outcome_id=token,
+                              bids=[BookLevel(ask - 0.02, 500)],
+                              asks=[BookLevel(ask, 1000)], ts=time.time())
+
+        def taker_fee(self, price):
+            return 0.0
+
+        def maker_fee(self, price):
+            return 0.0
+
+        def plan_entry(self, book):
+            return (book.asks[0].price, True) if book.asks else (0.0, True)
+
+    class Feed:
+        def sport_keys(self):
+            return ["tennis_wta_x"]
+
+        def server_clock_skew_s(self):
+            return 0.0
+
+        def fetch_events(self, sport_key):
+            ev = FeedEvent(
+                sport_key="tennis_wta_x", league_code="wta",
+                home="Jaume Munar", away="Rinky Hijikata",
+                commence_ts=time.time() + 3600,
+                h2h={"Jaume Munar": 2.0, "Rinky Hijikata": 2.0},
+                # Sharp games total: Over/Under 22.5 at odds implying ~0.35
+                # for the Over — 5c of edge over a 0.30 ask.
+                totals={"Over 22.5": 2.857, "Under 22.5": 1.538},
+                fetched_at=time.time(), anchors=1)
+            return [ev]
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    risk = RiskManager(ledger, {**POLICY.risk, "mode": "PAPER"})
+    funnel = run_cycle([TennisVenue()], Feed(), POLICY, risk, ledger,
+                       ["tennis_wta_x"])
+    assert funnel["logged"] == 1, funnel["rejects"]
+    assert funnel["rejects"].get("total_unit_mismatch", 0) >= 1
+    assert funnel["rejects"].get("no_side_match_moneyline", 0) == 0

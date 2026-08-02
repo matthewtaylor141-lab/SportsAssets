@@ -449,21 +449,77 @@ class Ledger:
             mid = (best_ask + best_bid) / 2.0
             cat = r["category"] or "unknown"
             b = out.setdefault(cat, {"n": 0, "spread": 0.0, "paid_over_mid": 0.0,
-                                     "edge": 0.0})
+                                     "edge": 0.0, "price": 0.0})
             b["n"] += 1
             b["spread"] += best_ask - best_bid
             b["paid_over_mid"] += float(r["price"]) - mid
             b["edge"] += float(d.get("edge") or 0.0)
+            b["price"] += float(r["price"])
 
         for b in out.values():
             n = b["n"]
             b["spread_c"] = round(b.pop("spread") / n * 100, 2)
             b["paid_over_mid_c"] = round(b.pop("paid_over_mid") / n * 100, 2)
             b["edge_c"] = round(b.pop("edge") / n * 100, 2)
+            # Mean entry price: the turnover denominator, so entry-side
+            # margins can be stated per dollar staked rather than per
+            # contract.
+            b["price_c"] = round(b.pop("price") / n * 100, 2)
             # What is left of the claimed edge after paying to cross. If this
             # is negative we were losing at the moment of entry, whatever the
             # model said.
             b["net_c"] = round(b["edge_c"] - b["paid_over_mid_c"], 2)
+        return out
+
+    def entry_margin(self, days: int = 7, live_only: bool = True,
+                     since: float | None = None) -> dict:
+        """Profit per dollar of turnover, measured AT ENTRY, per category.
+
+        The settled scorecard is the truth and converges like a coin flip:
+        thousands of settlements per band. This is the fast unbiased
+        predictor of the same number, and it converges in hundreds of fills
+        because every term is continuous:
+
+            margin = (claimed_edge x retention - paid_over_mid) / price
+
+        claimed_edge and paid_over_mid come from the fills' own book
+        snapshots (spread_report); retention is the fraction of claimed
+        edge still present a minute after entry (drift_report), which is
+        what discounts the claim for adverse selection. Where retention is
+        unmeasured the GROSS margin is reported alone, flagged — an
+        unmeasured discount silently treated as 1.0 is how a scorecard
+        starts lying.
+
+        What it cannot see, and why settlement still outranks it: a STABLE
+        mapping error. A wrong fair value that stays wrong scores perfect
+        retention, so this figure validates execution economics, never the
+        map.
+        """
+        spread = self.spread_report(days=days, live_only=live_only,
+                                    since=since)
+        drift = self.drift_report(days=days, since=since)
+        by_cat = drift.get("by_category") or {}
+        out: dict[str, dict] = {}
+        for cat, b in spread.items():
+            if not b.get("n") or not b.get("price_c"):
+                continue
+            stats = by_cat.get(cat) or {}
+            retention = stats.get("retention")
+            measured = (stats.get("n") or 0) >= self.DRIFT_MIN_N                 and retention is not None
+            gross = (b["edge_c"] - b["paid_over_mid_c"]) / b["price_c"]
+            row = {
+                "n_fills": b["n"],
+                "gross_margin": round(gross, 4),
+                "retention": retention if measured else None,
+                "retention_n": stats.get("n") or 0,
+                "net_margin": None,
+            }
+            if measured:
+                ret = min(1.0, max(0.0, float(retention)))
+                row["net_margin"] = round(
+                    (b["edge_c"] * ret - b["paid_over_mid_c"])
+                    / b["price_c"], 4)
+            out[cat] = row
         return out
 
     def performance_by_band(self, days: int = 7, live_only: bool = True,
@@ -535,18 +591,31 @@ class Ledger:
                 continue
             b = out.setdefault(r["category"], {
                 "settled": 0, "wins": 0, "losses": 0,
-                "staked": 0.0, "realized": 0.0})
+                "staked": 0.0, "realized": 0.0, "_rets": []})
             b["settled"] += 1
             b["wins"] += 1 if r["pnl"] > 0 else 0
             b["losses"] += 1 if r["pnl"] < 0 else 0
             b["staked"] += r["staked"]
             b["realized"] += r["pnl"]
+            b["_rets"].append(r["pnl"] / r["staked"])
         for b in out.values():
             b["staked"] = round(b["staked"], 2)
             b["realized"] = round(b["realized"], 2)
             b["roi"] = round(b["realized"] / b["staked"], 4) if b["staked"] else None
             b["win_rate"] = (round(b["wins"] / b["settled"], 4)
                              if b["settled"] else None)
+            # Distance of this category's own record from zero, in its own
+            # noise — the number a promotion decision reads. Same math as
+            # performance(); a category is promotable on ITS evidence, not
+            # the blended book's.
+            rets = b.pop("_rets")
+            n = len(rets)
+            b["sigma"] = None
+            if n > 1:
+                mean = sum(rets) / n
+                var = sum((x - mean) ** 2 for x in rets) / (n - 1)
+                if var > 0:
+                    b["sigma"] = round(abs(mean) / ((var ** 0.5) / n ** 0.5), 2)
         return out
 
     def performance(self, days: int = 7, live_only: bool = True,

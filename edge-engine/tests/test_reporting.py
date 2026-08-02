@@ -239,3 +239,99 @@ def test_the_cli_commands_run(tmp_path, monkeypatch, capsys, cmd):
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     _cmd_reporting(cmd, led, POLICY, ["--days", "3"])
     assert capsys.readouterr().out.strip()
+
+
+# ── entry margin: profit per turnover, measured at entry ────────────────
+
+def _margin_fill(led, uid, *, price, edge, category, mode="LIVE_BETA"):
+    """A fill carrying its book snapshot: mid sits half a spread below the
+    ask we paid, so paid_over_mid is (ask - mid)."""
+    led.record_fill(
+        fill_uid=uid, venue="polymarket-us", market_key=f"polymarket-us:{uid}",
+        side="BUY", qty=1.0 / price, price=price, ts=time.time(), mode=mode,
+        category=category,
+        decision={"edge": edge, "book_asks": [(price, 500)],
+                  "book_bids": [(price - 0.02, 500)]})
+
+
+def test_entry_margin_is_gross_only_until_retention_is_measured(tmp_path):
+    """An unmeasured retention must never silently become 1.0 — the gross
+    figure is reported alone and the net one says why it is absent."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    for i in range(5):
+        _margin_fill(led, f"f{i}", price=0.30, edge=0.03, category="prop")
+    m = led.entry_margin(days=7)
+    assert m["prop"]["n_fills"] == 5
+    # edge 3c minus paid-over-mid 1c, over a 30c price: 6.7% gross.
+    assert m["prop"]["gross_margin"] == pytest.approx(0.0667, abs=2e-3)
+    assert m["prop"]["net_margin"] is None
+    assert m["prop"]["retention"] is None
+
+
+def test_entry_margin_discounts_the_claim_by_measured_retention(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    for i in range(led.DRIFT_MIN_N + 3):
+        uid = f"f{i}"
+        _margin_fill(led, uid, price=0.30, edge=0.03, category="prop")
+        # Fair at entry 0.33; a minute later 0.32 — a third of the claimed
+        # edge gone. Retention ~0.667 measured on every fill's market.
+        led.record_entry_fair(f"polymarket-us:{uid}", 0.30, 0.33,
+                              category="prop")
+        led.record_drift_later(f"polymarket-us:{uid}", 0.32)
+    m = led.entry_margin(days=7)
+    assert m["prop"]["retention"] == pytest.approx(0.667, abs=0.01)
+    # (3c x 0.667 - 1c) / 30c = 3.3%: still paying, but half the gross —
+    # exactly the discount adverse selection should charge.
+    assert m["prop"]["net_margin"] == pytest.approx(0.033, abs=3e-3)
+    assert m["prop"]["net_margin"] < m["prop"]["gross_margin"]
+
+
+def test_entry_margin_reaches_the_figures_object(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    for i in range(4):
+        _margin_fill(led, f"f{i}", price=0.30, edge=0.03, category="prop")
+    f = compute_figures(led, POLICY, days=7)
+    em = f["entry_margin"]["prop"]
+    assert em["gross_margin"]["value"] is not None
+    assert em["net_margin"]["value"] is None
+    assert "retention_unmeasured" in em["net_margin"]["null_reason"]
+
+
+# ── promotion readiness: a bigger ticket must be EARNED ─────────────────
+
+def test_a_category_is_not_ready_on_a_hot_streak(tmp_path):
+    """35 settled at a good ROI is a week, not a record. Readiness needs
+    sigma AND sample size AND a positive record, and even then it only
+    reports — acting on it is a reviewed config edit."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    _settled(led, 35, pnl=1.0, wins=25)
+    f = compute_figures(led, POLICY, days=7)
+    ready = f["promotion_readiness"]["prop"]
+    assert ready["ready"] is False
+    assert ready["settled"] == 35
+
+
+def test_a_category_with_a_real_record_reads_ready(tmp_path):
+    from edge.reporting.figures import PROMOTION_MIN_N
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    n = PROMOTION_MIN_N + 50
+    # 60% winners at even prices: strongly positive, well-powered.
+    _settled(led, n, pnl=1.0, wins=int(n * 0.6))
+    f = compute_figures(led, POLICY, days=7)
+    ready = f["promotion_readiness"]["prop"]
+    assert ready["sigma"] is not None and ready["sigma"] >= 2.0
+    assert ready["ready"] is True
+
+
+def test_readiness_never_reads_ready_on_a_negative_record(tmp_path):
+    from edge.reporting.figures import PROMOTION_MIN_N
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    n = PROMOTION_MIN_N + 50
+    _settled(led, n, pnl=-1.0, wins=int(n * 0.4))
+    f = compute_figures(led, POLICY, days=7)
+    ready = f["promotion_readiness"]["prop"]
+    # A LOSING record can be many sigma from zero — that is evidence to
+    # close the category, never to promote it.
+    assert ready["ready"] is False
