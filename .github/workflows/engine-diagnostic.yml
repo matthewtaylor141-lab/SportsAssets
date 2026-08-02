@@ -112,6 +112,22 @@ jobs:
              /tmp/ai.json 2>/dev/null | head -20 || echo "  (unavailable)"
 
           echo ""
+          echo "#   WHALE INGESTION FRESHNESS (is the pipeline alive?)      #"
+          # Zero copy probes in 30d means either no fresh detections or a
+          # dead listener. The newest ingested trade timestamp settles it —
+          # and says whether stored whale data exists to measure edge decay.
+          curl -sS --max-time 60 -o /tmp/feed.json "$BASE/api/feed?limit=3" || true
+          jq -r '(.trades // .items // .) | if type=="array" then
+                   (.[0:3][] | "  \(.fill_ts // .ts // .detected_at // "?")  \(.whale_username // .username // "?")  \(.side // "?") $\(.notional // .size // "?")")
+                 else "  (unexpected shape)" end' /tmp/feed.json 2>/dev/null \
+            | head -5 || echo "  (unavailable)"
+          curl -sS --max-time 60 "$BASE/api/whales" 2>/dev/null | \
+            jq -r '(.whales // .) | if type=="array" then
+                     "  roster: \(length) whales; newest activity: \([.[].last_trade_at // .[].last_seen // empty] | max // "?")"
+                   else "  (unexpected shape)" end' 2>/dev/null \
+            || echo "  (unavailable)"
+
+          echo ""
           echo "###########################################################"
           echo "#                 EDGE DISTRIBUTION                       #"
           echo "###########################################################"
