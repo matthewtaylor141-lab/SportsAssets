@@ -2,6 +2,7 @@ import { NavLink, Route, Routes } from 'react-router-dom'
 import { Admin } from './pages/Admin'
 import { Analytics } from './pages/Analytics'
 import { Engine } from './pages/Engine'
+import { System } from './pages/System'
 import { TrackRecord } from './pages/TrackRecord'
 
 /* The site IS the AI trader now. The whale-hub pages remain in the repo
@@ -12,6 +13,7 @@ import { TrackRecord } from './pages/TrackRecord'
 const TABS = [
   { to: '/', label: 'Performance' },
   { to: '/analytics', label: 'Analytics' },
+  { to: '/system', label: 'System' },
   { to: '/engine', label: '⚙ Engine' },
   { to: '/admin', label: 'Ops' },
 ]
@@ -39,6 +41,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<TrackRecord />} />
           <Route path="/analytics" element={<Analytics />} />
+          <Route path="/system" element={<System />} />
           <Route path="/engine" element={<Engine />} />
           <Route path="/admin" element={<Admin />} />
         </Routes>

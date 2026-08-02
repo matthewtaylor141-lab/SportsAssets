@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -530,6 +531,30 @@ async def api_track_record(since: str | None = Query(None),
     from .track_record import track_record
 
     return await track_record(since, max_stake=max_stake)
+
+
+@app.get("/api/report")
+async def api_report(period: str = Query("weekly"),
+                     format: str = Query("md")) -> Any:
+    """Downloadable account report: daily/weekly/monthly x md/csv/json.
+    Derived from the same builder the site renders — a report can never
+    disagree with the page. Filters are stated in the report header."""
+    from .report import build_report
+
+    content, data = await build_report(period, format)
+    if content is None:
+        raise HTTPException(status_code=503,
+                            detail=data.get("error") or "not configured")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if format == "csv":
+        return PlainTextResponse(content, media_type="text/csv", headers={
+            "Content-Disposition":
+                f'attachment; filename="bettoredge-{period}-{stamp}.csv"'})
+    if format == "md":
+        return PlainTextResponse(content, media_type="text/markdown", headers={
+            "Content-Disposition":
+                f'inline; filename="bettoredge-{period}-{stamp}.md"'})
+    return content
 
 
 @app.get("/api/pmus-account")

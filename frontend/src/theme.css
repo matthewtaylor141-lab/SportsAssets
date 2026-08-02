@@ -512,3 +512,43 @@ table.data td.num, table.data th.num { text-align: right; }
 
 .an-cols-up .an-col-base { display: none; }
 .an-col-acc { background: var(--s1); }
+
+/* ── System page ── */
+.sy-funnel { display: flex; align-items: stretch; gap: 4px; flex-wrap: wrap; }
+.sy-funnel-cell { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 120px; }
+.sy-stage {
+  flex: 1; text-align: center; padding: 14px 10px; border-radius: 10px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  transition: border-color 0.15s;
+}
+.sy-stage:hover { border-color: var(--accent); }
+.sy-stage-val { font-size: 24px; font-weight: 800; }
+.sy-stage-label { font-size: 10px; letter-spacing: 0.12em; color: var(--muted); font-weight: 700; margin-top: 2px; }
+.sy-stage-sub { font-size: 11px; }
+.sy-arrow { color: var(--muted); font-size: 16px; }
+
+.sy-refusals { display: flex; flex-direction: column; gap: 6px; }
+.sy-ref-row { display: grid; grid-template-columns: 220px 1fr 44px; gap: 10px; align-items: center; }
+.sy-ref-name { font-size: 11.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sy-ref-bar { height: 10px; background: var(--surface-3); border-radius: 4px; overflow: hidden; }
+.sy-ref-bar > div { height: 100%; background: var(--s1); border-radius: 4px; min-width: 2px; }
+.sy-ref-n { text-align: right; font-size: 11.5px; }
+
+.sy-kvs { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.sy-kvs > div {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 2px;
+}
+.sy-kvs span { font-size: 10.5px; letter-spacing: 0.1em; font-weight: 700; }
+.sy-kvs b { font-size: 15px; }
+
+.sy-note { font-size: 11.5px; margin-top: 10px; line-height: 1.55; }
+
+.sy-reports { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.sy-report-card {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px;
+}
+.sy-report-title { font-weight: 800; letter-spacing: 0.1em; font-size: 12px; margin-bottom: 10px; }
+.sy-report-links { display: flex; flex-wrap: wrap; gap: 6px; }
+.sy-report-links a { text-decoration: none; }
