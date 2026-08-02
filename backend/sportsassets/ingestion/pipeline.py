@@ -152,16 +152,24 @@ async def _write_outbox(trade_id: int, payload: dict) -> None:
     if ntfy.enabled():
         kinds.append("ntfy")
     for kind in kinds:
-        await pool.execute(
-            """
-            INSERT INTO notification_outbox (trade_id, kind, payload)
-            VALUES ($1, $2, $3::jsonb)
-            ON CONFLICT (trade_id, kind) DO NOTHING
-            """,
-            trade_id,
-            kind,
-            json.dumps(payload, default=str),
-        )
+        try:
+            await pool.execute(
+                """
+                INSERT INTO notification_outbox (trade_id, kind, payload)
+                VALUES ($1, $2, $3::jsonb)
+                ON CONFLICT (trade_id, kind) DO NOTHING
+                """,
+                trade_id,
+                kind,
+                json.dumps(payload, default=str),
+            )
+        except Exception:  # noqa: BLE001
+            # A notification is a convenience; ingestion is the product. A
+            # schema drift on THIS insert (kind check vs the list above)
+            # silently killed six days of whale detection on 2026-07-27 —
+            # an alert channel must never be able to take the pipeline
+            # down with it.
+            log.exception("outbox enqueue failed for kind=%s (non-fatal)", kind)
 
 
 async def _enrich(trade_id: int, ev: TradeEvent, detected_at: datetime) -> None:
