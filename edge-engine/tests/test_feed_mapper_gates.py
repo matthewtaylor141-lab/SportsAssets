@@ -168,6 +168,45 @@ def test_stream_ensure_dedupes_and_bounds():
     assert sorted(s._pending) == ["a", "b", "c"]
 
 
+def test_stream_prune_frees_memory_and_subscription_room():
+    """Ended games must give their book memory and subscription room back.
+
+    `ensure` measures room against the lifetime subscription count, so
+    without pruning the 4,000-slug bound slowly fills with finished
+    markets and NEW games silently stop streaming — a leak that is also a
+    coverage bug. This (plus two more unbounded caches) is what kept
+    OOM-restarting the deployed worker on 2026-08-02.
+    """
+    from edge.venues.pmus_stream import BookStreamer
+
+    s = BookStreamer("k", "s", autostart=False)
+    s.ensure(["live-1", "ended-1", "ended-2"])
+    s._on_market_data({"marketData": {"marketSlug": "ended-1",
+                                      "offers": [{"px": {"value": "0.5"}, "qty": "1"}]}})
+    s.prune({"live-1"})
+    assert s._subscribed == {"live-1"}
+    assert s._pending == ["live-1"]
+    assert s.get("ended-1", max_age_s=1e9) is None
+    # ...and the freed room is actually usable again.
+    s.ensure(["fresh-1"])
+    assert "fresh-1" in s._subscribed
+
+
+def test_stream_stores_only_the_level_arrays():
+    """The venue's marketData payload carries metadata the adapter never
+    reads. At 4,000 cached slugs on a memory-capped worker, storing it is
+    pure ballast — only the level arrays may be kept."""
+    from edge.venues.pmus_stream import BookStreamer
+
+    s = BookStreamer("k", "s", autostart=False)
+    s._on_market_data({"marketData": {"marketSlug": "m1",
+                                      "offers": [{"px": {"value": "0.47"}, "qty": "9"}],
+                                      "title": "x" * 5000, "eventSlug": "y",
+                                      "volume": "123", "extra": {"deep": "z"}}})
+    cached = s.get("m1")
+    assert set(cached) == {"offers"}
+
+
 def test_adapter_serves_book_from_stream_without_rest():
     import types
 

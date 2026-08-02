@@ -556,6 +556,13 @@ class TheOddsAPIClient(OddsFeed):
             return 0
         bucket_of: dict = {}
         enriched = 0
+        # Evict expired payloads instead of skipping them: these are the
+        # largest objects in the process (every prop from every book in
+        # three regions), and a read path that ignores stale entries but
+        # never deletes them accumulates every game of the day. That is the
+        # OOM the worker kept restarting on (observed 2026-08-02).
+        self._event_cache = {k: v for k, v in self._event_cache.items()
+                             if now - v[0] < self.EVENT_TTL_S}
         # Nearest games first: those are the ones a venue actually lists.
         for ev in sorted(events, key=lambda e: e.commence_ts)[:self.EVENT_MAX_PER_SPORT]:
             if not ev.event_id:

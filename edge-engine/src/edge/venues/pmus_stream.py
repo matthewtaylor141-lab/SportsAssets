@@ -65,12 +65,29 @@ class BookStreamer:
             self._pending.extend(fresh)
 
     def get(self, slug: str, max_age_s: float = 90.0) -> dict | None:
-        """Latest full marketData for a slug, or None if absent/stale."""
+        """Latest book levels for a slug, or None if absent/stale."""
         with self._lock:
             entry = self._cache.get(slug)
         if entry and time.time() - entry[0] <= max_age_s:
             return entry[1]
         return None
+
+    def prune(self, keep: set[str]) -> None:
+        """Drop every slug not in `keep` (the currently discovered markets).
+
+        Without this the streamer only ever grows: ended games hold their
+        last book in memory forever, dead slugs are resubscribed on every
+        reconnect, and — because `ensure` measures room against the LIFETIME
+        subscription count — the 4,000-slug bound eventually fills with
+        finished games and new markets silently stop streaming. Called on
+        the discovery clock, so "no longer discovered" means "no longer a
+        market we could trade". A straggler update for a pruned slug just
+        re-caches one entry; the next prune removes it again.
+        """
+        with self._lock:
+            self._subscribed &= keep
+            self._pending = [s for s in self._pending if s in keep]
+            self._cache = {s: e for s, e in self._cache.items() if s in keep}
 
     def stats(self) -> dict:
         with self._lock:
@@ -86,7 +103,12 @@ class BookStreamer:
         if not slug:
             return
         with self._lock:
-            self._cache[slug] = (time.time(), md)
+            # Store only the level arrays the adapter parses. The full
+            # marketData payload carries metadata we never read, at 4,000
+            # slugs on a worker with a hard memory ceiling.
+            self._cache[slug] = (time.time(),
+                                 {k: md[k] for k in ("bids", "offers", "asks")
+                                  if k in md})
             self.updates += 1
             listeners = list(self._listeners)
         # Notify OUTSIDE the lock: a listener must never be able to deadlock

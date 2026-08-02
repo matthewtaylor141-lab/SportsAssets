@@ -281,10 +281,13 @@ class PolymarketUSAdapter(VenueAdapter):
             log.warning("polymarket-us discovery failed: %s", exc)
         self.last_census = census
         # Stream every discovered outcome book — books arrive by push before
-        # the pricing loop ever asks for them.
+        # the pricing loop ever asks for them. Prune first: ended games must
+        # give their memory and their subscription room back, or the 4,000
+        # bound fills with finished markets and new ones stop streaming.
         if self._stream is not None and out:
-            self._stream.ensure([slug for m in out
-                                 for slug in m.outcome_tokens.values()])
+            active = {slug for m in out for slug in m.outcome_tokens.values()}
+            self._stream.prune(active)
+            self._stream.ensure(sorted(active))
         return out
 
     def _book_err(self, cause: str) -> None:

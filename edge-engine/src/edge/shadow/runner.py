@@ -1516,6 +1516,10 @@ def main() -> None:
             # Nightly report on day rollover (build step 7).
             today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
             if today != last_report_day:
+                # Market keys embed the date, so yesterday's study dedupe
+                # entries can never match again — they are pure leak. This
+                # set was one of the worker's unbounded growths.
+                study_seen.clear()
                 if last_report_day:
                     from edge.shadow.report import nightly_report
 

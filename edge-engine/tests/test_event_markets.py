@@ -115,6 +115,21 @@ def test_payloads_are_cached_for_the_ttl():
     assert len(c.calls) == 2
 
 
+def test_expired_payloads_are_evicted_not_hoarded():
+    """These raw payloads are the largest objects in the worker (every prop
+    from every book in three regions). A cache that skips stale entries on
+    read but never deletes them accumulates every game of the day — the
+    memory-limit restarts observed on the deployed worker 2026-08-02."""
+    c = _client(lambda url, p: _Resp(_F5))
+    now = time.time()
+    c._enrich_segments("baseball_mlb", [_ev("old")], now)
+    assert "old" in c._event_cache
+    # A later cycle enriches a different slate after the TTL has lapsed:
+    # yesterday's payload must be GONE, not merely ignored.
+    c._enrich_segments("baseball_mlb", [_ev("new")], now + c.EVENT_TTL_S + 1)
+    assert "old" not in c._event_cache and "new" in c._event_cache
+
+
 def test_the_quota_floor_stops_enrichment():
     c = _client(lambda url, p: _Resp(_F5))
     c._quota = {"remaining": 10}                   # below the 50 reserve
