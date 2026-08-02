@@ -244,6 +244,13 @@ def normalize(balances_resp: dict, positions: dict[str, dict],
         # readings taken at times that never line up with a day boundary.
         "system_daily": _daily(system),
         "system_positions": sorted(system, key=lambda r: r["market_slug"])[:60],
+        # The manual cohort is defined as "cost > $5", which ASSUMES anything
+        # that large was placed by hand. A per-market cap breach breaks that
+        # assumption: an engine position that accumulated past $5 would be
+        # silently reclassified as the owner's own trade, hiding the breach
+        # inside the very number used to judge the engine. Listed so the
+        # boundary can be checked rather than trusted.
+        "manual_positions": sorted(manual, key=lambda r: -r["cost"])[:40],
     }
 
 

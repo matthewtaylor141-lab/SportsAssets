@@ -172,6 +172,11 @@ jobs:
                    "   settled \(.settled)  (W \(.wins) / L \(.losses))  win rate \(.win_rate // "n/a")",
                    "   realized $\(.realized)   ROI \(.roi // "n/a")",
                    "   open \(.open) worth $\(.open_cost)", "")' /tmp/acct.json 2>/dev/null || true
+          echo "MANUAL cohort in detail (cost > $5 — verify these are yours):"
+          jq -r '.manual_positions // [] | if length == 0 then "   (none)"
+                 else .[] | "  \(if .settled then "settled" else "OPEN   " end)  cost $\(.cost)  realized \(.realized)  \(.market_slug)" end' \
+             /tmp/acct.json 2>/dev/null || true
+          echo ""
           echo "system positions in detail:"
           jq -r '.system_positions // [] | .[]
                  | "  \(if .settled then "settled" else "OPEN   " end)  cost $\(.cost)  realized \(.realized)  \(.market_slug)"'              /tmp/acct.json 2>/dev/null || true
