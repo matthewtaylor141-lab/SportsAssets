@@ -38,15 +38,24 @@ async def lifespan(_: FastAPI):
 
     poller_task = None
     if _os.getenv("API_INGESTION_FALLBACK", "1") != "0":
-        from ..ingestion.poller import Poller
+        async def _delayed_poller():
+            # Let the service finish booting and pass its health check
+            # BEFORE the polling load starts — a heavy startup on a small
+            # instance reads as a failed deploy and extends the outage.
+            await asyncio.sleep(45)
+            from ..ingestion.poller import Poller
 
-        # history=False: live detection only. The deep-history backfill
-        # pages millions of trades and OOM-cycled this service when the
-        # fallback first shipped with it on.
-        poller_task = asyncio.get_running_loop().create_task(
-            Poller().run(history=False))
-        logging.getLogger(__name__).warning(
-            "ingestion fallback: poller (live-only) inside the API service")
+            # history=False: live detection only. The deep-history backfill
+            # pages millions of trades and OOM-cycled this service when the
+            # fallback first shipped with it on.
+            await Poller().run(history=False)
+
+        try:
+            poller_task = asyncio.get_running_loop().create_task(_delayed_poller())
+            logging.getLogger(__name__).warning(
+                "ingestion fallback: poller (live-only, delayed 45s) in API")
+        except Exception:  # noqa: BLE001 — the API must serve regardless
+            logging.getLogger(__name__).exception("ingestion fallback failed")
     yield
     if poller_task is not None:
         poller_task.cancel()

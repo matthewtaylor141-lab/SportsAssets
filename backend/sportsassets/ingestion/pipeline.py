@@ -132,9 +132,18 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
 
     # Copy-trade feasibility: snapshot the residual book at exactly the moment
     # an executor would react. Fire-and-forget; never delays ingestion.
-    from ..copy_probe import probe_trade
+    # FRESH DETECTIONS ONLY: after an outage, the first poll ingests every
+    # whale's newest ~100 trades AT ONCE — spawning hundreds of concurrent
+    # probe tasks (book fetches, DB conns, order mapping) during boot, which
+    # can OOM or starve health checks on a small instance (observed
+    # 2026-08-02). A stale detection is not copyable and its residual book
+    # is not evidence; probing it buys nothing. Backlog rows are ingested
+    # as data only.
+    fresh = (ev.ts_epoch or 0) > (datetime.now(timezone.utc).timestamp() - 300)
+    if fresh:
+        from ..copy_probe import probe_trade
 
-    asyncio.get_running_loop().create_task(probe_trade(payload))
+        asyncio.get_running_loop().create_task(probe_trade(payload))
 
     if not pre_enriched:
         # Enrich off the hot path; never blocks the next detection.
