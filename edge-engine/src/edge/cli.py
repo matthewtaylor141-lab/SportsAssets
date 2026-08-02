@@ -3,6 +3,13 @@
     python -m edge.cli status       engine state, summary, guards
     python -m edge.cli census [N]   N-day venue market census + estimate
     python -m edge.cli report       generate the nightly report now
+    python -m edge.cli methodology  render the methodology document
+    python -m edge.cli figures      every measured figure, as JSON
+    python -m edge.cli export       figures + positions.csv + the document
+
+Reporting commands take `--days N` (rolling, default 7), `--since DATE`
+(absolute UTC — what a re-baseline needs), `--all-modes` (include PAPER)
+and `--out PATH`.
     python -m edge.cli match-rate   mapper match rates (24h)
     python -m edge.cli check-live   go-live checklist; exit 0 iff clean
     python -m edge.cli kill         engage the kill switch (halts all trading)
@@ -161,6 +168,62 @@ def run_checklist(ledger, policy, risk) -> tuple[bool, list[str]]:
     return (len(failed) == 0, failed)
 
 
+def _parse_window(argv: list[str]) -> tuple[int, float | None, bool]:
+    """--days N | --since YYYY-MM-DD[THH:MM:SSZ] | --all-modes.
+
+    `--since` is an absolute UTC instant; `--days` a rolling window ending
+    now. A re-baseline needs the former and a dashboard wants the latter, so
+    both exist and absolute wins.
+    """
+    from datetime import datetime, timezone
+
+    days, since, live_only = 7, None, True
+    for i, a in enumerate(argv):
+        if a == "--days" and i + 1 < len(argv):
+            days = int(argv[i + 1])
+        elif a == "--since" and i + 1 < len(argv):
+            raw = argv[i + 1]
+            fmt = "%Y-%m-%dT%H:%M:%SZ" if "T" in raw else "%Y-%m-%d"
+            since = datetime.strptime(raw, fmt).replace(
+                tzinfo=timezone.utc).timestamp()
+        elif a == "--all-modes":
+            live_only = False
+    return days, since, live_only
+
+
+def _cmd_reporting(cmd: str, ledger, policy, argv: list[str]) -> None:
+    from pathlib import Path
+
+    from edge.reporting.export import write_bundle
+    from edge.reporting.figures import compute_figures
+    from edge.reporting.methodology import render
+    from edge.shadow.runner import _data_dir
+
+    days, since, live_only = _parse_window(argv)
+    out = None
+    for i, a in enumerate(argv):
+        if a == "--out" and i + 1 < len(argv):
+            out = Path(argv[i + 1])
+
+    if cmd == "figures":
+        print(json.dumps(compute_figures(ledger, policy, days=days,
+                                         since=since, live_only=live_only),
+                         indent=2))
+    elif cmd == "methodology":
+        doc = render(ledger, policy, days=days, since=since,
+                     live_only=live_only)
+        if out:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(doc)
+            print(f"wrote {out}")
+        else:
+            print(doc)
+    else:                                    # export
+        res = write_bundle(ledger, policy, out or (_data_dir() / "export"),
+                           days=days, since=since, live_only=live_only)
+        print(json.dumps(res, indent=2))
+
+
 def main() -> None:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
     ledger, policy, risk = _boot()
@@ -180,6 +243,8 @@ def main() -> None:
 
         rep = nightly_report(ledger, policy)
         print(json.dumps(rep, indent=2))
+    elif cmd in ("methodology", "figures", "export"):
+        _cmd_reporting(cmd, ledger, policy, sys.argv[2:])
     elif cmd == "census":
         _cmd_census(int(sys.argv[2]) if len(sys.argv) > 2 else 30)
     elif cmd == "match-rate":

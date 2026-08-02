@@ -51,6 +51,26 @@ class Caps:
     venue_bankroll_split: float     # fraction of per_day each venue may use
 
 
+def profile_for_mode(risk_cfg: dict, mode: str) -> dict:
+    """The effective settings for a mode: top-level, overlaid by its profile.
+
+    Every consumer must resolve settings THROUGH here. The methodology
+    document briefly did its own merge and reported the LIVE caps ($10 a
+    fill) while the engine was running the beta profile ($1) — a document
+    describing a system nobody was operating. One merge, one answer.
+    """
+    profiles = risk_cfg.get("profiles") or {}
+    if mode == "LIVE":
+        return dict(risk_cfg)
+    if mode == "PAPER":
+        # Paper dollars are free, so evidence velocity is capped only by
+        # opportunity supply; it falls back to the beta profile when no
+        # sampling profile is configured.
+        return {**risk_cfg,
+                **(profiles.get("paper") or profiles.get("live_beta") or {})}
+    return {**risk_cfg, **(profiles.get("live_beta") or {})}
+
+
 def caps_for_mode(risk_cfg: dict, mode: str, bankroll: float | None = None) -> Caps:
     """LIVE uses the measured top-level caps; LIVE_BETA the beta profile;
     PAPER the sampling profile (falls back to beta) — paper dollars are
@@ -61,13 +81,7 @@ def caps_for_mode(risk_cfg: dict, mode: str, bankroll: float | None = None) -> C
     actual account instead of a fixed number — a hardcoded daily cap is a
     trade-count cap in disguise (at $1 a fill, a $25 budget IS '25 trades a
     day'), and it goes stale the moment the account is funded."""
-    profiles = risk_cfg.get("profiles") or {}
-    if mode == "LIVE":
-        src = risk_cfg
-    elif mode == "PAPER":
-        src = {**risk_cfg, **(profiles.get("paper") or profiles.get("live_beta") or {})}
-    else:
-        src = {**risk_cfg, **(profiles.get("live_beta") or {})}
+    src = profile_for_mode(risk_cfg, mode)
 
     per_day = float(src.get("per_day_deployment_usd", 250))
     pct = float(src.get("per_day_deployment_pct_of_bankroll", 0) or 0)

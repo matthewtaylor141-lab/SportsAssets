@@ -587,6 +587,24 @@ class Ledger:
         wins = [r for r in rows if r["pnl"] > 0]
         settled_stake = sum(r["staked"] for r in rows)
         realized = sum(r["pnl"] for r in rows)
+
+        # How far from zero is this, in its own noise? A point estimate with
+        # no dispersion behind it invites reading a losing week as evidence
+        # of a broken engine and a winning one as evidence of an edge, when
+        # at these sample sizes neither is distinguishable from nothing. The
+        # unit is per-trade return, (payout - stake) / stake, so a $1 and a
+        # $1.50 ticket contribute equally to the shape of the distribution.
+        rets = [r["pnl"] / r["staked"] for r in rows]
+        n = len(rets)
+        mean = sum(rets) / n if n else None
+        sd = se = sigma = None
+        if n > 1:
+            var = sum((x - mean) ** 2 for x in rets) / (n - 1)
+            sd = var ** 0.5
+            if sd > 0:
+                se = sd / (n ** 0.5)
+                sigma = abs(mean) / se
+
         return {
             "days": days, "live_only": live_only,
             "fills": int(fills["n"]), "staked": round(float(fills["s"]), 2),
@@ -596,7 +614,123 @@ class Ledger:
             "realized": round(realized, 2),
             "roi": round(realized / settled_stake, 4) if settled_stake else None,
             "open_cost": round(float(open_cost), 2),
+            "mean_return": round(mean, 6) if mean is not None else None,
+            "sd_per_trade": round(sd, 4) if sd is not None else None,
+            "se": round(se, 6) if se is not None else None,
+            "sigma_from_zero": round(sigma, 2) if sigma is not None else None,
         }
+
+    def performance_daily(self, days: int = 7, live_only: bool = True,
+                          since: float | None = None) -> list[dict]:
+        """Settled P&L per UTC day, newest first.
+
+        Bucketed on `realizations.ts`, which is the settlement instant the
+        engine recorded when it resolved the position. (The platform's
+        account view buckets everything as 'undated' because the venue's
+        resolution activities carry no timestamp — that is a limitation of
+        that path, not of this one. Grading days off the engine's own clock
+        is both available and more defensible.)
+        """
+        since = window_start(days, since)
+        mode_clause = "AND f.mode != 'PAPER'" if live_only else ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT date(r.ts, 'unixepoch') AS day,
+                       r.pnl AS pnl,
+                       (SELECT COALESCE(sum(qty * price), 0) FROM fills f
+                         WHERE f.market_key = r.market_key AND f.side='BUY'
+                         {mode_clause}) AS staked
+                FROM realizations r
+                WHERE r.ts >= ? AND r.kind = 'resolution'
+                """, (since,)).fetchall()
+        by_day: dict[str, dict] = {}
+        for r in rows:
+            if r["staked"] <= 0:
+                continue
+            d = by_day.setdefault(r["day"], {
+                "day": r["day"], "settled": 0, "wins": 0, "losses": 0,
+                "staked": 0.0, "realized": 0.0})
+            d["settled"] += 1
+            d["wins"] += 1 if r["pnl"] > 0 else 0
+            d["losses"] += 1 if r["pnl"] < 0 else 0
+            d["staked"] += r["staked"]
+            d["realized"] += r["pnl"]
+        for d in by_day.values():
+            d["staked"] = round(d["staked"], 2)
+            d["realized"] = round(d["realized"], 2)
+            d["roi"] = round(d["realized"] / d["staked"], 4) if d["staked"] else None
+        return sorted(by_day.values(), key=lambda d: d["day"], reverse=True)
+
+    def positions_export(self, days: int = 7, live_only: bool = True,
+                         since: float | None = None) -> list[dict]:
+        """One row per position, with everything needed to audit the trade.
+
+        This is the artifact that makes a measured claim checkable by someone
+        who does not trust the summary: entry, what we thought it was worth,
+        what the bar was, what we staked, and how it resolved.
+
+        `fair_at_plus_60s` comes from `edge_drift`, which is keyed by MARKET,
+        not by fill. Under one-position-per-market that is one observation per
+        position and the join is exact; where a market carries several entries
+        (which should not happen, and did on 2026-08-02) the column describes
+        the market, not the individual entry, and `entries` says so.
+        """
+        since = window_start(days, since)
+        mode_clause = "AND f.mode != 'PAPER'" if live_only else ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT p.market_key, p.venue, p.league, p.shares, p.avg_cost,
+                       p.cost_in, p.realized_pnl, p.fees_paid, p.resolved,
+                       p.payout, p.resolved_ts,
+                       (SELECT count(*) FROM fills f
+                         WHERE f.market_key = p.market_key AND f.side='BUY'
+                         {mode_clause}) AS entries,
+                       (SELECT min(ts) FROM fills f
+                         WHERE f.market_key = p.market_key AND f.side='BUY'
+                         {mode_clause}) AS entry_ts,
+                       (SELECT f.decision FROM fills f
+                         WHERE f.market_key = p.market_key AND f.side='BUY'
+                         {mode_clause} ORDER BY f.ts LIMIT 1) AS decision,
+                       (SELECT f.category FROM fills f
+                         WHERE f.market_key = p.market_key AND f.side='BUY'
+                         {mode_clause} ORDER BY f.ts LIMIT 1) AS category,
+                       d.fair_entry, d.fair_later, d.price AS drift_price
+                FROM positions p
+                LEFT JOIN edge_drift d ON d.market_key = p.market_key
+                """).fetchall()
+        out = []
+        for r in rows:
+            if not r["entry_ts"] or r["entry_ts"] < since:
+                continue
+            try:
+                dec = json.loads(r["decision"]) if r["decision"] else {}
+            except ValueError:
+                dec = {}
+            out.append({
+                "market_key": r["market_key"],
+                "venue": r["venue"],
+                "league": r["league"],
+                "category": r["category"] or dec.get("category"),
+                "band": dec.get("band"),
+                "tier": dec.get("tier"),
+                "entries": int(r["entries"] or 0),
+                "entry_ts": r["entry_ts"],
+                "settle_ts": r["resolved_ts"],
+                "entry_price": round(float(r["avg_cost"]), 4),
+                "shares": round(float(r["shares"]), 4),
+                "stake": round(float(r["cost_in"]), 4),
+                "fair_at_entry": r["fair_entry"],
+                "fair_at_plus_60s": r["fair_later"],
+                "edge_claimed": dec.get("edge"),
+                "threshold_required": dec.get("threshold"),
+                "resolved": bool(r["resolved"]),
+                "payout": r["payout"],
+                "pnl": round(float(r["realized_pnl"]) - float(r["fees_paid"]), 4)
+                       if r["resolved"] else None,
+            })
+        return sorted(out, key=lambda d: d["entry_ts"], reverse=True)
 
     # ── adverse selection: does the edge survive the next observation? ──
 

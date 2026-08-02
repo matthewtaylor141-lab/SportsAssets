@@ -193,6 +193,28 @@ jobs:
                  | "  \(if .settled then "settled" else "OPEN   " end)  cost $\(.cost)  realized \(.realized)  \(.market_slug)"'              /tmp/acct.json 2>/dev/null || true
 
           echo ""
+          echo "###########################################################"
+          echo "#   METHODOLOGY DOCUMENT (generated from the ledger)       #"
+          echo "###########################################################"
+          # The engine renders this itself from config + its own ledger and
+          # publishes it here. Every number in it is computed at generation
+          # time, so it cannot drift from the system it describes the way a
+          # hand-maintained document does.
+          code=$(curl -sS --max-time 60 -o /tmp/meth.json \
+                      -w '%{http_code}' "$BASE/api/engine/methodology" || true)
+          if [ "$code" = "200" ]; then
+            jq -r '"published: \(.updated_at)", "bytes: \(.markdown | length)",
+                   "read it: '"$BASE"'/api/engine/methodology?format=md", "",
+                   "── verdict ──",
+                   (.markdown | split("\n") | map(select(startswith("> **"))) | .[0] // "(none)")' \
+               /tmp/meth.json 2>/dev/null || true
+          else
+            echo "HTTP ${code:-000} — not published yet (the worker publishes"
+            echo "on startup and at each day rollover; needs the deploy with"
+            echo "edge.reporting to be live)"
+          fi
+
+          echo ""
           echo "MAPPING MISSES (the funnel's biggest single loss):"
           jq -r '.detail.unpriced_examples // {} | to_entries[]
                  | "  [\(.key)]", (.value | if type=="array" then .[] else . end

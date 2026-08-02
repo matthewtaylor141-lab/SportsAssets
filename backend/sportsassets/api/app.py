@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .. import roster as roster_svc
@@ -269,6 +270,55 @@ async def engine_status_ingest(
 
     await heartbeat("edge_engine", body.status, body.detail)
     return {"ok": True}
+
+
+class EngineMethodologyBody(BaseModel):
+    markdown: str
+    figures: dict = {}
+    generated_ts: float | None = None
+
+
+@app.post("/api/engine/methodology")
+async def engine_methodology_ingest(
+    body: EngineMethodologyBody, x_engine_token: str = Header(default="")
+) -> dict:
+    """The engine publishes its own methodology document.
+
+    It is generated on the worker, because that is where the ledger lives,
+    and stored here because that is the only place a human can read it. The
+    document is a pure function of config plus the ledger — the numbers are
+    computed at generation time, never transcribed — so what is served here
+    always describes the system that produced it.
+    """
+    cfg = settings()
+    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
+        raise HTTPException(status_code=401, detail="engine token required")
+    from ..db import heartbeat
+
+    await heartbeat("edge_methodology", "ok", {
+        "markdown": body.markdown,
+        "figures": body.figures,
+        "generated_ts": body.generated_ts,
+    })
+    return {"ok": True, "bytes": len(body.markdown)}
+
+
+@app.get("/api/engine/methodology")
+async def engine_methodology(format: str = Query("json")) -> Any:
+    """`?format=md` serves the raw document, for reading or piping."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM service_heartbeats WHERE service='edge_methodology'")
+    if row is None:
+        raise HTTPException(status_code=404,
+                            detail="no methodology published yet")
+    detail = row["detail"]
+    if isinstance(detail, str):
+        detail = json.loads(detail)
+    if format == "md":
+        return PlainTextResponse(detail.get("markdown", ""),
+                                 media_type="text/markdown")
+    return {"updated_at": row["updated_at"], **detail}
 
 
 @app.get("/api/engine/status")

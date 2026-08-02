@@ -86,6 +86,27 @@ def _post_status(status: str, detail: dict) -> None:
         log.debug("status post failed (non-fatal): %s", exc)
 
 
+def _post_methodology(markdown: str, figures: dict) -> None:
+    """Publish the generated document to the platform, where it is readable.
+
+    Same fail-soft contract as the status post: reporting must never be able
+    to interfere with trading, so every failure here is logged and swallowed.
+    """
+    base = os.environ.get("EDGE_PLATFORM_API", "")
+    token = os.environ.get("EDGE_INGEST_TOKEN", "")
+    if not base or not token:
+        return
+    try:
+        import requests
+
+        requests.post(f"{base}/api/engine/methodology",
+                      json={"markdown": markdown, "figures": figures,
+                            "generated_ts": time.time()},
+                      headers={"X-Engine-Token": token}, timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("methodology post failed (non-fatal): %s", exc)
+
+
 # ── platform mirror: OFF the pricing loop ───────────────────────────────
 #
 # This used to be a synchronous POST per record, called from inside the
@@ -1252,6 +1273,26 @@ def main() -> None:
 
         threading.Thread(target=_run_census, daemon=True, name="census").start()
 
+    # Publish the methodology document once at startup as well as nightly.
+    # Otherwise a fresh deploy serves whatever the last rollover produced,
+    # and a config change (a new blocklist entry, a cap edit) would not reach
+    # the document until the next midnight — which is exactly the kind of lag
+    # that made the hand-written version untrustworthy.
+    def _publish_methodology() -> None:
+        try:
+            from edge.reporting.export import write_bundle
+
+            out = _data_dir() / "methodology"
+            log.info("methodology bundle: %s",
+                     write_bundle(ledger, policy, out))
+            _post_methodology((out / "METHODOLOGY.md").read_text(),
+                              json.loads((out / "figures.json").read_text()))
+        except Exception as exc:  # noqa: BLE001 — reporting never breaks
+            log.warning("methodology generation failed: %s", exc)  # trading
+
+    threading.Thread(target=_publish_methodology, daemon=True,
+                     name="methodology").start()
+
     # Event-driven reactor: the venue's book stream wakes the loop the moment
     # a subscribed book moves, and only the moved books get re-priced. The
     # full sweep below still runs on its own clock (discovery, health,
@@ -1402,6 +1443,28 @@ def main() -> None:
                                                     ("summary", "alerts") if k in rep})
                     _post_status("report", {"report": {"date": rep.get("date"),
                                                        "alerts": rep.get("alerts", [])}})
+                    # Regenerate the methodology document and its evidence
+                    # from the ledger. Hand-maintained, it drifted — three
+                    # different sample counts for one cohort, a mode line
+                    # that outlived the config change. Generated nightly, it
+                    # cannot: the numbers are read, never typed.
+                    try:
+                        from edge.reporting.export import write_bundle
+
+                        out = _data_dir() / "methodology"
+                        bundle = write_bundle(ledger, policy, out)
+                        log.info("methodology bundle: %s", bundle)
+                        _post_status("methodology", {"methodology": bundle})
+                        # The worker's disk is not readable by a human, so
+                        # publish the document where one can actually open
+                        # it. Without this the whole thing is a file nobody
+                        # sees.
+                        _post_methodology(
+                            (out / "METHODOLOGY.md").read_text(),
+                            json.loads((out / "figures.json").read_text()))
+                    except Exception as exc:  # noqa: BLE001
+                        # Reporting must never be able to stop trading.
+                        log.warning("methodology generation failed: %s", exc)
                     notify.push(f"Edge engine — daily {last_report_day}",
                                 notify.daily_summary(ledger, risk))
                 last_report_day = today
