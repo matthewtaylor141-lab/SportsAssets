@@ -84,18 +84,22 @@ def test_outcome_matches_enforces_exact_point_and_team():
 def test_moneyline_dead_zone_does_not_apply_to_spreads():
     assert POLICY.band_threshold(0.42, "moneyline") is None       # dead zone
     assert POLICY.band_threshold(0.42, "spread") == 0.025          # kch123 core
-    assert POLICY.band_threshold(0.52, "spread") == 0.025
-    # Outside the measured core the window stays open but the bar goes UP —
-    # see tests/test_category_bands.py for the reasoning.
-    assert POLICY.band_threshold(0.75, "spread") == 0.030
+    # 0.52+ died on the NET-ROI FLOOR, not the dead zone: 2.5c minus the
+    # 1.5c crossing at 52c pays 1.9%, under the benchmark. The measurement
+    # stands; the trade doesn't pay. See test_category_bands.py.
+    assert POLICY.band_threshold(0.52, "spread") is None
+    assert POLICY.band_threshold(0.65, "spread") == 0.030
 
 
-def test_totals_are_priced_symmetrically_around_the_line():
-    """Over and Under come from one de-vig, so both sides trade on the same
-    terms; the expensive side is not a different bet."""
+def test_totals_pricing_symmetry_ends_where_the_floor_begins():
+    """Over and Under come from one de-vig — the expensive side is the same
+    MEASUREMENT. It is no longer the same TRADE: the net-ROI floor closes
+    prices where threshold minus crossing pays under the benchmark, and
+    that is a function of price alone."""
     assert POLICY.band_threshold(0.45, "total") == 0.025
-    assert POLICY.band_threshold(0.55, "total") == 0.025
-    assert POLICY.band_threshold(0.75, "total") == 0.030
+    assert POLICY.band_threshold(0.55, "total") is None            # floored
+    assert POLICY.band_threshold(0.65, "total") == 0.030
+    assert POLICY.band_threshold(0.80, "total") is None            # floored
     assert POLICY.band_threshold(0.95, "total") is None            # tail, excluded
 
 
@@ -104,11 +108,13 @@ def test_unknown_category_never_tradeable():
 
 
 def test_nfl_moneyline_blocked_but_spread_allowed():
-    v = strategy_filter(POLICY, "nfl", 0.47, 0.55, category="moneyline")
+    # Fixtures sit at 0.30-0.35 — the strongest measured band (+3.59c) and
+    # inside the net-ROI floor, unlike the old 0.47 coin-flip fixtures.
+    v = strategy_filter(POLICY, "nfl", 0.32, 0.40, category="moneyline")
     assert not v.ok and "blocked" in v.reason
-    v2 = strategy_filter(POLICY, "nfl", 0.47, 0.55, category="spread")
+    v2 = strategy_filter(POLICY, "nfl", 0.32, 0.40, category="spread")
     assert v2.ok
-    v3 = strategy_filter(POLICY, "nhl", 0.47, 0.55, category="moneyline")
+    v3 = strategy_filter(POLICY, "nhl", 0.32, 0.40, category="moneyline")
     assert v3.ok  # NHL ML: specialist-positive on 104k fills
 
 
@@ -196,8 +202,8 @@ def test_implausible_edge_never_trades():
     # A "45c edge" is a mapping error wearing a costume — reject in any mode.
     v = strategy_filter(POLICY, "epl", 0.09, 0.54, category="moneyline")
     assert not v.ok and "implausible" in v.reason
-    # Healthy edges still clear.
-    v2 = strategy_filter(POLICY, "epl", 0.47, 0.51, category="moneyline")
+    # Healthy edges still clear (in a band the net-ROI floor keeps open).
+    v2 = strategy_filter(POLICY, "epl", 0.31, 0.35, category="moneyline")
     assert v2.ok
 
 
@@ -292,25 +298,42 @@ def test_every_measured_positive_band_is_tradeable():
         lo, edge = float(m.group(1)), float(row["edge_cents"])
         mid = lo + 0.025
         th = POLICY.band_threshold(mid, "moneyline")
-        if edge > 0.2 and lo < 0.90:
+        # Tradeable requires BOTH: measured-positive edge AND clearing the
+        # net-ROI floor at our measured crossing cost. Measured-positive
+        # bands above ~0.40 are real edges that lose to their own costs.
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        from gen_bands import clears_net_floor, threshold_for
+        # The floor gates on EXPECTED CAPTURE — the band's measured edge
+        # where one exists, never below the threshold — minus crossing.
+        should = (edge > 0.2 and lo < 0.90
+                  and clears_net_floor(lo, lo + 0.05, threshold_for(lo), edge))
+        if should:
             assert th is not None, f"band at {lo:.2f} measures +{edge}c but is blocked"
         else:
-            assert th is None, f"band at {lo:.2f} measures {edge}c but is tradeable"
+            assert th is None, f"band at {lo:.2f}: measured {edge}c, floored or dead"
 
 
-def test_existing_thresholds_unchanged_by_regeneration():
-    """The expansion is purely additive — previously tradeable bands keep
-    their exact thresholds."""
+def test_surviving_thresholds_unchanged_by_regeneration():
+    """Bands that clear the net-ROI floor keep their exact measured
+    thresholds — the floor removes bands, it never re-prices them."""
     for price, expected in ((0.07, 0.030), (0.17, 0.025), (0.32, 0.025),
-                            (0.37, 0.025), (0.47, 0.020), (0.77, 0.015),
-                            (0.82, 0.015), (0.87, 0.012)):
+                            (0.37, 0.025), (0.47, 0.020)):
         assert POLICY.band_threshold(price, "moneyline") == expected
+    # The floored bands: measured-positive, dead at our costs. 0.45-0.50
+    # SURVIVES because its measured +2.94c nets 3.0% after the 1.5c
+    # crossing; 0.75-0.90 measures +1.4-2.6c and cannot pay the benchmark.
+    for price in (0.52, 0.77, 0.82, 0.87):
+        assert POLICY.band_threshold(price, "moneyline") is None
 
 
-def test_fat_middle_now_tradeable():
-    # 0.50-0.65: where most sports prices live, +0.5 to +1.2c measured.
+def test_fat_middle_is_floored_out():
+    # 0.50-0.65 measures +0.5 to +1.2c — real, and SMALLER than the 1.5c we
+    # pay to cross. Trading it converts a measured edge into a measured
+    # loss. The floor keeps it shut until the crossing cost falls (maker
+    # pricing), at which point regeneration re-opens it.
     for price in (0.52, 0.57, 0.62):
-        assert POLICY.band_threshold(price, "moneyline") == 0.020
+        assert POLICY.band_threshold(price, "moneyline") is None
     # ...and the genuinely dead zones stay dead.
     for price in (0.42, 0.67, 0.92, 0.97):
         assert POLICY.band_threshold(price, "moneyline") is None

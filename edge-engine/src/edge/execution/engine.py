@@ -186,7 +186,12 @@ def strategy_filter(
                             and consensus_books >= min_books)
             if edge >= min_edge and enough_books:
                 max_edge = float(policy.bands.get("max_believable_edge", 0.08))
-                if edge <= max_edge + 1e-9:
+                max_ratio = float(policy.bands.get(
+                    "max_believable_edge_ratio", 0.5))
+                # Both implausibility guards bind here too — the exploration
+                # budget studies small edges, not suspicious ones.
+                if edge <= max_edge + 1e-9 and (
+                        price <= 0 or edge <= price * max_ratio + 1e-9):
                     return StrategyVerdict(
                         True, "exploration", band, threshold, edge,
                         tier="exploration", drift_penalty=drift_penalty,
@@ -206,6 +211,24 @@ def strategy_filter(
     if edge > max_edge + 1e-9:
         return StrategyVerdict(
             False, f"implausible edge {edge:.3f} > {max_edge:.2f} (mapping/model suspect)",
+            band, threshold, edge, drift_penalty=drift_penalty,
+            raw_edge=raw_edge, keep=keep)
+    # RELATIVE implausibility: the absolute cap does not scale. An 8c edge
+    # at 60c is a 13% disagreement — arguable; the same 8c at 10c claims
+    # the venue misprices the outcome by 80% of its value, which in
+    # practice is our mapping error, a one-sided quote, or a resolution
+    # mismatch far more often than it is free money. The 0.5 default
+    # admits the measured favorite-longshot signature (reference fills at
+    # 5-10c averaged +2.7c, a 0.36 ratio) and de facto closes sub-nickel
+    # prices, where the 3c bar cannot fit under half the price — a
+    # 2c contract claiming a 3c edge is claiming fair value 2.5x the
+    # market, and nothing we sell ourselves about longshot bias makes
+    # that a measurement.
+    max_ratio = float(policy.bands.get("max_believable_edge_ratio", 0.5))
+    if price > 0 and edge > price * max_ratio + 1e-9:
+        return StrategyVerdict(
+            False, f"implausible edge {edge:.3f} > {max_ratio:.0%} of price "
+                   f"{price:.2f} (mapping/model suspect)",
             band, threshold, edge, drift_penalty=drift_penalty,
             raw_edge=raw_edge, keep=keep)
     return StrategyVerdict(True, "ok", band, threshold, edge,

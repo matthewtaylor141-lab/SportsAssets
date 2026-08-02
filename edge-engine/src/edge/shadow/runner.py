@@ -244,6 +244,13 @@ _ROTATION = {"i": 0}
 # the ledger may have been wiped, and exactly when the caps need rebuilding.
 _RECONCILED: dict = {}
 
+# Entry prices below this are longshot claims and carry doubled evidence
+# requirements (two sharp anchors, not one). The productive low bands are
+# where both the return and the speed of proof concentrate — which is also
+# exactly where a de-vig error is proportionally largest, so the leash
+# tightens as the price falls.
+LOW_PRICE_CUTOFF = 0.20
+
 
 def _phase(market_key: str) -> int:
     """Stable per-market offset in [0, 3600) — spreads periodic work evenly
@@ -756,7 +763,17 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     # largest apparent edges come from the thinnest consensus —
                     # so this is where fake edge is manufactured, and we hold
                     # open positions in exactly those leagues.
-                    if getattr(ev, "anchors", 0) < min_anchors:
+                    # Below 20c the bar doubles. A 3c threshold at a 7c price
+                    # claims the venue is ~40% wrong about the probability —
+                    # exactly where favorite-longshot bias pays, and exactly
+                    # where OUR de-vig error is proportionally largest. One
+                    # anchor may be one stale Pinnacle quote; a longshot claim
+                    # needs two independent sharp books standing behind it or
+                    # the "edge" is more likely ours than the market's.
+                    need_anchors = (max(min_anchors, 2)
+                                    if entry_px < LOW_PRICE_CUTOFF
+                                    else min_anchors)
+                    if getattr(ev, "anchors", 0) < need_anchors:
                         reject("no_sharp_anchor")
                         ex = funnel.setdefault("unpriced_examples", {})
                         bucket = ex.setdefault("no_sharp_anchor", [])
@@ -764,6 +781,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                             bucket.append({"reason": "no_sharp_anchor",
                                            "league": ev.league_code,
                                            "books": getattr(ev, "books", 0),
+                                           "price": round(entry_px, 3),
+                                           "needed": need_anchors,
                                            "anchors": getattr(ev, "anchors", 0)})
                         continue
                     verdict = strategy_filter(policy, ev.league_code, entry_px, fair,

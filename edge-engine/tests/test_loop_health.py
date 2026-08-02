@@ -866,7 +866,7 @@ def test_shrinkage_and_surcharge_never_both_apply(tmp_path):
 def test_no_measurement_leaves_the_surcharge_in_charge(tmp_path):
     """Until reversion is measurable, the blunt instrument still governs."""
     from edge.execution.engine import strategy_filter
-    v = strategy_filter(POLICY, "mls", 0.50, 0.56, keep=None, drift_penalty=0.02)
+    v = strategy_filter(POLICY, "mls", 0.47, 0.53, keep=None, drift_penalty=0.02)
     assert v.keep == 1.0
     assert v.drift_penalty == pytest.approx(0.02)
     assert v.edge == pytest.approx(v.raw_edge)
@@ -1133,3 +1133,77 @@ def test_settlement_priority_survives_events_with_no_kick_off_time(tmp_path, mon
     funnel = run_cycle([Venue(ask_price=0.47)], Feed([unknown, near]), POLICY,
                        risk, ledger, ["soccer_epl"])
     assert funnel["order"] == "settlement"
+
+
+# ── low-price hardening: the leash tightens as the price falls ──────────
+
+def test_a_longshot_needs_two_anchors_not_one(tmp_path, monkeypatch):
+    """Below 20c a single anchor is not evidence. The productive low bands
+    are where return and proof-speed concentrate — and where a de-vig error
+    is proportionally largest, so the same fixture that trades at 47c on
+    one anchor is refused at 15c until a second sharp book agrees."""
+    from edge.shadow.runner import run_cycle
+
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    ledger, risk = _rig(tmp_path)
+    ev = _event(home_odds=5.00)               # fair 0.20 each... two-way 0.50
+    ev.h2h = {"Arsenal": 5.00, "Chelsea": 1.25}   # fair A ~0.20, ask below
+    funnel = run_cycle([StubVenue(ask_price=0.155)], StubFeed([ev]),
+                       POLICY, risk, ledger, ["soccer_epl"])
+    assert funnel["rejects"].get("no_sharp_anchor", 0) >= 1
+    assert funnel["logged"] == 0
+
+    # The identical event with a second anchor trades.
+    ledger2 = Ledger(db_path=str(tmp_path / "l2.sqlite3"))
+    risk2 = RiskManager(ledger2, {**POLICY.risk, "mode": "PAPER"})
+    ev2 = _event()
+    ev2.h2h = {"Arsenal": 5.00, "Chelsea": 1.25}
+    ev2.anchors = 2
+    funnel2 = run_cycle([StubVenue(ask_price=0.155)], StubFeed([ev2]),
+                        POLICY, risk2, ledger2, ["soccer_epl"])
+    assert funnel2["logged"] >= 1, funnel2["rejects"]
+
+
+def test_relative_implausibility_scales_where_the_absolute_cap_cannot():
+    """8c of edge at 60c is a 13% disagreement; 6c at 10c claims the venue
+    is wrong by 60% of the contract's value. The absolute cap passes both;
+    the relative one refuses the second."""
+    from edge.execution.engine import strategy_filter
+
+    ok = strategy_filter(POLICY, "epl", 0.32, 0.36, consensus_books=6)
+    assert ok.ok, ok.reason
+    v = strategy_filter(POLICY, "epl", 0.10, 0.16, consensus_books=6)
+    assert not v.ok and "implausible" in v.reason and "of price" in v.reason
+
+
+def test_relative_guard_admits_the_measured_longshot_signature():
+    """Reference fills at 5-10c averaged +2.7c — a 0.36 ratio. The guard
+    exists to catch mapping errors, not to un-measure the favorite-longshot
+    edge the whole low-band strategy is built on."""
+    from edge.execution.engine import strategy_filter
+
+    v = strategy_filter(POLICY, "epl", 0.09, 0.125, consensus_books=6)
+    assert v.ok, v.reason                      # 3.5c at 9c: ratio 0.39
+
+
+def test_relative_guard_closes_subnickel_prices():
+    """A 2c contract claiming a 3c edge is claiming fair value 2.5x the
+    market. The band table leaves 0.00-0.05 open on measured evidence; the
+    ratio guard is what actually stands between us and trading it, because
+    at those prices the 3c bar cannot fit under half the price."""
+    from edge.execution.engine import strategy_filter
+
+    v = strategy_filter(POLICY, "epl", 0.02, 0.055, consensus_books=6)
+    assert not v.ok and "implausible" in v.reason
+
+
+def test_exploration_respects_the_relative_guard_too():
+    """The study budget studies small edges, not suspicious ones: a
+    sub-threshold edge that is still over half the price does not become
+    tradeable by being called exploration."""
+    from edge.execution.engine import strategy_filter
+
+    # 2.4c at 4c: below the 3.0c band bar, above the exploration floor,
+    # deep consensus — and 60% of the price. Refused.
+    v = strategy_filter(POLICY, "epl", 0.04, 0.064, consensus_books=6)
+    assert not v.ok

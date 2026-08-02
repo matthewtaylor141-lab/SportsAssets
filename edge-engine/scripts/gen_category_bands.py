@@ -71,6 +71,18 @@ EXT_LO_C, EXT_HI_C = 10, 90
 CATEGORY_SURCHARGE = {"prop": 0.010}
 CATEGORY_SPAN_C = {"prop": (5, 95)}
 
+# ── net-ROI floor (same economics as gen_bands.py) ─────────────────────
+# net ROI per fill = (threshold - crossing) / price, and it must clear the
+# benchmark (reference account: 2.3% of turnover) or the band consumes
+# budget, claims and settlement-count while proving nothing. Crossing is
+# what we PAY over mid, measured per category from our own fills
+# (spread_report 2026-08-02): props 0.54c on n=28 — thin books but wide
+# thresholds; game lines have no clean measurement yet, so they carry the
+# conservative 1.5c until one exists. Re-measure, regenerate; never edit
+# the yaml.
+NET_ROI_FLOOR = 0.02
+CROSSING = {"spread": 0.015, "total": 0.015, "prop": 0.006}
+
 
 def windows_for(category: str) -> list[tuple[int, float, str]]:
     """(cent, threshold, basis) for every tradeable price, cheapest first."""
@@ -81,8 +93,18 @@ def windows_for(category: str) -> list[tuple[int, float, str]]:
     mirror = {100 - c for c in core}
     bump = CATEGORY_SURCHARGE.get(category, 0.0)
     lo_c, hi_c = CATEGORY_SPAN_C.get(category, (EXT_LO_C, EXT_HI_C))
+    cross = CROSSING[category]
     out = []
     for c in range(lo_c, hi_c + 1):
+        mid = (c + 0.5) / 100
+        th_here = (CORE_THRESHOLD if c in core or c in mirror
+                   else EXT_THRESHOLD) + bump
+        if (th_here - cross) / mid < NET_ROI_FLOOR:
+            # Real edge, unprofitable trade: below the floor the fill pays
+            # less than crossing-plus-benchmark, and the settlements it
+            # consumes prove nothing for seasons. Excluded by arithmetic,
+            # re-opened the day the measured crossing cost falls.
+            continue
         if bump:
             # A category with a surcharge has no measured core of its own —
             # it is borrowing another category's SHAPE, not its evidence, so
@@ -126,8 +148,15 @@ def render() -> str:
         "# edge we are trying to measure.",
         "# SHADOW-TESTABLE: the grader scores these bands; if the extension does",
         "# not pay, it comes back out.",
-        "# Ranges are [lo, hi): an upper bound of 0.61 means 60c is the last",
-        "# tradeable price, which is what makes the window mirror-symmetric.",
+        "# A NET-ROI FLOOR then trims what the evidence alone would allow: a",
+        "# band must pay (threshold - crossing cost)/price >= 2% or it is",
+        "# excluded — the edge may be real, but at our measured cost of",
+        "# crossing it cannot beat the benchmark, and its settlements prove",
+        "# nothing for seasons. This is why windows are no longer mirror-",
+        "# symmetric: the cheap side of a line pays the floor at thresholds",
+        "# the expensive side cannot.",
+        "# Ranges are [lo, hi): the upper bound is one cent past the last",
+        "# tradeable price.",
         "categories:",
     ]
     for category in ("spread", "total", "prop"):

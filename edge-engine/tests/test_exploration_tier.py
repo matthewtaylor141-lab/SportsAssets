@@ -49,28 +49,28 @@ def _fill(led, usd, tier, ts=None, mode="LIVE_BETA"):
 
 def test_a_sub_threshold_edge_now_trades_as_exploration():
     """1.5c against a 2.0c bar used to be nothing. It is now a measured bet."""
-    v = strategy_filter(POLICY, "epl", 0.50, 0.515, consensus_books=DEEP)
+    v = strategy_filter(POLICY, "epl", 0.47, 0.485, consensus_books=DEEP)
     assert v.ok and v.tier == "exploration"
-    core = strategy_filter(POLICY, "epl", 0.50, 0.53, consensus_books=DEEP)
+    core = strategy_filter(POLICY, "epl", 0.47, 0.50, consensus_books=DEEP)
     assert core.ok and core.tier == "core"
 
 
 def test_the_noise_floor_still_refuses_fractions_of_a_cent():
     """Below the floor the 'edge' is de-vig error, at any consensus depth."""
-    v = strategy_filter(POLICY, "epl", 0.50, 0.504, consensus_books=99)
+    v = strategy_filter(POLICY, "epl", 0.47, 0.474, consensus_books=99)
     assert not v.ok and v.tier == "core"
 
 
 def test_a_small_edge_needs_agreement_not_a_lone_quote():
-    v = strategy_filter(POLICY, "epl", 0.50, 0.515, consensus_books=THIN)
+    v = strategy_filter(POLICY, "epl", 0.47, 0.485, consensus_books=THIN)
     assert not v.ok and "thin_consensus" in v.reason
-    assert strategy_filter(POLICY, "epl", 0.50, 0.515, consensus_books=DEEP).ok
+    assert strategy_filter(POLICY, "epl", 0.47, 0.485, consensus_books=DEEP).ok
 
 
 def test_unknown_consensus_depth_is_not_permission():
     """Fail closed: if we cannot say how many books back this number, we are
     not trading a fraction of a cent on it."""
-    v = strategy_filter(POLICY, "epl", 0.50, 0.515, consensus_books=None)
+    v = strategy_filter(POLICY, "epl", 0.47, 0.485, consensus_books=None)
     assert not v.ok
 
 
@@ -81,9 +81,9 @@ def test_exploration_never_overrides_the_measured_blocks():
                                consensus_books=DEEP).ok          # dead zone
     assert not strategy_filter(POLICY, "ucl", 0.50, 0.515,
                                consensus_books=DEEP).ok          # blocked league
-    assert not strategy_filter(POLICY, "mlb", 0.50, 0.515, category="moneyline",
+    assert not strategy_filter(POLICY, "mlb", 0.47, 0.485, category="moneyline",
                                consensus_books=DEEP).ok          # blocked category
-    assert not strategy_filter(POLICY, "epl", 0.50, 0.60,
+    assert not strategy_filter(POLICY, "epl", 0.47, 0.57,
                                consensus_books=DEEP).ok          # implausible
 
 
