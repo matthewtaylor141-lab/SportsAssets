@@ -25,7 +25,27 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await get_pool()
+    # INGESTION FALLBACK (2026-08-02). The workers service died on Jul 27
+    # and stayed dead for six days because nothing else could do its job;
+    # whale detection is the platform's heartbeat and must not depend on a
+    # single service's health. The poller runs here too. Coexistence with
+    # a revived workers service is safe by construction: trades dedupe on
+    # dedupe_key, the outbox on (trade_id, kind), and live copy orders on
+    # trade_id — two pollers can never double-ingest or double-order.
+    # API_INGESTION_FALLBACK=0 turns this off.
+    import asyncio
+    import os as _os
+
+    poller_task = None
+    if _os.getenv("API_INGESTION_FALLBACK", "1") != "0":
+        from ..ingestion.poller import Poller
+
+        poller_task = asyncio.get_running_loop().create_task(Poller().run())
+        logging.getLogger(__name__).warning(
+            "ingestion fallback: poller running inside the API service")
     yield
+    if poller_task is not None:
+        poller_task.cancel()
     await close_pool()
 
 
