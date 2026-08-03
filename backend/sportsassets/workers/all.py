@@ -12,7 +12,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
-from . import analytics, chain_listener, dispatcher, metadata_refresher, poller, reconciler, roster
+from . import analytics, chain_listener, copy_sweep, dispatcher, metadata_refresher, poller, reconciler, roster
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     ("dispatcher", dispatcher.main),
     ("roster", roster.main),
     ("reconciler", reconciler.main),
+    ("copy_sweep", copy_sweep.main),
 ]
 
 
