@@ -393,6 +393,45 @@ _archive_cache: dict[str, Any] = {"ts": 0.0, "data": None}
 
 _archived_ids: set[str] = set()
 
+_hydrate_task: asyncio.Task | None = None
+
+
+def _ensure_hydrate_retry() -> None:
+    """Keep trying to load the archive until it loads.
+
+    A boot-time hydrate failure used to be permanent for the process —
+    the site served the venue's sliding window until the next deploy got
+    lucky. History coming back must not depend on luck."""
+    global _hydrate_task
+    if _hydrate_task is not None and not _hydrate_task.done():
+        return
+
+    async def _loop() -> None:
+        from ..db import get_pool
+
+        while _archive_cache["data"] is None:
+            await asyncio.sleep(15)
+            try:
+                pool = await get_pool()
+                stored = await pool.fetch(
+                    "SELECT payload FROM pmus_activity_archive")
+
+                def _parse() -> list[dict]:
+                    return [json.loads(r["payload"])
+                            if isinstance(r["payload"], str) else r["payload"]
+                            for r in stored]
+
+                parsed = await asyncio.to_thread(_parse)
+                _archive_cache["data"] = parsed
+                _archive_cache["ts"] = time.time()
+                logging.getLogger(__name__).warning(
+                    "archive hydrated on retry: %s rows", len(parsed))
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception(
+                    "archive hydrate retry failed; retrying in 15s")
+
+    _hydrate_task = asyncio.get_running_loop().create_task(_loop())
+
 
 async def _archive_and_union(acts: list[dict]) -> list[dict]:
     """Persist every venue activity ever seen; return the full archive.
@@ -451,11 +490,14 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
 
     if _archive_cache["data"] is None:
         # Cold boot: hydrate the in-memory archive from the table, once.
-        # RETRIED: this read races the workers' heaviest moments (analytics
-        # first cycle, backfill flood) on a shared Postgres; a single failed
-        # attempt used to leave the cache empty, silently demoting the site
-        # to the venue's ~2-day window — Aug 1 vanished and every total
-        # shrank (owner report, 2026-08-03 evening).
+        # This read races the workers' heaviest moments (analytics cycles,
+        # backfill flood) on a shared Postgres. A failed attempt must NOT
+        # give up — twice today a boot-time failure silently demoted the
+        # site to the venue's ~2-day window (Aug 1 vanished, every total
+        # shrank; owner reports 2026-08-03 evening, twice). On failure a
+        # background task retries every 15s until the history is back, and
+        # the request path unions archive+window so the page keeps serving
+        # the freshest data meanwhile.
         stored = None
         for wait in (0.0, 1.0, 4.0):
             if wait:
@@ -467,7 +509,8 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).exception("archive hydrate retry")
         if stored is None:
-            raise RuntimeError("archive hydrate failed after retries")
+            _ensure_hydrate_retry()
+            return [a for _, _, _, a in new]
 
         def _parse() -> list[dict]:
             out: list[dict] = []
@@ -561,16 +604,28 @@ async def track_record(since: str | None = None,
     raw = _raw_cache["data"]
     # The request path reads ONLY in-process caches — the archive is
     # synced by the refresh paths above, never by a page view.
-    acts = _archive_cache["data"] or raw["activities"]
+    # UNION, never either/or: picking one source meant a failed archive
+    # read served the venue's ~2-day window alone and history vanished
+    # from the record. The merge means the worst a failure can do is trim
+    # history until the retry task restores it — the fresh window always
+    # serves, and nothing that ever settled can be pushed off the page by
+    # an infrastructure hiccup.
+    archive = _archive_cache["data"] or []
+    window = raw["activities"] or []
+    if archive:
+        seen_ids = {str(a.get("id") or "") for a in archive}
+        acts = archive + [a for a in window
+                          if str(a.get("id") or "") not in seen_ids]
+    else:
+        acts = window
     # Self-describing provenance: which activity source built this payload.
     # When the archive is unavailable the record silently loses everything
     # older than the venue's sliding window — that state must be visible in
     # one curl, not deduced from shrunken totals.
     source = {
-        "activities_source": ("archive" if _archive_cache["data"]
-                              else "venue_window"),
-        "archive_rows": len(_archive_cache["data"] or []),
-        "window_rows": len(raw["activities"] or []),
+        "activities_source": "archive+window" if archive else "venue_window",
+        "archive_rows": len(archive),
+        "window_rows": len(window),
     }
     attributed = copy_slugs = None
     try:

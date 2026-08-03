@@ -11,7 +11,12 @@ from ..notifications import telegram
 
 log = logging.getLogger(__name__)
 
-CYCLE_SECONDS = 60
+# 300, was 60: the full-ledger replay is the heaviest query the shared
+# Postgres sees, and running it back-to-back starved the API's own reads
+# at boot (the track-record archive hydrate failed twice on 2026-08-03,
+# wiping history off the site until a lucky retry). Settlements landing
+# within five minutes is still "automatic" for a settlement-paced record.
+CYCLE_SECONDS = 300
 
 
 async def main() -> None:

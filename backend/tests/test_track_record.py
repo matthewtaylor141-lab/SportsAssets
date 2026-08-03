@@ -258,3 +258,43 @@ def test_warm_archive_refresh_appends_without_rereading_the_table(monkeypatch):
     monkeypatch.setitem(tr._archive_cache, "data", None)
     asyncio.run(tr._archive_and_union([{"id": "a1"}]))
     assert any("SELECT payload" in q for q in pool.fetches)
+
+
+def test_failed_hydrate_serves_the_window_and_arms_a_retry(monkeypatch):
+    """A boot-time archive failure must degrade to the fresh window and
+    KEEP TRYING — twice in one day a single failed read silently wiped
+    history off the site until the next deploy."""
+    import asyncio
+
+    from sportsassets.api import track_record as tr
+
+    class FailingPool:
+        async def execute(self, q, *a):
+            pass
+
+        async def executemany(self, q, rows):
+            pass
+
+        async def fetch(self, q, *a):
+            raise RuntimeError("too many connections")
+
+    async def fake_get_pool():
+        return FailingPool()
+
+    import sportsassets.db as db
+    monkeypatch.setattr(db, "get_pool", fake_get_pool)
+    monkeypatch.setattr(tr, "_archive_ready", True)
+    monkeypatch.setattr(tr, "_archived_ids", set())
+    monkeypatch.setattr(tr, "_hydrate_task", None)
+    monkeypatch.setitem(tr._archive_cache, "data", None)
+
+    async def run():
+        out = await tr._archive_and_union([{"id": "w1"}, {"id": "w2"}])
+        # Serves the window acts it was given, does NOT cache them as
+        # the archive, and a retry task is armed.
+        assert [a["id"] for a in out] == ["w1", "w2"]
+        assert tr._archive_cache["data"] is None
+        assert tr._hydrate_task is not None and not tr._hydrate_task.done()
+        tr._hydrate_task.cancel()
+
+    asyncio.run(run())
