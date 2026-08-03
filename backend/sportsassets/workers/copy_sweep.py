@@ -63,7 +63,7 @@ async def sweep_once() -> dict:
           -- (maybe_execute's ON CONFLICT would no-op it silently).
           AND NOT EXISTS (SELECT 1 FROM live_orders lo
                           WHERE lo.asset = t.asset
-                            AND lo.status <> 'rejected')
+                            AND lo.status IN ('submitting','filled','settled'))
           AND NOT EXISTS (SELECT 1 FROM live_orders lo2
                           WHERE lo2.trade_id = t.id)
         ORDER BY t.asset, t.ts DESC

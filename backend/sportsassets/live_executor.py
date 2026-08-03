@@ -214,6 +214,18 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     pool = await get_pool()
     if await _is_paused(pool):
         return
+    # ONE copy per proposition, no matter how many times the source adds
+    # (owner: "cardinals moneyline 10x -> copied once"). In-flight and
+    # filled rows retire the asset; rejected/unfilled ones stay retryable
+    # because they spent nothing. A partial unique index (migration 011)
+    # enforces this at the database, so the check here is just the cheap
+    # fast path.
+    taken = await pool.fetchval(
+        "SELECT 1 FROM live_orders WHERE asset = $1 "
+        "AND status IN ('submitting','filled','settled') LIMIT 1",
+        str(payload["asset"]))
+    if taken:
+        return
     day_room, total_room = await _caps_room(pool)
     if COPY_MODE == "penny_trial":
         # The trial ceiling binds tighter than the config caps: the day's
@@ -249,17 +261,24 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         if usd < 1 or shares <= 0:
             return
 
-    row_id = await pool.fetchval(
-        """
-        INSERT INTO live_orders (trade_id, whale_username, asset, condition_id, side,
-                                 his_price, reaction_s, limit_price, requested_usd,
-                                 requested_shares, status, venue)
-        VALUES ($1,$2,$3,$4,'BUY',$5,$6,$7,$8,$9,'submitting',$10)
-        ON CONFLICT (trade_id) DO NOTHING RETURNING id
-        """,
-        payload.get("id"), payload.get("whale_username"), str(payload["asset"]),
-        payload.get("condition_id"), his_price, reaction, limit, usd, shares, venue,
-    )
+    try:
+        row_id = await pool.fetchval(
+            """
+            INSERT INTO live_orders (trade_id, whale_username, asset, condition_id, side,
+                                     his_price, reaction_s, limit_price, requested_usd,
+                                     requested_shares, status, venue)
+            VALUES ($1,$2,$3,$4,'BUY',$5,$6,$7,$8,$9,'submitting',$10)
+            ON CONFLICT (trade_id) DO NOTHING RETURNING id
+            """,
+            payload.get("id"), payload.get("whale_username"), str(payload["asset"]),
+            payload.get("condition_id"), his_price, reaction, limit, usd, shares, venue,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # The one-fill-per-asset index catching a concurrent duplicate is
+        # the guard WORKING, not an error.
+        if "live_orders_one_fill_per_asset" in str(exc):
+            return
+        raise
     if row_id is None:
         return  # duplicate detection — never double-order one source trade
 
