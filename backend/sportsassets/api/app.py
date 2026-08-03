@@ -24,7 +24,13 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await get_pool()
+    # Boot must not require a healthy database. get_pool() retries lazily
+    # on first use; dying here just turns a DB hiccup into a full outage.
+    try:
+        await get_pool()
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception(
+            "DB unavailable at boot — serving anyway, will retry lazily")
     # INGESTION FALLBACK (2026-08-02). The workers service died on Jul 27
     # and stayed dead for six days because nothing else could do its job;
     # whale detection is the platform's heartbeat and must not depend on a
@@ -106,8 +112,17 @@ def require_admin(x_admin_token: str = Header(default="")) -> None:
 async def healthz() -> dict:
     import os
 
-    pool = await get_pool()
-    await pool.fetchval("SELECT 1")
+    # Health means "this process can serve" — the DB gets its own field
+    # instead of a veto. A 502ing health check during a DB hiccup turns a
+    # degraded product into a dead one (observed 2026-08-03: continuous
+    # platform 502s because every boot died before serving).
+    db_ok = False
+    try:
+        pool = await get_pool()
+        await pool.fetchval("SELECT 1")
+        db_ok = True
+    except Exception:  # noqa: BLE001
+        pass
     # Current RSS from /proc: after a night of OOM archaeology-by-email,
     # memory is a number the probes can track, not a timeline to argue.
     rss_mb = None
@@ -120,7 +135,8 @@ async def healthz() -> dict:
     except OSError:
         pass
     # Render injects the deployed commit — lets anyone confirm which build is live.
-    return {"ok": True, "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7],
+    return {"ok": True, "db_ok": db_ok,
+            "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7],
             "rss_mb": rss_mb}
 
 
