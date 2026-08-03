@@ -75,6 +75,30 @@ def _amount(price: float) -> dict:
     return {"value": f"{price:.2f}", "currency": "USD"}
 
 
+def _clean_title(t: str | None) -> str | None:
+    """A searchable matchup from a global market title.
+
+    The whales' titles carry market decorations the US venue's search
+    chokes on ("Spread: Atlanta Dream (-2.5)", "Halmstads BK vs. IK
+    Sirius: O/U 3.5", "Celtic FC vs. Dundee FC - More Markets"). All 305
+    of the first live copy attempts died in search with these — strip to
+    the matchup itself.
+    """
+    if not t:
+        return None
+    t = t.split(" - More Markets")[0]
+    t = re.sub(r"^(Spread|Total|Moneyline|O/U)\s*:\s*", "", t)
+    if ":" in t:
+        # Keep the side holding the matchup: "Canadian Open: A vs B" wants
+        # the right side; "A vs. B: O/U 3.5" wants the left.
+        parts = t.split(":")
+        vs = [p for p in parts if " vs" in p.lower()]
+        t = vs[-1] if vs else max(parts, key=len)
+    t = re.sub(r"\([^)]*\)", " ", t)
+    t = re.sub(r"\s+", " ", t).strip(" -")
+    return t or None
+
+
 def resolve_market(market_slug: str | None, event_slug: str | None,
                    market_title: str | None, event_title: str | None,
                    outcome: str | None) -> dict | None:
@@ -88,6 +112,7 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
     Every hit must still pass the outcome-similarity floor.
     """
     client = _get_client()
+    diag: list[str] = []
 
     # 1) direct slug parity
     if market_slug:
@@ -99,6 +124,7 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
                         "outcome": m.get("outcome"), "matched_by": "slug", "score": score}
         except Exception as exc:  # noqa: BLE001 — 404 is expected; fall through
             log.debug("pmus slug lookup miss (%s): %s", market_slug, exc)
+            diag.append(f"slug:{type(exc).__name__}")
 
     # 2) shared event slug → per-outcome siblings
     candidates: list[dict] = []
@@ -106,21 +132,37 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
         try:
             resp = client.markets.list({"eventSlug": [event_slug], "active": True})
             candidates = list((resp or {}).get("markets") or [])
-        except Exception:  # noqa: BLE001 — fall through to search
+            diag.append(f"event:{len(candidates)}")
+        except Exception as exc:  # noqa: BLE001 — fall through to search
             candidates = []
+            diag.append(f"event:{type(exc).__name__}")
 
-    # 3) title search → events with nested markets
+    # 3) title search → events with nested markets. Queries are tried
+    # cleanest-first: the raw titles carry market decorations the venue's
+    # search does not match.
     if not candidates and (event_title or market_title):
-        try:
-            resp = client.search.query(
-                {"query": event_title or market_title, "limit": 5, "status": "active"})
-            for ev in (resp or {}).get("events") or []:
-                ev_score = max(_sim(ev.get("title"), event_title),
-                               _sim(ev.get("title"), market_title))
-                if ev_score >= MATCH_FLOOR:
-                    candidates.extend(ev.get("markets") or [])
-        except Exception:  # noqa: BLE001
-            candidates = []
+        queries = []
+        for q in (_clean_title(event_title), _clean_title(market_title),
+                  event_title, market_title):
+            if q and q not in queries:
+                queries.append(q)
+        for q in queries:
+            try:
+                resp = client.search.query(
+                    {"query": q, "limit": 5, "status": "active"})
+                found = 0
+                for ev in (resp or {}).get("events") or []:
+                    ev_score = max(_sim(ev.get("title"), event_title),
+                                   _sim(ev.get("title"), market_title),
+                                   _sim(ev.get("title"), _clean_title(market_title)))
+                    if ev_score >= MATCH_FLOOR:
+                        candidates.extend(ev.get("markets") or [])
+                        found += 1
+                diag.append(f"search[{q[:24]}]:{found}ev/{len(candidates)}m")
+            except Exception as exc:  # noqa: BLE001
+                diag.append(f"search[{q[:24]}]:{type(exc).__name__}")
+            if candidates:
+                break
 
     best, best_score = None, 0.0
     for m in candidates:
@@ -133,6 +175,10 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
         return {"market_slug": best["slug"], "title": best.get("title"),
                 "outcome": best.get("outcome"),
                 "matched_by": "event" if event_slug else "search", "score": best_score}
+    diag.append(f"best_outcome_score:{round(best_score, 2)}")
+    # The trail rides the exception-free path out via last_resolve_diag so
+    # the caller can store WHY in the audit row without a signature break.
+    resolve_market.last_diag = "; ".join(diag)[:280]
     return None
 
 

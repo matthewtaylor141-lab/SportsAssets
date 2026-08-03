@@ -56,7 +56,16 @@ async def sweep_once() -> dict:
           AND t.ts > now() - interval '7 days'
           AND lower(w.username) = ANY($1)
           AND COALESCE(m.resolved, false) = false
-          AND NOT EXISTS (SELECT 1 FROM live_orders lo WHERE lo.asset = t.asset)
+          -- An asset is off the table once an order was actually PLACED
+          -- for it (filled/unfilled/submitting/error). Mapping rejections
+          -- are retryable: a mapper fix must be able to revisit the same
+          -- open positions, so only this trade-id's own audit row blocks
+          -- (maybe_execute's ON CONFLICT would no-op it silently).
+          AND NOT EXISTS (SELECT 1 FROM live_orders lo
+                          WHERE lo.asset = t.asset
+                            AND lo.status <> 'rejected')
+          AND NOT EXISTS (SELECT 1 FROM live_orders lo2
+                          WHERE lo2.trade_id = t.id)
         ORDER BY t.asset, t.ts DESC
         """,
         whales, PRICE_CEILING,

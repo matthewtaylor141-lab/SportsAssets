@@ -272,9 +272,11 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 ctx.get("market_title"), ctx.get("event_title"), ctx.get("outcome"),
             )
             if mapping is None:
+                diag = getattr(pmus.resolve_market, "last_diag", "") or ""
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 WHERE id=$1",
-                    row_id, "no verified Polymarket US market for this outcome",
+                    row_id, ("unmapped: " + diag)[:300] if diag
+                    else "no verified Polymarket US market for this outcome",
                 )
                 log.info("LIVE (US) unmapped: %s / %s", ctx.get("market_title"),
                          ctx.get("outcome"))
