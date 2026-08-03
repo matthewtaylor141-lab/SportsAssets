@@ -37,7 +37,16 @@ async def lifespan(_: FastAPI):
     import os as _os
 
     poller_task = None
-    if _os.getenv("API_INGESTION_FALLBACK", "1") != "0":
+    # DEFAULT OFF (2026-08-03 00:0x). The fallback proved the pipeline
+    # (poller heartbeat went fresh at 23:55Z after six dead days, live
+    # detections flowed) — and then proved the instance can't carry it:
+    # whale-rate ingestion plus per-detection probes/mapping OOM-flapped
+    # the API on a ~4-minute cycle even with the history loop off, the
+    # probe burst gated, and a delayed start. Serving the site is this
+    # service's job; ingestion belongs on the workers service, which now
+    # boots cleanly on the fixed schema. Set API_INGESTION_FALLBACK=1
+    # only for short-lived diagnostic use.
+    if _os.getenv("API_INGESTION_FALLBACK", "0") == "1":
         async def _delayed_poller():
             # Let the service finish booting and pass its health check
             # BEFORE the polling load starts — a heavy startup on a small
