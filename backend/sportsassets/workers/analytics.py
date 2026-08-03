@@ -19,6 +19,11 @@ async def main() -> None:
     alerted_drift = False
     while True:
         try:
+            # Beat BEFORE the cycle too: this loop once sat wedged for 12
+            # days (full-table fetch OOM-looping the process) with its last
+            # heartbeat frozen at "ok" — a hang must show as a fresh
+            # "running" beat with a start time, not as ancient success.
+            await heartbeat("analytics", "running", {})
             newly_resolved = await sweep_resolutions(client)
             result = await run_cycle()
             await heartbeat("analytics", "ok", {**result, "newly_resolved": newly_resolved,

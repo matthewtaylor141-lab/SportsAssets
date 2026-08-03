@@ -65,20 +65,24 @@ async def _load_resolutions() -> dict[str, tuple[list[float], datetime]]:
 
 
 async def rebuild_positions() -> list[PositionState]:
-    """Replay the full trade ledger into per-(whale, token) position states."""
+    """Replay the full trade ledger into per-(whale, token) position states.
+
+    STREAMED, never fetched whole. `pool.fetch` materialized every trade row
+    in memory at once; once the deep backfill grew the table past what the
+    512 MB workers instance could hold, the fetch OOM-killed the process
+    mid-query on every attempt — the analytics loop never completed a cycle
+    (and so never heartbeat) from 2026-07-22 onward, freezing settlements,
+    rollups and the site's return figures for 12 days while every OTHER
+    loop beat normally between restarts. A server-side cursor keeps memory
+    flat no matter how large the ledger grows; the states dict is bounded
+    by distinct (whale, token) positions, not by fill count.
+    """
     pool = await get_pool()
-    trades = await pool.fetch(
-        """
-        SELECT whale_id, asset, condition_id, outcome, outcome_index, side,
-               size::float8 AS size, price::float8 AS price, notional::float8 AS notional,
-               sport, ts
-        FROM trades ORDER BY ts, id
-        """
-    )
     resolutions = await _load_resolutions()
 
     states: dict[tuple[int, str], PositionState] = {}
-    for t in trades:
+
+    def _replay(t) -> None:
         key = (t["whale_id"], t["asset"])
         st = states.get(key)
         if st is None:
@@ -108,6 +112,19 @@ async def rebuild_positions() -> list[PositionState]:
         st.first_ts = st.first_ts or t["ts"]
         st.last_ts = t["ts"]
 
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            async for t in conn.cursor(
+                """
+                SELECT whale_id, asset, condition_id, outcome, outcome_index, side,
+                       size::float8 AS size, price::float8 AS price,
+                       notional::float8 AS notional, sport, ts
+                FROM trades ORDER BY ts, id
+                """,
+                prefetch=5_000,
+            ):
+                _replay(t)
+
     # Apply resolutions.
     for st in states.values():
         if st.condition_id and st.condition_id in resolutions and not st.position.resolved:
@@ -129,31 +146,27 @@ async def rebuild_positions() -> list[PositionState]:
 
 async def _persist_positions(states: list[PositionState]) -> None:
     pool = await get_pool()
+    rows = [
+        (st.whale_id, st.condition_id, st.token_id, st.outcome, st.outcome_index,
+         round(st.position.shares, 6), round(st.position.avg_cost, 6),
+         round(st.position.realized_pnl, 6), round(st.position.notional_in, 6),
+         st.position.resolved, st.first_ts, st.last_ts)
+        for st in states
+    ]
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("DELETE FROM positions")
-            for st in states:
-                p = st.position
-                await conn.execute(
-                    """
-                    INSERT INTO positions (whale_id, condition_id, token_id, outcome, outcome_index,
-                                           net_shares, avg_cost, realized_pnl, notional_in,
-                                           resolved, first_trade_ts, last_trade_ts, updated_at)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
-                    """,
-                    st.whale_id,
-                    st.condition_id,
-                    st.token_id,
-                    st.outcome,
-                    st.outcome_index,
-                    round(p.shares, 6),
-                    round(p.avg_cost, 6),
-                    round(p.realized_pnl, 6),
-                    round(p.notional_in, 6),
-                    p.resolved,
-                    st.first_ts,
-                    st.last_ts,
-                )
+            # One round-trip per BATCH, not per position: at post-backfill
+            # scale a per-row execute made each cycle minutes long.
+            await conn.executemany(
+                """
+                INSERT INTO positions (whale_id, condition_id, token_id, outcome, outcome_index,
+                                       net_shares, avg_cost, realized_pnl, notional_in,
+                                       resolved, first_trade_ts, last_trade_ts, updated_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
+                """,
+                rows,
+            )
 
 
 def compute_rollups(
