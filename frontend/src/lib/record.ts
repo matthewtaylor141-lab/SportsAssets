@@ -53,6 +53,9 @@ export interface TRSummary {
 export interface TrackRecordData {
   configured: boolean
   error?: string
+  activities_source?: string
+  archive_rows?: number
+  window_rows?: number
   since: string
   summary: TRSummary
   daily: TRDaily[]
@@ -80,5 +83,12 @@ export function useTrackRecord(refreshMs = 30_000) {
     `/api/track-record?since=${SINCE}&max_stake=${MAX_STAKE}`,
     refreshMs,
     (d) => d.error || null,
+    // NEVER display a downgrade: a freshly-booted API serves the venue's
+    // ~2-day window for the seconds until its archive hydrates, and
+    // accepting that snapshot made Aug 1 "vanish" from the site three
+    // times on 2026-08-03. History can grow or hold — it cannot shrink.
+    (prev, next) =>
+      !(prev.activities_source !== 'venue_window' &&
+        next.activities_source === 'venue_window'),
   )
 }
