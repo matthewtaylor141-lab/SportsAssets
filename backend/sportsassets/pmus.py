@@ -131,16 +131,43 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
     if event_slug:
         try:
             resp = client.markets.list({"eventSlug": [event_slug], "active": True})
-            candidates = list((resp or {}).get("markets") or [])
-            diag.append(f"event:{len(candidates)}")
+            got = list((resp or {}).get("markets") or [])
+            # The venue quietly ignores filters it doesn't recognize and
+            # returns a default page — 20 unrelated markets scoring 0
+            # "satisfied" this step and blocked the title search on every
+            # one of the first 700 copy attempts. Drop positive
+            # mismatches; markets without an eventSlug field stay (their
+            # zero scores no longer block the search below).
+            candidates = [m for m in got
+                          if (m.get("eventSlug") or m.get("event_slug"))
+                          in (None, event_slug)]
+            diag.append(f"event:{len(got)}/{len(candidates)}")
         except Exception as exc:  # noqa: BLE001 — fall through to search
             candidates = []
             diag.append(f"event:{type(exc).__name__}")
 
+    def _best(cands: list[dict]) -> tuple[dict | None, float]:
+        top, top_score = None, 0.0
+        for m in cands:
+            if m.get("closed") or not m.get("slug"):
+                continue
+            sc = _outcome_score(m, outcome)
+            if sc > top_score:
+                top, top_score = m, sc
+        return top, top_score
+
+    best, best_score = _best(candidates)
+    if best is not None and best_score >= MATCH_FLOOR:
+        return {"market_slug": best["slug"], "title": best.get("title"),
+                "outcome": best.get("outcome"),
+                "matched_by": "event", "score": best_score}
+
     # 3) title search → events with nested markets. Queries are tried
     # cleanest-first: the raw titles carry market decorations the venue's
-    # search does not match.
-    if not candidates and (event_title or market_title):
+    # search does not match. ALWAYS reached when the event step produced
+    # no verified match — unverified candidates must not block it.
+    candidates = []
+    if event_title or market_title:
         queries = []
         for q in (_clean_title(event_title), _clean_title(market_title),
                   event_title, market_title):
@@ -164,18 +191,12 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
             if candidates:
                 break
 
-    best, best_score = None, 0.0
-    for m in candidates:
-        if m.get("closed") or not m.get("slug"):
-            continue
-        score = _outcome_score(m, outcome)
-        if score > best_score:
-            best, best_score = m, score
-    if best is not None and best_score >= MATCH_FLOOR:
-        return {"market_slug": best["slug"], "title": best.get("title"),
-                "outcome": best.get("outcome"),
-                "matched_by": "event" if event_slug else "search", "score": best_score}
-    diag.append(f"best_outcome_score:{round(best_score, 2)}")
+    best2, best2_score = _best(candidates)
+    if best2 is not None and best2_score >= MATCH_FLOOR:
+        return {"market_slug": best2["slug"], "title": best2.get("title"),
+                "outcome": best2.get("outcome"),
+                "matched_by": "search", "score": best2_score}
+    diag.append(f"best_outcome_score:{round(max(best_score, best2_score), 2)}")
     # The trail rides the exception-free path out via last_resolve_diag so
     # the caller can store WHY in the audit row without a signature break.
     resolve_market.last_diag = "; ".join(diag)[:280]
