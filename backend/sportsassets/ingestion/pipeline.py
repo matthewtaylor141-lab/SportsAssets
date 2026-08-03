@@ -139,7 +139,12 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
     # 2026-08-02). A stale detection is not copyable and its residual book
     # is not evidence; probing it buys nothing. Backlog rows are ingested
     # as data only.
-    fresh = (ev.ts_epoch or 0) > (datetime.now(timezone.utc).timestamp() - 300)
+    # 600s, was 300: measured detection lag runs 3-6 minutes (poller
+    # cadence + venue API), so a 5-minute freshness gate silently excluded
+    # most REAL fresh fills — zero copy probes fired 21:13-22:24Z on
+    # 2026-08-03 while both whales traded. Staleness cost is bounded by
+    # the copier's FOK-at-his-price order, not by this gate.
+    fresh = (ev.ts_epoch or 0) > (datetime.now(timezone.utc).timestamp() - 600)
     if fresh:
         from ..copy_probe import probe_trade
 

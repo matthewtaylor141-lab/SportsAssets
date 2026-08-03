@@ -68,7 +68,20 @@ def _outcome_score(us_market: dict, outcome: str | None) -> float:
     team = us_market.get("team") or {}
     candidates = [us_market.get("outcome"), team.get("name"), team.get("alias"),
                   team.get("safeName"), team.get("abbreviation")]
-    return max((_sim(c, outcome) for c in candidates if c), default=0.0)
+    best = max((_sim(c, outcome) for c in candidates if c), default=0.0)
+    # Player-name robustness: "Bianca Andreescu" vs the venue's
+    # "Andreescu, B." scores ~0.68 on raw similarity — below the floor —
+    # while the surname is an exact token match. A distinctive surname
+    # (>3 chars) appearing as a whole token scores 0.9: above the floor,
+    # below a full-string match. Known blind spot: two players sharing a
+    # surname in one event (sisters); the FOK-at-his-price order bounds
+    # the cost of that rare wrong-sibling case to one contract.
+    out_last = (_norm(outcome).split() or [""])[-1] if outcome else ""
+    if len(out_last) > 3:
+        for c in candidates:
+            if c and out_last in _norm(c).split():
+                best = max(best, 0.9)
+    return best
 
 
 def _amount(price: float) -> dict:
@@ -97,6 +110,24 @@ def _clean_title(t: str | None) -> str | None:
     t = re.sub(r"\([^)]*\)", " ", t)
     t = re.sub(r"\s+", " ", t).strip(" -")
     return t or None
+
+
+def _surname_matchup(t: str | None) -> str | None:
+    """"Bartunkova vs Andreescu" from "Nikola Bartunkova vs Bianca
+    Andreescu" — venues abbreviate or reorder first names, and every
+    tennis copy attempt on 2026-08-03 missed the match floor over
+    exactly that."""
+    c = _clean_title(t)
+    if not c or " vs" not in c.lower():
+        return None
+    sides = re.split(r"\s+vs\.?\s+", c, flags=re.I)
+    if len(sides) != 2:
+        return None
+    a = sides[0].strip().split()[-1] if sides[0].strip() else ""
+    b = sides[1].strip().split()[-1] if sides[1].strip() else ""
+    if len(a) > 2 and len(b) > 2:
+        return f"{a} vs {b}"
+    return None
 
 
 def resolve_market(market_slug: str | None, event_slug: str | None,
@@ -170,6 +201,7 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
     if event_title or market_title:
         queries = []
         for q in (_clean_title(event_title), _clean_title(market_title),
+                  _surname_matchup(event_title), _surname_matchup(market_title),
                   event_title, market_title):
             if q and q not in queries:
                 queries.append(q)
@@ -181,7 +213,10 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
                 for ev in (resp or {}).get("events") or []:
                     ev_score = max(_sim(ev.get("title"), event_title),
                                    _sim(ev.get("title"), market_title),
-                                   _sim(ev.get("title"), _clean_title(market_title)))
+                                   _sim(ev.get("title"), _clean_title(market_title)),
+                                   _sim(_surname_matchup(ev.get("title")),
+                                        _surname_matchup(market_title)
+                                        or _surname_matchup(event_title)))
                     if ev_score >= MATCH_FLOOR:
                         candidates.extend(ev.get("markets") or [])
                         found += 1
