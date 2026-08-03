@@ -157,30 +157,35 @@ profiles:
     # `at` is a MULTIPLE of the band threshold, not a cent figure — the bar
     # already varies by band, by category and by measured drift, so a fixed
     # cent trigger would mean something different in every market.
+    # Ticket size doubled 2026-08-03 (owner request): $1.00 -> $2.00
+    # standard. The ladder keeps its 1.5x shape and every ticket-denominated
+    # cap scales with it, so the RELATIVE risk profile (rungs, five-tickets-
+    # a-game ceiling, halt sensitivity in tickets) is unchanged.
     size_ladder:
-      - {at: 1.0, usd: 1.00}    # clears the bar: standard ticket
-      - {at: 2.0, usd: 1.50}    # twice the bar: the larger ticket
-    per_fill_usd_default: 1
-    per_fill_usd_max: 1.5
-    per_market_exposure_usd: 1.5      # one ticket per bet; never add
+      - {at: 1.0, usd: 2.00}    # clears the bar: standard ticket
+      - {at: 2.0, usd: 3.00}    # twice the bar: the larger ticket
+    per_fill_usd_default: 2
+    per_fill_usd_max: 3
+    per_market_exposure_usd: 3        # one ticket per bet; never add
     # Sides of one game are not independent bets — exactly one of them pays.
     # A three-way soccer match is three markets and a full ladder is twenty,
     # so a per-market cap alone permits that much correlated exposure on a
     # single result. Five tickets a game is the concentration ceiling.
-    per_event_exposure_usd: 5
+    per_event_exposure_usd: 10
     # Day budget tracks the ACCOUNT, not a number typed here. A fixed daily
     # cap is a trade-count cap wearing a disguise: at $1 a fill, "$25/day"
     # means "25 trades a day" no matter how many edges exist. 1.0 = deploy up
     # to the full buying power each day; positions release cash as they
     # settle, so the real ceiling is settlement speed, not this line.
-    per_day_deployment_usd: 25        # floor, used before the balance is read
+    per_day_deployment_usd: 50        # floor, used before the balance is read
     per_day_deployment_pct_of_bankroll: 1.0
     # One position per BET, not per game. A single game lists a moneyline
     # plus a ladder of spreads and totals — 20-40 separately priced bets.
     # Claiming the whole event took one and abandoned the rest.
     one_position_per_event: false
     one_position_per_market: true     # ever; no adds after first fill
-    daily_loss_halt_usd: 15           # floor
+    daily_loss_halt_usd: 30           # floor (scaled with the $2 ticket:
+                                      # same ~15-ticket sensitivity as before)
     daily_loss_halt_pct_of_day: 0.15  # governs at high volume
     daily_loss_halt_sigmas: 4         # governs at low volume (4 sigma of the
                                       # day's own noise; a false halt costs 72h)

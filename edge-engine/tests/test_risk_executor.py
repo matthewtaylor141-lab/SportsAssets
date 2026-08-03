@@ -288,11 +288,11 @@ def test_paper_profile_decouples_sampling_caps():
     paper = caps_for_mode(risk_cfg, "PAPER")
     beta = caps_for_mode(risk_cfg, "LIVE_BETA")
     assert paper.per_fill_max == 10
-    # Micro live tier. The ceiling is 1.5, not 1, so the size ladder has a
-    # top rung — the DEFAULT stake is still $1 and only a bet clearing
-    # twice its bar reaches $1.50.
-    assert beta.per_fill_default == 1
-    assert beta.per_fill_max == 1.5
+    # Micro live tier, $2 ticket (owner request 2026-08-03). The ceiling is
+    # 3, not 2, so the size ladder has a top rung — the DEFAULT stake is
+    # still $2 and only a bet clearing twice its bar reaches $3.
+    assert beta.per_fill_default == 2
+    assert beta.per_fill_max == 3
     assert paper.one_per_market and beta.one_per_market
     assert not paper.one_per_event and not beta.one_per_event
 
@@ -306,11 +306,11 @@ def test_day_budget_follows_the_account_balance():
     unfunded = caps_for_mode(risk_cfg, "LIVE_BETA")
     funded = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=400.0)
     grown = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=5000.0)
-    assert unfunded.per_day == 25                       # floor before we know
-    assert funded.per_day == 400                        # 400 tickets a day
+    assert unfunded.per_day == 50                       # floor before we know
+    assert funded.per_day == 400                        # 200 tickets a day
     assert grown.per_day == 5000                        # scales with funding
     # A balance reading can never SHRINK the budget below the configured floor.
-    assert caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=1.0).per_day == 25
+    assert caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=1.0).per_day == 50
 
 
 def test_the_breaker_scales_with_the_trade_count():
@@ -322,7 +322,8 @@ def test_the_breaker_scales_with_the_trade_count():
     risk_cfg = Policy.load().risk
     small = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=100.0)
     big = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=4000.0)
-    assert small.daily_loss_halt == 40                   # 4 sigma of 100 bets
+    # $100 day at $2 tickets is 50 bets: 4 sigma = 4 * sqrt(50) * 2.
+    assert small.daily_loss_halt == pytest.approx(8 * 50**0.5)
     assert big.daily_loss_halt == 600                    # 15% of $4,000
     # Comfortably outside 3 sigma of the day's noise in both cases.
     for caps in (small, big):
@@ -336,7 +337,7 @@ def test_bankroll_updates_resize_the_caps(tmp_path):
     ledger = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     risk = RiskManager(ledger, Policy.load().risk)
     risk.set_mode("LIVE_BETA")
-    assert risk.caps.per_day == 25
+    assert risk.caps.per_day == 50
     risk.set_bankroll(800.0)
     assert risk.caps.per_day == 800
     risk.set_bankroll(None)          # venue unreachable: keep what we knew
@@ -495,12 +496,12 @@ def test_one_game_cannot_absorb_a_ticket_per_listed_outcome(tmp_path):
     bought on the same match, three times over."""
     led, risk = _live_rig(tmp_path)
     for i in range(5):
-        approved, _ = risk.approve("polymarket-us", f"pm:m{i}", "game-1", 1.0,
+        approved, _ = risk.approve("polymarket-us", f"pm:m{i}", "game-1", 2.0,
                                    mode="LIVE_BETA")
-        assert approved == 1.0
+        assert approved == 2.0
         _event_fill(led, "game-1", f"pm:m{i}", approved)
 
-    blocked, why = risk.approve("polymarket-us", "pm:m6", "game-1", 1.0,
+    blocked, why = risk.approve("polymarket-us", "pm:m6", "game-1", 2.0,
                                 mode="LIVE_BETA")
     assert blocked == 0 and "caps" in why
     # ...and a DIFFERENT game is unaffected.
@@ -525,7 +526,7 @@ def test_the_cap_is_opt_in_so_LIVE_keeps_its_measured_behaviour(tmp_path):
     from edge.execution.engine import Policy
 
     cfg = Policy.load().risk
-    assert caps_for_mode(cfg, "LIVE_BETA").per_event == 5
+    assert caps_for_mode(cfg, "LIVE_BETA").per_event == 10
     assert caps_for_mode(cfg, "LIVE").per_event == 0        # 0 = unbounded
 
 
@@ -560,10 +561,10 @@ def test_the_ladder_stakes_more_only_on_the_better_priced_bets():
     money where the price is better and nothing extra where it is not."""
     risk = _beta_risk()
     bar = 0.02
-    assert risk.size_for_edge(bar, bar) == 1.00           # exactly the bar
-    assert risk.size_for_edge(bar * 1.9, bar) == 1.00     # not yet 2x
-    assert risk.size_for_edge(bar * 2.0, bar) == 1.50     # the larger ticket
-    assert risk.size_for_edge(bar * 10, bar) == 1.50      # top rung, capped
+    assert risk.size_for_edge(bar, bar) == 2.00           # exactly the bar
+    assert risk.size_for_edge(bar * 1.9, bar) == 2.00     # not yet 2x
+    assert risk.size_for_edge(bar * 2.0, bar) == 3.00     # the larger ticket
+    assert risk.size_for_edge(bar * 10, bar) == 3.00      # top rung, capped
 
 
 def test_the_trigger_is_a_MULTIPLE_of_the_bar_not_a_cent_figure():
@@ -572,8 +573,8 @@ def test_the_trigger_is_a_MULTIPLE_of_the_bar_not_a_cent_figure():
     generous where the bar is low, unreachable where it is high."""
     risk = _beta_risk()
     # Same 4c edge, two different bars: only one is twice its bar.
-    assert risk.size_for_edge(0.04, 0.02) == 1.50
-    assert risk.size_for_edge(0.04, 0.035) == 1.00
+    assert risk.size_for_edge(0.04, 0.02) == 3.00
+    assert risk.size_for_edge(0.04, 0.035) == 2.00
 
 
 def test_an_unknown_bar_takes_the_STANDARD_ticket_not_the_top_rung():
@@ -581,9 +582,9 @@ def test_an_unknown_bar_takes_the_STANDARD_ticket_not_the_top_rung():
     this backwards would stake the maximum on precisely the markets we
     understand least."""
     risk = _beta_risk()
-    assert risk.size_for_edge(0.05, None) == 1.00
-    assert risk.size_for_edge(0.05, 0.0) == 1.00
-    assert risk.size_for_edge(None, 0.02) == 1.00
+    assert risk.size_for_edge(0.05, None) == 2.00
+    assert risk.size_for_edge(0.05, 0.0) == 2.00
+    assert risk.size_for_edge(None, 0.02) == 2.00
 
 
 def test_the_ladder_can_never_exceed_the_per_fill_cap():
