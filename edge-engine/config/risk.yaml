@@ -275,9 +275,18 @@ arbitrage:
   # one-per-market claim -> re-bought every qualifying cycle -> the
   # $0.50-0.99/cycle creep to $14-18), and partial books placed REAL
   # venue orders that were never ledger-recorded (why the positions had
-  # no provenance). The collector is now same-market-only in code; this
-  # stays false until that rebuild has shadow evidence behind it.
-  enabled: false
+  # no provenance). The collector is now same-market-only in code.
+  #
+  # RE-ENABLED 2026-08-03 (owner instruction: "ensure any available 100%
+  # arbitrage is traded"). What changed since the incident: legs pool by
+  # (market, family) so a ML+total pair can never read as a partition
+  # (regression test pins it), props are excluded, each proposition is
+  # claimed once in the ledger (no re-buy creep), and every filled leg is
+  # ledger-recorded with its order tagged. Sizing stays tiny (1 set,
+  # 3 books/cycle) until the live FOK semantics have been observed on
+  # real fills; a true set bought under $1 is arithmetic profit at
+  # settlement.
+  enabled: true
   max_sets: 1                 # contracts per leg, per opportunity
   max_books_per_cycle: 3
 
