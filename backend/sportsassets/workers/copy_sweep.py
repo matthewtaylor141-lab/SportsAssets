@@ -42,7 +42,7 @@ async def sweep_once() -> dict:
     rows = await pool.fetch(
         """
         SELECT DISTINCT ON (t.asset)
-               t.id, t.whale_id, t.whale_username, t.tx_hash, t.asset,
+               t.id, t.whale_id, w.username AS whale_username, t.tx_hash, t.asset,
                t.condition_id, t.side, t.outcome, t.outcome_index,
                t.size::float8 AS size, t.price::float8 AS price,
                t.notional::float8 AS notional, t.market_title, t.market_slug,
@@ -66,9 +66,7 @@ async def sweep_once() -> dict:
         payload = {
             "id": r["id"],
             "whale_id": r["whale_id"],
-            # The roster name is authoritative; the trade row's copy of the
-            # username is sometimes empty on backfilled rows.
-            "whale_username": r["whale_username"] or None,
+            "whale_username": r["whale_username"],
             "asset": r["asset"],
             "condition_id": r["condition_id"],
             "side": r["side"],
@@ -83,9 +81,6 @@ async def sweep_once() -> dict:
             "sport": r["sport"],
             "ts_epoch": r["ts_epoch"],
         }
-        if not payload["whale_username"]:
-            payload["whale_username"] = await pool.fetchval(
-                "SELECT username FROM whales WHERE id = $1", r["whale_id"])
         try:
             await maybe_execute(payload, None)
             attempted += 1
