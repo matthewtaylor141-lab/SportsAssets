@@ -102,8 +102,20 @@ async def healthz() -> dict:
 
     pool = await get_pool()
     await pool.fetchval("SELECT 1")
+    # Current RSS from /proc: after a night of OOM archaeology-by-email,
+    # memory is a number the probes can track, not a timeline to argue.
+    rss_mb = None
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss_mb = round(int(line.split()[1]) / 1024, 1)
+                    break
+    except OSError:
+        pass
     # Render injects the deployed commit — lets anyone confirm which build is live.
-    return {"ok": True, "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7]}
+    return {"ok": True, "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7],
+            "rss_mb": rss_mb}
 
 
 @app.get("/api/health/services")

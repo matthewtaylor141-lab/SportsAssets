@@ -348,7 +348,14 @@ def _fetch_raw() -> dict:
             break
     acts: list[dict] = []
     cursor = ""
-    for _ in range(12):     # deeper than the account card: entries need it
+    # First fetch after a deploy digs DEEP (Aug 1's trade activities had
+    # scrolled out of the shallow window before the permanent archive
+    # existed, which made the record's first day undatable and dropped it
+    # from the site — observed 2026-08-03). Once archived, history is
+    # permanent, so later refreshes go back to the cheap shallow page-in.
+    global _deep_swept
+    pages = 12 if _deep_swept else 80
+    for _ in range(pages):
         resp = client.portfolio.activities(
             {"limit": 100, "sortOrder": "SORT_ORDER_DESCENDING",
              "types": ["ACTIVITY_TYPE_TRADE",
@@ -358,7 +365,11 @@ def _fetch_raw() -> dict:
         cursor = resp.get("nextCursor") or ""
         if resp.get("eof") or not cursor:
             break
+    _deep_swept = True
     return {"positions": positions, "activities": acts}
+
+
+_deep_swept = False
 
 
 _archive_ready = False
