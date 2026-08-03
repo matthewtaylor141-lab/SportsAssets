@@ -188,7 +188,10 @@ export function TrackRecord() {
     return [...rows].sort((a, b) => key(b) - key(a))
   }, [data, status, sport, cat, q, sort])
 
-  if (err) return <EmptyState>{`Account API unreachable: ${err}`}</EmptyState>
+  // Cached numbers beat an error screen: only surface the failure when
+  // there is nothing at all to show — a refresh hiccup on a page already
+  // full of data should be invisible.
+  if (err && (!data || !s)) return <EmptyState>{`Account API unreachable: ${err}`}</EmptyState>
   if (!data || !s) return (
     <div className="page tr-page">
       <div className="tr-hero tr-skel" style={{ height: 340 }} />

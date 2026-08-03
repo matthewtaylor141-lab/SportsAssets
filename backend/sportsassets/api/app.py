@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -92,6 +93,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# The track-record payload alone is hundreds of KB of highly repetitive
+# JSON, polled every 30s by every open tab — uncompressed it dominated
+# page-load time on mobile. ~10x smaller on the wire with gzip.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 def require_admin(x_admin_token: str = Header(default="")) -> None:

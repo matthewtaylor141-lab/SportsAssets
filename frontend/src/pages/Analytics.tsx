@@ -208,7 +208,7 @@ function GroupTable({ rows, by, title }: {
 
 export function Analytics() {
   const { data, err } = useTrackRecord()
-  if (err) return <EmptyState>{`Account API unreachable: ${err}`}</EmptyState>
+  if (err && !data) return <EmptyState>{`Account API unreachable: ${err}`}</EmptyState>
   if (!data) return (
     <div className="page tr-page">
       <div className="card tr-skel" style={{ height: 280 }} />

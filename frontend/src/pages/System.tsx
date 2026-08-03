@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
+import { usePolled } from '../lib/poll'
 import { EmptyState } from '../components/EmptyState'
-import { api } from '../lib/api'
 import { fmtUsd } from '../lib/format'
 
 /* The evidence page: the engine's own telemetry, rendered for a team that
@@ -17,18 +17,7 @@ interface EngineStatus {
 const API_BASE = '' // api() prefixes
 
 function useEngine() {
-  const [status, setStatus] = useState<EngineStatus | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-  useEffect(() => {
-    let dead = false
-    const load = () =>
-      api<EngineStatus>('/api/engine/status')
-        .then((d) => !dead && (setStatus(d), setErr(null)))
-        .catch((e) => !dead && setErr(String(e)))
-    load()
-    const t = setInterval(load, 30_000)
-    return () => { dead = true; clearInterval(t) }
-  }, [])
+  const { data: status, err } = usePolled<EngineStatus>('/api/engine/status')
   return { status, err }
 }
 

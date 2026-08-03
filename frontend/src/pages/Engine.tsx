@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { usePolled } from '../lib/poll'
 import { EmptyState } from '../components/EmptyState'
 import { PnlCalendar } from '../components/PnlCalendar'
-import { api } from '../lib/api'
 import { fmtAgo, fmtCents, fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
 
 interface EngineSummary {
@@ -121,15 +121,7 @@ interface CopyReport {
 /** Measured copy-trade feasibility: for every fresh swisstony BUY we detect,
  * the residual order book is snapshotted at our real reaction time. */
 function CopyFeasibility() {
-  const [report, setReport] = useState<CopyReport | null>(null)
-
-  useEffect(() => {
-    const load = () =>
-      api<CopyReport>('/api/copy-report?whale=swisstony').then(setReport).catch(() => {})
-    load()
-    const t = setInterval(load, 30000)
-    return () => clearInterval(t)
-  }, [])
+  const { data: report } = usePolled<CopyReport>('/api/copy-report?whale=swisstony')
 
   const s = report?.summary
   return (
@@ -244,25 +236,12 @@ function CopyFeasibility() {
 }
 
 export function Engine() {
-  const [summary, setSummary] = useState<EngineSummary | null>(null)
-  const [fills, setFills] = useState<EngineFill[] | null>(null)
-  const [status, setStatus] = useState<EngineStatus | null>(null)
   const [venue, setVenue] = useState('')
 
-  const refresh = () => {
-    api<EngineSummary>('/api/engine/summary').then(setSummary).catch(() => {})
-    api<EngineStatus>('/api/engine/status').then(setStatus).catch(() => {})
-    api<EngineFill[]>(`/api/engine/fills?limit=100${venue ? `&venue=${venue}` : ''}`)
-      .then(setFills)
-      .catch(() => setFills([]))
-  }
-
-  useEffect(() => {
-    refresh()
-    const t = setInterval(refresh, 30000)
-    return () => clearInterval(t)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [venue])
+  const { data: summary } = usePolled<EngineSummary>('/api/engine/summary')
+  const { data: status } = usePolled<EngineStatus>('/api/engine/status')
+  const { data: fills } = usePolled<EngineFill[]>(
+    `/api/engine/fills?limit=100${venue ? `&venue=${venue}` : ''}`)
 
   const t = summary?.totals
 

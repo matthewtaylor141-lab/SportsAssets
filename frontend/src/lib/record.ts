@@ -1,5 +1,4 @@
-import { useEffect, useState } from 'react'
-import { api } from './api'
+import { usePolled } from './poll'
 
 /* One data source for the whole site: /api/track-record — the ACTUAL venue
  * account, windowed from Aug 1 on the venue's own entry timestamps. The
@@ -76,21 +75,9 @@ export const SINCE = '2026-08-01'
 export const MAX_STAKE = 100
 
 export function useTrackRecord(refreshMs = 30_000) {
-  const [data, setData] = useState<TrackRecordData | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-  useEffect(() => {
-    let dead = false
-    const load = () =>
-      api<TrackRecordData>(`/api/track-record?since=${SINCE}&max_stake=${MAX_STAKE}`)
-        .then((d) => {
-          if (dead) return
-          if (d.error) setErr(d.error)
-          else { setData(d); setErr(null) }
-        })
-        .catch((e) => !dead && setErr(String(e)))
-    load()
-    const t = setInterval(load, refreshMs)
-    return () => { dead = true; clearInterval(t) }
-  }, [refreshMs])
-  return { data, err }
+  return usePolled<TrackRecordData>(
+    `/api/track-record?since=${SINCE}&max_stake=${MAX_STAKE}`,
+    refreshMs,
+    (d) => d.error || null,
+  )
 }
