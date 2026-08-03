@@ -202,7 +202,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     if venue is None:
         return
     username = (payload.get("whale_username") or "").lower()
-    if payload.get("side") != "BUY" or username != cfg.ai_trader_source.lower():
+    if payload.get("side") != "BUY" or username not in cfg.source_whales():
         return
     his_notional = float(payload.get("notional") or 0)
     his_price = float(payload.get("price") or 0)

@@ -167,7 +167,7 @@ async def _place_ai_trade(
 ) -> None:
     cfg = settings()
     username = (payload.get("whale_username") or "").lower()
-    if not cfg.ai_trader_enabled or username != cfg.ai_trader_source.lower():
+    if not cfg.ai_trader_enabled or username not in cfg.source_whales():
         return
     his_notional = float(payload.get("notional") or 0)
     if his_notional <= 0:

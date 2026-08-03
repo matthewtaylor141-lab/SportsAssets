@@ -80,8 +80,17 @@ class Settings(BaseSettings):
     # AI TRADER paper account: copy the source whale's BUYs at ratio * his
     # notional, filled from the live residual book at our reaction time.
     ai_trader_enabled: bool = True
-    ai_trader_source: str = "swisstony"
+    # Comma-separated usernames to copy. swisstony's edge is MEASURED
+    # (decay study, 5.35M-fill calibration); RN1 added 2026-08-03 on owner
+    # instruction — unmeasured, so both the paper account and the live
+    # penny sleeve grade copies per-username and RN1 earns its keep or is
+    # removed on its own record, never blended into swisstony's.
+    ai_trader_source: str = "swisstony,RN1"
     ai_trader_ratio: float = 0.10
+
+    def source_whales(self) -> set[str]:
+        return {s.strip().lower() for s in self.ai_trader_source.split(",")
+                if s.strip()}
 
     # ── LIVE trading beta (REAL MONEY — disabled by default) ────────────
     # Requires an eligible, funded Polymarket account and a dedicated wallet

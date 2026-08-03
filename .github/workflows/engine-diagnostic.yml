@@ -112,6 +112,18 @@ jobs:
              /tmp/ai.json 2>/dev/null | head -20 || echo "  (unavailable)"
 
           echo ""
+          echo "#   LIVE COPY SLEEVE (live_orders — REAL dimes, all whales) #"
+          # orders==0 with fresh sub-10c source fills means the WORKERS env
+          # is missing LIVE_TRADING_ENABLED/PMUS creds (executor's venue
+          # resolves to None and it no-ops silently) — say so, don't guess.
+          curl -sS --max-time 60 -o /tmp/live.json "$BASE/api/live-status" || true
+          jq -r '"  enabled(api env): \(.enabled // .config.enabled // "?")  paused: \(.paused // "?")",
+                 (.orders // .summary // {} | to_entries[] | "  \(.key): \(.value)"),
+                 (.recent // [] | .[0:5][] |
+                   "  \(.placed_at // "?")  \(.whale_username // "?")  \(.status // "?")  limit \(.limit_price // "?")  $\(.filled_usd // 0)")' \
+             /tmp/live.json 2>/dev/null | head -25 || echo "  (unavailable)"
+
+          echo ""
           echo "#   MEMORY WATCH (rss_mb over 2 min — where does it die?)    #"
           for i in $(seq 1 24); do
             hz=$(curl -sS --max-time 8 "$BASE/healthz" 2>/dev/null)
