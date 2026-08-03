@@ -298,3 +298,32 @@ def test_failed_hydrate_serves_the_window_and_arms_a_retry(monkeypatch):
         tr._hydrate_task.cancel()
 
     asyncio.run(run())
+
+
+def test_slimmed_activities_build_the_identical_record():
+    """RAM keeps only what build() reads; the table keeps full payloads.
+    If build() grows a field dependency _slim missed, this catches it."""
+    from sportsassets.api.track_record import _slim
+
+    acts = [
+        _trade("aec-mlb-det-ath-2026-08-02", TS_AUG1 + 100, 4, 0.5),
+        _trade("aec-mlb-det-ath-2026-08-02", TS_AUG1 + 200, 2, 0.6),
+        _resolution("aec-mlb-det-ath-2026-08-02", TS_AUG2),
+        _trade("tsc-atp-x-y-2026-08-02-tg-21pt5", TS_AUG2 + 50, 3, 0.25),
+    ]
+    # Give the resolution settlement facts + metadata like the venue does.
+    acts[2]["positionResolution"].update({
+        "beforePosition": {"cost": 2.0, "realized": 0.0,
+                           "marketMetadata": {"title": "Tigers ML"}},
+        "afterPosition": {"realized": 4.0,
+                          "marketMetadata": {"title": "Tigers ML"}},
+    })
+    positions = {
+        "aec-mlb-det-ath-2026-08-02": _pos(0, 2.0, 0.0, realized=0.0, expired=True),
+        "tsc-atp-x-y-2026-08-02-tg-21pt5": _pos(3, 0.75, 0.9),
+    }
+    full = build(positions, acts, TS_AUG1)
+    slim = build(positions, [_slim(a) for a in acts], TS_AUG1)
+    full.pop("generated_at", None)
+    slim.pop("generated_at", None)
+    assert full == slim

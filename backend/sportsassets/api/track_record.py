@@ -393,6 +393,43 @@ _archive_cache: dict[str, Any] = {"ts": 0.0, "data": None}
 
 _archived_ids: set[str] = set()
 
+def _slim(a: dict) -> dict:
+    """Reduce an archived activity to exactly the fields build() reads.
+
+    The in-memory archive is every activity the account ever produced —
+    44k and growing ~2k/day — and holding the venue's full payloads put a
+    healthy process at 1.9 GB of a 2 GB instance (measured 2026-08-03
+    19:57Z: flat, but 93% of the kill line). The TABLE keeps full
+    fidelity; RAM keeps the record's working set. If build() grows a new
+    field dependency, add it here — the equivalence test will catch a
+    miss.
+    """
+    ts = _act_ts(a)
+    out: dict = {"id": a.get("id"), "type": a.get("type"),
+                 "timestamp": ts or None}
+    if a.get("type") == "ACTIVITY_TYPE_TRADE":
+        t = a.get("trade") or {}
+        out["trade"] = {"marketSlug": t.get("marketSlug"),
+                        "qty": t.get("qty"), "price": t.get("price"),
+                        "createTime": _act_ts(t) or None}
+    elif a.get("type") == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+        r = a.get("positionResolution") or {}
+        b = r.get("beforePosition") or {}
+        af = r.get("afterPosition") or {}
+        out["positionResolution"] = {
+            "marketSlug": r.get("marketSlug"),
+            "beforePosition": {
+                "realized": b.get("realized"), "cost": b.get("cost"),
+                "marketMetadata": {
+                    "title": (b.get("marketMetadata") or {}).get("title")}},
+            "afterPosition": {
+                "realized": af.get("realized"),
+                "marketMetadata": {
+                    "title": (af.get("marketMetadata") or {}).get("title")}},
+        }
+    return out
+
+
 _hydrate_task: asyncio.Task | None = None
 
 
@@ -417,8 +454,9 @@ def _ensure_hydrate_retry() -> None:
                     "SELECT payload FROM pmus_activity_archive")
 
                 def _parse() -> list[dict]:
-                    return [json.loads(r["payload"])
-                            if isinstance(r["payload"], str) else r["payload"]
+                    return [_slim(json.loads(r["payload"])
+                                  if isinstance(r["payload"], str)
+                                  else r["payload"])
                             for r in stored]
 
                 parsed = await asyncio.to_thread(_parse)
@@ -510,13 +548,13 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
                 logging.getLogger(__name__).exception("archive hydrate retry")
         if stored is None:
             _ensure_hydrate_retry()
-            return [a for _, _, _, a in new]
+            return [_slim(a) for _, _, _, a in new]
 
         def _parse() -> list[dict]:
             out: list[dict] = []
             for r in stored:
                 p = r["payload"]
-                out.append(json.loads(p) if isinstance(p, str) else p)
+                out.append(_slim(json.loads(p) if isinstance(p, str) else p))
             return out
 
         parsed = await asyncio.to_thread(_parse)
@@ -531,7 +569,7 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
         # — observed 2026-08-03, three OOM restarts on the Standard
         # instance). A new list, not in-place append: readers hold
         # references to the old one mid-request.
-        parsed = _archive_cache["data"] + [a for _, _, _, a in new]
+        parsed = _archive_cache["data"] + [_slim(a) for _, _, _, a in new]
 
     _archive_cache["data"], _archive_cache["ts"] = parsed, time.time()
     return parsed
