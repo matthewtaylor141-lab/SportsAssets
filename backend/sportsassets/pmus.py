@@ -205,6 +205,7 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
                   event_title, market_title):
             if q and q not in queries:
                 queries.append(q)
+        best_ev, best_ev_score = None, 0.0
         for q in queries:
             try:
                 resp = client.search.query(
@@ -218,13 +219,36 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
                                         _surname_matchup(market_title)
                                         or _surname_matchup(event_title)))
                     if ev_score >= MATCH_FLOOR:
-                        candidates.extend(ev.get("markets") or [])
                         found += 1
-                diag.append(f"search[{q[:24]}]:{found}ev/{len(candidates)}m")
+                        if ev_score > best_ev_score:
+                            best_ev, best_ev_score = ev, ev_score
+                diag.append(f"search[{q[:24]}]:{found}ev")
             except Exception as exc:  # noqa: BLE001
                 diag.append(f"search[{q[:24]}]:{type(exc).__name__}")
-            if candidates:
+            if best_ev is not None:
                 break
+        # Search returns SKELETON markets (slug + title, no outcome/team) —
+        # scoring them is scoring air: "New York Yankees" scored 0.0 against
+        # 298 markets that certainly included the Yankees ML (2026-08-03).
+        # Hydrate the best-matching event's markets with full lookups, then
+        # score fields that actually exist. Bounded to one event (~20-40
+        # markets) so a copy attempt costs a bounded number of API calls.
+        if best_ev is not None:
+            hydrated = 0
+            for m in (best_ev.get("markets") or [])[:40]:
+                if m.get("outcome") or m.get("team"):
+                    candidates.append(m)
+                    continue
+                slug = m.get("slug")
+                if not slug:
+                    continue
+                try:
+                    full = (client.markets.retrieve_by_slug(slug) or {})                         .get("market") or {}
+                    candidates.append(full or m)
+                    hydrated += 1
+                except Exception:  # noqa: BLE001 — score the skeleton instead
+                    candidates.append(m)
+            diag.append(f"hydrated:{hydrated}/{len(candidates)}")
 
     best2, best2_score = _best(candidates)
     if best2 is not None and best2_score >= MATCH_FLOOR:
