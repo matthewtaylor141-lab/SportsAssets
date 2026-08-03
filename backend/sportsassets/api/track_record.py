@@ -377,6 +377,9 @@ _archive_ready = False
 _archive_cache: dict[str, Any] = {"ts": 0.0, "data": None}
 
 
+_archived_ids: set[str] = set()
+
+
 async def _archive_and_union(acts: list[dict]) -> list[dict]:
     """Persist every venue activity ever seen; return the full archive.
 
@@ -388,6 +391,14 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
     evidence DECAYS is not a track record. So every activity is archived
     on first sight, keyed by the venue's own id, and the record is built
     from the archive: it can only ever grow.
+
+    CALLED ONCE PER RAW REFRESH, NEVER PER PAGE REQUEST. The first
+    version ran on every request, unguarded: ~8,000 rows serialized and
+    upserted per page view, concurrently for concurrent viewers — which
+    strangled the event loop and OOM-flapped the API for an hour on
+    2026-08-03 while every other suspect had already been eliminated.
+    Serialization runs in a worker thread; already-archived ids are
+    skipped via an in-process set seeded from the table.
     """
     global _archive_ready
     from ..db import get_pool
@@ -399,31 +410,41 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
                    id text PRIMARY KEY,
                    ts double precision,
                    payload jsonb NOT NULL)""")
+        known = await pool.fetch("SELECT id FROM pmus_activity_archive")
+        _archived_ids.update(r["id"] for r in known)
         _archive_ready = True
-    rows = []
-    for a in acts or []:
-        aid = str(a.get("id") or "")
-        if not aid:
-            aid = hashlib.sha256(json.dumps(a, sort_keys=True, default=str)
-                                 .encode()).hexdigest()
-        rows.append((aid, float(_act_ts(a) or 0.0),
-                     json.dumps(a, default=str)))
+
+    def _serialize() -> list[tuple]:
+        out = []
+        for a in acts or []:
+            aid = str(a.get("id") or "")
+            if not aid:
+                aid = hashlib.sha256(json.dumps(a, sort_keys=True, default=str)
+                                     .encode()).hexdigest()
+            if aid in _archived_ids:
+                continue
+            out.append((aid, float(_act_ts(a) or 0.0),
+                        json.dumps(a, default=str)))
+        return out
+
+    rows = await asyncio.to_thread(_serialize)
     if rows:
         await pool.executemany(
             "INSERT INTO pmus_activity_archive (id, ts, payload) "
             "VALUES ($1, $2, $3::jsonb) ON CONFLICT (id) DO NOTHING", rows)
-    # The archive only grows; re-reading and re-parsing all of it on every
-    # page request is pure allocation churn on a memory-capped service.
-    # One parsed copy, refreshed at most once a minute.
-    now = time.time()
-    if _archive_cache["data"] is None or now - _archive_cache["ts"] > 60:
-        stored = await pool.fetch("SELECT payload FROM pmus_activity_archive")
+        _archived_ids.update(r[0] for r in rows)
+    stored = await pool.fetch("SELECT payload FROM pmus_activity_archive")
+
+    def _parse() -> list[dict]:
         out: list[dict] = []
         for r in stored:
             p = r["payload"]
             out.append(json.loads(p) if isinstance(p, str) else p)
-        _archive_cache["data"], _archive_cache["ts"] = out, now
-    return _archive_cache["data"]
+        return out
+
+    parsed = await asyncio.to_thread(_parse)
+    _archive_cache["data"], _archive_cache["ts"] = parsed, time.time()
+    return parsed
 
 
 async def warm_cache() -> None:
@@ -465,6 +486,12 @@ async def track_record(since: str | None = None,
                     _raw_cache["data"] = await asyncio.wait_for(
                         asyncio.to_thread(_fetch_raw), timeout=55)
                     _raw_cache["ts"] = time.time()
+                    try:
+                        await _archive_and_union(
+                            _raw_cache["data"]["activities"])
+                    except Exception:  # noqa: BLE001
+                        logging.getLogger(__name__).exception(
+                            "archive sync failed on cold fetch")
                 except Exception as exc:  # noqa: BLE001 — surface, don't 500
                     return {"configured": True,
                             "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
@@ -476,19 +503,18 @@ async def track_record(since: str | None = None,
                 try:
                     _raw_cache["data"] = await asyncio.to_thread(_fetch_raw)
                     _raw_cache["ts"] = time.time()
+                    # Archive travels WITH the refresh — once per new
+                    # snapshot, never per page request.
+                    await _archive_and_union(_raw_cache["data"]["activities"])
                 except Exception:  # noqa: BLE001 — stale beats broken
                     logging.getLogger(__name__).exception(
                         "track-record background refresh failed; serving stale")
 
         asyncio.get_running_loop().create_task(_bg_refresh())
     raw = _raw_cache["data"]
-    acts = raw["activities"]
-    try:
-        acts = await _archive_and_union(acts)
-    except Exception:  # noqa: BLE001 — archive is an upgrade, not a gate
-        # Serve the live window rather than 500 if the DB hiccups; the
-        # next successful request re-archives everything it sees.
-        pass
+    # The request path reads ONLY in-process caches — the archive is
+    # synced by the refresh paths above, never by a page view.
+    acts = _archive_cache["data"] or raw["activities"]
     attributed = copy_slugs = None
     try:
         from ..db import get_pool
