@@ -181,7 +181,9 @@ async def _market_context(pool, payload: dict) -> dict:
 #   "full"        — ratio sizing per config; requires the trial cohort
 #                   to have cleared the promotion gate first
 COPY_MODE = "penny_trial"
-PENNY_TRIAL_DAILY_USD = 50.0
+# $100/day, was $50 (owner directive 2026-08-03) — roughly 300+ one-contract
+# copies a day at the 50c per-fill ceiling before the sleeve stands down.
+PENNY_TRIAL_DAILY_USD = 100.0
 # Owner directive 2026-08-03: raised $0.10 -> $0.50 per copy ("if that is
 # going to get more data flowing"). Still ONE CONTRACT per copy — the
 # ceiling only decides which of the source fills are copyable: at $0.10
