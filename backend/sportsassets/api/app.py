@@ -65,6 +65,12 @@ async def lifespan(_: FastAPI):
                 "ingestion fallback: poller (live-only, delayed 45s) in API")
         except Exception:  # noqa: BLE001 — the API must serve regardless
             logging.getLogger(__name__).exception("ingestion fallback failed")
+    # Warm the track-record snapshot (including the post-deploy deep
+    # activity sweep) BEFORE the first visitor, so no page load ever waits
+    # on the venue's 20-80 serial REST calls.
+    from .track_record import warm_cache
+
+    asyncio.get_running_loop().create_task(warm_cache())
     yield
     if poller_task is not None:
         poller_task.cancel()

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -425,6 +426,18 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
     return _archive_cache["data"]
 
 
+async def warm_cache() -> None:
+    """Run the first (deep) venue fetch at process boot, off the user path.
+
+    Fail-soft: a failed warm just means the first visitor takes the slow
+    path once."""
+    try:
+        await track_record()
+        logging.getLogger(__name__).info("track-record cache warmed")
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("track-record warm failed")
+
+
 async def track_record(since: str | None = None,
                        max_stake: float | None = None) -> dict:
     cfg = settings()
@@ -436,16 +449,38 @@ async def track_record(since: str | None = None,
     except ValueError:
         since_ts = datetime.strptime(DEFAULT_SINCE, "%Y-%m-%d") \
             .replace(tzinfo=timezone.utc).timestamp()
-    async with _lock:
-        now = time.time()
-        if _raw_cache["data"] is None or now - _raw_cache["ts"] > _RAW_TTL:
-            try:
-                _raw_cache["data"] = await asyncio.wait_for(
-                    asyncio.to_thread(_fetch_raw), timeout=30)
-                _raw_cache["ts"] = now
-            except Exception as exc:  # noqa: BLE001 — surface, don't 500
-                return {"configured": True,
-                        "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    # STALE-WHILE-REVALIDATE. The venue fetch is 20+ serial REST calls
+    # (80+ on the post-deploy deep sweep) — 5-60 seconds. Holding the page
+    # request for it made the site "take forever and honestly never load"
+    # (owner, 2026-08-03). A snapshot that is 30-90 seconds old is
+    # indistinguishable from live for a settlement-paced record, so: serve
+    # the last good snapshot INSTANTLY, refresh in the background
+    # (single-flight), and only ever block on the very first fetch of a
+    # process — which warm_cache() runs at boot, before any user arrives.
+    now = time.time()
+    if _raw_cache["data"] is None:
+        async with _lock:
+            if _raw_cache["data"] is None:
+                try:
+                    _raw_cache["data"] = await asyncio.wait_for(
+                        asyncio.to_thread(_fetch_raw), timeout=55)
+                    _raw_cache["ts"] = time.time()
+                except Exception as exc:  # noqa: BLE001 — surface, don't 500
+                    return {"configured": True,
+                            "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    elif now - _raw_cache["ts"] > _RAW_TTL and not _lock.locked():
+        async def _bg_refresh() -> None:
+            async with _lock:
+                if time.time() - _raw_cache["ts"] <= _RAW_TTL:
+                    return          # someone else already refreshed
+                try:
+                    _raw_cache["data"] = await asyncio.to_thread(_fetch_raw)
+                    _raw_cache["ts"] = time.time()
+                except Exception:  # noqa: BLE001 — stale beats broken
+                    logging.getLogger(__name__).exception(
+                        "track-record background refresh failed; serving stale")
+
+        asyncio.get_running_loop().create_task(_bg_refresh())
     raw = _raw_cache["data"]
     acts = raw["activities"]
     try:
