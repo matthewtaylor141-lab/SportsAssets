@@ -291,7 +291,7 @@ def _rich_client(remaining, used=10_000.0, elapsed_s=86_400.0):
 def test_a_rich_quota_buys_freshness_automatically():
     """Staleness is the measured edge leak (retention 0.72), and freshness
     is bought with credits. A plan upgrade must speed the engine up on its
-    own — no config edit, no redeploy: runway >= 2x the billing target
+    own — no config edit, no redeploy: runway >= 1.25x the billing target
     drops active sports to the fast TTL and props to the fast event TTL."""
     c = _rich_client(remaining=10_000.0 * 90)   # ~90 days of runway
     assert c._credits_rich() is True
@@ -301,10 +301,10 @@ def test_a_rich_quota_buys_freshness_automatically():
 
 
 def test_a_thin_or_unknown_quota_never_speeds_up():
-    """The same knob must fail SAFE: a runway under twice the target keeps
+    """The same knob must fail SAFE: a runway under 1.25x the target keeps
     the base clocks (the governor handles real scarcity by parking sports),
     and an unmeasured quota is not permission to burn it."""
-    thin = _rich_client(remaining=10_000.0 * 40)   # 40d < 2x30d target
+    thin = _rich_client(remaining=10_000.0 * 8)    # 8d < 1.25x7d target
     assert thin._credits_rich() is False
     assert thin._ttl_for("baseball_mlb") == 25
     assert thin._event_ttl_s() == thin.EVENT_TTL_S
@@ -331,8 +331,8 @@ def test_governor_parks_the_quietest_sports_when_credits_would_run_out():
     client = TheOddsAPIClient(api_key="k", cache_ttl_s=10)
     sports = ["busy", "medium", "quiet", "empty"]
     client._sport_events = {"busy": 40, "medium": 20, "quiet": 5, "empty": 0}
-    # 10 days of runway against a 30-day target -> afford a third of them.
-    client._quota = {"remaining": 10_000.0, "used": 5_000.0}
+    # ~2.3 days of runway against a 7-day target -> afford a third of them.
+    client._quota = {"remaining": 2_333.0, "used": 5_000.0}
     client._quota_t0, client._quota_used0 = time.time() - 86_400, 4_000.0
     parked = client.rebalance_budget(sports)
     assert "busy" not in parked and "empty" in parked

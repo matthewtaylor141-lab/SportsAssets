@@ -284,7 +284,13 @@ class TheOddsAPIClient(OddsFeed):
 
     FAST_TTL_S = 10.0          # sharp-line refresh when credits are rich
     FAST_EVENT_TTL_S = 600.0   # props/segments refresh when credits are rich
-    RICH_RUNWAY_FACTOR = 2.0   # runway must be twice the billing target
+    # 1.25x, was 2.0: the 2x margin was sized for a 30-day target, where the
+    # burn estimate is stale for weeks and an error compounds for weeks. At a
+    # 7-day target the estimate refreshes fast relative to the horizon, and
+    # the governor parks sports progressively as runway thins anyway — the
+    # doubled margin only kept fast mode off at runways the plan comfortably
+    # survives. (Staleness is the measured leak: retention 0.735.)
+    RICH_RUNWAY_FACTOR = 1.25
 
     def _credits_rich(self) -> bool:
         remaining = self._quota.get("remaining")
@@ -306,7 +312,13 @@ class TheOddsAPIClient(OddsFeed):
     # the trading window, and the tail is parked until credits recover.
 
     TRADING_WINDOW_H = 72
-    QUOTA_TARGET_DAYS = 30      # the budget should outlast the billing month
+    # Owner directive 2026-08-03: coverage-first. A 30-day target parked 54
+    # sports and held fast mode off to stretch the plan across the billing
+    # month; the owner prefers full coverage now and topping up credits when
+    # the provider warns. 7 days keeps a real safety margin (the governor
+    # still parks progressively as runway thins) without starving coverage
+    # for weeks to protect it. Override per-service: EDGE_QUOTA_TARGET_DAYS.
+    QUOTA_TARGET_DAYS = 7
 
     def _burn_per_day(self) -> float | None:
         used, t0 = self._quota.get("used"), getattr(self, "_quota_t0", None)
