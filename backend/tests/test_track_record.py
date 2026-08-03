@@ -209,3 +209,52 @@ def test_no_attribution_sets_means_the_old_behavior_exactly():
     assert len(out["trades"]) == 1
     assert out["excluded_unattributed"] is None
     assert out["excluded_copy_sleeve"] is None
+
+
+# ── archive refresh: warm path must not re-read the table ──────────────
+
+def test_warm_archive_refresh_appends_without_rereading_the_table(monkeypatch):
+    """Re-parsing the whole archive every ~30s refresh was the API's memory
+    ratchet (glibc thread arenas keep freed parse pages; RSS climbed to the
+    2 GB kill line three times on 2026-08-03). Warm refreshes must touch
+    only the NEW rows; the full table read happens once, at cold boot."""
+    import asyncio
+
+    from sportsassets.api import track_record as tr
+
+    class FakePool:
+        def __init__(self):
+            self.fetches, self.execs = [], []
+
+        async def execute(self, q, *a):
+            self.execs.append(q)
+
+        async def executemany(self, q, rows):
+            self.execs.append((q, rows))
+
+        async def fetch(self, q, *a):
+            self.fetches.append(q)
+            return []
+
+    pool = FakePool()
+
+    async def fake_get_pool():
+        return pool
+
+    import sportsassets.db as db
+    monkeypatch.setattr(db, "get_pool", fake_get_pool)
+    monkeypatch.setattr(tr, "_archive_ready", True)
+    monkeypatch.setattr(tr, "_archived_ids", {"a1"})
+    monkeypatch.setitem(tr._archive_cache, "data", [{"id": "a1"}])
+
+    out = asyncio.run(tr._archive_and_union([{"id": "a1"}, {"id": "a2"}]))
+
+    assert [a["id"] for a in out] == ["a1", "a2"]
+    assert pool.fetches == []                      # no full-table re-read
+    inserted = [r for q, r in pool.execs if isinstance(r, list)]
+    assert len(inserted) == 1 and len(inserted[0]) == 1  # only a2 upserted
+
+    # Cold boot (empty in-process cache) DOES hydrate from the table.
+    monkeypatch.setitem(tr._archive_cache, "data", None)
+    asyncio.run(tr._archive_and_union([{"id": "a1"}]))
+    assert any("SELECT payload" in q for q in pool.fetches)

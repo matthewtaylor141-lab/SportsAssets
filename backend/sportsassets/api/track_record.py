@@ -433,25 +433,42 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
             if aid in _archived_ids:
                 continue
             out.append((aid, float(_act_ts(a) or 0.0),
-                        json.dumps(a, default=str)))
+                        json.dumps(a, default=str), a))
         return out
 
-    rows = await asyncio.to_thread(_serialize)
-    if rows:
+    new = await asyncio.to_thread(_serialize)
+    if new:
         await pool.executemany(
             "INSERT INTO pmus_activity_archive (id, ts, payload) "
-            "VALUES ($1, $2, $3::jsonb) ON CONFLICT (id) DO NOTHING", rows)
-        _archived_ids.update(r[0] for r in rows)
-    stored = await pool.fetch("SELECT payload FROM pmus_activity_archive")
+            "VALUES ($1, $2, $3::jsonb) ON CONFLICT (id) DO NOTHING",
+            [(aid, ts, js) for aid, ts, js, _ in new])
+        _archived_ids.update(r[0] for r in new)
 
-    def _parse() -> list[dict]:
-        out: list[dict] = []
-        for r in stored:
-            p = r["payload"]
-            out.append(json.loads(p) if isinstance(p, str) else p)
-        return out
+    if _archive_cache["data"] is None:
+        # Cold boot: hydrate the in-memory archive from the table, once.
+        stored = await pool.fetch("SELECT payload FROM pmus_activity_archive")
 
-    parsed = await asyncio.to_thread(_parse)
+        def _parse() -> list[dict]:
+            out: list[dict] = []
+            for r in stored:
+                p = r["payload"]
+                out.append(json.loads(p) if isinstance(p, str) else p)
+            return out
+
+        parsed = await asyncio.to_thread(_parse)
+    else:
+        # Warm: the cache IS the archive (first-seen versions, exactly what
+        # the table holds under ON CONFLICT DO NOTHING), so append only this
+        # refresh's genuinely-new activities. Re-reading and re-parsing the
+        # WHOLE table here on every refresh was the API's memory ratchet:
+        # each multi-MB parse landed in a fresh worker thread whose malloc
+        # arena kept the freed pages, so RSS only ever went up (995 MB ->
+        # 1,336 MB baseline over one morning, spikes to the 2 GB kill line
+        # — observed 2026-08-03, three OOM restarts on the Standard
+        # instance). A new list, not in-place append: readers hold
+        # references to the old one mid-request.
+        parsed = _archive_cache["data"] + [a for _, _, _, a in new]
+
     _archive_cache["data"], _archive_cache["ts"] = parsed, time.time()
     return parsed
 
