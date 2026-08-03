@@ -9,8 +9,8 @@ it on a slow clock.
 
 Mechanics and why they're safe:
 - Candidates: each whale's most recent BUY per outcome token in the last
-  7 days, at <= $0.50, in a market not known to be resolved, that the live
-  sleeve has never touched (any live_orders row for the asset disqualifies).
+  7 days, at any price (owner directive: every trade, one contract), in a
+  market not known to be resolved and not already actually ordered.
 - Execution goes through maybe_execute — the SAME caps as fresh copies
   (one contract, per-fill ceiling, $100/day, kill switch, dedupe). The
   sweep adds no new authority; it only widens the candidate stream.
@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 
 BOOT_DELAY_S = 120       # let the poller/executor settle before sweeping
 SWEEP_EVERY_S = 6 * 3600
-PRICE_CEILING = 0.50     # mirrors the per-fill ceiling; cheap pre-filter
+PRICE_CEILING = 0.99     # mirrors the per-fill ceiling; cheap pre-filter
 
 
 async def sweep_once() -> dict:

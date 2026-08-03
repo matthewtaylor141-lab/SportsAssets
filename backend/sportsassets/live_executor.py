@@ -184,16 +184,14 @@ COPY_MODE = "penny_trial"
 # $100/day, was $50 (owner directive 2026-08-03) — roughly 300+ one-contract
 # copies a day at the 50c per-fill ceiling before the sleeve stands down.
 PENNY_TRIAL_DAILY_USD = 100.0
-# Owner directive 2026-08-03: raised $0.10 -> $0.50 per copy ("if that is
-# going to get more data flowing"). Still ONE CONTRACT per copy — the
-# ceiling only decides which of the source fills are copyable: at $0.10
-# only their sub-10c longshots qualified (one band); at $0.50 the copy
-# cohort spans their 05-10c (+2.7c), 15-20c (+2.3c), 30-35c (+3.6c) and
-# 45-50c (+2.9c) measured bands. Note 40-45c was measured DEAD (-0.4c)
-# for the reference account and is knowingly included — per-band grading
-# of settled copies will show it, and the $50/day ceiling bounds the
-# tuition. 1.00 ~= one contract at any price (full-band coverage).
-PENNY_TRIAL_PER_FILL_USD = 0.50
+# Owner directive 2026-08-03 (final): "every single trade as long as the
+# price is the same, better or within 2% if worse." Full-band coverage —
+# one contract per source fill at ANY price. The price tolerance moved
+# from an absolute 2c slippage to RELATIVE 2%, floored to the venue's
+# whole-cent tick so a fill can never exceed the owner's tolerance
+# (10c -> limit 10c: same-price-only; 50c -> 51c; 80c -> 81c). The FOK
+# limit mechanics give same-or-better for free.
+PENNY_TRIAL_PER_FILL_USD = 0.99
 
 
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
@@ -229,9 +227,12 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         return
 
     if COPY_MODE == "penny_trial":
-        # One contract at his price + slippage: the venue's true minimum.
-        # A whole-unit FOK either fills the single contract or kills.
-        limit = round(min(his_price + cfg.live_max_slippage_cents / 100.0, 0.99), 2)
+        # One contract at his price +2% RELATIVE, floored to the venue's
+        # cent tick (owner tolerance: same/better/within-2%-worse). A
+        # whole-unit FOK either fills the single contract or kills.
+        import math
+
+        limit = round(min(math.floor(his_price * 1.02 * 100) / 100.0, 0.99), 2)
         shares = 1.0
         usd = limit
         if usd > PENNY_TRIAL_PER_FILL_USD:
