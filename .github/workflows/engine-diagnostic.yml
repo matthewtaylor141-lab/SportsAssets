@@ -112,6 +112,20 @@ jobs:
              /tmp/ai.json 2>/dev/null | head -20 || echo "  (unavailable)"
 
           echo ""
+          echo "#   MEMORY WATCH (rss_mb over 2 min — where does it die?)    #"
+          for i in $(seq 1 24); do
+            hz=$(curl -sS --max-time 8 "$BASE/healthz" 2>/dev/null)
+            code=$?
+            ts=$(date -u +%H:%M:%S)
+            if [ $code -eq 0 ] && echo "$hz" | jq -e .ok >/dev/null 2>&1; then
+              echo "  $ts  $(echo "$hz" | jq -c '{rss_mb, db_ok, commit}')"
+            else
+              echo "  $ts  DOWN"
+            fi
+            sleep 5
+          done
+
+          echo ""
           echo "#   SERVICE HEARTBEATS (which worker is dead, and why)       #"
           curl -sS --max-time 60 "$BASE/api/health/services" 2>&1 | \
             jq -r '.[] | "  \(.service): \(.status)  \(.beat_at)  \(.error // "")"' \

@@ -355,7 +355,16 @@ def _fetch_raw() -> dict:
     # from the site — observed 2026-08-03). Once archived, history is
     # permanent, so later refreshes go back to the cheap shallow page-in.
     global _deep_swept
-    pages = 12 if _deep_swept else 80
+    # Deep sweep is OPT-IN (DEEP_SWEEP=1): it was a one-time recovery tool
+    # for Aug 1's scrolled-out history, but as a per-boot default it ran on
+    # EVERY restart — and on a restart-looping service that meant the
+    # heaviest possible work exactly when memory was scarcest (2026-08-03,
+    # ~90s kill cycles). Set the env, let one boot archive the history
+    # permanently, then unset it.
+    import os as _os
+
+    deep_ok = _os.getenv("DEEP_SWEEP", "0") == "1"
+    pages = 80 if (deep_ok and not _deep_swept) else 12
     for _ in range(pages):
         resp = client.portfolio.activities(
             {"limit": 100, "sortOrder": "SORT_ORDER_DESCENDING",
