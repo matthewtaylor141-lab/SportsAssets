@@ -266,7 +266,8 @@ export function TrackRecord() {
           <div className="card-title">DAILY P&amp;L</div>
           {data.daily.length ? (
             <PnlCalendar days={data.daily.map((d) => ({
-              date: d.date, pnl: d.pnl, volume: d.deployed, trades: d.trades }))} />
+              date: d.date, pnl: d.pnl, volume: d.deployed, trades: d.trades,
+              settled: d.settled, open: d.open }))} />
           ) : <EmptyState>First settlement day pending.</EmptyState>}
         </div>
         <div className="card">

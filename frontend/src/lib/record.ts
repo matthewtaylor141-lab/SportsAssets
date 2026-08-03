@@ -29,6 +29,7 @@ export interface TRDaily {
   date: string
   deployed: number
   trades: number
+  open: number
   pnl: number
   settled: number
   wins: number

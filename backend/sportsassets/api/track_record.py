@@ -258,17 +258,22 @@ def build(positions: dict[str, dict], activities: list[dict],
         if not r["entry_date"]:
             continue
         d = daily.setdefault(r["entry_date"], {
-            "date": r["entry_date"], "deployed": 0.0, "trades": 0,
+            "date": r["entry_date"], "deployed": 0.0, "trades": 0, "open": 0,
             "pnl": 0.0, "settled": 0, "wins": 0, "pnl_estimated": False})
         d["deployed"] += r["stake"]
         d["trades"] += 1
+        # Open count lets the UI tell "live day, money still on the table"
+        # apart from "settled at zero" — a day of open positions is not a
+        # $0 loss, and painting it red taught the owner to distrust the page.
+        if not r["settled"]:
+            d["open"] += 1
     for r in settled_rows:
         ts = r["settled_ts"] or r["entry_ts"]
         if not ts:
             continue
         day = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
         d = daily.setdefault(day, {
-            "date": day, "deployed": 0.0, "trades": 0,
+            "date": day, "deployed": 0.0, "trades": 0, "open": 0,
             "pnl": 0.0, "settled": 0, "wins": 0, "pnl_estimated": False})
         d["pnl"] += r["pnl"] or 0
         d["settled"] += 1
@@ -446,7 +451,23 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
 
     if _archive_cache["data"] is None:
         # Cold boot: hydrate the in-memory archive from the table, once.
-        stored = await pool.fetch("SELECT payload FROM pmus_activity_archive")
+        # RETRIED: this read races the workers' heaviest moments (analytics
+        # first cycle, backfill flood) on a shared Postgres; a single failed
+        # attempt used to leave the cache empty, silently demoting the site
+        # to the venue's ~2-day window — Aug 1 vanished and every total
+        # shrank (owner report, 2026-08-03 evening).
+        stored = None
+        for wait in (0.0, 1.0, 4.0):
+            if wait:
+                await asyncio.sleep(wait)
+            try:
+                stored = await pool.fetch(
+                    "SELECT payload FROM pmus_activity_archive")
+                break
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception("archive hydrate retry")
+        if stored is None:
+            raise RuntimeError("archive hydrate failed after retries")
 
         def _parse() -> list[dict]:
             out: list[dict] = []
@@ -541,6 +562,16 @@ async def track_record(since: str | None = None,
     # The request path reads ONLY in-process caches — the archive is
     # synced by the refresh paths above, never by a page view.
     acts = _archive_cache["data"] or raw["activities"]
+    # Self-describing provenance: which activity source built this payload.
+    # When the archive is unavailable the record silently loses everything
+    # older than the venue's sliding window — that state must be visible in
+    # one curl, not deduced from shrunken totals.
+    source = {
+        "activities_source": ("archive" if _archive_cache["data"]
+                              else "venue_window"),
+        "archive_rows": len(_archive_cache["data"] or []),
+        "window_rows": len(raw["activities"] or []),
+    }
     attributed = copy_slugs = None
     try:
         from ..db import get_pool
@@ -560,7 +591,7 @@ async def track_record(since: str | None = None,
         copy_slugs = {r["us_market_slug"] for r in cp}
     except Exception:  # noqa: BLE001 — provenance is an upgrade, not a gate
         attributed = copy_slugs = None
-    return {"configured": True,
+    return {"configured": True, **source,
             **build(raw["positions"], acts, since_ts,
                     max_stake=max_stake, attributed=attributed,
                     copy_slugs=copy_slugs)}

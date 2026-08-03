@@ -6,6 +6,8 @@ export interface DayStat {
   pnl: number
   volume: number
   trades: number
+  settled?: number
+  open?: number
 }
 
 /** Monthly calendar of daily realized P&L — green/red intensity per day,
@@ -48,7 +50,23 @@ export function PnlCalendar({
     }),
   ]
 
+  // A day whose money is still on the table is LIVE, not lost: red at $0
+  // taught the owner the page was wrong. Red/green is reserved for days
+  // where settled money says so; a live day gets a neutral "in play" cell.
+  // "Live" = most of the day's money is still in play and realized P&L is
+  // still a rounding error. A handful of tiny early settlements must not
+  // flip the whole day red while 30+ positions are unresolved.
+  const isLive = (d: DayStat) =>
+    (d.open ?? 0) > 0 && Math.abs(d.pnl) < 1 && (d.open ?? 0) > (d.settled ?? 0)
+
   const cellStyle = (d: DayStat): React.CSSProperties => {
+    if (isLive(d)) {
+      return {
+        background: 'rgba(148,163,184,0.14)',
+        color: 'var(--ink-2)',
+        border: '1px dashed rgba(148,163,184,0.45)',
+      }
+    }
     const k = Math.min(1, Math.abs(d.pnl) / maxAbs)
     const [r, g, b] = d.pnl >= 0 ? [57, 135, 229] : [230, 103, 103]
     return {
@@ -91,7 +109,9 @@ export function PnlCalendar({
               title={onSelect ? 'Click for the day report' : undefined}
             >
               <span className="cal-day">{day}</span>
-              <span className="cal-pnl">{fmtSignedUsd(c.pnl)}</span>
+              <span className="cal-pnl">
+                {isLive(c) ? `${c.open} live` : fmtSignedUsd(c.pnl)}
+              </span>
             </div>
           )
         })}
@@ -101,6 +121,9 @@ export function PnlCalendar({
           <div>{hover.d.date}</div>
           <strong className={hover.d.pnl >= 0 ? 'pos' : 'neg'}>{fmtSignedUsd(hover.d.pnl)}</strong>{' '}
           realized · {hover.d.trades} trades · {fmtUsd(hover.d.volume)} volume
+          {(hover.d.open ?? 0) > 0 && (
+            <div className="muted">{hover.d.open} still open — settles when games finish</div>
+          )}
         </div>
       )}
     </div>
