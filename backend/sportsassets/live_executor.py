@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 from .config import settings
@@ -186,7 +187,11 @@ COPY_MODE = "penny_trial"
 # activity itself (~$300-600/day), so $1000 is effectively unbinding —
 # it survives only as a runaway-bug breaker, which no live spend path
 # should ever be without. History: $50 -> $100 -> $200 -> $400 -> $1000.
-PENNY_TRIAL_DAILY_USD = 1000.0
+# Owner directive 2026-08-04: NO total-volume cap on copies — the per-fill
+# clip and the once-per-whale-position rule are the limits; total volume
+# is naturally bounded by what the source whales actually trade. The env
+# knob remains for the day the owner wants a ceiling back.
+PENNY_TRIAL_DAILY_USD = float(os.environ.get("COPY_DAILY_USD", "inf"))
 # Owner directive 2026-08-04 (revised minutes after the $3 call): $2
 # target per copy — as many whole contracts as $2 buys at the limit
 # (20c -> 10 contracts, 50c -> 4, 97c -> 2), rounded DOWN so a copy

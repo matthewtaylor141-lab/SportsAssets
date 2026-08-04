@@ -1968,7 +1968,7 @@ def _main_impl() -> None:
                             st = kcopy(kalshi=kalshi_a, ledger=ledger,
                                        identities=rows, live=risk.is_live,
                                        day_usd=float(os.environ.get(
-                                           "EDGE_KCOPY_DAY_USD", "200")))
+                                           "EDGE_KCOPY_DAY_USD", "inf")))
                             _KCOPY_STATS.clear()
                             _KCOPY_STATS.update(st, at=time.time())
                             log.info("kalshi copy sweep: %s", st)
