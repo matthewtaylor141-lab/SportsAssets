@@ -210,6 +210,23 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     his_price = float(payload.get("price") or 0)
     if his_notional <= 0 or not (0 < his_price < 1):
         return
+    # Capital turnover (owner, 2026-08-04): fresh detections on games more
+    # than ~a day out are DEFERRED — no audit row is written, so the 6h
+    # sweep re-candidates them once the game is inside the window. A small
+    # bankroll compounds by settling, not by holding Thursday's ticket
+    # since Monday.
+    import re as _re
+    from datetime import date, timedelta
+
+    mslug = payload.get("market_slug") or payload.get("event_slug") or ""
+    mdate = _re.search(r"\d{4}-\d{2}-\d{2}", mslug)
+    if mdate:
+        try:
+            y, mo, d = map(int, mdate.group(0).split("-"))
+            if date(y, mo, d) > date.today() + timedelta(days=1):
+                return
+        except ValueError:
+            pass
 
     pool = await get_pool()
     if await _is_paused(pool):

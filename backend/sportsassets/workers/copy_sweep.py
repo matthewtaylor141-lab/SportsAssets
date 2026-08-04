@@ -56,6 +56,17 @@ async def sweep_once() -> dict:
           AND t.ts > now() - interval '7 days'
           AND lower(w.username) = ANY($1)
           AND COALESCE(m.resolved, false) = false
+          -- CAPITAL TURNOVER (owner, 2026-08-04): with a small bankroll,
+          -- money locked in Wednesday's game is money not compounding
+          -- today. Only games dated today/tomorrow (slug-embedded date)
+          -- are candidates NOW; farther games are DEFERRED, not skipped —
+          -- each 6h sweep re-evaluates, so they place once inside the
+          -- window. Undated slugs pass (can't defer what can't be dated).
+          AND (substring(COALESCE(t.market_slug, t.event_slug, '')
+                         from '\d{4}-\d{2}-\d{2}') IS NULL
+               OR substring(COALESCE(t.market_slug, t.event_slug, '')
+                            from '\d{4}-\d{2}-\d{2}')::date
+                  <= current_date + 1)
           -- An asset is off the table once an order was actually PLACED
           -- for it (filled/unfilled/submitting/error). Mapping rejections
           -- are retryable: a mapper fix must be able to revisit the same
@@ -70,6 +81,15 @@ async def sweep_once() -> dict:
         """,
         whales, PRICE_CEILING,
     )
+    # Nearest game first: the day's copy budget goes to positions that
+    # settle (and free their capital) soonest.
+    def _game_date(r):
+        import re as _re
+        m = _re.search(r"\d{4}-\d{2}-\d{2}",
+                       (r["market_slug"] or r["event_slug"] or ""))
+        return m.group(0) if m else "0000-00-00"
+
+    rows = sorted(rows, key=_game_date)
     attempted = 0
     for r in rows:
         payload = {
