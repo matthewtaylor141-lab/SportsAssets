@@ -77,6 +77,16 @@ def _outcome_score(us_market: dict, outcome: str | None) -> float:
     title = us_market.get("title") or ""
     if title and " vs" not in title.lower() and title.count("-") < 4:
         candidates.append(title)
+    # The REAL schema (named by the 2026-08-04 trails): markets carry a
+    # natural-language `question` — "Will the Los Angeles Dodgers cover
+    # -1.5 vs the Chicago Cubs...", "Will CA Huracan win against CA
+    # Tucuman...". The subject of cover/win IS the side; extract it.
+    # "Who will win X vs Y" questions name no side and never vote.
+    q = us_market.get("question") or ""
+    if q:
+        mq = re.search(r"^will (?:the )?(.+?) (?:cover|win)", _norm(q))
+        if mq:
+            candidates.append(mq.group(1))
     best = max((_sim(c, outcome) for c in candidates if c), default=0.0)
     # Player-name robustness: "Bianca Andreescu" vs the venue's
     # "Andreescu, B." scores ~0.68 on raw similarity — below the floor —
@@ -191,7 +201,13 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
     # the source market title (the line) must agree with numbers in the
     # candidate's title: agreement is a nudge up, disagreement (including
     # line-vs-no-line) drops the candidate below the floor.
-    src_nums = set(re.findall(r"\d+(?:\.\d+)?", market_title or ""))
+    # Line numbers are the HALF-POINT decimals (-1.5, 10.5): question text
+    # also carries dates ("Aug 3, 2026") that a naive number-set equality
+    # falsely penalized. Compare lines only.
+    def _lines(text: str | None) -> set[str]:
+        return {n for n in re.findall(r"\d+\.5", text or "")}
+
+    src_lines = _lines(market_title)
 
     def _best(cands: list[dict]) -> tuple[dict | None, float]:
         top, top_score = None, 0.0
@@ -199,10 +215,11 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
             if m.get("closed") or not m.get("slug"):
                 continue
             sc = _outcome_score(m, outcome)
-            cand_nums = set(re.findall(r"\d+(?:\.\d+)?", m.get("title") or ""))
-            if src_nums != cand_nums:
+            cand_lines = _lines((m.get("title") or "") + " "
+                                + (m.get("question") or ""))
+            if src_lines != cand_lines:
                 sc -= 0.2
-            elif src_nums:
+            elif src_lines:
                 sc = min(1.0, sc + 0.05)
             if sc > top_score:
                 top, top_score = m, sc
@@ -285,7 +302,7 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
         ident = {k: c0.get(k) for k in
                  ("title", "outcome", "team", "name", "shortTitle",
                   "question", "groupItemTitle") if c0.get(k) is not None}
-        diag.insert(0, "keys:" + ",".join(sorted(c0.keys()))[:110])
+        diag.insert(0, "keys:" + ",".join(sorted(c0.keys()))[:200])
         diag.insert(1, "ident:" + str(ident)[:110])
     # The trail rides the exception-free path out via last_resolve_diag so
     # the caller can store WHY in the audit row without a signature break.
