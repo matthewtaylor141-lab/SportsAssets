@@ -2179,6 +2179,25 @@ def _main_impl() -> None:
                            or ledger.get_state("kalshi_smoke_last"))
             if smoke_state:
                 funnel["kalshi_smoke"] = smoke_state
+            # The live Kalshi book, published for the public site: every
+            # open venue-accepted position (ledger claims are venue truth
+            # since the fill_count fix — a zero-fill never records).
+            try:
+                k_rows = [
+                    {"ticker": p["market_key"].split(":", 1)[1],
+                     "qty": round(float(p["shares"]), 2),
+                     "avg_cost": round(float(p["avg_cost"]), 4),
+                     "cost": round(float(p["shares"])
+                                   * float(p["avg_cost"]), 2)}
+                    for p in ledger.open_positions(live_only=True)
+                    if (p.get("market_key") or "").startswith("kalshi:")
+                ][:150]
+                funnel["kalshi_open"] = {
+                    "n": len(k_rows),
+                    "cost": round(sum(r["cost"] for r in k_rows), 2),
+                    "rows": k_rows}
+            except Exception:  # noqa: BLE001 — telemetry never stalls trading
+                pass
             # Account maintenance runs in EVERY mode, not just live ones.
             # It was gated on risk.is_live, which meant the PAPER halt left
             # resting GTC orders alive at the venue with nothing cancelling

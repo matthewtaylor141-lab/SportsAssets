@@ -66,6 +66,9 @@ def sweep(*, pmus, kalshi, ledger, live: bool,
     spend = ledger.get_state("kadd_day") or {}
     spent = float(spend.get("spent", 0.0)) if spend.get("day") == day else 0.0
 
+    from edge.shadow.kalshi_guard import (cross_side_cap, note_fill,
+                                          open_kalshi_sides)
+    sides = open_kalshi_sides(ledger)
     discovered: dict = {}   # league -> list[VenueMarket]
     for slug, pos in positions.items():
         stats["positions"] += 1
@@ -149,6 +152,14 @@ def sweep(*, pmus, kalshi, ledger, live: bool,
         count = int(per_add_usd / ask)
         if count < 1:
             continue
+        # Same-event guard: an add must never complete a losing pair.
+        capped = cross_side_cap(sides, ticker, ask, count,
+                                fee_per_contract=kalshi.taker_fee(ask))
+        if capped < 1:
+            stats["skipped_cross_side"] = stats.get("skipped_cross_side",
+                                                    0) + 1
+            continue
+        count = capped
         if not live:
             stats["added"] += 1     # dry-run telemetry only
             continue
@@ -174,6 +185,7 @@ def sweep(*, pmus, kalshi, ledger, live: bool,
                 "status": str(r.get("status"))[:200],
                 "raw": str((r.get("raw") or {}).get("error"))[:300]}
         if filled > 0:
+            note_fill(sides, ticker, ask, filled)
             stats["added"] += 1
             add_cost = round(filled * ask, 2)
             spent += add_cost

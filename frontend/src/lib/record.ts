@@ -96,6 +96,25 @@ export interface TrackRecordData {
   excluded_unattributed?: TRExcluded | null
 }
 
+export interface KalshiOpenRow {
+  ticker: string
+  qty: number
+  avg_cost: number
+  cost: number
+}
+
+export interface KalshiOpen {
+  updated_at?: string
+  n: number
+  cost: number
+  rows: KalshiOpenRow[]
+}
+
+/** The engine's open book on the second venue, published every cycle. */
+export function useKalshiOpen(refreshMs = 30_000) {
+  return usePolled<KalshiOpen>('/api/kalshi-open', refreshMs)
+}
+
 export const SINCE = '2026-08-01'
 // The record presents strategy-sized positions. Anything costing more than
 // this is an execution incident or a non-strategy trade, not the $1-$5

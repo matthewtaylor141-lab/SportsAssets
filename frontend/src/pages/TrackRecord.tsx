@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { EmptyState } from '../components/EmptyState'
 import { PnlCalendar } from '../components/PnlCalendar'
 import { fmtCents, fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
-import { SINCE, TRRow, useTrackRecord } from '../lib/record'
+import { KalshiOpen, SINCE, TRRow, useKalshiOpen, useTrackRecord } from '../lib/record'
 
 /* The AI trader's account, told from the venue's own records. Every number
  * is fetched from /api/track-record — real positions, real entry prices
@@ -168,6 +168,47 @@ function SportBreakdown({ rows }: { rows: TRRow[] }) {
   )
 }
 
+/** 'KXWTAMATCH-26AUG04ANDPLI-AND' -> { series: 'WTA MATCH', tail: '26AUG04ANDPLI · AND' } */
+function prettyTicker(t: string): { series: string; tail: string } {
+  const parts = (t || '').split('-')
+  const series = (parts[0] || '').replace(/^KX/, '').replace(/([A-Z]+?)(MATCH|GAME)$/, '$1 $2')
+  return { series, tail: parts.slice(1).join(' · ') }
+}
+
+function KalshiBook({ k }: { k: KalshiOpen }) {
+  if (!k || k.n === 0) return null
+  return (
+    <div className="card">
+      <div className="card-title">
+        KALSHI · LIVE BOOK · {k.n} open · {fmtUsd(k.cost, 2)} at cost
+      </div>
+      <div className="kx-grid">
+        {k.rows.map((r) => {
+          const p = prettyTicker(r.ticker)
+          return (
+            <div key={r.ticker} className="kx-pos">
+              <div className="kx-top">
+                <span className="kx-series">{p.series}</span>
+                <span className="tr-chip open">● LIVE</span>
+              </div>
+              <div className="kx-tail mono">{p.tail}</div>
+              <div className="kx-nums mono">
+                {r.qty}× @{fmtCents(r.avg_cost)}
+                <span className="muted"> · cost {fmtUsd(r.cost, 2)}</span>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+      <div className="tr-foot muted">
+        Positions on the Kalshi venue account, read from the engine ledger —
+        only venue-accepted fills are recorded. Settled Kalshi results join
+        the record as they resolve.
+      </div>
+    </div>
+  )
+}
+
 type Status = 'all' | 'won' | 'lost' | 'open'
 type SortKey = 'time' | 'stake' | 'pnl'
 
@@ -179,6 +220,7 @@ function fmtAge(s: number): string {
 
 export function TrackRecord() {
   const { data, err } = useTrackRecord()
+  const { data: kalshi } = useKalshiOpen()
   const [status, setStatus] = useState<Status>('all')
   const [sport, setSport] = useState('all')
   const [cat, setCat] = useState('all')
@@ -279,6 +321,9 @@ export function TrackRecord() {
             <div className="tr-stat-value">{fmtUsd(heroDeployed, 2)}</div>
             <div className="tr-stat-foot muted">
               {s.trades.toLocaleString()} positions · {s.open} open worth {fmtUsd(s.open_value, 2)}
+              {kalshi && kalshi.n > 0 && (
+                <> · +{fmtUsd(kalshi.cost, 2)} live on Kalshi ({kalshi.n})</>
+              )}
             </div>
           </div>
           <div className="tr-stat">
@@ -323,6 +368,8 @@ export function TrackRecord() {
       </div>
 
       <ResultsTicker rows={data.trades} />
+
+      {kalshi && <KalshiBook k={kalshi} />}
 
       <div className="tr-columns">
         <div className="card">

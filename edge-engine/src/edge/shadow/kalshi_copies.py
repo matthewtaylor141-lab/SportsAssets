@@ -43,6 +43,8 @@ def _limit_for(his_price: float) -> float:
 def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
           day_usd: float = 200.0) -> dict:
     """One pass: whale open positions -> Kalshi orders where listed."""
+    from edge.shadow.kalshi_guard import (cross_side_cap, note_fill,
+                                          open_kalshi_sides)
     from edge.shadow.whale_align import game_key
     from edge.venues.kalshi import _series_map
     from edge.venues.mapper import team_score
@@ -52,6 +54,7 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
              "skipped_claimed": 0, "best_ask_gap_c": -99.0}
     if not identities:
         return stats
+    sides = open_kalshi_sides(ledger)
     day = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     spend = ledger.get_state("kcopy_day") or {}
     spent = float(spend.get("spent", 0.0)) if spend.get("day") == day else 0.0
@@ -132,6 +135,15 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         count = int(per / ask)
         if count < 1:
             continue
+        # Same-event guard: never build both sides of one market unless
+        # the completed pair locks profit, and then only pair-matched.
+        capped = cross_side_cap(sides, target_ticker, ask, count,
+                                fee_per_contract=kalshi.taker_fee(ask))
+        if capped < 1:
+            stats["skipped_cross_side"] = stats.get("skipped_cross_side",
+                                                    0) + 1
+            continue
+        count = capped
         if not live:
             stats["copied"] += 1     # dry-run telemetry
             continue
@@ -153,6 +165,7 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 "status": str(r.get("status"))[:200],
                 "raw": str((r.get("raw") or {}).get("error"))[:300]}
         if filled > 0:
+            note_fill(sides, target_ticker, ask, filled)
             stats["copied"] += 1
             cost = round(filled * ask, 2)
             spent += cost

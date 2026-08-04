@@ -463,6 +463,27 @@ async def engine_methodology(format: str = Query("json")) -> Any:
     return {"updated_at": row["beat_at"], **detail}
 
 
+@app.get("/api/kalshi-open")
+async def kalshi_open() -> dict:
+    """The engine's open Kalshi book, slimmed for the public site.
+
+    Published inside the engine heartbeat (detail.kalshi_open) every
+    cycle; this endpoint exists so the site does not have to poll the
+    full status payload for a dozen rows."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT beat_at, detail FROM service_heartbeats "
+        "WHERE service='edge_engine'")
+    empty = {"n": 0, "cost": 0.0, "rows": []}
+    if row is None:
+        return empty
+    detail = row["detail"]
+    if isinstance(detail, str):
+        detail = json.loads(detail)
+    ko = (detail or {}).get("kalshi_open") or empty
+    return {"updated_at": str(row["beat_at"]), **ko}
+
+
 @app.get("/api/engine/status")
 async def engine_status() -> dict:
     pool = await get_pool()
