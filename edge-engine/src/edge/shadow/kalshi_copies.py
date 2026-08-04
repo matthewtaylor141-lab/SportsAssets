@@ -34,6 +34,16 @@ log = logging.getLogger(__name__)
 
 PER_COPY_USD = {"rn1": 3.00}
 PER_COPY_DEFAULT = 2.00
+# A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
+# decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.
+# Copying an old position at today's price is buying fair value minus
+# fees. Default 45 minutes, env-tunable.
+MAX_AGE_S_DEFAULT = 2700.0
+# Collapse guard: an ask far BELOW his entry is information (the game
+# turned against the position), not a discount. Only-upper-bound
+# tolerance made the sweep preferentially copy his losers-in-progress
+# (observed live 2026-08-04: copied positions sitting at 1% chance).
+COLLAPSE_FLOOR = 0.85
 
 
 def _limit_for(his_price: float) -> float:
@@ -49,7 +59,7 @@ def _limit_for(his_price: float) -> float:
 
 
 def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
-          day_usd: float = 200.0) -> dict:
+          day_usd: float = 200.0, max_age_s: float | None = None) -> dict:
     """One pass: whale open positions -> Kalshi orders where listed."""
     from edge.shadow.kalshi_guard import (cross_side_cap, note_fill,
                                           open_kalshi_sides)
@@ -76,12 +86,24 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
 
     series = _series_map()
     discovered: dict = {}      # league -> {game_key: VenueMarket}
+    if max_age_s is None:
+        import os
+        max_age_s = float(os.environ.get("EDGE_KCOPY_MAX_AGE_S",
+                                         MAX_AGE_S_DEFAULT))
+    now = time.time()
     for row in identities:
         stats["whale_positions"] += 1
         slug = row.get("slug") or ""
         outcome = (row.get("outcome") or "").strip()
         his_price = float(row.get("price") or 0)
         if not slug or not outcome or not (0 < his_price < 1):
+            continue
+        # FRESH entries only. Identities lacking a timestamp are treated
+        # as stale, never grandfathered — an unknown age is not evidence
+        # of freshness.
+        entered = float(row.get("entered_ts") or 0)
+        if not entered or now - entered > max_age_s:
+            stats["skipped_stale"] = stats.get("skipped_stale", 0) + 1
             continue
         league = slug.split("-", 1)[0].lower()
         if league not in series:
@@ -146,6 +168,12 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                                       round((limit - eff) * 100, 2))
         if eff > limit:
             continue        # outside his price +2% fee-loaded: not a copy
+        if ask < his_price * COLLAPSE_FLOOR:
+            # Far below his entry = the market learned something he
+            # didn't know. That is not a discount on his edge.
+            stats["skipped_collapsed"] = stats.get("skipped_collapsed",
+                                                   0) + 1
+            continue
         stats["priced_in_tolerance"] += 1
         per = PER_COPY_USD.get((row.get("whale") or "").lower(),
                                PER_COPY_DEFAULT)

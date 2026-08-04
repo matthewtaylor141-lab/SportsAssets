@@ -39,7 +39,7 @@ class _Kalshi:
 
 
 _ROW = {"slug": "mlb-bal-tex-2026-08-04", "outcome": "Baltimore Orioles",
-        "price": 0.50, "whale": "swisstony"}
+        "price": 0.50, "whale": "swisstony", "entered_ts": time.time() - 60}
 
 
 def _run(ask, rows=None, live=True, led=None):
@@ -163,3 +163,22 @@ def test_smoke_zero_fill_is_not_done():
     assert last and last["ok"] and last["filled"] == 0
     _kalshi_smoke(ka, led, lambda: True)     # retries while not done
     assert len(ka.orders) == 2
+
+
+def test_stale_positions_are_never_copied():
+    """A days-old whale entry has no copy edge left — and an identity
+    with no timestamp is stale by definition, not grandfathered."""
+    old = {**_ROW, "entered_ts": time.time() - 86_400}
+    st, ka, _ = _run(0.48, rows=[old])
+    assert st.get("skipped_stale") == 1 and not ka.orders
+    untimed = {k: v for k, v in _ROW.items() if k != "entered_ts"}
+    st2, ka2, _ = _run(0.48, rows=[untimed])
+    assert st2.get("skipped_stale") == 1 and not ka2.orders
+
+
+def test_collapsed_price_is_information_not_a_discount():
+    """His entry 0.50, ask 0.20: the market learned something. The old
+    upper-bound-only tolerance bought exactly these losers-in-progress."""
+    st, ka, _ = _run(0.20)
+    assert st.get("skipped_collapsed") == 1
+    assert st["copied"] == 0 and not ka.orders
