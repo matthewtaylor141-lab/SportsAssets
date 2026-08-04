@@ -1852,6 +1852,10 @@ def _main_impl() -> None:
                         log.info("kalshi add sweep: %s", st)
                     except Exception as exc:  # noqa: BLE001 — never fatal
                         log.warning("kalshi add sweep failed: %s", exc)
+                        _KADD_STATS.clear()
+                        _KADD_STATS.update(
+                            error=f"{type(exc).__name__}: {str(exc)[:140]}",
+                            at=time.time())
                     time.sleep(every)
 
             threading.Thread(target=_kadd_loop, daemon=True,
@@ -1884,6 +1888,14 @@ def _main_impl() -> None:
                             log.info("kalshi copy sweep: %s", st)
                         except Exception as exc:  # noqa: BLE001
                             log.warning("kalshi copy sweep failed: %s", exc)
+                            # A sweep that dies only in service logs is
+                            # invisible to every probe — observed 18:28Z
+                            # when kalshi_copies vanished from the funnel.
+                            _KCOPY_STATS.clear()
+                            _KCOPY_STATS.update(
+                                error=f"{type(exc).__name__}: "
+                                      f"{str(exc)[:140]}",
+                                at=time.time())
                         time.sleep(every)
 
                 threading.Thread(target=_kcopy_loop, daemon=True,
