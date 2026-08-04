@@ -248,6 +248,7 @@ _ROTATION = {"i": 0}
 # event_key -> last time a book in this event priced within 1c of its bar.
 # Entries expire after 30 min: proximity decays with the odds.
 _NEAR_THRESHOLD: dict[str, float] = {}
+_LAST_SETTLE: dict = {}
 
 # Position reconciliation runs once per process: a restart is exactly when
 # the ledger may have been wiped, and exactly when the caps need rebuilding.
@@ -1571,11 +1572,19 @@ def main() -> None:
             verdict_watcher.observe(funnel["verdict"])
             if time.time() - last_settle > settle_s:
                 _league_probation_cache.clear()   # graduation without restart
-                funnel["settled"] = settle_cycle(adapters, ledger)
-                funnel["settle_stats"] = {
-                    a.name: getattr(a, "last_settle_stats", None)
-                    for a in adapters}
+                _LAST_SETTLE.update(
+                    settled=settle_cycle(adapters, ledger),
+                    stats={a.name: getattr(a, "last_settle_stats", None)
+                           for a in adapters},
+                    at=time.time())
                 last_settle = time.time()
+            # The funnel is per-cycle but settlement runs 1-in-10 cycles —
+            # without carrying the last pass forward, 90% of heartbeats
+            # (and every probe that read them) showed no settle evidence
+            # at all. Diagnosis-by-probe needs the LAST pass, always.
+            if _LAST_SETTLE:
+                funnel["settled"] = _LAST_SETTLE.get("settled")
+                funnel["settle_stats"] = _LAST_SETTLE.get("stats")
             # Account maintenance runs in EVERY mode, not just live ones.
             # It was gated on risk.is_live, which meant the PAPER halt left
             # resting GTC orders alive at the venue with nothing cancelling
