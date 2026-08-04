@@ -429,3 +429,23 @@ jobs:
               | jq -r '.events[]? | {title, event_ticker, outcomes: [.markets[]? | (.yes_sub_title // .subtitle)]}' \
               2>/dev/null | head -20 || true
           done
+
+      - name: Kalshi raw orderbook (what shape does the API actually return)
+        if: always()
+        run: |
+          B="https://api.elections.kalshi.com/trade-api/v2"
+          echo "###########################################################"
+          echo "#   KALSHI RAW ORDERBOOK (parser ground truth)             #"
+          echo "###########################################################"
+          for SERIES in KXWTAMATCH KXMLBGAME; do
+            T=$(curl -sS --max-time 15 "$B/events?series_ticker=$SERIES&status=open&with_nested_markets=true&limit=3" \
+                  | jq -r '[.events[]?.markets[]? | select(.status=="active") | .ticker][0] // empty' 2>/dev/null)
+            echo "== $SERIES ticker: ${T:-none-active} =="
+            if [ -n "$T" ]; then
+              curl -sS --max-time 15 "$B/markets/$T/orderbook" | head -c 1200
+              echo ""
+              echo "-- market snapshot (yes_bid/yes_ask/last_price fields) --"
+              curl -sS --max-time 15 "$B/markets/$T" \
+                | jq '{ticker: .market.ticker, status: .market.status, yes_bid: .market.yes_bid, yes_ask: .market.yes_ask, no_bid: .market.no_bid, last_price: .market.last_price, volume: .market.volume, liquidity: .market.liquidity}' 2>/dev/null || true
+            fi
+          done
