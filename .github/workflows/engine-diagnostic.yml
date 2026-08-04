@@ -435,17 +435,24 @@ jobs:
         run: |
           B="https://api.elections.kalshi.com/trade-api/v2"
           echo "###########################################################"
-          echo "#   KALSHI RAW ORDERBOOK (parser ground truth)             #"
+          echo "#   KALSHI MARKET STATES (why are the books empty?)        #"
           echo "###########################################################"
-          for SERIES in KXWTAMATCH KXMLBGAME; do
-            T=$(curl -sS --max-time 15 "$B/events?series_ticker=$SERIES&status=open&with_nested_markets=true&limit=3" \
-                  | jq -r '[.events[]?.markets[]? | select(.status=="active") | .ticker][0] // empty' 2>/dev/null)
-            echo "== $SERIES ticker: ${T:-none-active} =="
+          for SERIES in KXWTAMATCH KXMLBGAME KXWNBAGAME; do
+            sleep 1
+            echo "== $SERIES: first 3 open events, with MARKET STATUSES =="
+            CODE=$(curl -sS -o /tmp/ev.json -w "%{http_code}" --max-time 15 \
+              "$B/events?series_ticker=$SERIES&status=open&with_nested_markets=true&limit=3")
+            echo "   (events HTTP $CODE)"
+            jq -r '.events[]? | "\(.event_ticker): " + ([.markets[]? | "\(.ticker | split("-") | last)=\(.status)"] | join(" "))' /tmp/ev.json 2>/dev/null | head -6 || true
+            T=$(jq -r '[.events[]?.markets[]?.ticker][0] // empty' /tmp/ev.json 2>/dev/null)
             if [ -n "$T" ]; then
-              curl -sS --max-time 15 "$B/markets/$T/orderbook" | head -c 1200
-              echo ""
-              echo "-- market snapshot (yes_bid/yes_ask/last_price fields) --"
+              sleep 1
+              echo "   -- orderbook for $T (any status) --"
+              CODE=$(curl -sS -o /tmp/ob.json -w "%{http_code}" --max-time 15 "$B/markets/$T/orderbook")
+              echo "   (orderbook HTTP $CODE)"
+              head -c 500 /tmp/ob.json; echo ""
+              sleep 1
               curl -sS --max-time 15 "$B/markets/$T" \
-                | jq '{ticker: .market.ticker, status: .market.status, yes_bid: .market.yes_bid, yes_ask: .market.yes_ask, no_bid: .market.no_bid, last_price: .market.last_price, volume: .market.volume, liquidity: .market.liquidity}' 2>/dev/null || true
+                | jq '{ticker: .market.ticker, status: .market.status, open_time: .market.open_time, close_time: .market.close_time, yes_bid: .market.yes_bid, yes_ask: .market.yes_ask, volume: .market.volume, liquidity: .market.liquidity}' 2>/dev/null || true
             fi
           done
