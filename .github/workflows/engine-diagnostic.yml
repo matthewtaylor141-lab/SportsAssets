@@ -463,9 +463,11 @@ jobs:
           echo "###########################################################"
           echo "#   KALSHI V2 CREATE-ORDER SPEC                            #"
           echo "###########################################################"
-          for U in \
+          curl -sSL --max-time 20 \
             "https://docs.kalshi.com/api-reference/orders/create-order-v2.md" \
-            "https://docs.kalshi.com/api-reference/orders/create-order-v2"; do
-            echo "== $U =="
-            curl -sSL --max-time 20 "$U" | head -c 6000; echo ""
-          done
+            -o /tmp/v2.md || true
+          wc -c /tmp/v2.md
+          echo "-- self_trade_prevention_type onward (request tail) --"
+          awk '/self_trade_prevention_type:/,0' /tmp/v2.md | head -c 4000; echo ""
+          echo "-- CreateOrderV2Response schema --"
+          awk '/CreateOrderV2Response:/,0' /tmp/v2.md | head -c 8000; echo ""
