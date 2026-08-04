@@ -37,6 +37,15 @@ _DEFAULT_SERIES = {
     # strategy (measured flat) — but arbitrage is model-free arithmetic
     # and the blocklist does not apply to it.
     "mlb": "KXMLBGAME",
+    # Tennis (census 2026-08-04): KXWTACHALLENGERMATCH verified live with
+    # full player names as outcomes. The MATCH-winner series for the main
+    # tours are listed tentatively — a wrong ticker fails as a named
+    # census entry (…_http: 404), never silently, so tentative is safe.
+    # Set-winner series are deliberately EXCLUDED: a set is a different
+    # proposition than the match, and mapping one to the other is the
+    # wrong-bet class the identity gates exist to prevent.
+    "atp": "KXATPMATCH+KXATPCHALLENGERMATCH",
+    "wta": "KXWTAMATCH+KXWTACHALLENGERMATCH",
 }
 
 

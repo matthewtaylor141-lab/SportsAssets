@@ -201,3 +201,20 @@ def test_quarantined_band_paper_logs_instead_of_paying(monkeypatch):
                        ledger, ["soccer_epl"])
     assert not venue.orders, "no live order inside a quarantined band"
     assert funnel.get("band_quarantined", {}).get("0.10-0.15", 0) >= 1
+
+
+def test_kalshi_city_dialect_matches_at_the_bar():
+    """Census 2026-08-04: Kalshi speaks city + disambiguation letter."""
+    from edge.venues.mapper import team_score
+
+    # City-only (already worked) and the disambiguation-letter forms:
+    assert team_score("Baltimore", "Baltimore Orioles") >= 0.95
+    assert team_score("Golden State", "Golden State Valkyries") >= 0.95
+    assert team_score("Los Angeles A", "Los Angeles Angels") >= 0.95
+    assert team_score("New York Y", "New York Yankees") >= 0.95
+    assert team_score("A's", "Athletics") >= 0.95
+    # The letter must DISCRIMINATE — wrong team of a shared city refuses.
+    assert team_score("Los Angeles A", "Los Angeles Dodgers") < 0.95
+    assert team_score("New York Y", "New York Mets") < 0.95
+    # A lone letter with no shared anchor never matches.
+    assert team_score("A", "Athletics") < 0.95

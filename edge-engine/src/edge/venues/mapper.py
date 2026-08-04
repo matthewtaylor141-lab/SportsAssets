@@ -24,12 +24,50 @@ _NON_ALNUM = re.compile(r"[^a-z0-9 ]+")
 _VS = re.compile(r"\s+vs\.?\s+|\s+@\s+|\s+at\s+", re.IGNORECASE)
 
 
+# Names that normalization alone cannot join (measured on Kalshi's real
+# outcome strings, census 2026-08-04). "A's" normalizes to "a s", which no
+# token rule can reach "athletics" from.
+_TEAM_ALIASES = {"a s": "athletics", "as": "athletics"}
+
+
 def norm_team(name: str) -> str:
     """Canonical team token string: lowercase, deaccent, strip suffix noise."""
     s = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
     s = _NON_ALNUM.sub(" ", s.lower())
     s = _NOISE.sub(" ", s)
-    return " ".join(sorted(s.split()))
+    s = " ".join(sorted(s.split()))
+    return _TEAM_ALIASES.get(s, s)
+
+
+def _prefix_covered(short: set[str], long_: set[str]) -> bool:
+    """Every token of `short` equals or prefixes a DISTINCT token of
+    `long_`, with at least one exact multi-letter anchor.
+
+    This is Kalshi's naming dialect (census 2026-08-04): city plus a
+    disambiguation letter — "Los Angeles A" for the Angels, where the
+    lone "a" prefixes "angels" but matches nothing exactly. The exact-
+    anchor requirement stops junk like single letters joining on their
+    own; the distinctness requirement stops one long token absorbing
+    two short ones.
+    """
+    if not short:
+        return False
+    taken: set[str] = set()
+    anchored = False
+    for t in sorted(short, key=len, reverse=True):
+        hit = None
+        for u in long_:
+            if u in taken:
+                continue
+            if t == u or u.startswith(t):
+                hit = u
+                break
+        if hit is None:
+            return False
+        taken.add(hit)
+        if t == hit and len(t) > 1:
+            anchored = True
+    return anchored
 
 
 def team_score(a: str, b: str) -> float:
@@ -42,6 +80,12 @@ def team_score(a: str, b: str) -> float:
     # Token containment (e.g. "arsenal" vs "arsenal london") scores high.
     ta, tb = set(na.split()), set(nb.split())
     if ta and (ta <= tb or tb <= ta):
+        return 0.95
+    # Prefix containment: the shorter name's tokens all equal-or-prefix
+    # distinct tokens of the longer ("los angeles a" -> "los angeles
+    # angels", "new york y" -> "new york yankees").
+    short, long_ = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+    if _prefix_covered(short, long_):
         return 0.95
     return SequenceMatcher(None, na, nb).ratio()
 

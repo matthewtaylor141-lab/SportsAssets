@@ -415,7 +415,7 @@ jobs:
           echo "-- tennis-ish series, with one sample event each --"
           for S in $(curl -sS --max-time 20 "$B/series?category=Sports&limit=200" \
                        | jq -r '.series[]?.ticker' 2>/dev/null \
-                       | grep -iE "tennis|atp|wta" | head -6); do
+                       | grep -iE "tennis|atp|wta|match" | head -25); do
             echo "== $S =="
             curl -sS --max-time 15 "$B/events?series_ticker=$S&status=open&with_nested_markets=true&limit=1" \
               | jq -r '.events[]? | {title, event_ticker, outcomes: [.markets[]? | {t: .ticker, name: (.yes_sub_title // .subtitle)}]}' \
