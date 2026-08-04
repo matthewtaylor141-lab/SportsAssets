@@ -462,10 +462,16 @@ def _kalshi_smoke(kalshi_a, ledger, is_live) -> None:
                     r = kalshi_a.place_order(
                         ticker, ask.price, 1,
                         client_order_id=str(_uuid.uuid4()), taker=True)
-                    ledger.set_state("kalshi_smoke_done", {
+                    # Claim ONLY on success: a failed order must retry on
+                    # the next boot AND leave its venue response readable.
+                    state_key = ("kalshi_smoke_done" if r.get("ok")
+                                 else "kalshi_smoke_last")
+                    ledger.set_state(state_key, {
                         "ts": time.time(), "ticker": ticker,
                         "price": ask.price, "ok": bool(r.get("ok")),
-                        "status": r.get("status"),
+                        "status": str(r.get("status"))[:200],
+                        "raw_error": str((r.get("raw") or {}).get(
+                            "error"))[:300],
                         "order_id": r.get("order_id")})
                     filled = (int(float(r.get("count") or 0))
                               if r.get("ok") else 0)
@@ -2163,6 +2169,12 @@ def _main_impl() -> None:
                 funnel["kalshi_adds"] = dict(_KADD_STATS)
             if _KCOPY_STATS:
                 funnel["kalshi_copies"] = dict(_KCOPY_STATS)
+            # The venue's own response to our order attempts — the one
+            # string that diagnoses a rejected order class remotely.
+            smoke_state = (ledger.get_state("kalshi_smoke_done")
+                           or ledger.get_state("kalshi_smoke_last"))
+            if smoke_state:
+                funnel["kalshi_smoke"] = smoke_state
             # Account maintenance runs in EVERY mode, not just live ones.
             # It was gated on risk.is_live, which meant the PAPER halt left
             # resting GTC orders alive at the venue with nothing cancelling

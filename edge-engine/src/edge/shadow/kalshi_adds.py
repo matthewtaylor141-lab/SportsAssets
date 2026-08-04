@@ -156,9 +156,19 @@ def sweep(*, pmus, kalshi, ledger, live: bool,
         r = kalshi.place_order(ticker, ask, count,
                                client_order_id=str(uuid.uuid4()), taker=True)
         filled = int(float(r.get("count") or 0)) if r.get("ok") else 0
-        ledger.set_state(claim, {"ts": time.time(),
-                                 "status": r.get("status"),
-                                 "filled": filled})
+        if r.get("ok"):
+            ledger.set_state(claim, {"ts": time.time(),
+                                     "status": r.get("status"),
+                                     "filled": filled})
+        else:
+            # NO claim on a failed order — the venue's answer is surfaced
+            # and the position stays retryable (2026-08-04: a rejected
+            # first attempt permanently blacklisted the one position that
+            # was 5.39c better on Kalshi).
+            stats["last_order_error"] = {
+                "ticker": ticker,
+                "status": str(r.get("status"))[:200],
+                "raw": str((r.get("raw") or {}).get("error"))[:300]}
         if filled > 0:
             stats["added"] += 1
             add_cost = round(filled * ask, 2)

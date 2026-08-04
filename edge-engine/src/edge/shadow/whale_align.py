@@ -79,7 +79,7 @@ def aligned(pmus_slug: str, outcome_name: str,
     return any(team_score(n, outcome_name) >= 0.95 for n in names)
 
 
-def fetch(base_url: str, token: str = "", timeout: float = 10.0) -> list[dict]:
+def fetch(base_url: str, token: str = "", timeout: float = 30.0) -> list[dict]:
     """Pull the source whales' open moneyline positions from the platform."""
     import requests
 
