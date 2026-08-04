@@ -251,6 +251,35 @@ async def api_feed(
     return await queries.feed(limit, before_id, whale_id, sport, side, min_notional)
 
 
+@app.get("/api/whale-open-identities")
+async def api_whale_open_identities() -> dict:
+    """Source whales' open BUY positions as identity rows for the engine's
+    whale-alignment tagging: [{slug, outcome}]. Moneyline-shaped consumers
+    only — the engine joins on game key + team name at the mapper bar."""
+    from ..config import settings as _settings
+    from ..db import get_pool as _get_pool
+
+    pool = await _get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT DISTINCT ON (t.asset)
+               COALESCE(t.market_slug, t.event_slug, '') AS slug,
+               t.outcome
+        FROM trades t
+        JOIN whales w ON w.id = t.whale_id
+        LEFT JOIN markets m ON m.condition_id = t.condition_id
+        WHERE t.side = 'BUY'
+          AND t.ts > now() - interval '7 days'
+          AND lower(w.username) = ANY($1)
+          AND COALESCE(m.resolved, false) = false
+        ORDER BY t.asset, t.ts DESC
+        """,
+        sorted(_settings().source_whales()),
+    )
+    return {"identities": [{"slug": r["slug"], "outcome": r["outcome"]}
+                           for r in rows if r["slug"] and r["outcome"]]}
+
+
 @app.get("/api/whales")
 async def api_whales(include_inactive: bool = False) -> list[dict]:
     return await queries.whales(include_inactive)

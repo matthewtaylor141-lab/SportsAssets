@@ -257,6 +257,8 @@ _PROP_MAX_AGE_S = float(os.environ.get("EDGE_PROP_MAX_AGE_S", "600"))
 # main() when armed; run_cycle publishes proven identity pairs into it.
 _XV_WATCH = None
 _KADD_STATS: dict = {}
+# {game_key: [whale outcome names]} — refreshed on the discovery clock.
+_WHALE_MAP: dict = {}
 
 # Boot beacon: where the process is and how big it is, posted every ~45s
 # until the FIRST full cycle completes. Exists because of 2026-08-04: the
@@ -886,6 +888,17 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             decision["tier"] = verdict.tier
             decision["trigger"] = "reactor" if reactive else "sweep"
             decision["consensus_books"] = it["eff_books"]
+            # Whale alignment (moneyline only): a source whale is long the
+            # same team in the same game. Graded at settlement; costs one
+            # dict lookup here.
+            if category == "moneyline" and _WHALE_MAP:
+                try:
+                    from edge.shadow.whale_align import aligned
+
+                    decision["whale_aligned"] = aligned(
+                        it["token"], it["oc_name"], _WHALE_MAP)
+                except Exception:  # noqa: BLE001 — tag-only
+                    pass
             funnel.setdefault("by_tier", {}).setdefault(verdict.tier, 0)
             funnel["by_tier"][verdict.tier] += 1
             decision["venue_market"] = {"title": it["match"].market.title,
@@ -1963,6 +1976,19 @@ def _main_impl() -> None:
             # round-trip every 10s.
             if not candidates or time.time() - last_discovery > discovery_s:
                 _BEACON["phase"] = "discovery"
+                # Whale-alignment map, same clock: the engine's fills are
+                # tagged whale_aligned at decision time so settlement can
+                # grade the aligned cohort separately. Measurement only —
+                # nothing trades differently on it yet.
+                try:
+                    from edge.shadow.whale_align import build_map, fetch
+
+                    _WHALE_MAP.clear()
+                    _WHALE_MAP.update(build_map(fetch(
+                        os.environ.get("EDGE_PLATFORM_API", ""),
+                        os.environ.get("EDGE_INGEST_TOKEN", ""))))
+                except Exception as exc:  # noqa: BLE001 — tag-only, never fatal
+                    log.debug("whale map refresh failed: %s", exc)
                 for a in adapters:
                     bp = getattr(a, "buying_power", lambda: None)()
                     if bp is not None and a.name in live_venue_names:
