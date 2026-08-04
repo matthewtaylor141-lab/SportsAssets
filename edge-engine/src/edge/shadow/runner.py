@@ -435,6 +435,66 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
     return True
 
 
+def _kalshi_smoke(kalshi_a, ledger, is_live) -> None:
+    """Owner-ordered connectivity proof (2026-08-04): ONE ~$0.50 taker
+    order on the most liquid Kalshi market found, once ever — the ledger
+    claim survives redeploys, so this can never become a drip. The result
+    is posted as its own status and, on a fill, ledger-recorded under
+    category "smoke" so no performance cohort inherits it.
+    """
+    import uuid as _uuid
+
+    if ledger.get_state("kalshi_smoke_done"):
+        return
+    if not is_live():
+        _post_status("kalshi_smoke", {"skipped": "not live"})
+        return
+    try:
+        for league in ("wnba", "mlb"):
+            for vm in kalshi_a.discover_markets({league}):
+                for name, ticker in vm.outcome_tokens.items():
+                    book = kalshi_a.get_book(vm.market_id, ticker)
+                    if book is None or not book.asks:
+                        continue
+                    ask = book.asks[0]
+                    if not (0.05 <= ask.price <= 0.55 and ask.size >= 1):
+                        continue
+                    r = kalshi_a.place_order(
+                        ticker, ask.price, 1,
+                        client_order_id=str(_uuid.uuid4()), taker=True)
+                    ledger.set_state("kalshi_smoke_done", {
+                        "ts": time.time(), "ticker": ticker,
+                        "price": ask.price, "ok": bool(r.get("ok")),
+                        "status": r.get("status"),
+                        "order_id": r.get("order_id")})
+                    filled = (int(float(r.get("count") or 0))
+                              if r.get("ok") else 0)
+                    if filled:
+                        ledger.record_fill(
+                            fill_uid=f"kalshi-smoke-{int(time.time())}",
+                            venue="kalshi", market_key=f"kalshi:{ticker}",
+                            side="BUY", qty=float(filled), price=ask.price,
+                            fee=round(kalshi_a.taker_fee(ask.price) * filled,
+                                      4),
+                            league=league, mode="LIVE_BETA",
+                            category="smoke",
+                            decision={"smoke_test": True, "outcome": name})
+                    _post_status("kalshi_smoke", {
+                        "ticker": ticker, "outcome": name,
+                        "price": ask.price, "requested": 1,
+                        "filled": filled, "status": r.get("status"),
+                        "order_id": r.get("order_id")})
+                    log.warning("KALSHI SMOKE %s: %s (%s) @ %.2f filled=%s",
+                                r.get("status"), ticker, name, ask.price,
+                                filled)
+                    return
+        _post_status("kalshi_smoke",
+                     {"error": "no active market with ask in 5-55c found"})
+    except Exception as exc:  # noqa: BLE001 — a smoke test never breaks boot
+        _post_status("kalshi_smoke",
+                     {"error": f"{type(exc).__name__}: {str(exc)[:140]}"})
+
+
 def _xv_feed_team(oc_name: str, ev) -> str | None:
     """Which of the event's two teams a venue outcome IS — or None.
 
@@ -1901,6 +1961,14 @@ def _main_impl() -> None:
                 threading.Thread(target=_kcopy_loop, daemon=True,
                                  name="kalshi-copies").start()
                 log.warning("kalshi copy leg armed (10min sweep)")
+
+            # One-shot ~$0.50 connectivity proof (owner order 2026-08-04).
+            def _smoke_thread() -> None:
+                time.sleep(90)   # after the first books are streaming
+                _kalshi_smoke(kalshi_a, ledger, lambda: risk.is_live)
+
+            threading.Thread(target=_smoke_thread, daemon=True,
+                             name="kalshi-smoke").start()
 
     # One-shot venue census (EDGE_CENSUS_DAYS=0 disables): how many sports
     # markets the venue actually listed per day over the trailing window —

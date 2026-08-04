@@ -98,3 +98,27 @@ def test_paper_counts_but_never_orders():
     assert st["copied"] == 1
     assert not ka.orders
     assert not led.get_state("kcopy:mlb-bal-tex-2026-08-04:Baltimore Orioles")
+
+
+def test_smoke_order_fires_exactly_once_ever():
+    from edge.shadow.runner import _kalshi_smoke
+
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _Kalshi(0.45)
+    _kalshi_smoke(ka, led, lambda: True)
+    _kalshi_smoke(ka, led, lambda: True)
+    assert len(ka.orders) == 1, "the claim must survive re-runs"
+    assert ka.orders[0][2] == 1, "one contract only"
+    assert ka.orders[0][1] <= 0.55
+    done = led.get_state("kalshi_smoke_done")
+    assert done and done["ok"]
+
+
+def test_smoke_order_never_fires_in_paper():
+    from edge.shadow.runner import _kalshi_smoke
+
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _Kalshi(0.45)
+    _kalshi_smoke(ka, led, lambda: False)
+    assert not ka.orders
+    assert not led.get_state("kalshi_smoke_done")
