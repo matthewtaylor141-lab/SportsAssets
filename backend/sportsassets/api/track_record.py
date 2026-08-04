@@ -711,6 +711,19 @@ async def track_record(since: str | None = None,
     # an infrastructure hiccup.
     archive = _archive_cache["data"] or []
     window = raw["activities"] or []
+    # A freshly-booted process whose archive has not hydrated yet KNOWS how
+    # much history it is missing (_archived_ids was seeded from the table).
+    # Serving the bare window in that state shrinks the record to a few
+    # hours and presents it as the truth — the owner caught exactly that
+    # twice on 2026-08-04 (449 settled -> 215, +$73 -> +$18) during deploy
+    # reboots. Refusing is strictly better: the frontend treats an error
+    # payload as "keep showing the last good numbers".
+    known_history = len(_archived_ids)
+    if not archive and known_history > max(int(len(window) * 1.5), 2000):
+        return {"configured": True,
+                "error": (f"history hydrating ({known_history} archived "
+                          "activities not yet loaded); refusing to serve a "
+                          "shrunken record — retry shortly")}
     if archive:
         seen_ids = {str(a.get("id") or "") for a in archive}
         acts = archive + [a for a in window

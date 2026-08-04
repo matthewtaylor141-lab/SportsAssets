@@ -80,6 +80,9 @@ jobs:
           jq -r '.excluded_copy_sleeve // {} | "  excluded_copy_sleeve: n=\(.count // 0) open=\(.open // 0) stake=$\(.stake // 0) net=$\(.net_pnl // 0)"' /tmp/tr.json 2>/dev/null || true
           jq -r '.excluded_unattributed // {} | "  excluded_unattributed: n=\(.count // 0) stake=$\(.stake // 0) net=$\(.net_pnl // 0)"' /tmp/tr.json 2>/dev/null || true
           jq -r '"  source: \(.activities_source // "?")  archive_rows: \(.archive_rows // "?")  window_rows: \(.window_rows // "?")"' /tmp/tr.json 2>/dev/null || true
+          jq -r '.error // empty | "  REFUSED: \(.)"' /tmp/tr.json 2>/dev/null || true
+          jq -r '.snapshot // {} | "  snapshot: age_s=\(.age_s // "?") pos_pages=\(.positions_pages // "?") complete=\(.positions_complete // "?") refresh_err=\(.refresh_error // "none") streak=\(.refresh_error_streak // 0)"' /tmp/tr.json 2>/dev/null || true
+          jq -r '.account // {} | "  ACCOUNT: net=$\(.net_pnl // "?") trades=\(.trades // "?") open=\(.open // "?") stake=$\(.stake // "?")"' /tmp/tr.json 2>/dev/null || true
           jq -r '.daily // [] | .[0:3][] | "  day \(.date)  pnl \(.pnl)  settled \(.settled)  open \(.open // 0)"' /tmp/tr.json 2>/dev/null || true
           probe /healthz 30
 

@@ -397,3 +397,52 @@ def test_paged_retries_a_transient_failure_inside_the_walk():
 
     pages, complete = _paged(flaky, {}, max_pages=10, pace=0)
     assert complete and len(pages) == 2
+
+
+def test_unhydrated_boot_with_deep_history_refuses_to_serve(monkeypatch):
+    """A booted process that KNOWS the table holds deep history it has not
+    loaded must refuse the request rather than serve the bare window as
+    the record — that exact state shipped 215-settled/+$18 to the owner
+    while the account's real record was 449/+$72.61 (2026-08-04)."""
+    import asyncio
+
+    from sportsassets.api import track_record as tr
+
+    monkeypatch.setattr(tr, "_archived_ids", {f"a{i}" for i in range(50_000)})
+    monkeypatch.setitem(tr._archive_cache, "data", None)
+    monkeypatch.setitem(tr._raw_cache, "data",
+                        {"positions": {}, "activities": [{"id": "w1"}]})
+    monkeypatch.setitem(tr._raw_cache, "ts", 9e12)
+
+    class Cfg:
+        pmus_key_id = "k"
+        pmus_secret_key = "s"
+
+    monkeypatch.setattr(tr, "settings", lambda: Cfg())
+
+    out = asyncio.run(tr.track_record())
+    assert out["configured"] and "error" in out
+    assert "hydrating" in out["error"]
+
+
+def test_unhydrated_boot_with_shallow_history_still_serves(monkeypatch):
+    """A genuinely young account (little archived history) must NOT be
+    bricked by the deep-history guard."""
+    import asyncio
+
+    from sportsassets.api import track_record as tr
+
+    monkeypatch.setattr(tr, "_archived_ids", {"a1", "a2"})
+    monkeypatch.setitem(tr._archive_cache, "data", None)
+    monkeypatch.setitem(tr._raw_cache, "data",
+                        {"positions": {}, "activities": []})
+    monkeypatch.setitem(tr._raw_cache, "ts", 9e12)
+
+    class Cfg:
+        pmus_key_id = "k"
+        pmus_secret_key = "s"
+
+    monkeypatch.setattr(tr, "settings", lambda: Cfg())
+
+    out = asyncio.run(tr.track_record())
+    assert "error" not in out and out["summary"]["trades"] == 0

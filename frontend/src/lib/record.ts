@@ -111,8 +111,17 @@ export function useTrackRecord(refreshMs = 30_000) {
     // ~2-day window for the seconds until its archive hydrates, and
     // accepting that snapshot made Aug 1 "vanish" from the site three
     // times on 2026-08-03. History can grow or hold — it cannot shrink.
-    (prev, next) =>
-      !(prev.activities_source !== 'venue_window' &&
-        next.activities_source === 'venue_window'),
+    // Two independent checks, because the source label alone let a
+    // shrunken snapshot through on 2026-08-04: (a) refuse the
+    // archive->window source transition, (b) refuse any payload whose
+    // settled count collapses — settlements since a fixed start date are
+    // monotone, so a big drop is a degraded snapshot, not news.
+    (prev, next) => {
+      if (prev.activities_source !== 'venue_window' &&
+          next.activities_source === 'venue_window') return false
+      const ps = prev.summary?.settled ?? 0
+      const ns = next.summary?.settled ?? 0
+      return ns >= ps * 0.9
+    },
   )
 }
