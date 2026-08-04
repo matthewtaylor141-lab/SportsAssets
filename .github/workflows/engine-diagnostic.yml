@@ -77,7 +77,7 @@ jobs:
           jq -r '.summary // {} | "  settled \(.settled) (\(.wins)W-\(.losses)L)  net $\(.net_pnl)  deployed $\(.deployed)  roi \(.roi // "n/a")"' /tmp/tr.json 2>/dev/null || true
           jq -r '.excluded_over_limit // {} | "  excluded>limit: \(.count // 0) (net $\(.net_pnl // 0))"' /tmp/tr.json 2>/dev/null || true
           jq -r '"  undatable: \(.excluded_undatable // 0)"' /tmp/tr.json 2>/dev/null || true
-          jq -r '.excluded_copy_sleeve // {} | "  excluded_copy_sleeve: n=\(.count // 0) open=\(.open // 0) stake=$\(.stake // 0) net=$\(.net_pnl // 0)"' /tmp/tr.json 2>/dev/null || true
+          jq -r '(.copy_sleeve // .excluded_copy_sleeve) // {} | "  copy_sleeve: n=\(.count // 0) open=\(.open // 0) stake=$\(.stake // 0) net=$\(.net_pnl // 0)"' /tmp/tr.json 2>/dev/null || true
           jq -r '.excluded_unattributed // {} | "  excluded_unattributed: n=\(.count // 0) stake=$\(.stake // 0) net=$\(.net_pnl // 0)"' /tmp/tr.json 2>/dev/null || true
           jq -r '"  source: \(.activities_source // "?")  archive_rows: \(.archive_rows // "?")  window_rows: \(.window_rows // "?")"' /tmp/tr.json 2>/dev/null || true
           jq -r '.error // empty | "  REFUSED: \(.)"' /tmp/tr.json 2>/dev/null || true

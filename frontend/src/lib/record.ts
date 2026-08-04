@@ -5,6 +5,7 @@ import { usePolled } from './poll'
  * engine's shadow mirror is telemetry, not a record, and never renders. */
 
 export interface TRRow {
+  sleeve?: 'engine' | 'copy'
   market_slug: string
   title: string
   outcome: string | null
@@ -90,7 +91,8 @@ export interface TrackRecordData {
   trades: TRRow[]
   excluded_undatable: number
   excluded_over_limit: TRExcluded | null
-  excluded_copy_sleeve?: TRExcluded | null
+  /** Copy-sleeve cohort stats — its rows are IN the record, tagged. */
+  copy_sleeve?: TRExcluded | null
   excluded_unattributed?: TRExcluded | null
 }
 

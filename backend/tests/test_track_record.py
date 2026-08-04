@@ -189,17 +189,24 @@ def test_positive_attribution_excludes_what_the_engine_never_claimed():
     assert ex["stake"] == 17.55
 
 
-def test_copy_sleeve_positions_are_their_own_cohort_not_the_engines():
-    """Copy-sleeve fills are excluded FIRST — even if the engine's mirror
-    also touched the market, the copy trade never inflates the AI record."""
+def test_copy_sleeve_rows_are_in_the_record_tagged_and_graded():
+    """The copy sleeve IS the AI's trading (owner decision 2026-08-04):
+    its rows count in the headline record, wear a sleeve tag, and their
+    cohort stats still travel separately for per-sleeve grading. A copy
+    slug never falls into 'unattributed' even when the engine mirror
+    doesn't claim it."""
     positions = {"aec-mlb-shared-2026-08-02": _pos(2, 0.45, 0.5)}
     acts = [_trade("aec-mlb-shared-2026-08-02", TS_AUG2, 2, 0.225)]
     out = build(positions, acts, TS_AUG1,
-                attributed={"aec-mlb-shared-2026-08-02"},
+                attributed=set(),         # mirror claims nothing
                 copy_slugs={"aec-mlb-shared-2026-08-02"})
-    assert out["trades"] == []
-    assert out["excluded_copy_sleeve"]["count"] == 1
-    assert out["excluded_unattributed"]["count"] == 0
+    assert len(out["trades"]) == 1
+    assert out["trades"][0]["sleeve"] == "copy"
+    assert out["summary"]["trades"] == 1 and out["summary"]["open"] == 1
+    assert out["copy_sleeve"] == {"count": 1, "open": 1,
+                                  "stake": 0.45, "net_pnl": 0.0}
+    assert out["excluded_unattributed"] is None or \
+        out["excluded_unattributed"]["count"] == 0
 
 
 def test_no_attribution_sets_means_the_old_behavior_exactly():
@@ -208,7 +215,7 @@ def test_no_attribution_sets_means_the_old_behavior_exactly():
     out = build(positions, acts, TS_AUG1)
     assert len(out["trades"]) == 1
     assert out["excluded_unattributed"] is None
-    assert out["excluded_copy_sleeve"] is None
+    assert out["copy_sleeve"] is None
 
 
 # ── archive refresh: warm path must not re-read the table ──────────────

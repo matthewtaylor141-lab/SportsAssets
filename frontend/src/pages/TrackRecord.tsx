@@ -218,13 +218,6 @@ export function TrackRecord() {
   const sync: 'ok' | 'lag' | 'stale' =
     age === null ? 'ok' : age < 120 ? 'ok' : age < 600 ? 'lag' : 'stale'
   const acct = data.account
-  const exclusions: { label: string; x: { count: number; net_pnl: number } }[] = []
-  if (data.excluded_over_limit && data.excluded_over_limit.count > 0)
-    exclusions.push({ label: 'execution incidents', x: data.excluded_over_limit })
-  if (data.excluded_copy_sleeve && data.excluded_copy_sleeve.count > 0)
-    exclusions.push({ label: 'whale-copy sleeve', x: data.excluded_copy_sleeve })
-  if (data.excluded_unattributed && data.excluded_unattributed.count > 0)
-    exclusions.push({ label: 'other account activity', x: data.excluded_unattributed })
 
   return (
     <div className="page tr-page">
@@ -278,24 +271,6 @@ export function TrackRecord() {
             <div className="tr-stat-foot muted">on {fmtUsd(s.settled_stake, 2)} settled stake</div>
           </div>
         </div>
-
-        {acct && (
-          <div className="tr-account">
-            <span className="muted">WHOLE ACCOUNT since {SINCE} — the number the venue app shows: </span>
-            <b className={`mono ${acct.net_pnl >= 0 ? 'pos' : 'neg'}`}>
-              {fmtSignedUsd(acct.net_pnl)}
-            </b>
-            <span className="muted"> across {acct.trades.toLocaleString()} positions
-              ({acct.open.toLocaleString()} open). AI strategy cohort above: </span>
-            <span className={`mono ${s.net_pnl >= 0 ? 'pos' : 'neg'}`}>{fmtSignedUsd(s.net_pnl)}</span>
-            {exclusions.map(({ label, x }) => (
-              <span key={label} className="muted">
-                {' '}· {label}: <span className={`mono ${x.net_pnl >= 0 ? 'pos' : 'neg'}`}>
-                  {fmtSignedUsd(x.net_pnl)}</span> ({x.count})
-              </span>
-            ))}
-          </div>
-        )}
 
         {data.snapshot && data.snapshot.positions_complete === false && (
           <div className="tr-honesty">
@@ -376,6 +351,7 @@ export function TrackRecord() {
                       <span className="tr-slip-sport">{r.icon}</span>
                       <span className="tr-slip-title">{r.title}</span>
                       <span className="tr-tag">{r.category}</span>
+                      {r.sleeve === 'copy' && <span className="tr-tag">COPY</span>}
                       <span className={`tr-chip ${st}`}>
                         {st === 'open' ? '● LIVE' : st === 'won' ? '✓ WON' : '✕ LOST'}
                       </span>
@@ -425,6 +401,20 @@ export function TrackRecord() {
             every figure above — combined stake{' '}
             {fmtUsd(data.excluded_over_limit.stake, 2)}, settled net{' '}
             {fmtSignedUsd(data.excluded_over_limit.net_pnl)}.</>
+          )}
+          {data.copy_sleeve && data.copy_sleeve.count > 0 && (
+            <> Includes the whale-copy sleeve ({data.copy_sleeve.count} positions,
+            settled net {fmtSignedUsd(data.copy_sleeve.net_pnl)}), tagged COPY in
+            the ledger.</>
+          )}
+          {data.excluded_unattributed && data.excluded_unattributed.count > 0 && (
+            <> {data.excluded_unattributed.count} non-AI account position(s)
+            excluded (settled net {fmtSignedUsd(data.excluded_unattributed.net_pnl)}).</>
+          )}
+          {acct && (
+            <> Whole account since {SINCE}, all activity included:{' '}
+            {fmtSignedUsd(acct.net_pnl)} across {acct.trades.toLocaleString()}{' '}
+            positions ({acct.open.toLocaleString()} open).</>
           )}
           {' '}{data.excluded_undatable > 0 &&
             `${data.excluded_undatable} position(s) excluded: the venue reported no datable entry.`}

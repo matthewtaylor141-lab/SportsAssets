@@ -143,13 +143,28 @@ def build(positions: dict[str, dict], activities: list[dict],
     copy_sleeve = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
 
     def _excluded_bucket(slug: str, stake_now: float):
-        if copy_slugs is not None and slug in copy_slugs:
-            return copy_sleeve
         if attributed is not None and slug not in attributed:
             return unattributed
         if max_stake is not None and stake_now > max_stake:
             return over_limit
         return None
+
+    def _sleeve_of(slug: str) -> str:
+        """Copy-sleeve rows are PART of the record (owner decision
+        2026-08-04: the copy sleeve is the AI's trading too — presenting
+        engine-only understated real volume to the point of reading as
+        wrong). They stay tagged, and their cohort stats still travel
+        separately so per-sleeve grading survives the merge."""
+        return ("copy" if copy_slugs is not None and slug in copy_slugs
+                else "engine")
+
+    def _tally_copy(stake_now: float, settled: bool, realized: float):
+        copy_sleeve["count"] += 1
+        copy_sleeve["stake"] += stake_now
+        if settled:
+            copy_sleeve["net_pnl"] += realized
+        else:
+            copy_sleeve["open"] += 1
 
     seen: set[str] = set()
     for slug, p in (positions or {}).items():
@@ -178,17 +193,22 @@ def build(positions: dict[str, dict], activities: list[dict],
             realized = res["realized"] or realized
             cost = cost or res["cost"]
         stake_now = cost if cost > 0 else e.get("notional", 0.0)
-        bucket = _excluded_bucket(slug, stake_now)
-        if bucket is not None:
-            bucket["count"] += 1
-            bucket["stake"] += stake_now
-            if settled:
-                bucket["net_pnl"] += realized
-            else:
-                bucket["open"] += 1
-            continue
+        sleeve = _sleeve_of(slug)
+        if sleeve == "copy":
+            _tally_copy(stake_now, settled, realized)
+        else:
+            bucket = _excluded_bucket(slug, stake_now)
+            if bucket is not None:
+                bucket["count"] += 1
+                bucket["stake"] += stake_now
+                if settled:
+                    bucket["net_pnl"] += realized
+                else:
+                    bucket["open"] += 1
+                continue
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
+            "sleeve": sleeve,
             "market_slug": slug,
             "title": meta.get("title") or slug,
             "outcome": meta.get("outcome"),
@@ -220,14 +240,19 @@ def build(positions: dict[str, dict], activities: list[dict],
         if entry_ts < since_ts:
             continue
         cost = res["cost"] or e.get("notional", 0.0)
-        bucket = _excluded_bucket(slug, cost)
-        if bucket is not None:
-            bucket["count"] += 1
-            bucket["stake"] += cost
-            bucket["net_pnl"] += res["realized"]
-            continue
+        sleeve = _sleeve_of(slug)
+        if sleeve == "copy":
+            _tally_copy(cost, True, res["realized"])
+        else:
+            bucket = _excluded_bucket(slug, cost)
+            if bucket is not None:
+                bucket["count"] += 1
+                bucket["stake"] += cost
+                bucket["net_pnl"] += res["realized"]
+                continue
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
+            "sleeve": sleeve,
             "market_slug": slug,
             "title": res.get("title") or slug,
             "outcome": None,
@@ -290,11 +315,12 @@ def build(positions: dict[str, dict], activities: list[dict],
         d["deployed"] = round(d["deployed"], 2)
         d["pnl"] = round(d["pnl"], 2)
 
-    # Account-wide tie-out: cohort + every disclosed exclusion = what the
-    # owner sees in the venue app. The headline cohort alone read as
-    # "wrong" the day the incident cohort was deeply negative — the page
-    # must reconcile to the account, not ask to be trusted.
-    _buckets = [over_limit, unattributed, copy_sleeve]
+    # Account-wide tie-out: record + every disclosed exclusion = what the
+    # owner sees in the venue app. The headline alone read as "wrong" the
+    # day the incident cohort was deeply negative — the page must
+    # reconcile to the account, not ask to be trusted. (Copy rows are
+    # inside `rows` now, so only the true exclusions are added back.)
+    _buckets = [over_limit, unattributed]
     account = {
         "trades": len(rows) + sum(b["count"] for b in _buckets),
         "open": (len(rows) - len(settled_rows))
@@ -343,9 +369,10 @@ def build(positions: dict[str, dict], activities: list[dict],
              "stake": round(unattributed["stake"], 2),
              "net_pnl": round(unattributed["net_pnl"], 2)}
             if attributed is not None else None),
-        # The whale-copy sleeve's positions: its own strategy, its own
-        # cohort, never counted as the engine's.
-        "excluded_copy_sleeve": (
+        # The whale-copy sleeve's cohort stats. Its rows are INSIDE the
+        # record (it is the AI's trading too); this block keeps the sleeve
+        # gradable on its own.
+        "copy_sleeve": (
             {"count": copy_sleeve["count"],
              "open": copy_sleeve["open"],
              "stake": round(copy_sleeve["stake"], 2),
