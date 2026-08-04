@@ -76,13 +76,26 @@ def test_resting_price_is_strictly_better_than_the_ask():
 
 
 def test_default_adapter_contract_crosses_the_spread():
-    """Venues that can't rest must keep paying the ask — the base class is
-    what guarantees maker pricing never leaks into an adapter that lacks it."""
+    """Venues without a plan_entry override must keep paying the ask — the
+    base class guarantees maker pricing never leaks into an adapter that
+    lacks it. (Kalshi USED to be the example here; it now deliberately
+    overrides plan_entry, because it always executed maker while pricing
+    its threshold as a fee-paying taker — audit 2026-08-04.)"""
+    from edge.venues.base import VenueAdapter
+
+    # Unbound call: the base implementation never touches self, and an
+    # abstract class cannot be instantiated even via __new__.
+    px, taker = VenueAdapter.plan_entry(None, _book(0.40, 0.50))
+    assert (px, taker) == (0.50, True)
+
+
+def test_kalshi_now_prices_maker_first_like_it_executes():
     from edge.venues.kalshi import KalshiAdapter
 
     px, taker = KalshiAdapter.plan_entry(KalshiAdapter.__new__(KalshiAdapter),
                                          _book(0.40, 0.50))
-    assert (px, taker) == (0.50, True)
+    assert (px, taker) == (0.49, False), \
+        "threshold judged fee-free at the maker price actually paid"
 
 
 # ── order placement ─────────────────────────────────────────────────────

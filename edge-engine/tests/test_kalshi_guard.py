@@ -124,3 +124,48 @@ def test_copy_sweep_completes_a_guaranteed_pair_matched():
     assert st["copied"] == 1
     assert ka.orders == [("KXMLBGAME-26AUG04BALTEX-BAL", 0.50, 3)], \
         "pair-matched: 3 contracts, not the $2 default of 4"
+
+
+def test_reaper_releases_expired_unfilled_maker_claims():
+    from edge.execution.executor import reap_kalshi_makers
+
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    led.claim_event("ev-1", "kalshi:EVT-A", "kalshi")
+    led.set_state("kalshi_order:o1", {"market_key": "kalshi:EVT-A",
+                                      "event_key": "ev-1", "taker": False,
+                                      "ts": time.time() - 2000})
+    out = reap_kalshi_makers(led)
+    assert out == {"checked": 1, "released": 1, "filled": 0}
+    assert led.get_state("kalshi_order:o1") is None
+    assert led.claim_event("ev-1", "kalshi:EVT-A", "kalshi"), \
+        "the claim must be reusable after the release"
+
+
+def test_reaper_keeps_the_claim_when_the_order_filled():
+    from edge.execution.executor import reap_kalshi_makers
+
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    led.claim_event("ev-2", "kalshi:EVT-B", "kalshi")
+    led.record_fill(fill_uid="f1", venue="kalshi",
+                    market_key="kalshi:EVT-B", side="BUY", qty=3, price=0.4,
+                    fee=0.0, league="mlb", mode="LIVE_BETA",
+                    category="engine", decision={})
+    led.set_state("kalshi_order:o2", {"market_key": "kalshi:EVT-B",
+                                      "event_key": "ev-2", "taker": False,
+                                      "ts": time.time() - 2000})
+    out = reap_kalshi_makers(led)
+    assert out["filled"] == 1 and out["released"] == 0
+    assert not led.claim_event("ev-2", "kalshi:EVT-B", "kalshi"), \
+        "a filled market keeps its never-add claim"
+
+
+def test_reaper_leaves_young_orders_alone():
+    from edge.execution.executor import reap_kalshi_makers
+
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    led.set_state("kalshi_order:o3", {"market_key": "kalshi:EVT-C",
+                                      "event_key": "ev-3", "taker": False,
+                                      "ts": time.time() - 60})
+    out = reap_kalshi_makers(led)
+    assert out["checked"] == 0
+    assert led.get_state("kalshi_order:o3") is not None

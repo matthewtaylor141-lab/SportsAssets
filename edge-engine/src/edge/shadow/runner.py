@@ -2227,6 +2227,8 @@ def _main_impl() -> None:
                 if a.name == "kalshi":
                     if risk.is_live:
                         funnel["kalshi_fill_sync"] = sync_kalshi_fills(a, ledger, risk.mode)
+                        from edge.execution.executor import reap_kalshi_makers
+                        funnel["kalshi_reap"] = reap_kalshi_makers(ledger)
                 elif a.name == "polymarket-us":
                         # Order matters, and getting it wrong cost us four
                         # runaway positions on 2026-08-02.

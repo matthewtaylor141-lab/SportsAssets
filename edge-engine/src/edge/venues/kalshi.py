@@ -332,6 +332,26 @@ class KalshiAdapter(VenueAdapter):
         bal = (resp.json() or {}).get("balance")
         return {"ok": True, "balance_usd": (bal or 0) / 100.0}
 
+    def plan_entry(self, book) -> tuple[float, bool]:
+        """(entry_price, taker) — maker-first, matching what execution does.
+
+        Without this override the engine priced every Kalshi entry as a
+        fee-paying taker at the ask, then EXECUTED maker (fee-free) one
+        tick under it: the threshold carried a 0.7-1.75c fee that was
+        never paid, suppressing most qualifying Kalshi volume and biasing
+        the cross-venue router toward Polymarket at genuinely worse
+        prices (audit 2026-08-04). Rest one tick under the ask (never
+        below the bid); a one-tick market crosses and pays the real fee —
+        which the runner then correctly charges, because taker=True."""
+        if not book.asks:
+            return 0.0, True
+        ask = round(book.asks[0].price, 2)
+        bid = round(book.bids[0].price, 2) if book.bids else 0.0
+        px = round(max(ask - 0.01, bid), 2)
+        if px <= 0 or px >= ask:
+            return ask, True
+        return px, False
+
     def plan_maker_order(self, limit_price: float, best_ask: float,
                          edge: float, threshold: float) -> tuple[float, bool] | None:
         """Maker-first pricing (pure; unit-tested):

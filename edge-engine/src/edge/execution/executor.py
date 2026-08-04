@@ -12,6 +12,7 @@ Every fill carries its full decision record into the ledger.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 
 from edge.ledger.service import Ledger
@@ -84,7 +85,8 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
         if result["ok"]:
             ledger.set_state(f"kalshi_order:{result.get('order_id')}",
                              {**decision, "px": px, "count": count, "taker": taker,
-                              "market_key": mkey, "league": league, "ts": ts})
+                              "market_key": mkey, "league": league, "ts": ts,
+                              "event_key": event_key})
             return {"placed": True, "filled_usd": 0.0,
                     "status": f"{result.get('status')}:{result.get('order_id')}"}
         return {"placed": False, "filled_usd": 0.0,
@@ -450,6 +452,39 @@ def reap_pmus_makers(adapter, ledger: Ledger, ttl_s: float,
             adapter.mark_force_taker(slug)
         if ctx.get("event_key") and ledger.release_event(ctx["event_key"]):
             out["released"] += 1
+    return out
+
+
+def reap_kalshi_makers(ledger: Ledger, max_age_s: float = 1020.0) -> dict:
+    """Give expired-unfilled Kalshi maker orders their claims back.
+
+    Kalshi GTC makers carry a 15-minute expiration_time at the venue, so
+    no cancel call is needed — but an order that expired UNFILLED left
+    its one-per-market claim held forever, silently retiring the market
+    for the day (the exact volume-killing class reap_pmus_makers closed
+    for Polymarket). Any parked order context older than expiry+slack
+    whose market shows no position is released; contexts whose market
+    HAS a position filled — the claim stands, only the context is
+    cleaned. Runs every cycle from the kalshi maintenance branch.
+    """
+    out = {"checked": 0, "released": 0, "filled": 0}
+    now = time.time()
+    for key, ctx in (ledger.list_state("kalshi_order:") or {}).items():
+        ctx = ctx or {}
+        ts = float(ctx.get("ts") or 0)
+        if not ts or now - ts < max_age_s:
+            continue
+        out["checked"] += 1
+        mkey = ctx.get("market_key") or ""
+        held = any(p.get("market_key") == mkey and float(p.get("shares") or 0) > 0
+                   for p in ledger.open_positions(live_only=True))
+        if held:
+            out["filled"] += 1
+        else:
+            ev = ctx.get("event_key")
+            if ev and ledger.release_event(ev):
+                out["released"] += 1
+        ledger.clear_state(key)
     return out
 
 

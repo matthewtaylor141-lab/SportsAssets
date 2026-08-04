@@ -264,3 +264,33 @@ def test_v2_rejection_surfaces_raw_error():
     r = a.place_order("TICK", 0.30, 2, client_order_id="c-4", taker=True)
     assert not r["ok"] and r["status"] == "http_400"
     assert "error" in r["raw"]
+
+
+# --- maker-first entry pricing: threshold judged at the price we pay ---
+
+def _book(ask, bid=None):
+    import time as _t
+
+    from edge.venues.base import BookLevel, MarketBook
+    return MarketBook(venue="kalshi", market_id="EVT", outcome_id="T",
+                      bids=[BookLevel(bid, 10)] if bid else [],
+                      asks=[BookLevel(ask, 10)] if ask else [], ts=_t.time())
+
+
+def test_plan_entry_rests_one_tick_under_the_ask_fee_free():
+    a = KalshiAdapter()
+    px, taker = a.plan_entry(_book(0.50, 0.44))
+    assert (px, taker) == (0.49, False), \
+        "maker post: the threshold must be judged fee-free at 49c"
+
+
+def test_plan_entry_never_prices_below_the_bid():
+    a = KalshiAdapter()
+    px, taker = a.plan_entry(_book(0.50, 0.49))
+    assert (px, taker) == (0.49, False)
+
+
+def test_plan_entry_crosses_a_one_tick_market_as_taker():
+    a = KalshiAdapter()
+    px, taker = a.plan_entry(_book(0.01))
+    assert taker is True, "no room to rest: cross and pay the real fee"
