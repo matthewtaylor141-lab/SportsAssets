@@ -392,7 +392,13 @@ class RiskManager:
             if usd_left <= 0 or fills_left <= 0:
                 return 0.0, "exploration_budget: day's learning spend used"
             requested_usd = min(requested_usd, usd_left)
-        size = min(requested_usd, caps.per_fill_default, caps.per_fill_max)
+        # per_fill_max is the ceiling; per_fill_default is the FALLBACK for
+        # callers that request no specific size, not a second ceiling.
+        # (Audit 2026-08-04: clamping to default made the size ladder's
+        # upper rungs unreachable — production sizing was flat at $2 no
+        # matter how strong the edge, and no test caught it because none
+        # drove approve() with size_for_edge's output.)
+        size = min(requested_usd, caps.per_fill_max)
         market_room = caps.per_market - self.market_open_cost(market_key)
         if caps.per_event > 0:
             # Sides of one game are not independent bets — exactly one pays.

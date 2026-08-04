@@ -131,9 +131,22 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
         # the reconciler would record this fill a second time from the
         # activity feed.
         ledger.clear_state(f"{PMUS_ORDER_PREFIX}{outcome_id}")
+        # The FOK limit is NOT the observed ask — it is the worst price
+        # that still clears the bar (audit 2026-08-04). A limit pinned to
+        # the ask dies on a one-tick uptick between book read and send,
+        # which converts edges into `unfilled:` misses at exactly the
+        # moments prices are moving toward fair. edge and threshold were
+        # judged at entry_price, so entry + (edge - threshold) is by
+        # construction the highest price at which this trade still clears;
+        # the venue fills at the real ask whenever it is at or under that.
+        # Never pays more than the strategy permits, never worse than the
+        # old behaviour when the book is still.
+        slack = max(0.0, float(edge) - float(threshold))
+        limit_px = min(round(entry_price + slack, 2), 0.99)
+        qty = int(size_usd / limit_px) or qty
         # Micro orders skip the preview round-trip (FOK limit already bounds
         # cost); larger sizes keep the venue cost pre-check.
-        result = adapter.place_order(outcome_id, round(entry_price, 2), qty,
+        result = adapter.place_order(outcome_id, limit_px, qty,
                                      preview=size_usd > 25)
         if result["ok"]:
             filled = float(result["count"])

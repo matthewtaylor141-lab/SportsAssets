@@ -96,24 +96,44 @@ class LinePair:
     b_odds: float
 
 
+def _clean_binary_point(point: float | None) -> bool:
+    """Only half-point lines are true binaries on a no-push venue.
+
+    A book's two-way quote on a WHOLE line ("Over 8.0", "-2.0") is
+    P(side | no push) — the push outcomes are refunded at the book but do
+    not exist on the venue contract, so de-vigging it into a clean binary
+    overstates our fair value, always in the flattering direction (the
+    exact hazard props.py already documents for the N+ form). QUARTER
+    lines (-0.25, -0.75) are split bets, not binaries at all. Audit
+    2026-08-04: refuse both; .5 lines only.
+    """
+    if point is None:
+        return False
+    frac = abs(point) % 1
+    return abs(frac - 0.5) < 1e-9
+
+
 def pair_quotes(quotes: dict[str, float], kind: str) -> list[LinePair]:
     """Match a feed market dict {outcome_name: decimal_odds} into two-sided
     pairs at identical points. Unpaired quotes are dropped — a one-sided
-    line cannot be de-vigged and is untradeable."""
+    line cannot be de-vigged and is untradeable. Whole and quarter points
+    are dropped too: see _clean_binary_point."""
     parsed = {name: parse_outcome_line(name) for name in quotes}
     pairs: list[LinePair] = []
     if kind == "total":
         overs = {p.point: n for n, p in parsed.items()
-                 if p.kind == "total" and p.side == "over" and p.point is not None}
+                 if p.kind == "total" and p.side == "over"
+                 and _clean_binary_point(p.point)}
         unders = {p.point: n for n, p in parsed.items()
-                  if p.kind == "total" and p.side == "under" and p.point is not None}
+                  if p.kind == "total" and p.side == "under"
+                  and _clean_binary_point(p.point)}
         for pt in sorted(set(overs) & set(unders)):
             a, b = overs[pt], unders[pt]
             pairs.append(LinePair("total", pt, a, b, parsed[a], parsed[b],
                                   quotes[a], quotes[b]))
     elif kind == "spread":
         entries = [(n, p) for n, p in parsed.items()
-                   if p.kind == "spread" and p.point is not None]
+                   if p.kind == "spread" and _clean_binary_point(p.point)]
         used: set[str] = set()
         for i, (na, pa) in enumerate(entries):
             if na in used or pa.point >= 0:

@@ -149,6 +149,14 @@ def parse_prop(text: str) -> tuple[PropBet | None, str | None]:
             side, point = "Over", float(mo.group(1))
         elif mu:
             side, point = "Under", float(mu.group(1))
+        # A whole-number "over 5" carries push mass the venue contract
+        # doesn't have — the same hazard the module header names for N+,
+        # which reaches this code as its half-point equivalent. The
+        # explicit form was sailing through unconverted (audit
+        # 2026-08-04); a book's whole-line quote is P(side | no push)
+        # and de-vigging it flatters us on every such market.
+        if point is not None and abs(point % 1 - 0.5) > 1e-9:
+            return None, "whole_line_push_risk"
     if side is None or point is None:
         return None, "no_threshold"
 

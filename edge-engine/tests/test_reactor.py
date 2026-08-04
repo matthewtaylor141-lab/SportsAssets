@@ -129,7 +129,7 @@ def test_a_reaction_trades_on_the_same_terms_as_a_sweep(tmp_path, monkeypatch):
 def test_reactive_pass_still_obeys_the_dead_zone(tmp_path, monkeypatch):
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     ledger, risk = _rig(tmp_path)
-    funnel = run_cycle([StubVenue(ask_price=0.43)], StubFeed([_event(home_odds=1.60)]),
+    funnel = run_cycle([StubVenue(ask_price=0.43)], StubFeed([_event(home_odds=1.90)]),
                        POLICY, risk, ledger, ["soccer_epl"], only_slugs={"T-ARS"})
     assert ledger.summary()["fills"] == 0
     assert funnel["rejects"].get("band", 0) >= 1

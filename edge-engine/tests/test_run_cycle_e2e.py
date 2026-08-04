@@ -117,7 +117,7 @@ def test_dead_zone_ask_never_trades(tmp_path, monkeypatch):
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     ledger, risk = _rig(tmp_path)
     funnel = run_cycle([StubVenue(ask_price=0.43)], StubFeed(
-        [_event(home_odds=1.60)]), POLICY, risk, ledger, ["soccer_epl"])
+        [_event(home_odds=1.90)]), POLICY, risk, ledger, ["soccer_epl"])
     # 0.43 ask sits in the 0.40-0.45 dead zone: unconditionally untradeable.
     assert ledger.summary()["fills"] == 0
     assert funnel["rejects"].get("band", 0) >= 1
@@ -261,7 +261,7 @@ def test_study_records_every_priced_outcome_even_when_nothing_trades(tmp_path, m
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     ledger, risk = _rig(tmp_path)
     # 0.43 ask in a dead zone: zero trades by design.
-    funnel = run_cycle([StubVenue(ask_price=0.43)], StubFeed([_event(home_odds=1.60)]),
+    funnel = run_cycle([StubVenue(ask_price=0.43)], StubFeed([_event(home_odds=1.90)]),
                        POLICY, risk, ledger, ["soccer_epl"])
     assert ledger.summary()["fills"] == 0          # nothing traded, as intended
     assert funnel["studied"] >= 1                  # ...but we still learned

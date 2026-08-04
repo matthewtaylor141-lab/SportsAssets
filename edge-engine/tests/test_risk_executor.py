@@ -620,3 +620,17 @@ def test_league_live_record_counts_only_live_resolved(tmp_path):
     rec = led.league_live_record("xyz")
     assert rec["n"] == 1          # the PAPER market does not count
     assert rec["net"] > 0
+
+
+def test_the_ladder_survives_approve_end_to_end():
+    """Audit 2026-08-04: approve() clamped every request to
+    per_fill_default, so the $3 rung existed in config and could never
+    fill. The ladder's output must survive the full approval path."""
+    risk = _beta_risk()
+    bar = 0.02
+    requested = risk.size_for_edge(bar * 2.0, bar)
+    assert requested == 3.00
+    approved, why = risk.approve("polymarket-us", "polymarket-us:tok-x",
+                                 "ev-x", requested)
+    assert why == "ok"
+    assert approved == 3.00, "the top rung must not be clamped back to $2"

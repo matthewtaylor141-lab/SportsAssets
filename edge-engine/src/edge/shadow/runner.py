@@ -250,6 +250,8 @@ _ROTATION = {"i": 0}
 _NEAR_THRESHOLD: dict[str, float] = {}
 _LAST_SETTLE: dict = {}
 _ACCOUNT_LINK: dict = {}
+# Max age for the per-event payload (segments + props) behind a live order.
+_PROP_MAX_AGE_S = float(os.environ.get("EDGE_PROP_MAX_AGE_S", "600"))
 
 # Position reconciliation runs once per process: a restart is exactly when
 # the ledger may have been wiped, and exactly when the caps need rebuilding.
@@ -285,7 +287,7 @@ def _quarantined(ledger) -> set:
 
 
 def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
-                   funnel) -> bool:
+                   funnel, max_usd: float = 10.0) -> bool:
     """Look for a complete outcome set priced under $1 and buy all of it.
 
     Returns True if a book was attempted (so the caller can count it against
@@ -351,7 +353,12 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
         {"event": f"{ev.home} v {ev.away}", "cost": round(book.cost, 4),
          "profit_per_set": book.profit_per_set, "legs": len(book.legs),
          "depth_sets": book.sets})
-    take = min(sets, book.sets)
+    # Dollar-capped, depth-bounded (audit 2026-08-04: the computed depth
+    # was discarded and every arb bought exactly 1 contract — profit was
+    # capped at pennies regardless of how much the book offered). Every
+    # guarantee in execute_dutch_book is per-set and scale-invariant;
+    # `sets` (config max_sets) stays as the floor.
+    take = min(book.sets, max(sets, int(max_usd / max(book.cost, 0.01))))
     if not dry_run:
         # book.event IS the claim key (arb_tried:market:family).
         ledger.set_state(book.event, {"ts": time.time()})
@@ -689,10 +696,18 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     f = fresh.get((stale.home, stale.away))
                     if f is None or f.fetched_at <= stale.fetched_at:
                         continue
+                    # EVERY per-category field moves together with the
+                    # stamps. props and anchors were omitted here (audit
+                    # 2026-08-04), so an event's props stayed at their
+                    # first-fetch vintage forever while fetched_at was
+                    # repeatedly renewed — stale quotes wearing a fresh
+                    # timestamp, on the highest-volume category.
                     (stale.h2h, stale.totals, stale.spreads, stale.segments,
-                     stale.books, stale.fetched_at) = (
-                        f.h2h, f.totals, f.spreads, f.segments, f.books,
-                        f.fetched_at)
+                     stale.props, stale.books, stale.anchors,
+                     stale.fetched_at, stale.enriched_at) = (
+                        f.h2h, f.totals, f.spreads, f.segments,
+                        f.props, f.books, f.anchors,
+                        f.fetched_at, getattr(f, "enriched_at", 0.0))
                     rescued += 1
                 if rescued:
                     funnel["refreshed"] = funnel.get("refreshed", 0) + rescued
@@ -711,12 +726,33 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                 return priced["ok"]
             names = list(ev.h2h)
             try:
+                def _sane_overround(odds: list[float], n: int) -> bool:
+                    # Sanity band BEFORE de-vigging (audit 2026-08-04).
+                    # The synthetic quote is a median across books, so its
+                    # overround can be an artifact of book mixing: an
+                    # UNDERROUND pair (sum < 1) pushes the power exponent
+                    # above 1 and EXAGGERATES favourites; a heavy-vig pair
+                    # (sum >> 1.15 two-way) drives the exponent toward the
+                    # numerically meaningless. Both were silently accepted.
+                    s = sum(1.0 / o for o in odds)
+                    lo, hi = 0.99, 1.02 + 0.13 * (n - 1)
+                    if lo <= s <= hi:
+                        return True
+                    b = funnel.setdefault("overround_rejected", {})
+                    b[f"{n}way"] = b.get(f"{n}way", 0) + 1
+                    return False
+
                 def _pool(h2h, totals, spreads):
-                    fairs = dict(zip(list(h2h), fair_value(
-                        [h2h[n] for n in h2h]))) if len(h2h) >= 2 else {}
+                    fairs = {}
+                    if len(h2h) >= 2 and _sane_overround(
+                            [h2h[n] for n in h2h], len(h2h)):
+                        fairs = dict(zip(list(h2h), fair_value(
+                            [h2h[n] for n in h2h])))
                     sides: list[tuple] = []  # (ParsedLine, fair)
                     for kind, quotes in (("total", totals), ("spread", spreads)):
                         for pq in pair_quotes(quotes, kind):
+                            if not _sane_overround([pq.a_odds, pq.b_odds], 2):
+                                continue
                             fa, fb = fair_value([pq.a_odds, pq.b_odds])
                             sides.append((pq.a_parsed, fa))
                             sides.append((pq.b_parsed, fb))
@@ -764,6 +800,15 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     return None, "prop", {"reason": "prop_no_feed_quotes",
                                           "market": bet.market_key,
                                           "venue_outcome": oc_name[:48]}
+                # Props come from a separately cached per-event payload; the
+                # 30s fetched_at rule below never sees its age. Ten minutes
+                # is generous for prop lines pre-match and refuses the
+                # half-hour-old vintage the cache could otherwise serve.
+                enr = getattr(ev, "enriched_at", 0.0)
+                if enr and time.time() - enr > _PROP_MAX_AGE_S:
+                    return None, "prop", {"reason": "stale_prop_quote",
+                                          "age_s": int(time.time() - enr),
+                                          "venue_outcome": oc_name[:48]}
                 fair, miss = fair_for_prop(bet, props)
                 if fair is None:
                     return None, "prop", miss
@@ -781,6 +826,13 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             if segment is None:
                 fairs, deriv_sides = priced["fairs"], priced["deriv_sides"]
             else:
+                # Same per-event payload as props — same staleness hole.
+                enr = getattr(ev, "enriched_at", 0.0)
+                if enr and time.time() - enr > _PROP_MAX_AGE_S:
+                    return None, "segment", {
+                        "reason": "stale_segment_quote",
+                        "age_s": int(time.time() - enr),
+                        "venue_outcome": oc_name[:48]}
                 pool = priced["seg"].get(segment)
                 if not pool:
                     # We have no sharp quote for this part of the game. The
@@ -1232,6 +1284,11 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     # Tier rides on every fill so the grader can score the
                     # exploration bet separately from the measured core.
                     decision["tier"] = verdict.tier
+                    # Trigger too (audit 2026-08-04): without it the
+                    # reactor's contribution lives only in a counter that
+                    # reset_window() erases — "does sub-second reaction
+                    # actually earn money?" must be answerable from fills.
+                    decision["trigger"] = "reactor" if reactive else "sweep"
                     decision["consensus_books"] = getattr(ev, "books", None)
                     funnel.setdefault("by_tier", {}).setdefault(verdict.tier, 0)
                     funnel["by_tier"][verdict.tier] += 1
@@ -1288,7 +1345,9 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                       venue_legs=arb_legs,
                                       expected=len(ev.h2h),
                                       sets=arb_sets, dry_run=not risk.is_live,
-                                      funnel=funnel):
+                                      funnel=funnel,
+                                      max_usd=float(
+                                          arb_cfg.get("max_usd", 10.0))):
                         arb_done += 1
                 except Exception as exc:  # noqa: BLE001
                     # Arbitrage is additive. A failure here must never cost

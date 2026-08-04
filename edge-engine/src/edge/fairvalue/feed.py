@@ -59,9 +59,21 @@ def _weighted_median(pairs: list[tuple[float, float]]) -> float:
     ordered = sorted(pairs)
     total = sum(w for _, w in ordered)
     half, run = total / 2.0, 0.0
-    for price, w in ordered:
+    for i, (price, w) in enumerate(ordered):
         run += w
-        if run >= half:
+        if run > half + 1e-12:
+            return price
+        if abs(run - half) <= 1e-12:
+            # The halfway point lands exactly between two quotes — e.g. two
+            # equally-weighted anchors (Pinnacle + Betfair, both 3.0), a
+            # COMMON configuration. Returning the lower price here biased
+            # every outcome's implied probability upward, which power
+            # de-vig turned into systematic longshot inflation in the very
+            # 5-20c bands the strategy trades (audit 2026-08-04).
+            # Interpolate the straddle instead, like an ordinary even-n
+            # median.
+            if i + 1 < len(ordered):
+                return (price + ordered[i + 1][0]) / 2.0
             return price
     return ordered[-1][0]
 
@@ -123,6 +135,13 @@ class FeedEvent:
     props: dict = field(default_factory=dict)
     event_id: str = ""
     fetched_at: float = 0.0   # staleness stamp — set at fetch, checked pre-order
+    # When the per-event payload (segments + props) was actually FETCHED —
+    # not when it was last copied around. The event cache serves payloads up
+    # to EVENT_TTL_S old, so without this stamp a prop can trade on a
+    # half-hour-old quote while fetched_at swears it is 25 seconds fresh
+    # (audit 2026-08-04: props are most of the volume AND the category on
+    # probation; this was the biggest single staleness hole).
+    enriched_at: float = 0.0
 
     def is_fresh(self, max_age_s: float = 30.0, now: float | None = None) -> bool:
         """Hard rule: no order without a quote fresher than max_age_s."""
@@ -620,7 +639,9 @@ class TheOddsAPIClient(OddsFeed):
             hit = self._event_cache.get(ev.event_id)
             if hit and now - hit[0] < self._event_ttl_s():
                 raw = hit[1]
+                payload_at = hit[0]
             else:
+                payload_at = now
                 try:
                     r = self._sess.get(
                         f"{self.BASE}/sports/{sport_key}/events/{ev.event_id}/odds",
@@ -674,6 +695,7 @@ class TheOddsAPIClient(OddsFeed):
             # A segment or prop quote from books that never quoted the full game
             # counts toward the anchor: it is the segment we are pricing.
             ev.anchors = max(ev.anchors, len(contributing & ANCHOR_BOOKS))
+            ev.enriched_at = payload_at
             enriched += 1
         return enriched
 

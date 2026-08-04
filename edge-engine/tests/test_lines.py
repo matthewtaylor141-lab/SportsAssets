@@ -708,3 +708,31 @@ def test_prop_text_on_a_quoteless_event_never_reaches_the_team_matcher(
         funnel["rejects"]
     assert funnel["rejects"].get("no_side_match_moneyline", 0) == 0
     assert funnel["logged"] == 0
+
+
+# ── whole and quarter lines are not binaries (audit 2026-08-04) ─────────
+
+def test_whole_number_totals_are_refused_push_mass_is_not_ours():
+    from edge.fairvalue.lines import pair_quotes
+
+    pairs = pair_quotes({"Over 8": 1.9, "Under 8": 1.9,
+                         "Over 8.5": 2.0, "Under 8.5": 1.8}, "total")
+    assert [p.point for p in pairs] == [8.5]
+
+
+def test_whole_and_quarter_spreads_are_refused():
+    from edge.fairvalue.lines import pair_quotes
+
+    pairs = pair_quotes({"Rangers -2": 1.9, "Orioles +2": 1.9,
+                         "Rangers -0.25": 1.95, "Orioles +0.25": 1.85,
+                         "Rangers -1.5": 2.1, "Orioles +1.5": 1.7}, "spread")
+    assert [p.point for p in pairs] == [1.5]
+
+
+def test_explicit_whole_line_props_are_refused():
+    from edge.fairvalue.props import parse_prop
+
+    bet, why = parse_prop("Aaron Judge over 5 strikeouts")
+    assert bet is None and why == "whole_line_push_risk"
+    bet, why = parse_prop("Aaron Judge over 5.5 strikeouts")
+    assert bet is not None and bet.point == 5.5

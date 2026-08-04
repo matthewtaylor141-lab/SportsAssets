@@ -291,7 +291,8 @@ arbitrage:
   # real fills; a true set bought under $1 is arithmetic profit at
   # settlement.
   enabled: true
-  max_sets: 1                 # contracts per leg, per opportunity
+  max_sets: 1                 # floor: contracts per leg, per opportunity
+  max_usd: 10.0               # dollar cap per opportunity; depth-bounded
   max_books_per_cycle: 3
   # Cross-venue (owner instruction 2026-08-04: "exploit any guaranteed
   # profitable arbitrage between the venues"). Team A on one venue, Team B
