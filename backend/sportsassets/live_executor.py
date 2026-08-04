@@ -274,7 +274,11 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         # same/better/within-2%-worse). Whole-unit FOK fills all or kills.
         import math
 
-        limit = round(min(math.floor(his_price * 1.02 * 100) / 100.0, 0.99), 2)
+        # His price + 2%, floored to AT LEAST one tick: cent-flooring gave
+        # sub-50c copies zero tolerance, failing exactly when his edge was
+        # confirming and filling when price moved against him — manufactured
+        # adverse selection (audit 2026-08-04).
+        limit = round(min(his_price + max(0.01, his_price * 0.02), 0.99), 2)
         if limit <= 0:
             return
         shares = float(int(per_fill_usd(payload.get("whale_username")) / limit))

@@ -367,22 +367,46 @@ class KalshiAdapter(VenueAdapter):
         else:
             body["time_in_force"] = "good_till_canceled"
             body["expiration_time"] = int(time.time()) + 900
-        resp = self._sess.post(f"{BASE}/portfolio/events/orders", json=body,
-                               headers=self._auth_headers("POST", path), timeout=10)
+        try:
+            resp = self._sess.post(
+                f"{BASE}/portfolio/events/orders", json=body,
+                headers=self._auth_headers("POST", path), timeout=10)
+        except requests.RequestException as exc:
+            # An ambiguous network failure must read as NOT filled — the
+            # order may rest at the venue, and sync_kalshi_fills will
+            # reconcile any real fill by trade id.
+            return {"ok": False, "order_id": None, "status": "network_error",
+                    "price": price, "count": count, "taker": taker,
+                    "raw": {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}}
         ok = resp.status_code in (200, 201)
         try:
             data = resp.json() or {}
         except ValueError:
             data = {}
         order = data.get("order") or data
-        filled = count
+        # FAIL CLOSED on fills: the spec requires fill_count in every
+        # response, so a payload without one is an unknown shape — assuming
+        # "fully filled" there once meant buying the closing leg of an arb
+        # against contracts we never owned. remaining_count is the backup
+        # signal (count - remaining is what actually matched on an IOC).
+        filled = 0
         for key in ("filled_count", "fill_count", "matched_count"):
             if order.get(key) is not None:
                 try:
                     filled = int(float(order[key]))
                 except (TypeError, ValueError):
-                    pass
+                    filled = 0
                 break
+        else:
+            if order.get("remaining_count") is not None:
+                try:
+                    filled = max(0, count - int(float(order["remaining_count"])))
+                except (TypeError, ValueError):
+                    filled = 0
+            elif ok:
+                log.warning("kalshi order %s: response carries no fill field"
+                            " — treating as 0 filled: %s",
+                            order.get("order_id"), str(data)[:200])
         return {"ok": ok, "order_id": order.get("order_id") or order.get("id"),
                 "status": order.get("status", f"http_{resp.status_code}"),
                 "price": price, "count": filled if ok else count, "taker": taker,

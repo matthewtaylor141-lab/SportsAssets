@@ -37,7 +37,15 @@ PER_COPY_DEFAULT = 2.00
 
 
 def _limit_for(his_price: float) -> float:
-    return round(min(math.floor(his_price * 1.02 * 100) / 100.0, 0.99), 2)
+    """His price + 2%, floored to AT LEAST one tick of tolerance.
+
+    Cent-flooring the raw 2% gave sub-50c copies ZERO room (0.30*1.02
+    floors back to 0.30), which failed exactly when his edge was
+    confirming (price drifting toward him) and filled preferentially
+    when it moved against him — manufactured adverse selection
+    (audit 2026-08-04)."""
+    tol = max(0.01, his_price * 0.02)
+    return round(min(his_price + tol, 0.99), 2)
 
 
 def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
@@ -54,6 +62,13 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
              "skipped_claimed": 0, "best_ask_gap_c": -99.0}
     if not identities:
         return stats
+    if live:
+        from edge.shadow.kalshi_guard import live_blocked
+
+        blocked = live_blocked(ledger)
+        if blocked:
+            stats["blocked"] = blocked
+            return stats
     sides = open_kalshi_sides(ledger)
     day = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     spend = ledger.get_state("kcopy_day") or {}
@@ -122,10 +137,15 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             continue
         ask = book.asks[0].price
         limit = _limit_for(his_price)
+        # Fee-loaded: we cross as taker, so the true cost is ask + fee.
+        # Comparing the raw ask overpaid by up to 1.75c/contract against
+        # a ~2.3c gross copy edge (audit 2026-08-04) — the sleeve was
+        # structurally negative-EV at mid prices without this.
+        eff = ask + kalshi.taker_fee(ask)
         stats["best_ask_gap_c"] = max(stats["best_ask_gap_c"],
-                                      round((limit - ask) * 100, 2))
-        if ask > limit:
-            continue                # outside his price +2%: not a copy
+                                      round((limit - eff) * 100, 2))
+        if eff > limit:
+            continue        # outside his price +2% fee-loaded: not a copy
         stats["priced_in_tolerance"] += 1
         per = PER_COPY_USD.get((row.get("whale") or "").lower(),
                                PER_COPY_DEFAULT)
@@ -165,6 +185,9 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 "status": str(r.get("status"))[:200],
                 "raw": str((r.get("raw") or {}).get("error"))[:300]}
         if filled > 0:
+            if r.get("order_id"):
+                ledger.set_state(f"kalshi_inline:{r['order_id']}",
+                                 {"ts": time.time()})
             note_fill(sides, target_ticker, ask, filled)
             stats["copied"] += 1
             cost = round(filled * ask, 2)

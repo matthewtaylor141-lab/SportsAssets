@@ -27,7 +27,11 @@ from ..config import settings
 from .pmus_account import _act_ts, _amt
 
 _raw_cache: dict[str, Any] = {"ts": 0.0, "data": None}
-_RAW_TTL = 30.0
+# The record is settlement-paced: a 3-minute snapshot is indistinguishable
+# from live, and this TTL cuts the API's venue call volume ~6x — the
+# engine's settlement and order calls share the venue's rate budget, and
+# those are the calls that make money (audit 2026-08-04).
+_RAW_TTL = 180.0
 _lock = asyncio.Lock()
 # Refresh health, surfaced in the payload: a snapshot that quietly stopped
 # refreshing must be VISIBLE as stale, not indistinguishable from live.

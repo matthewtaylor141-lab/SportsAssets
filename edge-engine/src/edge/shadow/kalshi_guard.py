@@ -18,6 +18,27 @@ directional and normal rules apply untouched.
 
 from __future__ import annotations
 
+import time
+
+
+def live_blocked(ledger) -> str | None:
+    """Honor the account-level stops from ANY order path.
+
+    The kill switch, circuit-breaker halt, and watchdog live in shared
+    ledger state, but only RiskManager.approve() consulted them — the
+    sweeps (copies/adds/xv) spent real money straight through a halt.
+    Every side-channel spender must call this before a live order.
+    """
+    if ledger.get_state("kill_switch", False):
+        return "kill_switch"
+    halt = ledger.get_state("halt_until")
+    if halt and float(halt.get("until", 0)) > time.time():
+        return "halted"
+    wd = ledger.get_state("watchdog_tripped")
+    if wd and wd.get("tripped"):
+        return "watchdog"
+    return None
+
 
 def event_of(ticker: str) -> str:
     """'KXWTAMATCH-26AUG04ANDPLI-AND' -> 'KXWTAMATCH-26AUG04ANDPLI'."""

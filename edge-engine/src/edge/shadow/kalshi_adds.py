@@ -66,8 +66,13 @@ def sweep(*, pmus, kalshi, ledger, live: bool,
     spend = ledger.get_state("kadd_day") or {}
     spent = float(spend.get("spent", 0.0)) if spend.get("day") == day else 0.0
 
-    from edge.shadow.kalshi_guard import (cross_side_cap, note_fill,
-                                          open_kalshi_sides)
+    from edge.shadow.kalshi_guard import (cross_side_cap, live_blocked,
+                                          note_fill, open_kalshi_sides)
+    if live:
+        blocked = live_blocked(ledger)
+        if blocked:
+            stats["blocked"] = blocked
+            return stats
     sides = open_kalshi_sides(ledger)
     discovered: dict = {}   # league -> list[VenueMarket]
     for slug, pos in positions.items():
@@ -185,6 +190,9 @@ def sweep(*, pmus, kalshi, ledger, live: bool,
                 "status": str(r.get("status"))[:200],
                 "raw": str((r.get("raw") or {}).get("error"))[:300]}
         if filled > 0:
+            if r.get("order_id"):
+                ledger.set_state(f"kalshi_inline:{r['order_id']}",
+                                 {"ts": time.time()})
             note_fill(sides, ticker, ask, filled)
             stats["added"] += 1
             add_cost = round(filled * ask, 2)

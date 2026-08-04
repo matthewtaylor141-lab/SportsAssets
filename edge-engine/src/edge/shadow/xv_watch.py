@@ -142,8 +142,6 @@ class XVWatch:
         if profit < self.min_profit or profit > MAX_BELIEVABLE_PROFIT:
             return
         claim = f"xv_tried:{event_key}"        # SHARED with the sweep path
-        if self._ledger.get_state(claim):
-            return
         day = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
         spend = self._ledger.get_state("xv_watch_day") or {}
         spent = float(spend.get("spent", 0.0)) if spend.get("day") == day else 0.0
@@ -151,6 +149,19 @@ class XVWatch:
             self.stats["skipped_day_cap"] += 1
             return
         live = bool(self._is_live())
+        if live:
+            from edge.shadow.kalshi_guard import live_blocked
+
+            blocked = live_blocked(self._ledger)
+            if blocked:
+                self.stats["blocked_" + blocked] = \
+                    self.stats.get("blocked_" + blocked, 0) + 1
+                return
+            # ATOMIC claim BEFORE execution: get-then-set left a multi-
+            # second window in which this 3s watcher and the sweep both
+            # passed the check and each bought the full set.
+            if not self._ledger.claim_event(claim, event_key, "xv"):
+                return
         res = execute_cross_venue(
             event=claim, legs=best,
             max_sets=max(1, int(min(self.max_usd, self.day_usd - spent)
@@ -165,11 +176,19 @@ class XVWatch:
                     res.status, entry["label"], profit, res.sets)
         if not live:
             return
-        if res.status not in ("no_fills", "nothing_to_do", "not_cross_venue",
-                              "implausible_profit"):
+        if res.status in ("no_fills", "nothing_to_do", "not_cross_venue",
+                          "implausible_profit"):
+            # Clean miss: give the claim back so the pair stays retryable.
+            self._ledger.release_event(claim)
+        else:
             self._ledger.set_state(claim, {"ts": time.time(),
                                            "status": res.status,
                                            "via": "xv_watch"})
+        for o in res.orders:
+            if o.get("ok") and o.get("order_id") \
+                    and float(o.get("count") or 0) > 0:
+                self._ledger.set_state(f"kalshi_inline:{o['order_id']}",
+                                       {"ts": time.time()})
         if res.status == "INCOMPLETE_EXPOSED":
             self.stats["exposed"] += 1
         legs_by_token = {l.token: l for l in best}

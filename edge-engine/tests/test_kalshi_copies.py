@@ -50,34 +50,35 @@ def _run(ask, rows=None, live=True, led=None):
     return st, ka, led
 
 
-def test_limit_is_his_price_plus_two_percent_floored():
+def test_limit_is_his_price_plus_two_percent_min_one_tick():
     assert _limit_for(0.50) == 0.51
-    assert _limit_for(0.97) == 0.98
+    assert _limit_for(0.30) == 0.31, "sub-50c copies get a full tick"
+    assert _limit_for(0.97) == 0.99
     assert _limit_for(0.985) == 0.99
 
 
 def test_copies_when_kalshi_is_inside_his_tolerance():
-    st, ka, led = _run(0.50)
+    st, ka, led = _run(0.48)   # eff = 0.48 + fee(0.0175) <= limit 0.51
     assert st["matched"] == 1 and st["copied"] == 1
-    assert ka.orders == [("T-BAL", 0.50, 4)]   # $2 -> 4 contracts
+    assert ka.orders == [("T-BAL", 0.48, 4)]   # $2 -> 4 contracts
     assert led.get_state("kcopy:mlb-bal-tex-2026-08-04:Baltimore Orioles")
 
 
 def test_outside_tolerance_is_not_a_copy():
-    st, ka, _ = _run(0.55)   # his 0.50 -> limit 0.51 < ask
+    st, ka, _ = _run(0.505)  # his 0.50: eff 0.505+fee > limit 0.51
     assert st["matched"] == 1 and st["copied"] == 0
     assert not ka.orders
 
 
 def test_rn1_gets_the_three_dollar_clip():
     row = {**_ROW, "whale": "RN1"}
-    st, ka, _ = _run(0.50, rows=[row])
-    assert ka.orders == [("T-BAL", 0.50, 6)]   # $3 -> 6 contracts
+    st, ka, _ = _run(0.48, rows=[row])
+    assert ka.orders == [("T-BAL", 0.48, 6)]   # $3 -> 6 contracts
 
 
 def test_one_copy_per_position_ever():
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
-    st1, _, _ = _run(0.50, led=led)
+    st1, _, _ = _run(0.48, led=led)
     st2, ka2, _ = _run(0.45, led=led)
     assert st1["copied"] == 1
     assert st2["copied"] == 0 and st2["skipped_claimed"] == 1
@@ -94,7 +95,7 @@ def test_unlisted_league_never_reaches_kalshi():
 
 
 def test_paper_counts_but_never_orders():
-    st, ka, led = _run(0.50, live=False)
+    st, ka, led = _run(0.48, live=False)
     assert st["copied"] == 1
     assert not ka.orders
     assert not led.get_state("kcopy:mlb-bal-tex-2026-08-04:Baltimore Orioles")
@@ -135,7 +136,7 @@ def test_accepted_ioc_with_zero_fill_does_not_burn_the_claim():
             return {"ok": True, "count": 0, "price": price,
                     "status": "http_201"}
 
-    ka = _ZeroFill(0.50)
+    ka = _ZeroFill(0.48)
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
     assert st["copied"] == 0 and st.get("ioc_zero_fill") == 1
     assert not led.get_state("kcopy:mlb-bal-tex-2026-08-04:Baltimore Orioles")

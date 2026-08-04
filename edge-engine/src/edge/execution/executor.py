@@ -475,6 +475,11 @@ def sync_kalshi_fills(adapter, ledger: Ledger, mode: str) -> int:
             price = float(f.get("yes_price") or 0) / 100.0
             if qty <= 0 or not (0 < price < 1):
                 continue
+            # Sweeps/smoke/xv record their fills inline at placement and
+            # mark the order id — recording those here again doubled every
+            # position (2x caps, 2x P&L; audit 2026-08-04).
+            if ledger.get_state(f"kalshi_inline:{f.get('order_id')}"):
+                continue
             # Order context (decision record) was parked at placement time.
             ctx = ledger.get_state(f"kalshi_order:{f.get('order_id')}") or {}
             fee = adapter.taker_fee(price) * qty if f.get("is_taker") else 0.0

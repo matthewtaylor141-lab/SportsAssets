@@ -480,6 +480,10 @@ def _kalshi_smoke(kalshi_a, ledger, is_live) -> None:
                             "error"))[:300],
                         "order_id": r.get("order_id")})
                     if filled:
+                        if r.get("order_id"):
+                            ledger.set_state(
+                                f"kalshi_inline:{r['order_id']}",
+                                {"ts": time.time()})
                         ledger.record_fill(
                             fill_uid=f"kalshi-smoke-{int(time.time())}",
                             venue="kalshi", market_key=f"kalshi:{ticker}",
