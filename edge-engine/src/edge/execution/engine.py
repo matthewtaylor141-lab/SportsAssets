@@ -95,6 +95,18 @@ class Policy:
                 return "allow"
         return self.leagues.get("unknown_league_policy", "shadow_only")
 
+    def league_measured(self, code: str | None) -> bool:
+        """True only for leagues the 5.35M-fill calibration actually covers
+        (the allowlist). Unknown-but-allowed leagues trade on the strength
+        of the de-vig arithmetic, not on evidence — the probation tier
+        sizes them accordingly until their own settlements speak."""
+        if not code:
+            return False
+        for group in (self.leagues.get("allowlist") or {}).values():
+            if code in group:
+                return True
+        return False
+
 
 @dataclass
 class Decision:

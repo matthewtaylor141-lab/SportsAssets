@@ -615,11 +615,24 @@ async def live_status() -> dict:
     d = dict(agg)
     if d.get("live_slippage_p50") is not None:
         d["live_slippage_p50"] = round(float(d["live_slippage_p50"]), 3)
+    # Per-whale grading: RN1 and swisstony must earn promotion on their OWN
+    # settled records — a blended number lets one carry the other.
+    by_whale = await pool.fetch(
+        """
+        SELECT COALESCE(whale_username, '?') AS whale,
+               count(*) FILTER (WHERE status IN ('filled', 'settled'))::int AS fills,
+               COALESCE(sum(filled_usd), 0)::float8 AS deployed,
+               count(*) FILTER (WHERE status = 'settled')::int AS settled,
+               COALESCE(sum(pnl) FILTER (WHERE status = 'settled'), 0)::float8 AS pnl
+        FROM live_orders GROUP BY 1 ORDER BY deployed DESC
+        """
+    )
     venue = active_venue()
     return {
         "enabled": venue is not None,
         "venue": venue,
         "paused": paused,
+        "by_whale": [dict(r) for r in by_whale],
         "caps": {"per_fill": cfg.live_max_per_fill_usd, "daily": cfg.live_max_daily_usd,
                  "total": cfg.live_max_total_usd,
                  "max_slippage_cents": cfg.live_max_slippage_cents},

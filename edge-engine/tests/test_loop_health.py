@@ -1105,7 +1105,7 @@ def test_the_nearest_kick_off_is_priced_first(tmp_path, monkeypatch):
 
     funnel = run_cycle([Venue(ask_price=0.47)], Feed(events), POLICY, risk,
                        ledger, ["soccer_epl"])
-    assert funnel["order"] == "settlement"
+    assert funnel["order"] == "near-threshold+settlement"
 
 
 def test_settlement_priority_survives_events_with_no_kick_off_time(tmp_path, monkeypatch):
@@ -1132,7 +1132,7 @@ def test_settlement_priority_survives_events_with_no_kick_off_time(tmp_path, mon
 
     funnel = run_cycle([Venue(ask_price=0.47)], Feed([unknown, near]), POLICY,
                        risk, ledger, ["soccer_epl"])
-    assert funnel["order"] == "settlement"
+    assert funnel["order"] == "near-threshold+settlement"
 
 
 # ── low-price hardening: the leash tightens as the price falls ──────────

@@ -122,6 +122,7 @@ jobs:
           # resolves to None and it no-ops silently) — say so, don't guess.
           curl -sS --max-time 60 -o /tmp/live.json "$BASE/api/live-status" || true
           jq -r '"  enabled(api env): \(.enabled // .config.enabled // "?")  paused: \(.paused // "?")",
+                 (.by_whale // [] | .[] | "  whale \(.whale): fills \(.fills) deployed $\(.deployed) settled \(.settled) pnl $\(.pnl)"),
                  (.orders // .summary // {} | to_entries[] | "  \(.key): \(.value)"),
                  (.recent // [] | .[0:8][] |
                    "  \(.placed_at // "?")  \(.status // "?")  limit \(.limit_price // "?")  $\(.filled_usd // 0)  \(.market_title // "?") / \(.outcome // "?")  \(.error // "" | .[0:300])")' \

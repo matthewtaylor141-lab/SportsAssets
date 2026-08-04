@@ -302,6 +302,13 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
         ident = {k: c0.get(k) for k in
                  ("title", "outcome", "team", "name", "shortTitle",
                   "question", "groupItemTitle") if c0.get(k) is not None}
+        # marketSides is the suspected side-carrier on two-sided
+        # ("Who will win") markets — surface its raw shape so side-aware
+        # ordering can be built on evidence, not guessed. Only BUY_LONG is
+        # documented; ordering the wrong side of a two-sided market is the
+        # one mistake the match floor exists to prevent.
+        if c0.get("marketSides") is not None:
+            ident["marketSides"] = c0["marketSides"]
         diag.insert(0, "keys:" + ",".join(sorted(c0.keys()))[:200])
         diag.insert(1, "ident:" + str(ident)[:110])
     # The trail rides the exception-free path out via last_resolve_diag so

@@ -592,3 +592,31 @@ def test_the_ladder_can_never_exceed_the_per_fill_cap():
     for edge in (0.0, 0.01, 0.1, 1.0, 99.0):
         s = risk.size_for_edge(edge, 0.02)
         assert risk.caps.per_fill_default <= s <= risk.caps.per_fill_max
+
+
+# ── league probation ───────────────────────────────────────────────────
+
+def test_unmeasured_league_is_not_measured_and_allowlisted_is():
+    from edge.execution.engine import Policy
+
+    policy = Policy.load()
+    # epl is in the measured allowlist; a made-up league is not.
+    assert policy.league_measured("epl") is True
+    assert policy.league_measured("xyz_reserve_league") is False
+    assert policy.league_measured(None) is False
+
+
+def test_league_live_record_counts_only_live_resolved(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    now = time.time()
+    led.record_fill(fill_uid="p1", venue="polymarket-us", market_key="pm:a",
+                    side="BUY", qty=4, price=0.5, ts=now, mode="LIVE_BETA",
+                    league="xyz")
+    led.record_fill(fill_uid="p2", venue="polymarket-us", market_key="pm:b",
+                    side="BUY", qty=4, price=0.5, ts=now, mode="PAPER",
+                    league="xyz")
+    led.record_resolution("pm:a", 1.0)
+    led.record_resolution("pm:b", 0.0)
+    rec = led.league_live_record("xyz")
+    assert rec["n"] == 1          # the PAPER market does not count
+    assert rec["net"] > 0

@@ -542,14 +542,31 @@ class PolymarketUSAdapter(VenueAdapter):
         raise NotImplementedError("grader pulls settlements in batch")
 
     def fetch_results(self, slugs: list[str]) -> dict[str, float]:
-        """market slug -> payout for settled markets (grader input)."""
+        """market slug -> payout for settled markets (grader input).
+
+        Instrumented 2026-08-04: 2,006 live fills had settled ZERO in the
+        ledger while the venue account showed hundreds of settlements —
+        every per-slug error was swallowed silently. The stats dict names
+        the failure mode instead.
+        """
         out: dict[str, float] = {}
+        stats = {"checked": 0, "priced": 0, "no_price": 0, "errors": 0}
+        first_err = None
         for slug in slugs:
+            stats["checked"] += 1
             try:
                 s = self._pub.markets.settlement(slug) or {}
                 px = (s.get("settlementPrice") or {}).get("value")
                 if px is not None:
                     out[slug] = float(px)
-            except Exception:  # noqa: BLE001 — unsettled/unknown: skip
-                continue
+                    stats["priced"] += 1
+                else:
+                    stats["no_price"] += 1
+            except Exception as exc:  # noqa: BLE001 — unsettled/unknown: skip
+                stats["errors"] += 1
+                if first_err is None:
+                    first_err = f"{type(exc).__name__}: {str(exc)[:120]}"
+        stats["first_error"] = first_err
+        self.last_settle_stats = stats
+        log.info("pmus fetch_results: %s", stats)
         return out

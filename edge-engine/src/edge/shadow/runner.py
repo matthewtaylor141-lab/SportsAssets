@@ -245,6 +245,9 @@ def volume_verdict(funnel: dict, risk) -> str:
 
 
 _ROTATION = {"i": 0}
+# event_key -> last time a book in this event priced within 1c of its bar.
+# Entries expire after 30 min: proximity decays with the odds.
+_NEAR_THRESHOLD: dict[str, float] = {}
 
 # Position reconciliation runs once per process: a restart is exactly when
 # the ledger may have been wiped, and exactly when the caps need rebuilding.
@@ -467,9 +470,19 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         # settlement times are unknown or identical.
         if os.environ.get("EDGE_SETTLEMENT_PRIORITY", "1") != "0" and any(
                 getattr(e, "commence_ts", 0) for e in events):
-            events = sorted(events, key=lambda e: getattr(e, "commence_ts", 0)
-                            or float("inf"))
-            funnel["order"] = "settlement"
+            # Two-level priority: events that priced within 1c of their bar
+            # last cycle jump the queue (staleness is the measured leak, and
+            # these are the books where 25 seconds decides a fill), then
+            # nearest kick-off as before. Stale proximity entries expire.
+            for k, ts0 in list(_NEAR_THRESHOLD.items()):
+                if now - ts0 > 1800:
+                    del _NEAR_THRESHOLD[k]
+            events = sorted(
+                events,
+                key=lambda e: (0 if e.event_key() in _NEAR_THRESHOLD else 1,
+                               getattr(e, "commence_ts", 0) or float("inf")))
+            funnel["order"] = "near-threshold+settlement"
+            funnel["near_threshold_events"] = len(_NEAR_THRESHOLD)
         else:
             _ROTATION["i"] = (_ROTATION["i"] + 1) % max(len(events), 1)
             events = events[_ROTATION["i"]:] + events[:_ROTATION["i"]]
@@ -942,6 +955,12 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                  else "1-2c" if gap < 0.02 else ">2c")
                             gaps = funnel.setdefault("threshold_gap", {})
                             gaps[b] = gaps.get(b, 0) + 1
+                            # Near-threshold memory: this event gets priced
+                            # FIRST next cycle. A book 0.4c under its bar is
+                            # one tick from firing; reaching it 25s sooner is
+                            # the cheapest latency win available.
+                            if gap < 0.01:
+                                _NEAR_THRESHOLD[ev.event_key()] = now
                     # Mispricing-distribution telemetry: every completed
                     # fair-vs-ask comparison is counted, with the best edge
                     # seen and near-misses — so "are there mispricings?" is
@@ -1024,6 +1043,21 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     # asks for more, it does not raise the ceiling.
                     want = risk.size_for_edge(verdict.edge, verdict.threshold,
                                               mode=effective_mode)
+                    # PROBATION (2026-08-04): a league the calibration never
+                    # measured trades at HALF ticket until its own LIVE
+                    # settlements clear the bar (>=50 settled, net positive).
+                    # Context: coverage tripled on 08-03 and the overnight
+                    # cohort went 17W-60L the same night — expansion tuition
+                    # must be half-price until a league earns full size.
+                    if not policy.league_measured(ev.league_code):
+                        rec = _league_probation_cache.get(ev.league_code or "?")
+                        if rec is None:
+                            rec = ledger.league_live_record(ev.league_code or "?")
+                            _league_probation_cache[ev.league_code or "?"] = rec
+                        if rec["n"] < 50 or rec["net"] <= 0:
+                            want = round(want / 2, 2)
+                            pv = funnel.setdefault("probation", {})
+                            pv[ev.league_code or "?"] = rec
                     approved, why = risk.approve(adapter.name, mkey, ev.event_key(),
                                                  requested_usd=want, now=now,
                                                  mode=effective_mode,
@@ -1234,6 +1268,9 @@ def whale_alignment(condition_id: str, outcome_name: str):
                 "recent_trades_48h": len(data.get("recent_trades", []))}
     except Exception:  # noqa: BLE001
         return None
+
+
+_league_probation_cache: dict[str, dict] = {}
 
 
 def settle_cycle(adapters, ledger) -> int:
@@ -1533,7 +1570,11 @@ def main() -> None:
             log.warning("VERDICT: %s", funnel["verdict"])
             verdict_watcher.observe(funnel["verdict"])
             if time.time() - last_settle > settle_s:
+                _league_probation_cache.clear()   # graduation without restart
                 funnel["settled"] = settle_cycle(adapters, ledger)
+                funnel["settle_stats"] = {
+                    a.name: getattr(a, "last_settle_stats", None)
+                    for a in adapters}
                 last_settle = time.time()
             # Account maintenance runs in EVERY mode, not just live ones.
             # It was gated on risk.is_live, which meant the PAPER halt left

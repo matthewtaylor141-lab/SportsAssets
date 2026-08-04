@@ -1070,6 +1070,24 @@ class Ledger:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def league_live_record(self, league: str) -> dict:
+        """Settled count + net for one league's LIVE fills — the probation
+        gate's evidence. Live-ness is judged the same way the rest of the
+        ledger does: fills tagged with a LIVE mode exist for the market."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT count(*) AS n, COALESCE(sum(p.realized_pnl), 0) AS net
+                FROM positions p
+                WHERE p.league = ? AND p.resolved = 1
+                  AND EXISTS (SELECT 1 FROM fills f
+                              WHERE f.market_key = p.market_key
+                                AND f.mode LIKE 'LIVE%')
+                """,
+                (league,),
+            ).fetchone()
+        return {"n": int(row["n"] or 0), "net": float(row["net"] or 0.0)}
+
     def realized_pnl_since(self, ts: float, live_only: bool = False) -> float:
         """Gross realized PnL since ts. live_only=True restricts to
         live-money realizations — the ONLY correct circuit-breaker input
