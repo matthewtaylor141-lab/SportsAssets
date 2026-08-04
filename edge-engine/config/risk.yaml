@@ -310,6 +310,17 @@ arbitrage:
     max_books_per_cycle: 2
     leagues: [nba, wnba, nhl, mlb]
 
+# Entry-price bands quarantined from LIVE money on OUR OWN settled
+# evidence (they keep paper-logging — study never stops). First entry
+# 2026-08-04: 10-15c measured -55% ROI on 113 settled live fills (-$78 of
+# the cohort's -$78.. total) while the neighbouring 5-10c band ran +24%
+# on 54. The reference calibration never flagged it because its mechanism
+# fills differently there; ours now has enough of its own dead bodies to
+# name the zone. Remove an entry only when a fresh settled cohort (n>=50)
+# reads net positive in paper.
+band_quarantine:
+  - [0.10, 0.15]
+
 # Watchdog: any breach halts live trading until inputs are healthy again.
 watchdog:
   max_feed_age_s: 60

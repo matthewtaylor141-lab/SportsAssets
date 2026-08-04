@@ -181,10 +181,11 @@ async def _market_context(pool, payload: dict) -> dict:
 #   "full"        — ratio sizing per config; requires the trial cohort
 #                   to have cleared the promotion gate first
 COPY_MODE = "penny_trial"
-# $200/day (owner directive 2026-08-04, raised from $100 with the sleeve
-# at $98.98/100 spent and +$29.27 realized on 76 settled copies — the cap
-# was binding on a working strategy). History: $50 -> $100 (08-03) -> $200.
-PENNY_TRIAL_DAILY_USD = 200.0
+# $400/day (owner directive 2026-08-04 "make all these upgrades"). The
+# evidence bar set for this raise — settled copies >= +5% on the day —
+# was already cleared intraday: +$29.27 realized on 76 settled against
+# ~$99 deployed. History: $50 -> $100 (08-03) -> $200 -> $400 (08-04).
+PENNY_TRIAL_DAILY_USD = 400.0
 # Owner directive 2026-08-04 (revised minutes after the $3 call): $2
 # target per copy — as many whole contracts as $2 buys at the limit
 # (20c -> 10 contracts, 50c -> 4, 97c -> 2), rounded DOWN so a copy
@@ -193,6 +194,16 @@ PENNY_TRIAL_DAILY_USD = 200.0
 # for free. Grading stays per-whale/per-band; the settled paper cohort
 # behind this sizing read +7.3% ROI on 304 settled.
 PENNY_TRIAL_PER_FILL_USD = 2.00
+# Per-whale override (owner-approved 2026-08-04): RN1's live cohort was
+# outrunning the sleeve (+$17.03 on 58 settled same-day), so his copies
+# clip at $3. Keys are lowercased usernames; anyone absent gets the
+# default. Revisit when either whale's settled cohort flips sign.
+PER_FILL_BY_WHALE = {"rn1": 3.00}
+
+
+def per_fill_usd(whale_username: str | None) -> float:
+    return PER_FILL_BY_WHALE.get((whale_username or "").lower(),
+                                 PENNY_TRIAL_PER_FILL_USD)
 
 
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
@@ -265,7 +276,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         limit = round(min(math.floor(his_price * 1.02 * 100) / 100.0, 0.99), 2)
         if limit <= 0:
             return
-        shares = float(int(PENNY_TRIAL_PER_FILL_USD / limit))
+        shares = float(int(per_fill_usd(payload.get("whale_username")) / limit))
         if shares < 1:
             return
         usd = round(shares * limit, 2)

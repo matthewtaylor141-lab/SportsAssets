@@ -153,3 +153,51 @@ def test_live_orders_route_to_the_venue_with_the_better_price(monkeypatch):
     assert rt.get("contested", 0) >= 1
     assert rt.get("to", {}).get("kalshi", 0) >= 1
     assert funnel["rejects"].get("routed_better_price", 0) >= 1
+
+
+def test_quarantined_band_paper_logs_instead_of_paying(monkeypatch):
+    """10-15c measured -55% on 113 settled: live entries there demote to
+    PAPER (study continues, money stops) until a fresh cohort clears it."""
+    import pathlib
+    import tempfile
+    import time as _t
+
+    from edge.fairvalue.feed import FeedEvent
+    from edge.execution.risk import RiskManager
+    from edge.ledger.service import Ledger
+    from edge.shadow.runner import run_cycle
+    from tests.test_run_cycle_e2e import POLICY, StubFeed, StubVenue
+
+    class LiveVenue(StubVenue):
+        name = "polymarket-us"
+
+        def __init__(self, ask):
+            super().__init__(ask)
+            self.orders = []
+
+        def has_credentials(self):
+            return True
+
+        def place_order(self, token, price, qty, **kw):
+            self.orders.append((token, price, qty))
+            return {"ok": True, "count": qty, "price": price,
+                    "order_id": "o", "status": "filled"}
+
+    monkeypatch.setenv("EDGE_LIVE_VENUES", "polymarket-us")
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp))
+    ledger = Ledger(db_path=str(tmp / "l.sqlite3"))
+    policy = POLICY
+    policy.risk = {**policy.risk, "band_quarantine": [[0.10, 0.15]]}
+    risk = RiskManager(ledger, {**policy.risk, "mode": "LIVE_BETA"})
+    # fair ~0.185 (5.4 odds two-way with 1.9) -> ask 0.12 clears the bar
+    ev = FeedEvent(
+        sport_key="soccer_epl", league_code="epl", home="Arsenal",
+        away="Chelsea", commence_ts=_t.time() + 3600,
+        h2h={"Arsenal": 6.20, "Chelsea": 1.20},
+        fetched_at=_t.time(), anchors=2)
+    venue = LiveVenue(0.12)
+    funnel = run_cycle([venue], StubFeed([ev]), policy, risk,
+                       ledger, ["soccer_epl"])
+    assert not venue.orders, "no live order inside a quarantined band"
+    assert funnel.get("band_quarantined", {}).get("0.10-0.15", 0) >= 1

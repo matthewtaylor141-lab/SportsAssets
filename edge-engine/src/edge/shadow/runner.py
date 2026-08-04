@@ -1394,6 +1394,20 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                         # Hard rule: real money only on MEASURED leagues;
                         # shadow-only leagues keep paper-logging.
                         effective_mode = "PAPER"
+                    if effective_mode != "PAPER":
+                        # Band quarantine (2026-08-04): entry bands our OWN
+                        # settled fills measured net-negative trade paper
+                        # only until a fresh cohort clears them. 10-15c:
+                        # -55% ROI on 113 settled while 5-10c ran +24%.
+                        for lo, hi in (policy.risk.get("band_quarantine")
+                                       or []):
+                            if lo <= entry_px < hi:
+                                effective_mode = "PAPER"
+                                bq = funnel.setdefault(
+                                    "band_quarantined", {})
+                                key = f"{lo:.2f}-{hi:.2f}"
+                                bq[key] = bq.get(key, 0) + 1
+                                break
                     it = {"adapter": adapter, "book": book, "ask": ask,
                           "verdict": verdict, "entry_px": entry_px,
                           "taker": taker, "mkey": mkey, "token": token,
