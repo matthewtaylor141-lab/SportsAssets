@@ -95,3 +95,29 @@ def test_segment_titles_are_tagged_so_halves_never_meet_full_game():
     ])], "KXNFLGAME")
     assert len(out) == 1
     assert all(k.startswith("[h1] ") for k in out[0].outcome_tokens)
+
+
+# ── PEM normalization: env-var pastes must not brick auth ────────────────
+
+def _fresh_rsa_pem() -> str:
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding, NoEncryption, PrivateFormat)
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8,
+                             NoEncryption()).decode()
+
+
+def test_pem_loads_in_every_paste_format(monkeypatch):
+    pem = _fresh_rsa_pem()
+    adapter = KalshiAdapter()
+    for variant in (
+        pem,                                   # proper multi-line
+        pem.replace("\n", "\\n"),              # escaped newlines
+        pem.replace("\n", " ").strip(),        # newlines -> spaces
+        pem.replace("\n", ""),                 # newlines stripped
+        f'"{pem}"',                            # quoted paste
+    ):
+        monkeypatch.setenv("EDGE_KALSHI_PRIVATE_KEY", variant)
+        assert adapter._private_key() is not None

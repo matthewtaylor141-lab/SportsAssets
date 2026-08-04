@@ -187,6 +187,36 @@ class KalshiAdapter(VenueAdapter):
                     and (os.environ.get("EDGE_KALSHI_PRIVATE_KEY")
                          or os.environ.get("EDGE_KALSHI_PRIVATE_KEY_PATH")))
 
+    @staticmethod
+    def _normalize_pem(pem: str) -> str:
+        """Repair the newlines an env-var paste destroys.
+
+        Observed live 2026-08-04: the key pasted into Render's env editor
+        arrived as one line and load_pem_private_key refused it. A PEM's
+        base64 body is newline-wrapped by spec, but every common paste
+        format is mechanically recoverable, so recover instead of asking
+        the operator to guess quoting rules: literal backslash-n escapes
+        become newlines, and a single-line key (newlines collapsed to
+        spaces or nothing) is re-wrapped at 64 columns between its
+        BEGIN/END armor. A properly formatted key passes through as-is.
+        """
+        import re
+
+        pem = pem.strip().strip('"').strip("'")
+        if "\\n" in pem and "\n" not in pem:
+            pem = pem.replace("\\n", "\n")
+        if "\n" not in pem:
+            m = re.match(
+                r"^(-----BEGIN [A-Z0-9 ]+-----)(.*?)(-----END [A-Z0-9 ]+-----)$",
+                pem)
+            if m:
+                head, body, tail = m.groups()
+                body = re.sub(r"\s+", "", body)
+                wrapped = "\n".join(body[i:i + 64]
+                                    for i in range(0, len(body), 64))
+                pem = f"{head}\n{wrapped}\n{tail}\n"
+        return pem
+
     def _private_key(self):
         from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
@@ -197,7 +227,8 @@ class KalshiAdapter(VenueAdapter):
                 raise RuntimeError("Kalshi live credentials absent")
             with open(path, "rb") as f:
                 pem = f.read().decode()
-        return load_pem_private_key(pem.encode(), password=None)
+        return load_pem_private_key(self._normalize_pem(pem).encode(),
+                                    password=None)
 
     def _auth_headers(self, method: str, path: str) -> dict:
         import base64
