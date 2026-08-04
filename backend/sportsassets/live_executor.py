@@ -184,14 +184,15 @@ COPY_MODE = "penny_trial"
 # $100/day, was $50 (owner directive 2026-08-03) — roughly 300+ one-contract
 # copies a day at the 50c per-fill ceiling before the sleeve stands down.
 PENNY_TRIAL_DAILY_USD = 100.0
-# Owner directive 2026-08-03 (final): "every single trade as long as the
-# price is the same, better or within 2% if worse." Full-band coverage —
-# one contract per source fill at ANY price. The price tolerance moved
-# from an absolute 2c slippage to RELATIVE 2%, floored to the venue's
-# whole-cent tick so a fill can never exceed the owner's tolerance
-# (10c -> limit 10c: same-price-only; 50c -> 51c; 80c -> 81c). The FOK
-# limit mechanics give same-or-better for free.
-PENNY_TRIAL_PER_FILL_USD = 0.99
+# Owner directive 2026-08-04 ("let's up the sizing... average $3 per
+# trade"): each copy TARGETS $3 — as many whole contracts as $3 buys at
+# the limit (30c -> 10 contracts, 60c -> 5, 97c -> 3), rounded DOWN so a
+# copy never exceeds the budget. Price tolerance unchanged: his price
+# +2% relative, floored to the venue's cent tick; FOK gives
+# same-or-better for free. Grading stays per-whale/per-band; the settled
+# paper cohort that justified this sizing read +7.3% ROI on 304 settled
+# at the moment of the decision.
+PENNY_TRIAL_PER_FILL_USD = 3.00
 
 
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
@@ -239,16 +240,18 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         return
 
     if COPY_MODE == "penny_trial":
-        # One contract at his price +2% RELATIVE, floored to the venue's
-        # cent tick (owner tolerance: same/better/within-2%-worse). A
-        # whole-unit FOK either fills the single contract or kills.
+        # $3 target per copy: whole contracts at his price +2% RELATIVE,
+        # floored to the venue's cent tick (owner tolerance:
+        # same/better/within-2%-worse). Whole-unit FOK fills all or kills.
         import math
 
         limit = round(min(math.floor(his_price * 1.02 * 100) / 100.0, 0.99), 2)
-        shares = 1.0
-        usd = limit
-        if usd > PENNY_TRIAL_PER_FILL_USD:
-            return          # over the per-trade ceiling: not copied
+        if limit <= 0:
+            return
+        shares = float(int(PENNY_TRIAL_PER_FILL_USD / limit))
+        if shares < 1:
+            return
+        usd = round(shares * limit, 2)
         if usd > day_room:
             return
     else:
