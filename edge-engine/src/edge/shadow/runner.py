@@ -812,6 +812,117 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         # after the call, same thread, so a plain dict is safe.
         matched_sample = {"key": None}
 
+        def _finish_intent(it: dict) -> None:
+            """Gate, size, approve and place one qualified intent.
+
+            Called inline for PAPER, and from the router for LIVE — same
+            arithmetic either way, so routing can never change WHAT gets
+            checked, only WHERE the winning order goes.
+            """
+            adapter, book, ask = it["adapter"], it["book"], it["ask"]
+            verdict, entry_px = it["verdict"], it["entry_px"]
+            mkey, category = it["mkey"], it["category"]
+            effective_mode = it["effective_mode"]
+            # PER-FILL net-margin gate: the band threshold prices the EDGE;
+            # this prices the BOOK actually in front of us —
+            # (edge - paid_over_mid) / price >= floor. Maker entries price
+            # below mid and pass more easily, correctly. A book with no bid
+            # has no measurable mid: core proceeds on the band floor,
+            # exploration refuses (the study tier never buys unmeasurable).
+            net_floor = float(policy.risk.get("net_margin_floor", 0.02))
+            best_bid = book.bids[0].price if book.bids else None
+            if best_bid is not None and 0 < best_bid < ask.price:
+                paid_over_mid = entry_px - (ask.price + best_bid) / 2
+                net = (verdict.edge - paid_over_mid) / max(entry_px, 1e-6)
+                if net < net_floor:
+                    reject("net_margin")
+                    nm = funnel.setdefault("net_margin_refused", {})
+                    nm[category] = nm.get(category, 0) + 1
+                    return
+            elif verdict.tier == "exploration":
+                reject("net_margin_unmeasurable")
+                return
+            # Stake in proportion to how far the edge clears its bar,
+            # bounded by the same caps either way.
+            want = risk.size_for_edge(verdict.edge, verdict.threshold,
+                                      mode=effective_mode)
+            # PROBATION: an unmeasured league trades at HALF ticket until
+            # its own live settlements clear the bar (>=50 settled, net>0).
+            if not policy.league_measured(ev.league_code):
+                rec = _league_probation_cache.get(ev.league_code or "?")
+                if rec is None:
+                    rec = ledger.league_live_record(ev.league_code or "?")
+                    _league_probation_cache[ev.league_code or "?"] = rec
+                if rec["n"] < 50 or rec["net"] <= 0:
+                    want = round(want / 2, 2)
+                    pv = funnel.setdefault("probation", {})
+                    pv[ev.league_code or "?"] = rec
+            approved, why = risk.approve(adapter.name, mkey, ev.event_key(),
+                                         requested_usd=want, now=now,
+                                         mode=effective_mode,
+                                         tier=verdict.tier)
+            if approved <= 0:
+                reject(why.split(":")[0].split()[0])
+                return
+            claim = risk.claim_key(effective_mode, adapter.name, mkey,
+                                   ev.event_key())
+            decision = build_decision_record(
+                fair=it["fair"], edge=verdict.edge,
+                threshold=verdict.threshold,
+                band=verdict.band, book=book,
+                feed_snapshot={"h2h": ev.h2h, "home": ev.home,
+                               "away": ev.away, "fetched_at": ev.fetched_at},
+                approved_usd=approved, guard_reason=why,
+            )
+            decision["category"] = category
+            decision["outcome"] = it["oc_name"]
+            decision["entry"] = {"price": entry_px, "taker": it["taker"],
+                                 "ask": ask.price}
+            decision["tier"] = verdict.tier
+            decision["trigger"] = "reactor" if reactive else "sweep"
+            decision["consensus_books"] = it["eff_books"]
+            funnel.setdefault("by_tier", {}).setdefault(verdict.tier, 0)
+            funnel["by_tier"][verdict.tier] += 1
+            decision["venue_market"] = {"title": it["match"].market.title,
+                                        "id": it["match"].market.market_id,
+                                        "match_score": round(it["match"].score, 3)}
+            result = execute(adapter=adapter, ledger=ledger,
+                             mode=effective_mode,
+                             mkey=mkey, league=ev.league_code,
+                             ask_price=ask.price, ask_size=ask.size,
+                             size_usd=approved, edge=verdict.edge,
+                             threshold=verdict.threshold, decision=decision,
+                             ts=time.time(), entry_price=entry_px,
+                             taker=it["taker"], event_key=claim,
+                             category=it["drift_cat"])
+            if result["placed"]:
+                ledger.record_entry_fair(mkey, round(entry_px, 4),
+                                         round(it["fair"], 4),
+                                         category=it["drift_cat"])
+            funnel["logged"] += int(result["placed"])
+            funnel.setdefault("by_category", {}).setdefault(category, 0)
+            funnel["by_category"][category] += int(result["placed"])
+            if not result["placed"]:
+                reject(result["status"].split(":")[0])
+                # approve() claimed this market before the attempt; nothing
+                # filled, so the claim goes back — otherwise every unfilled
+                # order retires a market from the universe forever.
+                if claim:
+                    ledger.release_event(claim)
+                    funnel["reclaimed"] = funnel.get("reclaimed", 0) + 1
+            intent = FillIntent(
+                market_id=it["match"].market.market_id,
+                outcome_id=it["token"],
+                limit_price=entry_px, size_usd=approved,
+                fair_value=round(it["fair"], 4),
+                edge=round(it["fair"] - entry_px, 4),
+                league=ev.league_code, band=verdict.band,
+            )
+            log_shadow_fill(intent, book,
+                            {"h2h": ev.h2h, "home": ev.home, "away": ev.away},
+                            ask.size * ask.price >= approved,
+                            whale_alignment=None)
+
         def fair_for(oc_name: str):
             """(fair, category, reason) — reason names WHY no fair value was
             found, so the funnel can distinguish 'venue lists a line our
@@ -959,6 +1070,15 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         # Cross-venue legs for THIS event, keyed by FEED team so venues'
         # different naming can meet: {team: {venue_name: XVLeg}}.
         xv_pool: dict = {}
+        # Best-execution routing (owner, 2026-08-04: "if prices are better
+        # on Kalshi, take them there — and vice versa"). LIVE intents that
+        # clear the bar are NOT executed inline; they park here keyed by
+        # bet identity (the feed sample key) until every venue has priced
+        # the event, then the venue offering the largest fee-net edge wins
+        # and the same real-world bet is never taken twice. PAPER keeps
+        # executing inline on every venue — the paper record's job is the
+        # venue comparison itself.
+        route_pending: dict = {}
         for adapter, candidates in venue_candidates.values():
             # Fuzzy matching is CPU-heavy at 10s cadence; results only change
             # when discovery changes, so memoize per (venue, event) between
@@ -1269,129 +1389,24 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                         # Hard rule: real money only on MEASURED leagues;
                         # shadow-only leagues keep paper-logging.
                         effective_mode = "PAPER"
-                    # PER-FILL net-margin gate. The band threshold prices the
-                    # EDGE; nothing until now priced the BOOK. Entry margin
-                    # measured live 2026-08-02: exploration props entered at
-                    # -0.92% net — paying 2.13c over mid for 1.86c of claimed
-                    # edge on 4.3c-wide books. The band floor works on
-                    # category averages; this is the same arithmetic applied
-                    # to the fill actually in front of us:
-                    #     (edge - paid_over_mid) / price >= floor
-                    # Maker entries price BELOW mid and pass more easily —
-                    # correctly, since not crossing is the whole point of
-                    # resting. A book with no bid has no measurable mid:
-                    # core fills proceed on the band floor alone (which
-                    # already embeds average crossing cost), exploration
-                    # refuses — the study tier never buys unmeasurable.
-                    net_floor = float(policy.risk.get("net_margin_floor", 0.02))
-                    best_bid = book.bids[0].price if book.bids else None
-                    if best_bid is not None and 0 < best_bid < ask.price:
-                        paid_over_mid = entry_px - (ask.price + best_bid) / 2
-                        net = (verdict.edge - paid_over_mid) / max(entry_px, 1e-6)
-                        if net < net_floor:
-                            reject("net_margin")
-                            nm = funnel.setdefault("net_margin_refused", {})
-                            nm[category] = nm.get(category, 0) + 1
-                            continue
-                    elif verdict.tier == "exploration":
-                        reject("net_margin_unmeasurable")
-                        continue
-                    # Stake in proportion to how far the edge clears its
-                    # bar: a flat ticket pays the same for a 2c edge as a
-                    # 6c one. Bounded by the same caps either way — this
-                    # asks for more, it does not raise the ceiling.
-                    want = risk.size_for_edge(verdict.edge, verdict.threshold,
-                                              mode=effective_mode)
-                    # PROBATION (2026-08-04): a league the calibration never
-                    # measured trades at HALF ticket until its own LIVE
-                    # settlements clear the bar (>=50 settled, net positive).
-                    # Context: coverage tripled on 08-03 and the overnight
-                    # cohort went 17W-60L the same night — expansion tuition
-                    # must be half-price until a league earns full size.
-                    if not policy.league_measured(ev.league_code):
-                        rec = _league_probation_cache.get(ev.league_code or "?")
-                        if rec is None:
-                            rec = ledger.league_live_record(ev.league_code or "?")
-                            _league_probation_cache[ev.league_code or "?"] = rec
-                        if rec["n"] < 50 or rec["net"] <= 0:
-                            want = round(want / 2, 2)
-                            pv = funnel.setdefault("probation", {})
-                            pv[ev.league_code or "?"] = rec
-                    approved, why = risk.approve(adapter.name, mkey, ev.event_key(),
-                                                 requested_usd=want, now=now,
-                                                 mode=effective_mode,
-                                                 tier=verdict.tier)
-                    if approved <= 0:
-                        reject(why.split(":")[0].split()[0])
-                        continue
-                    claim = risk.claim_key(effective_mode, adapter.name, mkey,
-                                           ev.event_key())
-                    decision = build_decision_record(
-                        fair=fair, edge=verdict.edge, threshold=verdict.threshold,
-                        band=verdict.band, book=book,
-                        feed_snapshot={"h2h": ev.h2h, "home": ev.home,
-                                       "away": ev.away, "fetched_at": ev.fetched_at},
-                        approved_usd=approved, guard_reason=why,
-                    )
-                    decision["category"] = category
-                    decision["outcome"] = oc_name
-                    # Maker vs taker entry, recorded per fill so the nightly
-                    # report can measure whether resting actually paid.
-                    decision["entry"] = {"price": entry_px, "taker": taker,
-                                         "ask": ask.price}
-                    # Tier rides on every fill so the grader can score the
-                    # exploration bet separately from the measured core.
-                    decision["tier"] = verdict.tier
-                    # Trigger too (audit 2026-08-04): without it the
-                    # reactor's contribution lives only in a counter that
-                    # reset_window() erases — "does sub-second reaction
-                    # actually earn money?" must be answerable from fills.
-                    decision["trigger"] = "reactor" if reactive else "sweep"
-                    decision["consensus_books"] = eff_books
-                    funnel.setdefault("by_tier", {}).setdefault(verdict.tier, 0)
-                    funnel["by_tier"][verdict.tier] += 1
-                    # Mapping provenance — makes 'why this fair value?'
-                    # answerable from the record alone.
-                    decision["venue_market"] = {"title": match.market.title,
-                                                "id": match.market.market_id,
-                                                "match_score": round(match.score, 3)}
-                    result = execute(adapter=adapter, ledger=ledger, mode=effective_mode,
-                                     mkey=mkey, league=ev.league_code,
-                                     ask_price=ask.price, ask_size=ask.size,
-                                     size_usd=approved, edge=verdict.edge,
-                                     threshold=verdict.threshold, decision=decision,
-                                     ts=time.time(), entry_price=entry_px,
-                                     taker=taker, event_key=claim,
-                                     category=drift_cat)
-                    if result["placed"]:
-                        ledger.record_entry_fair(mkey, round(entry_px, 4),
-                                                 round(fair, 4), category=drift_cat)
-                    funnel["logged"] += int(result["placed"])
-                    funnel.setdefault("by_category", {}).setdefault(category, 0)
-                    funnel["by_category"][category] += int(result["placed"])
-                    if not result["placed"]:
-                        reject(result["status"].split(":")[0])
-                        # approve() CLAIMED this market before the order was
-                        # attempted. If the attempt produced nothing, holding
-                        # the claim retires the bet permanently — every
-                        # sub-contract, rejection or unfilled order silently
-                        # subtracted one market from the tradeable universe,
-                        # forever. We took this claim moments ago and nothing
-                        # filled against it, so it is ours to give back.
-                        if claim:
-                            ledger.release_event(claim)
-                            funnel["reclaimed"] = funnel.get("reclaimed", 0) + 1
-                    # Legacy shadow JSONL + platform mirror (grader history).
-                    intent = FillIntent(
-                        market_id=match.market.market_id, outcome_id=token,
-                        limit_price=entry_px, size_usd=approved,
-                        fair_value=round(fair, 4), edge=round(fair - entry_px, 4),
-                        league=ev.league_code, band=verdict.band,
-                    )
-                    would_fill = ask.size * ask.price >= approved
-                    log_shadow_fill(intent, book,
-                                    {"h2h": ev.h2h, "home": ev.home, "away": ev.away},
-                                    would_fill, whale_alignment=None)
+                    it = {"adapter": adapter, "book": book, "ask": ask,
+                          "verdict": verdict, "entry_px": entry_px,
+                          "taker": taker, "mkey": mkey, "token": token,
+                          "oc_name": oc_name, "category": category,
+                          "drift_cat": drift_cat, "fair": fair,
+                          "eff_books": eff_books, "match": match,
+                          "effective_mode": effective_mode}
+                    if effective_mode == "PAPER":
+                        # Paper fills on EVERY venue — the paper record's
+                        # job is the venue comparison itself.
+                        _finish_intent(it)
+                    else:
+                        # LIVE: park until every venue has priced this
+                        # event; the router below sends the order to the
+                        # venue with the largest fee-net edge and refuses
+                        # the same real-world bet a second listing.
+                        ident = matched_sample["key"] or (adapter.name, mkey)
+                        route_pending.setdefault(ident, []).append(it)
 
 
             # Every market of this event is now priced, so the complete
@@ -1412,6 +1427,32 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     # the ordinary pricing pass that already ran.
                     log.warning('arb scan failed for %s: %s', ev.home, exc)
                     funnel['arb_errors'] = funnel.get('arb_errors', 0) + 1
+        # Best-execution router: every venue has priced this event, so each
+        # bet identity goes to the venue offering the largest fee-net edge
+        # (verdict.edge is fair - entry - venue_fee, shrunk — comparable
+        # across venues by construction). One identity, one order, ever:
+        # the second-best listing is priced worse for the SAME real-world
+        # outcome, and buying both would double exposure, not edge.
+        for ident, its in route_pending.items():
+            its.sort(key=lambda i: i["verdict"].edge, reverse=True)
+            best = its[0]
+            if len(its) > 1:
+                rt = funnel.setdefault(
+                    "routing", {"contested": 0, "to": {}, "saved_c": 0.0})
+                rt["contested"] += 1
+                vn = best["adapter"].name
+                rt["to"][vn] = rt["to"].get(vn, 0) + 1
+                rt["saved_c"] = round(
+                    rt["saved_c"] + max(0.0, (best["verdict"].edge
+                                              - its[1]["verdict"].edge) * 100),
+                    2)
+                for _ in its[1:]:
+                    reject("routed_better_price")
+            try:
+                _finish_intent(best)
+            except Exception as exc:  # noqa: BLE001 — one order, not the sweep
+                log.warning("routed intent failed for %s: %s", ident, exc)
+                funnel["route_errors"] = funnel.get("route_errors", 0) + 1
         # Both venues have now contributed their legs for this event — the
         # cross-venue check runs where the whole pool is finally visible.
         if xv_on and xv_done < xv_budget and len(xv_pool) == 2:

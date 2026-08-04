@@ -84,3 +84,72 @@ def test_consensus_depth_is_per_outcome_not_per_event():
     assert _sample_depth(thin_rung) == (1, 0)
     # Legacy two-element samples (no book tag) count zero rather than lie.
     assert _sample_depth([(1.95, 3.0)]) == (0, 0)
+
+
+def test_live_orders_route_to_the_venue_with_the_better_price(monkeypatch):
+    """Owner 2026-08-04: same bet on both venues -> take the better price,
+    never both. Two venues list Arsenal ML; the cheaper ask wins the one
+    live order and the other listing is refused as routed_better_price."""
+    import pathlib
+    import time as _t
+
+    from edge.fairvalue.feed import FeedEvent
+    from edge.execution.risk import RiskManager
+    from edge.ledger.service import Ledger
+    from edge.shadow.runner import run_cycle
+    from tests.test_run_cycle_e2e import POLICY, StubFeed, StubVenue
+
+    class LiveVenue(StubVenue):
+        def __init__(self, name, ask_price):
+            super().__init__(ask_price)
+            self.name = name
+            self.orders = []
+
+        def get_book(self, market_id, token):
+            import time as _tt
+
+            from edge.venues.base import BookLevel, MarketBook
+
+            # Chelsea priced ABOVE fair on both venues: no edge there and
+            # no sub-$1 outcome set, so the dutch-book path stays quiet
+            # and the only order is the routed Arsenal one.
+            px = self._ask.price if token == "T-ARS" else 0.56
+            return MarketBook(venue=self.name, market_id=market_id,
+                              outcome_id=token,
+                              bids=[BookLevel(px - 0.02, 500)],
+                              asks=[BookLevel(px, 1000)], ts=_tt.time())
+
+        def has_credentials(self):
+            return True
+
+        def plan_maker_order(self, limit_price, best_ask, edge, threshold):
+            return round(best_ask, 2), True   # cross; fee is zero in stubs
+
+        def place_order(self, token, price, qty, **kw):
+            self.orders.append({"token": token, "price": price, "qty": qty})
+            return {"ok": True, "count": qty, "price": price,
+                    "order_id": f"{self.name}-{len(self.orders)}",
+                    "status": "filled"}
+
+    monkeypatch.setenv("EDGE_LIVE_VENUES", "kalshi,polymarket-us")
+    tmp = pathlib.Path(__import__("tempfile").mkdtemp())
+    monkeypatch.setenv("EDGE_DATA_DIR", str(tmp))
+    ledger = Ledger(db_path=str(tmp / "l.sqlite3"))
+    risk = RiskManager(ledger, {**POLICY.risk, "mode": "LIVE_BETA"})
+    ev = FeedEvent(
+        sport_key="soccer_epl", league_code="epl", home="Arsenal",
+        away="Chelsea", commence_ts=_t.time() + 3600,
+        h2h={"Arsenal": 1.90, "Chelsea": 1.90},   # fair 0.50 each
+        fetched_at=_t.time(), anchors=1)
+    rich = LiveVenue("polymarket-us", ask_price=0.47)
+    cheap = LiveVenue("kalshi", ask_price=0.45)
+    funnel = run_cycle([rich, cheap], StubFeed([ev]), POLICY, risk,
+                       ledger, ["soccer_epl"])
+    placed = [(v.name, o) for v in (rich, cheap) for o in v.orders]
+    assert len(placed) >= 1, "the routed winner must actually order"
+    assert all(name == "kalshi" for name, _ in placed), \
+        "every order must go to the better-priced venue"
+    rt = funnel.get("routing") or {}
+    assert rt.get("contested", 0) >= 1
+    assert rt.get("to", {}).get("kalshi", 0) >= 1
+    assert funnel["rejects"].get("routed_better_price", 0) >= 1
