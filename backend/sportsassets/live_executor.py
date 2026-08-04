@@ -181,9 +181,10 @@ async def _market_context(pool, payload: dict) -> dict:
 #   "full"        — ratio sizing per config; requires the trial cohort
 #                   to have cleared the promotion gate first
 COPY_MODE = "penny_trial"
-# $100/day, was $50 (owner directive 2026-08-03) — roughly 300+ one-contract
-# copies a day at the 50c per-fill ceiling before the sleeve stands down.
-PENNY_TRIAL_DAILY_USD = 100.0
+# $200/day (owner directive 2026-08-04, raised from $100 with the sleeve
+# at $98.98/100 spent and +$29.27 realized on 76 settled copies — the cap
+# was binding on a working strategy). History: $50 -> $100 (08-03) -> $200.
+PENNY_TRIAL_DAILY_USD = 200.0
 # Owner directive 2026-08-04 (revised minutes after the $3 call): $2
 # target per copy — as many whole contracts as $2 buys at the limit
 # (20c -> 10 contracts, 50c -> 4, 97c -> 2), rounded DOWN so a copy
