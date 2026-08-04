@@ -70,6 +70,11 @@ function EquityCurve({ daily }: { daily: { date: string; pnl: number }[] }) {
   const up = pts[pts.length - 1].cum >= 0
   const stroke = up ? 'var(--good)' : 'var(--critical)'
   const h = hover !== null ? pts[hover] : null
+  // Generous over-estimate of path length: the draw animation only needs
+  // dashoffset >= true length, and measuring via ref costs a layout pass.
+  const drawLen = Math.ceil((W + H) * 1.6)
+  const endX = x(pts.length - 1)
+  const endY = y(pts[pts.length - 1].cum)
   return (
     <div className="tr-curve" role="img" aria-label="Cumulative realized profit by day">
       <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
@@ -82,14 +87,24 @@ function EquityCurve({ daily }: { daily: { date: string; pnl: number }[] }) {
         }}>
         <defs>
           <linearGradient id="tr-fill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={stroke} stopOpacity="0.25" />
+            <stop offset="0%" stopColor={stroke} stopOpacity="0.28" />
             <stop offset="100%" stopColor={stroke} stopOpacity="0" />
+          </linearGradient>
+          <linearGradient id="tr-stroke" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stopColor={stroke} stopOpacity="0.45" />
+            <stop offset="72%" stopColor={stroke} />
+            <stop offset="100%" stopColor={up ? '#7ee2a0' : '#ff9d9d'} />
           </linearGradient>
         </defs>
         <line x1={PAD} x2={W - PAD} y1={y(0)} y2={y(0)} stroke="var(--baseline)" />
         <path d={`${path} L${x(pts.length - 1)},${y(0)} L${x(0)},${y(0)} Z`} fill="url(#tr-fill)" />
-        <path d={path} fill="none" stroke={stroke} strokeWidth="2.5"
-          strokeLinejoin="round" strokeLinecap="round" />
+        <path d={path} fill="none" stroke="url(#tr-stroke)" strokeWidth="2.5"
+          strokeLinejoin="round" strokeLinecap="round"
+          className="tr-curve-draw"
+          strokeDasharray={drawLen}
+          style={{ ['--curve-len' as string]: drawLen }} />
+        <circle className="tr-curve-dot" cx={endX} cy={endY} r="4"
+          fill={stroke} stroke="var(--surface)" strokeWidth="1.5" />
         {h && (
           <g>
             <line x1={x(hover!)} x2={x(hover!)} y1={PAD} y2={H - PAD}
@@ -141,6 +156,7 @@ function SportBreakdown({ rows }: { rows: TRRow[] }) {
             <div className="tr-sport-zero" />
             <div className={`tr-sport-fill ${r.pnl >= 0 ? 'pos-bg' : 'neg-bg'}`}
               style={{ width: `${(Math.abs(r.pnl) / maxAbs) * 50}%`,
+                       ['--org' as string]: r.pnl >= 0 ? 'left' : 'right',
                        [r.pnl >= 0 ? 'left' : 'right' as any]: '50%' }} />
           </div>
           <span className={`tr-sport-val mono ${r.pnl >= 0 ? 'pos' : 'neg'}`}>
@@ -246,6 +262,7 @@ export function TrackRecord() {
 
         <div className="tr-hero-grid">
           <div className="tr-stat tr-stat-main">
+            <span className="tr-sheen" aria-hidden />
             <div className="tr-stat-label">NET P&amp;L · SETTLED</div>
             <div className={`tr-stat-value tr-grad ${s.net_pnl >= 0 ? 'pos' : 'neg'}`}>
               {fmtSignedUsd(heroPnl)}
@@ -257,6 +274,7 @@ export function TrackRecord() {
             </div>
           </div>
           <div className="tr-stat">
+            <span className="tr-sheen" aria-hidden />
             <div className="tr-stat-label">CAPITAL DEPLOYED</div>
             <div className="tr-stat-value">{fmtUsd(heroDeployed, 2)}</div>
             <div className="tr-stat-foot muted">
@@ -264,11 +282,24 @@ export function TrackRecord() {
             </div>
           </div>
           <div className="tr-stat">
+            <span className="tr-sheen" aria-hidden />
             <div className="tr-stat-label">ROI · TRADED CAPITAL</div>
-            <div className={`tr-stat-value ${s.roi === null ? '' : s.roi >= 0 ? 'pos' : 'neg'}`}>
-              {s.roi === null ? '—' : fmtPct(s.roi)}
+            <div className="tr-ring-wrap">
+              {s.roi !== null && (
+                <div
+                  className={`tr-ring${s.roi < 0 ? ' neg' : ''}`}
+                  style={{ ['--v' as string]: Math.min(100, Math.abs(s.roi) * 1000) }}
+                  title="Dial spans 0–10% ROI"
+                  aria-hidden
+                />
+              )}
+              <div>
+                <div className={`tr-stat-value ${s.roi === null ? '' : s.roi >= 0 ? 'pos' : 'neg'}`}>
+                  {s.roi === null ? '—' : fmtPct(s.roi)}
+                </div>
+                <div className="tr-stat-foot muted">on {fmtUsd(s.settled_stake, 2)} settled stake</div>
+              </div>
             </div>
-            <div className="tr-stat-foot muted">on {fmtUsd(s.settled_stake, 2)} settled stake</div>
           </div>
         </div>
 
@@ -338,13 +369,14 @@ export function TrackRecord() {
           <EmptyState>Nothing matches this filter yet.</EmptyState>
         ) : (
           <div className="tr-slips">
-            {ledger.slice(0, limit).map((r) => {
+            {ledger.slice(0, limit).map((r, i) => {
               const won = r.settled && (r.pnl || 0) > 0
               const st = !r.settled ? 'open' : won ? 'won' : 'lost'
               const toWin = r.entry_price && r.entry_price > 0
                 ? r.stake / r.entry_price - r.stake : null
               return (
-                <div key={r.market_slug} className={`tr-slip ${st}`}>
+                <div key={r.market_slug} className={`tr-slip ${st}`}
+                  style={{ ['--i' as string]: Math.min(i, 14) }}>
                   <div className="tr-slip-edge" aria-hidden />
                   <div className="tr-slip-main">
                     <div className="tr-slip-top">

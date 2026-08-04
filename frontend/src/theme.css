@@ -563,3 +563,212 @@ table.data td.num, table.data th.num { text-align: right; }
 .sy-report-title { font-weight: 800; letter-spacing: 0.1em; font-size: 12px; margin-bottom: 10px; }
 .sy-report-links { display: flex; flex-wrap: wrap; gap: 6px; }
 .sy-report-links a { text-decoration: none; }
+
+/* ════════════════════════════════════════════════════════════════════
+   Visual system v3 — cinematic terminal.
+   Appended as an override layer: later rules win the cascade, so the
+   upgrade is reviewable in one block and reversible by deleting it.
+   Every animation dies under prefers-reduced-motion at the bottom.
+   ════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-snap: cubic-bezier(0.3, 1.4, 0.4, 1);
+  --accent-2: #199e70;
+  --glow-accent: 0 0 24px rgba(57, 135, 229, 0.25);
+  --glow-good: 0 0 26px rgba(33, 176, 33, 0.22);
+  --radius-lg: 16px;
+}
+
+/* Ambient aurora: two huge blurred orbs drifting behind everything.
+   transform-only animation = GPU compositing, no layout, no paint. */
+body { position: relative; overflow-x: hidden; }
+body::before, body::after {
+  content: ''; position: fixed; z-index: -1; border-radius: 50%;
+  filter: blur(90px); opacity: 0.55; pointer-events: none;
+}
+body::before {
+  width: 900px; height: 520px; left: -220px; top: -240px;
+  background: radial-gradient(closest-side, rgba(57, 135, 229, 0.16), transparent);
+  animation: drift-a 46s ease-in-out infinite alternate;
+}
+body::after {
+  width: 760px; height: 480px; right: -200px; top: 30vh;
+  background: radial-gradient(closest-side, rgba(25, 158, 112, 0.1), transparent);
+  animation: drift-b 58s ease-in-out infinite alternate;
+}
+@keyframes drift-a { to { transform: translate(120px, 60px) scale(1.12); } }
+@keyframes drift-b { to { transform: translate(-140px, -80px) scale(0.94); } }
+
+/* ── Nav: glass bar, gradient brand, animated underline ── */
+.nav {
+  height: 58px; gap: 4px;
+  background: rgba(11, 12, 14, 0.6);
+  backdrop-filter: blur(18px) saturate(1.4);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.nav .brand {
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-size: 16px; letter-spacing: 0.01em; position: relative;
+  background: linear-gradient(92deg, var(--ink) 30%, #9db8dd 55%, var(--ink) 75%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: brand-sheen 7s var(--ease) infinite;
+}
+.nav .brand span {
+  background: linear-gradient(92deg, #58a1f5, #3987e5 60%, #7fc0ff);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+@keyframes brand-sheen { 0%, 60% { background-position: 120% 0; } 100% { background-position: -60% 0; } }
+.nav a.tab { position: relative; border-radius: 9px; transition: color 0.18s var(--ease), background 0.18s var(--ease); }
+.nav a.tab::after {
+  content: ''; position: absolute; left: 12px; right: 12px; bottom: 3px; height: 2px;
+  border-radius: 2px; background: linear-gradient(90deg, var(--accent), #7fc0ff);
+  transform: scaleX(0); transform-origin: left center;
+  transition: transform 0.28s var(--ease);
+}
+.nav a.tab.active { background: rgba(57, 135, 229, 0.09); border-color: transparent; box-shadow: none; }
+.nav a.tab.active::after { transform: scaleX(1); }
+.nav a.tab:hover:not(.active) { background: rgba(255, 255, 255, 0.045); }
+
+/* ── Cards: gradient hairline border + hover lift/glow ── */
+.card {
+  position: relative; border-radius: var(--radius-lg); border: 1px solid transparent;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 70px) padding-box,
+    var(--surface) padding-box,
+    linear-gradient(155deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.03) 40%, rgba(57, 135, 229, 0.12)) border-box;
+  transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease);
+}
+.card:hover { transform: translateY(-2px); box-shadow: var(--shadow), 0 12px 40px rgba(0, 0, 0, 0.35); }
+.card-title { letter-spacing: 0.12em; }
+.card-title::after {
+  content: ''; display: block; width: 34px; height: 2px; margin-top: 6px;
+  border-radius: 2px; background: linear-gradient(90deg, var(--accent), transparent);
+}
+
+/* ── Page entrance choreography (route-level) ── */
+.page-fade { animation: page-in 0.45s var(--ease) both; }
+@keyframes page-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.tr-page > *:nth-child(5) { animation-delay: 0.24s; }
+.tr-page > *:nth-child(6) { animation-delay: 0.3s; }
+
+/* ── Hero v3: aurora sweep + refined tiles ── */
+.tr-hero { border-radius: var(--radius-lg); border: 1px solid rgba(255, 255, 255, 0.09); }
+.tr-hero::before {
+  content: ''; position: absolute; width: 640px; height: 640px; right: -180px; top: -420px;
+  background: conic-gradient(from 0deg, transparent 0 62%, rgba(57, 135, 229, 0.14) 78%, rgba(25, 158, 112, 0.1) 88%, transparent 96%);
+  border-radius: 50%; filter: blur(40px); pointer-events: none;
+  animation: hero-sweep 26s linear infinite;
+}
+@keyframes hero-sweep { to { transform: rotate(360deg); } }
+.tr-stat {
+  position: relative; overflow: hidden; border-radius: 14px;
+  transition: transform 0.22s var(--ease), border-color 0.22s var(--ease), box-shadow 0.22s var(--ease);
+}
+.tr-stat::before {
+  content: ''; position: absolute; left: 0; right: 0; top: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(57, 135, 229, 0.55), transparent);
+  opacity: 0; transition: opacity 0.25s var(--ease);
+}
+.tr-stat:hover { transform: translateY(-3px); box-shadow: var(--glow-accent); }
+.tr-stat:hover::before { opacity: 1; }
+.tr-sheen {
+  position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(115deg, transparent 42%, rgba(255, 255, 255, 0.05) 50%, transparent 58%);
+  transform: translateX(-120%);
+}
+.tr-stat:hover .tr-sheen { animation: sheen 0.9s var(--ease); }
+@keyframes sheen { to { transform: translateX(120%); } }
+.tr-stat-main .tr-stat-value { font-size: 44px; text-shadow: 0 0 34px rgba(33, 176, 33, 0.18); }
+.tr-stat-value { font-size: 32px; }
+
+/* ROI ring: conic progress dial, value set inline via --v (0-100) */
+.tr-ring-wrap { display: flex; align-items: center; gap: 14px; }
+.tr-ring {
+  --v: 0;
+  width: 52px; height: 52px; border-radius: 50%; flex: none; position: relative;
+  background: conic-gradient(var(--good) calc(var(--v) * 1%), var(--surface-3) 0);
+  transition: --v 1s;
+  mask: radial-gradient(farthest-side, transparent calc(100% - 7px), black calc(100% - 6px));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 7px), black calc(100% - 6px));
+}
+.tr-ring.neg { background: conic-gradient(var(--critical) calc(var(--v) * 1%), var(--surface-3) 0); }
+
+/* Curve: gradient stroke + draw-on-mount + breathing endpoint */
+.tr-curve svg { height: 170px; }
+.tr-curve-draw {
+  animation: curve-draw 1.5s var(--ease) 0.25s both;
+}
+@keyframes curve-draw { from { stroke-dashoffset: var(--curve-len, 1600); } to { stroke-dashoffset: 0; } }
+.tr-curve-dot { animation: dot-breathe 2.4s ease-in-out infinite; transform-origin: center; transform-box: fill-box; }
+@keyframes dot-breathe { 0%, 100% { opacity: 0.9; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.5); } }
+
+/* Ticker: glass items */
+.tk-wrap { border-radius: 12px; background: rgba(22, 24, 27, 0.7); backdrop-filter: blur(8px); }
+.tk-item {
+  padding: 3px 12px; border-radius: 999px; background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Slips: staggered entrance + hover glow; LIVE chip breathes */
+.tr-slip {
+  animation: tr-rise 0.4s var(--ease) both;
+  animation-delay: calc(var(--i, 0) * 28ms);
+  transition: transform 0.18s var(--ease), border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+.tr-slip:hover { transform: translateX(4px); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35); }
+.tr-slip.won:hover { border-color: rgba(33, 176, 33, 0.4); }
+.tr-slip.lost:hover { border-color: rgba(224, 82, 82, 0.35); }
+.tr-slip.open:hover { border-color: rgba(57, 135, 229, 0.45); }
+.tr-slip-edge { width: 3px; }
+.tr-chip.open { animation: chip-breathe 2.2s ease-in-out infinite; }
+@keyframes chip-breathe { 0%, 100% { box-shadow: 0 0 0 0 rgba(57, 135, 229, 0.35); } 50% { box-shadow: 0 0 10px 1px rgba(57, 135, 229, 0.25); } }
+
+/* Sport bars: fills grow in */
+.tr-sport-fill { animation: bar-grow 0.8s var(--ease) both; transform-origin: var(--org, left) center; }
+@keyframes bar-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+/* Controls */
+.tr-chipbtn, .tr-select, .tr-search { transition: all 0.18s var(--ease); }
+.tr-chipbtn.on { box-shadow: 0 0 14px rgba(57, 135, 229, 0.35); }
+.tr-search:focus { box-shadow: 0 0 0 3px rgba(57, 135, 229, 0.18); width: 240px; }
+button, select { cursor: pointer; }
+:focus-visible { outline: 2px solid rgba(57, 135, 229, 0.6); outline-offset: 2px; }
+
+/* Tables everywhere: hover slide + accent rail */
+table.data tbody tr:hover, .an-table tr:hover td { background: rgba(57, 135, 229, 0.05); }
+table.data tbody tr { position: relative; }
+
+/* System funnel: stages glow on hover, arrows pulse subtly */
+.sy-stage { transition: transform 0.2s var(--ease), border-color 0.2s var(--ease), box-shadow 0.2s var(--ease); }
+.sy-stage:hover { transform: translateY(-2px); box-shadow: var(--glow-accent); }
+.sy-ref-bar > div { animation: bar-grow 0.7s var(--ease) both; transform-origin: left center; }
+
+/* Footer notice: quiet, centered, hairline */
+.notice {
+  margin-top: 40px; padding-top: 18px; text-align: center;
+  color: var(--muted); font-size: 11px; border-top: 1px solid var(--border);
+}
+
+/* Reduced motion: everything decorative stops dead. */
+@media (prefers-reduced-motion: reduce) {
+  body::before, body::after, .nav .brand, .tr-hero::before, .tr-slip,
+  .tr-curve-draw, .tr-curve-dot, .tr-chip.open, .tr-sport-fill,
+  .sy-ref-bar > div, .page-fade, .tr-stat:hover .tr-sheen {
+    animation: none !important;
+  }
+  .card, .tr-stat, .tr-slip, .sy-stage { transition: none !important; }
+}
+
+/* Mobile refinements for the v3 pass */
+@media (max-width: 640px) {
+  .tr-hero-head { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .tr-live { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: rgba(0, 0, 0, 0.3); }
+  .tr-filters { flex-wrap: wrap; }
+  .tr-search { width: 100%; }
+  .tr-search:focus { width: 100%; }
+  .tr-stat-main .tr-stat-value { font-size: 38px; }
+  body::before { width: 560px; height: 380px; }
+  body::after { display: none; }
+}

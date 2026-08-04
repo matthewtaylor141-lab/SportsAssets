@@ -1,4 +1,4 @@
-import { NavLink, Route, Routes } from 'react-router-dom'
+import { NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import { Admin } from './pages/Admin'
 import { Analytics } from './pages/Analytics'
 import { Engine } from './pages/Engine'
@@ -19,6 +19,9 @@ const TABS = [
 ]
 
 export default function App() {
+  // Keying the content wrapper by path replays the entrance choreography
+  // on every route change — navigation feels composed, not swapped.
+  const { pathname } = useLocation()
   return (
     <div className="app">
       <nav className="nav">
@@ -37,7 +40,7 @@ export default function App() {
         ))}
         <span className="spacer" />
       </nav>
-      <main className="main">
+      <main className="main page-fade" key={pathname}>
         <Routes>
           <Route path="/" element={<TrackRecord />} />
           <Route path="/analytics" element={<Analytics />} />
