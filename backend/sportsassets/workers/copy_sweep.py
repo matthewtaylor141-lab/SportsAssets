@@ -75,8 +75,15 @@ async def sweep_once() -> dict:
           AND NOT EXISTS (SELECT 1 FROM live_orders lo
                           WHERE lo.asset = t.asset
                             AND lo.status IN ('submitting','filled','settled'))
+          -- Rejected rows do NOT block: a mapping rejection is retryable
+          -- by design, and every mapper improvement re-runs against the
+          -- backlog on the next sweep instead of applying only to future
+          -- trades (8,896 candidates were permanently dead here before
+          -- 2026-08-04). Unfilled/errored rows still block — those had a
+          -- market and made an attempt.
           AND NOT EXISTS (SELECT 1 FROM live_orders lo2
-                          WHERE lo2.trade_id = t.id)
+                          WHERE lo2.trade_id = t.id
+                            AND lo2.status <> 'rejected')
         ORDER BY t.asset, t.ts DESC
         """,
         whales, PRICE_CEILING,

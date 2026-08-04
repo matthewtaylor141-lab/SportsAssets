@@ -309,7 +309,10 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                                      his_price, reaction_s, limit_price, requested_usd,
                                      requested_shares, status, venue)
             VALUES ($1,$2,$3,$4,'BUY',$5,$6,$7,$8,$9,'submitting',$10)
-            ON CONFLICT (trade_id) DO NOTHING RETURNING id
+            ON CONFLICT (trade_id) DO UPDATE
+              SET status='submitting', error=NULL
+              WHERE live_orders.status = 'rejected'
+            RETURNING id
             """,
             payload.get("id"), payload.get("whale_username"), str(payload["asset"]),
             payload.get("condition_id"), his_price, reaction, limit, usd, shares, venue,

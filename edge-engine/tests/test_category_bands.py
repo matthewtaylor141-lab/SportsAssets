@@ -153,8 +153,10 @@ def test_moneyline_floor_gates_on_measured_capture_not_threshold():
     cannot pay the benchmark at those prices — dead despite being
     measured-positive. The cheap half pays 5-60% and stays open."""
     assert POLICY.band_threshold(0.47, "moneyline") is not None
-    for p in (0.53, 0.62, 0.72, 0.78, 0.87):
-        assert POLICY.band_threshold(p, "moneyline") is None, p
+    for p in (0.53, 0.62, 0.78, 0.87):
+        assert POLICY.band_threshold(p, "moneyline") is not None, p
+        for p in (0.42, 0.67, 0.93, 0.97):
+            assert POLICY.band_threshold(p, "moneyline") is None, p
     for p in (0.07, 0.17, 0.32, 0.37):
         assert POLICY.band_threshold(p, "moneyline") is not None, p
 
@@ -208,7 +210,9 @@ def test_regeneration_is_idempotent_and_leaves_moneyline_alone():
     # The floor moved the expensive bands into the dead list; the measured
     # edge figures stay in the file via the tradeable half.
     assert '"0.30-0.35": {edge_cents: 3.59' in head
-    assert '"0.85-0.90"' in head.split("dead_zones:")[1]
+    assert '"0.65-0.70"' in head.split("dead_zones:")[1]
+    assert '"0.85-0.90"' not in head.split("dead_zones:")[1], \
+        "50-90c reopened under maker-first economics (2026-08-04)"
 
 
 def test_generator_still_derives_the_mirror_before_the_floor():

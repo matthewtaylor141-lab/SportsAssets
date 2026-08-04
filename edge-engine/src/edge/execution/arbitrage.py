@@ -291,7 +291,10 @@ def execute_cross_venue(*, event: str, legs: list[XVLeg], max_sets: int,
         res.status = "no_fills"   # flat: the only cost was the opportunity
         return res
     res.legs_filled = 1
-    res.paid += first.price + first.fee()
+    # Accumulate what the venue REPORTS, not what we quoted — telemetry
+    # that steers min_profit must not be calibrated on flattering numbers.
+    px1 = float(r1.get("price") or first.price)
+    res.paid += px1 + first.fee()
     if got < sets:
         log.warning("%s: first leg partial %d/%d — closing the smaller set",
                     event, got, sets)
@@ -301,7 +304,8 @@ def execute_cross_venue(*, event: str, legs: list[XVLeg], max_sets: int,
     res.orders.append(r2)
     if r2.get("ok") and float(r2.get("count") or 0) >= sets:
         res.legs_filled = 2
-        res.paid = round(res.paid + closer.price + closer.fee(), 4)
+        px2 = float(r2.get("price") or closer.price)
+        res.paid = round(res.paid + px2 + closer.fee(), 4)
         res.ok, res.status = True, "complete"
         res.profit = round(sets * (1.0 - res.paid), 4)
         return res

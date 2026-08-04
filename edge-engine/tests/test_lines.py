@@ -320,20 +320,19 @@ def test_surviving_thresholds_unchanged_by_regeneration():
     for price, expected in ((0.07, 0.030), (0.17, 0.025), (0.32, 0.025),
                             (0.37, 0.025), (0.47, 0.020)):
         assert POLICY.band_threshold(price, "moneyline") == expected
-    # The floored bands: measured-positive, dead at our costs. 0.45-0.50
-    # SURVIVES because its measured +2.94c nets 3.0% after the 1.5c
-    # crossing; 0.75-0.90 measures +1.4-2.6c and cannot pay the benchmark.
-    for price in (0.52, 0.77, 0.82, 0.87):
+    # Under maker-first economics only the measured dead zones stay out.
+    for price in (0.42, 0.67, 0.93):
         assert POLICY.band_threshold(price, "moneyline") is None
 
 
 def test_fat_middle_is_floored_out():
-    # 0.50-0.65 measures +0.5 to +1.2c — real, and SMALLER than the 1.5c we
-    # pay to cross. Trading it converts a measured edge into a measured
-    # loss. The floor keeps it shut until the crossing cost falls (maker
-    # pricing), at which point regeneration re-opens it.
+    # 2026-08-04: the crossing cost DID fall — maker-first on both venues
+    # prices a half-tick, and the live net-margin gate screens per fill.
+    # Regeneration re-opened the fat middle exactly as this test's old
+    # comment promised; the measured dead zone at 65-70c stays shut.
     for price in (0.52, 0.57, 0.62):
-        assert POLICY.band_threshold(price, "moneyline") is None
+        assert POLICY.band_threshold(price, "moneyline") is not None
+    assert POLICY.band_threshold(0.67, "moneyline") is None
     # ...and the genuinely dead zones stay dead.
     for price in (0.42, 0.67, 0.92, 0.97):
         assert POLICY.band_threshold(price, "moneyline") is None

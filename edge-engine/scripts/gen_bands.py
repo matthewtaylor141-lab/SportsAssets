@@ -36,8 +36,16 @@ DEAD_CEILING = 0.20   # cents of measured edge at/below which a band is dead
 # even though the average fill there does. Where a measurement exists it
 # is the better estimate; expected capture can never be below the
 # threshold, because we refuse everything under it.
-NET_ROI_FLOOR = 0.02      # the benchmark: reference account = 2.3%
-CROSSING_CENTS = 1.5
+# Maker-first on BOTH venues (PMUS post-only, Kalshi one-tick-under, both
+# fee-free) means the static crossing assumption is a HALF-tick, not 1.5c —
+# and the runner now enforces a LIVE per-fill net-margin gate at the actual
+# book, which is strictly sharper than any static screen. The static floor
+# here only prunes bands that cannot pay even at ideal maker fills; the
+# live gate does the real work per trade. Reverting to 1.5c/2% once cost
+# the entire 50-90c region: ~54% of the reference account's stake and
+# ~$8.3M of its implied PnL (audit 2026-08-04).
+NET_ROI_FLOOR = 0.005
+CROSSING_CENTS = 0.5
 
 
 def threshold_for(lo: float) -> float:

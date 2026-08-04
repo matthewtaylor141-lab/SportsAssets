@@ -191,6 +191,13 @@ class KalshiAdapter(VenueAdapter):
             # both venues). Quiet books are tallied separately.
             self.book_quiet["http_404"] = self.book_quiet.get("http_404", 0) + 1
             return None
+        if resp.status_code == 429:
+            # Rate limit: a backoff signal, never a venue error — a burst
+            # of 429s from background pollers once fed the watchdog and
+            # froze ALL orders. Pause this session's book reads briefly.
+            self.book_quiet["http_429"] = self.book_quiet.get("http_429", 0) + 1
+            time.sleep(1.0)
+            return None
         if resp.status_code != 200:
             self._book_err(f"http_{resp.status_code}")
             log.info("kalshi book %s for %s: %s", resp.status_code, market_ticker,
