@@ -184,15 +184,14 @@ COPY_MODE = "penny_trial"
 # $100/day, was $50 (owner directive 2026-08-03) — roughly 300+ one-contract
 # copies a day at the 50c per-fill ceiling before the sleeve stands down.
 PENNY_TRIAL_DAILY_USD = 100.0
-# Owner directive 2026-08-04 ("let's up the sizing... average $3 per
-# trade"): each copy TARGETS $3 — as many whole contracts as $3 buys at
-# the limit (30c -> 10 contracts, 60c -> 5, 97c -> 3), rounded DOWN so a
-# copy never exceeds the budget. Price tolerance unchanged: his price
-# +2% relative, floored to the venue's cent tick; FOK gives
-# same-or-better for free. Grading stays per-whale/per-band; the settled
-# paper cohort that justified this sizing read +7.3% ROI on 304 settled
-# at the moment of the decision.
-PENNY_TRIAL_PER_FILL_USD = 3.00
+# Owner directive 2026-08-04 (revised minutes after the $3 call): $2
+# target per copy — as many whole contracts as $2 buys at the limit
+# (20c -> 10 contracts, 50c -> 4, 97c -> 2), rounded DOWN so a copy
+# never exceeds the budget. Price tolerance unchanged: his price +2%
+# relative, floored to the venue's cent tick; FOK gives same-or-better
+# for free. Grading stays per-whale/per-band; the settled paper cohort
+# behind this sizing read +7.3% ROI on 304 settled.
+PENNY_TRIAL_PER_FILL_USD = 2.00
 
 
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
