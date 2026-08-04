@@ -249,6 +249,7 @@ _ROTATION = {"i": 0}
 # Entries expire after 30 min: proximity decays with the odds.
 _NEAR_THRESHOLD: dict[str, float] = {}
 _LAST_SETTLE: dict = {}
+_ACCOUNT_LINK: dict = {}
 
 # Position reconciliation runs once per process: a restart is exactly when
 # the ledger may have been wiped, and exactly when the caps need rebuilding.
@@ -1415,6 +1416,7 @@ def main() -> None:
             account_link[a.name] = {"ok": False,
                                     "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}
         log.info("account link %s: %s", a.name, account_link[a.name])
+    _ACCOUNT_LINK.update(account_link)
     _post_status("startup", {"mode": risk.mode, "account_link": account_link,
                              "venues": [a.name for a in adapters],
                              "sports": len(sport_keys)})
@@ -1585,6 +1587,12 @@ def main() -> None:
             if _LAST_SETTLE:
                 funnel["settled"] = _LAST_SETTLE.get("settled")
                 funnel["settle_stats"] = _LAST_SETTLE.get("stats")
+            # Same carry-forward logic for the account link: the boot-time
+            # credential check posts once as "startup" and scrolls away —
+            # a probe that reads only recent heartbeats could never answer
+            # "is the Kalshi account actually connected?".
+            if _ACCOUNT_LINK:
+                funnel["account_link"] = _ACCOUNT_LINK
             # Account maintenance runs in EVERY mode, not just live ones.
             # It was gated on risk.is_live, which meant the PAPER halt left
             # resting GTC orders alive at the venue with nothing cancelling

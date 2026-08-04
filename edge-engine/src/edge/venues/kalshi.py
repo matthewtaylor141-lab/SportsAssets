@@ -52,12 +52,14 @@ class KalshiAdapter(VenueAdapter):
     def __init__(self) -> None:
         self._sess = requests.Session()
         self.book_errors: dict[str, int] = {}
+        self.last_census: dict = {}
 
     def _book_err(self, cause: str) -> None:
         self.book_errors[cause] = self.book_errors.get(cause, 0) + 1
 
     def discover_markets(self, league_codes: set[str]) -> list[VenueMarket]:
         out: list[VenueMarket] = []
+        self.last_census = {}
         for code, series_list in _series_map().items():
             if code not in league_codes:
                 continue
@@ -65,8 +67,16 @@ class KalshiAdapter(VenueAdapter):
                 self._discover_series(out, code, series)
         return out
 
+    def _census(self, key: str) -> None:
+        self.last_census[key] = self.last_census.get(key, 0) + 1
+
     def _discover_series(self, out: list[VenueMarket], code: str, series: str) -> None:
-        from edge.fairvalue.lines import canonical_outcome
+        from edge.fairvalue.lines import (
+            canonical_outcome,
+            parse_outcome_line,
+            tag_segment,
+            title_segment,
+        )
 
         cursor = ""
         for _ in range(10):  # bounded paging
@@ -86,6 +96,7 @@ class KalshiAdapter(VenueAdapter):
             except (requests.RequestException, ValueError) as exc:
                 log.warning("kalshi discovery failed for %s: %s", series, exc)
                 break
+            sser = series.upper()
             for ev in data.get("events") or []:
                 outcomes = {}
                 for m in ev.get("markets") or []:
@@ -93,8 +104,32 @@ class KalshiAdapter(VenueAdapter):
                     if raw_name and m.get("ticker"):
                         # Canonical form carries the line: "Over 45.5",
                         # "Eagles -7.5", or a plain team for moneyline.
-                        key = canonical_outcome(m.get("title") or ev.get("title", ""),
-                                                raw_name)
+                        title = m.get("title") or ev.get("title", "")
+                        key = canonical_outcome(title, raw_name)
+                        parsed = parse_outcome_line(key)
+                        # Identity gate (audit 2026-08-04). A total whose
+                        # subtitle dropped the number matches ANY sharp rung
+                        # downstream — pair matching lets point-less sides
+                        # through and the lowest alternate rung wins, so the
+                        # "edge" is the gap between rungs, not a mispricing.
+                        if parsed.kind == "total" and parsed.point is None:
+                            self._census("bare_total")
+                            continue
+                        # A spread/total-series outcome that parses as a
+                        # plain team name lost its line somewhere — priced
+                        # against the MONEYLINE fair value it is a different
+                        # bet wearing the team's name. Never guess.
+                        if "SPREAD" in sser and parsed.kind != "spread":
+                            self._census("untagged_spread")
+                            continue
+                        if ("TOTAL" in sser or "POINTS" in sser) and \
+                                parsed.kind != "total":
+                            self._census("untagged_total")
+                            continue
+                        # Segment tag: a first-half line must never collide
+                        # with — or be priced against — the full-game line.
+                        key = tag_segment(key, title_segment(title)
+                                          or title_segment(ev.get("title") or ""))
                         outcomes[key] = m["ticker"]
                 if len(outcomes) >= 2:
                     out.append(VenueMarket(
