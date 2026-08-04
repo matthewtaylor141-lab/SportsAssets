@@ -24,3 +24,7 @@ dist/
 .idea/
 .vscode/
 .DS_Store
+
+# SQLite WAL runtime artifacts (created by local test runs)
+*.sqlite3-shm
+*.sqlite3-wal
