@@ -456,3 +456,16 @@ jobs:
                 | jq '{ticker: .market.ticker, status: .market.status, open_time: .market.open_time, close_time: .market.close_time, yes_bid: .market.yes_bid, yes_ask: .market.yes_ask, volume: .market.volume, liquidity: .market.liquidity}' 2>/dev/null || true
             fi
           done
+
+      - name: Kalshi V2 create-order spec (docs, via runner)
+        if: always()
+        run: |
+          echo "###########################################################"
+          echo "#   KALSHI V2 CREATE-ORDER SPEC                            #"
+          echo "###########################################################"
+          for U in \
+            "https://docs.kalshi.com/api-reference/orders/create-order-v2.md" \
+            "https://docs.kalshi.com/api-reference/orders/create-order-v2"; do
+            echo "== $U =="
+            curl -sSL --max-time 20 "$U" | head -c 6000; echo ""
+          done
