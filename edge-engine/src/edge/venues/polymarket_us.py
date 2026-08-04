@@ -544,28 +544,63 @@ class PolymarketUSAdapter(VenueAdapter):
     def fetch_results(self, slugs: list[str]) -> dict[str, float]:
         """market slug -> payout for settled markets (grader input).
 
-        Instrumented 2026-08-04: 2,006 live fills had settled ZERO in the
-        ledger while the venue account showed hundreds of settlements —
-        every per-slug error was swallowed silently. The stats dict names
-        the failure mode instead.
+        Rewritten 2026-08-04 from the probe's settle_stats: the public
+        per-slug settlement endpoint priced 0 of 782 traded slugs
+        (700 no_price, 82 NotFoundError) while the account showed
+        hundreds of settlements. On this venue settlement is an ACCOUNT
+        ACTIVITY (ACTIVITY_TYPE_POSITION_RESOLUTION keyed by marketSlug)
+        — the same feed the platform's track record consumes — not a
+        public market attribute. For a buy-only book the payout is the
+        sign of `realized`: a win pays $1/contract (realized =
+        qty - cost > 0), a loss pays $0 (realized = -cost < 0).
+        realized == 0 is ambiguous and stays unsettled rather than
+        guessed.
         """
-        out: dict[str, float] = {}
-        stats = {"checked": 0, "priced": 0, "no_price": 0, "errors": 0}
-        first_err = None
-        for slug in slugs:
-            stats["checked"] += 1
+
+        def _amt(a) -> float:
+            if isinstance(a, dict):
+                a = a.get("value")
             try:
-                s = self._pub.markets.settlement(slug) or {}
-                px = (s.get("settlementPrice") or {}).get("value")
-                if px is not None:
-                    out[slug] = float(px)
-                    stats["priced"] += 1
-                else:
-                    stats["no_price"] += 1
-            except Exception as exc:  # noqa: BLE001 — unsettled/unknown: skip
-                stats["errors"] += 1
-                if first_err is None:
-                    first_err = f"{type(exc).__name__}: {str(exc)[:120]}"
+                return float(a or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        out: dict[str, float] = {}
+        wanted = set(slugs)
+        stats = {"checked": len(slugs), "priced": 0, "no_price": 0,
+                 "errors": 0, "activities": 0}
+        first_err = None
+        cursor = ""
+        try:
+            for _ in range(40):  # page cap: 40 x 250 resolutions
+                resp = self._client().portfolio.activities(
+                    {"limit": 250, "sortOrder": "SORT_ORDER_DESCENDING",
+                     "types": ["ACTIVITY_TYPE_POSITION_RESOLUTION"],
+                     **({"cursor": cursor} if cursor else {})}) or {}
+                acts = resp.get("activities") or []
+                stats["activities"] += len(acts)
+                for a in acts:
+                    res = a.get("positionResolution") or {}
+                    slug = res.get("marketSlug")
+                    if not slug or slug not in wanted or slug in out:
+                        continue
+                    realized = _amt((res.get("afterPosition") or {})
+                                    .get("realized"))
+                    if not realized:
+                        realized = _amt((res.get("beforePosition") or {})
+                                        .get("realized"))
+                    if realized > 0:
+                        out[slug] = 1.0
+                    elif realized < 0:
+                        out[slug] = 0.0
+                cursor = resp.get("nextCursor") or ""
+                if resp.get("eof") or not cursor or len(out) == len(wanted):
+                    break
+        except Exception as exc:  # noqa: BLE001 — partial results still settle
+            stats["errors"] += 1
+            first_err = f"{type(exc).__name__}: {str(exc)[:120]}"
+        stats["priced"] = len(out)
+        stats["no_price"] = len(wanted) - len(out)
         stats["first_error"] = first_err
         self.last_settle_stats = stats
         log.info("pmus fetch_results: %s", stats)
