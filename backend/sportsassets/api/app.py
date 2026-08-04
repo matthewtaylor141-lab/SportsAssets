@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -398,6 +399,15 @@ class EngineStatusBody(BaseModel):
     detail: dict = {}
 
 
+# Posts from engine processes that predate the boot stamp are DROPPED and
+# counted. Discovered 2026-08-04: a stale engine instance survived deploys
+# and kept overwriting the status row with old-code heartbeats, poisoning
+# every remote diagnosis for hours ("Deploy live" on the new build while
+# probes only ever saw the old one). Only a stamped process — the current
+# build — may write telemetry; the drop counter keeps the stray VISIBLE.
+_unstamped_drops = {"n": 0, "last_at": 0.0}
+
+
 @app.post("/api/engine/status")
 async def engine_status_ingest(
     body: EngineStatusBody, x_engine_token: str = Header(default="")
@@ -405,6 +415,10 @@ async def engine_status_ingest(
     cfg = settings()
     if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
         raise HTTPException(status_code=401, detail="engine token required")
+    if not (body.detail or {}).get("boot"):
+        _unstamped_drops["n"] += 1
+        _unstamped_drops["last_at"] = time.time()
+        return {"ok": False, "ignored": "unstamped legacy process"}
     from ..db import heartbeat
 
     await heartbeat("edge_engine", body.status, body.detail)
@@ -489,10 +503,14 @@ async def engine_status() -> dict:
     pool = await get_pool()
     row = await pool.fetchrow("SELECT * FROM service_heartbeats WHERE service='edge_engine'")
     if row is None:
-        return {"status": "never_reported"}
+        return {"status": "never_reported",
+                "unstamped_drops": dict(_unstamped_drops)}
     d = dict(row)
     if isinstance(d.get("detail"), str):
         d["detail"] = json.loads(d["detail"])
+    # How often a stale (unstamped) engine process is still posting — a
+    # nonzero, growing count means a stray instance is alive somewhere.
+    d["unstamped_drops"] = dict(_unstamped_drops)
     return d
 
 
