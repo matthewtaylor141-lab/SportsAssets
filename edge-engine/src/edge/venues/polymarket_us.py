@@ -534,6 +534,38 @@ class PolymarketUSAdapter(VenueAdapter):
             log.error("cancel_all failed: %s", exc)
             return False
 
+    def open_positions_map(self) -> dict[str, dict]:
+        """Open account positions: slug -> {qty, cost, outcome, title}.
+
+        Feeds the Kalshi better-price add sweep — the account's real book,
+        not the ledger's view of it, because the directive is about every
+        open position regardless of which system placed it.
+        """
+        out: dict[str, dict] = {}
+        cursor = ""
+        for _ in range(5):
+            resp = self._client().portfolio.positions(
+                {"limit": 100, **({"cursor": cursor} if cursor else {})}) or {}
+            for slug, p in (resp.get("positions") or {}).items():
+                def _amt(a):
+                    if isinstance(a, dict):
+                        a = a.get("value")
+                    try:
+                        return float(a or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+                qty = _amt(p.get("netPosition"))
+                if qty <= 0 or p.get("expired"):
+                    continue
+                meta = p.get("marketMetadata") or {}
+                out[slug] = {"qty": qty, "cost": _amt(p.get("cost")),
+                             "outcome": meta.get("outcome"),
+                             "title": meta.get("title")}
+            cursor = resp.get("nextCursor") or ""
+            if resp.get("eof") or not cursor:
+                break
+        return out
+
     def open_orders(self) -> list[dict]:
         try:
             return list((self._client().orders.list() or {}).get("orders") or [])

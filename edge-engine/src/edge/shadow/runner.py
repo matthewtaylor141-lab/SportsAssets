@@ -256,6 +256,7 @@ _PROP_MAX_AGE_S = float(os.environ.get("EDGE_PROP_MAX_AGE_S", "600"))
 # The 24/7 cross-venue arbitrage watcher (see xv_watch.py). Installed by
 # main() when armed; run_cycle publishes proven identity pairs into it.
 _XV_WATCH = None
+_KADD_STATS: dict = {}
 
 # Boot beacon: where the process is and how big it is, posted every ~45s
 # until the FIRST full cycle completes. Exists because of 2026-08-04: the
@@ -1793,6 +1794,37 @@ def _main_impl() -> None:
         log.warning("xv watch armed: %ss poll, min profit %.3f, day cap $%s",
                     _XV_WATCH.poll_s, _XV_WATCH.min_profit, _XV_WATCH.day_usd)
 
+    # Better-price adds (owner directive 2026-08-04): open PMUS positions
+    # that Kalshi currently sells cheaper (fee-loaded, >=2c) get a $2 add,
+    # once per position, $50/day class budget, graded as its own category.
+    if os.environ.get("EDGE_KALSHI_ADDS", "1") != "0" and len(adapters) >= 2:
+        kalshi_a = next((a for a in adapters if a.name == "kalshi"), None)
+        pmus_a = next((a for a in adapters if a.name == "polymarket-us"), None)
+        if kalshi_a is not None and pmus_a is not None \
+                and kalshi_a.has_credentials() and pmus_a.has_credentials():
+            def _kadd_loop() -> None:
+                from edge.shadow.kalshi_adds import sweep as kadd_sweep
+
+                time.sleep(240)   # after the first sweep has settled in
+                every = float(os.environ.get("EDGE_KADD_EVERY_S", "7200"))
+                while True:
+                    try:
+                        st = kadd_sweep(
+                            pmus=pmus_a, kalshi=kalshi_a, ledger=ledger,
+                            live=risk.is_live,
+                            day_usd=float(os.environ.get(
+                                "EDGE_KADD_DAY_USD", "50")))
+                        _KADD_STATS.clear()
+                        _KADD_STATS.update(st, at=time.time())
+                        log.info("kalshi add sweep: %s", st)
+                    except Exception as exc:  # noqa: BLE001 — never fatal
+                        log.warning("kalshi add sweep failed: %s", exc)
+                    time.sleep(every)
+
+            threading.Thread(target=_kadd_loop, daemon=True,
+                             name="kalshi-adds").start()
+            log.warning("kalshi better-price adds armed (2h sweep)")
+
     # One-shot venue census (EDGE_CENSUS_DAYS=0 disables): how many sports
     # markets the venue actually listed per day over the trailing window —
     # the opportunity universe behind any volume estimate. Runs in a thread
@@ -1969,6 +2001,8 @@ def _main_impl() -> None:
             if _XV_WATCH is not None:
                 funnel["xv_watch"] = {**_XV_WATCH.stats,
                                       "registered": _XV_WATCH.registered()}
+            if _KADD_STATS:
+                funnel["kalshi_adds"] = dict(_KADD_STATS)
             # Account maintenance runs in EVERY mode, not just live ones.
             # It was gated on risk.is_live, which meant the PAPER halt left
             # resting GTC orders alive at the venue with nothing cancelling
