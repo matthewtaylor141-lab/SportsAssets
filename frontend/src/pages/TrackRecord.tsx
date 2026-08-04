@@ -273,8 +273,10 @@ export function TrackRecord() {
   // owner to distrust every number on it.
   const age = data.snapshot?.age_s ?? null
   const refreshErr = data.snapshot?.refresh_error || null
+  // Thresholds track the server's snapshot cadence (raw TTL 180s): under
+  // ~5 min is simply "current"; amber and red mean something is wrong.
   const sync: 'ok' | 'lag' | 'stale' =
-    age === null ? 'ok' : age < 120 ? 'ok' : age < 600 ? 'lag' : 'stale'
+    age === null ? 'ok' : age < 300 ? 'ok' : age < 900 ? 'lag' : 'stale'
   const acct = data.account
 
   return (

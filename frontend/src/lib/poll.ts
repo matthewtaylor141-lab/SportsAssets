@@ -37,6 +37,7 @@ export function usePolled<T>(
   // Synchronous mirror of `data` for the keep() comparison — React state
   // updaters are async, so deciding inside one and acting outside races.
   const dataRef = useRef<T | null>(data)
+  const lastLoad = useRef(0)
 
   useEffect(() => {
     // Path changed (e.g. a filter in the URL): show that path's cache, not
@@ -51,6 +52,7 @@ export function usePolled<T>(
     let dead = false
     const load = async () => {
       try {
+        lastLoad.current = Date.now()
         const d = await api<T>(path)
         if (dead) return
         const bad = accept?.(d) ?? null
@@ -74,7 +76,10 @@ export function usePolled<T>(
     }
     load()
     const t = window.setInterval(() => {
-      if (!document.hidden) load()
+      // Visible: every tick. Hidden: still refresh at least every 5
+      // minutes, so a glance at a backgrounded phone tab shows numbers
+      // that are already fresh instead of frozen at tab-switch time.
+      if (!document.hidden || Date.now() - lastLoad.current > 300_000) load()
     }, refreshMs)
     const onShow = () => {
       if (!document.hidden) load()
