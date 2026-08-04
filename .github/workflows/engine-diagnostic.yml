@@ -58,6 +58,20 @@ jobs:
 
           # The verdict line first: it names the single binding constraint.
           probe /api/engine/status 120
+
+          # Status-row race sampler: who is writing this row? Eight quick
+          # reads catch BOTH posters when a stale instance interleaves
+          # with the current build (observed 2026-08-04).
+          echo ""
+          echo "STATUS RACE (8 samples, 10s apart — boot id or UNSTAMPED):"
+          for i in $(seq 1 8); do
+            S=$(curl -sS --max-time 10 "$BASE/api/engine/status" 2>/dev/null)
+            HB=$(echo "$S" | jq -r '.detail.heartbeat // .beat_at // "?"' 2>/dev/null)
+            BOOT=$(echo "$S" | jq -r '.detail.boot.id // "UNSTAMPED"' 2>/dev/null)
+            DROPS=$(echo "$S" | jq -r '.unstamped_drops.n // "n/a"' 2>/dev/null)
+            echo "  sample $i: boot=$BOOT  hb=$HB  drops=$DROPS"
+            sleep 10
+          done
           echo ""
           echo "===================== VERDICT ============================="
           jq -r '.detail.verdict // "(no verdict — engine predates this build)"' \
