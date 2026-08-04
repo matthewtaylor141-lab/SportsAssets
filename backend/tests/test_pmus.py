@@ -236,3 +236,48 @@ def test_active_venue_prefers_us(monkeypatch):
     assert live_executor.active_venue() == "polymarket-clob"
     monkeypatch.setattr(cfg, "live_trading_enabled", False)
     assert live_executor.active_venue() is None
+
+
+def test_market_sides_map_to_the_named_sides_own_slug(monkeypatch):
+    """The venue decomposes two-sided markets into per-side INSTRUMENT
+    markets: description names the side, identifier is that side's own
+    orderable slug. Matching the side must return the SIDE's slug — the
+    structural end of wrong-side risk (schema named by the 2026-08-04
+    audit trails)."""
+    from sportsassets import pmus
+
+    two_sided = {
+        "slug": "who-will-win-galfi-seidel",
+        "question": "Who will win in the upcoming tennis event Dalma Galfi vs Ella Seidel?",
+        "closed": False,
+        "marketSides": [
+            {"id": "1", "description": "Dalma Galfi",
+             "identifier": "aec-wta-dalgal-ellsei-2026-08-03"},
+            {"id": "2", "description": "Ella Seidel",
+             "identifier": "aec-wta-ellsei-dalgal-2026-08-03"},
+        ],
+    }
+
+    class _Markets:
+        def retrieve_by_slug(self, slug):
+            raise KeyError(slug)
+
+        def list(self, params):
+            return {"markets": []}
+
+    class _Search:
+        def query(self, params):
+            return {"events": [{"title": "Dalma Galfi vs Ella Seidel",
+                                "markets": [two_sided]}]}
+
+    class _Client:
+        markets = _Markets()
+        search = _Search()
+
+    monkeypatch.setattr(pmus, "_get_client", lambda: _Client())
+    r = pmus.resolve_market(None, None,
+                            "Warsaw: Dalma Galfi vs Ella Seidel", None,
+                            "Ella Seidel")
+    assert r is not None
+    assert r["market_slug"] == "aec-wta-ellsei-dalgal-2026-08-03"
+    assert r["outcome"] == "Ella Seidel"

@@ -212,17 +212,34 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
     def _best(cands: list[dict]) -> tuple[dict | None, float]:
         top, top_score = None, 0.0
         for m in cands:
-            if m.get("closed") or not m.get("slug"):
+            if m.get("closed"):
                 continue
-            sc = _outcome_score(m, outcome)
             cand_lines = _lines((m.get("title") or "") + " "
                                 + (m.get("question") or ""))
-            if src_lines != cand_lines:
-                sc -= 0.2
-            elif src_lines:
-                sc = min(1.0, sc + 0.05)
-            if sc > top_score:
-                top, top_score = m, sc
+            line_adj = (-0.2 if src_lines != cand_lines
+                        else (0.05 if src_lines else 0.0))
+            if m.get("slug"):
+                sc = _outcome_score(m, outcome) + line_adj
+                if sc > top_score:
+                    top, top_score = m, min(sc, 1.0)
+            # marketSides (schema named by the 2026-08-04 trails): each
+            # side of a two-sided market is its OWN market — description
+            # names the side ("Dalma Galfi"), identifier is that side's
+            # slug (aec-wta-...), orderable with the same BUY_LONG flow
+            # as any other market. Matching the side kills the wrong-side
+            # risk structurally: we order the slug that IS his outcome.
+            for side in (m.get("marketSides") or []):
+                if not isinstance(side, dict):
+                    continue
+                desc = side.get("description")
+                ident = side.get("identifier")
+                if not desc or not ident:
+                    continue
+                ssc = _outcome_score({"outcome": desc}, outcome) + line_adj
+                if ssc > top_score:
+                    top = {"slug": ident, "title": m.get("question"),
+                           "outcome": desc, "closed": False}
+                    top_score = min(ssc, 1.0)
         return top, top_score
 
     best, best_score = _best(candidates)
