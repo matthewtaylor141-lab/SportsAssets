@@ -68,6 +68,17 @@ def log_shadow_fill(intent, book, feed_snapshot, would_fill: bool, whale_alignme
     _record_to_platform(rec)
 
 
+# Identity of THIS process, stamped into every status post. Two different
+# builds appeared to alternate on the status row on 2026-08-04 (funnel keys
+# present at 19:27, absent at 20:00-21:07 while V2 orders demonstrably
+# fired in between) — without a boot stamp, "which process said this" is
+# unanswerable from outside.
+import uuid as _uuid_mod
+
+_BOOT = {"id": _uuid_mod.uuid4().hex[:10], "started": time.time(),
+         "build": "v2-orders+guard+kalshi_open"}
+
+
 def _post_status(status: str, detail: dict) -> None:
     """Cycle telemetry -> platform Admin panel (service row 'edge_engine').
     This is how an empty Engine tab becomes diagnosable: the funnel shows
@@ -80,7 +91,8 @@ def _post_status(status: str, detail: dict) -> None:
         import requests
 
         requests.post(f"{base}/api/engine/status",
-                      json={"status": status, "detail": detail},
+                      json={"status": status,
+                            "detail": {**detail, "boot": dict(_BOOT)}},
                       headers={"X-Engine-Token": token}, timeout=5)
     except Exception as exc:  # noqa: BLE001
         log.debug("status post failed (non-fatal): %s", exc)
