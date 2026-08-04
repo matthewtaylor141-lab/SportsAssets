@@ -68,6 +68,15 @@ def _outcome_score(us_market: dict, outcome: str | None) -> float:
     team = us_market.get("team") or {}
     candidates = [us_market.get("outcome"), team.get("name"), team.get("alias"),
                   team.get("safeName"), team.get("abbreviation")]
+    # On the real venue many per-outcome markets carry NO outcome field —
+    # the market TITLE names the side ("New York Yankees", "Eagles -7.5").
+    # The engine's own adapter learned this the hard way (see
+    # edge/venues/polymarket_us.py "outcome_from_title"). Guard: a title
+    # that reads like a matchup ("A vs B") names BOTH sides and must
+    # never vote, and slug-looking strings are noise.
+    title = us_market.get("title") or ""
+    if title and " vs" not in title.lower() and title.count("-") < 4:
+        candidates.append(title)
     best = max((_sim(c, outcome) for c in candidates if c), default=0.0)
     # Player-name robustness: "Bianca Andreescu" vs the venue's
     # "Andreescu, B." scores ~0.68 on raw similarity — below the floor —
@@ -177,12 +186,24 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
             candidates = []
             diag.append(f"event:{type(exc).__name__}")
 
+    # Line-consistency: his "Spread: Nationals (-1.5)" must not map to the
+    # Nationals MONEYLINE just because the team name matches. Numbers in
+    # the source market title (the line) must agree with numbers in the
+    # candidate's title: agreement is a nudge up, disagreement (including
+    # line-vs-no-line) drops the candidate below the floor.
+    src_nums = set(re.findall(r"\d+(?:\.\d+)?", market_title or ""))
+
     def _best(cands: list[dict]) -> tuple[dict | None, float]:
         top, top_score = None, 0.0
         for m in cands:
             if m.get("closed") or not m.get("slug"):
                 continue
             sc = _outcome_score(m, outcome)
+            cand_nums = set(re.findall(r"\d+(?:\.\d+)?", m.get("title") or ""))
+            if src_nums != cand_nums:
+                sc -= 0.2
+            elif src_nums:
+                sc = min(1.0, sc + 0.05)
             if sc > top_score:
                 top, top_score = m, sc
         return top, top_score
@@ -256,6 +277,10 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
                 "outcome": best2.get("outcome"),
                 "matched_by": "search", "score": best2_score}
     diag.append(f"best_outcome_score:{round(max(best_score, best2_score), 2)}")
+    if candidates:
+        c0 = candidates[0]
+        diag.append("sample:" + str({k: c0.get(k) for k in
+                                     ("title", "outcome", "team")})[:90])
     # The trail rides the exception-free path out via last_resolve_diag so
     # the caller can store WHY in the audit row without a signature break.
     resolve_market.last_diag = "; ".join(diag)[:280]
