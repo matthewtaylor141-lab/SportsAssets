@@ -98,6 +98,9 @@ class KalshiAdapter(VenueAdapter):
                 if resp.status_code != 200:
                     log.info("kalshi discovery %s -> HTTP %s (series unavailable?)",
                              series, resp.status_code)
+                    # Named in the census so a wrong series ticker is a
+                    # probe-readable fact, not a silent zero.
+                    self.last_census[f"{series}_http"] = resp.status_code
                     break
                 data = resp.json()
             except (requests.RequestException, ValueError) as exc:
@@ -145,6 +148,9 @@ class KalshiAdapter(VenueAdapter):
                         league_code=code,
                         outcome_tokens=outcomes,
                     ))
+            self.last_census[f"{series}_events"] = (
+                self.last_census.get(f"{series}_events", 0)
+                + len(data.get("events") or []))
             cursor = data.get("cursor") or ""
             if not cursor:
                 break

@@ -253,6 +253,10 @@ _ACCOUNT_LINK: dict = {}
 # Max age for the per-event payload (segments + props) behind a live order.
 _PROP_MAX_AGE_S = float(os.environ.get("EDGE_PROP_MAX_AGE_S", "600"))
 
+# The 24/7 cross-venue arbitrage watcher (see xv_watch.py). Installed by
+# main() when armed; run_cycle publishes proven identity pairs into it.
+_XV_WATCH = None
+
 # Boot beacon: where the process is and how big it is, posted every ~45s
 # until the FIRST full cycle completes. Exists because of 2026-08-04: the
 # service restart-looped with nothing but clean "startup" posts to show for
@@ -1453,6 +1457,14 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             except Exception as exc:  # noqa: BLE001 — one order, not the sweep
                 log.warning("routed intent failed for %s: %s", ident, exc)
                 funnel["route_errors"] = funnel.get("route_errors", 0) + 1
+        # Feed the 24/7 watcher every proven two-venue identity join — it
+        # re-prices these pairs on its own fast clock between sweeps.
+        if _XV_WATCH is not None and len(xv_pool) == 2:
+            try:
+                _XV_WATCH.publish(ev.event_key(), f"{ev.home} v {ev.away}",
+                                  ev.league_code, xv_pool)
+            except Exception:  # noqa: BLE001 — telemetry, never fatal
+                pass
         # Both venues have now contributed their legs for this event — the
         # cross-venue check runs where the whole pool is finally visible.
         if xv_on and xv_done < xv_budget and len(xv_pool) == 2:
@@ -1760,6 +1772,27 @@ def _main_impl() -> None:
                              "rss_mb": _rss_mb()})
     threading.Thread(target=_boot_beacon, daemon=True, name="beacon").start()
 
+    # 24/7 cross-venue arbitrage watcher (owner directive 2026-08-04):
+    # its own fast clock over every proven Kalshi<->Polymarket identity
+    # pair, firing whenever the fee-loaded books sum under $1. Shares the
+    # sweep path's once-per-event claims so the two can never double-fire.
+    global _XV_WATCH
+    xv_cfg_boot = (policy.risk.get("arbitrage") or {}).get("cross_venue") or {}
+    if (os.environ.get("EDGE_XV_WATCH", "1") != "0"
+            and bool(xv_cfg_boot.get("enabled")) and len(adapters) >= 2):
+        from edge.shadow.xv_watch import XVWatch
+
+        _XV_WATCH = XVWatch(
+            ledger=ledger, is_live=lambda: risk.is_live,
+            min_profit=float(xv_cfg_boot.get("min_profit", 0.02)),
+            max_usd=float(xv_cfg_boot.get("max_usd", 10.0)),
+            day_usd=float(xv_cfg_boot.get("watch_day_usd", 200.0)),
+            poll_s=float(os.environ.get("EDGE_XV_WATCH_S", "3")))
+        threading.Thread(target=_XV_WATCH.run, daemon=True,
+                         name="xv-watch").start()
+        log.warning("xv watch armed: %ss poll, min profit %.3f, day cap $%s",
+                    _XV_WATCH.poll_s, _XV_WATCH.min_profit, _XV_WATCH.day_usd)
+
     # One-shot venue census (EDGE_CENSUS_DAYS=0 disables): how many sports
     # markets the venue actually listed per day over the trailing window —
     # the opportunity universe behind any volume estimate. Runs in a thread
@@ -1933,6 +1966,9 @@ def _main_impl() -> None:
             # "is the Kalshi account actually connected?".
             if _ACCOUNT_LINK:
                 funnel["account_link"] = _ACCOUNT_LINK
+            if _XV_WATCH is not None:
+                funnel["xv_watch"] = {**_XV_WATCH.stats,
+                                      "registered": _XV_WATCH.registered()}
             # Account maintenance runs in EVERY mode, not just live ones.
             # It was gated on risk.is_live, which meant the PAPER halt left
             # resting GTC orders alive at the venue with nothing cancelling

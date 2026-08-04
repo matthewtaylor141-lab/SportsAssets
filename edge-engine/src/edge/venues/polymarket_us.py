@@ -310,6 +310,28 @@ class PolymarketUSAdapter(VenueAdapter):
         return (levels(body.get("bids"), reverse=True),
                 levels(body.get("offers") or body.get("asks"), reverse=False))
 
+    def peek_book(self, market_slug: str) -> MarketBook | None:
+        """Stream-cache-only book read — no REST, no session contention.
+
+        Built for the 24/7 arbitrage watcher: it runs on its own thread,
+        and the one thing a background scanner must never do is race the
+        trading loop for the shared HTTP client. A market not in the
+        cache returns None (and is asked to stream from now on) rather
+        than falling back to a competing REST call.
+        """
+        if self._stream is None:
+            return None
+        md = self._stream.get(market_slug)
+        if md is None:
+            self._stream.ensure([market_slug])
+            return None
+        bids, asks = self._parse_levels(md)
+        if not asks:
+            return None
+        return MarketBook(venue=self.name, market_id=market_slug,
+                          outcome_id=market_slug, bids=bids, asks=asks,
+                          ts=time.time())
+
     def get_book(self, market_id: str, market_slug: str) -> MarketBook | None:
         # Push-latency path: serve from the live stream cache when current.
         if self._stream is not None:
@@ -596,6 +618,10 @@ class PolymarketUSAdapter(VenueAdapter):
                 cursor = resp.get("nextCursor") or ""
                 if resp.get("eof") or not cursor or len(out) == len(wanted):
                     break
+                # Gentle on the venue: deep paging at full speed tripped
+                # Cloudflare rate limiting (observed 2026-08-04, first_error
+                # RateLimitError) and cost the rest of the pass.
+                time.sleep(0.3)
         except Exception as exc:  # noqa: BLE001 — partial results still settle
             stats["errors"] += 1
             first_err = f"{type(exc).__name__}: {str(exc)[:120]}"
