@@ -327,3 +327,73 @@ def test_slimmed_activities_build_the_identical_record():
     full.pop("generated_at", None)
     slim.pop("generated_at", None)
     assert full == slim
+
+
+def test_account_block_reconciles_cohort_plus_every_exclusion():
+    """account = AI cohort + incidents + copies + unattributed: the number
+    that must match the venue app. A page whose headline cannot be tied out
+    to the account it claims to read is a page the owner stops trusting."""
+    positions = {
+        "eng-won": _pos(0, 1.0, 0.0, realized=1.1, expired=True),
+        "big-lost": _pos(0, 150.0, 0.0, realized=-150.0, expired=True),
+        "copy-open": _pos(4, 2.0, 2.2),
+        "stray-won": _pos(0, 3.0, 0.0, realized=0.5, expired=True),
+    }
+    acts = [_trade("eng-won", TS_AUG2, 2, 0.5),
+            _resolution("eng-won", TS_AUG2 + 3600),
+            _trade("big-lost", TS_AUG2, 300, 0.5),
+            _resolution("big-lost", TS_AUG2 + 3600),
+            _trade("copy-open", TS_AUG2, 4, 0.5),
+            _trade("stray-won", TS_AUG2, 6, 0.5),
+            _resolution("stray-won", TS_AUG2 + 3600)]
+    out = build(positions, acts, TS_AUG1, max_stake=100.0,
+                attributed={"eng-won", "big-lost"},
+                copy_slugs={"copy-open"})
+    a = out["account"]
+    assert a["trades"] == 4 and a["open"] == 1
+    assert a["net_pnl"] == round(1.1 - 150.0 + 0.5, 2)
+    assert a["stake"] == round(1.0 + 150.0 + 2.0 + 3.0, 2)
+    # and the cohort headline still excludes all three other cohorts
+    assert out["summary"]["net_pnl"] == 1.1
+
+
+def test_paged_walks_to_eof_and_reports_completeness():
+    from sportsassets.api.track_record import _paged
+
+    calls = []
+
+    def fake(params):
+        calls.append(dict(params))
+        page = len(calls)
+        return {"positions": {f"s{page}": {}},
+                "nextCursor": f"c{page}" if page < 3 else "",
+                "eof": page >= 3}
+
+    pages, complete = _paged(fake, {"limit": 100}, max_pages=40, pace=0)
+    assert len(pages) == 3 and complete
+    assert calls[1]["cursor"] == "c1" and calls[2]["cursor"] == "c2"
+
+
+def test_paged_cap_reports_incomplete_never_silence():
+    from sportsassets.api.track_record import _paged
+
+    def endless(params):
+        return {"positions": {}, "nextCursor": "more", "eof": False}
+
+    pages, complete = _paged(endless, {}, max_pages=5, pace=0)
+    assert len(pages) == 5 and not complete
+
+
+def test_paged_retries_a_transient_failure_inside_the_walk():
+    from sportsassets.api.track_record import _paged
+
+    state = {"n": 0}
+
+    def flaky(params):
+        state["n"] += 1
+        if state["n"] == 2:          # second call blows up once
+            raise RuntimeError("rate limited")
+        return {"nextCursor": "" if state["n"] > 2 else "c", "eof": state["n"] > 2}
+
+    pages, complete = _paged(flaky, {}, max_pages=10, pace=0)
+    assert complete and len(pages) == 2

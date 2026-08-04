@@ -462,19 +462,23 @@ def _kalshi_smoke(kalshi_a, ledger, is_live) -> None:
                     r = kalshi_a.place_order(
                         ticker, ask.price, 1,
                         client_order_id=str(_uuid.uuid4()), taker=True)
-                    # Claim ONLY on success: a failed order must retry on
-                    # the next boot AND leave its venue response readable.
-                    state_key = ("kalshi_smoke_done" if r.get("ok")
+                    filled = (int(float(r.get("count") or 0))
+                              if r.get("ok") else 0)
+                    # Done ONLY on a real fill: the V2 endpoint can accept
+                    # an IOC and fill zero (book moved), and "accepted,
+                    # nothing bought" proves nothing — retry next boot with
+                    # the venue's answer left readable either way.
+                    state_key = ("kalshi_smoke_done"
+                                 if r.get("ok") and filled > 0
                                  else "kalshi_smoke_last")
                     ledger.set_state(state_key, {
                         "ts": time.time(), "ticker": ticker,
                         "price": ask.price, "ok": bool(r.get("ok")),
+                        "filled": filled,
                         "status": str(r.get("status"))[:200],
                         "raw_error": str((r.get("raw") or {}).get(
                             "error"))[:300],
                         "order_id": r.get("order_id")})
-                    filled = (int(float(r.get("count") or 0))
-                              if r.get("ok") else 0)
                     if filled:
                         ledger.record_fill(
                             fill_uid=f"kalshi-smoke-{int(time.time())}",

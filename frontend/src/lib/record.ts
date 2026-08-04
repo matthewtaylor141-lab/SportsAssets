@@ -50,6 +50,32 @@ export interface TRSummary {
   win_rate: number | null
 }
 
+export interface TRExcluded {
+  limit?: number
+  count: number
+  open?: number
+  stake: number
+  net_pnl: number
+}
+
+export interface TRSnapshot {
+  raw_ts: number
+  age_s: number
+  positions_pages: number | null
+  positions_complete: boolean
+  refresh_error: string | null
+  refresh_error_streak: number
+}
+
+/** Whole-account tie-out: AI cohort + every disclosed exclusion. This is
+ * the number that must match the venue app's own P&L view. */
+export interface TRAccount {
+  trades: number
+  open: number
+  stake: number
+  net_pnl: number
+}
+
 export interface TrackRecordData {
   configured: boolean
   error?: string
@@ -57,17 +83,15 @@ export interface TrackRecordData {
   archive_rows?: number
   window_rows?: number
   since: string
+  snapshot?: TRSnapshot
+  account?: TRAccount
   summary: TRSummary
   daily: TRDaily[]
   trades: TRRow[]
   excluded_undatable: number
-  excluded_over_limit: {
-    limit: number
-    count: number
-    open: number
-    stake: number
-    net_pnl: number
-  } | null
+  excluded_over_limit: TRExcluded | null
+  excluded_copy_sleeve?: TRExcluded | null
+  excluded_unattributed?: TRExcluded | null
 }
 
 export const SINCE = '2026-08-01'

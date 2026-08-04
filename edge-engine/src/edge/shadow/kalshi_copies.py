@@ -138,10 +138,15 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         r = kalshi.place_order(target_ticker, ask, count,
                                client_order_id=str(uuid.uuid4()), taker=True)
         filled = int(float(r.get("count") or 0)) if r.get("ok") else 0
-        if r.get("ok"):
+        if r.get("ok") and filled > 0:
             ledger.set_state(claim, {"ts": time.time(),
                                      "status": r.get("status"),
                                      "filled": filled})
+        elif r.get("ok"):
+            # Accepted IOC, zero filled: the copy's once-ever claim must
+            # not be burned on a fill that never happened — retry next
+            # sweep at whatever the book says then.
+            stats["ioc_zero_fill"] = stats.get("ioc_zero_fill", 0) + 1
         else:
             stats["last_order_error"] = {
                 "ticker": target_ticker,

@@ -156,10 +156,14 @@ def sweep(*, pmus, kalshi, ledger, live: bool,
         r = kalshi.place_order(ticker, ask, count,
                                client_order_id=str(uuid.uuid4()), taker=True)
         filled = int(float(r.get("count") or 0)) if r.get("ok") else 0
-        if r.get("ok"):
+        if r.get("ok") and filled > 0:
             ledger.set_state(claim, {"ts": time.time(),
                                      "status": r.get("status"),
                                      "filled": filled})
+        elif r.get("ok"):
+            # Accepted IOC, zero filled (book moved between look and order):
+            # no claim, so the add retries against a fresh book next sweep.
+            stats["ioc_zero_fill"] = stats.get("ioc_zero_fill", 0) + 1
         else:
             # NO claim on a failed order — the venue's answer is surfaced
             # and the position stays retryable (2026-08-04: a rejected

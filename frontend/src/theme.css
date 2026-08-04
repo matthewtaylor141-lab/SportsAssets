@@ -297,6 +297,17 @@ table.data td.num, table.data th.num { text-align: right; }
   width: 8px; height: 8px; border-radius: 50%; background: var(--good);
   animation: tr-pulse 1.6s ease-out infinite;
 }
+/* Freshness states: the badge tells the truth about snapshot age. */
+.tr-live-lag { color: var(--warning); }
+.tr-live-lag .tr-pulse { background: var(--warning); animation: none; }
+.tr-live-stale { color: var(--critical); }
+.tr-live-stale .tr-pulse { background: var(--critical); animation: none; }
+/* Whole-account tie-out strip under the hero numbers. */
+.tr-account {
+  margin-top: 12px; padding: 9px 14px; border-radius: 10px; font-size: 12.5px;
+  background: rgba(120, 144, 180, 0.08); border: 1px solid var(--border-strong);
+  line-height: 1.6;
+}
 @keyframes tr-pulse {
   0% { box-shadow: 0 0 0 0 rgba(33, 176, 33, 0.5); }
   100% { box-shadow: 0 0 0 9px rgba(33, 176, 33, 0); }

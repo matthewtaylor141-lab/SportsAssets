@@ -155,6 +155,12 @@ function SportBreakdown({ rows }: { rows: TRRow[] }) {
 type Status = 'all' | 'won' | 'lost' | 'open'
 type SortKey = 'time' | 'stake' | 'pnl'
 
+function fmtAge(s: number): string {
+  if (s < 90) return `${Math.round(s)}s`
+  if (s < 5400) return `${Math.round(s / 60)}m`
+  return `${(s / 3600).toFixed(1)}h`
+}
+
 export function TrackRecord() {
   const { data, err } = useTrackRecord()
   const [status, setStatus] = useState<Status>('all')
@@ -204,6 +210,22 @@ export function TrackRecord() {
 
   const early = s.settled < MIN_SETTLED
 
+  // Snapshot freshness drives the badge: green under 2 minutes, amber to
+  // 10, red past that. A page that cannot admit it is stale trains its
+  // owner to distrust every number on it.
+  const age = data.snapshot?.age_s ?? null
+  const refreshErr = data.snapshot?.refresh_error || null
+  const sync: 'ok' | 'lag' | 'stale' =
+    age === null ? 'ok' : age < 120 ? 'ok' : age < 600 ? 'lag' : 'stale'
+  const acct = data.account
+  const exclusions: { label: string; x: { count: number; net_pnl: number } }[] = []
+  if (data.excluded_over_limit && data.excluded_over_limit.count > 0)
+    exclusions.push({ label: 'execution incidents', x: data.excluded_over_limit })
+  if (data.excluded_copy_sleeve && data.excluded_copy_sleeve.count > 0)
+    exclusions.push({ label: 'whale-copy sleeve', x: data.excluded_copy_sleeve })
+  if (data.excluded_unattributed && data.excluded_unattributed.count > 0)
+    exclusions.push({ label: 'other account activity', x: data.excluded_unattributed })
+
   return (
     <div className="page tr-page">
       <div className="tr-hero">
@@ -217,7 +239,16 @@ export function TrackRecord() {
               </div>
             </div>
           </div>
-          <div className="tr-live"><span className="tr-pulse" /> ACCOUNT SYNC</div>
+          <div
+            className={`tr-live${sync !== 'ok' ? ` tr-live-${sync}` : ''}`}
+            title={refreshErr ? `last refresh error: ${refreshErr}` : undefined}>
+            <span className="tr-pulse" />
+            {sync === 'ok'
+              ? <>SYNCED{age !== null && <> · {fmtAge(age)} AGO</>}</>
+              : sync === 'lag'
+                ? <>SYNC LAG · {fmtAge(age!)}</>
+                : <>STALE · {fmtAge(age!)}</>}
+          </div>
         </div>
 
         <div className="tr-hero-grid">
@@ -247,6 +278,32 @@ export function TrackRecord() {
             <div className="tr-stat-foot muted">on {fmtUsd(s.settled_stake, 2)} settled stake</div>
           </div>
         </div>
+
+        {acct && (
+          <div className="tr-account">
+            <span className="muted">WHOLE ACCOUNT since {SINCE} — the number the venue app shows: </span>
+            <b className={`mono ${acct.net_pnl >= 0 ? 'pos' : 'neg'}`}>
+              {fmtSignedUsd(acct.net_pnl)}
+            </b>
+            <span className="muted"> across {acct.trades.toLocaleString()} positions
+              ({acct.open.toLocaleString()} open). AI strategy cohort above: </span>
+            <span className={`mono ${s.net_pnl >= 0 ? 'pos' : 'neg'}`}>{fmtSignedUsd(s.net_pnl)}</span>
+            {exclusions.map(({ label, x }) => (
+              <span key={label} className="muted">
+                {' '}· {label}: <span className={`mono ${x.net_pnl >= 0 ? 'pos' : 'neg'}`}>
+                  {fmtSignedUsd(x.net_pnl)}</span> ({x.count})
+              </span>
+            ))}
+          </div>
+        )}
+
+        {data.snapshot && data.snapshot.positions_complete === false && (
+          <div className="tr-honesty">
+            ⚠️ POSITION LIST TRUNCATED — the venue returned more open positions than
+            one sync fetches ({data.snapshot.positions_pages} pages). Open counts are
+            a floor, not a total.
+          </div>
+        )}
 
         {early && (
           <div className="tr-honesty">

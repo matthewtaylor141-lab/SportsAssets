@@ -29,6 +29,10 @@ from .pmus_account import _act_ts, _amt
 _raw_cache: dict[str, Any] = {"ts": 0.0, "data": None}
 _RAW_TTL = 30.0
 _lock = asyncio.Lock()
+# Refresh health, surfaced in the payload: a snapshot that quietly stopped
+# refreshing must be VISIBLE as stale, not indistinguishable from live.
+_refresh_health: dict[str, Any] = {"error": None, "error_at": 0.0,
+                                   "streak": 0}
 
 DEFAULT_SINCE = "2026-08-01"
 
@@ -286,10 +290,24 @@ def build(positions: dict[str, dict], activities: list[dict],
         d["deployed"] = round(d["deployed"], 2)
         d["pnl"] = round(d["pnl"], 2)
 
+    # Account-wide tie-out: cohort + every disclosed exclusion = what the
+    # owner sees in the venue app. The headline cohort alone read as
+    # "wrong" the day the incident cohort was deeply negative — the page
+    # must reconcile to the account, not ask to be trusted.
+    _buckets = [over_limit, unattributed, copy_sleeve]
+    account = {
+        "trades": len(rows) + sum(b["count"] for b in _buckets),
+        "open": (len(rows) - len(settled_rows))
+                + sum(b["open"] for b in _buckets),
+        "stake": round(deployed + sum(b["stake"] for b in _buckets), 2),
+        "net_pnl": round(net + sum(b["net_pnl"] for b in _buckets), 2),
+    }
+
     return {
         "since": datetime.fromtimestamp(since_ts, timezone.utc)
                  .strftime("%Y-%m-%d"),
         "generated_at": time.time(),
+        "account": account,
         "summary": {
             "trades": len(rows),
             "open": len(rows) - len(settled_rows),
@@ -338,22 +356,56 @@ def build(positions: dict[str, dict], activities: list[dict],
     }
 
 
+def _paged(call, params: dict, max_pages: int,
+           pace: float = 0.15) -> tuple[list[dict], bool]:
+    """Cursor-page a venue endpoint to eof (or the page cap).
+
+    Returns (pages, complete). Each page call retries twice on transient
+    failure — one rate-limited call out of forty must not throw away the
+    whole refresh (that is how the site went stale while looking healthy).
+    Pacing keeps the burst under the venue's rate limit in the first place.
+    """
+    pages: list[dict] = []
+    cursor = ""
+    for _ in range(max_pages):
+        p = dict(params)
+        if cursor:
+            p["cursor"] = cursor
+        resp: dict | None = None
+        for attempt in range(3):
+            try:
+                resp = call(p) or {}
+                break
+            except Exception:  # noqa: BLE001 — retry transient venue errors
+                if attempt == 2:
+                    raise
+                time.sleep(1.0 + 2.0 * attempt)
+        pages.append(resp or {})
+        cursor = (resp or {}).get("nextCursor") or ""
+        if (resp or {}).get("eof") or not cursor:
+            return pages, True
+        if pace:
+            time.sleep(pace)
+    return pages, False
+
+
 def _fetch_raw() -> dict:
     from polymarket_us import PolymarketUS
 
     cfg = settings()
     client = PolymarketUS(key_id=cfg.pmus_key_id, secret_key=cfg.pmus_secret_key)
+    # Positions page to EOF (cap 40 = 4,000). The old cap of 8 pages was
+    # sized for the engine sleeve alone; once the copy sleeve ran hundreds
+    # of clips a day the account blew through 800 rows and every position
+    # past page 8 silently vanished — the owner's "we have more pending
+    # trades than the site shows" (2026-08-04). Completeness is now
+    # measured and travels with the payload instead of being assumed.
+    pos_pages, pos_complete = _paged(
+        client.portfolio.positions, {"limit": 100}, max_pages=40)
     positions: dict[str, dict] = {}
-    cursor = ""
-    for _ in range(8):
-        resp = client.portfolio.positions(
-            {"limit": 100, **({"cursor": cursor} if cursor else {})}) or {}
+    for resp in pos_pages:
         positions.update(resp.get("positions") or {})
-        cursor = resp.get("nextCursor") or ""
-        if resp.get("eof") or not cursor:
-            break
     acts: list[dict] = []
-    cursor = ""
     # First fetch after a deploy digs DEEP (Aug 1's trade activities had
     # scrolled out of the shallow window before the permanent archive
     # existed, which made the record's first day undatable and dropped it
@@ -370,18 +422,18 @@ def _fetch_raw() -> dict:
 
     deep_ok = _os.getenv("DEEP_SWEEP", "0") == "1"
     pages = 80 if (deep_ok and not _deep_swept) else 12
-    for _ in range(pages):
-        resp = client.portfolio.activities(
-            {"limit": 100, "sortOrder": "SORT_ORDER_DESCENDING",
-             "types": ["ACTIVITY_TYPE_TRADE",
-                       "ACTIVITY_TYPE_POSITION_RESOLUTION"],
-             **({"cursor": cursor} if cursor else {})}) or {}
+    act_pages, _ = _paged(
+        client.portfolio.activities,
+        {"limit": 100, "sortOrder": "SORT_ORDER_DESCENDING",
+         "types": ["ACTIVITY_TYPE_TRADE",
+                   "ACTIVITY_TYPE_POSITION_RESOLUTION"]},
+        max_pages=pages)
+    for resp in act_pages:
         acts.extend(resp.get("activities") or [])
-        cursor = resp.get("nextCursor") or ""
-        if resp.get("eof") or not cursor:
-            break
     _deep_swept = True
-    return {"positions": positions, "activities": acts}
+    return {"positions": positions, "activities": acts,
+            "positions_pages": len(pos_pages),
+            "positions_complete": pos_complete}
 
 
 _deep_swept = False
@@ -629,12 +681,21 @@ async def track_record(since: str | None = None,
                 if time.time() - _raw_cache["ts"] <= _RAW_TTL:
                     return          # someone else already refreshed
                 try:
-                    _raw_cache["data"] = await asyncio.to_thread(_fetch_raw)
+                    # Hard ceiling: a hung venue call used to hold this lock
+                    # forever, freezing the snapshot permanently with no
+                    # visible symptom. 150s covers the full 52-page fetch.
+                    _raw_cache["data"] = await asyncio.wait_for(
+                        asyncio.to_thread(_fetch_raw), timeout=150)
                     _raw_cache["ts"] = time.time()
+                    _refresh_health.update(error=None, streak=0)
                     # Archive travels WITH the refresh — once per new
                     # snapshot, never per page request.
                     await _archive_and_union(_raw_cache["data"]["activities"])
-                except Exception:  # noqa: BLE001 — stale beats broken
+                except Exception as exc:  # noqa: BLE001 — stale beats broken
+                    _refresh_health.update(
+                        error=f"{type(exc).__name__}: {str(exc)[:200]}",
+                        error_at=time.time(),
+                        streak=_refresh_health["streak"] + 1)
                     logging.getLogger(__name__).exception(
                         "track-record background refresh failed; serving stale")
 
@@ -684,7 +745,15 @@ async def track_record(since: str | None = None,
         copy_slugs = {r["us_market_slug"] for r in cp}
     except Exception:  # noqa: BLE001 — provenance is an upgrade, not a gate
         attributed = copy_slugs = None
-    return {"configured": True, **source,
+    snapshot = {
+        "raw_ts": _raw_cache["ts"],
+        "age_s": round(time.time() - _raw_cache["ts"], 1),
+        "positions_pages": raw.get("positions_pages"),
+        "positions_complete": bool(raw.get("positions_complete", True)),
+        "refresh_error": _refresh_health["error"],
+        "refresh_error_streak": _refresh_health["streak"],
+    }
+    return {"configured": True, **source, "snapshot": snapshot,
             **build(raw["positions"], acts, since_ts,
                     max_stake=max_stake, attributed=attributed,
                     copy_slugs=copy_slugs)}

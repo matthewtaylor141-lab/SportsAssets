@@ -122,3 +122,43 @@ def test_smoke_order_never_fires_in_paper():
     _kalshi_smoke(ka, led, lambda: False)
     assert not ka.orders
     assert not led.get_state("kalshi_smoke_done")
+
+
+def test_accepted_ioc_with_zero_fill_does_not_burn_the_claim():
+    """V2 can accept an IOC and fill nothing (book moved). The copy's
+    once-ever claim must survive that for a retry at the fresh book."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+
+    class _ZeroFill(_Kalshi):
+        def place_order(self, ticker, price, count, **kw):
+            self.orders.append((ticker, price, count))
+            return {"ok": True, "count": 0, "price": price,
+                    "status": "http_201"}
+
+    ka = _ZeroFill(0.50)
+    st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
+    assert st["copied"] == 0 and st.get("ioc_zero_fill") == 1
+    assert not led.get_state("kcopy:mlb-bal-tex-2026-08-04:Baltimore Orioles")
+    # next sweep retries: no claim recorded
+    st2 = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
+    assert st2.get("skipped_claimed", 0) == 0
+
+
+def test_smoke_zero_fill_is_not_done():
+    from edge.shadow.runner import _kalshi_smoke
+
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+
+    class _ZeroFill(_Kalshi):
+        def place_order(self, ticker, price, count, **kw):
+            self.orders.append((ticker, price, count))
+            return {"ok": True, "count": 0, "price": price,
+                    "status": "http_201"}
+
+    ka = _ZeroFill(0.45)
+    _kalshi_smoke(ka, led, lambda: True)
+    assert not led.get_state("kalshi_smoke_done")
+    last = led.get_state("kalshi_smoke_last")
+    assert last and last["ok"] and last["filled"] == 0
+    _kalshi_smoke(ka, led, lambda: True)     # retries while not done
+    assert len(ka.orders) == 2
