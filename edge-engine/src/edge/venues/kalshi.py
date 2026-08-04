@@ -348,24 +348,44 @@ class KalshiAdapter(VenueAdapter):
 
     def place_order(self, market_ticker: str, price: float, count: int,
                     client_order_id: str, taker: bool) -> dict:
-        """POST a YES buy limit. Resting maker orders expire after 15 min so
-        stale quotes never linger; crossing orders expire almost immediately
-        (IOC semantics via expiration_ts)."""
-        path = "/trade-api/v2/portfolio/orders"
+        """POST a YES buy limit via the V2 events-orders endpoint. The legacy
+        /portfolio/orders path now answers HTTP 410 deprecated_v1_order_endpoint
+        (observed live 2026-08-04); V2 is a single YES-denominated book where a
+        buy is side "bid", and prices/counts travel as fixed-point strings —
+        the same dialect the orderbook_fp payload speaks. Crossing orders are
+        immediate_or_cancel; resting maker orders carry a 15-minute
+        expiration_time so stale quotes never linger."""
+        path = "/trade-api/v2/portfolio/events/orders"
         body = {
             "ticker": market_ticker, "client_order_id": client_order_id,
-            "side": "yes", "action": "buy", "type": "limit",
-            "count": int(count), "yes_price": int(round(price * 100)),
-            "expiration_ts": int(time.time()) + (2 if taker else 900),
+            "side": "bid", "count": f"{int(count)}.00",
+            "price": f"{price:.4f}",
+            "self_trade_prevention_type": "taker_at_cross",
         }
-        resp = self._sess.post(f"{BASE}/portfolio/orders", json=body,
+        if taker:
+            body["time_in_force"] = "immediate_or_cancel"
+        else:
+            body["time_in_force"] = "good_till_canceled"
+            body["expiration_time"] = int(time.time()) + 900
+        resp = self._sess.post(f"{BASE}/portfolio/events/orders", json=body,
                                headers=self._auth_headers("POST", path), timeout=10)
         ok = resp.status_code in (200, 201)
-        data = resp.json() if ok else {}
-        order = data.get("order") or {}
-        return {"ok": ok, "order_id": order.get("order_id"),
+        try:
+            data = resp.json() or {}
+        except ValueError:
+            data = {}
+        order = data.get("order") or data
+        filled = count
+        for key in ("filled_count", "fill_count", "matched_count"):
+            if order.get(key) is not None:
+                try:
+                    filled = int(float(order[key]))
+                except (TypeError, ValueError):
+                    pass
+                break
+        return {"ok": ok, "order_id": order.get("order_id") or order.get("id"),
                 "status": order.get("status", f"http_{resp.status_code}"),
-                "price": price, "count": count, "taker": taker,
+                "price": price, "count": filled if ok else count, "taker": taker,
                 "raw": data if ok else {"error": resp.text[:300]}}
 
     async def subscribe_books(self, market_ids: list[str]):

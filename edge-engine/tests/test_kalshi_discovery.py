@@ -191,3 +191,76 @@ def test_truly_empty_book_counts_quiet_not_error():
     a.get_book("EVT", "TICK")
     assert a.book_quiet.get("empty_no_side") == 1
     assert not a.book_errors, "quiet is never a venue error"
+
+
+# --- V2 order endpoint (legacy /portfolio/orders answers HTTP 410) ---
+
+class _OrderResp:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = str(payload)
+
+    def json(self):
+        return self._payload
+
+
+class _OrderSess:
+    def __init__(self, resp):
+        self.resp = resp
+        self.calls = []
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        self.calls.append({"url": url, "json": json})
+        return self.resp
+
+
+def _order_adapter(resp):
+    a = KalshiAdapter()
+    a._sess = _OrderSess(resp)
+    a._auth_headers = lambda method, path: {}
+    return a
+
+
+def test_v2_taker_order_body_is_the_documented_shape():
+    a = _order_adapter(_OrderResp(201, {"order": {
+        "order_id": "oid-1", "status": "executed",
+        "filled_count": "4.00"}}))
+    r = a.place_order("KXMLBGAME-26AUG04BALTEX-BAL", 0.55, 4,
+                      client_order_id="c-1", taker=True)
+    call = a._sess.calls[0]
+    assert call["url"].endswith("/portfolio/events/orders")
+    body = call["json"]
+    assert body["side"] == "bid"
+    assert body["count"] == "4.00" and body["price"] == "0.5500"
+    assert body["time_in_force"] == "immediate_or_cancel"
+    assert "expiration_time" not in body, \
+        "IOC cannot carry expiration_time per the V2 spec"
+    assert body["self_trade_prevention_type"] == "taker_at_cross"
+    assert r["ok"] and r["order_id"] == "oid-1" and r["count"] == 4
+
+
+def test_v2_maker_order_rests_with_expiration():
+    a = _order_adapter(_OrderResp(201, {"order": {
+        "order_id": "oid-2", "status": "resting"}}))
+    r = a.place_order("TICK", 0.42, 7, client_order_id="c-2", taker=False)
+    body = a._sess.calls[0]["json"]
+    assert body["time_in_force"] == "good_till_canceled"
+    assert isinstance(body["expiration_time"], int)
+    assert r["ok"] and r["status"] == "resting"
+
+
+def test_v2_partial_fill_count_comes_from_the_response():
+    a = _order_adapter(_OrderResp(201, {"order": {
+        "order_id": "oid-3", "status": "canceled",
+        "filled_count": "1.00"}}))
+    r = a.place_order("TICK", 0.30, 6, client_order_id="c-3", taker=True)
+    assert r["ok"] and r["count"] == 1, \
+        "an IOC that filled 1 of 6 must not book 6"
+
+
+def test_v2_rejection_surfaces_raw_error():
+    a = _order_adapter(_OrderResp(400, {"error": {"code": "bad"}}))
+    r = a.place_order("TICK", 0.30, 2, client_order_id="c-4", taker=True)
+    assert not r["ok"] and r["status"] == "http_400"
+    assert "error" in r["raw"]
