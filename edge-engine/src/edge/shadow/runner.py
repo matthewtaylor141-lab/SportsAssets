@@ -332,8 +332,15 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
         claim = f"arb_tried:{market_id}:{family}"
         if ledger.get_state(claim):
             continue                     # one attempt per proposition, ever
+        # REAL fees, not zero (audit 2026-08-04): Kalshi's taker fee is
+        # ~1.75c at 50c — enough to turn every arb in the 1-2c window
+        # into a guaranteed loss. Worst leg's fee, applied to every leg:
+        # conservative by construction.
+        fee_fn = getattr(a, "taker_fee", None)
+        worst_fee = (max(fee_fn(l.price) for l in ls) if fee_fn else 0.0)
         b = find_dutch_book(event=claim, kind=str(family[1]), legs=ls,
-                            expected_outcomes=need, fee_per_contract=0.0)
+                            expected_outcomes=need,
+                            fee_per_contract=worst_fee)
         if b is not None:
             adapter, book = a, b
             break
@@ -381,6 +388,117 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
         if res.ok and res.complete:
             funnel["arb_profit"] = round(
                 funnel.get("arb_profit", 0.0) + res.profit, 4)
+    return True
+
+
+def _xv_feed_team(oc_name: str, ev) -> str | None:
+    """Which of the event's two teams a venue outcome IS — or None.
+
+    Cross-venue pooling joins legs from different venues by FEED team
+    identity, because the venues' own strings never match each other
+    ("LAL" vs "Los Angeles Lakers"). Full-game moneyline only; anything
+    else returns None and stays out of the pool.
+    """
+    from edge.fairvalue.lines import is_draw, parse_outcome_line, split_segment
+    from edge.venues.mapper import team_score
+    from edge.venues.pmus_slug import CODE_PREFIX, resolve_side
+
+    seg, name = split_segment(oc_name)
+    if seg is not None or is_draw(name):
+        return None
+    if name.startswith(CODE_PREFIX):
+        return resolve_side(name[len(CODE_PREFIX):], ev.home, ev.away)
+    if parse_outcome_line(name).kind != "moneyline":
+        return None
+    hit = None
+    for team in (ev.home, ev.away):
+        if team_score(team, name) >= 0.95:
+            if hit is not None:
+                return None          # matches both: refuse, never guess
+            hit = team
+    return hit
+
+
+def _try_cross_venue(*, ledger, ev, pool, min_profit, max_usd, dry_run,
+                     funnel) -> bool:
+    """Team A on one venue + Team B on the other, under $1 after fees.
+
+    The arithmetic is the dutch book's; the extra risk is SETTLEMENT
+    EQUIVALENCE — both venues must pay the same game result. The caller
+    only feeds no-tie two-way leagues, and this function still refuses
+    anything that is not exactly two teams on two different venues.
+    """
+    from edge.execution.arbitrage import (
+        cross_venue_cost,
+        execute_cross_venue,
+    )
+
+    if len(pool) != 2 or set(pool) != {ev.home, ev.away}:
+        return False
+    claim = f"xv_tried:{ev.event_key()}"
+    if ledger.get_state(claim):
+        return False
+    best, best_cost = None, 10.0
+    (t1, sides1), (t2, sides2) = pool.items()
+    for v1, leg1 in sides1.items():
+        for v2, leg2 in sides2.items():
+            if v1 == v2:
+                continue             # same-venue books have their own path
+            cost = cross_venue_cost([leg1, leg2])
+            if cost < best_cost:
+                best, best_cost = [leg1, leg2], cost
+    if best is None:
+        return False
+    profit = round(1.0 - best_cost, 4)
+    funnel["xv_checked"] = funnel.get("xv_checked", 0) + 1
+    # Near-miss telemetry: the evidence for tuning min_profit later.
+    funnel["xv_best_seen"] = max(funnel.get("xv_best_seen", -1.0), profit)
+    if profit < min_profit:
+        return False
+    funnel["xv_found"] = funnel.get("xv_found", 0) + 1
+    funnel.setdefault("xv_books", []).append(
+        {"event": f"{ev.home} v {ev.away}", "cost": best_cost,
+         "profit_per_set": profit,
+         "venues": [getattr(l.adapter, "name", "?") for l in best]})
+    res = execute_cross_venue(
+        event=f"{claim}", legs=best,
+        max_sets=max(1, int(max_usd / best_cost)), dry_run=dry_run)
+    funnel.setdefault("xv_status", {}).setdefault(res.status, 0)
+    funnel["xv_status"][res.status] += 1
+    if res.status == "INCOMPLETE_EXPOSED":
+        funnel.setdefault("xv_exposed", []).append(
+            {"event": f"{ev.home} v {ev.away}", "holding": res.exposed})
+    if dry_run:
+        return True
+    # Claim AFTER the attempt, and only when venue money moved (audit:
+    # claim-before-execution turned every transient no-fill into a
+    # permanent blacklist). A clean miss may retry next sweep.
+    if res.status not in ("no_fills", "nothing_to_do", "not_cross_venue",
+                          "implausible_profit"):
+        ledger.set_state(claim, {"ts": time.time(), "status": res.status})
+    legs_by_token = {l.token: l for l in best}
+    for o in res.orders:
+        if not (o.get("ok") and float(o.get("count") or 0) > 0):
+            continue
+        leg = legs_by_token.get(o.get("token") or "")
+        if leg is None:
+            continue
+        vname = getattr(leg.adapter, "name", "?")
+        ledger.record_fill(
+            fill_uid=f"xv-{claim}-{leg.token}-{int(time.time())}",
+            venue=vname, market_key=f"{vname}:{leg.token}",
+            side="BUY", qty=float(o.get("count") or res.sets),
+            price=float(o.get("price") or leg.price),
+            fee=round(leg.fee() * float(o.get("count") or res.sets), 4),
+            league=ev.league_code, mode="LIVE_BETA", category="arb",
+            decision={"arb": True, "cross_venue": True,
+                      "cost_per_set": best_cost, "profit_per_set": profit,
+                      "status": res.status,
+                      "legs": [f"{getattr(l.adapter, 'name', '?')}:"
+                               f"{l.outcome}" for l in best]})
+    if res.ok and res.complete:
+        funnel["xv_profit"] = round(
+            funnel.get("xv_profit", 0.0) + res.profit, 4)
     return True
 
 def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str],
@@ -517,6 +635,17 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
     arb_sets = int(arb_cfg.get("max_sets", 1))
     arb_budget = int(arb_cfg.get("max_books_per_cycle", 3))
     arb_done = 0
+    # Cross-venue: Team A on one venue + Team B on the other, fee-loaded
+    # asks summing under $1. Only no-tie two-way sports — the "guarantee"
+    # rests entirely on both venues settling the same game result, so the
+    # league allowlist is the safety, not a tuning knob.
+    xv_cfg = arb_cfg.get("cross_venue") or {}
+    xv_on = arb_on and bool(xv_cfg.get("enabled"))
+    xv_min_profit = float(xv_cfg.get("min_profit", 0.02))
+    xv_max_usd = float(xv_cfg.get("max_usd", 10.0))
+    xv_budget = int(xv_cfg.get("max_books_per_cycle", 2))
+    xv_leagues = set(xv_cfg.get("leagues") or ["nba", "wnba", "nhl", "mlb"])
+    xv_done = 0
     rev = ledger.reversion(days=7)
     keep = rev.get("keep")
     if keep is not None:
@@ -729,6 +858,9 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                 "feed_teams": [t[:24] for t in list(fairs)[:4]],
             }
 
+        # Cross-venue legs for THIS event, keyed by FEED team so venues'
+        # different naming can meet: {team: {venue_name: XVLeg}}.
+        xv_pool: dict = {}
         for adapter, candidates in venue_candidates.values():
             # Fuzzy matching is CPU-heavy at 10s cadence; results only change
             # when discovery changes, so memoize per (venue, event) between
@@ -806,6 +938,21 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                          _ArbLeg(
                             outcome=oc_name, token=token, price=ask.price,
                             size=float(ask.size))))
+                    if (xv_on and category == "moneyline"
+                            and len(ev.h2h) == 2
+                            and (ev.league_code or "") in xv_leagues
+                            and ask.size >= 1):
+                        team = _xv_feed_team(oc_name, ev)
+                        if team is not None:
+                            from edge.execution.arbitrage import XVLeg
+                            side = xv_pool.setdefault(team, {})
+                            cur = side.get(adapter.name)
+                            # Keep the venue's CHEAPEST listing per team.
+                            if cur is None or ask.price < cur.price:
+                                side[adapter.name] = XVLeg(
+                                    adapter=adapter, token=token,
+                                    outcome=team, price=ask.price,
+                                    size=float(ask.size))
                     mkey = market_key(adapter.name, token)
                     # Second observation for the adverse-selection detector.
                     # Free: this fair value was computed anyway.
@@ -1148,6 +1295,18 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     # the ordinary pricing pass that already ran.
                     log.warning('arb scan failed for %s: %s', ev.home, exc)
                     funnel['arb_errors'] = funnel.get('arb_errors', 0) + 1
+        # Both venues have now contributed their legs for this event — the
+        # cross-venue check runs where the whole pool is finally visible.
+        if xv_on and xv_done < xv_budget and len(xv_pool) == 2:
+            try:
+                if _try_cross_venue(ledger=ledger, ev=ev, pool=xv_pool,
+                                    min_profit=xv_min_profit,
+                                    max_usd=xv_max_usd,
+                                    dry_run=not risk.is_live, funnel=funnel):
+                    xv_done += 1
+            except Exception as exc:  # noqa: BLE001 — additive, never fatal
+                log.warning('cross-venue scan failed for %s: %s', ev.home, exc)
+                funnel['xv_errors'] = funnel.get('xv_errors', 0) + 1
     mirror = mirror_stats()
     if mirror["sent"] or mirror["queued"] or mirror["dropped"]:
         funnel["mirror"] = mirror

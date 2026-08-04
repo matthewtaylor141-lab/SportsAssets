@@ -190,7 +190,11 @@ profiles:
     daily_loss_halt_sigmas: 4         # governs at low volume (4 sigma of the
                                       # day's own noise; a false halt costs 72h)
     halt_hours: 72                    # then auto-resume; NO manual override
-    venue_bankroll_split: 1.0         # single-venue beta (Kalshi disabled)
+    # Two live venues since 2026-08-04 (owner connected the Kalshi
+    # corporate account). 0.6 each: either venue may use up to 60% of the
+    # day budget, so PMUS (the bigger opportunity set) is not starved by a
+    # hard 50/50 while neither venue can spend the whole day alone.
+    venue_bankroll_split: 0.6
 
   # PAPER sampling profile: paper dollars are free — evidence velocity is
   # the point. Wide day budget so every qualifying opportunity is graded;
@@ -289,6 +293,21 @@ arbitrage:
   enabled: true
   max_sets: 1                 # contracts per leg, per opportunity
   max_books_per_cycle: 3
+  # Cross-venue (owner instruction 2026-08-04: "exploit any guaranteed
+  # profitable arbitrage between the venues"). Team A on one venue, Team B
+  # on the other, fee-loaded asks under $1. The arithmetic guarantee rests
+  # on both venues settling the SAME game result, so only no-tie two-way
+  # leagues are eligible — the allowlist IS the safety. NFL is excluded
+  # (ties exist), soccer is excluded structurally (three-way). Kalshi's
+  # taker fee is charged inside the cost, so a "profit" here is net.
+  # min_profit is 2c (vs 1c same-venue): the extra cent pays for the
+  # cross-venue execution gap risk.
+  cross_venue:
+    enabled: true
+    min_profit: 0.02
+    max_usd: 10.0             # dollar cap per opportunity, both legs
+    max_books_per_cycle: 2
+    leagues: [nba, wnba, nhl, mlb]
 
 # Watchdog: any breach halts live trading until inputs are healthy again.
 watchdog:

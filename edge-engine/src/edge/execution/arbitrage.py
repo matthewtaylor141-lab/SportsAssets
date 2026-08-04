@@ -77,6 +77,24 @@ def _ordered_legs(legs):
     return sorted(legs, key=lambda l: l.size)
 
 
+def _safe_place(place_fn, *args, **kwargs) -> dict:
+    """An exception is a failed leg, never an aborted sequence.
+
+    Audit 2026-08-04: place_order was unguarded, so a network timeout
+    after leg 1 filled raised straight past the completion path — legs
+    owned at the venue, no completion attempt, no ledger record, no
+    alarm. Exactly the unrecorded-naked-position class this module
+    exists to prevent. A thrown order becomes {"ok": False} so the
+    abort/complete/record logic downstream always runs.
+    """
+    try:
+        return place_fn(*args, **kwargs) or {}
+    except Exception as exc:  # noqa: BLE001 — the sequence must decide, not die
+        log.error("order exception treated as failed leg: %s: %s",
+                  type(exc).__name__, exc)
+        return {"ok": False, "status": f"exception_{type(exc).__name__}"}
+
+
 def execute_dutch_book(*, adapter, book, sets: int, dry_run: bool = True,
                        max_completion_slip: float = MAX_COMPLETION_SLIP,
                        now: float | None = None) -> ArbResult:
@@ -107,8 +125,8 @@ def execute_dutch_book(*, adapter, book, sets: int, dry_run: bool = True,
     filled: list = []
     missing: list = []
     for i, leg in enumerate(legs):
-        r = adapter.place_order(leg.token, leg.price, sets, preview=False,
-                                tif="TIME_IN_FORCE_FILL_OR_KILL")
+        r = _safe_place(adapter.place_order, leg.token, leg.price, sets,
+                        preview=False, tif="TIME_IN_FORCE_FILL_OR_KILL")
         # Tag the result with its leg so the caller can ledger-record every
         # fill — including the ones from books that never completed.
         r = {**(r or {}), "token": leg.token}
@@ -146,9 +164,9 @@ def execute_dutch_book(*, adapter, book, sets: int, dry_run: bool = True,
                 book.event, len(filled), len(legs))
     for leg in list(missing):
         ceiling = round(leg.price + max_completion_slip, 4)
-        r = adapter.place_order(leg.token, min(ceiling, 0.99), sets,
-                                preview=False,
-                                tif="TIME_IN_FORCE_FILL_OR_KILL")
+        r = _safe_place(adapter.place_order, leg.token, min(ceiling, 0.99),
+                        sets, preview=False,
+                        tif="TIME_IN_FORCE_FILL_OR_KILL")
         r = {**(r or {}), "token": leg.token}
         res.orders.append(r)
         if r.get("ok") and float(r.get("count") or 0) >= sets:
@@ -176,4 +194,136 @@ def execute_dutch_book(*, adapter, book, sets: int, dry_run: bool = True,
     log.error("%s: EXPOSED — hold %s without %s. Not an arbitrage; a "
               "directional position that needs a human decision.",
               book.event, res.exposed, [l.outcome for l in missing])
+    return res
+
+
+# ── cross-venue: the same partition, one leg per venue ──────────────────
+#
+# Buy Team A on one venue and Team B on the other when the fee-loaded asks
+# sum under $1. The arithmetic is the dutch book's; the engineering is NOT,
+# because the two venues' order semantics differ:
+#
+#   Polymarket US : FOK limit — atomic. Fills completely or not at all.
+#   Kalshi        : short-expiry limit — NOT atomic. May partially fill.
+#
+# So ordering is by ATOMICITY, not by depth: the non-atomic venue goes
+# FIRST. Whatever count it actually fills (0..N) becomes the set size, and
+# the atomic FOK venue closes exactly that count. A partial first leg
+# shrinks the arbitrage instead of breaking it; a failed first leg costs
+# nothing. The FOK closer is the only step that can strand us, and it gets
+# one full-price attempt plus one capped completion attempt before the
+# position is named EXPOSED.
+
+@dataclass
+class XVLeg:
+    adapter: object
+    token: str
+    outcome: str      # feed team name — for the ledger and the alarm
+    price: float
+    size: float       # displayed depth, contracts
+
+    def fee(self, price: float | None = None) -> float:
+        fn = getattr(self.adapter, "taker_fee", None)
+        return float(fn(price if price is not None else self.price)) if fn else 0.0
+
+
+def _xv_place(leg: XVLeg, price: float, count: int) -> dict:
+    """Venue-shaped taker buy. Adapters do not share an order signature."""
+    import uuid
+
+    name = getattr(leg.adapter, "name", "")
+    if name == "kalshi":
+        return _safe_place(leg.adapter.place_order, leg.token, price, count,
+                           client_order_id=str(uuid.uuid4()), taker=True)
+    return _safe_place(leg.adapter.place_order, leg.token, price, count,
+                       preview=False, tif="TIME_IN_FORCE_FILL_OR_KILL")
+
+
+def cross_venue_cost(legs: list[XVLeg]) -> float:
+    """Fee-loaded cost of one set. Kalshi's taker fee is real money
+    (~1.75c at 50c) and omitting it is how a guaranteed profit becomes a
+    guaranteed loss."""
+    return round(sum(l.price + l.fee() for l in legs), 4)
+
+
+def execute_cross_venue(*, event: str, legs: list[XVLeg], max_sets: int,
+                        dry_run: bool = True,
+                        max_completion_slip: float = MAX_COMPLETION_SLIP,
+                        ) -> ArbResult:
+    """Buy one contract-set across venues, or end owning nothing.
+
+    Caller guarantees: exactly one leg per outcome of a TWO-way partition,
+    legs on DIFFERENT venues, both venues settling on the same game result
+    (no-tie sports only — the allowlist lives with the caller).
+    """
+    cost = cross_venue_cost(legs)
+    profit_per_set = round(1.0 - cost, 4)
+    res = ArbResult(ok=False, status="", event=event, legs_filled=0,
+                    legs_total=len(legs), sets=0)
+    if len(legs) != 2 or len({id(l.adapter) for l in legs}) != 2:
+        res.status = "not_cross_venue"
+        return res
+    if profit_per_set > MAX_BELIEVABLE_PROFIT:
+        res.status = "implausible_profit"
+        log.warning("refusing %s: claims %.3f/set across venues — resolution "
+                    "mismatch or stale quote, not free money",
+                    event, profit_per_set)
+        return res
+    sets = min(max_sets, *(int(l.size) for l in legs))
+    if sets < 1:
+        res.status = "nothing_to_do"
+        return res
+    res.sets = sets
+    if dry_run:
+        res.ok, res.status = True, "dry_run"
+        res.paid, res.profit = cost, round(sets * profit_per_set, 4)
+        return res
+
+    # Non-atomic venue first (anything that isn't the FOK closer).
+    ordered = sorted(legs, key=lambda l: getattr(l.adapter, "name", "")
+                     == "polymarket-us")
+    first, closer = ordered[0], ordered[1]
+
+    r1 = {**_xv_place(first, first.price, sets), "token": first.token}
+    res.orders.append(r1)
+    got = int(float(r1.get("count") or 0)) if r1.get("ok") else 0
+    if got < 1:
+        res.status = "no_fills"   # flat: the only cost was the opportunity
+        return res
+    res.legs_filled = 1
+    res.paid += first.price + first.fee()
+    if got < sets:
+        log.warning("%s: first leg partial %d/%d — closing the smaller set",
+                    event, got, sets)
+        res.sets = sets = got
+
+    r2 = {**_xv_place(closer, closer.price, sets), "token": closer.token}
+    res.orders.append(r2)
+    if r2.get("ok") and float(r2.get("count") or 0) >= sets:
+        res.legs_filled = 2
+        res.paid = round(res.paid + closer.price + closer.fee(), 4)
+        res.ok, res.status = True, "complete"
+        res.profit = round(sets * (1.0 - res.paid), 4)
+        return res
+
+    # Completion: one capped retry. Holding first-leg contracts without the
+    # closer is a directional bet nobody chose.
+    ceiling = min(round(closer.price + max_completion_slip, 2), 0.99)
+    r3 = {**_xv_place(closer, ceiling, sets), "token": closer.token}
+    res.orders.append(r3)
+    if r3.get("ok") and float(r3.get("count") or 0) >= sets:
+        res.legs_filled = 2
+        res.paid = round(res.paid + ceiling + closer.fee(ceiling), 4)
+        res.ok, res.status = True, "completed_with_slip"
+        res.profit = round(sets * (1.0 - res.paid), 4)
+        if res.profit < 0:
+            log.warning("%s: cross-venue completed at %.4f/set loss — bounded "
+                        "and deliberate", event, -res.profit)
+        return res
+
+    res.status = "INCOMPLETE_EXPOSED"
+    res.exposed = [f"{getattr(first.adapter, 'name', '?')}:{first.outcome}"
+                   f" x{sets}"]
+    log.error("%s: EXPOSED — hold %s without its %s complement. A human "
+              "decision is required.", event, res.exposed, closer.outcome)
     return res
