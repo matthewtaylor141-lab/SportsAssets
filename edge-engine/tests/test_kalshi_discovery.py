@@ -121,3 +121,73 @@ def test_pem_loads_in_every_paste_format(monkeypatch):
     ):
         monkeypatch.setenv("EDGE_KALSHI_PRIVATE_KEY", variant)
         assert adapter._private_key() is not None
+
+
+# ── orderbook_fp: the format the venue ACTUALLY serves (probe 18:44Z) ────
+
+def test_fp_orderbook_parses_to_executable_asks():
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"orderbook_fp": {
+                "no_dollars": [["0.0100", "28945.00"], ["0.3800", "450.50"],
+                               ["0.4200", "120.00"]],
+                "yes_dollars": [["0.0100", "99999.00"], ["0.5500", "310.00"]],
+            }}
+
+    class _Sess:
+        @staticmethod
+        def get(url, timeout=None):
+            return _Resp()
+
+    a = KalshiAdapter()
+    a._sess = _Sess()
+    book = a.get_book("EVT", "TICK")
+    # Best YES ask = 1 - best (highest) NO bid: 1 - 0.42 = 0.58.
+    assert book.asks[0].price == 0.58
+    assert book.asks[0].size == 120.00
+    # Best YES bid is the highest yes level.
+    assert book.bids[0].price == 0.55
+    assert not a.book_quiet, "a deep book must not count as quiet"
+
+
+def test_legacy_cents_orderbook_still_parses():
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"orderbook": {"no": [[40, 100]], "yes": [[55, 50]]}}
+
+    class _Sess:
+        @staticmethod
+        def get(url, timeout=None):
+            return _Resp()
+
+    a = KalshiAdapter()
+    a._sess = _Sess()
+    book = a.get_book("EVT", "TICK")
+    assert book.asks[0].price == 0.6
+    assert book.bids[0].price == 0.55
+
+
+def test_truly_empty_book_counts_quiet_not_error():
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"orderbook_fp": {"no_dollars": [], "yes_dollars": []}}
+
+    class _Sess:
+        @staticmethod
+        def get(url, timeout=None):
+            return _Resp()
+
+    a = KalshiAdapter()
+    a._sess = _Sess()
+    a.get_book("EVT", "TICK")
+    assert a.book_quiet.get("empty_no_side") == 1
+    assert not a.book_errors, "quiet is never a venue error"

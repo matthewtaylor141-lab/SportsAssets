@@ -197,23 +197,49 @@ class KalshiAdapter(VenueAdapter):
                      resp.text[:120])
             return None
         try:
-            ob = (resp.json() or {}).get("orderbook") or {}
+            data = resp.json() or {}
         except ValueError:
             self._book_err("bad_json")
             return None
-        if not ob.get("no"):
-            # Same reasoning: an empty NO side is a thin market, not a
-            # broken venue. The runner already rejects bookless outcomes
-            # by name (no_book); the watchdog must not starve on it.
+        # Kalshi migrated the orderbook payload to "orderbook_fp":
+        # dollar-string prices and decimal contract quantities
+        # ({"no_dollars": [["0.0100","28945.00"], ...]}). Our parser read
+        # the legacy "orderbook" key, found nothing, and reported EVERY
+        # book empty — 448 "empty" reads during live WTA sessions while
+        # the raw payloads showed five-figure walls (probe ground truth
+        # 2026-08-04 18:44Z). Both formats are accepted; legacy stays for
+        # compatibility if the venue serves it anywhere.
+        fp = data.get("orderbook_fp") or {}
+        ob = data.get("orderbook") or {}
+
+        def _fp_levels(key: str) -> list[tuple[float, float]]:
+            out = []
+            for pq in fp.get(key) or []:
+                try:
+                    out.append((float(pq[0]), float(pq[1])))
+                except (TypeError, ValueError, IndexError):
+                    continue
+            return out
+
+        if fp:
+            no_lv = _fp_levels("no_dollars")
+            yes_lv = _fp_levels("yes_dollars")
+        else:
+            no_lv = [(p / 100.0, float(q)) for p, q in (ob.get("no") or [])]
+            yes_lv = [(p / 100.0, float(q)) for p, q in (ob.get("yes") or [])]
+        if not no_lv:
+            # An empty NO side is a thin market, not a broken venue. The
+            # runner already rejects bookless outcomes by name (no_book);
+            # the watchdog must not starve on it.
             self.book_quiet["empty_no_side"] = \
                 self.book_quiet.get("empty_no_side", 0) + 1
         yes_bids = sorted(
-            (BookLevel(p / 100.0, float(q)) for p, q in (ob.get("yes") or [])),
+            (BookLevel(p, q) for p, q in yes_lv),
             key=lambda level: -level.price,
         )
-        # Executable YES asks come from resting NO bids at (100 - price).
+        # Executable YES asks come from resting NO bids at (1 - price).
         yes_asks = sorted(
-            (BookLevel((100 - p) / 100.0, float(q)) for p, q in (ob.get("no") or [])),
+            (BookLevel(round(1.0 - p, 4), q) for p, q in no_lv),
             key=lambda level: level.price,
         )
         return MarketBook(venue=self.name, market_id=market_id, outcome_id=market_ticker,
