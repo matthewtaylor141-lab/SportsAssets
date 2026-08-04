@@ -1526,6 +1526,11 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             marked_delta += (bid - pos["avg_cost"]) * pos["shares"]
     halted = risk.check_circuit_breaker(marked_delta_usd=marked_delta, now=time.time())
 
+    quiet = {a.name: dict(getattr(a, "book_quiet", {}) or {})
+             for a, _ in venue_candidates.values()
+             if getattr(a, "book_quiet", None)}
+    if quiet:
+        funnel["books_quiet"] = quiet
     venue_errors = sum(sum((getattr(a, "book_errors", {}) or {}).values())
                        for a, _ in venue_candidates.values())
     feed_age = time.time() - max((ev.fetched_at for ev in events), default=0)

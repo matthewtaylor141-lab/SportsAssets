@@ -68,6 +68,9 @@ class KalshiAdapter(VenueAdapter):
     def __init__(self) -> None:
         self._sess = requests.Session()
         self.book_errors: dict[str, int] = {}
+        # Quiet books (404 / empty side): market states, never watchdog
+        # inputs. Surfaced in telemetry so thinness stays measurable.
+        self.book_quiet: dict[str, int] = {}
         self.last_census: dict = {}
 
     def _book_err(self, cause: str) -> None:
@@ -180,6 +183,14 @@ class KalshiAdapter(VenueAdapter):
         except requests.RequestException as exc:
             self._book_err(f"exc_{type(exc).__name__}")
             return None
+        if resp.status_code == 404:
+            # A market with no orderbook yet is a MARKET STATE, not an
+            # input-health failure. Counting these as venue errors tripped
+            # the watchdog the moment coverage widened (2026-08-04: 63
+            # "errors"/cycle of quiet tennis/MLB books froze ALL orders,
+            # both venues). Quiet books are tallied separately.
+            self.book_quiet["http_404"] = self.book_quiet.get("http_404", 0) + 1
+            return None
         if resp.status_code != 200:
             self._book_err(f"http_{resp.status_code}")
             log.info("kalshi book %s for %s: %s", resp.status_code, market_ticker,
@@ -191,8 +202,11 @@ class KalshiAdapter(VenueAdapter):
             self._book_err("bad_json")
             return None
         if not ob.get("no"):
-            self._book_err("empty_no_side")
-            log.info("kalshi empty book for %s: %s", market_ticker, str(ob)[:160])
+            # Same reasoning: an empty NO side is a thin market, not a
+            # broken venue. The runner already rejects bookless outcomes
+            # by name (no_book); the watchdog must not starve on it.
+            self.book_quiet["empty_no_side"] = \
+                self.book_quiet.get("empty_no_side", 0) + 1
         yes_bids = sorted(
             (BookLevel(p / 100.0, float(q)) for p, q in (ob.get("yes") or [])),
             key=lambda level: -level.price,
