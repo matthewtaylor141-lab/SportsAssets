@@ -299,18 +299,17 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
         # Keys first (names the schema), then identity values. Kept ahead
         # of nothing — the audit column truncates at 300 chars and the
         # sample is the payload that matters most on a zero score.
-        ident = {k: c0.get(k) for k in
-                 ("title", "outcome", "team", "name", "shortTitle",
-                  "question", "groupItemTitle") if c0.get(k) is not None}
-        # marketSides is the suspected side-carrier on two-sided
-        # ("Who will win") markets — surface its raw shape so side-aware
-        # ordering can be built on evidence, not guessed. Only BUY_LONG is
-        # documented; ordering the wrong side of a two-sided market is the
-        # one mistake the match floor exists to prevent.
+        # marketSides is the side-carrier on two-sided markets and the
+        # last unknown in the tennis mapping — when present it gets the
+        # whole diagnostic budget (the keys list already did its job).
         if c0.get("marketSides") is not None:
-            ident["marketSides"] = c0["marketSides"]
-        diag.insert(0, "keys:" + ",".join(sorted(c0.keys()))[:200])
-        diag.insert(1, "ident:" + str(ident)[:110])
+            diag.insert(0, "sides:" + str(c0["marketSides"])[:240])
+        else:
+            ident = {k: c0.get(k) for k in
+                     ("title", "outcome", "team", "name", "question")
+                     if c0.get(k) is not None}
+            diag.insert(0, "keys:" + ",".join(sorted(c0.keys()))[:120])
+            diag.insert(1, "ident:" + str(ident)[:110])
     # The trail rides the exception-free path out via last_resolve_diag so
     # the caller can store WHY in the audit row without a signature break.
     resolve_market.last_diag = "; ".join(diag)[:280]
