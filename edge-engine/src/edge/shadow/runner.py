@@ -253,6 +253,35 @@ _ACCOUNT_LINK: dict = {}
 # Max age for the per-event payload (segments + props) behind a live order.
 _PROP_MAX_AGE_S = float(os.environ.get("EDGE_PROP_MAX_AGE_S", "600"))
 
+# Boot beacon: where the process is and how big it is, posted every ~45s
+# until the FIRST full cycle completes. Exists because of 2026-08-04: the
+# service restart-looped with nothing but clean "startup" posts to show for
+# it — no error status (the main loop catches Exceptions), so the death was
+# uncatchable (OOM-kill class) and the only way to see WHERE it dies and
+# at WHAT memory is to phone home continuously until proven healthy.
+_BEACON = {"phase": "boot", "stop": False}
+
+
+def _rss_mb() -> float | None:
+    try:
+        for line in open("/proc/self/status"):
+            if line.startswith("VmRSS"):
+                return round(int(line.split()[1]) / 1024, 1)
+    except Exception:  # noqa: BLE001 — telemetry never raises
+        pass
+    return None
+
+
+def _boot_beacon() -> None:
+    t0 = time.time()
+    while not _BEACON["stop"]:
+        time.sleep(45)
+        if _BEACON["stop"]:
+            break
+        _post_status("beacon", {"up_s": int(time.time() - t0),
+                                "rss_mb": _rss_mb(),
+                                "phase": _BEACON["phase"]})
+
 # Position reconciliation runs once per process: a restart is exactly when
 # the ledger may have been wiped, and exactly when the caps need rebuilding.
 _RECONCILED: dict = {}
@@ -668,6 +697,9 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
 
     refreshed_sports: set[str] = set()
     for seen_events, ev in enumerate(events):
+        # Where-am-I marker for the boot beacon: if the process dies
+        # mid-sweep, the last beacon names the sport and position.
+        _BEACON["phase"] = f"{ev.sport_key}:{seen_events}/{len(events)}"
         if budget_s and time.time() - cycle_started > budget_s:
             funnel["truncated"] = {"reached": seen_events, "of": len(events)}
             log.warning("cycle budget %.0fs exhausted after %s/%s events — "
@@ -1544,6 +1576,26 @@ def settle_cycle(adapters, ledger) -> int:
 
 
 def main() -> None:
+    # Crash-visible wrapper. The 2026-08-04 restart loop taught us that a
+    # death outside the cycle try/except (boot code, MemoryError, any
+    # BaseException) restarts the service with no trace anywhere a probe
+    # can read. Whatever escapes _main_impl gets posted before the process
+    # dies; a kernel SIGKILL still can't be caught, but then the boot
+    # beacon's last phase+rss IS the diagnosis.
+    try:
+        _main_impl()
+    except BaseException as exc:  # noqa: BLE001 — post, then die loudly
+        import traceback
+
+        _post_status("crash", {
+            "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+            "phase": _BEACON.get("phase"),
+            "rss_mb": _rss_mb(),
+            "trace": traceback.format_exc()[-1200:]})
+        raise
+
+
+def _main_impl() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     from datetime import datetime, timezone
 
@@ -1663,7 +1715,9 @@ def main() -> None:
     _ACCOUNT_LINK.update(account_link)
     _post_status("startup", {"mode": risk.mode, "account_link": account_link,
                              "venues": [a.name for a in adapters],
-                             "sports": len(sport_keys)})
+                             "sports": len(sport_keys),
+                             "rss_mb": _rss_mb()})
+    threading.Thread(target=_boot_beacon, daemon=True, name="beacon").start()
 
     # One-shot venue census (EDGE_CENSUS_DAYS=0 disables): how many sports
     # markets the venue actually listed per day over the trailing window —
@@ -1788,6 +1842,7 @@ def main() -> None:
             # discovery clock — neither changes fast enough to be worth a
             # round-trip every 10s.
             if not candidates or time.time() - last_discovery > discovery_s:
+                _BEACON["phase"] = "discovery"
                 for a in adapters:
                     bp = getattr(a, "buying_power", lambda: None)()
                     if bp is not None and a.name in live_venue_names:
@@ -1884,6 +1939,7 @@ def main() -> None:
                         funnel["makers"] = reap_pmus_makers(a, ledger, maker_ttl_s)
             log.info("cycle complete: %s", funnel)
             _post_status("ok", funnel)
+            _BEACON["stop"] = True   # first full cycle proves the boot
 
             # Nightly report on day rollover (build step 7).
             today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
