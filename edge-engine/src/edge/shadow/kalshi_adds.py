@@ -110,6 +110,22 @@ def sweep(*, pmus, kalshi, ledger, live: bool,
             if target:
                 break
         if target is None:
+            # Name the near-miss: the exact strings that failed to join,
+            # so the matcher gets fixed against reality.
+            ex = stats.setdefault("unmatched_examples", [])
+            if len(ex) < 4:
+                near = None
+                for vm in discovered[league]:
+                    if date_tok in (vm.market_id or ""):
+                        names = list(vm.outcome_tokens)
+                        scores = sorted(
+                            ((round(team_score(n, outcome), 2), n[:30])
+                             for n in names), reverse=True)
+                        near = {"event": vm.market_id[-24:],
+                                "top": scores[:2]}
+                        break
+                ex.append({"slug": slug[-40:], "outcome": outcome[:30],
+                           "near": near})
             continue
         stats["matched"] += 1
         book = kalshi.get_book(target.market_id, ticker)

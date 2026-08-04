@@ -141,6 +141,16 @@ class KalshiAdapter(VenueAdapter):
                         key = tag_segment(key, title_segment(title)
                                           or title_segment(ev.get("title") or ""))
                         outcomes[key] = m["ticker"]
+                # Census samples: the ACTUAL outcome-name strings this
+                # series produces, so a mapper mismatch is fixed against
+                # real forms instead of guesses (2026-08-04: 41 MLB events
+                # discovered, ~3/35 matched — the strings are the suspect).
+                if outcomes and len(self.last_census.get(
+                        f"{series}_samples", [])) < 3:
+                    self.last_census.setdefault(f"{series}_samples", [])
+                    self.last_census[f"{series}_samples"].append(
+                        {"title": (ev.get("title") or "")[:48],
+                         "outcomes": [k[:36] for k in list(outcomes)[:2]]})
                 if len(outcomes) >= 2:
                     out.append(VenueMarket(
                         market_id=ev.get("event_ticker", ""),
