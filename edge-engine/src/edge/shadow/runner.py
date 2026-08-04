@@ -257,6 +257,7 @@ _PROP_MAX_AGE_S = float(os.environ.get("EDGE_PROP_MAX_AGE_S", "600"))
 # main() when armed; run_cycle publishes proven identity pairs into it.
 _XV_WATCH = None
 _KADD_STATS: dict = {}
+_KCOPY_STATS: dict = {}
 # {game_key: [whale outcome names]} — refreshed on the discovery clock.
 _WHALE_MAP: dict = {}
 
@@ -1852,6 +1853,38 @@ def _main_impl() -> None:
                              name="kalshi-adds").start()
             log.warning("kalshi better-price adds armed (2h sweep)")
 
+            # Kalshi COPY leg (owner directive 2026-08-04): the source
+            # whales' open positions, expressed on Kalshi wherever it
+            # lists the same proposition, at his price +2%. 10-minute
+            # cadence: whale positions persist, so freshness is about
+            # book prices, not detection speed.
+            if os.environ.get("EDGE_KCOPY", "1") != "0":
+                def _kcopy_loop() -> None:
+                    from edge.shadow.kalshi_copies import sweep as kcopy
+                    from edge.shadow.whale_align import fetch as widents
+
+                    time.sleep(300)
+                    every = float(os.environ.get("EDGE_KCOPY_EVERY_S", "600"))
+                    while True:
+                        try:
+                            rows = widents(
+                                os.environ.get("EDGE_PLATFORM_API", ""),
+                                os.environ.get("EDGE_INGEST_TOKEN", ""))
+                            st = kcopy(kalshi=kalshi_a, ledger=ledger,
+                                       identities=rows, live=risk.is_live,
+                                       day_usd=float(os.environ.get(
+                                           "EDGE_KCOPY_DAY_USD", "200")))
+                            _KCOPY_STATS.clear()
+                            _KCOPY_STATS.update(st, at=time.time())
+                            log.info("kalshi copy sweep: %s", st)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("kalshi copy sweep failed: %s", exc)
+                        time.sleep(every)
+
+                threading.Thread(target=_kcopy_loop, daemon=True,
+                                 name="kalshi-copies").start()
+                log.warning("kalshi copy leg armed (10min sweep)")
+
     # One-shot venue census (EDGE_CENSUS_DAYS=0 disables): how many sports
     # markets the venue actually listed per day over the trailing window —
     # the opportunity universe behind any volume estimate. Runs in a thread
@@ -2043,6 +2076,8 @@ def _main_impl() -> None:
                                       "registered": _XV_WATCH.registered()}
             if _KADD_STATS:
                 funnel["kalshi_adds"] = dict(_KADD_STATS)
+            if _KCOPY_STATS:
+                funnel["kalshi_copies"] = dict(_KCOPY_STATS)
             # Account maintenance runs in EVERY mode, not just live ones.
             # It was gated on risk.is_live, which meant the PAPER halt left
             # resting GTC orders alive at the venue with nothing cancelling

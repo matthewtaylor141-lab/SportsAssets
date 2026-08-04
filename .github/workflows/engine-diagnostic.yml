@@ -398,3 +398,34 @@ jobs:
           jq -r '.system_daily // [] | if length == 0 then "   (no settlements in window)"
                  else .[] | "   \(.day)  \(.settled) settled  W\(.wins)/L\(.losses)  staked $\(.staked)  realized $\(.realized)  ROI \(.roi // "n/a")" end' \
              /tmp/acct.json 2>/dev/null || true
+
+      - name: Kalshi series census (runner has open internet; the container does not)
+        if: always()
+        run: |
+          B="https://api.elections.kalshi.com/trade-api/v2"
+          echo "###########################################################"
+          echo "#   KALSHI SERIES CENSUS (find the real sports tickers)    #"
+          echo "###########################################################"
+          # Sports series list — the authoritative answer to "what does
+          # Kalshi actually call tennis/MLB/WNBA series".
+          curl -sS --max-time 20 "$B/series?category=Sports&limit=200" \
+            | jq -r '.series[]? | "\(.ticker)  \(.title)"' 2>/dev/null \
+            | sort | head -80 || echo "(series list unavailable)"
+          echo ""
+          echo "-- tennis-ish series, with one sample event each --"
+          for S in $(curl -sS --max-time 20 "$B/series?category=Sports&limit=200" \
+                       | jq -r '.series[]?.ticker' 2>/dev/null \
+                       | grep -iE "tennis|atp|wta" | head -6); do
+            echo "== $S =="
+            curl -sS --max-time 15 "$B/events?series_ticker=$S&status=open&with_nested_markets=true&limit=1" \
+              | jq -r '.events[]? | {title, event_ticker, outcomes: [.markets[]? | {t: .ticker, name: (.yes_sub_title // .subtitle)}]}' \
+              2>/dev/null | head -30 || true
+          done
+          echo ""
+          echo "-- MLB + WNBA sample outcome names (mapper dialect check) --"
+          for S in KXMLBGAME KXWNBAGAME; do
+            echo "== $S =="
+            curl -sS --max-time 15 "$B/events?series_ticker=$S&status=open&with_nested_markets=true&limit=2" \
+              | jq -r '.events[]? | {title, event_ticker, outcomes: [.markets[]? | (.yes_sub_title // .subtitle)]}' \
+              2>/dev/null | head -20 || true
+          done

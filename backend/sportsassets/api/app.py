@@ -264,7 +264,8 @@ async def api_whale_open_identities() -> dict:
         """
         SELECT DISTINCT ON (t.asset)
                COALESCE(t.market_slug, t.event_slug, '') AS slug,
-               t.outcome
+               t.outcome, t.price::float8 AS price,
+               w.username AS whale
         FROM trades t
         JOIN whales w ON w.id = t.whale_id
         LEFT JOIN markets m ON m.condition_id = t.condition_id
@@ -276,7 +277,8 @@ async def api_whale_open_identities() -> dict:
         """,
         sorted(_settings().source_whales()),
     )
-    return {"identities": [{"slug": r["slug"], "outcome": r["outcome"]}
+    return {"identities": [{"slug": r["slug"], "outcome": r["outcome"],
+                            "price": r["price"], "whale": r["whale"]}
                            for r in rows if r["slug"] and r["outcome"]]}
 
 

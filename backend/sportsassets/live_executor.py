@@ -181,11 +181,12 @@ async def _market_context(pool, payload: dict) -> dict:
 #   "full"        — ratio sizing per config; requires the trial cohort
 #                   to have cleared the promotion gate first
 COPY_MODE = "penny_trial"
-# $400/day (owner directive 2026-08-04 "make all these upgrades"). The
-# evidence bar set for this raise — settled copies >= +5% on the day —
-# was already cleared intraday: +$29.27 realized on 76 settled against
-# ~$99 deployed. History: $50 -> $100 (08-03) -> $200 -> $400 (08-04).
-PENNY_TRIAL_DAILY_USD = 400.0
+# Owner directive 2026-08-04 (evening): "lift the maximum on copy
+# trades." At $2-3 clips the sleeve's natural spend is bounded by whale
+# activity itself (~$300-600/day), so $1000 is effectively unbinding —
+# it survives only as a runaway-bug breaker, which no live spend path
+# should ever be without. History: $50 -> $100 -> $200 -> $400 -> $1000.
+PENNY_TRIAL_DAILY_USD = 1000.0
 # Owner directive 2026-08-04 (revised minutes after the $3 call): $2
 # target per copy — as many whole contracts as $2 buys at the limit
 # (20c -> 10 contracts, 50c -> 4, 97c -> 2), rounded DOWN so a copy
