@@ -70,3 +70,17 @@ def test_fok_limit_is_the_worst_price_that_still_clears_the_bar():
     assert a.orders[0]["price"] == pytest.approx(0.53)
     # A book uptick to 0.52 now fills (venue matches at the real ask); a
     # move past 0.53 kills. Either way we never pay above the bar.
+
+
+def test_consensus_depth_is_per_outcome_not_per_event():
+    """A deep alt rung quoted by one soft book must not inherit the
+    moneyline's Pinnacle anchor (the winner's-curse hole)."""
+    from edge.fairvalue.feed import _sample_depth
+
+    ml_sample = [(1.95, 3.0, "pinnacle"), (1.96, 3.0, "betfair_ex_eu"),
+                 (1.94, 1.0, "lowvig")]
+    thin_rung = [(4.10, 1.0, "lowvig")]
+    assert _sample_depth(ml_sample) == (3, 2)
+    assert _sample_depth(thin_rung) == (1, 0)
+    # Legacy two-element samples (no book tag) count zero rather than lie.
+    assert _sample_depth([(1.95, 3.0)]) == (0, 0)

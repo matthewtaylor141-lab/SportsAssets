@@ -30,6 +30,13 @@ BASE = os.environ.get("EDGE_KALSHI_BASE", "https://api.elections.kalshi.com/trad
 _DEFAULT_SERIES = {
     "nba": "KXNBAGAME", "wnba": "KXWNBAGAME", "epl": "KXEPLGAME",
     "nhl": "KXNHLGAME", "nfl": "KXNFLGAME",
+    # MLB added 2026-08-04: in August it is the only deep sport in season
+    # (NBA/NHL are dark, NFL is preseason, EPL starts mid-month). Without
+    # it the Kalshi surface is WNBA-only and cross-venue arbitrage has
+    # almost nothing to scan. MLB stays league-blocked for the EDGE
+    # strategy (measured flat) — but arbitrage is model-free arithmetic
+    # and the blocklist does not apply to it.
+    "mlb": "KXMLBGAME",
 }
 
 

@@ -47,6 +47,12 @@ BOOK_WEIGHTS = {
 }
 
 
+def _sample_depth(quotes: list) -> tuple[int, int]:
+    """(distinct books, distinct anchor books) behind one outcome's sample."""
+    books = {q[2] for q in quotes if len(q) > 2}
+    return len(books), len(books & ANCHOR_BOOKS)
+
+
 def _weighted_median(pairs: list[tuple[float, float]]) -> float:
     """Median that counts sharper books more, and stays a MEDIAN.
 
@@ -56,7 +62,9 @@ def _weighted_median(pairs: list[tuple[float, float]]) -> float:
     """
     if not pairs:
         raise ValueError("no quotes")
-    ordered = sorted(pairs)
+    # Samples may carry a third element (the quoting book, for per-outcome
+    # consensus depth); the median reads price and weight only.
+    ordered = sorted((p[0], p[1]) for p in pairs)
     total = sum(w for _, w in ordered)
     half, run = total / 2.0, 0.0
     for i, (price, w) in enumerate(ordered):
@@ -133,6 +141,12 @@ class FeedEvent:
     # "Under": odds}. Keyed on the EXACT point because a prop paired against
     # the wrong line is a different bet that still prices cleanly.
     props: dict = field(default_factory=dict)
+    # Per-OUTCOME consensus: sample key -> (distinct_books, anchor_books).
+    # The event-level `books`/`anchors` above answer "did anyone sharp price
+    # this game"; depth answers "who priced THIS line" — the difference is
+    # the winner's curse (audit 2026-08-04). Segment keys carry the
+    # "[seg] " prefix; prop keys are the (market, player, point) tuple.
+    depth: dict = field(default_factory=dict)
     event_id: str = ""
     fetched_at: float = 0.0   # staleness stamp — set at fetch, checked pre-order
     # When the per-event payload (segments + props) was actually FETCHED —
@@ -556,7 +570,12 @@ class TheOddsAPIClient(OddsFeed):
                     if price <= 1.0:
                         continue
                     key = name if bucket == "h2h" else f"{name} {oc.get('point')}"
-                    wq = (price, BOOK_WEIGHTS.get(book["key"], 1.0))
+                    # Book identity rides with the quote: consensus depth is
+                    # per OUTCOME, not per event (audit 2026-08-04 — a deep
+                    # alt rung quoted by one soft-ish book inherited the
+                    # moneyline's Pinnacle anchor and 6-book count, exactly
+                    # where the winner's curse lives).
+                    wq = (price, BOOK_WEIGHTS.get(book["key"], 1.0), book["key"])
                     if seg is None:
                         samples[bucket].setdefault(key, []).append(wq)
                     else:
@@ -602,7 +621,7 @@ class TheOddsAPIClient(OddsFeed):
                         (self.base_prop_market(mkt["key"]), player,
                          float(point)), {}) \
                        .setdefault(side, []).append(
-                           (price, BOOK_WEIGHTS.get(key, 1.0)))
+                           (price, BOOK_WEIGHTS.get(key, 1.0), key))
         return out
 
     def _enrich_segments(self, sport_key: str, events: list, now: float) -> int:
@@ -688,10 +707,23 @@ class TheOddsAPIClient(OddsFeed):
                     seg: {b: {k: _weighted_median(v) for k, v in keyed.items()}
                           for b, keyed in buckets.items()}
                     for seg, buckets in seg_samples.items()}
+                for seg, buckets in seg_samples.items():
+                    for _b, keyed in buckets.items():
+                        for k, v in keyed.items():
+                            ev.depth[f"[{seg}] {k}"] = _sample_depth(v)
             if prop_samples:
                 ev.props = {k: {side: _weighted_median(v)
                                 for side, v in sides.items()}
                             for k, sides in prop_samples.items()}
+                for k, sides in prop_samples.items():
+                    # A prop's consensus is the books quoting BOTH sides —
+                    # one book's Over married to another's Under is the
+                    # cross-book pairing problem, not agreement.
+                    per_side = [{q[2] for q in v if len(q) > 2}
+                                for v in sides.values()]
+                    both = (set.intersection(*per_side)
+                            if len(per_side) == 2 else set())
+                    ev.depth[k] = (len(both), len(both & ANCHOR_BOOKS))
             # A segment or prop quote from books that never quoted the full game
             # counts toward the anchor: it is the segment we are pricing.
             ev.anchors = max(ev.anchors, len(contributing & ANCHOR_BOOKS))
@@ -780,6 +812,13 @@ class TheOddsAPIClient(OddsFeed):
             # estimate with no anchor is a consensus of followers, and the
             # prediction worth testing is that those revert hardest.
             ev.anchors = len(contributing & ANCHOR_BOOKS)
+            for bucket in ("h2h", "totals", "spreads"):
+                for k, v in samples[bucket].items():
+                    ev.depth[k] = _sample_depth(v)
+            for seg, buckets in seg_samples.items():
+                for _b, keyed in buckets.items():
+                    for k, v in keyed.items():
+                        ev.depth[f"[{seg}] {k}"] = _sample_depth(v)
             if ev.h2h:
                 out.append(ev)
         # Partial-game markets, per event, off the endpoint that serves them.

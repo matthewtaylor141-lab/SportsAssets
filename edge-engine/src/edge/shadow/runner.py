@@ -703,10 +703,11 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     # repeatedly renewed — stale quotes wearing a fresh
                     # timestamp, on the highest-volume category.
                     (stale.h2h, stale.totals, stale.spreads, stale.segments,
-                     stale.props, stale.books, stale.anchors,
+                     stale.props, stale.books, stale.anchors, stale.depth,
                      stale.fetched_at, stale.enriched_at) = (
                         f.h2h, f.totals, f.spreads, f.segments,
                         f.props, f.books, f.anchors,
+                        getattr(f, "depth", {}) or {},
                         f.fetched_at, getattr(f, "enriched_at", 0.0))
                     rescued += 1
                 if rescued:
@@ -748,14 +749,14 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                             [h2h[n] for n in h2h], len(h2h)):
                         fairs = dict(zip(list(h2h), fair_value(
                             [h2h[n] for n in h2h])))
-                    sides: list[tuple] = []  # (ParsedLine, fair)
+                    sides: list[tuple] = []  # (ParsedLine, fair, sample_key)
                     for kind, quotes in (("total", totals), ("spread", spreads)):
                         for pq in pair_quotes(quotes, kind):
                             if not _sane_overround([pq.a_odds, pq.b_odds], 2):
                                 continue
                             fa, fb = fair_value([pq.a_odds, pq.b_odds])
-                            sides.append((pq.a_parsed, fa))
-                            sides.append((pq.b_parsed, fb))
+                            sides.append((pq.a_parsed, fa, pq.a_name))
+                            sides.append((pq.b_parsed, fb, pq.b_name))
                     return fairs, sides
 
                 priced["fairs"], priced["deriv_sides"] = _pool(
@@ -774,10 +775,16 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                 priced["ok"] = False
             return priced["ok"]
 
+        # Which sample key the last successful fair_for priced against —
+        # the join into ev.depth for per-outcome consensus. Read immediately
+        # after the call, same thread, so a plain dict is safe.
+        matched_sample = {"key": None}
+
         def fair_for(oc_name: str):
             """(fair, category, reason) — reason names WHY no fair value was
             found, so the funnel can distinguish 'venue lists a line our
             sharp book doesn't quote' from 'we couldn't identify the side'."""
+            matched_sample["key"] = None
             if not _price_event():
                 return None, "moneyline", {"reason": "fair_error"}
             # Player props first: they are per-PLAYER, not per-team, so the
@@ -812,6 +819,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                 fair, miss = fair_for_prop(bet, props)
                 if fair is None:
                     return None, "prop", miss
+                matched_sample["key"] = (bet.market_key, bet.player, bet.point)
                 return fair, "prop", None
             if why in ("no_threshold", "ambiguous_stat"):
                 # It named a stat we know but we could not pin the line.
@@ -867,10 +875,12 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                         "reason": f"{p.kind}_unit_mismatch",
                         "unit": p.unit, "sport": ev.sport_key,
                         "venue_outcome": oc_name[:48]}
-                for side, f in deriv_sides:
+                for side, f, sname in deriv_sides:
                     if side.kind == p.kind and outcome_matches(oc_name, side):
+                        matched_sample["key"] = (f"[{segment}] {sname}"
+                                                 if segment else sname)
                         return f, p.kind, None
-                have = sorted({s.point for s, _ in deriv_sides
+                have = sorted({s.point for s, _, _n in deriv_sides
                                if s.kind == p.kind and s.point is not None})
                 return None, p.kind, {
                     "reason": f"no_sharp_quote_{p.kind}",
@@ -884,6 +894,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             if is_draw(oc_name):
                 for team_name, f in fairs.items():
                     if is_draw(team_name):
+                        matched_sample["key"] = (f"[{segment}] {team_name}"
+                                                 if segment else team_name)
                         return f, "moneyline", None
                 return None, "moneyline", {
                     "reason": "no_draw_quote",
@@ -895,6 +907,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     continue      # a team is never the draw, and vice versa
                 s = team_score(team_name, oc_name)
                 if s >= 0.95:
+                    matched_sample["key"] = (f"[{segment}] {team_name}"
+                                             if segment else team_name)
                     return f, "moneyline", None
                 if s > best_score:
                     best_name, best_score = team_name, s
@@ -1072,21 +1086,33 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     need_anchors = (max(min_anchors, 2)
                                     if entry_px < LOW_PRICE_CUTOFF
                                     else min_anchors)
-                    if getattr(ev, "anchors", 0) < need_anchors:
+                    # Per-OUTCOME depth when the priced sample is known
+                    # (audit 2026-08-04): the event-level counts let a deep
+                    # alt rung quoted by one soft book inherit the
+                    # moneyline's Pinnacle anchor — the guard was written
+                    # per-event and the hazard is per-market. Event-level
+                    # remains the fallback for outcomes with no sample key.
+                    _d = (getattr(ev, "depth", None) or {}).get(
+                        matched_sample["key"])
+                    eff_books = _d[0] if _d else getattr(ev, "books", 0)
+                    eff_anchors = _d[1] if _d else getattr(ev, "anchors", 0)
+                    if eff_anchors < need_anchors:
                         reject("no_sharp_anchor")
                         ex = funnel.setdefault("unpriced_examples", {})
                         bucket = ex.setdefault("no_sharp_anchor", [])
                         if isinstance(bucket, list) and len(bucket) < 5:
                             bucket.append({"reason": "no_sharp_anchor",
                                            "league": ev.league_code,
-                                           "books": getattr(ev, "books", 0),
+                                           "books": eff_books,
                                            "price": round(entry_px, 3),
                                            "needed": need_anchors,
-                                           "anchors": getattr(ev, "anchors", 0)})
+                                           "anchors": eff_anchors,
+                                           "outcome": str(
+                                               matched_sample["key"])[:40]})
                         continue
                     verdict = strategy_filter(policy, ev.league_code, entry_px, fair,
                                               venue_fee=fee, category=category,
-                                              consensus_books=getattr(ev, "books", None),
+                                              consensus_books=eff_books,
                                               drift_penalty=drift_pen.get(
                                                   drift_cat, drift_pen.get("*", 0.0)),
                                               keep=keep)
@@ -1289,7 +1315,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     # reset_window() erases — "does sub-second reaction
                     # actually earn money?" must be answerable from fills.
                     decision["trigger"] = "reactor" if reactive else "sweep"
-                    decision["consensus_books"] = getattr(ev, "books", None)
+                    decision["consensus_books"] = eff_books
                     funnel.setdefault("by_tier", {}).setdefault(verdict.tier, 0)
                     funnel["by_tier"][verdict.tier] += 1
                     # Mapping provenance — makes 'why this fair value?'
