@@ -279,8 +279,14 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
     diag.append(f"best_outcome_score:{round(max(best_score, best2_score), 2)}")
     if candidates:
         c0 = candidates[0]
-        diag.append("sample:" + str({k: c0.get(k) for k in
-                                     ("title", "outcome", "team")})[:90])
+        # Keys first (names the schema), then identity values. Kept ahead
+        # of nothing — the audit column truncates at 300 chars and the
+        # sample is the payload that matters most on a zero score.
+        ident = {k: c0.get(k) for k in
+                 ("title", "outcome", "team", "name", "shortTitle",
+                  "question", "groupItemTitle") if c0.get(k) is not None}
+        diag.insert(0, "keys:" + ",".join(sorted(c0.keys()))[:110])
+        diag.insert(1, "ident:" + str(ident)[:110])
     # The trail rides the exception-free path out via last_resolve_diag so
     # the caller can store WHY in the audit row without a signature break.
     resolve_market.last_diag = "; ".join(diag)[:280]

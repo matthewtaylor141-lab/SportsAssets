@@ -122,7 +122,7 @@ jobs:
           jq -r '"  enabled(api env): \(.enabled // .config.enabled // "?")  paused: \(.paused // "?")",
                  (.orders // .summary // {} | to_entries[] | "  \(.key): \(.value)"),
                  (.recent // [] | .[0:8][] |
-                   "  \(.placed_at // "?")  \(.status // "?")  limit \(.limit_price // "?")  $\(.filled_usd // 0)  \(.market_title // "?") / \(.outcome // "?")  \(.error // "" | .[0:130])")' \
+                   "  \(.placed_at // "?")  \(.status // "?")  limit \(.limit_price // "?")  $\(.filled_usd // 0)  \(.market_title // "?") / \(.outcome // "?")  \(.error // "" | .[0:300])")' \
              /tmp/live.json 2>/dev/null | head -25 || echo "  (unavailable)"
 
           echo ""
