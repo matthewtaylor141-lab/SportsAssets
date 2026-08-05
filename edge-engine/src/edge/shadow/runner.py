@@ -2050,16 +2050,21 @@ def _main_impl() -> None:
 
             # Kalshi COPY leg (owner directive 2026-08-04): the source
             # whales' open positions, expressed on Kalshi wherever it
-            # lists the same proposition, at his price +2%. 10-minute
-            # cadence: whale positions persist, so freshness is about
-            # book prices, not detection speed.
+            # lists the same proposition, at his price +2%. 2-minute
+            # cadence (owner 2026-08-05: "need them rolling in"): a copy
+            # is only priceable in the first minutes after his entry,
+            # before the book moves past his+2% — at 10 minutes the sweep
+            # arrived to an 11c gap every pass. The identities snapshot
+            # refreshes server-side every 90s, so faster sweeps cost the
+            # platform nothing; every price/freshness/cross-game gate is
+            # unchanged.
             if os.environ.get("EDGE_KCOPY", "1") != "0":
                 def _kcopy_loop() -> None:
                     from edge.shadow.kalshi_copies import sweep as kcopy
                     from edge.shadow.whale_align import fetch as widents
 
-                    time.sleep(300)
-                    every = float(os.environ.get("EDGE_KCOPY_EVERY_S", "600"))
+                    time.sleep(60)
+                    every = float(os.environ.get("EDGE_KCOPY_EVERY_S", "120"))
                     while True:
                         try:
                             rows = widents(
