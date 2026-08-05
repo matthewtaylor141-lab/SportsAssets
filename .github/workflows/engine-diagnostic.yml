@@ -65,10 +65,13 @@ jobs:
           echo ""
           echo "STATUS RACE (8 samples, 10s apart — boot id or UNSTAMPED):"
           for i in $(seq 1 8); do
-            S=$(curl -sS --max-time 10 "$BASE/api/engine/status" 2>/dev/null)
-            HB=$(echo "$S" | jq -r '.detail.heartbeat // .beat_at // "?"' 2>/dev/null)
-            BOOT=$(echo "$S" | jq -r '.detail.boot.id // "UNSTAMPED"' 2>/dev/null)
-            DROPS=$(echo "$S" | jq -r '.unstamped_drops.n // "n/a"' 2>/dev/null)
+            # Every stage may fail standalone while the API is mid-deploy
+            # (curl exit 5/7, jq exit 2 on a partial body). Bare failures
+            # kill the whole step under bash -e; partial output must win.
+            S=$(curl -sS --max-time 10 "$BASE/api/engine/status" 2>/dev/null || true)
+            HB=$(echo "$S" | jq -r '.detail.heartbeat // .beat_at // "?"' 2>/dev/null || true)
+            BOOT=$(echo "$S" | jq -r '.detail.boot.id // "UNSTAMPED"' 2>/dev/null || true)
+            DROPS=$(echo "$S" | jq -r '.unstamped_drops.n // "n/a"' 2>/dev/null || true)
             echo "  sample $i: boot=$BOOT  hb=$HB  drops=$DROPS"
             sleep 10
           done
@@ -148,8 +151,9 @@ jobs:
           echo ""
           echo "#   MEMORY WATCH (rss_mb over 2 min — where does it die?)    #"
           for i in $(seq 1 24); do
-            hz=$(curl -sS --max-time 8 "$BASE/healthz" 2>/dev/null)
-            code=$?
+            # A dead API must print DOWN, not exit the step (bash -e turns
+            # a failed assignment-substitution into a job failure).
+            hz=$(curl -sS --max-time 8 "$BASE/healthz" 2>/dev/null) && code=0 || code=$?
             ts=$(date -u +%H:%M:%S)
             if [ $code -eq 0 ] && echo "$hz" | jq -e .ok >/dev/null 2>&1; then
               echo "  $ts  $(echo "$hz" | jq -c '{rss_mb, db_ok, commit}')"
@@ -223,7 +227,7 @@ jobs:
           echo "###########################################################"
           echo "#                      VERDICT                            #"
           echo "###########################################################"
-          jq -r '.detail.verdict // "(engine predates the verdict build)"' /tmp/status.json
+          jq -r '.detail.verdict // "(engine predates the verdict build)"' /tmp/status.json 2>/dev/null || true
           # Liveness first. A blank funnel reads identically whether the
           # engine is idle or dead; the heartbeat age is what separates them.
           jq -r '"heartbeat : \(.beat_at // "NONE — engine has not reported")"' \

@@ -73,6 +73,23 @@ def test_fires_on_a_real_fee_loaded_gap_and_records_fills():
     assert day and day["spent"] > 0
 
 
+def test_a_deep_pair_is_sized_down_to_the_ten_dollar_total_cap():
+    """Owner directive 2026-08-05: guaranteed arbitrage may take up to $5
+    PER SIDE — $10 TOTAL locked-pair cost. max_usd bounds the COMBINED
+    fee-loaded cost of both legs, so a book offering 50 sets (~$48 of
+    pair cost) is taken only up to 10 sets: int($10 / $0.967-per-set),
+    ~$4.67 on one venue plus $5.00 on the other."""
+    w, led, ka, pm = _watch(0.45, 0.50)
+    w._tick()
+    assert w.stats["fired"] == 1
+    (_, ka_px, ka_n), = ka.orders
+    (_, pm_px, pm_n), = pm.orders
+    assert ka_n == pm_n == 10, "depth must not override the $10 pair cap"
+    total = ka_n * (ka_px + ka.taker_fee(ka_px)) + pm_n * pm_px
+    assert total <= 10.0 + 1e-9
+    assert ka_n * ka_px <= 5.0 + 1e-9 and pm_n * pm_px <= 5.0 + 1e-9
+
+
 def test_never_fires_twice_on_one_event():
     w, led, ka, pm = _watch(0.45, 0.50)
     w._tick()

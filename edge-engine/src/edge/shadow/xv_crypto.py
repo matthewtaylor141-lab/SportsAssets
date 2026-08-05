@@ -266,6 +266,10 @@ class XVCryptoWatch:
         self._is_live = is_live          # callable: () -> bool (engine mode)
         self._pub = pmus_pub             # False disables; None = lazy-create
         self.min_profit = _f(min_profit, "EDGE_XV_CRYPTO_MIN_PROFIT", "0.03")
+        # max_usd is the TOTAL pair cost, BOTH legs combined (~$5/side —
+        # owner directive 2026-08-05, guaranteed-profit class): sizing
+        # divides it by cross_venue_cost([l1, l2]), the fee-loaded
+        # two-leg cost of one set, never by a single leg's price.
         self.max_usd = _f(max_usd, "EDGE_XV_CRYPTO_MAX_USD", "10")
         self.day_usd = _f(day_usd, "EDGE_XV_CRYPTO_DAY_USD", "100")
         self.poll_s = _f(poll_s, "EDGE_XV_CRYPTO_POLL_S", "10")

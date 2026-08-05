@@ -1,6 +1,7 @@
 """Better-price adds (owner directive 2026-08-04): for every OPEN
 Polymarket position, if Kalshi currently sells the SAME bet meaningfully
-cheaper than we paid, add a $2 clip there.
+cheaper than we paid, add a $1 clip there (owner directive 2026-08-05:
+all software-generated trades at $1; was $2).
 
 This deliberately relaxes the engine's never-add rule for one narrow,
 owner-ordered case: buying more of a bet we already hold at a strictly
@@ -14,7 +15,7 @@ better price than our entry. Guardrails carry the weight:
   game, which is worse than missing a better price.
 - BETTER means fee-loaded: kalshi ask + taker fee <= our entry minus
   min_improve (2c default). Kalshi's fee is real money.
-- ONCE per position, ever (ledger claim), $2 per add, and a daily
+- ONCE per position, ever (ledger claim), $1 per add, and a daily
   budget for the class (EDGE_KADD_DAY_USD, default $50).
 - Every add is ledger-recorded category "kalshi_add" so settlement
   grades this cohort SEPARATELY — if averaging-in doesn't pay, the
@@ -45,7 +46,7 @@ def _kalshi_date_token(slug: str) -> str | None:
 
 
 def sweep(*, pmus, kalshi, ledger, live: bool,
-          min_improve: float = 0.02, per_add_usd: float = 2.0,
+          min_improve: float = 0.02, per_add_usd: float = 1.0,
           day_usd: float = 50.0) -> dict:
     """One pass over open PMUS positions. Returns stats for telemetry."""
     from edge.venues.mapper import team_score

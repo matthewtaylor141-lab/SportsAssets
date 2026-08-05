@@ -945,14 +945,19 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             want = risk.size_for_edge(verdict.edge, verdict.threshold,
                                       mode=effective_mode)
             # PROBATION: an unmeasured league trades at HALF ticket until
-            # its own live settlements clear the bar (>=50 settled, net>0).
+            # its own live settlements clear the bar (>=50 settled, net>0)
+            # — floored at $1.00, the smallest executable trade (approve()
+            # refuses anything under $1 and the venue sells whole
+            # contracts). At the owner-directed $1 ticket (2026-08-05) the
+            # halving therefore no-ops rather than silently blocking every
+            # unmeasured league.
             if not policy.league_measured(ev.league_code):
                 rec = _league_probation_cache.get(ev.league_code or "?")
                 if rec is None:
                     rec = ledger.league_live_record(ev.league_code or "?")
                     _league_probation_cache[ev.league_code or "?"] = rec
                 if rec["n"] < 50 or rec["net"] <= 0:
-                    want = round(want / 2, 2)
+                    want = round(max(want / 2, 1.0), 2)
                     pv = funnel.setdefault("probation", {})
                     pv[ev.league_code or "?"] = rec
             approved, why = risk.approve(adapter.name, mkey, ev.event_key(),
@@ -1981,7 +1986,7 @@ def _main_impl() -> None:
                 _XV_CRYPTO.day_usd)
 
     # Better-price adds (owner directive 2026-08-04): open PMUS positions
-    # that Kalshi currently sells cheaper (fee-loaded, >=2c) get a $2 add,
+    # that Kalshi currently sells cheaper (fee-loaded, >=2c) get a $1 add,
     # once per position, $50/day class budget, graded as its own category.
     if os.environ.get("EDGE_KALSHI_ADDS", "1") != "0" and len(adapters) >= 2:
         kalshi_a = next((a for a in adapters if a.name == "kalshi"), None)

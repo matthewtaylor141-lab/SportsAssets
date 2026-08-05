@@ -67,7 +67,7 @@ def test_a_meaningfully_cheaper_kalshi_listing_gets_the_add():
     # entry 0.50; kalshi 0.45 + 1.7c fee = 0.467 -> 3.3c better: fires.
     st, ka, led = _run(0.45)
     assert st["matched"] == 1 and st["added"] == 1
-    assert ka.orders == [("T-BAL", 0.45, 4)]   # $2 -> 4 contracts at 45c
+    assert ka.orders == [("T-BAL", 0.45, 2)]   # $1 -> 2 contracts at 45c
     assert led.get_state("kadd:aec-mlb-bal-tex-2026-08-04")
     assert (led.get_state("kadd_day") or {}).get("spent", 0) > 0
 

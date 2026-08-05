@@ -157,20 +157,24 @@ profiles:
     # `at` is a MULTIPLE of the band threshold, not a cent figure — the bar
     # already varies by band, by category and by measured drift, so a fixed
     # cent trigger would mean something different in every market.
-    # Ticket size doubled 2026-08-03 (owner request): $1.00 -> $2.00
-    # standard. The ladder keeps its 1.5x shape and every ticket-denominated
-    # cap scales with it, so the RELATIVE risk profile (rungs, five-tickets-
-    # a-game ceiling, halt sensitivity in tickets) is unchanged.
+    # OWNER DIRECTIVE 2026-08-05: ALL software-generated (edge-engine
+    # strategy) trades are $1.00 per trade on BOTH venues. Copy-sleeve
+    # trades (backend live_executor / kalshi_copies) are a separate class
+    # and STAY at $3. The ladder keeps its rung structure so a future
+    # re-scale is a two-number edit, but both rungs sit at the $1 ticket;
+    # every cap/room mechanism (market/event/day/venue room, breaker,
+    # pacing) is unchanged — a $1 request still clamps to the tightest room.
     size_ladder:
-      - {at: 1.0, usd: 2.00}    # clears the bar: standard ticket
-      - {at: 2.0, usd: 3.00}    # twice the bar: the larger ticket
-    per_fill_usd_default: 2
-    per_fill_usd_max: 3
+      - {at: 1.0, usd: 1.00}    # clears the bar: the $1 ticket
+      - {at: 2.0, usd: 1.00}    # twice the bar: same $1 (owner 2026-08-05)
+    per_fill_usd_default: 1
+    per_fill_usd_max: 1
     per_market_exposure_usd: 3        # one ticket per bet; never add
     # Sides of one game are not independent bets — exactly one of them pays.
     # A three-way soccer match is three markets and a full ladder is twenty,
     # so a per-market cap alone permits that much correlated exposure on a
-    # single result. Five tickets a game is the concentration ceiling.
+    # single result. $10 a game is the concentration ceiling (ten $1
+    # tickets at the 2026-08-05 sizing; the dollar cap is what holds).
     per_event_exposure_usd: 10
     # Day budget tracks the ACCOUNT, not a number typed here. A fixed daily
     # cap is a trade-count cap wearing a disguise: at $1 a fill, "$25/day"
@@ -292,6 +296,10 @@ arbitrage:
   # settlement.
   enabled: true
   max_sets: 1                 # floor: contracts per leg, per opportunity
+  # TOTAL fee-loaded cost across ALL legs of one opportunity (~$5 per side
+  # on a two-leg pair — owner directive 2026-08-05, guaranteed-profit class
+  # only). Sizing divides max_usd by the COMBINED cost of one set, so a
+  # deeper book is taken only up to $10 of total pair cost.
   max_usd: 10.0               # dollar cap per opportunity; depth-bounded
   max_books_per_cycle: 3
   # Cross-venue (owner instruction 2026-08-04: "exploit any guaranteed
@@ -306,6 +314,10 @@ arbitrage:
   cross_venue:
     enabled: true
     min_profit: 0.02
+    # TOTAL pair cost, BOTH legs together — i.e. $5 per side (owner
+    # directive 2026-08-05). max_sets = max_usd / fee-loaded cost_per_set
+    # where cost_per_set is the combined two-leg cost, so the $10 bounds
+    # the whole locked pair, never $10 per leg.
     max_usd: 10.0             # dollar cap per opportunity, both legs
     max_books_per_cycle: 2
     leagues: [nba, wnba, nhl, mlb]

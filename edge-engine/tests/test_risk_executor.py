@@ -509,11 +509,11 @@ def test_paper_profile_decouples_sampling_caps():
     paper = caps_for_mode(risk_cfg, "PAPER")
     beta = caps_for_mode(risk_cfg, "LIVE_BETA")
     assert paper.per_fill_max == 10
-    # Micro live tier, $2 ticket (owner request 2026-08-03). The ceiling is
-    # 3, not 2, so the size ladder has a top rung — the DEFAULT stake is
-    # still $2 and only a bet clearing twice its bar reaches $3.
-    assert beta.per_fill_default == 2
-    assert beta.per_fill_max == 3
+    # Micro live tier, $1 ticket (owner directive 2026-08-05): every
+    # software-generated engine trade is $1, so default and ceiling meet
+    # at $1 and the ladder is flat until the owner re-scales it.
+    assert beta.per_fill_default == 1
+    assert beta.per_fill_max == 1
     assert paper.one_per_market and beta.one_per_market
     assert not paper.one_per_event and not beta.one_per_event
 
@@ -543,8 +543,8 @@ def test_the_breaker_scales_with_the_trade_count():
     risk_cfg = Policy.load().risk
     small = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=100.0)
     big = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=4000.0)
-    # $100 day at $2 tickets is 50 bets: 4 sigma = 4 * sqrt(50) * 2.
-    assert small.daily_loss_halt == pytest.approx(8 * 50**0.5)
+    # $100 day at $1 tickets is 100 bets: 4 sigma = 4 * sqrt(100) * 1.
+    assert small.daily_loss_halt == pytest.approx(4 * 100**0.5)
     assert big.daily_loss_halt == 600                    # 15% of $4,000
     # Comfortably outside 3 sigma of the day's noise in both cases.
     for caps in (small, big):
@@ -716,13 +716,15 @@ def test_one_game_cannot_absorb_a_ticket_per_listed_outcome(tmp_path):
     carrying a full spread and totals ladder. Seen live: home, away AND draw
     bought on the same match, three times over."""
     led, risk = _live_rig(tmp_path)
-    for i in range(5):
+    for i in range(10):
         approved, _ = risk.approve("polymarket-us", f"pm:m{i}", "game-1", 2.0,
                                    mode="LIVE_BETA")
-        assert approved == 2.0
+        # $1 ticket (owner 2026-08-05): even a $2 request clamps to $1,
+        # and the $10 event ceiling now holds ten tickets, not five.
+        assert approved == 1.0
         _event_fill(led, "game-1", f"pm:m{i}", approved)
 
-    blocked, why = risk.approve("polymarket-us", "pm:m6", "game-1", 2.0,
+    blocked, why = risk.approve("polymarket-us", "pm:m11", "game-1", 2.0,
                                 mode="LIVE_BETA")
     assert blocked == 0 and "caps" in why
     # ...and a DIFFERENT game is unaffected.
@@ -777,25 +779,30 @@ def _beta_risk():
     return RiskManager(led, {**Policy.load().risk, "mode": "LIVE_BETA"})
 
 
-def test_the_ladder_stakes_more_only_on_the_better_priced_bets():
-    """A flat ticket pays the same for a 2c edge as a 6c one. The rungs put
-    money where the price is better and nothing extra where it is not."""
+def test_every_engine_ticket_is_one_dollar():
+    """Owner directive 2026-08-05: ALL software-generated engine trades are
+    $1 per trade. The ladder mechanism stays (rungs still resolve by edge
+    multiple) but every rung sits at the $1 ticket, so no edge — however
+    strong — can stake more than $1."""
     risk = _beta_risk()
     bar = 0.02
-    assert risk.size_for_edge(bar, bar) == 2.00           # exactly the bar
-    assert risk.size_for_edge(bar * 1.9, bar) == 2.00     # not yet 2x
-    assert risk.size_for_edge(bar * 2.0, bar) == 3.00     # the larger ticket
-    assert risk.size_for_edge(bar * 10, bar) == 3.00      # top rung, capped
+    assert risk.size_for_edge(bar, bar) == 1.00           # exactly the bar
+    assert risk.size_for_edge(bar * 1.9, bar) == 1.00     # not yet 2x
+    assert risk.size_for_edge(bar * 2.0, bar) == 1.00     # same $1 ticket
+    assert risk.size_for_edge(bar * 10, bar) == 1.00      # still $1, capped
 
 
 def test_the_trigger_is_a_MULTIPLE_of_the_bar_not_a_cent_figure():
     """The bar already varies by band, by category and by measured drift.
     A fixed cent trigger would mean something different in every market —
-    generous where the bar is low, unreachable where it is high."""
+    generous where the bar is low, unreachable where it is high. With the
+    flat $1 ladder (owner 2026-08-05) both rungs resolve to the same
+    stake; the multiple arithmetic itself must keep working for the day
+    the rungs are re-scaled."""
     risk = _beta_risk()
-    # Same 4c edge, two different bars: only one is twice its bar.
-    assert risk.size_for_edge(0.04, 0.02) == 3.00
-    assert risk.size_for_edge(0.04, 0.035) == 2.00
+    # Same 4c edge, two different bars: both stake the flat $1 ticket.
+    assert risk.size_for_edge(0.04, 0.02) == 1.00
+    assert risk.size_for_edge(0.04, 0.035) == 1.00
 
 
 def test_an_unknown_bar_takes_the_STANDARD_ticket_not_the_top_rung():
@@ -803,9 +810,9 @@ def test_an_unknown_bar_takes_the_STANDARD_ticket_not_the_top_rung():
     this backwards would stake the maximum on precisely the markets we
     understand least."""
     risk = _beta_risk()
-    assert risk.size_for_edge(0.05, None) == 2.00
-    assert risk.size_for_edge(0.05, 0.0) == 2.00
-    assert risk.size_for_edge(None, 0.02) == 2.00
+    assert risk.size_for_edge(0.05, None) == 1.00
+    assert risk.size_for_edge(0.05, 0.0) == 1.00
+    assert risk.size_for_edge(None, 0.02) == 1.00
 
 
 def test_the_ladder_can_never_exceed_the_per_fill_cap():
@@ -845,13 +852,15 @@ def test_league_live_record_counts_only_live_resolved(tmp_path):
 
 def test_the_ladder_survives_approve_end_to_end():
     """Audit 2026-08-04: approve() clamped every request to
-    per_fill_default, so the $3 rung existed in config and could never
-    fill. The ladder's output must survive the full approval path."""
+    per_fill_default, so the top rung existed in config and could never
+    fill. The ladder's output must survive the full approval path —
+    which at the flat $1 ladder (owner 2026-08-05) means exactly $1.00
+    comes out the other side, not $0 (the sub-$1 floor) and not more."""
     risk = _beta_risk()
     bar = 0.02
     requested = risk.size_for_edge(bar * 2.0, bar)
-    assert requested == 3.00
+    assert requested == 1.00
     approved, why = risk.approve("polymarket-us", "polymarket-us:tok-x",
                                  "ev-x", requested)
     assert why == "ok"
-    assert approved == 3.00, "the top rung must not be clamped back to $2"
+    assert approved == 1.00, "$1 must clear approve()'s own $1 floor intact"
