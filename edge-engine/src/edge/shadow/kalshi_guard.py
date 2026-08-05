@@ -21,19 +21,27 @@ from __future__ import annotations
 import time
 
 
-def live_blocked(ledger) -> str | None:
+def live_blocked(ledger, scope: str = "engine") -> str | None:
     """Honor the account-level stops from ANY order path.
 
     The kill switch, circuit-breaker halt, and watchdog live in shared
     ledger state, but only RiskManager.approve() consulted them — the
     sweeps (copies/adds/xv) spent real money straight through a halt.
     Every side-channel spender must call this before a live order.
+
+    scope="engine" (default): the engine strategy's breaker (halt_until).
+    scope="copy": the copy sleeve's OWN breaker (copy_halt_until) — owner
+    directive 2026-08-05: copies are a separate strategy class graded on
+    their own P&L, and an engine-side loss day must not pause profitable
+    copying. Kill switch and watchdog stay global: they mean "the account
+    or the inputs are unsafe", which no sleeve trades through.
     """
     if ledger.get_state("kill_switch", False):
         return "kill_switch"
-    halt = ledger.get_state("halt_until")
+    halt_key = "copy_halt_until" if scope == "copy" else "halt_until"
+    halt = ledger.get_state(halt_key)
     if halt and float(halt.get("until", 0)) > time.time():
-        return "halted"
+        return "copy_halted" if scope == "copy" else "halted"
     wd = ledger.get_state("watchdog_tripped")
     if wd and wd.get("tripped"):
         return "watchdog"

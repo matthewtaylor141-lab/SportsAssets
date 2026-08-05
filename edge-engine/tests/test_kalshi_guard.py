@@ -8,8 +8,8 @@ import time
 
 from edge.ledger.service import Ledger
 from edge.shadow.kalshi_copies import sweep
-from edge.shadow.kalshi_guard import cross_side_cap, event_of, note_fill, \
-    open_kalshi_sides
+from edge.shadow.kalshi_guard import cross_side_cap, event_of, live_blocked, \
+    note_fill, open_kalshi_sides
 
 
 def test_event_of_strips_the_outcome_segment():
@@ -206,3 +206,50 @@ def test_engine_executor_path_is_game_guarded(tmp_path):
                 league="mlb", ask_price=0.51, ask_size=50, size_usd=2.0,
                 edge=0.03, threshold=0.02, decision={}, ts=1000.0)
     assert r["status"] == "cross_game_blocked" and not r["placed"]
+
+
+def test_copy_scope_rides_its_own_breaker_not_the_engines(tmp_path):
+    """Owner directive 2026-08-05: an engine-side halt must not pause the
+    copy sleeve; a copy-side halt must not need the engine's. Kill switch
+    and watchdog stay global — no sleeve trades through those."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    # Engine breaker live: engine scope blocks, copy scope does not.
+    led.set_state("halt_until", {"until": time.time() + 3600})
+    assert live_blocked(led) == "halted"
+    assert live_blocked(led, scope="copy") is None
+    # Copy breaker live: copy scope blocks, engine scope unaffected.
+    led.set_state("halt_until", {"until": 0})
+    led.set_state("copy_halt_until", {"until": time.time() + 3600})
+    assert live_blocked(led, scope="copy") == "copy_halted"
+    assert live_blocked(led) is None
+    # Global stops block BOTH scopes.
+    led.set_state("kill_switch", True)
+    assert live_blocked(led) == "kill_switch"
+    assert live_blocked(led, scope="copy") == "kill_switch"
+    led.set_state("kill_switch", False)
+    led.set_state("copy_halt_until", {"until": 0})
+    led.set_state("watchdog_tripped", {"tripped": True, "reason": "feed"})
+    assert live_blocked(led, scope="copy") == "watchdog"
+
+
+def test_copy_breaker_trips_on_copy_losses_only(tmp_path, monkeypatch):
+    """The copy breaker reads the kalshi_copy cohort's realized 24h P&L —
+    engine-category losses can never trip it, and a trip halts copies."""
+    from edge.shadow.kalshi_copies import check_copy_breaker
+
+    monkeypatch.setenv("EDGE_KCOPY_HALT_USD", "50")
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    # $80 of ENGINE losses: copy breaker must not care.
+    led.record_fill(fill_uid="e1", venue="kalshi", market_key="kalshi:KXA-1-X",
+                    side="BUY", qty=100.0, price=0.8, league="mlb",
+                    mode="LIVE_BETA", category="edge")
+    led.record_resolution("kalshi:KXA-1-X", 0.0)
+    assert check_copy_breaker(led) is None
+    # $60 of COPY losses inside 24h: trips, and the halt state persists.
+    led.record_fill(fill_uid="c1", venue="kalshi", market_key="kalshi:KXB-1-Y",
+                    side="BUY", qty=100.0, price=0.6, league="mlb",
+                    mode="LIVE_BETA", category="kalshi_copy")
+    led.record_resolution("kalshi:KXB-1-Y", 0.0)
+    assert check_copy_breaker(led) == "copy_halted"
+    assert live_blocked(led, scope="copy") == "copy_halted"
+    assert live_blocked(led) is None      # engine untouched by copy halt

@@ -66,6 +66,43 @@ MAX_AGE_S_DEFAULT = 2700.0
 # (observed live 2026-08-04: copied positions sitting at 1% chance).
 COLLAPSE_FLOOR = 0.85
 
+# The copy sleeve's OWN circuit breaker (owner directive 2026-08-05:
+# separate the breakers — an engine-side loss day must not pause
+# profitable copying). Trips on the kalshi_copy cohort's rolling-24h
+# realized loss; the sizing mirrors the engine's shape at copy scale
+# ($3 tickets): a fixed floor, env-tunable. 24h halt (not the engine's
+# 72h): the sleeve's edge source is the whales, re-validated daily.
+COPY_HALT_USD_DEFAULT = 60.0
+COPY_HALT_HOURS_DEFAULT = 24.0
+
+
+def check_copy_breaker(ledger) -> str | None:
+    """Trip/report the copy sleeve's own daily-loss halt. Returns the
+    block reason or None. Same no-override contract as the engine's."""
+    import os
+
+    now = time.time()
+    halt = ledger.get_state("copy_halt_until")
+    if halt and float(halt.get("until", 0)) > now:
+        return "copy_halted"
+    halt_usd = float(os.environ.get("EDGE_KCOPY_HALT_USD",
+                                    COPY_HALT_USD_DEFAULT))
+    fn = getattr(ledger, "realized_pnl_since_for_category", None)
+    if fn is None or halt_usd <= 0:
+        return None
+    day_pnl = float(fn(now - 86_400, "kalshi_copy"))
+    if day_pnl <= -halt_usd:
+        hours = float(os.environ.get("EDGE_KCOPY_HALT_H",
+                                     COPY_HALT_HOURS_DEFAULT))
+        ledger.set_state("copy_halt_until", {
+            "until": now + hours * 3600,
+            "reason": "copy_daily_loss_circuit_breaker",
+            "day_pnl": round(day_pnl, 2), "tripped_at": now})
+        log.error("COPY CIRCUIT BREAKER: kalshi_copy day PnL %.2f <= "
+                  "-%.2f — halting copies %sh", day_pnl, halt_usd, hours)
+        return "copy_halted"
+    return None
+
 
 def _limit_for(his_price: float) -> float:
     """His price + 2%, floored to AT LEAST one tick of tolerance.
@@ -136,7 +173,10 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
     if live:
         from edge.shadow.kalshi_guard import live_blocked
 
-        blocked = live_blocked(ledger)
+        # Copy scope: the sleeve rides its OWN breaker, not the engine's
+        # (owner directive 2026-08-05). Kill switch/watchdog stay global.
+        blocked = live_blocked(ledger, scope="copy") or \
+            check_copy_breaker(ledger)
         if blocked:
             stats["blocked"] = blocked
             return stats

@@ -1099,6 +1099,26 @@ class Ledger:
             row = conn.execute(q, (ts,)).fetchone()
         return float(row[0])
 
+    def realized_pnl_since_for_category(self, ts: float,
+                                        category: str) -> float:
+        """Live realized PnL since ts for ONE fill category — a sleeve's
+        own circuit-breaker input (owner directive 2026-08-05: the copy
+        sleeve gets its own loss stop; an engine-side bad day must not
+        pause profitable copying). Realizations carry no category, so a
+        realization belongs to the category of its market's live BUYs."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(sum(r.pnl), 0)
+                FROM realizations r
+                WHERE r.ts >= ? AND r.kind = 'resolution'
+                  AND EXISTS (SELECT 1 FROM fills f
+                              WHERE f.market_key = r.market_key
+                                AND f.side = 'BUY' AND f.mode != 'PAPER'
+                                AND f.category = ?)
+                """, (ts, category)).fetchone()
+        return float(row[0])
+
     def live_fill_count_since(self, ts: float) -> int:
         """Real-money fills in the window (bogus-halt detection input)."""
         with self._conn() as conn:
