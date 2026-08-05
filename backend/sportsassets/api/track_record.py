@@ -97,6 +97,15 @@ def build(positions: dict[str, dict], activities: list[dict],
     strategy trades $1-$5 tickets, and anything far above that is an
     execution incident or a non-strategy trade, not the strategy.
     """
+    # The record's first calendar day is the UTC date the window opens
+    # (2026-08-01), even though that instant is 8pm ET July 31: the
+    # account's opening session settled Jul 31 evening ET, and it belongs
+    # to day 1 of the record, not to a phantom July box the month view
+    # never shows (owner report 2026-08-05: "+$45 missing from Aug 1").
+    # Only dates BEFORE this fold forward; every later day stays Eastern.
+    first_day = datetime.fromtimestamp(since_ts, timezone.utc) \
+        .strftime("%Y-%m-%d")
+
     # Entry facts come from the venue's TRADE activities: first trade time,
     # volume-weighted entry price, buy count.
     entries: dict[str, dict] = {}
@@ -226,8 +235,9 @@ def build(positions: dict[str, dict], activities: list[dict],
             "outcome": meta.get("outcome"),
             **classify_slug(slug),
             "entry_ts": entry_ts or None,
-            "entry_date": (datetime.fromtimestamp(entry_ts, tz)
-                           .strftime("%Y-%m-%d") if entry_ts else None),
+            "entry_date": (max(datetime.fromtimestamp(entry_ts, tz)
+                               .strftime("%Y-%m-%d"), first_day)
+                           if entry_ts else None),
             "entry_price": round(vwap, 4) if vwap else None,
             "fills": e.get("fills", 0),
             "qty": qty if not settled else e.get("qty", 0.0),
@@ -270,8 +280,8 @@ def build(positions: dict[str, dict], activities: list[dict],
             "outcome": None,
             **classify_slug(slug),
             "entry_ts": entry_ts,
-            "entry_date": datetime.fromtimestamp(entry_ts, tz)
-                          .strftime("%Y-%m-%d"),
+            "entry_date": max(datetime.fromtimestamp(entry_ts, tz)
+                              .strftime("%Y-%m-%d"), first_day),
             "entry_price": round(vwap, 4) if vwap else None,
             "fills": e.get("fills", 0),
             "qty": e.get("qty", 0.0),
@@ -312,7 +322,8 @@ def build(positions: dict[str, dict], activities: list[dict],
         ts = r["settled_ts"] or r["entry_ts"]
         if not ts:
             continue
-        day = datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d")
+        day = max(datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d"),
+                  first_day)
         d = daily.setdefault(day, {
             "date": day, "deployed": 0.0, "trades": 0, "open": 0,
             "pnl": 0.0, "settled": 0, "wins": 0, "pnl_estimated": False})
