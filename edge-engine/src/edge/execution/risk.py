@@ -133,6 +133,13 @@ class RiskManager:
         self.bankroll = bankroll
         self.caps = caps_for_mode(risk_cfg, mode, bankroll)
         self.risk_cfg = risk_cfg
+        # The binding per-fill ceiling of the LAST successful approve():
+        # min(per_fill_max, market/event/day/venue-day room, exploration
+        # budget) at approval time. Contract quantization rounds up toward
+        # THIS bound — per_fill_max alone would let the round-up breach
+        # whichever tighter room actually clamped the grant (audit
+        # 2026-08-05). Read immediately after approve(), same thread.
+        self.last_fill_ceiling = 0.0
 
     @property
     def is_live(self) -> bool:
@@ -368,6 +375,14 @@ class RiskManager:
                 stake = usd
         return round(min(stake, top), 2)
 
+    def per_fill_cap(self, mode: str | None = None) -> float:
+        """The static per-fill ceiling for MODE. NOT the quantization bound
+        — that is last_fill_ceiling, which also carries whatever tighter
+        market/event/day room bound the actual grant."""
+        caps = (self.caps if mode in (None, self.mode)
+                else caps_for_mode(self.risk_cfg, mode, self.bankroll))
+        return caps.per_fill_max
+
     def approve(self, venue: str, market_key: str, event_key: str,
                 requested_usd: float, now: float | None = None,
                 mode: str | None = None, tier: str = "core") -> tuple[float, str]:
@@ -383,15 +398,23 @@ class RiskManager:
         mode = mode or self.mode
         caps = (self.caps if mode == self.mode
                 else caps_for_mode(self.risk_cfg, mode, self.bankroll))
+        self.last_fill_ceiling = 0.0   # set on the success path only
         ok, why = self.guard(now)
         if not ok:
             return 0.0, why
 
+        # ceiling: everything that bounds this fill EXCEPT the requested
+        # size — the room contract quantization may round up into. Rounding
+        # toward per_fill_max alone breached whichever tighter room clamped
+        # the grant (audit 2026-08-05: $2.00 venue-day room at 70c sent
+        # $2.10).
+        ceiling = caps.per_fill_max
         if tier == "exploration":
             usd_left, fills_left = self.exploration_room(now=now, mode=mode)
             if usd_left <= 0 or fills_left <= 0:
                 return 0.0, "exploration_budget: day's learning spend used"
             requested_usd = min(requested_usd, usd_left)
+            ceiling = min(ceiling, usd_left)
         # per_fill_max is the ceiling; per_fill_default is the FALLBACK for
         # callers that request no specific size, not a second ceiling.
         # (Audit 2026-08-04: clamping to default made the size ladder's
@@ -406,6 +429,7 @@ class RiskManager:
             # carry as many dollars as the venue lists outcomes.
             spent = self.ledger.event_exposure(event_key, mode)["cost"]
             size = min(size, caps.per_event - spent)
+            ceiling = min(ceiling, caps.per_event - spent)
         venue_day_cap = caps.per_day * caps.venue_bankroll_split
         day_room = min(caps.per_day - self.day_deployed(now=now, mode=mode),
                        venue_day_cap - self.day_deployed(venue=venue, now=now, mode=mode))
@@ -418,4 +442,6 @@ class RiskManager:
                                                            venue, ts=now):
             scope = "market" if caps.one_per_market else "event"
             return 0.0, f"one-per-{scope}: already positioned"
+        self.last_fill_ceiling = round(
+            max(min(ceiling, market_room, day_room), 0.0), 2)
         return size, "ok"

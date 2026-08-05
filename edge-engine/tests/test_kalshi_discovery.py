@@ -97,6 +97,45 @@ def test_segment_titles_are_tagged_so_halves_never_meet_full_game():
     assert all(k.startswith("[h1] ") for k in out[0].outcome_tokens)
 
 
+# ── spread/total series: the surface the *GAME-only map never had ────────
+
+def test_default_series_cover_spreads_and_totals(monkeypatch):
+    """The strategy blocks moneyline on these leagues (category_blocks), so
+    a *GAME-only map made the Kalshi edge surface zero by construction. A
+    wrong ticker fails loudly as {series}_http in the census; a missing one
+    fails silently, which is the worse error."""
+    from edge.venues.kalshi import _series_map
+
+    monkeypatch.delenv("EDGE_KALSHI_SERIES", raising=False)
+    m = _series_map()
+    for code in ("nba", "wnba", "epl", "nhl", "nfl", "mlb"):
+        joined = "+".join(m[code])
+        assert "SPREAD" in joined and "TOTAL" in joined, code
+        assert any("GAME" in s for s in m[code]), code
+
+
+def test_a_total_series_outcome_missing_its_line_is_refused():
+    """The identity gates must keep working on the new series: a plain team
+    name in a TOTAL series is a different bet wearing the team's name, and
+    a bare Over matches ANY sharp rung downstream."""
+    a, out = _discover([_event("Eagles vs Cowboys Total", [
+        ("T1", "Eagles", "Eagles vs Cowboys Total"),
+        ("T2", "Over", "Eagles vs Cowboys Total"),
+    ])], "KXNFLTOTAL")
+    assert out == []
+    assert a.last_census.get("untagged_total") == 1
+    assert a.last_census.get("bare_total") == 1
+
+
+def test_lined_totals_on_a_total_series_keep_their_lines():
+    _, out = _discover([_event("Eagles vs Cowboys Total", [
+        ("T1", "Over 45.5", "Eagles vs Cowboys Total"),
+        ("T2", "Under 45.5", "Eagles vs Cowboys Total"),
+    ])], "KXNFLTOTAL")
+    assert len(out) == 1
+    assert any("45.5" in k for k in out[0].outcome_tokens)
+
+
 # ── PEM normalization: env-var pastes must not brick auth ────────────────
 
 def _fresh_rsa_pem() -> str:
@@ -294,3 +333,92 @@ def test_plan_entry_crosses_a_one_tick_market_as_taker():
     a = KalshiAdapter()
     px, taker = a.plan_entry(_book(0.01))
     assert taker is True, "no room to rest: cross and pay the real fee"
+
+
+# --- force-taker memory: a reaped unfilled maker must not requote forever ---
+
+def test_a_marked_market_crosses_and_pays_the_real_fee():
+    a = KalshiAdapter()
+    a.mark_force_taker("T")
+    px, taker = a.plan_entry(_book(0.50, 0.44))
+    assert (px, taker) == (0.50, True), \
+        "the queue never came to us: judge the threshold as a taker"
+    # Other markets keep resting — the memory is per market.
+    b = _book(0.50, 0.44)
+    b = type(b)(venue=b.venue, market_id=b.market_id, outcome_id="OTHER",
+                bids=b.bids, asks=b.asks, ts=b.ts)
+    assert a.plan_entry(b) == (0.49, False)
+
+
+def test_a_forced_market_takes_only_when_net_of_fee_edge_clears():
+    a = KalshiAdapter()
+    a.mark_force_taker("T")
+    # fee at 0.50 = 0.07 * 0.25 = 0.0175
+    assert a.plan_maker_order(0.50, 0.50, edge=0.04, threshold=0.02,
+                              market_ticker="T") == (0.50, True)
+    assert a.plan_maker_order(0.50, 0.50, edge=0.03, threshold=0.02,
+                              market_ticker="T") is None
+    # Unmarked markets keep the maker-first plan.
+    assert a.plan_maker_order(0.50, 0.50, edge=0.03, threshold=0.02,
+                              market_ticker="U") == (0.49, False)
+
+
+def test_an_edge_already_net_of_the_fee_is_not_charged_again():
+    """When the entry was planned taker, strategy_filter already subtracted
+    the taker fee from the edge. Deducting it AGAIN in the cross check
+    demanded threshold + 2x fee of every forced cross (audit 2026-08-05)."""
+    a = KalshiAdapter()
+    a.mark_force_taker("T")
+    # 0.03 fee-net clears the 0.02 bar — must cross, not die.
+    assert a.plan_maker_order(0.50, 0.50, edge=0.03, threshold=0.02,
+                              market_ticker="T",
+                              edge_is_fee_net=True) == (0.50, True)
+    # ...and a fee-net edge under the bar still refuses.
+    assert a.plan_maker_order(0.50, 0.50, edge=0.019, threshold=0.02,
+                              market_ticker="T",
+                              edge_is_fee_net=True) is None
+
+
+def test_the_kalshi_cross_only_lasts_for_the_cool_off(monkeypatch):
+    monkeypatch.setenv("EDGE_KALSHI_FORCE_TAKER_S", "0")
+    a = KalshiAdapter()
+    a.mark_force_taker("T")
+    assert a.plan_entry(_book(0.50, 0.44)) == (0.49, False)   # already expired
+
+
+def test_a_reaped_unfilled_maker_marks_its_market_force_taker(tmp_path):
+    from edge.execution.executor import reap_kalshi_makers
+    from edge.ledger.service import Ledger
+
+    import time as _t
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    led.claim_event("ev1", "kalshi:TICK", "kalshi")
+    led.set_state("kalshi_order:o1", {"market_key": "kalshi:TICK",
+                                      "event_key": "ev1",
+                                      "ts": _t.time() - 2000})
+    a = KalshiAdapter()
+    out = reap_kalshi_makers(led, adapter=a)
+    assert out == {"checked": 1, "released": 1, "filled": 0}
+    assert a._crossing("TICK") is True, \
+        "the next look must cross instead of requoting the dead queue"
+
+
+def test_a_filled_kalshi_maker_is_not_forced_to_cross(tmp_path):
+    """A fill proves the queue DOES reach us there — keep quoting maker."""
+    from edge.execution.executor import reap_kalshi_makers
+    from edge.ledger.service import Ledger
+
+    import time as _t
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    led.record_fill(fill_uid="f1", venue="kalshi", market_key="kalshi:TICK",
+                    side="BUY", qty=4, price=0.50, ts=_t.time(),
+                    mode="LIVE_BETA")
+    led.set_state("kalshi_order:o1", {"market_key": "kalshi:TICK",
+                                      "event_key": "ev1",
+                                      "ts": _t.time() - 2000})
+    a = KalshiAdapter()
+    out = reap_kalshi_makers(led, adapter=a)
+    assert out["filled"] == 1
+    assert a._crossing("TICK") is False

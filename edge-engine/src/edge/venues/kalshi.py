@@ -28,15 +28,25 @@ BASE = os.environ.get("EDGE_KALSHI_BASE", "https://api.elections.kalshi.com/trad
 # series are distinct on Kalshi), env-overridable:
 #   EDGE_KALSHI_SERIES="nba:KXNBAGAME+KXNBASPREAD,epl:KXEPLGAME"
 _DEFAULT_SERIES = {
-    "nba": "KXNBAGAME", "wnba": "KXWNBAGAME", "epl": "KXEPLGAME",
-    "nhl": "KXNHLGAME", "nfl": "KXNFLGAME",
+    # Spread/total series added 2026-08-04: the strategy blocks MONEYLINE on
+    # these leagues (category_blocks), so a *GAME-only map made the Kalshi
+    # edge surface zero by construction. Tickers follow the venue's
+    # {series}SPREAD / {series}TOTAL pattern; a wrong one fails loudly as a
+    # named census entry ({series}_http: 404), never silently, and the
+    # untagged_spread / untagged_total identity gates refuse any outcome
+    # that lost its line.
+    "nba": "KXNBAGAME+KXNBASPREAD+KXNBATOTAL",
+    "wnba": "KXWNBAGAME+KXWNBASPREAD+KXWNBATOTAL",
+    "epl": "KXEPLGAME+KXEPLSPREAD+KXEPLTOTAL",
+    "nhl": "KXNHLGAME+KXNHLSPREAD+KXNHLTOTAL",
+    "nfl": "KXNFLGAME+KXNFLSPREAD+KXNFLTOTAL",
     # MLB added 2026-08-04: in August it is the only deep sport in season
     # (NBA/NHL are dark, NFL is preseason, EPL starts mid-month). Without
     # it the Kalshi surface is WNBA-only and cross-venue arbitrage has
     # almost nothing to scan. MLB stays league-blocked for the EDGE
     # strategy (measured flat) — but arbitrage is model-free arithmetic
     # and the blocklist does not apply to it.
-    "mlb": "KXMLBGAME",
+    "mlb": "KXMLBGAME+KXMLBSPREAD+KXMLBTOTAL",
     # Tennis (census 2026-08-04): KXWTACHALLENGERMATCH verified live with
     # full player names as outcomes. The MATCH-winner series for the main
     # tours are listed tentatively — a wrong ticker fails as a named
@@ -72,6 +82,9 @@ class KalshiAdapter(VenueAdapter):
         # inputs. Surfaced in telemetry so thinness stays measurable.
         self.book_quiet: dict[str, int] = {}
         self.last_census: dict = {}
+        # Markets whose maker quote expired unfilled: cross for a cool-off
+        # (mirrors PMUS mark_force_taker; see reap_kalshi_makers).
+        self._force_taker: dict[str, float] = {}   # ticker -> cross-until ts
 
     def _book_err(self, cause: str) -> None:
         self.book_errors[cause] = self.book_errors.get(cause, 0) + 1
@@ -353,23 +366,56 @@ class KalshiAdapter(VenueAdapter):
         if not book.asks:
             return 0.0, True
         ask = round(book.asks[0].price, 2)
+        if self._crossing(book.outcome_id):
+            return ask, True
         bid = round(book.bids[0].price, 2) if book.bids else 0.0
         px = round(max(ask - 0.01, bid), 2)
         if px <= 0 or px >= ask:
             return ask, True
         return px, False
 
+    def mark_force_taker(self, market_ticker: str) -> None:
+        """Cross on this market for a while — its queue didn't come to us.
+
+        A reaped unfilled maker (reap_kalshi_makers) proves the queue never
+        reached us; without this the next look requotes maker into the same
+        dead queue forever and the taker fallback stays dead code."""
+        self._force_taker[market_ticker] = time.time() + float(
+            os.environ.get("EDGE_KALSHI_FORCE_TAKER_S", "600"))
+
+    def _crossing(self, market_ticker: str) -> bool:
+        # getattr: tests build adapters via __new__ without __init__.
+        until = getattr(self, "_force_taker", {}).get(market_ticker)
+        if until is None:
+            return False
+        if time.time() >= until:      # cool-off elapsed: try resting again
+            self._force_taker.pop(market_ticker, None)
+            return False
+        return True
+
     def plan_maker_order(self, limit_price: float, best_ask: float,
-                         edge: float, threshold: float) -> tuple[float, bool] | None:
+                         edge: float, threshold: float,
+                         market_ticker: str | None = None,
+                         edge_is_fee_net: bool = False) -> tuple[float, bool] | None:
         """Maker-first pricing (pure; unit-tested):
         Post at our limit BELOW the ask -> rests as maker, fee-free.
         Cross the ask ONLY if edge net of the taker fee still clears the
-        threshold. Returns (price, is_taker) or None for no order."""
+        threshold — or if the market is marked force-taker, because a maker
+        quote already expired unfilled there. Returns (price, is_taker) or
+        None for no order.
+
+        edge_is_fee_net: the caller already judged the threshold at a taker
+        entry, so the taker fee is inside `edge` (plan_entry returned
+        taker=True and strategy_filter subtracted taker_fee). Deducting it
+        again here charged every forced cross the fee TWICE — threshold plus
+        2x fee (audit 2026-08-05)."""
         tick = 0.01
-        maker_px = round(min(limit_price, best_ask - tick), 2)
-        if maker_px >= 0.01 and maker_px < best_ask:
-            return maker_px, False
-        if edge - self.taker_fee(best_ask) >= threshold:
+        if market_ticker is None or not self._crossing(market_ticker):
+            maker_px = round(min(limit_price, best_ask - tick), 2)
+            if maker_px >= 0.01 and maker_px < best_ask:
+                return maker_px, False
+        net = edge if edge_is_fee_net else edge - self.taker_fee(best_ask)
+        if net >= threshold:
             return round(best_ask, 2), True
         return None
 

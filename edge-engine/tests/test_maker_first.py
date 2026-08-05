@@ -219,6 +219,56 @@ def test_paper_fill_uses_the_planned_entry_price(tmp_path):
     assert rec["entry_taker"] is False and rec["ask_price"] == 0.50
 
 
+# ── taker FOK: quantization + thin-book depth clamp ─────────────────────
+
+def _exec_taker(ledger, adapter, *, size_usd=2.0, ask_size=500,
+                entry_price=0.70, edge=0.02, threshold=0.02,
+                max_fill_usd=None):
+    return execute(adapter=adapter, ledger=ledger, mode="LIVE_BETA",
+                   mkey=market_key("polymarket-us", "slug-x"), league="nba",
+                   ask_price=entry_price, ask_size=ask_size,
+                   size_usd=size_usd, edge=edge, threshold=threshold,
+                   decision={}, ts=1000.0, entry_price=entry_price,
+                   taker=True, max_fill_usd=max_fill_usd)
+
+
+def _filled_orders(price="0.70", shares="3"):
+    return _FakeOrders({"id": "o2", "executions": [
+        {"order": {"state": "ORDER_STATE_FILLED"},
+         "type": "EXECUTION_TYPE_FILL",
+         "lastPx": {"value": price}, "lastShares": shares}]})
+
+
+def test_fok_qty_rounds_up_toward_the_cap(tmp_path):
+    """$2 at a 70c limit floored to 2 contracts — $1.40 deployed of an
+    approved $2. The third contract ($2.10) fits under the $3 per-fill
+    ceiling, so it is taken."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    a = _wire(_adapter(), _filled_orders())
+    r = _exec_taker(led, a, max_fill_usd=3.0)
+    assert r["placed"]
+    assert a._auth.orders.sent[0]["quantity"] == 3
+
+
+def test_fok_clamps_to_displayed_depth_instead_of_dying(tmp_path):
+    """FOK dies whole: a book showing 2 contracts kills a 4-contract order
+    entirely. Clamp to what the book shows and fill that."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    a = _wire(_adapter(), _filled_orders(price="0.50", shares="2"))
+    r = _exec_taker(led, a, entry_price=0.50, ask_size=2, max_fill_usd=3.0)
+    assert r["placed"]
+    assert a._auth.orders.sent[0]["quantity"] == 2
+
+
+def test_a_sub_contract_book_is_refused_not_sent(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    orders = _filled_orders()
+    a = _wire(_adapter(), orders)
+    r = _exec_taker(led, a, entry_price=0.50, ask_size=0.4)
+    assert not r["placed"] and r["status"] == "taker_no_depth"
+    assert orders.sent == []
+
+
 # ── reconciliation ──────────────────────────────────────────────────────
 
 class _TradeAdapter:

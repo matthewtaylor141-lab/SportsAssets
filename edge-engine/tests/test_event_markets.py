@@ -188,16 +188,67 @@ def test_props_and_segments_share_one_request():
 
 
 def test_a_422_drops_only_what_the_provider_named():
-    """Losing props because a SEGMENT key is unsupported would throw away
-    the larger half of the universe for an unrelated reason."""
+    """Per KEY, not per class: one refused key must not take the working
+    markets down with it — neither the props (the larger half) nor the
+    sibling segments (audit 2026-08-05: a refused quarter key killed the
+    working h1/f5 for the whole sport)."""
     def handler(url, p):
         return _Resp({"message": "Markets not supported by this endpoint: "
                                  "h2h_1st_5_innings"}, status=422)
 
     c = _client(handler)
     c._enrich_segments("baseball_mlb", [_ev()], time.time())
-    assert "baseball_mlb" in c._no_segments
+    assert c._refused_markets["baseball_mlb"] == {"h2h_1st_5_innings"}
+    assert "baseball_mlb" not in c._no_segments  # sibling segments survive
     assert "baseball_mlb" not in c._no_props     # props survive
+    # The next request retries with the remainder, minus the named key.
+    c._enrich_segments("baseball_mlb", [_ev()], time.time())
+    asked = c.calls[1][1]
+    assert "h2h_1st_5_innings" not in asked
+    assert "spreads_1st_5_innings" in asked      # sibling still requested
+    assert "pitcher_strikeouts" in asked         # props still requested
+
+
+def test_only_when_every_segment_key_is_refused_does_the_class_shut_off():
+    def handler(url, p):
+        return _Resp({"message": "Markets not supported by this endpoint: "
+                                 "h2h_1st_5_innings, spreads_1st_5_innings, "
+                                 "totals_1st_5_innings"}, status=422)
+
+    c = _client(handler)
+    c._enrich_segments("baseball_mlb", [_ev()], time.time())
+    assert "baseball_mlb" in c._no_segments
+    assert "baseball_mlb" not in c._no_props
+
+
+def test_a_surviving_segment_still_prices_after_a_named_422():
+    """The full loop: cycle 1 gets a 422 naming one quarter key; cycle 2
+    must still fetch and absorb the h1 lines the provider DOES carry."""
+    state = {"n": 0}
+
+    def handler(url, p):
+        state["n"] += 1
+        if state["n"] == 1:
+            return _Resp({"message": "Markets not supported by this "
+                                     "endpoint: totals_q3"}, status=422)
+        return _Resp({"bookmakers": [{"key": "pinnacle", "markets": [
+            {"key": "totals_h1",
+             "outcomes": [{"name": "Over", "price": 1.95, "point": 110.5},
+                          {"name": "Under", "price": 1.95, "point": 110.5}]},
+        ]}]})
+
+    c = _client(handler)
+    ev = FeedEvent(sport_key="basketball_nba", league_code="nba",
+                   home="Lakers", away="Celtics",
+                   commence_ts=time.time() + 3600,
+                   h2h={"Lakers": 2.0, "Celtics": 2.0}, event_id="e7",
+                   fetched_at=time.time())
+    assert c._enrich_segments("basketball_nba", [ev], time.time()) == 0
+    assert c._refused_markets["basketball_nba"] == {"totals_q3"}
+    assert c._enrich_segments("basketball_nba", [ev], time.time()) == 1
+    assert ev.segments["h1"]["totals"]["Over 110.5"] == 1.95
+    assert "totals_q3" not in c.calls[1][1]
+    assert "totals_h1" in c.calls[1][1]
 
 
 def test_props_can_be_switched_off_independently(monkeypatch):
@@ -247,3 +298,51 @@ def test_a_prop_quote_supplies_the_anchor():
     ev.anchors = 0
     c._enrich_segments("baseball_mlb", [ev], time.time())
     assert ev.anchors == 1
+
+
+# ── segment coverage: request what SEGMENT_KEYS can already parse ────────
+
+def test_every_requested_segment_market_is_parseable():
+    """A requested key with no SEGMENT_KEYS entry is silently dropped by
+    _absorb; a parseable key never requested can only ever refuse
+    no_sharp_quote_segment_*. The two tables stay pinned together."""
+    for family, keys in TheOddsAPIClient.SEGMENT_MARKETS.items():
+        for k in keys:
+            assert k in TheOddsAPIClient.SEGMENT_KEYS, (family, k)
+
+
+def test_quarters_and_second_halves_are_requested_not_just_h1():
+    """SEGMENT_KEYS mapped q1 and slug parsing handles q1-q4/h2/p1-p3, but
+    only h1 (p1 for hockey) was ever REQUESTED — so every venue quarter or
+    second-half line refused no_sharp_quote_segment_* forever."""
+    for family in ("basketball", "americanfootball"):
+        req = set(TheOddsAPIClient.SEGMENT_MARKETS[family])
+        for seg in ("q1", "q2", "q3", "q4", "h1", "h2"):
+            assert {f"h2h_{seg}", f"spreads_{seg}", f"totals_{seg}"} <= req, \
+                (family, seg)
+    hockey = set(TheOddsAPIClient.SEGMENT_MARKETS["icehockey"])
+    for seg in ("p1", "p2", "p3"):
+        assert {f"h2h_{seg}", f"totals_{seg}"} <= hockey, seg
+    soccer = set(TheOddsAPIClient.SEGMENT_MARKETS["soccer"])
+    assert {"h2h_h2", "totals_h2"} <= soccer
+
+
+def test_quarter_quotes_land_under_their_own_segment():
+    q1 = {"bookmakers": [{"key": "pinnacle", "markets": [
+        {"key": "totals_q1",
+         "outcomes": [{"name": "Over", "price": 1.95, "point": 28.5},
+                      {"name": "Under", "price": 1.95, "point": 28.5}]},
+        {"key": "spreads_h2",
+         "outcomes": [{"name": "Lakers", "price": 1.90, "point": -2.5},
+                      {"name": "Celtics", "price": 1.90, "point": 2.5}]}]}]}
+    c = _client(lambda url, p: _Resp(q1))
+    ev = FeedEvent(sport_key="basketball_nba", league_code="nba",
+                   home="Lakers", away="Celtics",
+                   commence_ts=time.time() + 3600,
+                   h2h={"Lakers": 2.0, "Celtics": 2.0}, event_id="e9",
+                   fetched_at=time.time())
+    assert c._enrich_segments("basketball_nba", [ev], time.time()) == 1
+    assert ev.segments["q1"]["totals"]["Over 28.5"] == 1.95
+    assert ev.segments["h2"]["spreads"]["Lakers -2.5"] == 1.90
+    # ...and never under the full-game or h1 buckets.
+    assert set(ev.segments) == {"q1", "h2"}

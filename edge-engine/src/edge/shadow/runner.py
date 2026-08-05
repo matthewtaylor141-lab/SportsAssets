@@ -999,7 +999,12 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                              threshold=verdict.threshold, decision=decision,
                              ts=time.time(), entry_price=entry_px,
                              taker=it["taker"], event_key=claim,
-                             category=it["drift_cat"])
+                             category=it["drift_cat"],
+                             # The BINDING ceiling from this approve() — not
+                             # per_fill_max, which would let the contract
+                             # round-up breach a tighter market/event/day
+                             # room (audit 2026-08-05).
+                             max_fill_usd=risk.last_fill_ceiling)
             if result["placed"]:
                 ledger.record_entry_fair(mkey, round(entry_px, 4),
                                          round(it["fair"], 4),
@@ -2228,7 +2233,8 @@ def _main_impl() -> None:
                     if risk.is_live:
                         funnel["kalshi_fill_sync"] = sync_kalshi_fills(a, ledger, risk.mode)
                         from edge.execution.executor import reap_kalshi_makers
-                        funnel["kalshi_reap"] = reap_kalshi_makers(ledger)
+                        funnel["kalshi_reap"] = reap_kalshi_makers(ledger,
+                                                                   adapter=a)
                 elif a.name == "polymarket-us":
                         # Order matters, and getting it wrong cost us four
                         # runaway positions on 2026-08-02.

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -295,6 +296,10 @@ class TheOddsAPIClient(OddsFeed):
         self._no_alt_lines: set[str] = set()
         # sports whose partial-game markets the provider rejects (422)
         self._no_segments: set[str] = set()
+        # sport_key -> individual market keys the provider 422-named as
+        # unsupported. Per-KEY, not per-sport: one refused quarter key must
+        # not take the working h1/f5 markets down with it.
+        self._refused_markets: dict[str, set[str]] = {}
 
     def quota(self) -> dict:
         q = dict(self._quota)
@@ -422,10 +427,24 @@ class TheOddsAPIClient(OddsFeed):
     SEGMENT_MARKETS = {
         "baseball": ["h2h_1st_5_innings", "spreads_1st_5_innings",
                      "totals_1st_5_innings"],
-        "soccer": ["h2h_h1", "totals_h1"],
-        "basketball": ["h2h_h1", "spreads_h1", "totals_h1"],
-        "americanfootball": ["h2h_h1", "spreads_h1", "totals_h1"],
-        "icehockey": ["h2h_p1", "totals_p1"],
+        "soccer": ["h2h_h1", "totals_h1", "h2h_h2", "totals_h2"],
+        # Quarters and second halves were never REQUESTED though the venues
+        # list them and SEGMENT_KEYS/slug parsing already handle them — every
+        # such market could only ever refuse no_sharp_quote_segment_*.
+        "basketball": ["h2h_h1", "spreads_h1", "totals_h1",
+                       "h2h_h2", "spreads_h2", "totals_h2",
+                       "h2h_q1", "spreads_q1", "totals_q1",
+                       "h2h_q2", "spreads_q2", "totals_q2",
+                       "h2h_q3", "spreads_q3", "totals_q3",
+                       "h2h_q4", "spreads_q4", "totals_q4"],
+        "americanfootball": ["h2h_h1", "spreads_h1", "totals_h1",
+                             "h2h_h2", "spreads_h2", "totals_h2",
+                             "h2h_q1", "spreads_q1", "totals_q1",
+                             "h2h_q2", "spreads_q2", "totals_q2",
+                             "h2h_q3", "spreads_q3", "totals_q3",
+                             "h2h_q4", "spreads_q4", "totals_q4"],
+        "icehockey": ["h2h_p1", "totals_p1", "h2h_p2", "totals_p2",
+                      "h2h_p3", "totals_p3"],
     }
     # provider market key -> (segment, bucket)
     SEGMENT_KEYS = {
@@ -434,9 +453,19 @@ class TheOddsAPIClient(OddsFeed):
         "totals_1st_5_innings": ("f5", "totals"),
         "h2h_h1": ("h1", "h2h"), "spreads_h1": ("h1", "spreads"),
         "totals_h1": ("h1", "totals"),
+        "h2h_h2": ("h2", "h2h"), "spreads_h2": ("h2", "spreads"),
+        "totals_h2": ("h2", "totals"),
         "h2h_p1": ("p1", "h2h"), "totals_p1": ("p1", "totals"),
+        "h2h_p2": ("p2", "h2h"), "totals_p2": ("p2", "totals"),
+        "h2h_p3": ("p3", "h2h"), "totals_p3": ("p3", "totals"),
         "h2h_q1": ("q1", "h2h"), "spreads_q1": ("q1", "spreads"),
         "totals_q1": ("q1", "totals"),
+        "h2h_q2": ("q2", "h2h"), "spreads_q2": ("q2", "spreads"),
+        "totals_q2": ("q2", "totals"),
+        "h2h_q3": ("q3", "h2h"), "spreads_q3": ("q3", "spreads"),
+        "totals_q3": ("q3", "totals"),
+        "h2h_q4": ("q4", "h2h"), "spreads_q4": ("q4", "spreads"),
+        "totals_q4": ("q4", "totals"),
     }
 
     def _segment_markets(self, sport_key: str) -> list[str]:
@@ -637,6 +666,15 @@ class TheOddsAPIClient(OddsFeed):
         if sport_key in self._no_segments:
             seg_markets = []
         prop_markets = self._prop_markets(sport_key)
+        # Keys the provider has already 422-named for this sport are dropped
+        # INDIVIDUALLY — the rest of the request keeps working. getattr:
+        # tests build clients via __new__ without __init__.
+        if getattr(self, "_refused_markets", None) is None:
+            self._refused_markets = {}
+        refused = self._refused_markets.get(sport_key, set())
+        if refused:
+            seg_markets = [m for m in seg_markets if m not in refused]
+            prop_markets = [m for m in prop_markets if m not in refused]
         wanted = seg_markets + prop_markets
         if not wanted:
             return 0
@@ -672,18 +710,32 @@ class TheOddsAPIClient(OddsFeed):
                     self._track_response(r)
                     if r.status_code == 422:
                         # The provider does not carry some of these for this
-                        # sport, and names which. Drop only what it named:
-                        # losing props because a segment key is unsupported
-                        # (or the reverse) would throw away the larger half.
+                        # sport, and names which. Drop ONLY the named keys —
+                        # per key, not per class: one unsupported quarter key
+                        # must not kill the working h1/f5 segments for the
+                        # sport (audit 2026-08-05), and losing props because
+                        # a segment key is refused (or the reverse) would
+                        # throw away the larger half. The next call retries
+                        # with the surviving remainder.
                         named = (r.json() or {}).get("message", "")
-                        dropped = False
-                        if any(m in named for m in seg_markets):
-                            self._no_segments.add(sport_key)
-                            dropped = True
-                        if any(m in named for m in prop_markets):
-                            self._no_props.add(sport_key)
-                            dropped = True
-                        if not dropped:
+                        # Word-bounded: 'pitcher_strikeouts' must not match
+                        # inside 'pitcher_strikeouts_alternate'.
+                        bad = {m for m in wanted
+                               if re.search(rf"\b{re.escape(m)}\b", named)}
+                        if bad:
+                            self._refused_markets.setdefault(
+                                sport_key, set()).update(bad)
+                            log.info("segment/prop keys refused for %s: %s",
+                                     sport_key, sorted(bad))
+                            # Only when NOTHING of a class survives does the
+                            # whole class shut off for the sport.
+                            if seg_markets and not set(seg_markets) - bad:
+                                self._no_segments.add(sport_key)
+                            if prop_markets and not set(prop_markets) - bad:
+                                self._no_props.add(sport_key)
+                        else:
+                            # Message named nothing we sent: shut off rather
+                            # than 422-loop every event of every cycle.
                             self._no_segments.add(sport_key)
                             self._no_props.add(sport_key)
                         return enriched

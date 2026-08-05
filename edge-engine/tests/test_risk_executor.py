@@ -205,6 +205,227 @@ def test_cross_only_when_net_of_fee_clears():
     assert plan2 is None                            # net 0.0198 — fee eats it
 
 
+# ── contract quantization: round toward the cap, never past it ─────────
+
+def _live_kalshi(monkeypatch_place=None):
+    a = KalshiAdapter()
+    a.sent = {}
+
+    def _po(ticker, price, count, client_order_id, taker):
+        a.sent.update(ticker=ticker, price=price, count=count, taker=taker)
+        return {"ok": True, "order_id": "o1", "status": "resting",
+                "price": price, "count": 0, "taker": taker}
+
+    a.place_order = _po
+    return a
+
+
+def test_quantize_rounds_up_only_within_the_cap():
+    from edge.execution.executor import quantize_contracts
+
+    assert quantize_contracts(2.0, 0.70, 3.0) == 3   # floor lost 60c: round up
+    assert quantize_contracts(2.0, 0.70, 2.0) == 2   # extra would breach: floor
+    assert quantize_contracts(2.0, 0.50, 3.0) == 4   # exact: no rounding
+    assert quantize_contracts(2.0, 0.03, 3.0) == 67  # 66 leaves 2c behind
+    for size, px, cap in ((2.0, 0.7, 3.0), (1.0, 0.99, 3.0), (3.0, 0.13, 3.0)):
+        assert quantize_contracts(size, px, cap) * px <= cap + 1e-9
+
+
+def test_quantize_rounds_to_nearest_never_inflating_a_tight_grant():
+    """Rounding UP whenever the per-fill max allowed it turned small grants
+    into bigger tickets (audit 2026-08-05): a $1 probation half-ticket at
+    70c deployed $1.40 (+40%) and a $1 grant at 99c doubled to $1.98. The
+    extra contract is taken only when it lands CLOSER to the approved size
+    than flooring does."""
+    from edge.execution.executor import quantize_contracts
+
+    assert quantize_contracts(1.0, 0.70, 3.0) == 1   # $0.70, not $1.40
+    assert quantize_contracts(1.0, 0.99, 3.0) == 1   # $0.99, not $1.98
+    assert quantize_contracts(1.4, 0.60, 3.0) == 2   # $1.20, not $1.80
+    # Sent notional never strays further from the grant than flooring would.
+    for size in (1.0, 1.4, 2.0, 2.5, 3.0):
+        for px in (0.03, 0.13, 0.31, 0.50, 0.70, 0.99):
+            n = quantize_contracts(size, px, 1000.0)
+            assert abs(n * px - size) <= (size - int(size / px) * px) + 1e-9
+
+
+def test_kalshi_live_count_rounds_up_toward_the_per_fill_cap(tmp_path):
+    """A $2 grant at a 70c maker price floored to 2 contracts — $1.40
+    deployed of an approved $2. The extra contract fits under the $3
+    per-fill ceiling approve() enforces, so it is taken."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    a = _live_kalshi()
+    r = execute(adapter=a, ledger=led, mode="LIVE_BETA", mkey="kalshi:T",
+                league="nba", ask_price=0.71, ask_size=100, size_usd=2.0,
+                edge=0.05, threshold=0.02, decision={}, ts=1.0,
+                max_fill_usd=3.0)
+    assert r["placed"]
+    assert (a.sent["price"], a.sent["taker"]) == (0.70, False)
+    assert a.sent["count"] == 3
+    assert a.sent["count"] * a.sent["price"] <= 3.0 + 1e-9
+
+
+def test_without_a_cap_the_count_still_never_exceeds_the_grant(tmp_path):
+    """Callers that pass no ceiling keep the old floor behaviour — rounding
+    up must never be a silent cap breach."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    a = _live_kalshi()
+    execute(adapter=a, ledger=led, mode="LIVE_BETA", mkey="kalshi:T",
+            league="nba", ask_price=0.71, ask_size=100, size_usd=2.0,
+            edge=0.05, threshold=0.02, decision={}, ts=1.0)
+    assert a.sent["count"] == 2                      # $1.40 <= the $2 grant
+
+
+def test_per_fill_cap_resolves_the_orders_mode(rig):
+    _, risk = rig
+    assert risk.per_fill_cap() == risk.caps.per_fill_max == 25
+    assert risk.per_fill_cap("LIVE") == 10000
+
+
+def _live_fill(ledger, venue, mkey, usd, price=0.50, ts=None):
+    ledger.record_fill(
+        fill_uid=f"{mkey}-{usd}-{random.random()}", venue=venue,
+        market_key=mkey, side="BUY", qty=usd / price, price=price,
+        ts=ts or time.time(), mode="LIVE_BETA")
+
+
+def test_the_ceiling_is_the_binding_room_not_the_per_fill_max(rig):
+    """Audit 2026-08-05: rounding toward per_fill_max let the extra contract
+    breach whichever TIGHTER room actually clamped the grant. approve()
+    must surface the binding ceiling for quantization to round toward."""
+    ledger, risk = rig
+    now = time.time()
+    # Exhaust the kalshi half of the live-beta day budget to $2 of room.
+    _live_fill(ledger, "kalshi", "kalshi:warm", 123.0, ts=now)
+    approved, _why = risk.approve("kalshi", "kalshi:mT", "ev-T", 25,
+                                  now=now, mode="LIVE_BETA")
+    assert approved == pytest.approx(2.0)          # day room binds, not $25
+    assert risk.last_fill_ceiling == pytest.approx(2.0)
+
+
+def test_a_day_room_bound_grant_floors_instead_of_breaching(rig):
+    """The audit repro: $2.00 of venue-day room, approved $2.00, price 70c.
+    3 contracts = $2.10 breaches the room on fill — the executor must send
+    2 ($1.40), because the ceiling it rounds toward is the binding room."""
+    ledger, risk = rig
+    now = time.time()
+    _live_fill(ledger, "kalshi", "kalshi:warm", 123.0, ts=now)
+    approved, _ = risk.approve("kalshi", "kalshi:mT", "ev-T", 25,
+                               now=now, mode="LIVE_BETA")
+    a = _live_kalshi()
+    r = execute(adapter=a, ledger=ledger, mode="LIVE_BETA", mkey="kalshi:mT",
+                league="nba", ask_price=0.71, ask_size=100,
+                size_usd=approved, edge=0.05, threshold=0.02, decision={},
+                ts=now, max_fill_usd=risk.last_fill_ceiling)
+    assert r["placed"]
+    assert (a.sent["price"], a.sent["count"]) == (0.70, 2)   # $1.40, not $2.10
+
+
+def test_property_sent_notional_never_exceeds_any_room(tmp_path):
+    """The old property test asserted on approve() output alone, so the
+    execute()-level contract round-up escaped the very invariant it claimed
+    (audit 2026-08-05). This one drives the EXECUTOR with the ceiling the
+    runner passes and asserts SENT notional (count * px) against every
+    room at approve time."""
+    cfg = {**RISK_CFG, "profiles": {"live_beta": {
+        **RISK_CFG["profiles"]["live_beta"],
+        "per_event_exposure_usd": 30,
+    }}}
+    ledger = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    risk = RiskManager(ledger, cfg)
+    caps = caps_for_mode(cfg, "LIVE_BETA", None)
+    rng = random.Random(7)
+    now = time.time()
+    sent_by_market: dict[str, float] = {}
+    sent_by_event: dict[str, float] = {}
+    total = 0.0
+    placed = 0
+    for _ in range(1500):
+        event = f"ev{rng.randrange(120)}"
+        mkey = f"kalshi:m{event}-{rng.randrange(3)}"
+        requested = rng.choice([1.5, 2, 5, 10, 25, 100])
+        approved, _why = risk.approve("kalshi", mkey, event, requested,
+                                      now=now, mode="LIVE_BETA")
+        if approved <= 0:
+            continue
+        px = rng.choice([0.03, 0.13, 0.31, 0.50, 0.70, 0.97])
+        a = _live_kalshi()
+        r = execute(adapter=a, ledger=ledger, mode="LIVE_BETA", mkey=mkey,
+                    league="nba", ask_price=round(px + 0.01, 2),
+                    ask_size=10_000, size_usd=approved, edge=0.20,
+                    threshold=0.02, decision={}, ts=now,
+                    max_fill_usd=risk.last_fill_ceiling)
+        if not r["placed"]:
+            continue
+        placed += 1
+        notional = a.sent["count"] * a.sent["price"]
+        assert notional <= caps.per_fill_max + 0.01
+        assert notional <= risk.last_fill_ceiling + 0.01
+        # The venue fills what was sent; the rooms must already have had
+        # room for it (0.01 tolerance: the ceiling is rounded to cents).
+        ledger.record_fill(
+            fill_uid=f"{mkey}-{placed}", venue="kalshi", market_key=mkey,
+            side="BUY", qty=a.sent["count"], price=a.sent["price"], ts=now,
+            mode="LIVE_BETA", decision={"event_key": event})
+        sent_by_market[mkey] = sent_by_market.get(mkey, 0) + notional
+        sent_by_event[event] = sent_by_event.get(event, 0) + notional
+        total += notional
+        assert sent_by_market[mkey] <= caps.per_market + 0.01
+        assert sent_by_event[event] <= caps.per_event + 0.01
+        assert total <= caps.per_day * caps.venue_bankroll_split + 0.01
+    assert placed >= 5                       # the test actually sent orders
+    assert total > 100                       # ...and pressed on the day room
+
+
+# ── kalshi force-taker wiring through the executor ─────────────────────
+
+def test_a_forced_kalshi_market_crosses_through_the_executor(tmp_path):
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    a = _live_kalshi()
+    a.mark_force_taker("T")
+    r = execute(adapter=a, ledger=led, mode="LIVE_BETA", mkey="kalshi:T",
+                league="nba", ask_price=0.50, ask_size=100, size_usd=2.0,
+                edge=0.05, threshold=0.02, decision={}, ts=1.0, taker=True,
+                max_fill_usd=3.0)
+    # plan_entry crossed, so 0.05 is already net of the 0.0175 fee: cross.
+    assert r["placed"]
+    assert (a.sent["price"], a.sent["taker"]) == (0.50, True)
+
+
+def test_a_forced_cross_is_not_charged_the_taker_fee_twice(tmp_path):
+    """taker=True means strategy_filter ALREADY subtracted the taker fee
+    from the edge (plan_entry returned a crossing price). Re-deducting it in
+    plan_maker_order demanded threshold + 2x fee of every forced cross —
+    edges the strategy priced as winners were silently dropped (audit
+    2026-08-05)."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    a = _live_kalshi()
+    a.mark_force_taker("T")
+    # Fee-net edge 0.03 clears the 0.02 bar; a second 0.0175 deduction
+    # would wrongly kill it.
+    r = execute(adapter=a, ledger=led, mode="LIVE_BETA", mkey="kalshi:T",
+                league="nba", ask_price=0.50, ask_size=100, size_usd=2.0,
+                edge=0.03, threshold=0.02, decision={}, ts=1.0, taker=True,
+                max_fill_usd=3.0)
+    assert r["placed"]
+    assert (a.sent["price"], a.sent["taker"]) == (0.50, True)
+
+
+def test_a_forced_market_without_fee_room_places_nothing(tmp_path):
+    """The entry was planned MAKER (gross edge), so the cross fallback must
+    still deduct the taker fee before judging the bar."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    a = _live_kalshi()
+    a.mark_force_taker("T")
+    r = execute(adapter=a, ledger=led, mode="LIVE_BETA", mkey="kalshi:T",
+                league="nba", ask_price=0.50, ask_size=100, size_usd=2.0,
+                edge=0.03, threshold=0.02, decision={}, ts=1.0, taker=False,
+                max_fill_usd=3.0)
+    # fee at 0.50 = 0.0175; 0.03 - 0.0175 = 0.0125 < 0.02: no order.
+    assert not r["placed"] and r["status"] == "no_maker_no_fee_room"
+    assert a.sent == {}
+
+
 # ── executor: paper path ───────────────────────────────────────────────
 
 class _StubAdapter:

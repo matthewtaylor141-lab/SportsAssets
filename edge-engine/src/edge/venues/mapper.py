@@ -113,12 +113,26 @@ class MarketMatch:
         return self.score >= TRADEABLE_SCORE
 
 
+# Series words a venue appends to the matchup itself ("Eagles vs Cowboys
+# Spread"). Left in place they dilute the away team's tokens below MIN_SCORE
+# against the feed's full names — the market discovers but never maps, and
+# the surface stays zero silently (audit 2026-08-05, Kalshi *SPREAD/*TOTAL
+# series).
+_SERIES_QUALIFIER = re.compile(
+    r"\s+(spread|spreads|total|totals|winner|moneyline|money\s*line)\b.*$",
+    re.IGNORECASE)
+
+
 def parse_matchup(title: str) -> tuple[str, str] | None:
     parts = [p.strip() for p in _VS.split(title or "") if p.strip()]
     if len(parts) != 2:
         return None
-    # Trim trailing qualifiers ("Chelsea: winner" etc.)
-    return parts[0], re.split(r"[:—]", parts[1])[0].strip()
+    # Trim trailing qualifiers ("Chelsea: winner", "Cowboys Total" etc.)
+    a = _SERIES_QUALIFIER.sub("", parts[0]).strip()
+    b = _SERIES_QUALIFIER.sub("", re.split(r"[:—]", parts[1])[0]).strip()
+    if not a or not b:
+        return None
+    return a, b
 
 
 def match_events_all(

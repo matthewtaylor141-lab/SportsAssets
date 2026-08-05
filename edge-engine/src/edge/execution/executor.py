@@ -27,6 +27,27 @@ def market_key(venue: str, outcome_id: str) -> str:
     return f"{venue}:{outcome_id}"
 
 
+def quantize_contracts(size_usd: float, px: float, cap_usd: float) -> int:
+    """Integer contracts for an approved dollar size. Flooring silently
+    stripped up to px dollars off every ticket — a $2 ticket at 70c deployed
+    $1.40 (audit 2026-08-04) — so round to the NEAREST count instead: take
+    the extra contract only when the overshoot past size_usd is no larger
+    than the shortfall flooring would leave, AND it still fits under cap_usd
+    (the BINDING ceiling approve() computed — per_fill_max clamped by every
+    market/event/day room). Rounding up whenever the per-fill max allowed it
+    inflated tight grants — a $1 probation half-ticket at 70c deployed $1.40
+    and a $1 grant at 99c doubled to $1.98 (audit 2026-08-05)."""
+    if px <= 0:
+        return 0
+    count = int(size_usd / px)
+    shortfall = size_usd - count * px
+    overshoot = (count + 1) * px - size_usd
+    if (shortfall > 1e-9 and overshoot <= shortfall + 1e-9
+            and (count + 1) * px <= cap_usd + 1e-9):
+        count += 1
+    return count
+
+
 def build_decision_record(*, fair: float, edge: float, threshold: float,
                           band: str, book: MarketBook, feed_snapshot: dict,
                           approved_usd: float, guard_reason: str) -> dict:
@@ -44,13 +65,21 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
             ask_price: float, ask_size: float, size_usd: float,
             edge: float, threshold: float, decision: dict,
             ts: float, entry_price: float | None = None, taker: bool = True,
-            event_key: str | None = None, category: str | None = None) -> dict:
+            event_key: str | None = None, category: str | None = None,
+            max_fill_usd: float | None = None) -> dict:
     """Returns {placed, filled_usd, status}. Paper fills always 'fill' up to
     displayed depth (conservative: no fill beyond what the book showed).
 
     entry_price/taker come from the adapter's plan_entry(): when the venue
-    can rest an order, entry_price is inside the spread and taker is False."""
+    can rest an order, entry_price is inside the spread and taker is False.
+    max_fill_usd is the BINDING per-fill ceiling approve() computed
+    (risk.last_fill_ceiling — per_fill_max clamped by every room): contract
+    counts round toward it (never past it) instead of flooring dollars
+    away."""
     entry_price = ask_price if entry_price is None else entry_price
+    # Without an explicit ceiling, round up only within the approved size —
+    # the old floor behaviour, never a cap breach.
+    max_fill_usd = size_usd if max_fill_usd is None else max_fill_usd
     displayed_usd = ask_price * ask_size
     if mode == "PAPER":
         usd = min(size_usd, displayed_usd)
@@ -70,11 +99,20 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
     # ── live paths ──────────────────────────────────────────────────────
     outcome_id = mkey.split(":", 1)[1]
     if adapter.name == "kalshi":
-        plan = adapter.plan_maker_order(ask_price, ask_price, edge, threshold)
+        # Adapters carrying force-taker memory get told which market, so a
+        # reaped-unfilled maker crosses instead of requoting a dead queue —
+        # and whether the fee is ALREADY inside `edge`: when the entry was
+        # planned taker, strategy_filter judged the threshold net of the
+        # taker fee, and re-deducting it here double-charged every forced
+        # cross (audit 2026-08-05).
+        kw = ({"market_ticker": outcome_id, "edge_is_fee_net": taker}
+              if hasattr(adapter, "mark_force_taker") else {})
+        plan = adapter.plan_maker_order(ask_price, ask_price, edge, threshold,
+                                        **kw)
         if plan is None:
             return {"placed": False, "filled_usd": 0.0, "status": "no_maker_no_fee_room"}
         px, taker = plan
-        count = int(size_usd / px)
+        count = quantize_contracts(size_usd, px, max_fill_usd)
         if count < 1:
             return {"placed": False, "filled_usd": 0.0, "status": "sub_contract"}
         result = adapter.place_order(outcome_id, px, count,
@@ -145,7 +183,15 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
         # old behaviour when the book is still.
         slack = max(0.0, float(edge) - float(threshold))
         limit_px = min(round(entry_price + slack, 2), 0.99)
-        qty = int(size_usd / limit_px) or qty
+        qty = quantize_contracts(size_usd, limit_px, max_fill_usd) or qty
+        # FOK dies whole: a book showing 3 contracts kills a 4-contract
+        # order entirely. Clamp to displayed depth so a thin book fills
+        # what it shows at the approved price instead of filling nothing.
+        if ask_size > 0:
+            qty = min(qty, int(ask_size))
+        if qty < 1:
+            return {"placed": False, "filled_usd": 0.0,
+                    "status": "taker_no_depth"}
         # Micro orders skip the preview round-trip (FOK limit already bounds
         # cost); larger sizes keep the venue cost pre-check.
         result = adapter.place_order(outcome_id, limit_px, qty,
@@ -455,7 +501,8 @@ def reap_pmus_makers(adapter, ledger: Ledger, ttl_s: float,
     return out
 
 
-def reap_kalshi_makers(ledger: Ledger, max_age_s: float = 1020.0) -> dict:
+def reap_kalshi_makers(ledger: Ledger, max_age_s: float = 1020.0,
+                       adapter=None) -> dict:
     """Give expired-unfilled Kalshi maker orders their claims back.
 
     Kalshi GTC makers carry a 15-minute expiration_time at the venue, so
@@ -466,6 +513,11 @@ def reap_kalshi_makers(ledger: Ledger, max_age_s: float = 1020.0) -> dict:
     whose market shows no position is released; contexts whose market
     HAS a position filled — the claim stands, only the context is
     cleaned. Runs every cycle from the kalshi maintenance branch.
+
+    An unfilled expiry also marks the market force-taker on the adapter:
+    without that memory the next look requotes maker at the same dead
+    queue forever, and the taker path — which only fires when edge net of
+    the taker fee still clears the threshold — stays dead code.
     """
     out = {"checked": 0, "released": 0, "filled": 0}
     now = time.time()
@@ -484,6 +536,10 @@ def reap_kalshi_makers(ledger: Ledger, max_age_s: float = 1020.0) -> dict:
             ev = ctx.get("event_key")
             if ev and ledger.release_event(ev):
                 out["released"] += 1
+            if adapter is not None and hasattr(adapter, "mark_force_taker"):
+                ticker = mkey.split(":", 1)[1] if ":" in mkey else mkey
+                if ticker:
+                    adapter.mark_force_taker(ticker)
         ledger.clear_state(key)
     return out
 
