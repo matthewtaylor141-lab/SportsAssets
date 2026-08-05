@@ -7,13 +7,29 @@ the same proposition. Same trading rules as the Polymarket sleeve:
 
 - his price + 2% relative tolerance, floored to the cent — we only take
   a Kalshi book whose ask is at/inside that limit;
-- $2 per copy ($3 for RN1, same per-whale map spirit), whole contracts,
-  rounded down;
-- one copy per whale position EVER (ledger claim), day budget for the
-  class (EDGE_KCOPY_DAY_USD, default $200), kill switch EDGE_KCOPY=0;
+- $3 per copy, uniform across whales (owner directive 2026-08-05: ALL
+  copy trades $3 per trade; the per-whale map stays for the day the
+  owner wants divergence back), whole contracts, rounded down;
+- one copy per whale position EVER — and that means ACROSS VENUES, not
+  per venue: identity rows the platform marks pmus_copied (a filled or
+  settled live_orders copy already exists) are skipped here outright
+  (counter skipped_already_copied). Plus the ledger claim, day budget
+  for the class (EDGE_KCOPY_DAY_USD, default $200), kill switch
+  EDGE_KCOPY=0;
 - category "kalshi_copy" so settlement grades this venue's copy edge
   SEPARATELY from Polymarket's — the venues' fill mechanics differ and
   their measured ROI may too.
+
+ROUTING (owner directive 2026-08-05): each whale position gets ONE copy,
+executed at the best-priced venue at placement. The fast PMUS leg — the
+chain listener reacting in seconds at his-price limit — is the PRIMARY;
+this Kalshi leg fires only where Kalshi is the better-priced venue at
+sweep time or PMUS couldn't fill/map the identity. Concretely: before
+placing, the sweep peeks the PMUS ask for the same identity (stream-
+cache-only peek_book, no REST) and skips Kalshi when the PMUS ask beats
+Kalshi's fee-loaded effective price (counter routed_pmus_better). No
+PMUS book, or Kalshi cheaper fee-loaded -> Kalshi places as before
+(fresh gates, collapse floor, cross-game guard all unchanged).
 
 Matching reuses the strict join built for the adds sweep: game key
 (sorted tokens + date) plus the mapper's 0.95 name bar. Tennis works the
@@ -26,14 +42,19 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+# Owner directive 2026-08-05: ALL copy trades $3 per trade, uniform.
+# The per-whale map is kept (RN1 was already $3) for future divergence.
 PER_COPY_USD = {"rn1": 3.00}
-PER_COPY_DEFAULT = 2.00
+PER_COPY_DEFAULT = 3.00
 # A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
 # decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.
 # Copying an old position at today's price is buying fair value minus
@@ -58,8 +79,48 @@ def _limit_for(his_price: float) -> float:
     return round(min(his_price + tol, 0.99), 2)
 
 
+def _pmus_ask(pmus, slug: str, outcome: str) -> float | None:
+    """Best PMUS ask for the whale's side, stream-cache-only. Best effort.
+
+    The whale slug names the game's team codes in away-home order
+    ("mlb-bal-tex-2026-08-04"); PMUS's per-team moneyline slug is the
+    same tokens under the atc grammar with the held side appended
+    ("atc-mlb-bal-tex-2026-08-04-bal"). Resolve his side by scoring the
+    two codes against his outcome name (code_score, two-candidate
+    discrimination with a margin — an inverted side is a bet on the
+    OPPOSITE outcome, so ambiguity fails closed) and peek that slug.
+
+    peek_book is the arbitrage watcher's cache-only read: a miss returns
+    None (and arms the stream for next sweep) — never a REST call, never
+    a mapper pass. Any None here means "no PMUS price visible cheaply",
+    and the caller falls through to Kalshi as before.
+    """
+    peek = getattr(pmus, "peek_book", None)
+    if peek is None:
+        return None
+    from edge.venues.pmus_slug import code_score
+
+    m = _DATE_RE.search(slug or "")
+    if not m:
+        return None
+    head = [t for t in (slug or "")[: m.start()].strip("-").split("-") if t]
+    if len(head) != 3:      # league + exactly two team codes, or give up
+        return None
+    league, codes = head[0], head[1:]
+    scores = sorted(((code_score(c, outcome), c) for c in codes),
+                    reverse=True)
+    if scores[0][0] < 0.8 or scores[0][0] - scores[1][0] < 0.1:
+        return None
+    side = scores[0][1]
+    book = peek(f"atc-{league}-{codes[0]}-{codes[1]}-{m.group(0)}-{side}")
+    if book is None or not book.asks or book.asks[0].size < 1:
+        return None
+    return book.asks[0].price
+
+
 def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
-          day_usd: float = 200.0, max_age_s: float | None = None) -> dict:
+          day_usd: float = 200.0, max_age_s: float | None = None,
+          pmus=None) -> dict:
     """One pass: whale open positions -> Kalshi orders where listed."""
     from edge.shadow.kalshi_guard import (cross_side_cap, note_fill,
                                           open_kalshi_sides)
@@ -93,6 +154,14 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
     now = time.time()
     for row in identities:
         stats["whale_positions"] += 1
+        if row.get("pmus_copied"):
+            # The fast PMUS leg (chain listener, seconds of latency)
+            # already holds a filled copy of this position. One copy per
+            # whale position ACROSS venues (owner directive 2026-08-05)
+            # — Kalshi never duplicates a filled copy.
+            stats["skipped_already_copied"] = \
+                stats.get("skipped_already_copied", 0) + 1
+            continue
         slug = row.get("slug") or ""
         outcome = (row.get("outcome") or "").strip()
         his_price = float(row.get("price") or 0)
@@ -175,6 +244,16 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                                                    0) + 1
             continue
         stats["priced_in_tolerance"] += 1
+        if pmus is not None:
+            # Best-venue-at-placement (owner directive 2026-08-05): if
+            # PMUS is showing a better ask than Kalshi's fee-loaded
+            # effective price, the fast PMUS leg owns this copy — do not
+            # place it here. No visible PMUS book -> Kalshi as before.
+            pask = _pmus_ask(pmus, slug, outcome)
+            if pask is not None and pask < eff:
+                stats["routed_pmus_better"] = \
+                    stats.get("routed_pmus_better", 0) + 1
+                continue
         per = PER_COPY_USD.get((row.get("whale") or "").lower(),
                                PER_COPY_DEFAULT)
         if spent + per > day_usd:

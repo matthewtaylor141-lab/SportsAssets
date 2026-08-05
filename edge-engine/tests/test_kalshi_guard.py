@@ -123,7 +123,7 @@ def test_copy_sweep_completes_a_guaranteed_pair_matched():
     st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
     assert st["copied"] == 1
     assert ka.orders == [("KXMLBGAME-26AUG04BALTEX-BAL", 0.50, 3)], \
-        "pair-matched: 3 contracts, not the $2 default of 4"
+        "pair-matched: 3 contracts, not the $3 default of 6"
 
 
 def test_reaper_releases_expired_unfilled_maker_claims():

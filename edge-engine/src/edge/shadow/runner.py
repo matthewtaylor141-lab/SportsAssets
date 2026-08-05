@@ -2032,8 +2032,12 @@ def _main_impl() -> None:
                             rows = widents(
                                 os.environ.get("EDGE_PLATFORM_API", ""),
                                 os.environ.get("EDGE_INGEST_TOKEN", ""))
+                            # pmus armed alongside kalshi: the sweep
+                            # peeks PMUS asks to route each copy to the
+                            # best-priced venue (directive 2026-08-05).
                             st = kcopy(kalshi=kalshi_a, ledger=ledger,
                                        identities=rows, live=risk.is_live,
+                                       pmus=pmus_a,
                                        day_usd=float(os.environ.get(
                                            "EDGE_KCOPY_DAY_USD", "inf")))
                             _KCOPY_STATS.clear()

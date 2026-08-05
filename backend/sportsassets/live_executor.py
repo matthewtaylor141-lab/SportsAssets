@@ -192,18 +192,18 @@ COPY_MODE = "penny_trial"
 # is naturally bounded by what the source whales actually trade. The env
 # knob remains for the day the owner wants a ceiling back.
 PENNY_TRIAL_DAILY_USD = float(os.environ.get("COPY_DAILY_USD", "inf"))
-# Owner directive 2026-08-04 (revised minutes after the $3 call): $2
-# target per copy — as many whole contracts as $2 buys at the limit
-# (20c -> 10 contracts, 50c -> 4, 97c -> 2), rounded DOWN so a copy
-# never exceeds the budget. Price tolerance unchanged: his price +2%
-# relative, floored to the venue's cent tick; FOK gives same-or-better
-# for free. Grading stays per-whale/per-band; the settled paper cohort
-# behind this sizing read +7.3% ROI on 304 settled.
-PENNY_TRIAL_PER_FILL_USD = 2.00
-# Per-whale override (owner-approved 2026-08-04): RN1's live cohort was
-# outrunning the sleeve (+$17.03 on 58 settled same-day), so his copies
-# clip at $3. Keys are lowercased usernames; anyone absent gets the
-# default. Revisit when either whale's settled cohort flips sign.
+# Owner directive 2026-08-05: ALL copy trades $3 per trade — as many
+# whole contracts as $3 buys at the limit (20c -> 15 contracts,
+# 50c -> 6, 97c -> 3), rounded DOWN so a copy never exceeds the budget.
+# Price tolerance unchanged: his price +2% relative, floored to the
+# venue's cent tick; FOK gives same-or-better for free. Grading stays
+# per-whale/per-band. (History: $2 default set 2026-08-04 on the +7.3%
+# ROI paper cohort; RN1 was raised to $3 the same day on his live
+# cohort, and 2026-08-05 made $3 uniform.)
+PENNY_TRIAL_PER_FILL_USD = 3.00
+# Per-whale override map. RN1's $3 is now the default too; the map stays
+# so per-whale sizing can diverge again the day a settled cohort earns
+# it. Keys are lowercased usernames; anyone absent gets the default.
 PER_FILL_BY_WHALE = {"rn1": 3.00}
 
 

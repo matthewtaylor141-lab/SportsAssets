@@ -267,7 +267,11 @@ async def api_whale_open_identities() -> dict:
                COALESCE(t.market_slug, t.event_slug, '') AS slug,
                t.outcome, t.price::float8 AS price,
                w.username AS whale,
-               extract(epoch FROM t.ts)::float8 AS entered_ts
+               extract(epoch FROM t.ts)::float8 AS entered_ts,
+               EXISTS (SELECT 1 FROM live_orders lo
+                       WHERE lo.asset = t.asset
+                         AND lo.status IN ('filled', 'settled'))
+                   AS pmus_copied
         FROM trades t
         JOIN whales w ON w.id = t.whale_id
         LEFT JOIN markets m ON m.condition_id = t.condition_id
@@ -282,10 +286,14 @@ async def api_whale_open_identities() -> dict:
     # entered_ts travels with each identity so copy consumers can enforce
     # FRESHNESS — copying a days-old position at today's price is buying
     # fair value minus fees, and preferentially the collapsed ones
-    # (audit 2026-08-04).
+    # (audit 2026-08-04). pmus_copied marks positions whose fast PMUS
+    # copy already FILLED (or settled): one copy per whale position
+    # ACROSS venues (owner directive 2026-08-05), so the Kalshi sweep
+    # must skip these rather than duplicate them.
     return {"identities": [{"slug": r["slug"], "outcome": r["outcome"],
                             "price": r["price"], "whale": r["whale"],
-                            "entered_ts": r["entered_ts"]}
+                            "entered_ts": r["entered_ts"],
+                            "pmus_copied": bool(r["pmus_copied"])}
                            for r in rows if r["slug"] and r["outcome"]]}
 
 

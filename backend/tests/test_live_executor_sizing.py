@@ -1,4 +1,6 @@
-"""Per-whale copy sizing: RN1 clips at $3, everyone else at $2."""
+"""Per-whale copy sizing: $3 per trade for EVERYONE (owner directive
+2026-08-05). RN1's map entry stays so per-whale divergence remains a
+one-line change, but it no longer differs from the default."""
 
 from sportsassets.live_executor import per_fill_usd
 
@@ -8,7 +10,7 @@ def test_rn1_clips_at_three_dollars():
     assert per_fill_usd("rn1") == 3.00
 
 
-def test_default_stays_two_dollars():
-    assert per_fill_usd("swisstony") == 2.00
-    assert per_fill_usd(None) == 2.00
-    assert per_fill_usd("someone-new") == 2.00
+def test_default_is_three_dollars():
+    assert per_fill_usd("swisstony") == 3.00
+    assert per_fill_usd(None) == 3.00
+    assert per_fill_usd("someone-new") == 3.00

@@ -1,5 +1,6 @@
-"""The Kalshi copy leg: his price +2%, once per position, day-capped,
-strict name join — and RN1's $3 clip carries over."""
+"""The Kalshi copy leg: his price +2%, once per position (ACROSS venues),
+day-capped, strict name join, $3 per copy uniform (owner directive
+2026-08-05) — and routed to the best-priced venue at placement."""
 
 import tempfile
 import time
@@ -60,7 +61,7 @@ def test_limit_is_his_price_plus_two_percent_min_one_tick():
 def test_copies_when_kalshi_is_inside_his_tolerance():
     st, ka, led = _run(0.48)   # eff = 0.48 + fee(0.0175) <= limit 0.51
     assert st["matched"] == 1 and st["copied"] == 1
-    assert ka.orders == [("T-BAL", 0.48, 4)]   # $2 -> 4 contracts
+    assert ka.orders == [("T-BAL", 0.48, 6)]   # $3 -> 6 contracts
     assert led.get_state("kcopy:mlb-bal-tex-2026-08-04:Baltimore Orioles")
 
 
@@ -70,7 +71,7 @@ def test_outside_tolerance_is_not_a_copy():
     assert not ka.orders
 
 
-def test_rn1_gets_the_three_dollar_clip():
+def test_rn1_clips_at_three_dollars_like_everyone_now():
     row = {**_ROW, "whale": "RN1"}
     st, ka, _ = _run(0.48, rows=[row])
     assert ka.orders == [("T-BAL", 0.48, 6)]   # $3 -> 6 contracts
@@ -182,3 +183,71 @@ def test_collapsed_price_is_information_not_a_discount():
     st, ka, _ = _run(0.20)
     assert st.get("skipped_collapsed") == 1
     assert st["copied"] == 0 and not ka.orders
+
+
+# ── One copy per position ACROSS venues + best-venue routing
+#    (owner directive 2026-08-05) ──────────────────────────────────────
+
+
+class _Pmus:
+    """Stream-cache-only PMUS stub: ask=None models a cache miss."""
+
+    name = "polymarket-us"
+
+    def __init__(self, ask=None):
+        self.ask = ask
+        self.peeked = []
+
+    def peek_book(self, slug):
+        self.peeked.append(slug)
+        if self.ask is None:
+            return None
+        return MarketBook(venue=self.name, market_id=slug, outcome_id=slug,
+                          bids=[], asks=[BookLevel(self.ask, 50)],
+                          ts=time.time())
+
+
+def test_pmus_filled_copy_is_never_duplicated_on_kalshi():
+    """A position the fast PMUS leg already copied (pmus_copied from the
+    platform's live_orders) must be skipped no matter how good the
+    Kalshi book looks — one copy per whale position across venues."""
+    row = {**_ROW, "pmus_copied": True}
+    st, ka, _ = _run(0.48, rows=[row])
+    assert st.get("skipped_already_copied") == 1
+    assert st["copied"] == 0 and not ka.orders
+
+
+def test_pmus_better_priced_routes_the_copy_away_from_kalshi():
+    """Kalshi ask 0.48 -> eff ~0.4975 fee-loaded; PMUS shows 0.49.
+    PMUS is the better venue at placement, so the fast leg owns it."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka, pm = _Kalshi(0.48), _Pmus(0.49)
+    st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
+               pmus=pm)
+    assert st.get("routed_pmus_better") == 1
+    assert st["copied"] == 0 and not ka.orders
+    # The peek resolved his side structurally: atc grammar, 'bal' code.
+    assert pm.peeked == ["atc-mlb-bal-tex-2026-08-04-bal"]
+
+
+def test_kalshi_places_when_it_is_cheaper_fee_loaded():
+    """PMUS 0.55 vs Kalshi eff ~0.4975: Kalshi is the best-priced venue
+    at placement, so the $3 copy lands there exactly as before."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka, pm = _Kalshi(0.48), _Pmus(0.55)
+    st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
+               pmus=pm)
+    assert st.get("routed_pmus_better") is None
+    assert st["copied"] == 1
+    assert ka.orders == [("T-BAL", 0.48, 6)]
+
+
+def test_no_pmus_book_falls_through_to_kalshi():
+    """peek_book cache miss (returns None): no PMUS price is visible
+    cheaply, so Kalshi places — PMUS couldn't fill/map."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka, pm = _Kalshi(0.48), _Pmus(None)
+    st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
+               pmus=pm)
+    assert pm.peeked, "the peek must have been attempted"
+    assert st["copied"] == 1 and ka.orders == [("T-BAL", 0.48, 6)]
