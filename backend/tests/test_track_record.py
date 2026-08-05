@@ -1,10 +1,16 @@
 """The track record must come from the venue account, windowed honestly."""
 
-from sportsassets.api.track_record import build, classify_slug
+from datetime import datetime
 
-TS_AUG1 = 1785542400.0     # 2026-08-01T00:00:00Z
-TS_JUL30 = TS_AUG1 - 2 * 86_400
-TS_AUG2 = TS_AUG1 + 86_400
+from sportsassets.api.track_record import RECORD_TZ, build, classify_slug
+
+TS_AUG1 = 1785542400.0     # 2026-08-01T00:00:00Z (raw window boundary)
+# Day bucketing is Eastern now, so activity timestamps sit MID-DAY in both
+# clocks (16:00Z = noon EDT): a test about windows or settlement math must
+# not quietly also be a test about midnight boundary crossings.
+NOON = 16 * 3600
+TS_JUL30 = TS_AUG1 - 2 * 86_400 + NOON   # 2026-07-30, noon ET
+TS_AUG2 = TS_AUG1 + 86_400 + NOON        # 2026-08-02, noon ET
 
 
 def _trade(slug, ts, qty, price):
@@ -73,6 +79,7 @@ def test_summary_and_daily_come_from_settled_money_only():
     assert s["net_pnl"] == 0.2 and s["settled_stake"] == 2.0
     assert s["roi"] == 0.1 and s["win_rate"] == 0.5
     day = next(d for d in out["daily"] if d["settled"])
+    assert day["date"] == "2026-08-02"     # the EASTERN day of settlement
     assert day["pnl"] == 0.2 and day["pnl_estimated"] is False
 
 
@@ -82,6 +89,31 @@ def test_a_settlement_without_a_venue_timestamp_is_flagged_estimated():
     out = build(positions, acts, TS_AUG1)
     day = next(d for d in out["daily"] if d["settled"])
     assert day["pnl_estimated"] is True
+
+
+def test_a_late_night_settlement_buckets_to_the_eastern_day():
+    """03:00Z Aug 5 is 11pm ET Aug 4: Tuesday's calendar box, not
+    Wednesday's. UTC bucketing pushed every post-8pm-ET settlement onto
+    the NEXT day's box — Wednesday wore Tuesday night's -$16 two days
+    running (owner report 2026-08-05)."""
+    ts_settle = TS_AUG1 + 4 * 86_400 + 3 * 3600   # 2026-08-05T03:00:00Z
+    positions = {"won": _pos(0, 1.0, 0.0, realized=1.2, expired=True)}
+    acts = [_trade("won", TS_AUG2, 2, 0.5), _resolution("won", ts_settle)]
+    out = build(positions, acts, TS_AUG1)
+    assert [d["date"] for d in out["daily"] if d["settled"]] == ["2026-08-04"]
+    assert all(d["date"] != "2026-08-05" for d in out["daily"])
+
+
+def test_a_late_evening_eastern_entry_is_outside_the_next_days_window():
+    """02:00Z Aug 1 is 10pm ET Jul 31. With the since window parsed at ET
+    midnight (as track_record does), that entry falls OUTSIDE
+    since=2026-08-01 — the same clock the calendar buckets on."""
+    since_ts = datetime.strptime("2026-08-01", "%Y-%m-%d") \
+        .replace(tzinfo=RECORD_TZ).timestamp()
+    positions = {"late-jul31": _pos(2, 1.0, 1.1)}
+    acts = [_trade("late-jul31", TS_AUG1 + 2 * 3600, 2, 0.5)]
+    out = build(positions, acts, since_ts)
+    assert out["trades"] == []
 
 
 def test_over_limit_positions_are_excluded_and_always_disclosed():
@@ -313,8 +345,8 @@ def test_slimmed_activities_build_the_identical_record():
     from sportsassets.api.track_record import _slim
 
     acts = [
-        _trade("aec-mlb-det-ath-2026-08-02", TS_AUG1 + 100, 4, 0.5),
-        _trade("aec-mlb-det-ath-2026-08-02", TS_AUG1 + 200, 2, 0.6),
+        _trade("aec-mlb-det-ath-2026-08-02", TS_AUG1 + NOON + 100, 4, 0.5),
+        _trade("aec-mlb-det-ath-2026-08-02", TS_AUG1 + NOON + 200, 2, 0.6),
         _resolution("aec-mlb-det-ath-2026-08-02", TS_AUG2),
         _trade("tsc-atp-x-y-2026-08-02-tg-21pt5", TS_AUG2 + 50, 3, 0.25),
     ]

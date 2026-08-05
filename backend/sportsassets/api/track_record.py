@@ -20,8 +20,9 @@ import hashlib
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from ..config import settings
 from .pmus_account import _act_ts, _amt
@@ -39,6 +40,12 @@ _refresh_health: dict[str, Any] = {"error": None, "error_at": 0.0,
                                    "streak": 0}
 
 DEFAULT_SINCE = "2026-08-01"
+
+# All human-facing DAY bucketing happens in the owner's timezone. Bucketing
+# in UTC put every settlement after 8pm Eastern on the NEXT day's calendar
+# box (Wednesday wore Tuesday night's -$16 two days running, owner report
+# 2026-08-05): a "day" on the Performance page means an Eastern day.
+RECORD_TZ = ZoneInfo("America/New_York")
 
 # Slug grammar: {kind}-{league}-{teams...}-{date}-{qualifiers...}
 #   atc   team contract (moneyline / segment h2h)   aec  event contract
@@ -77,7 +84,8 @@ def classify_slug(slug: str) -> dict:
 def build(positions: dict[str, dict], activities: list[dict],
           since_ts: float, max_stake: float | None = None,
           attributed: set[str] | None = None,
-          copy_slugs: set[str] | None = None) -> dict:
+          copy_slugs: set[str] | None = None,
+          tz: ZoneInfo = RECORD_TZ) -> dict:
     """Pure builder (unit-tested): venue payloads -> the track record.
 
     `max_stake` caps what the RECORD presents: positions whose cost exceeds
@@ -218,7 +226,7 @@ def build(positions: dict[str, dict], activities: list[dict],
             "outcome": meta.get("outcome"),
             **classify_slug(slug),
             "entry_ts": entry_ts or None,
-            "entry_date": (datetime.fromtimestamp(entry_ts, timezone.utc)
+            "entry_date": (datetime.fromtimestamp(entry_ts, tz)
                            .strftime("%Y-%m-%d") if entry_ts else None),
             "entry_price": round(vwap, 4) if vwap else None,
             "fills": e.get("fills", 0),
@@ -262,7 +270,7 @@ def build(positions: dict[str, dict], activities: list[dict],
             "outcome": None,
             **classify_slug(slug),
             "entry_ts": entry_ts,
-            "entry_date": datetime.fromtimestamp(entry_ts, timezone.utc)
+            "entry_date": datetime.fromtimestamp(entry_ts, tz)
                           .strftime("%Y-%m-%d"),
             "entry_price": round(vwap, 4) if vwap else None,
             "fills": e.get("fills", 0),
@@ -304,7 +312,7 @@ def build(positions: dict[str, dict], activities: list[dict],
         ts = r["settled_ts"] or r["entry_ts"]
         if not ts:
             continue
-        day = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+        day = datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d")
         d = daily.setdefault(day, {
             "date": day, "deployed": 0.0, "trades": 0, "open": 0,
             "pnl": 0.0, "settled": 0, "wins": 0, "pnl_estimated": False})
@@ -334,7 +342,7 @@ def build(positions: dict[str, dict], activities: list[dict],
     }
 
     return {
-        "since": datetime.fromtimestamp(since_ts, timezone.utc)
+        "since": datetime.fromtimestamp(since_ts, tz)
                  .strftime("%Y-%m-%d"),
         "generated_at": time.time(),
         "account": account,
@@ -675,12 +683,15 @@ async def track_record(since: str | None = None,
     cfg = settings()
     if not (cfg.pmus_key_id and cfg.pmus_secret_key):
         return {"configured": False}
+    # The window boundary is ET midnight, same clock the calendar buckets
+    # on — a UTC-midnight boundary let 8pm-midnight ET entries from the
+    # night BEFORE the since date into the window.
     try:
         since_ts = datetime.strptime(since or DEFAULT_SINCE, "%Y-%m-%d") \
-            .replace(tzinfo=timezone.utc).timestamp()
+            .replace(tzinfo=RECORD_TZ).timestamp()
     except ValueError:
         since_ts = datetime.strptime(DEFAULT_SINCE, "%Y-%m-%d") \
-            .replace(tzinfo=timezone.utc).timestamp()
+            .replace(tzinfo=RECORD_TZ).timestamp()
     # STALE-WHILE-REVALIDATE. The venue fetch is 20+ serial REST calls
     # (80+ on the post-deploy deep sweep) — 5-60 seconds. Holding the page
     # request for it made the site "take forever and honestly never load"
