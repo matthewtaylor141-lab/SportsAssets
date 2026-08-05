@@ -134,3 +134,27 @@ def test_one_sided_pools_are_never_registered():
               {"A": {"kalshi": XVLeg(ka, "K1", "A", 0.5, 9)},
                "B": {"kalshi": XVLeg(ka, "K2", "B", 0.5, 9)}})
     assert w.registered() == 0
+
+
+def test_side_channel_pmus_fills_reach_the_attribution_mirror(monkeypatch):
+    """The public record attributes AI fills via the platform mirror; a
+    PMUS arb leg that skips it lands in the 'unattributed' cohort (5->17
+    creep, 2026-08-04). Kalshi legs stay out — attribution reconciles the
+    PMUS account only."""
+    from edge.shadow import runner
+
+    sent = []
+    monkeypatch.setattr(runner, "_record_to_platform",
+                        lambda rec: sent.append(rec))
+    runner.mirror_side_channel_fill(
+        venue="polymarket-us", slug="atc-mlb-sf-tex-2026-08-05-sf",
+        price=0.5, qty=4, league="mlb", category="arb")
+    runner.mirror_side_channel_fill(
+        venue="kalshi", slug="KXMLBGAME-26AUG05SFTEX-SF",
+        price=0.5, qty=4, league="mlb", category="arb")
+    assert len(sent) == 1
+    rec = sent[0]
+    assert rec["outcome_id"] == "atc-mlb-sf-tex-2026-08-05-sf"
+    assert rec["venue"] == "polymarket-us"
+    assert rec["size_usd"] == 2.0
+    assert rec["band"] == "arb"

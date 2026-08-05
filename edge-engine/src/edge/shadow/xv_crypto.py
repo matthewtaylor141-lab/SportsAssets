@@ -598,6 +598,11 @@ class XVCryptoWatch:
                           "status": res.status,
                           "legs": [f"{getattr(l.adapter, 'name', '?')}:"
                                    f"{l.outcome}" for l in (l1, l2)]})
+            # Import at call time: runner imports this module at wiring.
+            from edge.shadow.runner import mirror_side_channel_fill
+            mirror_side_channel_fill(
+                venue=vname, slug=leg.token, price=px, qty=qty,
+                league="crypto", category="arb_crypto")
         if filled_cost:
             self._ledger.set_state("xv_crypto_day",
                                    {"day": day,

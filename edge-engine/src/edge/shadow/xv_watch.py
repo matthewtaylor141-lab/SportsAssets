@@ -214,6 +214,11 @@ class XVWatch:
                           "profit_per_set": profit, "status": res.status,
                           "legs": [f"{getattr(l.adapter, 'name', '?')}:"
                                    f"{l.outcome}" for l in best]})
+            # Import at call time: runner imports this module at wiring.
+            from edge.shadow.runner import mirror_side_channel_fill
+            mirror_side_channel_fill(
+                venue=vname, slug=leg.token, price=px, qty=qty,
+                league=entry["league"], category="arb")
         if filled_cost:
             self._ledger.set_state("xv_watch_day",
                                    {"day": day,

@@ -174,6 +174,25 @@ def _mirror_loop() -> None:
             log.debug("platform mirror failed (non-fatal): %s", exc)
 
 
+def mirror_side_channel_fill(*, venue: str, slug: str, price: float,
+                             qty: float, league: str | None,
+                             category: str) -> None:
+    """Attribution mirror for PMUS orders placed OUTSIDE the intent loop
+    (arb legs and other side channels). The public track record attributes
+    the AI's fills by the slugs in the platform's engine_fills mirror,
+    which log_shadow_fill feeds only from the intent path — so every
+    side-channel PMUS fill landed in the record's 'unattributed' cohort
+    (5→17 creep on 2026-08-04, the night the cross-venue watcher armed).
+    Kalshi fills skip this: attribution reconciles the PMUS account."""
+    if not (venue or "").startswith("polymarket"):
+        return
+    _record_to_platform({
+        "ts": time.time(), "venue": venue, "market_id": slug,
+        "outcome_id": slug, "league": league, "band": category,
+        "limit_price": float(price), "size_usd": round(qty * price, 4),
+        "would_fill": True})
+
+
 def _record_to_platform(rec: dict) -> None:
     """Hand the record to the background sender. Never blocks, never raises,
     never waits on the network — this is called from the hot path."""
@@ -445,6 +464,10 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
                           "profit_per_set": book.profit_per_set,
                           "status": res.status,
                           "legs": [l.outcome for l in book.legs]})
+            mirror_side_channel_fill(
+                venue=adapter.name, slug=leg.token,
+                price=float(o.get("price") or leg.price), qty=float(take),
+                league=ev.league_code, category="arb")
         if res.ok and res.complete:
             funnel["arb_profit"] = round(
                 funnel.get("arb_profit", 0.0) + res.profit, 4)
@@ -630,6 +653,11 @@ def _try_cross_venue(*, ledger, ev, pool, min_profit, max_usd, dry_run,
                       "status": res.status,
                       "legs": [f"{getattr(l.adapter, 'name', '?')}:"
                                f"{l.outcome}" for l in best]})
+        mirror_side_channel_fill(
+            venue=vname, slug=leg.token,
+            price=float(o.get("price") or leg.price),
+            qty=float(o.get("count") or res.sets),
+            league=ev.league_code, category="arb")
     if res.ok and res.complete:
         funnel["xv_profit"] = round(
             funnel.get("xv_profit", 0.0) + res.profit, 4)
