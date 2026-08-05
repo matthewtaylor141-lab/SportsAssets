@@ -447,6 +447,98 @@ jobs:
               2>/dev/null | head -20 || true
           done
 
+      - name: Crypto census — Kalshi BTC 15-min series (xv_crypto ground truth)
+        if: always()
+        run: |
+          B="https://api.elections.kalshi.com/trade-api/v2"
+          echo "###########################################################"
+          echo "#   KALSHI BTC SERIES (discover, don't guess)              #"
+          echo "###########################################################"
+          # The scanner (edge/shadow/xv_crypto.py) resolves BTC series the
+          # same way: list series by category, keep tickers containing BTC.
+          # This step prints the venue's actual naming so tuning happens
+          # against ground truth, never guesses like KXBTC15M.
+          : > /tmp/btc_series.txt
+          for CAT in Crypto Financials; do
+            echo "-- /series?category=$CAT — tickers containing BTC --"
+            curl -sS --max-time 20 "$B/series?category=$CAT&limit=200" \
+              -o /tmp/series.json || true
+            jq -r '.series[]? | "\(.ticker)  \(.title)  freq=\(.frequency // "?")"' \
+              /tmp/series.json 2>/dev/null | grep -i btc | tee -a /tmp/btc_cat.txt \
+              || echo "(none / unavailable)"
+            jq -r '.series[]?.ticker' /tmp/series.json 2>/dev/null \
+              | grep -i btc >> /tmp/btc_series.txt || true
+            sleep 1
+          done
+          echo ""
+          echo "-- 3 sample open events per BTC series (tickers/strikes/close_times) --"
+          for S in $(sort -u /tmp/btc_series.txt | head -8); do
+            echo "== $S =="
+            curl -sS --max-time 15 \
+              "$B/events?series_ticker=$S&status=open&with_nested_markets=true&limit=3" \
+              | jq -r '.events[0:3][]? | {event_ticker, title,
+                       markets: [.markets[0:4][]? | {ticker, strike_type,
+                                 floor_strike, cap_strike, close_time,
+                                 sub: (.yes_sub_title // .subtitle)}]}' \
+              2>/dev/null | head -60 || true
+            sleep 1
+          done
+
+      - name: Crypto census — PMUS crypto markets (public gateway via SDK)
+        if: always()
+        run: |
+          pip install --quiet polymarket-us 2>/dev/null || pip install polymarket-us
+          echo "###########################################################"
+          echo "#   PMUS CRYPTO CENSUS (slugs, strikes, close times)       #"
+          echo "###########################################################"
+          python - <<'PY'
+          from polymarket_us import PolymarketUS
+
+          pub = PolymarketUS()
+          variants = [
+              {"active": True, "closed": False, "categories": ["crypto"]},
+              {"active": True, "closed": False, "categories": ["Crypto"]},
+              {"active": True, "closed": False},
+          ]
+          events, used = [], None
+          for v in variants:
+              try:
+                  resp = pub.events.list({"limit": 100, **v}) or {}
+              except Exception as e:
+                  print("variant", v, "->", type(e).__name__, str(e)[:120])
+                  continue
+              evs = resp.get("events") or []
+              print("variant", v, "->", len(evs), "events")
+              if evs and used is None:
+                  events, used = evs, v
+          print("USING:", used)
+          words = ("bitcoin", "btc", "ethereum", "eth ", "crypto", "solana", "xrp")
+          crypt = [e for e in events
+                   if any(w in (e.get("title") or "").lower() for w in words)]
+          print(len(crypt), "crypto-looking events of", len(events))
+          for e in crypt[:6]:
+              print("=" * 66)
+              print("event:", e.get("slug"), "|", (e.get("title") or "")[:80])
+              print("event keys:", sorted(e.keys()))
+              for m in (e.get("markets") or [])[:4]:
+                  print("  market:", m.get("slug"),
+                        "| title:", (m.get("title") or "?")[:60],
+                        "| outcome:", m.get("outcome"),
+                        "| closed:", m.get("closed"))
+                  print("  market keys:", sorted(m.keys()))
+                  for k in ("closeTime", "close_time", "endTime", "end_time",
+                            "endDate", "end_date", "expirationTime",
+                            "startTime", "start_time"):
+                      val = m.get(k) or e.get(k)
+                      if val:
+                          print("   ", k, "=", val)
+          if not crypt:
+              # The listing has no crypto — print what surfaces the SDK has
+              # so the next tuning pass knows where to look for a search API.
+              print("NO crypto events in listing; SDK surfaces:",
+                    [a for a in dir(pub) if not a.startswith("_")])
+          PY
+
       - name: Kalshi raw orderbook (what shape does the API actually return)
         if: always()
         run: |

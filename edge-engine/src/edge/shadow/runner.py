@@ -268,6 +268,10 @@ _PROP_MAX_AGE_S = float(os.environ.get("EDGE_PROP_MAX_AGE_S", "600"))
 # The 24/7 cross-venue arbitrage watcher (see xv_watch.py). Installed by
 # main() when armed; run_cycle publishes proven identity pairs into it.
 _XV_WATCH = None
+# The crypto-binary cross-venue scanner (see xv_crypto.py): Kalshi 15-min
+# BTC over/unders vs Polymarket US short-interval binaries. Owns its whole
+# pipeline (discovery -> identity join -> pricing); measurement-first.
+_XV_CRYPTO = None
 _KADD_STATS: dict = {}
 _KCOPY_STATS: dict = {}
 # {game_key: [whale outcome names]} — refreshed on the discovery clock.
@@ -1951,6 +1955,31 @@ def _main_impl() -> None:
         log.warning("xv watch armed: %ss poll, min profit %.3f, day cap $%s",
                     _XV_WATCH.poll_s, _XV_WATCH.min_profit, _XV_WATCH.day_usd)
 
+    # Crypto cross-venue scanner (owner-approved 2026-08-05): Kalshi's
+    # 15-minute BTC over/under binaries vs Polymarket US short-interval
+    # crypto binaries. MEASUREMENT FIRST — it counts locked dislocations;
+    # execution stays behind EDGE_XV_CRYPTO_LIVE=1 (see xv_crypto.py for
+    # the index-basis honesty constraint that sets the 3c/set floor).
+    global _XV_CRYPTO
+    if os.environ.get("EDGE_XV_CRYPTO", "1") != "0":
+        xc_kalshi = next((a for a in adapters if a.name == "kalshi"), None)
+        xc_pmus = next((a for a in adapters
+                        if a.name == "polymarket-us"), None)
+        if xc_kalshi is not None and xc_pmus is not None:
+            from edge.shadow.xv_crypto import XVCryptoWatch
+
+            _XV_CRYPTO = XVCryptoWatch(ledger=ledger, kalshi=xc_kalshi,
+                                       pmus=xc_pmus,
+                                       is_live=lambda: risk.is_live)
+            threading.Thread(target=_XV_CRYPTO.run, daemon=True,
+                             name="xv-crypto").start()
+            log.warning(
+                "xv crypto armed: %ss poll, min profit %.3f (basis buffer), "
+                "live=%s, day cap $%s", _XV_CRYPTO.poll_s,
+                _XV_CRYPTO.min_profit,
+                os.environ.get("EDGE_XV_CRYPTO_LIVE", "0") == "1",
+                _XV_CRYPTO.day_usd)
+
     # Better-price adds (owner directive 2026-08-04): open PMUS positions
     # that Kalshi currently sells cheaper (fee-loaded, >=2c) get a $2 add,
     # once per position, $50/day class budget, graded as its own category.
@@ -2223,6 +2252,8 @@ def _main_impl() -> None:
             if _XV_WATCH is not None:
                 funnel["xv_watch"] = {**_XV_WATCH.stats,
                                       "registered": _XV_WATCH.registered()}
+            if _XV_CRYPTO is not None:
+                funnel["xv_crypto"] = dict(_XV_CRYPTO.stats)
             if _KADD_STATS:
                 funnel["kalshi_adds"] = dict(_KADD_STATS)
             if _KCOPY_STATS:
