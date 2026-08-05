@@ -18,37 +18,37 @@ def test_event_of_strips_the_outcome_segment():
 
 
 def test_no_opposite_side_means_directional_rules_untouched():
-    assert cross_side_cap({}, "EVT-A", 0.60, 7) == 7
+    assert cross_side_cap({}, "KX-EVT-A", 0.60, 7) == 7
 
 
 def test_losing_pair_is_refused_outright():
-    sides = {"EVT": [{"ticker": "EVT-B", "shares": 8, "avg_cost": 0.38}]}
+    sides = {"EVT": [{"ticker": "KX-EVT-B", "shares": 8, "avg_cost": 0.38}]}
     # 0.63 + 0.38 > 0.99: the Atmane/Draper shape. Zero contracts.
-    assert cross_side_cap(sides, "EVT-A", 0.63, 4, fee_per_contract=0.016) == 0
+    assert cross_side_cap(sides, "KX-EVT-A", 0.63, 4, fee_per_contract=0.016) == 0
 
 
 def test_guaranteed_pair_is_allowed_but_only_pair_matched():
-    sides = {"EVT": [{"ticker": "EVT-B", "shares": 6, "avg_cost": 0.18}]}
+    sides = {"EVT": [{"ticker": "KX-EVT-B", "shares": 6, "avg_cost": 0.18}]}
     # 0.43 + 0.18 + fee well under 0.99 -> allowed, capped at 6 pairs.
-    assert cross_side_cap(sides, "EVT-A", 0.43, 10,
+    assert cross_side_cap(sides, "KX-EVT-A", 0.43, 10,
                           fee_per_contract=0.017) == 6
 
 
 def test_same_side_reentry_is_not_cross_side():
-    sides = {"EVT": [{"ticker": "EVT-A", "shares": 5, "avg_cost": 0.50}]}
-    assert cross_side_cap(sides, "EVT-A", 0.55, 3) == 3
+    sides = {"EVT": [{"ticker": "KX-EVT-A", "shares": 5, "avg_cost": 0.50}]}
+    assert cross_side_cap(sides, "KX-EVT-A", 0.55, 3) == 3
 
 
 def test_note_fill_makes_later_orders_in_sweep_see_the_leg():
     sides = {}
-    note_fill(sides, "EVT-A", 0.60, 4)
-    assert cross_side_cap(sides, "EVT-B", 0.55, 4) == 0
+    note_fill(sides, "KX-EVT-A", 0.60, 4)
+    assert cross_side_cap(sides, "KX-EVT-B", 0.55, 4) == 0
 
 
 def test_open_kalshi_sides_reads_only_live_kalshi_positions():
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     led.record_fill(fill_uid="k1", venue="kalshi",
-                    market_key="kalshi:EVT-A", side="BUY", qty=4, price=0.6,
+                    market_key="kalshi:KX-EVT-A", side="BUY", qty=4, price=0.6,
                     fee=0.02, league="wta", mode="LIVE_BETA",
                     category="kalshi_copy", decision={})
     led.record_fill(fill_uid="p1", venue="polymarket_us",
@@ -56,7 +56,7 @@ def test_open_kalshi_sides_reads_only_live_kalshi_positions():
                     fee=0.0, league="mlb", mode="LIVE_BETA",
                     category="engine", decision={})
     led.record_fill(fill_uid="k2", venue="kalshi",
-                    market_key="kalshi:EVT2-C", side="BUY", qty=2, price=0.3,
+                    market_key="kalshi:KX-EVT2-C", side="BUY", qty=2, price=0.3,
                     fee=0.01, league="wta", mode="PAPER",
                     category="kalshi_copy", decision={})
     sides = open_kalshi_sides(led)
@@ -130,14 +130,14 @@ def test_reaper_releases_expired_unfilled_maker_claims():
     from edge.execution.executor import reap_kalshi_makers
 
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
-    led.claim_event("ev-1", "kalshi:EVT-A", "kalshi")
-    led.set_state("kalshi_order:o1", {"market_key": "kalshi:EVT-A",
+    led.claim_event("ev-1", "kalshi:KX-EVT-A", "kalshi")
+    led.set_state("kalshi_order:o1", {"market_key": "kalshi:KX-EVT-A",
                                       "event_key": "ev-1", "taker": False,
                                       "ts": time.time() - 2000})
     out = reap_kalshi_makers(led)
     assert out == {"checked": 1, "released": 1, "filled": 0}
     assert led.get_state("kalshi_order:o1") is None
-    assert led.claim_event("ev-1", "kalshi:EVT-A", "kalshi"), \
+    assert led.claim_event("ev-1", "kalshi:KX-EVT-A", "kalshi"), \
         "the claim must be reusable after the release"
 
 
@@ -169,3 +169,40 @@ def test_reaper_leaves_young_orders_alone():
     out = reap_kalshi_makers(led)
     assert out["checked"] == 0
     assert led.get_state("kalshi_order:o3") is not None
+
+
+def test_cross_market_same_game_is_refused_outright():
+    """Spread/total vs moneyline of the SAME game can never lock $1 —
+    refused regardless of prices (owner rule 2026-08-05)."""
+    sides = {"26AUG04BALTEX": [{"ticker": "KXMLBGAME-26AUG04BALTEX-TEX",
+                                "shares": 4, "avg_cost": 0.20}]}
+    assert cross_side_cap(sides, "KXMLBSPREAD-26AUG04BALTEX-BAL",
+                          0.30, 5) == 0
+
+
+def test_engine_executor_path_is_game_guarded(tmp_path):
+    from edge.execution.executor import execute, market_key
+
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    led.record_fill(fill_uid="k1", venue="kalshi",
+                    market_key="kalshi:KXMLBGAME-26AUG04BALTEX-TEX",
+                    side="BUY", qty=4, price=0.55, fee=0.02, league="mlb",
+                    mode="LIVE_BETA", category="kalshi_copy", decision={})
+
+    class _A:
+        name = "kalshi"
+
+        def taker_fee(self, p):
+            return 0.07 * p * (1 - p)
+
+        def plan_maker_order(self, *a, **k):
+            return (0.50, True)
+
+        def place_order(self, *a, **k):
+            raise AssertionError("order must be blocked before the venue")
+
+    r = execute(adapter=_A(), ledger=led, mode="LIVE_BETA",
+                mkey=market_key("kalshi", "KXMLBGAME-26AUG04BALTEX-BAL"),
+                league="mlb", ask_price=0.51, ask_size=50, size_usd=2.0,
+                edge=0.03, threshold=0.02, decision={}, ts=1000.0)
+    assert r["status"] == "cross_game_blocked" and not r["placed"]

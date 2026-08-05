@@ -115,6 +115,19 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
         count = quantize_contracts(size_usd, px, max_fill_usd)
         if count < 1:
             return {"placed": False, "filled_usd": 0.0, "status": "sub_contract"}
+        # ONE position per GAME on Kalshi across ALL order paths (owner
+        # rule 2026-08-05): the sweeps were guarded but this engine path
+        # was not, so engine entries could stack against copies on the
+        # same matchup. A second position passes only as a guaranteed
+        # same-market pair; cross-market stacking is refused outright.
+        from edge.shadow.kalshi_guard import cross_side_cap, open_kalshi_sides
+        count = cross_side_cap(open_kalshi_sides(ledger), outcome_id, px,
+                               count,
+                               fee_per_contract=adapter.taker_fee(px)
+                               if taker else 0.0)
+        if count < 1:
+            return {"placed": False, "filled_usd": 0.0,
+                    "status": "cross_game_blocked"}
         result = adapter.place_order(outcome_id, px, count,
                                      client_order_id=str(uuid.uuid4()), taker=taker)
         # ALL Kalshi fills (immediate taker and resting maker alike) are

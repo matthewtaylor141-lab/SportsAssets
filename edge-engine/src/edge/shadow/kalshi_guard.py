@@ -46,6 +46,15 @@ def event_of(ticker: str) -> str:
     return parts[0] if len(parts) == 2 else (ticker or "")
 
 
+def game_of(ticker: str) -> str:
+    """'KXMLBGAME-26AUG04BALTEX-BAL' -> '26AUG04BALTEX': the GAME identity,
+    shared across the game/spread/total series of the same matchup. The
+    event-level key let one game accumulate opposing positions through
+    different series and different order paths (owner report 2026-08-05)."""
+    parts = (ticker or "").split("-")
+    return parts[1] if len(parts) >= 3 else (ticker or "")
+
+
 def open_kalshi_sides(ledger) -> dict[str, list[dict]]:
     """Open LIVE kalshi positions grouped by event ticker."""
     out: dict[str, list[dict]] = {}
@@ -57,7 +66,7 @@ def open_kalshi_sides(ledger) -> dict[str, list[dict]]:
         shares = float(p.get("shares") or 0)
         if shares <= 0:
             continue
-        out.setdefault(event_of(ticker), []).append(
+        out.setdefault(game_of(ticker), []).append(
             {"ticker": ticker, "shares": shares,
              "avg_cost": float(p.get("avg_cost") or 0)})
     return out
@@ -72,14 +81,22 @@ def cross_side_cap(sides: dict[str, list[dict]], ticker: str, price: float,
     trade). Otherwise returns a matched-pair count only when the pair is
     guaranteed profit, else 0.
     """
-    ev = event_of(ticker)
-    others = [s for s in (sides.get(ev) or []) if s["ticker"] != ticker]
+    gm = game_of(ticker)
+    others = [s for s in (sides.get(gm) or []) if s["ticker"] != ticker]
     if not others:
         return want
-    other_shares = sum(s["shares"] for s in others)
+    # ONE position per GAME (owner rule 2026-08-05). A second position on
+    # the same game is allowed ONLY as a guaranteed pair: the opposite
+    # outcome of the SAME market event, priced so the pair locks profit.
+    # Positions in a DIFFERENT market of the same game (spread vs
+    # moneyline vs total) can never lock $1, so they are refused outright.
+    same_event = [s for s in others if event_of(s["ticker"]) == event_of(ticker)]
+    if len(same_event) != len(others):
+        return 0
+    other_shares = sum(s["shares"] for s in same_event)
     if other_shares <= 0:
         return want
-    other_cost = sum(s["shares"] * s["avg_cost"] for s in others) / other_shares
+    other_cost = sum(s["shares"] * s["avg_cost"] for s in same_event) / other_shares
     if price + other_cost + fee_per_contract > 1.0 - margin:
         return 0
     return max(0, min(want, int(other_shares)))
@@ -91,5 +108,5 @@ def note_fill(sides: dict[str, list[dict]], ticker: str, price: float,
     the ledger snapshot was taken at sweep start."""
     if count <= 0:
         return
-    sides.setdefault(event_of(ticker), []).append(
+    sides.setdefault(game_of(ticker), []).append(
         {"ticker": ticker, "shares": float(count), "avg_cost": price})
