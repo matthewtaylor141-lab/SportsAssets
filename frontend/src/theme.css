@@ -394,6 +394,7 @@ table.data td.num, table.data th.num { text-align: right; }
 .tr-chip.won { background: rgba(33, 176, 33, 0.14); color: var(--good); }
 .tr-chip.lost { background: rgba(224, 82, 82, 0.14); color: var(--critical); }
 .tr-chip.open { background: rgba(57, 135, 229, 0.14); color: var(--accent); }
+.tr-chip.settling { background: rgba(140, 140, 140, 0.14); color: var(--muted); }
 .tr-slip-mid { display: flex; gap: 8px; align-items: center; margin-top: 3px; font-size: 12.5px; color: var(--ink-2); flex-wrap: wrap; }
 .tr-slip-outcome { font-weight: 500; }
 .tr-tag {

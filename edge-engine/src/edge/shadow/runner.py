@@ -1753,6 +1753,39 @@ def settle_cycle(adapters, ledger) -> int:
     return settled
 
 
+def kalshi_open_snapshot(ledger, adapters) -> dict:
+    """The live Kalshi book for the public site: every open venue-accepted
+    position (ledger claims are venue truth since the fill_count fix).
+
+    Rows whose market the venue reports as past trading but not yet
+    resolved carry venue_status (last settle sweep's answer, free — no
+    extra venue call), so the card can say "awaiting settlement" instead
+    of presenting a finished game as LIVE."""
+    k_status: dict = {}
+    for a in adapters:
+        if getattr(a, "name", "") == "kalshi":
+            k_status = getattr(a, "last_market_status", None) or {}
+    rows = []
+    for p in ledger.open_positions(live_only=True):
+        mkey = p.get("market_key") or ""
+        if not mkey.startswith("kalshi:"):
+            continue
+        ticker = mkey.split(":", 1)[1]
+        row = {"ticker": ticker,
+               "qty": round(float(p["shares"]), 2),
+               "avg_cost": round(float(p["avg_cost"]), 4),
+               "cost": round(float(p["shares"]) * float(p["avg_cost"]), 2)}
+        status = k_status.get(ticker)
+        if status and status not in ("initialized", "unopened", "open",
+                                     "active"):
+            row["venue_status"] = status
+        rows.append(row)
+    rows = rows[:150]
+    return {"n": len(rows),
+            "cost": round(sum(r["cost"] for r in rows), 2),
+            "rows": rows}
+
+
 def main() -> None:
     # Crash-visible wrapper. The 2026-08-04 restart loop taught us that a
     # death outside the cycle try/except (boot code, MemoryError, any
@@ -2200,23 +2233,11 @@ def _main_impl() -> None:
                            or ledger.get_state("kalshi_smoke_last"))
             if smoke_state:
                 funnel["kalshi_smoke"] = smoke_state
-            # The live Kalshi book, published for the public site: every
-            # open venue-accepted position (ledger claims are venue truth
-            # since the fill_count fix — a zero-fill never records).
+            # The live Kalshi book, published for the public site — with
+            # venue statuses from the last settle sweep, so finished-but-
+            # unresolved games are flagged instead of shown as LIVE.
             try:
-                k_rows = [
-                    {"ticker": p["market_key"].split(":", 1)[1],
-                     "qty": round(float(p["shares"]), 2),
-                     "avg_cost": round(float(p["avg_cost"]), 4),
-                     "cost": round(float(p["shares"])
-                                   * float(p["avg_cost"]), 2)}
-                    for p in ledger.open_positions(live_only=True)
-                    if (p.get("market_key") or "").startswith("kalshi:")
-                ][:150]
-                funnel["kalshi_open"] = {
-                    "n": len(k_rows),
-                    "cost": round(sum(r["cost"] for r in k_rows), 2),
-                    "rows": k_rows}
+                funnel["kalshi_open"] = kalshi_open_snapshot(ledger, adapters)
             except Exception:  # noqa: BLE001 — telemetry never stalls trading
                 pass
             # Account maintenance runs in EVERY mode, not just live ones.

@@ -101,6 +101,9 @@ export interface KalshiOpenRow {
   qty: number
   avg_cost: number
   cost: number
+  /** Venue market status when past trading but unresolved (e.g. 'closed',
+   * 'determined') — the game is over and the row awaits settlement. */
+  venue_status?: string
 }
 
 export interface KalshiOpen {

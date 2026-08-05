@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { EmptyState } from '../components/EmptyState'
 import { PnlCalendar } from '../components/PnlCalendar'
-import { fmtCents, fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
+import { fmtAgo, fmtCents, fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
 import { KalshiOpen, SINCE, TRRow, useKalshiOpen, useTrackRecord } from '../lib/record'
 
 /* The AI trader's account, told from the venue's own records. Every number
@@ -181,6 +181,7 @@ function KalshiBook({ k }: { k: KalshiOpen }) {
     <div className="card">
       <div className="card-title">
         KALSHI · LIVE BOOK · {k.n} open · {fmtUsd(k.cost, 2)} at cost
+        {k.updated_at && <span className="muted"> · as of {fmtAgo(k.updated_at)}</span>}
       </div>
       <div className="kx-grid">
         {k.rows.map((r) => {
@@ -189,7 +190,14 @@ function KalshiBook({ k }: { k: KalshiOpen }) {
             <div key={r.ticker} className="kx-pos">
               <div className="kx-top">
                 <span className="kx-series">{p.series}</span>
-                <span className="tr-chip open">● LIVE</span>
+                {r.venue_status ? (
+                  <span className="tr-chip settling"
+                    title={`Venue status: ${r.venue_status} — game over, awaiting settlement`}>
+                    ◌ SETTLING
+                  </span>
+                ) : (
+                  <span className="tr-chip open">● LIVE</span>
+                )}
               </div>
               <div className="kx-tail mono">{p.tail}</div>
               <div className="kx-nums mono">

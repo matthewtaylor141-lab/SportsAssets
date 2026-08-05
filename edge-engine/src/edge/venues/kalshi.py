@@ -494,20 +494,67 @@ class KalshiAdapter(VenueAdapter):
     async def settlements(self):
         raise NotImplementedError("grader pulls settlements in batch; see shadow/grader.py")
 
-    # Batch settlement lookup used by the grader.
+    # Batch settlement lookup used by the settle sweep and the grader.
     def fetch_results(self, tickers: list[str]) -> dict[str, float]:
-        """market ticker -> payout (1.0 yes / 0.0 no) for settled markets."""
+        """market ticker -> payout (1.0 yes / 0.0 no) for resolved markets.
+
+        Instrumented like the PMUS adapter (audit 2026-08-05): the probe
+        read settle_stats {"kalshi": null} for DAYS because this method
+        kept no counters — whether it even ran, what the venue answered,
+        and why nothing settled were all unanswerable from telemetry.
+        Two staleness causes fixed here:
+        - only status == "settled" priced. Kalshi holds a finished market
+          at determined/finalized (result already known) before financial
+          settlement completes, so realized P&L lagged the game by however
+          long the venue took to pay out. The result field is authoritative
+          the moment it is yes/no; price on it. Voids stay unsettled — a
+          void pays cost back, not $1/$0, and guessing either is wrong.
+        - non-200 answers were silently skipped: a rate-limited sweep read
+          exactly like "no results". Now every page is counted, errors keep
+          their first cause, and pages are paced 0.3s apart so deep books
+          cannot trip the limiter in the first place.
+        last_market_status (ticker -> venue status) is kept for every market
+        checked, so the kalshi_open card can flag finished-but-unresolved
+        rows instead of presenting a dead game as LIVE.
+        """
         out: dict[str, float] = {}
+        stats = {"checked": len(tickers), "priced": 0, "no_price": 0,
+                 "errors": 0, "pages": 0, "by_status": {}}
+        first_err = None
+        statuses: dict[str, str] = {}
         for i in range(0, len(tickers), 100):
             chunk = tickers[i : i + 100]
+            if i:
+                # Gentle on the venue: full-speed paging is how the PMUS
+                # sweep tripped Cloudflare and lost the rest of the pass.
+                time.sleep(0.3)
             try:
                 resp = self._sess.get(f"{BASE}/markets",
                                       params={"tickers": ",".join(chunk)}, timeout=15)
                 if resp.status_code != 200:
+                    stats["errors"] += 1
+                    if first_err is None:
+                        first_err = f"HTTP {resp.status_code}: {resp.text[:120]}"
                     continue
+                stats["pages"] += 1
                 for m in resp.json().get("markets") or []:
-                    if m.get("status") == "settled" and m.get("result") in ("yes", "no"):
+                    status = str(m.get("status") or "?")
+                    stats["by_status"][status] = \
+                        stats["by_status"].get(status, 0) + 1
+                    if m.get("ticker"):
+                        statuses[m["ticker"]] = status
+                    if status in ("determined", "finalized", "settled") and \
+                            m.get("result") in ("yes", "no"):
                         out[m["ticker"]] = 1.0 if m["result"] == "yes" else 0.0
             except (requests.RequestException, ValueError) as exc:
+                stats["errors"] += 1
+                if first_err is None:
+                    first_err = f"{type(exc).__name__}: {str(exc)[:120]}"
                 log.warning("kalshi settlement fetch failed: %s", exc)
+        stats["priced"] = len(out)
+        stats["no_price"] = stats["checked"] - len(out)
+        stats["first_error"] = first_err
+        self.last_settle_stats = stats
+        self.last_market_status = statuses
+        log.info("kalshi fetch_results: %s", stats)
         return out

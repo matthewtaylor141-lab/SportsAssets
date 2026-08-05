@@ -501,7 +501,12 @@ async def kalshi_open() -> dict:
     if isinstance(detail, str):
         detail = json.loads(detail)
     ko = (detail or {}).get("kalshi_open") or empty
-    return {"updated_at": str(row["beat_at"]), **ko}
+    # ISO 8601, not str(datetime): asyncpg's datetime stringifies with a
+    # space separator, which Date.parse treats as NaN on Safari — the card's
+    # "as of" age depends on this parsing everywhere.
+    beat = row["beat_at"]
+    updated = beat.isoformat() if hasattr(beat, "isoformat") else str(beat)
+    return {"updated_at": updated, **ko}
 
 
 @app.get("/api/engine/status")
