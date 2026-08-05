@@ -1,8 +1,8 @@
 """The track record must come from the venue account, windowed honestly."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sportsassets.api.track_record import RECORD_TZ, build, classify_slug
+from sportsassets.api.track_record import build, classify_slug
 
 TS_AUG1 = 1785542400.0     # 2026-08-01T00:00:00Z (raw window boundary)
 # Day bucketing is Eastern now, so activity timestamps sit MID-DAY in both
@@ -104,16 +104,20 @@ def test_a_late_night_settlement_buckets_to_the_eastern_day():
     assert all(d["date"] != "2026-08-05" for d in out["daily"])
 
 
-def test_a_late_evening_eastern_entry_is_outside_the_next_days_window():
-    """02:00Z Aug 1 is 10pm ET Jul 31. With the since window parsed at ET
-    midnight (as track_record does), that entry falls OUTSIDE
-    since=2026-08-01 — the same clock the calendar buckets on."""
+def test_the_accounts_first_utc_hours_stay_in_the_window():
+    """02:00Z Aug 1 is 10pm ET Jul 31. Parsing the since window at ET
+    midnight (04:00Z) silently dropped the account's first ~4 hours of
+    trades and shrank the Aug 1 record (owner report 2026-08-05). The
+    window boundary is UTC midnight — the entry IS in the record — and
+    the calendar buckets it, truthfully, into the 2026-07-31 ET day box."""
     since_ts = datetime.strptime("2026-08-01", "%Y-%m-%d") \
-        .replace(tzinfo=RECORD_TZ).timestamp()
+        .replace(tzinfo=timezone.utc).timestamp()   # as track_record parses
     positions = {"late-jul31": _pos(2, 1.0, 1.1)}
     acts = [_trade("late-jul31", TS_AUG1 + 2 * 3600, 2, 0.5)]
     out = build(positions, acts, since_ts)
-    assert out["trades"] == []
+    assert [r["market_slug"] for r in out["trades"]] == ["late-jul31"]
+    assert out["trades"][0]["entry_date"] == "2026-07-31"
+    assert [d["date"] for d in out["daily"]] == ["2026-07-31"]
 
 
 def test_over_limit_positions_are_excluded_and_always_disclosed():

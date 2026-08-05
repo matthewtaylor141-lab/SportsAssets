@@ -20,7 +20,7 @@ import hashlib
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -683,15 +683,19 @@ async def track_record(since: str | None = None,
     cfg = settings()
     if not (cfg.pmus_key_id and cfg.pmus_secret_key):
         return {"configured": False}
-    # The window boundary is ET midnight, same clock the calendar buckets
-    # on — a UTC-midnight boundary let 8pm-midnight ET entries from the
-    # night BEFORE the since date into the window.
+    # The window boundary is UTC midnight, deliberately NOT the ET midnight
+    # the calendar buckets on. Parsing `since` at ET midnight (04:00Z)
+    # silently dropped the account's first ~4 hours of trades (00:00-04:00Z
+    # Aug 1) and shrank the Aug 1 record — owner report 2026-08-05. A UTC
+    # boundary keeps every trade in the record; the cost is that a
+    # 00:00-04:00Z entry (evening ET of the day before) displays in the
+    # PREVIOUS ET day's calendar box, which is truthful.
     try:
         since_ts = datetime.strptime(since or DEFAULT_SINCE, "%Y-%m-%d") \
-            .replace(tzinfo=RECORD_TZ).timestamp()
+            .replace(tzinfo=timezone.utc).timestamp()
     except ValueError:
         since_ts = datetime.strptime(DEFAULT_SINCE, "%Y-%m-%d") \
-            .replace(tzinfo=RECORD_TZ).timestamp()
+            .replace(tzinfo=timezone.utc).timestamp()
     # STALE-WHILE-REVALIDATE. The venue fetch is 20+ serial REST calls
     # (80+ on the post-deploy deep sweep) — 5-60 seconds. Holding the page
     # request for it made the site "take forever and honestly never load"
