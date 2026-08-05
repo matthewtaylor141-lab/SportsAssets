@@ -261,25 +261,35 @@ async def api_whale_open_identities() -> dict:
     from ..db import get_pool as _get_pool
 
     pool = await _get_pool()
+    # pmus_copied is computed AFTER the DISTINCT ON dedup, never inline:
+    # inline, the EXISTS probe ran for every raw trade row in the 7-day
+    # scan (a source whale posts ~10-15k fills/day), which blew past the
+    # engine sweep's 30s read timeout and silently starved the Kalshi
+    # copy leg for hours (observed 14:53Z and 16:06Z, 2026-08-05).
     rows = await pool.fetch(
         """
-        SELECT DISTINCT ON (t.asset)
-               COALESCE(t.market_slug, t.event_slug, '') AS slug,
-               t.outcome, t.price::float8 AS price,
-               w.username AS whale,
-               extract(epoch FROM t.ts)::float8 AS entered_ts,
+        WITH latest AS (
+            SELECT DISTINCT ON (t.asset)
+                   t.asset,
+                   COALESCE(t.market_slug, t.event_slug, '') AS slug,
+                   t.outcome, t.price::float8 AS price,
+                   w.username AS whale,
+                   extract(epoch FROM t.ts)::float8 AS entered_ts
+            FROM trades t
+            JOIN whales w ON w.id = t.whale_id
+            LEFT JOIN markets m ON m.condition_id = t.condition_id
+            WHERE t.side = 'BUY'
+              AND t.ts > now() - interval '7 days'
+              AND lower(w.username) = ANY($1)
+              AND COALESCE(m.resolved, false) = false
+            ORDER BY t.asset, t.ts DESC
+        )
+        SELECT l.slug, l.outcome, l.price, l.whale, l.entered_ts,
                EXISTS (SELECT 1 FROM live_orders lo
-                       WHERE lo.asset = t.asset
+                       WHERE lo.asset = l.asset
                          AND lo.status IN ('filled', 'settled'))
                    AS pmus_copied
-        FROM trades t
-        JOIN whales w ON w.id = t.whale_id
-        LEFT JOIN markets m ON m.condition_id = t.condition_id
-        WHERE t.side = 'BUY'
-          AND t.ts > now() - interval '7 days'
-          AND lower(w.username) = ANY($1)
-          AND COALESCE(m.resolved, false) = false
-        ORDER BY t.asset, t.ts DESC
+        FROM latest l
         """,
         sorted(_settings().source_whales()),
     )
