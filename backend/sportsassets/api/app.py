@@ -252,13 +252,30 @@ async def api_feed(
     return await queries.feed(limit, before_id, whale_id, sport, side, min_notional)
 
 
+_whale_idents_cache: dict = {"ts": 0.0, "data": None}
+# The identities query walks 7 days of source-whale trades (10-15k rows a
+# day per whale) and goes >30s under evening ingest contention even with
+# the CTE rewrite — the engine's copy sweep timed out again at 20:11Z on
+# the day of the first fix. The consumer sweeps every 10 minutes and its
+# freshness gate is 45 minutes, so a <=2-minute-stale list is free; a
+# cache miss recomputes, a recompute failure serves the last good copy.
+_WHALE_IDENTS_TTL = 120.0
+
+
 @app.get("/api/whale-open-identities")
 async def api_whale_open_identities() -> dict:
     """Source whales' open BUY positions as identity rows for the engine's
     whale-alignment tagging: [{slug, outcome}]. Moneyline-shaped consumers
     only — the engine joins on game key + team name at the mapper bar."""
+    import time as _time
+
     from ..config import settings as _settings
     from ..db import get_pool as _get_pool
+
+    now = _time.time()
+    if (_whale_idents_cache["data"] is not None
+            and now - _whale_idents_cache["ts"] < _WHALE_IDENTS_TTL):
+        return _whale_idents_cache["data"]
 
     pool = await _get_pool()
     # pmus_copied is computed AFTER the DISTINCT ON dedup, never inline:
@@ -300,11 +317,15 @@ async def api_whale_open_identities() -> dict:
     # copy already FILLED (or settled): one copy per whale position
     # ACROSS venues (owner directive 2026-08-05), so the Kalshi sweep
     # must skip these rather than duplicate them.
-    return {"identities": [{"slug": r["slug"], "outcome": r["outcome"],
-                            "price": r["price"], "whale": r["whale"],
-                            "entered_ts": r["entered_ts"],
-                            "pmus_copied": bool(r["pmus_copied"])}
-                           for r in rows if r["slug"] and r["outcome"]]}
+    out = {"identities": [{"slug": r["slug"], "outcome": r["outcome"],
+                           "price": r["price"], "whale": r["whale"],
+                           "entered_ts": r["entered_ts"],
+                           "pmus_copied": bool(r["pmus_copied"])}
+                          for r in rows if r["slug"] and r["outcome"]],
+           "as_of": now}
+    _whale_idents_cache["ts"] = now
+    _whale_idents_cache["data"] = out
+    return out
 
 
 @app.get("/api/whales")
