@@ -79,6 +79,11 @@ async def lifespan(_: FastAPI):
     from .track_record import warm_cache
 
     asyncio.get_running_loop().create_task(warm_cache())
+    # Whale-identities snapshot refresher: the engine's Kalshi copy sweep
+    # reads /api/whale-open-identities behind a 30s timeout; the query
+    # can take longer under evening ingest load, so it must never run on
+    # the request path (starved the copy leg 3x on 2026-08-05).
+    asyncio.get_running_loop().create_task(refresh_whale_idents_loop())
     yield
     if poller_task is not None:
         poller_task.cancel()
@@ -255,28 +260,25 @@ async def api_feed(
 _whale_idents_cache: dict = {"ts": 0.0, "data": None}
 # The identities query walks 7 days of source-whale trades (10-15k rows a
 # day per whale) and goes >30s under evening ingest contention even with
-# the CTE rewrite — the engine's copy sweep timed out again at 20:11Z on
-# the day of the first fix. The consumer sweeps every 10 minutes and its
-# freshness gate is 45 minutes, so a <=2-minute-stale list is free; a
-# cache miss recomputes, a recompute failure serves the last good copy.
-_WHALE_IDENTS_TTL = 120.0
+# the CTE rewrite. A request-path cache cannot save the ONE consumer —
+# the engine sweeps every 10 minutes, so every call was a cold miss and
+# paid the full compute (still timing out 21:23Z after the 120s-TTL
+# attempt). The snapshot is therefore maintained by a BACKGROUND
+# refresher (armed in lifespan): the endpoint always answers instantly
+# from the last computed snapshot, however the database is feeling; a
+# refresh failure keeps serving the previous snapshot. The consumer's
+# own freshness gate is 45 minutes, so a couple minutes of staleness is
+# free.
+_WHALE_IDENTS_TTL = 90.0
 
 
-@app.get("/api/whale-open-identities")
-async def api_whale_open_identities() -> dict:
-    """Source whales' open BUY positions as identity rows for the engine's
-    whale-alignment tagging: [{slug, outcome}]. Moneyline-shaped consumers
-    only — the engine joins on game key + team name at the mapper bar."""
+async def _compute_whale_idents() -> dict:
     import time as _time
 
     from ..config import settings as _settings
     from ..db import get_pool as _get_pool
 
     now = _time.time()
-    if (_whale_idents_cache["data"] is not None
-            and now - _whale_idents_cache["ts"] < _WHALE_IDENTS_TTL):
-        return _whale_idents_cache["data"]
-
     pool = await _get_pool()
     # pmus_copied is computed AFTER the DISTINCT ON dedup, never inline:
     # inline, the EXISTS probe ran for every raw trade row in the 7-day
@@ -326,6 +328,34 @@ async def api_whale_open_identities() -> dict:
     _whale_idents_cache["ts"] = now
     _whale_idents_cache["data"] = out
     return out
+
+
+async def refresh_whale_idents_loop() -> None:
+    """Keep the identities snapshot warm so the engine's 30s-timeout
+    fetch NEVER runs the heavy query inline. Armed from lifespan."""
+    import asyncio
+
+    while True:
+        try:
+            await _compute_whale_idents()
+        except Exception:  # noqa: BLE001 — keep serving the last snapshot
+            logging.getLogger(__name__).exception(
+                "whale identities refresh failed; serving last snapshot")
+        await asyncio.sleep(_WHALE_IDENTS_TTL)
+
+
+@app.get("/api/whale-open-identities")
+async def api_whale_open_identities() -> dict:
+    """Source whales' open BUY positions as identity rows for the engine's
+    whale-alignment tagging: [{slug, outcome}]. Moneyline-shaped consumers
+    only — the engine joins on game key + team name at the mapper bar.
+    Served from the background-refreshed snapshot; before the first
+    refresh completes (cold boot) the caller gets an empty list and picks
+    up the real one next sweep rather than waiting on a slow compute."""
+    data = _whale_idents_cache["data"]
+    if data is not None:
+        return data
+    return {"identities": [], "as_of": None, "warming": True}
 
 
 @app.get("/api/whales")
