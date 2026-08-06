@@ -167,7 +167,12 @@ async def _place_ai_trade(
 ) -> None:
     cfg = settings()
     username = (payload.get("whale_username") or "").lower()
-    if not cfg.ai_trader_enabled or username not in cfg.source_whales():
+    # Vetting whales are paper-copied alongside the live sources (owner
+    # directive 2026-08-06): the paper account grades a candidate at our
+    # REAL latency for days before any promotion to live copying. Live
+    # execution (maybe_execute) still gates on source_whales() alone.
+    if not cfg.ai_trader_enabled or username not in (
+            cfg.source_whales() | cfg.vetting_whales()):
         return
     his_notional = float(payload.get("notional") or 0)
     if his_notional <= 0:

@@ -87,9 +87,19 @@ class Settings(BaseSettings):
     # removed on its own record, never blended into swisstony's.
     ai_trader_source: str = "swisstony,RN1"
     ai_trader_ratio: float = 0.10
+    # VETTING whales (owner directive 2026-08-06): candidates under
+    # evaluation for the live copy sleeve. Vetting whales are probed and
+    # PAPER-copied (per-username graded) but NEVER live-copied — only
+    # promotion into ai_trader_source arms real money. Comma-separated
+    # usernames, matched against the tracked roster.
+    ai_trader_vetting: str = ""
 
     def source_whales(self) -> set[str]:
         return {s.strip().lower() for s in self.ai_trader_source.split(",")
+                if s.strip()}
+
+    def vetting_whales(self) -> set[str]:
+        return {s.strip().lower() for s in self.ai_trader_vetting.split(",")
                 if s.strip()}
 
     # ── LIVE trading beta (REAL MONEY — disabled by default) ────────────

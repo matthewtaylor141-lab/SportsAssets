@@ -1034,6 +1034,25 @@ async def copy_report(whale: str | None = "swisstony", hours: int = Query(24, le
         """,
         *args,
     )
+    # Per-whale vetting census (owner directive 2026-08-06): the same
+    # residual-edge measurement for EVERY probed whale, so copy-source
+    # candidates are graded on the identical yardstick as the incumbents.
+    by_whale = await pool.fetch(
+        """
+        SELECT lower(COALESCE(username, '?')) AS whale,
+               count(*)::int AS probes,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY reaction_s)
+                   AS reaction_p50,
+               avg(residual_roi_1k) FILTER (WHERE fillable_1k) AS avg_roi_1k,
+               count(*) FILTER (WHERE residual_roi_1k > 0)::int AS positive_1k,
+               count(*) FILTER (WHERE fillable_1k)::int AS fillable_1k,
+               avg(his_notional) AS avg_his_notional
+        FROM copy_probes
+        WHERE probe_at > now() - make_interval(hours => $1)
+        GROUP BY 1 ORDER BY probes DESC
+        """,
+        hours,
+    )
     recent = await pool.fetch(
         f"""
         SELECT cp.probe_at, cp.reaction_s::float8 AS reaction_s,
@@ -1059,7 +1078,15 @@ async def copy_report(whale: str | None = "swisstony", hours: int = Query(24, le
         if d.get(k) is not None:
             d[k] = round(float(d[k]), 4)
     d["assumed_edge"] = settings().copy_probe_assumed_edge
+    bw = []
+    for r in by_whale:
+        row = dict(r)
+        for k in ("reaction_p50", "avg_roi_1k", "avg_his_notional"):
+            if row.get(k) is not None:
+                row[k] = round(float(row[k]), 4)
+        bw.append(row)
     return {"whale": whale, "hours": hours, "summary": d,
+            "by_whale": bw,
             "recent": [dict(r) for r in recent]}
 
 

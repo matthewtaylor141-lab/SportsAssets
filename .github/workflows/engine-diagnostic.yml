@@ -135,6 +135,9 @@ jobs:
                "$BASE/api/copy-report?hours=720&whale=" || true
           jq -r '.summary // . | to_entries[] | "  \(.key): \(.value)"' \
              /tmp/copy.json 2>/dev/null | head -30 || echo "  (unavailable)"
+          echo "  -- per-whale vetting census (same yardstick as incumbents) --"
+          jq -r '.by_whale[]? | "  VET \(.whale)  probes=\(.probes)  roi1k=\(.avg_roi_1k // "?")  pos=\(.positive_1k)/\(.fillable_1k)  react_p50=\(.reaction_p50 // "?")s  avg_bet=$\(.avg_his_notional // "?")"' \
+             /tmp/copy.json 2>/dev/null || true
 
           echo ""
           echo "#   PAPER AI TRADER (whale copy, paper account, 30d)        #"
@@ -592,3 +595,69 @@ jobs:
           awk '/self_trade_prevention_type:/,0' /tmp/v2.md | head -c 4000; echo ""
           echo "-- CreateOrderV2Response schema --"
           awk '/CreateOrderV2Response:/,0' /tmp/v2.md | head -c 8000; echo ""
+
+      - name: Whale candidate census (sports leaderboard, via runner)
+        if: always()
+        run: |
+          echo "###########################################################"
+          echo "#   WHALE CANDIDATE CENSUS (vetting pipeline input)        #"
+          echo "###########################################################"
+          # Same endpoint family the roster service uses. Display P&L is
+          # known-unreliable (Sparkling8899 lesson) — this list is a
+          # SHORTLIST for full-history vetting, never a promotion basis.
+          for URL in \
+            "https://lb-api.polymarket.com/profit?window=all&limit=25&category=sports" \
+            "https://lb-api.polymarket.com/profit?window=all&limit=25" ; do
+            echo "-- $URL --"
+            CODE=$(curl -sS -o /tmp/lb.json -w "%{http_code}" --max-time 20 "$URL") || true
+            echo "   (HTTP $CODE)"
+            jq -r '.[]? | "  \(.rank // "?")  \(.name // .userName // .pseudonym // "?")  $\(.amount // .profit // 0)  \(.proxyWallet // .walletAddress // .address // "?")"' \
+              /tmp/lb.json 2>/dev/null | head -25 && break || echo "  (unparseable)"
+          done
+          echo ""
+          echo "-- 30d window (recency check on the same board) --"
+          curl -sS --max-time 20 "https://lb-api.polymarket.com/profit?window=30d&limit=15" -o /tmp/lb30.json || true
+          jq -r '.[]? | "  \(.rank // "?")  \(.name // .userName // "?")  $\(.amount // .profit // 0)  \(.proxyWallet // .address // "?")"' \
+            /tmp/lb30.json 2>/dev/null | head -15 || echo "  (unavailable)"
+
+      - name: BTC 15-min OVER/UNDER census (365d, via runner)
+        if: always()
+        timeout-minutes: 8
+        run: |
+          echo "###########################################################"
+          echo "#   KXBTC15M SETTLED CENSUS — over vs under                #"
+          echo "###########################################################"
+          B="https://api.elections.kalshi.com/trade-api/v2"
+          MIN_TS=$(( $(date +%s) - 365*86400 ))
+          CUR="" ; YES=0 ; NO=0 ; OTHER=0 ; PAGES=0
+          EARLIEST="" ; LATEST=""
+          while : ; do
+            URL="$B/markets?series_ticker=KXBTC15M&status=settled&limit=1000&min_close_ts=$MIN_TS"
+            [ -n "$CUR" ] && URL="$URL&cursor=$CUR"
+            curl -sS --max-time 25 "$URL" -o /tmp/pg.json || break
+            N=$(jq '.markets | length' /tmp/pg.json 2>/dev/null || echo 0)
+            [ "$N" = "0" ] || [ -z "$N" ] && break
+            Y=$(jq '[.markets[] | select(.result=="yes")] | length' /tmp/pg.json)
+            X=$(jq '[.markets[] | select(.result=="no")] | length' /tmp/pg.json)
+            O=$(( N - Y - X ))
+            YES=$(( YES + Y )); NO=$(( NO + X )); OTHER=$(( OTHER + O ))
+            PAGES=$(( PAGES + 1 ))
+            PL=$(jq -r '.markets[-1].close_time // ""' /tmp/pg.json)
+            PF=$(jq -r '.markets[0].close_time // ""' /tmp/pg.json)
+            [ -z "$LATEST" ] && LATEST="$PF"
+            EARLIEST="$PL"
+            CUR=$(jq -r '.cursor // ""' /tmp/pg.json)
+            echo "  page $PAGES: n=$N yes=$Y no=$X (running: $YES/$NO) tail_close=$PL"
+            [ -z "$CUR" ] && break
+            [ "$PAGES" -ge 60 ] && { echo "  (page cap hit)"; break; }
+          done
+          TOT=$(( YES + NO ))
+          echo ""
+          echo "BTCCENSUS pages=$PAGES settled_markets=$(( TOT + OTHER ))"
+          echo "BTCCENSUS yes_over=$YES no_under=$NO other=$OTHER"
+          if [ "$TOT" -gt 0 ]; then
+            PY=$(awk "BEGIN{printf \"%.2f\", $YES*100/$TOT}")
+            PN=$(awk "BEGIN{printf \"%.2f\", $NO*100/$TOT}")
+            echo "BTCCENSUS pct_over=$PY pct_under=$PN"
+          fi
+          echo "BTCCENSUS window_earliest=$EARLIEST window_latest=$LATEST"
