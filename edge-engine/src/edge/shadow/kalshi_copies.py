@@ -74,6 +74,15 @@ COLLAPSE_FLOOR = 0.85
 # 72h): the sleeve's edge source is the whales, re-validated daily.
 COPY_HALT_USD_DEFAULT = 60.0
 COPY_HALT_HOURS_DEFAULT = 24.0
+# Owner amnesty 2026-08-06 ("Let's get Kalshi going now"): the halt
+# tripped ~01:00Z on Wednesday-evening losses was ordered lifted early.
+# A halt tripped BEFORE this instant is cleared, and losses realized
+# before it stop counting toward a re-trip (they already bought one
+# halt; without the floor the same losses re-trip a fresh 24h the
+# moment the old one clears). The floor self-expires: 24h past the
+# amnesty, the rolling window no longer reaches behind it. Halts
+# tripped on NEW losses after the amnesty are honored in full.
+COPY_BREAKER_AMNESTY_TS = 1786053600.0   # 2026-08-06T22:00:00Z
 
 
 def check_copy_breaker(ledger) -> str | None:
@@ -84,13 +93,21 @@ def check_copy_breaker(ledger) -> str | None:
     now = time.time()
     halt = ledger.get_state("copy_halt_until")
     if halt and float(halt.get("until", 0)) > now:
-        return "copy_halted"
+        if float(halt.get("tripped_at", 0)) < COPY_BREAKER_AMNESTY_TS:
+            ledger.set_state("copy_halt_until", {
+                "until": 0, "reason": "owner_amnesty_2026-08-06",
+                "cleared_at": now})
+            log.warning("COPY BREAKER: pre-amnesty halt cleared "
+                        "(owner directive 2026-08-06)")
+        else:
+            return "copy_halted"
     halt_usd = float(os.environ.get("EDGE_KCOPY_HALT_USD",
                                     COPY_HALT_USD_DEFAULT))
     fn = getattr(ledger, "realized_pnl_since_for_category", None)
     if fn is None or halt_usd <= 0:
         return None
-    day_pnl = float(fn(now - 86_400, "kalshi_copy"))
+    day_pnl = float(fn(max(now - 86_400, COPY_BREAKER_AMNESTY_TS),
+                       "kalshi_copy"))
     if day_pnl <= -halt_usd:
         hours = float(os.environ.get("EDGE_KCOPY_HALT_H",
                                      COPY_HALT_HOURS_DEFAULT))
@@ -175,8 +192,11 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
 
         # Copy scope: the sleeve rides its OWN breaker, not the engine's
         # (owner directive 2026-08-05). Kill switch/watchdog stay global.
-        blocked = live_blocked(ledger, scope="copy") or \
-            check_copy_breaker(ledger)
+        # check_copy_breaker runs FIRST — it owns the halt state (amnesty
+        # clearing included); live_blocked would report a stale halt the
+        # breaker check is about to clear.
+        blocked = check_copy_breaker(ledger) or \
+            live_blocked(ledger, scope="copy")
         if blocked:
             stats["blocked"] = blocked
             return stats

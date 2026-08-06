@@ -152,7 +152,10 @@ class XVWatch:
         if live:
             from edge.shadow.kalshi_guard import live_blocked
 
-            blocked = live_blocked(self._ledger)
+            # Arb scope (owner directive 2026-08-06): a dutched pair locks
+            # its margin at entry — the daily-loss halts don't apply, only
+            # the global kill switch/watchdog do.
+            blocked = live_blocked(self._ledger, scope="arb")
             if blocked:
                 self.stats["blocked_" + blocked] = \
                     self.stats.get("blocked_" + blocked, 0) + 1

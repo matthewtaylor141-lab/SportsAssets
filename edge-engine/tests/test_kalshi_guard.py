@@ -253,3 +253,64 @@ def test_copy_breaker_trips_on_copy_losses_only(tmp_path, monkeypatch):
     assert check_copy_breaker(led) == "copy_halted"
     assert live_blocked(led, scope="copy") == "copy_halted"
     assert live_blocked(led) is None      # engine untouched by copy halt
+
+
+def test_arb_scope_ignores_daily_loss_halts_but_not_global_stops(tmp_path):
+    """Owner directive 2026-08-06: a dutched pair locks its margin at
+    entry — neither daily-loss breaker may block it. The global stops
+    still do: bad inputs are how 'guaranteed' turns into a loss."""
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    led.set_state("halt_until", {"until": time.time() + 3600})
+    led.set_state("copy_halt_until", {"until": time.time() + 3600})
+    assert live_blocked(led) == "halted"
+    assert live_blocked(led, scope="copy") == "copy_halted"
+    assert live_blocked(led, scope="arb") is None
+    led.set_state("kill_switch", True)
+    assert live_blocked(led, scope="arb") == "kill_switch"
+    led.set_state("kill_switch", False)
+    led.set_state("watchdog_tripped", {"tripped": True, "reason": "feed"})
+    assert live_blocked(led, scope="arb") == "watchdog"
+
+
+def test_copy_breaker_amnesty_clears_pre_amnesty_halt_only(tmp_path):
+    """Owner amnesty 2026-08-06: the halt tripped on Wednesday-evening
+    losses is cleared; a halt tripped on NEW losses stays honored."""
+    from edge.shadow.kalshi_copies import (COPY_BREAKER_AMNESTY_TS,
+                                           check_copy_breaker)
+
+    now = time.time()
+    led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    led.set_state("copy_halt_until", {
+        "until": now + 3600, "reason": "copy_daily_loss_circuit_breaker",
+        "tripped_at": COPY_BREAKER_AMNESTY_TS - 100})
+    assert check_copy_breaker(led) is None
+    assert live_blocked(led, scope="copy") is None   # state truly cleared
+    led.set_state("copy_halt_until", {
+        "until": now + 3600, "reason": "copy_daily_loss_circuit_breaker",
+        "tripped_at": now})
+    assert check_copy_breaker(led) == "copy_halted"
+
+
+def test_copy_breaker_window_floors_at_the_amnesty():
+    """Pre-amnesty losses bought one halt already — they must not re-trip
+    a fresh 24h the moment the amnesty clears the old one."""
+    from edge.shadow.kalshi_copies import (COPY_BREAKER_AMNESTY_TS,
+                                           check_copy_breaker)
+
+    seen = {}
+
+    class _Led:
+        def get_state(self, key, default=None):
+            return default
+
+        def set_state(self, key, val):
+            pass
+
+        def realized_pnl_since_for_category(self, ts, cat):
+            seen["ts"] = ts
+            seen["cat"] = cat
+            return 0.0
+
+    assert check_copy_breaker(_Led()) is None
+    assert seen["cat"] == "kalshi_copy"
+    assert seen["ts"] >= COPY_BREAKER_AMNESTY_TS

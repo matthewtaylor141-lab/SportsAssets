@@ -35,13 +35,22 @@ def live_blocked(ledger, scope: str = "engine") -> str | None:
     their own P&L, and an engine-side loss day must not pause profitable
     copying. Kill switch and watchdog stay global: they mean "the account
     or the inputs are unsafe", which no sleeve trades through.
+    scope="arb": dutched guaranteed-margin pairs (xv_watch/xv_crypto) —
+    owner directive 2026-08-06: "do not miss a single arbitrage
+    opportunity". A daily-loss breaker exists to stop a bleeding
+    strategy; a completed dutch pair locks its margin at entry and
+    structurally cannot bleed, so NEITHER halt applies. Kill switch and
+    watchdog still do — bad inputs make "guaranteed" a lie (a mapping
+    error dutches two different games), and those are exactly the
+    conditions the watchdog trips on.
     """
     if ledger.get_state("kill_switch", False):
         return "kill_switch"
-    halt_key = "copy_halt_until" if scope == "copy" else "halt_until"
-    halt = ledger.get_state(halt_key)
-    if halt and float(halt.get("until", 0)) > time.time():
-        return "copy_halted" if scope == "copy" else "halted"
+    if scope != "arb":
+        halt_key = "copy_halt_until" if scope == "copy" else "halt_until"
+        halt = ledger.get_state(halt_key)
+        if halt and float(halt.get("until", 0)) > time.time():
+            return "copy_halted" if scope == "copy" else "halted"
     wd = ledger.get_state("watchdog_tripped")
     if wd and wd.get("tripped"):
         return "watchdog"
