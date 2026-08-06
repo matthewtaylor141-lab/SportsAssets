@@ -104,6 +104,11 @@ jobs:
           # ...and the most recent days — "how is TODAY looking" must be
           # answerable from a probe without shipping anything.
           jq -r '.daily // [] | .[-3:][] | "  day(recent) \(.date)  pnl \(.pnl)  settled \(.settled)  open \(.open // 0)"' /tmp/tr.json 2>/dev/null || true
+          echo ""
+          echo "#   DAILY BREAKDOWN BY CATEGORY (owner report)             #"
+          curl -sS --max-time 90 -o /tmp/db.json "$BASE/api/daily-breakdown" || true
+          jq -r '.days[]? | "  BRK \(.date)  rn1=\(.rn1.pnl // 0)/\(.rn1.wins // 0)-\(.rn1.losses // 0)  st=\(.swisstony.pnl // 0)/\(.swisstony.wins // 0)-\(.swisstony.losses // 0)  sw=\(.software.pnl // 0)/\(.software.wins // 0)-\(.software.losses // 0)  arb=\(.arb.pnl // 0)/\(.arb.wins // 0)-\(.arb.losses // 0)"' /tmp/db.json 2>/dev/null || true
+          jq -r '.totals | to_entries[]? | "  BRKTOT \(.key)  pnl=\(.value.pnl)  \(.value.wins)-\(.value.losses) of \(.value.settled)"' /tmp/db.json 2>/dev/null || true
           probe /healthz 30
 
           # ── the decisive number ────────────────────────────────────

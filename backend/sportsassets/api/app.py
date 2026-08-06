@@ -806,6 +806,96 @@ async def api_track_record(since: str | None = Query(None),
     return await track_record(since, max_stake=max_stake)
 
 
+@app.get("/api/daily-breakdown")
+async def api_daily_breakdown() -> dict:
+    """Month-to-date daily results by category (owner report 2026-08-06):
+    per ET day — RN1 copies and swisstony copies (live_orders, order-level
+    settled P&L), software selections and arbitrage (venue-account record
+    rows, split by the engine mirror's band tag), with the unattributed
+    cohort folded into software per the owner's rule. Copies use our audit
+    table (the only per-whale source); software/arb use the venue account."""
+    from datetime import datetime as _dt
+
+    from .track_record import RECORD_TZ, track_record
+
+    pool = await get_pool()
+    copies = await pool.fetch(
+        """
+        SELECT lower(COALESCE(whale_username, '?')) AS whale,
+               to_char(settled_at AT TIME ZONE 'America/New_York',
+                       'YYYY-MM-DD') AS day,
+               count(*)::int AS settled,
+               count(*) FILTER (WHERE pnl > 0)::int AS wins,
+               count(*) FILTER (WHERE pnl < 0)::int AS losses,
+               COALESCE(sum(pnl), 0)::float8 AS pnl
+        FROM live_orders
+        WHERE status = 'settled' AND settled_at IS NOT NULL
+        GROUP BY 1, 2
+        """)
+    arb_rows = await pool.fetch(
+        "SELECT DISTINCT outcome_id FROM engine_fills "
+        "WHERE band IN ('arb', 'arb_crypto')")
+    arb_slugs = {r["outcome_id"] for r in arb_rows}
+    rec = await track_record(None)
+    first_day = "2026-08-01"
+
+    days: dict[str, dict] = {}
+
+    def _cat(day: str, cat: str) -> dict:
+        d = days.setdefault(day, {})
+        return d.setdefault(cat, {"pnl": 0.0, "settled": 0,
+                                  "wins": 0, "losses": 0})
+
+    for r in copies:
+        if r["whale"] not in ("rn1", "swisstony"):
+            continue
+        c = _cat(max(r["day"], first_day), r["whale"])
+        c["pnl"] = round(c["pnl"] + r["pnl"], 4)
+        c["settled"] += r["settled"]
+        c["wins"] += r["wins"]
+        c["losses"] += r["losses"]
+
+    for r in rec.get("trades") or []:
+        if r.get("sleeve") == "copy" or not r.get("settled"):
+            continue
+        ts = r.get("settled_ts") or r.get("entry_ts")
+        if not ts:
+            continue
+        day = max(_dt.fromtimestamp(ts, RECORD_TZ).strftime("%Y-%m-%d"),
+                  first_day)
+        cat = "arb" if r.get("market_slug") in arb_slugs else "software"
+        pnl = float(r.get("pnl") or 0)
+        c = _cat(day, cat)
+        c["pnl"] = round(c["pnl"] + pnl, 4)
+        c["settled"] += 1
+        c["wins"] += 1 if pnl > 0 else 0
+        c["losses"] += 1 if pnl < 0 else 0
+
+    # Unattributed -> software (owner rule). Pre-mirror arb legs live here
+    # too; they cannot be split retroactively and count as software.
+    for u in ((rec.get("excluded_unattributed") or {}).get("daily") or []):
+        c = _cat(u["date"], "software")
+        c["pnl"] = round(c["pnl"] + u["pnl"], 4)
+        c["settled"] += u["settled"]
+        c["wins"] += u["wins"]
+        c["losses"] += u["settled"] - u["wins"]
+
+    totals: dict[str, dict] = {}
+    for d in days.values():
+        for cat, c in d.items():
+            t = totals.setdefault(cat, {"pnl": 0.0, "settled": 0,
+                                        "wins": 0, "losses": 0})
+            t["pnl"] = round(t["pnl"] + c["pnl"], 4)
+            for k in ("settled", "wins", "losses"):
+                t[k] += c[k]
+    return {"days": [{"date": k, **v} for k, v in sorted(days.items())],
+            "totals": totals,
+            "note": ("copies=order-level audit table (per-whale, both "
+                     "cross-venue legs where recorded); software/arb="
+                     "venue-account record; unattributed folded into "
+                     "software (owner rule 2026-08-06)")}
+
+
 @app.get("/api/report")
 async def api_report(period: str = Query("weekly"),
                      format: str = Query("md")) -> Any:

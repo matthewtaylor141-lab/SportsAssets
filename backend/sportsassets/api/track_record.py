@@ -162,6 +162,23 @@ def build(positions: dict[str, dict], activities: list[dict],
     # disclosed with the same honesty contract as the size cap.
     unattributed = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
     copy_sleeve = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
+    # Daily slice of the unattributed cohort (owner directive 2026-08-06:
+    # unattributed results count toward the software category in the daily
+    # breakdown report — an aggregate-only bucket can't be day-bucketed).
+    unattributed_daily: dict[str, dict] = {}
+
+    def _tally_unattributed_day(settled: bool, realized: float,
+                                ts: float | None):
+        if not settled or not ts:
+            return
+        day = max(datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d"),
+                  first_day)
+        d = unattributed_daily.setdefault(
+            day, {"date": day, "pnl": 0.0, "settled": 0, "wins": 0})
+        d["pnl"] = round(d["pnl"] + realized, 4)
+        d["settled"] += 1
+        if realized > 0:
+            d["wins"] += 1
 
     def _excluded_bucket(slug: str, stake_now: float):
         if attributed is not None and slug not in attributed:
@@ -226,6 +243,10 @@ def build(positions: dict[str, dict], activities: list[dict],
                     bucket["net_pnl"] += realized
                 else:
                     bucket["open"] += 1
+                if bucket is unattributed:
+                    _tally_unattributed_day(
+                        settled, realized,
+                        (res["ts"] if res else None) or entry_ts)
                 continue
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
@@ -271,6 +292,9 @@ def build(positions: dict[str, dict], activities: list[dict],
                 bucket["count"] += 1
                 bucket["stake"] += cost
                 bucket["net_pnl"] += res["realized"]
+                if bucket is unattributed:
+                    _tally_unattributed_day(True, res["realized"],
+                                            res["ts"] or entry_ts)
                 continue
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
@@ -390,7 +414,9 @@ def build(positions: dict[str, dict], activities: list[dict],
             {"count": unattributed["count"],
              "open": unattributed["open"],
              "stake": round(unattributed["stake"], 2),
-             "net_pnl": round(unattributed["net_pnl"], 2)}
+             "net_pnl": round(unattributed["net_pnl"], 2),
+             "daily": sorted(unattributed_daily.values(),
+                             key=lambda d: d["date"])}
             if attributed is not None else None),
         # The whale-copy sleeve's cohort stats. Its rows are INSIDE the
         # record (it is the AI's trading too); this block keeps the sleeve
