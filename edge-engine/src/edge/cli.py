@@ -149,10 +149,19 @@ def run_checklist(ledger, policy, risk) -> tuple[bool, list[str]]:
           risk.caps.daily_loss_halt > 0 and risk.caps.halt_hours > 0,
           f"halt at -${risk.caps.daily_loss_halt} for {risk.caps.halt_hours}h")
     check("kill switch released", not ledger.get_state("kill_switch", False))
+    # An ACTIVE halt is reported but does NOT fail the checklist. The halt
+    # is an ORDER-TIME stop — risk.guard() blocks every engine order and
+    # live_blocked() every side-channel sweep, scope-aware, until it
+    # expires. Failing BOOT on it demoted the whole process to PAPER on
+    # any redeploy inside a halt window, silently converting the copy
+    # sleeve (its own breaker, owner directive 2026-08-05) to paper for
+    # hours while the status read "halted" (observed 18:31Z 2026-08-05 →
+    # 00:45Z 2026-08-06: every 'copied' counter that evening was dry-run).
     halt = ledger.get_state("halt_until") or {}
-    check("no active circuit-breaker halt",
-          time.time() >= float(halt.get("until", 0)),
-          halt.get("reason", ""))
+    halted = time.time() < float(halt.get("until", 0))
+    check("circuit-breaker halt state (informational)", True,
+          "ACTIVE — engine paths blocked at order time until "
+          f"{halt.get('until')}" if halted else "none")
 
     # 5. Mode transitions are being logged; ledger is writable.
     try:

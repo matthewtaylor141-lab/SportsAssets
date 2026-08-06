@@ -488,6 +488,15 @@ def _kalshi_smoke(kalshi_a, ledger, is_live) -> None:
     if not is_live():
         _post_status("kalshi_smoke", {"skipped": "not live"})
         return
+    # The smoke probe is an ENGINE-class order: with the boot checklist no
+    # longer demoting a mid-halt boot to PAPER, this is the one path that
+    # would otherwise fire real money during an active halt.
+    from edge.shadow.kalshi_guard import live_blocked
+
+    blocked = live_blocked(ledger)
+    if blocked:
+        _post_status("kalshi_smoke", {"skipped": blocked})
+        return
     try:
         for league in ("wnba", "mlb"):
             for vm in kalshi_a.discover_markets({league}):
