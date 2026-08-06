@@ -661,3 +661,106 @@ jobs:
             echo "BTCCENSUS pct_over=$PY pct_under=$PN"
           fi
           echo "BTCCENSUS window_earliest=$EARLIEST window_latest=$LATEST"
+
+  btc-calibration:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - name: KXBTC15M taker calibration backtest (price band vs actual win rate)
+        run: |
+          python3 - <<'PY'
+          import json, time, urllib.request, urllib.parse, random
+
+          B = "https://api.elections.kalshi.com/trade-api/v2"
+
+          def get(path, **params):
+              url = B + path + "?" + urllib.parse.urlencode(params)
+              for attempt in range(3):
+                  try:
+                      with urllib.request.urlopen(url, timeout=25) as r:
+                          return json.load(r)
+                  except Exception as e:
+                      if attempt == 2:
+                          raise
+                      time.sleep(1.5)
+
+          # 1) Every settled market + result (same pager as the census).
+          settled, cur = [], ""
+          min_ts = int(time.time()) - 365 * 86400
+          while True:
+              params = dict(series_ticker="KXBTC15M", status="settled",
+                            limit=1000, min_close_ts=min_ts)
+              if cur:
+                  params["cursor"] = cur
+              d = get("/markets", **params)
+              ms = d.get("markets") or []
+              if not ms:
+                  break
+              for m in ms:
+                  if m.get("result") in ("yes", "no"):
+                      settled.append((m["ticker"], m["result"]))
+              cur = d.get("cursor") or ""
+              if not cur:
+                  break
+          print(f"settled markets with result: {len(settled)}")
+
+          # 2) Stratified sample across the whole window (every k-th).
+          k = max(1, len(settled) // 700)
+          sample = settled[::k]
+          print(f"sampling {len(sample)} markets (every {k}th)")
+
+          # 3) Pull executed trades per market; bucket taker buys by side+band.
+          bands = {}   # (side, band_lo) -> [contracts, cost_c, win_contracts]
+          got, empty = 0, 0
+          for i, (tick, result) in enumerate(sample):
+              try:
+                  d = get("/markets/trades", ticker=tick, limit=1000)
+              except Exception:
+                  continue
+              trades = d.get("trades") or []
+              if not trades:
+                  empty += 1
+              got += 1
+              for t in trades:
+                  side = t.get("taker_side")
+                  if side not in ("yes", "no"):
+                      continue
+                  px = t.get("yes_price") if side == "yes" else t.get("no_price")
+                  cnt = t.get("count") or 0
+                  if not px or not cnt:
+                      continue
+                  band = (int(px) // 5) * 5
+                  keyb = (side, band)
+                  b = bands.setdefault(keyb, [0, 0.0, 0])
+                  b[0] += cnt
+                  b[1] += px * cnt
+                  if result == side:
+                      b[2] += cnt
+              if i % 50 == 0:
+                  print(f"  ..{i}/{len(sample)} markets, {sum(v[0] for v in bands.values())} contracts")
+              time.sleep(0.12)
+          print(f"markets fetched: {got} (no-trades: {empty})")
+
+          # 4) Calibration table: implied vs actual, fee-loaded net edge.
+          print()
+          print("CAL side band  contracts  avg_price_c  actual_win%  gross_edge_c  fee_c  net_edge_c  sigma")
+          rows = []
+          for (side, band), (cnt, cost, wins) in sorted(bands.items()):
+              if cnt < 200:
+                  continue
+              avg_p = cost / cnt
+              win = wins / cnt * 100
+              gross = win - avg_p
+              p = avg_p / 100
+              fee = 7 * p * (1 - p)   # 0.07*p*(1-p) in cents
+              net = gross - fee
+              se = (p * (1 - p) / cnt) ** 0.5 * 100
+              sig = gross / se if se else 0
+              rows.append((net, side, band, cnt, avg_p, win, gross, fee, sig))
+              print(f"CAL {side:>3} {band:>3}-{band+5:<3} {cnt:>9} {avg_p:>11.2f} {win:>11.2f} {gross:>12.2f} {fee:>6.2f} {net:>10.2f} {sig:>6.1f}")
+          rows.sort(reverse=True)
+          print()
+          for net, side, band, cnt, avg_p, win, gross, fee, sig in rows[:5]:
+              print(f"BEST {side} {band}-{band+5}c: net {net:+.2f}c/contract on {cnt} contracts (sigma {sig:.1f})")
+          PY
