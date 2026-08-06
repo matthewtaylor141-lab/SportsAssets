@@ -76,7 +76,16 @@ def log_shadow_fill(intent, book, feed_snapshot, would_fill: bool, whale_alignme
 import uuid as _uuid_mod
 
 _BOOT = {"id": _uuid_mod.uuid4().hex[:10], "started": time.time(),
-         "build": "v2-orders+guard+kalshi_open"}
+         "build": "copy-portfolio"}
+
+
+def _strategy_live() -> bool:
+    """Owner directive 2026-08-06: software-generated (engine-strategy)
+    entries are OFF — the live book is whale copies plus guaranteed
+    arbitrage only. Strategy intents still PAPER-log every cycle (the
+    shadow record keeps grading the model for the day it earns its seat
+    back); they place no live orders. EDGE_STRATEGY_LIVE=1 re-arms."""
+    return os.environ.get("EDGE_STRATEGY_LIVE", "0") == "1"
 
 
 def _post_status(status: str, detail: dict) -> None:
@@ -487,6 +496,9 @@ def _kalshi_smoke(kalshi_a, ledger, is_live) -> None:
         return
     if not is_live():
         _post_status("kalshi_smoke", {"skipped": "not live"})
+        return
+    if not _strategy_live():
+        _post_status("kalshi_smoke", {"skipped": "strategy_off"})
         return
     # The smoke probe is an ENGINE-class order: with the boot checklist no
     # longer demoting a mid-halt boot to PAPER, this is the one path that
@@ -1353,7 +1365,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                             reject("quarantined_slice")
                             continue
                     effective_mode = risk.mode if (
-                        risk.is_live and adapter.name in live_venues) else "PAPER"
+                        risk.is_live and _strategy_live()
+                        and adapter.name in live_venues) else "PAPER"
                     # Ask the venue where it would actually buy. A venue that
                     # can rest an order quotes inside the spread, so the
                     # threshold is judged at the price we'd really pay —
@@ -2025,7 +2038,10 @@ def _main_impl() -> None:
     # Better-price adds (owner directive 2026-08-04): open PMUS positions
     # that Kalshi currently sells cheaper (fee-loaded, >=2c) get a $1 add,
     # once per position, $50/day class budget, graded as its own category.
-    if os.environ.get("EDGE_KALSHI_ADDS", "1") != "0" and len(adapters) >= 2:
+    # Adds are software-class, so they ride the strategy switch (owner
+    # 2026-08-06: copies + guaranteed arbitrage only).
+    if os.environ.get("EDGE_KALSHI_ADDS", "1") != "0" and _strategy_live() \
+            and len(adapters) >= 2:
         kalshi_a = next((a for a in adapters if a.name == "kalshi"), None)
         pmus_a = next((a for a in adapters if a.name == "polymarket-us"), None)
         if kalshi_a is not None and pmus_a is not None \

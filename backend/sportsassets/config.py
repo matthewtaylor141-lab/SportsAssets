@@ -85,7 +85,11 @@ class Settings(BaseSettings):
     # instruction — unmeasured, so both the paper account and the live
     # penny sleeve grade copies per-username and RN1 earns its keep or is
     # removed on its own record, never blended into swisstony's.
-    ai_trader_source: str = "swisstony,RN1"
+    # Four-account sport-weighted portfolio (owner directive 2026-08-06):
+    # per-whale sport assignments live in copy_sports.py; this list is WHO
+    # gets copied at all. kch123 + HomeRunHazard added from fill-level
+    # forensic reconstructions (kch123 7.1% blended; HRH directional +3.51%).
+    ai_trader_source: str = "swisstony,RN1,kch123,HomeRunHazard"
     ai_trader_ratio: float = 0.10
     # VETTING whales (owner directive 2026-08-06): candidates under
     # evaluation for the live copy sleeve. Vetting whales are probed and

@@ -40,7 +40,7 @@ class _Kalshi:
 
 
 _ROW = {"slug": "mlb-bal-tex-2026-08-04", "outcome": "Baltimore Orioles",
-        "price": 0.50, "whale": "swisstony", "entered_ts": time.time() - 60}
+        "price": 0.50, "whale": "HomeRunHazard", "entered_ts": time.time() - 60}
 
 
 def _run(ask, rows=None, live=True, led=None):
@@ -71,10 +71,16 @@ def test_outside_tolerance_is_not_a_copy():
     assert not ka.orders
 
 
-def test_rn1_clips_at_three_dollars_like_everyone_now():
+def test_sport_assignments_gate_the_sweep():
+    """Owner directive 2026-08-06: each whale copies ONLY its assigned
+    sport(s). RN1 is tennis-only, so his MLB identity is refused; the
+    MLB assignee (HomeRunHazard, the default fixture whale) trades."""
     row = {**_ROW, "whale": "RN1"}
     st, ka, _ = _run(0.48, rows=[row])
-    assert ka.orders == [("T-BAL", 0.48, 6)]   # $3 -> 6 contracts
+    assert st.get("skipped_sport") == 1
+    assert not ka.orders
+    st2, ka2, _ = _run(0.48)     # HomeRunHazard + mlb: assigned pair
+    assert ka2.orders == [("T-BAL", 0.48, 6)]   # $3 -> 6 contracts
 
 
 def test_one_copy_per_position_ever():
@@ -103,6 +109,8 @@ def test_paper_counts_but_never_orders():
 
 
 def test_smoke_order_fires_exactly_once_ever():
+    import os
+    os.environ["EDGE_STRATEGY_LIVE"] = "1"   # smoke is engine-class
     from edge.shadow.runner import _kalshi_smoke
 
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
@@ -147,6 +155,8 @@ def test_accepted_ioc_with_zero_fill_does_not_burn_the_claim():
 
 
 def test_smoke_zero_fill_is_not_done():
+    import os
+    os.environ["EDGE_STRATEGY_LIVE"] = "1"   # smoke is engine-class
     from edge.shadow.runner import _kalshi_smoke
 
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")

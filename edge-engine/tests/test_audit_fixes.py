@@ -131,6 +131,7 @@ def test_live_orders_route_to_the_venue_with_the_better_price(monkeypatch):
                     "order_id": f"{self.name}-{len(self.orders)}",
                     "status": "filled"}
 
+    monkeypatch.setenv("EDGE_STRATEGY_LIVE", "1")
     monkeypatch.setenv("EDGE_LIVE_VENUES", "kalshi,polymarket-us")
     tmp = pathlib.Path(__import__("tempfile").mkdtemp())
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp))
@@ -183,6 +184,7 @@ def test_quarantined_band_paper_logs_instead_of_paying(monkeypatch):
             return {"ok": True, "count": qty, "price": price,
                     "order_id": "o", "status": "filled"}
 
+    monkeypatch.setenv("EDGE_STRATEGY_LIVE", "1")
     monkeypatch.setenv("EDGE_LIVE_VENUES", "polymarket-us")
     tmp = pathlib.Path(tempfile.mkdtemp())
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp))

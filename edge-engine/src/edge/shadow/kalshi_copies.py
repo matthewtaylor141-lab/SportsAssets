@@ -207,6 +207,13 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         his_price = float(row.get("price") or 0)
         if not slug or not outcome or not (0 < his_price < 1):
             continue
+        # Sport-weighted portfolio (owner directive 2026-08-06): each
+        # whale is copied ONLY in its assigned sport(s) — same map as the
+        # PMUS executor. Fails closed on unassigned whales.
+        from edge.shadow.copy_sports import copy_allowed
+        if not copy_allowed(row.get("whale") or "", slug):
+            stats["skipped_sport"] = stats.get("skipped_sport", 0) + 1
+            continue
         # FRESH entries only. Identities lacking a timestamp are treated
         # as stale, never grandfathered — an unknown age is not evidence
         # of freshness.
