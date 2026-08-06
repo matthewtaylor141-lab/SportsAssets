@@ -231,18 +231,31 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     username = (payload.get("whale_username") or "").lower()
     if payload.get("side") != "BUY" or username not in cfg.source_whales():
         return
-    # Cell-level copy policy (owner directive 2026-08-06): each source
-    # whale is copied ONLY in its statistically proven sport x market-type
-    # x entry-band cells, derived from fill-level forensic data. Fails
-    # closed on anything unrecognized.
-    from .copy_sports import copy_allowed
-    if not copy_allowed(username, payload.get("market_slug")
-                        or payload.get("event_slug") or "",
-                        price=payload.get("price")):
-        return
     his_notional = float(payload.get("notional") or 0)
     his_price = float(payload.get("price") or 0)
     if his_notional <= 0 or not (0 < his_price < 1):
+        return
+
+    pool = await get_pool()
+    if await _is_paused(pool):
+        return
+    # Cell-level copy policy (owner directive 2026-08-06): each source
+    # whale is copied ONLY in its statistically proven sport x market-type
+    # x entry-band cells, derived from fill-level forensic data. Fails
+    # closed on anything unrecognized. The market identity must be
+    # RESOLVED before it is judged: fresh Path-A detections reach here
+    # before enrichment (the payload carries no slug — it lands in the
+    # trades row afterwards), and gating on the raw payload fed the
+    # fail-closed parser an empty string, silently dropping every fresh
+    # copy for ~3h on 2026-08-06 evening.
+    from .copy_sports import copy_allowed
+    ctx = await _market_context(pool, payload)
+    for k, v in ctx.items():
+        if v and not payload.get(k):
+            payload[k] = v
+    if not copy_allowed(username, payload.get("market_slug")
+                        or payload.get("event_slug") or "",
+                        price=payload.get("price")):
         return
     # Capital turnover (owner, 2026-08-04): fresh detections on games more
     # than ~a day out are DEFERRED — no audit row is written, so the 6h
@@ -261,10 +274,6 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 return
         except ValueError:
             pass
-
-    pool = await get_pool()
-    if await _is_paused(pool):
-        return
     # ONE copy per proposition, no matter how many times the source adds
     # (owner: "cardinals moneyline 10x -> copied once"). In-flight and
     # filled rows retire the asset; rejected/unfilled ones stay retryable
