@@ -76,10 +76,10 @@ class _Kalshi:
 
     def discover_markets(self, league_codes):
         from edge.venues.mapper import VenueMarket
-        return [VenueMarket(market_id="KXMLBGAME-26AUG04BALTEX",
-                            title="Orioles at Rangers", league_code="mlb",
-                            outcome_tokens={"Baltimore Orioles": "KXMLBGAME-26AUG04BALTEX-BAL",
-                                            "Texas Rangers": "KXMLBGAME-26AUG04BALTEX-TEX"})]
+        return [VenueMarket(market_id="KXWNBAGAME-26AUG04DALCHI",
+                            title="Wings at Sky", league_code="wnba",
+                            outcome_tokens={"Dallas Wings": "KXWNBAGAME-26AUG04DALCHI-DAL",
+                                            "Chicago Sky": "KXWNBAGAME-26AUG04DALCHI-CHI"})]
 
     def get_book(self, market_id, ticker):
         from edge.venues.base import BookLevel, MarketBook
@@ -97,11 +97,11 @@ def test_copy_sweep_refuses_the_second_side_of_a_losing_pair():
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     # We already hold Texas at 55c live.
     led.record_fill(fill_uid="k1", venue="kalshi",
-                    market_key="kalshi:KXMLBGAME-26AUG04BALTEX-TEX",
-                    side="BUY", qty=4, price=0.55, fee=0.02, league="mlb",
+                    market_key="kalshi:KXWNBAGAME-26AUG04DALCHI-CHI",
+                    side="BUY", qty=4, price=0.55, fee=0.02, league="wnba",
                     mode="LIVE_BETA", category="kalshi_copy", decision={})
     ka = _Kalshi(0.50)   # Baltimore ask 50c: 0.50+0.55 > 1 -> refuse
-    row = {"slug": "mlb-bal-tex-2026-08-04", "outcome": "Baltimore Orioles",
+    row = {"slug": "wnba-dal-chi-2026-08-04", "outcome": "Dallas Wings",
            "price": 0.55, "whale": "HomeRunHazard",
            "entered_ts": time.time() - 60}
     st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
@@ -113,16 +113,16 @@ def test_copy_sweep_completes_a_guaranteed_pair_matched():
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     # Held: Texas 3 @ 20c. New: Baltimore at 50c -> 0.70 + fee < 0.99 ok.
     led.record_fill(fill_uid="k1", venue="kalshi",
-                    market_key="kalshi:KXMLBGAME-26AUG04BALTEX-TEX",
-                    side="BUY", qty=3, price=0.20, fee=0.01, league="mlb",
+                    market_key="kalshi:KXWNBAGAME-26AUG04DALCHI-CHI",
+                    side="BUY", qty=3, price=0.20, fee=0.01, league="wnba",
                     mode="LIVE_BETA", category="kalshi_copy", decision={})
     ka = _Kalshi(0.50)
-    row = {"slug": "mlb-bal-tex-2026-08-04", "outcome": "Baltimore Orioles",
+    row = {"slug": "wnba-dal-chi-2026-08-04", "outcome": "Dallas Wings",
            "price": 0.55, "whale": "HomeRunHazard",
            "entered_ts": time.time() - 60}
     st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
     assert st["copied"] == 1
-    assert ka.orders == [("KXMLBGAME-26AUG04BALTEX-BAL", 0.50, 3)], \
+    assert ka.orders == [("KXWNBAGAME-26AUG04DALCHI-DAL", 0.50, 3)], \
         "pair-matched: 3 contracts, not the $3 default of 6"
 
 
@@ -174,7 +174,7 @@ def test_reaper_leaves_young_orders_alone():
 def test_cross_market_same_game_is_refused_outright():
     """Spread/total vs moneyline of the SAME game can never lock $1 —
     refused regardless of prices (owner rule 2026-08-05)."""
-    sides = {"26AUG04BALTEX": [{"ticker": "KXMLBGAME-26AUG04BALTEX-TEX",
+    sides = {"26AUG04BALTEX": [{"ticker": "KXWNBAGAME-26AUG04DALCHI-TEX",
                                 "shares": 4, "avg_cost": 0.20}]}
     assert cross_side_cap(sides, "KXMLBSPREAD-26AUG04BALTEX-BAL",
                           0.30, 5) == 0
@@ -185,8 +185,8 @@ def test_engine_executor_path_is_game_guarded(tmp_path):
 
     led = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     led.record_fill(fill_uid="k1", venue="kalshi",
-                    market_key="kalshi:KXMLBGAME-26AUG04BALTEX-TEX",
-                    side="BUY", qty=4, price=0.55, fee=0.02, league="mlb",
+                    market_key="kalshi:KXWNBAGAME-26AUG04DALCHI-CHI",
+                    side="BUY", qty=4, price=0.55, fee=0.02, league="wnba",
                     mode="LIVE_BETA", category="kalshi_copy", decision={})
 
     class _A:
@@ -202,7 +202,7 @@ def test_engine_executor_path_is_game_guarded(tmp_path):
             raise AssertionError("order must be blocked before the venue")
 
     r = execute(adapter=_A(), ledger=led, mode="LIVE_BETA",
-                mkey=market_key("kalshi", "KXMLBGAME-26AUG04BALTEX-BAL"),
+                mkey=market_key("kalshi", "KXWNBAGAME-26AUG04DALCHI-BAL"),
                 league="mlb", ask_price=0.51, ask_size=50, size_usd=2.0,
                 edge=0.03, threshold=0.02, decision={}, ts=1000.0)
     assert r["status"] == "cross_game_blocked" and not r["placed"]
@@ -247,7 +247,7 @@ def test_copy_breaker_trips_on_copy_losses_only(tmp_path, monkeypatch):
     assert check_copy_breaker(led) is None
     # $60 of COPY losses inside 24h: trips, and the halt state persists.
     led.record_fill(fill_uid="c1", venue="kalshi", market_key="kalshi:KXB-1-Y",
-                    side="BUY", qty=100.0, price=0.6, league="mlb",
+                    side="BUY", qty=100.0, price=0.6, league="wnba",
                     mode="LIVE_BETA", category="kalshi_copy")
     led.record_resolution("kalshi:KXB-1-Y", 0.0)
     assert check_copy_breaker(led) == "copy_halted"

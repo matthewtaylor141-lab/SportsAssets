@@ -231,11 +231,14 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     username = (payload.get("whale_username") or "").lower()
     if payload.get("side") != "BUY" or username not in cfg.source_whales():
         return
-    # Sport-weighted portfolio (owner directive 2026-08-06): each source
-    # whale is copied ONLY in its assigned sport(s). Fails closed.
+    # Cell-level copy policy (owner directive 2026-08-06): each source
+    # whale is copied ONLY in its statistically proven sport x market-type
+    # x entry-band cells, derived from fill-level forensic data. Fails
+    # closed on anything unrecognized.
     from .copy_sports import copy_allowed
     if not copy_allowed(username, payload.get("market_slug")
-                        or payload.get("event_slug") or ""):
+                        or payload.get("event_slug") or "",
+                        price=float(payload.get("price") or 0) or None):
         return
     his_notional = float(payload.get("notional") or 0)
     his_price = float(payload.get("price") or 0)

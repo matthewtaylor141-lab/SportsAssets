@@ -17,15 +17,15 @@ class _Kalshi:
     def __init__(self, ask, outcomes=None):
         self.ask = ask
         self.orders = []
-        self._outcomes = outcomes or {"Baltimore Orioles": "T-BAL",
-                                      "Texas Rangers": "T-TEX"}
+        self._outcomes = outcomes or {"Dallas Wings": "T-DAL",
+                                      "Chicago Sky": "T-CHI"}
 
     def taker_fee(self, price):
         return 0.07 * price * (1 - price)
 
     def discover_markets(self, league_codes):
-        return [VenueMarket(market_id="KXMLBGAME-26AUG04BALTEX",
-                            title="Orioles at Rangers", league_code="mlb",
+        return [VenueMarket(market_id="KXWNBAGAME-26AUG04DALCHI",
+                            title="Wings at Sky", league_code="wnba",
                             outcome_tokens=dict(self._outcomes))]
 
     def get_book(self, market_id, ticker):
@@ -39,7 +39,7 @@ class _Kalshi:
                 "status": "filled"}
 
 
-_ROW = {"slug": "mlb-bal-tex-2026-08-04", "outcome": "Baltimore Orioles",
+_ROW = {"slug": "wnba-dal-chi-2026-08-04", "outcome": "Dallas Wings",
         "price": 0.50, "whale": "HomeRunHazard", "entered_ts": time.time() - 60}
 
 
@@ -61,8 +61,8 @@ def test_limit_is_his_price_plus_two_percent_min_one_tick():
 def test_copies_when_kalshi_is_inside_his_tolerance():
     st, ka, led = _run(0.48)   # eff = 0.48 + fee(0.0175) <= limit 0.51
     assert st["matched"] == 1 and st["copied"] == 1
-    assert ka.orders == [("T-BAL", 0.48, 6)]   # $3 -> 6 contracts
-    assert led.get_state("kcopy:mlb-bal-tex-2026-08-04:Baltimore Orioles")
+    assert ka.orders == [("T-DAL", 0.48, 6)]   # $3 -> 6 contracts
+    assert led.get_state("kcopy:wnba-dal-chi-2026-08-04:Dallas Wings")
 
 
 def test_outside_tolerance_is_not_a_copy():
@@ -80,7 +80,7 @@ def test_sport_assignments_gate_the_sweep():
     assert st.get("skipped_sport") == 1
     assert not ka.orders
     st2, ka2, _ = _run(0.48)     # HomeRunHazard + mlb: assigned pair
-    assert ka2.orders == [("T-BAL", 0.48, 6)]   # $3 -> 6 contracts
+    assert ka2.orders == [("T-DAL", 0.48, 6)]   # $3 -> 6 contracts
 
 
 def test_one_copy_per_position_ever():
@@ -105,7 +105,7 @@ def test_paper_counts_but_never_orders():
     st, ka, led = _run(0.48, live=False)
     assert st["copied"] == 1
     assert not ka.orders
-    assert not led.get_state("kcopy:mlb-bal-tex-2026-08-04:Baltimore Orioles")
+    assert not led.get_state("kcopy:wnba-dal-chi-2026-08-04:Dallas Wings")
 
 
 def test_smoke_order_fires_exactly_once_ever():
@@ -148,7 +148,7 @@ def test_accepted_ioc_with_zero_fill_does_not_burn_the_claim():
     ka = _ZeroFill(0.48)
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
     assert st["copied"] == 0 and st.get("ioc_zero_fill") == 1
-    assert not led.get_state("kcopy:mlb-bal-tex-2026-08-04:Baltimore Orioles")
+    assert not led.get_state("kcopy:wnba-dal-chi-2026-08-04:Dallas Wings")
     # next sweep retries: no claim recorded
     st2 = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
     assert st2.get("skipped_claimed", 0) == 0
@@ -237,7 +237,7 @@ def test_pmus_better_priced_routes_the_copy_away_from_kalshi():
     assert st.get("routed_pmus_better") == 1
     assert st["copied"] == 0 and not ka.orders
     # The peek resolved his side structurally: atc grammar, 'bal' code.
-    assert pm.peeked == ["atc-mlb-bal-tex-2026-08-04-bal"]
+    assert pm.peeked == ["atc-wnba-dal-chi-2026-08-04-dal"]
 
 
 def test_kalshi_places_when_it_is_cheaper_fee_loaded():
@@ -249,7 +249,7 @@ def test_kalshi_places_when_it_is_cheaper_fee_loaded():
                pmus=pm)
     assert st.get("routed_pmus_better") is None
     assert st["copied"] == 1
-    assert ka.orders == [("T-BAL", 0.48, 6)]
+    assert ka.orders == [("T-DAL", 0.48, 6)]
 
 
 def test_no_pmus_book_falls_through_to_kalshi():
@@ -260,4 +260,4 @@ def test_no_pmus_book_falls_through_to_kalshi():
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
                pmus=pm)
     assert pm.peeked, "the peek must have been attempted"
-    assert st["copied"] == 1 and ka.orders == [("T-BAL", 0.48, 6)]
+    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 6)]

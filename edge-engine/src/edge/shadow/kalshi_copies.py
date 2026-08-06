@@ -207,11 +207,12 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         his_price = float(row.get("price") or 0)
         if not slug or not outcome or not (0 < his_price < 1):
             continue
-        # Sport-weighted portfolio (owner directive 2026-08-06): each
-        # whale is copied ONLY in its assigned sport(s) — same map as the
-        # PMUS executor. Fails closed on unassigned whales.
-        from edge.shadow.copy_sports import copy_allowed
-        if not copy_allowed(row.get("whale") or "", slug):
+        # Cell-level copy policy (owner directive 2026-08-06): each whale
+        # is copied ONLY in its statistically proven sport x market-type
+        # x entry-band cells — same policy module as the PMUS executor.
+        # Fails closed on anything unrecognized.
+        from edge.shadow.copy_sports import copy_allowed, kalshi_min_ask
+        if not copy_allowed(row.get("whale") or "", slug, price=his_price):
             stats["skipped_sport"] = stats.get("skipped_sport", 0) + 1
             continue
         # FRESH entries only. Identities lacking a timestamp are treated
@@ -274,6 +275,13 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         if book is None or not book.asks or book.asks[0].size < 1:
             continue
         ask = book.asks[0].price
+        # Fee-viability carve-out: thin-edge cells (donor ROI ~2-3.5%)
+        # cannot pay Kalshi's mid-price taker fee (peaks 1.75% at 50c);
+        # they route here only at >=70c where the fee is <=1.47%.
+        floor = kalshi_min_ask(row.get("whale") or "", slug)
+        if floor and ask < floor:
+            stats["skipped_fee_floor"] = stats.get("skipped_fee_floor", 0) + 1
+            continue
         limit = _limit_for(his_price)
         # Fee-loaded: we cross as taker, so the true cost is ask + fee.
         # Comparing the raw ask overpaid by up to 1.75c/contract against
