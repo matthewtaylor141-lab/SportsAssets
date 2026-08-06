@@ -238,7 +238,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     from .copy_sports import copy_allowed
     if not copy_allowed(username, payload.get("market_slug")
                         or payload.get("event_slug") or "",
-                        price=float(payload.get("price") or 0) or None):
+                        price=payload.get("price")):
         return
     his_notional = float(payload.get("notional") or 0)
     his_price = float(payload.get("price") or 0)

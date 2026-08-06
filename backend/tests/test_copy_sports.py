@@ -79,3 +79,34 @@ def test_kalshi_fee_floor_for_thin_edge_cells():
     assert kalshi_min_ask("homerunhazard",
                           "tsc-wnba-dal-wsh-2026-08-05-o160") == 0.0
     assert kalshi_min_ask("kch123", "atc-nhl-tor-mtl-2026-10-12-tor") == 0.0
+
+
+def test_kindless_feed_grammar_market_types():
+    """The whale FEED's slugs are kindless and league-led (audit
+    2026-08-06) — the type lives in the post-date suffix. The fail-open
+    scenarios from the audit are pinned here."""
+    assert market_type_of("mlb-nyy-bos-2026-07-22") == "moneyline"
+    assert market_type_of("uslc-tul-srp-2026-08-05-srp") == "moneyline"
+    assert market_type_of("nhl-tor-mtl-2026-10-12-tor-1pt5") == "spread"
+    assert market_type_of("nba-lal-bos-2026-11-01-lal-5pt5") == "spread"
+    assert market_type_of("mlb-tor-hou-2026-08-08-o8pt5") == "total"
+    assert market_type_of("epl-ars-che-2026-08-15-es-2-0") == "exact_score"
+    assert market_type_of("lgscup-tol-sea-2026-08-05-ftts-sea") == "btts"
+    assert market_type_of("mlb-tor-hou-2026-08-08-weird-99x") == "unknown"
+    assert market_type_of("no-date-here-at-all") == "unknown"
+
+
+def test_kindless_cells_route_correctly():
+    # Strongest cells now reachable on production-shaped slugs:
+    assert copy_allowed("kch123", "nba-lal-bos-2026-11-01-lal-5pt5")
+    assert copy_allowed("homerunhazard", "mlb-tor-hou-2026-08-08-o8pt5",
+                        price=0.60)
+    # Audit fail-open scenarios refused:
+    assert not copy_allowed("kch123", "nhl-tor-mtl-2026-10-12-tor-1pt5")
+    assert not copy_allowed("homerunhazard",
+                            "wnba-dal-wsh-2026-08-05-dal-3pt5", price=0.55)
+    assert not copy_allowed("swisstony", "epl-ars-che-2026-08-15-es-2-0")
+    # Banded whale with missing/garbage price: refused.
+    assert not copy_allowed("homerunhazard", "mlb-tor-hou-2026-08-08-o8pt5")
+    assert not copy_allowed("homerunhazard", "mlb-tor-hou-2026-08-08-o8pt5",
+                            price="n/a")

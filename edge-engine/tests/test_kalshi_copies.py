@@ -79,7 +79,7 @@ def test_sport_assignments_gate_the_sweep():
     st, ka, _ = _run(0.48, rows=[row])
     assert st.get("skipped_sport") == 1
     assert not ka.orders
-    st2, ka2, _ = _run(0.48)     # HomeRunHazard + mlb: assigned pair
+    st2, ka2, _ = _run(0.48)     # HomeRunHazard + wnba ML: assigned cell
     assert ka2.orders == [("T-DAL", 0.48, 6)]   # $3 -> 6 contracts
 
 

@@ -65,12 +65,35 @@ KALSHI_MIN_ASK: dict[tuple[str, str], float] = {
 }
 
 
+import re as _re
+
+_DATE_RE = _re.compile(r"^\d{4}$")
+_TOTAL_RE = _re.compile(r"^[ou]\d+(pt\d)?$")
+_LINE_RE = _re.compile(r"^(pos|neg)?\d+(pt\d)?$")
+
+
+def _post_date_tokens(parts: list[str]) -> list[str] | None:
+    """Tokens after the YYYY-MM-DD triple, or None if no date found."""
+    for i in range(len(parts) - 2):
+        if (_DATE_RE.match(parts[i]) and parts[i + 1].isdigit()
+                and parts[i + 2].isdigit()):
+            return parts[i + 3:]
+    return None
+
+
 def market_type_of(slug: str) -> str:
-    """Market type from the slug's kind prefix (and derivative tokens):
-    moneyline (atc/aec), spread (asc), total (tsc), and astatc derivatives
-    split into btts ('ftts' token), exact_score ('es' segment) and prop.
-    Kindless slugs are venue moneyline events. Fails to 'unknown', never
-    silently to a tradeable type."""
+    """Market type from either slug grammar.
+
+    PMUS venue grammar keys on the kind prefix: atc/aec moneyline, asc
+    spread, tsc total, astatc derivatives (ftts=btts, es=exact score).
+
+    The WHALE FEED's slugs are kindless and league-led (audit
+    2026-08-06: 'mlb-nyy-bos-2026-07-22...') — there the market type
+    lives in the post-date suffix: empty or a single team code is a
+    moneyline; 'o8pt5'/'u10' totals; a bare line ('3pt5', 'pos-2pt5',
+    optionally after a team code) is a spread; 'es-2-0' exact score;
+    'ftts'/'btts' both-teams-to-score. Anything unrecognized returns
+    'unknown' — NEVER silently a tradeable type."""
     s = (slug or "").lower()
     parts = [p for p in s.split("-") if p]
     if not parts:
@@ -92,8 +115,23 @@ def market_type_of(slug: str) -> str:
         return "prop"
     if kind in _KINDS:
         return "unknown"
-    # Kindless feed slugs ({league}-...) are event moneylines.
-    return "moneyline"
+    # Kindless feed grammar: type from the post-date suffix.
+    suffix = _post_date_tokens(parts)
+    if suffix is None:
+        return "unknown"          # undatable slug: fail closed
+    if not suffix:
+        return "moneyline"        # bare event slug
+    if "ftts" in suffix or "btts" in suffix:
+        return "btts"
+    if suffix[0] == "es":
+        return "exact_score"
+    if any(_TOTAL_RE.match(t) for t in suffix):
+        return "total"
+    if any(_LINE_RE.match(t) for t in suffix):
+        return "spread"
+    if len(suffix) == 1 and suffix[0].isalpha():
+        return "moneyline"        # team-code pick side
+    return "unknown"
 
 
 def league_of(slug: str) -> str:
@@ -129,9 +167,17 @@ def copy_allowed(whale: str, slug: str, price: float | None = None) -> bool:
         return False
     if (sport, market_type_of(slug)) not in cells:
         return False
-    if price is not None:
-        band = ENTRY_BAND.get(w)
-        if band is not None and not (band[0] <= float(price) <= band[1]):
+    band = ENTRY_BAND.get(w)
+    if band is not None:
+        # A banded whale with no readable price is REFUSED — the band is
+        # the protection, and an absent price must not disable it.
+        if price is None:
+            return False
+        try:
+            px = float(price)
+        except (TypeError, ValueError):
+            return False
+        if not (band[0] <= px <= band[1]):
             return False
     return True
 
@@ -139,4 +185,5 @@ def copy_allowed(whale: str, slug: str, price: float | None = None) -> bool:
 def kalshi_min_ask(whale: str, slug: str) -> float:
     """Minimum Kalshi ask for this cell (fee-viability carve-out);
     0.0 = no extra constraint."""
-    return KALSHI_MIN_ASK.get(((whale or "").lower(), sport_of(slug)), 0.0)
+    return KALSHI_MIN_ASK.get(((whale or "").strip().lower(),
+                               sport_of(slug)), 0.0)
