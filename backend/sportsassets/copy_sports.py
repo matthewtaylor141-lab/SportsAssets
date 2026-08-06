@@ -44,6 +44,37 @@ ASSIGNMENTS: dict[str, set[str]] = {
 }
 
 
+def market_type_of(slug: str) -> str:
+    """Market type from the slug's kind prefix (and derivative tokens):
+    moneyline (atc/aec), spread (asc), total (tsc), and astatc derivatives
+    split into btts ('ftts' token), exact_score ('-es-' segment) and prop.
+    Kindless slugs are venue moneyline events. Fails to 'unknown' never
+    silently to a tradeable type."""
+    s = (slug or "").lower()
+    parts = [p for p in s.split("-") if p]
+    if not parts:
+        return "unknown"
+    kind = parts[0]
+    if kind in ("atc", "aec"):
+        return "moneyline"
+    if kind == "asc":
+        return "spread"
+    if kind == "tsc":
+        return "total"
+    if kind == "cpc":
+        return "crypto"
+    if kind == "astatc":
+        if "ftts" in parts:
+            return "btts"
+        if "es" in parts:
+            return "exact_score"
+        return "prop"
+    if kind in _KINDS:
+        return "unknown"
+    # Kindless feed slugs ({league}-...) are event moneylines.
+    return "moneyline"
+
+
 def league_of(slug: str) -> str:
     parts = [p for p in (slug or "").lower().split("-") if p]
     if not parts:

@@ -31,3 +31,13 @@ def test_unassigned_pairs_fail_closed():
     assert not copy_allowed("somebody_new", "atc-epl-ars-che-2026-08-15-ars")
     assert not copy_allowed("", "atc-epl-ars-che-2026-08-15-ars")
     assert not copy_allowed("swisstony", "")
+
+
+def test_market_type_parsing():
+    from edge.shadow.copy_sports import market_type_of
+    assert market_type_of("atc-nba-lal-bos-2026-11-01-lal") == "moneyline"
+    assert market_type_of("asc-nfl-kc-buf-2026-09-10-kc-3pt5") == "spread"
+    assert market_type_of("tsc-mlb-tor-hou-2026-08-08-o8pt5") == "total"
+    assert market_type_of("astatc-lgscup-tol-sea-2026-08-05-ftts-sea") == "btts"
+    assert market_type_of("astatc-atp-nunbor-tometc-2026-08-06-es-0-2") == "exact_score"
+    assert market_type_of("uslc-tul-srp-2026-08-05-srp") == "moneyline"
