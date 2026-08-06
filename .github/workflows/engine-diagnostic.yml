@@ -722,13 +722,28 @@ jobs:
               if not trades:
                   empty += 1
               got += 1
+              if got == 1 and trades:
+                  print("RAW TRADE SAMPLE:", json.dumps(trades[0])[:500])
+              def _num(x):
+                  try:
+                      return float(x)
+                  except (TypeError, ValueError):
+                      return 0.0
               for t in trades:
-                  side = t.get("taker_side")
+                  side = str(t.get("taker_side") or t.get("side") or "").lower()
                   if side not in ("yes", "no"):
                       continue
-                  px = t.get("yes_price") if side == "yes" else t.get("no_price")
-                  cnt = t.get("count") or 0
-                  if not px or not cnt:
+                  px = _num(t.get("yes_price") if side == "yes"
+                            else t.get("no_price"))
+                  if px <= 0:
+                      p2 = _num(t.get("price"))
+                      if 0 < p2 < 1:      # dollars, not cents
+                          p2 *= 100
+                      px = p2 if side == "yes" else (100 - p2 if p2 else 0)
+                  if px > 0 and px < 1:   # cents fields served as dollars
+                      px *= 100
+                  cnt = int(_num(t.get("count") or t.get("quantity")))
+                  if px <= 0 or px >= 100 or cnt <= 0:
                       continue
                   band = (int(px) // 5) * 5
                   keyb = (side, band)
