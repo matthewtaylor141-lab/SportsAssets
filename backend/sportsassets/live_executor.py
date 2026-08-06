@@ -192,6 +192,13 @@ COPY_MODE = "penny_trial"
 # is naturally bounded by what the source whales actually trade. The env
 # knob remains for the day the owner wants a ceiling back.
 PENNY_TRIAL_DAILY_USD = float(os.environ.get("COPY_DAILY_USD", "inf"))
+# Owner directive 2026-08-05: no LIFETIME volume cap either. The config's
+# live_max_total_usd ($500) predates that directive and silently bound
+# for the first time at 21:24Z 2026-08-05 — lifetime filled crossed
+# $500.65 and every copy from every path no-opped for hours while all
+# heartbeats read healthy. In penny_trial the trial knobs are the
+# authority; the config caps govern only the future "full" mode.
+PENNY_TRIAL_TOTAL_USD = float(os.environ.get("COPY_TOTAL_USD", "inf"))
 # Owner directive 2026-08-05: ALL copy trades $3 per trade — as many
 # whole contracts as $3 buys at the limit (20c -> 15 contracts,
 # 50c -> 6, 97c -> 3), rounded DOWN so a copy never exceeds the budget.
@@ -263,11 +270,14 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         return
     day_room, total_room = await _caps_room(pool)
     if COPY_MODE == "penny_trial":
-        # The trial ceiling binds tighter than the config caps: the day's
-        # copy spend never exceeds PENNY_TRIAL_DAILY_USD no matter what
-        # live_max_daily_usd says.
+        # In penny_trial the TRIAL knobs are the authority, not the config
+        # caps (owner 2026-08-05: per-trade limits only; day and lifetime
+        # ceilings are env knobs, default unlimited). Deriving spend from
+        # the config-cap rooms keeps _caps_room's single query.
         day_spent = cfg.live_max_daily_usd - day_room
-        day_room = min(day_room, PENNY_TRIAL_DAILY_USD - day_spent)
+        total_spent = cfg.live_max_total_usd - total_room
+        day_room = PENNY_TRIAL_DAILY_USD - day_spent
+        total_room = PENNY_TRIAL_TOTAL_USD - total_spent
     if day_room <= 0 or total_room <= 1:
         log.warning("live caps exhausted (day room %.2f, total room %.2f) — skipping",
                     day_room, total_room)
