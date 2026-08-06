@@ -733,16 +733,15 @@ jobs:
                   side = str(t.get("taker_side") or t.get("side") or "").lower()
                   if side not in ("yes", "no"):
                       continue
-                  px = _num(t.get("yes_price") if side == "yes"
-                            else t.get("no_price"))
+                  # Real schema (raw sample 2026-08-06): yes/no_price_dollars
+                  # as string dollars, count_fp as string count.
+                  px = _num(t.get("yes_price_dollars") if side == "yes"
+                            else t.get("no_price_dollars")) * 100
                   if px <= 0:
-                      p2 = _num(t.get("price"))
-                      if 0 < p2 < 1:      # dollars, not cents
-                          p2 *= 100
-                      px = p2 if side == "yes" else (100 - p2 if p2 else 0)
-                  if px > 0 and px < 1:   # cents fields served as dollars
-                      px *= 100
-                  cnt = int(_num(t.get("count") or t.get("quantity")))
+                      px = _num(t.get("yes_price") if side == "yes"
+                                else t.get("no_price"))
+                  cnt = int(_num(t.get("count_fp") or t.get("count")
+                                 or t.get("quantity")))
                   if px <= 0 or px >= 100 or cnt <= 0:
                       continue
                   band = (int(px) // 5) * 5
