@@ -32,7 +32,13 @@ from ..live_executor import maybe_execute
 log = logging.getLogger(__name__)
 
 BOOT_DELAY_S = 120       # let the poller/executor settle before sweeping
-SWEEP_EVERY_S = 6 * 3600
+# Hourly (owner directive 2026-08-06: "make sure we aren't missing any
+# trades"). The sweep is the recovery net for everything the fresh path
+# drops — metadata lag, transient venue errors, deferred far-dated games
+# — and at 6h a missed fresh detection sat unrecovered for most of a
+# slate. The query is cheap and execution re-runs the same caps as fresh
+# copies, so the only cost of running it hourly is a few venue reads.
+SWEEP_EVERY_S = 3600
 PRICE_CEILING = 0.99     # mirrors the per-fill ceiling; cheap pre-filter
 
 
