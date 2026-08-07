@@ -51,9 +51,14 @@ def test_disallowed_cells_fail_closed():
     assert not copy_allowed("swisstony", "tsc-epl-ars-che-2026-08-15-o2pt5")
     assert not copy_allowed("swisstony", "astatc-cdb-cru-cha-2026-08-05-es-2-0")
     assert not copy_allowed("swisstony", "atc-nba-lal-bos-2026-11-01-lal")
-    # RN1: empty allowlist — his own forensic report's do-not-copy verdict.
-    assert not copy_allowed("RN1", "aec-atp-rafjod-cormou-2026-08-06")
-    assert not copy_allowed("rn1", "aec-wta-vikgol-igaswi-2026-08-05")
+    # RN1: UNRESTRICTED (owner decision 2026-08-06 evening) — the live
+    # sleeve's own 285-settled record of the first-entry rule (+$170.95)
+    # governs, not the donor-book residual. Any sport, any market type,
+    # no band.
+    assert copy_allowed("RN1", "aec-atp-rafjod-cormou-2026-08-06")
+    assert copy_allowed("rn1", "aec-wta-vikgol-igaswi-2026-08-05")
+    assert copy_allowed("rn1", "mlb-nyy-bos-2026-07-22-o8pt5")
+    assert copy_allowed("rn1", "nhl-tor-mtl-2026-08-06-pos1pt5", price=None)
     # Unknown whale / empty slug: closed.
     assert not copy_allowed("somebody_new", "atc-epl-ars-che-2026-08-15-ars")
     assert not copy_allowed("swisstony", "")

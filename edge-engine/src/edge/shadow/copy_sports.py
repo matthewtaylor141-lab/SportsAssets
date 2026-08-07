@@ -15,12 +15,18 @@ hedge legs are not signals):
                 -100%), and >95c fails the $1M sample floor
   swisstony     soccer moneyline (+3.3% / $360M), soccer spreads
                 (+3.5% / $99.2M); exact-score (+0.7%) fails the bar
-  RN1           NOTHING. His own forensic verdict: >100% of profit is
-                matched-pair spread capture (+3.64%); the copyable
-                directional residual is -1.07%. "Any attempt to copy
-                RN1's picks would copy the losing half of the account."
-                He stays in the probe/paper cohort so our filtered
-                variant keeps being measured for free.
+  RN1           UNRESTRICTED (owner decision 2026-08-06 evening). The
+                forensic verdict on his BOOK stands — >100% of profit is
+                matched-pair spread capture (+3.64%), directional
+                residual -1.07% — but neither that residual nor the
+                all-fills paper cohort (-2.3%) measures the rule we
+                actually run: first entry per market, $3 FOK at his
+                price +2%. His first leg is the side the market tends
+                to move toward while he completes the pair, and our own
+                285-settled live record of exactly that rule is
+                +$170.95 (163-122). Reinstated on that evidence, under
+                watch: review trigger at -$60 from the sleeve's
+                high-water mark.
 
 Kalshi carve-out: at 30-70c the taker fee (7%*p*(1-p), peak 1.75%)
 consumes a thin donor edge, so thin-edge cells (swisstony soccer, HRH
@@ -42,6 +48,11 @@ SPORT_OF = {"nba": "basketball", "cbb": "basketball",
             "nhl": "hockey", "mlb": "baseball", "wnba": "wnba",
             "atp": "tennis", "wta": "tennis", "itf": "tennis"}
 
+# Whales copied WITHOUT a cell gate — the live sleeve's own record of
+# the first-entry-per-market rule is the governing measurement (owner
+# decision 2026-08-06; see the RN1 note above).
+UNRESTRICTED = frozenset({"rn1"})
+
 # whale -> allowed (sport, market_type) cells. Fail-closed.
 CELLS: dict[str, frozenset] = {
     "kch123": frozenset({("basketball", "spread"), ("basketball", "total"),
@@ -49,7 +60,6 @@ CELLS: dict[str, frozenset] = {
     "homerunhazard": frozenset({("baseball", "total"), ("wnba", "total"),
                                 ("wnba", "moneyline")}),
     "swisstony": frozenset({("soccer", "moneyline"), ("soccer", "spread")}),
-    "rn1": frozenset(),
 }
 
 # whale -> (entry floor, entry ceiling) on HIS price, dollars.
@@ -159,6 +169,8 @@ def copy_allowed(whale: str, slug: str, price: float | None = None) -> bool:
     w = (whale or "").strip().lower()
     if not w:
         return False
+    if w in UNRESTRICTED:
+        return True
     cells = CELLS.get(w)
     if not cells:
         return False

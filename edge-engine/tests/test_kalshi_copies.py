@@ -72,15 +72,22 @@ def test_outside_tolerance_is_not_a_copy():
 
 
 def test_sport_assignments_gate_the_sweep():
-    """Owner directive 2026-08-06: each whale copies ONLY its assigned
-    sport(s). RN1 is tennis-only, so his MLB identity is refused; the
-    MLB assignee (HomeRunHazard, the default fixture whale) trades."""
-    row = {**_ROW, "whale": "RN1"}
+    """Owner directive 2026-08-06: cell-gated whales copy ONLY their
+    assigned sport(s) — swisstony is soccer-only, so his WNBA identity
+    is refused; the WNBA assignee (HomeRunHazard, the default fixture
+    whale) trades. RN1 is UNRESTRICTED (owner decision the same
+    evening, on the live sleeve's own +$170.95 record) and copies
+    anywhere."""
+    row = {**_ROW, "whale": "swisstony"}
     st, ka, _ = _run(0.48, rows=[row])
     assert st.get("skipped_sport") == 1
     assert not ka.orders
     st2, ka2, _ = _run(0.48)     # HomeRunHazard + wnba ML: assigned cell
     assert ka2.orders == [("T-DAL", 0.48, 6)]   # $3 -> 6 contracts
+    row3 = {**_ROW, "whale": "RN1"}
+    st3, ka3, _ = _run(0.48, rows=[row3])
+    assert st3["copied"] == 1
+    assert ka3.orders == [("T-DAL", 0.48, 6)]
 
 
 def test_one_copy_per_position_ever():
