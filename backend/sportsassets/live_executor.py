@@ -259,7 +259,18 @@ async def execute_manual(asset: str, usd: float, note: str = "") -> dict:
     """Place an admin-directed BUY: FOK limit at the live ask +2c
     protection, whole contracts rounded down so the ticket never
     exceeds the requested budget. Returns a UI-ready result dict —
-    every refusal is a named reason, never an exception."""
+    every refusal is a named reason, never an exception (an unhandled
+    500 loses its CORS headers and reads as a blank network failure on
+    the desk — observed 2026-08-07)."""
+    try:
+        return await _execute_manual(asset, usd, note)
+    except Exception as exc:  # noqa: BLE001 — the desk reports, never 500s
+        log.exception("manual order failed pre-flight")
+        return {"ok": False,
+                "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+
+async def _execute_manual(asset: str, usd: float, note: str = "") -> dict:
     cfg = settings()
     venue = active_venue()
     if venue != "polymarket-us":
@@ -279,6 +290,18 @@ async def execute_manual(asset: str, usd: float, note: str = "") -> dict:
                 "error": (f"manual day budget exhausted "
                           f"(${day_spent:.2f} of ${MANUAL_DAILY_USD:.0f} "
                           "in 24h)")}
+    # Double-click / impatient-retry guard: placement takes tens of
+    # seconds (market resolution + preview + FOK), and a retried request
+    # while the first is in flight would buy twice.
+    inflight = await pool.fetchval(
+        "SELECT 1 FROM live_orders WHERE whale_username = 'manual' "
+        "AND asset = $1 AND status = 'submitting' "
+        "AND placed_at > now() - interval '3 minutes' LIMIT 1",
+        str(asset))
+    if inflight:
+        return {"ok": False,
+                "error": "an order for this market is already in flight "
+                         "— check the blotter in a few seconds"}
     ctx = await _market_context(pool, {"asset": str(asset)})
     if not ctx.get("outcome"):
         return {"ok": False, "error": "unknown asset — pick from search"}

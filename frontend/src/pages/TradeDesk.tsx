@@ -174,11 +174,21 @@ export function TradeDesk() {
         : { venue: 'kalshi', ticker: pick.ticker, side: pick.side.toLowerCase(), title: `${pick.label} — ${pick.side}`, usd: amount }
       const r = await adminApi<any>('/api/admin/manual-trade', token, {
         method: 'POST', body: JSON.stringify(body),
+        // Placement resolves the market on the venue and previews the
+        // order before committing — routinely 20-40s. The default 20s
+        // API timeout aborted mid-placement (owner report 2026-08-07).
+        signal: AbortSignal.timeout(90000),
       })
       setResult(r)
       loadBlotter(token)
-    } catch {
-      setResult({ ok: false, error: 'Request failed — the API may be redeploying.' })
+    } catch (e: any) {
+      setResult({
+        ok: false,
+        error: e?.name === 'TimeoutError'
+          ? 'Still working after 90s — check the blotter before retrying.'
+          : `Request failed (${e?.message || 'network'}) — check the blotter before retrying.`,
+      })
+      loadBlotter(token)
     } finally {
       setPlacing(false)
     }
