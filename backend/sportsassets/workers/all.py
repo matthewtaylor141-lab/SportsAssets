@@ -1,5 +1,10 @@
 """Worker: ALL background loops in one process (cheap single-instance deploys).
 
+Deploy marker 2026-08-07: the worker must be running >= 0e358f0 (RN1
+reinstated in copy_sports) and 460425e (hourly sweep). If the copy_sweep
+heartbeat lags more than ~70 minutes, this service is on stale code —
+check the host dashboard for a stuck deploy.
+
 Runs the poller, chain listener, metadata refresher, analytics, dispatcher,
 roster, and reconciler as supervised asyncio tasks. Each loop is restarted
 with a delay if it ever crashes, so one bad loop can't take down the rest.
