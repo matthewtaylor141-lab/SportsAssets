@@ -171,7 +171,7 @@ export function TradeDesk() {
     try {
       const body = pick.venue === 'polymarket'
         ? { venue: 'polymarket-us', asset: pick.asset, usd: amount }
-        : { venue: 'kalshi', ticker: pick.ticker, title: `${pick.label} — ${pick.side}`, usd: amount }
+        : { venue: 'kalshi', ticker: pick.ticker, side: pick.side.toLowerCase(), title: `${pick.label} — ${pick.side}`, usd: amount }
       const r = await adminApi<any>('/api/admin/manual-trade', token, {
         method: 'POST', body: JSON.stringify(body),
       })
@@ -293,15 +293,18 @@ export function TradeDesk() {
               {m.sub_title && <span style={{ opacity: 0.6 }}> · {m.sub_title}</span>}
               <div style={{ opacity: 0.5, fontSize: 12 }}>{m.ticker}</div>
             </div>
-            {priceBtn('YES', m.yes_ask, pick?.ticker === m.ticker, () => {
+            {priceBtn('YES', m.yes_ask, pick?.ticker === m.ticker && pick?.side === 'YES', () => {
               if (m.yes_ask != null) {
                 setPick({ venue: 'kalshi', label: m.title, side: 'YES', ask: m.yes_ask, ticker: m.ticker })
                 setResult(null)
               }
             })}
-            <span style={{ opacity: 0.55, minWidth: 74, textAlign: 'right' }}>
-              No {cents(m.no_ask)}
-            </span>
+            {priceBtn('NO', m.no_ask, pick?.ticker === m.ticker && pick?.side === 'NO', () => {
+              if (m.no_ask != null) {
+                setPick({ venue: 'kalshi', label: m.title, side: 'NO', ask: m.no_ask, ticker: m.ticker })
+                setResult(null)
+              }
+            })}
           </div>
         ))}
         {err && <p style={{ color: 'var(--red, #f66)' }}>{err}</p>}

@@ -772,11 +772,13 @@ async def api_manual_trade(body: ManualTradeBody) -> dict:
     if not (0 < body.usd <= MANUAL_MAX_PER_ORDER_USD):
         return {"ok": False,
                 "error": f"size must be $0-{MANUAL_MAX_PER_ORDER_USD:.0f}"}
-    # The venue is YES-denominated per outcome ticker (each team/side is
-    # its own ticker) — every desk buy is the YES side of the picked
-    # ticker; the opposite side of a game is its own ticker row.
-    side = "yes"
-    if not body.ticker.strip():
+    # The venue is YES-denominated per outcome ticker. A NO buy is the
+    # SAME BET as YES on the event's sibling ticker (NO Ruud 55c == YES
+    # Fonseca 55c), so NO routes through the one order path the venue
+    # has proven for us — no new order semantics, identical economics.
+    side = body.side.lower() if body.side.lower() in ("yes", "no") else "yes"
+    ticker = body.ticker.strip()
+    if not ticker:
         return {"ok": False, "error": "pick a market"}
     pool = await get_pool()
     day_spent = float(await pool.fetchval(
@@ -799,12 +801,27 @@ async def api_manual_trade(body: ManualTradeBody) -> dict:
     try:
         async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
                                      timeout=8) as client:
-            resp = await client.get("/markets",
-                                    params={"tickers": body.ticker.strip()})
-            ms = (resp.json().get("markets") or []) if \
-                resp.status_code == 200 else []
-            if ms:
-                ask = _kcents(ms[0], f"{side}_ask")
+            if side == "no":
+                event = ticker.rsplit("-", 1)[0]
+                resp = await client.get("/markets",
+                                        params={"event_ticker": event})
+                ms = (resp.json().get("markets") or []) if \
+                    resp.status_code == 200 else []
+                sibs = [m for m in ms if m.get("ticker")
+                        and m["ticker"] != ticker]
+                if len(sibs) != 1:
+                    return {"ok": False,
+                            "error": ("no tradable NO side listed for "
+                                      "this market")}
+                ticker = sibs[0]["ticker"]
+                ask = _kcents(sibs[0], "yes_ask")
+            else:
+                resp = await client.get("/markets",
+                                        params={"tickers": ticker})
+                ms = (resp.json().get("markets") or []) if \
+                    resp.status_code == 200 else []
+                if ms:
+                    ask = _kcents(ms[0], "yes_ask")
     except Exception:  # noqa: BLE001
         ask = None
     if ask is None or not (0 < ask < 1):
@@ -820,11 +837,11 @@ async def api_manual_trade(body: ManualTradeBody) -> dict:
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id
         """,
-        body.ticker.strip(), body.title[:200] or body.ticker.strip(), side,
+        ticker, body.title[:200] or ticker, side,
         limit, count, round(count * limit, 2), body.note[:200])
     return {"ok": True, "queued": True, "row_id": row_id,
             "quoted_ask": ask, "limit_price": limit, "count": count,
-            "title": body.title or body.ticker,
+            "title": body.title or ticker,
             "outcome": side.upper(),
             "error": None,
             "detail": "queued — the engine places it within ~10 seconds"}
