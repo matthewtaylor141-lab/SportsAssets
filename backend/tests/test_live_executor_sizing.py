@@ -6,11 +6,11 @@ from sportsassets.live_executor import per_fill_usd
 
 
 def test_rn1_clips_at_three_dollars():
-    assert per_fill_usd("RN1") == 3.00
-    assert per_fill_usd("rn1") == 3.00
+    assert per_fill_usd("RN1") == 5.00
+    assert per_fill_usd("rn1") == 5.00
 
 
 def test_default_is_three_dollars():
-    assert per_fill_usd("swisstony") == 3.00
-    assert per_fill_usd(None) == 3.00
-    assert per_fill_usd("someone-new") == 3.00
+    assert per_fill_usd("swisstony") == 5.00
+    assert per_fill_usd(None) == 5.00
+    assert per_fill_usd("someone-new") == 5.00

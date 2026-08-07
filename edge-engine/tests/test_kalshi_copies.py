@@ -61,7 +61,7 @@ def test_limit_is_his_price_plus_two_percent_min_one_tick():
 def test_copies_when_kalshi_is_inside_his_tolerance():
     st, ka, led = _run(0.48)   # eff = 0.48 + fee(0.0175) <= limit 0.51
     assert st["matched"] == 1 and st["copied"] == 1
-    assert ka.orders == [("T-DAL", 0.48, 6)]   # $3 -> 6 contracts
+    assert ka.orders == [("T-DAL", 0.48, 10)]   # $5 -> 10 contracts
     assert led.get_state("kcopy:wnba-dal-chi-2026-08-04:Dallas Wings")
 
 
@@ -83,11 +83,11 @@ def test_sport_assignments_gate_the_sweep():
     assert st.get("skipped_sport") == 1
     assert not ka.orders
     st2, ka2, _ = _run(0.48)     # HomeRunHazard + wnba ML: assigned cell
-    assert ka2.orders == [("T-DAL", 0.48, 6)]   # $3 -> 6 contracts
+    assert ka2.orders == [("T-DAL", 0.48, 10)]   # $5 -> 10 contracts
     row3 = {**_ROW, "whale": "RN1"}
     st3, ka3, _ = _run(0.48, rows=[row3])
     assert st3["copied"] == 1
-    assert ka3.orders == [("T-DAL", 0.48, 6)]
+    assert ka3.orders == [("T-DAL", 0.48, 10)]
 
 
 def test_one_copy_per_position_ever():
@@ -256,7 +256,7 @@ def test_kalshi_places_when_it_is_cheaper_fee_loaded():
                pmus=pm)
     assert st.get("routed_pmus_better") is None
     assert st["copied"] == 1
-    assert ka.orders == [("T-DAL", 0.48, 6)]
+    assert ka.orders == [("T-DAL", 0.48, 10)]
 
 
 def test_no_pmus_book_falls_through_to_kalshi():
@@ -267,4 +267,4 @@ def test_no_pmus_book_falls_through_to_kalshi():
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
                pmus=pm)
     assert pm.peeked, "the peek must have been attempted"
-    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 6)]
+    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 10)]

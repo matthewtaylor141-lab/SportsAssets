@@ -51,10 +51,12 @@ log = logging.getLogger(__name__)
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
-# Owner directive 2026-08-05: ALL copy trades $3 per trade, uniform.
-# The per-whale map is kept (RN1 was already $3) for future divergence.
-PER_COPY_USD = {"rn1": 3.00}
-PER_COPY_DEFAULT = 3.00
+# Owner directive 2026-08-07: ALL copy trades $5 per trade, uniform —
+# the $3->$5 promotion he gated on sleeve evidence, granted with 450+
+# settled across the live sleeves. The per-whale map is kept (empty of
+# divergence today) for the day sizing splits by whale again.
+PER_COPY_USD = {"rn1": 5.00}
+PER_COPY_DEFAULT = 5.00
 # A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
 # decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.
 # Copying an old position at today's price is buying fair value minus

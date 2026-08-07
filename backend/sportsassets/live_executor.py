@@ -199,19 +199,20 @@ PENNY_TRIAL_DAILY_USD = float(os.environ.get("COPY_DAILY_USD", "inf"))
 # heartbeats read healthy. In penny_trial the trial knobs are the
 # authority; the config caps govern only the future "full" mode.
 PENNY_TRIAL_TOTAL_USD = float(os.environ.get("COPY_TOTAL_USD", "inf"))
-# Owner directive 2026-08-05: ALL copy trades $3 per trade — as many
-# whole contracts as $3 buys at the limit (20c -> 15 contracts,
-# 50c -> 6, 97c -> 3), rounded DOWN so a copy never exceeds the budget.
-# Price tolerance unchanged: his price +2% relative, floored to the
-# venue's cent tick; FOK gives same-or-better for free. Grading stays
-# per-whale/per-band. (History: $2 default set 2026-08-04 on the +7.3%
-# ROI paper cohort; RN1 was raised to $3 the same day on his live
-# cohort, and 2026-08-05 made $3 uniform.)
-PENNY_TRIAL_PER_FILL_USD = 3.00
-# Per-whale override map. RN1's $3 is now the default too; the map stays
-# so per-whale sizing can diverge again the day a settled cohort earns
-# it. Keys are lowercased usernames; anyone absent gets the default.
-PER_FILL_BY_WHALE = {"rn1": 3.00}
+# Owner directive 2026-08-07: ALL copy trades $5 per trade — the $3->$5
+# promotion he gated on sleeve evidence, granted with 450+ settled
+# across the live sleeves. As many whole contracts as $5 buys at the
+# limit (20c -> 25 contracts, 50c -> 10, 97c -> 5), rounded DOWN so a
+# copy never exceeds the budget. Price tolerance unchanged: his price
+# +2% relative, floored to the venue's cent tick; FOK gives
+# same-or-better for free. Grading stays per-whale/per-band. (History:
+# $2 default 2026-08-04; RN1 $3 same day; $3 uniform 2026-08-05; $5
+# uniform 2026-08-07.)
+PENNY_TRIAL_PER_FILL_USD = 5.00
+# Per-whale override map (empty of divergence today); the map stays so
+# per-whale sizing can diverge again the day a settled cohort earns it.
+# Keys are lowercased usernames; anyone absent gets the default.
+PER_FILL_BY_WHALE = {"rn1": 5.00}
 
 
 def per_fill_usd(whale_username: str | None) -> float:
