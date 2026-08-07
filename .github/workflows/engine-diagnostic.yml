@@ -113,10 +113,13 @@ jobs:
           # candidate, AND ask the API's CORS layer which origin it is
           # configured to allow — CORS_ORIGINS was set to the real site
           # URL, so the echoed Access-Control-Allow-Origin is ground truth.
+          # polymarkettracker1 is the CONFIRMED production hostname —
+          # named by real browser traffic via /api/system/seen-origins
+          # on 2026-08-07. It goes first; the rest stay as fallbacks in
+          # case the site is ever renamed.
           echo "SITE discovery:"
           FOUND=""
-          for H in markettracker1 marketracker1 markettracker marketracker \
-                   market-tracker1 sportsassets bettoredge bettortoken; do
+          for H in polymarkettracker1 markettracker1 marketracker1; do
             CODE=$(curl -s -o /tmp/h.html -w '%{http_code}' --max-time 15 "https://$H.netlify.app/" || echo ERR)
             B=$(grep -o '[^"]*assets/index-[^"]*\.js' /tmp/h.html | head -1 || true)
             ACAO=$(curl -s -o /dev/null --max-time 15 -X OPTIONS "$BASE/api/track-record" \
