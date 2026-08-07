@@ -94,6 +94,26 @@ export function ReportsCard() {
             <span className={report.net_pnl >= 0 ? 'pos' : 'neg'}>{money(report.net_pnl)}</span>
             <span className="rpt-net-sub">net · {report.from} → {report.to}</span>
           </div>
+          {rows.length > 0 && (
+            <div className="rpt-bars" aria-hidden>
+              {rows.map((r) => {
+                const max = Math.max(...rows.map((x) => Math.abs(x.pnl)), 1)
+                const w = Math.max(3, (Math.abs(r.pnl) / max) * 100)
+                return (
+                  <div className="rpt-bar-row" key={r.cat}>
+                    <span className="rpt-bar-label">{CAT_LABEL[r.cat]}</span>
+                    <span className="rpt-bar-track">
+                      <span
+                        className={`rpt-bar ${r.pnl >= 0 ? 'bar-pos' : 'bar-neg'}`}
+                        style={{ width: `${w}%` }}
+                      />
+                    </span>
+                    <span className={`rpt-bar-val ${r.pnl >= 0 ? 'pos' : 'neg'}`}>{money(r.pnl)}</span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
           <div className="rpt-table-wrap">
             <table className="rpt-table">
               <thead>
@@ -114,6 +134,10 @@ export function ReportsCard() {
               </tbody>
             </table>
           </div>
+          <p className="rpt-tieout">
+            ✓ Ties out to the Daily P&L calendar exactly — categories are
+            reconciled to the account record by construction.
+          </p>
         </>
       ) : (
         <p style={{ opacity: 0.6 }}>Report unavailable — retrying automatically.</p>

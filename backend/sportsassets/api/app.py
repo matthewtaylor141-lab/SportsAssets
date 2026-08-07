@@ -1343,6 +1343,21 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
     def _in_range(day: str) -> bool:
         return from_day <= day <= to_day
 
+    # RECONCILED BY CONSTRUCTION (owner report 2026-08-07: "the reports
+    # don't line up with the daily PNLs"). The venue-account calendar is
+    # the ANCHOR: each day's category rows must sum to that day's
+    # calendar P&L exactly. Copies/manual come from the order-level
+    # audit table (they are venue-account trades, so they subtract);
+    # arb from the record's band-tagged rows; SOFTWARE IS THE DERIVED
+    # REMAINDER — the same identity used in the owner's ops PDF, which
+    # ties out to the account to the penny instead of drifting across
+    # two accounting bases.
+    acct_by_day: dict[str, float] = {}
+    for d in rec.get("daily") or []:
+        day = d.get("date") or ""
+        if _in_range(day):
+            acct_by_day[day] = float(d.get("pnl") or 0)
+
     for r in copies:
         # Each live sleeve is its own category: the four source whales
         # plus the admin manual desk (owner 2026-08-07).
@@ -1366,29 +1381,50 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
             continue
         day = max(_dt.fromtimestamp(ts, RECORD_TZ).strftime("%Y-%m-%d"),
                   first_day)
-        if not _in_range(day):
+        if not _in_range(day) or r.get("market_slug") not in arb_slugs:
             continue
-        cat = "arb" if r.get("market_slug") in arb_slugs else "software"
         pnl = float(r.get("pnl") or 0)
-        c = _cat(day, cat)
+        c = _cat(day, "arb")
         c["pnl"] = round(c["pnl"] + pnl, 4)
         c["settled"] += 1
         c["wins"] += 1 if pnl > 0 else 0
         c["losses"] += 1 if pnl < 0 else 0
 
-    # Unattributed -> software (owner rule). Pre-mirror arb legs live here
-    # too; they cannot be split retroactively and count as software.
-    for u in ((rec.get("excluded_unattributed") or {}).get("daily") or []):
-        if not _in_range(u["date"]):
+    # Software = account minus everything attributed, per day. Wins and
+    # losses for the derived remainder come from the record's non-copy,
+    # non-arb settled rows (counts are additive even though dollars are
+    # derived).
+    sw_counts: dict[str, dict] = {}
+    for r in rec.get("trades") or []:
+        if r.get("sleeve") == "copy" or not r.get("settled") \
+                or r.get("market_slug") in arb_slugs:
             continue
-        c = _cat(u["date"], "software")
-        c["pnl"] = round(c["pnl"] + u["pnl"], 4)
-        c["settled"] += u["settled"]
-        c["wins"] += u["wins"]
-        c["losses"] += u["settled"] - u["wins"]
+        ts = r.get("settled_ts") or r.get("entry_ts")
+        if not ts:
+            continue
+        day = max(_dt.fromtimestamp(ts, RECORD_TZ).strftime("%Y-%m-%d"),
+                  first_day)
+        if not _in_range(day):
+            continue
+        sc = sw_counts.setdefault(day, {"settled": 0, "wins": 0,
+                                        "losses": 0})
+        pnl = float(r.get("pnl") or 0)
+        sc["settled"] += 1
+        sc["wins"] += 1 if pnl > 0 else 0
+        sc["losses"] += 1 if pnl < 0 else 0
+
+    for day, acct_pnl in acct_by_day.items():
+        attributed = sum(c["pnl"] for c in (days.get(day) or {}).values())
+        c = _cat(day, "software")
+        c["pnl"] = round(acct_pnl - attributed, 2)
+        counts = sw_counts.get(day) or {"settled": 0, "wins": 0,
+                                        "losses": 0}
+        c["settled"] += counts["settled"]
+        c["wins"] += counts["wins"]
+        c["losses"] += counts["losses"]
 
     totals: dict[str, dict] = {}
-    for d in days.values():
+    for day, d in days.items():
         for cat, c in d.items():
             t = totals.setdefault(cat, {"pnl": 0.0, "settled": 0,
                                         "wins": 0, "losses": 0})
@@ -1396,13 +1432,19 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
             for k in ("settled", "wins", "losses"):
                 t[k] += c[k]
     net = round(sum(t["pnl"] for t in totals.values()), 2)
+    out_days = []
+    for k in sorted(days):
+        out_days.append({"date": k, "account": acct_by_day.get(k),
+                         **days[k]})
     return {"from": from_day, "to": to_day,
-            "days": [{"date": k, **v} for k, v in sorted(days.items())],
+            "days": out_days,
             "totals": totals, "net_pnl": net,
-            "note": ("copies=order-level audit table (per-whale, both "
-                     "cross-venue legs where recorded); software/arb="
-                     "venue-account record; unattributed folded into "
-                     "software (owner rule 2026-08-06)")}
+            "reconciled": True,
+            "note": ("reconciled by construction: each day's categories "
+                     "sum exactly to the account calendar; copies/manual "
+                     "from the order-level audit table, arb from the "
+                     "engine mirror's band tag, software is the derived "
+                     "remainder (identity method, owner ops PDF v1.1)")}
 
 
 @app.get("/api/daily-breakdown")
