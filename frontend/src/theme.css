@@ -955,3 +955,133 @@ body { -webkit-tap-highlight-color: transparent; }
   .desk-mkt-row { flex-wrap: wrap; }
   .desk-mkt-label { flex-basis: 100%; }
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   Homepage v4 — command deck (owner directive 2026-08-07 evening).
+   Same override-layer discipline as v3: appended, cascade-winning,
+   reversible as one block, all motion killed under reduced-motion.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* Rotating conic border on the headline tile needs a typed custom
+   property; browsers without @property simply show a static ring. */
+@property --ring-a {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+/* Hero backdrop: deepen the aurora, add a faint starfield of dots. */
+.tr-hero {
+  background:
+    radial-gradient(closest-side, rgba(255, 255, 255, 0.05) 0.8px, transparent 1.6px) 0 0 / 34px 34px,
+    radial-gradient(closest-side, rgba(255, 255, 255, 0.03) 0.8px, transparent 1.6px) 17px 23px / 34px 34px,
+    radial-gradient(760px 300px at 12% -100px, rgba(57, 135, 229, 0.26), transparent 70%),
+    radial-gradient(560px 260px at 88% -80px, rgba(25, 158, 112, 0.15), transparent 70%),
+    linear-gradient(168deg, #1b2027, #101317 62%);
+}
+
+/* Pointer-tracked tilt: hover-capable pointers only; touch stays flat. */
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .tr-hero-grid { perspective: 1100px; }
+  .tr-stat {
+    transform: rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+    transition: transform 0.12s ease-out, border-color 0.22s var(--ease),
+                box-shadow 0.22s var(--ease);
+  }
+  .tr-stat:hover {
+    transform: rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) translateY(-3px);
+  }
+}
+
+/* Headline tile: rotating conic light running the border. */
+.tr-stat-main::after {
+  content: ''; position: absolute; inset: -1px; border-radius: inherit;
+  padding: 1px; pointer-events: none;
+  background: conic-gradient(from var(--ring-a),
+    transparent 0%, rgba(33, 176, 33, 0.55) 10%, rgba(126, 226, 160, 0.9) 16%,
+    rgba(33, 176, 33, 0.4) 24%, transparent 34%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: ring-rotate 5.5s linear infinite;
+}
+@keyframes ring-rotate { to { --ring-a: 360deg; } }
+
+/* Headline number: living gradient — slow pan, never a hue change. */
+.tr-stat-main .tr-grad.pos {
+  background: linear-gradient(100deg, #34d05e, #21b021 40%, #7ee2a0 60%, #34d05e);
+  background-size: 220% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: grad-pan 6s ease-in-out infinite;
+}
+@keyframes grad-pan {
+  0%, 100% { background-position: 0% 0; }
+  50% { background-position: 100% 0; }
+}
+
+/* Today chip inside the headline tile foot. */
+.tr-today {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-left: 8px; padding: 2px 9px; border-radius: 999px;
+  font-size: 11px; font-weight: 800; letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums; vertical-align: middle;
+  animation: tr-rise 0.5s var(--ease) 0.5s both;
+}
+
+/* KPI strip: glass chips under the hero grid. */
+.tr-kpis { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.tr-kpi {
+  display: flex; align-items: baseline; gap: 8px; padding: 9px 14px;
+  border-radius: 12px; background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--border); backdrop-filter: blur(8px);
+  animation: tr-rise 0.5s var(--ease) both;
+  transition: border-color 0.2s var(--ease), transform 0.2s var(--ease);
+}
+.tr-kpi:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+.tr-kpi:nth-child(2) { animation-delay: 0.08s; }
+.tr-kpi:nth-child(3) { animation-delay: 0.16s; }
+.tr-kpi:nth-child(4) { animation-delay: 0.24s; }
+.tr-kpi-k { font-size: 9.5px; letter-spacing: 0.13em; color: var(--muted); font-weight: 800; }
+.tr-kpi-v {
+  font-weight: 800; font-size: 15px; font-variant-numeric: tabular-nums;
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+}
+.tr-kpi-s { color: var(--muted); font-size: 11px; }
+
+/* Equity chart v2: taller stage, non-distorting HTML overlays. */
+.tr-curve svg { height: 190px; }
+.tr-curve-stage { position: relative; }
+.tr-curve-badge {
+  position: absolute; transform: translate(-104%, -130%);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11.5px; font-weight: 700; pointer-events: none;
+  padding: 2px 8px; border-radius: 7px; white-space: nowrap;
+  background: rgba(10, 12, 14, 0.75); border: 1px solid var(--border-strong);
+  backdrop-filter: blur(4px);
+  animation: tr-rise 0.5s var(--ease) 1.4s both;
+}
+.tr-curve-badge.pos { color: var(--good); box-shadow: 0 0 18px rgba(33, 176, 33, 0.18); }
+.tr-curve-badge.neg { color: var(--critical); box-shadow: 0 0 18px rgba(224, 82, 82, 0.16); }
+.tr-curve-y {
+  position: absolute; left: 2px; transform: translateY(-50%);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9.5px; color: var(--muted); pointer-events: none;
+  background: rgba(11, 12, 14, 0.5); padding: 0 4px; border-radius: 4px;
+}
+.tr-curve-bar { transition: opacity 0.15s ease; }
+
+/* Reduced motion: v4 decorations stop dead too. */
+@media (prefers-reduced-motion: reduce) {
+  .tr-stat-main::after, .tr-stat-main .tr-grad.pos, .tr-today, .tr-kpi,
+  .tr-curve-badge {
+    animation: none !important;
+  }
+}
+
+/* Mobile: tighter chips, badge stays on-screen. */
+@media (max-width: 640px) {
+  .tr-kpis { gap: 8px; }
+  .tr-kpi { padding: 8px 11px; }
+  .tr-curve-badge { transform: translate(-104%, -120%); font-size: 10.5px; }
+}

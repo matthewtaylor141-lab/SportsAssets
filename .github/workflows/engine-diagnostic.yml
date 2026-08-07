@@ -109,13 +109,21 @@ jobs:
           # Which build is the SITE actually serving (owner 2026-08-07:
           # "no changes on the front end" — answer with evidence).
           SITE="https://markettracker1.netlify.app"
-          BUNDLE=$(curl -sS --max-time 30 "$SITE/" | grep -o 'assets/index-[^"]*\.js' | head -1 || true)
-          echo "SITE bundle: $BUNDLE"
+          SITE_CODE=$(curl -sS --max-time 30 -o /tmp/site.html -w '%{http_code}' "$SITE/" || echo FETCH-FAIL)
+          BUNDLE=$(grep -o '[^"]*assets/index-[^"]*\.js' /tmp/site.html | head -1 || true)
+          echo "SITE bundle: $BUNDLE (HTTP $SITE_CODE)"
           if [ -n "$BUNDLE" ]; then
-            curl -sS --max-time 30 "$SITE/$BUNDLE" -o /tmp/site.js || true
+            curl -sS --max-time 30 "$SITE/${BUNDLE#/}" -o /tmp/site.js || true
             echo "  deployed build: $(grep -o 'bsha_[0-9a-f]\{7\}\|bsha_dev' /tmp/site.js | head -1 || echo 'pre-stamp build')"
             echo "  live-strip present: $(grep -c "TODAY'S SETTLEMENTS" /tmp/site.js || echo 0)"
             echo "  reports-card present: $(grep -c 'Performance Reports' /tmp/site.js || echo 0)"
+            echo "  homepage-v4 present: $(grep -c 'BEST DAY' /tmp/site.js || echo 0)"
+          else
+            # The regex missed: show what the site actually served so the
+            # next probe iteration is a fix, not another guess.
+            echo "  (no bundle ref in HTML — first 300 bytes follow)"
+            head -c 300 /tmp/site.html | tr -d '\r' | sed 's/^/  | /'
+            echo ""
           fi
           jq -r '.account // {} | "  ACCOUNT: net=$\(.net_pnl // "?") trades=\(.trades // "?") open=\(.open // "?") stake=$\(.stake // "?")"' /tmp/tr.json 2>/dev/null || true
           jq -r '.daily // [] | .[0:3][] | "  day \(.date)  pnl \(.pnl)  settled \(.settled)  open \(.open // 0)"' /tmp/tr.json 2>/dev/null || true

@@ -14,6 +14,22 @@ import { KalshiOpen, SINCE, TRRow, useKalshiOpen, useTrackRecord } from '../lib/
 
 const MIN_SETTLED = 30
 
+/* Pointer-tracked 3D tilt for the hero tiles: writes --rx/--ry custom
+ * properties the CSS consumes under a perspective parent. Pure transform,
+ * so it composites on the GPU; hover-only media query keeps it off touch. */
+function tilt(e: React.MouseEvent<HTMLDivElement>) {
+  const el = e.currentTarget
+  const r = el.getBoundingClientRect()
+  const px = (e.clientX - r.left) / r.width - 0.5
+  const py = (e.clientY - r.top) / r.height - 0.5
+  el.style.setProperty('--rx', `${(-py * 5).toFixed(2)}deg`)
+  el.style.setProperty('--ry', `${(px * 7).toFixed(2)}deg`)
+}
+function untilt(e: React.MouseEvent<HTMLDivElement>) {
+  e.currentTarget.style.setProperty('--rx', '0deg')
+  e.currentTarget.style.setProperty('--ry', '0deg')
+}
+
 function useCountUp(target: number, ms = 1100): number {
   const [v, setV] = useState(0)
   const from = useRef(0)
@@ -63,11 +79,16 @@ function EquityCurve({ daily }: { daily: { date: string; pnl: number }[] }) {
     return daily.map((d) => ({ date: d.date, cum: (acc += d.pnl), day: d.pnl }))
   }, [daily])
   if (pts.length < 2) return null
-  const W = 720, H = 170, PAD = 12
+  // A daily-P&L bar band lives under the equity line — same x scale, its
+  // own tiny magnitude scale — so one glance gives both the journey and
+  // the size of each day's swing.
+  const W = 720, H = 190, PAD = 12, BAND = 30
   const min = Math.min(0, ...pts.map((p) => p.cum))
   const max = Math.max(0.01, ...pts.map((p) => p.cum))
+  const maxDay = Math.max(0.01, ...pts.map((p) => Math.abs(p.day)))
   const x = (i: number) => PAD + (i / (pts.length - 1)) * (W - PAD * 2)
-  const y = (v: number) => H - PAD - ((v - min) / (max - min || 1)) * (H - PAD * 2)
+  const y = (v: number) =>
+    H - PAD - BAND - ((v - min) / (max - min || 1)) * (H - PAD * 2 - BAND)
   const path = pts.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.cum).toFixed(1)}`).join(' ')
   const up = pts[pts.length - 1].cum >= 0
   const stroke = up ? 'var(--good)' : 'var(--critical)'
@@ -77,8 +98,11 @@ function EquityCurve({ daily }: { daily: { date: string; pnl: number }[] }) {
   const drawLen = Math.ceil((W + H) * 1.6)
   const endX = x(pts.length - 1)
   const endY = y(pts[pts.length - 1].cum)
+  const barW = Math.max(1.5, ((W - PAD * 2) / pts.length) * 0.55)
+  const barBase = H - 6
   return (
-    <div className="tr-curve" role="img" aria-label="Cumulative realized profit by day">
+    <div className="tr-curve" role="img" aria-label="Cumulative realized profit by day, with daily P&L bars">
+      <div className="tr-curve-stage">
       <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
         onMouseLeave={() => setHover(null)}
         onMouseMove={(e) => {
@@ -99,6 +123,16 @@ function EquityCurve({ daily }: { daily: { date: string; pnl: number }[] }) {
           </linearGradient>
         </defs>
         <line x1={PAD} x2={W - PAD} y1={y(0)} y2={y(0)} stroke="var(--baseline)" />
+        {pts.map((p, i) => {
+          const bh = Math.max(1.5, (Math.abs(p.day) / maxDay) * (BAND - 10))
+          return (
+            <rect key={p.date} className="tr-curve-bar"
+              x={x(i) - barW / 2} y={barBase - bh} width={barW} height={bh}
+              rx={Math.min(1.5, barW / 2)}
+              fill={p.day >= 0 ? 'var(--good)' : 'var(--critical)'}
+              opacity={hover === i ? 0.95 : 0.4} />
+          )
+        })}
         <path d={`${path} L${x(pts.length - 1)},${y(0)} L${x(0)},${y(0)} Z`} fill="url(#tr-fill)" />
         <path d={path} fill="none" stroke="url(#tr-stroke)" strokeWidth="2.5"
           strokeLinejoin="round" strokeLinecap="round"
@@ -116,6 +150,23 @@ function EquityCurve({ daily }: { daily: { date: string; pnl: number }[] }) {
           </g>
         )}
       </svg>
+      {/* HTML overlays track the stretched SVG by percentage so text never
+          distorts under preserveAspectRatio="none". */}
+      <span className={`tr-curve-badge ${up ? 'pos' : 'neg'}`}
+        style={{ left: `${(endX / W) * 100}%`, top: `${(endY / H) * 100}%` }}>
+        {fmtSignedUsd(pts[pts.length - 1].cum)}
+      </span>
+      {max > 0.01 && (
+        <span className="tr-curve-y" style={{ top: `${(y(max) / H) * 100}%` }}>
+          {fmtSignedUsd(max)}
+        </span>
+      )}
+      {min < 0 && (
+        <span className="tr-curve-y" style={{ top: `${(y(min) / H) * 100}%` }}>
+          {fmtSignedUsd(min)}
+        </span>
+      )}
+      </div>
       <div className="tr-curve-tip">
         {h ? (
           <>
@@ -245,6 +296,29 @@ export function TrackRecord() {
   const sports = useMemo(() => [...new Set((data?.trades || []).map((r) => r.sport))].sort(), [data])
   const cats = useMemo(() => [...new Set((data?.trades || []).map((r) => r.category))].sort(), [data])
 
+  // Headline KPIs, all derived from the same daily calendar the page
+  // already shows — nothing here is a new claim, just a sharper lens.
+  const kpis = useMemo(() => {
+    const days = data?.daily || []
+    if (!days.length) return null
+    let best = days[0]
+    for (const d of days) if (d.pnl > best.pnl) best = d
+    const green = days.filter((d) => d.pnl > 0).length
+    let streak = 0
+    for (let i = days.length - 1; i >= 0; i--) {
+      if (days[i].pnl > 0) streak++
+      else break
+    }
+    // "today" chip only when the newest calendar day IS the viewer's
+    // trading day (ET) — a stale label would be a lie.
+    const todayEt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
+    const last = days[days.length - 1]
+    return {
+      best, green, total: days.length, streak,
+      today: last.date === todayEt ? last.pnl : null,
+    }
+  }, [data])
+
   const ledger = useMemo(() => {
     let rows = data?.trades || []
     if (status === 'won') rows = rows.filter((r) => r.settled && (r.pnl || 0) > 0)
@@ -315,7 +389,7 @@ export function TrackRecord() {
         </div>
 
         <div className="tr-hero-grid">
-          <div className="tr-stat tr-stat-main">
+          <div className="tr-stat tr-stat-main" onMouseMove={tilt} onMouseLeave={untilt}>
             <span className="tr-sheen" aria-hidden />
             <div className="tr-stat-label">NET P&amp;L · SETTLED</div>
             <div className={`tr-stat-value tr-grad ${s.net_pnl >= 0 ? 'pos' : 'neg'}`}>
@@ -325,9 +399,14 @@ export function TrackRecord() {
               {s.wins}W – {s.losses}L
               {s.win_rate !== null && <> · {fmtPct(s.win_rate, 0)} win rate</>}
               {' '}· {s.settled} settled
+              {kpis?.today !== null && kpis?.today !== undefined && (
+                <span className={`tr-today ${kpis.today >= 0 ? 'pos-bg' : 'neg-bg'}`}>
+                  {kpis.today >= 0 ? '▲' : '▼'} {fmtSignedUsd(kpis.today)} today
+                </span>
+              )}
             </div>
           </div>
-          <div className="tr-stat">
+          <div className="tr-stat" onMouseMove={tilt} onMouseLeave={untilt}>
             <span className="tr-sheen" aria-hidden />
             <div className="tr-stat-label">CAPITAL DEPLOYED</div>
             <div className="tr-stat-value">{fmtUsd(heroDeployed, 2)}</div>
@@ -338,7 +417,7 @@ export function TrackRecord() {
               )}
             </div>
           </div>
-          <div className="tr-stat">
+          <div className="tr-stat" onMouseMove={tilt} onMouseLeave={untilt}>
             <span className="tr-sheen" aria-hidden />
             <div className="tr-stat-label">ROI · TRADED CAPITAL</div>
             <div className="tr-ring-wrap">
@@ -359,6 +438,35 @@ export function TrackRecord() {
             </div>
           </div>
         </div>
+
+        {kpis && (
+          <div className="tr-kpis">
+            <div className="tr-kpi">
+              <span className="tr-kpi-k">BEST DAY</span>
+              <span className={`tr-kpi-v ${kpis.best.pnl >= 0 ? 'pos' : 'neg'}`}>
+                {fmtSignedUsd(kpis.best.pnl)}
+              </span>
+              <span className="tr-kpi-s">{kpis.best.date.slice(5)}</span>
+            </div>
+            <div className="tr-kpi">
+              <span className="tr-kpi-k">GREEN DAYS</span>
+              <span className="tr-kpi-v">{kpis.green}<span className="tr-kpi-s"> / {kpis.total}</span></span>
+            </div>
+            {kpis.streak > 1 && (
+              <div className="tr-kpi">
+                <span className="tr-kpi-k">DAY STREAK</span>
+                <span className="tr-kpi-v pos">{kpis.streak} 🔥</span>
+              </div>
+            )}
+            <div className="tr-kpi">
+              <span className="tr-kpi-k">VENUES LIVE</span>
+              <span className="tr-kpi-v">{kalshi && kalshi.n > 0 ? 2 : 1}</span>
+              <span className="tr-kpi-s">
+                {kalshi && kalshi.n > 0 ? 'Polymarket + Kalshi' : 'Polymarket'}
+              </span>
+            </div>
+          </div>
+        )}
 
         {data.snapshot && data.snapshot.positions_complete === false && (
           <div className="tr-honesty">
