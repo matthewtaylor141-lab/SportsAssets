@@ -57,8 +57,22 @@ UNRESTRICTED = frozenset({"rn1"})
 CELLS: dict[str, frozenset] = {
     "kch123": frozenset({("basketball", "spread"), ("basketball", "total"),
                          ("football", "spread"), ("hockey", "moneyline")}),
-    "homerunhazard": frozenset({("baseball", "total"), ("wnba", "total"),
-                                ("wnba", "moneyline")}),
+    # Owner directive 2026-08-07 ("every whale trade copied as long as
+    # edge metrics are met"): every EDGE-POSITIVE cell in his book is
+    # on — the +1.5% bar relaxes to >0 donor ROI, with the 50-95c entry
+    # band still guarding (his sub-50c entries lose account-wide) and
+    # Kalshi fee floors covering the thin cells. Added: MLB moneyline
+    # (+0.80%/$23.9M), tennis moneyline (ATP +1.07%/$24M, WTA
+    # +1.12%/$19.4M — his scale sport), NBA spread (+2.76%) and total
+    # (+1.27%), NHL total (+3.93%). Still OUT (edge not met): MLB
+    # spread (+0.01% dead), ATP totals (-3.51%), CFL (unmeasured mix).
+    "homerunhazard": frozenset({("baseball", "total"),
+                                ("baseball", "moneyline"),
+                                ("wnba", "total"), ("wnba", "moneyline"),
+                                ("tennis", "moneyline"),
+                                ("basketball", "spread"),
+                                ("basketball", "total"),
+                                ("hockey", "total")}),
     "swisstony": frozenset({("soccer", "moneyline"), ("soccer", "spread")}),
 }
 
@@ -72,6 +86,8 @@ ENTRY_BAND: dict[str, tuple[float, float]] = {
 KALSHI_MIN_ASK: dict[tuple[str, str], float] = {
     ("swisstony", "soccer"): 0.70,
     ("homerunhazard", "baseball"): 0.70,
+    # Tennis ~1.1% donor edge cannot pay the mid-price taker fee either.
+    ("homerunhazard", "tennis"): 0.70,
 }
 
 
