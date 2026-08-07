@@ -123,7 +123,13 @@ jobs:
                      -H "Origin: https://$H.netlify.app" \
                      -H "Access-Control-Request-Method: GET" -D - \
                    | grep -i '^access-control-allow-origin' | tr -d '\r' || true)
-            echo "  $H.netlify.app -> HTTP $CODE bundle=${B:-none} cors=[${ACAO:-none}]"
+            TITLE=$(grep -o '<title>[^<]*' /tmp/h.html | head -1 | cut -c8-80 || true)
+            echo "  $H.netlify.app -> HTTP $CODE bundle=${B:-none} title=[${TITLE:-none}]"
+            # Our app's title is the identity check; a 200 without our
+            # title or a bundle is someone else's site, not evidence.
+            if [ "$CODE" = "200" ] && [ -z "$B" ]; then
+              head -c 240 /tmp/h.html | tr -d '\r\n' | sed 's/^/    | /'; echo ""
+            fi
             if [ -n "$B" ] && [ -z "$FOUND" ]; then FOUND="https://$H.netlify.app"; BUNDLE="$B"; fi
           done
           if [ -n "$FOUND" ]; then

@@ -117,7 +117,10 @@ _SEEN_ORIGINS: dict[str, float] = {}
 @app.middleware("http")
 async def _track_origins(request, call_next):
     raw = request.headers.get("origin") or request.headers.get("referer") or ""
-    if raw:
+    # OPTIONS excluded: the diagnostic probe's CORS-preflight sweep sends
+    # candidate Origins and polluted the list with its own guesses. Real
+    # browsers follow every preflight with the actual GET/POST.
+    if raw and request.method != "OPTIONS":
         try:
             from urllib.parse import urlsplit
 
