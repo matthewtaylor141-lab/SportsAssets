@@ -24,6 +24,7 @@ Mechanics and why they're safe:
 
 import asyncio
 import logging
+import os
 
 from ..config import settings
 from ..db import get_pool, heartbeat
@@ -40,6 +41,15 @@ BOOT_DELAY_S = 120       # let the poller/executor settle before sweeping
 # copies, so the only cost of running it hourly is a few venue reads.
 SWEEP_EVERY_S = 3600
 PRICE_CEILING = 0.99     # mirrors the per-fill ceiling; cheap pre-filter
+# BOUNDED PASSES (2026-08-07): an unbounded pass over RN1's re-eligible
+# backlog ran hours at ~1-3s/row, so every redeploy killed it before its
+# completion heartbeat — copy_sweep read frozen at its boot time all day
+# while the loop was actually working. Nearest games go first, the
+# remainder is DISCLOSED (deferred_to_next_pass) and drains on the next
+# hourly pass; a per-row timeout stops one hung venue call from wedging
+# the whole loop.
+MAX_ROWS_PER_SWEEP = int(os.environ.get("COPY_SWEEP_MAX_ROWS", "150"))
+ROW_TIMEOUT_S = 60.0
 
 
 async def sweep_once() -> dict:
@@ -110,6 +120,8 @@ async def sweep_once() -> dict:
         return m.group(0) if m else "0000-00-00"
 
     rows = sorted(rows, key=_game_date)
+    deferred = max(0, len(rows) - MAX_ROWS_PER_SWEEP)
+    rows = rows[:MAX_ROWS_PER_SWEEP]
     attempted = 0
     for r in rows:
         payload = {
@@ -134,12 +146,16 @@ async def sweep_once() -> dict:
             "sweep_recovery": True,
         }
         try:
-            await maybe_execute(payload, None)
+            await asyncio.wait_for(maybe_execute(payload, None),
+                                   timeout=ROW_TIMEOUT_S)
             attempted += 1
+        except asyncio.TimeoutError:
+            log.warning("sweep copy timed out for trade %s", r["id"])
         except Exception:  # noqa: BLE001 — one bad market must not stop the sweep
             log.exception("sweep copy failed for trade %s", r["id"])
         await asyncio.sleep(1.0)   # gentle on the venue API
-    return {"candidates": len(rows), "attempted": attempted}
+    return {"candidates": len(rows), "attempted": attempted,
+            "deferred_to_next_pass": deferred}
 
 
 async def main() -> None:
