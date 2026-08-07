@@ -2073,74 +2073,6 @@ def _main_impl() -> None:
                              name="kalshi-adds").start()
             log.warning("kalshi better-price adds armed (2h sweep)")
 
-            # Kalshi COPY leg (owner directive 2026-08-04): the source
-            # whales' open positions, expressed on Kalshi wherever it
-            # lists the same proposition, at his price +2%. 2-minute
-            # cadence (owner 2026-08-05: "need them rolling in"): a copy
-            # is only priceable in the first minutes after his entry,
-            # before the book moves past his+2% — at 10 minutes the sweep
-            # arrived to an 11c gap every pass. The identities snapshot
-            # refreshes server-side every 90s, so faster sweeps cost the
-            # platform nothing; every price/freshness/cross-game gate is
-            # unchanged.
-            if os.environ.get("EDGE_KCOPY", "1") != "0":
-                def _kcopy_loop() -> None:
-                    from edge.shadow.kalshi_copies import sweep as kcopy
-                    from edge.shadow.whale_align import fetch as widents
-
-                    time.sleep(60)
-                    every = float(os.environ.get("EDGE_KCOPY_EVERY_S", "120"))
-                    while True:
-                        try:
-                            rows = widents(
-                                os.environ.get("EDGE_PLATFORM_API", ""),
-                                os.environ.get("EDGE_INGEST_TOKEN", ""))
-                            # pmus armed alongside kalshi: the sweep
-                            # peeks PMUS asks to route each copy to the
-                            # best-priced venue (directive 2026-08-05).
-                            def _claim_back(asset: str, ticker: str,
-                                            whale: str) -> None:
-                                # One copy per position ACROSS venues:
-                                # every filled Kalshi copy is claimed
-                                # back so the PMUS paths skip it.
-                                base = os.environ.get(
-                                    "EDGE_PLATFORM_API", "")
-                                token = os.environ.get(
-                                    "EDGE_INGEST_TOKEN", "")
-                                if not base or not token or not asset:
-                                    return
-                                import requests
-                                requests.post(
-                                    f"{base}/api/engine/kalshi-claim",
-                                    json={"asset": asset, "ticker": ticker,
-                                          "whale": whale},
-                                    headers={"X-Engine-Token": token},
-                                    timeout=10)
-
-                            st = kcopy(kalshi=kalshi_a, ledger=ledger,
-                                       identities=rows, live=risk.is_live,
-                                       pmus=pmus_a, on_copied=_claim_back,
-                                       day_usd=float(os.environ.get(
-                                           "EDGE_KCOPY_DAY_USD", "inf")))
-                            _KCOPY_STATS.clear()
-                            _KCOPY_STATS.update(st, at=time.time())
-                            log.info("kalshi copy sweep: %s", st)
-                        except Exception as exc:  # noqa: BLE001
-                            log.warning("kalshi copy sweep failed: %s", exc)
-                            # A sweep that dies only in service logs is
-                            # invisible to every probe — observed 18:28Z
-                            # when kalshi_copies vanished from the funnel.
-                            _KCOPY_STATS.clear()
-                            _KCOPY_STATS.update(
-                                error=f"{type(exc).__name__}: "
-                                      f"{str(exc)[:140]}",
-                                at=time.time())
-                        time.sleep(every)
-
-                threading.Thread(target=_kcopy_loop, daemon=True,
-                                 name="kalshi-copies").start()
-                log.warning("kalshi copy leg armed (10min sweep)")
-
             # One-shot ~$0.50 connectivity proof (owner order 2026-08-04).
             def _smoke_thread() -> None:
                 time.sleep(90)   # after the first books are streaming
@@ -2148,6 +2080,75 @@ def _main_impl() -> None:
 
             threading.Thread(target=_smoke_thread, daemon=True,
                              name="kalshi-smoke").start()
+
+    # Kalshi COPY leg (owner directive 2026-08-04): the source whales'
+    # open positions, expressed on Kalshi wherever it lists the same
+    # proposition, at his price +2%. 2-minute cadence (owner 2026-08-05:
+    # "need them rolling in"): a copy is only priceable in the first
+    # minutes after his entry. COPY-CLASS, NOT SOFTWARE-CLASS — it arms
+    # regardless of EDGE_STRATEGY_LIVE (owner 2026-08-06: copies +
+    # guaranteed arbitrage only). Until 2026-08-07 this loop lived
+    # INSIDE the strategy-gated adds block above, so the cutover's
+    # strategy switch silently disarmed it: Kalshi copies were dark from
+    # the cutover deploy onward, with the copy breaker masking the
+    # outage. It now arms on its own conditions only.
+    kalshi_c = next((a for a in adapters if a.name == "kalshi"), None)
+    pmus_c = next((a for a in adapters if a.name == "polymarket-us"), None)
+    if os.environ.get("EDGE_KCOPY", "1") != "0" and kalshi_c is not None \
+            and kalshi_c.has_credentials():
+        def _kcopy_loop() -> None:
+            from edge.shadow.kalshi_copies import sweep as kcopy
+            from edge.shadow.whale_align import fetch as widents
+
+            time.sleep(60)
+            every = float(os.environ.get("EDGE_KCOPY_EVERY_S", "120"))
+            while True:
+                try:
+                    rows = widents(
+                        os.environ.get("EDGE_PLATFORM_API", ""),
+                        os.environ.get("EDGE_INGEST_TOKEN", ""))
+
+                    def _claim_back(asset: str, ticker: str,
+                                    whale: str) -> None:
+                        # One copy per position ACROSS venues: every
+                        # filled Kalshi copy is claimed back so the
+                        # PMUS paths skip it.
+                        base = os.environ.get("EDGE_PLATFORM_API", "")
+                        token = os.environ.get("EDGE_INGEST_TOKEN", "")
+                        if not base or not token or not asset:
+                            return
+                        import requests
+                        requests.post(
+                            f"{base}/api/engine/kalshi-claim",
+                            json={"asset": asset, "ticker": ticker,
+                                  "whale": whale},
+                            headers={"X-Engine-Token": token},
+                            timeout=10)
+
+                    # pmus rides along for the pm-first deference peek
+                    # (stream-cache-only read; needs no credentials).
+                    st = kcopy(kalshi=kalshi_c, ledger=ledger,
+                               identities=rows, live=risk.is_live,
+                               pmus=pmus_c, on_copied=_claim_back,
+                               day_usd=float(os.environ.get(
+                                   "EDGE_KCOPY_DAY_USD", "inf")))
+                    _KCOPY_STATS.clear()
+                    _KCOPY_STATS.update(st, at=time.time())
+                    log.info("kalshi copy sweep: %s", st)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("kalshi copy sweep failed: %s", exc)
+                    # A sweep that dies only in service logs is
+                    # invisible to every probe — observed 18:28Z when
+                    # kalshi_copies vanished from the funnel.
+                    _KCOPY_STATS.clear()
+                    _KCOPY_STATS.update(
+                        error=f"{type(exc).__name__}: {str(exc)[:140]}",
+                        at=time.time())
+                time.sleep(every)
+
+        threading.Thread(target=_kcopy_loop, daemon=True,
+                         name="kalshi-copies").start()
+        log.warning("kalshi copy leg armed (2min sweep, strategy-independent)")
 
     # One-shot venue census (EDGE_CENSUS_DAYS=0 disables): how many sports
     # markets the venue actually listed per day over the trailing window —
