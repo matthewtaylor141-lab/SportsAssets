@@ -98,7 +98,14 @@ jobs:
           jq -r '.excluded_unattributed // {} | "  excluded_unattributed: n=\(.count // 0) stake=$\(.stake // 0) net=$\(.net_pnl // 0)"' /tmp/tr.json 2>/dev/null || true
           jq -r '"  source: \(.activities_source // "?")  archive_rows: \(.archive_rows // "?")  window_rows: \(.window_rows // "?")"' /tmp/tr.json 2>/dev/null || true
           jq -r '.error // empty | "  REFUSED: \(.)"' /tmp/tr.json 2>/dev/null || true
+          jq -r '.restored_across_deploy // empty | "  RESTORED-ACROSS-DEPLOY: \(.)"' /tmp/tr.json 2>/dev/null || true
           jq -r '.snapshot // {} | "  snapshot: age_s=\(.age_s // "?") pos_pages=\(.positions_pages // "?") complete=\(.positions_complete // "?") refresh_err=\(.refresh_error // "none") streak=\(.refresh_error_streak // 0)"' /tmp/tr.json 2>/dev/null || true
+          # Report downloads (owner 2026-08-07): prove the endpoints serve.
+          echo "REPORTS:"
+          echo "  range: $(curl -sS --max-time 30 "$BASE/api/report/range?from=2026-08-01" | head -c 120)"
+          echo "  pdf: HTTP $(curl -sS -o /dev/null -w '%{http_code} %{size_download}b' --max-time 60 "$BASE/api/report.pdf?from=2026-08-01")"
+          echo "  csv: HTTP $(curl -sS -o /dev/null -w '%{http_code} %{size_download}b' --max-time 60 "$BASE/api/report.csv?from=2026-08-01")"
+          echo "  today-live: $(curl -sS --max-time 30 "$BASE/api/today-live" | head -c 160)"
           jq -r '.account // {} | "  ACCOUNT: net=$\(.net_pnl // "?") trades=\(.trades // "?") open=\(.open // "?") stake=$\(.stake // "?")"' /tmp/tr.json 2>/dev/null || true
           jq -r '.daily // [] | .[0:3][] | "  day \(.date)  pnl \(.pnl)  settled \(.settled)  open \(.open // 0)"' /tmp/tr.json 2>/dev/null || true
           # ...and the most recent days — "how is TODAY looking" must be

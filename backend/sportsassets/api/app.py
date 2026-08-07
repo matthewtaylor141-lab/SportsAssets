@@ -1411,6 +1411,55 @@ async def api_daily_breakdown() -> dict:
     return await _category_breakdown("2026-08-01", _today_et())
 
 
+@app.get("/api/today-live")
+async def api_today_live() -> dict:
+    """Second-latency settlement feed from OUR OWN ledger (owner report
+    2026-08-07: 'won 4 trades, page didn't move'). The venue-account
+    snapshot lags minutes by design; the copy/manual sleeves settle in
+    live_orders the moment our resolution pipeline marks them — this
+    endpoint powers the hero LIVE strip and the win toasts."""
+    from .track_record import PNL_DISPLAY_CAP
+
+    pool = await get_pool()
+    day = await pool.fetchrow(
+        """
+        SELECT COALESCE(sum(pnl), 0)::float8 AS pnl,
+               count(*)::int AS settled,
+               count(*) FILTER (WHERE pnl > 0)::int AS wins
+        FROM live_orders
+        WHERE status = 'settled' AND settled_at IS NOT NULL
+          AND to_char(settled_at AT TIME ZONE 'America/New_York',
+                      'YYYY-MM-DD')
+              = to_char(now() AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')
+          AND abs(COALESCE(pnl, 0)) <= $1
+        """, PNL_DISPLAY_CAP)
+    recent = await pool.fetch(
+        """
+        SELECT lo.pnl::float8 AS pnl, lo.settled_at, lo.whale_username,
+               m.title, mt.outcome
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.status = 'settled' AND lo.settled_at IS NOT NULL
+          AND abs(COALESCE(lo.pnl, 0)) <= $1
+        ORDER BY lo.settled_at DESC
+        LIMIT 8
+        """, PNL_DISPLAY_CAP)
+    return {
+        "pnl": round(float(day["pnl"]), 2),
+        "settled": day["settled"],
+        "wins": day["wins"],
+        "recent": [{
+            "title": r["title"] or "position",
+            "outcome": r["outcome"],
+            "whale": r["whale_username"],
+            "pnl": round(float(r["pnl"] or 0), 2),
+            "at": r["settled_at"].isoformat() if r["settled_at"] else None,
+        } for r in recent],
+        "scope": "copy + manual sleeves (order-level, our ledger)",
+    }
+
+
 @app.get("/api/report/range")
 async def api_report_range(
     from_: str | None = Query(None, alias="from"),

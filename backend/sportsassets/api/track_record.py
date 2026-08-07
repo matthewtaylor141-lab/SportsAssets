@@ -771,6 +771,59 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
     return parsed
 
 
+# ── Deploy-survival persistence (owner report 2026-08-07: the page
+# showed FEWER settled trades minutes after showing more — every deploy
+# cold-boots this process and the first thin window briefly regressed
+# the record). The last served payload persists in the database; a
+# fresh boot serves it instantly instead of blocking, refusing, or
+# stepping backward, and a fresh build that shows fewer settled than
+# the persisted high-water serves the persisted copy instead.
+_PERSIST_KEY = "track_record_last_payload"
+_persist_state: dict[str, float] = {"ts": 0.0, "settled": -1.0}
+
+
+async def _persist_payload(payload: dict) -> None:
+    settled = float((payload.get("summary") or {}).get("settled") or 0)
+    now = time.time()
+    if settled < _persist_state["settled"] \
+            or now - _persist_state["ts"] < 60:
+        return
+    try:
+        from ..db import get_pool
+
+        pool = await get_pool()
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            _PERSIST_KEY, json.dumps({"at": now, "payload": payload},
+                                     default=str))
+        _persist_state["ts"] = now
+        _persist_state["settled"] = settled
+    except Exception:  # noqa: BLE001 — persistence is an upgrade, not a gate
+        logging.getLogger(__name__).debug("payload persist failed",
+                                          exc_info=True)
+
+
+async def _load_persisted() -> dict | None:
+    try:
+        from ..db import get_pool
+
+        pool = await get_pool()
+        val = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1", _PERSIST_KEY)
+        if not val:
+            return None
+        obj = json.loads(val) if isinstance(val, str) else val
+        payload = obj.get("payload")
+        if payload:
+            _persist_state["settled"] = max(
+                _persist_state["settled"],
+                float((payload.get("summary") or {}).get("settled") or 0))
+        return payload
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def warm_cache() -> None:
     """Run the first (deep) venue fetch at process boot, off the user path.
 
@@ -811,6 +864,29 @@ async def track_record(since: str | None = None,
     # process — which warm_cache() runs at boot, before any user arrives.
     now = time.time()
     if _raw_cache["data"] is None:
+        # Deploy survival: serve the persisted payload INSTANTLY and let
+        # the cold fetch warm in the background — a reboot must never
+        # block a page, refuse, or step the record backward.
+        persisted = await _load_persisted()
+        if persisted is not None:
+            if not _lock.locked():
+                async def _cold() -> None:
+                    async with _lock:
+                        if _raw_cache["data"] is not None:
+                            return
+                        try:
+                            _raw_cache["data"] = await asyncio.wait_for(
+                                asyncio.to_thread(_fetch_raw), timeout=150)
+                            _raw_cache["ts"] = time.time()
+                            await _archive_and_union(
+                                _raw_cache["data"]["activities"])
+                        except Exception:  # noqa: BLE001
+                            logging.getLogger(__name__).exception(
+                                "background cold fetch failed")
+
+                asyncio.get_running_loop().create_task(_cold())
+            return {"configured": True, "restored_across_deploy": True,
+                    **persisted}
         async with _lock:
             if _raw_cache["data"] is None:
                 try:
@@ -871,6 +947,12 @@ async def track_record(since: str | None = None,
     # payload as "keep showing the last good numbers".
     known_history = len(_archived_ids)
     if not archive and known_history > max(int(len(window) * 1.5), 2000):
+        # Hydration window: the persisted payload is strictly better
+        # than a refusal — real numbers from minutes ago vs an error.
+        persisted = await _load_persisted()
+        if persisted is not None:
+            return {"configured": True, "restored_across_deploy": True,
+                    **persisted}
         return {"configured": True,
                 "error": (f"history hydrating ({known_history} archived "
                           "activities not yet loaded); refusing to serve a "
@@ -925,8 +1007,19 @@ async def track_record(since: str | None = None,
         "refresh_error": _refresh_health["error"],
         "refresh_error_streak": _refresh_health["streak"],
     }
-    return {"configured": True, **source, "snapshot": snapshot,
-            **build(raw["positions"], acts, since_ts,
-                    max_stake=max_stake, attributed=attributed,
-                    copy_slugs=copy_slugs, max_abs_pnl=PNL_DISPLAY_CAP,
-                    manual_slugs=manual_slugs)}
+    payload = {"configured": True, **source, "snapshot": snapshot,
+               **build(raw["positions"], acts, since_ts,
+                       max_stake=max_stake, attributed=attributed,
+                       copy_slugs=copy_slugs, max_abs_pnl=PNL_DISPLAY_CAP,
+                       manual_slugs=manual_slugs)}
+    # Monotonic guard: a fresh build thinner than the persisted
+    # high-water (post-boot window still catching up) must not show the
+    # owner fewer settled trades than he already saw.
+    fresh_settled = float((payload.get("summary") or {}).get("settled") or 0)
+    if fresh_settled < _persist_state["settled"]:
+        persisted = await _load_persisted()
+        if persisted is not None:
+            return {"configured": True, "restored_across_deploy": True,
+                    **persisted}
+    await _persist_payload(payload)
+    return payload

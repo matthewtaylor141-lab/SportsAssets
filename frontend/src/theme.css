@@ -852,3 +852,57 @@ body { -webkit-tap-highlight-color: transparent; }
   border-radius: var(--radius);
 }
 @keyframes skel-slide { to { background-position: -200% 0; } }
+
+/* ── LIVE settlement strip (our ledger, second-latency) ── */
+.live-strip {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 14px 16px; margin: 14px 0;
+  background: linear-gradient(160deg, rgba(38, 178, 108, 0.07), var(--surface) 55%);
+  transition: box-shadow 400ms ease, border-color 400ms ease;
+}
+.live-flash {
+  border-color: var(--good);
+  box-shadow: 0 0 0 1px var(--good), 0 0 28px rgba(38, 178, 108, 0.25);
+}
+.live-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--good);
+  align-self: center; animation: live-pulse 1.6s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(38, 178, 108, 0.5); }
+  50% { box-shadow: 0 0 0 6px rgba(38, 178, 108, 0); }
+}
+.live-label {
+  font-size: 10.5px; letter-spacing: 0.09em; color: var(--muted);
+  font-weight: 700;
+}
+.live-pnl {
+  font-size: 22px; font-weight: 800; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.live-sub { color: var(--muted); font-size: 12px; }
+.live-rows { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.live-row {
+  display: flex; align-items: center; gap: 10px; font-size: 13px;
+  animation: live-slide 320ms ease;
+}
+@keyframes live-slide {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: none; }
+}
+.live-chip {
+  font-size: 9.5px; font-weight: 800; letter-spacing: 0.06em;
+  padding: 3px 7px; border-radius: 5px;
+}
+.pos-bg { background: rgba(38, 178, 108, 0.16); color: var(--good); }
+.neg-bg { background: rgba(224, 82, 82, 0.14); color: var(--critical); }
+.live-title {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.live-amt { font-variant-numeric: tabular-nums; font-weight: 700; }
+.live-when { color: var(--muted); font-size: 11.5px; min-width: 52px; text-align: right; }
+@media (max-width: 640px) {
+  .live-when { display: none; }
+}

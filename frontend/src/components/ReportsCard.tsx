@@ -120,8 +120,8 @@ export function ReportsCard() {
       )}
 
       <div className="rpt-downloads">
-        <a className="btn primary" href={`${API_BASE}/api/report.pdf?${qs}`}>Download PDF</a>
-        <a className="btn" href={`${API_BASE}/api/report.csv?${qs}`}>Download CSV</a>
+        <a className="btn primary" href={`${API_BASE}/api/report.pdf?${qs}`} download>Download PDF</a>
+        <a className="btn" href={`${API_BASE}/api/report.csv?${qs}`} download>Download CSV</a>
       </div>
     </div>
   )
