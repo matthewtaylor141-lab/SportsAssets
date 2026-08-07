@@ -165,11 +165,29 @@ def resolve_market_exact(candidate_slugs: list[str],
             m = (client.markets.retrieve_by_slug(slug) or {}).get("market") or {}
         except Exception:  # noqa: BLE001 — 404 is expected; next candidate
             continue
+        if not m.get("slug") or m.get("closed"):
+            continue
         score = _outcome_score(m, outcome)
-        if m.get("slug") and score >= MATCH_FLOOR and not m.get("closed"):
+        if score >= MATCH_FLOOR:
             return {"market_slug": m["slug"], "title": m.get("title"),
                     "outcome": m.get("outcome"),
                     "matched_by": "desk_exact", "score": score}
+        # Two-sided markets (tennis aec- especially) score near zero on
+        # the PARENT outcome — the tradable sides live in marketSides,
+        # each side its own orderable slug (the copy sleeve's tennis
+        # path since 2026-08-04). Order the side that IS the outcome.
+        for side in (m.get("marketSides") or []):
+            if not isinstance(side, dict):
+                continue
+            desc, ident = side.get("description"), side.get("identifier")
+            if not desc or not ident:
+                continue
+            sscore = _outcome_score({"outcome": desc}, outcome)
+            if sscore >= MATCH_FLOOR:
+                return {"market_slug": ident,
+                        "title": m.get("question") or m.get("title"),
+                        "outcome": desc,
+                        "matched_by": "desk_exact_side", "score": sscore}
     return None
 
 
