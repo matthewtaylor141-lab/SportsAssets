@@ -41,6 +41,13 @@ _refresh_health: dict[str, Any] = {"error": None, "error_at": 0.0,
 
 DEFAULT_SINCE = "2026-08-01"
 
+# Owner directive 2026-08-06: no single trade may move any displayed P&L
+# by more than this, either direction — at $3-5 clips a $100+ swing is an
+# anomaly, not the strategy. Applied by default to every served record
+# (and to the daily-breakdown copy query); excluded rows are disclosed in
+# `excluded_over_pnl`, never silently dropped.
+PNL_DISPLAY_CAP = 100.0
+
 # All human-facing DAY bucketing happens in the owner's timezone. Bucketing
 # in UTC put every settlement after 8pm Eastern on the NEXT day's calendar
 # box (Wednesday wore Tuesday night's -$16 two days running, owner report
@@ -85,6 +92,7 @@ def build(positions: dict[str, dict], activities: list[dict],
           since_ts: float, max_stake: float | None = None,
           attributed: set[str] | None = None,
           copy_slugs: set[str] | None = None,
+          max_abs_pnl: float | None = None,
           tz: ZoneInfo = RECORD_TZ) -> dict:
     """Pure builder (unit-tested): venue payloads -> the track record.
 
@@ -96,6 +104,16 @@ def build(positions: dict[str, dict], activities: list[dict],
     the record it modifies. Rationale for having the cap at all: the
     strategy trades $1-$5 tickets, and anything far above that is an
     execution incident or a non-strategy trade, not the strategy.
+
+    `max_abs_pnl` (owner directive 2026-08-06): a single trade moving the
+    P&L by more than this — either direction, realized or open
+    mark-to-market — is excluded from every displayed figure. At $3-5
+    clips a $100+ single-trade swing is an anomaly (mis-attribution, a
+    venue data glitch, a runaway fill), not the strategy; letting one
+    such row through would swamp the record it sits in. Highest
+    precedence of the exclusions (a $100+ swing is out no matter which
+    cohort it belongs to, copy sleeve included) and disclosed like the
+    others, in `excluded_over_pnl`.
     """
     # The record's first calendar day is the UTC date the window opens
     # (2026-08-01), even though that instant is 8pm ET July 31: the
@@ -162,6 +180,7 @@ def build(positions: dict[str, dict], activities: list[dict],
     # disclosed with the same honesty contract as the size cap.
     unattributed = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
     copy_sleeve = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
+    over_pnl = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
     # Daily slice of the unattributed cohort (owner directive 2026-08-06:
     # unattributed results count toward the software category in the daily
     # breakdown report — an aggregate-only bucket can't be day-bucketed).
@@ -180,7 +199,17 @@ def build(positions: dict[str, dict], activities: list[dict],
         if realized > 0:
             d["wins"] += 1
 
-    def _excluded_bucket(slug: str, stake_now: float):
+    def _pnl_capped(settled: bool, realized: float, unreal: float) -> bool:
+        if max_abs_pnl is None:
+            return False
+        return abs(realized if settled else unreal) > max_abs_pnl
+
+    def _excluded_bucket(slug: str, stake_now: float, settled: bool,
+                         realized: float, unreal: float):
+        # The P&L cap outranks every cohort split: a $100+ single-trade
+        # swing is out of the record no matter whose row it is.
+        if _pnl_capped(settled, realized, unreal):
+            return over_pnl
         if attributed is not None and slug not in attributed:
             return unattributed
         if max_stake is not None and stake_now > max_stake:
@@ -231,11 +260,14 @@ def build(positions: dict[str, dict], activities: list[dict],
             realized = res["realized"] or realized
             cost = cost or res["cost"]
         stake_now = cost if cost > 0 else e.get("notional", 0.0)
+        unreal = (value - cost) if not settled else 0.0
         sleeve = _sleeve_of(slug)
-        if sleeve == "copy":
+        if sleeve == "copy" and not _pnl_capped(settled, realized, unreal):
             _tally_copy(stake_now, settled, realized)
         else:
-            bucket = _excluded_bucket(slug, stake_now)
+            bucket = (over_pnl if sleeve == "copy"
+                      else _excluded_bucket(slug, stake_now, settled,
+                                            realized, unreal))
             if bucket is not None:
                 bucket["count"] += 1
                 bucket["stake"] += stake_now
@@ -284,10 +316,12 @@ def build(positions: dict[str, dict], activities: list[dict],
             continue
         cost = res["cost"] or e.get("notional", 0.0)
         sleeve = _sleeve_of(slug)
-        if sleeve == "copy":
+        if sleeve == "copy" and not _pnl_capped(True, res["realized"], 0.0):
             _tally_copy(cost, True, res["realized"])
         else:
-            bucket = _excluded_bucket(slug, cost)
+            bucket = (over_pnl if sleeve == "copy"
+                      else _excluded_bucket(slug, cost, True,
+                                            res["realized"], 0.0))
             if bucket is not None:
                 bucket["count"] += 1
                 bucket["stake"] += cost
@@ -367,7 +401,7 @@ def build(positions: dict[str, dict], activities: list[dict],
     # day the incident cohort was deeply negative — the page must
     # reconcile to the account, not ask to be trusted. (Copy rows are
     # inside `rows` now, so only the true exclusions are added back.)
-    _buckets = [over_limit, unattributed]
+    _buckets = [over_limit, unattributed, over_pnl]
     account = {
         "trades": len(rows) + sum(b["count"] for b in _buckets),
         "open": (len(rows) - len(settled_rows))
@@ -407,6 +441,16 @@ def build(positions: dict[str, dict], activities: list[dict],
              "stake": round(over_limit["stake"], 2),
              "net_pnl": round(over_limit["net_pnl"], 2)}
             if max_stake is not None else None),
+        # Single trades swinging the P&L past the cap in either direction
+        # (owner directive 2026-08-06) — excluded from every figure above,
+        # copy sleeve included, and disclosed here.
+        "excluded_over_pnl": (
+            {"limit": max_abs_pnl,
+             "count": over_pnl["count"],
+             "open": over_pnl["open"],
+             "stake": round(over_pnl["stake"], 2),
+             "net_pnl": round(over_pnl["net_pnl"], 2)}
+            if max_abs_pnl is not None else None),
         # Positions the engine's own mirror does not claim. When attribution
         # is active this is where non-engine activity (the arb-bug cohort,
         # anything unexplained) lands — visible, never blended in.
@@ -852,4 +896,4 @@ async def track_record(since: str | None = None,
     return {"configured": True, **source, "snapshot": snapshot,
             **build(raw["positions"], acts, since_ts,
                     max_stake=max_stake, attributed=attributed,
-                    copy_slugs=copy_slugs)}
+                    copy_slugs=copy_slugs, max_abs_pnl=PNL_DISPLAY_CAP)}

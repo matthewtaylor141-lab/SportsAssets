@@ -816,7 +816,7 @@ async def api_daily_breakdown() -> dict:
     table (the only per-whale source); software/arb use the venue account."""
     from datetime import datetime as _dt
 
-    from .track_record import RECORD_TZ, track_record
+    from .track_record import PNL_DISPLAY_CAP, RECORD_TZ, track_record
 
     pool = await get_pool()
     copies = await pool.fetch(
@@ -830,8 +830,11 @@ async def api_daily_breakdown() -> dict:
                COALESCE(sum(pnl), 0)::float8 AS pnl
         FROM live_orders
         WHERE status = 'settled' AND settled_at IS NOT NULL
+          -- Owner directive 2026-08-06: a single order swinging the P&L
+          -- past the display cap is an anomaly, not the record.
+          AND abs(COALESCE(pnl, 0)) <= $1
         GROUP BY 1, 2
-        """)
+        """, PNL_DISPLAY_CAP)
     arb_rows = await pool.fetch(
         "SELECT DISTINCT outcome_id FROM engine_fills "
         "WHERE band IN ('arb', 'arb_crypto')")

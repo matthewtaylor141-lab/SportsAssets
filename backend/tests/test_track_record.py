@@ -160,6 +160,91 @@ def test_a_cap_with_nothing_over_it_still_shows_the_rule():
     assert out["excluded_over_limit"]["count"] == 0
 
 
+def test_pnl_cap_excludes_big_swings_both_directions_and_discloses():
+    """Owner directive 2026-08-06: no single trade may move any displayed
+    P&L by more than the cap — either direction. Excluded rows leave every
+    figure and arrive disclosed in excluded_over_pnl; the account tie-out
+    still reconciles."""
+    positions = {
+        "small-won": _pos(0, 1.0, 0.0, realized=1.1, expired=True),
+        "big-won": _pos(0, 40.0, 0.0, realized=150.0, expired=True),
+        "big-lost": _pos(0, 120.0, 0.0, realized=-120.0, expired=True),
+    }
+    acts = [_trade("small-won", TS_AUG2, 2, 0.5),
+            _resolution("small-won", TS_AUG2 + 3600),
+            _trade("big-won", TS_AUG2, 80, 0.5),
+            _resolution("big-won", TS_AUG2 + 3600),
+            _trade("big-lost", TS_AUG2, 240, 0.5),
+            _resolution("big-lost", TS_AUG2 + 3600)]
+    out = build(positions, acts, TS_AUG1, max_abs_pnl=100.0)
+    assert [r["market_slug"] for r in out["trades"]] == ["small-won"]
+    assert out["summary"]["net_pnl"] == 1.1
+    day = next(d for d in out["daily"] if d["settled"])
+    assert day["pnl"] == 1.1
+    ex = out["excluded_over_pnl"]
+    assert ex == {"limit": 100.0, "count": 2, "open": 0,
+                  "stake": 160.0, "net_pnl": 30.0}
+    assert out["account"]["net_pnl"] == round(1.1 + 30.0, 2)
+
+
+def test_pnl_cap_applies_to_copy_sleeve_rows_too():
+    positions = {"cp-big": _pos(0, 90.0, 0.0, realized=140.0, expired=True),
+                 "cp-ok": _pos(0, 3.0, 0.0, realized=2.5, expired=True)}
+    acts = [_trade("cp-big", TS_AUG2, 180, 0.5),
+            _resolution("cp-big", TS_AUG2 + 3600),
+            _trade("cp-ok", TS_AUG2, 6, 0.5),
+            _resolution("cp-ok", TS_AUG2 + 3600)]
+    out = build(positions, acts, TS_AUG1,
+                copy_slugs={"cp-big", "cp-ok"}, max_abs_pnl=100.0)
+    assert out["copy_sleeve"]["count"] == 1
+    assert out["copy_sleeve"]["net_pnl"] == 2.5
+    assert out["excluded_over_pnl"]["count"] == 1
+    assert out["excluded_over_pnl"]["net_pnl"] == 140.0
+
+
+def test_pnl_cap_reads_open_positions_at_mark_to_market():
+    positions = {"open-big": _pos(500, 50.0, 190.0),   # +140 unrealized
+                 "open-ok": _pos(2, 1.0, 1.15)}
+    acts = [_trade("open-big", TS_AUG2, 500, 0.1),
+            _trade("open-ok", TS_AUG2, 2, 0.5)]
+    out = build(positions, acts, TS_AUG1, max_abs_pnl=100.0)
+    assert [r["market_slug"] for r in out["trades"]] == ["open-ok"]
+    assert out["excluded_over_pnl"] == {"limit": 100.0, "count": 1,
+                                        "open": 1, "stake": 50.0,
+                                        "net_pnl": 0.0}
+
+
+def test_pnl_cap_outranks_the_unattributed_bucket():
+    """A capped swing must not reach the unattributed cohort — its daily
+    slice folds into the software category downstream, which would smuggle
+    the excluded money back into a displayed P&L."""
+    positions = {"ghost-big": _pos(0, 50.0, 0.0, realized=-130.0,
+                                   expired=True)}
+    acts = [_trade("ghost-big", TS_AUG2, 100, 0.5),
+            _resolution("ghost-big", TS_AUG2 + 3600)]
+    out = build(positions, acts, TS_AUG1, attributed={"something-else"},
+                max_abs_pnl=100.0)
+    assert out["excluded_over_pnl"]["count"] == 1
+    assert out["excluded_unattributed"]["count"] == 0
+    assert out["excluded_unattributed"]["daily"] == []
+
+
+def test_pnl_cap_covers_resolution_only_rows():
+    """Settled markets the positions payload no longer carries settle the
+    record through their resolution — the cap must reach that path too."""
+    res = {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+           "timestamp": (TS_AUG2 + 3600) * 1000,
+           "positionResolution": {
+               "marketSlug": "gone-big",
+               "beforePosition": {"realized": {"value": 180.0},
+                                  "cost": {"value": 60.0}}}}
+    acts = [_trade("gone-big", TS_AUG2, 120, 0.5), res]
+    out = build({}, acts, TS_AUG1, max_abs_pnl=100.0)
+    assert out["trades"] == []
+    assert out["excluded_over_pnl"]["count"] == 1
+    assert out["excluded_over_pnl"]["net_pnl"] == 180.0
+
+
 def test_a_resolved_market_absent_from_positions_still_settles_the_record():
     """The venue REMOVES resolved markets from the positions payload — the
     resolution activity is often the only record a settled trade leaves.
