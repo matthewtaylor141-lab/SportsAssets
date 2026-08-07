@@ -55,6 +55,7 @@ export default function App() {
           All figures are read live from the trading engine's own ledger — nothing on this
           site is entered by hand. Informational only — not betting or investment advice.
           Not affiliated with any prediction market operator.
+          {' '}<span style={{ opacity: 0.55 }}>build {__BUILD_SHA__.replace('bsha_', '')}</span>
         </p>
       </main>
     </div>

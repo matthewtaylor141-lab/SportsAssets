@@ -106,6 +106,17 @@ jobs:
           echo "  pdf: HTTP $(curl -sS -o /dev/null -w '%{http_code} %{size_download}b' --max-time 60 "$BASE/api/report.pdf?from=2026-08-01")"
           echo "  csv: HTTP $(curl -sS -o /dev/null -w '%{http_code} %{size_download}b' --max-time 60 "$BASE/api/report.csv?from=2026-08-01")"
           echo "  today-live: $(curl -sS --max-time 30 "$BASE/api/today-live" | head -c 160)"
+          # Which build is the SITE actually serving (owner 2026-08-07:
+          # "no changes on the front end" — answer with evidence).
+          SITE="https://marketracker1.netlify.app"
+          BUNDLE=$(curl -sS --max-time 30 "$SITE/" | grep -o 'assets/index-[^"]*\.js' | head -1 || true)
+          echo "SITE bundle: $BUNDLE"
+          if [ -n "$BUNDLE" ]; then
+            curl -sS --max-time 30 "$SITE/$BUNDLE" -o /tmp/site.js || true
+            echo "  deployed build: $(grep -o 'bsha_[0-9a-f]\{7\}\|bsha_dev' /tmp/site.js | head -1 || echo 'pre-stamp build')"
+            echo "  live-strip present: $(grep -c "TODAY'S SETTLEMENTS" /tmp/site.js || echo 0)"
+            echo "  reports-card present: $(grep -c 'Performance Reports' /tmp/site.js || echo 0)"
+          fi
           jq -r '.account // {} | "  ACCOUNT: net=$\(.net_pnl // "?") trades=\(.trades // "?") open=\(.open // "?") stake=$\(.stake // "?")"' /tmp/tr.json 2>/dev/null || true
           jq -r '.daily // [] | .[0:3][] | "  day \(.date)  pnl \(.pnl)  settled \(.settled)  open \(.open // 0)"' /tmp/tr.json 2>/dev/null || true
           # ...and the most recent days — "how is TODAY looking" must be
