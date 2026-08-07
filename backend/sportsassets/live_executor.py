@@ -255,6 +255,43 @@ async def _clob_best_ask(cfg, asset: str) -> float | None:
         return None
 
 
+def _us_slug_candidates(global_slug: str, outcome: str) -> list[str]:
+    """US-venue slug candidates for a global market, most exact first.
+
+    The global feed's slugs are kindless and league-led
+    ('atp-ruud-fonseca-2026-08-07'); the US venue keys the same game as
+    'atc-<league>-<a>-<b>-<date>-<side>' (per-side team contract) and
+    'aec-<league>-<a>-<b>-<date>' (the two-outcome event contract). The
+    side code is chosen only when exactly ONE of the slug's two codes
+    matches the outcome name — ambiguity falls through to the aec form,
+    whose own outcome-similarity floor disambiguates."""
+    import re as _re
+
+    out: list[str] = []
+    s = (global_slug or "").lower()
+    m = _re.search(r"\d{4}-\d{2}-\d{2}", s)
+    if m:
+        head = [t for t in s[:m.start()].strip("-").split("-") if t]
+        if len(head) == 3:
+            lg, a, b = head
+            date = m.group(0)
+            ol = (outcome or "").lower()
+            words = ol.split()
+
+            def _hits(code: str) -> bool:
+                return code in ol or any(w.startswith(code)
+                                         or code.startswith(w)
+                                         for w in words)
+
+            sides = [c for c in (a, b) if _hits(c)]
+            if len(sides) == 1:
+                out.append(f"atc-{lg}-{a}-{b}-{date}-{sides[0]}")
+            out.append(f"aec-{lg}-{a}-{b}-{date}")
+    if s:
+        out.append(s)
+    return out
+
+
 async def execute_manual(asset: str, usd: float, note: str = "") -> dict:
     """Place an admin-directed BUY: FOK limit at the live ask +2c
     protection, whole contracts rounded down so the ticket never
@@ -327,17 +364,22 @@ async def _execute_manual(asset: str, usd: float, note: str = "") -> dict:
         str(asset), None, ask, limit, round(shares * limit, 2),
         float(shares), venue)
     try:
+        # Deterministic mapping ONLY (no fuzzy fallback): the desk's
+        # first ticket mapped onto a player prop via the full-text
+        # search. Exact slug-grammar candidates or a clean refusal.
         mapping = await asyncio.to_thread(
-            pmus.resolve_market, ctx.get("market_slug"),
-            ctx.get("event_slug"), ctx.get("market_title"),
-            ctx.get("event_title"), ctx.get("outcome"))
+            pmus.resolve_market_exact,
+            _us_slug_candidates(ctx.get("market_slug")
+                                or ctx.get("event_slug") or "",
+                                ctx.get("outcome") or ""),
+            ctx.get("outcome"))
         if mapping is None:
             await pool.execute(
                 "UPDATE live_orders SET status='rejected', error=$2 "
                 "WHERE id=$1",
                 row_id, "no verified Polymarket US market for this outcome")
             return {"ok": False, "row_id": row_id,
-                    "error": "no US market maps to this outcome"}
+                    "error": "no US market maps exactly to this outcome"}
         await pool.execute(
             "UPDATE live_orders SET us_market_slug=$2 WHERE id=$1",
             row_id, mapping["market_slug"])

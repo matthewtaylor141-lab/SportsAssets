@@ -129,6 +129,25 @@ def test_manual_rows_are_excluded_and_disclosed():
     assert out["account"]["net_pnl"] == round(1.1 + 60.0, 2)
 
 
+def test_us_slug_candidates_are_exact_grammar_only():
+    """Owner incident 2026-08-07: fuzzy search mapped 'Casper Ruud' to a
+    player prop. Candidates must be the slug-grammar forms, side-coded
+    only when unambiguous."""
+    from sportsassets.live_executor import _us_slug_candidates
+
+    c = _us_slug_candidates("atp-ruud-fonseca-2026-08-07", "Casper Ruud")
+    assert c[0] == "atc-atp-ruud-fonseca-2026-08-07-ruud"
+    assert c[1] == "aec-atp-ruud-fonseca-2026-08-07"
+    # Team codes prefix-match city/name words.
+    c2 = _us_slug_candidates("mlb-det-ath-2026-08-02", "Detroit Tigers")
+    assert c2[0] == "atc-mlb-det-ath-2026-08-02-det"
+    # Ambiguous outcome -> no side-coded candidate, aec still offered.
+    c3 = _us_slug_candidates("atp-ruud-fonseca-2026-08-07", "Draw")
+    assert c3[0] == "aec-atp-ruud-fonseca-2026-08-07"
+    # Undatable slug -> only itself.
+    assert _us_slug_candidates("weird-slug", "X") == ["weird-slug"]
+
+
 def test_manual_outranks_the_copy_sleeve_tag():
     """A slug in both sets is manual money — the copy sleeve's grading
     must not absorb the admin's ticket."""

@@ -149,6 +149,30 @@ def _surname_matchup(t: str | None) -> str | None:
     return None
 
 
+def resolve_market_exact(candidate_slugs: list[str],
+                         outcome: str | None) -> dict | None:
+    """Deterministic US-market resolution for the manual desk: try each
+    candidate slug via direct lookup ONLY — no fuzzy fallback. The
+    desk's first live ticket proved why (2026-08-07): the full-text
+    search mapped 'Casper Ruud' onto an astatc PLAYER PROP instead of
+    the match moneyline. A human's directed trade must map to exactly
+    the market implied by the slug grammar or refuse outright."""
+    client = _get_client()
+    for slug in candidate_slugs:
+        if not slug:
+            continue
+        try:
+            m = (client.markets.retrieve_by_slug(slug) or {}).get("market") or {}
+        except Exception:  # noqa: BLE001 — 404 is expected; next candidate
+            continue
+        score = _outcome_score(m, outcome)
+        if m.get("slug") and score >= MATCH_FLOOR and not m.get("closed"):
+            return {"market_slug": m["slug"], "title": m.get("title"),
+                    "outcome": m.get("outcome"),
+                    "matched_by": "desk_exact", "score": score}
+    return None
+
+
 def resolve_market(market_slug: str | None, event_slug: str | None,
                    market_title: str | None, event_title: str | None,
                    outcome: str | None) -> dict | None:
