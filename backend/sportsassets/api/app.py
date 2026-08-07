@@ -548,21 +548,32 @@ async def api_market_search(q: str = Query(min_length=2)) -> dict:
 
     import httpx
 
+    from ..team_aliases import matches as _team_match, terms_of
+
     pool = await get_pool()
+    # Recall-first SQL (any alias of any term), precision in Python
+    # (every term must match) — so 'braves ml' finds the Atlanta game
+    # whichever word the venue titled it with.
+    pats = sorted({a for s in terms_of(q) for a in s})[:12] \
+        or [q.strip().lower()]
+    conds = []
+    for i in range(1, len(pats) + 1):
+        conds.append(
+            f"(m.title ILIKE '%' || ${i} || '%' "
+            f"OR m.slug ILIKE '%' || ${i} || '%' "
+            f"OR m.event_title ILIKE '%' || ${i} || '%' "
+            f"OR mt.outcome ILIKE '%' || ${i} || '%')")
     rows = await pool.fetch(
-        """
+        f"""
         SELECT m.slug, m.title, m.event_title, mt.outcome,
                mt.outcome_index, mt.token_id
         FROM markets m
         JOIN market_tokens mt ON mt.condition_id = m.condition_id
         WHERE COALESCE(m.resolved, false) = false
-          AND (m.title ILIKE '%' || $1 || '%'
-               OR m.slug ILIKE '%' || $1 || '%'
-               OR m.event_title ILIKE '%' || $1 || '%'
-               OR mt.outcome ILIKE '%' || $1 || '%')
+          AND ({' OR '.join(conds)})
         ORDER BY m.slug DESC, mt.outcome_index
-        LIMIT 60
-        """, q.strip())
+        LIMIT 250
+        """, *pats)
     markets: dict[str, dict] = {}
     for r in rows:
         m = markets.setdefault(r["slug"], {
@@ -571,7 +582,9 @@ async def api_market_search(q: str = Query(min_length=2)) -> dict:
         m["outcomes"].append({"outcome": r["outcome"],
                               "asset": str(r["token_id"]),
                               "ask": None, "bid": None})
-    out = list(markets.values())[:12]
+    out = [m for m in markets.values()
+           if _team_match(q, [m["title"], m["event_title"], m["slug"]]
+                          + [o["outcome"] for o in m["outcomes"]])][:12]
 
     async def _quote(client: httpx.AsyncClient, o: dict) -> None:
         try:
@@ -635,7 +648,9 @@ async def api_kalshi_markets(q: str = Query(default="")) -> dict:
 
     import httpx
 
-    ql = q.strip().lower()
+    from ..team_aliases import matches as _team_match
+
+    ql = q.strip()
     out: list[dict] = []
 
     async def _series(client: httpx.AsyncClient, series: str) -> None:
@@ -647,8 +662,10 @@ async def api_kalshi_markets(q: str = Query(default="")) -> dict:
             for m in (resp.json().get("markets") or []):
                 title = m.get("title") or ""
                 sub = m.get("yes_sub_title") or m.get("subtitle") or ""
-                if ql and ql not in title.lower() and ql not in sub.lower() \
-                        and ql not in (m.get("ticker") or "").lower():
+                # Alias-aware: 'braves' finds the game Kalshi titles
+                # 'Atlanta at ...' (owner report 2026-08-07).
+                if ql and not _team_match(ql, [title, sub,
+                                               m.get("ticker")]):
                     continue
                 out.append({
                     "ticker": m.get("ticker"),
@@ -673,6 +690,60 @@ async def api_kalshi_markets(q: str = Query(default="")) -> dict:
         pass
     out.sort(key=lambda m: (m.get("close_time") or ""))
     return {"markets": out[:60]}
+
+
+@app.get("/api/admin/book", dependencies=[Depends(require_admin)])
+async def api_admin_book(venue: str = Query(...),
+                         id: str = Query(...)) -> dict:
+    """Live order-book depth for the desk ticket — the venue's actual
+    liquidity at each level, both sides. Polymarket: token book as-is.
+    Kalshi: the public book lists resting BIDS per side; the YES asks
+    are the NO bids mirrored through $1."""
+    import httpx
+
+    levels: dict = {"bids": [], "asks": []}
+    try:
+        if venue == "polymarket":
+            cfg = settings()
+            async with httpx.AsyncClient(base_url=cfg.clob_api_base,
+                                         timeout=8) as client:
+                resp = await client.get("/book", params={"token_id": id})
+            if resp.status_code == 200:
+                d = resp.json()
+                levels["asks"] = sorted(
+                    ([float(x["price"]), float(x["size"])]
+                     for x in (d.get("asks") or [])),
+                    key=lambda l: l[0])[:5]
+                levels["bids"] = sorted(
+                    ([float(x["price"]), float(x["size"])]
+                     for x in (d.get("bids") or [])),
+                    key=lambda l: -l[0])[:5]
+        elif venue == "kalshi":
+            async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                         timeout=8) as client:
+                resp = await client.get(f"/markets/{id}/orderbook")
+            if resp.status_code == 200:
+                ob = (resp.json() or {}).get("orderbook") or {}
+
+                def _lv(raw) -> list[list[float]]:
+                    outl = []
+                    for lv in raw or []:
+                        try:
+                            p, c = float(lv[0]), float(lv[1])
+                            outl.append([p if p <= 1 else p / 100.0, c])
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                    return outl
+
+                yes_bids = _lv(ob.get("yes_dollars") or ob.get("yes"))
+                no_bids = _lv(ob.get("no_dollars") or ob.get("no"))
+                levels["bids"] = sorted(yes_bids, key=lambda l: -l[0])[:5]
+                levels["asks"] = sorted(
+                    ([round(1 - p, 2), c] for p, c in no_bids),
+                    key=lambda l: l[0])[:5]
+    except Exception:  # noqa: BLE001 — depth is display, never a gate
+        pass
+    return levels
 
 
 class ManualTradeBody(BaseModel):

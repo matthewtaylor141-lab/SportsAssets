@@ -73,6 +73,12 @@ export function TradeDesk() {
   const [placing, setPlacing] = useState(false)
   const [result, setResult] = useState<any>(null)
   const [blotter, setBlotter] = useState<Blotter | null>(null)
+  const [depth, setDepth] = useState<{ bids: number[][]; asks: number[][] } | null>(null)
+
+  // Venue accent: generic exchange colors so each tab reads like its
+  // venue's kind of screen (green Kalshi, blue Polymarket) without
+  // wearing either company's brand.
+  const accent = venue === 'kalshi' ? '#1dc98b' : '#3b82f6'
 
   const loadBlotter = useCallback((tok: string) => {
     adminApi<Blotter>('/api/admin/manual-trades', tok).then(setBlotter).catch(() => {})
@@ -139,6 +145,23 @@ export function TradeDesk() {
     if (v === 'kalshi') browse(v, q)
   }
 
+  useEffect(() => {
+    // Live liquidity for the picked side — the venue's actual book.
+    setDepth(null)
+    if (!pick) return
+    const id = pick.venue === 'polymarket' ? pick.asset : pick.ticker
+    if (!id) return
+    let dead = false
+    const load = () =>
+      adminApi<{ bids: number[][]; asks: number[][] }>(
+        `/api/admin/book?venue=${pick.venue}&id=${encodeURIComponent(id)}`, token,
+      ).then((d) => { if (!dead) setDepth(d) }).catch(() => {})
+    load()
+    const t = setInterval(load, 6000)
+    return () => { dead = true; clearInterval(t) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pick])
+
   const place = async () => {
     if (!pick || placing) return
     const amount = parseFloat(usd)
@@ -193,11 +216,12 @@ export function TradeDesk() {
       onClick={onPick}
       style={{
         minWidth: 130, display: 'flex', justifyContent: 'space-between', gap: 10,
-        ...(selected ? { outline: '2px solid var(--accent, #6cf)' } : {}),
+        borderLeft: `3px solid ${accent}`,
+        ...(selected ? { outline: `2px solid ${accent}` } : {}),
       }}
     >
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
-      <b>{cents(price)}</b>
+      <b style={{ color: accent }}>{cents(price)}</b>
     </button>
   )
 
@@ -275,6 +299,9 @@ export function TradeDesk() {
                 setResult(null)
               }
             })}
+            <span style={{ opacity: 0.55, minWidth: 74, textAlign: 'right' }}>
+              No {cents(m.no_ask)}
+            </span>
           </div>
         ))}
         {err && <p style={{ color: 'var(--red, #f66)' }}>{err}</p>}
@@ -306,7 +333,32 @@ export function TradeDesk() {
                 (profit {money(estPayout - estCost)})
               </p>
             )}
-            <button className="btn" onClick={place} disabled={placing} style={{ marginTop: 6 }}>
+            {depth && (depth.asks.length > 0 || depth.bids.length > 0) && (
+              <div style={{ display: 'flex', gap: 24, margin: '10px 0', fontSize: 13 }}>
+                <div>
+                  <div style={{ opacity: 0.6 }}>Asks (you buy)</div>
+                  {depth.asks.slice(0, 3).map(([p, s], i) => (
+                    <div key={i} style={{ display: 'flex', gap: 12, justifyContent: 'space-between', minWidth: 130 }}>
+                      <span style={{ color: 'var(--red, #f66)' }}>{cents(p)}</span>
+                      <span style={{ opacity: 0.7 }}>{Math.round(s).toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+                <div>
+                  <div style={{ opacity: 0.6 }}>Bids</div>
+                  {depth.bids.slice(0, 3).map(([p, s], i) => (
+                    <div key={i} style={{ display: 'flex', gap: 12, justifyContent: 'space-between', minWidth: 130 }}>
+                      <span style={{ color: 'var(--green, #6f6)' }}>{cents(p)}</span>
+                      <span style={{ opacity: 0.7 }}>{Math.round(s).toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <button
+              className="btn" onClick={place} disabled={placing}
+              style={{ marginTop: 6, background: accent, color: '#08131a', fontWeight: 700 }}
+            >
               {placing ? 'Placing…' : `Buy ${pick.side} for $${usd || '0'}`}
             </button>
             <p style={{ opacity: 0.6, fontSize: 13, marginTop: 8 }}>
