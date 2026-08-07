@@ -1,31 +1,34 @@
 import { useCallback, useEffect, useState } from 'react'
 import { adminApi } from '../lib/api'
 
-// Manual trade desk (owner directive 2026-08-07): exchange-style market
-// browser with a venue toggle — Polymarket cards with outcome odds,
-// Kalshi event rows with YES prices in cents — and one-tap execution
-// through the live account as the walled-off 'manual' sleeve.
-// Polymarket fills synchronously; Kalshi relays through the engine
-// (~10s), since only the engine holds Kalshi credentials.
+// Desk v3 (owner directive 2026-08-07): the venue experience in our
+// skin — sport chips, game cards with live prices, and a full game view
+// where every market for the game populates grouped the way the venues
+// group them, with the desk's own positions inline. Execution is the
+// walled-off 'manual' sleeve: Polymarket fills synchronously, Kalshi
+// relays through the engine (~10s). Positions hold to resolution — no
+// cash-out theater, this account never sells.
 
 type Venue = 'polymarket' | 'kalshi'
 
-interface PmOutcome { outcome: string; asset: string; ask: number | null; bid: number | null }
-interface PmMarket { slug: string; title: string; event_title: string | null; outcomes: PmOutcome[] }
-interface KMarket {
-  ticker: string; series: string; title: string; sub_title: string
-  yes_ask: number | null; yes_bid: number | null
-  no_ask: number | null; no_bid: number | null
-  close_time: string | null
+interface Outcome { label: string; asset?: string; ticker?: string; price: number | null; no_price?: number | null }
+interface GameCard { id: string; venue: Venue; league: string; title: string; outcomes: Outcome[]; markets_n?: number }
+interface GameGroup { name: string; markets: Outcome[] }
+interface Position {
+  asset: string; outcome: string | null; cost: number; fill_price: number
+  shares: number; status: string; current_value: number | null
+  to_win: number | null; pnl: number | null
 }
+interface GameView { id: string; venue: Venue; title: string; groups: GameGroup[]; positions: Position[] }
 
 interface Pick {
   venue: Venue
-  label: string        // market title
-  side: string         // outcome / YES side
+  label: string
+  side: string
   ask: number
-  asset?: string       // polymarket token
-  ticker?: string      // kalshi ticker
+  asset?: string
+  ticker?: string
+  kalshiSide?: 'yes' | 'no'
 }
 
 interface ManualTrade {
@@ -43,30 +46,30 @@ interface ManualTrade {
   error: string | null
 }
 
-interface Blotter {
-  trades: ManualTrade[]
-  day_spent: number
-  day_budget: number
-  max_per_order: number
-}
+interface Blotter { trades: ManualTrade[]; day_spent: number; day_budget: number; max_per_order: number }
 
 const cents = (v: number | null | undefined) => (v == null ? '—' : `${Math.round(v * 100)}¢`)
 const money = (v: number | null | undefined) =>
   v == null ? '—' : `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(2)}`
 
-const SERIES_LABEL: Record<string, string> = {
-  KXMLBGAME: 'MLB', KXWNBAGAME: 'WNBA', KXNBAGAME: 'NBA', KXNFLGAME: 'NFL',
-  KXNHLGAME: 'NHL', KXATPMATCH: 'ATP', KXWTAMATCH: 'WTA',
-}
+const LEAGUES: { key: string; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'mlb', label: '⚾ MLB' },
+  { key: 'wnba', label: '🏀 WNBA' },
+  { key: 'tennis', label: '🎾 Tennis' },
+  { key: 'nba', label: '🏀 NBA' },
+  { key: 'nfl', label: '🏈 NFL' },
+  { key: 'nhl', label: '🏒 NHL' },
+]
 
 export function TradeDesk() {
   const [token, setToken] = useState(() => sessionStorage.getItem('sa_admin_token') || '')
   const [authed, setAuthed] = useState(false)
   const [err, setErr] = useState('')
   const [venue, setVenue] = useState<Venue>('polymarket')
-  const [q, setQ] = useState('')
-  const [pmMarkets, setPmMarkets] = useState<PmMarket[]>([])
-  const [kMarkets, setKMarkets] = useState<KMarket[]>([])
+  const [league, setLeague] = useState('all')
+  const [games, setGames] = useState<GameCard[]>([])
+  const [game, setGame] = useState<GameView | null>(null)
   const [loading, setLoading] = useState(false)
   const [pick, setPick] = useState<Pick | null>(null)
   const [usd, setUsd] = useState('50')
@@ -75,9 +78,6 @@ export function TradeDesk() {
   const [blotter, setBlotter] = useState<Blotter | null>(null)
   const [depth, setDepth] = useState<{ bids: number[][]; asks: number[][] } | null>(null)
 
-  // Venue accent: generic exchange colors so each tab reads like its
-  // venue's kind of screen (green Kalshi, blue Polymarket) without
-  // wearing either company's brand.
   const accent = venue === 'kalshi' ? '#1dc98b' : '#3b82f6'
 
   const loadBlotter = useCallback((tok: string) => {
@@ -107,46 +107,37 @@ export function TradeDesk() {
 
   useEffect(() => {
     if (!authed) return
-    const t = setInterval(() => loadBlotter(token), 12000)
+    const t = setInterval(() => loadBlotter(token), 15000)
     return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authed])
 
-  const browse = async (v: Venue = venue, query: string = q) => {
+  const loadGames = useCallback((v: Venue, lg: string) => {
     setLoading(true)
-    setResult(null)
-    try {
-      if (v === 'polymarket') {
-        if (query.trim().length < 2) { setPmMarkets([]); setErr('Type at least 2 characters to search Polymarket.'); return }
-        const r = await adminApi<{ markets: PmMarket[] }>(
-          `/api/admin/market-search?q=${encodeURIComponent(query.trim())}`, token,
-        )
-        setPmMarkets(r.markets)
-        setErr(r.markets.length ? '' : 'No live markets match.')
-      } else {
-        const r = await adminApi<{ markets: KMarket[] }>(
-          `/api/admin/kalshi-markets?q=${encodeURIComponent(query.trim())}`, token,
-        )
-        setKMarkets(r.markets)
-        setErr(r.markets.length ? '' : 'No open Kalshi markets match.')
-      }
-    } catch {
-      setErr('Market load failed — try again.')
-    } finally {
-      setLoading(false)
-    }
-  }
+    adminApi<{ games: GameCard[] }>(`/api/admin/desk-games?venue=${v}&league=${lg}`, token)
+      .then((r) => { setGames(r.games); setErr(r.games.length ? '' : 'No games in this window — try another sport.') })
+      .catch(() => setErr('Games failed to load — pull to retry.'))
+      .finally(() => setLoading(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token])
 
-  const switchVenue = (v: Venue) => {
-    setVenue(v)
+  useEffect(() => {
+    if (authed) loadGames(venue, league)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed, venue, league])
+
+  const openGame = (g: GameCard) => {
+    setGame(null)
     setPick(null)
     setResult(null)
-    setErr('')
-    if (v === 'kalshi') browse(v, q)
+    setLoading(true)
+    adminApi<GameView>(`/api/admin/desk-game?venue=${g.venue}&id=${encodeURIComponent(g.id)}`, token)
+      .then(setGame)
+      .catch(() => setErr('Game failed to load.'))
+      .finally(() => setLoading(false))
   }
 
   useEffect(() => {
-    // Live liquidity for the picked side — the venue's actual book.
     setDepth(null)
     if (!pick) return
     const id = pick.venue === 'polymarket' ? pick.asset : pick.ticker
@@ -171,16 +162,14 @@ export function TradeDesk() {
     try {
       const body = pick.venue === 'polymarket'
         ? { venue: 'polymarket-us', asset: pick.asset, usd: amount }
-        : { venue: 'kalshi', ticker: pick.ticker, side: pick.side.toLowerCase(), title: `${pick.label} — ${pick.side}`, usd: amount }
+        : { venue: 'kalshi', ticker: pick.ticker, side: pick.kalshiSide || 'yes', title: `${pick.label} — ${pick.side}`, usd: amount }
       const r = await adminApi<any>('/api/admin/manual-trade', token, {
         method: 'POST', body: JSON.stringify(body),
-        // Placement resolves the market on the venue and previews the
-        // order before committing — routinely 20-40s. The default 20s
-        // API timeout aborted mid-placement (owner report 2026-08-07).
         signal: AbortSignal.timeout(90000),
       })
       setResult(r)
       loadBlotter(token)
+      if (game) openGame({ id: game.id, venue: game.venue } as GameCard)
     } catch (e: any) {
       setResult({
         ok: false,
@@ -221,204 +210,245 @@ export function TradeDesk() {
 
   const priceBtn = (label: string, price: number | null, selected: boolean, onPick: () => void) => (
     <button
-      className="btn"
+      className="btn desk-price"
       disabled={price == null}
       onClick={onPick}
       style={{
-        minWidth: 130, display: 'flex', justifyContent: 'space-between', gap: 10,
         borderLeft: `3px solid ${accent}`,
         ...(selected ? { outline: `2px solid ${accent}` } : {}),
       }}
     >
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+      <span className="desk-price-label">{label}</span>
       <b style={{ color: accent }}>{cents(price)}</b>
     </button>
+  )
+
+  const ticket = pick && (
+    <div className="card desk-ticket">
+      <div className="card-title">TICKET</div>
+      <p style={{ margin: '6px 0' }}>
+        <b>{pick.label}</b> — {pick.side} @ <b>{cents(pick.ask)}</b>
+        <span style={{ opacity: 0.6 }}> ({pick.venue})</span>
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span>$</span>
+        <input
+          className="input" style={{ width: 100 }} inputMode="decimal"
+          value={usd} onChange={(e) => setUsd(e.target.value)}
+          aria-label="Dollar amount"
+        />
+        {[10, 25, 50, 100].map((v) => (
+          <button key={v} className="btn" onClick={() => setUsd(String(v))}>${v}</button>
+        ))}
+      </div>
+      {estContracts > 0 && (
+        <p style={{ opacity: 0.8, marginTop: 8 }}>
+          ≈ <b>{estContracts}</b> contracts · cost ≈ {money(estCost)} ·
+          pays <b>{money(estPayout)}</b> if it hits (profit {money(estPayout - estCost)})
+        </p>
+      )}
+      {depth && (depth.asks.length > 0 || depth.bids.length > 0) && (
+        <div style={{ display: 'flex', gap: 24, margin: '10px 0', fontSize: 13 }}>
+          <div>
+            <div style={{ opacity: 0.6 }}>Asks (you buy)</div>
+            {depth.asks.slice(0, 3).map(([p, s], i) => (
+              <div key={i} style={{ display: 'flex', gap: 12, justifyContent: 'space-between', minWidth: 130 }}>
+                <span style={{ color: 'var(--red, #f66)' }}>{cents(p)}</span>
+                <span style={{ opacity: 0.7 }}>{Math.round(s).toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+          <div>
+            <div style={{ opacity: 0.6 }}>Bids</div>
+            {depth.bids.slice(0, 3).map(([p, s], i) => (
+              <div key={i} style={{ display: 'flex', gap: 12, justifyContent: 'space-between', minWidth: 130 }}>
+                <span style={{ color: 'var(--green, #6f6)' }}>{cents(p)}</span>
+                <span style={{ opacity: 0.7 }}>{Math.round(s).toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <button
+        className="btn" onClick={place} disabled={placing}
+        style={{ marginTop: 6, background: accent, color: '#08131a', fontWeight: 700, width: '100%' }}
+      >
+        {placing ? 'Placing…' : `Buy ${pick.side} for $${usd || '0'}`}
+      </button>
+      <p style={{ opacity: 0.6, fontSize: 13, marginTop: 8 }}>
+        Fill-or-kill at the live ask +2¢ protection.
+        {pick.venue === 'kalshi' && ' Kalshi orders place via the engine within ~10 seconds.'}
+        {' '}Positions hold to resolution.
+      </p>
+      {result && (
+        <p style={{ color: result.ok ? 'var(--green, #6f6)' : 'var(--red, #f66)' }}>
+          {result.ok
+            ? result.queued
+              ? `QUEUED: ${result.count} contracts @ ≤${cents(result.limit_price)} — ${result.detail}`
+              : `FILLED: ${result.filled_shares} contracts @ ${cents(result.fill_price)} (${result.title} — ${result.outcome})`
+            : `Not placed: ${result.error}`}
+        </p>
+      )}
+    </div>
   )
 
   return (
     <>
       <h1>Trade Desk</h1>
       <p style={{ opacity: 0.75 }}>
-        Directed trades run as the <b>manual</b> sleeve — separate budget and P&amp;L,
-        zero effect on autonomous trading.
+        Orders execute through the AI's live accounts as the <b>manual</b> sleeve —
+        separate budget, zero effect on autonomous trading.
         {blotter && (
           <> Today: <b>{money(blotter.day_spent)}</b> of {money(blotter.day_budget)} ·
             max {money(blotter.max_per_order)}/ticket.</>
         )}
       </p>
 
-      <div className="card">
-        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-          {(['polymarket', 'kalshi'] as Venue[]).map((v) => (
-            <button
-              key={v}
-              className="btn"
-              onClick={() => switchVenue(v)}
-              style={venue === v ? { outline: '2px solid var(--accent, #6cf)', fontWeight: 700 } : {}}
-            >
-              {v === 'polymarket' ? 'Polymarket' : 'Kalshi'}
-            </button>
-          ))}
-          <input
-            className="input" style={{ flex: 1 }}
-            placeholder={venue === 'polymarket' ? 'Search markets — e.g. yankees, wnba total' : 'Filter Kalshi — e.g. yankees (empty = all open)'}
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && browse()}
-            aria-label="Market search"
-          />
-          <button className="btn" onClick={() => browse()} disabled={loading}>
-            {loading ? 'Loading…' : venue === 'polymarket' ? 'Search' : 'Browse'}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+        {(['polymarket', 'kalshi'] as Venue[]).map((v) => (
+          <button
+            key={v}
+            className="btn"
+            onClick={() => { setVenue(v); setGame(null); setPick(null) }}
+            style={venue === v ? { outline: `2px solid ${accent}`, fontWeight: 700 } : {}}
+          >
+            {v === 'polymarket' ? 'Polymarket' : 'Kalshi'}
           </button>
-        </div>
-
-        {venue === 'polymarket' && pmMarkets.map((m) => (
-          <div key={m.slug} style={{ padding: '10px 0', borderTop: '1px solid rgba(128,128,128,.2)' }}>
-            <div style={{ marginBottom: 6 }}>
-              <b>{m.title}</b>
-              {m.event_title && m.event_title !== m.title && (
-                <span style={{ opacity: 0.6 }}> · {m.event_title}</span>
-              )}
-              <div style={{ opacity: 0.5, fontSize: 12 }}>{m.slug}</div>
-            </div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {m.outcomes.map((o) =>
-                priceBtn(o.outcome, o.ask, pick?.asset === o.asset, () => {
-                  if (o.ask != null) {
-                    setPick({ venue: 'polymarket', label: m.title, side: o.outcome, ask: o.ask, asset: o.asset })
-                    setResult(null)
-                  }
-                }))}
-            </div>
-          </div>
         ))}
-
-        {venue === 'kalshi' && kMarkets.map((m) => (
-          <div key={m.ticker} style={{ padding: '10px 0', borderTop: '1px solid rgba(128,128,128,.2)', display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{ flex: 1 }}>
-              <span style={{ opacity: 0.6, fontSize: 12, marginRight: 8 }}>
-                {SERIES_LABEL[m.series] || m.series}
-              </span>
-              <b>{m.title}</b>
-              {m.sub_title && <span style={{ opacity: 0.6 }}> · {m.sub_title}</span>}
-              <div style={{ opacity: 0.5, fontSize: 12 }}>{m.ticker}</div>
-            </div>
-            {priceBtn('YES', m.yes_ask, pick?.ticker === m.ticker && pick?.side === 'YES', () => {
-              if (m.yes_ask != null) {
-                setPick({ venue: 'kalshi', label: m.title, side: 'YES', ask: m.yes_ask, ticker: m.ticker })
-                setResult(null)
-              }
-            })}
-            {priceBtn('NO', m.no_ask, pick?.ticker === m.ticker && pick?.side === 'NO', () => {
-              if (m.no_ask != null) {
-                setPick({ venue: 'kalshi', label: m.title, side: 'NO', ask: m.no_ask, ticker: m.ticker })
-                setResult(null)
-              }
-            })}
-          </div>
-        ))}
-        {err && <p style={{ color: 'var(--red, #f66)' }}>{err}</p>}
       </div>
 
-      <div className="card">
-        <h2>Ticket</h2>
-        {pick ? (
-          <>
-            <p>
-              <b>{pick.label}</b> — {pick.side} @ <b>{cents(pick.ask)}</b>
-              <span style={{ opacity: 0.6 }}> ({pick.venue})</span>
-            </p>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <span>$</span>
-              <input
-                className="input" style={{ width: 100 }} inputMode="decimal"
-                value={usd} onChange={(e) => setUsd(e.target.value)}
-                aria-label="Dollar amount"
-              />
-              {[10, 25, 50, 100].map((v) => (
-                <button key={v} className="btn" onClick={() => setUsd(String(v))}>${v}</button>
+      {!game && (
+        <>
+          <div className="desk-chips">
+            {LEAGUES.map((l) => (
+              <button
+                key={l.key}
+                className={`tr-chipbtn${league === l.key ? ' on' : ''}`}
+                onClick={() => setLeague(l.key)}
+              >
+                {l.label}
+              </button>
+            ))}
+          </div>
+          {loading && games.length === 0 ? (
+            <div className="tr-skel" style={{ height: 220, borderRadius: 12 }} />
+          ) : (
+            <div className="desk-grid">
+              {games.map((g) => (
+                <div className="card desk-gamecard" key={`${g.venue}-${g.id}`}>
+                  <div className="desk-game-title">{g.title}</div>
+                  <div className="desk-game-sub">{g.league.toUpperCase()} · {g.id.slice(-10)}</div>
+                  <div className="desk-game-sides">
+                    {g.outcomes.slice(0, 2).map((o) => (
+                      <span key={o.label}>
+                        {priceBtn(o.label, o.price,
+                          pick?.asset === o.asset && pick?.ticker === o.ticker,
+                          () => {
+                            if (o.price != null) {
+                              setPick({ venue: g.venue, label: g.title, side: o.label, ask: o.price, asset: o.asset, ticker: o.ticker, kalshiSide: 'yes' })
+                              setResult(null)
+                            }
+                          })}
+                      </span>
+                    ))}
+                  </div>
+                  <button className="btn desk-allmk" onClick={() => openGame(g)}>
+                    All markets{g.markets_n ? ` (${g.markets_n})` : ''} →
+                  </button>
+                </div>
               ))}
             </div>
-            {estContracts > 0 && (
-              <p style={{ opacity: 0.8, marginTop: 8 }}>
-                ≈ <b>{estContracts}</b> contracts · cost ≈ {money(estCost)} ·
-                pays <b>{money(estPayout)}</b> if it hits
-                (profit {money(estPayout - estCost)})
-              </p>
-            )}
-            {depth && (depth.asks.length > 0 || depth.bids.length > 0) && (
-              <div style={{ display: 'flex', gap: 24, margin: '10px 0', fontSize: 13 }}>
-                <div>
-                  <div style={{ opacity: 0.6 }}>Asks (you buy)</div>
-                  {depth.asks.slice(0, 3).map(([p, s], i) => (
-                    <div key={i} style={{ display: 'flex', gap: 12, justifyContent: 'space-between', minWidth: 130 }}>
-                      <span style={{ color: 'var(--red, #f66)' }}>{cents(p)}</span>
-                      <span style={{ opacity: 0.7 }}>{Math.round(s).toLocaleString()}</span>
-                    </div>
-                  ))}
-                </div>
-                <div>
-                  <div style={{ opacity: 0.6 }}>Bids</div>
-                  {depth.bids.slice(0, 3).map(([p, s], i) => (
-                    <div key={i} style={{ display: 'flex', gap: 12, justifyContent: 'space-between', minWidth: 130 }}>
-                      <span style={{ color: 'var(--green, #6f6)' }}>{cents(p)}</span>
-                      <span style={{ opacity: 0.7 }}>{Math.round(s).toLocaleString()}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            <button
-              className="btn" onClick={place} disabled={placing}
-              style={{ marginTop: 6, background: accent, color: '#08131a', fontWeight: 700 }}
-            >
-              {placing ? 'Placing…' : `Buy ${pick.side} for $${usd || '0'}`}
-            </button>
-            <p style={{ opacity: 0.6, fontSize: 13, marginTop: 8 }}>
-              Fill-or-kill at the live ask +2¢ protection.
-              {pick.venue === 'kalshi' && ' Kalshi orders place via the engine within ~10 seconds.'}
-            </p>
-          </>
-        ) : <p style={{ opacity: 0.6 }}>Pick a side above.</p>}
-        {result && (
-          <p style={{ color: result.ok ? 'var(--green, #6f6)' : 'var(--red, #f66)' }}>
-            {result.ok
-              ? result.queued
-                ? `QUEUED: ${result.count} contracts @ ≤${cents(result.limit_price)} — ${result.detail}`
-                : `FILLED: ${result.filled_shares} contracts @ ${cents(result.fill_price)} (${result.title} — ${result.outcome})`
-              : `Not placed: ${result.error}`}
+          )}
+          {err && <p style={{ color: 'var(--red, #f66)' }}>{err}</p>}
+        </>
+      )}
+
+      {game && (
+        <>
+          <button className="btn" onClick={() => { setGame(null); setPick(null) }}>← All games</button>
+          <h2 style={{ margin: '12px 0 2px' }}>{game.title}</h2>
+          <p style={{ opacity: 0.6, fontSize: 13, marginTop: 0 }}>
+            {game.venue} · every live market for this game
           </p>
-        )}
-      </div>
+
+          {game.positions.length > 0 && (
+            <div className="card desk-pos">
+              <div className="card-title">YOUR POSITION</div>
+              {game.positions.map((p) => (
+                <div className="desk-pos-row" key={p.asset}>
+                  <b>{p.outcome || 'position'}</b>
+                  <span>Cost {money(p.cost)} @ {cents(p.fill_price)}</span>
+                  <span>Current {money(p.current_value)}</span>
+                  <span>To win <b>{money(p.to_win)}</b></span>
+                  {p.pnl != null && (
+                    <span className={p.pnl >= 0 ? 'pos' : 'neg'}>settled {money(p.pnl)}</span>
+                  )}
+                </div>
+              ))}
+              <p style={{ opacity: 0.55, fontSize: 12, margin: '4px 0 0' }}>
+                Positions hold to resolution — winnings settle automatically.
+              </p>
+            </div>
+          )}
+
+          {game.groups.map((grp) => (
+            <div className="card" key={grp.name}>
+              <div className="card-title">{grp.name.toUpperCase()}</div>
+              <div className="desk-mkts">
+                {grp.markets.map((mk) => (
+                  <div className="desk-mkt-row" key={mk.asset || mk.ticker}>
+                    <span className="desk-mkt-label">{mk.label}</span>
+                    {priceBtn(game.venue === 'kalshi' ? 'YES' : 'Buy', mk.price,
+                      pick?.asset === mk.asset && pick?.ticker === mk.ticker && pick?.kalshiSide !== 'no',
+                      () => {
+                        if (mk.price != null) {
+                          setPick({ venue: game.venue, label: game.title, side: mk.label || 'YES', ask: mk.price, asset: mk.asset, ticker: mk.ticker, kalshiSide: 'yes' })
+                          setResult(null)
+                        }
+                      })}
+                    {game.venue === 'kalshi' && mk.no_price != null &&
+                      priceBtn('NO', mk.no_price,
+                        pick?.ticker === mk.ticker && pick?.kalshiSide === 'no',
+                        () => {
+                          setPick({ venue: 'kalshi', label: game.title, side: `NO ${mk.label}`, ask: mk.no_price!, ticker: mk.ticker, kalshiSide: 'no' })
+                          setResult(null)
+                        })}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
+      {ticket}
 
       <div className="card">
-        <h2>Blotter</h2>
+        <div className="card-title">BLOTTER</div>
         {blotter && blotter.trades.length > 0 ? (
-          <table style={{ width: '100%' }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: 'left' }}>Placed</th>
-                <th style={{ textAlign: 'left' }}>Market</th>
-                <th style={{ textAlign: 'left' }}>Side</th>
-                <th>Venue</th><th>Status</th><th>Cost</th><th>P&amp;L</th>
-              </tr>
-            </thead>
-            <tbody>
-              {blotter.trades.map((t) => (
-                <tr key={t.id}>
-                  <td>{t.placed_at ? new Date(t.placed_at).toLocaleString() : '—'}</td>
-                  <td>{t.title}</td>
-                  <td>{t.outcome || '—'}</td>
-                  <td style={{ textAlign: 'center' }}>{t.venue || 'polymarket'}</td>
-                  <td style={{ textAlign: 'center' }}>{t.status}{t.error ? ` (${t.error.slice(0, 50)})` : ''}</td>
-                  <td style={{ textAlign: 'right' }}>{money(t.filled_usd || t.requested_usd)}</td>
-                  <td style={{ textAlign: 'right', color: (t.pnl ?? 0) > 0 ? 'var(--green, #6f6)' : (t.pnl ?? 0) < 0 ? 'var(--red, #f66)' : undefined }}>
-                    {money(t.pnl)}
-                  </td>
+          <div className="rpt-table-wrap">
+            <table className="rpt-table">
+              <thead>
+                <tr>
+                  <th>Placed</th><th>Market</th><th>Side</th>
+                  <th>Venue</th><th>Status</th><th>Cost</th><th>P&L</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {blotter.trades.map((t) => (
+                  <tr key={t.id}>
+                    <td>{t.placed_at ? new Date(t.placed_at).toLocaleTimeString() : '—'}</td>
+                    <td>{t.title}</td>
+                    <td>{t.outcome || '—'}</td>
+                    <td>{t.venue || 'polymarket'}</td>
+                    <td>{t.status}{t.error ? ` (${t.error.slice(0, 40)})` : ''}</td>
+                    <td>{money(t.filled_usd || t.requested_usd)}</td>
+                    <td className={(t.pnl ?? 0) > 0 ? 'pos' : (t.pnl ?? 0) < 0 ? 'neg' : ''}>{money(t.pnl)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : <p style={{ opacity: 0.6 }}>No manual trades yet.</p>}
       </div>
     </>

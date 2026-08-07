@@ -746,6 +746,239 @@ async def api_admin_book(venue: str = Query(...),
     return levels
 
 
+# ── Desk v3: venue-style browse + full game views (owner directive
+#    2026-08-07: "feel like you are inside the venue placing an order").
+#    Sport chips -> game cards -> a game view where EVERY market for the
+#    game populates, grouped the way the venues group them. Data is the
+#    venues' own (metadata + live books); the skin is ours. ──────────────
+
+_DESK_LEAGUES = {
+    "mlb": ("mlb",), "wnba": ("wnba",), "nba": ("nba",),
+    "nfl": ("nfl",), "nhl": ("nhl",),
+    "tennis": ("atp", "wta", "itf", "itfm", "itfw"),
+}
+_GAME_DATE_RE = __import__("re").compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _game_base(slug: str) -> str | None:
+    """'mlb-nyy-bos-2026-08-07-o8pt5' -> 'mlb-nyy-bos-2026-08-07'."""
+    m = _GAME_DATE_RE.search(slug or "")
+    if not m:
+        return None
+    return slug[: m.end()]
+
+
+async def _pm_quote_many(assets: list[str]) -> dict[str, dict]:
+    """Best ask/bid for many tokens, concurrently, best-effort."""
+    import asyncio as _asyncio
+
+    import httpx
+
+    out: dict[str, dict] = {}
+    cfg = settings()
+
+    async def _one(client: httpx.AsyncClient, a: str) -> None:
+        try:
+            resp = await client.get("/book", params={"token_id": a})
+            if resp.status_code != 200:
+                return
+            d = resp.json()
+            asks = sorted(float(x["price"]) for x in (d.get("asks") or []))
+            bids = sorted((float(x["price"]) for x in (d.get("bids") or [])),
+                          reverse=True)
+            out[a] = {"ask": asks[0] if asks else None,
+                      "bid": bids[0] if bids else None}
+        except Exception:  # noqa: BLE001
+            return
+
+    try:
+        async with httpx.AsyncClient(base_url=cfg.clob_api_base,
+                                     timeout=8) as client:
+            await _asyncio.gather(*(_one(client, a) for a in assets[:48]))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+@app.get("/api/admin/desk-games", dependencies=[Depends(require_admin)])
+async def api_desk_games(venue: str = Query("polymarket"),
+                         league: str = Query("all")) -> dict:
+    """Game cards for the browse view: today/tomorrow's games with live
+    moneyline prices on each side — the venue home screen's shape."""
+    from datetime import date as _date, timedelta as _td
+
+    from ..copy_sports import market_type_of
+
+    days = {(_date.today() + _td(days=i)).isoformat() for i in (-1, 0, 1)}
+    if venue == "kalshi":
+        # Kalshi games from the per-league series (each side its own
+        # ticker); group into games by the event code.
+        raw = await api_kalshi_markets(q="")
+        games: dict[str, dict] = {}
+        for m in raw["markets"]:
+            t = m.get("ticker") or ""
+            parts = t.split("-")
+            if len(parts) < 3:
+                continue
+            gkey = "-".join(parts[:2])
+            series = m.get("series") or ""
+            lg = {"KXMLBGAME": "mlb", "KXWNBAGAME": "wnba",
+                  "KXNBAGAME": "nba", "KXNFLGAME": "nfl",
+                  "KXNHLGAME": "nhl"}.get(series, "tennis")
+            if league != "all" and lg != league \
+                    and lg not in _DESK_LEAGUES.get(league, ()):
+                continue
+            g = games.setdefault(gkey, {
+                "id": gkey, "venue": "kalshi", "league": lg,
+                "title": (m.get("title") or "").replace(" Winner?", ""),
+                "outcomes": []})
+            g["outcomes"].append({
+                "label": m.get("sub_title") or m.get("title"),
+                "ticker": t, "price": m.get("yes_ask")})
+        return {"games": [g for g in games.values()
+                          if g["outcomes"]][:20]}
+
+    prefixes = _DESK_LEAGUES.get(league, ()) if league != "all" else ()
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT m.slug, m.title, mt.outcome, mt.outcome_index, mt.token_id
+        FROM markets m
+        JOIN market_tokens mt ON mt.condition_id = m.condition_id
+        WHERE COALESCE(m.resolved, false) = false
+        ORDER BY m.slug, mt.outcome_index
+        LIMIT 4000
+        """)
+    games: dict[str, dict] = {}
+    for r in rows:
+        slug = r["slug"] or ""
+        base = _game_base(slug)
+        if base is None or base[-10:] not in days:
+            continue
+        lg = base.split("-", 1)[0]
+        if prefixes and lg not in prefixes:
+            continue
+        if league == "all" and lg not in {p for ps in
+                                          _DESK_LEAGUES.values()
+                                          for p in ps}:
+            continue
+        g = games.setdefault(base, {
+            "id": base, "venue": "polymarket", "league": lg,
+            "title": None, "markets_n": 0, "outcomes": []})
+        g["markets_n"] += 1
+        # The bare (suffix-free) slug IS the game's moneyline market.
+        if slug == base and market_type_of(slug) == "moneyline":
+            g["title"] = r["title"]
+            g["outcomes"].append({"label": r["outcome"],
+                                  "asset": str(r["token_id"]),
+                                  "price": None})
+    picked = [g for g in games.values() if g["outcomes"]][:14]
+    quotes = await _pm_quote_many(
+        [o["asset"] for g in picked for o in g["outcomes"]])
+    for g in picked:
+        for o in g["outcomes"]:
+            o["price"] = (quotes.get(o["asset"]) or {}).get("ask")
+        g["title"] = g["title"] or g["id"]
+    return {"games": picked}
+
+
+@app.get("/api/admin/desk-game", dependencies=[Depends(require_admin)])
+async def api_desk_game(venue: str = Query(...),
+                        id: str = Query(...)) -> dict:
+    """The full game view: EVERY market for one game, grouped the way
+    the venue groups them, quoted live, with the desk's own positions
+    inline (cost / current value / to-win — no cash-out: this account
+    holds to resolution by design)."""
+    from ..copy_sports import market_type_of
+
+    group_label = {"moneyline": "Moneyline", "spread": "Spreads",
+                   "total": "Totals"}
+    if venue == "kalshi":
+        raw = await api_kalshi_markets(q="")
+        code = id.split("-", 1)[1] if "-" in id else id
+        groups: dict[str, list] = {}
+        title = id
+        for m in raw["markets"]:
+            t = m.get("ticker") or ""
+            if code not in t:
+                continue
+            series = m.get("series") or ""
+            label = ("Moneyline" if series.endswith("GAME")
+                     or series.endswith("MATCH") else
+                     "Spreads" if "SPREAD" in series else
+                     "Totals" if "TOTAL" in series else "More")
+            groups.setdefault(label, []).append({
+                "label": m.get("sub_title") or m.get("title"),
+                "ticker": t, "price": m.get("yes_ask"),
+                "no_price": m.get("no_ask")})
+            title = (m.get("title") or title).replace(" Winner?", "")
+        return {"id": id, "venue": "kalshi", "title": title,
+                "groups": [{"name": k, "markets": v}
+                           for k, v in groups.items()], "positions": []}
+
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT m.slug, m.title, mt.outcome, mt.outcome_index, mt.token_id
+        FROM markets m
+        JOIN market_tokens mt ON mt.condition_id = m.condition_id
+        WHERE COALESCE(m.resolved, false) = false
+          AND m.slug LIKE $1 || '%'
+        ORDER BY m.slug, mt.outcome_index
+        LIMIT 300
+        """, id)
+    groups: dict[str, list] = {}
+    title = id
+    for r in rows:
+        slug = r["slug"] or ""
+        if _game_base(slug) != id:
+            continue
+        mtype = market_type_of(slug)
+        label = group_label.get(mtype, "Props & More")
+        if slug == id:
+            title = r["title"] or title
+        groups.setdefault(label, []).append({
+            "label": (r["outcome"] if slug == id
+                      else f"{r['title']} — {r['outcome']}"
+                      if r["title"] else r["outcome"]),
+            "asset": str(r["token_id"]), "slug": slug, "price": None})
+    all_assets = [mk["asset"] for g in groups.values() for mk in g]
+    quotes = await _pm_quote_many(all_assets)
+    for g in groups.values():
+        for mk in g:
+            mk["price"] = (quotes.get(mk["asset"]) or {}).get("ask")
+    # The desk's own open positions in this game (manual sleeve).
+    pos_rows = await pool.fetch(
+        """
+        SELECT lo.asset, lo.fill_price::float8 AS fill_price,
+               lo.filled_shares::float8 AS shares,
+               lo.filled_usd::float8 AS cost, lo.status,
+               lo.pnl::float8 AS pnl, mt.outcome
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.whale_username = 'manual'
+          AND lo.status IN ('filled', 'settled')
+          AND m.slug LIKE $1 || '%'
+        """, id)
+    positions = []
+    for p in pos_rows:
+        cur = (quotes.get(str(p["asset"])) or {}).get("bid")
+        positions.append({
+            "asset": str(p["asset"]), "outcome": p["outcome"],
+            "cost": p["cost"], "fill_price": p["fill_price"],
+            "shares": p["shares"], "status": p["status"],
+            "current_value": (round(cur * p["shares"], 2)
+                              if cur and p["shares"] else None),
+            "to_win": round(p["shares"], 2) if p["shares"] else None,
+            "pnl": p["pnl"]})
+    order = ["Moneyline", "Spreads", "Totals", "Props & More"]
+    return {"id": id, "venue": "polymarket", "title": title,
+            "groups": [{"name": k, "markets": groups[k]}
+                       for k in order if k in groups],
+            "positions": positions}
+
+
 class ManualTradeBody(BaseModel):
     asset: str = ""            # Polymarket token id
     usd: float
