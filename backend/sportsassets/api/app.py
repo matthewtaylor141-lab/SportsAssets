@@ -1281,14 +1281,30 @@ async def api_track_record(since: str | None = Query(None),
     return await track_record(since, max_stake=max_stake)
 
 
-@app.get("/api/daily-breakdown")
-async def api_daily_breakdown() -> dict:
-    """Month-to-date daily results by category (owner report 2026-08-06):
-    per ET day — RN1 copies and swisstony copies (live_orders, order-level
-    settled P&L), software selections and arbitrage (venue-account record
-    rows, split by the engine mirror's band tag), with the unattributed
-    cohort folded into software per the owner's rule. Copies use our audit
-    table (the only per-whale source); software/arb use the venue account."""
+def _parse_day(s: str | None, default: str) -> str:
+    from datetime import datetime as _dt
+
+    try:
+        return _dt.strptime((s or "").strip(), "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return default
+
+
+def _today_et() -> str:
+    from datetime import datetime as _dt
+
+    from .track_record import RECORD_TZ
+
+    return _dt.now(RECORD_TZ).strftime("%Y-%m-%d")
+
+
+async def _category_breakdown(from_day: str, to_day: str) -> dict:
+    """Per-ET-day results by category over a date range (owner reports
+    2026-08-06/07): each live sleeve (RN1, swisstony, kch123,
+    HomeRunHazard, manual) from the order-level audit table; software
+    and arbitrage from the venue-account record split by the engine
+    mirror's band tag; unattributed folded into software (owner rule).
+    The site's ±$100 single-trade display cap applies throughout."""
     from datetime import datetime as _dt
 
     from .track_record import PNL_DISPLAY_CAP, RECORD_TZ, track_record
@@ -1324,13 +1340,19 @@ async def api_daily_breakdown() -> dict:
         return d.setdefault(cat, {"pnl": 0.0, "settled": 0,
                                   "wins": 0, "losses": 0})
 
+    def _in_range(day: str) -> bool:
+        return from_day <= day <= to_day
+
     for r in copies:
         # Each live sleeve is its own category: the four source whales
         # plus the admin manual desk (owner 2026-08-07).
         if r["whale"] not in ("rn1", "swisstony", "kch123",
                               "homerunhazard", "manual"):
             continue
-        c = _cat(max(r["day"], first_day), r["whale"])
+        day = max(r["day"], first_day)
+        if not _in_range(day):
+            continue
+        c = _cat(day, r["whale"])
         c["pnl"] = round(c["pnl"] + r["pnl"], 4)
         c["settled"] += r["settled"]
         c["wins"] += r["wins"]
@@ -1344,6 +1366,8 @@ async def api_daily_breakdown() -> dict:
             continue
         day = max(_dt.fromtimestamp(ts, RECORD_TZ).strftime("%Y-%m-%d"),
                   first_day)
+        if not _in_range(day):
+            continue
         cat = "arb" if r.get("market_slug") in arb_slugs else "software"
         pnl = float(r.get("pnl") or 0)
         c = _cat(day, cat)
@@ -1355,6 +1379,8 @@ async def api_daily_breakdown() -> dict:
     # Unattributed -> software (owner rule). Pre-mirror arb legs live here
     # too; they cannot be split retroactively and count as software.
     for u in ((rec.get("excluded_unattributed") or {}).get("daily") or []):
+        if not _in_range(u["date"]):
+            continue
         c = _cat(u["date"], "software")
         c["pnl"] = round(c["pnl"] + u["pnl"], 4)
         c["settled"] += u["settled"]
@@ -1369,12 +1395,89 @@ async def api_daily_breakdown() -> dict:
             t["pnl"] = round(t["pnl"] + c["pnl"], 4)
             for k in ("settled", "wins", "losses"):
                 t[k] += c[k]
-    return {"days": [{"date": k, **v} for k, v in sorted(days.items())],
-            "totals": totals,
+    net = round(sum(t["pnl"] for t in totals.values()), 2)
+    return {"from": from_day, "to": to_day,
+            "days": [{"date": k, **v} for k, v in sorted(days.items())],
+            "totals": totals, "net_pnl": net,
             "note": ("copies=order-level audit table (per-whale, both "
                      "cross-venue legs where recorded); software/arb="
                      "venue-account record; unattributed folded into "
                      "software (owner rule 2026-08-06)")}
+
+
+@app.get("/api/daily-breakdown")
+async def api_daily_breakdown() -> dict:
+    """Month-to-date category breakdown (kept for existing consumers)."""
+    return await _category_breakdown("2026-08-01", _today_et())
+
+
+@app.get("/api/report/range")
+async def api_report_range(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+) -> dict:
+    """Category P&L over any date range (owner directive 2026-08-07:
+    daily / weekly / monthly / custom downloadable reports)."""
+    return await _category_breakdown(
+        _parse_day(from_, "2026-08-01"), _parse_day(to, _today_et()))
+
+
+_CAT_ORDER = ["rn1", "swisstony", "kch123", "homerunhazard",
+              "manual", "arb", "software"]
+_CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
+              "kch123": "kch123 copies", "homerunhazard": "HomeRunHazard copies",
+              "manual": "Manual desk", "arb": "Arbitrage",
+              "software": "Software"}
+
+
+@app.get("/api/report.csv")
+async def api_report_csv(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+):
+    import csv
+    import io as _io
+
+    data = await _category_breakdown(
+        _parse_day(from_, "2026-08-01"), _parse_day(to, _today_et()))
+    buf = _io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["date", "category", "pnl", "settled", "wins", "losses"])
+    for d in data["days"]:
+        for cat in _CAT_ORDER:
+            c = d.get(cat)
+            if not c:
+                continue
+            w.writerow([d["date"], _CAT_LABEL[cat], f"{c['pnl']:.2f}",
+                        c["settled"], c["wins"], c["losses"]])
+    for cat in _CAT_ORDER:
+        t = data["totals"].get(cat)
+        if not t:
+            continue
+        w.writerow(["TOTAL", _CAT_LABEL[cat], f"{t['pnl']:.2f}",
+                    t["settled"], t["wins"], t["losses"]])
+    w.writerow(["TOTAL", "ALL", f"{data['net_pnl']:.2f}", "", "", ""])
+    name = f"bettoredge_pnl_{data['from']}_{data['to']}.csv"
+    return PlainTextResponse(
+        buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.get("/api/report.pdf")
+async def api_report_pdf(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+):
+    from fastapi.responses import Response
+
+    from .reports import build_category_report
+
+    data = await _category_breakdown(
+        _parse_day(from_, "2026-08-01"), _parse_day(to, _today_et()))
+    pdf, name = build_category_report(data)
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{name}"'})
 
 
 @app.get("/api/report")

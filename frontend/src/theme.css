@@ -790,3 +790,65 @@ table.data tbody tr { position: relative; }
 .kx-series { font-size: 11px; font-weight: 800; letter-spacing: 0.1em; color: var(--ink-2); }
 .kx-tail { font-size: 11px; color: var(--muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kx-nums { font-size: 12.5px; margin-top: 6px; }
+
+/* ── Performance Reports card (owner directive 2026-08-07) ── */
+.rpt-card { display: flex; flex-direction: column; gap: 12px; }
+.rpt-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; flex-wrap: wrap;
+}
+.rpt-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.rpt-range { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rpt-range .input { min-height: 42px; }
+.rpt-range-sep { color: var(--muted); }
+.rpt-net { display: flex; align-items: baseline; gap: 10px; }
+.rpt-net > span:first-child {
+  font-size: 26px; font-weight: 800; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.rpt-net-sub { color: var(--muted); font-size: 12.5px; }
+.rpt-table-wrap { overflow-x: auto; }
+.rpt-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.rpt-table th {
+  text-align: left; color: var(--muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 6px 10px 6px 0; border-bottom: 1px solid var(--border);
+}
+.rpt-table td {
+  padding: 8px 10px 8px 0; border-bottom: 1px solid var(--baseline);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.rpt-table tr:last-child td { border-bottom: none; }
+.rpt-downloads { display: flex; gap: 8px; flex-wrap: wrap; }
+.rpt-downloads .btn { min-height: 44px; display: inline-flex; align-items: center; }
+
+/* ── Mobile-first polish (owner directive 2026-08-07: fast, easy,
+     no-glitch execution from a phone) ── */
+@media (max-width: 640px) {
+  /* Comfortable thumb targets everywhere. */
+  .btn, .tr-chipbtn, .input, .tr-select {
+    min-height: 44px;
+  }
+  .nav { height: 56px; padding: 0 10px; }
+  .nav a.tab { padding: 10px 12px; font-size: 14px; }
+  .card { padding: 14px; }
+  .rpt-net > span:first-child { font-size: 30px; }
+}
+
+/* iOS momentum + safe areas: the app should feel native, not webby. */
+body { -webkit-tap-highlight-color: transparent; }
+.nav { padding-left: max(10px, env(safe-area-inset-left)); padding-right: max(10px, env(safe-area-inset-right)); }
+.main { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+
+/* Press feedback on every actionable control. */
+.btn:active, .tr-chipbtn:active { transform: scale(0.97); }
+.btn, .tr-chipbtn { transition: transform 80ms ease, background 120ms ease, border-color 120ms ease; }
+
+/* Skeleton shimmer (shared) */
+.tr-skel {
+  background: linear-gradient(100deg, var(--surface-2) 40%, var(--surface-3) 50%, var(--surface-2) 60%);
+  background-size: 200% 100%;
+  animation: skel-slide 1.4s ease-in-out infinite;
+  border-radius: var(--radius);
+}
+@keyframes skel-slide { to { background-position: -200% 0; } }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { EmptyState } from '../components/EmptyState'
 import { PnlCalendar } from '../components/PnlCalendar'
+import { ReportsCard } from '../components/ReportsCard'
 import { fmtAgo, fmtCents, fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
 import { KalshiOpen, SINCE, TRRow, useKalshiOpen, useTrackRecord } from '../lib/record'
 
@@ -395,6 +396,8 @@ export function TrackRecord() {
           <SportBreakdown rows={data.trades} />
         </div>
       </div>
+
+      <ReportsCard />
 
       <div className="card">
         <div className="tr-ledger-head">

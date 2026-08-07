@@ -346,6 +346,91 @@ def _settled_sections(bets: list[dict], daily: list[dict]) -> list:
     return story
 
 
+_CAT_ORDER = ["rn1", "swisstony", "kch123", "homerunhazard",
+              "manual", "arb", "software"]
+_CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
+              "kch123": "kch123 copies",
+              "homerunhazard": "HomeRunHazard copies",
+              "manual": "Manual desk", "arb": "Arbitrage",
+              "software": "Software"}
+
+
+def build_category_report(data: dict) -> tuple[bytes, str]:
+    """Ops report (owner directive 2026-08-07): per-day, per-category
+    P&L over an arbitrary range — the shareable house-style document
+    behind the site's Download buttons."""
+    frm, to = data.get("from", ""), data.get("to", "")
+    totals = data.get("totals") or {}
+    days = data.get("days") or []
+    net = data.get("net_pnl") or 0.0
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=LETTER,
+                            leftMargin=0.7 * inch, rightMargin=0.7 * inch,
+                            topMargin=0.7 * inch, bottomMargin=0.7 * inch)
+    story = [
+        Paragraph("Daily P&amp;L by Strategy", H1),
+        Paragraph(_esc(f"{frm} through {to} · Eastern trading days · "
+                       "single trades beyond ±$100 excluded and disclosed "
+                       "separately"), SUB),
+    ]
+    settled_n = sum(t.get("settled", 0) for t in totals.values())
+    wins_n = sum(t.get("wins", 0) for t in totals.values())
+    best_cat = max(totals.items(), key=lambda kv: kv[1]["pnl"])[0] \
+        if totals else None
+    story.append(_stat_grid([
+        ("Net P&L", _signed(net), GOOD if net >= 0 else BAD),
+        ("Settled trades", f"{settled_n:,}", None),
+        ("Win rate", _pct(wins_n / settled_n) if settled_n else "—", None),
+        ("Best category", _CAT_LABEL.get(best_cat, "—")
+         if best_cat else "—", None),
+    ]))
+
+    story.append(Paragraph("Totals by category", H2))
+    rows, raws = [], []
+    for cat in _CAT_ORDER:
+        t = totals.get(cat)
+        if not t:
+            continue
+        rows.append([_CAT_LABEL[cat], _signed(t["pnl"]),
+                     str(t["settled"]), f"{t['wins']}-{t['losses']}"])
+        raws.append(t["pnl"])
+    rows.append(["ALL STRATEGIES", _signed(net),
+                 str(settled_n), f"{wins_n}-{sum(t.get('losses', 0) for t in totals.values())}"])
+    raws.append(net)
+    story.append(_table(["Category", "P&L", "Settled", "W-L"],
+                        rows, [2.4, 1.3, 1.1, 1.2],
+                        color_col=1, raw_values=raws))
+
+    story.append(Paragraph("Daily ledger", H2))
+    drows, draws = [], []
+    for d in days:
+        day_net = round(sum(c["pnl"] for k, c in d.items()
+                            if isinstance(c, dict)), 2)
+        cells = [d["date"], _signed(day_net)]
+        for cat in _CAT_ORDER:
+            c = d.get(cat)
+            cells.append(_signed(c["pnl"]) if c else "—")
+        drows.append(cells)
+        draws.append(day_net)
+    story.append(_table(
+        ["Date", "Net"] + [_CAT_LABEL[c].replace(" copies", "")
+                           for c in _CAT_ORDER],
+        drows, [0.85, 0.75] + [0.72] * len(_CAT_ORDER),
+        color_col=1, raw_values=draws))
+
+    story.append(Spacer(1, 14))
+    story.append(Paragraph(_esc(
+        "Copies are order-level results from the platform's own audit "
+        "table; software and arbitrage are venue-account settlements "
+        "split by the engine mirror's band tag; unattributed results "
+        "count toward software (owner rule 2026-08-06). Generated "
+        "directly from the trading ledger — nothing entered by hand."),
+        FOOT))
+    doc.build(story)
+    return buf.getvalue(), f"bettoredge_pnl_{frm}_{to}.pdf"
+
+
 async def build_settled_report(whale_id: int) -> tuple[bytes, str]:
     """Complete settled-history report: sport ranking, P&L calendars, and
     EVERY settled bet grouped by sport — for management analysis."""
