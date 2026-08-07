@@ -105,6 +105,38 @@ app.add_middleware(
 # page-load time on mobile. ~10x smaller on the wire with gzip.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
+# Which frontends actually talk to this API? The deployed site's hostname
+# is recorded nowhere (Netlify names are set in its UI), which has made
+# "is the new build live?" unanswerable by probes twice now. Real browser
+# traffic is ground truth: remember the distinct Origin/Referer hosts.
+# Hostnames only — no paths, tokens, IPs, or user data — and the list is
+# capped so it cannot grow unboundedly.
+_SEEN_ORIGINS: dict[str, float] = {}
+
+
+@app.middleware("http")
+async def _track_origins(request, call_next):
+    raw = request.headers.get("origin") or request.headers.get("referer") or ""
+    if raw:
+        try:
+            from urllib.parse import urlsplit
+
+            host = urlsplit(raw).netloc.lower()
+            if host and (host in _SEEN_ORIGINS or len(_SEEN_ORIGINS) < 40):
+                _SEEN_ORIGINS[host] = time.time()
+        except Exception:
+            pass
+    return await call_next(request)
+
+
+@app.get("/api/system/seen-origins")
+async def seen_origins():
+    now = time.time()
+    return {"origins": [
+        {"host": h, "ago_s": round(now - t, 1)}
+        for h, t in sorted(_SEEN_ORIGINS.items(), key=lambda kv: -kv[1])
+    ]}
+
 
 def require_admin(x_admin_token: str = Header(default="")) -> None:
     import hmac

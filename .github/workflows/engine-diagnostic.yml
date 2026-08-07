@@ -133,9 +133,15 @@ jobs:
             echo "  live-strip present: $(grep -c "TODAY'S SETTLEMENTS" /tmp/site.js || echo 0)"
             echo "  reports-card present: $(grep -c 'Performance Reports' /tmp/site.js || echo 0)"
             echo "  homepage-v4 present: $(grep -c 'BEST DAY' /tmp/site.js || echo 0)"
+            echo "  is-our-app: $(grep -c 'sportsassets-api.onrender.com' /tmp/site.js || echo 0)"
           else
             echo "SITE bundle: NOT FOUND on any candidate hostname"
           fi
+          # Ground truth beats guessing: hostnames of real browsers that
+          # have hit this API since its last restart.
+          echo "SEEN ORIGINS (real browser traffic):"
+          curl -s --max-time 20 "$BASE/api/system/seen-origins" \
+            | jq -r '.origins[]? | "  \(.host)  (\(.ago_s)s ago)"' || true
           jq -r '.account // {} | "  ACCOUNT: net=$\(.net_pnl // "?") trades=\(.trades // "?") open=\(.open // "?") stake=$\(.stake // "?")"' /tmp/tr.json 2>/dev/null || true
           jq -r '.daily // [] | .[0:3][] | "  day \(.date)  pnl \(.pnl)  settled \(.settled)  open \(.open // 0)"' /tmp/tr.json 2>/dev/null || true
           # ...and the most recent days — "how is TODAY looking" must be
