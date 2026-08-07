@@ -306,7 +306,11 @@ async def _compute_whale_idents() -> dict:
         SELECT l.asset, l.slug, l.outcome, l.price, l.whale, l.entered_ts,
                EXISTS (SELECT 1 FROM live_orders lo
                        WHERE lo.asset = l.asset
-                         AND lo.status IN ('filled', 'settled'))
+                         AND lo.status IN ('filled', 'settled')
+                         -- Manual-desk rows must not mark a whale
+                         -- position as already copied (owner 2026-08-07:
+                         -- the desk never impacts autonomous trading).
+                         AND COALESCE(lo.whale_username, '') <> 'manual')
                    AS pmus_copied
         FROM latest l
         """,
@@ -528,6 +532,94 @@ async def kalshi_claim_ingest(
         "VALUES ($1, $2, $3) ON CONFLICT (asset) DO NOTHING",
         body.asset.strip(), body.whale[:120], body.ticker[:120])
     return {"ok": True}
+
+
+# ── Manual trade desk (owner directive 2026-08-07) ───────────────────
+
+
+@app.get("/api/admin/market-search", dependencies=[Depends(require_admin)])
+async def api_market_search(q: str = Query(min_length=2)) -> dict:
+    """Find live markets for the desk: title/slug/outcome substring over
+    unresolved markets, newest first, with the token id the desk trades."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT m.slug, m.title, m.event_title, mt.outcome, mt.token_id
+        FROM markets m
+        JOIN market_tokens mt ON mt.condition_id = m.condition_id
+        WHERE COALESCE(m.resolved, false) = false
+          AND (m.title ILIKE '%' || $1 || '%'
+               OR m.slug ILIKE '%' || $1 || '%'
+               OR m.event_title ILIKE '%' || $1 || '%'
+               OR mt.outcome ILIKE '%' || $1 || '%')
+        ORDER BY m.slug DESC
+        LIMIT 30
+        """, q.strip())
+    return {"results": [
+        {"slug": r["slug"], "title": r["title"],
+         "event_title": r["event_title"], "outcome": r["outcome"],
+         "asset": str(r["token_id"])} for r in rows]}
+
+
+class ManualTradeBody(BaseModel):
+    asset: str
+    usd: float
+    note: str = ""
+
+
+@app.post("/api/admin/manual-trade", dependencies=[Depends(require_admin)])
+async def api_manual_trade(body: ManualTradeBody) -> dict:
+    """Place an admin-directed trade as the 'manual' sleeve. Separate
+    budget, separate P&L line, zero interaction with autonomous flows."""
+    from ..live_executor import execute_manual
+
+    return await execute_manual(body.asset, body.usd, body.note)
+
+
+@app.get("/api/admin/manual-trades", dependencies=[Depends(require_admin)])
+async def api_manual_trades() -> dict:
+    """The desk blotter: every manual ticket with status and settled P&L."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT lo.id, lo.placed_at, lo.asset, lo.us_market_slug,
+               lo.limit_price, lo.fill_price, lo.requested_usd,
+               lo.filled_usd, lo.filled_shares, lo.status, lo.pnl,
+               lo.settled_at, lo.error,
+               m.title AS market_title, mt.outcome
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.whale_username = 'manual'
+        ORDER BY lo.placed_at DESC
+        LIMIT 200
+        """)
+    out = []
+    for r in rows:
+        out.append({
+            "id": r["id"],
+            "placed_at": r["placed_at"].isoformat() if r["placed_at"] else None,
+            "title": r["market_title"] or r["us_market_slug"] or r["asset"],
+            "outcome": r["outcome"],
+            "status": r["status"],
+            "limit_price": float(r["limit_price"] or 0) or None,
+            "fill_price": float(r["fill_price"] or 0) or None,
+            "requested_usd": float(r["requested_usd"] or 0),
+            "filled_usd": float(r["filled_usd"] or 0),
+            "filled_shares": float(r["filled_shares"] or 0),
+            "pnl": float(r["pnl"]) if r["pnl"] is not None else None,
+            "settled_at": r["settled_at"].isoformat() if r["settled_at"] else None,
+            "error": r["error"],
+        })
+    day_spent = float(await pool.fetchval(
+        "SELECT COALESCE(sum(filled_usd), 0) FROM live_orders "
+        "WHERE whale_username = 'manual' "
+        "AND placed_at > now() - interval '24 hours'") or 0)
+    from ..live_executor import MANUAL_DAILY_USD, MANUAL_MAX_PER_ORDER_USD
+
+    return {"trades": out, "day_spent": round(day_spent, 2),
+            "day_budget": MANUAL_DAILY_USD,
+            "max_per_order": MANUAL_MAX_PER_ORDER_USD}
 
 
 class EngineMethodologyBody(BaseModel):
@@ -880,7 +972,10 @@ async def api_daily_breakdown() -> dict:
                                   "wins": 0, "losses": 0})
 
     for r in copies:
-        if r["whale"] not in ("rn1", "swisstony"):
+        # Each live sleeve is its own category: the four source whales
+        # plus the admin manual desk (owner 2026-08-07).
+        if r["whale"] not in ("rn1", "swisstony", "kch123",
+                              "homerunhazard", "manual"):
             continue
         c = _cat(max(r["day"], first_day), r["whale"])
         c["pnl"] = round(c["pnl"] + r["pnl"], 4)

@@ -4,6 +4,7 @@ import { Analytics } from './pages/Analytics'
 import { Engine } from './pages/Engine'
 import { System } from './pages/System'
 import { TrackRecord } from './pages/TrackRecord'
+import { TradeDesk } from './pages/TradeDesk'
 
 /* The site IS the AI trader now. The whale-hub pages remain in the repo
  * (and in git history) but are off the router: this product has one story
@@ -15,6 +16,7 @@ const TABS = [
   { to: '/analytics', label: 'Analytics' },
   { to: '/system', label: 'System' },
   { to: '/engine', label: '⚙ Engine' },
+  { to: '/desk', label: 'Desk' },
   { to: '/admin', label: 'Ops' },
 ]
 
@@ -46,6 +48,7 @@ export default function App() {
           <Route path="/analytics" element={<Analytics />} />
           <Route path="/system" element={<System />} />
           <Route path="/engine" element={<Engine />} />
+          <Route path="/desk" element={<TradeDesk />} />
           <Route path="/admin" element={<Admin />} />
         </Routes>
         <p className="notice">

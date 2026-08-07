@@ -93,6 +93,7 @@ def build(positions: dict[str, dict], activities: list[dict],
           attributed: set[str] | None = None,
           copy_slugs: set[str] | None = None,
           max_abs_pnl: float | None = None,
+          manual_slugs: set[str] | None = None,
           tz: ZoneInfo = RECORD_TZ) -> dict:
     """Pure builder (unit-tested): venue payloads -> the track record.
 
@@ -181,6 +182,11 @@ def build(positions: dict[str, dict], activities: list[dict],
     unattributed = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
     copy_sleeve = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
     over_pnl = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
+    # Admin-directed trades (owner directive 2026-08-07): REAL account
+    # money, but a human's picks — never the AI's record. Excluded from
+    # every displayed figure, disclosed like the other exclusions, and
+    # checked FIRST so a manual row can't leak into any other cohort.
+    manual = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
     # Daily slice of the unattributed cohort (owner directive 2026-08-06:
     # unattributed results count toward the software category in the daily
     # breakdown report — an aggregate-only bucket can't be day-bucketed).
@@ -206,7 +212,11 @@ def build(positions: dict[str, dict], activities: list[dict],
 
     def _excluded_bucket(slug: str, stake_now: float, settled: bool,
                          realized: float, unreal: float):
-        # The P&L cap outranks every cohort split: a $100+ single-trade
+        # Manual-desk rows first: a human's ticket is manual money no
+        # matter its size or attribution state.
+        if manual_slugs is not None and slug in manual_slugs:
+            return manual
+        # The P&L cap outranks the remaining splits: a $100+ single-trade
         # swing is out of the record no matter whose row it is.
         if _pnl_capped(settled, realized, unreal):
             return over_pnl
@@ -261,11 +271,14 @@ def build(positions: dict[str, dict], activities: list[dict],
             cost = cost or res["cost"]
         stake_now = cost if cost > 0 else e.get("notional", 0.0)
         unreal = (value - cost) if not settled else 0.0
+        is_manual = manual_slugs is not None and slug in manual_slugs
         sleeve = _sleeve_of(slug)
-        if sleeve == "copy" and not _pnl_capped(settled, realized, unreal):
+        if sleeve == "copy" and not is_manual \
+                and not _pnl_capped(settled, realized, unreal):
             _tally_copy(stake_now, settled, realized)
         else:
-            bucket = (over_pnl if sleeve == "copy"
+            bucket = (manual if is_manual
+                      else over_pnl if sleeve == "copy"
                       else _excluded_bucket(slug, stake_now, settled,
                                             realized, unreal))
             if bucket is not None:
@@ -315,11 +328,14 @@ def build(positions: dict[str, dict], activities: list[dict],
         if entry_ts < since_ts:
             continue
         cost = res["cost"] or e.get("notional", 0.0)
+        is_manual = manual_slugs is not None and slug in manual_slugs
         sleeve = _sleeve_of(slug)
-        if sleeve == "copy" and not _pnl_capped(True, res["realized"], 0.0):
+        if sleeve == "copy" and not is_manual \
+                and not _pnl_capped(True, res["realized"], 0.0):
             _tally_copy(cost, True, res["realized"])
         else:
-            bucket = (over_pnl if sleeve == "copy"
+            bucket = (manual if is_manual
+                      else over_pnl if sleeve == "copy"
                       else _excluded_bucket(slug, cost, True,
                                             res["realized"], 0.0))
             if bucket is not None:
@@ -401,7 +417,7 @@ def build(positions: dict[str, dict], activities: list[dict],
     # day the incident cohort was deeply negative — the page must
     # reconcile to the account, not ask to be trusted. (Copy rows are
     # inside `rows` now, so only the true exclusions are added back.)
-    _buckets = [over_limit, unattributed, over_pnl]
+    _buckets = [over_limit, unattributed, over_pnl, manual]
     account = {
         "trades": len(rows) + sum(b["count"] for b in _buckets),
         "open": (len(rows) - len(settled_rows))
@@ -451,6 +467,14 @@ def build(positions: dict[str, dict], activities: list[dict],
              "stake": round(over_pnl["stake"], 2),
              "net_pnl": round(over_pnl["net_pnl"], 2)}
             if max_abs_pnl is not None else None),
+        # Admin-directed tickets: real account money, a human's picks —
+        # disclosed, never blended into the AI's figures.
+        "manual_desk": (
+            {"count": manual["count"],
+             "open": manual["open"],
+             "stake": round(manual["stake"], 2),
+             "net_pnl": round(manual["net_pnl"], 2)}
+            if manual_slugs is not None else None),
         # Positions the engine's own mirror does not claim. When attribution
         # is active this is where non-engine activity (the arb-bug cohort,
         # anything unexplained) lands — visible, never blended in.
@@ -866,7 +890,7 @@ async def track_record(since: str | None = None,
         "archive_rows": len(archive),
         "window_rows": len(window),
     }
-    attributed = copy_slugs = None
+    attributed = copy_slugs = manual_slugs = None
     try:
         from ..db import get_pool
 
@@ -881,10 +905,18 @@ async def track_record(since: str | None = None,
         attributed = {r["outcome_id"] for r in eng} or None
         cp = await pool.fetch(
             "SELECT DISTINCT us_market_slug FROM live_orders "
-            "WHERE us_market_slug IS NOT NULL")
+            "WHERE us_market_slug IS NOT NULL "
+            "AND COALESCE(whale_username, '') <> 'manual'")
         copy_slugs = {r["us_market_slug"] for r in cp}
+        # Admin-directed tickets (owner 2026-08-07): their own disclosed
+        # cohort, never the AI's record.
+        mn = await pool.fetch(
+            "SELECT DISTINCT us_market_slug FROM live_orders "
+            "WHERE us_market_slug IS NOT NULL "
+            "AND whale_username = 'manual'")
+        manual_slugs = {r["us_market_slug"] for r in mn}
     except Exception:  # noqa: BLE001 — provenance is an upgrade, not a gate
-        attributed = copy_slugs = None
+        attributed = copy_slugs = manual_slugs = None
     snapshot = {
         "raw_ts": _raw_cache["ts"],
         "age_s": round(time.time() - _raw_cache["ts"], 1),
@@ -896,4 +928,5 @@ async def track_record(since: str | None = None,
     return {"configured": True, **source, "snapshot": snapshot,
             **build(raw["positions"], acts, since_ts,
                     max_stake=max_stake, attributed=attributed,
-                    copy_slugs=copy_slugs, max_abs_pnl=PNL_DISPLAY_CAP)}
+                    copy_slugs=copy_slugs, max_abs_pnl=PNL_DISPLAY_CAP,
+                    manual_slugs=manual_slugs)}

@@ -90,7 +90,10 @@ async def sweep_once() -> dict:
           -- (maybe_execute's ON CONFLICT would no-op it silently).
           AND NOT EXISTS (SELECT 1 FROM live_orders lo
                           WHERE lo.asset = t.asset
-                            AND lo.status IN ('submitting','filled','settled'))
+                            AND lo.status IN ('submitting','filled','settled')
+                            -- Manual-desk rows are invisible to the
+                            -- autonomous paths (owner 2026-08-07).
+                            AND COALESCE(lo.whale_username, '') <> 'manual')
           -- Cross-venue one-copy rule: positions the engine already
           -- copied on Kalshi (kalshi_claims) are taken. Without this
           -- the sweep double-bought any position PM missed fresh but

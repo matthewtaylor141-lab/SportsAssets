@@ -63,7 +63,11 @@ def plan_order(
 
 
 async def _caps_room(pool) -> tuple[float, float]:
-    """Remaining (daily, total) bankroll room from actual filled orders."""
+    """Remaining (daily, total) bankroll room from actual filled orders.
+
+    Manual-desk rows are excluded: the admin's directed trades ride
+    their OWN budget (execute_manual) and must never consume the copy
+    sleeve's room — nor the reverse."""
     cfg = settings()
     row = await pool.fetchrow(
         """
@@ -71,6 +75,7 @@ async def _caps_room(pool) -> tuple[float, float]:
                    ::float8 AS day,
                COALESCE(sum(filled_usd), 0)::float8 AS total
         FROM live_orders
+        WHERE COALESCE(whale_username, '') <> 'manual'
         """
     )
     return (cfg.live_max_daily_usd - row["day"], cfg.live_max_total_usd - row["total"])
@@ -220,6 +225,136 @@ def per_fill_usd(whale_username: str | None) -> float:
                                  PENNY_TRIAL_PER_FILL_USD)
 
 
+# ── Manual trade desk (owner directive 2026-08-07) ───────────────────
+# An admin directs trades ("$50 on Yankees ML") executed by the live
+# account as the 'manual' sleeve: its own budget, its own P&L line,
+# invisible to every autonomous rule in both directions. Global stops
+# still bind — the kill switch means "the ACCOUNT is unsafe", and no
+# sleeve trades through that.
+MANUAL_WHALE = "manual"
+MANUAL_MAX_PER_ORDER_USD = float(os.environ.get("MANUAL_MAX_PER_ORDER_USD",
+                                                "250"))
+MANUAL_DAILY_USD = float(os.environ.get("MANUAL_DAILY_USD", "1000"))
+
+
+async def _clob_best_ask(cfg, asset: str) -> float | None:
+    """Best global-CLOB ask for a token — the reference price the desk
+    quotes and protects the limit against. None = no live book."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(base_url=cfg.clob_api_base,
+                                     timeout=8) as http:
+            resp = await http.get("/book", params={"token_id": str(asset)})
+        if resp.status_code != 200:
+            return None
+        asks = sorted(float(x["price"]) for x in
+                      (resp.json().get("asks") or []))
+        return asks[0] if asks else None
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        return None
+
+
+async def execute_manual(asset: str, usd: float, note: str = "") -> dict:
+    """Place an admin-directed BUY: FOK limit at the live ask +2c
+    protection, whole contracts rounded down so the ticket never
+    exceeds the requested budget. Returns a UI-ready result dict —
+    every refusal is a named reason, never an exception."""
+    cfg = settings()
+    venue = active_venue()
+    if venue != "polymarket-us":
+        return {"ok": False, "error": "live venue not armed"}
+    if not (0 < usd <= MANUAL_MAX_PER_ORDER_USD):
+        return {"ok": False,
+                "error": f"size must be $0-{MANUAL_MAX_PER_ORDER_USD:.0f}"}
+    pool = await get_pool()
+    if await _is_paused(pool):
+        return {"ok": False, "error": "live trading paused (kill switch)"}
+    day_spent = float(await pool.fetchval(
+        "SELECT COALESCE(sum(filled_usd), 0) FROM live_orders "
+        "WHERE whale_username = 'manual' "
+        "AND placed_at > now() - interval '24 hours'") or 0)
+    if day_spent + usd > MANUAL_DAILY_USD:
+        return {"ok": False,
+                "error": (f"manual day budget exhausted "
+                          f"(${day_spent:.2f} of ${MANUAL_DAILY_USD:.0f} "
+                          "in 24h)")}
+    ctx = await _market_context(pool, {"asset": str(asset)})
+    if not ctx.get("outcome"):
+        return {"ok": False, "error": "unknown asset — pick from search"}
+    ask = await _clob_best_ask(cfg, str(asset))
+    if ask is None or not (0 < ask < 1):
+        return {"ok": False, "error": "no live order book for this outcome"}
+    limit = round(min(ask + 0.02, 0.99), 2)
+    shares = int(usd / limit)
+    if shares < 1:
+        return {"ok": False, "error": "budget buys zero whole contracts"}
+    from . import pmus
+
+    row_id = await pool.fetchval(
+        """
+        INSERT INTO live_orders (trade_id, whale_username, asset,
+                                 condition_id, side, his_price, limit_price,
+                                 requested_usd, requested_shares, status,
+                                 venue)
+        VALUES (NULL, 'manual', $1, $2, 'BUY', $3, $4, $5, $6,
+                'submitting', $7)
+        RETURNING id
+        """,
+        str(asset), None, ask, limit, round(shares * limit, 2),
+        float(shares), venue)
+    try:
+        mapping = await asyncio.to_thread(
+            pmus.resolve_market, ctx.get("market_slug"),
+            ctx.get("event_slug"), ctx.get("market_title"),
+            ctx.get("event_title"), ctx.get("outcome"))
+        if mapping is None:
+            await pool.execute(
+                "UPDATE live_orders SET status='rejected', error=$2 "
+                "WHERE id=$1",
+                row_id, "no verified Polymarket US market for this outcome")
+            return {"ok": False, "row_id": row_id,
+                    "error": "no US market maps to this outcome"}
+        await pool.execute(
+            "UPDATE live_orders SET us_market_slug=$2 WHERE id=$1",
+            row_id, mapping["market_slug"])
+        result = await asyncio.to_thread(
+            pmus.submit_fok, mapping["market_slug"], limit, shares)
+        filled = float(result["filled_shares"]) if result["ok"] else 0.0
+        fill_price = float(result["fill_price"]) if result["ok"] else None
+        await pool.execute(
+            """
+            UPDATE live_orders
+            SET status=$2, order_id=$3, filled_shares=$4, fill_price=$5,
+                filled_usd=$6, raw=$7::jsonb, error=$8
+            WHERE id=$1
+            """,
+            row_id,
+            "filled" if result["ok"] and filled > 0 else "unfilled",
+            result.get("order_id"), filled, fill_price,
+            round(filled * (fill_price or 0), 2),
+            json.dumps(result.get("raw"), default=str),
+            None if result["ok"] else str(result.get("raw"))[:300])
+        log.info("MANUAL order %s: %.0f shares @ %.2f (%s)",
+                 "FILLED" if filled > 0 else "unfilled", filled,
+                 fill_price or limit, note[:80] or "no note")
+        return {"ok": bool(result["ok"] and filled > 0), "row_id": row_id,
+                "filled_shares": filled, "fill_price": fill_price,
+                "limit_price": limit, "quoted_ask": ask,
+                "us_market_slug": mapping["market_slug"],
+                "title": ctx.get("market_title"),
+                "outcome": ctx.get("outcome"),
+                "error": (None if result["ok"] and filled > 0 else
+                          "order did not fill at the protected limit")}
+    except Exception as exc:  # noqa: BLE001 — the desk reports, never crashes
+        log.exception("manual order failed (row %s)", row_id)
+        await pool.execute(
+            "UPDATE live_orders SET status='error', error=$2 WHERE id=$1",
+            row_id, str(exc)[:300])
+        return {"ok": False, "row_id": row_id,
+                "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
     """Called on every fresh detection (after the paper trade). All guards
     re-checked here; failure of any guard is a silent no-op or logged skip."""
@@ -297,7 +432,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     # fast path.
     taken = await pool.fetchval(
         "SELECT 1 FROM live_orders WHERE asset = $1 "
-        "AND status IN ('submitting','filled','settled') LIMIT 1",
+        "AND status IN ('submitting','filled','settled') "
+        "AND COALESCE(whale_username, '') <> 'manual' LIMIT 1",
         str(payload["asset"]))
     if not taken:
         # Cross-venue: a position the engine already copied on Kalshi is
