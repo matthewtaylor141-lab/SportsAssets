@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -539,12 +540,19 @@ async def kalshi_claim_ingest(
 
 @app.get("/api/admin/market-search", dependencies=[Depends(require_admin)])
 async def api_market_search(q: str = Query(min_length=2)) -> dict:
-    """Find live markets for the desk: title/slug/outcome substring over
-    unresolved markets, newest first, with the token id the desk trades."""
+    """Exchange-style market browser for the desk: title/slug/outcome
+    substring over unresolved markets, grouped per MARKET with each
+    outcome's live best ask/bid quoted from the venue book — so the
+    desk shows real prices before the ticket, like any exchange UI."""
+    import asyncio as _asyncio
+
+    import httpx
+
     pool = await get_pool()
     rows = await pool.fetch(
         """
-        SELECT m.slug, m.title, m.event_title, mt.outcome, mt.token_id
+        SELECT m.slug, m.title, m.event_title, mt.outcome,
+               mt.outcome_index, mt.token_id
         FROM markets m
         JOIN market_tokens mt ON mt.condition_id = m.condition_id
         WHERE COALESCE(m.resolved, false) = false
@@ -552,28 +560,250 @@ async def api_market_search(q: str = Query(min_length=2)) -> dict:
                OR m.slug ILIKE '%' || $1 || '%'
                OR m.event_title ILIKE '%' || $1 || '%'
                OR mt.outcome ILIKE '%' || $1 || '%')
-        ORDER BY m.slug DESC
-        LIMIT 30
+        ORDER BY m.slug DESC, mt.outcome_index
+        LIMIT 60
         """, q.strip())
-    return {"results": [
-        {"slug": r["slug"], "title": r["title"],
-         "event_title": r["event_title"], "outcome": r["outcome"],
-         "asset": str(r["token_id"])} for r in rows]}
+    markets: dict[str, dict] = {}
+    for r in rows:
+        m = markets.setdefault(r["slug"], {
+            "slug": r["slug"], "title": r["title"],
+            "event_title": r["event_title"], "outcomes": []})
+        m["outcomes"].append({"outcome": r["outcome"],
+                              "asset": str(r["token_id"]),
+                              "ask": None, "bid": None})
+    out = list(markets.values())[:12]
+
+    async def _quote(client: httpx.AsyncClient, o: dict) -> None:
+        try:
+            resp = await client.get("/book", params={"token_id": o["asset"]})
+            if resp.status_code != 200:
+                return
+            d = resp.json()
+            asks = sorted(float(x["price"]) for x in (d.get("asks") or []))
+            bids = sorted((float(x["price"]) for x in (d.get("bids") or [])),
+                          reverse=True)
+            o["ask"] = asks[0] if asks else None
+            o["bid"] = bids[0] if bids else None
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return
+
+    cfg = settings()
+    try:
+        async with httpx.AsyncClient(base_url=cfg.clob_api_base,
+                                     timeout=8) as client:
+            await _asyncio.gather(*(_quote(client, o)
+                                    for m in out for o in m["outcomes"]))
+    except Exception:  # noqa: BLE001 — quotes are an upgrade, not a gate
+        pass
+    return {"markets": out}
+
+
+# Public Kalshi market data (no auth needed for market/book reads).
+KALSHI_PUBLIC_API = os.environ.get(
+    "KALSHI_PUBLIC_API", "https://api.elections.kalshi.com/trade-api/v2")
+# The sports series the desk browses — same universe the engine trades.
+_DESK_KALSHI_SERIES = ["KXMLBGAME", "KXWNBAGAME", "KXNBAGAME", "KXNFLGAME",
+                       "KXNHLGAME", "KXATPMATCH", "KXWTAMATCH"]
+
+
+def _kcents(m: dict, key: str) -> float | None:
+    """Tolerant price read: the venue migrated int-cent fields to
+    string-dollar '*_dollars' twins (learned the hard way in the BTC
+    calibration) — accept either, return dollars 0-1."""
+    v = m.get(f"{key}_dollars")
+    try:
+        if v is not None and str(v).strip():
+            f = float(v)
+            return f if 0 <= f <= 1 else None
+    except (TypeError, ValueError):
+        pass
+    try:
+        c = m.get(key)
+        if c is not None:
+            f = float(c) / 100.0
+            return f if 0 <= f <= 1 else None
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+@app.get("/api/admin/kalshi-markets", dependencies=[Depends(require_admin)])
+async def api_kalshi_markets(q: str = Query(default="")) -> dict:
+    """Browse Kalshi's live sports markets for the desk — event rows
+    with Yes/No prices in cents, the venue's own presentation shape."""
+    import asyncio as _asyncio
+
+    import httpx
+
+    ql = q.strip().lower()
+    out: list[dict] = []
+
+    async def _series(client: httpx.AsyncClient, series: str) -> None:
+        try:
+            resp = await client.get("/markets", params={
+                "series_ticker": series, "status": "open", "limit": 100})
+            if resp.status_code != 200:
+                return
+            for m in (resp.json().get("markets") or []):
+                title = m.get("title") or ""
+                sub = m.get("yes_sub_title") or m.get("subtitle") or ""
+                if ql and ql not in title.lower() and ql not in sub.lower() \
+                        and ql not in (m.get("ticker") or "").lower():
+                    continue
+                out.append({
+                    "ticker": m.get("ticker"),
+                    "series": series,
+                    "title": title,
+                    "sub_title": sub,
+                    "yes_ask": _kcents(m, "yes_ask"),
+                    "yes_bid": _kcents(m, "yes_bid"),
+                    "no_ask": _kcents(m, "no_ask"),
+                    "no_bid": _kcents(m, "no_bid"),
+                    "close_time": m.get("close_time"),
+                })
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return
+
+    try:
+        async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                     timeout=10) as client:
+            await _asyncio.gather(*(_series(client, s)
+                                    for s in _DESK_KALSHI_SERIES))
+    except Exception:  # noqa: BLE001
+        pass
+    out.sort(key=lambda m: (m.get("close_time") or ""))
+    return {"markets": out[:60]}
 
 
 class ManualTradeBody(BaseModel):
-    asset: str
+    asset: str = ""            # Polymarket token id
     usd: float
     note: str = ""
+    venue: str = "polymarket-us"
+    ticker: str = ""           # Kalshi market ticker
+    side: str = "yes"          # Kalshi side
+    title: str = ""
 
 
 @app.post("/api/admin/manual-trade", dependencies=[Depends(require_admin)])
 async def api_manual_trade(body: ManualTradeBody) -> dict:
     """Place an admin-directed trade as the 'manual' sleeve. Separate
-    budget, separate P&L line, zero interaction with autonomous flows."""
-    from ..live_executor import execute_manual
+    budget, separate P&L line, zero interaction with autonomous flows.
+    Polymarket executes synchronously; Kalshi queues for the engine's
+    ~10s relay (only the engine holds Kalshi credentials)."""
+    from ..live_executor import (MANUAL_DAILY_USD, MANUAL_MAX_PER_ORDER_USD,
+                                 execute_manual)
 
-    return await execute_manual(body.asset, body.usd, body.note)
+    if body.venue == "polymarket-us":
+        return await execute_manual(body.asset, body.usd, body.note)
+    if body.venue != "kalshi":
+        return {"ok": False, "error": "unknown venue"}
+    if not (0 < body.usd <= MANUAL_MAX_PER_ORDER_USD):
+        return {"ok": False,
+                "error": f"size must be $0-{MANUAL_MAX_PER_ORDER_USD:.0f}"}
+    # The venue is YES-denominated per outcome ticker (each team/side is
+    # its own ticker) — every desk buy is the YES side of the picked
+    # ticker; the opposite side of a game is its own ticker row.
+    side = "yes"
+    if not body.ticker.strip():
+        return {"ok": False, "error": "pick a market"}
+    pool = await get_pool()
+    day_spent = float(await pool.fetchval(
+        """
+        SELECT COALESCE((SELECT sum(filled_usd) FROM live_orders
+                         WHERE whale_username = 'manual'
+                           AND placed_at > now() - interval '24 hours'), 0)
+             + COALESCE((SELECT sum(usd) FROM manual_kalshi_queue
+                         WHERE status IN ('pending', 'placed', 'filled')
+                           AND created_at > now() - interval '24 hours'), 0)
+        """) or 0)
+    if day_spent + body.usd > MANUAL_DAILY_USD:
+        return {"ok": False,
+                "error": (f"manual day budget exhausted (${day_spent:.2f} "
+                          f"of ${MANUAL_DAILY_USD:.0f} in 24h)")}
+    # Re-quote server-side — never trust a client-supplied price.
+    import httpx
+
+    ask = None
+    try:
+        async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                     timeout=8) as client:
+            resp = await client.get("/markets",
+                                    params={"tickers": body.ticker.strip()})
+            ms = (resp.json().get("markets") or []) if \
+                resp.status_code == 200 else []
+            if ms:
+                ask = _kcents(ms[0], f"{side}_ask")
+    except Exception:  # noqa: BLE001
+        ask = None
+    if ask is None or not (0 < ask < 1):
+        return {"ok": False, "error": "no live Kalshi quote for that side"}
+    limit = round(min(ask + 0.02, 0.99), 2)
+    count = int(body.usd / limit)
+    if count < 1:
+        return {"ok": False, "error": "budget buys zero whole contracts"}
+    row_id = await pool.fetchval(
+        """
+        INSERT INTO manual_kalshi_queue
+            (ticker, title, side, limit_price, count, usd, note)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id
+        """,
+        body.ticker.strip(), body.title[:200] or body.ticker.strip(), side,
+        limit, count, round(count * limit, 2), body.note[:200])
+    return {"ok": True, "queued": True, "row_id": row_id,
+            "quoted_ask": ask, "limit_price": limit, "count": count,
+            "title": body.title or body.ticker,
+            "outcome": side.upper(),
+            "error": None,
+            "detail": "queued — the engine places it within ~10 seconds"}
+
+
+@app.get("/api/engine/manual-kalshi-queue")
+async def api_manual_kalshi_queue(
+    x_engine_token: str = Header(default="")
+) -> dict:
+    """Pending desk orders for the engine's Kalshi relay."""
+    cfg = settings()
+    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
+        raise HTTPException(status_code=401, detail="engine token required")
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id, ticker, side, limit_price::float8 AS limit_price, "
+        "count FROM manual_kalshi_queue WHERE status = 'pending' "
+        "ORDER BY id LIMIT 20")
+    return {"orders": [dict(r) for r in rows]}
+
+
+class KalshiRelayResult(BaseModel):
+    id: int
+    status: str                # placed|filled|unfilled|error
+    order_id: str | None = None
+    fill_count: int | None = None
+    fill_price: float | None = None
+    error: str | None = None
+
+
+@app.post("/api/engine/manual-kalshi-result")
+async def api_manual_kalshi_result(
+    body: KalshiRelayResult, x_engine_token: str = Header(default="")
+) -> dict:
+    cfg = settings()
+    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
+        raise HTTPException(status_code=401, detail="engine token required")
+    if body.status not in ("placed", "filled", "unfilled", "error"):
+        raise HTTPException(status_code=400, detail="bad status")
+    pool = await get_pool()
+    await pool.execute(
+        """
+        UPDATE manual_kalshi_queue
+        SET status=$2, order_id=$3, fill_count=$4, fill_price=$5,
+            error=$6, updated_at=now()
+        WHERE id=$1
+        """,
+        body.id, body.status, body.order_id, body.fill_count,
+        body.fill_price, (body.error or None) and body.error[:300])
+    return {"ok": True}
 
 
 @app.get("/api/admin/manual-trades", dependencies=[Depends(require_admin)])
@@ -609,12 +839,47 @@ async def api_manual_trades() -> dict:
             "filled_shares": float(r["filled_shares"] or 0),
             "pnl": float(r["pnl"]) if r["pnl"] is not None else None,
             "settled_at": r["settled_at"].isoformat() if r["settled_at"] else None,
+            "venue": "polymarket",
             "error": r["error"],
         })
+    # Kalshi leg of the desk: queued/relayed orders join the blotter.
+    krows = await pool.fetch(
+        """
+        SELECT id, created_at, ticker, title, side, status,
+               limit_price::float8 AS limit_price,
+               fill_price::float8 AS fill_price,
+               usd::float8 AS usd, count, fill_count, error
+        FROM manual_kalshi_queue
+        ORDER BY created_at DESC LIMIT 100
+        """)
+    for r in krows:
+        out.append({
+            "id": f"k{r['id']}",
+            "placed_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "title": r["title"] or r["ticker"],
+            "outcome": (r["side"] or "yes").upper(),
+            "status": r["status"],
+            "limit_price": r["limit_price"],
+            "fill_price": r["fill_price"],
+            "requested_usd": float(r["usd"] or 0),
+            "filled_usd": round(float(r["fill_count"] or 0)
+                                * float(r["fill_price"] or 0), 2),
+            "filled_shares": float(r["fill_count"] or 0),
+            "pnl": None,          # Kalshi manual P&L settles venue-side
+            "settled_at": None,
+            "venue": "kalshi",
+            "error": r["error"],
+        })
+    out.sort(key=lambda t: t["placed_at"] or "", reverse=True)
     day_spent = float(await pool.fetchval(
-        "SELECT COALESCE(sum(filled_usd), 0) FROM live_orders "
-        "WHERE whale_username = 'manual' "
-        "AND placed_at > now() - interval '24 hours'") or 0)
+        """
+        SELECT COALESCE((SELECT sum(filled_usd) FROM live_orders
+                         WHERE whale_username = 'manual'
+                           AND placed_at > now() - interval '24 hours'), 0)
+             + COALESCE((SELECT sum(usd) FROM manual_kalshi_queue
+                         WHERE status IN ('pending', 'placed', 'filled')
+                           AND created_at > now() - interval '24 hours'), 0)
+        """) or 0)
     from ..live_executor import MANUAL_DAILY_USD, MANUAL_MAX_PER_ORDER_USD
 
     return {"trades": out, "day_spent": round(day_spent, 2),

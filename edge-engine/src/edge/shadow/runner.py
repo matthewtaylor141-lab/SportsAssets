@@ -2150,6 +2150,83 @@ def _main_impl() -> None:
                          name="kalshi-copies").start()
         log.warning("kalshi copy leg armed (2min sweep, strategy-independent)")
 
+        # Manual desk relay (owner directive 2026-08-07): admin-directed
+        # Kalshi orders queue on the platform (only this process holds
+        # Kalshi credentials) and place here within ~10s. MANUAL-class:
+        # a human's ticket rides no strategy or sleeve halt — only the
+        # global stops (kill switch / watchdog) and the engine being in
+        # a live mode.
+        def _desk_relay_loop() -> None:
+            import requests
+
+            from edge.shadow.kalshi_guard import live_blocked
+
+            base = os.environ.get("EDGE_PLATFORM_API", "")
+            token = os.environ.get("EDGE_INGEST_TOKEN", "")
+            if not base or not token:
+                return
+            sess = requests.Session()
+            hdrs = {"X-Engine-Token": token}
+            time.sleep(30)
+            while True:
+                try:
+                    r = sess.get(f"{base}/api/engine/manual-kalshi-queue",
+                                 headers=hdrs, timeout=10)
+                    orders = (r.json().get("orders") or []) \
+                        if r.status_code == 200 else []
+                    for o in orders:
+                        res = {"id": int(o["id"])}
+                        blocked = live_blocked(ledger, scope="manual")
+                        if blocked:
+                            res.update(status="error",
+                                       error=f"blocked: {blocked}")
+                        elif not risk.is_live:
+                            res.update(status="error",
+                                       error="engine not in a live mode")
+                        else:
+                            # The venue is YES-denominated per outcome
+                            # ticker — every desk buy is the YES side of
+                            # the ticker the admin picked; the opposite
+                            # side of a game is its own ticker row.
+                            pr = kalshi_c.place_order(
+                                o["ticker"], float(o["limit_price"]),
+                                int(o["count"]),
+                                client_order_id=f"desk-{o['id']}",
+                                taker=True)
+                            filled = int(float(pr.get("count") or 0)) \
+                                if pr.get("ok") else 0
+                            if pr.get("ok") and filled > 0:
+                                res.update(status="filled",
+                                           order_id=pr.get("order_id"),
+                                           fill_count=filled,
+                                           fill_price=float(
+                                               o["limit_price"]))
+                                ledger.record_fill(
+                                    fill_uid=f"desk-{o['id']}",
+                                    venue="kalshi",
+                                    market_key=f"kalshi:{o['ticker']}",
+                                    side="BUY", qty=float(filled),
+                                    price=float(o["limit_price"]),
+                                    league="manual", mode="LIVE_BETA",
+                                    category="manual")
+                            elif pr.get("ok"):
+                                res.update(status="unfilled",
+                                           error="did not fill at limit")
+                            else:
+                                res.update(
+                                    status="error",
+                                    error=str(pr.get("status"))[:200])
+                        sess.post(
+                            f"{base}/api/engine/manual-kalshi-result",
+                            json=res, headers=hdrs, timeout=10)
+                except Exception as exc:  # noqa: BLE001 — relay never dies
+                    log.warning("desk relay pass failed: %s", exc)
+                time.sleep(10)
+
+        threading.Thread(target=_desk_relay_loop, daemon=True,
+                         name="desk-relay").start()
+        log.warning("manual desk relay armed (10s poll)")
+
     # One-shot venue census (EDGE_CENSUS_DAYS=0 disables): how many sports
     # markets the venue actually listed per day over the trailing window —
     # the opportunity universe behind any volume estimate. Runs in a thread

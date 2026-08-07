@@ -43,10 +43,13 @@ def live_blocked(ledger, scope: str = "engine") -> str | None:
     watchdog still do — bad inputs make "guaranteed" a lie (a mapping
     error dutches two different games), and those are exactly the
     conditions the watchdog trips on.
+    scope="manual": admin-directed desk tickets (owner 2026-08-07) — a
+    human's deliberate order rides no strategy or sleeve halt; only the
+    global stops apply.
     """
     if ledger.get_state("kill_switch", False):
         return "kill_switch"
-    if scope != "arb":
+    if scope not in ("arb", "manual"):
         halt_key = "copy_halt_until" if scope == "copy" else "halt_until"
         halt = ledger.get_state(halt_key)
         if halt and float(halt.get("until", 0)) > time.time():
