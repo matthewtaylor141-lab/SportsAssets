@@ -1420,7 +1420,14 @@ async def api_today_live() -> dict:
     endpoint powers the hero LIVE strip and the win toasts."""
     from .track_record import PNL_DISPLAY_CAP
 
-    pool = await get_pool()
+    # Mid-boot resilience: this endpoint is polled every 12s by every
+    # open page — during a redeploy the pool may not be ready, and a
+    # 500 here paints an error where a quiet empty strip belongs.
+    try:
+        pool = await get_pool()
+    except Exception:  # noqa: BLE001
+        return {"pnl": 0.0, "settled": 0, "wins": 0, "recent": [],
+                "warming": True}
     day = await pool.fetchrow(
         """
         SELECT COALESCE(sum(pnl), 0)::float8 AS pnl,

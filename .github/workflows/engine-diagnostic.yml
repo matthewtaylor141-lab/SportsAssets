@@ -108,7 +108,7 @@ jobs:
           echo "  today-live: $(curl -sS --max-time 30 "$BASE/api/today-live" | head -c 160)"
           # Which build is the SITE actually serving (owner 2026-08-07:
           # "no changes on the front end" — answer with evidence).
-          SITE="https://marketracker1.netlify.app"
+          SITE="https://markettracker1.netlify.app"
           BUNDLE=$(curl -sS --max-time 30 "$SITE/" | grep -o 'assets/index-[^"]*\.js' | head -1 || true)
           echo "SITE bundle: $BUNDLE"
           if [ -n "$BUNDLE" ]; then
