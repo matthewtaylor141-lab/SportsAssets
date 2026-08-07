@@ -75,7 +75,31 @@ KALSHI_MIN_ASK: dict[tuple[str, str], float] = {
 }
 
 
+import hashlib as _hashlib
 import re as _re
+
+# Venue split (owner directive 2026-08-07: "trades firing on both venues
+# almost evenly, when it makes sense from a pricing standpoint"). The
+# fast PMUS leg reacts in ~86s and wins the race for every fillable
+# copy; the cross-venue one-copy rule then locks Kalshi out — Kalshi
+# was structurally the leftover venue. A deterministic per-asset split
+# gives Kalshi FIRST CLAIM on half the flow in the sports it actually
+# lists; the engine's price gates (his+2% fee-loaded, fee floors,
+# collapse guard) remain the "when it makes sense" bar, and anything
+# Kalshi cannot price is reclaimed by the hourly PMUS sweep. Soccer
+# stays PMUS-first: Kalshi's soccer coverage is thin and the 70c fee
+# floor already routes most of it to the fee-free venue.
+KALSHI_FIRST_SPORTS = frozenset({"baseball", "wnba", "basketball",
+                                 "football", "hockey", "tennis"})
+
+
+def kalshi_first(asset: str) -> bool:
+    """Deterministic ~50/50 split by asset id — same answer on every
+    service, so the two venues never race for one position."""
+    if not asset:
+        return False
+    return int(_hashlib.sha1(str(asset).encode()).hexdigest()[-1], 16) % 2 == 0
+
 
 _DATE_RE = _re.compile(r"^\d{4}$")
 _TOTAL_RE = _re.compile(r"^[ou]\d+(pt\d)?$")

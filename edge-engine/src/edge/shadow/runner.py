@@ -2098,9 +2098,28 @@ def _main_impl() -> None:
                             # pmus armed alongside kalshi: the sweep
                             # peeks PMUS asks to route each copy to the
                             # best-priced venue (directive 2026-08-05).
+                            def _claim_back(asset: str, ticker: str,
+                                            whale: str) -> None:
+                                # One copy per position ACROSS venues:
+                                # every filled Kalshi copy is claimed
+                                # back so the PMUS paths skip it.
+                                base = os.environ.get(
+                                    "EDGE_PLATFORM_API", "")
+                                token = os.environ.get(
+                                    "EDGE_INGEST_TOKEN", "")
+                                if not base or not token or not asset:
+                                    return
+                                import requests
+                                requests.post(
+                                    f"{base}/api/engine/kalshi-claim",
+                                    json={"asset": asset, "ticker": ticker,
+                                          "whale": whale},
+                                    headers={"X-Engine-Token": token},
+                                    timeout=10)
+
                             st = kcopy(kalshi=kalshi_a, ledger=ledger,
                                        identities=rows, live=risk.is_live,
-                                       pmus=pmus_a,
+                                       pmus=pmus_a, on_copied=_claim_back,
                                        day_usd=float(os.environ.get(
                                            "EDGE_KCOPY_DAY_USD", "inf")))
                             _KCOPY_STATS.clear()

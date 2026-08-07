@@ -258,6 +258,20 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                         or payload.get("event_slug") or "",
                         price=payload.get("price")):
         return
+    # Venue split (owner directive 2026-08-07: both venues firing near
+    # evenly, when pricing makes sense): Kalshi holds FIRST CLAIM on a
+    # deterministic half of fresh flow in the sports it lists. The
+    # engine's sweep prices those within ~2 minutes under its own gates
+    # (his+2% fee-loaded, fee floors, collapse guard); whatever Kalshi
+    # cannot price is reclaimed by the hourly sweep here — which is why
+    # sweep-recovery rows never defer: they ARE the reclaim.
+    from .copy_sports import KALSHI_FIRST_SPORTS, kalshi_first, sport_of
+    if (not payload.get("sweep_recovery")
+            and kalshi_first(str(payload.get("asset") or ""))
+            and sport_of(payload.get("market_slug")
+                         or payload.get("event_slug") or "")
+            in KALSHI_FIRST_SPORTS):
+        return
     # Capital turnover (owner, 2026-08-04): fresh detections on games more
     # than ~a day out are DEFERRED — no audit row is written, so the 6h
     # sweep re-candidates them once the game is inside the window. A small
@@ -285,6 +299,17 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         "SELECT 1 FROM live_orders WHERE asset = $1 "
         "AND status IN ('submitting','filled','settled') LIMIT 1",
         str(payload["asset"]))
+    if not taken:
+        # Cross-venue: a position the engine already copied on Kalshi is
+        # just as taken (one copy per position ACROSS venues). Guarded so
+        # a not-yet-migrated table degrades to the live_orders check
+        # alone — today's protection — instead of failing the copy.
+        try:
+            taken = await pool.fetchval(
+                "SELECT 1 FROM kalshi_claims WHERE asset = $1 LIMIT 1",
+                str(payload["asset"]))
+        except Exception:  # noqa: BLE001
+            taken = None
     if taken:
         return
     day_room, total_room = await _caps_room(pool)

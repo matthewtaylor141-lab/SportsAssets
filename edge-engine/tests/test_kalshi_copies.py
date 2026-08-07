@@ -268,3 +268,60 @@ def test_no_pmus_book_falls_through_to_kalshi():
                pmus=pm)
     assert pm.peeked, "the peek must have been attempted"
     assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 10)]
+
+
+# ── Venue split (owner directive 2026-08-07): Kalshi first claim on
+#    half the flow; filled copies claimed back to the platform ────────
+
+
+def _asset(want_kalshi_first: bool) -> str:
+    from edge.shadow.copy_sports import kalshi_first
+    return next(str(i) for i in range(200)
+                if kalshi_first(str(i)) is want_kalshi_first)
+
+
+def test_kalshi_first_assets_skip_the_pmus_deference():
+    """The PMUS executor deferred this asset here by the venue split —
+    a marginally better PMUS ask must not bounce it back. The price
+    gates (his+2% fee-loaded, floors, collapse) are the pricing bar."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka, pm = _Kalshi(0.48), _Pmus(0.49)
+    st = sweep(kalshi=ka, ledger=led,
+               identities=[{**_ROW, "asset": _asset(True)}],
+               live=True, pmus=pm)
+    assert not pm.peeked, "kalshi-first assets must not consult PMUS"
+    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 10)]
+
+
+def test_pm_first_assets_still_defer_to_a_better_pmus():
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka, pm = _Kalshi(0.48), _Pmus(0.49)
+    st = sweep(kalshi=ka, ledger=led,
+               identities=[{**_ROW, "asset": _asset(False)}],
+               live=True, pmus=pm)
+    assert st.get("routed_pmus_better") == 1
+    assert st["copied"] == 0 and not ka.orders
+
+
+def test_filled_copy_claims_the_position_back():
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _Kalshi(0.48)
+    claims = []
+    sweep(kalshi=ka, ledger=led,
+          identities=[{**_ROW, "asset": "777"}], live=True,
+          on_copied=lambda a, t, w: claims.append((a, t, w)))
+    assert claims == [("777", "T-DAL", "HomeRunHazard")]
+
+
+def test_claim_post_failure_never_blocks_the_copy():
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _Kalshi(0.48)
+
+    def boom(a, t, w):
+        raise RuntimeError("api down")
+
+    st = sweep(kalshi=ka, ledger=led,
+               identities=[{**_ROW, "asset": "9"}], live=True,
+               on_copied=boom)
+    assert st["copied"] == 1 and st.get("claim_post_fail") == 1
+    assert ka.orders, "the order itself must have been placed"

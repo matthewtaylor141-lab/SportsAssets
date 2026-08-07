@@ -7,9 +7,9 @@ the same proposition. Same trading rules as the Polymarket sleeve:
 
 - his price + 2% relative tolerance, floored to the cent — we only take
   a Kalshi book whose ask is at/inside that limit;
-- $3 per copy, uniform across whales (owner directive 2026-08-05: ALL
-  copy trades $3 per trade; the per-whale map stays for the day the
-  owner wants divergence back), whole contracts, rounded down;
+- $5 per copy, uniform across whales (owner directive 2026-08-07; the
+  per-whale map stays for the day the owner wants divergence back),
+  whole contracts, rounded down;
 - one copy per whale position EVER — and that means ACROSS VENUES, not
   per venue: identity rows the platform marks pmus_copied (a filled or
   settled live_orders copy already exists) are skipped here outright
@@ -176,7 +176,7 @@ def _pmus_ask(pmus, slug: str, outcome: str) -> float | None:
 
 def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
           day_usd: float = 200.0, max_age_s: float | None = None,
-          pmus=None) -> dict:
+          pmus=None, on_copied=None) -> dict:
     """One pass: whale open positions -> Kalshi orders where listed."""
     from edge.shadow.kalshi_guard import (cross_side_cap, note_fill,
                                           open_kalshi_sides)
@@ -321,11 +321,16 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                                                    0) + 1
             continue
         stats["priced_in_tolerance"] += 1
-        if pmus is not None:
+        from edge.shadow.copy_sports import kalshi_first
+        if pmus is not None and not kalshi_first(str(row.get("asset") or "")):
             # Best-venue-at-placement (owner directive 2026-08-05): if
             # PMUS is showing a better ask than Kalshi's fee-loaded
             # effective price, the fast PMUS leg owns this copy — do not
             # place it here. No visible PMUS book -> Kalshi as before.
+            # KALSHI-FIRST assets skip this deference (venue split, owner
+            # directive 2026-08-07): the PMUS executor already deferred
+            # them here, and the gates above — his+2% fee-loaded, fee
+            # floors, collapse guard — are the pricing-sense bar.
             pask = _pmus_ask(pmus, slug, outcome)
             if pask is not None and pask < eff:
                 stats["routed_pmus_better"] = \
@@ -374,6 +379,18 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                                  {"ts": time.time()})
             note_fill(sides, target_ticker, ask, filled)
             stats["copied"] += 1
+            # Claim the position back to the platform so the PMUS paths
+            # never buy it a second time (one copy ACROSS venues). Best
+            # effort — reporting must never block trading; a failed post
+            # is counted and the platform's live_orders guard still
+            # protects the common PM-copied-first direction.
+            if on_copied is not None:
+                try:
+                    on_copied(str(row.get("asset") or ""), target_ticker,
+                              row.get("whale") or "")
+                except Exception:  # noqa: BLE001
+                    stats["claim_post_fail"] = \
+                        stats.get("claim_post_fail", 0) + 1
             cost = round(filled * ask, 2)
             spent += cost
             stats["spent"] = round(stats["spent"] + cost, 2)

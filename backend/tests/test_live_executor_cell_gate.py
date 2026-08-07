@@ -90,3 +90,89 @@ def test_unresolvable_market_still_fails_closed(monkeypatch):
     })
     asyncio.run(live_executor.maybe_execute(_payload(), None))
     assert pool.fetchval_calls == 0
+
+
+# ── Venue split (owner directive 2026-08-07): Kalshi first claim ─────
+
+
+def _asset(want_kalshi_first: bool) -> str:
+    from sportsassets.copy_sports import kalshi_first
+    return next(str(i) for i in range(200)
+                if kalshi_first(str(i)) is want_kalshi_first)
+
+
+def _wnba_ctx():
+    from datetime import date
+    return {"market_slug": f"wnba-dal-chi-{date.today().isoformat()}",
+            "event_slug": None, "market_title": "Wings v Sky",
+            "event_title": None, "outcome": "Dallas Wings"}
+
+
+def test_kalshi_first_fresh_copy_defers_to_the_engine(monkeypatch):
+    """Half the fresh flow in Kalshi-listed sports belongs to the
+    Kalshi leg — the PMUS executor steps aside before writing rows so
+    the engine's sweep can claim it."""
+    pool = _FakePool()
+    _wire(monkeypatch, pool, _wnba_ctx())
+    asyncio.run(live_executor.maybe_execute(
+        _payload(asset=_asset(True)), None))
+    assert pool.fetchval_calls == 0
+
+
+def test_sweep_recovery_rows_never_defer(monkeypatch):
+    """The hourly sweep IS the reclaim leg: anything Kalshi could not
+    price must place on PMUS, never bounce back to Kalshi."""
+    pool = _FakePool()
+    _wire(monkeypatch, pool, _wnba_ctx())
+    asyncio.run(live_executor.maybe_execute(
+        _payload(asset=_asset(True), sweep_recovery=True), None))
+    assert pool.fetchval_calls > 0
+
+
+def test_pm_first_fresh_copy_proceeds(monkeypatch):
+    pool = _FakePool()
+    _wire(monkeypatch, pool, _wnba_ctx())
+    asyncio.run(live_executor.maybe_execute(
+        _payload(asset=_asset(False)), None))
+    assert pool.fetchval_calls > 0
+
+
+def test_soccer_stays_pmus_first_even_when_hash_says_kalshi(monkeypatch):
+    """Kalshi's soccer coverage is thin; swisstony's soccer flow keeps
+    the fast fee-free venue regardless of the hash split."""
+    from datetime import date
+    pool = _FakePool()
+    _wire(monkeypatch, pool, {
+        "market_slug": f"epl-ars-che-{date.today().isoformat()}",
+        "event_slug": None, "market_title": "Arsenal v Chelsea",
+        "event_title": None, "outcome": "Arsenal",
+    })
+    asyncio.run(live_executor.maybe_execute(
+        _payload(asset=_asset(True), whale_username="swisstony"), None))
+    assert pool.fetchval_calls > 0
+
+
+def test_kalshi_claimed_position_is_taken(monkeypatch):
+    """A position the engine copied on Kalshi (kalshi_claims) must never
+    be bought again on PMUS — the reverse direction of the one-copy
+    rule, previously unguarded."""
+    class _ClaimPool(_FakePool):
+        def __init__(self):
+            super().__init__()
+            self.queries = []
+
+        async def fetchval(self, q, *a, **k):
+            self.fetchval_calls += 1
+            self.queries.append(q)
+            if "live_orders" in q:
+                return None          # no PMUS copy yet...
+            if "kalshi_claims" in q:
+                return 1             # ...but Kalshi holds it
+            raise AssertionError(f"unexpected query past the claim: {q}")
+
+    pool = _ClaimPool()
+    _wire(monkeypatch, pool, _wnba_ctx())
+    asyncio.run(live_executor.maybe_execute(
+        _payload(asset=_asset(False)), None))
+    assert any("kalshi_claims" in q for q in pool.queries)
+    assert pool.fetchval_calls == 2   # both taken-checks, nothing beyond

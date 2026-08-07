@@ -81,6 +81,13 @@ async def sweep_once() -> dict:
           AND NOT EXISTS (SELECT 1 FROM live_orders lo
                           WHERE lo.asset = t.asset
                             AND lo.status IN ('submitting','filled','settled'))
+          -- Cross-venue one-copy rule: positions the engine already
+          -- copied on Kalshi (kalshi_claims) are taken. Without this
+          -- the sweep double-bought any position PM missed fresh but
+          -- Kalshi copied (latent since the Kalshi leg shipped; hourly
+          -- cadence made it 6x more likely).
+          AND NOT EXISTS (SELECT 1 FROM kalshi_claims kc
+                          WHERE kc.asset = t.asset)
           -- Rejected rows do NOT block: a mapping rejection is retryable
           -- by design, and every mapper improvement re-runs against the
           -- backlog on the next sweep instead of applying only to future
@@ -122,6 +129,9 @@ async def sweep_once() -> dict:
             "event_slug": r["event_slug"],
             "sport": r["sport"],
             "ts_epoch": r["ts_epoch"],
+            # The sweep IS the reclaim leg of the venue split — its rows
+            # must never re-defer to Kalshi (live_executor checks this).
+            "sweep_recovery": True,
         }
         try:
             await maybe_execute(payload, None)

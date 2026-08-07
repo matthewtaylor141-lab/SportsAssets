@@ -303,7 +303,7 @@ async def _compute_whale_idents() -> dict:
               AND COALESCE(m.resolved, false) = false
             ORDER BY t.asset, t.ts DESC
         )
-        SELECT l.slug, l.outcome, l.price, l.whale, l.entered_ts,
+        SELECT l.asset, l.slug, l.outcome, l.price, l.whale, l.entered_ts,
                EXISTS (SELECT 1 FROM live_orders lo
                        WHERE lo.asset = l.asset
                          AND lo.status IN ('filled', 'settled'))
@@ -319,7 +319,11 @@ async def _compute_whale_idents() -> dict:
     # copy already FILLED (or settled): one copy per whale position
     # ACROSS venues (owner directive 2026-08-05), so the Kalshi sweep
     # must skip these rather than duplicate them.
-    out = {"identities": [{"slug": r["slug"], "outcome": r["outcome"],
+    # `asset` rides along so the engine's Kalshi copies can claim the
+    # position back (kalshi_claims) and so the venue split has a stable
+    # id to hash on — same id the PMUS paths key on.
+    out = {"identities": [{"asset": str(r["asset"]),
+                           "slug": r["slug"], "outcome": r["outcome"],
                            "price": r["price"], "whale": r["whale"],
                            "entered_ts": r["entered_ts"],
                            "pmus_copied": bool(r["pmus_copied"])}
@@ -497,6 +501,32 @@ async def engine_status_ingest(
     from ..db import heartbeat
 
     await heartbeat("edge_engine", body.status, body.detail)
+    return {"ok": True}
+
+
+class KalshiClaimBody(BaseModel):
+    asset: str
+    ticker: str = ""
+    whale: str = ""
+
+
+@app.post("/api/engine/kalshi-claim")
+async def kalshi_claim_ingest(
+    body: KalshiClaimBody, x_engine_token: str = Header(default="")
+) -> dict:
+    """The engine's Kalshi sleeve reports each FILLED copy here so the
+    PMUS paths never buy the same whale position twice (one copy per
+    position ACROSS venues — owner rule). Idempotent by asset."""
+    cfg = settings()
+    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
+        raise HTTPException(status_code=401, detail="engine token required")
+    if not body.asset.strip():
+        return {"ok": False, "ignored": "empty asset"}
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO kalshi_claims (asset, whale, ticker) "
+        "VALUES ($1, $2, $3) ON CONFLICT (asset) DO NOTHING",
+        body.asset.strip(), body.whale[:120], body.ticker[:120])
     return {"ok": True}
 
 
