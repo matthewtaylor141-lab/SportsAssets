@@ -48,6 +48,20 @@ interface ManualTrade {
 
 interface Blotter { trades: ManualTrade[]; day_spent: number; day_budget: number; max_per_order: number }
 
+interface PMSearchMarket {
+  slug: string
+  title: string
+  event_title: string | null
+  outcomes: { outcome: string; asset: string; ask: number | null; bid: number | null }[]
+}
+interface KalshiSearchRow {
+  ticker: string
+  title: string
+  sub_title: string
+  yes_ask: number | null
+  no_ask: number | null
+}
+
 const cents = (v: number | null | undefined) => (v == null ? '—' : `${Math.round(v * 100)}¢`)
 const money = (v: number | null | undefined) =>
   v == null ? '—' : `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(2)}`
@@ -77,6 +91,10 @@ export function TradeDesk() {
   const [result, setResult] = useState<any>(null)
   const [blotter, setBlotter] = useState<Blotter | null>(null)
   const [depth, setDepth] = useState<{ bids: number[][]; asks: number[][] } | null>(null)
+  const [q, setQ] = useState('')
+  const [searching, setSearching] = useState(false)
+  const [pmResults, setPmResults] = useState<PMSearchMarket[]>([])
+  const [kResults, setKResults] = useState<KalshiSearchRow[]>([])
 
   const accent = venue === 'kalshi' ? '#1dc98b' : '#3b82f6'
 
@@ -125,6 +143,32 @@ export function TradeDesk() {
     if (authed) loadGames(venue, league)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authed, venue, league])
+
+  // Search rides alongside the browse view (owner directive: the new
+  // interface must not lose search) — debounced, venue-aware, and it
+  // finds anything tradable even outside the browse window.
+  useEffect(() => {
+    const query = q.trim()
+    if (!authed || query.length < 2) { setPmResults([]); setKResults([]); setSearching(false); return }
+    setSearching(true)
+    const t = setTimeout(() => {
+      if (venue === 'polymarket') {
+        adminApi<{ markets: PMSearchMarket[] }>(
+          `/api/admin/market-search?q=${encodeURIComponent(query)}`, token)
+          .then((r) => setPmResults(r.markets || []))
+          .catch(() => setPmResults([]))
+          .finally(() => setSearching(false))
+      } else {
+        adminApi<{ markets: KalshiSearchRow[] }>(
+          `/api/admin/kalshi-markets?q=${encodeURIComponent(query)}`, token)
+          .then((r) => setKResults(r.markets || []))
+          .catch(() => setKResults([]))
+          .finally(() => setSearching(false))
+      }
+    }, 350)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, venue, authed])
 
   const openGame = (g: GameCard) => {
     setGame(null)
@@ -319,6 +363,73 @@ export function TradeDesk() {
 
       {!game && (
         <>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
+            <input
+              className="tr-search" style={{ flex: 1, minWidth: 200 }}
+              placeholder={`Search ${venue === 'kalshi' ? 'Kalshi' : 'Polymarket'} markets — team, player…`}
+              value={q} onChange={(e) => setQ(e.target.value)}
+              aria-label="Search markets"
+            />
+            {q && <button className="btn" onClick={() => setQ('')}>✕</button>}
+          </div>
+          {q.trim().length >= 2 ? (
+            searching && pmResults.length === 0 && kResults.length === 0 ? (
+              <div className="tr-skel" style={{ height: 140, borderRadius: 12 }} />
+            ) : venue === 'polymarket' ? (
+              <div className="desk-mkts">
+                {pmResults.map((m) => (
+                  <div className="card" key={m.slug} style={{ marginBottom: 8 }}>
+                    <div className="desk-game-title">{m.title || m.slug}</div>
+                    {m.event_title && <div className="desk-game-sub">{m.event_title}</div>}
+                    <div className="desk-game-sides" style={{ marginTop: 8 }}>
+                      {m.outcomes.map((o) => (
+                        <span key={o.asset}>
+                          {priceBtn(o.outcome, o.ask, pick?.asset === o.asset, () => {
+                            if (o.ask != null) {
+                              setPick({ venue: 'polymarket', label: m.title || m.slug, side: o.outcome, ask: o.ask, asset: o.asset })
+                              setResult(null)
+                            }
+                          })}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {pmResults.length === 0 && !searching && (
+                  <p style={{ opacity: 0.6 }}>No live Polymarket markets match "{q.trim()}".</p>
+                )}
+              </div>
+            ) : (
+              <div className="desk-mkts">
+                {kResults.map((m) => (
+                  <div className="card" key={m.ticker} style={{ marginBottom: 8 }}>
+                    <div className="desk-game-title">{m.title.replace(' Winner?', '')}</div>
+                    <div className="desk-game-sub">{m.sub_title || m.ticker}</div>
+                    <div className="desk-game-sides" style={{ marginTop: 8 }}>
+                      {priceBtn(`YES ${m.sub_title || ''}`.trim(), m.yes_ask,
+                        pick?.ticker === m.ticker && pick?.kalshiSide === 'yes', () => {
+                          if (m.yes_ask != null) {
+                            setPick({ venue: 'kalshi', label: m.title.replace(' Winner?', ''), side: m.sub_title || 'YES', ask: m.yes_ask, ticker: m.ticker, kalshiSide: 'yes' })
+                            setResult(null)
+                          }
+                        })}
+                      {priceBtn('NO', m.no_ask,
+                        pick?.ticker === m.ticker && pick?.kalshiSide === 'no', () => {
+                          if (m.no_ask != null) {
+                            setPick({ venue: 'kalshi', label: m.title.replace(' Winner?', ''), side: `NO ${m.sub_title || ''}`.trim(), ask: m.no_ask, ticker: m.ticker, kalshiSide: 'no' })
+                            setResult(null)
+                          }
+                        })}
+                    </div>
+                  </div>
+                ))}
+                {kResults.length === 0 && !searching && (
+                  <p style={{ opacity: 0.6 }}>No live Kalshi markets match "{q.trim()}".</p>
+                )}
+              </div>
+            )
+          ) : (
+          <>
           <div className="desk-chips">
             {LEAGUES.map((l) => (
               <button
@@ -359,7 +470,11 @@ export function TradeDesk() {
               ))}
             </div>
           )}
-          {err && <p style={{ color: 'var(--red, #f66)' }}>{err}</p>}
+          </>
+          )}
+          {err && q.trim().length < 2 && (
+            <p style={{ color: 'var(--red, #f66)' }}>{err}</p>
+          )}
         </>
       )}
 

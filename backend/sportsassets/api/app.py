@@ -675,11 +675,32 @@ def _kcents(m: dict, key: str) -> float | None:
     return None
 
 
-@app.get("/api/admin/kalshi-markets", dependencies=[Depends(require_admin)])
-async def api_kalshi_markets(q: str = Query(default="")) -> dict:
-    """Browse Kalshi's live sports markets for the desk — event rows
-    with Yes/No prices in cents, the venue's own presentation shape."""
+def _kalshi_shape(m: dict, series: str) -> dict:
+    return {
+        "ticker": m.get("ticker"),
+        "series": series,
+        "title": m.get("title") or "",
+        "sub_title": m.get("yes_sub_title") or m.get("subtitle") or "",
+        "yes_ask": _kcents(m, "yes_ask"),
+        "yes_bid": _kcents(m, "yes_bid"),
+        "no_ask": _kcents(m, "no_ask"),
+        "no_bid": _kcents(m, "no_bid"),
+        "close_time": m.get("close_time"),
+    }
+
+
+async def _kalshi_fetch(series_list: list[str], q: str = "",
+                        max_close_h: int | None = None,
+                        cap: int | None = 60) -> list[dict]:
+    """Kalshi's open markets for the given series, close-time sorted.
+
+    limit=1000 (the venue max) per series: at 100 a big tournament board
+    (ATP mid-major week is 400+ open markets) hid TODAY's matches behind
+    far-future rounds — Sam's Tennis tab showed 'no games' during a live
+    session (owner report 2026-08-07 evening). A max_close_h window
+    trims browse views to the actual slate; search passes None."""
     import asyncio as _asyncio
+    import time as _time
 
     import httpx
 
@@ -687,11 +708,15 @@ async def api_kalshi_markets(q: str = Query(default="")) -> dict:
 
     ql = q.strip()
     out: list[dict] = []
+    base_params: dict = {"status": "open", "limit": 1000,
+                         "min_close_ts": int(_time.time())}
+    if max_close_h is not None:
+        base_params["max_close_ts"] = int(_time.time()) + max_close_h * 3600
 
     async def _series(client: httpx.AsyncClient, series: str) -> None:
         try:
             resp = await client.get("/markets", params={
-                "series_ticker": series, "status": "open", "limit": 100})
+                **base_params, "series_ticker": series})
             if resp.status_code != 200:
                 return
             for m in (resp.json().get("markets") or []):
@@ -702,17 +727,7 @@ async def api_kalshi_markets(q: str = Query(default="")) -> dict:
                 if ql and not _team_match(ql, [title, sub,
                                                m.get("ticker")]):
                     continue
-                out.append({
-                    "ticker": m.get("ticker"),
-                    "series": series,
-                    "title": title,
-                    "sub_title": sub,
-                    "yes_ask": _kcents(m, "yes_ask"),
-                    "yes_bid": _kcents(m, "yes_bid"),
-                    "no_ask": _kcents(m, "no_ask"),
-                    "no_bid": _kcents(m, "no_bid"),
-                    "close_time": m.get("close_time"),
-                })
+                out.append(_kalshi_shape(m, series))
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             return
 
@@ -720,11 +735,18 @@ async def api_kalshi_markets(q: str = Query(default="")) -> dict:
         async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
                                      timeout=10) as client:
             await _asyncio.gather(*(_series(client, s)
-                                    for s in _DESK_KALSHI_SERIES))
+                                    for s in series_list))
     except Exception:  # noqa: BLE001
         pass
     out.sort(key=lambda m: (m.get("close_time") or ""))
-    return {"markets": out[:60]}
+    return out[:cap] if cap else out
+
+
+@app.get("/api/admin/kalshi-markets", dependencies=[Depends(require_admin)])
+async def api_kalshi_markets(q: str = Query(default="")) -> dict:
+    """Search Kalshi's live sports markets for the desk — event rows
+    with Yes/No prices, the venue's own presentation shape."""
+    return {"markets": await _kalshi_fetch(_DESK_KALSHI_SERIES, q=q)}
 
 
 @app.get("/api/admin/book", dependencies=[Depends(require_admin)])
@@ -847,10 +869,20 @@ async def api_desk_games(venue: str = Query("polymarket"),
     days = {(_date.today() + _td(days=i)).isoformat() for i in (-1, 0, 1)}
     if venue == "kalshi":
         # Kalshi games from the per-league series (each side its own
-        # ticker); group into games by the event code.
-        raw = await api_kalshi_markets(q="")
+        # ticker); the league picks its OWN series so a busy MLB slate
+        # can never crowd tennis out of a shared cap, and the 48h close
+        # window keeps the board to the actual slate (live matches stay:
+        # they close soonest and sort first).
+        series_by_league = {
+            "mlb": ["KXMLBGAME"], "wnba": ["KXWNBAGAME"],
+            "nba": ["KXNBAGAME"], "nfl": ["KXNFLGAME"],
+            "nhl": ["KXNHLGAME"], "tennis": ["KXATPMATCH", "KXWTAMATCH"],
+        }
+        series_list = (_DESK_KALSHI_SERIES if league == "all"
+                       else series_by_league.get(league, []))
+        mkts = await _kalshi_fetch(series_list, max_close_h=48, cap=None)
         games: dict[str, dict] = {}
-        for m in raw["markets"]:
+        for m in mkts:
             t = m.get("ticker") or ""
             parts = t.split("-")
             if len(parts) < 3:
@@ -860,9 +892,6 @@ async def api_desk_games(venue: str = Query("polymarket"),
             lg = {"KXMLBGAME": "mlb", "KXWNBAGAME": "wnba",
                   "KXNBAGAME": "nba", "KXNFLGAME": "nfl",
                   "KXNHLGAME": "nhl"}.get(series, "tennis")
-            if league != "all" and lg != league \
-                    and lg not in _DESK_LEAGUES.get(league, ()):
-                continue
             g = games.setdefault(gkey, {
                 "id": gkey, "venue": "kalshi", "league": lg,
                 "title": (m.get("title") or "").replace(" Winner?", ""),
@@ -929,22 +958,33 @@ async def api_desk_game(venue: str = Query(...),
     group_label = {"moneyline": "Moneyline", "spread": "Spreads",
                    "total": "Totals"}
     if venue == "kalshi":
-        raw = await api_kalshi_markets(q="")
-        code = id.split("-", 1)[1] if "-" in id else id
+        # The game id IS the venue's event_ticker (SERIES-EVENTCODE):
+        # ask for the event directly — precise, and immune to any cap
+        # or window on the shared browse list.
+        import httpx
+
+        raw_markets: list[dict] = []
+        try:
+            async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                         timeout=10) as client:
+                resp = await client.get("/markets", params={
+                    "event_ticker": id, "status": "open", "limit": 200})
+            if resp.status_code == 200:
+                raw_markets = resp.json().get("markets") or []
+        except Exception:  # noqa: BLE001
+            raw_markets = []
         groups: dict[str, list] = {}
         title = id
-        for m in raw["markets"]:
-            t = m.get("ticker") or ""
-            if code not in t:
-                continue
-            series = m.get("series") or ""
+        for rm in raw_markets:
+            series = (rm.get("ticker") or "").split("-", 1)[0]
+            m = _kalshi_shape(rm, series)
             label = ("Moneyline" if series.endswith("GAME")
                      or series.endswith("MATCH") else
                      "Spreads" if "SPREAD" in series else
                      "Totals" if "TOTAL" in series else "More")
             groups.setdefault(label, []).append({
                 "label": m.get("sub_title") or m.get("title"),
-                "ticker": t, "price": m.get("yes_ask"),
+                "ticker": m.get("ticker"), "price": m.get("yes_ask"),
                 "no_price": m.get("no_ask")})
             title = (m.get("title") or title).replace(" Winner?", "")
         return {"id": id, "venue": "kalshi", "title": title,
