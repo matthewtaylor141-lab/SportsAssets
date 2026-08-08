@@ -209,6 +209,15 @@ async def health_services() -> list[dict]:
         err = str((detail or {}).get("error") or "")[:160]
         out.append({"service": r["service"], "status": r["status"],
                     "beat_at": r["beat_at"],
+                    # Sweep counters are diagnostics, not payloads: the
+                    # underdog sleeve's per-gate stats are how "running
+                    # but placing nothing" gets localized in one probe
+                    # (owner report 2026-08-08). Numbers and short
+                    # strings only, capped.
+                    "detail": {k: (v if isinstance(v, (int, float, bool))
+                                   else str(v)[:80])
+                               for k, v in (detail or {}).items()
+                               if k != "error"} or None,
                     **({"error": err} if err else {})})
     return out
 
