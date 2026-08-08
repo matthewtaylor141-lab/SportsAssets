@@ -779,13 +779,34 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
 # stepping backward, and a fresh build that shows fewer settled than
 # the persisted high-water serves the persisted copy instead.
 _PERSIST_KEY = "track_record_last_payload"
-_persist_state: dict[str, float] = {"ts": 0.0, "settled": -1.0}
+_persist_state: dict[str, float] = {"ts": 0.0, "settled": -1.0, "stake": -1.0}
+
+# A degraded build can GROW the settled count while losing half its
+# activities (missing redemptions turn wins into losses; missing fills
+# shrink every stake) — exactly what put fake negatives on the homepage
+# on 2026-08-07 ~01:00Z: settled 958->963 while settled stake halved
+# $6.9k->$2.9k and the corrupt payload displaced the good persisted one.
+# Settled stake NEVER legitimately shrinks (settlements accumulate), so
+# a fresh build materially below the stake high-water is evidence of
+# data loss, not trading.
+_STAKE_SHRINK_FLOOR = 0.75
+
+
+def _stake_of(payload: dict) -> float:
+    return float((payload.get("summary") or {}).get("settled_stake") or 0)
+
+
+def _looks_degraded(payload: dict) -> bool:
+    return (_persist_state["stake"] > 0
+            and _stake_of(payload) < _persist_state["stake"]
+            * _STAKE_SHRINK_FLOOR)
 
 
 async def _persist_payload(payload: dict) -> None:
     settled = float((payload.get("summary") or {}).get("settled") or 0)
     now = time.time()
     if settled < _persist_state["settled"] \
+            or _looks_degraded(payload) \
             or now - _persist_state["ts"] < 60:
         return
     try:
@@ -799,6 +820,8 @@ async def _persist_payload(payload: dict) -> None:
                                      default=str))
         _persist_state["ts"] = now
         _persist_state["settled"] = settled
+        _persist_state["stake"] = max(_persist_state["stake"],
+                                      _stake_of(payload))
     except Exception:  # noqa: BLE001 — persistence is an upgrade, not a gate
         logging.getLogger(__name__).debug("payload persist failed",
                                           exc_info=True)
@@ -819,6 +842,8 @@ async def _load_persisted() -> dict | None:
             _persist_state["settled"] = max(
                 _persist_state["settled"],
                 float((payload.get("summary") or {}).get("settled") or 0))
+            _persist_state["stake"] = max(_persist_state["stake"],
+                                          _stake_of(payload))
         return payload
     except Exception:  # noqa: BLE001
         return None
@@ -1012,14 +1037,25 @@ async def track_record(since: str | None = None,
                        max_stake=max_stake, attributed=attributed,
                        copy_slugs=copy_slugs, max_abs_pnl=PNL_DISPLAY_CAP,
                        manual_slugs=manual_slugs)}
-    # Monotonic guard: a fresh build thinner than the persisted
+    # Monotonic guards: a fresh build thinner than the persisted
     # high-water (post-boot window still catching up) must not show the
-    # owner fewer settled trades than he already saw.
+    # owner fewer settled trades than he already saw — and a build whose
+    # settled STAKE shrank materially is built from lost activities
+    # (fake losses), not from trading, however many rows it counts.
     fresh_settled = float((payload.get("summary") or {}).get("settled") or 0)
-    if fresh_settled < _persist_state["settled"]:
+    degraded = _looks_degraded(payload)
+    if fresh_settled < _persist_state["settled"] or degraded:
         persisted = await _load_persisted()
         if persisted is not None:
-            return {"configured": True, "restored_across_deploy": True,
-                    **persisted}
+            out = {"configured": True, "restored_across_deploy": True,
+                   **persisted}
+            if degraded:
+                out["degraded_build"] = {
+                    "fresh_settled_stake": round(_stake_of(payload), 2),
+                    "high_water_stake": round(_persist_state["stake"], 2),
+                    "note": "fresh build lost activities; serving last "
+                            "good payload",
+                }
+            return out
     await _persist_payload(payload)
     return payload
