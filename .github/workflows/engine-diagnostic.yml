@@ -228,9 +228,12 @@ jobs:
 
           echo ""
           echo "#   SERVICE HEARTBEATS (which worker is dead, and why)       #"
-          curl -sS --max-time 60 "$BASE/api/health/services" 2>&1 | \
-            jq -r '.[] | "  \(.service): \(.status)  \(.beat_at)  \(.error // "")"' \
-            2>/dev/null | head -15 || echo "  (endpoint not deployed yet)"
+          curl -sS --max-time 60 -o /tmp/hb.json "$BASE/api/health/services" || true
+          jq -r '.[] | "  \(.service): \(.status)  \(.beat_at)  \(.error // "")"' \
+            /tmp/hb.json 2>/dev/null | head -15 || echo "  (endpoint not deployed yet)"
+          # The underdog sweep's per-gate stats live in its heartbeat
+          # detail — the one line that says WHERE entries are dying.
+          echo "  underdog detail: $(jq -c '.[] | select(.service == "underdog") | .detail' /tmp/hb.json 2>/dev/null)"
 
           echo ""
           echo "#   WHALE INGESTION RAW (shape + freshness, no jq guessing) #"
