@@ -600,31 +600,31 @@ def build(positions: dict[str, dict], activities: list[dict],
         "generated_at": time.time(),
         "account": account,
         "record_subset": record_subset,
-        # HEADLINE = the venue's own arithmetic (owner directive
-        # 2026-08-08): cumulative realized as the venue stamps it, no
-        # windowing, no entry-dating — the number that matches the
-        # venue app. Counts/deployed still come from the dated rows
-        # (they feed the ledger and calendar); win_rate and ROI ride
-        # the venue basis so "profit per dollar" is account-true.
+        # HEADLINE = the whole account, WINDOWED (owner confirmation
+        # 2026-08-08 evening: "it should be the 314 number" — the venue
+        # app's displayed P&L matches the all-activity-since-Aug-1 total,
+        # NOT the venue's raw cumulative-realized field, which runs ~2x
+        # it and evidently includes history the app does not display).
+        # Every cohort's rows are in these figures — manual, cash-outs,
+        # large positions included.
         "summary": {
             "trades": len(rows),
             "open": len(rows) - len(settled_rows),
-            "settled": venue_totals["settled"],
-            "wins": venue_totals["wins"],
+            "settled": len(settled_rows),
+            "wins": len(wins),
             # zero-realized settlements are pushes/voids, not losses
-            "losses": venue_totals["losses"],
+            "losses": len(losses),
             "deployed": round(deployed, 2),
             "open_value": round(sum(r["value"] for r in rows
                                     if not r["settled"]), 2),
-            "net_pnl": venue_totals["net_pnl"],
-            "settled_stake": venue_totals["settled_stake"],
-            "roi": (round(venue_totals["net_pnl"]
-                          / venue_totals["settled_stake"], 4)
-                    if venue_totals["settled_stake"] else None),
-            "win_rate": (round(venue_totals["wins"]
-                               / venue_totals["settled"], 4)
-                         if venue_totals["settled"] else None),
+            "net_pnl": round(net, 2),
+            "settled_stake": round(settled_stake, 2),
+            "roi": round(net / settled_stake, 4) if settled_stake else None,
+            "win_rate": (round(len(wins) / len(settled_rows), 4)
+                         if settled_rows else None),
         },
+        # The venue's raw cumulative-realized sum, kept as a diagnostic
+        # for tie-outs — NOT the headline (see note above).
         "venue_totals": venue_totals,
         "excluded_undatable": undatable,
         # Always present when a cap was applied, even at zero exclusions —
