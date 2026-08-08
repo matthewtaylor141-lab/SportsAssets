@@ -257,6 +257,8 @@ def test_live_needs_both_the_env_flag_and_a_live_engine(tmp_path,
                                                         monkeypatch):
     # env flag alone, engine not live: measure-only.
     monkeypatch.setenv("EDGE_XV_CRYPTO_LIVE", "1")
+    # Live-path tests must lift the owner arb pause (2026-08-08).
+    monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, _ = _watch(tmp_path, 0.45, 0.50, live=False)
     w._tick()
     assert w.stats["would_fire"] == 1 and w.stats["fired"] == 0
@@ -266,6 +268,8 @@ def test_live_needs_both_the_env_flag_and_a_live_engine(tmp_path,
 def test_live_fires_through_execute_cross_venue_with_atomic_claim(
         tmp_path, monkeypatch):
     monkeypatch.setenv("EDGE_XV_CRYPTO_LIVE", "1")
+    # Live-path tests must lift the owner arb pause (2026-08-08).
+    monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, pair = _watch(tmp_path, 0.45, 0.50, live=True)
     w._tick()
     assert w.stats["fired"] == 1
@@ -284,6 +288,8 @@ def test_live_fires_through_execute_cross_venue_with_atomic_claim(
 def test_clean_miss_releases_the_claim_so_the_pair_stays_retryable(
         tmp_path, monkeypatch):
     monkeypatch.setenv("EDGE_XV_CRYPTO_LIVE", "1")
+    # Live-path tests must lift the owner arb pause (2026-08-08).
+    monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, pair = _watch(tmp_path, 0.45, 0.50, live=True)
     ka.fill = False          # first (non-atomic) leg misses: flat, no fills
     w._tick()
@@ -302,6 +308,8 @@ def test_day_cap_stops_the_class(tmp_path, monkeypatch):
     from datetime import datetime, timezone
 
     monkeypatch.setenv("EDGE_XV_CRYPTO_LIVE", "1")
+    # Live-path tests must lift the owner arb pause (2026-08-08).
+    monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, _ = _watch(tmp_path, 0.45, 0.50, live=True)
     led.set_state("xv_crypto_day",
                   {"day": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
@@ -314,6 +322,8 @@ def test_day_cap_stops_the_class(tmp_path, monkeypatch):
 
 def test_account_level_stops_block_the_live_path(tmp_path, monkeypatch):
     monkeypatch.setenv("EDGE_XV_CRYPTO_LIVE", "1")
+    # Live-path tests must lift the owner arb pause (2026-08-08).
+    monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, _ = _watch(tmp_path, 0.45, 0.50, live=True)
     led.set_state("kill_switch", True)
     w._tick()

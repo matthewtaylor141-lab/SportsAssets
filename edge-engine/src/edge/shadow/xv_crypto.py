@@ -514,8 +514,13 @@ class XVCryptoWatch:
                "mode": "measure",
                "at": datetime.now(tz=timezone.utc).strftime(
                    "%Y-%m-%dT%H:%M:%SZ")}
+        # EDGE_ARB_PAUSE=0 lifts the owner's 2026-08-08 arb pause (both
+        # arb sleeves 1-9 lifetime; second legs not completing). Config
+        # cross_venue.enabled covers the sports watcher; this covers the
+        # crypto one even where EDGE_XV_CRYPTO_LIVE=1 is set in the env.
         live = (bool(self._is_live())
-                and os.environ.get("EDGE_XV_CRYPTO_LIVE", "0") == "1")
+                and os.environ.get("EDGE_XV_CRYPTO_LIVE", "0") == "1"
+                and os.environ.get("EDGE_ARB_PAUSE", "1") != "1")
         if not live:
             # MEASUREMENT: the whole point of this phase. Record and stop —
             # no dry-run order plumbing, no claim burned.

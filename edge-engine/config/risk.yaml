@@ -315,7 +315,12 @@ arbitrage:
   # min_profit is 2c (vs 1c same-venue): the extra cent pays for the
   # cross-venue execution gap risk.
   cross_venue:
-    enabled: true
+    # PAUSED (owner decision 2026-08-08, via AskUserQuestion): the sleeve
+    # is 1-9 lifetime, -$19.80, 0-3 again today — the second leg is not
+    # completing and each "arb" ends as a one-sided position at a bad
+    # price. Re-enable ONLY after the leg-completion failure is diagnosed
+    # and a paired fill is proven again.
+    enabled: false
     min_profit: 0.02
     # TOTAL pair cost, BOTH legs together — i.e. $5 per side (owner
     # directive 2026-08-05). max_sets = max_usd / fee-loaded cost_per_set
