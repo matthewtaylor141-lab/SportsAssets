@@ -126,8 +126,14 @@ def build(positions: dict[str, dict], activities: list[dict],
         .strftime("%Y-%m-%d")
 
     # Entry facts come from the venue's TRADE activities: first trade time,
-    # volume-weighted entry price, buy count.
+    # volume-weighted entry price, buy count. SELLS are their own ledger
+    # (owner directive 2026-08-08: cashed-out trades must count toward
+    # P&L): a sell must not inflate the entry VWAP, and its realizedPnl
+    # is the cash-out's settlement record. A trade is a sell when the
+    # venue says so or — enum-spelling-proof — when it carries realized
+    # P&L, which a buy under average-cost accounting never does.
     entries: dict[str, dict] = {}
+    sold: dict[str, dict] = {}
     for act in activities or []:
         if act.get("type") != "ACTIVITY_TYPE_TRADE":
             continue
@@ -137,6 +143,18 @@ def build(positions: dict[str, dict], activities: list[dict],
             continue
         ts = _act_ts(act) or _act_ts(t)
         qty, price = _amt(t.get("qty")), _amt(t.get("price"))
+        rp = _amt(t.get("realizedPnl"))
+        is_sell = "SELL" in str(t.get("side") or "").upper() or rp != 0
+        if is_sell:
+            if qty > 0 and 0 < price < 1:
+                s = sold.setdefault(slug, {"qty": 0.0, "proceeds": 0.0,
+                                           "realized": 0.0, "last_ts": 0.0})
+                s["qty"] += qty
+                s["proceeds"] += qty * price
+                s["realized"] += rp
+                if ts:
+                    s["last_ts"] = max(s["last_ts"], ts)
+            continue
         e = entries.setdefault(slug, {"first_ts": ts, "qty": 0.0,
                                       "notional": 0.0, "fills": 0})
         if ts and (not e["first_ts"] or ts < e["first_ts"]):
@@ -269,6 +287,15 @@ def build(positions: dict[str, dict], activities: list[dict],
             settled = True
             realized = res["realized"] or realized
             cost = cost or res["cost"]
+        s = sold.get(slug)
+        cashed_out = bool(settled and not res and not p.get("expired") and s)
+        if cashed_out:
+            # Sold to zero before resolution: the sale IS the settlement.
+            # The venue's own cumulative realized is authoritative when it
+            # has caught up; the sell trades' realizedPnl covers the lag.
+            realized = realized or s["realized"] \
+                or (s["proceeds"] - e.get("notional", 0.0))
+            cost = cost or e.get("notional", 0.0)
         stake_now = cost if cost > 0 else e.get("notional", 0.0)
         unreal = (value - cost) if not settled else 0.0
         is_manual = manual_slugs is not None and slug in manual_slugs
@@ -310,7 +337,10 @@ def build(positions: dict[str, dict], activities: list[dict],
             "stake": round(cost if cost > 0 else e.get("notional", 0.0), 4),
             "value": round(value, 4),
             "settled": settled,
-            "settled_ts": res["ts"] if res else None,
+            "settled_ts": (res["ts"] if res
+                           else (s or {}).get("last_ts") if cashed_out
+                           else None),
+            "cashed_out": cashed_out,
             "pnl": round(realized, 4) if settled else None,
             "unrealized": round(value - cost, 4) if not settled else None,
         })
@@ -364,6 +394,61 @@ def build(positions: dict[str, dict], activities: list[dict],
             "settled": True,
             "settled_ts": res["ts"] or None,
             "pnl": round(res["realized"], 4),
+            "unrealized": None,
+        })
+    # Cashed-out markets the positions payload no longer carries and no
+    # resolution ever will (the market is still open — WE closed): build
+    # their settled rows from the entry trades + the sell ledger. Without
+    # this a full cash-out on an unresolved market simply vanished from
+    # the record (owner report 2026-08-08).
+    for slug, s in sold.items():
+        if slug in seen or slug in resolutions:
+            continue
+        e = entries.get(slug) or {}
+        entry_ts = e.get("first_ts") or 0.0
+        if not entry_ts:
+            undatable += 1
+            continue
+        if entry_ts < since_ts:
+            continue
+        cost = e.get("notional", 0.0)
+        realized = s["realized"] or (s["proceeds"] - cost)
+        is_manual = manual_slugs is not None and slug in manual_slugs
+        sleeve = _sleeve_of(slug)
+        if sleeve == "copy" and not is_manual \
+                and not _pnl_capped(True, realized, 0.0):
+            _tally_copy(cost, True, realized)
+        else:
+            bucket = (manual if is_manual
+                      else over_pnl if sleeve == "copy"
+                      else _excluded_bucket(slug, cost, True, realized, 0.0))
+            if bucket is not None:
+                bucket["count"] += 1
+                bucket["stake"] += cost
+                bucket["net_pnl"] += realized
+                if bucket is unattributed:
+                    _tally_unattributed_day(True, realized,
+                                            s["last_ts"] or entry_ts)
+                continue
+        vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
+        rows.append({
+            "sleeve": sleeve,
+            "market_slug": slug,
+            "title": slug,
+            "outcome": None,
+            **classify_slug(slug),
+            "entry_ts": entry_ts,
+            "entry_date": max(datetime.fromtimestamp(entry_ts, tz)
+                              .strftime("%Y-%m-%d"), first_day),
+            "entry_price": round(vwap, 4) if vwap else None,
+            "fills": e.get("fills", 0),
+            "qty": e.get("qty", 0.0),
+            "stake": round(cost, 4),
+            "value": 0.0,
+            "settled": True,
+            "settled_ts": s["last_ts"] or None,
+            "cashed_out": True,
+            "pnl": round(realized, 4),
             "unrealized": None,
         })
     rows.sort(key=lambda r: -(r["entry_ts"] or 0))

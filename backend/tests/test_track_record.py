@@ -575,3 +575,58 @@ def test_unhydrated_boot_with_shallow_history_still_serves(monkeypatch):
 
     out = asyncio.run(tr.track_record())
     assert "error" not in out and out["summary"]["trades"] == 0
+
+
+# ── Cash-outs (owner directive 2026-08-08: sold trades count) ─────────
+
+
+def _sell(slug, ts, qty, price, realized=0.0):
+    return {"type": "ACTIVITY_TYPE_TRADE",
+            "trade": {"marketSlug": slug, "qty": qty, "side": "TRADE_SIDE_SELL",
+                      "price": {"value": price}, "createTime": ts * 1000,
+                      "realizedPnl": {"value": realized}}}
+
+
+def test_sells_do_not_inflate_the_entry_vwap():
+    positions = {"s": _pos(0, 0.0, 0.0, realized=0.4)}
+    acts = [_trade("s", TS_AUG2, 10, 0.50),
+            _sell("s", TS_AUG2 + 3600, 10, 0.54, realized=0.4)]
+    out = build(positions, acts, TS_AUG1)
+    r = out["trades"][0]
+    assert r["entry_price"] == 0.50        # the sell must not average in
+    assert r["fills"] == 1
+
+
+def test_sold_out_position_row_settles_with_the_sale_pnl():
+    """netPosition 0, market unresolved: the sale IS the settlement —
+    counted, dated to the sale, flagged cashed_out."""
+    positions = {"s": _pos(0, 0.0, 0.0, realized=0.0)}   # venue realized lags
+    acts = [_trade("s", TS_AUG2, 10, 0.50),
+            _sell("s", TS_AUG2 + 3600, 10, 0.54, realized=0.4)]
+    out = build(positions, acts, TS_AUG1)
+    r = out["trades"][0]
+    assert r["settled"] and r["cashed_out"]
+    assert r["pnl"] == 0.4
+    assert r["settled_ts"] == TS_AUG2 + 3600
+    assert out["summary"]["net_pnl"] == 0.4
+    assert out["summary"]["wins"] == 1
+
+
+def test_vanished_cashed_out_position_is_synthesized_from_the_sells():
+    """Fully sold AND dropped from the positions payload with no
+    resolution: the record must rebuild it from entry + sell trades."""
+    acts = [_trade("gone", TS_AUG2, 10, 0.50),
+            _sell("gone", TS_AUG2 + 3600, 10, 0.44, realized=-0.6)]
+    out = build({}, acts, TS_AUG1)
+    r = out["trades"][0]
+    assert r["market_slug"] == "gone"
+    assert r["settled"] and r["cashed_out"]
+    assert r["pnl"] == -0.6
+    assert out["summary"]["losses"] == 1
+
+
+def test_sell_without_realizedpnl_falls_back_to_proceeds_minus_cost():
+    acts = [_trade("g2", TS_AUG2, 10, 0.50),
+            _sell("g2", TS_AUG2 + 3600, 10, 0.56)]
+    out = build({}, acts, TS_AUG1)
+    assert out["trades"][0]["pnl"] == 0.6   # 10*(0.56-0.50)
