@@ -65,6 +65,99 @@ CASHOUT_SWEEP_S = float(os.environ.get("UNDERDOG_CASHOUT_SWEEP_S", "60"))
 _LEAGUES = ("mlb", "atp", "wta")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+# ── Slate discovery (owner report 2026-08-08: "Tennis match plays for
+# $1 in the cash out sleeve are not firing") ─────────────────────────
+# The markets table only learns a market when a whale trades it or the
+# metadata refresher's bounded venue paging happens to reach it. MLB
+# games ride in on constant whale flow; tennis matches the whales skip
+# never enter the catalog at all — so the sleeve couldn't see them.
+# This discovery asks Gamma for the venue's soonest-ending open markets
+# (today's games sort first), keeps MLB/Tennis two-token game markets,
+# and upserts them into the shared catalog the entry sweep reads.
+_DISCOVER_EVERY_S = float(os.environ.get("UNDERDOG_DISCOVER_EVERY_S", "900"))
+_DISCOVER_PAGES = int(os.environ.get("UNDERDOG_DISCOVER_PAGES", "15"))
+_discover_state: dict = {"ts": 0.0, "order_ok": True}
+
+
+def _is_game_market(meta: dict, today: str) -> bool:
+    """A candidate $1 game: MLB/Tennis, exactly two sides, open, and a
+    BARE league-led slug ending at today's date (derivatives carry a
+    suffix after it; other days are other sweeps' business)."""
+    if meta.get("sport") not in ("MLB", "Tennis"):
+        return False
+    if meta.get("closed") or meta.get("resolved"):
+        return False
+    if len(meta.get("tokens") or []) != 2:
+        return False
+    slug = meta.get("slug") or ""
+    return slug.startswith(_LEAGUES_PREFIXES) and slug.endswith(today)
+
+
+_LEAGUES_PREFIXES = tuple(f"{lg}-" for lg in _LEAGUES)
+
+
+def _parse_start(raw: str | None) -> float | None:
+    """Gamma gameStartTime -> epoch. Formats seen in the wild: full ISO
+    with Z, with offset, or 'YYYY-MM-DD HH:MM:SS+00'. None on anything
+    unparseable — an unknown start is skipped, never guessed."""
+    if not raw:
+        return None
+    s = str(raw).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        from datetime import timezone as _tz
+        dt = dt.replace(tzinfo=_tz.utc)
+    return dt.timestamp()
+
+
+async def _discover_games(today: str) -> dict:
+    """Pull today's MLB/Tennis game markets straight from Gamma into the
+    catalog. Soonest-ending markets first (today's games); falls back to
+    plain paging if the venue rejects the ordering params."""
+    import time as _t
+
+    from .. import gamma
+
+    stats = {"pages": 0, "upserted": 0, "starts_primed": 0}
+    client = gamma.GammaClient()
+    try:
+        order = ({"order": "endDate", "ascending": "true"}
+                 if _discover_state["order_ok"] else {})
+        for page in range(_DISCOVER_PAGES):
+            try:
+                batch = await client.fetch_markets(
+                    {"closed": "false", "limit": 100,
+                     "offset": page * 100, **order})
+            except Exception:  # noqa: BLE001
+                if order:
+                    # Ordering params rejected: remember, retry plain.
+                    _discover_state["order_ok"] = False
+                    log.warning("gamma endDate ordering rejected; "
+                                "falling back to plain paging")
+                    return await _discover_games(today)
+                raise
+            stats["pages"] += 1
+            for raw in batch:
+                meta = gamma.parse_market(raw)
+                if meta is None or not _is_game_market(meta, today):
+                    continue
+                await gamma.upsert_market(meta)
+                stats["upserted"] += 1
+                start = _parse_start(raw.get("gameStartTime")
+                                     or raw.get("game_start_time"))
+                if start and meta["slug"] not in _starts:
+                    _starts[meta["slug"]] = start
+                    stats["starts_primed"] += 1
+            if len(batch) < 100:
+                break
+    finally:
+        await client.close()
+    _discover_state["ts"] = _t.time()
+    return stats
+
 
 def pick_underdog(quotes: list[tuple[str, float | None]],
                   min_ask: float = MIN_ASK,
@@ -190,6 +283,15 @@ async def _entry_sweep(pool) -> dict:
         "WHERE whale_username = 'underdog' "
         "AND placed_at > now() - interval '24 hours'") or 0)
     today = datetime.now(ET).strftime("%Y-%m-%d")
+    # Slate discovery: the catalog only knows whale-traded markets, so
+    # tennis was invisible. Refresh it from the venue every 15 minutes.
+    import time as _tt
+    if _tt.time() - _discover_state["ts"] >= _DISCOVER_EVERY_S:
+        try:
+            d = await _discover_games(today)
+            stats["discover"] = d
+        except Exception as exc:  # noqa: BLE001 — catalog rows still serve
+            stats["discover_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
     # A game moneyline is the BARE slug: league-led and ENDING at the
     # date — every derivative (total, spread, prop, segment) carries a
     # suffix after it.
@@ -211,6 +313,10 @@ async def _entry_sweep(pool) -> dict:
         if len(sides) != 2:
             continue
         stats["games"] += 1
+        # Per-sport visibility: "tennis not firing" must be readable
+        # from the heartbeat, not inferred from a bare total.
+        _lg = "games_mlb" if slug.startswith("mlb-") else "games_tennis"
+        stats[_lg] = stats.get(_lg, 0) + 1
         if day_spent + PER_FILL_USD > DAILY_USD:
             stats["skipped_day_cap"] = stats.get("skipped_day_cap", 0) + 1
             continue

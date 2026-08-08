@@ -80,6 +80,43 @@ def test_kud_backfill_covers_every_open_pmus_dog():
     assert "('rejected', 'unfilled', 'error')" in sweep
 
 
+def _meta(**kw):
+    return {"sport": "Tennis", "closed": False, "resolved": False,
+            "tokens": [{}, {}],
+            "slug": "wta-jespeg-diashn-2026-08-08", **kw}
+
+
+def test_discovery_keeps_only_todays_bare_game_markets():
+    """Owner report 2026-08-08: tennis $1 plays not firing — the catalog
+    only knew whale-traded markets. Discovery pulls the slate from the
+    venue; this filter is what keeps it to the sleeve's exact universe."""
+    from sportsassets.workers.underdog import _is_game_market
+
+    today = "2026-08-08"
+    assert _is_game_market(_meta(), today)
+    assert _is_game_market(
+        _meta(sport="MLB", slug="mlb-tor-phi-2026-08-08"), today)
+    # Tomorrow's match, derivative suffix, wrong sport, wrong token
+    # count, closed market: all refused.
+    assert not _is_game_market(
+        _meta(slug="wta-jespeg-diashn-2026-08-09"), today)
+    assert not _is_game_market(
+        _meta(sport="MLB", slug="mlb-tor-phi-2026-08-08-f5-tor"), today)
+    assert not _is_game_market(
+        _meta(sport="Soccer", slug="epl-ars-che-2026-08-08"), today)
+    assert not _is_game_market(_meta(tokens=[{}]), today)
+    assert not _is_game_market(_meta(closed=True), today)
+
+
+def test_gamma_start_times_parse_or_refuse():
+    from sportsassets.workers.underdog import _parse_start
+
+    assert _parse_start("2026-08-08T23:05:00Z") == 1786230300.0
+    assert _parse_start("2026-08-08 23:05:00+00") == 1786230300.0
+    assert _parse_start("garbage") is None
+    assert _parse_start(None) is None
+
+
 def test_entries_fire_only_in_the_t_minus_five_window():
     from sportsassets.workers.underdog import entry_window
 
