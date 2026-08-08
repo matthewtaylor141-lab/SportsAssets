@@ -972,9 +972,10 @@ _persist_state: dict[str, float] = {"ts": 0.0, "settled": -1.0, "stake": -1.0}
 # on 2026-08-07 ~01:00Z: settled 958->963 while settled stake halved
 # $6.9k->$2.9k and the corrupt payload displaced the good persisted one.
 # Settled stake NEVER legitimately shrinks (settlements accumulate), so
-# a fresh build materially below the stake high-water is evidence of
-# data loss, not trading.
-_STAKE_SHRINK_FLOOR = 0.75
+# ANY meaningful shrink is data loss, not trading. 0.75 let a degraded
+# build through at 0.76x on 2026-08-08 evening (-$165 of fake losses on
+# the homepage while people watched); 2% covers float jitter only.
+_STAKE_SHRINK_FLOOR = 0.98
 
 
 def _stake_of(payload: dict) -> float:
@@ -1046,11 +1047,23 @@ async def warm_cache() -> None:
         logging.getLogger(__name__).exception("track-record warm failed")
 
 
+# Built-payload cache: build() walks ~170k archived activities; running
+# it PER PAGE REQUEST (30s polls x N viewers) is both the memory churn
+# behind the 1.9GB RSS climb and the widest exposure window for
+# degraded-data builds. One build serves every viewer for the TTL.
+_payload_cache: dict[str, Any] = {"ts": 0.0, "data": None}
+_PAYLOAD_TTL = 25.0
+
+
 async def track_record(since: str | None = None,
                        max_stake: float | None = None) -> dict:
     cfg = settings()
     if not (cfg.pmus_key_id and cfg.pmus_secret_key):
         return {"configured": False}
+    if (since is None and max_stake is None
+            and _payload_cache["data"] is not None
+            and time.time() - _payload_cache["ts"] < _PAYLOAD_TTL):
+        return _payload_cache["data"]
     # The window boundary is UTC midnight, deliberately NOT the ET midnight
     # the calendar buckets on. Parsing `since` at ET midnight (04:00Z)
     # silently dropped the account's first ~4 hours of trades (00:00-04:00Z
@@ -1253,4 +1266,7 @@ async def track_record(since: str | None = None,
                 }
             return out
     await _persist_payload(payload)
+    if since is None and max_stake is None:
+        _payload_cache["data"] = payload
+        _payload_cache["ts"] = time.time()
     return payload
