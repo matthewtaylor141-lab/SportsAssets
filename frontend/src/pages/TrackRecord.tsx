@@ -391,7 +391,7 @@ export function TrackRecord() {
         <div className="tr-hero-grid">
           <div className="tr-stat tr-stat-main" onMouseMove={tilt} onMouseLeave={untilt}>
             <span className="tr-sheen" aria-hidden />
-            <div className="tr-stat-label">NET P&amp;L · SETTLED</div>
+            <div className="tr-stat-label">NET P&amp;L · WHOLE ACCOUNT</div>
             <div className={`tr-stat-value tr-grad ${s.net_pnl >= 0 ? 'pos' : 'neg'}`}>
               {fmtSignedUsd(heroPnl)}
             </div>
@@ -468,15 +468,16 @@ export function TrackRecord() {
           </div>
         )}
 
-        {acct && (
+        {data.record_subset && (
           <div className="tr-account">
-            <b>WHOLE ACCOUNT · ALL ACTIVITY</b>{' '}
-            <span className={`tr-acct-net ${acct.net_pnl >= 0 ? 'pos' : 'neg'}`}>
-              {fmtSignedUsd(acct.net_pnl)}
+            <b>AI SLEEVES ALONE</b>{' '}
+            <span className={`tr-acct-net ${data.record_subset.net_pnl >= 0 ? 'pos' : 'neg'}`}>
+              {fmtSignedUsd(data.record_subset.net_pnl)}
             </span>{' '}
-            settled net across {acct.trades.toLocaleString()} positions since {SINCE}
-            {' '}({acct.open.toLocaleString()} open). Includes manual trades and
-            cash-outs, which the AI record above excludes.
+            over {data.record_subset.settled.toLocaleString()} settled
+            ({data.record_subset.wins}W–{data.record_subset.losses}L).
+            The headline above is the WHOLE account — every trade, manual and
+            cash-outs included (your directive).
           </div>
         )}
 
@@ -567,6 +568,12 @@ export function TrackRecord() {
                       <span className="tr-slip-title">{r.title}</span>
                       <span className="tr-tag">{r.category}</span>
                       {r.sleeve === 'copy' && <span className="tr-tag">COPY</span>}
+                      {r.cohort === 'manual' && <span className="tr-tag">MANUAL</span>}
+                      {r.cohort === 'unattributed' && <span className="tr-tag">OWNER</span>}
+                      {(r.cohort === 'over_pnl' || r.cohort === 'over_limit') && (
+                        <span className="tr-tag">LARGE</span>
+                      )}
+                      {r.cashed_out && <span className="tr-tag">CASHED OUT</span>}
                       <span className={`tr-chip ${st}`}>
                         {st === 'open' ? '● LIVE' : st === 'won' ? '✓ WON' : '✕ LOST'}
                       </span>
@@ -609,8 +616,9 @@ export function TrackRecord() {
         <div className="tr-foot muted">
           Source: the live venue account (positions + its own trade activities),
           window {SINCE} → today, refreshed every 30s. Entry prices are the venue's
-          own VWAP. This record shows strategy-sized positions (≤{' '}
-          {fmtUsd(data.excluded_over_limit?.limit ?? 100)} at cost).
+          own VWAP. Every account position is shown and counted — manual trades,
+          cash-outs and large positions included (owner directive 2026-08-08),
+          each tagged with its cohort.
           {data.excluded_over_limit && data.excluded_over_limit.count > 0 && (
             <> {data.excluded_over_limit.count} larger position(s) are excluded from
             every figure above — combined stake{' '}

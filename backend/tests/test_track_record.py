@@ -136,11 +136,16 @@ def test_over_limit_positions_are_excluded_and_always_disclosed():
             _resolution("big-lost", TS_AUG2 + 3600),
             _trade("big-open", TS_AUG2, 240, 0.5)]
     out = build(positions, acts, TS_AUG1, max_stake=100.0)
-    assert [r["market_slug"] for r in out["trades"]] == ["small-won"]
-    assert out["summary"]["net_pnl"] == 1.1          # the big loss is OUT...
-    ex = out["excluded_over_limit"]                  # ...and DISCLOSED
+    # Whole-account basis (owner 2026-08-08): every row is IN, tagged.
+    by = {r["market_slug"]: r for r in out["trades"]}
+    assert set(by) == {"small-won", "big-lost", "big-open"}
+    assert by["small-won"]["cohort"] == "record"
+    assert by["big-lost"]["cohort"] == "over_limit"
+    assert out["summary"]["net_pnl"] == round(1.1 - 150.0, 2)
+    ex = out["excluded_over_limit"]                  # cohort still DISCLOSED
     assert ex == {"limit": 100.0, "count": 2, "open": 1,
                   "stake": 270.0, "net_pnl": -150.0}
+    assert out["record_subset"]["net_pnl"] == 1.1    # AI-only view survives
 
 
 def test_no_cap_means_no_exclusion_and_a_null_disclosure():
@@ -177,10 +182,13 @@ def test_pnl_cap_excludes_big_swings_both_directions_and_discloses():
             _trade("big-lost", TS_AUG2, 240, 0.5),
             _resolution("big-lost", TS_AUG2 + 3600)]
     out = build(positions, acts, TS_AUG1, max_abs_pnl=100.0)
-    assert [r["market_slug"] for r in out["trades"]] == ["small-won"]
-    assert out["summary"]["net_pnl"] == 1.1
-    day = next(d for d in out["daily"] if d["settled"])
-    assert day["pnl"] == 1.1
+    # Account basis: capped rows are IN and tagged; the cap survives as
+    # a disclosure and in record_subset (the AI-only view).
+    by = {r["market_slug"]: r for r in out["trades"]}
+    assert by["big-won"]["cohort"] == "over_pnl"
+    assert by["big-lost"]["cohort"] == "over_pnl"
+    assert out["summary"]["net_pnl"] == round(1.1 + 150.0 - 120.0, 2)
+    assert out["record_subset"]["net_pnl"] == 1.1
     ex = out["excluded_over_pnl"]
     assert ex == {"limit": 100.0, "count": 2, "open": 0,
                   "stake": 160.0, "net_pnl": 30.0}
@@ -208,7 +216,9 @@ def test_pnl_cap_reads_open_positions_at_mark_to_market():
     acts = [_trade("open-big", TS_AUG2, 500, 0.1),
             _trade("open-ok", TS_AUG2, 2, 0.5)]
     out = build(positions, acts, TS_AUG1, max_abs_pnl=100.0)
-    assert [r["market_slug"] for r in out["trades"]] == ["open-ok"]
+    by = {r["market_slug"]: r for r in out["trades"]}
+    assert by["open-big"]["cohort"] == "over_pnl"
+    assert by["open-ok"]["cohort"] == "record"
     assert out["excluded_over_pnl"] == {"limit": 100.0, "count": 1,
                                         "open": 1, "stake": 50.0,
                                         "net_pnl": 0.0}
@@ -240,7 +250,8 @@ def test_pnl_cap_covers_resolution_only_rows():
                                   "cost": {"value": 60.0}}}}
     acts = [_trade("gone-big", TS_AUG2, 120, 0.5), res]
     out = build({}, acts, TS_AUG1, max_abs_pnl=100.0)
-    assert out["trades"] == []
+    assert [r["cohort"] for r in out["trades"]] == ["over_pnl"]
+    assert out["summary"]["net_pnl"] == 180.0        # account basis counts it
     assert out["excluded_over_pnl"]["count"] == 1
     assert out["excluded_over_pnl"]["net_pnl"] == 180.0
 
@@ -305,7 +316,9 @@ def test_positive_attribution_excludes_what_the_engine_never_claimed():
             _trade("aec-atp-rogue-2026-08-02", TS_AUG2, 30, 0.585)]
     out = build(positions, acts, TS_AUG1,
                 attributed={"aec-mlb-ours-2026-08-02"})
-    assert [r["market_slug"] for r in out["trades"]] == ["aec-mlb-ours-2026-08-02"]
+    by = {r["market_slug"]: r for r in out["trades"]}
+    assert by["aec-mlb-ours-2026-08-02"]["cohort"] == "record"
+    assert by["aec-atp-rogue-2026-08-02"]["cohort"] == "unattributed"
     ex = out["excluded_unattributed"]
     assert ex["count"] == 1 and ex["open"] == 1
     assert ex["stake"] == 17.55
@@ -482,8 +495,10 @@ def test_account_block_reconciles_cohort_plus_every_exclusion():
     assert a["trades"] == 4 and a["open"] == 1
     assert a["net_pnl"] == round(1.1 - 150.0 + 0.5, 2)
     assert a["stake"] == round(1.0 + 150.0 + 2.0 + 3.0, 2)
-    # and the cohort headline still excludes all three other cohorts
-    assert out["summary"]["net_pnl"] == 1.1
+    # Account basis: the headline IS the account (owner 2026-08-08)...
+    assert out["summary"]["net_pnl"] == a["net_pnl"]
+    # ...and the AI-only subset survives as the disclosure.
+    assert out["record_subset"]["net_pnl"] == 1.1
 
 
 def test_paged_walks_to_eof_and_reports_completeness():

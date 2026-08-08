@@ -6,6 +6,9 @@ import { usePolled } from './poll'
 
 export interface TRRow {
   sleeve?: 'engine' | 'copy'
+  /** Whole-account basis (owner 2026-08-08): which cohort the row is. */
+  cohort?: 'record' | 'manual' | 'unattributed' | 'over_pnl' | 'over_limit'
+  cashed_out?: boolean
   market_slug: string
   title: string
   outcome: string | null
@@ -86,6 +89,9 @@ export interface TrackRecordData {
   since: string
   snapshot?: TRSnapshot
   account?: TRAccount
+  /** The AI-only subset, disclosed now that the headline is the account. */
+  record_subset?: { trades: number; settled: number; wins: number
+                    losses: number; net_pnl: number; settled_stake: number }
   summary: TRSummary
   daily: TRDaily[]
   trades: TRRow[]

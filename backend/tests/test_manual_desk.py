@@ -122,8 +122,12 @@ def test_manual_rows_are_excluded_and_disclosed():
             _trade("manual-won", TS_AUG2, 100, 0.5),
             _resolution("manual-won", TS_AUG2 + 3600)]
     out = build(positions, acts, TS_AUG1, manual_slugs={"manual-won"})
-    assert [r["market_slug"] for r in out["trades"]] == ["ai-won"]
-    assert out["summary"]["net_pnl"] == 1.1
+    # Account basis (owner 2026-08-08): manual rows are IN, tagged, and
+    # counted; the manual cohort survives as a disclosure.
+    by = {r["market_slug"]: r for r in out["trades"]}
+    assert by["manual-won"]["cohort"] == "manual"
+    assert out["summary"]["net_pnl"] == round(1.1 + 60.0, 2)
+    assert out["record_subset"]["net_pnl"] == 1.1
     assert out["manual_desk"] == {"count": 1, "open": 0,
                                   "stake": 50.0, "net_pnl": 60.0}
     assert out["account"]["net_pnl"] == round(1.1 + 60.0, 2)

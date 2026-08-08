@@ -261,6 +261,12 @@ def build(positions: dict[str, dict], activities: list[dict],
         else:
             copy_sleeve["open"] += 1
 
+    def _cohort_name(bucket: dict) -> str:
+        return ("manual" if bucket is manual
+                else "over_pnl" if bucket is over_pnl
+                else "unattributed" if bucket is unattributed
+                else "over_limit")
+
     seen: set[str] = set()
     for slug, p in (positions or {}).items():
         seen.add(slug)
@@ -300,6 +306,7 @@ def build(positions: dict[str, dict], activities: list[dict],
         unreal = (value - cost) if not settled else 0.0
         is_manual = manual_slugs is not None and slug in manual_slugs
         sleeve = _sleeve_of(slug)
+        cohort = "record"
         if sleeve == "copy" and not is_manual \
                 and not _pnl_capped(settled, realized, unreal):
             _tally_copy(stake_now, settled, realized)
@@ -319,9 +326,13 @@ def build(positions: dict[str, dict], activities: list[dict],
                     _tally_unattributed_day(
                         settled, realized,
                         (res["ts"] if res else None) or entry_ts)
-                continue
+                # OWNER DIRECTIVE 2026-08-08: the whole account is THE
+                # P&L metric — cohort rows stay tallied for the reports
+                # but are no longer dropped from the displayed record.
+                cohort = _cohort_name(bucket)
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
+            "cohort": cohort,
             "sleeve": sleeve,
             "market_slug": slug,
             "title": meta.get("title") or slug,
@@ -360,6 +371,7 @@ def build(positions: dict[str, dict], activities: list[dict],
         cost = res["cost"] or e.get("notional", 0.0)
         is_manual = manual_slugs is not None and slug in manual_slugs
         sleeve = _sleeve_of(slug)
+        cohort = "record"
         if sleeve == "copy" and not is_manual \
                 and not _pnl_capped(True, res["realized"], 0.0):
             _tally_copy(cost, True, res["realized"])
@@ -375,9 +387,10 @@ def build(positions: dict[str, dict], activities: list[dict],
                 if bucket is unattributed:
                     _tally_unattributed_day(True, res["realized"],
                                             res["ts"] or entry_ts)
-                continue
+                cohort = _cohort_name(bucket)
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
+            "cohort": cohort,
             "sleeve": sleeve,
             "market_slug": slug,
             "title": res.get("title") or slug,
@@ -415,6 +428,7 @@ def build(positions: dict[str, dict], activities: list[dict],
         realized = s["realized"] or (s["proceeds"] - cost)
         is_manual = manual_slugs is not None and slug in manual_slugs
         sleeve = _sleeve_of(slug)
+        cohort = "record"
         if sleeve == "copy" and not is_manual \
                 and not _pnl_capped(True, realized, 0.0):
             _tally_copy(cost, True, realized)
@@ -429,9 +443,10 @@ def build(positions: dict[str, dict], activities: list[dict],
                 if bucket is unattributed:
                     _tally_unattributed_day(True, realized,
                                             s["last_ts"] or entry_ts)
-                continue
+                cohort = _cohort_name(bucket)
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
+            "cohort": cohort,
             "sleeve": sleeve,
             "market_slug": slug,
             "title": slug,
@@ -497,18 +512,27 @@ def build(positions: dict[str, dict], activities: list[dict],
         d["deployed"] = round(d["deployed"], 2)
         d["pnl"] = round(d["pnl"], 2)
 
-    # Account-wide tie-out: record + every disclosed exclusion = what the
-    # owner sees in the venue app. The headline alone read as "wrong" the
-    # day the incident cohort was deeply negative — the page must
-    # reconcile to the account, not ask to be trusted. (Copy rows are
-    # inside `rows` now, so only the true exclusions are added back.)
-    _buckets = [over_limit, unattributed, over_pnl, manual]
+    # OWNER DIRECTIVE 2026-08-08: the whole account IS the record — every
+    # cohort's rows are inside `rows` now, so the account tie-out is the
+    # summary itself, not summary-plus-buckets (adding the buckets back
+    # would double-count every excluded-cohort row).
     account = {
-        "trades": len(rows) + sum(b["count"] for b in _buckets),
-        "open": (len(rows) - len(settled_rows))
-                + sum(b["open"] for b in _buckets),
-        "stake": round(deployed + sum(b["stake"] for b in _buckets), 2),
-        "net_pnl": round(net + sum(b["net_pnl"] for b in _buckets), 2),
+        "trades": len(rows),
+        "open": len(rows) - len(settled_rows),
+        "stake": round(deployed, 2),
+        "net_pnl": round(net, 2),
+    }
+    # The AI-only subset survives as a DISCLOSURE — the strategy stays
+    # gradable on its own even though the headline is the account.
+    _rec = [r for r in rows if r.get("cohort") == "record"]
+    _rec_settled = [r for r in _rec if r["settled"]]
+    record_subset = {
+        "trades": len(_rec),
+        "settled": len(_rec_settled),
+        "wins": sum(1 for r in _rec_settled if (r["pnl"] or 0) > 0),
+        "losses": sum(1 for r in _rec_settled if (r["pnl"] or 0) < 0),
+        "net_pnl": round(sum(r["pnl"] or 0 for r in _rec_settled), 2),
+        "settled_stake": round(sum(r["stake"] for r in _rec_settled), 2),
     }
 
     return {
@@ -516,6 +540,7 @@ def build(positions: dict[str, dict], activities: list[dict],
                  .strftime("%Y-%m-%d"),
         "generated_at": time.time(),
         "account": account,
+        "record_subset": record_subset,
         "summary": {
             "trades": len(rows),
             "open": len(rows) - len(settled_rows),
