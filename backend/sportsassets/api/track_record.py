@@ -187,6 +187,65 @@ def build(positions: dict[str, dict], activities: list[dict],
                      or (before.get("marketMetadata") or {}).get("title"),
         }
 
+    # VENUE-BASIS totals (owner directive 2026-08-08, second report: the
+    # headline must match the venue app's own number). The venue stamps
+    # cumulative realized P&L on every position row — no windowing, no
+    # entry-dating. Summing that (plus resolutions/sells for rows the
+    # payload no longer carries) reproduces the venue's own arithmetic;
+    # the dated-row machinery below still builds the ledger, calendar
+    # and cohorts, but the HEADLINE is this.
+    venue_totals = {"net_pnl": 0.0, "settled": 0, "wins": 0, "losses": 0,
+                    "settled_stake": 0.0}
+    _vseen: set[str] = set()
+    for _slug, _p in (positions or {}).items():
+        _vseen.add(_slug)
+        _r = _amt(_p.get("realized"))
+        _res = resolutions.get(_slug)
+        if _res and not _r:
+            _r = _res["realized"]
+        if not _r and _slug in sold \
+                and _amt(_p.get("netPosition")) <= 0:
+            # Sold to zero, venue's cumulative realized lagging: the sell
+            # ledger is the sale's own settlement record.
+            _s = sold[_slug]
+            _r = _s["realized"] or (_s["proceeds"]
+                                    - (entries.get(_slug) or {})
+                                    .get("notional", 0.0))
+        venue_totals["net_pnl"] += _r
+        if bool(_p.get("expired")) or _amt(_p.get("netPosition")) <= 0 \
+                or _res:
+            venue_totals["settled"] += 1
+            venue_totals["settled_stake"] += (
+                _amt(_p.get("cost")) or (_res["cost"] if _res else 0.0))
+            if _r > 0:
+                venue_totals["wins"] += 1
+            elif _r < 0:
+                venue_totals["losses"] += 1
+    for _slug, _res in resolutions.items():
+        if _slug in _vseen:
+            continue
+        venue_totals["net_pnl"] += _res["realized"]
+        venue_totals["settled"] += 1
+        venue_totals["settled_stake"] += _res["cost"]
+        if _res["realized"] > 0:
+            venue_totals["wins"] += 1
+        elif _res["realized"] < 0:
+            venue_totals["losses"] += 1
+    for _slug, _s in sold.items():
+        if _slug in _vseen or _slug in resolutions:
+            continue
+        _e = entries.get(_slug) or {}
+        _r = _s["realized"] or (_s["proceeds"] - _e.get("notional", 0.0))
+        venue_totals["net_pnl"] += _r
+        venue_totals["settled"] += 1
+        venue_totals["settled_stake"] += _e.get("notional", 0.0)
+        if _r > 0:
+            venue_totals["wins"] += 1
+        elif _r < 0:
+            venue_totals["losses"] += 1
+    for _k in ("net_pnl", "settled_stake"):
+        venue_totals[_k] = round(venue_totals[_k], 2)
+
     rows = []
     undatable = 0
     over_limit = {"count": 0, "stake": 0.0, "net_pnl": 0.0, "open": 0}
@@ -541,22 +600,32 @@ def build(positions: dict[str, dict], activities: list[dict],
         "generated_at": time.time(),
         "account": account,
         "record_subset": record_subset,
+        # HEADLINE = the venue's own arithmetic (owner directive
+        # 2026-08-08): cumulative realized as the venue stamps it, no
+        # windowing, no entry-dating — the number that matches the
+        # venue app. Counts/deployed still come from the dated rows
+        # (they feed the ledger and calendar); win_rate and ROI ride
+        # the venue basis so "profit per dollar" is account-true.
         "summary": {
             "trades": len(rows),
             "open": len(rows) - len(settled_rows),
-            "settled": len(settled_rows),
-            "wins": len(wins),
+            "settled": venue_totals["settled"],
+            "wins": venue_totals["wins"],
             # zero-realized settlements are pushes/voids, not losses
-            "losses": len(losses),
+            "losses": venue_totals["losses"],
             "deployed": round(deployed, 2),
             "open_value": round(sum(r["value"] for r in rows
                                     if not r["settled"]), 2),
-            "net_pnl": round(net, 2),
-            "settled_stake": round(settled_stake, 2),
-            "roi": round(net / settled_stake, 4) if settled_stake else None,
-            "win_rate": (round(len(wins) / len(settled_rows), 4)
-                         if settled_rows else None),
+            "net_pnl": venue_totals["net_pnl"],
+            "settled_stake": venue_totals["settled_stake"],
+            "roi": (round(venue_totals["net_pnl"]
+                          / venue_totals["settled_stake"], 4)
+                    if venue_totals["settled_stake"] else None),
+            "win_rate": (round(venue_totals["wins"]
+                               / venue_totals["settled"], 4)
+                         if venue_totals["settled"] else None),
         },
+        "venue_totals": venue_totals,
         "excluded_undatable": undatable,
         # Always present when a cap was applied, even at zero exclusions —
         # the reader can see the rule itself, not only its effects.
