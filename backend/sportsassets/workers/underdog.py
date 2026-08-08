@@ -12,7 +12,12 @@ The sleeve's contract, in order of importance:
      (positions pool at the venue; selling from a shared position
      would realize another sleeve's basis).
   2. One entry per GAME, ever — $1 a game bounds the test regardless
-     of how long the game stays cheap.
+     of how long the game stays cheap. Entries fire in a T-MINUS-5
+     window (owner directive 2026-08-08 evening): each game is bought
+     in the five minutes before its scheduled start, so the sleeve
+     never carries a whole day's slate as outstanding exposure at
+     once. A game with no venue start time cannot honor the window
+     and is skipped, counted, never guessed.
   3. Cash-out is a SELL FOK at the live best bid, only when
      bid >= entry * (1 + UNDERDOG_TAKE_PROFIT). A missed FOK simply
      waits for the next look at the fresh book (repricing each cycle,
@@ -47,7 +52,10 @@ TAKE_PROFIT = float(os.environ.get("UNDERDOG_TAKE_PROFIT", "0.20"))
 # lottery ticket whose book will never bid +20% — both refused.
 MIN_ASK = float(os.environ.get("UNDERDOG_MIN_ASK", "0.05"))
 MAX_ASK = float(os.environ.get("UNDERDOG_MAX_ASK", "0.48"))
-ENTRY_SWEEP_S = float(os.environ.get("UNDERDOG_ENTRY_SWEEP_S", "600"))
+# Minute cadence: the T-minus-5 window needs minute resolution.
+ENTRY_SWEEP_S = float(os.environ.get("UNDERDOG_ENTRY_SWEEP_S", "60"))
+ENTRY_LEAD_S = float(os.environ.get("UNDERDOG_LEAD_S", "300"))
+ENTRY_GRACE_S = float(os.environ.get("UNDERDOG_GRACE_S", "60"))
 CASHOUT_SWEEP_S = float(os.environ.get("UNDERDOG_CASHOUT_SWEEP_S", "60"))
 
 # The markets table is the GLOBAL catalog: a game's moneyline is the
@@ -83,6 +91,48 @@ def cash_out_threshold(entry: float, take: float = TAKE_PROFIT) -> float:
 def shares_for(usd: float, ask: float) -> int:
     """Whole contracts $usd buys at ask, rounded DOWN — never over budget."""
     return int(usd / ask) if ask > 0 else 0
+
+
+def entry_window(start_ts: float | None, now: float,
+                 lead: float = ENTRY_LEAD_S,
+                 grace: float = ENTRY_GRACE_S) -> str:
+    """'enter' inside [start - lead, start + grace]; 'wait' before it;
+    'missed' after; 'unknown' when the venue reports no start. Pure."""
+    if not start_ts:
+        return "unknown"
+    delta = start_ts - now
+    if delta > lead:
+        return "wait"
+    if delta < -grace:
+        return "missed"
+    return "enter"
+
+
+# slug -> venue-reported start ts, cached per process (a game's start
+# does not move minute to minute; entries happen once).
+_starts: dict[str, float | None] = {}
+
+
+async def _game_start_ts(cfg, condition_id: str) -> float | None:
+    import httpx
+
+    from datetime import timezone as _tz
+
+    try:
+        async with httpx.AsyncClient(base_url=cfg.clob_api_base,
+                                     timeout=8) as http:
+            resp = await http.get(f"/markets/{condition_id}")
+        if resp.status_code != 200:
+            return None
+        val = (resp.json() or {}).get("game_start_time")
+        if not val or not isinstance(val, str):
+            return None
+        parsed = datetime.fromisoformat(val.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_tz.utc)
+        return parsed.timestamp()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def _best_bid(cfg, asset: str) -> float | None:
@@ -139,6 +189,17 @@ async def _entry_sweep(pool) -> dict:
         stats["games"] += 1
         if day_spent + PER_FILL_USD > DAILY_USD:
             stats["skipped_day_cap"] = stats.get("skipped_day_cap", 0) + 1
+            continue
+        # T-MINUS-5 WINDOW: only games starting within the lead fire;
+        # everything else waits for its own five-minute window.
+        if slug not in _starts:
+            _starts[slug] = await _game_start_ts(
+                cfg, next(iter(sides))["condition_id"])
+        import time as _t
+        win = entry_window(_starts.get(slug), _t.time())
+        if win != "enter":
+            k = f"skipped_{win}"
+            stats[k] = stats.get(k, 0) + 1
             continue
         # NON-INTERFERENCE and one-entry-per-game in one check: any
         # existing row on either token — any sleeve INCLUDING our own,

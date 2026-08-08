@@ -47,3 +47,15 @@ def test_one_fill_index_ignores_the_underdog_sleeve():
     sql = open("migrations/016_underdog_sleeve.sql").read()
     assert "NOT IN ('manual', 'underdog')" in sql
     assert "'cashed_out'" in sql
+
+
+def test_entries_fire_only_in_the_t_minus_five_window():
+    from sportsassets.workers.underdog import entry_window
+
+    start = 1_000_000.0
+    assert entry_window(start, start - 600) == "wait"     # 10 min out
+    assert entry_window(start, start - 300) == "enter"    # window opens
+    assert entry_window(start, start - 30) == "enter"     # 30s before
+    assert entry_window(start, start + 30) == "enter"     # grace
+    assert entry_window(start, start + 120) == "missed"   # in play
+    assert entry_window(None, start) == "unknown"         # no venue time
