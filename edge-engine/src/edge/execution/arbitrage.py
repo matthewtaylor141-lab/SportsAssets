@@ -249,12 +249,20 @@ def cross_venue_cost(legs: list[XVLeg]) -> float:
 def execute_cross_venue(*, event: str, legs: list[XVLeg], max_sets: int,
                         dry_run: bool = True,
                         max_completion_slip: float = MAX_COMPLETION_SLIP,
+                        complements: dict | None = None,
                         ) -> ArbResult:
-    """Buy one contract-set across venues, or end owning nothing.
+    """Buy one contract-set across venues, or end holding a SETTLED set.
 
     Caller guarantees: exactly one leg per outcome of a TWO-way partition,
     legs on DIFFERENT venues, both venues settling on the same game result
     (no-tie sports only — the allowlist lives with the caller).
+
+    `complements` maps a leg's token -> the SAME-VENUE XVLeg for the other
+    outcome. It is the guarantee's last line (owner directive 2026-08-08:
+    "guaranteed needs to be guaranteed"): if the cross-venue closer cannot
+    fill even paying up, the position is RELOCKED on the first leg's own
+    venue — a complete set at a small bounded cost — instead of held naked
+    to settlement, which is how this sleeve went 1-9.
     """
     cost = cross_venue_cost(legs)
     profit_per_set = round(1.0 - cost, 4)
@@ -279,9 +287,12 @@ def execute_cross_venue(*, event: str, legs: list[XVLeg], max_sets: int,
         res.paid, res.profit = cost, round(sets * profit_per_set, 4)
         return res
 
-    # Non-atomic venue first (anything that isn't the FOK closer).
-    ordered = sorted(legs, key=lambda l: getattr(l.adapter, "name", "")
-                     == "polymarket-us")
+    # Scarce book first: the thin side is the one that vanishes; the deep
+    # side rarely misses as the closer. Equal depth falls back to the
+    # atomicity ordering (PMUS FOK last).
+    ordered = sorted(legs, key=lambda l: (float(l.size),
+                                          getattr(l.adapter, "name", "")
+                                          == "polymarket-us"))
     first, closer = ordered[0], ordered[1]
 
     r1 = {**_xv_place(first, first.price, sets), "token": first.token}
@@ -300,34 +311,67 @@ def execute_cross_venue(*, event: str, legs: list[XVLeg], max_sets: int,
                     event, got, sets)
         res.sets = sets = got
 
-    r2 = {**_xv_place(closer, closer.price, sets), "token": closer.token}
-    res.orders.append(r2)
-    if r2.get("ok") and float(r2.get("count") or 0) >= sets:
-        res.legs_filled = 2
-        px2 = float(r2.get("price") or closer.price)
-        res.paid = round(res.paid + px2 + closer.fee(), 4)
-        res.ok, res.status = True, "complete"
-        res.profit = round(sets * (1.0 - res.paid), 4)
-        return res
-
-    # Completion: one capped retry. Holding first-leg contracts without the
-    # closer is a directional bet nobody chose.
+    # Closer: escalate price, filling only the REMAINDER each attempt (a
+    # partial first attempt plus a full-size retry used to overfill).
     ceiling = min(round(closer.price + max_completion_slip, 2), 0.99)
-    r3 = {**_xv_place(closer, ceiling, sets), "token": closer.token}
-    res.orders.append(r3)
-    if r3.get("ok") and float(r3.get("count") or 0) >= sets:
+    filled2, paid2 = 0, 0.0
+    for px in (closer.price, ceiling):
+        need = sets - filled2
+        if need <= 0:
+            break
+        r = {**_xv_place(closer, px, need), "token": closer.token}
+        res.orders.append(r)
+        g = int(float(r.get("count") or 0)) if r.get("ok") else 0
+        if g > 0:
+            filled2 += g
+            paid2 += g * (float(r.get("price") or px) + closer.fee(px))
+    if filled2 >= sets:
         res.legs_filled = 2
-        res.paid = round(res.paid + ceiling + closer.fee(ceiling), 4)
-        res.ok, res.status = True, "completed_with_slip"
+        res.paid = round(res.paid + paid2 / sets, 4)
+        res.ok = True
+        res.status = ("complete" if len(res.orders) == 2
+                      else "completed_with_slip")
         res.profit = round(sets * (1.0 - res.paid), 4)
         if res.profit < 0:
             log.warning("%s: cross-venue completed at %.4f/set loss — bounded "
                         "and deliberate", event, -res.profit)
         return res
 
+    # RELOCK: the cross-venue closer is gone. Buy the other outcome on the
+    # FIRST leg's own venue — a complete (single-venue) set at a bounded
+    # cost, typically the spread. Never a naked hold by choice.
+    need = sets - filled2
+    comp = (complements or {}).get(first.token)
+    if comp is not None:
+        book = None
+        try:
+            book = comp.adapter.get_book(comp.token, comp.token)
+        except Exception:  # noqa: BLE001
+            book = None
+        ask = (book.asks[0].price if book is not None and book.asks
+               else comp.price)
+        relock_px = min(round(ask + 0.03, 2), 0.99)
+        r4 = {**_xv_place(comp, relock_px, need), "token": comp.token}
+        res.orders.append(r4)
+        g4 = int(float(r4.get("count") or 0)) if r4.get("ok") else 0
+        if g4 >= need:
+            res.legs_filled = 2
+            # Conservative blend: naked-turned-relocked sets pay out $1
+            # like any set; cost = first leg + (closer fills + relock).
+            total_cost = (sets * (px1 + first.fee()) + paid2
+                          + g4 * (relock_px + comp.fee(relock_px)))
+            res.paid = round(total_cost / sets, 4)
+            res.ok, res.status = True, "relocked_same_venue"
+            res.profit = round(sets * 1.0 - total_cost, 4)
+            log.warning("%s: RELOCKED %d set(s) on %s at %.2f — bounded "
+                        "%.4f net, no exposure", event, g4,
+                        getattr(comp.adapter, "name", "?"), relock_px,
+                        res.profit)
+            return res
+
     res.status = "INCOMPLETE_EXPOSED"
     res.exposed = [f"{getattr(first.adapter, 'name', '?')}:{first.outcome}"
-                   f" x{sets}"]
-    log.error("%s: EXPOSED — hold %s without its %s complement. A human "
-              "decision is required.", event, res.exposed, closer.outcome)
+                   f" x{sets - filled2}"]
+    log.error("%s: EXPOSED — hold %s without a complement anywhere. "
+              "Arb fires are frozen until reviewed.", event, res.exposed)
     return res

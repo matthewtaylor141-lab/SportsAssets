@@ -126,3 +126,89 @@ def test_feed_team_resolution_joins_the_venues():
     assert _xv_feed_team("[h1] Los Angeles Lakers", _Ev) is None, "segments out"
     assert _xv_feed_team("Over 210.5", _Ev) is None, "totals are not teams"
     assert _xv_feed_team("Draw", _Ev) is None
+
+
+# ── Relock guarantee (owner directive 2026-08-08: guaranteed means
+#    guaranteed — a missed closer relocks on the first venue, never a
+#    naked hold) ─────────────────────────────────────────────────────────
+
+
+class _BookVenue(_Venue):
+    """Venue that also serves a book for the relock re-price."""
+
+    def __init__(self, name, ask=0.61, **kw):
+        super().__init__(name, **kw)
+        self._ask = ask
+
+    def get_book(self, market_id, ticker):
+        from edge.venues.base import BookLevel, MarketBook
+        import time as _t
+        return MarketBook(venue=self.name, market_id=market_id,
+                          outcome_id=ticker, bids=[],
+                          asks=[BookLevel(self._ask, 50)], ts=_t.time())
+
+
+def test_missed_closer_relocks_on_the_first_venue():
+    """Closer misses at price AND at the ceiling: the same-venue
+    complement completes a settled set at a bounded cost instead of a
+    naked hold."""
+    pm = _Venue("polymarket-us", fills=[0, 0])
+    ka = _BookVenue("kalshi", ask=0.61, fee=0.07)
+    legs = [XVLeg(adapter=pm, token="pm-tok", outcome="Lakers",
+                  price=0.55, size=50),
+            XVLeg(adapter=ka, token="KXTOK-CEL", outcome="Celtics",
+                  price=0.40, size=50)]
+    comp = XVLeg(adapter=ka, token="KXTOK-LAK", outcome="Lakers",
+                 price=0.60, size=50)
+    res = execute_cross_venue(event="e", legs=legs, max_sets=1,
+                              dry_run=False,
+                              complements={"KXTOK-CEL": comp})
+    assert res.ok and res.status == "relocked_same_venue"
+    assert res.legs_filled == 2
+    # The relock order went to the complement token on the FIRST venue.
+    assert ka.calls[-1]["token"] == "KXTOK-LAK"
+    assert ka.calls[-1]["price"] <= 0.99
+    # Bounded: cost ≈ 0.40 + fee + 0.64 -> a few cents over $1, never a
+    # 40c naked coin-flip.
+    assert -0.10 < res.profit <= 0.05
+
+
+def test_partial_closer_retry_fills_only_the_remainder():
+    """A partial first closer attempt plus a full-size retry used to
+    OVERFILL — the escalation must request only what is still open."""
+    pm = _Venue("polymarket-us", fills=[2, 1])
+    ka = _Venue("kalshi", fee=0.07)
+    legs = [XVLeg(adapter=pm, token="pm-tok", outcome="A",
+                  price=0.55, size=50),
+            XVLeg(adapter=ka, token="KXTOK", outcome="B",
+                  price=0.40, size=50)]
+    res = execute_cross_venue(event="e", legs=legs, max_sets=3,
+                              dry_run=False)
+    assert res.ok and res.legs_filled == 2
+    assert pm.calls[0]["count"] == 3 and pm.calls[1]["count"] == 1
+    assert res.status == "completed_with_slip"
+
+
+def test_relock_impossible_is_exposed_and_loud():
+    pm = _Venue("polymarket-us", fills=[0, 0])
+    ka = _Venue("kalshi", fee=0.07)
+    legs = [XVLeg(adapter=pm, token="pm-tok", outcome="A",
+                  price=0.55, size=50),
+            XVLeg(adapter=ka, token="KXTOK", outcome="B",
+                  price=0.40, size=50)]
+    res = execute_cross_venue(event="e", legs=legs, max_sets=1,
+                              dry_run=False, complements={})
+    assert not res.ok and res.status == "INCOMPLETE_EXPOSED"
+
+
+def test_scarce_book_goes_first():
+    pm = _Venue("polymarket-us")
+    ka = _Venue("kalshi", fee=0.07)
+    legs = [XVLeg(adapter=pm, token="pm-tok", outcome="A",
+                  price=0.55, size=5),          # thin PM book
+            XVLeg(adapter=ka, token="KXTOK", outcome="B",
+                  price=0.40, size=500)]
+    res = execute_cross_venue(event="e", legs=legs, max_sets=3,
+                              dry_run=False)
+    assert res.orders[0]["token"] == "pm-tok", "thin side fires first"
+    assert res.ok

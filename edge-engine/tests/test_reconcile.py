@@ -59,11 +59,12 @@ def test_the_per_market_cap_holds_again_after_reconciliation(tmp_path):
     # Fresh ledger: the market looks untouched and full room is available.
     assert risk.market_open_cost(mkey) == 0.0
 
-    # The venue says otherwise — we already hold a full ticket of it.
-    v = FakeVenue([_trade("t1", "k-mickin-gte6", 12.0, 0.25)])
+    # The venue says otherwise — we already hold a cap-filling position
+    # (120 x 0.25 = $30, the per-market cap at the $10 ticket).
+    v = FakeVenue([_trade("t1", "k-mickin-gte6", 120.0, 0.25)])
     reconcile_positions(v, led, mode="LIVE_BETA")
 
-    assert risk.market_open_cost(mkey) == pytest.approx(3.0)
+    assert risk.market_open_cost(mkey) == pytest.approx(30.0)
     assert risk.market_open_cost(mkey) >= risk.caps.per_market
 
 

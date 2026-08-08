@@ -315,12 +315,15 @@ arbitrage:
   # min_profit is 2c (vs 1c same-venue): the extra cent pays for the
   # cross-venue execution gap risk.
   cross_venue:
-    # PAUSED (owner decision 2026-08-08, via AskUserQuestion): the sleeve
-    # is 1-9 lifetime, -$19.80, 0-3 again today — the second leg is not
-    # completing and each "arb" ends as a one-sided position at a bad
-    # price. Re-enable ONLY after the leg-completion failure is diagnosed
-    # and a paired fill is proven again.
-    enabled: false
+    # RE-ENABLED 2026-08-08 (owner directive: "guaranteed needs to be
+    # guaranteed, then fill the most you can") with the hardened
+    # execution path after the 1-9 diagnosis: the closer escalates to a
+    # price ceiling filling only the remainder; if it still misses, the
+    # position RELOCKS on the first leg's own venue (complete set,
+    # bounded cost) instead of holding naked to settlement; a true
+    # exposure (relock impossible too) freezes all arb fires for 6h.
+    # Leg order is scarce-book-first.
+    enabled: true
     min_profit: 0.02
     # TOTAL pair cost, BOTH legs together — i.e. $5 per side (owner
     # directive 2026-08-05). max_sets = max_usd / fee-loaded cost_per_set
@@ -328,7 +331,10 @@ arbitrage:
     # the whole locked pair, never $10 per leg.
     max_usd: 10.0             # dollar cap per opportunity, both legs
     max_books_per_cycle: 2
-    leagues: [nba, wnba, nhl, mlb]
+    # Tennis added 2026-08-08 with the relock hardening: two-outcome
+    # matches, both venues list them (KXATP/KXWTA + Challengers), and
+    # the in-season surface is where "fill the most you can" lives.
+    leagues: [nba, wnba, nhl, mlb, nfl, atp, wta]
 
 # Entry-price bands quarantined from LIVE money on OUR OWN settled
 # evidence (they keep paper-logging — study never stops). First entry

@@ -135,6 +135,14 @@ class XVWatch:
                     best, best_cost = [l1, l2], cost
         if best is None:
             return
+        # Exposure freeze (owner directive 2026-08-08): one naked hold is
+        # a diagnosis event, not a cadence — no further arb fires until
+        # the freeze expires or a human clears the state.
+        frozen = self._ledger.get_state("xv_exposed_block") or {}
+        if float(frozen.get("until", 0)) > time.time():
+            self.stats["blocked_exposed"] = \
+                self.stats.get("blocked_exposed", 0) + 1
+            return
         self.stats["pairs"] += 1
         profit = round(1.0 - best_cost, 4)
         self.stats["best_gap_c"] = max(self.stats["best_gap_c"],
@@ -165,11 +173,21 @@ class XVWatch:
             # passed the check and each bought the full set.
             if not self._ledger.claim_event(claim, event_key, "xv"):
                 return
+        # Same-venue complements: the other outcome's leg on each chosen
+        # leg's OWN venue — the relock path's raw material.
+        l1, l2 = best
+        v1 = getattr(l1.adapter, "name", "")
+        v2 = getattr(l2.adapter, "name", "")
+        comps = {}
+        if fresh2.get(v1) is not None:
+            comps[l1.token] = fresh2[v1]
+        if fresh1.get(v2) is not None:
+            comps[l2.token] = fresh1[v2]
         res = execute_cross_venue(
             event=claim, legs=best,
             max_sets=max(1, int(min(self.max_usd, self.day_usd - spent)
                                 / best_cost)),
-            dry_run=not live)
+            dry_run=not live, complements=comps)
         self.stats["fired"] += 1
         self.stats["last_hit"] = {"event": entry["label"],
                                   "profit_per_set": profit,
@@ -194,6 +212,15 @@ class XVWatch:
                                        {"ts": time.time()})
         if res.status == "INCOMPLETE_EXPOSED":
             self.stats["exposed"] += 1
+            # Self-freeze for 6h: an exposure means both the cross-venue
+            # closer AND the same-venue relock failed — something is wrong
+            # with the pair identity or the books, and firing again into
+            # the same condition is how 1-9 happened.
+            self._ledger.set_state("xv_exposed_block", {
+                "until": time.time() + 6 * 3600,
+                "event": entry["label"], "at": time.time()})
+        if res.status == "relocked_same_venue":
+            self.stats["relocked"] = self.stats.get("relocked", 0) + 1
         legs_by_token = {l.token: l for l in best}
         filled_cost = 0.0
         for o in res.orders:

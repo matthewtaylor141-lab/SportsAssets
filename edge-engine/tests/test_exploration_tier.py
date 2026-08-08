@@ -105,8 +105,10 @@ def test_exploration_is_capped_at_a_share_of_the_day(tmp_path):
 
 
 def test_a_spent_exploration_budget_stops_exploring_not_trading(tmp_path):
-    led, risk = _rig(tmp_path, bankroll=100.0)   # $25 exploration budget
-    for _ in range(30):
+    # Day floor is 500 at the $10 ticket (2026-08-08), so the 25%
+    # exploration budget is $125 — spend past it.
+    led, risk = _rig(tmp_path, bankroll=100.0)
+    for _ in range(130):
         _fill(led, 1.0, "exploration")
     approved, why = risk.approve("polymarket-us", "m1", "ev1", 1.0,
                                  tier="exploration")
