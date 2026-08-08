@@ -213,6 +213,18 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
     day = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     spend = ledger.get_state("kcopy_day") or {}
     spent = float(spend.get("spent", 0.0)) if spend.get("day") == day else 0.0
+    # Day-cumulative funnel counters. The per-cycle stats reset every
+    # sweep, so a probe that lands on a quiet cycle reads all zeros and
+    # cannot say whether the EVENING went quiet or broke — these persist
+    # with the day spend and ride the heartbeat.
+    _dc = ({k: int(spend.get(k, 0))
+            for k in ("rested", "maker_fills", "taker_fills")}
+           if spend.get("day") == day
+           else {"rested": 0, "maker_fills": 0, "taker_fills": 0})
+
+    def _save_day() -> None:
+        ledger.set_state("kcopy_day",
+                         {"day": day, "spent": round(spent, 2), **_dc})
 
     # Maker fills land ASYNCHRONOUSLY (sync_kalshi_fills records the fill
     # and enqueues an event); the sweep drains the queue first so claims,
@@ -227,6 +239,7 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         stats["spent"] = round(stats["spent"] + cost, 2)
         stats["copied"] += 1
         stats["copied_maker"] = stats.get("copied_maker", 0) + 1
+        _dc["maker_fills"] += 1
         note_fill(sides, ev.get("ticker") or "", px, int(qty))
         if on_copied is not None:
             try:
@@ -236,7 +249,7 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 stats["claim_post_fail"] = \
                     stats.get("claim_post_fail", 0) + 1
     if q.get("events"):
-        ledger.set_state("kcopy_day", {"day": day, "spent": round(spent, 2)})
+        _save_day()
         ledger.set_state("kcopy_fill_events", {"events": []})
 
     series = _series_map()
@@ -401,6 +414,8 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                                                 "order_id": rr["order_id"]})
                     stats["maker_rested"] = \
                         stats.get("maker_rested", 0) + 1
+                    _dc["rested"] += 1
+                    _save_day()
                     log.warning("KALSHI MAKER REST %s (%s): %s x%d @ %.2f "
                                 "(his %.3f, ask %.2f)", outcome,
                                 row.get("whale"), target_ticker, mcount,
@@ -486,8 +501,8 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             cost = round(filled * ask, 2)
             spent += cost
             stats["spent"] = round(stats["spent"] + cost, 2)
-            ledger.set_state("kcopy_day", {"day": day,
-                                           "spent": round(spent, 2)})
+            _dc["taker_fills"] += 1
+            _save_day()
             ledger.record_fill(
                 fill_uid=f"kcopy-{claim}-{int(time.time())}",
                 venue="kalshi", market_key=f"kalshi:{target_ticker}",
@@ -501,4 +516,5 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             log.warning("KALSHI COPY %s (%s): %s x%d @ %.2f (his %.3f)",
                         outcome, row.get("whale"), target_ticker, filled,
                         ask, his_price)
+    stats["day"] = {"spent": round(spent, 2), **_dc}
     return stats
