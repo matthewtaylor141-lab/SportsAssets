@@ -596,8 +596,23 @@ def sync_kalshi_fills(adapter, ledger: Ledger, mode: str) -> int:
                 ts=float(f.get("created_time_ts") or 0) or None,
                 fee=round(fee, 4), league=ctx.get("league"),
                 mode=mode, decision={**ctx, "source": "fill_sync", "raw": f},
+                category=ctx.get("category"),
             )
             n += int(r["applied"])
+            # A resting MAKER COPY that filled: burn the copy's once-ever
+            # claim NOW (idempotent with the fill dedupe) and enqueue the
+            # event — the copy sweep drains it for day-spend, cross-side
+            # bookkeeping and the cross-venue claim-back POST.
+            if r["applied"] and ctx.get("kcopy_claim"):
+                ledger.set_state(ctx["kcopy_claim"],
+                                 {"ts": time.time(), "status": "maker_fill",
+                                  "filled": qty})
+                evq = ledger.get_state("kcopy_fill_events") or {}
+                evs = list(evq.get("events") or [])
+                evs.append({"ticker": f.get("ticker"), "qty": qty,
+                            "price": price, "asset": ctx.get("asset"),
+                            "whale": ctx.get("whale")})
+                ledger.set_state("kcopy_fill_events", {"events": evs})
         return n
     except (requests.RequestException, ValueError, RuntimeError) as exc:
         log.warning("kalshi fill sync failed: %s", exc)

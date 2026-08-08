@@ -192,8 +192,10 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
     stats = {"whale_positions": 0, "league_listed": 0, "matched": 0,
              "priced_in_tolerance": 0, "copied": 0, "spent": 0.0,
              "skipped_claimed": 0, "best_ask_gap_c": -99.0}
-    if not identities:
-        return stats
+    # NOTE: an empty identities list does NOT return early — the maker
+    # fill-event queue below must drain even when the whale feed is
+    # momentarily empty, or async fills would wait for whale activity
+    # to be bookkept.
     if live:
         from edge.shadow.kalshi_guard import live_blocked
 
@@ -211,6 +213,31 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
     day = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     spend = ledger.get_state("kcopy_day") or {}
     spent = float(spend.get("spent", 0.0)) if spend.get("day") == day else 0.0
+
+    # Maker fills land ASYNCHRONOUSLY (sync_kalshi_fills records the fill
+    # and enqueues an event); the sweep drains the queue first so claims,
+    # day spend, cross-side bookkeeping and the platform claim-back stay
+    # in copy-sleeve hands and each fill is bookkept exactly once.
+    q = ledger.get_state("kcopy_fill_events") or {}
+    for ev in (q.get("events") or []):
+        qty = float(ev.get("qty") or 0)
+        px = float(ev.get("price") or 0)
+        cost = round(qty * px, 2)
+        spent += cost
+        stats["spent"] = round(stats["spent"] + cost, 2)
+        stats["copied"] += 1
+        stats["copied_maker"] = stats.get("copied_maker", 0) + 1
+        note_fill(sides, ev.get("ticker") or "", px, int(qty))
+        if on_copied is not None:
+            try:
+                on_copied(str(ev.get("asset") or ""),
+                          ev.get("ticker") or "", ev.get("whale") or "")
+            except Exception:  # noqa: BLE001
+                stats["claim_post_fail"] = \
+                    stats.get("claim_post_fail", 0) + 1
+    if q.get("events"):
+        ledger.set_state("kcopy_day", {"day": day, "spent": round(spent, 2)})
+        ledger.set_state("kcopy_fill_events", {"events": []})
 
     series = _series_map()
     discovered: dict = {}      # league -> {game_key: VenueMarket}
@@ -318,7 +345,67 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         stats["best_ask_gap_c"] = max(stats["best_ask_gap_c"],
                                       round((limit - eff) * 100, 2))
         if eff > limit:
-            continue        # outside his price +2% fee-loaded: not a copy
+            # Taker cannot pay the fee inside his+2% — at mid prices the
+            # 1.75c fee consumed the whole tolerance and priced_in_tolerance
+            # sat at 0 cycle after cycle (owner: "more fires on Kalshi",
+            # 2026-08-08). MAKER pays NO fee: rest a bid at
+            # min(his+2%, ask - tick) under the venue's own 15-minute
+            # expiry and let the queue come to us. Restricted to
+            # KALSHI-FIRST assets (structurally ours — the PMUS executor
+            # defers them) young enough that the resting window ends
+            # before the PMUS sweep's one-hour reclaim can overlap it:
+            # no cross-venue double-copy is possible by construction.
+            from edge.shadow.copy_sports import kalshi_first as _kf
+            young = (now - entered) < (max_age_s - 900)
+            if (live and _kf(str(row.get("asset") or "")) and young
+                    and ask >= his_price * COLLAPSE_FLOOR):
+                rest_key = f"kcopy_rest:{claim}"
+                rest = ledger.get_state(rest_key) or {}
+                if float(rest.get("until", 0)) >= now:
+                    stats["maker_resting"] = \
+                        stats.get("maker_resting", 0) + 1
+                    continue
+                per_m = PER_COPY_USD.get((row.get("whale") or "").lower(),
+                                         PER_COPY_DEFAULT)
+                if spent + per_m > day_usd:
+                    continue
+                plan = kalshi.plan_maker_order(limit, ask, 0.0, 1.0)
+                # (edge 0 < threshold 1: plan can only return a maker rest)
+                if plan is None or plan[1]:
+                    continue
+                mpx = plan[0]
+                mcount = int(per_m / mpx)
+                if mcount >= 1:
+                    mcount = cross_side_cap(sides, target_ticker, mpx,
+                                            mcount, fee_per_contract=0.0)
+                if mcount < 1:
+                    continue
+                rr = kalshi.place_order(target_ticker, mpx, mcount,
+                                        client_order_id=str(uuid.uuid4()),
+                                        taker=False)
+                if rr.get("ok") and rr.get("order_id"):
+                    # Context parked for sync_kalshi_fills: an async fill
+                    # becomes a claimed, categorized copy; the next sweep
+                    # drains the event queue for spend/claim-back.
+                    ledger.set_state(
+                        f"kalshi_order:{rr['order_id']}",
+                        {"market_key": f"kalshi:{target_ticker}",
+                         "league": league, "category": "kalshi_copy",
+                         "kalshi_copy": True, "maker": True,
+                         "kcopy_claim": claim,
+                         "asset": str(row.get("asset") or ""),
+                         "whale": row.get("whale") or "",
+                         "his_price": his_price, "limit": limit,
+                         "pm_slug": slug, "outcome": outcome})
+                    ledger.set_state(rest_key, {"until": now + 900,
+                                                "order_id": rr["order_id"]})
+                    stats["maker_rested"] = \
+                        stats.get("maker_rested", 0) + 1
+                    log.warning("KALSHI MAKER REST %s (%s): %s x%d @ %.2f "
+                                "(his %.3f, ask %.2f)", outcome,
+                                row.get("whale"), target_ticker, mcount,
+                                mpx, his_price, ask)
+            continue        # outside his price +2% fee-loaded: no taker copy
         if ask < his_price * COLLAPSE_FLOOR:
             # Far below his entry = the market learned something he
             # didn't know. That is not a discount on his edge.

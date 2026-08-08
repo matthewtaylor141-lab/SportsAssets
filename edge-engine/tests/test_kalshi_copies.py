@@ -326,3 +326,84 @@ def test_claim_post_failure_never_blocks_the_copy():
                on_copied=boom)
     assert st["copied"] == 1 and st.get("claim_post_fail") == 1
     assert ka.orders, "the order itself must have been placed"
+
+
+# ── Maker-first copies (owner directive 2026-08-08: "more fires on
+#    Kalshi"): when the taker fee prices a copy out of his+2%, rest a
+#    fee-free maker bid instead of walking away ─────────────────────────
+
+
+class _MakerKalshi(_Kalshi):
+    """Adds the maker planning surface the real adapter exposes."""
+
+    def plan_maker_order(self, limit_price, best_ask, edge, threshold,
+                         market_ticker=None, edge_is_fee_net=False):
+        px = round(min(limit_price, best_ask - 0.01), 2)
+        if px >= 0.01 and px < best_ask:
+            return px, False
+        return None
+
+    def place_order(self, ticker, price, count, client_order_id="",
+                    taker=True):
+        self.orders.append((ticker, price, count, taker))
+        return {"ok": True, "count": count if taker else 0, "price": price,
+                "status": "filled" if taker else "resting",
+                "order_id": f"ord-{len(self.orders)}"}
+
+
+def test_taker_priced_out_rests_a_fee_free_maker_on_kalshi_first():
+    """At his 0.50 the limit is 0.51; ask 0.51 + fee ≈ 0.527 > limit, so
+    the taker path refuses — the maker path must rest at the limit (one
+    tick inside the ask), GTC, without burning the once-ever claim."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _MakerKalshi(0.51)
+    row = {**_ROW, "asset": _asset(True)}
+    st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
+    assert st["copied"] == 0                       # nothing filled yet
+    assert st.get("maker_rested") == 1
+    # HRH clips $5 (default tier): floor(5/0.50) = 10 contracts, maker.
+    assert ka.orders == [("T-DAL", 0.50, 10, False)]
+    claim = "kcopy:wnba-dal-chi-2026-08-04:Dallas Wings"
+    assert not led.get_state(claim), "claim burns on FILL, not on rest"
+    # Second sweep while the rest is live: no duplicate order.
+    st2 = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
+    assert st2.get("maker_resting") == 1
+    assert len(ka.orders) == 1
+
+
+def test_pm_first_assets_do_not_rest_makers():
+    """The venue split still governs: a PM-first asset priced out as
+    taker walks away — the PMUS leg owns it."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _MakerKalshi(0.51)
+    st = sweep(kalshi=ka, ledger=led,
+               identities=[{**_ROW, "asset": _asset(False)}], live=True)
+    assert not ka.orders and not st.get("maker_rested")
+
+
+def test_positions_near_the_sweep_reclaim_never_rest():
+    """A rest whose 15-minute window could overlap the PMUS sweep's
+    one-hour reclaim risks a cross-venue double copy — refused."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _MakerKalshi(0.51)
+    old = {**_ROW, "asset": _asset(True),
+           "entered_ts": time.time() - (45 * 60 - 300)}   # 40 min old
+    st = sweep(kalshi=ka, ledger=led, identities=[old], live=True)
+    assert not ka.orders and not st.get("maker_rested")
+
+
+def test_async_maker_fill_is_drained_with_claim_and_spend():
+    """sync_kalshi_fills enqueues the fill event; the next sweep drains
+    it: copied counted, day spend recorded, position claimed back."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    led.set_state("kcopy_fill_events", {"events": [
+        {"ticker": "KXWNBAGAME-26AUG04DALCHI-DAL", "qty": 20.0,
+         "price": 0.50, "asset": "42", "whale": "RN1"}]})
+    claims = []
+    ka = _MakerKalshi(0.51)
+    st = sweep(kalshi=ka, ledger=led, identities=[], live=True,
+               on_copied=lambda a, t, w: claims.append((a, t, w)))
+    assert st["copied"] == 1 and st.get("copied_maker") == 1
+    assert st["spent"] == 10.0
+    assert claims == [("42", "KXWNBAGAME-26AUG04DALCHI-DAL", "RN1")]
+    assert (led.get_state("kcopy_fill_events") or {}).get("events") == []
