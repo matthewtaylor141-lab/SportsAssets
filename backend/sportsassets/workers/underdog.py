@@ -161,6 +161,30 @@ async def _entry_sweep(pool) -> dict:
     if active_venue() != "polymarket-us":
         stats["off"] = "venue not armed"
         return stats
+    # KALSHI-LEG BACKFILL (owner 2026-08-08: "make sure we aren't
+    # missing any"): every OPEN $1 position this sleeve holds on
+    # Polymarket must have its Kalshi task queued — including games
+    # entered before the Kalshi leg existed. Runs every sweep, so the
+    # guarantee is a standing invariant, not a one-shot migration;
+    # UNIQUE(game_slug) makes it free once covered. The engine's own
+    # band gate decides whether a late entry still prices as a dog.
+    backfilled = await pool.fetch(
+        """
+        INSERT INTO kud_queue (game_slug, league, dog_outcome,
+                               other_outcome, per_fill_usd, take_profit)
+        SELECT m.slug, split_part(m.slug, '-', 1), mt.outcome,
+               mt2.outcome, $1, $2
+        FROM live_orders lo
+        JOIN market_tokens mt ON mt.token_id = lo.asset
+        JOIN markets m ON m.condition_id = mt.condition_id
+        JOIN market_tokens mt2 ON mt2.condition_id = m.condition_id
+                               AND mt2.token_id <> mt.token_id
+        WHERE lo.whale_username = 'underdog' AND lo.status = 'filled'
+        ON CONFLICT (game_slug) DO NOTHING
+        RETURNING id
+        """, PER_FILL_USD, TAKE_PROFIT)
+    if backfilled:
+        stats["kud_backfilled"] = len(backfilled)
     day_spent = float(await pool.fetchval(
         "SELECT COALESCE(sum(filled_usd), 0) FROM live_orders "
         "WHERE whale_username = 'underdog' "

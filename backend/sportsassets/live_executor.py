@@ -573,7 +573,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             VALUES ($1,$2,$3,$4,'BUY',$5,$6,$7,$8,$9,'submitting',$10)
             ON CONFLICT (trade_id) DO UPDATE
               SET status='submitting', error=NULL
-              WHERE live_orders.status = 'rejected'
+              WHERE live_orders.status IN ('rejected', 'unfilled', 'error')
             RETURNING id
             """,
             payload.get("id"), payload.get("whale_username"), str(payload["asset"]),

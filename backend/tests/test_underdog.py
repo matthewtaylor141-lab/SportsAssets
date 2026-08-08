@@ -68,6 +68,18 @@ def test_kud_enqueue_rides_the_entry_sweep():
         "NON-INTERFERENCE and one-entry-per-game")
 
 
+def test_kud_backfill_covers_every_open_pmus_dog():
+    """Owner 2026-08-08: 'make sure we aren't missing any.' Every sweep
+    re-asserts that each OPEN $1 Polymarket position has its Kalshi
+    task — a standing invariant, not a one-shot migration — and the
+    failed-copy recovery net retries unfilled/errored copies."""
+    src = open("sportsassets/workers/underdog.py").read()
+    assert src.count("INSERT INTO kud_queue") == 2   # backfill + entry
+    assert "lo.whale_username = 'underdog' AND lo.status = 'filled'" in src
+    sweep = open("sportsassets/workers/copy_sweep.py").read()
+    assert "('rejected', 'unfilled', 'error')" in sweep
+
+
 def test_entries_fire_only_in_the_t_minus_five_window():
     from sportsassets.workers.underdog import entry_window
 
