@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -769,6 +770,25 @@ _archive_cache: dict[str, Any] = {"ts": 0.0, "data": None}
 
 _archived_ids: set[str] = set()
 
+
+def _malloc_trim() -> None:
+    """Return freed heap pages to the OS after a heavy parse. glibc keeps
+    them in per-thread malloc arenas otherwise — the ratchet that made
+    RSS only ever climb (995 MB -> 1.9 GB against a 2 GB kill line)."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:  # noqa: BLE001 - non-glibc platforms simply skip
+        pass
+
+
+def _i(s: Any) -> Any:
+    """Intern archive strings: type tags repeat 172k times and market
+    slugs repeat per trade of the same market; one shared object each
+    instead of a fresh parse-copy per row."""
+    return sys.intern(s) if isinstance(s, str) else s
+
+
 def _slim(a: dict) -> dict:
     """Reduce an archived activity to exactly the fields build() reads.
 
@@ -781,28 +801,61 @@ def _slim(a: dict) -> dict:
     miss.
     """
     ts = _act_ts(a)
-    out: dict = {"id": a.get("id"), "type": a.get("type"),
+    out: dict = {"id": _i(a.get("id")), "type": _i(a.get("type")),
                  "timestamp": ts or None}
     if a.get("type") == "ACTIVITY_TYPE_TRADE":
         t = a.get("trade") or {}
-        out["trade"] = {"marketSlug": t.get("marketSlug"),
+        # side/realizedPnl: the sell-vs-buy split (cash-out accounting,
+        # owner directive 2026-08-08). Dropping them here silently turned
+        # every ARCHIVED sell back into a buy once it scrolled out of the
+        # venue's fresh window — wrong VWAP, lost cash-out P&L.
+        out["trade"] = {"marketSlug": _i(t.get("marketSlug")),
                         "qty": t.get("qty"), "price": t.get("price"),
+                        "side": _i(t.get("side")),
+                        "realizedPnl": t.get("realizedPnl"),
                         "createTime": _act_ts(t) or None}
     elif a.get("type") == "ACTIVITY_TYPE_POSITION_RESOLUTION":
         r = a.get("positionResolution") or {}
         b = r.get("beforePosition") or {}
         af = r.get("afterPosition") or {}
         out["positionResolution"] = {
-            "marketSlug": r.get("marketSlug"),
+            "marketSlug": _i(r.get("marketSlug")),
             "beforePosition": {
                 "realized": b.get("realized"), "cost": b.get("cost"),
                 "marketMetadata": {
-                    "title": (b.get("marketMetadata") or {}).get("title")}},
+                    "title": _i((b.get("marketMetadata") or {}).get("title"))}},
             "afterPosition": {
                 "realized": af.get("realized"),
                 "marketMetadata": {
-                    "title": (af.get("marketMetadata") or {}).get("title")}},
+                    "title": _i((af.get("marketMetadata") or {}).get("title"))}},
         }
+    return out
+
+
+async def _hydrate_all(pool: Any) -> list[dict]:
+    """Stream the archive out of Postgres in id-keyed chunks, slimming
+    each chunk before fetching the next. The single all-rows fetch held
+    ~172k FULL venue payloads in RAM at once — a transient spike measured
+    in hundreds of MB, fired on every cold boot and every 15s retry,
+    against a 2 GB kill line. Chunks cap the high-water at ~10k payloads,
+    and the trim hands the parse arenas back to the OS."""
+    out: list[dict] = []
+    last = ""
+    while True:
+        rows = await pool.fetch(
+            "SELECT id, payload FROM pmus_activity_archive "
+            "WHERE id > $1 ORDER BY id LIMIT 10000", last)
+        if not rows:
+            break
+        last = rows[-1]["id"]
+
+        def _parse(chunk: Any = rows) -> list[dict]:
+            return [_slim(json.loads(r["payload"])
+                          if isinstance(r["payload"], str) else r["payload"])
+                    for r in chunk]
+
+        out.extend(await asyncio.to_thread(_parse))
+    _malloc_trim()
     return out
 
 
@@ -826,16 +879,7 @@ def _ensure_hydrate_retry() -> None:
             await asyncio.sleep(15)
             try:
                 pool = await get_pool()
-                stored = await pool.fetch(
-                    "SELECT payload FROM pmus_activity_archive")
-
-                def _parse() -> list[dict]:
-                    return [_slim(json.loads(r["payload"])
-                                  if isinstance(r["payload"], str)
-                                  else r["payload"])
-                            for r in stored]
-
-                parsed = await asyncio.to_thread(_parse)
+                parsed = await _hydrate_all(pool)
                 _archive_cache["data"] = parsed
                 _archive_cache["ts"] = time.time()
                 logging.getLogger(__name__).warning(
@@ -912,28 +956,18 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
         # background task retries every 15s until the history is back, and
         # the request path unions archive+window so the page keeps serving
         # the freshest data meanwhile.
-        stored = None
+        parsed = None
         for wait in (0.0, 1.0, 4.0):
             if wait:
                 await asyncio.sleep(wait)
             try:
-                stored = await pool.fetch(
-                    "SELECT payload FROM pmus_activity_archive")
+                parsed = await _hydrate_all(pool)
                 break
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).exception("archive hydrate retry")
-        if stored is None:
+        if parsed is None:
             _ensure_hydrate_retry()
             return [_slim(a) for _, _, _, a in new]
-
-        def _parse() -> list[dict]:
-            out: list[dict] = []
-            for r in stored:
-                p = r["payload"]
-                out.append(_slim(json.loads(p) if isinstance(p, str) else p))
-            return out
-
-        parsed = await asyncio.to_thread(_parse)
     else:
         # Warm: the cache IS the archive (first-seen versions, exactly what
         # the table holds under ON CONFLICT DO NOTHING), so append only this
@@ -1269,4 +1303,5 @@ async def track_record(since: str | None = None,
     if since is None and max_stake is None:
         _payload_cache["data"] = payload
         _payload_cache["ts"] = time.time()
+    _malloc_trim()
     return payload

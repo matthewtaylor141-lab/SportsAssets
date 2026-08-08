@@ -383,10 +383,13 @@ def test_warm_archive_refresh_appends_without_rereading_the_table(monkeypatch):
     inserted = [r for q, r in pool.execs if isinstance(r, list)]
     assert len(inserted) == 1 and len(inserted[0]) == 1  # only a2 upserted
 
-    # Cold boot (empty in-process cache) DOES hydrate from the table.
+    # Cold boot (empty in-process cache) DOES hydrate from the table —
+    # in id-keyed chunks, never one all-rows fetch.
     monkeypatch.setitem(tr._archive_cache, "data", None)
     asyncio.run(tr._archive_and_union([{"id": "a1"}]))
-    assert any("SELECT payload" in q for q in pool.fetches)
+    assert any("payload FROM pmus_activity_archive" in q for q in pool.fetches)
+    assert all("LIMIT" in q for q in pool.fetches
+               if "payload FROM pmus_activity_archive" in q)
 
 
 def test_failed_hydrate_serves_the_window_and_arms_a_retry(monkeypatch):
@@ -439,6 +442,10 @@ def test_slimmed_activities_build_the_identical_record():
         _trade("aec-mlb-det-ath-2026-08-02", TS_AUG1 + NOON + 200, 2, 0.6),
         _resolution("aec-mlb-det-ath-2026-08-02", TS_AUG2),
         _trade("tsc-atp-x-y-2026-08-02-tg-21pt5", TS_AUG2 + 50, 3, 0.25),
+        # A SELL must survive slimming: dropping side/realizedPnl turned
+        # archived cash-outs back into buys (found live 2026-08-08).
+        _sell("tsc-atp-x-y-2026-08-02-tg-21pt5", TS_AUG2 + 90, 1, 0.30,
+              realized=0.05),
     ]
     # Give the resolution settlement facts + metadata like the venue does.
     acts[2]["positionResolution"].update({
