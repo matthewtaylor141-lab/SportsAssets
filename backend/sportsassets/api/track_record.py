@@ -385,10 +385,12 @@ def build(positions: dict[str, dict], activities: list[dict],
                     _tally_unattributed_day(
                         settled, realized,
                         (res["ts"] if res else None) or entry_ts)
-                # OWNER DIRECTIVE 2026-08-08: the whole account is THE
-                # P&L metric — cohort rows stay tallied for the reports
-                # but are no longer dropped from the displayed record.
-                cohort = _cohort_name(bucket)
+                # OWNER DIRECTIVE 2026-08-08 (final): the headline is the
+                # AI's trading ONLY — engine, copies, underdog sleeve and
+                # their cash-outs. Manual/owner rows are tallied for the
+                # disclosures and the account strip, never displayed as
+                # the record.
+                continue
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
             "cohort": cohort,
@@ -446,7 +448,7 @@ def build(positions: dict[str, dict], activities: list[dict],
                 if bucket is unattributed:
                     _tally_unattributed_day(True, res["realized"],
                                             res["ts"] or entry_ts)
-                cohort = _cohort_name(bucket)
+                continue
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
             "cohort": cohort,
@@ -502,7 +504,7 @@ def build(positions: dict[str, dict], activities: list[dict],
                 if bucket is unattributed:
                     _tally_unattributed_day(True, realized,
                                             s["last_ts"] or entry_ts)
-                cohort = _cohort_name(bucket)
+                continue
         vwap = (e.get("notional", 0) / e["qty"]) if e.get("qty") else None
         rows.append({
             "cohort": cohort,
@@ -571,15 +573,16 @@ def build(positions: dict[str, dict], activities: list[dict],
         d["deployed"] = round(d["deployed"], 2)
         d["pnl"] = round(d["pnl"], 2)
 
-    # OWNER DIRECTIVE 2026-08-08: the whole account IS the record — every
-    # cohort's rows are inside `rows` now, so the account tie-out is the
-    # summary itself, not summary-plus-buckets (adding the buckets back
-    # would double-count every excluded-cohort row).
+    # Account-wide tie-out: AI record + every disclosed exclusion = what
+    # the owner sees in the venue app. Shown as its own strip; never the
+    # headline (owner directive 2026-08-08 final: the headline is the AI).
+    _buckets = [over_limit, unattributed, over_pnl, manual]
     account = {
-        "trades": len(rows),
-        "open": len(rows) - len(settled_rows),
-        "stake": round(deployed, 2),
-        "net_pnl": round(net, 2),
+        "trades": len(rows) + sum(b["count"] for b in _buckets),
+        "open": (len(rows) - len(settled_rows))
+                + sum(b["open"] for b in _buckets),
+        "stake": round(deployed + sum(b["stake"] for b in _buckets), 2),
+        "net_pnl": round(net + sum(b["net_pnl"] for b in _buckets), 2),
     }
     # The AI-only subset survives as a DISCLOSURE — the strategy stays
     # gradable on its own even though the headline is the account.
@@ -600,13 +603,11 @@ def build(positions: dict[str, dict], activities: list[dict],
         "generated_at": time.time(),
         "account": account,
         "record_subset": record_subset,
-        # HEADLINE = the whole account, WINDOWED (owner confirmation
-        # 2026-08-08 evening: "it should be the 314 number" — the venue
-        # app's displayed P&L matches the all-activity-since-Aug-1 total,
-        # NOT the venue's raw cumulative-realized field, which runs ~2x
-        # it and evidently includes history the app does not display).
-        # Every cohort's rows are in these figures — manual, cash-outs,
-        # large positions included.
+        # HEADLINE = the AI's trading only (owner directive 2026-08-08
+        # final): engine + copies + underdog sleeve, with their
+        # cash-outs counted at sale. Manual/owner rows live in the
+        # `account` strip and the disclosures, never these figures —
+        # they swamped deployed/ROI ($17K vs the AI's ~$8K).
         "summary": {
             "trades": len(rows),
             "open": len(rows) - len(settled_rows),

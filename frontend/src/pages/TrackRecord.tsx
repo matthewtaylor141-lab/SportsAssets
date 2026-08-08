@@ -391,7 +391,7 @@ export function TrackRecord() {
         <div className="tr-hero-grid">
           <div className="tr-stat tr-stat-main" onMouseMove={tilt} onMouseLeave={untilt}>
             <span className="tr-sheen" aria-hidden />
-            <div className="tr-stat-label">NET P&amp;L · WHOLE ACCOUNT</div>
+            <div className="tr-stat-label">NET P&amp;L · AI TRADER</div>
             <div className={`tr-stat-value tr-grad ${s.net_pnl >= 0 ? 'pos' : 'neg'}`}>
               {fmtSignedUsd(heroPnl)}
             </div>
@@ -468,16 +468,15 @@ export function TrackRecord() {
           </div>
         )}
 
-        {data.record_subset && (
+        {acct && (
           <div className="tr-account">
-            <b>AI SLEEVES ALONE</b>{' '}
-            <span className={`tr-acct-net ${data.record_subset.net_pnl >= 0 ? 'pos' : 'neg'}`}>
-              {fmtSignedUsd(data.record_subset.net_pnl)}
+            <b>WHOLE ACCOUNT</b>{' '}
+            <span className={`tr-acct-net ${acct.net_pnl >= 0 ? 'pos' : 'neg'}`}>
+              {fmtSignedUsd(acct.net_pnl)}
             </span>{' '}
-            over {data.record_subset.settled.toLocaleString()} settled
-            ({data.record_subset.wins}W–{data.record_subset.losses}L).
-            The headline above is the WHOLE account — every trade, manual and
-            cash-outs included (your directive).
+            across {acct.trades.toLocaleString()} positions incl. manual/owner
+            trades. The headline above is the AI's trading only — engine,
+            copies, underdog sleeve, and their cash-outs (your directive).
           </div>
         )}
 
@@ -616,9 +615,9 @@ export function TrackRecord() {
         <div className="tr-foot muted">
           Source: the live venue account (positions + its own trade activities),
           window {SINCE} → today, refreshed every 30s. Entry prices are the venue's
-          own VWAP. Every account position is shown and counted — manual trades,
-          cash-outs and large positions included (owner directive 2026-08-08),
-          each tagged with its cohort.
+          own VWAP. This record is the AI's trading only — engine, copies and the
+          underdog cash-out sleeve, with cash-outs counted at sale; manual/owner
+          trades are excluded here and included in the WHOLE ACCOUNT strip above.
           {data.excluded_over_limit && data.excluded_over_limit.count > 0 && (
             <> {data.excluded_over_limit.count} larger position(s) are excluded from
             every figure above — combined stake{' '}
