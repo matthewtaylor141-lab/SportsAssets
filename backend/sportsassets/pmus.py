@@ -375,14 +375,22 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
     return None
 
 
-def submit_fok(us_market_slug: str, limit_price: float, quantity: int) -> dict:
-    """Preview then place a BUY_LONG FOK limit order. Returns the same
-    normalized shape the global executor uses:
-    {ok, order_id, status, fill_price, filled_shares, raw}."""
+def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
+               sell: bool = False) -> dict:
+    """Preview then place a FOK limit order. Returns the same normalized
+    shape the global executor uses:
+    {ok, order_id, status, fill_price, filled_shares, raw}.
+
+    sell=True places SELL_LONG (underdog cash-out sleeve, owner directive
+    2026-08-08) — the limit is then the MINIMUM acceptable price, so a
+    fill can only ever realize at least the requested profit. The
+    preview cost-tolerance guard is buy-shaped (it bounds what we PAY);
+    a sell's preview reports proceeds, so the guard is skipped."""
     client = _get_client()
     params = {
         "marketSlug": us_market_slug,
-        "intent": "ORDER_INTENT_BUY_LONG",
+        "intent": "ORDER_INTENT_SELL_LONG" if sell
+                  else "ORDER_INTENT_BUY_LONG",
         "type": "ORDER_TYPE_LIMIT",
         "price": _amount(limit_price),
         "quantity": int(quantity),
@@ -392,14 +400,18 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int) -> dict:
 
     # The venue's own cost calculation must agree with ours before we commit.
     expected_cost = limit_price * quantity
-    preview = client.orders.preview({"request": {k: v for k, v in params.items()
-                                                 if k != "synchronousExecution"}})
-    prev_order = (preview or {}).get("order") or {}
-    prev_cost = _order_cost(prev_order, default=expected_cost)
-    if prev_cost > expected_cost * PREVIEW_COST_TOLERANCE:
-        return {"ok": False, "order_id": None, "status": "preview_mismatch",
-                "fill_price": None, "filled_shares": 0.0,
-                "raw": {"preview": preview, "expected_cost": expected_cost}}
+    if not sell:
+        preview = client.orders.preview(
+            {"request": {k: v for k, v in params.items()
+                         if k != "synchronousExecution"}})
+        prev_order = (preview or {}).get("order") or {}
+        prev_cost = _order_cost(prev_order, default=expected_cost)
+        if prev_cost > expected_cost * PREVIEW_COST_TOLERANCE:
+            return {"ok": False, "order_id": None,
+                    "status": "preview_mismatch",
+                    "fill_price": None, "filled_shares": 0.0,
+                    "raw": {"preview": preview,
+                            "expected_cost": expected_cost}}
 
     resp = client.orders.create(params)
     order_id = (resp or {}).get("id")
