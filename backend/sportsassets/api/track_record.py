@@ -1123,8 +1123,18 @@ async def track_record(since: str | None = None,
         cp = await pool.fetch(
             "SELECT DISTINCT us_market_slug FROM live_orders "
             "WHERE us_market_slug IS NOT NULL "
-            "AND COALESCE(whale_username, '') <> 'manual'")
+            "AND COALESCE(whale_username, '') NOT IN "
+            "('manual', 'underdog')")
         copy_slugs = {r["us_market_slug"] for r in cp}
+        # The underdog sleeve is the AI's own trading (not a whale copy,
+        # not the owner): its slugs count as ATTRIBUTED so the rows wear
+        # the record cohort rather than falling to 'unattributed'.
+        ud = await pool.fetch(
+            "SELECT DISTINCT us_market_slug FROM live_orders "
+            "WHERE us_market_slug IS NOT NULL "
+            "AND whale_username = 'underdog'")
+        if attributed is not None:
+            attributed |= {r["us_market_slug"] for r in ud}
         # Admin-directed tickets (owner 2026-08-07): their own disclosed
         # cohort, never the AI's record.
         mn = await pool.fetch(

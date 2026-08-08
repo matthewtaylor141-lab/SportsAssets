@@ -1,0 +1,263 @@
+"""Underdog cash-out sleeve — a live tandem test (owner directive
+2026-08-08): $1 on EVERY MLB and tennis underdog moneyline on the US
+venue, sold back the moment the book bids a 20% profit on the entry.
+
+The sleeve's contract, in order of importance:
+  1. NON-INTERFERENCE. Rows carry whale_username='underdog'; the
+     one-fill-per-asset claim, the copy taken-checks and the copy caps
+     all scope around this sleeve (migration 016) — it neither blocks
+     nor is blocked by the copy or manual paths. It also refuses to
+     ENTER any asset the account already holds through any other
+     sleeve, so its sells can never touch someone else's inventory
+     (positions pool at the venue; selling from a shared position
+     would realize another sleeve's basis).
+  2. One entry per GAME, ever — $1 a game bounds the test regardless
+     of how long the game stays cheap.
+  3. Cash-out is a SELL FOK at the live best bid, only when
+     bid >= entry * (1 + UNDERDOG_TAKE_PROFIT). A missed FOK simply
+     waits for the next look at the fresh book (repricing each cycle,
+     never blind-retrying an order).
+  4. A row sold this way becomes status='cashed_out' — a terminal
+     state the resolution settlement sweep never touches, so sale P&L
+     survives the market's later resolution. Unsold rows ride to
+     resolution like any hold.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+log = logging.getLogger(__name__)
+
+ET = ZoneInfo("America/New_York")
+
+ENABLED = os.environ.get("UNDERDOG_ENABLED", "1") != "0"
+PER_FILL_USD = float(os.environ.get("UNDERDOG_PER_FILL_USD", "1.00"))
+DAILY_USD = float(os.environ.get("UNDERDOG_DAILY_USD", "50"))
+TAKE_PROFIT = float(os.environ.get("UNDERDOG_TAKE_PROFIT", "0.20"))
+# Entry band: a 48c "underdog" is a coin flip, and a sub-5c one is a
+# lottery ticket whose book will never bid +20% — both refused.
+MIN_ASK = float(os.environ.get("UNDERDOG_MIN_ASK", "0.05"))
+MAX_ASK = float(os.environ.get("UNDERDOG_MAX_ASK", "0.48"))
+ENTRY_SWEEP_S = float(os.environ.get("UNDERDOG_ENTRY_SWEEP_S", "600"))
+CASHOUT_SWEEP_S = float(os.environ.get("UNDERDOG_CASHOUT_SWEEP_S", "60"))
+
+# aec- markets carry BOTH sides as two tokens of one market — the shape
+# this sleeve needs to compare sides. MLB + both tennis tours.
+_LEAGUES = ("mlb", "atp", "wta")
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def pick_underdog(quotes: list[tuple[str, float | None]],
+                  min_ask: float = MIN_ASK,
+                  max_ask: float = MAX_ASK) -> tuple[str, float] | None:
+    """The cheaper side of a two-sided market, inside the entry band.
+    Pure; returns (token_id, ask) or None."""
+    priced = [(t, a) for t, a in quotes if a is not None and 0 < a < 1]
+    if len(priced) != 2:
+        return None
+    tok, ask = min(priced, key=lambda p: p[1])
+    other = max(p[1] for p in priced)
+    if ask > max_ask or ask < min_ask:
+        return None
+    if ask >= other:          # equal books: nobody is the dog
+        return None
+    return tok, ask
+
+
+def cash_out_threshold(entry: float, take: float = TAKE_PROFIT) -> float:
+    """The bid at which the sale realizes the configured profit."""
+    return round(entry * (1.0 + take), 4)
+
+
+def shares_for(usd: float, ask: float) -> int:
+    """Whole contracts $usd buys at ask, rounded DOWN — never over budget."""
+    return int(usd / ask) if ask > 0 else 0
+
+
+async def _best_bid(cfg, asset: str) -> float | None:
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(base_url=cfg.clob_api_base,
+                                     timeout=8) as http:
+            resp = await http.get("/book", params={"token_id": str(asset)})
+        if resp.status_code != 200:
+            return None
+        bids = sorted((float(x["price"]) for x in
+                       (resp.json().get("bids") or [])), reverse=True)
+        return bids[0] if bids else None
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        return None
+
+
+async def _entry_sweep(pool) -> dict:
+    from ..config import settings
+    from ..live_executor import _clob_best_ask, _submit_fok, active_venue
+
+    stats = {"games": 0, "entered": 0, "skipped_held": 0,
+             "skipped_band": 0, "skipped_done": 0}
+    if active_venue() != "polymarket-us":
+        stats["off"] = "venue not armed"
+        return stats
+    day_spent = float(await pool.fetchval(
+        "SELECT COALESCE(sum(filled_usd), 0) FROM live_orders "
+        "WHERE whale_username = 'underdog' "
+        "AND placed_at > now() - interval '24 hours'") or 0)
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    rows = await pool.fetch(
+        """
+        SELECT m.slug, m.title, m.condition_id, mt.outcome, mt.token_id
+        FROM markets m JOIN market_tokens mt USING (condition_id)
+        WHERE COALESCE(m.resolved, false) = false
+          AND (m.slug LIKE 'aec-mlb-%' OR m.slug LIKE 'aec-atp-%'
+               OR m.slug LIKE 'aec-wta-%')
+          AND position($1 in m.slug) > 0
+        ORDER BY m.slug, mt.outcome_index
+        """, today)
+    games: dict[str, list] = {}
+    for r in rows:
+        games.setdefault(r["slug"], []).append(r)
+    cfg = settings()
+    for slug, sides in games.items():
+        if len(sides) != 2:
+            continue
+        stats["games"] += 1
+        if day_spent + PER_FILL_USD > DAILY_USD:
+            stats["skipped_day_cap"] = stats.get("skipped_day_cap", 0) + 1
+            continue
+        done = await pool.fetchval(
+            "SELECT 1 FROM live_orders WHERE whale_username = 'underdog' "
+            "AND us_market_slug = $1 LIMIT 1", slug)
+        if done:
+            stats["skipped_done"] += 1
+            continue
+        # NON-INTERFERENCE: any existing row on either token — any
+        # sleeve, any status that ever held inventory — vetoes entry.
+        held = await pool.fetchval(
+            "SELECT 1 FROM live_orders WHERE asset = ANY($1::text[]) "
+            "AND status IN ('submitting','filled','settled','cashed_out') "
+            "LIMIT 1", [str(s["token_id"]) for s in sides])
+        if held:
+            stats["skipped_held"] += 1
+            continue
+        quotes = []
+        for s in sides:
+            quotes.append((str(s["token_id"]),
+                           await _clob_best_ask(cfg, str(s["token_id"]))))
+        dog = pick_underdog(quotes)
+        if dog is None:
+            stats["skipped_band"] += 1
+            continue
+        token, ask = dog
+        n = shares_for(PER_FILL_USD, ask)
+        if n < 1:
+            continue
+        outcome = next((s["outcome"] for s in sides
+                        if str(s["token_id"]) == token), None)
+        row_id = await pool.fetchval(
+            """
+            INSERT INTO live_orders (whale_username, asset, condition_id,
+                                     side, his_price, limit_price,
+                                     requested_usd, requested_shares,
+                                     status, venue, us_market_slug)
+            VALUES ('underdog', $1, $2, 'BUY', $3, $3, $4, $5,
+                    'submitting', 'polymarket-us', $6)
+            RETURNING id
+            """, token, next(iter(sides))["condition_id"], ask,
+            round(n * ask, 2), float(n), slug)
+        try:
+            r = await asyncio.to_thread(_submit_fok, token, ask, float(n))
+        except Exception as exc:  # noqa: BLE001
+            await pool.execute(
+                "UPDATE live_orders SET status='error', error=$2 "
+                "WHERE id=$1", row_id, str(exc)[:300])
+            continue
+        filled = float(r.get("filled_shares") or 0)
+        if r.get("ok") and filled > 0:
+            await pool.execute(
+                """UPDATE live_orders SET status='filled', order_id=$2,
+                   fill_price=$3, filled_shares=$4, filled_usd=$5, raw=$6
+                   WHERE id=$1""",
+                row_id, r.get("order_id"), r["fill_price"], filled,
+                round(filled * r["fill_price"], 2),
+                __import__("json").dumps(r.get("raw") or {})[:8000])
+            day_spent += filled * r["fill_price"]
+            stats["entered"] += 1
+            log.warning("UNDERDOG entry %s (%s) x%d @ %.2f",
+                        slug, outcome, int(filled), r["fill_price"])
+        else:
+            await pool.execute(
+                "UPDATE live_orders SET status='unfilled', raw=$2 "
+                "WHERE id=$1", row_id,
+                __import__("json").dumps(r.get("raw") or {})[:8000])
+    return stats
+
+
+async def _cashout_sweep(pool) -> dict:
+    from ..config import settings
+    from ..live_executor import _submit_fok, active_venue
+
+    stats = {"open": 0, "cashed": 0}
+    if active_venue() != "polymarket-us":
+        return stats
+    rows = await pool.fetch(
+        "SELECT id, asset, fill_price::float8 AS entry, "
+        "filled_shares::float8 AS qty FROM live_orders "
+        "WHERE whale_username = 'underdog' AND status = 'filled'")
+    cfg = settings()
+    for r in rows:
+        stats["open"] += 1
+        bid = await _best_bid(cfg, r["asset"])
+        if bid is None or bid < cash_out_threshold(r["entry"]):
+            continue
+        try:
+            res = await asyncio.to_thread(_submit_fok, r["asset"], bid,
+                                          r["qty"], True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("underdog cash-out failed (%s): %s", r["asset"], exc)
+            continue
+        sold = float(res.get("filled_shares") or 0)
+        if res.get("ok") and sold >= r["qty"]:
+            px = float(res.get("fill_price") or bid)
+            pnl = round((px - r["entry"]) * r["qty"], 4)
+            await pool.execute(
+                """UPDATE live_orders SET status='cashed_out', pnl=$2,
+                   settled_at=now() WHERE id=$1""", r["id"], pnl)
+            stats["cashed"] += 1
+            log.warning("UNDERDOG CASH-OUT %s: %d @ %.2f (entry %.2f) "
+                        "pnl +%.2f", r["asset"], int(r["qty"]), px,
+                        r["entry"], pnl)
+    return stats
+
+
+async def main() -> None:
+    from ..db import get_pool, heartbeat
+
+    if not ENABLED:
+        log.warning("underdog sleeve disabled (UNDERDOG_ENABLED=0)")
+        while True:
+            await asyncio.sleep(3600)
+    last_entry = 0.0
+    while True:
+        try:
+            pool = await get_pool()
+            import time as _t
+
+            now = _t.time()
+            if now - last_entry >= ENTRY_SWEEP_S:
+                st = await _entry_sweep(pool)
+                last_entry = now
+                await heartbeat("underdog", "ok", st)
+                log.info("underdog entry sweep: %s", st)
+            cs = await _cashout_sweep(pool)
+            if cs.get("cashed"):
+                log.info("underdog cashout sweep: %s", cs)
+        except Exception:  # noqa: BLE001 — the supervisor restarts us
+            log.exception("underdog sweep failed")
+        await asyncio.sleep(CASHOUT_SWEEP_S)

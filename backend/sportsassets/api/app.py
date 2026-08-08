@@ -1670,7 +1670,8 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
         # Each live sleeve is its own category: the four source whales
         # plus the admin manual desk (owner 2026-08-07).
         if r["whale"] not in ("rn1", "swisstony", "kch123",
-                              "homerunhazard", "manual"):
+                              "homerunhazard", "manual",
+                              "underdog"):
             continue
         day = max(r["day"], first_day)
         if not _in_range(day):
@@ -1829,11 +1830,11 @@ async def api_report_range(
 
 
 _CAT_ORDER = ["rn1", "swisstony", "kch123", "homerunhazard",
-              "manual", "arb", "software"]
+              "manual", "underdog", "arb", "software"]
 _CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
               "kch123": "kch123 copies", "homerunhazard": "HomeRunHazard copies",
-              "manual": "Manual desk", "arb": "Arbitrage",
-              "software": "Software"}
+              "manual": "Manual desk", "underdog": "Underdog cash-out",
+              "arb": "Arbitrage", "software": "Software"}
 
 
 @app.get("/api/report.csv")

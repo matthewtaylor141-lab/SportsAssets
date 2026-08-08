@@ -75,7 +75,7 @@ async def _caps_room(pool) -> tuple[float, float]:
                    ::float8 AS day,
                COALESCE(sum(filled_usd), 0)::float8 AS total
         FROM live_orders
-        WHERE COALESCE(whale_username, '') <> 'manual'
+        WHERE COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
         """
     )
     return (cfg.live_max_daily_usd - row["day"], cfg.live_max_total_usd - row["total"])
@@ -107,14 +107,19 @@ def _get_client():
     return _client
 
 
-def _submit_fok(token_id: str, price: float, shares: float) -> dict:
-    """Sync order submission; returns a normalized result dict."""
+def _submit_fok(token_id: str, price: float, shares: float,
+                sell: bool = False) -> dict:
+    """Sync order submission; returns a normalized result dict.
+
+    sell=True places the SELL side (underdog cash-out sleeve, owner
+    directive 2026-08-08) — same FOK contract, opposite side."""
     from py_clob_client.clob_types import OrderArgs, OrderType
-    from py_clob_client.order_builder.constants import BUY
+    from py_clob_client.order_builder.constants import BUY, SELL
 
     client = _get_client()
     order = client.create_order(
-        OrderArgs(token_id=token_id, price=price, size=shares, side=BUY)
+        OrderArgs(token_id=token_id, price=price, size=shares,
+                  side=SELL if sell else BUY)
     )
     resp = client.post_order(order, OrderType.FOK)
     ok = bool(resp.get("success")) if isinstance(resp, dict) else False
@@ -499,7 +504,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     taken = await pool.fetchval(
         "SELECT 1 FROM live_orders WHERE asset = $1 "
         "AND status IN ('submitting','filled','settled') "
-        "AND COALESCE(whale_username, '') <> 'manual' LIMIT 1",
+        "AND COALESCE(whale_username, '') NOT IN ('manual','underdog') "
+        "LIMIT 1",
         str(payload["asset"]))
     if not taken:
         # Cross-venue: a position the engine already copied on Kalshi is
