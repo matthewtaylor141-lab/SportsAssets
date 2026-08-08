@@ -46,10 +46,14 @@ def live_blocked(ledger, scope: str = "engine") -> str | None:
     scope="manual": admin-directed desk tickets (owner 2026-08-07) — a
     human's deliberate order rides no strategy or sleeve halt; only the
     global stops apply.
+    scope="underdog": the $1 underdog test sleeve (owner 2026-08-08) —
+    a fixed-dollar experiment the owner wants on every game; neither the
+    engine's nor the copy sleeve's loss breaker pauses it. Global stops
+    still apply.
     """
     if ledger.get_state("kill_switch", False):
         return "kill_switch"
-    if scope not in ("arb", "manual"):
+    if scope not in ("arb", "manual", "underdog"):
         halt_key = "copy_halt_until" if scope == "copy" else "halt_until"
         halt = ledger.get_state(halt_key)
         if halt and float(halt.get("until", 0)) > time.time():

@@ -420,18 +420,21 @@ class KalshiAdapter(VenueAdapter):
         return None
 
     def place_order(self, market_ticker: str, price: float, count: int,
-                    client_order_id: str, taker: bool) -> dict:
-        """POST a YES buy limit via the V2 events-orders endpoint. The legacy
+                    client_order_id: str, taker: bool,
+                    sell: bool = False) -> dict:
+        """POST a YES limit via the V2 events-orders endpoint. The legacy
         /portfolio/orders path now answers HTTP 410 deprecated_v1_order_endpoint
         (observed live 2026-08-04); V2 is a single YES-denominated book where a
-        buy is side "bid", and prices/counts travel as fixed-point strings —
-        the same dialect the orderbook_fp payload speaks. Crossing orders are
-        immediate_or_cancel; resting maker orders carry a 15-minute
-        expiration_time so stale quotes never linger."""
+        buy is side "bid" and a sale of held YES contracts is side "ask" —
+        prices/counts travel as fixed-point strings, the same dialect the
+        orderbook_fp payload speaks. Crossing orders are immediate_or_cancel;
+        resting maker orders carry a 15-minute expiration_time so stale quotes
+        never linger. Sells are only ever sized to contracts we hold (the
+        underdog exit) — never a short."""
         path = "/trade-api/v2/portfolio/events/orders"
         body = {
             "ticker": market_ticker, "client_order_id": client_order_id,
-            "side": "bid", "count": f"{int(count)}.00",
+            "side": "ask" if sell else "bid", "count": f"{int(count)}.00",
             "price": f"{price:.4f}",
             "self_trade_prevention_type": "taker_at_cross",
         }
@@ -450,6 +453,7 @@ class KalshiAdapter(VenueAdapter):
             # reconcile any real fill by trade id.
             return {"ok": False, "order_id": None, "status": "network_error",
                     "price": price, "count": count, "taker": taker,
+                    "sell": sell,
                     "raw": {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}}
         ok = resp.status_code in (200, 201)
         try:
@@ -483,6 +487,7 @@ class KalshiAdapter(VenueAdapter):
         return {"ok": ok, "order_id": order.get("order_id") or order.get("id"),
                 "status": order.get("status", f"http_{resp.status_code}"),
                 "price": price, "count": filled if ok else count, "taker": taker,
+                "sell": sell,
                 "raw": data if ok else {"error": resp.text[:300]}}
 
     async def subscribe_books(self, market_ids: list[str]):

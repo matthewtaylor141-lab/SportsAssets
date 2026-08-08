@@ -573,11 +573,50 @@ def sync_kalshi_fills(adapter, ledger: Ledger, mode: str) -> int:
             return 0
         n = 0
         for f in (resp.json() or {}).get("fills") or []:
-            if f.get("action") != "buy" or f.get("side") != "yes":
+            if f.get("side") != "yes":
                 continue
             qty = float(f.get("count") or 0)
             price = float(f.get("yes_price") or 0) / 100.0
             if qty <= 0 or not (0 < price < 1):
+                continue
+            if f.get("action") == "sell":
+                # The only sell path is the underdog sleeve's resting
+                # +20% exit; any other sell fill is unexpected and left
+                # alone (never guess at bookkeeping for an order this
+                # process didn't place).
+                ctx = ledger.get_state(
+                    f"kalshi_order:{f.get('order_id')}") or {}
+                if ctx.get("category") != "kalshi_underdog_exit":
+                    continue
+                r = ledger.record_fill(
+                    fill_uid=f"kalshi-fill-{f.get('trade_id') or f.get('fill_id')}",
+                    venue="kalshi", market_key=ctx.get("market_key")
+                        or market_key("kalshi", f.get("ticker", "")),
+                    side="SELL", qty=qty, price=price,
+                    ts=float(f.get("created_time_ts") or 0) or None,
+                    fee=0.0,  # maker rests fill fee-free
+                    league=ctx.get("league"), mode=mode,
+                    decision={**ctx, "source": "fill_sync", "raw": f},
+                    category="kalshi_underdog",
+                )
+                if r["applied"]:
+                    n += 1
+                    tk = f.get("ticker") or ""
+                    st = ledger.get_state(f"kud:{tk}") or {}
+                    # A partial sell still flips the state: the report
+                    # goes out once and any remainder (2-3 contracts at
+                    # $1 scale) rides to settlement via the settle sweep.
+                    ledger.set_state(f"kud:{tk}",
+                                     {**st, "status": "cashed_out",
+                                      "exit": price})
+                    evq = ledger.get_state("kud_exit_events") or {}
+                    evs = list(evq.get("events") or [])
+                    evs.append({"task_id": ctx.get("task_id"),
+                                "ticker": tk, "qty": qty, "price": price,
+                                "entry": ctx.get("entry") or 0.0})
+                    ledger.set_state("kud_exit_events", {"events": evs})
+                continue
+            if f.get("action") != "buy":
                 continue
             # Sweeps/smoke/xv record their fills inline at placement and
             # mark the order id — recording those here again doubled every

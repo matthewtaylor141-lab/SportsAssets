@@ -201,6 +201,38 @@ async def _entry_sweep(pool) -> dict:
             k = f"skipped_{win}"
             stats[k] = stats.get(k, 0) + 1
             continue
+        quotes = []
+        for s in sides:
+            quotes.append((str(s["token_id"]),
+                           await _clob_best_ask(cfg, str(s["token_id"]))))
+        dog = pick_underdog(quotes)
+        if dog is None:
+            stats["skipped_band"] += 1
+            continue
+        token, ask = dog
+        outcome = next((s["outcome"] for s in sides
+                        if str(s["token_id"]) == token), None)
+        other = next((s["outcome"] for s in sides
+                      if str(s["token_id"]) != token), None)
+        # KALSHI LEG (owner directive 2026-08-08): the same game, same
+        # dog, same dollar, queued for the engine's relay — only that
+        # process holds Kalshi credentials. Enqueued BEFORE the PMUS
+        # held-veto: a copy holding this game on Polymarket does not
+        # cancel the Kalshi leg (the engine runs its own held check
+        # against the Kalshi book). UNIQUE(game_slug) makes re-sweeps
+        # a no-op, so each game queues exactly once.
+        if outcome and other:
+            queued = await pool.fetchval(
+                """
+                INSERT INTO kud_queue (game_slug, league, dog_outcome,
+                                       other_outcome, per_fill_usd,
+                                       take_profit)
+                VALUES ($1, split_part($1, '-', 1), $2, $3, $4, $5)
+                ON CONFLICT (game_slug) DO NOTHING
+                RETURNING id
+                """, slug, outcome, other, PER_FILL_USD, TAKE_PROFIT)
+            if queued is not None:
+                stats["kud_queued"] = stats.get("kud_queued", 0) + 1
         # NON-INTERFERENCE and one-entry-per-game in one check: any
         # existing row on either token — any sleeve INCLUDING our own,
         # any status that ever held inventory — vetoes entry. (An
@@ -213,20 +245,9 @@ async def _entry_sweep(pool) -> dict:
         if held:
             stats["skipped_held"] += 1
             continue
-        quotes = []
-        for s in sides:
-            quotes.append((str(s["token_id"]),
-                           await _clob_best_ask(cfg, str(s["token_id"]))))
-        dog = pick_underdog(quotes)
-        if dog is None:
-            stats["skipped_band"] += 1
-            continue
-        token, ask = dog
         n = shares_for(PER_FILL_USD, ask)
         if n < 1:
             continue
-        outcome = next((s["outcome"] for s in sides
-                        if str(s["token_id"]) == token), None)
         # US mapping first — the manual desk's exact pipeline. No US
         # market, no trade: mapped-or-refused, never guessed.
         mapping = await asyncio.to_thread(

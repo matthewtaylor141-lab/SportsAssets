@@ -49,6 +49,25 @@ def test_one_fill_index_ignores_the_underdog_sleeve():
     assert "'cashed_out'" in sql
 
 
+def test_kud_queue_migration_is_one_task_per_game():
+    """The Kalshi leg queues via UNIQUE(game_slug) + ON CONFLICT DO
+    NOTHING — the enqueue itself is the one-per-game guarantee."""
+    sql = open("migrations/017_kud_queue.sql").read()
+    assert "game_slug    text NOT NULL UNIQUE" in sql
+    assert "kud_queue" in sql
+
+
+def test_kud_enqueue_rides_the_entry_sweep():
+    """The worker must enqueue the Kalshi leg BEFORE the PMUS held-veto:
+    a copy holding the game on Polymarket does not cancel the $1 Kalshi
+    test (the engine runs its own held check against the Kalshi book)."""
+    src = open("sportsassets/workers/underdog.py").read()
+    assert "INSERT INTO kud_queue" in src
+    assert "ON CONFLICT (game_slug) DO NOTHING" in src
+    assert src.index("INSERT INTO kud_queue") < src.index(
+        "NON-INTERFERENCE and one-entry-per-game")
+
+
 def test_entries_fire_only_in_the_t_minus_five_window():
     from sportsassets.workers.underdog import entry_window
 

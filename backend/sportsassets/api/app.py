@@ -1211,6 +1211,60 @@ async def api_manual_kalshi_result(
     return {"ok": True}
 
 
+@app.get("/api/engine/kud-queue")
+async def api_kud_queue(x_engine_token: str = Header(default="")) -> dict:
+    """Queued Kalshi-leg underdog tasks for the engine's relay. The
+    worker queues one per game at T-minus-5; the engine resolves the
+    Kalshi market, buys the dog, and rests the +20% exit."""
+    cfg = settings()
+    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
+        raise HTTPException(status_code=401, detail="engine token required")
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id, game_slug, league, dog_outcome, other_outcome, "
+        "per_fill_usd::float8 AS per_fill_usd, "
+        "take_profit::float8 AS take_profit "
+        "FROM kud_queue WHERE status = 'queued' ORDER BY id LIMIT 40")
+    return {"tasks": [dict(r) for r in rows]}
+
+
+class KudResult(BaseModel):
+    id: int
+    status: str          # filled|cashed_out|no_market|band_fail|held|unfilled|error
+    ticker: str | None = None
+    entry_price: float | None = None
+    qty: int | None = None
+    exit_price: float | None = None
+    pnl: float | None = None
+    error: str | None = None
+
+
+@app.post("/api/engine/kud-result")
+async def api_kud_result(
+    body: KudResult, x_engine_token: str = Header(default="")
+) -> dict:
+    cfg = settings()
+    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
+        raise HTTPException(status_code=401, detail="engine token required")
+    if body.status not in ("filled", "cashed_out", "no_market", "band_fail",
+                           "held", "unfilled", "error"):
+        raise HTTPException(status_code=400, detail="bad status")
+    pool = await get_pool()
+    await pool.execute(
+        """
+        UPDATE kud_queue
+        SET status=$2, ticker=COALESCE($3, ticker),
+            entry_price=COALESCE($4, entry_price),
+            qty=COALESCE($5, qty), exit_price=COALESCE($6, exit_price),
+            pnl=COALESCE($7, pnl), error=$8, updated_at=now()
+        WHERE id=$1
+        """,
+        body.id, body.status, body.ticker, body.entry_price, body.qty,
+        body.exit_price, body.pnl,
+        (body.error or None) and body.error[:300])
+    return {"ok": True}
+
+
 @app.get("/api/admin/manual-trades", dependencies=[Depends(require_admin)])
 async def api_manual_trades() -> dict:
     """The desk blotter: every manual ticket with status and settled P&L."""

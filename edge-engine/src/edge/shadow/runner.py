@@ -302,6 +302,7 @@ _XV_WATCH = None
 _XV_CRYPTO = None
 _KADD_STATS: dict = {}
 _KCOPY_STATS: dict = {}
+_KUD_STATS: dict = {}
 # {game_key: [whale outcome names]} — refreshed on the discovery clock.
 _WHALE_MAP: dict = {}
 
@@ -2227,6 +2228,41 @@ def _main_impl() -> None:
                          name="desk-relay").start()
         log.warning("manual desk relay armed (10s poll)")
 
+        # Kalshi leg of the $1 underdog sleeve (owner 2026-08-08): the
+        # platform worker queues one task per game at T-minus-5; this
+        # loop places the dog and keeps the +20% maker exit resting.
+        # Sleeve-class like manual/arb: only global stops apply.
+        if os.environ.get("EDGE_KUD", "1") != "0":
+            def _kud_loop() -> None:
+                from edge.shadow.kalshi_underdog import sweep as kud
+
+                base = os.environ.get("EDGE_PLATFORM_API", "")
+                token = os.environ.get("EDGE_INGEST_TOKEN", "")
+                if not base or not token:
+                    return
+                time.sleep(45)
+                every = float(os.environ.get("EDGE_KUD_EVERY_S", "60"))
+                while True:
+                    try:
+                        st = kud(kalshi=kalshi_c, ledger=ledger,
+                                 base=base, token=token,
+                                 live=risk.is_live)
+                        _KUD_STATS.clear()
+                        _KUD_STATS.update(st, at=time.time())
+                        if st.get("placed") or st.get("cashed_out"):
+                            log.warning("kalshi underdog sweep: %s", st)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("kalshi underdog sweep failed: %s", exc)
+                        _KUD_STATS.clear()
+                        _KUD_STATS.update(
+                            error=f"{type(exc).__name__}: {str(exc)[:140]}",
+                            at=time.time())
+                    time.sleep(every)
+
+            threading.Thread(target=_kud_loop, daemon=True,
+                             name="kalshi-underdog").start()
+            log.warning("kalshi underdog leg armed (60s sweep)")
+
     # One-shot venue census (EDGE_CENSUS_DAYS=0 disables): how many sports
     # markets the venue actually listed per day over the trailing window —
     # the opportunity universe behind any volume estimate. Runs in a thread
@@ -2422,6 +2458,8 @@ def _main_impl() -> None:
                 funnel["kalshi_adds"] = dict(_KADD_STATS)
             if _KCOPY_STATS:
                 funnel["kalshi_copies"] = dict(_KCOPY_STATS)
+            if _KUD_STATS:
+                funnel["kalshi_underdog"] = dict(_KUD_STATS)
             # The venue's own response to our order attempts — the one
             # string that diagnoses a rejected order class remotely.
             smoke_state = (ledger.get_state("kalshi_smoke_done")
