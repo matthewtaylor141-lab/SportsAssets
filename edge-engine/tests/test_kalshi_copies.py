@@ -87,7 +87,8 @@ def test_sport_assignments_gate_the_sweep():
     row3 = {**_ROW, "whale": "RN1"}
     st3, ka3, _ = _run(0.48, rows=[row3])
     assert st3["copied"] == 1
-    assert ka3.orders == [("T-DAL", 0.48, 10)]
+    # RN1 clips at $10 (owner promotion 2026-08-08): floor(10/0.48) = 20.
+    assert ka3.orders == [("T-DAL", 0.48, 20)]
 
 
 def test_one_copy_per_position_ever():

@@ -51,11 +51,13 @@ log = logging.getLogger(__name__)
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
-# Owner directive 2026-08-07: ALL copy trades $5 per trade, uniform —
-# the $3->$5 promotion he gated on sleeve evidence, granted with 450+
-# settled across the live sleeves. The per-whale map is kept (empty of
-# divergence today) for the day sizing splits by whale again.
-PER_COPY_USD = {"rn1": 5.00}
+# Owner directive 2026-08-08: RN1 and SwissTony to $10 per trade — the
+# $5->$10 promotion gated on their own settled cohorts (RN1 +$198.66
+# over 304 settled, SwissTony +$139.61 at 64% over 176). Everyone else
+# stays at the $5 default (HRH's widened cells have 2 settled; kch123
+# is out of season). History: $3 -> $5 uniform 2026-08-07 -> $10 for
+# the two proven sleeves 2026-08-08.
+PER_COPY_USD = {"rn1": 10.00, "swisstony": 10.00}
 PER_COPY_DEFAULT = 5.00
 # A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
 # decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.
@@ -72,9 +74,12 @@ COLLAPSE_FLOOR = 0.85
 # separate the breakers — an engine-side loss day must not pause
 # profitable copying). Trips on the kalshi_copy cohort's rolling-24h
 # realized loss; the sizing mirrors the engine's shape at copy scale
-# ($3 tickets): a fixed floor, env-tunable. 24h halt (not the engine's
+# a fixed floor, env-tunable. 24h halt (not the engine's
 # 72h): the sleeve's edge source is the whales, re-validated daily.
-COPY_HALT_USD_DEFAULT = 60.0
+# Scaled 60 -> 120 with the $5 -> $10 clip promotion (2026-08-08) to
+# keep the same ~12-full-loss sensitivity — an unchanged floor would
+# have halved the breaker's tolerance the same hour sizing doubled.
+COPY_HALT_USD_DEFAULT = 120.0
 COPY_HALT_HOURS_DEFAULT = 24.0
 # Owner amnesty 2026-08-06 ("Let's get Kalshi going now"): the halt
 # tripped ~01:00Z on Wednesday-evening losses was ordered lifted early.

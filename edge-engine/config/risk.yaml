@@ -157,38 +157,41 @@ profiles:
     # `at` is a MULTIPLE of the band threshold, not a cent figure — the bar
     # already varies by band, by category and by measured drift, so a fixed
     # cent trigger would mean something different in every market.
-    # OWNER DIRECTIVE 2026-08-05: ALL software-generated (edge-engine
-    # strategy) trades are $1.00 per trade on BOTH venues. Copy-sleeve
-    # trades (backend live_executor / kalshi_copies) are a separate class
-    # and STAY at $3. The ladder keeps its rung structure so a future
-    # re-scale is a two-number edit, but both rungs sit at the $1 ticket;
-    # every cap/room mechanism (market/event/day/venue room, breaker,
-    # pacing) is unchanged — a $1 request still clamps to the tightest room.
+    # OWNER DIRECTIVE 2026-08-08: software-generated (edge-engine
+    # strategy) trades are $10.00 per trade on BOTH venues (was $1.00
+    # since 2026-08-05). Copy-sleeve trades (backend live_executor /
+    # kalshi_copies) are a separate class with their own per-whale
+    # sizing. Both rungs sit at the $10 ticket; every cap/room mechanism
+    # (market/event/day/venue room, breaker, pacing) is unchanged in
+    # STRUCTURE — the correlated caps below scale with the ticket so the
+    # same ticket-count discipline holds at the new size.
     size_ladder:
-      - {at: 1.0, usd: 1.00}    # clears the bar: the $1 ticket
-      - {at: 2.0, usd: 1.00}    # twice the bar: same $1 (owner 2026-08-05)
-    per_fill_usd_default: 1
-    per_fill_usd_max: 1
-    per_market_exposure_usd: 3        # one ticket per bet; never add
+      - {at: 1.0, usd: 10.00}   # clears the bar: the $10 ticket
+      - {at: 2.0, usd: 10.00}   # twice the bar: same $10 (owner 2026-08-08)
+    per_fill_usd_default: 10
+    per_fill_usd_max: 10
+    per_market_exposure_usd: 30       # one ticket per bet; never add
     # Sides of one game are not independent bets — exactly one of them pays.
     # A three-way soccer match is three markets and a full ladder is twenty,
     # so a per-market cap alone permits that much correlated exposure on a
-    # single result. $10 a game is the concentration ceiling (ten $1
-    # tickets at the 2026-08-05 sizing; the dollar cap is what holds).
-    per_event_exposure_usd: 10
+    # single result. $100 a game is the concentration ceiling (ten $10
+    # tickets at the 2026-08-08 sizing; the dollar cap is what holds).
+    per_event_exposure_usd: 100
     # Day budget tracks the ACCOUNT, not a number typed here. A fixed daily
     # cap is a trade-count cap wearing a disguise: at $1 a fill, "$25/day"
     # means "25 trades a day" no matter how many edges exist. 1.0 = deploy up
     # to the full buying power each day; positions release cash as they
     # settle, so the real ceiling is settlement speed, not this line.
-    per_day_deployment_usd: 50        # floor, used before the balance is read
+    per_day_deployment_usd: 500       # floor, used before the balance is
+                                      # read (same 50-ticket parity as the
+                                      # $1-era floor of 50)
     per_day_deployment_pct_of_bankroll: 1.0
     # One position per BET, not per game. A single game lists a moneyline
     # plus a ladder of spreads and totals — 20-40 separately priced bets.
     # Claiming the whole event took one and abandoned the rest.
     one_position_per_event: false
     one_position_per_market: true     # ever; no adds after first fill
-    daily_loss_halt_usd: 30           # floor (scaled with the $2 ticket:
+    daily_loss_halt_usd: 150          # floor (scaled with the $10 ticket:
                                       # same ~15-ticket sensitivity as before)
     daily_loss_halt_pct_of_day: 0.15  # governs at high volume
     daily_loss_halt_sigmas: 4         # governs at low volume (4 sigma of the
