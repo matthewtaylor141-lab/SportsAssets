@@ -38,7 +38,10 @@ ET = ZoneInfo("America/New_York")
 
 ENABLED = os.environ.get("UNDERDOG_ENABLED", "1") != "0"
 PER_FILL_USD = float(os.environ.get("UNDERDOG_PER_FILL_USD", "1.00"))
-DAILY_USD = float(os.environ.get("UNDERDOG_DAILY_USD", "50"))
+# No day cap (owner directive 2026-08-08: "every MLB and tennis match").
+# Natural bound: $1 x one-entry-per-game x the day's slate. The env knob
+# stays for the day a ceiling is wanted back.
+DAILY_USD = float(os.environ.get("UNDERDOG_DAILY_USD", "inf"))
 TAKE_PROFIT = float(os.environ.get("UNDERDOG_TAKE_PROFIT", "0.20"))
 # Entry band: a 48c "underdog" is a coin flip, and a sub-5c one is a
 # lottery ticket whose book will never bid +20% — both refused.
