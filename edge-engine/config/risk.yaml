@@ -299,11 +299,13 @@ arbitrage:
   # settlement.
   enabled: true
   max_sets: 1                 # floor: contracts per leg, per opportunity
-  # TOTAL fee-loaded cost across ALL legs of one opportunity (~$5 per side
-  # on a two-leg pair — owner directive 2026-08-05, guaranteed-profit class
-  # only). Sizing divides max_usd by the COMBINED cost of one set, so a
-  # deeper book is taken only up to $10 of total pair cost.
-  max_usd: 10.0               # dollar cap per opportunity; depth-bounded
+  # TOTAL fee-loaded cost across ALL legs of one opportunity ($25 per
+  # side — owner directive 2026-08-08, on the relock-hardened path:
+  # every pair ends locked, relocked at bounded cents, or flat). Sizing
+  # divides max_usd by the COMBINED cost of one set, so a deeper book is
+  # taken only up to $50 of total pair cost; displayed depth still
+  # bounds sets, so thin books never force size.
+  max_usd: 50.0               # dollar cap per opportunity; depth-bounded
   max_books_per_cycle: 3
   # Cross-venue (owner instruction 2026-08-04: "exploit any guaranteed
   # profitable arbitrage between the venues"). Team A on one venue, Team B
@@ -329,12 +331,19 @@ arbitrage:
     # directive 2026-08-05). max_sets = max_usd / fee-loaded cost_per_set
     # where cost_per_set is the combined two-leg cost, so the $10 bounds
     # the whole locked pair, never $10 per leg.
-    max_usd: 10.0             # dollar cap per opportunity, both legs
+    max_usd: 50.0             # $25 per side (owner directive 2026-08-08,
+                              # relock-hardened path), both legs together
     max_books_per_cycle: 2
     # Tennis added 2026-08-08 with the relock hardening: two-outcome
     # matches, both venues list them (KXATP/KXWTA + Challengers), and
     # the in-season surface is where "fill the most you can" lives.
     leagues: [nba, wnba, nhl, mlb, nfl, atp, wta]
+    # Day budget scaled with the $50 pair (owner 2026-08-08): 20 max-size
+    # pairs a day, same pair-count capacity as the $10 era. Absolute
+    # worst corner (every pair relocked at ~3c/set) is low tens of
+    # dollars — and the 6h exposure freeze halts systemic failure long
+    # before a budget does.
+    watch_day_usd: 1000.0
 
 # Entry-price bands quarantined from LIVE money on OUR OWN settled
 # evidence (they keep paper-logging — study never stops). First entry
