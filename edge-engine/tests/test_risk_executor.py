@@ -870,3 +870,32 @@ def test_the_ladder_survives_approve_end_to_end():
                                  "ev-x", requested)
     assert why == "ok"
     assert approved == 10.00, "$10 must clear approve() intact"
+
+
+def test_pmus_entry_refuses_tokens_the_platform_holds(tmp_path, monkeypatch):
+    """No-stack (owner 2026-08-08: 'trades are higher than $10 per
+    trade'): each sleeve capped its own ticket while together building
+    $13-16 positions. A token any platform sleeve holds is refused
+    before sizing, maker and taker alike."""
+    from edge.execution import executor as ex
+
+    class _PMUS(_StubAdapter):
+        name = "polymarket-us"
+
+    monkeypatch.setenv("EDGE_PLATFORM_API", "http://platform")
+    monkeypatch.setenv("EDGE_INGEST_TOKEN", "t")
+    ledger = Ledger(db_path=str(tmp_path / "l.sqlite3"))
+    ex._PLATFORM_HELD.update(ts=time.time() + 3600,
+                             assets=frozenset({"tok123"}))
+    try:
+        r = execute(adapter=_PMUS(), ledger=ledger, mode="LIVE_BETA",
+                    mkey="polymarket-us:tok123", league="epl",
+                    ask_price=0.47, ask_size=100, size_usd=10.0,
+                    edge=0.03, threshold=0.02, decision={}, ts=1000.0)
+        assert not r["placed"] and r["status"] == "platform_holds"
+        # An unheld token proceeds past the guard (fails later only on
+        # the stub's missing order plumbing, which is fine — the guard
+        # is what's under test).
+        assert not ex.platform_holds("tok999")
+    finally:
+        ex._PLATFORM_HELD.update(ts=0.0, assets=frozenset())

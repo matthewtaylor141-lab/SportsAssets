@@ -35,6 +35,49 @@ MATCH_FLOOR = 0.85  # minimum similarity for a verified outcome match
 PREVIEW_COST_TOLERANCE = 1.02  # venue-computed cost may exceed ours by ≤2%
 
 
+# ── No-stack referee (owner 2026-08-08: "trades are higher than $10 per
+# trade") ────────────────────────────────────────────────────────────
+# Copies and the edge engine run separate ledgers, so each respected its
+# own $10 clip while together building $13-16 positions on the same
+# outcome. The venue account is the one referee every sleeve can see:
+# before any autonomous buy, ask it whether the market is already held.
+_pos_cache: dict = {"ts": 0.0, "slugs": frozenset()}
+_POS_TTL = 20.0
+
+
+def account_holds(us_market_slug: str) -> bool:
+    """True when the account already holds ANY open position on this US
+    market. Fail-open on a venue read error (a transient outage must not
+    starve the profitable copy sleeve) but reuse the last snapshot, so a
+    blip degrades to 20-second-old truth, not blindness."""
+    import time as _t
+
+    now = _t.time()
+    if now - _pos_cache["ts"] >= _POS_TTL:
+        try:
+            client = _get_client()
+            held: set[str] = set()
+            cursor = ""
+            for _ in range(5):  # bounded paging
+                resp = client.portfolio.positions(
+                    {"limit": 100,
+                     **({"cursor": cursor} if cursor else {})}) or {}
+                for slug, p in (resp.get("positions") or {}).items():
+                    try:
+                        if float((p or {}).get("netPosition") or 0) > 0:
+                            held.add(slug)
+                    except (TypeError, ValueError):
+                        held.add(slug)
+                cursor = resp.get("nextCursor") or ""
+                if resp.get("eof") or not cursor:
+                    break
+            _pos_cache.update(ts=now, slugs=frozenset(held))
+        except Exception:  # noqa: BLE001 — stale snapshot beats blindness
+            log.warning("account_holds: positions read failed; using "
+                        "stale snapshot", exc_info=True)
+    return us_market_slug in _pos_cache["slugs"]
+
+
 def _get_client():
     global _client
     if _client is not None:

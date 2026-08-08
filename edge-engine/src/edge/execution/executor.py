@@ -22,6 +22,42 @@ log = logging.getLogger(__name__)
 
 PMUS_ORDER_PREFIX = "pmus_order:"   # state key: resting maker order context
 
+# ── No-stack referee (owner 2026-08-08: "trades are higher than $10 per
+# trade") ────────────────────────────────────────────────────────────
+# The platform's sleeves (copies, desk, underdog) and this engine each
+# capped their own tickets while sharing no ledger — together they built
+# $13-16 positions on one outcome. Before any PMUS entry the engine asks
+# the platform which token ids it already holds and skips them outright.
+# Fail-open on a fetch error (the platform's own venue-account check
+# guards the reverse direction), refreshed at most every 30s.
+_PLATFORM_HELD: dict = {"ts": 0.0, "assets": frozenset()}
+_PLATFORM_HELD_TTL = 30.0
+
+
+def platform_holds(outcome_id: str) -> bool:
+    import os
+
+    import requests
+
+    base = os.environ.get("EDGE_PLATFORM_API", "")
+    token = os.environ.get("EDGE_INGEST_TOKEN", "")
+    if not base or not token:
+        return False
+    now = time.time()
+    if now - _PLATFORM_HELD["ts"] >= _PLATFORM_HELD_TTL:
+        try:
+            r = requests.get(f"{base}/api/engine/held-assets",
+                             headers={"X-Engine-Token": token}, timeout=5)
+            if r.status_code == 200:
+                _PLATFORM_HELD["assets"] = frozenset(
+                    str(a) for a in (r.json().get("assets") or []))
+                _PLATFORM_HELD["ts"] = now
+            else:
+                _PLATFORM_HELD["ts"] = now - (_PLATFORM_HELD_TTL - 5.0)
+        except requests.RequestException:
+            _PLATFORM_HELD["ts"] = now - (_PLATFORM_HELD_TTL - 5.0)
+    return str(outcome_id) in _PLATFORM_HELD["assets"]
+
 
 def market_key(venue: str, outcome_id: str) -> str:
     return f"{venue}:{outcome_id}"
@@ -144,6 +180,11 @@ def execute(*, adapter, ledger: Ledger, mode: str, mkey: str, league: str,
                 "status": f"rejected:{result.get('status')}"}
 
     if adapter.name == "polymarket-us":
+        # A token any platform sleeve already holds is never added to —
+        # the PMUS mirror of the Kalshi one-position-per-game rule above.
+        if platform_holds(outcome_id):
+            return {"placed": False, "filled_usd": 0.0,
+                    "status": "platform_holds"}
         qty = int(size_usd / entry_price)
         if qty < 1:
             return {"placed": False, "filled_usd": 0.0, "status": "sub_contract"}

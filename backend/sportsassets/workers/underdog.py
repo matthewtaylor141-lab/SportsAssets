@@ -280,6 +280,13 @@ async def _entry_sweep(pool) -> dict:
         if mapping is None:
             stats["unmapped"] += 1
             continue
+        # NO-STACK: the token-level veto above only sees OUR sleeves'
+        # rows; the engine's own fills live in its ledger. The account
+        # is the referee — never add to a market it already holds.
+        if await asyncio.to_thread(pmus.account_holds,
+                                   mapping["market_slug"]):
+            stats["skipped_held"] += 1
+            continue
         limit = round(min(ask + 0.02, 0.99), 2)
         n = shares_for(PER_FILL_USD, limit)
         if n < 1:

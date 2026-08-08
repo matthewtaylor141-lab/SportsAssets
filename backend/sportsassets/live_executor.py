@@ -611,6 +611,18 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 "UPDATE live_orders SET us_market_slug=$2 WHERE id=$1",
                 row_id, mapping["market_slug"],
             )
+            # NO-STACK (owner 2026-08-08: "trades are higher than $10 per
+            # trade"): the engine, the desk, and this copy path each cap
+            # their own tickets but shared no ledger, so two sleeves could
+            # build one $20 position. The venue account is the referee —
+            # an outcome the account already holds is never added to.
+            if await asyncio.to_thread(pmus.account_holds,
+                                       mapping["market_slug"]):
+                await pool.execute(
+                    "UPDATE live_orders SET status='rejected', error=$2 "
+                    "WHERE id=$1", row_id,
+                    "no-stack: account already holds this market")
+                return
             result = await asyncio.to_thread(
                 pmus.submit_fok, mapping["market_slug"], limit, int(shares))
         else:

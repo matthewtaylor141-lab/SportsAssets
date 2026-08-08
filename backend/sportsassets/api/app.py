@@ -1211,6 +1211,23 @@ async def api_manual_kalshi_result(
     return {"ok": True}
 
 
+@app.get("/api/engine/held-assets")
+async def api_held_assets(x_engine_token: str = Header(default="")) -> dict:
+    """PMUS token ids the platform already holds through ANY sleeve —
+    copies, the desk, the underdog test. The engine skips these outright
+    (owner 2026-08-08: 'trades are higher than $10 per trade' — each
+    sleeve capped its own ticket while stacking one position)."""
+    cfg = settings()
+    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
+        raise HTTPException(status_code=401, detail="engine token required")
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT DISTINCT asset FROM live_orders "
+        "WHERE status IN ('submitting', 'filled') "
+        "  AND placed_at > now() - interval '7 days'")
+    return {"assets": [str(r["asset"]) for r in rows]}
+
+
 @app.get("/api/engine/kud-queue")
 async def api_kud_queue(x_engine_token: str = Header(default="")) -> dict:
     """Queued Kalshi-leg underdog tasks for the engine's relay. The
