@@ -958,7 +958,12 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
 # fresh boot serves it instantly instead of blocking, refusing, or
 # stepping backward, and a fresh build that shows fewer settled than
 # the persisted high-water serves the persisted copy instead.
-_PERSIST_KEY = "track_record_last_payload"
+# Key VERSIONED with the record's basis: the account-basis payloads of
+# 2026-08-08 persisted with ~$17K stake and ~1100 settled as high-water;
+# the AI-basis revert legitimately shows LESS, and under the old key the
+# shrink guards would refuse it forever and serve the inflated payload.
+# A basis change starts its own history.
+_PERSIST_KEY = "track_record_last_payload_ai2"
 _persist_state: dict[str, float] = {"ts": 0.0, "settled": -1.0, "stake": -1.0}
 
 # A degraded build can GROW the settled count while losing half its
