@@ -468,6 +468,18 @@ export function TrackRecord() {
           </div>
         )}
 
+        {acct && (
+          <div className="tr-account">
+            <b>WHOLE ACCOUNT · ALL ACTIVITY</b>{' '}
+            <span className={`tr-acct-net ${acct.net_pnl >= 0 ? 'pos' : 'neg'}`}>
+              {fmtSignedUsd(acct.net_pnl)}
+            </span>{' '}
+            settled net across {acct.trades.toLocaleString()} positions since {SINCE}
+            {' '}({acct.open.toLocaleString()} open). Includes manual trades and
+            cash-outs, which the AI record above excludes.
+          </div>
+        )}
+
         {data.snapshot && data.snapshot.positions_complete === false && (
           <div className="tr-honesty">
             ⚠️ POSITION LIST TRUNCATED — the venue returned more open positions than
