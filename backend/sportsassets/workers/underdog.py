@@ -75,7 +75,13 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # (today's games sort first), keeps MLB/Tennis two-token game markets,
 # and upserts them into the shared catalog the entry sweep reads.
 _DISCOVER_EVERY_S = float(os.environ.get("UNDERDOG_DISCOVER_EVERY_S", "900"))
-_DISCOVER_PAGES = int(os.environ.get("UNDERDOG_DISCOVER_PAGES", "15"))
+# 50 pages, not 15 (owner report 2026-08-09 ~12:30pm ET: live tennis
+# with no entries): endDate-ordered paging is FLOODED by crypto markets
+# that expire every 15 minutes — 1,500 markets never reached the tennis
+# slate, so live matches were never catalogued and their T-minus-5
+# windows never existed. Paging stops early once endDates pass ~36h out.
+_DISCOVER_PAGES = int(os.environ.get("UNDERDOG_DISCOVER_PAGES", "50"))
+_DISCOVER_HORIZON_S = 36 * 3600
 _discover_state: dict = {"ts": 0.0, "order_ok": True}
 
 
@@ -140,9 +146,14 @@ async def _discover_games(today: str) -> dict:
                     return await _discover_games(today)
                 raise
             stats["pages"] += 1
+            horizon_hit = False
             for raw in batch:
                 meta = gamma.parse_market(raw)
                 if meta is None or not _is_game_market(meta, today):
+                    end = _parse_start(raw.get("endDate")
+                                       or raw.get("end_date_iso"))
+                    if end and end > _t.time() + _DISCOVER_HORIZON_S:
+                        horizon_hit = True
                     continue
                 await gamma.upsert_market(meta)
                 stats["upserted"] += 1
@@ -151,7 +162,7 @@ async def _discover_games(today: str) -> dict:
                 if start and meta["slug"] not in _starts:
                     _starts[meta["slug"]] = start
                     stats["starts_primed"] += 1
-            if len(batch) < 100:
+            if len(batch) < 100 or horizon_hit:
                 break
     finally:
         await client.close()
