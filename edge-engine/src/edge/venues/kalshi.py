@@ -421,7 +421,7 @@ class KalshiAdapter(VenueAdapter):
 
     def place_order(self, market_ticker: str, price: float, count: int,
                     client_order_id: str, taker: bool,
-                    sell: bool = False) -> dict:
+                    sell: bool = False, rest_s: int = 900) -> dict:
         """POST a YES limit via the V2 events-orders endpoint. The legacy
         /portfolio/orders path now answers HTTP 410 deprecated_v1_order_endpoint
         (observed live 2026-08-04); V2 is a single YES-denominated book where a
@@ -442,7 +442,7 @@ class KalshiAdapter(VenueAdapter):
             body["time_in_force"] = "immediate_or_cancel"
         else:
             body["time_in_force"] = "good_till_canceled"
-            body["expiration_time"] = int(time.time()) + 900
+            body["expiration_time"] = int(time.time()) + int(rest_s)
         try:
             resp = self._sess.post(
                 f"{BASE}/portfolio/events/orders", json=body,

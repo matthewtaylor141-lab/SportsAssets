@@ -31,7 +31,11 @@ log = logging.getLogger(__name__)
 
 MIN_ASK = 0.05     # sub-5c is lottery junk, same band as the PMUS leg
 MAX_ASK = 0.48     # 50c+ is no dog
-REST_S = 900       # venue-enforced maker expiry; we re-rest each sweep
+# Exit rests live HOURS, not the copies' 15 minutes: a +20% target does
+# not go stale (it IS the strategy), and 15-minute churn left dozens of
+# expired sell orders in the venue's history — which read as "a bunch
+# sold" (owner 2026-08-09 morning). Long rests also keep queue priority.
+REST_S = 4 * 3600
 
 
 def threshold_price(entry: float, take: float = 0.20) -> float:
@@ -225,7 +229,7 @@ def sweep(*, kalshi, ledger, base: str, token: str, live: bool) -> dict:
             continue
         rr = kalshi.place_order(ticker, float(st["thr"]), int(st["qty"]),
                                 client_order_id=f"kudx-{uuid.uuid4().hex[:12]}",
-                                taker=False, sell=True)
+                                taker=False, sell=True, rest_s=REST_S)
         if rr.get("ok") and rr.get("order_id"):
             ledger.set_state(
                 f"kalshi_order:{rr['order_id']}",

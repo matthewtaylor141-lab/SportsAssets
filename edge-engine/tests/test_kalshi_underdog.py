@@ -36,7 +36,7 @@ class _Kalshi:
                           asks=[BookLevel(self.ask, 60)], ts=time.time())
 
     def place_order(self, ticker, price, count, client_order_id="",
-                    taker=True, sell=False):
+                    taker=True, sell=False, rest_s=900):
         self.orders.append((ticker, price, count, taker, sell))
         return {"ok": True, "count": count, "price": price,
                 "order_id": f"ord-{len(self.orders)}", "status": "filled"}
