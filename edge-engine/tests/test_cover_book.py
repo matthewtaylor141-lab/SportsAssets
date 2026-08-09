@@ -6,6 +6,7 @@ import tempfile
 
 import pytest
 
+import edge.shadow.runner as runner_mod
 from edge.analysis.consistency import Leg, find_cover_book
 from edge.ledger.service import Ledger
 from edge.shadow.runner import _try_arbitrage
@@ -13,6 +14,15 @@ from edge.shadow.runner import _try_arbitrage
 
 def _leg(outcome, token, price, size=40):
     return Leg(outcome=outcome, token=token, price=price, size=size)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_cover_seen():
+    """Dark-mode telemetry dedupes by claim key across cycles; tests need
+    each to start unseen."""
+    runner_mod._COVER_SEEN.clear()
+    yield
+    runner_mod._COVER_SEEN.clear()
 
 
 def test_cover_locks_when_the_pair_prices_under_a_dollar():
@@ -136,3 +146,131 @@ def test_under_half_never_masquerades_as_the_over(led):
     assert not _try_arbitrage(ledger=led, ev=_Ev(), venue_legs=legs,
                               expected=2, sets=1, dry_run=True, funnel={},
                               max_usd=50.0)
+
+
+# ---------------------------------------------------------------------------
+# Adversarial-verification fixes (2026-08-09): everything below pins the
+# hardening the 14 confirmed findings demanded.
+# ---------------------------------------------------------------------------
+
+
+def test_segment_moneyline_pool_requires_all_three_sides(led):
+    """A tie-missing home+away segment pool must NEVER pass as a complete
+    partition — the venue's segment winner is 3-way, whatever the feed's
+    full-game h2h says. This was the Mets/Pirates F5 loss."""
+    funnel: dict = {}
+    pm = _Pmus()
+    two = [
+        (pm, "m1", _leg("[f5] Orioles", "tok-bal5", 0.46)),
+        (pm, "m1", _leg("[f5] Rangers", "tok-tex5", 0.44)),
+    ]
+    assert not _try_arbitrage(ledger=led, ev=_Ev(), venue_legs=two,
+                              expected=2, sets=1, dry_run=True,
+                              funnel=funnel, max_usd=50.0)
+    # With the tie present and the full 3-way priced under $1, the same
+    # segment IS a legitimate dutch — need=3 enables it, not just blocks.
+    three = two + [(pm, "m1", _leg("[f5] Tie", "tok-tie5", 0.05))]
+    fired = _try_arbitrage(ledger=led, ev=_Ev(), venue_legs=three,
+                           expected=2, sets=1, dry_run=True,
+                           funnel=funnel, max_usd=50.0)
+    assert fired and funnel["arb_books"][0]["legs"] == 3
+
+
+def test_cover_only_builds_f5_and_first_inning(led, monkeypatch):
+    """Late innings are out: cumulative-tie wording and half-played-9th
+    settlement cannot be told apart from the per-inning proposition."""
+    monkeypatch.setenv("EDGE_COVER_ARB", "1")
+    for seg in ("i2", "i7", "i9"):
+        funnel: dict = {}
+        assert not _try_arbitrage(
+            ledger=led, ev=_Ev(), venue_legs=_legs(_Pmus(), seg=seg),
+            expected=2, sets=1, dry_run=True, funnel=funnel, max_usd=50.0)
+        assert "cover_found" not in funnel
+
+
+def test_cover_requires_exactly_mlb(led, monkeypatch):
+    """Substring 'baseball' admitted NCAA 7-inning doubleheaders and
+    KBO/NPB shortened-game conventions. Exact key only."""
+    monkeypatch.setenv("EDGE_COVER_ARB", "1")
+
+    class _Ncaa(_Ev):
+        sport_key = "baseball_ncaa"
+
+    assert not _try_arbitrage(ledger=led, ev=_Ncaa(),
+                              venue_legs=_legs(_Pmus()), expected=2, sets=1,
+                              dry_run=True, funnel={}, max_usd=50.0)
+
+
+def test_two_over_shaped_legs_refuse_the_pair(led, monkeypatch):
+    """Two markets answering to one canonical key is an identity
+    ambiguity (team total vs game total) — refuse, never guess."""
+    monkeypatch.setenv("EDGE_COVER_ARB", "1")
+    funnel: dict = {}
+    pm = _Pmus()
+    legs = [
+        (pm, "m1", _leg("[i1] Tie", "tok-tie", 0.30)),
+        (pm, "m1", _leg("[i1] Over 0.5", "tok-over-a", 0.45)),
+        (pm, "m1", _leg("[i1] Over 0.5", "tok-over-b", 0.60)),
+    ]
+    assert not _try_arbitrage(ledger=led, ev=_Ev(), venue_legs=legs,
+                              expected=2, sets=1, dry_run=True,
+                              funnel=funnel, max_usd=50.0)
+    assert funnel.get("cover_ambiguous") == 1
+
+
+class _FillNone(_Pmus):
+    def place_order(self, token, price, sets, **kw):
+        return {"ok": False}
+
+
+class _FillFirstOnly(_Pmus):
+    def __init__(self):
+        self.placed = 0
+
+    def place_order(self, token, price, sets, **kw):
+        self.placed += 1
+        if self.placed == 1:
+            return {"ok": True, "count": sets, "price": price}
+        return {"ok": False}
+
+
+def test_clean_miss_does_not_burn_the_claim(led, monkeypatch):
+    """FOK misses on in-play books are transient; claim-before-execution
+    turned each one into a permanent blacklist. Claim only when venue
+    money moved."""
+    monkeypatch.setenv("EDGE_COVER_ARB", "1")
+    funnel: dict = {}
+    fired = _try_arbitrage(ledger=led, ev=_Ev(),
+                           venue_legs=_legs(_FillNone()), expected=2,
+                           sets=1, dry_run=False, funnel=funnel,
+                           max_usd=50.0)
+    assert fired and funnel["arb_status"].get("no_fills") == 1
+    assert led.get_state("arb_tried:m1:cover-i1") is None
+    # Same market next cycle: still eligible — it retries.
+    runner_mod._COVER_SEEN.clear()
+    funnel2: dict = {}
+    assert _try_arbitrage(ledger=led, ev=_Ev(),
+                          venue_legs=_legs(_FillNone()), expected=2,
+                          sets=1, dry_run=False, funnel=funnel2,
+                          max_usd=50.0)
+
+
+def test_exposed_leg_claims_and_freezes_the_class(led, monkeypatch):
+    """One stranded leg is disqualifying (owner directive 2026-08-08):
+    the claim burns AND the whole arb class self-freezes for 6h."""
+    monkeypatch.setenv("EDGE_COVER_ARB", "1")
+    funnel: dict = {}
+    fired = _try_arbitrage(ledger=led, ev=_Ev(),
+                           venue_legs=_legs(_FillFirstOnly()), expected=2,
+                           sets=1, dry_run=False, funnel=funnel,
+                           max_usd=50.0)
+    assert fired and funnel["arb_status"].get("INCOMPLETE_EXPOSED") == 1
+    assert led.get_state("arb_tried:m1:cover-i1") is not None
+    blk = led.get_state("arb_exposed_block")
+    assert blk and blk["until"] > __import__("time").time()
+    # Frozen: nothing else may fire, loudly counted.
+    funnel2: dict = {}
+    assert not _try_arbitrage(ledger=led, ev=_Ev(),
+                              venue_legs=_legs(_Pmus()), expected=2, sets=1,
+                              dry_run=True, funnel=funnel2, max_usd=50.0)
+    assert funnel2.get("arb_blocked_exposed") == 1

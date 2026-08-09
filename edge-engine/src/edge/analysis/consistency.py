@@ -75,6 +75,9 @@ def find_dutch_book(event: str, kind: str, legs: list[Leg],
         return None
     if len({leg.token for leg in legs}) != len(legs):
         return None                      # the same market counted twice
+    if len({leg.outcome for leg in legs}) != len(legs):
+        return None                      # two legs of one OUTCOME is not a
+        #                                  partition, whatever the tokens say
     if any(leg.price <= 0 or leg.price >= 1 or leg.size <= 0 for leg in legs):
         return None
     cost = sum(leg.price + fee_per_contract for leg in legs)
@@ -103,9 +106,11 @@ def find_cover_book(event: str, segment: str, tie: Leg, over: Leg,
 
     Only sound where the segment's total unit is RUNS and 0.5 means
     "anything scored" — the CALLER gates to baseball segments. The two
-    legs must come from the same venue event (same resolution source):
-    the caller pairs them by (adapter, market_id, segment) so a voided
-    game voids both sides together.
+    legs are SEPARATE venue condition markets with independently written
+    resolution rules; the caller's (adapter, market_id, segment) pairing
+    proves same game only, NOT joint voiding. Until per-market rules
+    verification exists, that residual asymmetric-resolution risk is why
+    this class ships dark (adversarial verification 2026-08-09).
     """
     legs = (tie, over)
     if tie.token == over.token:

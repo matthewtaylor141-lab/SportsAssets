@@ -368,23 +368,43 @@ def _quarantined(ledger) -> set:
 
 
 
-# Segments where "Over 0.5" means "anything scored at all": baseball
-# innings and the first-five. The cover arithmetic (owner design
-# 2026-08-09) is only sound where the total's unit is runs.
-_COVER_SEGMENTS = {"f5"} | {f"i{i}" for i in range(1, 10)}
+# Segments where "Over 0.5" means "anything scored at all" AND a
+# cumulative "tied after N" reading coincides with the per-segment tie
+# (the segment starts 0-0): the first inning and the first five. Later
+# innings are OUT until per-market resolution rules are verified — a
+# cumulative Tie ("leader after the 7th") or a half-played 9th settles
+# differently from the per-inning proposition, and the pipeline cannot
+# tell those markets apart by outcome name (adversarial verification
+# 2026-08-09, 14/14 findings confirmed).
+_COVER_SEGMENTS = {"f5", "i1"}
+
+# Exact sport keys with guaranteed 9-inning regulation structure. A
+# substring test admitted NCAA (7-inning doubleheaders, mercy rule),
+# KBO/NPB and preseason keys, whose shortened games void asymmetrically.
+_COVER_SPORTS = {"baseball_mlb"}
+
+# Venue segment winners are 3-way (home/away/tie) for every timed or
+# scored segment we see EXCEPT tennis sets, which cannot tie. The feed's
+# h2h count describes the FULL GAME and must never size a segment
+# partition: a tie-missing home+away pool passing as "complete" is the
+# uncovered-tie dutch that lost money 2026-08-08 (Mets/Pirates F5).
+_TWO_WAY_SEGMENTS = frozenset(f"s{i}" for i in range(1, 8))
 
 
 def _find_cover_book(ledger, ev, venue_legs, funnel=None):
     """Tie(seg) + Over 0.5(seg) on the SAME fee-free venue event.
 
-    Both legs from one (adapter, market_id, segment): one resolution
-    source, so a voided game voids the pair together. Kalshi never
-    qualifies — its taker fee on two legs eats the whole window, and
-    the tie/first-run markets live on PMUS anyway."""
+    The pairing key (adapter, market_id, segment) proves SAME GAME and
+    same segment label only — the two legs are separate condition
+    markets with independently written resolution rules. Joint voiding
+    is NOT guaranteed; that residual risk is why this class stays dark
+    until per-market rules verification exists. Kalshi never qualifies —
+    its taker fee on two legs eats the whole window, and the tie/first-
+    run markets live on PMUS anyway."""
     from edge.analysis.consistency import find_cover_book
     from edge.fairvalue.lines import is_draw, parse_outcome_line, split_segment
 
-    if "baseball" not in str(ev.sport_key):
+    if str(ev.sport_key) not in _COVER_SPORTS:
         return None, None
     ties: dict = {}
     overs: dict = {}
@@ -395,16 +415,24 @@ def _find_cover_book(ledger, ev, venue_legs, funnel=None):
         if seg not in _COVER_SEGMENTS:
             continue
         if is_draw(name):
-            ties[(a, market_id, seg)] = leg
+            ties.setdefault((a, market_id, seg), []).append(leg)
             continue
         p = parse_outcome_line(name)
         if (p.kind == "total" and p.point == 0.5
                 and name.strip().lower().startswith("over")):
-            overs[(a, market_id, seg)] = leg
-    for key, tleg in ties.items():
-        oleg = overs.get(key)
-        if oleg is None:
+            overs.setdefault((a, market_id, seg), []).append(leg)
+    for key, tlist in ties.items():
+        olist = overs.get(key) or []
+        if len(tlist) != 1 or len(olist) != 1:
+            # Two tie-shaped or two over-shaped legs under one key is an
+            # identity ambiguity (team total vs game total, cumulative
+            # vs per-inning tie). Refuse — never guess which market a
+            # "guarantee" is built on.
+            if funnel is not None and (len(tlist) > 1 or len(olist) > 1):
+                funnel["cover_ambiguous"] = funnel.get(
+                    "cover_ambiguous", 0) + 1
             continue
+        tleg, oleg = tlist[0], olist[0]
         a, market_id, seg = key
         claim = f"arb_tried:{market_id}:cover-{seg}"
         if ledger.get_state(claim):
@@ -415,13 +443,15 @@ def _find_cover_book(ledger, ev, venue_legs, funnel=None):
                             fee_per_contract=fee)
         if b is not None:
             # DARK until the adversarial verification signs off (owner
-            # authorized live fire 2026-08-09; yesterday a "guaranteed"
-            # class leaked, so this one deploys measuring first): every
-            # real lock is counted and priced in telemetry either way.
-            if funnel is not None:
+            # authorized live fire 2026-08-09; the verification came back
+            # with confirmed identity holes, so the switch stays off):
+            # every real lock is counted ONCE and priced in telemetry.
+            if funnel is not None and claim not in _COVER_SEEN:
+                _COVER_SEEN.add(claim)
                 funnel.setdefault("cover_locks_seen", []).append(
                     {"event": f"{ev.home} v {ev.away}", "seg": seg,
-                     "cost": b.cost, "sets": b.sets})
+                     "cost": b.cost, "sets": b.sets,
+                     "verified": False})
             import os
             if os.environ.get("EDGE_COVER_ARB", "0") != "1":
                 if funnel is not None:
@@ -429,6 +459,12 @@ def _find_cover_book(ledger, ev, venue_legs, funnel=None):
                 continue
             return a, b
     return None, None
+
+
+# First-sighting dedupe for dark-mode cover telemetry: the funnel is
+# rebuilt every cycle, so a persistent lock would otherwise be counted
+# once per cycle — inflating exactly the evidence a go-live reads.
+_COVER_SEEN: set = set()
 
 
 def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
@@ -455,6 +491,16 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
     from edge.fairvalue.lines import parse_outcome_line, split_segment
     from edge.fairvalue.props import parse_prop
 
+    # A stranded leg is a position nobody decided to take. While one is
+    # outstanding the arb class does not get to keep firing (owner
+    # directive 2026-08-08: one naked hold is disqualifying) — same
+    # 6-hour ledger-backed self-freeze the cross-venue sleeve uses,
+    # human-clearable by deleting the state row.
+    frozen = ledger.get_state("arb_exposed_block") or {}
+    if float(frozen.get("until", 0) or 0) > time.time():
+        funnel["arb_blocked_exposed"] = funnel.get("arb_blocked_exposed", 0) + 1
+        return False
+
     # Legs pool by BET FAMILY — (market, segment, kind, |line|) — because a
     # partition is the outcome set of one PROPOSITION. The venue groups a
     # whole event's sides (ML, totals, spreads, props) under one market_id,
@@ -469,6 +515,14 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
         p = parse_outcome_line(name)
         if p.kind in ("total", "spread") and p.point is not None:
             family, need = (seg, p.kind, abs(p.point)), 2
+        elif seg is not None and seg not in _TWO_WAY_SEGMENTS:
+            # Segment winners are 3-way at the venue (tie is a real
+            # outcome) even where the sharp feed prices two-way with
+            # tie=push. `expected` is the FULL-GAME outcome count; using
+            # it here let a tie-missing home+away pool pass as complete
+            # (the 2026-08-08 F5 loss). need=3 fails closed until all
+            # three sides are present and priced.
+            family, need = (seg, "moneyline", None), 3
         else:
             family, need = (seg, "moneyline", None), expected
         pools.setdefault((adapter, market_id, family), (need, []))[1].append(leg)
@@ -508,17 +562,27 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
     # guarantee in execute_dutch_book is per-set and scale-invariant;
     # `sets` (config max_sets) stays as the floor.
     take = min(book.sets, max(sets, int(max_usd / max(book.cost, 0.01))))
-    if not dry_run:
-        # book.event IS the claim key (arb_tried:market:family).
-        ledger.set_state(book.event, {"ts": time.time()})
     res = execute_dutch_book(adapter=adapter, book=book, sets=take,
                              dry_run=dry_run)
+    if not dry_run and res.status not in (
+            "no_fills", "nothing_to_do", "implausible_profit"):
+        # Claim AFTER the attempt, and only when venue money moved —
+        # book.event IS the claim key (arb_tried:market:family). The
+        # cross-venue path was already fixed this way: claim-before-
+        # execution turned every transient FOK miss into a permanent
+        # blacklist, and in-play books miss transiently all the time.
+        ledger.set_state(book.event, {"ts": time.time(),
+                                      "status": res.status})
     funnel.setdefault("arb_status", {}).setdefault(res.status, 0)
     funnel["arb_status"][res.status] += 1
     if res.status == "INCOMPLETE_EXPOSED":
         # Loudest possible: a position nobody decided to take.
         funnel.setdefault("arb_exposed", []).append(
             {"event": f"{ev.home} v {ev.away}", "holding": res.exposed})
+        if not dry_run:
+            ledger.set_state("arb_exposed_block", {
+                "until": time.time() + 6 * 3600, "event": book.event,
+                "holding": res.exposed, "at": time.time()})
     if not dry_run:
         # EVERY filled leg reaches the ledger — complete sets and naked
         # rescues alike. Venue money moved; a ledger that only records the
@@ -526,15 +590,20 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
         filled_orders = [o for o in res.orders
                          if o.get("ok") and float(o.get("count") or 0) > 0]
         legs_by_token = {l.token: l for l in book.legs}
-        for o in filled_orders:
+        for i, o in enumerate(filled_orders):
             token = o.get("token") or ""
             leg = legs_by_token.get(token)
             if leg is None:
                 continue
+            # qty is the venue-REPORTED count, never the intended take: a
+            # venue-violating partial otherwise books at full size — the
+            # ledger overstating the very naked position it exists to
+            # expose. The order index keeps an initial partial and its
+            # same-second completion re-buy from colliding on fill_uid.
             ledger.record_fill(
-                fill_uid=f"arb-{book.event}-{leg.token}-{int(time.time())}",
+                fill_uid=f"arb-{book.event}-{leg.token}-{i}-{int(time.time())}",
                 venue=adapter.name, market_key=f"{adapter.name}:{leg.token}",
-                side="BUY", qty=float(take),
+                side="BUY", qty=float(o.get("count") or 0),
                 price=float(o.get("price") or leg.price),
                 league=ev.league_code, mode="LIVE_BETA", category="arb",
                 decision={"arb": True, "cost_per_set": book.cost,
@@ -543,7 +612,8 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
                           "legs": [l.outcome for l in book.legs]})
             mirror_side_channel_fill(
                 venue=adapter.name, slug=leg.token,
-                price=float(o.get("price") or leg.price), qty=float(take),
+                price=float(o.get("price") or leg.price),
+                qty=float(o.get("count") or 0),
                 league=ev.league_code, category="arb")
         if res.ok and res.complete:
             funnel["arb_profit"] = round(

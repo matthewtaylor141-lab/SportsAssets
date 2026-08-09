@@ -203,6 +203,7 @@ class PolymarketUSAdapter(VenueAdapter):
                     if len(census["samples"]) < 3 and ev.get("title"):
                         census["samples"].append(ev["title"][:60])
                     outcomes = {}
+                    collided: set = set()
                     for m in ev.get("markets") or []:
                         census["markets_seen"] += 1
                         if len(census["market_samples"]) < 3 and m.get("title"):
@@ -272,7 +273,26 @@ class PolymarketUSAdapter(VenueAdapter):
                             census["segments"] = census.get("segments", {})
                             census["segments"][ident.segment] = census[
                                 "segments"].get(ident.segment, 0) + 1
-                        outcomes[key] = m["slug"]
+                        # A canonical key two DIFFERENT markets claim is an
+                        # identity ambiguity, not a tiebreak: the canonical
+                        # form drops a total's subject ("Orioles 1st Inning
+                        # O/U 0.5" and the game's YRFI both come out as
+                        # "[i1] Over 0.5"), so last-writer-wins silently
+                        # substitutes one proposition for another. Refuse
+                        # BOTH — never trade a key two markets answered to.
+                        if key in outcomes and outcomes[key] != m["slug"]:
+                            collided.add(key)
+                            census["key_collision"] = census.get(
+                                "key_collision", 0) + 1
+                            if "key_collision_example" not in census:
+                                census["key_collision_example"] = {
+                                    "key": key[:60],
+                                    "slugs": [outcomes[key][:60],
+                                              m["slug"][:60]]}
+                        else:
+                            outcomes[key] = m["slug"]
+                    for k in collided:
+                        outcomes.pop(k, None)
                     if not ev.get("title"):
                         census["skipped_no_title"] += 1
                     elif len(outcomes) < 2:
