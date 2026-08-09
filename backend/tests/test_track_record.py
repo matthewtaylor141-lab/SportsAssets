@@ -351,6 +351,17 @@ def test_warm_archive_refresh_appends_without_rereading_the_table(monkeypatch):
 
     from sportsassets.api import track_record as tr
 
+    class _Tx:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Cursor:
+        async def fetch(self, n):
+            return []
+
     class FakePool:
         def __init__(self):
             self.fetches, self.execs = [], []
@@ -364,6 +375,25 @@ def test_warm_archive_refresh_appends_without_rereading_the_table(monkeypatch):
         async def fetch(self, q, *a):
             self.fetches.append(q)
             return []
+
+        # Streaming-cursor hydrate path (2026-08-09): one scan, batched.
+        def acquire(self):
+            pool = self
+
+            class _Acq:
+                async def __aenter__(self):
+                    class _Conn:
+                        def transaction(self):
+                            return _Tx()
+
+                        async def cursor(self, q, *a):
+                            pool.fetches.append(q)
+                            return _Cursor()
+                    return _Conn()
+
+                async def __aexit__(self, *a):
+                    return False
+            return _Acq()
 
     pool = FakePool()
 
@@ -384,12 +414,11 @@ def test_warm_archive_refresh_appends_without_rereading_the_table(monkeypatch):
     assert len(inserted) == 1 and len(inserted[0]) == 1  # only a2 upserted
 
     # Cold boot (empty in-process cache) DOES hydrate from the table —
-    # in id-keyed chunks, never one all-rows fetch.
+    # via one streaming cursor scan, never repeated all-rows fetches.
     monkeypatch.setitem(tr._archive_cache, "data", None)
     asyncio.run(tr._archive_and_union([{"id": "a1"}]))
-    assert any("payload FROM pmus_activity_archive" in q for q in pool.fetches)
-    assert all("LIMIT" in q for q in pool.fetches
-               if "payload FROM pmus_activity_archive" in q)
+    assert any("payload FROM pmus_activity_archive" in q
+               and "ORDER BY id" in q for q in pool.fetches)
 
 
 def test_failed_hydrate_serves_the_window_and_arms_a_retry(monkeypatch):

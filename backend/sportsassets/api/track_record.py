@@ -864,23 +864,32 @@ async def _hydrate_all(pool: Any) -> list[dict]:
     out: list[dict] = _hydrate_progress["rows"]
     last: str = _hydrate_progress["last"]
     try:
-        while True:
-            rows = await asyncio.wait_for(pool.fetch(
-                "SELECT id, payload FROM pmus_activity_archive "
-                "WHERE id > $1 ORDER BY id LIMIT 2500", last), timeout=30)
-            if not rows:
-                break
-            last = rows[-1]["id"]
-            _hydrate_err["chunks"] += 1
+        # ONE streaming server-side cursor, not repeated LIMIT queries:
+        # the planner answered "WHERE id > $1 ORDER BY id LIMIT n" with a
+        # fresh scan of the whole table per chunk (probe 2026-08-09
+        # 15:00Z: TimeoutError at chunk 6, 30s+ per chunk) — 73 chunks of
+        # that never finishes. A cursor scans once and streams.
+        async with pool.acquire() as con:
+            async with con.transaction():
+                cur = await con.cursor(
+                    "SELECT id, payload FROM pmus_activity_archive "
+                    "WHERE id > $1 ORDER BY id", last)
+                while True:
+                    rows = await asyncio.wait_for(cur.fetch(2500),
+                                                  timeout=60)
+                    if not rows:
+                        break
+                    last = rows[-1]["id"]
+                    _hydrate_err["chunks"] += 1
 
-            def _parse(chunk: Any = rows) -> list[dict]:
-                return [_slim(json.loads(r["payload"])
-                              if isinstance(r["payload"], str)
-                              else r["payload"])
-                        for r in chunk]
+                    def _parse(chunk: Any = rows) -> list[dict]:
+                        return [_slim(json.loads(r["payload"])
+                                      if isinstance(r["payload"], str)
+                                      else r["payload"])
+                                for r in chunk]
 
-            out.extend(await asyncio.to_thread(_parse))
-            _hydrate_progress.update(last=last, rows=out)
+                    out.extend(await asyncio.to_thread(_parse))
+                    _hydrate_progress.update(last=last, rows=out)
     except Exception as exc:  # noqa: BLE001 — record + keep progress
         # Probe-readable failure, resumable next attempt from `last`.
         _hydrate_err.update(err=f"{type(exc).__name__}: {str(exc)[:200]}",
