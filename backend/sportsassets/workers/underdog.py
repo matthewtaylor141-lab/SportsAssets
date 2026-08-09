@@ -484,6 +484,32 @@ async def _cashout_sweep(pool) -> dict:
     return stats
 
 
+async def _record(pool) -> dict:
+    """The sleeve's cumulative scorecard, on every heartbeat: 'how is
+    the 20% selling sleeve performing' must be a probe read, not an
+    inference (owner question 2026-08-08 evening)."""
+    out: dict = {}
+    rows = await pool.fetch(
+        "SELECT status, count(*)::int AS n, "
+        "COALESCE(sum(filled_usd), 0)::float8 AS usd, "
+        "COALESCE(sum(pnl), 0)::float8 AS pnl "
+        "FROM live_orders WHERE whale_username = 'underdog' "
+        "GROUP BY status")
+    out["pmus"] = {r["status"]: {"n": r["n"], "usd": round(r["usd"], 2),
+                                 "pnl": round(r["pnl"], 2)} for r in rows}
+    try:
+        krows = await pool.fetch(
+            "SELECT status, count(*)::int AS n, "
+            "COALESCE(sum(pnl), 0)::float8 AS pnl "
+            "FROM kud_queue GROUP BY status")
+        out["kalshi"] = {r["status"]: {"n": r["n"],
+                                       "pnl": round(r["pnl"], 2)}
+                         for r in krows}
+    except Exception:  # noqa: BLE001 — table lands with migration 017
+        pass
+    return out
+
+
 async def main() -> None:
     from ..db import get_pool, heartbeat
 
@@ -500,6 +526,7 @@ async def main() -> None:
             now = _t.time()
             if now - last_entry >= ENTRY_SWEEP_S:
                 st = await _entry_sweep(pool)
+                st["record"] = await _record(pool)
                 last_entry = now
                 await heartbeat("underdog", "ok", st)
                 log.info("underdog entry sweep: %s", st)
