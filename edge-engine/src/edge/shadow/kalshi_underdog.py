@@ -172,24 +172,30 @@ def sweep(*, kalshi, ledger, base: str, token: str, live: bool) -> dict:
                                 taker=True)
         filled = int(float(pr.get("count") or 0)) if pr.get("ok") else 0
         if pr.get("ok") and filled > 0:
+            # ENTRY BASIS = the ask, not the limit. An IOC fills at the
+            # resting book price; the +2c limit is crash-protection we
+            # almost never pay. Basing the +20% target on the limit
+            # parked every exit ~7% too high (a 30c dog was offered at
+            # 38c, +27%) — the bug behind exits never triggering at the
+            # designed rate (owner report 2026-08-09 morning).
             if pr.get("order_id"):
                 ledger.set_state(f"kalshi_inline:{pr['order_id']}",
                                  {"ts": time.time()})
             ledger.record_fill(
                 fill_uid=f"kud-{t['id']}",
                 venue="kalshi", market_key=f"kalshi:{ticker}",
-                side="BUY", qty=float(filled), price=limit,
-                fee=round(kalshi.taker_fee(limit) * filled, 4),
+                side="BUY", qty=float(filled), price=ask,
+                fee=round(kalshi.taker_fee(ask) * filled, 4),
                 league=league, mode="LIVE_BETA",
                 category="kalshi_underdog",
                 decision={"underdog": True, "task_id": t["id"],
                           "game_slug": t.get("game_slug"),
-                          "dog": t.get("dog_outcome"), "ask": ask})
-            note_fill(sides, ticker, limit, filled)
-            thr = threshold_price(limit, float(t.get("take_profit") or 0.20))
+                          "dog": t.get("dog_outcome"), "limit": limit})
+            note_fill(sides, ticker, ask, filled)
+            thr = threshold_price(ask, float(t.get("take_profit") or 0.20))
             ledger.set_state(f"kud:{ticker}",
                              {"task_id": t["id"], "qty": filled,
-                              "entry": limit, "thr": thr, "status": "open",
+                              "entry": ask, "thr": thr, "status": "open",
                               "ts": time.time()})
             idx = ledger.get_state("kud_index") or {}
             tickers = list(dict.fromkeys((idx.get("tickers") or []) + [ticker]))

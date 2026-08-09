@@ -96,19 +96,20 @@ def test_contracts_never_exceed_the_dollar():
 def test_entry_buys_the_dog_and_rests_the_exit(monkeypatch):
     st, ka, led, sess = _run(0.30, monkeypatch=monkeypatch)
     assert st["placed"] == 1
-    # Taker buy at ask+2c, $1 -> 3 contracts; then the maker sell rests
-    # at the +20% threshold in the SAME sweep.
+    # Taker buy LIMIT at ask+2c (crash protection; the IOC fills at the
+    # book price), then the maker sell rests at +20% ON THE ASK — basing
+    # the target on the limit parked every exit ~7% too high.
     assert ka.orders[0] == (f"{_EV}-CHI", 0.32, 3, True, False)
-    assert ka.orders[1] == (f"{_EV}-CHI", 0.38, 3, False, True)
+    assert ka.orders[1] == (f"{_EV}-CHI", 0.36, 3, False, True)
     assert st["resting"] == 1
     kud = led.get_state(f"kud:{_EV}-CHI")
-    assert kud["status"] == "open" and kud["thr"] == 0.38
+    assert kud["status"] == "open" and kud["thr"] == 0.36
     statuses = [j["status"] for _, j in sess.posts]
     assert statuses == ["filled"]
     # The parked exit context carries the accounting the fill sync needs.
     rest = led.get_state(f"kud_rest:{_EV}-CHI")
     ctx = led.get_state(f"kalshi_order:{rest['order_id']}")
-    assert ctx["category"] == "kalshi_underdog_exit" and ctx["entry"] == 0.32
+    assert ctx["category"] == "kalshi_underdog_exit" and ctx["entry"] == 0.30
 
 
 def test_band_gate_refuses_favorites_and_junk(monkeypatch):

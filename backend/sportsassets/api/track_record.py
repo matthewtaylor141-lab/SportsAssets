@@ -1024,6 +1024,10 @@ _persist_state: dict[str, float] = {"ts": 0.0, "settled": -1.0, "stake": -1.0}
 # the homepage while people watched); 2% covers float jitter only.
 _STAKE_SHRINK_FLOOR = 0.98
 
+# Refused-build history for the freeze escape hatch (2026-08-09): the
+# shrink guard alone froze the page on yesterday's payload for ~16h.
+_refused: dict = {"streak": 0, "stakes": [], "settled": []}
+
 
 def _stake_of(payload: dict) -> float:
     return float((payload.get("summary") or {}).get("settled_stake") or 0)
@@ -1300,18 +1304,65 @@ async def track_record(since: str | None = None,
     fresh_settled = float((payload.get("summary") or {}).get("settled") or 0)
     degraded = _looks_degraded(payload)
     if fresh_settled < _persist_state["settled"] or degraded:
-        persisted = await _load_persisted()
-        if persisted is not None:
-            out = {"configured": True, "restored_across_deploy": True,
-                   **persisted}
-            if degraded:
-                out["degraded_build"] = {
-                    "fresh_settled_stake": round(_stake_of(payload), 2),
-                    "high_water_stake": round(_persist_state["stake"], 2),
-                    "note": "fresh build lost activities; serving last "
-                            "good payload",
+        # ESCAPE HATCH (owner report 2026-08-09: the page served
+        # yesterday's numbers for ~16h while saying SYNCED). The guard
+        # had no way back: one legitimate 2% recomposition dip (a
+        # settled row moving to an excluded cohort) refused every fresh
+        # build forever. Distinguish loss from recomposition by
+        # SELF-CONSISTENCY: transient data loss wobbles build to build;
+        # a real recomposition is stable. Three consecutive refused
+        # builds agreeing within 1% stake and ±2 settled = the truth
+        # changed — re-baseline and serve fresh.
+        _refused["streak"] += 1
+        _refused["stakes"] = (_refused["stakes"]
+                              + [_stake_of(payload)])[-5:]
+        _refused["settled"] = (_refused["settled"] + [fresh_settled])[-5:]
+        s3, n3 = _refused["stakes"][-3:], _refused["settled"][-3:]
+        agree = (len(s3) >= 3 and max(s3) > 0
+                 and (max(s3) - min(s3)) <= 0.01 * max(s3)
+                 and (max(n3) - min(n3)) <= 2)
+        if agree:
+            logging.getLogger(__name__).warning(
+                "track-record re-baseline after %d consistent refused "
+                "builds: settled %s->%s stake %.2f->%.2f",
+                _refused["streak"], _persist_state["settled"],
+                fresh_settled, _persist_state["stake"], _stake_of(payload))
+            _persist_state["settled"] = fresh_settled
+            _persist_state["stake"] = _stake_of(payload)
+            _persist_state["ts"] = 0.0     # let the next persist through
+            _refused.update(streak=0, stakes=[], settled=[])
+            payload["rebaselined"] = {"refused_builds": 3,
+                                      "reason": "consistent lower basis"}
+        else:
+            persisted = await _load_persisted()
+            if persisted is not None:
+                out = {"configured": True, "restored_across_deploy": True,
+                       **persisted}
+                # ALWAYS disclose staleness — a probe must read the
+                # freeze on its first look, not infer it from identical
+                # numbers across runs.
+                out["stale_served"] = {
+                    "refused_streak": _refused["streak"],
+                    "fresh_settled": fresh_settled,
+                    "fresh_stake": round(_stake_of(payload), 2),
+                    "high_settled": _persist_state["settled"],
+                    "high_stake": round(_persist_state["stake"], 2),
                 }
-            return out
+                if degraded:
+                    out["degraded_build"] = {
+                        "fresh_settled_stake": round(_stake_of(payload), 2),
+                        "high_water_stake": round(_persist_state["stake"], 2),
+                        "note": "fresh build lost activities; serving last "
+                                "good payload",
+                    }
+                # Cache the stale serve too: during the 16h freeze every
+                # page view ran a full 173k-row build only to discard it.
+                if since is None and max_stake is None:
+                    _payload_cache["data"] = out
+                    _payload_cache["ts"] = time.time()
+                return out
+    else:
+        _refused.update(streak=0, stakes=[], settled=[])
     await _persist_payload(payload)
     if since is None and max_stake is None:
         _payload_cache["data"] = payload

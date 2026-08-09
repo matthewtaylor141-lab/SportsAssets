@@ -355,7 +355,18 @@ export function TrackRecord() {
   // Snapshot freshness drives the badge: green under 2 minutes, amber to
   // 10, red past that. A page that cannot admit it is stale trains its
   // owner to distrust every number on it.
-  const age = data.snapshot?.age_s ?? null
+  //
+  // The age comes from generated_at — when the PAYLOAD was built — not
+  // from the embedded snapshot age. The server can serve a persisted
+  // payload whose snapshot block froze along with it: on 2026-08-09 the
+  // page showed 16-hour-old numbers under a green "SYNCED · 35s AGO"
+  // badge because it trusted the frozen block's own claim.
+  const genAt = (data as { generated_at?: number }).generated_at
+  const payloadAge = genAt ? Math.max(0, Date.now() / 1000 - genAt) : null
+  const snapAge = data.snapshot?.age_s ?? null
+  const age = payloadAge !== null
+    ? Math.max(payloadAge, snapAge ?? 0)
+    : snapAge
   const refreshErr = data.snapshot?.refresh_error || null
   // Thresholds track the server's snapshot cadence (raw TTL 180s): under
   // ~5 min is simply "current"; amber and red mean something is wrong.
