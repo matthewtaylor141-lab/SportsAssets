@@ -845,6 +845,9 @@ def _slim(a: dict) -> dict:
     return out
 
 
+_hydrate_err: dict = {"err": None, "at": 0.0, "chunks": 0}
+
+
 async def _hydrate_all(pool: Any) -> list[dict]:
     """Stream the archive out of Postgres in id-keyed chunks, slimming
     each chunk before fetching the next. The single all-rows fetch held
@@ -854,20 +857,32 @@ async def _hydrate_all(pool: Any) -> list[dict]:
     and the trim hands the parse arenas back to the OS."""
     out: list[dict] = []
     last = ""
-    while True:
-        rows = await pool.fetch(
-            "SELECT id, payload FROM pmus_activity_archive "
-            "WHERE id > $1 ORDER BY id LIMIT 10000", last)
-        if not rows:
-            break
-        last = rows[-1]["id"]
+    _hydrate_err["chunks"] = 0
+    try:
+        while True:
+            rows = await pool.fetch(
+                "SELECT id, payload FROM pmus_activity_archive "
+                "WHERE id > $1 ORDER BY id LIMIT 2500", last)
+            if not rows:
+                break
+            last = rows[-1]["id"]
+            _hydrate_err["chunks"] += 1
 
-        def _parse(chunk: Any = rows) -> list[dict]:
-            return [_slim(json.loads(r["payload"])
-                          if isinstance(r["payload"], str) else r["payload"])
-                    for r in chunk]
+            def _parse(chunk: Any = rows) -> list[dict]:
+                return [_slim(json.loads(r["payload"])
+                              if isinstance(r["payload"], str)
+                              else r["payload"])
+                        for r in chunk]
 
-        out.extend(await asyncio.to_thread(_parse))
+            out.extend(await asyncio.to_thread(_parse))
+    except Exception as exc:  # noqa: BLE001 — record, then re-raise
+        # The failure mode must be probe-readable: this hydrate failing
+        # SILENTLY on every boot is what actually froze the page from
+        # 2026-08-08 21:35Z (the shrink guard took the blame for a day).
+        _hydrate_err.update(err=f"{type(exc).__name__}: {str(exc)[:200]}",
+                            at=time.time())
+        raise
+    _hydrate_err.update(err=None, at=time.time())
     _malloc_trim()
     return out
 
@@ -1089,6 +1104,25 @@ async def _load_persisted() -> dict | None:
         return None
 
 
+async def _load_legacy_persisted() -> dict | None:
+    """Previous-generation persisted payload, serve-only: it never touches
+    the high-water state (that is exactly the poison a key bump exists to
+    shed)."""
+    try:
+        from ..db import get_pool
+
+        pool = await get_pool()
+        val = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1",
+            "track_record_last_payload_ai2")
+        if not val:
+            return None
+        obj = json.loads(val) if isinstance(val, str) else val
+        return obj.get("payload")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def warm_cache() -> None:
     """Run the first (deep) venue fetch at process boot, off the user path.
 
@@ -1230,7 +1264,17 @@ async def track_record(since: str | None = None,
         if persisted is not None:
             return {"configured": True, "restored_across_deploy": True,
                     "served_by": "hydrating_persisted", **persisted}
+        # Interim service: a baseline reset leaves no persisted copy
+        # under the new key while hydration completes. The PREVIOUS
+        # key's snapshot with an honest STALE badge (the frontend ages
+        # generated_at) beats an error page in front of viewers.
+        legacy = await _load_legacy_persisted()
+        if legacy is not None:
+            return {"configured": True, "restored_across_deploy": True,
+                    "served_by": "legacy_persisted",
+                    "hydrate_err": dict(_hydrate_err), **legacy}
         return {"configured": True,
+                "hydrate_err": dict(_hydrate_err),
                 "error": (f"history hydrating ({known_history} archived "
                           "activities not yet loaded); refusing to serve a "
                           "shrunken record — retry shortly")}

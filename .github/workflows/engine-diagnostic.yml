@@ -102,6 +102,7 @@ jobs:
           jq -r '.stale_served // empty | "  STALE-SERVED: streak=\(.refused_streak) fresh=\(.fresh_settled)/$\(.fresh_stake) high=\(.high_settled)/$\(.high_stake)"' /tmp/tr.json 2>/dev/null || true
           jq -r '.rebaselined // empty | "  REBASELINED: \(.reason)"' /tmp/tr.json 2>/dev/null || true
           jq -r '.served_by // "fresh" | "  served_by: \(.)"' /tmp/tr.json 2>/dev/null || true
+          jq -r '.hydrate_err // empty | "  HYDRATE: chunks=\(.chunks) err=\(.err // "none")"' /tmp/tr.json 2>/dev/null || true
           jq -r '"  generated_age_s: \((now - (.generated_at // now)) | round)"' /tmp/tr.json 2>/dev/null || true
           jq -r '.snapshot // {} | "  snapshot: age_s=\(.age_s // "?") pos_pages=\(.positions_pages // "?") complete=\(.positions_complete // "?") refresh_err=\(.refresh_error // "none") streak=\(.refresh_error_streak // 0)"' /tmp/tr.json 2>/dev/null || true
           # Cash-out ledger (owner 2026-08-08 night: "I see a bunch of
