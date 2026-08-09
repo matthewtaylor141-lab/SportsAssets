@@ -1248,6 +1248,11 @@ async def warm_cache() -> None:
 _payload_cache: dict[str, Any] = {"ts": 0.0, "data": None}
 _PAYLOAD_TTL = 25.0
 
+# Last GOOD attribution sets (engine mirror + sleeve slugs). Provenance
+# is the P&L basis — see the fail-closed block in track_record().
+_prov_cache: dict[str, Any] = {"attributed": None, "copy": None,
+                               "manual": None, "at": 0.0}
+
 
 async def track_record(since: str | None = None,
                        max_stake: float | None = None) -> dict:
@@ -1426,6 +1431,7 @@ async def track_record(since: str | None = None,
         "window_rows": len(window),
     }
     attributed = copy_slugs = manual_slugs = None
+    provenance = "live"
     try:
         from ..db import get_pool
 
@@ -1460,8 +1466,28 @@ async def track_record(since: str | None = None,
             "WHERE us_market_slug IS NOT NULL "
             "AND whale_username = 'manual'")
         manual_slugs = {r["us_market_slug"] for r in mn}
-    except Exception:  # noqa: BLE001 — provenance is an upgrade, not a gate
-        attributed = copy_slugs = manual_slugs = None
+        _prov_cache.update({"attributed": attributed, "copy": copy_slugs,
+                            "manual": manual_slugs, "at": time.time()})
+    except Exception:  # noqa: BLE001
+        # Provenance IS the basis, not an upgrade (owner P&L directive:
+        # headline = AI trading only). A DB flake here used to silently
+        # disable the cohort filter and publish a different population's
+        # number under the AI's headline (observed 2026-08-09 22:37Z:
+        # net flipped +$128 -> -$13 in one build because the attribution
+        # queries failed while the archive read succeeded). Fail CLOSED:
+        # reuse the last good attribution sets — slug sets only grow, so
+        # minutes-stale attribution misclassifies at most the newest
+        # rows into 'unattributed' (excluded), never a wrong headline.
+        if _prov_cache["at"] > 0:
+            attributed = _prov_cache["attributed"]
+            copy_slugs = _prov_cache["copy"]
+            manual_slugs = _prov_cache["manual"]
+            provenance = "cached"
+        else:
+            # No attribution has EVER loaded in this process: a fresh
+            # build would carry the wrong cohort. Serve the persisted
+            # payload instead of publishing it.
+            provenance = "refused"
     snapshot = {
         "raw_ts": _raw_cache["ts"],
         "age_s": round(time.time() - _raw_cache["ts"], 1),
@@ -1470,7 +1496,20 @@ async def track_record(since: str | None = None,
         "refresh_error": _refresh_health["error"],
         "refresh_error_streak": _refresh_health["streak"],
     }
+    if provenance == "refused":
+        persisted = await _load_persisted() or await _load_legacy_persisted()
+        if persisted:
+            out = {"configured": True, **source, "snapshot": snapshot,
+                   "served_by": "provenance_refused",
+                   "provenance": "refused", **persisted}
+            if since is None and max_stake is None:
+                _payload_cache["data"] = out
+                _payload_cache["ts"] = time.time()
+            return out
+        # Nothing persisted either (first boot against a dead DB):
+        # size-cap-only is the only basis available; disclose it.
     payload = {"configured": True, **source, "snapshot": snapshot,
+               "provenance": provenance,
                **build(raw["positions"], acts, since_ts,
                        max_stake=max_stake, attributed=attributed,
                        copy_slugs=copy_slugs, max_abs_pnl=PNL_DISPLAY_CAP,
