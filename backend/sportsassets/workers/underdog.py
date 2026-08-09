@@ -488,6 +488,10 @@ async def _record(pool) -> dict:
     """The sleeve's cumulative scorecard, on every heartbeat: 'how is
     the 20% selling sleeve performing' must be a probe read, not an
     inference (owner question 2026-08-08 evening)."""
+    # FLAT numeric keys: the health endpoint's sanitizer passes numbers
+    # through but truncates strings at 80 chars — a nested dict arrives
+    # stringified and cut mid-key (observed on the first probe of this
+    # very counter).
     out: dict = {}
     rows = await pool.fetch(
         "SELECT status, count(*)::int AS n, "
@@ -495,16 +499,20 @@ async def _record(pool) -> dict:
         "COALESCE(sum(pnl), 0)::float8 AS pnl "
         "FROM live_orders WHERE whale_username = 'underdog' "
         "GROUP BY status")
-    out["pmus"] = {r["status"]: {"n": r["n"], "usd": round(r["usd"], 2),
-                                 "pnl": round(r["pnl"], 2)} for r in rows}
+    for r in rows:
+        out[f"pm_{r['status']}"] = r["n"]
+        out[f"pm_{r['status']}_usd"] = round(r["usd"], 2)
+        if r["pnl"]:
+            out[f"pm_{r['status']}_pnl"] = round(r["pnl"], 2)
     try:
         krows = await pool.fetch(
             "SELECT status, count(*)::int AS n, "
             "COALESCE(sum(pnl), 0)::float8 AS pnl "
             "FROM kud_queue GROUP BY status")
-        out["kalshi"] = {r["status"]: {"n": r["n"],
-                                       "pnl": round(r["pnl"], 2)}
-                         for r in krows}
+        for r in krows:
+            out[f"k_{r['status']}"] = r["n"]
+            if r["pnl"]:
+                out[f"k_{r['status']}_pnl"] = round(r["pnl"], 2)
     except Exception:  # noqa: BLE001 — table lands with migration 017
         pass
     return out
@@ -526,7 +534,7 @@ async def main() -> None:
             now = _t.time()
             if now - last_entry >= ENTRY_SWEEP_S:
                 st = await _entry_sweep(pool)
-                st["record"] = await _record(pool)
+                st.update(await _record(pool))
                 last_entry = now
                 await heartbeat("underdog", "ok", st)
                 log.info("underdog entry sweep: %s", st)
