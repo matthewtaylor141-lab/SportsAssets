@@ -9,7 +9,7 @@ import { API_BASE, api } from '../lib/api'
 const CAT_LABEL: Record<string, string> = {
   rn1: 'RN1 copies', swisstony: 'SwissTony copies', kch123: 'kch123 copies',
   homerunhazard: 'HomeRunHazard copies', manual: 'Manual desk',
-  underdog: 'Underdog cash-out', arb: 'Arbitrage', software: 'Software',
+  underdog: 'Underdog $1 test', arb: 'Arbitrage', software: 'Software',
 }
 const CAT_ORDER = ['rn1', 'swisstony', 'kch123', 'homerunhazard', 'manual', 'underdog', 'arb', 'software']
 

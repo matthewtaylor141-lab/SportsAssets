@@ -1913,7 +1913,7 @@ _CAT_ORDER = ["rn1", "swisstony", "kch123", "homerunhazard",
               "manual", "underdog", "arb", "software"]
 _CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
               "kch123": "kch123 copies", "homerunhazard": "HomeRunHazard copies",
-              "manual": "Manual desk", "underdog": "Underdog cash-out",
+              "manual": "Manual desk", "underdog": "Underdog $1 test",
               "arb": "Arbitrage", "software": "Software"}
 
 
