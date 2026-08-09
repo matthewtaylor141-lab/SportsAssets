@@ -100,6 +100,15 @@ jobs:
           jq -r '.error // empty | "  REFUSED: \(.)"' /tmp/tr.json 2>/dev/null || true
           jq -r '.restored_across_deploy // empty | "  RESTORED-ACROSS-DEPLOY: \(.)"' /tmp/tr.json 2>/dev/null || true
           jq -r '.snapshot // {} | "  snapshot: age_s=\(.age_s // "?") pos_pages=\(.positions_pages // "?") complete=\(.positions_complete // "?") refresh_err=\(.refresh_error // "none") streak=\(.refresh_error_streak // 0)"' /tmp/tr.json 2>/dev/null || true
+          # Cash-out ledger (owner 2026-08-08 night: "I see a bunch of
+          # cash outs" — name them from the venue's own sell records, so
+          # sleeve exits and manual sells are never conflated again).
+          echo "CASH-OUTS (rows the venue says were sold, newest first):"
+          jq -r '[.rows[]? | select(.cashed_out == true)] |
+                 "  total: \(length)  net $\([.[].pnl // 0] | add // 0 | .*100 | round | ./100)",
+                 (sort_by(-(.settled_ts // 0)) | .[:12][] |
+                  "  \(.title // .slug)  stake $\(.stake)  pnl $\(.pnl // "open")  cohort \(.cohort // "ai")")' \
+             /tmp/tr.json 2>/dev/null || true
           # Report downloads (owner 2026-08-07): prove the endpoints serve.
           echo "REPORTS:"
           echo "  range: $(curl -sS --max-time 30 "$BASE/api/report/range?from=2026-08-01" | head -c 120)"
