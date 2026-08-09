@@ -1010,7 +1010,10 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
 # the AI-basis revert legitimately shows LESS, and under the old key the
 # shrink guards would refuse it forever and serve the inflated payload.
 # A basis change starts its own history.
-_PERSIST_KEY = "track_record_last_payload_ai2"
+# _ai3 (2026-08-09): the _ai2 high-water froze the page on 2026-08-08
+# 21:35Z's payload for 16h; a poisoned baseline is discarded, not argued
+# with. A basis or baseline reset starts its own history.
+_PERSIST_KEY = "track_record_last_payload_ai3"
 _persist_state: dict[str, float] = {"ts": 0.0, "settled": -1.0, "stake": -1.0}
 
 # A degraded build can GROW the settled count while losing half its
@@ -1160,7 +1163,7 @@ async def track_record(since: str | None = None,
 
                 asyncio.get_running_loop().create_task(_cold())
             return {"configured": True, "restored_across_deploy": True,
-                    **persisted}
+                    "served_by": "cold_boot_persisted", **persisted}
         async with _lock:
             if _raw_cache["data"] is None:
                 try:
@@ -1226,7 +1229,7 @@ async def track_record(since: str | None = None,
         persisted = await _load_persisted()
         if persisted is not None:
             return {"configured": True, "restored_across_deploy": True,
-                    **persisted}
+                    "served_by": "hydrating_persisted", **persisted}
         return {"configured": True,
                 "error": (f"history hydrating ({known_history} archived "
                           "activities not yet loaded); refusing to serve a "
@@ -1337,7 +1340,7 @@ async def track_record(since: str | None = None,
             persisted = await _load_persisted()
             if persisted is not None:
                 out = {"configured": True, "restored_across_deploy": True,
-                       **persisted}
+                       "served_by": "stale_guard", **persisted}
                 # ALWAYS disclose staleness — a probe must read the
                 # freeze on its first look, not infer it from identical
                 # numbers across runs.
