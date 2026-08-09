@@ -846,6 +846,12 @@ def _slim(a: dict) -> dict:
 
 
 _hydrate_err: dict = {"err": None, "at": 0.0, "chunks": 0}
+# RESUMABLE progress: the pass is ~73 chunks and used to be
+# all-or-nothing — one flaky chunk anywhere restarted it from zero, so
+# under steady DB load it NEVER completed (the true root cause of the
+# 2026-08-08 21:35Z freeze). Progress survives across retries; each
+# attempt advances at least one chunk, so completion is guaranteed.
+_hydrate_progress: dict = {"last": "", "rows": []}
 
 
 async def _hydrate_all(pool: Any) -> list[dict]:
@@ -855,14 +861,13 @@ async def _hydrate_all(pool: Any) -> list[dict]:
     in hundreds of MB, fired on every cold boot and every 15s retry,
     against a 2 GB kill line. Chunks cap the high-water at ~10k payloads,
     and the trim hands the parse arenas back to the OS."""
-    out: list[dict] = []
-    last = ""
-    _hydrate_err["chunks"] = 0
+    out: list[dict] = _hydrate_progress["rows"]
+    last: str = _hydrate_progress["last"]
     try:
         while True:
-            rows = await pool.fetch(
+            rows = await asyncio.wait_for(pool.fetch(
                 "SELECT id, payload FROM pmus_activity_archive "
-                "WHERE id > $1 ORDER BY id LIMIT 2500", last)
+                "WHERE id > $1 ORDER BY id LIMIT 2500", last), timeout=30)
             if not rows:
                 break
             last = rows[-1]["id"]
@@ -875,14 +880,15 @@ async def _hydrate_all(pool: Any) -> list[dict]:
                         for r in chunk]
 
             out.extend(await asyncio.to_thread(_parse))
-    except Exception as exc:  # noqa: BLE001 — record, then re-raise
-        # The failure mode must be probe-readable: this hydrate failing
-        # SILENTLY on every boot is what actually froze the page from
-        # 2026-08-08 21:35Z (the shrink guard took the blame for a day).
+            _hydrate_progress.update(last=last, rows=out)
+    except Exception as exc:  # noqa: BLE001 — record + keep progress
+        # Probe-readable failure, resumable next attempt from `last`.
         _hydrate_err.update(err=f"{type(exc).__name__}: {str(exc)[:200]}",
                             at=time.time())
         raise
     _hydrate_err.update(err=None, at=time.time())
+    # Complete: hand the rows over and drop the progress buffer.
+    _hydrate_progress.update(last="", rows=[])
     _malloc_trim()
     return out
 
@@ -1263,7 +1269,8 @@ async def track_record(since: str | None = None,
         persisted = await _load_persisted()
         if persisted is not None:
             return {"configured": True, "restored_across_deploy": True,
-                    "served_by": "hydrating_persisted", **persisted}
+                    "served_by": "hydrating_persisted",
+                    "hydrate_err": dict(_hydrate_err), **persisted}
         # Interim service: a baseline reset leaves no persisted copy
         # under the new key while hydration completes. The PREVIOUS
         # key's snapshot with an honest STALE badge (the frontend ages
