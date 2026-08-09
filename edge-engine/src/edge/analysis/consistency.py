@@ -89,6 +89,39 @@ def find_dutch_book(event: str, kind: str, legs: list[Leg],
                      cost=round(cost, 4), sets=sets)
 
 
+def find_cover_book(event: str, segment: str, tie: Leg, over: Leg,
+                    fee_per_contract: float = 0.0,
+                    min_profit: float = DEFAULT_MIN_PROFIT) -> DutchBook | None:
+    """A COVER, not a partition: Tie(segment) + Over 0.5 runs(segment).
+
+    Owner design 2026-08-09 (from his own YRFI/inning-winner read):
+    a team winning the segment implies a run was scored (Over pays);
+    a 0-0 segment IS the tie (Tie pays); a scored tie pays BOTH.
+    Every branch returns at least $1 per set, so a combined cost under
+    $1 is locked profit — with the scored tie as free upside this
+    arithmetic deliberately ignores.
+
+    Only sound where the segment's total unit is RUNS and 0.5 means
+    "anything scored" — the CALLER gates to baseball segments. The two
+    legs must come from the same venue event (same resolution source):
+    the caller pairs them by (adapter, market_id, segment) so a voided
+    game voids both sides together.
+    """
+    legs = (tie, over)
+    if tie.token == over.token:
+        return None                      # the same market counted twice
+    if any(leg.price <= 0 or leg.price >= 1 or leg.size <= 0 for leg in legs):
+        return None
+    cost = sum(leg.price + fee_per_contract for leg in legs)
+    if 1.0 - cost < min_profit:
+        return None
+    sets = int(min(leg.size for leg in legs))
+    if sets < 1:
+        return None
+    return DutchBook(event=event, kind=f"cover {segment}", legs=legs,
+                     cost=round(cost, 4), sets=sets)
+
+
 def ladder_violations(rungs: dict[float, float]) -> list[tuple[float, float]]:
     """Points where a monotone ladder is priced backwards.
 

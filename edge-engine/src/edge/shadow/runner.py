@@ -368,6 +368,69 @@ def _quarantined(ledger) -> set:
 
 
 
+# Segments where "Over 0.5" means "anything scored at all": baseball
+# innings and the first-five. The cover arithmetic (owner design
+# 2026-08-09) is only sound where the total's unit is runs.
+_COVER_SEGMENTS = {"f5"} | {f"i{i}" for i in range(1, 10)}
+
+
+def _find_cover_book(ledger, ev, venue_legs, funnel=None):
+    """Tie(seg) + Over 0.5(seg) on the SAME fee-free venue event.
+
+    Both legs from one (adapter, market_id, segment): one resolution
+    source, so a voided game voids the pair together. Kalshi never
+    qualifies — its taker fee on two legs eats the whole window, and
+    the tie/first-run markets live on PMUS anyway."""
+    from edge.analysis.consistency import find_cover_book
+    from edge.fairvalue.lines import is_draw, parse_outcome_line, split_segment
+
+    if "baseball" not in str(ev.sport_key):
+        return None, None
+    ties: dict = {}
+    overs: dict = {}
+    for a, market_id, leg in venue_legs:
+        if getattr(a, "name", "") != "polymarket-us":
+            continue
+        seg, name = split_segment(leg.outcome)
+        if seg not in _COVER_SEGMENTS:
+            continue
+        if is_draw(name):
+            ties[(a, market_id, seg)] = leg
+            continue
+        p = parse_outcome_line(name)
+        if (p.kind == "total" and p.point == 0.5
+                and name.strip().lower().startswith("over")):
+            overs[(a, market_id, seg)] = leg
+    for key, tleg in ties.items():
+        oleg = overs.get(key)
+        if oleg is None:
+            continue
+        a, market_id, seg = key
+        claim = f"arb_tried:{market_id}:cover-{seg}"
+        if ledger.get_state(claim):
+            continue
+        fee_fn = getattr(a, "taker_fee", None)
+        fee = (max(fee_fn(tleg.price), fee_fn(oleg.price)) if fee_fn else 0.0)
+        b = find_cover_book(event=claim, segment=seg, tie=tleg, over=oleg,
+                            fee_per_contract=fee)
+        if b is not None:
+            # DARK until the adversarial verification signs off (owner
+            # authorized live fire 2026-08-09; yesterday a "guaranteed"
+            # class leaked, so this one deploys measuring first): every
+            # real lock is counted and priced in telemetry either way.
+            if funnel is not None:
+                funnel.setdefault("cover_locks_seen", []).append(
+                    {"event": f"{ev.home} v {ev.away}", "seg": seg,
+                     "cost": b.cost, "sets": b.sets})
+            import os
+            if os.environ.get("EDGE_COVER_ARB", "0") != "1":
+                if funnel is not None:
+                    funnel["cover_dark"] = funnel.get("cover_dark", 0) + 1
+                continue
+            return a, b
+    return None, None
+
+
 def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
                    funnel, max_usd: float = 10.0) -> bool:
     """Look for a complete outcome set priced under $1 and buy all of it.
@@ -428,6 +491,10 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
         if b is not None:
             adapter, book = a, b
             break
+    if book is None:
+        adapter, book = _find_cover_book(ledger, ev, venue_legs, funnel)
+        if book is not None:
+            funnel["cover_found"] = funnel.get("cover_found", 0) + 1
     if book is None:
         return False
     funnel["arb_found"] = funnel.get("arb_found", 0) + 1
