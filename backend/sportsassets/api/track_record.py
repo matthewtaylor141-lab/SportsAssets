@@ -1263,6 +1263,18 @@ async def track_record(since: str | None = None,
     # serves, and nothing that ever settled can be pushed off the page by
     # an infrastructure hiccup.
     archive = _archive_cache["data"] or []
+    if not archive and _hydrate_progress["rows"]:
+        # EMERGENCY PROMOTION (owner 2026-08-09 ~16:00Z: "front end still
+        # stuck. Please fix it immediately"): the resumable hydrate had
+        # read ~187k rows — the whole archive — but the crawling DB kept
+        # timing out the final empty-fetch confirmation, so the buffer
+        # sat unused while the page served a thin window build. Progress
+        # covering >=98% of known history IS the archive for serving
+        # purposes; the fresh window union covers any tail, and the next
+        # completed pass replaces it wholesale.
+        done = len(_hydrate_progress["rows"])
+        if done >= max(len(_archived_ids), 1) * 0.98:
+            archive = _hydrate_progress["rows"]
     window = raw["activities"] or []
     # A freshly-booted process whose archive has not hydrated yet KNOWS how
     # much history it is missing (_archived_ids was seeded from the table).

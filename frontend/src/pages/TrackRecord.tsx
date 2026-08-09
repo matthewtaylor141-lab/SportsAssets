@@ -372,7 +372,6 @@ export function TrackRecord() {
   // ~5 min is simply "current"; amber and red mean something is wrong.
   const sync: 'ok' | 'lag' | 'stale' =
     age === null ? 'ok' : age < 300 ? 'ok' : age < 900 ? 'lag' : 'stale'
-  const acct = data.account
 
   return (
     <div className="page tr-page">
@@ -479,17 +478,10 @@ export function TrackRecord() {
           </div>
         )}
 
-        {acct && (
-          <div className="tr-account">
-            <b>WHOLE ACCOUNT</b>{' '}
-            <span className={`tr-acct-net ${acct.net_pnl >= 0 ? 'pos' : 'neg'}`}>
-              {fmtSignedUsd(acct.net_pnl)}
-            </span>{' '}
-            across {acct.trades.toLocaleString()} positions incl. manual/owner
-            trades. The headline above is the AI's trading only — engine,
-            copies, underdog sleeve, and their cash-outs (your directive).
-          </div>
-        )}
+        {/* WHOLE ACCOUNT strip removed (owner 2026-08-09: "remove the
+            full account balance from the frontend") — the page shows
+            the AI's trading only; account-wide figures stay available
+            in the API payload for reports and probes. */}
 
         {data.snapshot && data.snapshot.positions_complete === false && (
           <div className="tr-honesty">
@@ -628,7 +620,7 @@ export function TrackRecord() {
           window {SINCE} → today, refreshed every 30s. Entry prices are the venue's
           own VWAP. This record is the AI's trading only — engine, copies and the
           underdog cash-out sleeve, with cash-outs counted at sale; manual/owner
-          trades are excluded here and included in the WHOLE ACCOUNT strip above.
+          trades are excluded from every figure on this page.
           {data.excluded_over_limit && data.excluded_over_limit.count > 0 && (
             <> {data.excluded_over_limit.count} larger position(s) are excluded from
             every figure above — combined stake{' '}
@@ -643,11 +635,6 @@ export function TrackRecord() {
           {data.excluded_unattributed && data.excluded_unattributed.count > 0 && (
             <> {data.excluded_unattributed.count} non-AI account position(s)
             excluded (settled net {fmtSignedUsd(data.excluded_unattributed.net_pnl)}).</>
-          )}
-          {acct && (
-            <> Whole account since {SINCE}, all activity included:{' '}
-            {fmtSignedUsd(acct.net_pnl)} across {acct.trades.toLocaleString()}{' '}
-            positions ({acct.open.toLocaleString()} open).</>
           )}
           {' '}{data.excluded_undatable > 0 &&
             `${data.excluded_undatable} position(s) excluded: the venue reported no datable entry.`}
