@@ -846,6 +846,70 @@ def _slim(a: dict) -> dict:
 
 
 _hydrate_err: dict = {"err": None, "at": 0.0, "chunks": 0}
+
+# ── Compact archive snapshot (owner 2026-08-09: "I really don't
+# understand the reason anymore") ────────────────────────────────────
+# The chaos had one root: rebuilding the record needs the 190k-row
+# archive, and reading it row-by-row from a failing Postgres kept dying
+# — including to our own deploys resetting the grind. The whole SLIM
+# archive gzips to a few MB: persisted as ONE row, a boot hydrates in
+# seconds with a single small read. The grind also checkpoints partial
+# progress here every 20 chunks, so progress survives deploys and the
+# FIRST completion is guaranteed even on a sick database.
+_SNAP_KEY = "track_record_slim_archive_v1"
+_snap_state: dict = {"at": 0.0}
+_SNAP_REFRESH_S = 6 * 3600.0
+_SNAP_MAX_AGE_S = 24 * 3600.0   # window union covers ~2 days; stay well under
+
+
+def _pack_rows(rows: list[dict]) -> str:
+    import base64
+    import gzip
+    return base64.b64encode(
+        gzip.compress(json.dumps(rows, default=str).encode(), 5)).decode()
+
+
+def _unpack_rows(gz: str) -> list[dict]:
+    import base64
+    import gzip
+    return json.loads(gzip.decompress(base64.b64decode(gz)))
+
+
+async def _save_snapshot(pool: Any, rows: list[dict], *, complete: bool,
+                         last: str = "") -> None:
+    """Best-effort; a failed save just means the next boot grinds more."""
+    try:
+        gz = await asyncio.to_thread(_pack_rows, rows)
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            _SNAP_KEY, json.dumps({"at": time.time(), "n": len(rows),
+                                   "complete": complete, "last": last,
+                                   "gz": gz}))
+        if complete:
+            _snap_state["at"] = time.time()
+        _malloc_trim()
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("snapshot save failed",
+                                            exc_info=True)
+
+
+async def _load_snapshot(pool: Any) -> dict | None:
+    try:
+        val = await asyncio.wait_for(pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1", _SNAP_KEY),
+            timeout=120)
+        if not val:
+            return None
+        obj = json.loads(val) if isinstance(val, str) else val
+        rows = await asyncio.to_thread(_unpack_rows, obj.get("gz") or "")
+        return {"rows": rows, "at": float(obj.get("at") or 0),
+                "complete": bool(obj.get("complete")),
+                "last": str(obj.get("last") or "")}
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("snapshot load failed",
+                                            exc_info=True)
+        return None
 # RESUMABLE progress: the pass is ~73 chunks and used to be
 # all-or-nothing — one flaky chunk anywhere restarted it from zero, so
 # under steady DB load it NEVER completed (the true root cause of the
@@ -863,6 +927,23 @@ async def _hydrate_all(pool: Any) -> list[dict]:
     and the trim hands the parse arenas back to the OS."""
     out: list[dict] = _hydrate_progress["rows"]
     last: str = _hydrate_progress["last"]
+    if not out:
+        snap = await _load_snapshot(pool)
+        if snap:
+            age = time.time() - snap["at"]
+            if snap["complete"] and age < _SNAP_MAX_AGE_S:
+                # One small read IS the hydrate; the window union covers
+                # everything since the snapshot was written.
+                _hydrate_err.update(err=None, at=time.time())
+                _snap_state["at"] = snap["at"]
+                _malloc_trim()
+                return snap["rows"]
+            if snap["rows"]:
+                # Partial checkpoint from a previous process: resume the
+                # grind from where IT died instead of from zero.
+                out = snap["rows"]
+                last = snap["last"]
+                _hydrate_progress.update(last=last, rows=out)
     try:
         # ONE streaming server-side cursor, not repeated LIMIT queries:
         # the planner answered "WHERE id > $1 ORDER BY id LIMIT n" with a
@@ -890,13 +971,17 @@ async def _hydrate_all(pool: Any) -> list[dict]:
 
                     out.extend(await asyncio.to_thread(_parse))
                     _hydrate_progress.update(last=last, rows=out)
+                    if _hydrate_err["chunks"] % 20 == 0:
+                        await _save_snapshot(pool, out, complete=False,
+                                             last=last)
     except Exception as exc:  # noqa: BLE001 — record + keep progress
         # Probe-readable failure, resumable next attempt from `last`.
         _hydrate_err.update(err=f"{type(exc).__name__}: {str(exc)[:200]}",
                             at=time.time())
         raise
     _hydrate_err.update(err=None, at=time.time())
-    # Complete: hand the rows over and drop the progress buffer.
+    # Complete: checkpoint the finished archive, hand the rows over.
+    await _save_snapshot(pool, out, complete=True)
     _hydrate_progress.update(last="", rows=[])
     _malloc_trim()
     return out
@@ -1025,6 +1110,12 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
         parsed = _archive_cache["data"] + [_slim(a) for _, _, _, a in new]
 
     _archive_cache["data"], _archive_cache["ts"] = parsed, time.time()
+    # Rolling snapshot refresh: keeps the one-read boot path fresh so the
+    # window union always covers the gap since it was written.
+    if time.time() - _snap_state["at"] > _SNAP_REFRESH_S:
+        _snap_state["at"] = time.time()   # claim before the slow save
+        asyncio.get_running_loop().create_task(
+            _save_snapshot(pool, parsed, complete=True))
     return parsed
 
 
@@ -1275,6 +1366,19 @@ async def track_record(since: str | None = None,
         done = len(_hydrate_progress["rows"])
         if done >= max(len(_archived_ids), 1) * 0.98:
             archive = _hydrate_progress["rows"]
+            # A promoted buffer is snapshot-worthy: persist it so the
+            # NEXT boot is one small read, not another grind.
+            if time.time() - _snap_state["at"] > _SNAP_REFRESH_S:
+                _snap_state["at"] = time.time()
+                from ..db import get_pool as _gp
+
+                async def _snap_bg() -> None:
+                    try:
+                        await _save_snapshot(await _gp(), archive,
+                                             complete=True)
+                    except Exception:  # noqa: BLE001
+                        pass
+                asyncio.get_running_loop().create_task(_snap_bg())
     window = raw["activities"] or []
     # A freshly-booted process whose archive has not hydrated yet KNOWS how
     # much history it is missing (_archived_ids was seeded from the table).

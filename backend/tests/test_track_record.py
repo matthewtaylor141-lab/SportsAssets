@@ -666,3 +666,18 @@ def test_sell_without_realizedpnl_falls_back_to_proceeds_minus_cost():
             _sell("g2", TS_AUG2 + 3600, 10, 0.56)]
     out = build({}, acts, TS_AUG1)
     assert out["trades"][0]["pnl"] == 0.6   # 10*(0.56-0.50)
+
+
+def test_snapshot_roundtrip_preserves_the_slim_archive():
+    """The compact snapshot is the one-read boot path that ended the
+    grind-vs-dying-database cycle (2026-08-09): what goes in must come
+    out byte-identical, or the record silently changes shape."""
+    from sportsassets.api.track_record import _pack_rows, _unpack_rows
+
+    rows = [{"id": f"a{i}", "type": "ACTIVITY_TYPE_TRADE",
+             "timestamp": 1000.0 + i,
+             "trade": {"marketSlug": "mlb-tor-phi-2026-08-08", "qty": i,
+                       "price": {"value": 0.5}, "side": None,
+                       "realizedPnl": None, "createTime": 1000.0 + i}}
+            for i in range(500)]
+    assert _unpack_rows(_pack_rows(rows)) == rows
