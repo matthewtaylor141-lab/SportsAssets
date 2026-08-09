@@ -598,11 +598,24 @@ def build(positions: dict[str, dict], activities: list[dict],
         "settled_stake": round(sum(r["stake"] for r in _rec_settled), 2),
     }
 
+    # Every SELL the venue reports, by market, newest first — the
+    # ground truth behind any "I see a bunch sold" question (owner
+    # 2026-08-08 night). realized comes from the venue's own
+    # realizedPnl on the sell trades; nothing is inferred.
+    sold_markets = sorted(
+        ({"slug": s, "qty": round(v["qty"], 2),
+          "proceeds": round(v["proceeds"], 2),
+          "realized": round(v["realized"], 2),
+          "last_ts": v["last_ts"] or None}
+         for s, v in sold.items()),
+        key=lambda x: -(x["last_ts"] or 0))[:30]
+
     return {
         "since": datetime.fromtimestamp(since_ts, tz)
                  .strftime("%Y-%m-%d"),
         "generated_at": time.time(),
         "account": account,
+        "sold_markets": sold_markets,
         "record_subset": record_subset,
         # HEADLINE = the AI's trading only (owner directive 2026-08-08
         # final): engine + copies + underdog sleeve, with their

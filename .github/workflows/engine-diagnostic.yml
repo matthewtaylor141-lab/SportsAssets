@@ -103,6 +103,10 @@ jobs:
           # Cash-out ledger (owner 2026-08-08 night: "I see a bunch of
           # cash outs" — name them from the venue's own sell records, so
           # sleeve exits and manual sells are never conflated again).
+          echo "SELL LEDGER (every venue-reported sale, by market):"
+          jq -r '.sold_markets[]? |
+                 "  \(.slug)  qty \(.qty)  proceeds $\(.proceeds)  realized $\(.realized)  at \(.last_ts // 0 | todate)"' \
+             /tmp/tr.json 2>/dev/null || true
           echo "CASH-OUTS (rows the venue says were sold, newest first):"
           jq -r '[.rows[]? | select(.cashed_out == true)] |
                  "  total: \(length)  net $\([.[].pnl // 0] | add // 0 | .*100 | round | ./100)",
