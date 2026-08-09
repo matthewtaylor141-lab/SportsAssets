@@ -128,6 +128,22 @@ class GammaClient:
         data = resp.json()
         return data if isinstance(data, list) else data.get("data", [])
 
+    async def fetch_tag_id(self, slug: str) -> int | None:
+        """Numeric tag id for a tag slug ('mlb', 'tennis'), or None if the
+        deployment doesn't serve /tags/slug/{slug}. Tag-filtered /markets
+        queries are the only way to reach a sport's slate without paging
+        through thousands of 15-minute crypto expiries first."""
+        resp = await self._http.get(f"/tags/slug/{slug}")
+        if resp.status_code >= 400:
+            return None
+        data = resp.json() or {}
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        try:
+            return int(data.get("id"))
+        except (TypeError, ValueError):
+            return None
+
     async def _resolve_open_params(self) -> dict[str, str]:
         if self._open_params is not None:
             return self._open_params

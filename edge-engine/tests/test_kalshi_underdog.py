@@ -18,8 +18,14 @@ _OUTCOMES = {"Dallas Wings": f"{_EV}-DAL", "Chicago Sky": f"{_EV}-CHI"}
 class _Kalshi:
     name = "kalshi"
 
-    def __init__(self, ask):
-        self.ask = ask
+    def __init__(self, ask, fav_ask=0.70):
+        # The dog is picked from the venue's own book now, so both
+        # sides quote: `ask` is the task's nominal dog (CHI), `fav_ask`
+        # the other side. Pass a dict to control tickers directly.
+        if isinstance(ask, dict):
+            self.asks = ask
+        else:
+            self.asks = {f"{_EV}-CHI": ask, f"{_EV}-DAL": fav_ask}
         self.orders = []
 
     def taker_fee(self, price):
@@ -31,9 +37,11 @@ class _Kalshi:
                             outcome_tokens=dict(_OUTCOMES))]
 
     def get_book(self, market_id, ticker):
+        a = self.asks.get(ticker)
         return MarketBook(venue=self.name, market_id=market_id,
                           outcome_id=ticker, bids=[],
-                          asks=[BookLevel(self.ask, 60)], ts=time.time())
+                          asks=([BookLevel(a, 60)] if a is not None else []),
+                          ts=time.time())
 
     def place_order(self, ticker, price, count, client_order_id="",
                     taker=True, sell=False, rest_s=900):
@@ -84,6 +92,9 @@ def test_threshold_is_twenty_percent_capped_at_99c():
     assert threshold_price(0.25) == 0.30
     assert threshold_price(0.32) == 0.38     # 0.384 rounds down
     assert threshold_price(0.90) == 0.99     # cap
+    # A cheap dog's +20% rounds back to its own entry (0.02*1.2=0.024);
+    # the floor keeps the exit a real tick above it.
+    assert threshold_price(0.02) == 0.03
 
 
 def test_contracts_never_exceed_the_dollar():
@@ -113,10 +124,57 @@ def test_entry_buys_the_dog_and_rests_the_exit(monkeypatch):
 
 
 def test_band_gate_refuses_favorites_and_junk(monkeypatch):
-    for ask in (0.55, 0.03):
+    for ask in (0.55, 0.02):
         st, ka, _, sess = _run(ask, monkeypatch=monkeypatch)
         assert st.get("band_fail") == 1 and not ka.orders
         assert sess.posts[0][1]["status"] == "band_fail"
+
+
+def test_dog_is_the_venues_cheaper_side_not_the_tasks(monkeypatch):
+    """The queue's dog_outcome is Polymarket's opinion; Kalshi's book
+    decides. When DAL is the cheaper side on Kalshi, DAL is the dog."""
+    ka_asks = {f"{_EV}-CHI": 0.60, f"{_EV}-DAL": 0.35}
+    st, ka, _, sess = _run(ka_asks, monkeypatch=monkeypatch)
+    assert st["placed"] == 1
+    assert ka.orders[0][0] == f"{_EV}-DAL"
+    assert ka.orders[0][1] == 0.37            # ask + 2c crash protection
+
+
+def test_fifty_fifty_book_has_no_dog(monkeypatch):
+    ka_asks = {f"{_EV}-CHI": 0.50, f"{_EV}-DAL": 0.50}
+    st, ka, _, sess = _run(ka_asks, monkeypatch=monkeypatch)
+    assert st.get("band_fail") == 1 and not ka.orders
+
+
+def test_window_waits_fires_and_expires(monkeypatch):
+    now = time.time()
+    # Too early: stays queued, nothing reported.
+    early = {**_TASK, "start_ts": now + 3600}
+    st, ka, _, sess = _run(0.30, tasks=[early], monkeypatch=monkeypatch)
+    assert st.get("waiting") == 1 and not ka.orders and not sess.posts
+    # Inside T-minus-5: fires.
+    open_w = {**_TASK, "start_ts": now + 120}
+    st, ka, _, sess = _run(0.30, tasks=[open_w], monkeypatch=monkeypatch)
+    assert st["placed"] == 1
+    # Window long closed: reported missed, never entered in-play.
+    late = {**_TASK, "start_ts": now - 7200}
+    st, ka, _, sess = _run(0.30, tasks=[late], monkeypatch=monkeypatch)
+    assert st.get("missed") == 1 and not ka.orders
+    assert sess.posts[0][1]["status"] == "missed"
+
+
+def test_in_window_miss_retries_instead_of_reporting(monkeypatch):
+    """A timed task that fails inside its window stays queued for the
+    next sweep — no terminal report, no permanent skip. Only a task
+    with no start (single shot) reports its failure immediately."""
+    now = time.time()
+    timed = {**_TASK, "start_ts": now + 60}
+    ka_asks = {f"{_EV}-CHI": 0.50, f"{_EV}-DAL": 0.50}  # no dog yet
+    st, ka, _, sess = _run(ka_asks, tasks=[timed], monkeypatch=monkeypatch)
+    assert st.get("retry_band_fail") == 1 and not sess.posts
+    # Same book, no start_ts: one shot, terminal report.
+    st, ka, _, sess = _run(ka_asks, monkeypatch=monkeypatch)
+    assert sess.posts[0][1]["status"] == "band_fail"
 
 
 def test_existing_position_on_the_game_vetoes_entry(monkeypatch):

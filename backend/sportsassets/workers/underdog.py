@@ -48,10 +48,12 @@ PER_FILL_USD = float(os.environ.get("UNDERDOG_PER_FILL_USD", "1.00"))
 # stays for the day a ceiling is wanted back.
 DAILY_USD = float(os.environ.get("UNDERDOG_DAILY_USD", "inf"))
 TAKE_PROFIT = float(os.environ.get("UNDERDOG_TAKE_PROFIT", "0.20"))
-# Entry band: a 48c "underdog" is a coin flip, and a sub-5c one is a
-# lottery ticket whose book will never bid +20% — both refused.
-MIN_ASK = float(os.environ.get("UNDERDOG_MIN_ASK", "0.05"))
-MAX_ASK = float(os.environ.get("UNDERDOG_MAX_ASK", "0.48"))
+# Entry band. Widened 2026-08-09 (owner: "this should be firing every
+# single mlb game and every single tennis match") — a 49c dog is still
+# the cheaper side, and near-even games were the single biggest silent
+# skip. The 3c floor only drops dogs whose 1c tick makes +20% ambiguous.
+MIN_ASK = float(os.environ.get("UNDERDOG_MIN_ASK", "0.03"))
+MAX_ASK = float(os.environ.get("UNDERDOG_MAX_ASK", "0.50"))
 # Minute cadence: the T-minus-5 window needs minute resolution.
 ENTRY_SWEEP_S = float(os.environ.get("UNDERDOG_ENTRY_SWEEP_S", "60"))
 ENTRY_LEAD_S = float(os.environ.get("UNDERDOG_LEAD_S", "300"))
@@ -119,10 +121,37 @@ def _parse_start(raw: str | None) -> float | None:
     return dt.timestamp()
 
 
+# Tag slugs for the sleeve's sports. A tag-filtered /markets query goes
+# straight to the sport's slate — the endDate-ordered fallback below has
+# to wade through thousands of 15-minute crypto expiries first and was
+# reaching 3 of ~15 MLB games (owner 2026-08-09 evening: "this should be
+# firing every single mlb game and every single tennis match").
+_TAG_SLUGS = ("mlb", "tennis", "atp", "wta")
+_tag_ids: dict[str, int | None] = {}
+
+
+async def _ingest_batch(batch: list, today: str, stats: dict) -> None:
+    from .. import gamma
+
+    for raw in batch:
+        meta = gamma.parse_market(raw)
+        if meta is None or not _is_game_market(meta, today):
+            continue
+        await gamma.upsert_market(meta)
+        stats["upserted"] += 1
+        start = _parse_start(raw.get("gameStartTime")
+                             or raw.get("game_start_time"))
+        if start and meta["slug"] not in _starts:
+            _starts[meta["slug"]] = start
+            stats["starts_primed"] += 1
+
+
 async def _discover_games(today: str) -> dict:
     """Pull today's MLB/Tennis game markets straight from Gamma into the
-    catalog. Soonest-ending markets first (today's games); falls back to
-    plain paging if the venue rejects the ordering params."""
+    catalog. Tag-filtered queries first (each sport's slate directly);
+    endDate-ordered paging only as the fallback when the tag surface is
+    missing, so the sleeve still sees SOMETHING on a Gamma deploy that
+    drops /tags."""
     import time as _t
 
     from .. import gamma
@@ -130,40 +159,56 @@ async def _discover_games(today: str) -> dict:
     stats = {"pages": 0, "upserted": 0, "starts_primed": 0}
     client = gamma.GammaClient()
     try:
-        order = ({"order": "endDate", "ascending": "true"}
-                 if _discover_state["order_ok"] else {})
-        for page in range(_DISCOVER_PAGES):
+        tagged_ok = False
+        for slug in _TAG_SLUGS:
+            if slug not in _tag_ids:
+                try:
+                    _tag_ids[slug] = await client.fetch_tag_id(slug)
+                except Exception:  # noqa: BLE001
+                    _tag_ids[slug] = None
+            tag_id = _tag_ids[slug]
+            if tag_id is None:
+                continue
             try:
-                batch = await client.fetch_markets(
-                    {"closed": "false", "limit": 100,
-                     "offset": page * 100, **order})
-            except Exception:  # noqa: BLE001
-                if order:
-                    # Ordering params rejected: remember, retry plain.
-                    _discover_state["order_ok"] = False
-                    log.warning("gamma endDate ordering rejected; "
-                                "falling back to plain paging")
-                    return await _discover_games(today)
-                raise
-            stats["pages"] += 1
-            horizon_hit = False
-            for raw in batch:
-                meta = gamma.parse_market(raw)
-                if meta is None or not _is_game_market(meta, today):
+                for page in range(10):
+                    batch = await client.fetch_markets(
+                        {"closed": "false", "tag_id": tag_id,
+                         "related_tags": "true", "limit": 100,
+                         "offset": page * 100})
+                    stats["pages"] += 1
+                    await _ingest_batch(batch, today, stats)
+                    if len(batch) < 100:
+                        break
+                tagged_ok = True
+                stats[f"tag_{slug}"] = tag_id
+            except Exception:  # noqa: BLE001 — try the next tag/fallback
+                _tag_ids[slug] = None
+        if not tagged_ok:
+            order = ({"order": "endDate", "ascending": "true"}
+                     if _discover_state["order_ok"] else {})
+            for page in range(_DISCOVER_PAGES):
+                try:
+                    batch = await client.fetch_markets(
+                        {"closed": "false", "limit": 100,
+                         "offset": page * 100, **order})
+                except Exception:  # noqa: BLE001
+                    if order:
+                        # Ordering params rejected: remember, retry plain.
+                        _discover_state["order_ok"] = False
+                        log.warning("gamma endDate ordering rejected; "
+                                    "falling back to plain paging")
+                        return await _discover_games(today)
+                    raise
+                stats["pages"] += 1
+                horizon_hit = False
+                for raw in batch:
                     end = _parse_start(raw.get("endDate")
                                        or raw.get("end_date_iso"))
                     if end and end > _t.time() + _DISCOVER_HORIZON_S:
                         horizon_hit = True
-                    continue
-                await gamma.upsert_market(meta)
-                stats["upserted"] += 1
-                start = _parse_start(raw.get("gameStartTime")
-                                     or raw.get("game_start_time"))
-                if start and meta["slug"] not in _starts:
-                    _starts[meta["slug"]] = start
-                    stats["starts_primed"] += 1
-            if len(batch) < 100 or horizon_hit:
-                break
+                await _ingest_batch(batch, today, stats)
+                if len(batch) < 100 or horizon_hit:
+                    break
     finally:
         await client.close()
     _discover_state["ts"] = _t.time()
@@ -331,12 +376,39 @@ async def _entry_sweep(pool) -> dict:
         if day_spent + PER_FILL_USD > DAILY_USD:
             stats["skipped_day_cap"] = stats.get("skipped_day_cap", 0) + 1
             continue
-        # T-MINUS-5 WINDOW: only games starting within the lead fire;
-        # everything else waits for its own five-minute window.
         if slug not in _starts:
             _starts[slug] = await _game_start_ts(
                 cfg, next(iter(sides))["condition_id"])
         import time as _t
+        # KALSHI LEG (owner 2026-08-09: "firing every single mlb game
+        # and every single tennis match"): EVERY catalogued game queues
+        # at first sight — before the window, the band, the quotes, and
+        # every PMUS-side veto. The engine is the sleeve's Kalshi arm:
+        # it runs the T-minus-5 window off start_ts, picks the dog from
+        # its OWN book (the venue's dog is the venue's price, not
+        # Polymarket's), and retries inside the window. The two outcome
+        # names ride along solely so the engine can resolve the matchup.
+        # UNIQUE(game_slug) makes re-sweeps a no-op; a game whose start
+        # was unknown at first sight gets it stamped when it appears.
+        _sides = list(sides)
+        _start = _starts.get(slug)
+        queued = await pool.fetchval(
+            """
+            INSERT INTO kud_queue (game_slug, league, dog_outcome,
+                                   other_outcome, per_fill_usd,
+                                   take_profit, start_ts)
+            VALUES ($1, split_part($1, '-', 1), $2, $3, $4, $5,
+                    to_timestamp($6))
+            ON CONFLICT (game_slug) DO UPDATE
+                SET start_ts = COALESCE(kud_queue.start_ts,
+                                        EXCLUDED.start_ts)
+            RETURNING (xmax = 0) AS inserted
+            """, slug, _sides[0]["outcome"], _sides[1]["outcome"],
+            PER_FILL_USD, TAKE_PROFIT, _start)
+        if queued:
+            stats["kud_queued"] = stats.get("kud_queued", 0) + 1
+        # T-MINUS-5 WINDOW: only games starting within the lead fire;
+        # everything else waits for its own five-minute window.
         win = entry_window(_starts.get(slug), _t.time())
         if win != "enter":
             k = f"skipped_{win}"
@@ -355,25 +427,6 @@ async def _entry_sweep(pool) -> dict:
                         if str(s["token_id"]) == token), None)
         other = next((s["outcome"] for s in sides
                       if str(s["token_id"]) != token), None)
-        # KALSHI LEG (owner directive 2026-08-08): the same game, same
-        # dog, same dollar, queued for the engine's relay — only that
-        # process holds Kalshi credentials. Enqueued BEFORE the PMUS
-        # held-veto: a copy holding this game on Polymarket does not
-        # cancel the Kalshi leg (the engine runs its own held check
-        # against the Kalshi book). UNIQUE(game_slug) makes re-sweeps
-        # a no-op, so each game queues exactly once.
-        if outcome and other:
-            queued = await pool.fetchval(
-                """
-                INSERT INTO kud_queue (game_slug, league, dog_outcome,
-                                       other_outcome, per_fill_usd,
-                                       take_profit)
-                VALUES ($1, split_part($1, '-', 1), $2, $3, $4, $5)
-                ON CONFLICT (game_slug) DO NOTHING
-                RETURNING id
-                """, slug, outcome, other, PER_FILL_USD, TAKE_PROFIT)
-            if queued is not None:
-                stats["kud_queued"] = stats.get("kud_queued", 0) + 1
         # NON-INTERFERENCE and one-entry-per-game in one check: any
         # existing row on either token — any sleeve INCLUDING our own,
         # any status that ever held inventory — vetoes entry. (An

@@ -14,17 +14,22 @@ def test_the_dog_is_the_cheaper_side_inside_the_band():
     assert pick_underdog([("dog", 0.36), ("fav", 0.62)]) == ("dog", 0.36)
 
 
-def test_coin_flips_and_lottery_tickets_are_refused():
-    assert pick_underdog([("a", 0.50), ("b", 0.52)]) is None   # 50c is no dog
+def test_ties_junk_and_unpriced_sides_are_refused():
+    # Band widened 2026-08-09 (owner: "every single mlb game and every
+    # single tennis match"): a 50c side with a pricier opponent IS the
+    # dog now. Refusals left: no strictly cheaper side, sub-3c lottery
+    # tickets, unpriced or missing sides.
+    assert pick_underdog([("a", 0.51), ("b", 0.52)]) is None   # past 50c
     assert pick_underdog([("a", 0.49), ("b", 0.49)]) is None   # nobody cheaper
-    assert pick_underdog([("a", 0.03), ("b", 0.96)]) is None   # sub-5c junk
+    assert pick_underdog([("a", 0.02), ("b", 0.97)]) is None   # sub-3c junk
     assert pick_underdog([("a", None), ("b", 0.40)]) is None   # unpriced side
     assert pick_underdog([("a", 0.40)]) is None                # one-sided
 
 
 def test_band_edges_are_inclusive_where_they_should_be():
+    assert pick_underdog([("a", 0.50), ("b", 0.52)]) == ("a", 0.50)
     assert pick_underdog([("a", 0.48), ("b", 0.55)]) == ("a", 0.48)
-    assert pick_underdog([("a", 0.05), ("b", 0.94)]) == ("a", 0.05)
+    assert pick_underdog([("a", 0.03), ("b", 0.96)]) == ("a", 0.03)
 
 
 def test_cash_out_threshold_is_twenty_percent_on_entry():

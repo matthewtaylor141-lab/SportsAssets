@@ -24,13 +24,25 @@ drains to report cash-outs back to the platform.
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 
 log = logging.getLogger(__name__)
 
-MIN_ASK = 0.05     # sub-5c is lottery junk, same band as the PMUS leg
-MAX_ASK = 0.48     # 50c+ is no dog
+# Band widened 2026-08-09 (owner: "this should be firing every single
+# mlb game and every single tennis match") — near-even games where the
+# dog sits at 49-50c were the biggest silent skip. The dog is still
+# strictly the CHEAPER side; 50/50 books have no dog and wait for one.
+MIN_ASK = 0.03
+MAX_ASK = 0.50
+# T-minus-5 window, run HERE off the task's start_ts (the brain used to
+# gate the queue on its own window and Polymarket's prices, so a game
+# that missed either never reached Kalshi at all). Inside the window a
+# miss retries every sweep at the fresh book; only when the window
+# closes does a reason go terminal.
+LEAD_S = 300
+GRACE_S = float(os.environ.get("EDGE_KUD_GRACE_S", "1800"))
 # Exit rests live HOURS, not the copies' 15 minutes: a +20% target does
 # not go stale (it IS the strategy), and 15-minute churn left dozens of
 # expired sell orders in the venue's history — which read as "a bunch
@@ -40,8 +52,10 @@ REST_S = 4 * 3600
 
 def threshold_price(entry: float, take: float = 0.20) -> float:
     """The resting sell limit IS the +20% trigger: a maker fill at or
-    above it realizes the take on dollars spent. Capped at 99c."""
-    return round(min(entry * (1.0 + take), 0.99), 2)
+    above it realizes the take on dollars spent. Capped at 99c, floored
+    a full tick above entry — round() on a cheap dog (2c * 1.2 = 2.4c)
+    otherwise parks the "profit" exit AT the entry price."""
+    return round(min(max(entry * (1.0 + take), entry + 0.01), 0.99), 2)
 
 
 def contracts_for(usd: float, limit: float) -> int:
@@ -51,27 +65,42 @@ def contracts_for(usd: float, limit: float) -> int:
     return int(usd / limit)
 
 
-def _resolve(discovered: list, dog: str, other: str) -> str | None:
-    """Kalshi ticker for the dog, matched by BOTH outcome names — the
-    dog at the mapper bar and the opponent confirming the same matchup
-    (one name alone matches 'same player, different match')."""
+def _resolve_game(discovered: list, side_a: str, side_b: str
+                  ) -> tuple[str, str] | None:
+    """(ticker_a, ticker_b) for the matchup, matched by BOTH outcome
+    names — one at the mapper bar and the other confirming the same
+    matchup (one name alone matches 'same player, different match').
+    The caller picks the dog from the venue's own book; the task's two
+    names are just the matchup, in no meaningful order."""
     from edge.venues.mapper import team_score
 
     for vm in discovered:
         names = list(vm.outcome_tokens)
         if len(names) != 2:
             continue
-        hit = None
-        for name in names:
-            if team_score(name, dog) >= 0.9:
-                hit = name
-                break
-        if hit is None:
-            continue
-        rest = [n for n in names if n != hit][0]
-        if team_score(rest, other) >= 0.6:
-            return vm.outcome_tokens[hit]
+        for a_name, b_name in ((names[0], names[1]), (names[1], names[0])):
+            if (team_score(a_name, side_a) >= 0.9
+                    and team_score(b_name, side_b) >= 0.6):
+                return vm.outcome_tokens[a_name], vm.outcome_tokens[b_name]
+            if (team_score(b_name, side_b) >= 0.9
+                    and team_score(a_name, side_a) >= 0.6):
+                return vm.outcome_tokens[a_name], vm.outcome_tokens[b_name]
     return None
+
+
+def window_state(start_ts: float | None, now: float,
+                 lead: float = LEAD_S, grace: float = GRACE_S) -> str:
+    """'enter' inside [start - lead, start + grace]; 'wait' before;
+    'closed' after. A task with no start fires at first sight — the
+    brain could not honor a window either, and 'every game' beats
+    'every game we could time'. Pure."""
+    if not start_ts:
+        return "enter"
+    if now < start_ts - lead:
+        return "wait"
+    if now > start_ts + grace:
+        return "closed"
+    return "enter"
 
 
 def sweep(*, kalshi, ledger, base: str, token: str, live: bool) -> dict:
@@ -136,17 +165,66 @@ def sweep(*, kalshi, ledger, base: str, token: str, live: bool) -> dict:
         if not live:
             stats["dry_run"] = stats.get("dry_run", 0) + 1
             continue
+        # The window runs HERE now (owner 2026-08-09: "firing every
+        # single mlb game and every single tennis match"): the queue
+        # holds the whole slate from first sight, tasks wait for their
+        # own T-minus-5, retry every sweep inside it, and a game whose
+        # window already closed reports 'missed' instead of entering
+        # half-played. A task with no start fires at first sight but
+        # gets ONE shot — an unlisted matchup must not clog the queue
+        # retrying forever.
+        start_ts = t.get("start_ts")
+        oneshot = not start_ts
+        win = window_state(start_ts, time.time())
+        if win == "wait":
+            stats["waiting"] = stats.get("waiting", 0) + 1
+            continue
+        if win == "closed":
+            _report(t["id"], "missed", error="window closed before entry")
+            stats["missed"] = stats.get("missed", 0) + 1
+            continue
+
+        def _fail(task, reason: str, detail: str = "") -> None:
+            """Terminal only when this was the task's single shot;
+            otherwise stay queued and retry at the next sweep's book."""
+            if oneshot:
+                _report(task["id"], reason, error=detail[:200])
+                stats[reason] = stats.get(reason, 0) + 1
+            else:
+                k = f"retry_{reason}"
+                stats[k] = stats.get(k, 0) + 1
+
         league = str(t.get("league") or "").lower()
         if league not in discovered:
             try:
                 discovered[league] = kalshi.discover_markets({league})
             except Exception:  # noqa: BLE001
                 discovered[league] = []
-        ticker = _resolve(discovered[league], t.get("dog_outcome") or "",
-                          t.get("other_outcome") or "")
-        if ticker is None:
-            _report(t["id"], "no_market")
-            stats["no_market"] = stats.get("no_market", 0) + 1
+        pair = _resolve_game(discovered[league], t.get("dog_outcome") or "",
+                             t.get("other_outcome") or "")
+        if pair is None:
+            _fail(t, "no_market")
+            continue
+        # THE DOG IS THE VENUE'S DOG: strictly the cheaper ask on
+        # Kalshi's own book, decided at entry time — never Polymarket's
+        # opinion relayed through the queue. Both sides must quote (a
+        # one-sided book cannot name a dog) and a 50/50 book has none.
+        asks = []
+        for tk in pair:
+            book = kalshi.get_book(tk, tk)
+            a = book.asks[0].price if book is not None and book.asks else None
+            if a is not None:
+                asks.append((tk, a))
+        if len(asks) != 2:
+            _fail(t, "band_fail", "one-sided or empty book")
+            continue
+        asks.sort(key=lambda p: p[1])
+        (ticker, ask), (_, fav_ask) = asks
+        if ask >= fav_ask:
+            _fail(t, "band_fail", f"no dog: {ask:.2f}/{fav_ask:.2f}")
+            continue
+        if not (MIN_ASK <= ask <= MAX_ASK):
+            _fail(t, "band_fail", f"ask={ask}")
             continue
         # Non-interference: any existing engine position on this GAME —
         # either team, any sleeve, any series — vetoes the $1 entry.
@@ -154,18 +232,10 @@ def sweep(*, kalshi, ledger, base: str, token: str, live: bool) -> dict:
             _report(t["id"], "held")
             stats["held"] = stats.get("held", 0) + 1
             continue
-        book = kalshi.get_book(ticker, ticker)
-        ask = book.asks[0].price if book is not None and book.asks else None
-        if ask is None or not (MIN_ASK <= ask <= MAX_ASK):
-            _report(t["id"], "band_fail",
-                    error=f"ask={ask}" if ask is not None else "no quote")
-            stats["band_fail"] = stats.get("band_fail", 0) + 1
-            continue
         limit = round(min(ask + 0.02, 0.99), 2)
         n = contracts_for(float(t.get("per_fill_usd") or 1.0), limit)
         if n < 1:
-            _report(t["id"], "band_fail", error=f"zero contracts at {limit}")
-            stats["band_fail"] = stats.get("band_fail", 0) + 1
+            _fail(t, "band_fail", f"zero contracts at {limit}")
             continue
         pr = kalshi.place_order(ticker, limit, n,
                                 client_order_id=f"kud-{t['id']}-{uuid.uuid4().hex[:8]}",
@@ -200,17 +270,18 @@ def sweep(*, kalshi, ledger, base: str, token: str, live: bool) -> dict:
             idx = ledger.get_state("kud_index") or {}
             tickers = list(dict.fromkeys((idx.get("tickers") or []) + [ticker]))
             ledger.set_state("kud_index", {"tickers": tickers})
-            _report(t["id"], "filled", ticker=ticker, entry_price=limit,
+            _report(t["id"], "filled", ticker=ticker, entry_price=ask,
                     qty=filled)
             stats["placed"] += 1
             log.warning("KUD entry %s x%d @ %.2f (exit rests at %.2f)",
                         ticker, filled, limit, thr)
         elif pr.get("ok"):
-            _report(t["id"], "unfilled", error="IOC zero fill")
-            stats["unfilled"] = stats.get("unfilled", 0) + 1
+            # A zero-fill IOC at a moved price retries at the NEXT
+            # sweep's fresh book while the window is open — repricing
+            # per cycle, never re-firing the same order blind.
+            _fail(t, "unfilled", "IOC zero fill")
         else:
-            _report(t["id"], "error", error=str(pr.get("status"))[:200])
-            stats["order_error"] = stats.get("order_error", 0) + 1
+            _fail(t, "error", str(pr.get("status"))[:200])
 
     # 3) Exits: keep one maker sell resting at the threshold for every
     # open $1 position. The venue expires rests at 15 minutes; re-rest

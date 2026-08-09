@@ -1231,8 +1231,11 @@ async def api_held_assets(x_engine_token: str = Header(default="")) -> dict:
 @app.get("/api/engine/kud-queue")
 async def api_kud_queue(x_engine_token: str = Header(default="")) -> dict:
     """Queued Kalshi-leg underdog tasks for the engine's relay. The
-    worker queues one per game at T-minus-5; the engine resolves the
-    Kalshi market, buys the dog, and rests the +20% exit."""
+    worker queues EVERY catalogued game at first sight; the engine runs
+    the T-minus-5 window off start_ts, resolves the Kalshi market, picks
+    the dog from its own book, and rests the +20% exit. Soonest start
+    first so a full day's slate can never starve an open window behind
+    tonight's waiting games."""
     cfg = settings()
     if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
         raise HTTPException(status_code=401, detail="engine token required")
@@ -1240,14 +1243,16 @@ async def api_kud_queue(x_engine_token: str = Header(default="")) -> dict:
     rows = await pool.fetch(
         "SELECT id, game_slug, league, dog_outcome, other_outcome, "
         "per_fill_usd::float8 AS per_fill_usd, "
-        "take_profit::float8 AS take_profit "
-        "FROM kud_queue WHERE status = 'queued' ORDER BY id LIMIT 40")
+        "take_profit::float8 AS take_profit, "
+        "extract(epoch FROM start_ts)::float8 AS start_ts "
+        "FROM kud_queue WHERE status = 'queued' "
+        "ORDER BY start_ts ASC NULLS FIRST, id LIMIT 200")
     return {"tasks": [dict(r) for r in rows]}
 
 
 class KudResult(BaseModel):
     id: int
-    status: str          # filled|cashed_out|no_market|band_fail|held|unfilled|error
+    status: str          # filled|cashed_out|no_market|band_fail|held|unfilled|error|missed
     ticker: str | None = None
     entry_price: float | None = None
     qty: int | None = None
@@ -1264,7 +1269,7 @@ async def api_kud_result(
     if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
         raise HTTPException(status_code=401, detail="engine token required")
     if body.status not in ("filled", "cashed_out", "no_market", "band_fail",
-                           "held", "unfilled", "error"):
+                           "held", "unfilled", "error", "missed"):
         raise HTTPException(status_code=400, detail="bad status")
     pool = await get_pool()
     await pool.execute(
