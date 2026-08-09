@@ -387,6 +387,18 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 if plan is None or plan[1]:
                     continue
                 mpx = plan[0]
+                # COMPETITIVE rests only (owner 2026-08-09: "I need there
+                # to be volume on Kalshi"; day counters ran 38 rests /
+                # 0 fills): a bid more than 2c under the ask is queue
+                # theater — it expires unfilled every 15 minutes and
+                # burns the sweep's attention. If our his+2% limit can't
+                # sit within 2c of the ask, there is no realistic fill
+                # at our price; skip and let the next sweep's book
+                # decide (the claim is not burned).
+                if ask - mpx > 0.02:
+                    stats["skipped_dead_rest"] = \
+                        stats.get("skipped_dead_rest", 0) + 1
+                    continue
                 mcount = int(per_m / mpx)
                 if mcount >= 1:
                     mcount = cross_side_cap(sides, target_ticker, mpx,
@@ -429,15 +441,23 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             continue
         stats["priced_in_tolerance"] += 1
         from edge.shadow.copy_sports import kalshi_first
-        if pmus is not None and not kalshi_first(str(row.get("asset") or "")):
+        import os as _os
+        prefer_kalshi = _os.environ.get("EDGE_KCOPY_PREFER_KALSHI",
+                                        "1") == "1"
+        if (pmus is not None and not prefer_kalshi
+                and not kalshi_first(str(row.get("asset") or ""))):
             # Best-venue-at-placement (owner directive 2026-08-05): if
             # PMUS is showing a better ask than Kalshi's fee-loaded
             # effective price, the fast PMUS leg owns this copy — do not
             # place it here. No visible PMUS book -> Kalshi as before.
-            # KALSHI-FIRST assets skip this deference (venue split, owner
-            # directive 2026-08-07): the PMUS executor already deferred
-            # them here, and the gates above — his+2% fee-loaded, fee
-            # floors, collapse guard — are the pricing-sense bar.
+            # SUPERSEDED BY DEFAULT 2026-08-09 (owner: "I need there to
+            # be volume on Kalshi"): when a copy clears every Kalshi
+            # gate — his+2% fee-loaded, fee floor, collapse, cells —
+            # Kalshi keeps it instead of deferring to a marginally
+            # better PMUS ask. The one-copy-across-venues rule is
+            # untouched (pmus_copied skip + claim-back still run);
+            # only the venue tiebreak moved. Set
+            # EDGE_KCOPY_PREFER_KALSHI=0 to restore the old routing.
             pask = _pmus_ask(pmus, slug, outcome)
             if pask is not None and pask < eff:
                 stats["routed_pmus_better"] = \

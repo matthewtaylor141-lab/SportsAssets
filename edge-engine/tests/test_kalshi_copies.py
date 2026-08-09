@@ -235,9 +235,11 @@ def test_pmus_filled_copy_is_never_duplicated_on_kalshi():
     assert st["copied"] == 0 and not ka.orders
 
 
-def test_pmus_better_priced_routes_the_copy_away_from_kalshi():
-    """Kalshi ask 0.48 -> eff ~0.4975 fee-loaded; PMUS shows 0.49.
-    PMUS is the better venue at placement, so the fast leg owns it."""
+def test_pmus_better_priced_routes_the_copy_away_from_kalshi(monkeypatch):
+    """LEGACY routing (EDGE_KCOPY_PREFER_KALSHI=0): Kalshi ask 0.48 ->
+    eff ~0.4975 fee-loaded; PMUS shows 0.49. PMUS is the better venue
+    at placement, so the fast leg owns it."""
+    monkeypatch.setenv("EDGE_KCOPY_PREFER_KALSHI", "0")
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka, pm = _Kalshi(0.48), _Pmus(0.49)
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
@@ -246,6 +248,18 @@ def test_pmus_better_priced_routes_the_copy_away_from_kalshi():
     assert st["copied"] == 0 and not ka.orders
     # The peek resolved his side structurally: atc grammar, 'bal' code.
     assert pm.peeked == ["atc-wnba-dal-chi-2026-08-04-dal"]
+
+
+def test_kalshi_keeps_the_copy_by_default_when_it_qualifies():
+    """DEFAULT routing (owner 2026-08-09: "I need there to be volume on
+    Kalshi"): a copy that clears every Kalshi gate places on Kalshi even
+    when PMUS shows a marginally better ask — no deference, no peek."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka, pm = _Kalshi(0.48), _Pmus(0.49)
+    st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
+               pmus=pm)
+    assert st.get("routed_pmus_better") is None
+    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 10)]
 
 
 def test_kalshi_places_when_it_is_cheaper_fee_loaded():
@@ -260,9 +274,11 @@ def test_kalshi_places_when_it_is_cheaper_fee_loaded():
     assert ka.orders == [("T-DAL", 0.48, 10)]
 
 
-def test_no_pmus_book_falls_through_to_kalshi():
+def test_no_pmus_book_falls_through_to_kalshi(monkeypatch):
     """peek_book cache miss (returns None): no PMUS price is visible
-    cheaply, so Kalshi places — PMUS couldn't fill/map."""
+    cheaply, so Kalshi places — PMUS couldn't fill/map. (Legacy routing
+    so the peek path is exercised at all.)"""
+    monkeypatch.setenv("EDGE_KCOPY_PREFER_KALSHI", "0")
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka, pm = _Kalshi(0.48), _Pmus(None)
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
@@ -294,7 +310,8 @@ def test_kalshi_first_assets_skip_the_pmus_deference():
     assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 10)]
 
 
-def test_pm_first_assets_still_defer_to_a_better_pmus():
+def test_pm_first_assets_still_defer_to_a_better_pmus(monkeypatch):
+    monkeypatch.setenv("EDGE_KCOPY_PREFER_KALSHI", "0")
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka, pm = _Kalshi(0.48), _Pmus(0.49)
     st = sweep(kalshi=ka, ledger=led,
