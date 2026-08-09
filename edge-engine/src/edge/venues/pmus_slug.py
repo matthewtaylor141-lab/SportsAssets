@@ -50,6 +50,7 @@ class PmusSlug:
     codes: tuple[str, ...]   # team codes in slug order (away, home)
     side: str | None         # trailing team code, when the slug names one
     date: str | None
+    tail: tuple[str, ...] = ()   # everything after the date, verbatim
 
 
 def parse_slug(slug: str) -> PmusSlug:
@@ -74,7 +75,7 @@ def parse_slug(slug: str) -> PmusSlug:
     side = next((p for p in reversed(tail)
                  if p not in _NOT_A_CODE and not p.isdigit()
                  and "pt" not in p and not _PERIOD.match(p)), None)
-    return PmusSlug(kind, league, codes, side, parts[date_i])
+    return PmusSlug(kind, league, codes, side, parts[date_i], tuple(tail))
 
 
 def code_score(code: str, team: str) -> float:
@@ -131,6 +132,21 @@ def resolve_side(code: str, home: str, away: str) -> str | None:
     if best < MIN_SIDE_SCORE or best - other < MIN_MARGIN:
         return None
     return winner
+
+
+def is_bare_team_market(slug: str) -> bool:
+    """True only for a FULL-GAME team moneyline slug: 'atc' kind whose
+    post-date tail is exactly the side code and nothing else.
+
+    The slug-code outcome fallback used this parser's `side` while
+    DISCARDING the qualifiers around it — so 'atc-mlb-nym-pit-…-f5-nym'
+    (first five innings, CAN TIE) entered the cross-venue arbitrage pool
+    wearing a bare team name. Two of those "guaranteed" legs lose the
+    whole stake on a tie (owner report 2026-08-09: Mets/Pirates F5 pair,
+    $51 exposed). Anything with a segment, line, or extra qualifier is
+    a different proposition and never a dutchable moneyline side."""
+    p = parse_slug(slug)
+    return bool(p.kind == "atc" and p.side and p.tail == (p.side,))
 
 
 def looks_like_a_slug(text: str) -> bool:

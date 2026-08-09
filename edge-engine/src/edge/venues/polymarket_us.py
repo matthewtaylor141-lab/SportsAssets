@@ -172,7 +172,8 @@ class PolymarketUSAdapter(VenueAdapter):
             canonical_outcome,
             tag_segment,
         )
-        from edge.venues.pmus_slug import CODE_PREFIX, looks_like_a_slug, parse_slug
+        from edge.venues.pmus_slug import (CODE_PREFIX, is_bare_team_market,
+                                           looks_like_a_slug, parse_slug)
 
         census: dict[str, Any] = {"events_seen": 0, "skipped_no_title": 0,
                                   "skipped_lt2_outcomes": 0, "markets_seen": 0,
@@ -227,11 +228,22 @@ class PolymarketUSAdapter(VenueAdapter):
                             # against the event's actual teams. Guessing from
                             # a slug string is how a market gets priced as its
                             # own opposite.
+                            # ONLY a full-game team moneyline may wear a
+                            # bare code: the side extraction DISCARDS the
+                            # qualifiers around it, so an F5/segment slug
+                            # would enter the pools as a full-game side —
+                            # two of those "dutched" lose everything on a
+                            # tie (owner report 2026-08-09, Mets/Pirates
+                            # F5, $51 exposed on the third outcome).
                             parsed = parse_slug(m["slug"])
-                            if parsed.side:
+                            if parsed.side and is_bare_team_market(m["slug"]):
                                 oc = f"{CODE_PREFIX}{parsed.side}"
                                 census["outcome_from_slug_code"] = census.get(
                                     "outcome_from_slug_code", 0) + 1
+                            elif parsed.side:
+                                census["slug_code_refused_derivative"] = \
+                                    census.get(
+                                        "slug_code_refused_derivative", 0) + 1
                         if not (oc and m.get("slug")):
                             census["markets_no_outcome"] += 1
                             continue

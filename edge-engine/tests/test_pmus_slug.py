@@ -151,3 +151,19 @@ def test_a_resolvable_side_prices_and_trades(tmp_path, monkeypatch):
                        policy, risk, led, ["soccer_epl"])
     assert funnel["logged"] == 2          # both sides resolved and priced
     assert led.position("kalshi:T-ARS")["shares"] > 0
+
+
+def test_only_bare_moneyline_slugs_may_wear_a_code():
+    """Owner report 2026-08-09: an F5 pair (Mets/Pirates) entered the
+    'guaranteed' arb pool as full-game sides — first-five-innings can
+    END TIED and both legs lose. The slug-code outcome fallback must
+    refuse every derivative: the tail must be exactly the side code."""
+    from edge.venues.pmus_slug import is_bare_team_market
+
+    assert is_bare_team_market("atc-mlb-nym-pit-2026-08-09-nym")
+    assert not is_bare_team_market("atc-mlb-nym-pit-2026-08-09-f5-nym")
+    assert not is_bare_team_market("atc-mlb-min-sea-2026-08-02-f5-sea")
+    assert not is_bare_team_market("asc-mlb-ath-bos-2026-08-08-neg-1pt5")
+    assert not is_bare_team_market("tsc-atp-x-y-2026-08-02-tg-21pt5")
+    assert not is_bare_team_market("aec-mlb-tor-phi-2026-08-08")  # eventless side
+    assert not is_bare_team_market("atc-eflc-pa-exc-2026-08-10-draw")
