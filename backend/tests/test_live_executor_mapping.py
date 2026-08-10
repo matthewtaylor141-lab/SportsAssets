@@ -117,6 +117,49 @@ def test_exact_miss_still_falls_through_to_fuzzy(monkeypatch):
         "a double miss must still record the unmapped rejection"
 
 
+def test_derivative_slugs_never_take_the_exact_path(monkeypatch):
+    """Review finding, same day: the candidate grammar drops the line
+    suffix, so a SPREAD slug resolved exactly would land on the game's
+    MONEYLINE market — and a spread outcome is a team name, which
+    passes the outcome floor. Derivatives must go straight to the fuzzy
+    pipeline and its line-consistency guard."""
+    pool = _MapPool()
+    _wire(monkeypatch, pool)
+    calls = {"exact": 0, "fuzzy": 0}
+
+    def fake_exact(slugs, outcome):
+        calls["exact"] += 1
+        return {"market_slug": "wrong-moneyline", "title": "x",
+                "outcome": outcome, "matched_by": "desk_exact",
+                "score": 1.0}
+
+    def fake_fuzzy(*a, **k):
+        calls["fuzzy"] += 1
+        return None
+
+    async def spread_ctx(_pool, _payload):
+        return {"market_slug": f"nhl-tor-mtl-{date.today().isoformat()}"
+                               "-tor-1pt5",
+                "event_slug": None, "market_title": "Leafs spread",
+                "event_title": None, "outcome": "Toronto Maple Leafs"}
+
+    monkeypatch.setattr(live_executor, "_market_context", spread_ctx)
+    monkeypatch.setattr(pmus, "resolve_market_exact", fake_exact)
+    monkeypatch.setattr(pmus, "resolve_market", fake_fuzzy)
+    # Hockey is a Kalshi-first sport, so the asset must hash PM-first or
+    # the venue split defers before mapping ever runs.
+    import hashlib
+
+    asset = next(str(i) for i in range(1000)
+                 if int(hashlib.sha1(str(i).encode()).hexdigest()[-2:],
+                        16) % 100 >= 50)
+    asyncio.run(live_executor.maybe_execute(
+        _payload(whale_username="rn1", asset=asset,
+                 outcome="Toronto Maple Leafs"), 5.0))
+    assert calls == {"exact": 0, "fuzzy": 1}, \
+        "a line-suffixed slug must never touch the exact grammar"
+
+
 def test_execute_copy_stamps_its_own_reaction(monkeypatch):
     seen = []
 
@@ -126,9 +169,29 @@ def test_execute_copy_stamps_its_own_reaction(monkeypatch):
     monkeypatch.setattr(live_executor, "maybe_execute", fake_me)
     ts = (datetime.now(timezone.utc) - timedelta(seconds=30)) \
         .isoformat().replace("+00:00", "Z")
-    asyncio.run(live_executor.execute_copy({"id": 1, "ts": ts}))
+    asyncio.run(live_executor.execute_copy(
+        {"id": 1, "side": "BUY", "ts": ts}))
     assert seen and 29.0 <= seen[0] <= 60.0
     # No fill timestamp: reaction unknown, execution still proceeds —
     # and deliberately no 120s ceiling (the sweep-forfeit fix).
-    asyncio.run(live_executor.execute_copy({"id": 2}))
+    asyncio.run(live_executor.execute_copy({"id": 2, "side": "BUY"}))
     assert seen[1] is None
+
+
+def test_execute_copy_staleness_ceiling_and_side_gate(monkeypatch):
+    seen = []
+
+    async def fake_me(payload, reaction):
+        seen.append(reaction)
+
+    monkeypatch.setattr(live_executor, "maybe_execute", fake_me)
+    # 20 minutes stale: past the 900s ceiling — the sweep's job, not an
+    # immediate order.
+    old = (datetime.now(timezone.utc) - timedelta(seconds=1200)) \
+        .isoformat().replace("+00:00", "Z")
+    asyncio.run(live_executor.execute_copy(
+        {"id": 3, "side": "BUY", "ts": old}))
+    assert not seen
+    # SELLs never execute.
+    asyncio.run(live_executor.execute_copy({"id": 4, "side": "SELL"}))
+    assert not seen

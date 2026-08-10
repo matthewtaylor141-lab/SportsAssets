@@ -2357,7 +2357,9 @@ def _main_impl() -> None:
                                       stream=True, timeout=(10, 90)) as r:
                         if r.status_code == 200:
                             for line in r.iter_lines(decode_unicode=True):
-                                if line and line.startswith("event: trade"):
+                                # Exact match: 'event: trade_update'
+                                # (enrichment) would double every wake.
+                                if line and line.strip() == "event: trade":
                                     kcopy_wake.set()
                 except Exception:  # noqa: BLE001 — reconnect forever
                     pass

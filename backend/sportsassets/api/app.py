@@ -351,7 +351,15 @@ async def _compute_whale_idents() -> dict:
         SELECT l.asset, l.slug, l.outcome, l.price, l.whale, l.entered_ts,
                EXISTS (SELECT 1 FROM live_orders lo
                        WHERE lo.asset = l.asset
-                         AND lo.status IN ('filled', 'settled')
+                         -- 'submitting' counts as copied (review
+                         -- 2026-08-10): the event-woken Kalshi sweep
+                         -- reacts inside the PMUS order's in-flight
+                         -- window, and a not-yet-filled FOK must still
+                         -- hold the position or both venues buy it. A
+                         -- row that ends unfilled/rejected releases the
+                         -- claim on the next refresh.
+                         AND lo.status IN ('submitting', 'filled',
+                                           'settled')
                          -- Manual-desk rows must not mark a whale
                          -- position as already copied (owner 2026-08-07:
                          -- the desk never impacts autonomous trading).
@@ -426,7 +434,11 @@ async def _fresh_whale_idents(fresh_s: float) -> list[dict]:
         SELECT l.asset, l.slug, l.outcome, l.price, l.whale, l.entered_ts,
                EXISTS (SELECT 1 FROM live_orders lo
                        WHERE lo.asset = l.asset
-                         AND lo.status IN ('filled', 'settled')
+                         -- 'submitting' holds the claim here too — this
+                         -- fresh tail is exactly what the event-woken
+                         -- sweep reads mid-race (review 2026-08-10).
+                         AND lo.status IN ('submitting', 'filled',
+                                           'settled')
                          AND COALESCE(lo.whale_username, '') <> 'manual')
                    AS pmus_copied
         FROM latest l

@@ -62,6 +62,13 @@ async def execute_copy(payload: dict) -> None:
     staleness — a 2-10 minute detection is a copy the sleeve previously
     forfeited to the 10-minute sweep for no risk reason."""
     try:
+        # copy_probe_enabled was the fresh-copy path's de facto master
+        # switch while execution lived inside the probe; it stays one
+        # (same-day review finding — an operator flipping it expects
+        # copies to stop, and silently un-braking a kill dial is worse
+        # than the naming being imperfect).
+        if not settings().copy_probe_enabled or payload.get("side") != "BUY":
+            return
         reaction = None
         ts = payload.get("ts")
         if ts:
@@ -73,6 +80,14 @@ async def execute_copy(payload: dict) -> None:
                     .total_seconds(), 3)
             except ValueError:
                 pass
+        # Staleness ceiling: the probe's 120s gate is gone by design
+        # (2-10 min detections are copies we forfeited for no risk
+        # reason), but a burst queuing behind the semaphore must not
+        # fire orders tens of minutes after his fill — the sweep is the
+        # venue for anything older.
+        max_age = float(os.environ.get("COPY_EXEC_MAX_AGE_S", "900"))
+        if reaction is not None and reaction > max_age:
+            return
         async with _COPY_SEM:
             await maybe_execute(payload, reaction)
     except Exception:  # noqa: BLE001 — execution must never disturb ingestion
@@ -637,15 +652,20 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # but the auto copy path went straight to the fuzzy search
             # pipeline, whose slug-parity step can almost never hit —
             # whale-feed slugs use a different grammar than the US venue.
-            # Exact costs at most a few direct lookups, deterministically
-            # maps every dated two-team market the venue lists, and only
-            # then does the fuzzy pipeline take the leftovers.
-            mapping = await asyncio.to_thread(
-                pmus.resolve_market_exact,
-                _us_slug_candidates(ctx.get("market_slug")
-                                    or ctx.get("event_slug") or "",
-                                    ctx.get("outcome") or ""),
-                ctx.get("outcome"))
+            # MONEYLINE ONLY (same-day review finding): the candidate
+            # grammar drops the post-date line suffix, so a spread/total
+            # slug would resolve to the game's MONEYLINE market — and a
+            # spread outcome is a team name, which sails through the
+            # outcome floor. Derivative types keep the fuzzy pipeline,
+            # whose line-consistency guard is the defense that matters.
+            from .copy_sports import market_type_of
+            src_slug = ctx.get("market_slug") or ctx.get("event_slug") or ""
+            mapping = None
+            if market_type_of(src_slug) == "moneyline":
+                mapping = await asyncio.to_thread(
+                    pmus.resolve_market_exact,
+                    _us_slug_candidates(src_slug, ctx.get("outcome") or ""),
+                    ctx.get("outcome"))
             if mapping is None:
                 mapping = await asyncio.to_thread(
                     pmus.resolve_market, ctx.get("market_slug"), ctx.get("event_slug"),
