@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     polygon_http_url: str = ""
     ctf_exchange_address: str = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
     neg_risk_ctf_exchange_address: str = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+    # The 2026 exchange (Polymarket migrated; the two above stopped
+    # emitting fills — diagnosed on-chain 2026-08-10). Old addresses stay
+    # subscribed: harmless if silent, covering any straggler flow.
+    pm_exchange_v2_address: str = "0xE2222D279d744050d28E00520010520000310f59"
 
     # Public APIs
     data_api_base: str = "https://data-api.polymarket.com"

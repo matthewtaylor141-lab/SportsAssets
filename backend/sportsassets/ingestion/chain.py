@@ -65,6 +65,61 @@ def _topic_addr(topic: str) -> str:
     return "0x" + topic[-40:].lower()
 
 
+# The 2026 exchange contract's fill event (Polymarket migrated exchanges;
+# the old CTF contracts stopped emitting — diagnosed 2026-08-10 when the
+# listener sat subscribed-but-silent all day). The topic is the OBSERVED
+# constant from live receipts (tx 0x2be95df8...62e3d4), not computed from
+# a signature: the contract is unverified on the explorers, so the
+# signature string is unknowable — but the layout was decoded empirically
+# against a known RN1 fill and every word tied out exactly
+# ($7.6322 / 12.31 shares @ 0.62, fee 0.145):
+#   topic1 orderHash, topic2 order owner, topic3 counterparty/exchange
+#   word0 side (0 = owner bought, 1 = owner sold)
+#   word1 outcome token id
+#   word2 amount the owner GAVE   (USDC on buys, tokens on sells)
+#   word3 amount the owner GOT    (tokens on buys, USDC on sells)
+#   word4 fee (USDC, 6dp)         words 5-6 observed zero
+ORDER_FILLED_V2_TOPIC = (
+    "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee")
+
+
+def decode_order_filled_v2(log_entry: dict[str, Any],
+                           roster: set[str]) -> DecodedFill | None:
+    """Decode one v2 fill log; each matched order emits its OWN log with
+    the order owner in topic2, so only that side is matched against the
+    roster. Pure function — unit-tested with the live log verbatim."""
+    topics = log_entry.get("topics") or []
+    if len(topics) < 4:
+        return None
+    owner = _topic_addr(topics[2])
+    if owner not in roster:
+        return None
+    data = log_entry.get("data", "0x")[2:]
+    if len(data) < 4 * 64:
+        return None
+    words = [int(data[i * 64: (i + 1) * 64], 16) for i in range(4)]
+    side_flag, token, gave, got = words
+    if gave == 0 or got == 0:
+        return None
+    if side_flag == 0:
+        side, usdc_units, size_units = "BUY", gave, got
+    else:
+        side, size_units, usdc_units = "SELL", gave, got
+    size = size_units / USDC_DECIMALS
+    price = round(usdc_units / size_units, 6)
+    if not (0 < price < 1):
+        return None
+    return DecodedFill(
+        wallet=owner,
+        token_id=str(token),
+        side=side,
+        size=round(size, 6),
+        price=price,
+        tx_hash=str(log_entry.get("transactionHash", "")).lower(),
+        block_number=int(str(log_entry.get("blockNumber", "0x0")), 16),
+    )
+
+
 def decode_order_filled(log_entry: dict[str, Any], roster: set[str]) -> DecodedFill | None:
     """Decode one OrderFilled log; return a fill if a roster wallet is involved.
 
@@ -152,8 +207,12 @@ class ChainListener:
         self._addresses = [
             cfg.ctf_exchange_address.lower(),
             cfg.neg_risk_ctf_exchange_address.lower(),
+            cfg.pm_exchange_v2_address.lower(),
         ]
+        # OR-list in topic position 0: legacy OrderFilled plus the v2
+        # fill event — either matches.
         self._topic = order_filled_topic()
+        self._topics = [[self._topic, ORDER_FILLED_V2_TOPIC]]
         self._http = httpx.AsyncClient(timeout=10)
         self._blocks = BlockTimestampCache(self._http, self._http_url)
         self._roster: dict[str, dict] = {}  # address -> {id, username}
@@ -182,7 +241,11 @@ class ChainListener:
 
     async def _handle_log(self, log_entry: dict[str, Any]) -> None:
         self.events_seen += 1
-        fill = decode_order_filled(log_entry, set(self._roster))
+        topics = log_entry.get("topics") or []
+        if topics and str(topics[0]).lower() == ORDER_FILLED_V2_TOPIC:
+            fill = decode_order_filled_v2(log_entry, set(self._roster))
+        else:
+            fill = decode_order_filled(log_entry, set(self._roster))
         if fill is None:
             return
         self.decoded += 1
@@ -246,7 +309,7 @@ class ChainListener:
                             "fromBlock": hex(start),
                             "toBlock": hex(end),
                             "address": self._addresses,
-                            "topics": [self._topic],
+                            "topics": self._topics,
                         }
                     ],
                 },
@@ -290,7 +353,8 @@ class ChainListener:
                                 "method": "eth_subscribe",
                                 "params": [
                                     "logs",
-                                    {"address": self._addresses, "topics": [self._topic]},
+                                    {"address": self._addresses,
+                                     "topics": self._topics},
                                 ],
                             }
                         )
