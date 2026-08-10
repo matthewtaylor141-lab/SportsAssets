@@ -158,6 +158,20 @@ class ChainListener:
         self._blocks = BlockTimestampCache(self._http, self._http_url)
         self._roster: dict[str, dict] = {}  # address -> {id, username}
         self.last_event_at: float = time.time()
+        # Diagnosis counters (2026-08-10: the socket beat 'ok' all day
+        # while every fill arrived via the poller — 'subscribed' alone
+        # cannot distinguish a silent provider from a decode mismatch).
+        self.events_seen = 0    # raw OrderFilled logs delivered by the WS
+        self.decoded = 0        # logs that decoded to a roster wallet
+        self.ingested = 0       # decoded fills that won the dedupe
+
+    def _beat_detail(self) -> dict:
+        return {"subscribed": True,
+                "last_event_age_s": round(time.time() - self.last_event_at),
+                "events_seen": self.events_seen,
+                "decoded": self.decoded,
+                "ingested": self.ingested,
+                "roster": len(self._roster)}
 
     async def refresh_roster(self) -> None:
         pool = await get_pool()
@@ -167,9 +181,11 @@ class ChainListener:
         self._roster = {r["address"].lower(): dict(r) for r in rows}
 
     async def _handle_log(self, log_entry: dict[str, Any]) -> None:
+        self.events_seen += 1
         fill = decode_order_filled(log_entry, set(self._roster))
         if fill is None:
             return
+        self.decoded += 1
         whale = self._roster[fill.wallet]
         ts_epoch = await self._blocks.get(fill.block_number)
         ev = TradeEvent(
@@ -185,6 +201,7 @@ class ChainListener:
         )
         trade_id = await ingest_trade(ev)
         if trade_id:
+            self.ingested += 1
             log.info(
                 "chain fill: %s %s %s %.2f @ %.3f (trade %s)",
                 whale["username"] or fill.wallet,
@@ -280,7 +297,7 @@ class ChainListener:
                     )
                     await ws.recv()  # subscription ack
                     log.info("Path A subscribed to OrderFilled on %s", self._addresses)
-                    await heartbeat("chain_listener", "ok", {"subscribed": True})
+                    await heartbeat("chain_listener", "ok", self._beat_detail())
                     roster_refreshed = time.time()
                     while True:
                         raw = await asyncio.wait_for(ws.recv(), timeout=60)
@@ -293,7 +310,8 @@ class ChainListener:
                         if time.time() - roster_refreshed > 60:
                             await self.refresh_roster()
                             roster_refreshed = time.time()
-                            await heartbeat("chain_listener", "ok", {"subscribed": True})
+                            await heartbeat("chain_listener", "ok",
+                                            self._beat_detail())
             except asyncio.TimeoutError:
                 # No events for 60s can be legitimate quiet time; heartbeat + resubscribe
                 # to be safe (subscription may have silently died).

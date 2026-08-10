@@ -268,6 +268,11 @@ jobs:
           # The underdog sweep's per-gate stats live in its heartbeat
           # detail — the one line that says WHERE entries are dying.
           echo "  underdog detail: $(jq -c '.[] | select(.service == "underdog") | .detail' /tmp/hb.json 2>/dev/null)"
+          # Path A diagnosis (2026-08-10): events_seen=0 with a growing
+          # last_event_age means the WS provider delivers nothing —
+          # swap POLYGON_WS_URL; events without decodes means a roster
+          # or decode mismatch — a code problem.
+          echo "  chain detail: $(jq -c '.[] | select(.service == "chain_listener") | .detail' /tmp/hb.json 2>/dev/null)"
 
           echo ""
           echo "#   WHALE INGESTION RAW (shape + freshness, no jq guessing) #"
