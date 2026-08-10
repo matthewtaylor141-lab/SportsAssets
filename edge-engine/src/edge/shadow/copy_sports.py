@@ -124,16 +124,19 @@ def kalshi_first(asset: str) -> bool:
     asset id — same answer on every service, so the two venues never
     race for one position.
 
-    Default 50 (owner directive 2026-08-10, profitability upgrade #3:
-    copy edge decays in minutes and the Kalshi sweep adds up to 60s
-    versus the instant PMUS leg — a 50/50 split recovers that speed on
-    half the flow while Kalshi keeps first claim on the other half).
-    History: 100 was the 2026-08-09 "trades firing left and right"
-    setting; KALSHI_FIRST_PCT=100 restores it in one env change."""
+    Default 100 (owner directive 2026-08-10 evening: "I want trades
+    coming in and not missing as many copies" on Kalshi). The 50/50
+    split earlier the same day existed because the Kalshi sweep added
+    up to 2-4 minutes versus the instant PMUS leg; the fresh-fill wake
+    shipped since then prices a new position in ~10-40s, so first claim
+    no longer costs meaningful edge — and the 10-minute PMUS sweep
+    still reclaims anything Kalshi cannot price. History: 100 was the
+    2026-08-09 setting, 50 the 2026-08-10 morning speed trade-off;
+    KALSHI_FIRST_PCT overrides either way in one env change."""
     if not asset:
         return False
     import os as _os
-    pct = int(_os.environ.get("KALSHI_FIRST_PCT", "50"))
+    pct = int(_os.environ.get("KALSHI_FIRST_PCT", "100"))
     if pct >= 100:
         return True
     if pct <= 0:
