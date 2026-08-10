@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from .config import settings
@@ -39,6 +40,43 @@ log = logging.getLogger(__name__)
 _client = None
 _client_lock = asyncio.Lock()
 PAUSE_KEY = "live_trading_paused"
+
+# Executor-side concurrency cap (owner approval 2026-08-10, reaction-time
+# work): copy execution used to run INSIDE copy_probe's 4-slot probe
+# semaphore, so a whale burst serialized later fills' probes — and their
+# reaction stamps — behind earlier fills' full map+order cycles.
+# Execution is now its own task per fresh detection (see execute_copy);
+# this semaphore is what still keeps a burst from firing unbounded
+# concurrent mapping/preview/create calls at the venue, which was
+# Cloudflare-throttled once already (polymarket_us.py page pacing note).
+_COPY_SEM = asyncio.Semaphore(4)
+
+
+async def execute_copy(payload: dict) -> None:
+    """Fresh-detection execution entry point, spawned by the ingestion
+    pipeline ALONGSIDE (not inside) the measurement probe.
+
+    Deliberately no 120s probe gate here: MAX_REACTION_S protects the
+    probe cohort's measurement integrity, but for EXECUTION the
+    pipeline's 600s fresh gate plus the FOK at his+2% already bound
+    staleness — a 2-10 minute detection is a copy the sleeve previously
+    forfeited to the 10-minute sweep for no risk reason."""
+    try:
+        reaction = None
+        ts = payload.get("ts")
+        if ts:
+            try:
+                fill_dt = datetime.fromisoformat(
+                    str(ts).replace("Z", "+00:00"))
+                reaction = round(
+                    (datetime.now(tz=timezone.utc) - fill_dt)
+                    .total_seconds(), 3)
+            except ValueError:
+                pass
+        async with _COPY_SEM:
+            await maybe_execute(payload, reaction)
+    except Exception:  # noqa: BLE001 — execution must never disturb ingestion
+        log.exception("copy execution failed for trade %s", payload.get("id"))
 
 
 def plan_order(
@@ -593,10 +631,26 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             from . import pmus
 
             ctx = await _market_context(pool, payload)
+            # Deterministic grammar FIRST (2026-08-10, unmapped-funnel
+            # work): the manual desk and underdog sleeve already map via
+            # the US slug grammar (atc-/aec- candidates -> exact lookup),
+            # but the auto copy path went straight to the fuzzy search
+            # pipeline, whose slug-parity step can almost never hit —
+            # whale-feed slugs use a different grammar than the US venue.
+            # Exact costs at most a few direct lookups, deterministically
+            # maps every dated two-team market the venue lists, and only
+            # then does the fuzzy pipeline take the leftovers.
             mapping = await asyncio.to_thread(
-                pmus.resolve_market, ctx.get("market_slug"), ctx.get("event_slug"),
-                ctx.get("market_title"), ctx.get("event_title"), ctx.get("outcome"),
-            )
+                pmus.resolve_market_exact,
+                _us_slug_candidates(ctx.get("market_slug")
+                                    or ctx.get("event_slug") or "",
+                                    ctx.get("outcome") or ""),
+                ctx.get("outcome"))
+            if mapping is None:
+                mapping = await asyncio.to_thread(
+                    pmus.resolve_market, ctx.get("market_slug"), ctx.get("event_slug"),
+                    ctx.get("market_title"), ctx.get("event_title"), ctx.get("outcome"),
+                )
             if mapping is None:
                 diag = getattr(pmus.resolve_market, "last_diag", "") or ""
                 await pool.execute(

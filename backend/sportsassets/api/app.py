@@ -397,18 +397,81 @@ async def refresh_whale_idents_loop() -> None:
         await asyncio.sleep(_WHALE_IDENTS_TTL)
 
 
+async def _fresh_whale_idents(fresh_s: float) -> list[dict]:
+    """Identity rows for source-whale BUYs in the last fresh_s seconds —
+    the same shape as the snapshot, from a cheap bounded scan (minutes,
+    not the 7-day walk that forced the snapshot design)."""
+    from ..config import settings as _settings
+    from ..db import get_pool as _get_pool
+
+    pool = await _get_pool()
+    rows = await pool.fetch(
+        """
+        WITH latest AS (
+            SELECT DISTINCT ON (t.asset)
+                   t.asset,
+                   COALESCE(t.market_slug, t.event_slug, '') AS slug,
+                   t.outcome, t.price::float8 AS price,
+                   w.username AS whale,
+                   extract(epoch FROM t.ts)::float8 AS entered_ts
+            FROM trades t
+            JOIN whales w ON w.id = t.whale_id
+            LEFT JOIN markets m ON m.condition_id = t.condition_id
+            WHERE t.side = 'BUY'
+              AND t.ts > now() - make_interval(secs => $2)
+              AND lower(w.username) = ANY($1)
+              AND COALESCE(m.resolved, false) = false
+            ORDER BY t.asset, t.ts DESC
+        )
+        SELECT l.asset, l.slug, l.outcome, l.price, l.whale, l.entered_ts,
+               EXISTS (SELECT 1 FROM live_orders lo
+                       WHERE lo.asset = l.asset
+                         AND lo.status IN ('filled', 'settled')
+                         AND COALESCE(lo.whale_username, '') <> 'manual')
+                   AS pmus_copied
+        FROM latest l
+        """,
+        sorted(_settings().source_whales()), float(fresh_s),
+    )
+    return [{"asset": str(r["asset"]), "slug": r["slug"],
+             "outcome": r["outcome"], "price": r["price"],
+             "whale": r["whale"], "entered_ts": r["entered_ts"],
+             "pmus_copied": bool(r["pmus_copied"])}
+            for r in rows if r["slug"] and r["outcome"]]
+
+
 @app.get("/api/whale-open-identities")
-async def api_whale_open_identities() -> dict:
+async def api_whale_open_identities(fresh_s: float | None = None) -> dict:
     """Source whales' open BUY positions as identity rows for the engine's
     whale-alignment tagging: [{slug, outcome}]. Moneyline-shaped consumers
     only — the engine joins on game key + team name at the mapper bar.
     Served from the background-refreshed snapshot; before the first
     refresh completes (cold boot) the caller gets an empty list and picks
-    up the real one next sweep rather than waiting on a slow compute."""
+    up the real one next sweep rather than waiting on a slow compute.
+
+    fresh_s (2026-08-10, reaction-time work): the engine's copy sweep now
+    wakes on fresh-fill events, and the fill that woke it is younger than
+    this snapshot's 90s TTL. When set, a bounded fresh-tail query is
+    merged over the snapshot (fresh rows win by asset) so the woken sweep
+    can actually price the position that woke it. Tail failures serve the
+    plain snapshot — freshness is an upgrade, never an outage."""
     data = _whale_idents_cache["data"]
-    if data is not None:
+    if data is None:
+        return {"identities": [], "as_of": None, "warming": True}
+    if not fresh_s or fresh_s <= 0:
         return data
-    return {"identities": [], "as_of": None, "warming": True}
+    try:
+        fresh_rows = await _fresh_whale_idents(min(float(fresh_s), 900.0))
+    except Exception:  # noqa: BLE001 — snapshot alone is today's behavior
+        logging.getLogger(__name__).exception("fresh-tail identities failed")
+        return data
+    if not fresh_rows:
+        return data
+    by_asset = {i["asset"]: i for i in data["identities"]}
+    for r in fresh_rows:
+        by_asset[r["asset"]] = r
+    return {"identities": list(by_asset.values()), "as_of": data["as_of"],
+            "fresh_merged": len(fresh_rows)}
 
 
 @app.get("/api/whales")
@@ -1659,6 +1722,78 @@ async def live_status() -> dict:
     }
 
 
+@app.get("/api/copy-unmapped")
+async def api_copy_unmapped(days: int | None = None) -> dict:
+    """Breakdown of the copy sleeve's rejected rows — the number the site
+    shows as 'unmapped' (2026-08-10, unmapped-funnel work). The counter
+    blends three different writers (mapping failures, no-stack refusals,
+    manual-desk refusals) and a league mix that is largely world-soccer
+    flow the US venue simply does not list; this endpoint separates
+    'mapper bug we can fix' from 'venue does not carry it' without a
+    database dig. Pure DB read — never calls a venue."""
+    from ..copy_sports import league_of, market_type_of
+
+    pool = await get_pool()
+    where_days = "AND lo.placed_at > now() - make_interval(days => $1)" \
+        if days and days > 0 else ""
+    args = [int(days)] if days and days > 0 else []
+    rows = await pool.fetch(
+        f"""
+        SELECT lower(COALESCE(lo.whale_username, '?')) AS whale,
+               COALESCE(t.market_slug, t.event_slug, '') AS slug,
+               CASE WHEN lo.error LIKE 'no-stack%' THEN 'no_stack'
+                    WHEN lo.error LIKE 'unmapped%' THEN 'unmapped'
+                    ELSE 'no_us_market' END AS reason,
+               count(*)::int AS n,
+               count(*) FILTER
+                   (WHERE lo.placed_at > now() - interval '7 days')::int
+                   AS n_7d
+        FROM live_orders lo
+        LEFT JOIN trades t ON t.id = lo.trade_id
+        WHERE lo.status = 'rejected' {where_days}
+        GROUP BY 1, 2, 3
+        """,
+        *args,
+    )
+    by_reason: dict[str, int] = {}
+    by_whale: dict[str, int] = {}
+    by_league: dict[str, dict] = {}
+    by_type: dict[str, int] = {}
+    total = 0
+    total_7d = 0
+    for r in rows:
+        n = r["n"]
+        total += n
+        total_7d += r["n_7d"]
+        by_reason[r["reason"]] = by_reason.get(r["reason"], 0) + n
+        by_whale[r["whale"]] = by_whale.get(r["whale"], 0) + n
+        slug = r["slug"] or ""
+        league = league_of(slug) if slug else "(no slug)"
+        mtype = market_type_of(slug) if slug else "unknown"
+        lg = by_league.setdefault(league, {"n": 0, "n_7d": 0, "types": {}})
+        lg["n"] += n
+        lg["n_7d"] += r["n_7d"]
+        lg["types"][mtype] = lg["types"].get(mtype, 0) + n
+        by_type[mtype] = by_type.get(mtype, 0) + n
+    leagues = sorted(by_league.items(), key=lambda kv: -kv[1]["n"])[:30]
+    return {
+        "totals": {"rows": total, "recent_7d": total_7d},
+        "by_reason": [{"reason": k, "n": v}
+                      for k, v in sorted(by_reason.items(),
+                                         key=lambda kv: -kv[1])],
+        "by_market_type": [{"market_type": k, "n": v}
+                           for k, v in sorted(by_type.items(),
+                                              key=lambda kv: -kv[1])],
+        "by_whale": [{"whale": k, "n": v}
+                     for k, v in sorted(by_whale.items(),
+                                        key=lambda kv: -kv[1])],
+        "by_league": [{"league": k, "n": v["n"], "n_7d": v["n_7d"],
+                       "market_types": dict(sorted(v["types"].items(),
+                                                   key=lambda kv: -kv[1]))}
+                      for k, v in leagues],
+    }
+
+
 @app.get("/api/track-record")
 async def api_track_record(since: str | None = Query(None),
                            max_stake: float | None = Query(None)) -> dict:
@@ -1752,11 +1887,15 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
             acct_by_day[day] = float(d.get("pnl") or 0)
 
     for r in copies:
-        # Each live sleeve is its own category: the four source whales
-        # plus the admin manual desk (owner 2026-08-07).
+        # Each live sleeve is its own category: the source whales plus
+        # the admin manual desk (owner 2026-08-07). A whale missing from
+        # this tuple silently leaks its P&L into the derived Software
+        # remainder — extend it with every promotion.
         if r["whale"] not in ("rn1", "swisstony", "kch123",
                               "homerunhazard", "manual",
-                              "underdog"):
+                              "underdog",
+                              "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563"
+                              "-1759935795465"):
             continue
         day = max(r["day"], first_day)
         if not _in_range(day):
@@ -1914,10 +2053,15 @@ async def api_report_range(
         _parse_day(from_, "2026-08-01"), _parse_day(to, _today_et()))
 
 
+_WHALE_0X2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 _CAT_ORDER = ["rn1", "swisstony", "kch123", "homerunhazard",
+              _WHALE_0X2C33,
               "manual", "underdog", "arb", "software"]
 _CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
               "kch123": "kch123 copies", "homerunhazard": "HomeRunHazard copies",
+              # Display label is the truncated address — the owner names
+              # whales; until he does, the wallet is its own name.
+              _WHALE_0X2C33: "0x2c33…0563 copies",
               "manual": "Manual desk", "underdog": "Underdog $1 test",
               "arb": "Arbitrage", "software": "Software"}
 

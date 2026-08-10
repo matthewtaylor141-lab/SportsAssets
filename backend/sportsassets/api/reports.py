@@ -346,11 +346,14 @@ def _settled_sections(bets: list[dict], daily: list[dict]) -> list:
     return story
 
 
+_WHALE_0X2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 _CAT_ORDER = ["rn1", "swisstony", "kch123", "homerunhazard",
+              _WHALE_0X2C33,
               "manual", "arb", "software"]
 _CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
               "kch123": "kch123 copies",
               "homerunhazard": "HomeRunHazard copies",
+              _WHALE_0X2C33: "0x2c33…0563 copies",
               "manual": "Manual desk", "arb": "Arbitrage",
               "software": "Software"}
 

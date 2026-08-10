@@ -157,7 +157,9 @@ def test_window_waits_fires_and_expires(monkeypatch):
     st, ka, _, sess = _run(0.30, tasks=[open_w], monkeypatch=monkeypatch)
     assert st["placed"] == 1
     # Window long closed: reported missed, never entered in-play.
-    late = {**_TASK, "start_ts": now - 7200}
+    # 4h after start clears the widened 60-minute grace (2026-08-10)
+    # with headroom — keep this fixture beyond any future grace bump.
+    late = {**_TASK, "start_ts": now - 4 * 3600}
     st, ka, _, sess = _run(0.30, tasks=[late], monkeypatch=monkeypatch)
     assert st.get("missed") == 1 and not ka.orders
     assert sess.posts[0][1]["status"] == "missed"
@@ -175,6 +177,27 @@ def test_in_window_miss_retries_instead_of_reporting(monkeypatch):
     # Same book, no start_ts: one shot, terminal report.
     st, ka, _, sess = _run(ka_asks, monkeypatch=monkeypatch)
     assert sess.posts[0][1]["status"] == "band_fail"
+
+
+def test_discovery_failure_is_retryable_even_for_oneshot(monkeypatch):
+    """The boot stagger is gone (2026-08-10), so the first sweep can run
+    against a cold adapter — a DISCOVERY failure must never burn a
+    no-start_ts task's single shot as 'no_market'. Only a successful
+    discovery that finds no matching market stays terminal for oneshots."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _Kalshi(0.30)
+
+    def _boom(league_codes):
+        raise RuntimeError("venue 500")
+
+    ka.discover_markets = _boom
+    sess = _Sess([dict(_TASK)])
+    monkeypatch.setattr(requests, "Session", lambda: sess)
+    st = sweep(kalshi=ka, ledger=led, base="http://api", token="t",
+               live=True)
+    assert st.get("retry_discovery") == 1
+    assert not sess.posts, "nothing terminal may be reported"
+    assert not ka.orders
 
 
 def test_existing_position_on_the_game_vetoes_entry(monkeypatch):

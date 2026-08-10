@@ -115,3 +115,40 @@ def test_kindless_cells_route_correctly():
     assert not copy_allowed("homerunhazard", "mlb-tor-hou-2026-08-08-o8pt5")
     assert not copy_allowed("homerunhazard", "mlb-tor-hou-2026-08-08-o8pt5",
                             price="n/a")
+
+
+def test_promoted_whale_0x2c33_is_unrestricted():
+    """Owner approval 2026-08-10: the vetted wallet copies UNRESTRICTED
+    like RN1 (the vetting graded his WHOLE book, +0.76%/$1k over 1,712
+    probes) — any sport, any market type, no band. His own settled
+    record governs from here."""
+    w = "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563-1759935795465"
+    assert copy_allowed(w, "aec-atp-rafjod-cormou-2026-08-06")
+    assert copy_allowed(w.lower(), "mlb-nyy-bos-2026-07-22-o8pt5")
+    assert copy_allowed(w, "atc-nba-lal-bos-2026-11-01-lal", price=0.12)
+    # The gate stays fail-closed for anyone NOT promoted.
+    assert not copy_allowed("somebody_new", "aec-atp-rafjod-cormou-2026-08-06")
+
+
+def test_copy_sports_twins_are_byte_identical():
+    """backend/sportsassets/copy_sports.py and edge-engine/src/edge/
+    shadow/copy_sports.py are ONE policy deployed to two services; a
+    one-sided edit desynchronizes venue routing with no runtime error
+    anywhere. Until 2026-08-10 only convention guarded this."""
+    import pathlib
+
+    import pytest
+
+    here = pathlib.Path(__file__).resolve()
+    root = next(
+        (p for p in here.parents
+         if (p / "backend" / "sportsassets" / "copy_sports.py").exists()
+         and (p / "edge-engine" / "src" / "edge" / "shadow"
+              / "copy_sports.py").exists()),
+        None)
+    if root is None:
+        pytest.skip("sibling tree not present in this checkout")
+    a = (root / "backend" / "sportsassets" / "copy_sports.py").read_bytes()
+    b = (root / "edge-engine" / "src" / "edge" / "shadow"
+         / "copy_sports.py").read_bytes()
+    assert a == b, "edit both copies together — they are one policy"

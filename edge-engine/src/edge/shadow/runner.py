@@ -2337,17 +2337,54 @@ def _main_impl() -> None:
     pmus_c = next((a for a in adapters if a.name == "polymarket-us"), None)
     if os.environ.get("EDGE_KCOPY", "1") != "0" and kalshi_c is not None \
             and kalshi_c.has_credentials():
+        # Fresh-fill wake (owner approval 2026-08-10, reaction-time work):
+        # the platform's SSE stream publishes every detected whale fill;
+        # this listener sets the event so the sweep prices a new position
+        # in seconds instead of waiting out the timer. Fail-soft like the
+        # reactor: no stream (API restarting, no base URL) means no wakes
+        # and the loop degrades to exactly the timer cadence below.
+        kcopy_wake = threading.Event()
+
+        def _kcopy_stream_listener() -> None:
+            import requests
+
+            base = os.environ.get("EDGE_PLATFORM_API", "")
+            if not base:
+                return
+            while True:
+                try:
+                    with requests.get(f"{base.rstrip('/')}/stream",
+                                      stream=True, timeout=(10, 90)) as r:
+                        if r.status_code == 200:
+                            for line in r.iter_lines(decode_unicode=True):
+                                if line and line.startswith("event: trade"):
+                                    kcopy_wake.set()
+                except Exception:  # noqa: BLE001 — reconnect forever
+                    pass
+                time.sleep(5)
+
+        threading.Thread(target=_kcopy_stream_listener, daemon=True,
+                         name="kcopy-stream").start()
+
         def _kcopy_loop() -> None:
             from edge.shadow.kalshi_copies import sweep as kcopy
             from edge.shadow.whale_align import fetch as widents
 
             time.sleep(60)
-            every = float(os.environ.get("EDGE_KCOPY_EVERY_S", "120"))
+            # 120 -> 30 (2026-08-10): with league discovery cached across
+            # sweeps (kalshi_copies._discover_cached) a pass costs one
+            # identities GET plus live book reads, so the timer alone
+            # carries most of the latency win when the stream is down.
+            every = float(os.environ.get("EDGE_KCOPY_EVERY_S", "30"))
             while True:
                 try:
+                    # fresh_s: the platform merges a fresh-tail query over
+                    # its 90s-TTL identities snapshot, so a just-detected
+                    # fill is copyable on the wake that announced it.
                     rows = widents(
                         os.environ.get("EDGE_PLATFORM_API", ""),
-                        os.environ.get("EDGE_INGEST_TOKEN", ""))
+                        os.environ.get("EDGE_INGEST_TOKEN", ""),
+                        fresh_s=300)
 
                     def _claim_back(asset: str, ticker: str,
                                     whale: str) -> None:
@@ -2385,11 +2422,17 @@ def _main_impl() -> None:
                     _KCOPY_STATS.update(
                         error=f"{type(exc).__name__}: {str(exc)[:140]}",
                         at=time.time())
-                time.sleep(every)
+                # Timer OR fresh-fill wake, whichever lands first. The
+                # debounce coalesces a whale's burst of fills into one
+                # pass and floors the sweep rate under constant flow.
+                kcopy_wake.wait(timeout=every)
+                kcopy_wake.clear()
+                time.sleep(5)
 
         threading.Thread(target=_kcopy_loop, daemon=True,
                          name="kalshi-copies").start()
-        log.warning("kalshi copy leg armed (2min sweep, strategy-independent)")
+        log.warning("kalshi copy leg armed (30s sweep + fresh-fill wake, "
+                    "strategy-independent)")
 
         # Manual desk relay (owner directive 2026-08-07): admin-directed
         # Kalshi orders queue on the platform (only this process holds
@@ -2468,40 +2511,51 @@ def _main_impl() -> None:
                          name="desk-relay").start()
         log.warning("manual desk relay armed (10s poll)")
 
-        # Kalshi leg of the $1 underdog sleeve (owner 2026-08-08): the
-        # platform worker queues one task per game at T-minus-5; this
-        # loop places the dog and keeps the +20% maker exit resting.
-        # Sleeve-class like manual/arb: only global stops apply.
-        if os.environ.get("EDGE_KUD", "1") != "0":
-            def _kud_loop() -> None:
-                from edge.shadow.kalshi_underdog import sweep as kud
+    # Kalshi leg of the $1 underdog sleeve (owner 2026-08-08): the
+    # platform worker queues one task per game at T-minus-5; this
+    # loop places the dog and keeps the +20% maker exit resting.
+    # Sleeve-class like manual/arb: only global stops apply.
+    # ARMED INDEPENDENTLY of the copies leg (2026-08-10): this block
+    # used to nest inside the EDGE_KCOPY conditional above, so
+    # EDGE_KCOPY=0 would have silently disarmed the underdog sleeve
+    # too — the same silent-disarm class as the 2026-08-07 copies
+    # outage documented at the top of that block.
+    if os.environ.get("EDGE_KUD", "1") != "0" and kalshi_c is not None \
+            and kalshi_c.has_credentials():
+        def _kud_loop() -> None:
+            from edge.shadow.kalshi_underdog import sweep as kud
 
-                base = os.environ.get("EDGE_PLATFORM_API", "")
-                token = os.environ.get("EDGE_INGEST_TOKEN", "")
-                if not base or not token:
-                    return
-                time.sleep(45)
-                every = float(os.environ.get("EDGE_KUD_EVERY_S", "60"))
-                while True:
-                    try:
-                        st = kud(kalshi=kalshi_c, ledger=ledger,
-                                 base=base, token=token,
-                                 live=risk.is_live)
-                        _KUD_STATS.clear()
-                        _KUD_STATS.update(st, at=time.time())
-                        if st.get("placed") or st.get("cashed_out"):
-                            log.warning("kalshi underdog sweep: %s", st)
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("kalshi underdog sweep failed: %s", exc)
-                        _KUD_STATS.clear()
-                        _KUD_STATS.update(
-                            error=f"{type(exc).__name__}: {str(exc)[:140]}",
-                            at=time.time())
-                    time.sleep(every)
+            base = os.environ.get("EDGE_PLATFORM_API", "")
+            token = os.environ.get("EDGE_INGEST_TOKEN", "")
+            if not base or not token:
+                return
+            # NO boot stagger (2026-08-10): the entry window keeps
+            # elapsing through a deploy, and the old 45s pre-sleep was
+            # pure lost window time. A cold-boot pass is safe — a
+            # discovery failure is a retryable sentinel in the sweep
+            # (never burns a oneshot task), and a not-yet-live engine
+            # counts dry_run without reporting anything terminal.
+            every = float(os.environ.get("EDGE_KUD_EVERY_S", "60"))
+            while True:
+                try:
+                    st = kud(kalshi=kalshi_c, ledger=ledger,
+                             base=base, token=token,
+                             live=risk.is_live)
+                    _KUD_STATS.clear()
+                    _KUD_STATS.update(st, at=time.time())
+                    if st.get("placed") or st.get("cashed_out"):
+                        log.warning("kalshi underdog sweep: %s", st)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("kalshi underdog sweep failed: %s", exc)
+                    _KUD_STATS.clear()
+                    _KUD_STATS.update(
+                        error=f"{type(exc).__name__}: {str(exc)[:140]}",
+                        at=time.time())
+                time.sleep(every)
 
-            threading.Thread(target=_kud_loop, daemon=True,
-                             name="kalshi-underdog").start()
-            log.warning("kalshi underdog leg armed (60s sweep)")
+        threading.Thread(target=_kud_loop, daemon=True,
+                         name="kalshi-underdog").start()
+        log.warning("kalshi underdog leg armed (60s sweep, boot-immediate)")
 
     # One-shot venue census (EDGE_CENSUS_DAYS=0 disables): how many sports
     # markets the venue actually listed per day over the trailing window —

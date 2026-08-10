@@ -59,6 +59,15 @@ ENTRY_SWEEP_S = float(os.environ.get("UNDERDOG_ENTRY_SWEEP_S", "60"))
 ENTRY_LEAD_S = float(os.environ.get("UNDERDOG_LEAD_S", "300"))
 ENTRY_GRACE_S = float(os.environ.get("UNDERDOG_GRACE_S", "60"))
 CASHOUT_SWEEP_S = float(os.environ.get("UNDERDOG_CASHOUT_SWEEP_S", "60"))
+# The ENGINE's Kalshi-leg entry window, mirrored here ONLY so the
+# k_windows_open / k_next_window_s heartbeat counters describe what the
+# engine will actually do (the PM leg's much tighter ENTRY_GRACE_S above
+# is a different window). Defaults must track kalshi_underdog.py — grace
+# went 1800 -> 3600 on 2026-08-10; if the owner overrides EDGE_KUD_GRACE_S
+# on the edge-shadow service it must be set identically on this worker or
+# the heartbeat lies about open windows.
+K_LEAD_S = 300.0
+K_GRACE_S = float(os.environ.get("EDGE_KUD_GRACE_S", "3600"))
 
 # The markets table is the GLOBAL catalog: a game's moneyline is the
 # BARE kindless slug ("mlb-tor-phi-2026-08-08") carrying both sides as
@@ -584,18 +593,19 @@ async def _record(pool) -> dict:
         # for hours with no way to see WHEN it would open).
         nx = await pool.fetchrow(
             "SELECT count(*) FILTER (WHERE start_ts IS NOT NULL "
-            "  AND now() >= start_ts - interval '300 seconds' "
-            "  AND now() <= start_ts + interval '1800 seconds')::int "
+            "  AND now() >= start_ts - make_interval(secs => $1) "
+            "  AND now() <= start_ts + make_interval(secs => $2))::int "
             "  AS open_now, "
             "count(*) FILTER (WHERE start_ts IS NULL)::int AS no_start, "
             "extract(epoch FROM (min(start_ts) "
             "  FILTER (WHERE start_ts > now()) - now()))::int AS next_in_s "
-            "FROM kud_queue WHERE status = 'queued'")
+            "FROM kud_queue WHERE status = 'queued'",
+            float(K_LEAD_S), float(K_GRACE_S))
         if nx is not None:
             out["k_windows_open"] = nx["open_now"] or 0
             out["k_no_start"] = nx["no_start"] or 0
             if nx["next_in_s"] is not None:
-                out["k_next_window_s"] = max(0, nx["next_in_s"] - 300)
+                out["k_next_window_s"] = max(0, nx["next_in_s"] - int(K_LEAD_S))
     except Exception:  # noqa: BLE001 — table lands with migration 017
         pass
     return out

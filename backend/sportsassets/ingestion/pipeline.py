@@ -147,8 +147,15 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
     fresh = (ev.ts_epoch or 0) > (datetime.now(timezone.utc).timestamp() - 600)
     if fresh:
         from ..copy_probe import probe_trade
+        from ..live_executor import execute_copy
 
+        # Probe (measurement) and live execution are INDEPENDENT tasks
+        # (2026-08-10): execution used to run inside the probe's
+        # semaphore, so a whale burst serialized real orders behind book
+        # snapshots — and the probe's 120s measurement gate silently
+        # forfeited every slower detection to the 10-minute sweep.
         asyncio.get_running_loop().create_task(probe_trade(payload))
+        asyncio.get_running_loop().create_task(execute_copy(payload))
 
     if not pre_enriched:
         # Enrich off the hot path; never blocks the next detection.

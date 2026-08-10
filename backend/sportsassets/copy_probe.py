@@ -29,7 +29,11 @@ from .db import get_pool
 
 log = logging.getLogger(__name__)
 
-_SEM = asyncio.Semaphore(4)
+# 4 -> 8 (2026-08-10, reaction-time work): with live execution moved out
+# to its own task (live_executor.execute_copy), the critical section here
+# is one 8s-timeout book GET plus two inserts — burst probes stop
+# queueing behind full order cycles.
+_SEM = asyncio.Semaphore(8)
 CLIPS = (1_000.0, 5_000.0)
 MAX_REACTION_S = 120.0  # older detections (reconciler catch-ups) measure nothing
 
@@ -100,8 +104,11 @@ async def probe_trade(payload: dict) -> None:
     if latency is not None and float(latency) > MAX_REACTION_S:
         return
     try:
+        # probe_at is stamped BEFORE the semaphore (2026-08-10): reaction_s
+        # measures detection lag, and stamping after the queue wait blended
+        # our own burst serialization into the whales' latency statistic.
+        probe_at = datetime.now(tz=timezone.utc)
         async with _SEM:
-            probe_at = datetime.now(tz=timezone.utc)
             asks: list[tuple[float, float]] = []
             error = None
             try:
@@ -153,10 +160,11 @@ async def probe_trade(payload: dict) -> None:
             # AI TRADER paper account: copy the source whale at the size ratio,
             # filled from this exact residual book snapshot.
             await _place_ai_trade(payload, asks, his_price, reaction)
-            # LIVE beta (off by default; multiple guards inside).
-            from .live_executor import maybe_execute
-
-            await maybe_execute(payload, reaction)
+            # LIVE execution no longer runs here (2026-08-10): the
+            # pipeline spawns live_executor.execute_copy as its own task,
+            # so a mapping+order cycle never holds a probe slot and a
+            # >120s detection still executes instead of waiting for the
+            # sweep. This probe is measurement only.
     except Exception:  # noqa: BLE001 — probing must never disturb ingestion
         log.exception("copy probe failed for trade %s", payload.get("id"))
 

@@ -51,7 +51,17 @@ SPORT_OF = {"nba": "basketball", "cbb": "basketball",
 # Whales copied WITHOUT a cell gate — the live sleeve's own record of
 # the first-entry-per-market rule is the governing measurement (owner
 # decision 2026-08-06; see the RN1 note above).
-UNRESTRICTED = frozenset({"rn1"})
+# 0x2c33…0563 promoted from vetting 2026-08-10 (owner approval): 1,712
+# probes at our REAL latency graded +0.76% per-$1k residual ROI —
+# strongest measured candidate on the board. Vetting measured his whole
+# book, so he enters unrestricted like RN1 and earns cells (or removal)
+# on his own settled record. Keyed by the roster's auto-generated
+# username; the row is pinned (migration 019) so the weekly roster
+# refresh can neither rename nor deactivate it out from under this key.
+UNRESTRICTED = frozenset({
+    "rn1",
+    "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465",
+})
 
 # whale -> allowed (sport, market_type) cells. Fail-closed.
 CELLS: dict[str, frozenset] = {

@@ -64,7 +64,11 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # 2026-08-10 (owner funding the accounts up): ALL Kalshi copies to $50,
 # RN1 to $100 — Kalshi leg only; PMUS sizing unchanged until the owner's
 # Polymarket deposit lands.
-PER_COPY_USD = {"rn1": 100.00}
+# 2026-08-10 (owner approval, profitability round 2): swisstony to $100
+# — his settled Kalshi-leg record (+$673 on $1,648 deployed) is the
+# stronger of the two proven books. His soccer cell's 0.70 Kalshi ask
+# floor still binds: only >=70c entries reach this venue at any clip.
+PER_COPY_USD = {"rn1": 100.00, "swisstony": 100.00}
 PER_COPY_DEFAULT = 50.00
 # A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
 # decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.
@@ -91,7 +95,11 @@ COLLAPSE_FLOOR = 0.85
 # breaker keeps its ~12-full-loss sensitivity at the new clip size —
 # an unchanged floor would have tripped on two ordinary losses and
 # halted the sleeve almost daily. EDGE_KCOPY_HALT_USD still overrides.
-COPY_HALT_USD_DEFAULT = 600.0
+# Scaled 600 -> 1200 later the same day when swisstony joined RN1 at
+# the $100 clip: with BOTH high-volume whales at $100 the dominant clip
+# doubled, and an unchanged floor would have halved tolerance to ~6
+# full losses — the exact mistake the scaling rule exists to prevent.
+COPY_HALT_USD_DEFAULT = 1200.0
 COPY_HALT_HOURS_DEFAULT = 24.0
 # Owner amnesty 2026-08-06 ("Let's get Kalshi going now"): the halt
 # tripped ~01:00Z on Wednesday-evening losses was ordered lifted early.
@@ -102,6 +110,32 @@ COPY_HALT_HOURS_DEFAULT = 24.0
 # amnesty, the rolling window no longer reaches behind it. Halts
 # tripped on NEW losses after the amnesty are honored in full.
 COPY_BREAKER_AMNESTY_TS = 1786053600.0   # 2026-08-06T22:00:00Z
+
+# League discovery cached ACROSS sweeps (2026-08-10, reaction-time work):
+# the sweep now also wakes on fresh-fill events, and re-running paginated
+# REST discovery per league on every wake would multiply venue calls into
+# the Cloudflare throttle that already bit once. Kalshi lists a game well
+# before any copy window opens, so a 5-minute-old market list prices the
+# same copies; the books quoted against it are always fetched live.
+_DISCO_TTL_S = 300.0
+# Keyed by adapter identity as well as league so a rebuilt adapter (or a
+# test's fake) never serves another instance's market list.
+_DISCO_CACHE: dict[tuple[int, str], tuple[float, dict]] = {}
+
+
+def _discover_cached(kalshi, league: str) -> dict:
+    """{market_id: VenueMarket} for a league, at most one REST discovery
+    per TTL. Failures are NOT cached — the next sweep retries."""
+    now = time.time()
+    key = (id(kalshi), league)
+    hit = _DISCO_CACHE.get(key)
+    if hit is not None and now - hit[0] < _DISCO_TTL_S:
+        return hit[1]
+    markets: dict = {}
+    for vm in kalshi.discover_markets({league}):
+        markets[vm.market_id] = vm
+    _DISCO_CACHE[key] = (now, markets)
+    return markets
 
 
 def check_copy_breaker(ledger) -> str | None:
@@ -323,13 +357,11 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             continue
         if league not in discovered:
             try:
-                discovered[league] = {}
-                for vm in kalshi.discover_markets({league}):
-                    # Kalshi event tickers carry no slug-style date; key by
-                    # the market's own outcome names + the event date token
-                    # is already enforced in the adds sweep. Here the join
-                    # is name-first: index every market by its outcome set.
-                    discovered[league][vm.market_id] = vm
+                # Kalshi event tickers carry no slug-style date; key by
+                # the market's own outcome names + the event date token
+                # is already enforced in the adds sweep. Here the join
+                # is name-first: index every market by its outcome set.
+                discovered[league] = _discover_cached(kalshi, league)
             except Exception:  # noqa: BLE001
                 discovered[league] = {}
         target_ticker = None

@@ -79,15 +79,21 @@ def aligned(pmus_slug: str, outcome_name: str,
     return any(team_score(n, outcome_name) >= 0.95 for n in names)
 
 
-def fetch(base_url: str, token: str = "", timeout: float = 30.0) -> list[dict]:
-    """Pull the source whales' open moneyline positions from the platform."""
+def fetch(base_url: str, token: str = "", timeout: float = 30.0,
+          fresh_s: float | None = None) -> list[dict]:
+    """Pull the source whales' open moneyline positions from the platform.
+
+    fresh_s asks the platform to merge a fresh-tail query (trades in the
+    last N seconds) over its cached snapshot, so an event-woken sweep
+    sees the fill that woke it instead of a 90s-stale snapshot."""
     import requests
 
     if not base_url:
         return []
     headers = {"Authorization": f"Bearer {token}"} if token else {}
+    params = {"fresh_s": fresh_s} if fresh_s else None
     r = requests.get(f"{base_url.rstrip('/')}/api/whale-open-identities",
-                     headers=headers, timeout=timeout)
+                     headers=headers, params=params, timeout=timeout)
     if r.status_code != 200:
         log.info("whale identities fetch: HTTP %s", r.status_code)
         return []

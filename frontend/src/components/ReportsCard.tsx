@@ -6,12 +6,14 @@ import { API_BASE, api } from '../lib/api'
 // manual desk, arbitrage, software) with CSV and PDF exports straight
 // from the ledger-backed report endpoints.
 
+const WHALE_0X2C33 = '0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465'
 const CAT_LABEL: Record<string, string> = {
   rn1: 'RN1 copies', swisstony: 'SwissTony copies', kch123: 'kch123 copies',
-  homerunhazard: 'HomeRunHazard copies', manual: 'Manual desk',
+  homerunhazard: 'HomeRunHazard copies', [WHALE_0X2C33]: '0x2c33…0563 copies',
+  manual: 'Manual desk',
   underdog: 'Underdog $1 test', arb: 'Arbitrage', software: 'Software',
 }
-const CAT_ORDER = ['rn1', 'swisstony', 'kch123', 'homerunhazard', 'manual', 'underdog', 'arb', 'software']
+const CAT_ORDER = ['rn1', 'swisstony', 'kch123', 'homerunhazard', WHALE_0X2C33, 'manual', 'underdog', 'arb', 'software']
 
 interface CatTotal { pnl: number; settled: number; wins: number; losses: number }
 interface RangeReport {

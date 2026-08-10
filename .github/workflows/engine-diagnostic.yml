@@ -231,6 +231,21 @@ jobs:
              /tmp/live.json 2>/dev/null | head -25 || echo "  (unavailable)"
 
           echo ""
+          echo "#   UNMAPPED FUNNEL (rejected copy rows: league x type x why) #"
+          # Separates 'mapper gap we can fix' from 'the US venue does not
+          # list it' — recent_7d is the live problem, the rest is frozen
+          # history the sweep no longer retries.
+          curl -sS --max-time 60 -o /tmp/unm.json "$BASE/api/copy-unmapped" || true
+          jq -r '"  rows=\(.totals.rows // "?")  recent_7d=\(.totals.recent_7d // "?")"' \
+             /tmp/unm.json 2>/dev/null || echo "  (endpoint not deployed yet)"
+          jq -r '.by_reason // [] | .[] | "  RSN \(.reason): \(.n)"' \
+             /tmp/unm.json 2>/dev/null | head -5 || true
+          jq -r '.by_market_type // [] | .[] | "  TYP \(.market_type): \(.n)"' \
+             /tmp/unm.json 2>/dev/null | head -8 || true
+          jq -r '.by_league // [] | .[] | "  LGE \(.league): \(.n) (7d \(.n_7d))  \(.market_types // {} | to_entries[0:3] | map("\(.key):\(.value)") | join(" "))"' \
+             /tmp/unm.json 2>/dev/null | head -20 || true
+
+          echo ""
           echo "#   MEMORY WATCH (rss_mb over 2 min — where does it die?)    #"
           for i in $(seq 1 24); do
             # A dead API must print DOWN, not exit the step (bash -e turns

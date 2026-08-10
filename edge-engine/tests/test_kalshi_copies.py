@@ -5,10 +5,23 @@ day-capped, strict name join, $3 per copy uniform (owner directive
 import tempfile
 import time
 
+import pytest
+
 from edge.ledger.service import Ledger
+from edge.shadow import kalshi_copies as _kc
 from edge.shadow.kalshi_copies import _limit_for, sweep
 from edge.venues.base import BookLevel, MarketBook
 from edge.venues.mapper import VenueMarket
+
+
+@pytest.fixture(autouse=True)
+def _fresh_discovery_cache():
+    """League discovery is cached ACROSS sweeps in production; between
+    tests a recycled fake-adapter id must never serve another test's
+    market list."""
+    _kc._DISCO_CACHE.clear()
+    yield
+    _kc._DISCO_CACHE.clear()
 
 
 class _Kalshi:
@@ -90,6 +103,33 @@ def test_sport_assignments_gate_the_sweep():
     # RN1 clips at $100 on Kalshi (owner directive 2026-08-10):
     # floor(100/0.48) = 208 contracts.
     assert ka3.orders == [("T-DAL", 0.48, 208)]
+
+
+def test_swisstony_kalshi_clip_is_100():
+    """Owner approval 2026-08-10 (profitability round 2): swisstony joins
+    RN1 at $100/clip on the Kalshi leg. His soccer cell's 0.70 ask floor
+    still binds, so the fixture is a 72c EPL entry: floor(100/0.72) = 138
+    contracts."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _Kalshi(0.72, outcomes={"Arsenal": "T-ARS", "Chelsea": "T-CHE"})
+    row = {"slug": "epl-ars-che-2026-08-15", "outcome": "Arsenal",
+           "price": 0.74, "whale": "swisstony",
+           "entered_ts": time.time() - 60}
+    st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
+    assert st["copied"] == 1
+    assert ka.orders == [("T-ARS", 0.72, 138)]
+
+
+def test_promoted_whale_0x2c33_copies_at_the_default_clip():
+    """Owner approval 2026-08-10: the vetted wallet copies UNRESTRICTED
+    (like RN1) at the $50 default — floor(50/0.48) = 104 contracts on
+    the standard fixture."""
+    row = {**_ROW,
+           "whale": "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563"
+                    "-1759935795465"}
+    st, ka, _ = _run(0.48, rows=[row])
+    assert st["copied"] == 1
+    assert ka.orders == [("T-DAL", 0.48, 104)]
 
 
 def test_one_copy_per_position_ever():

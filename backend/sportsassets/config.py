@@ -89,7 +89,15 @@ class Settings(BaseSettings):
     # per-whale sport assignments live in copy_sports.py; this list is WHO
     # gets copied at all. kch123 + HomeRunHazard added from fill-level
     # forensic reconstructions (kch123 7.1% blended; HRH directional +3.51%).
-    ai_trader_source: str = "swisstony,RN1,kch123,HomeRunHazard"
+    # 0x2c33…0563 promoted from vetting 2026-08-10 (owner approval; 1,712
+    # probes, +0.76%/$1k residual ROI at our real latency). Keyed by the
+    # roster's auto-generated username — pinned in migration 019 so the
+    # weekly refresh cannot rename it out from under this list. NOTE: an
+    # AI_TRADER_SOURCE env on Render overrides this default; if one is
+    # set, the owner must add the same entry there.
+    ai_trader_source: str = ("swisstony,RN1,kch123,HomeRunHazard,"
+                             "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563"
+                             "-1759935795465")
     ai_trader_ratio: float = 0.10
     # VETTING whales (owner directive 2026-08-06): candidates under
     # evaluation for the live copy sleeve. Vetting whales are probed and

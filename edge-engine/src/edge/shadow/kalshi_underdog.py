@@ -41,8 +41,14 @@ MAX_ASK = 0.50
 # that missed either never reached Kalshi at all). Inside the window a
 # miss retries every sweep at the fresh book; only when the window
 # closes does a reason go terminal.
+# Grace 1800 -> 3600 (owner approval 2026-08-10): 7 of the sleeve's
+# first-week misses were windows that expired during engine deploys or
+# late catalogue arrivals. A late entry is SAFE — the dog is picked from
+# Kalshi's LIVE book at entry moment and the [0.03, 0.50] band re-checks
+# there, so the only cost is less remaining time for the +20% exit. The
+# window is now [start-5min, start+60min].
 LEAD_S = 300
-GRACE_S = float(os.environ.get("EDGE_KUD_GRACE_S", "1800"))
+GRACE_S = float(os.environ.get("EDGE_KUD_GRACE_S", "3600"))
 # Exit rests live HOURS, not the copies' 15 minutes: a +20% target does
 # not go stale (it IS the strategy), and 15-minute churn left dozens of
 # expired sell orders in the venue's history — which read as "a bunch
@@ -154,7 +160,7 @@ def sweep(*, kalshi, ledger, base: str, token: str, live: bool) -> dict:
     except Exception as exc:  # noqa: BLE001
         stats["queue_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
         tasks = []
-    discovered: dict[str, list] = {}
+    discovered: dict[str, list | None] = {}
     sides = open_kalshi_sides(ledger) if tasks else {}
     for t in tasks:
         stats["tasks"] += 1
@@ -199,7 +205,16 @@ def sweep(*, kalshi, ledger, base: str, token: str, live: bool) -> dict:
             try:
                 discovered[league] = kalshi.discover_markets({league})
             except Exception:  # noqa: BLE001
-                discovered[league] = []
+                # None = DISCOVERY failed (venue/network hiccup), which
+                # must stay retryable even for oneshot tasks — the boot
+                # sweep now runs immediately and a cold adapter must not
+                # burn every no-start task's single shot as 'no_market'.
+                # An EMPTY list means discovery succeeded and the game
+                # genuinely is not listed; that stays terminal below.
+                discovered[league] = None
+        if discovered[league] is None:
+            stats["retry_discovery"] = stats.get("retry_discovery", 0) + 1
+            continue
         pair = _resolve_game(discovered[league], t.get("dog_outcome") or "",
                              t.get("other_outcome") or "")
         if pair is None:
