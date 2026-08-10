@@ -160,6 +160,48 @@ def test_derivative_slugs_never_take_the_exact_path(monkeypatch):
         "a line-suffixed slug must never touch the exact grammar"
 
 
+def test_kalshi_claim_landing_mid_flight_blocks_the_order(monkeypatch):
+    """Reverse direction of the double-copy race (review 2026-08-10):
+    the engine's event-woken Kalshi leg can claim the asset during our
+    mapping/no-stack cycle. The claim is re-checked at the last instant
+    before submit — a mid-flight claim must reject, not double-buy."""
+    pool = _MapPool()
+    claims_seen = {"n": 0}
+
+    orig_fetchval = pool.fetchval
+
+    async def fetchval(sql, *a):
+        if "kalshi_claims" in sql:
+            claims_seen["n"] += 1
+            # Entry check: no claim yet. Re-check: the engine got there.
+            return 1 if claims_seen["n"] >= 2 else None
+        return await orig_fetchval(sql, *a)
+
+    pool.fetchval = fetchval
+    _wire(monkeypatch, pool)
+
+    def fake_exact(slugs, outcome):
+        return {"market_slug": slugs[0], "title": "x", "outcome": outcome,
+                "matched_by": "desk_exact", "score": 1.0}
+
+    submitted = []
+
+    def fake_submit(slug, limit, shares):
+        submitted.append(slug)
+        return {"ok": True, "filled_shares": float(shares),
+                "fill_price": limit, "order_id": "o1", "raw": {}}
+
+    monkeypatch.setattr(pmus, "resolve_market_exact", fake_exact)
+    monkeypatch.setattr(pmus, "account_holds", lambda slug: False)
+    monkeypatch.setattr(pmus, "submit_fok", fake_submit)
+
+    asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
+    assert claims_seen["n"] >= 2, "the claim must be re-checked pre-submit"
+    assert not submitted, "a mid-flight kalshi claim must block the order"
+    assert any("kalshi copied this position mid-flight" in str(a)
+               for _, a in pool.updates)
+
+
 def test_execute_copy_stamps_its_own_reaction(monkeypatch):
     seen = []
 

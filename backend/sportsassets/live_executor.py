@@ -69,26 +69,30 @@ async def execute_copy(payload: dict) -> None:
         # than the naming being imperfect).
         if not settings().copy_probe_enabled or payload.get("side") != "BUY":
             return
-        reaction = None
-        ts = payload.get("ts")
-        if ts:
-            try:
-                fill_dt = datetime.fromisoformat(
-                    str(ts).replace("Z", "+00:00"))
-                reaction = round(
-                    (datetime.now(tz=timezone.utc) - fill_dt)
-                    .total_seconds(), 3)
-            except ValueError:
-                pass
-        # Staleness ceiling: the probe's 120s gate is gone by design
-        # (2-10 min detections are copies we forfeited for no risk
-        # reason), but a burst queuing behind the semaphore must not
-        # fire orders tens of minutes after his fill — the sweep is the
-        # venue for anything older.
-        max_age = float(os.environ.get("COPY_EXEC_MAX_AGE_S", "900"))
-        if reaction is not None and reaction > max_age:
-            return
         async with _COPY_SEM:
+            # Reaction is stamped and the ceiling judged INSIDE the
+            # semaphore (review 2026-08-10): a burst can queue a task
+            # here for minutes, and both the recorded latency and the
+            # staleness gate must describe the moment the order actually
+            # fires, not the moment the task was spawned.
+            reaction = None
+            ts = payload.get("ts")
+            if ts:
+                try:
+                    fill_dt = datetime.fromisoformat(
+                        str(ts).replace("Z", "+00:00"))
+                    reaction = round(
+                        (datetime.now(tz=timezone.utc) - fill_dt)
+                        .total_seconds(), 3)
+                except ValueError:
+                    pass
+            # Staleness ceiling: the probe's 120s gate is gone by design
+            # (2-10 min detections are copies we forfeited for no risk
+            # reason), but nothing may fire tens of minutes after his
+            # fill — the sweep is the venue for anything older.
+            max_age = float(os.environ.get("COPY_EXEC_MAX_AGE_S", "900"))
+            if reaction is not None and reaction > max_age:
+                return
             await maybe_execute(payload, reaction)
     except Exception:  # noqa: BLE001 — execution must never disturb ingestion
         log.exception("copy execution failed for trade %s", payload.get("id"))
@@ -697,6 +701,22 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     "WHERE id=$1", row_id,
                     "no-stack: account already holds this market")
                 return
+            # Cross-venue claim RE-CHECK at the last instant (review
+            # 2026-08-10): the event-woken Kalshi leg can fire and claim
+            # this asset during the seconds this mapping/no-stack cycle
+            # just spent — the entry check is stale by now. Guarded like
+            # the entry check: a missing table degrades to no re-check.
+            try:
+                if await pool.fetchval(
+                        "SELECT 1 FROM kalshi_claims WHERE asset = $1 "
+                        "LIMIT 1", str(payload["asset"])):
+                    await pool.execute(
+                        "UPDATE live_orders SET status='rejected', "
+                        "error=$2 WHERE id=$1", row_id,
+                        "kalshi copied this position mid-flight")
+                    return
+            except Exception:  # noqa: BLE001
+                pass
             result = await asyncio.to_thread(
                 pmus.submit_fok, mapping["market_slug"], limit, int(shares))
         else:
