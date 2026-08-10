@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import zlib
@@ -376,7 +377,30 @@ def _quarantined(ledger) -> set:
 # differently from the per-inning proposition, and the pipeline cannot
 # tell those markets apart by outcome name (adversarial verification
 # 2026-08-09, 14/14 findings confirmed).
-_COVER_SEGMENTS = {"f5", "i1"}
+#
+# LIVE vs DARK (owner go-live 2026-08-10): i1 fires — once the first
+# inning starts it always completes, so the joint-void asymmetry the
+# verification flagged is confined to games that never start (both
+# markets void together). f5 stays telemetry-only: a rain-shortened
+# sub-5-inning game can settle the F5 winner and the F5 runs total
+# under different clauses, and nothing reads rules text yet.
+_COVER_SEGMENTS = {"i1"}
+_COVER_DARK_SEGMENTS = {"f5"}
+
+# Identity whitelists (adversarial verification 2026-08-09: the
+# canonical outcome string is lossy — a team total, hits prop, or
+# cumulative-leader market collapses to the same key as the real
+# proposition). A cover leg is accepted only when its SOURCE MARKET
+# TITLE full-matches the expected shape; anything else — including a
+# missing title — is refused and counted, with examples kept so the
+# patterns can be widened from evidence, never from guesses.
+_COVER_TIE_TITLE = re.compile(
+    r"^\s*(?:\d{1,2}(?:st|nd|rd|th)\s+inning|first\s+(?:5|five)\s+innings?)"
+    r"\s*[:\-]?\s*(?:winner|moneyline)\s*$", re.IGNORECASE)
+_COVER_OVER_TITLE = re.compile(
+    r"^\s*(?:\d{1,2}(?:st|nd|rd|th)\s+inning|first\s+(?:5|five)\s+innings?)"
+    r"\s*[:\-]?\s*(?:total\s+)?runs?\s*[:\-]?\s*"
+    r"(?:o/?u|over\s*/?\s*under)?\s*0?\.5?\s*$", re.IGNORECASE)
 
 # Exact sport keys with guaranteed 9-inning regulation structure. A
 # substring test admitted NCAA (7-inning doubleheaders, mercy rule),
@@ -391,28 +415,45 @@ _COVER_SPORTS = {"baseball_mlb"}
 _TWO_WAY_SEGMENTS = frozenset(f"s{i}" for i in range(1, 8))
 
 
-def _find_cover_book(ledger, ev, venue_legs, funnel=None):
+def _cover_title_ok(kind: str, title: str | None) -> bool:
+    """Does the leg's SOURCE MARKET title full-match the whitelisted
+    shape for its role? Fail-closed: a missing or unexpected title is a
+    refusal, never a guess — team totals ('Orioles 1st Inning O/U 0.5'),
+    props ('1st Inning Hits O/U 0.5') and cumulative markets ('Leader
+    after 1st Inning') all fail the full-match by construction."""
+    if not title:
+        return False
+    pat = _COVER_TIE_TITLE if kind == "tie" else _COVER_OVER_TITLE
+    return bool(pat.match(title))
+
+
+def _find_cover_book(ledger, ev, venue_legs, funnel=None, leg_titles=None):
     """Tie(seg) + Over 0.5(seg) on the SAME fee-free venue event.
 
-    The pairing key (adapter, market_id, segment) proves SAME GAME and
-    same segment label only — the two legs are separate condition
-    markets with independently written resolution rules. Joint voiding
-    is NOT guaranteed; that residual risk is why this class stays dark
-    until per-market rules verification exists. Kalshi never qualifies —
-    its taker fee on two legs eats the whole window, and the tie/first-
-    run markets live on PMUS anyway."""
+    IDENTITY-VERIFIED (owner go-live 2026-08-10): each leg's actual
+    market title must full-match its role's whitelist before pairing —
+    the canonical outcome string alone let team totals and props wear
+    the game total's key (adversarial verification 2026-08-09). The
+    pairing key (adapter, market_id, segment) still proves SAME GAME
+    only; joint voiding across the two condition markets is guaranteed
+    for i1 only (an inning that starts always completes; a game that
+    never starts voids both) — f5 stays telemetry-dark until rules
+    text is verified. Kalshi never qualifies — its taker fee on two
+    legs eats the whole window."""
     from edge.analysis.consistency import find_cover_book
     from edge.fairvalue.lines import is_draw, parse_outcome_line, split_segment
 
     if str(ev.sport_key) not in _COVER_SPORTS:
         return None, None
+    titles = leg_titles or {}
+    all_segs = _COVER_SEGMENTS | _COVER_DARK_SEGMENTS
     ties: dict = {}
     overs: dict = {}
     for a, market_id, leg in venue_legs:
         if getattr(a, "name", "") != "polymarket-us":
             continue
         seg, name = split_segment(leg.outcome)
-        if seg not in _COVER_SEGMENTS:
+        if seg not in all_segs:
             continue
         if is_draw(name):
             ties.setdefault((a, market_id, seg), []).append(leg)
@@ -434,6 +475,20 @@ def _find_cover_book(ledger, ev, venue_legs, funnel=None):
             continue
         tleg, oleg = tlist[0], olist[0]
         a, market_id, seg = key
+        # THE IDENTITY GATE. Refused titles are counted and sampled so
+        # the whitelist grows from live evidence, never loosened blind.
+        bad = [(k, t) for k, t in (("tie", titles.get(tleg.token)),
+                                   ("over", titles.get(oleg.token)))
+               if not _cover_title_ok(k, t)]
+        if bad:
+            if funnel is not None:
+                funnel["cover_title_refused"] = funnel.get(
+                    "cover_title_refused", 0) + 1
+                ex = funnel.setdefault("cover_title_examples", [])
+                if len(ex) < 5:
+                    ex.append({k: (t or "<no title>")[:70]
+                               for k, t in bad})
+            continue
         claim = f"arb_tried:{market_id}:cover-{seg}"
         if ledger.get_state(claim):
             continue
@@ -442,18 +497,19 @@ def _find_cover_book(ledger, ev, venue_legs, funnel=None):
         b = find_cover_book(event=claim, segment=seg, tie=tleg, over=oleg,
                             fee_per_contract=fee)
         if b is not None:
-            # DARK until the adversarial verification signs off (owner
-            # authorized live fire 2026-08-09; the verification came back
-            # with confirmed identity holes, so the switch stays off):
-            # every real lock is counted ONCE and priced in telemetry.
             if funnel is not None and claim not in _COVER_SEEN:
                 _COVER_SEEN.add(claim)
                 funnel.setdefault("cover_locks_seen", []).append(
                     {"event": f"{ev.home} v {ev.away}", "seg": seg,
                      "cost": b.cost, "sets": b.sets,
-                     "verified": False})
+                     "verified": True})
             import os
-            if os.environ.get("EDGE_COVER_ARB", "0") != "1":
+            # LIVE by default for _COVER_SEGMENTS (owner authorization
+            # 2026-08-09/10, after the identity gate above shipped);
+            # EDGE_COVER_ARB=0 re-darkens everything in one env change.
+            # Dark segments (f5) are counted, never fired.
+            if (os.environ.get("EDGE_COVER_ARB", "1") != "1"
+                    or seg in _COVER_DARK_SEGMENTS):
                 if funnel is not None:
                     funnel["cover_dark"] = funnel.get("cover_dark", 0) + 1
                 continue
@@ -468,7 +524,8 @@ _COVER_SEEN: set = set()
 
 
 def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
-                   funnel, max_usd: float = 10.0) -> bool:
+                   funnel, max_usd: float = 10.0,
+                   leg_titles: dict | None = None) -> bool:
     """Look for a complete outcome set priced under $1 and buy all of it.
 
     Returns True if a book was attempted (so the caller can count it against
@@ -546,7 +603,8 @@ def _try_arbitrage(*, ledger, ev, venue_legs, expected, sets, dry_run,
             adapter, book = a, b
             break
     if book is None:
-        adapter, book = _find_cover_book(ledger, ev, venue_legs, funnel)
+        adapter, book = _find_cover_book(ledger, ev, venue_legs, funnel,
+                                         leg_titles=leg_titles)
         if book is not None:
             funnel["cover_found"] = funnel.get("cover_found", 0) + 1
     if book is None:
@@ -1413,9 +1471,35 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
             # per outcome, so a complete partition spans several markets and
             # can only be assembled at the event level.
             arb_legs: list = []
+            leg_titles: dict = {}
+
+            def _cover_candidate(oc_name: str) -> bool:
+                # Cover legs are MODEL-FREE (the lock is arithmetic, not
+                # fair value) but used to enter arb_legs only after the
+                # sharp feed priced them — per-inning ties and 0.5
+                # totals mostly have no sharp quote, so the class was
+                # nearly dead code (adversarial verification 2026-08-09,
+                # 'model-free legs gated by the model').
+                if getattr(adapter, "name", "") != "polymarket-us":
+                    return False
+                if str(ev.sport_key) not in _COVER_SPORTS:
+                    return False
+                from edge.fairvalue.lines import (is_draw,
+                                                  parse_outcome_line,
+                                                  split_segment)
+                seg, name = split_segment(oc_name)
+                if seg not in (_COVER_SEGMENTS | _COVER_DARK_SEGMENTS):
+                    return False
+                if is_draw(name):
+                    return True
+                p = parse_outcome_line(name)
+                return (p.kind == "total" and p.point == 0.5
+                        and name.strip().lower().startswith("over"))
+
             for match in matches:
                 if not match.tradeable:
                     continue
+                _titles = getattr(match.market, "outcome_titles", None) or {}
                 for oc_name, token in match.market.outcome_tokens.items():
                     # Reactive pass: only the books that actually moved. This
                     # is the whole speed win — everything else is skipped
@@ -1427,6 +1511,23 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                     seen_tokens.add(token)
                     fair, category, miss = fair_for(oc_name)
                     if fair is None:
+                        # Cover-eligible legs proceed on the VENUE book
+                        # alone; the identity gate in _find_cover_book
+                        # (source-title whitelist) is their bar.
+                        if arb_on and _cover_candidate(oc_name):
+                            cbook = adapter.get_book(
+                                match.market.market_id, token)
+                            if (cbook is not None and cbook.asks
+                                    and cbook.asks[0].size >= 1):
+                                arb_legs.append(
+                                    (adapter, match.market.market_id,
+                                     _ArbLeg(outcome=oc_name, token=token,
+                                             price=cbook.asks[0].price,
+                                             size=float(cbook.asks[0].size))))
+                                leg_titles[token] = _titles.get(oc_name)
+                                funnel["cover_candidates"] = funnel.get(
+                                    "cover_candidates", 0) + 1
+                                continue
                         # Previously a silent skip — the single biggest blind
                         # spot in the funnel. Count it and keep one example.
                         reject(miss["reason"])
@@ -1462,6 +1563,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                          _ArbLeg(
                             outcome=oc_name, token=token, price=ask.price,
                             size=float(ask.size))))
+                        leg_titles[token] = _titles.get(oc_name)
                     if (xv_on and category == "moneyline"
                             and len(ev.h2h) == 2
                             and (ev.league_code or "") in xv_leagues
@@ -1741,7 +1843,8 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                       sets=arb_sets, dry_run=not risk.is_live,
                                       funnel=funnel,
                                       max_usd=float(
-                                          arb_cfg.get("max_usd", 10.0))):
+                                          arb_cfg.get("max_usd", 10.0)),
+                                      leg_titles=leg_titles):
                         arb_done += 1
                 except Exception as exc:  # noqa: BLE001
                     # Arbitrage is additive. A failure here must never cost

@@ -81,24 +81,87 @@ def _legs(adapter, tie_price=0.53, over_price=0.45, seg="i1"):
     ]
 
 
+# Source-market titles that pass the identity whitelist (go-live
+# 2026-08-10): the tie leg from an inning-WINNER market, the over leg
+# from the combined-RUNS total. Everything the whitelist is built to
+# refuse is exercised in the identity tests below.
+def _titles(seg="i1"):
+    word = "1st Inning" if seg == "i1" else "First 5 Innings"
+    return {"tok-tie": f"{word} Winner",
+            "tok-over": f"{word} Total Runs O/U 0.5"}
+
+
 def test_try_arbitrage_fires_the_cover_in_dry_run(led, monkeypatch):
     monkeypatch.setenv("EDGE_COVER_ARB", "1")
     funnel: dict = {}
     fired = _try_arbitrage(ledger=led, ev=_Ev(), venue_legs=_legs(_Pmus()),
                            expected=2, sets=1, dry_run=True, funnel=funnel,
-                           max_usd=50.0)
+                           max_usd=50.0, leg_titles=_titles())
     assert fired and funnel.get("cover_found") == 1
     assert funnel["arb_books"][0]["cost"] == 0.98
 
 
-def test_cover_deploys_dark_by_default(led, monkeypatch):
-    """Until the adversarial sign-off flips EDGE_COVER_ARB, a real lock
-    is COUNTED and PRICED in telemetry but never bought."""
+def test_cover_is_live_by_default_with_verified_titles(led, monkeypatch):
+    """Owner authorization 2026-08-09/10: with the identity gate in
+    place the class fires by default; EDGE_COVER_ARB=0 re-darkens."""
     monkeypatch.delenv("EDGE_COVER_ARB", raising=False)
     funnel: dict = {}
     fired = _try_arbitrage(ledger=led, ev=_Ev(), venue_legs=_legs(_Pmus()),
                            expected=2, sets=1, dry_run=True, funnel=funnel,
-                           max_usd=50.0)
+                           max_usd=50.0, leg_titles=_titles())
+    assert fired and funnel.get("cover_found") == 1
+
+
+def test_title_gate_refuses_identity_masquerades(led, monkeypatch):
+    """Every identity leak the adversarial verification confirmed: a
+    TEAM total, a stat prop, a cumulative leader market, and a missing
+    title must all refuse the pair — never guess."""
+    monkeypatch.setenv("EDGE_COVER_ARB", "1")
+    bad_overs = ["Orioles 1st Inning O/U 0.5",       # team total
+                 "1st Inning Hits O/U 0.5",          # stat prop
+                 "Judge 1st Inning Total Bases O/U 0.5",
+                 None]                               # no title at all
+    for bad in bad_overs:
+        funnel: dict = {}
+        titles = {**_titles(), "tok-over": bad}
+        assert not _try_arbitrage(
+            ledger=led, ev=_Ev(), venue_legs=_legs(_Pmus()), expected=2,
+            sets=1, dry_run=True, funnel=funnel, max_usd=50.0,
+            leg_titles=titles)
+        assert funnel.get("cover_title_refused") == 1, bad
+    # Cumulative tie market masquerading as the inning winner.
+    funnel2: dict = {}
+    titles2 = {**_titles(), "tok-tie": "Leader after 1st Inning"}
+    assert not _try_arbitrage(
+        ledger=led, ev=_Ev(), venue_legs=_legs(_Pmus()), expected=2,
+        sets=1, dry_run=True, funnel=funnel2, max_usd=50.0,
+        leg_titles=titles2)
+    assert funnel2.get("cover_title_refused") == 1
+
+
+def test_f5_locks_are_counted_dark_never_fired(led, monkeypatch):
+    """F5 stays telemetry-only until per-market void rules are read: a
+    rain-shortened game can settle its two condition markets under
+    different clauses."""
+    monkeypatch.setenv("EDGE_COVER_ARB", "1")
+    funnel: dict = {}
+    fired = _try_arbitrage(
+        ledger=led, ev=_Ev(), venue_legs=_legs(_Pmus(), seg="f5"),
+        expected=2, sets=1, dry_run=True, funnel=funnel, max_usd=50.0,
+        leg_titles=_titles(seg="f5"))
+    assert not fired
+    assert funnel.get("cover_dark") == 1
+    assert funnel["cover_locks_seen"][0]["seg"] == "f5"
+
+
+def test_env_kill_switch_re_darkens_the_class(led, monkeypatch):
+    """EDGE_COVER_ARB=0: a real lock is COUNTED and PRICED in telemetry
+    but never bought — one env change stands the whole class down."""
+    monkeypatch.setenv("EDGE_COVER_ARB", "0")
+    funnel: dict = {}
+    fired = _try_arbitrage(ledger=led, ev=_Ev(), venue_legs=_legs(_Pmus()),
+                           expected=2, sets=1, dry_run=True, funnel=funnel,
+                           max_usd=50.0, leg_titles=_titles())
     assert not fired and funnel.get("cover_dark") == 1
     assert funnel["cover_locks_seen"][0]["cost"] == 0.98
 
@@ -176,7 +239,7 @@ def test_segment_moneyline_pool_requires_all_three_sides(led):
     assert fired and funnel["arb_books"][0]["legs"] == 3
 
 
-def test_cover_only_builds_f5_and_first_inning(led, monkeypatch):
+def test_cover_only_builds_first_inning(led, monkeypatch):
     """Late innings are out: cumulative-tie wording and half-played-9th
     settlement cannot be told apart from the per-inning proposition."""
     monkeypatch.setenv("EDGE_COVER_ARB", "1")
@@ -214,7 +277,8 @@ def test_two_over_shaped_legs_refuse_the_pair(led, monkeypatch):
     ]
     assert not _try_arbitrage(ledger=led, ev=_Ev(), venue_legs=legs,
                               expected=2, sets=1, dry_run=True,
-                              funnel=funnel, max_usd=50.0)
+                              funnel=funnel, max_usd=50.0,
+                              leg_titles=_titles())
     assert funnel.get("cover_ambiguous") == 1
 
 
@@ -243,7 +307,7 @@ def test_clean_miss_does_not_burn_the_claim(led, monkeypatch):
     fired = _try_arbitrage(ledger=led, ev=_Ev(),
                            venue_legs=_legs(_FillNone()), expected=2,
                            sets=1, dry_run=False, funnel=funnel,
-                           max_usd=50.0)
+                           max_usd=50.0, leg_titles=_titles())
     assert fired and funnel["arb_status"].get("no_fills") == 1
     assert led.get_state("arb_tried:m1:cover-i1") is None
     # Same market next cycle: still eligible — it retries.
@@ -252,7 +316,7 @@ def test_clean_miss_does_not_burn_the_claim(led, monkeypatch):
     assert _try_arbitrage(ledger=led, ev=_Ev(),
                           venue_legs=_legs(_FillNone()), expected=2,
                           sets=1, dry_run=False, funnel=funnel2,
-                          max_usd=50.0)
+                          max_usd=50.0, leg_titles=_titles())
 
 
 def test_exposed_leg_claims_and_freezes_the_class(led, monkeypatch):
@@ -263,7 +327,7 @@ def test_exposed_leg_claims_and_freezes_the_class(led, monkeypatch):
     fired = _try_arbitrage(ledger=led, ev=_Ev(),
                            venue_legs=_legs(_FillFirstOnly()), expected=2,
                            sets=1, dry_run=False, funnel=funnel,
-                           max_usd=50.0)
+                           max_usd=50.0, leg_titles=_titles())
     assert fired and funnel["arb_status"].get("INCOMPLETE_EXPOSED") == 1
     assert led.get_state("arb_tried:m1:cover-i1") is not None
     blk = led.get_state("arb_exposed_block")

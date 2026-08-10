@@ -96,6 +96,11 @@ class VenueMarket:
     title: str                # e.g. "Arsenal vs. Chelsea"
     league_code: str | None   # slug prefix
     outcome_tokens: dict[str, str]  # outcome name -> token id
+    # Source-market TITLES per outcome key (PMUS: each outcome is its own
+    # condition market). The cover-arb identity check verifies a leg's
+    # actual market wording — the canonical outcome string is lossy by
+    # design and cannot carry it (adversarial verification 2026-08-09).
+    outcome_titles: dict[str, str] | None = None
 
 
 @dataclass

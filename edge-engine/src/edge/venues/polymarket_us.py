@@ -203,6 +203,7 @@ class PolymarketUSAdapter(VenueAdapter):
                     if len(census["samples"]) < 3 and ev.get("title"):
                         census["samples"].append(ev["title"][:60])
                     outcomes = {}
+                    titles = {}
                     collided: set = set()
                     for m in ev.get("markets") or []:
                         census["markets_seen"] += 1
@@ -291,8 +292,10 @@ class PolymarketUSAdapter(VenueAdapter):
                                               m["slug"][:60]]}
                         else:
                             outcomes[key] = m["slug"]
+                            titles[key] = (m.get("title") or "").strip()
                     for k in collided:
                         outcomes.pop(k, None)
+                        titles.pop(k, None)
                     if not ev.get("title"):
                         census["skipped_no_title"] += 1
                     elif len(outcomes) < 2:
@@ -303,6 +306,7 @@ class PolymarketUSAdapter(VenueAdapter):
                             title=ev["title"],
                             league_code=None,   # resolved by the mapper's fuzzy match
                             outcome_tokens=outcomes,
+                            outcome_titles=titles,
                         ))
                 if len(events) < 100:
                     break
