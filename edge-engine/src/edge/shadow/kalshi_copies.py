@@ -225,10 +225,21 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             for k in ("rested", "maker_fills", "taker_fills")}
            if spend.get("day") == day
            else {"rested": 0, "maker_fills": 0, "taker_fills": 0})
+    # RN1 is EXEMPT from the day budget (owner directive 2026-08-10:
+    # "remove day budget for RN1 on Kalshi"). His spend is tracked so it
+    # can be EXCLUDED from the cap arithmetic — an uncapped whale must
+    # not eat the budget the capped whales are governed by. Account
+    # cash and the copy circuit breaker remain RN1's only brakes.
+    rn1_spent = (float(spend.get("rn1_spent", 0.0))
+                 if spend.get("day") == day else 0.0)
+
+    def _uncapped(whale: str) -> bool:
+        return (whale or "").lower() == "rn1"
 
     def _save_day() -> None:
         ledger.set_state("kcopy_day",
-                         {"day": day, "spent": round(spent, 2), **_dc})
+                         {"day": day, "spent": round(spent, 2),
+                          "rn1_spent": round(rn1_spent, 2), **_dc})
 
     # Maker fills land ASYNCHRONOUSLY (sync_kalshi_fills records the fill
     # and enqueues an event); the sweep drains the queue first so claims,
@@ -240,6 +251,8 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         px = float(ev.get("price") or 0)
         cost = round(qty * px, 2)
         spent += cost
+        if _uncapped(str(ev.get("whale") or "")):
+            rn1_spent += cost
         stats["spent"] = round(stats["spent"] + cost, 2)
         stats["copied"] += 1
         stats["copied_maker"] = stats.get("copied_maker", 0) + 1
@@ -406,7 +419,8 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                         continue
                 per_m = PER_COPY_USD.get((row.get("whale") or "").lower(),
                                          PER_COPY_DEFAULT)
-                if spent + per_m > day_usd:
+                if (not _uncapped(row.get("whale") or "")
+                        and (spent - rn1_spent) + per_m > day_usd):
                     continue
                 plan = kalshi.plan_maker_order(limit, ask, 0.0, 1.0)
                 # (edge 0 < threshold 1: plan can only return a maker rest)
@@ -492,7 +506,8 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 continue
         per = PER_COPY_USD.get((row.get("whale") or "").lower(),
                                PER_COPY_DEFAULT)
-        if spent + per > day_usd:
+        if (not _uncapped(row.get("whale") or "")
+                and (spent - rn1_spent) + per > day_usd):
             stats["skipped_day_cap"] = stats.get("skipped_day_cap", 0) + 1
             continue
         count = int(per / ask)
@@ -547,6 +562,8 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                         stats.get("claim_post_fail", 0) + 1
             cost = round(filled * ask, 2)
             spent += cost
+            if _uncapped(row.get("whale") or ""):
+                rn1_spent += cost
             stats["spent"] = round(stats["spent"] + cost, 2)
             _dc["taker_fills"] += 1
             _save_day()

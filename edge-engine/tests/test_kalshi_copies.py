@@ -472,3 +472,26 @@ def test_async_maker_fill_is_drained_with_claim_and_spend():
     assert st["spent"] == 10.0
     assert claims == [("42", "KXWNBAGAME-26AUG04DALCHI-DAL", "RN1")]
     assert (led.get_state("kcopy_fill_events") or {}).get("events") == []
+
+
+def test_rn1_is_exempt_from_the_day_budget_and_does_not_eat_it():
+    """Owner directive 2026-08-10: no day cap for RN1 on Kalshi. RN1
+    copies past the budget, AND his spend must not consume the budget
+    the capped whales are governed by."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _Kalshi(0.48)
+    rn1 = {**_ROW, "whale": "RN1"}
+    # Budget of $50: one $100 RN1 clip blows straight past it.
+    st = sweep(kalshi=ka, ledger=led, identities=[rn1], live=True,
+               day_usd=50.0)
+    assert st["copied"] == 1 and st.get("skipped_day_cap") is None
+    assert ka.orders[0][2] == 208          # full $100 clip placed
+    # A capped whale on a FRESH matchup still has the whole $50 budget:
+    # RN1's ~$99.84 spend is excluded from the cap arithmetic.
+    ka2 = _Kalshi(0.48, outcomes={"Atlanta Dream": "T-ATL",
+                                  "Indiana Fever": "T-IND"})
+    hrh = {**_ROW, "slug": "wnba-atl-ind-2026-08-04",
+           "outcome": "Atlanta Dream"}
+    st2 = sweep(kalshi=ka2, ledger=led, identities=[hrh], live=True,
+                day_usd=50.0)
+    assert st2["copied"] == 1 and st2.get("skipped_day_cap") is None
