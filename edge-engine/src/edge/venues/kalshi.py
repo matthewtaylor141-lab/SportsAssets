@@ -526,22 +526,24 @@ class KalshiAdapter(VenueAdapter):
                 headers=self._auth_headers("GET", path), timeout=10)
             if resp.status_code == 200:
                 rows = (resp.json() or {}).get("market_positions") or []
-                open_rows = [
-                    r for r in rows
-                    if abs(float(r.get("position") or 0)) > 0]
+
+                # Field dialect named by the live raw samples 2026-08-10:
+                # position_fp (fixed-point contracts, e.g. '526.00') and
+                # market_exposure_dollars (e.g. '199.880000'). The bare
+                # 'position' key never appears; keep it as a fallback.
+                def _pos(r):
+                    return abs(float(r.get("position_fp")
+                                     or r.get("position") or 0))
+
+                open_rows = [r for r in rows if _pos(r) > 0]
                 out["positions"] = len(open_rows)
-                out["position_contracts"] = round(sum(
-                    abs(float(r.get("position") or 0))
+                out["position_contracts"] = round(
+                    sum(_pos(r) for r in open_rows), 2)
+                out["exposure_usd"] = round(sum(
+                    abs(float(r.get("market_exposure_dollars") or 0))
                     for r in open_rows), 2)
-                exp = sum(abs(float(r.get("market_exposure") or 0))
-                          for r in open_rows)
-                # market_exposure travels in cents in the fixed-point
-                # dialect; report dollars, best effort.
-                out["exposure_usd"] = round(exp / 100.0, 2)
-                # Shape self-diagnosis (first live read parsed a funded
-                # account to zero): when rows exist but none parse as
-                # open, ship one raw row so the next probe names the
-                # real field dialect instead of guessing.
+                # Shape self-diagnosis stays: if the dialect shifts
+                # again, the next probe names it instead of guessing.
                 if rows and not open_rows:
                     out["positions_raw_sample"] = str(rows[0])[:240]
             else:
@@ -559,12 +561,22 @@ class KalshiAdapter(VenueAdapter):
                 today = [f for f in fills
                          if str(f.get("created_time") or "")[:10] == day]
                 out["fills_today"] = len(today)
-                out["fills_today_contracts"] = round(sum(
-                    float(f.get("count") or 0) for f in today), 2)
-                out["fills_today_usd"] = round(sum(
-                    float(f.get("count") or 0)
-                    * float(f.get("yes_price") or 0) / 100.0
-                    for f in today), 2)
+
+                # count_fp ('263.00') per the live raw samples; bare
+                # 'count' kept as fallback. yes_price_dollars when
+                # present, else yes_price in cents.
+                def _qty(f):
+                    return float(f.get("count_fp") or f.get("count") or 0)
+
+                def _px(f):
+                    if f.get("yes_price_dollars") is not None:
+                        return float(f["yes_price_dollars"])
+                    return float(f.get("yes_price") or 0) / 100.0
+
+                out["fills_today_contracts"] = round(
+                    sum(_qty(f) for f in today), 2)
+                out["fills_today_usd"] = round(
+                    sum(_qty(f) * _px(f) for f in today), 2)
                 if len(fills) >= 100 and len(today) == len(fills):
                     out["fills_today_truncated"] = True
                 if today and not out["fills_today_contracts"]:
