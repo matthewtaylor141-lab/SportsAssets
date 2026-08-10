@@ -427,7 +427,7 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                         continue
                 per_m = PER_COPY_USD.get((row.get("whale") or "").lower(),
                                          PER_COPY_DEFAULT)
-                if (not _uncapped(row.get("whale") or "")
+                if (day_usd > 0 and not _uncapped(row.get("whale") or "")
                         and (spent - rn1_spent) + per_m > day_usd):
                     continue
                 plan = kalshi.plan_maker_order(limit, ask, 0.0, 1.0)
@@ -514,7 +514,11 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 continue
         per = PER_COPY_USD.get((row.get("whale") or "").lower(),
                                PER_COPY_DEFAULT)
-        if (not _uncapped(row.get("whale") or "")
+        # EDGE_KCOPY_DAY_USD <= 0 = NO day cap (owner 2026-08-10: "I dont
+        # want trades missing if they are being placed by our copied and
+        # tested accounts"). The copy circuit breaker and account cash
+        # remain the loss brakes.
+        if (day_usd > 0 and not _uncapped(row.get("whale") or "")
                 and (spent - rn1_spent) + per > day_usd):
             stats["skipped_day_cap"] = stats.get("skipped_day_cap", 0) + 1
             continue

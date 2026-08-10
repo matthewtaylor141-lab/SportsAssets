@@ -495,3 +495,16 @@ def test_rn1_is_exempt_from_the_day_budget_and_does_not_eat_it():
     st2 = sweep(kalshi=ka2, ledger=led, identities=[hrh], live=True,
                 day_usd=50.0)
     assert st2["copied"] == 1 and st2.get("skipped_day_cap") is None
+
+
+def test_day_budget_zero_means_no_cap_at_all():
+    """Owner 2026-08-10: EDGE_KCOPY_DAY_USD=0 disables the day cap for
+    every whale — validated signals are never skipped on budget."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _Kalshi(0.48, outcomes={"Atlanta Dream": "T-ATL",
+                                 "Indiana Fever": "T-IND"})
+    hrh = {**_ROW, "slug": "wnba-atl-ind-2026-08-04",
+           "outcome": "Atlanta Dream"}
+    st = sweep(kalshi=ka, ledger=led, identities=[hrh], live=True,
+               day_usd=0.0)
+    assert st["copied"] == 1 and st.get("skipped_day_cap") is None
