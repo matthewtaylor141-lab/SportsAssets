@@ -2372,6 +2372,7 @@ def _main_impl() -> None:
             from edge.shadow.kalshi_copies import sweep as kcopy
             from edge.shadow.whale_align import fetch as widents
 
+            _venue_truth: dict = {}
             time.sleep(60)
             # 120 -> 30 (2026-08-10): with league discovery cached across
             # sweeps (kalshi_copies._discover_cached) a pass costs one
@@ -2412,6 +2413,22 @@ def _main_impl() -> None:
                                pmus=pmus_c, on_copied=_claim_back,
                                day_usd=float(os.environ.get(
                                    "EDGE_KCOPY_DAY_USD", "inf")))
+                    # VENUE TRUTH rides with every heartbeat (owner
+                    # report 2026-08-10 evening): the account's actual
+                    # open positions / today's fills, refreshed every
+                    # ~5 min, so 'the counter says 14 fills' and 'the
+                    # app shows one position' are answerable in one
+                    # probe read. Fail-soft: a fetch error reports
+                    # itself and the stale copy keeps serving.
+                    if time.time() - _venue_truth.get("at", 0) > 300:
+                        try:
+                            vt = kalshi_c.portfolio_truth()
+                        except Exception as exc:  # noqa: BLE001
+                            vt = {"error":
+                                  f"{type(exc).__name__}: {str(exc)[:80]}"}
+                        _venue_truth.clear()
+                        _venue_truth.update(vt, at=time.time())
+                    st["venue_truth"] = dict(_venue_truth)
                     _KCOPY_STATS.clear()
                     _KCOPY_STATS.update(st, at=time.time())
                     log.info("kalshi copy sweep: %s", st)

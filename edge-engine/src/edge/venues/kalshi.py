@@ -509,6 +509,77 @@ class KalshiAdapter(VenueAdapter):
                 "sell": sell,
                 "raw": data if ok else {"error": resp.text[:300]}}
 
+    def portfolio_truth(self) -> dict:
+        """The VENUE's answer to 'is this account actually trading':
+        open positions, resting orders, and today's fills straight from
+        the portfolio API (owner report 2026-08-10 evening: the app
+        showed one $4 position while the day counter read 14 fills —
+        internal counters and account state must be comparable in ONE
+        probe read, not argued about from inference). Every field is
+        best-effort; a fetch error reports itself instead of zeroes so
+        an auth/rate failure never reads as a flat account."""
+        out: dict = {}
+        try:
+            path = "/trade-api/v2/portfolio/positions"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/positions", params={"limit": 200},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code == 200:
+                rows = (resp.json() or {}).get("market_positions") or []
+                open_rows = [
+                    r for r in rows
+                    if abs(float(r.get("position") or 0)) > 0]
+                out["positions"] = len(open_rows)
+                out["position_contracts"] = round(sum(
+                    abs(float(r.get("position") or 0))
+                    for r in open_rows), 2)
+                exp = sum(abs(float(r.get("market_exposure") or 0))
+                          for r in open_rows)
+                # market_exposure travels in cents in the fixed-point
+                # dialect; report dollars, best effort.
+                out["exposure_usd"] = round(exp / 100.0, 2)
+            else:
+                out["positions_error"] = f"http_{resp.status_code}"
+        except requests.RequestException as exc:
+            out["positions_error"] = f"{type(exc).__name__}"
+        try:
+            path = "/trade-api/v2/portfolio/fills"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/fills", params={"limit": 100},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code == 200:
+                fills = (resp.json() or {}).get("fills") or []
+                day = time.strftime("%Y-%m-%d", time.gmtime())
+                today = [f for f in fills
+                         if str(f.get("created_time") or "")[:10] == day]
+                out["fills_today"] = len(today)
+                out["fills_today_contracts"] = round(sum(
+                    float(f.get("count") or 0) for f in today), 2)
+                out["fills_today_usd"] = round(sum(
+                    float(f.get("count") or 0)
+                    * float(f.get("yes_price") or 0) / 100.0
+                    for f in today), 2)
+                if len(fills) >= 100 and len(today) == len(fills):
+                    out["fills_today_truncated"] = True
+            else:
+                out["fills_error"] = f"http_{resp.status_code}"
+        except requests.RequestException as exc:
+            out["fills_error"] = f"{type(exc).__name__}"
+        try:
+            path = "/trade-api/v2/portfolio/orders"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/orders",
+                params={"status": "resting", "limit": 100},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code == 200:
+                out["resting_orders"] = len(
+                    (resp.json() or {}).get("orders") or [])
+            else:
+                out["orders_error"] = f"http_{resp.status_code}"
+        except requests.RequestException as exc:
+            out["orders_error"] = f"{type(exc).__name__}"
+        return out
+
     def cancel_order(self, order_id: str) -> str:
         """DELETE a resting order. Returns 'cancelled' (confirmed dead,
         safe to repost), 'gone' (404 — already filled or expired: do NOT
