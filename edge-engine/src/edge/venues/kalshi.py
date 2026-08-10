@@ -54,27 +54,15 @@ _DEFAULT_SERIES = {
     # Set-winner series are deliberately EXCLUDED: a set is a different
     # proposition than the match, and mapping one to the other is the
     # wrong-bet class the identity gates exist to prevent.
-    "atp": "KXATPMATCH+KXATPCHALLENGERMATCH+KXCHALLENGERMATCH",
-    "wta": "KXWTAMATCH+KXWTACHALLENGERMATCH+KXWTAGAME",
-    # ITF-level tennis (owner 2026-08-10 evening, "not missing as many
-    # copies": the unmapped funnel shows 1,213 itf moneylines this week).
-    # Kalshi's challenger series are the closest listed tier; the 0.95
-    # both-names identity gate decides whether a given match is actually
-    # the same one, so a wrong-tier candidate refuses, never mismaps.
-    "itf": "KXATPCHALLENGERMATCH+KXWTACHALLENGERMATCH+KXCHALLENGERMATCH",
-    # European soccer + MLS (tentative tickers, standard {league}GAME
-    # grammar; census 2026-08-10 verified only the pattern, not each
-    # ticker — a wrong one fails loudly as a named census entry
-    # ({series}_http: 404), never silently). Seasons start mid-August;
-    # copies on 3-way soccer events are still refused by the
-    # exactly-2-outcomes join, so today this widens the ARBITRAGE
-    # surface and readies the copy leg for the 2-outcome markets.
-    "lal": "KXLALIGAGAME",
-    "sea": "KXSERIEAGAME",
-    "fl1": "KXLIGUE1GAME",
-    "bun": "KXBUNDESLIGAGAME",
-    "mls": "KXMLSGAME",
-    "ucl": "KXUCLGAME",
+    "atp": "KXATPMATCH+KXATPCHALLENGERMATCH",
+    "wta": "KXWTAMATCH+KXWTACHALLENGERMATCH",
+    # REVERTED 2026-08-10 evening, same hour they shipped: the itf /
+    # KXCHALLENGERMATCH / KXWTAGAME / European-soccer additions widened
+    # discovery for EVERY consumer of this map — copies, underdog, and
+    # arbitrage alike — minutes before an unexplained $204 position
+    # appeared in the account. Surface stays at the known-good set until
+    # the position is attributed from the ledger; volume work resumes
+    # behind a consumer-scoped overlay, not a global map edit.
 }
 
 
