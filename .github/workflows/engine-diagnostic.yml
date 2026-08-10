@@ -728,6 +728,49 @@ jobs:
                 " + 0xc5d563a36ae78145c45a50134d48a1215220f80a")
           PYEOF
 
+      - name: New exchange ABI (name the event behind topic d543adfd)
+        if: always()
+        run: |
+          echo "###########################################################"
+          echo "#   NEW EXCHANGE ABI (0xe2222d...0f59 event signatures)    #"
+          echo "###########################################################"
+          # Ground truth showed fills now emit from this contract with
+          # topic0 0xd543adfd... — enumerate its ABI events, hash each
+          # signature, and name the one that matches so the listener can
+          # subscribe to and decode the REAL event.
+          A="0xe2222d279d744050d28e00520010520000310f59"
+          for URL in \
+            "https://api.etherscan.io/v2/api?chainid=137&module=contract&action=getabi&address=$A" \
+            "https://api.polygonscan.com/api?module=contract&action=getabi&address=$A" ; do
+            echo "-- $URL --"
+            curl -sS --max-time 25 "$URL" -o /tmp/abi.json || true
+            jq -r '.status // "?"' /tmp/abi.json 2>/dev/null
+            jq -e '.result | fromjson' /tmp/abi.json >/dev/null 2>&1 && break
+          done
+          pip install --quiet pycryptodome 2>/dev/null || true
+          python3 - <<'PYEOF'
+          import json
+          from Crypto.Hash import keccak
+
+          try:
+              abi = json.loads(json.load(open("/tmp/abi.json"))["result"])
+          except Exception as exc:
+              print(f"  (abi unavailable: {type(exc).__name__} — contract may be unverified)")
+              raise SystemExit(0)
+          target = "d543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee"
+          for item in abi:
+              if item.get("type") != "event":
+                  continue
+              sig = item["name"] + "(" + ",".join(
+                  i["type"] for i in item.get("inputs", [])) + ")"
+              h = keccak.new(digest_bits=256); h.update(sig.encode())
+              mark = "  <=== THE FILL EVENT" if h.hexdigest() == target else ""
+              print(f"  {h.hexdigest()[:10]}  {sig}{mark}")
+              if h.hexdigest() == target:
+                  for i in item.get("inputs", []):
+                      print(f"      {'indexed ' if i.get('indexed') else '        '}{i['type']:10} {i['name']}")
+          PYEOF
+
       - name: Whale candidate census (sports leaderboard, via runner)
         if: always()
         run: |
