@@ -375,9 +375,31 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 rest_key = f"kcopy_rest:{claim}"
                 rest = ledger.get_state(rest_key) or {}
                 if float(rest.get("until", 0)) >= now:
-                    stats["maker_resting"] = \
-                        stats.get("maker_resting", 0) + 1
-                    continue
+                    # REPRICE (owner 2026-08-10, profitability upgrade
+                    # #4): a resting bid the book has moved away from is
+                    # queue theater — if our stored price is no longer
+                    # within 2c of the current ask, cancel and requote
+                    # at the fresh book. Repost ONLY on a confirmed
+                    # cancel: 'gone' means the order may have FILLED
+                    # (the fill sync will claim it — a repost would
+                    # double the copy) and 'error' means it may still
+                    # be live (a repost would stack).
+                    stale_px = (rest.get("px") is not None
+                                and round(ask - float(rest["px"]), 4)
+                                > 0.02)
+                    if stale_px and rest.get("order_id"):
+                        cx = getattr(kalshi, "cancel_order", None)
+                        res = cx(rest["order_id"]) if cx else "error"
+                        stats[f"reprice_{res}"] = \
+                            stats.get(f"reprice_{res}", 0) + 1
+                        ledger.set_state(rest_key, {})
+                        if res != "cancelled":
+                            continue
+                        # fall through: requote at the fresh book below
+                    else:
+                        stats["maker_resting"] = \
+                            stats.get("maker_resting", 0) + 1
+                        continue
                 per_m = PER_COPY_USD.get((row.get("whale") or "").lower(),
                                          PER_COPY_DEFAULT)
                 if spent + per_m > day_usd:
@@ -395,7 +417,7 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 # sit within 2c of the ask, there is no realistic fill
                 # at our price; skip and let the next sweep's book
                 # decide (the claim is not burned).
-                if ask - mpx > 0.02:
+                if round(ask - mpx, 4) > 0.02:
                     stats["skipped_dead_rest"] = \
                         stats.get("skipped_dead_rest", 0) + 1
                     continue
@@ -423,7 +445,8 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                          "his_price": his_price, "limit": limit,
                          "pm_slug": slug, "outcome": outcome})
                     ledger.set_state(rest_key, {"until": now + 900,
-                                                "order_id": rr["order_id"]})
+                                                "order_id": rr["order_id"],
+                                                "px": mpx})
                     stats["maker_rested"] = \
                         stats.get("maker_rested", 0) + 1
                     _dc["rested"] += 1

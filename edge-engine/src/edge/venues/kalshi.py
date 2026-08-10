@@ -490,6 +490,26 @@ class KalshiAdapter(VenueAdapter):
                 "sell": sell,
                 "raw": data if ok else {"error": resp.text[:300]}}
 
+    def cancel_order(self, order_id: str) -> str:
+        """DELETE a resting order. Returns 'cancelled' (confirmed dead,
+        safe to repost), 'gone' (404 — already filled or expired: do NOT
+        repost until the fill sync has spoken, a fill plus a repost is a
+        doubled copy), or 'error' (ambiguous — treat the order as
+        possibly still live and never repost on top of it)."""
+        path = f"/trade-api/v2/portfolio/orders/{order_id}"
+        try:
+            resp = self._sess.delete(
+                f"{BASE}/portfolio/orders/{order_id}",
+                headers=self._auth_headers("DELETE", path), timeout=10)
+        except requests.RequestException as exc:
+            log.warning("kalshi cancel %s failed: %s", order_id, exc)
+            return "error"
+        if resp.status_code in (200, 204):
+            return "cancelled"
+        if resp.status_code == 404:
+            return "gone"
+        return "error"
+
     async def subscribe_books(self, market_ids: list[str]):
         raise NotImplementedError("v1 uses REST polling")
 

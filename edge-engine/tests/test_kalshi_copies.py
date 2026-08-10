@@ -395,6 +395,46 @@ def test_taker_priced_out_rests_a_fee_free_maker_on_kalshi_first():
     assert len(ka.orders) == 1
 
 
+def test_stale_rest_reprices_only_on_confirmed_cancel():
+    """The book ran away from a resting bid (ask moved >2c above our
+    price): cancel and requote at the fresh book. 'gone'/'error' cancel
+    results must NOT repost — a filled-then-reposted rest is a doubled
+    copy, an ambiguous one is a stacked order."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _MakerKalshi(0.51)
+    ka.cancel_results = ["cancelled"]
+    ka.cancels = []
+    ka.cancel_order = lambda oid: (ka.cancels.append(oid) or
+                                   ka.cancel_results.pop(0))
+    row = {**_ROW, "asset": _asset(True)}
+    sweep(kalshi=ka, ledger=led, identities=[row], live=True)
+    assert len(ka.orders) == 1                     # initial rest at 0.50
+    # Book moves a step: ask 0.53, our 0.50 bid is >2c behind but the
+    # his+2% limit (0.51) can still sit within 2c — cancel and requote.
+    ka.ask = 0.53
+    st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
+    assert st.get("reprice_cancelled") == 1 and ka.cancels
+    assert len(ka.orders) == 2                     # requoted fresh
+    assert ka.orders[1][1] == 0.51                 # his 0.50 + 2% limit
+    # Book RUNS AWAY (0.56): cancel the stale rest but never chase — the
+    # limit can't sit competitively, so no repost (dead-rest rule).
+    ka.cancel_results.append("cancelled")
+    ka.ask = 0.56
+    st_run = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
+    assert st_run.get("reprice_cancelled") == 1
+    assert st_run.get("skipped_dead_rest") == 1
+    assert len(ka.orders) == 2                     # no chase
+    # Ambiguous cancel: no repost, rest context cleared for next look.
+    ka2 = _MakerKalshi(0.51)
+    ka2.cancel_order = lambda oid: "error"
+    led2 = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    sweep(kalshi=ka2, ledger=led2, identities=[row], live=True)
+    ka2.ask = 0.53
+    st2 = sweep(kalshi=ka2, ledger=led2, identities=[row], live=True)
+    assert st2.get("reprice_error") == 1
+    assert len(ka2.orders) == 1                    # no repost
+
+
 def test_pm_first_assets_do_not_rest_makers():
     """The venue split still governs: a PM-first asset priced out as
     taker walks away — the PMUS leg owns it."""

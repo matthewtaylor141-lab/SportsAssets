@@ -114,16 +114,16 @@ def kalshi_first(asset: str) -> bool:
     asset id — same answer on every service, so the two venues never
     race for one position.
 
-    Default 100 (owner directive 2026-08-09: "Can the system check
-    Kalshi first for price before executing on POLYMARKET. I want
-    trades firing left and right"): every copy in a Kalshi-listed
-    sport goes to the Kalshi leg first; the PMUS reclaim sweep picks
-    up whatever Kalshi cannot list or price. KALSHI_FIRST_PCT restores
-    a partial split (50 was the 2026-08-07 venue-split default)."""
+    Default 50 (owner directive 2026-08-10, profitability upgrade #3:
+    copy edge decays in minutes and the Kalshi sweep adds up to 60s
+    versus the instant PMUS leg — a 50/50 split recovers that speed on
+    half the flow while Kalshi keeps first claim on the other half).
+    History: 100 was the 2026-08-09 "trades firing left and right"
+    setting; KALSHI_FIRST_PCT=100 restores it in one env change."""
     if not asset:
         return False
     import os as _os
-    pct = int(_os.environ.get("KALSHI_FIRST_PCT", "100"))
+    pct = int(_os.environ.get("KALSHI_FIRST_PCT", "50"))
     if pct >= 100:
         return True
     if pct <= 0:
