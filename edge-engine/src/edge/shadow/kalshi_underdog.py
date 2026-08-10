@@ -248,7 +248,14 @@ def sweep(*, kalshi, ledger, base: str, token: str, live: bool) -> dict:
             stats["held"] = stats.get("held", 0) + 1
             continue
         limit = round(min(ask + 0.02, 0.99), 2)
-        n = contracts_for(float(t.get("per_fill_usd") or 1.0), limit)
+        # HARD $1 CLAMP at the point of order (2026-08-10 evening): the
+        # sleeve's settled cohort shows ~$11.66 average entries against
+        # the owner's $1 directive — the queue's per_fill_usd is DATA,
+        # not authority, and a bad row must not size a real order. The
+        # ceiling is env-tunable for the day the owner raises the sleeve.
+        per_usd = min(float(t.get("per_fill_usd") or 1.0),
+                      float(os.environ.get("EDGE_KUD_MAX_USD", "1.0")))
+        n = contracts_for(per_usd, limit)
         if n < 1:
             _fail(t, "band_fail", f"zero contracts at {limit}")
             continue

@@ -586,6 +586,15 @@ async def _record(pool) -> dict:
             out[f"k_{r['status']}"] = r["n"]
             if r["pnl"]:
                 out[f"k_{r['status']}_pnl"] = round(r["pnl"], 2)
+        # Stake audit (2026-08-10 evening: settled entries averaged
+        # ~$11.66 against the $1 directive): the queue's per-fill values
+        # must be probe-readable, not inferred from settled dollars.
+        pf = await pool.fetchrow(
+            "SELECT max(per_fill_usd)::float8 AS mx, "
+            "avg(per_fill_usd)::float8 AS av FROM kud_queue")
+        if pf is not None and pf["mx"] is not None:
+            out["k_per_fill_max"] = round(pf["mx"], 2)
+            out["k_per_fill_avg"] = round(pf["av"], 2)
         # Window timing, probe-readable: 42 tasks all 'waiting' is either
         # a slate that hasn't started or a timezone bug, and the
         # difference must be one heartbeat read, not a code dig

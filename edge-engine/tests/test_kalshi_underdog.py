@@ -179,6 +179,21 @@ def test_in_window_miss_retries_instead_of_reporting(monkeypatch):
     assert sess.posts[0][1]["status"] == "band_fail"
 
 
+def test_oversized_queue_row_is_clamped_to_one_dollar(monkeypatch):
+    """2026-08-10 evening: settled entries averaged ~$11.66 against the
+    owner's $1 directive — queue rows carried oversized per_fill_usd.
+    The engine clamps at the point of order: a $10 row buys exactly what
+    a $1 row buys."""
+    now = time.time()
+    big = {**_TASK, "per_fill_usd": 10.0, "start_ts": now + 60}
+    st, ka, _, sess = _run(0.30, tasks=[big], monkeypatch=monkeypatch)
+    assert st["placed"] == 1
+    # Entry is a taker limit at ask+2c = 0.32: $1 buys 3 contracts —
+    # NOT the 31 a $10 budget would.
+    buy = [o for o in ka.orders if not o[4]][0]
+    assert buy[2] == 3, f"clamp failed: bought {buy[2]} contracts"
+
+
 def test_discovery_failure_is_retryable_even_for_oneshot(monkeypatch):
     """The boot stagger is gone (2026-08-10), so the first sweep can run
     against a cold adapter — a DISCOVERY failure must never burn a
