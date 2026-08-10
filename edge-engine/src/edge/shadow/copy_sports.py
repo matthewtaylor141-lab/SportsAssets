@@ -110,11 +110,26 @@ KALSHI_FIRST_SPORTS = frozenset({"baseball", "wnba", "basketball",
 
 
 def kalshi_first(asset: str) -> bool:
-    """Deterministic ~50/50 split by asset id — same answer on every
-    service, so the two venues never race for one position."""
+    """Kalshi's first-claim share of fresh copy flow, deterministic by
+    asset id — same answer on every service, so the two venues never
+    race for one position.
+
+    Default 100 (owner directive 2026-08-09: "Can the system check
+    Kalshi first for price before executing on POLYMARKET. I want
+    trades firing left and right"): every copy in a Kalshi-listed
+    sport goes to the Kalshi leg first; the PMUS reclaim sweep picks
+    up whatever Kalshi cannot list or price. KALSHI_FIRST_PCT restores
+    a partial split (50 was the 2026-08-07 venue-split default)."""
     if not asset:
         return False
-    return int(_hashlib.sha1(str(asset).encode()).hexdigest()[-1], 16) % 2 == 0
+    import os as _os
+    pct = int(_os.environ.get("KALSHI_FIRST_PCT", "100"))
+    if pct >= 100:
+        return True
+    if pct <= 0:
+        return False
+    return int(_hashlib.sha1(str(asset).encode()).hexdigest()[-2:],
+               16) % 100 < pct
 
 
 _DATE_RE = _re.compile(r"^\d{4}$")

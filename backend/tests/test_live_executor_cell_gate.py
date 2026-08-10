@@ -63,7 +63,11 @@ def test_unenriched_fresh_payload_resolves_slug_before_cell_gate(monkeypatch):
         "event_slug": None, "market_title": "Wings v Sky",
         "event_title": None, "outcome": "Dallas Wings",
     })
-    asyncio.run(live_executor.maybe_execute(_payload(), None))
+    # A PMUS-side asset: this test is about slug resolution reaching the
+    # cell gate, not the venue split — a kalshi-first asset would defer
+    # before ever touching the pool.
+    asyncio.run(live_executor.maybe_execute(_payload(asset=_asset(False)),
+                                            None))
     assert pool.fetchval_calls > 0, (
         "an allowed cell must pass the gate once the slug is resolved "
         "from the metadata tables")
@@ -93,6 +97,13 @@ def test_unresolvable_market_still_fails_closed(monkeypatch):
 
 
 # ── Venue split (owner directive 2026-08-07): Kalshi first claim ─────
+
+
+# The venue-split mechanics below need assets on BOTH sides of the
+# split; the production default is now 100% Kalshi-first (owner
+# 2026-08-09), so pin the historical 50/50 for these tests.
+import os as _os
+_os.environ["KALSHI_FIRST_PCT"] = "50"
 
 
 def _asset(want_kalshi_first: bool) -> str:

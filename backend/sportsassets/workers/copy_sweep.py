@@ -39,7 +39,11 @@ BOOT_DELAY_S = 120       # let the poller/executor settle before sweeping
 # — and at 6h a missed fresh detection sat unrecovered for most of a
 # slate. The query is cheap and execution re-runs the same caps as fresh
 # copies, so the only cost of running it hourly is a few venue reads.
-SWEEP_EVERY_S = 3600
+# 10 minutes, not the original hour (owner 2026-08-09: Kalshi holds
+# first claim on ALL listed-sport flow now, so this sweep is the PMUS
+# reclaim leg for everything Kalshi can't list or price — an hourly
+# reclaim would hand PMUS only stale, decayed copies).
+SWEEP_EVERY_S = float(os.environ.get("COPY_SWEEP_EVERY_S", "600"))
 PRICE_CEILING = 0.99     # mirrors the per-fill ceiling; cheap pre-filter
 # BOUNDED PASSES (2026-08-07): an unbounded pass over RN1's re-eligible
 # backlog ran hours at ~1-3s/row, so every redeploy killed it before its

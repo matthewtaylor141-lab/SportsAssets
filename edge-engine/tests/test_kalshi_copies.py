@@ -291,6 +291,13 @@ def test_no_pmus_book_falls_through_to_kalshi(monkeypatch):
 #    half the flow; filled copies claimed back to the platform ────────
 
 
+# The venue-split mechanics below need assets on BOTH sides of the
+# split; the production default is now 100% Kalshi-first (owner
+# 2026-08-09), so pin the historical 50/50 for these tests.
+import os as _os
+_os.environ["KALSHI_FIRST_PCT"] = "50"
+
+
 def _asset(want_kalshi_first: bool) -> str:
     from edge.shadow.copy_sports import kalshi_first
     return next(str(i) for i in range(200)
