@@ -54,15 +54,27 @@ _DEFAULT_SERIES = {
     # Set-winner series are deliberately EXCLUDED: a set is a different
     # proposition than the match, and mapping one to the other is the
     # wrong-bet class the identity gates exist to prevent.
-    "atp": "KXATPMATCH+KXATPCHALLENGERMATCH",
-    "wta": "KXWTAMATCH+KXWTACHALLENGERMATCH",
-    # REVERTED 2026-08-10 evening, same hour they shipped: the itf /
-    # KXCHALLENGERMATCH / KXWTAGAME / European-soccer additions widened
-    # discovery for EVERY consumer of this map — copies, underdog, and
-    # arbitrage alike — minutes before an unexplained $204 position
-    # appeared in the account. Surface stays at the known-good set until
-    # the position is attributed from the ledger; volume work resumes
-    # behind a consumer-scoped overlay, not a global map edit.
+    "atp": "KXATPMATCH+KXATPCHALLENGERMATCH+KXCHALLENGERMATCH",
+    "wta": "KXWTAMATCH+KXWTACHALLENGERMATCH+KXWTAGAME",
+    # RESTORED 2026-08-10 night (owner: "copies and guaranteed arbitrage
+    # firing at every possible scenario"). These entries were reverted
+    # for a few hours while a $204 position was attributed; the ledger
+    # attributed it to a copy double-buy through two PM-side identities
+    # — nothing to do with this map — and the venue-side never-add veto,
+    # the $1 underdog clamp, and the per-slug claims now guard every
+    # consumer of wider discovery. itf routes to the challenger tier
+    # (1,213 unmapped itf moneylines/week; the 0.95 both-names identity
+    # gate decides match identity). Soccer tickers are tentative
+    # {league}GAME grammar — a wrong one fails loudly as a named census
+    # entry, never silently; 3-way soccer copies are still refused by
+    # the exactly-2-outcomes join, so soccer widens ARBITRAGE first.
+    "itf": "KXATPCHALLENGERMATCH+KXWTACHALLENGERMATCH+KXCHALLENGERMATCH",
+    "lal": "KXLALIGAGAME",
+    "sea": "KXSERIEAGAME",
+    "fl1": "KXLIGUE1GAME",
+    "bun": "KXBUNDESLIGAGAME",
+    "mls": "KXMLSGAME",
+    "ucl": "KXUCLGAME",
 }
 
 

@@ -294,11 +294,10 @@ def test_pmus_filled_copy_is_never_duplicated_on_kalshi():
     assert st["copied"] == 0 and not ka.orders
 
 
-def test_pmus_better_priced_routes_the_copy_away_from_kalshi(monkeypatch):
-    """LEGACY routing (EDGE_KCOPY_PREFER_KALSHI=0): Kalshi ask 0.48 ->
-    eff ~0.4975 fee-loaded; PMUS shows 0.49. PMUS is the better venue
-    at placement, so the fast leg owns it."""
-    monkeypatch.setenv("EDGE_KCOPY_PREFER_KALSHI", "0")
+def test_pmus_better_priced_routes_the_copy_away_from_kalshi():
+    """DEFAULT routing (owner 2026-08-10 night: best price, every copy):
+    Kalshi ask 0.48 -> eff ~0.4975 fee-loaded; PMUS shows 0.49. PMUS is
+    the better venue at placement, so the copy defers to the reclaim."""
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka, pm = _Kalshi(0.48), _Pmus(0.49)
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
@@ -309,10 +308,11 @@ def test_pmus_better_priced_routes_the_copy_away_from_kalshi(monkeypatch):
     assert pm.peeked == ["atc-wnba-dal-chi-2026-08-04-dal"]
 
 
-def test_kalshi_keeps_the_copy_by_default_when_it_qualifies():
-    """DEFAULT routing (owner 2026-08-09: "I need there to be volume on
-    Kalshi"): a copy that clears every Kalshi gate places on Kalshi even
+def test_kalshi_keeps_the_copy_when_prefer_kalshi_is_pinned(monkeypatch):
+    """EDGE_KCOPY_PREFER_KALSHI=1 restores the 2026-08-09 volume
+    routing: a copy that clears every Kalshi gate places on Kalshi even
     when PMUS shows a marginally better ask — no deference, no peek."""
+    monkeypatch.setenv("EDGE_KCOPY_PREFER_KALSHI", "1")
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka, pm = _Kalshi(0.48), _Pmus(0.49)
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
@@ -363,17 +363,19 @@ def _asset(want_kalshi_first: bool) -> str:
                 if kalshi_first(str(i)) is want_kalshi_first)
 
 
-def test_kalshi_first_assets_skip_the_pmus_deference():
-    """The PMUS executor deferred this asset here by the venue split —
-    a marginally better PMUS ask must not bounce it back. The price
-    gates (his+2% fee-loaded, floors, collapse) are the pricing bar."""
+def test_kalshi_first_assets_also_route_to_the_better_venue():
+    """Owner 2026-08-10 night ("best price"): the peek prices EVERY
+    copy now, including assets the venue split handed to Kalshi. PMUS
+    0.49 beats Kalshi's fee-loaded ~0.4975, so even a Kalshi-first
+    asset defers to the 2-minute PMUS reclaim."""
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka, pm = _Kalshi(0.48), _Pmus(0.49)
     st = sweep(kalshi=ka, ledger=led,
                identities=[{**_ROW, "asset": _asset(True)}],
                live=True, pmus=pm)
-    assert not pm.peeked, "kalshi-first assets must not consult PMUS"
-    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 104)]
+    assert pm.peeked, "best-price routing must consult PMUS"
+    assert st.get("routed_pmus_better") == 1
+    assert st["copied"] == 0 and not ka.orders
 
 
 def test_pm_first_assets_still_defer_to_a_better_pmus(monkeypatch):

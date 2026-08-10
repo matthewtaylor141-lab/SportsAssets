@@ -534,24 +534,20 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                                                    0) + 1
             continue
         stats["priced_in_tolerance"] += 1
-        from edge.shadow.copy_sports import kalshi_first
         import os as _os
         prefer_kalshi = _os.environ.get("EDGE_KCOPY_PREFER_KALSHI",
-                                        "1") == "1"
-        if (pmus is not None and not prefer_kalshi
-                and not kalshi_first(str(row.get("asset") or ""))):
-            # Best-venue-at-placement (owner directive 2026-08-05): if
-            # PMUS is showing a better ask than Kalshi's fee-loaded
-            # effective price, the fast PMUS leg owns this copy — do not
-            # place it here. No visible PMUS book -> Kalshi as before.
-            # SUPERSEDED BY DEFAULT 2026-08-09 (owner: "I need there to
-            # be volume on Kalshi"): when a copy clears every Kalshi
-            # gate — his+2% fee-loaded, fee floor, collapse, cells —
-            # Kalshi keeps it instead of deferring to a marginally
-            # better PMUS ask. The one-copy-across-venues rule is
-            # untouched (pmus_copied skip + claim-back still run);
-            # only the venue tiebreak moved. Set
-            # EDGE_KCOPY_PREFER_KALSHI=0 to restore the old routing.
+                                        "0") == "1"
+        if pmus is not None and not prefer_kalshi:
+            # Best-venue-at-placement, EVERY copy (owner directive
+            # 2026-08-10 night: "copies firing on both venues, best
+            # price"). If PMUS visibly shows a better ask than Kalshi's
+            # fee-loaded effective price, the copy defers and the
+            # 2-minute PMUS reclaim sweep takes it at the better venue;
+            # no visible PMUS book means Kalshi keeps it. This peek used
+            # to skip Kalshi-first assets (2026-08-09 "volume on Kalshi"
+            # default) — now it prices them too. The one-copy rule is
+            # untouched (pmus_copied skip, claim-back, never-add veto).
+            # EDGE_KCOPY_PREFER_KALSHI=1 restores keep-when-qualifying.
             pask = _pmus_ask(pmus, slug, outcome)
             if pask is not None and pask < eff:
                 stats["routed_pmus_better"] = \

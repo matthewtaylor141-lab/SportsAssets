@@ -513,8 +513,8 @@ def test_paper_profile_decouples_sampling_caps():
     # micro tier of 2026-08-05): every software-generated engine trade
     # is $10, so default and ceiling meet at $10 and the ladder is flat
     # until the owner re-scales it.
-    assert beta.per_fill_default == 10
-    assert beta.per_fill_max == 10
+    assert beta.per_fill_default == 25
+    assert beta.per_fill_max == 25
     assert paper.one_per_market and beta.one_per_market
     assert not paper.one_per_event and not beta.one_per_event
 
@@ -528,11 +528,11 @@ def test_day_budget_follows_the_account_balance():
     unfunded = caps_for_mode(risk_cfg, "LIVE_BETA")
     funded = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=400.0)
     grown = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=5000.0)
-    assert unfunded.per_day == 500                      # floor before we know
-    assert funded.per_day == 500                        # floor still governs
+    assert unfunded.per_day == 1250                      # floor before we know
+    assert funded.per_day == 1250                        # floor still governs
     assert grown.per_day == 5000                        # scales with funding
     # A balance reading can never SHRINK the budget below the configured floor.
-    assert caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=1.0).per_day == 500
+    assert caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=1.0).per_day == 1250
 
 
 def test_the_breaker_scales_with_the_trade_count():
@@ -544,13 +544,13 @@ def test_the_breaker_scales_with_the_trade_count():
     risk_cfg = Policy.load().risk
     small = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=100.0)
     big = caps_for_mode(risk_cfg, "LIVE_BETA", bankroll=4000.0)
-    # Small day: the $150 floor governs (sigma term 4*sqrt(50)*10 ~ $283
-    # of a $500-floor day... at bankroll $100 the day floor is $500, so
-    # n=50 fills: 4*sqrt(50)*10 = 282.8 > 150 -> sigma governs).
-    assert small.daily_loss_halt == pytest.approx(4 * (500 / 10) ** 0.5 * 10)
-    # Big day: n = 4000/10 = 400 fills, sigma = 4*sqrt(400)*10 = $800 >
-    # 15% of $4,000 = $600 -> the sigma term governs at the $10 ticket.
-    assert big.daily_loss_halt == pytest.approx(800)
+    # Small day: at bankroll $100 the $1,250 day floor governs, so
+    # n = 1250/25 = 50 fills: 4*sqrt(50)*25 ~ $707 > the $375 floor ->
+    # the sigma term governs at the $25 ticket.
+    assert small.daily_loss_halt == pytest.approx(4 * (1250 / 25) ** 0.5 * 25)
+    # Big day: n = 4000/25 = 160 fills, sigma = 4*sqrt(160)*25 ~ $1,265 >
+    # 15% of $4,000 = $600 -> the sigma term governs at the $25 ticket.
+    assert big.daily_loss_halt == pytest.approx(4 * (4000 / 25) ** 0.5 * 25)
     # Comfortably outside 3 sigma of the day's noise in both cases.
     for caps in (small, big):
         n = caps.per_day / caps.per_fill_default
@@ -563,11 +563,13 @@ def test_bankroll_updates_resize_the_caps(tmp_path):
     ledger = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     risk = RiskManager(ledger, Policy.load().risk)
     risk.set_mode("LIVE_BETA")
-    assert risk.caps.per_day == 500
-    risk.set_bankroll(800.0)
-    assert risk.caps.per_day == 800
+    assert risk.caps.per_day == 1250
+    risk.set_bankroll(800.0)         # below the $1,250 floor: floor governs
+    assert risk.caps.per_day == 1250
+    risk.set_bankroll(2000.0)        # above it: the account governs
+    assert risk.caps.per_day == 2000
     risk.set_bankroll(None)          # venue unreachable: keep what we knew
-    assert risk.caps.per_day == 800
+    assert risk.caps.per_day == 2000
 
 
 def test_the_day_budget_does_not_shrink_as_it_is_spent(tmp_path):
@@ -587,16 +589,19 @@ def test_the_day_budget_does_not_shrink_as_it_is_spent(tmp_path):
     risk = RiskManager(ledger, Policy.load().risk)
     risk.set_mode("LIVE_BETA")
 
-    risk.set_bankroll(623.0)                 # start of day, nothing deployed
-    assert risk.caps.per_day == pytest.approx(623.0)
+    # 10x the observed live figures so the scenario clears the $1,250
+    # floor and the budget-follows-bankroll behavior is what's tested.
+    risk.set_bankroll(6230.0)                # start of day, nothing deployed
+    assert risk.caps.per_day == pytest.approx(6230.0)
 
-    # Deploy $390.22 of it. Cash is now $232.78; the budget must not follow.
+    # Deploy $3,902.20 of it. Cash falls to $2,327.80; the budget must
+    # not follow it down.
     ledger.record_fill(fill_uid="f1", venue="polymarket-us",
                        market_key="polymarket-us:m1", side="BUY",
-                       qty=390.22, price=1.0, ts=time.time(), mode="LIVE_BETA")
-    risk.set_bankroll(232.78)
-    assert risk.caps.per_day == pytest.approx(623.0)
-    assert risk.day_deployed() == pytest.approx(390.22)
+                       qty=3902.20, price=1.0, ts=time.time(), mode="LIVE_BETA")
+    risk.set_bankroll(2327.80)
+    assert risk.caps.per_day == pytest.approx(6230.0)
+    assert risk.day_deployed() == pytest.approx(3902.20)
 
 
 def test_paper_claims_per_venue_live_claims_global(rig):
@@ -722,19 +727,19 @@ def test_one_game_cannot_absorb_a_ticket_per_listed_outcome(tmp_path):
     bought on the same match, three times over."""
     led, risk = _live_rig(tmp_path)
     for i in range(10):
-        approved, _ = risk.approve("polymarket-us", f"pm:m{i}", "game-1", 20.0,
+        approved, _ = risk.approve("polymarket-us", f"pm:m{i}", "game-1", 30.0,
                                    mode="LIVE_BETA")
-        # $10 ticket (owner 2026-08-08): even a $20 request clamps to
-        # $10, and the $100 event ceiling holds ten tickets.
-        assert approved == 10.0
+        # $25 ticket (owner 2026-08-10): even a $30 request clamps to
+        # $25, and the $250 event ceiling holds ten tickets.
+        assert approved == 25.0
         _event_fill(led, "game-1", f"pm:m{i}", approved)
 
-    blocked, why = risk.approve("polymarket-us", "pm:m11", "game-1", 20.0,
+    blocked, why = risk.approve("polymarket-us", "pm:m11", "game-1", 30.0,
                                 mode="LIVE_BETA")
     assert blocked == 0 and "caps" in why
     # ...and a DIFFERENT game is unaffected.
-    assert risk.approve("polymarket-us", "pm:other", "game-2", 10.0,
-                        mode="LIVE_BETA")[0] == 10.0
+    assert risk.approve("polymarket-us", "pm:other", "game-2", 30.0,
+                        mode="LIVE_BETA")[0] == 25.0
 
 
 def test_event_exposure_counts_only_that_game_and_that_mode(tmp_path):
@@ -754,7 +759,7 @@ def test_the_cap_is_opt_in_so_LIVE_keeps_its_measured_behaviour(tmp_path):
     from edge.execution.engine import Policy
 
     cfg = Policy.load().risk
-    assert caps_for_mode(cfg, "LIVE_BETA").per_event == 100
+    assert caps_for_mode(cfg, "LIVE_BETA").per_event == 250
     assert caps_for_mode(cfg, "LIVE").per_event == 0        # 0 = unbounded
 
 
@@ -792,10 +797,10 @@ def test_every_engine_ticket_is_ten_dollars():
     can stake more than $10."""
     risk = _beta_risk()
     bar = 0.02
-    assert risk.size_for_edge(bar, bar) == 10.00          # exactly the bar
-    assert risk.size_for_edge(bar * 1.9, bar) == 10.00    # not yet 2x
-    assert risk.size_for_edge(bar * 2.0, bar) == 10.00    # same $10 ticket
-    assert risk.size_for_edge(bar * 10, bar) == 10.00     # still $10, capped
+    assert risk.size_for_edge(bar, bar) == 25.00          # exactly the bar
+    assert risk.size_for_edge(bar * 1.9, bar) == 25.00    # not yet 2x
+    assert risk.size_for_edge(bar * 2.0, bar) == 25.00    # same $10 ticket
+    assert risk.size_for_edge(bar * 10, bar) == 25.00     # still $10, capped
 
 
 def test_the_trigger_is_a_MULTIPLE_of_the_bar_not_a_cent_figure():
@@ -807,8 +812,8 @@ def test_the_trigger_is_a_MULTIPLE_of_the_bar_not_a_cent_figure():
     the rungs are re-scaled."""
     risk = _beta_risk()
     # Same 4c edge, two different bars: both stake the flat $10 ticket.
-    assert risk.size_for_edge(0.04, 0.02) == 10.00
-    assert risk.size_for_edge(0.04, 0.035) == 10.00
+    assert risk.size_for_edge(0.04, 0.02) == 25.00
+    assert risk.size_for_edge(0.04, 0.035) == 25.00
 
 
 def test_an_unknown_bar_takes_the_STANDARD_ticket_not_the_top_rung():
@@ -816,9 +821,9 @@ def test_an_unknown_bar_takes_the_STANDARD_ticket_not_the_top_rung():
     this backwards would stake the maximum on precisely the markets we
     understand least."""
     risk = _beta_risk()
-    assert risk.size_for_edge(0.05, None) == 10.00
-    assert risk.size_for_edge(0.05, 0.0) == 10.00
-    assert risk.size_for_edge(None, 0.02) == 10.00
+    assert risk.size_for_edge(0.05, None) == 25.00
+    assert risk.size_for_edge(0.05, 0.0) == 25.00
+    assert risk.size_for_edge(None, 0.02) == 25.00
 
 
 def test_the_ladder_can_never_exceed_the_per_fill_cap():
@@ -865,11 +870,11 @@ def test_the_ladder_survives_approve_end_to_end():
     risk = _beta_risk()
     bar = 0.02
     requested = risk.size_for_edge(bar * 2.0, bar)
-    assert requested == 10.00
+    assert requested == 25.00
     approved, why = risk.approve("polymarket-us", "polymarket-us:tok-x",
                                  "ev-x", requested)
     assert why == "ok"
-    assert approved == 10.00, "$10 must clear approve() intact"
+    assert approved == 25.00, "$10 must clear approve() intact"
 
 
 def test_pmus_entry_refuses_tokens_the_platform_holds(tmp_path, monkeypatch):
