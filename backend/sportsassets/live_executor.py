@@ -277,10 +277,15 @@ PENNY_TRIAL_TOTAL_USD = float(os.environ.get("COPY_TOTAL_USD", "inf"))
 # same-or-better for free. Grading stays per-whale/per-band. (History:
 # $2 default 2026-08-04; RN1 $3 same day; $3 uniform 2026-08-05; $5
 # uniform 2026-08-07; RN1/SwissTony $10 2026-08-08.)
-PENNY_TRIAL_PER_FILL_USD = 5.00
+# Owner directive 2026-08-10 evening: the Polymarket deposit landed —
+# PMUS clips scale to parity with the Kalshi leg: RN1 and SwissTony
+# $100 (each promoted on his own settled record), everyone else $50.
+# The underdog cash-out sleeve is NOT this map — it stays at its own
+# $1 constant (workers/underdog.py PER_FILL_USD).
+PENNY_TRIAL_PER_FILL_USD = 50.00
 # Per-whale override map; keys are lowercased usernames; anyone absent
 # gets the default.
-PER_FILL_BY_WHALE = {"rn1": 10.00, "swisstony": 10.00}
+PER_FILL_BY_WHALE = {"rn1": 100.00, "swisstony": 100.00}
 
 
 def per_fill_usd(whale_username: str | None) -> float:

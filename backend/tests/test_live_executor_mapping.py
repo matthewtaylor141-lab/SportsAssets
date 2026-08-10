@@ -146,15 +146,12 @@ def test_derivative_slugs_never_take_the_exact_path(monkeypatch):
     monkeypatch.setattr(live_executor, "_market_context", spread_ctx)
     monkeypatch.setattr(pmus, "resolve_market_exact", fake_exact)
     monkeypatch.setattr(pmus, "resolve_market", fake_fuzzy)
-    # Hockey is a Kalshi-first sport, so the asset must hash PM-first or
-    # the venue split defers before mapping ever runs.
-    import hashlib
-
-    asset = next(str(i) for i in range(1000)
-                 if int(hashlib.sha1(str(i).encode()).hexdigest()[-2:],
-                        16) % 100 >= 50)
+    # Hockey is a Kalshi-first sport and the routing default is 100 —
+    # pin the split OFF so this test exercises mapping, not routing
+    # (and never depends on another module's env leakage).
+    monkeypatch.setenv("KALSHI_FIRST_PCT", "0")
     asyncio.run(live_executor.maybe_execute(
-        _payload(whale_username="rn1", asset=asset,
+        _payload(whale_username="rn1",
                  outcome="Toronto Maple Leafs"), 5.0))
     assert calls == {"exact": 0, "fuzzy": 1}, \
         "a line-suffixed slug must never touch the exact grammar"
