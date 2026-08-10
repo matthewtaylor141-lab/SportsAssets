@@ -116,9 +116,10 @@ def test_stale_quotes_never_trade(tmp_path, monkeypatch):
 def test_dead_zone_ask_never_trades(tmp_path, monkeypatch):
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     ledger, risk = _rig(tmp_path)
-    funnel = run_cycle([StubVenue(ask_price=0.43)], StubFeed(
+    funnel = run_cycle([StubVenue(ask_price=0.67)], StubFeed(
         [_event(home_odds=1.90)]), POLICY, risk, ledger, ["soccer_epl"])
-    # 0.43 ask sits in the 0.40-0.45 dead zone: unconditionally untradeable.
+    # 0.67 ask sits in the 0.65-0.70 dead zone: unconditionally untradeable.
+    # (0.40-0.45 is PROBATION since 2026-08-10 — elevated bar, not dead.)
     assert ledger.summary()["fills"] == 0
     assert funnel["rejects"].get("band", 0) >= 1
 
@@ -260,8 +261,9 @@ def test_study_records_every_priced_outcome_even_when_nothing_trades(tmp_path, m
 
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     ledger, risk = _rig(tmp_path)
-    # 0.43 ask in a dead zone: zero trades by design.
-    funnel = run_cycle([StubVenue(ask_price=0.43)], StubFeed([_event(home_odds=1.90)]),
+    # 0.67 ask in a dead zone: zero trades by design. (0.43 moved to
+    # PROBATION 2026-08-10 and can trade on a wide enough fair gap.)
+    funnel = run_cycle([StubVenue(ask_price=0.67)], StubFeed([_event(home_odds=1.90)]),
                        POLICY, risk, ledger, ["soccer_epl"])
     assert ledger.summary()["fills"] == 0          # nothing traded, as intended
     assert funnel["studied"] >= 1                  # ...but we still learned
@@ -273,7 +275,7 @@ def test_study_records_every_priced_outcome_even_when_nothing_trades(tmp_path, m
     assert study, "priced outcomes must be recorded for calibration"
     assert study[0]["feed"]["would_clear"] is False
     assert "dead" in study[0]["feed"]["blocked_by"]
-    assert study[0]["fair_value"] > 0 and study[0]["limit_price"] == 0.43
+    assert study[0]["fair_value"] > 0 and study[0]["limit_price"] == 0.67
 
 
 def test_threshold_gap_distribution_is_reported(tmp_path, monkeypatch):

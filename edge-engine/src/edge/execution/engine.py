@@ -70,6 +70,18 @@ class Policy:
                 return float(c["min_edge_threshold"])
         return None  # unlisted band — not proven, don't trade
 
+    def band_probation(self, price: float, category: str = "moneyline") -> bool:
+        """Is this a PROBATION band — donor-dead, re-opened at a
+        deliberately elevated bar to generate our own evidence? The
+        elevated bar is the FLOOR there: no tier may discount it."""
+        src = (self.bands if category == "moneyline"
+               else (self.bands.get("categories") or {}).get(category) or {})
+        for key, c in (src.get("tradeable") or {}).items():
+            lo, hi = (float(x) for x in key.split("-"))
+            if lo <= price < hi:
+                return bool(c.get("probation"))
+        return False
+
     def category_blocked(self, league_code: str | None, category: str) -> bool:
         """League x category blocks, plus GLOBAL category quarantines.
 
@@ -184,7 +196,11 @@ def strategy_filter(
         # trade on a separate, capped budget so the threshold becomes a
         # measurement rather than an assumption.
         exp = policy.risk.get("exploration") or {}
-        if exp.get("enabled"):
+        if exp.get("enabled") and not policy.band_probation(price, category):
+            # (Probation bands are exploration-EXEMPT: their elevated bar
+            # exists to demand unusually clear mispricing in a zone the
+            # donor measured DEAD — discounting it would fund exactly the
+            # trades the calibration disproved.)
             # Exploration exists to test whether SMALL edges pay. An edge
             # smaller than the measured adverse drift is not an open question
             # — it is a measured loser — so the floor moves with the drift

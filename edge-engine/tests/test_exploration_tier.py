@@ -77,8 +77,10 @@ def test_unknown_consensus_depth_is_not_permission():
 def test_exploration_never_overrides_the_measured_blocks():
     """A cheaper bar is not a licence. Dead zones, blocked leagues, blocked
     categories and the implausibility guard all still bind."""
-    assert not strategy_filter(POLICY, "epl", 0.43, 0.445,
+    assert not strategy_filter(POLICY, "epl", 0.67, 0.685,
                                consensus_books=DEEP).ok          # dead zone
+    assert not strategy_filter(POLICY, "epl", 0.43, 0.445,
+                               consensus_books=DEEP).ok  # probation bar binds
     assert not strategy_filter(POLICY, "ucl", 0.50, 0.515,
                                consensus_books=DEEP).ok          # blocked league
     assert not strategy_filter(POLICY, "mlb", 0.47, 0.485, category="moneyline",

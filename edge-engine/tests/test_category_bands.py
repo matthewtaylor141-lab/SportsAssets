@@ -129,6 +129,12 @@ def test_extension_is_stricter_than_moneyline_everywhere(category):
     """A derivative price never trades on easier terms than the same
     moneyline price, whose bar rests on 5.34M measured fills."""
     for p in _prices(0.10, 0.90):
+        if 0.40 <= p < 0.45:
+            # PROBATION band (owner 2026-08-10): its 3.5c ML bar is
+            # deliberately punitive, not donor-measured — the invariant's
+            # premise (ML bar rests on 5.34M fills) doesn't hold there,
+            # and the derivative window has its own kch123 measurement.
+            continue
         ml = POLICY.band_threshold(p, "moneyline")
         deriv = POLICY.band_threshold(p, category)
         if ml is not None and deriv is not None:
@@ -138,8 +144,11 @@ def test_extension_is_stricter_than_moneyline_everywhere(category):
 def test_the_moneyline_dead_zone_does_not_leak_into_derivatives():
     """40-45c is a moneyline phenomenon of the reference account's mechanism,
     and it is exactly where the kch123 spread edge was measured."""
-    assert POLICY.band_threshold(0.43, "moneyline") is None
+    # ML 40-45c is probation (elevated 3.5c bar) since 2026-08-10; the
+    # spread window keeps its own measured 2.5c bar independently.
+    assert POLICY.band_threshold(0.43, "moneyline") == 0.035
     assert POLICY.band_threshold(0.43, "spread") == CORE_THRESHOLD
+    assert POLICY.band_threshold(0.67, "moneyline") is None   # still dead
 
 
 def test_an_unknown_category_is_still_never_tradeable():
@@ -155,8 +164,10 @@ def test_moneyline_floor_gates_on_measured_capture_not_threshold():
     assert POLICY.band_threshold(0.47, "moneyline") is not None
     for p in (0.53, 0.62, 0.78, 0.87):
         assert POLICY.band_threshold(p, "moneyline") is not None, p
-        for p in (0.42, 0.67, 0.93, 0.97):
+        for p in (0.67, 0.93, 0.97):
             assert POLICY.band_threshold(p, "moneyline") is None, p
+        # 0.42 is PROBATION (owner 2026-08-10): open at an elevated 3.5c.
+        assert POLICY.band_threshold(0.42, "moneyline") == 0.035
     for p in (0.07, 0.17, 0.32, 0.37):
         assert POLICY.band_threshold(p, "moneyline") is not None, p
 

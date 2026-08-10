@@ -67,6 +67,21 @@ def clears_net_floor(lo: float, hi: float, threshold: float,
     return (capture - CROSSING_CENTS) / 100 / mid >= NET_ROI_FLOOR
 
 
+# ── PROBATION re-entries (owner directive 2026-08-10, upgrade #2) ──────
+# Donor-dead bands our OWN live cohort contradicts, re-enabled at an
+# ELEVATED threshold (tier + 1c) so only clearly-mispriced entries fire.
+# The evidence caveat that keeps this surgical: the contradicting fills
+# (0.40-0.45: n=151, +18.0% ROI as of 2026-08-10) are predominantly the
+# COPY mechanism, not engine-threshold entries — the donor's dead zone is
+# mechanism-specific (CLAUDE.md cross-account note), so his number is not
+# imported and neither is ours. The raised bar generates engine-mechanism
+# evidence at sleeve-scale size; the live per-fill net-margin gate still
+# applies. Graduation or re-burial comes from OUR settled cohort in this
+# band, by regeneration. 0.65-0.70 (own n=32) stays dead: sample too
+# thin. 0.90-0.95 stays dead: own data agrees with the donor.
+PROBATION = {"0.40-0.45": 0.035}
+
+
 def main() -> None:
     tradeable, dead = [], []
     for r in csv.DictReader(open("data/calib_price.csv")):
@@ -75,8 +90,11 @@ def main() -> None:
             continue
         lo, hi = float(m.group(1)), float(m.group(2))
         edge = float(r["edge_cents"])
+        band_key = f"{lo:.2f}-{hi:.2f}"
         th = threshold_for(lo)
-        if lo >= 0.90 or edge <= DEAD_CEILING:      # 90c+ dead per spec
+        if band_key in PROBATION:
+            tradeable.append((lo, hi, edge, PROBATION[band_key]))
+        elif lo >= 0.90 or edge <= DEAD_CEILING:    # 90c+ dead per spec
             dead.append((lo, hi, edge))
         elif not clears_net_floor(lo, hi, th, edge):
             # Measured-positive but unprofitable to TRADE at our costs: the
@@ -92,8 +110,10 @@ def main() -> None:
            "# Source: 5.34M resolved fills of the reference account.",
            "tradeable:"]
     for lo, hi, edge, th in tradeable:
+        flag = (", probation: true"
+                if f"{lo:.2f}-{hi:.2f}" in PROBATION else "")
         out.append(f'  "{lo:.2f}-{hi:.2f}": {{edge_cents: {edge:.2f}, '
-                   f"min_edge_threshold: {th:.3f}}}")
+                   f"min_edge_threshold: {th:.3f}{flag}}}")
     out.append("dead_zones: [" + ", ".join(f'"{lo:.2f}-{hi:.2f}"'
                                            for lo, hi, _ in dead) + "]")
     out.append("kalshi_fee_adjustment: true")

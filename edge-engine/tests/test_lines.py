@@ -82,7 +82,10 @@ def test_outcome_matches_enforces_exact_point_and_team():
 # ── per-category bands ─────────────────────────────────────────────────
 
 def test_moneyline_dead_zone_does_not_apply_to_spreads():
-    assert POLICY.band_threshold(0.42, "moneyline") is None       # dead zone
+    # 40-45c ML is PROBATION now (owner 2026-08-10): elevated 3.5c bar,
+    # not dead. The still-dead 65-70c zone carries this test's point.
+    assert POLICY.band_threshold(0.42, "moneyline") == 0.035       # probation
+    assert POLICY.band_threshold(0.67, "moneyline") is None        # dead zone
     assert POLICY.band_threshold(0.42, "spread") == 0.025          # kch123 core
     # 0.52+ died on the NET-ROI FLOOR, not the dead zone: 2.5c minus the
     # 1.5c crossing at 52c pays 1.9%, under the benchmark. The measurement
@@ -190,12 +193,16 @@ def test_paper_cycle_trades_a_total(tmp_path, monkeypatch):
 
 
 def test_ml_dead_zone_still_dead_in_same_cycle_as_spread(tmp_path, monkeypatch):
-    # A 0.43 ask: blocked for moneyline (dead zone) but the SAME price on a
+    # A 0.43 ask: under-probation-bar for moneyline (3.5c needed, 7c fair
+    # gap here clears it — so use the elevated bar itself) but the SAME
+    # price on a
     # spread market is inside the kch123 window — both verdicts in one config.
-    v_ml = strategy_filter(POLICY, "nba", 0.43, 0.50, category="moneyline")
-    v_sp = strategy_filter(POLICY, "nba", 0.43, 0.50, category="spread")
-    assert not v_ml.ok and "dead" in v_ml.reason
-    assert v_sp.ok and v_sp.edge == pytest.approx(0.07)
+    # fair 0.46: 3c edge clears the spread's 2.5c bar but NOT the ML
+    # probation bar of 3.5c — the elevated bar is doing dead-zone duty.
+    v_ml = strategy_filter(POLICY, "nba", 0.43, 0.46, category="moneyline")
+    v_sp = strategy_filter(POLICY, "nba", 0.43, 0.46, category="spread")
+    assert not v_ml.ok
+    assert v_sp.ok and v_sp.edge == pytest.approx(0.03)
 
 
 def test_implausible_edge_never_trades():
@@ -303,13 +310,18 @@ def test_every_measured_positive_band_is_tradeable():
         # bands above ~0.40 are real edges that lose to their own costs.
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-        from gen_bands import clears_net_floor, threshold_for
+        from gen_bands import PROBATION, clears_net_floor, threshold_for
         # The floor gates on EXPECTED CAPTURE — the band's measured edge
         # where one exists, never below the threshold — minus crossing.
         should = (edge > 0.2 and lo < 0.90
                   and clears_net_floor(lo, lo + 0.05, threshold_for(lo), edge))
         if should:
             assert th is not None, f"band at {lo:.2f} measures +{edge}c but is blocked"
+        elif f"{lo:.2f}-{lo + 0.05:.2f}" in PROBATION:
+            # Probation re-entry (owner 2026-08-10): donor-dead, open at
+            # an ELEVATED bar to generate our own engine-mechanism
+            # evidence — never at the tier bar.
+            assert th is not None and th > threshold_for(lo)
         else:
             assert th is None, f"band at {lo:.2f}: measured {edge}c, floored or dead"
 
@@ -320,8 +332,10 @@ def test_surviving_thresholds_unchanged_by_regeneration():
     for price, expected in ((0.07, 0.030), (0.17, 0.025), (0.32, 0.025),
                             (0.37, 0.025), (0.47, 0.020)):
         assert POLICY.band_threshold(price, "moneyline") == expected
+    # Probation re-entry (owner 2026-08-10): 40-45c at an ELEVATED bar.
+    assert POLICY.band_threshold(0.42, "moneyline") == 0.035
     # Under maker-first economics only the measured dead zones stay out.
-    for price in (0.42, 0.67, 0.93):
+    for price in (0.67, 0.93):
         assert POLICY.band_threshold(price, "moneyline") is None
 
 
@@ -333,8 +347,8 @@ def test_fat_middle_is_floored_out():
     for price in (0.52, 0.57, 0.62):
         assert POLICY.band_threshold(price, "moneyline") is not None
     assert POLICY.band_threshold(0.67, "moneyline") is None
-    # ...and the genuinely dead zones stay dead.
-    for price in (0.42, 0.67, 0.92, 0.97):
+    # ...and the genuinely dead zones stay dead (40-45c is probation now).
+    for price in (0.67, 0.92, 0.97):
         assert POLICY.band_threshold(price, "moneyline") is None
 
 

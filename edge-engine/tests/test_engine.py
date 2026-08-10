@@ -10,8 +10,18 @@ POLICY.leagues = {**POLICY.leagues, "blocked_categories": []}
 
 
 def test_dead_zone_rejected():
-    d = decide(POLICY, ExposureBook(), "m1", "epl", price=0.42, fair=0.60)
+    d = decide(POLICY, ExposureBook(), "m1", "epl", price=0.67, fair=0.85)
     assert not d.trade and "dead" in d.reason
+
+
+def test_probation_band_needs_the_elevated_bar():
+    """40-45c re-entered on PROBATION (owner 2026-08-10): tradeable only
+    at 3.5c — a full cent above its tier — never at the tier bar."""
+    small = decide(POLICY, ExposureBook(), "m1", "epl", price=0.42,
+                   fair=0.45)                      # 3c: clears tier, not bar
+    assert not small.trade
+    big = decide(POLICY, ExposureBook(), "m1", "epl", price=0.42, fair=0.60)
+    assert big.trade and big.band == "0.40-0.45"
 
 
 def test_blocked_league_rejected():

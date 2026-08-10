@@ -471,6 +471,14 @@ jobs:
           echo "ARBITRAGE:"
           jq -r '"   books found: \(.detail.arb_found // 0)   profit booked $\(.detail.arb_profit // 0)"' \
              /tmp/status.json 2>/dev/null || true
+          echo "OFFSET CLASSES (DD rollup — offsetting-position share):"
+          jq -r '.detail.by_cat_performance.arb // {} | "   same-venue (partitions+covers): \(.settled // 0) settled  staked $\(.staked // 0)  realized $\(.realized // 0)"' \
+             /tmp/status.json 2>/dev/null || true
+          jq -r '"   cover: candidates \(.detail.cover_candidates // 0)  locks_seen \(.detail.cover_locks_seen // [] | length)  title_refused \(.detail.cover_title_refused // 0)  dark \(.detail.cover_dark // 0)"' \
+             /tmp/status.json 2>/dev/null || true
+          jq -r '.detail.cover_title_examples // [] | .[] | "   refused title: \(.)"' \
+             /tmp/status.json 2>/dev/null || true
+          echo "   cross-venue: frozen by policy (xv sleeve off)"
           jq -r '.detail.arb_status // {} | to_entries[] | "   \(.key): \(.value)"' \
              /tmp/status.json 2>/dev/null || true
           jq -r '.detail.arb_books // [] | .[] | "   \(.event): \(.legs) legs, cost $\(.cost), profit/set \(.profit_per_set), depth \(.depth_sets) sets"' \
