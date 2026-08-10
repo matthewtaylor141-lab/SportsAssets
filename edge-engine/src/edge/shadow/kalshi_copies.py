@@ -51,13 +51,17 @@ log = logging.getLogger(__name__)
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
-# Owner directive 2026-08-08: RN1 and SwissTony to $10 per trade — the
-# $5->$10 promotion gated on their own settled cohorts (RN1 +$198.66
-# over 304 settled, SwissTony +$139.61 at 64% over 176). Everyone else
-# stays at the $5 default (HRH's widened cells have 2 settled; kch123
-# is out of season). History: $3 -> $5 uniform 2026-08-07 -> $10 for
-# the two proven sleeves 2026-08-08.
-PER_COPY_USD = {"rn1": 10.00, "swisstony": 10.00}
+# Owner directive 2026-08-10: RN1 to $100 per trade ON KALSHI — RN1
+# only, promoted on the sleeve's own record (+$199.80 realized over 307
+# settled since Aug 1, ~58% win rate). SwissTony stays $10; everyone
+# else the $5 default. History: $3 -> $5 uniform 2026-08-07 -> $10 for
+# the two proven sleeves 2026-08-08 -> RN1 $100 (Kalshi leg) 2026-08-10.
+# NOTE the binding constraints at this clip: the day budget
+# (EDGE_KCOPY_DAY_USD) caps fills at budget/100 per day, the copy
+# breaker (EDGE_KCOPY_HALT_USD, default 120) now trips on ~2 full RN1
+# losses, and account cash bounds concurrent open positions. Those are
+# env-tunable risk-policy dials, deliberately not changed here.
+PER_COPY_USD = {"rn1": 100.00, "swisstony": 10.00}
 PER_COPY_DEFAULT = 5.00
 # A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
 # decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.
