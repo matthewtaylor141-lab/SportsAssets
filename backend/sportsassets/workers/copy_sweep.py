@@ -43,7 +43,14 @@ BOOT_DELAY_S = 120       # let the poller/executor settle before sweeping
 # first claim on ALL listed-sport flow now, so this sweep is the PMUS
 # reclaim leg for everything Kalshi can't list or price — an hourly
 # reclaim would hand PMUS only stale, decayed copies).
-SWEEP_EVERY_S = float(os.environ.get("COPY_SWEEP_EVERY_S", "600"))
+# 2 minutes (owner directive 2026-08-10 night: "both firing correct
+# trades and copied edges immediately"): with the flow split 50/50 and
+# Kalshi deciding within ~30-60s, this reclaim is the only remaining
+# slow link — at 10 minutes a position the first venue refused sat
+# unpriced for most of its edge decay. Each pass stays bounded
+# (COPY_SWEEP_MAX_ROWS + per-row timeout), so the tighter timer costs
+# repeat reads only when there is actually a backlog to drain.
+SWEEP_EVERY_S = float(os.environ.get("COPY_SWEEP_EVERY_S", "120"))
 PRICE_CEILING = 0.99     # mirrors the per-fill ceiling; cheap pre-filter
 # BOUNDED PASSES (2026-08-07): an unbounded pass over RN1's re-eligible
 # backlog ran hours at ~1-3s/row, so every redeploy killed it before its

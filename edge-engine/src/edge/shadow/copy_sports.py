@@ -124,19 +124,20 @@ def kalshi_first(asset: str) -> bool:
     asset id — same answer on every service, so the two venues never
     race for one position.
 
-    Default 100 (owner directive 2026-08-10 evening: "I want trades
-    coming in and not missing as many copies" on Kalshi). The 50/50
-    split earlier the same day existed because the Kalshi sweep added
-    up to 2-4 minutes versus the instant PMUS leg; the fresh-fill wake
-    shipped since then prices a new position in ~10-40s, so first claim
-    no longer costs meaningful edge — and the 10-minute PMUS sweep
-    still reclaims anything Kalshi cannot price. History: 100 was the
-    2026-08-09 setting, 50 the 2026-08-10 morning speed trade-off;
-    KALSHI_FIRST_PCT overrides either way in one env change."""
+    Default 50 (owner directive 2026-08-10 night: "both firing correct
+    trades and copied edges immediately"). PMUS fires instantly on its
+    half; the fresh-fill wake fires Kalshi in ~10-40s on the other; and
+    the reclaim sweep (COPY_SWEEP_EVERY_S, now 2 minutes) cross-covers
+    whatever the first venue refused, so neither leg ever waits long on
+    the other. One copy per position stays enforced by the claims and
+    the venue-side never-add veto. History: 100 on 2026-08-09, 50 on
+    2026-08-10 morning, 100 that evening for Kalshi volume, 50 again
+    the same night for both-immediate; KALSHI_FIRST_PCT overrides in
+    one env change."""
     if not asset:
         return False
     import os as _os
-    pct = int(_os.environ.get("KALSHI_FIRST_PCT", "100"))
+    pct = int(_os.environ.get("KALSHI_FIRST_PCT", "50"))
     if pct >= 100:
         return True
     if pct <= 0:
