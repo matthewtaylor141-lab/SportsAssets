@@ -61,8 +61,11 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # breaker (EDGE_KCOPY_HALT_USD, default 120) now trips on ~2 full RN1
 # losses, and account cash bounds concurrent open positions. Those are
 # env-tunable risk-policy dials, deliberately not changed here.
-PER_COPY_USD = {"rn1": 100.00, "swisstony": 10.00}
-PER_COPY_DEFAULT = 5.00
+# 2026-08-10 (owner funding the accounts up): ALL Kalshi copies to $50,
+# RN1 to $100 — Kalshi leg only; PMUS sizing unchanged until the owner's
+# Polymarket deposit lands.
+PER_COPY_USD = {"rn1": 100.00}
+PER_COPY_DEFAULT = 50.00
 # A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
 # decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.
 # Copying an old position at today's price is buying fair value minus
@@ -83,7 +86,12 @@ COLLAPSE_FLOOR = 0.85
 # Scaled 60 -> 120 with the $5 -> $10 clip promotion (2026-08-08) to
 # keep the same ~12-full-loss sensitivity — an unchanged floor would
 # have halved the breaker's tolerance the same hour sizing doubled.
-COPY_HALT_USD_DEFAULT = 120.0
+# Scaled 120 -> 600 with the $5/$10 -> $50/$100 clip promotion
+# (2026-08-10), same rule as the 60 -> 120 scaling on 2026-08-08: the
+# breaker keeps its ~12-full-loss sensitivity at the new clip size —
+# an unchanged floor would have tripped on two ordinary losses and
+# halted the sleeve almost daily. EDGE_KCOPY_HALT_USD still overrides.
+COPY_HALT_USD_DEFAULT = 600.0
 COPY_HALT_HOURS_DEFAULT = 24.0
 # Owner amnesty 2026-08-06 ("Let's get Kalshi going now"): the halt
 # tripped ~01:00Z on Wednesday-evening losses was ordered lifted early.

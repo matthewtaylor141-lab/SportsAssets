@@ -61,7 +61,7 @@ def test_limit_is_his_price_plus_two_percent_min_one_tick():
 def test_copies_when_kalshi_is_inside_his_tolerance():
     st, ka, led = _run(0.48)   # eff = 0.48 + fee(0.0175) <= limit 0.51
     assert st["matched"] == 1 and st["copied"] == 1
-    assert ka.orders == [("T-DAL", 0.48, 10)]   # $5 -> 10 contracts
+    assert ka.orders == [("T-DAL", 0.48, 104)]  # $50 -> 104 contracts
     assert led.get_state("kcopy:wnba-dal-chi-2026-08-04:Dallas Wings")
 
 
@@ -83,7 +83,7 @@ def test_sport_assignments_gate_the_sweep():
     assert st.get("skipped_sport") == 1
     assert not ka.orders
     st2, ka2, _ = _run(0.48)     # HomeRunHazard + wnba ML: assigned cell
-    assert ka2.orders == [("T-DAL", 0.48, 10)]   # $5 -> 10 contracts
+    assert ka2.orders == [("T-DAL", 0.48, 104)]  # $50 -> 104 contracts
     row3 = {**_ROW, "whale": "RN1"}
     st3, ka3, _ = _run(0.48, rows=[row3])
     assert st3["copied"] == 1
@@ -260,7 +260,7 @@ def test_kalshi_keeps_the_copy_by_default_when_it_qualifies():
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
                pmus=pm)
     assert st.get("routed_pmus_better") is None
-    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 10)]
+    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 104)]
 
 
 def test_kalshi_places_when_it_is_cheaper_fee_loaded():
@@ -272,7 +272,7 @@ def test_kalshi_places_when_it_is_cheaper_fee_loaded():
                pmus=pm)
     assert st.get("routed_pmus_better") is None
     assert st["copied"] == 1
-    assert ka.orders == [("T-DAL", 0.48, 10)]
+    assert ka.orders == [("T-DAL", 0.48, 104)]
 
 
 def test_no_pmus_book_falls_through_to_kalshi(monkeypatch):
@@ -285,7 +285,7 @@ def test_no_pmus_book_falls_through_to_kalshi(monkeypatch):
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
                pmus=pm)
     assert pm.peeked, "the peek must have been attempted"
-    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 10)]
+    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 104)]
 
 
 # ── Venue split (owner directive 2026-08-07): Kalshi first claim on
@@ -315,7 +315,7 @@ def test_kalshi_first_assets_skip_the_pmus_deference():
                identities=[{**_ROW, "asset": _asset(True)}],
                live=True, pmus=pm)
     assert not pm.peeked, "kalshi-first assets must not consult PMUS"
-    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 10)]
+    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 104)]
 
 
 def test_pm_first_assets_still_defer_to_a_better_pmus(monkeypatch):
@@ -386,8 +386,8 @@ def test_taker_priced_out_rests_a_fee_free_maker_on_kalshi_first():
     st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
     assert st["copied"] == 0                       # nothing filled yet
     assert st.get("maker_rested") == 1
-    # HRH clips $5 (default tier): floor(5/0.50) = 10 contracts, maker.
-    assert ka.orders == [("T-DAL", 0.50, 10, False)]
+    # HRH clips $50 (default tier, 2026-08-10): floor(50/0.50) = 100, maker.
+    assert ka.orders == [("T-DAL", 0.50, 100, False)]
     claim = "kcopy:wnba-dal-chi-2026-08-04:Dallas Wings"
     assert not led.get_state(claim), "claim burns on FILL, not on rest"
     # Second sweep while the rest is live: no duplicate order.
