@@ -132,6 +132,24 @@ def test_promoted_whale_0x2c33_copies_at_the_default_clip():
     assert ka.orders == [("T-DAL", 0.48, 104)]
 
 
+def test_held_ticker_refuses_a_second_buy_from_any_identity():
+    """2026-08-10 evening, the $204 challenger position: the same whale
+    outcome reached the sweep as TWO identities (two PM asset ids, two
+    slugs, two distinct kcopy claims) and bought the same Kalshi ticker
+    twice. Venue-side never-add: an open position on the ticker refuses
+    every later buy, whatever identity proposes it."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    st1, ka1, _ = _run(0.48, led=led)
+    assert st1["copied"] == 1 and ka1.orders
+    # Same outcome again under a DIFFERENT slug (fresh claim key) —
+    # the whale feed lists the same game with the teams flipped.
+    row2 = {**_ROW, "slug": "wnba-chi-dal-2026-08-04",
+            "entered_ts": time.time() - 30}
+    st2, ka2, _ = _run(0.45, rows=[row2], led=led)
+    assert st2.get("skipped_held_ticker") == 1
+    assert not ka2.orders, "a held ticker must never be bought again"
+
+
 def test_one_copy_per_position_ever():
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     st1, _, _ = _run(0.48, led=led)

@@ -229,8 +229,8 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
           day_usd: float = 200.0, max_age_s: float | None = None,
           pmus=None, on_copied=None) -> dict:
     """One pass: whale open positions -> Kalshi orders where listed."""
-    from edge.shadow.kalshi_guard import (cross_side_cap, note_fill,
-                                          open_kalshi_sides)
+    from edge.shadow.kalshi_guard import (cross_side_cap, game_of,
+                                          note_fill, open_kalshi_sides)
     from edge.shadow.whale_align import game_key
     from edge.venues.kalshi import _series_map
     from edge.venues.mapper import team_score
@@ -394,6 +394,19 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         claim = f"kcopy:{slug}:{outcome[:24]}"
         if ledger.get_state(claim):
             stats["skipped_claimed"] += 1
+            continue
+        # NEVER-ADD, VENUE-SIDE (2026-08-10 evening: a ~$204 challenger
+        # position = two ~$100 copies of the same dog reached the
+        # account through two different PM-side identities — same
+        # outcome, two asset ids, two distinct kcopy claims. The claim
+        # keys on the PM slug, so nothing deduped the venue TICKER).
+        # Any open position on this ticker refuses a second buy, no
+        # matter which identity proposed it; cross_side_cap only guards
+        # the OPPOSITE side and calls a same-ticker add 'directional'.
+        if any(s.get("ticker") == target_ticker
+               for s in (sides.get(game_of(target_ticker)) or [])):
+            stats["skipped_held_ticker"] = \
+                stats.get("skipped_held_ticker", 0) + 1
             continue
         book = kalshi.get_book(target_ticker, target_ticker)
         if book is None or not book.asks or book.asks[0].size < 1:

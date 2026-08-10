@@ -526,6 +526,12 @@ class KalshiAdapter(VenueAdapter):
                 # market_exposure travels in cents in the fixed-point
                 # dialect; report dollars, best effort.
                 out["exposure_usd"] = round(exp / 100.0, 2)
+                # Shape self-diagnosis (first live read parsed a funded
+                # account to zero): when rows exist but none parse as
+                # open, ship one raw row so the next probe names the
+                # real field dialect instead of guessing.
+                if rows and not open_rows:
+                    out["positions_raw_sample"] = str(rows[0])[:240]
             else:
                 out["positions_error"] = f"http_{resp.status_code}"
         except requests.RequestException as exc:
@@ -549,6 +555,8 @@ class KalshiAdapter(VenueAdapter):
                     for f in today), 2)
                 if len(fills) >= 100 and len(today) == len(fills):
                     out["fills_today_truncated"] = True
+                if today and not out["fills_today_contracts"]:
+                    out["fills_raw_sample"] = str(today[0])[:240]
             else:
                 out["fills_error"] = f"http_{resp.status_code}"
         except requests.RequestException as exc:
