@@ -698,6 +698,36 @@ jobs:
           echo "-- CreateOrderV2Response schema --"
           awk '/CreateOrderV2Response:/,0' /tmp/v2.md | head -c 8000; echo ""
 
+      - name: Path A ground truth (which contract+topic a real fill emits)
+        if: always()
+        run: |
+          echo "###########################################################"
+          echo "#   PATH A GROUND TRUTH (receipt of a real RN1 fill)       #"
+          echo "###########################################################"
+          # Both providers deliver zero events on our subscription, so the
+          # filter itself is suspect. The receipt of a REAL RN1 fill names
+          # the emitting contract and topic0; our listener's computed topic
+          # and configured addresses print beside it. A mismatch on either
+          # is the bug.
+          TX="0x2be95df880975cf37af78330c7c9b597aeff44d6338110c79cf11db46362e3d4"
+          for RPC in https://polygon-rpc.com https://1rpc.io/matic; do
+            echo "-- receipt via $RPC --"
+            OUT=$(curl -sS --max-time 20 "$RPC" -H 'content-type: application/json' \
+              --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getTransactionReceipt\",\"params\":[\"$TX\"]}" 2>/dev/null) || true
+            echo "$OUT" | jq -r '.result.logs[]? | "  emitter \(.address)  topic0 \(.topics[0])"' \
+              2>/dev/null | sort | uniq -c | head -20
+            echo "$OUT" | jq -e '.result.logs' >/dev/null 2>&1 && break
+          done
+          pip install --quiet pycryptodome 2>/dev/null || true
+          python3 - <<'PYEOF'
+          from Crypto.Hash import keccak
+          sig = "OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)"
+          h = keccak.new(digest_bits=256); h.update(sig.encode())
+          print("  our listener topic0: 0x" + h.hexdigest())
+          print("  our addresses: 0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e"
+                " + 0xc5d563a36ae78145c45a50134d48a1215220f80a")
+          PYEOF
+
       - name: Whale candidate census (sports leaderboard, via runner)
         if: always()
         run: |
