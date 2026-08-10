@@ -577,6 +577,25 @@ async def _record(pool) -> dict:
             out[f"k_{r['status']}"] = r["n"]
             if r["pnl"]:
                 out[f"k_{r['status']}_pnl"] = round(r["pnl"], 2)
+        # Window timing, probe-readable: 42 tasks all 'waiting' is either
+        # a slate that hasn't started or a timezone bug, and the
+        # difference must be one heartbeat read, not a code dig
+        # (2026-08-10 overnight: the first full tennis queue sat waiting
+        # for hours with no way to see WHEN it would open).
+        nx = await pool.fetchrow(
+            "SELECT count(*) FILTER (WHERE start_ts IS NOT NULL "
+            "  AND now() >= start_ts - interval '300 seconds' "
+            "  AND now() <= start_ts + interval '1800 seconds')::int "
+            "  AS open_now, "
+            "count(*) FILTER (WHERE start_ts IS NULL)::int AS no_start, "
+            "extract(epoch FROM (min(start_ts) "
+            "  FILTER (WHERE start_ts > now()) - now()))::int AS next_in_s "
+            "FROM kud_queue WHERE status = 'queued'")
+        if nx is not None:
+            out["k_windows_open"] = nx["open_now"] or 0
+            out["k_no_start"] = nx["no_start"] or 0
+            if nx["next_in_s"] is not None:
+                out["k_next_window_s"] = max(0, nx["next_in_s"] - 300)
     except Exception:  # noqa: BLE001 — table lands with migration 017
         pass
     return out
