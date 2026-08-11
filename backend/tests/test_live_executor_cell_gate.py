@@ -160,8 +160,13 @@ def test_pm_first_fresh_copy_proceeds(monkeypatch):
 
 def test_soccer_stays_pmus_first_even_when_hash_says_kalshi(monkeypatch):
     """Kalshi's soccer coverage is thin; swisstony's soccer flow keeps
-    the fast fee-free venue regardless of the hash split."""
+    the fast fee-free venue regardless of the hash split. (Routing
+    behavior — the 2026-08-11 soccer HALT is pinned out; it has its own
+    tests in test_copy_sports.)"""
     from datetime import date
+
+    from sportsassets import copy_sports as _cs
+    monkeypatch.setattr(_cs, "HALTED_SPORTS", frozenset())
     pool = _FakePool()
     _wire(monkeypatch, pool, {
         "market_slug": f"epl-ars-che-{date.today().isoformat()}",

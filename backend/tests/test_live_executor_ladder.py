@@ -80,6 +80,10 @@ def _wire(monkeypatch, pool, mapped_slug):
     async def fake_ctx(_pool, _payload):
         return dict(ctx)
 
+    from sportsassets import copy_sports as _cs
+    monkeypatch.setattr(_cs, "HALTED_SPORTS", frozenset(),
+                        raising=True)   # these tests exercise mapping/
+    # ladder logic, not the soccer halt (which has its own tests)
     monkeypatch.setattr(live_executor, "get_pool", fake_get_pool)
     monkeypatch.setattr(live_executor, "_is_paused", fake_paused)
     monkeypatch.setattr(live_executor, "_market_context", fake_ctx)

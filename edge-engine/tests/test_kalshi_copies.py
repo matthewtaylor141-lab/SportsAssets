@@ -120,19 +120,20 @@ def test_sport_assignments_gate_the_sweep():
     assert ka3.orders == [("T-DAL", 0.48, 312)]
 
 
-def test_swisstony_kalshi_clip_is_200():
-    """Owner decision 2026-08-11 (profitability round 3): swisstony to
-    $200/clip — strongest measured earner. His soccer cell's 0.70 ask
-    floor still binds, so the fixture is a 72c EPL entry:
-    floor(200/0.72) = 277 contracts."""
+def test_swisstony_is_dark_while_soccer_is_halted():
+    """Owner order 2026-08-11: soccer halted — and swisstony's cells are
+    ALL soccer, so his sleeve places nothing anywhere. His $200 clip
+    (round 3) stays configured for the resume."""
+    from edge.shadow.kalshi_copies import PER_COPY_USD
+    assert PER_COPY_USD["swisstony"] == 200.00
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka = _Kalshi(0.72, outcomes={"Arsenal": "T-ARS", "Chelsea": "T-CHE"})
     row = {"slug": "epl-ars-che-2026-08-15", "outcome": "Arsenal",
            "price": 0.74, "whale": "swisstony",
            "entered_ts": time.time() - 60}
     st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
-    assert st["copied"] == 1
-    assert ka.orders == [("T-ARS", 0.72, 277)]
+    assert st.get("skipped_sport") == 1
+    assert not ka.orders
 
 
 def test_promoted_whale_0x2c33_copies_at_the_default_clip():

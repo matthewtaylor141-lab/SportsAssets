@@ -29,9 +29,8 @@ def test_allowed_cells_route_to_their_accounts():
     assert copy_allowed("kch123", "atc-nhl-tor-mtl-2026-10-12-tor")
     # HomeRunHazard's cells moved to test_paused_whale_copies_nothing —
     # he is PAUSED (owner 2026-08-11) and copies nothing anywhere.
-    assert copy_allowed("swisstony", "atc-lgscup-mia-asl-2026-08-05-mia")
-    assert copy_allowed("swisstony", "asc-epl-ars-che-2026-08-15-ars-1pt5")
-    assert copy_allowed("swisstony", "uslc-tul-srp-2026-08-05-srp")
+    # swisstony's soccer cells are HALTED with the sport (owner order
+    # 2026-08-11) — his positives moved to test_soccer_halt_blocks_everyone.
 
 
 def test_disallowed_cells_fail_closed():
@@ -73,7 +72,7 @@ def test_paused_whale_copies_nothing():
     assert not copy_allowed("homerunhazard", "mlb-tor-hou-2026-08-08-o8pt5",
                             price=0.60)
     # No band constraint for the unpaused (band-less) whales.
-    assert copy_allowed("swisstony", "atc-epl-ars-che-2026-08-15-ars",
+    assert copy_allowed("rn1", "aec-atp-rafjod-cormou-2026-08-06",
                         price=0.12)
 
 
@@ -84,7 +83,7 @@ def test_prop_markets_blocked_for_everyone():
     assert not copy_allowed("rn1", prop)
     assert not copy_allowed(
         "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465", prop)
-    assert not copy_allowed("swisstony", prop, price=0.60)
+    assert not copy_allowed("rn1", "astatc-atp-a-b-2026-08-11-hr-x-gte1")
     # Non-prop derivative types still governed by cells, not the blocklist:
     assert copy_allowed("rn1", "mlb-nyy-bos-2026-07-22-o8pt5")
 
@@ -165,3 +164,23 @@ def test_copy_sports_twins_are_byte_identical():
     b = (root / "edge-engine" / "src" / "edge" / "shadow"
          / "copy_sports.py").read_bytes()
     assert a == b, "edit both copies together — they are one policy"
+
+
+def test_soccer_halt_blocks_everyone():
+    """Owner order 2026-08-11 ("halt all soccer trading until this issue
+    is tested and resolved" — the PMUS stacking incident): soccer copies
+    refuse for EVERY whale, including swisstony's own measured cells and
+    the unrestricted wallets. The misc bucket (table tennis, cricket)
+    rides the same halt; US majors and tennis are untouched."""
+    assert not copy_allowed("swisstony", "atc-epl-ars-che-2026-08-15-ars")
+    assert not copy_allowed("swisstony", "asc-epl-ars-che-2026-08-15-ars-1pt5")
+    assert not copy_allowed("swisstony", "uslc-tul-srp-2026-08-05-srp")
+    assert not copy_allowed("rn1", "epl-ars-che-2026-08-15")
+    assert not copy_allowed(
+        "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465",
+        "tsc-epl-ars-che-2026-08-15-o2pt5")
+    assert not copy_allowed("rn1", "setkameua-pakser-sydand-2026-08-11"), \
+        "the misc bucket halts with soccer"
+    # Non-soccer flow unaffected:
+    assert copy_allowed("rn1", "aec-atp-rafjod-cormou-2026-08-06")
+    assert copy_allowed("rn1", "mlb-nyy-bos-2026-07-22-o8pt5")

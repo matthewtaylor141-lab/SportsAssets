@@ -63,6 +63,16 @@ UNRESTRICTED = frozenset({
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465",
 })
 
+# ALL soccer copying HALTED (owner order 2026-08-11 ~3:40pm ET: "halt
+# all soccer trading until this issue is tested and resolved" — the
+# PMUS same-market stacking incident). Checked before every other gate,
+# both venues. NOTE: sport_of buckets every league outside the named US
+# majors and tennis into 'soccer', so this also halts the misc bucket
+# (table tennis, cricket, esports) — conservative and intended. NOTE
+# ALSO: swisstony's cells are all soccer, so this halts him entirely
+# until the owner lifts it.
+HALTED_SPORTS = frozenset({"soccer"})
+
 # Whales copied NOWHERE right now (owner directive 2026-08-11 during the
 # profitability review): HomeRunHazard measured flat-negative on his own
 # live record (33 fills, 10 settled, -$0.80) while his prop-heavy flow
@@ -252,6 +262,8 @@ def copy_allowed(whale: str, slug: str, price: float | None = None) -> bool:
     if not w:
         return False
     if w in PAUSED:
+        return False
+    if sport_of(slug) in HALTED_SPORTS:
         return False
     if market_type_of(slug) in BLOCKED_TYPES:
         return False
