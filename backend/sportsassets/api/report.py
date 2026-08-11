@@ -173,7 +173,9 @@ def to_markdown(data: dict, period: str) -> str:
 
 
 async def build_report(period: str, fmt: str,
-                       max_stake: float | None = 100.0):
+                       max_stake: float | None = None):
+    # No stake cap by default (owner 2026-08-11: "include the excluded
+    # bucket") — downloadable reports must show the same record as the site.
     period = period if period in PERIOD_DAYS else "monthly"
     data = await track_record(_since_for(period), max_stake=max_stake)
     if not data.get("configured") or data.get("error"):

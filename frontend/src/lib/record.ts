@@ -125,16 +125,16 @@ export function useKalshiOpen(refreshMs = 30_000) {
 }
 
 export const SINCE = '2026-08-01'
-// The record presents strategy-sized positions. Anything costing more than
-// this is an execution incident or a non-strategy trade, not the $1-$5
-// strategy — excluded from every figure and ALWAYS disclosed on the page
-// (count + net P&L), because a record that hides its exclusions is not a
-// record.
-export const MAX_STAKE = 100
+// No stake cap (owner directive 2026-08-11: "include the excluded bucket").
+// The $100 cap dated from the $1-$5 ticket era, when a larger position could
+// only be an execution incident; at $50/$100 copy clips, legitimate positions
+// cross it routinely and the cap was silently carving real trades out of the
+// headline. Every position now counts. The $100 single-trade P&L swing
+// exclusion (over_pnl, owner directive 2026-08-06) is separate and stands.
 
 export function useTrackRecord(refreshMs = 30_000) {
   return usePolled<TrackRecordData>(
-    `/api/track-record?since=${SINCE}&max_stake=${MAX_STAKE}`,
+    `/api/track-record?since=${SINCE}`,
     refreshMs,
     (d) => d.error || null,
     // NEVER display a downgrade: a freshly-booted API serves the venue's
