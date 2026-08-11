@@ -43,13 +43,19 @@ PREVIEW_COST_TOLERANCE = 1.02  # venue-computed cost may exceed ours by ≤2%
 # before any autonomous buy, ask it whether the market is already held.
 _pos_cache: dict = {"ts": 0.0, "slugs": frozenset()}
 _POS_TTL = 20.0
+# Fail-open was designed for 20-second blips; the 2026-08-11 venue
+# maintenance stretched "the last snapshot" to HOURS and the no-stack
+# guard answered all morning with 6am truth while positions stacked to
+# $318. Beyond this bound the snapshot refuses instead of guessing.
+_POS_MAX_STALE_S = 600.0
 
 
 def account_holds(us_market_slug: str) -> bool:
     """True when the account already holds ANY open position on this US
-    market. Fail-open on a venue read error (a transient outage must not
-    starve the profitable copy sleeve) but reuse the last snapshot, so a
-    blip degrades to 20-second-old truth, not blindness."""
+    market. A read error reuses the last snapshot (a BLIP must not starve
+    the profitable copy sleeve) — but only within _POS_MAX_STALE_S: past
+    that bound the answer is HELD (refuse), because a snapshot hours old
+    is not truth, it is the 2026-08-11 stacking incident."""
     import time as _t
 
     now = _t.time()
@@ -75,6 +81,13 @@ def account_holds(us_market_slug: str) -> bool:
         except Exception:  # noqa: BLE001 — stale snapshot beats blindness
             log.warning("account_holds: positions read failed; using "
                         "stale snapshot", exc_info=True)
+    if now - _pos_cache["ts"] > _POS_MAX_STALE_S:
+        # Too stale to trust either answer: report HELD so the caller
+        # refuses the buy. A venue we cannot read for 10+ minutes is an
+        # outage, and an outage must starve the sleeve, not blind it.
+        log.warning("account_holds: snapshot %.0fs stale — failing "
+                    "CLOSED for %s", now - _pos_cache["ts"], us_market_slug)
+        return True
     return us_market_slug in _pos_cache["slugs"]
 
 

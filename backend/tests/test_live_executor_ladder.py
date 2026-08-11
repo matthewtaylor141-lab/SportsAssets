@@ -41,6 +41,8 @@ class _LadderPool:
     async def fetchval(self, sql, *a):
         if "INSERT INTO live_orders" in sql:
             return 101
+        if "SELECT 1 FROM live_orders" in sql and "us_market_slug = $2" in sql:
+            return 1 if getattr(self, "prior_market", None) == a[1] else None
         return None
 
     async def fetchrow(self, sql, *a):
@@ -129,3 +131,32 @@ def test_moneylines_skip_the_ladder_query_entirely(monkeypatch):
     asyncio.run(live_executor.maybe_execute(_payload(outcome="Arsenal"), 5.0))
     assert pool.ladder_queries == 0, "moneylines are not a ladder family"
     assert submitted
+
+
+def test_same_market_never_adds_even_when_venue_is_blind(monkeypatch):
+    """DB-side never-add (2026-08-11 afternoon, the $318 position): our
+    own order ledger refuses a second buy on the exact market, so a
+    stale venue snapshot can never let positions stack again."""
+    pool = _LadderPool([])
+    pool.prior_market = f"tsc-epl-ars-che-{TODAY}-o3pt5"
+    submitted = _wire(monkeypatch, pool,
+                      f"tsc-epl-ars-che-{TODAY}-o3pt5")
+    asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
+    assert not submitted
+    assert any("never-add" in str(a) for _, a in pool.updates)
+
+
+def test_stale_positions_snapshot_fails_closed(monkeypatch):
+    """account_holds past the staleness bound reports HELD: an outage
+    starves the sleeve instead of blinding the no-stack guard."""
+    import time as _t
+
+    from sportsassets import pmus as _pmus
+
+    monkeypatch.setattr(_pmus, "_get_client",
+                        lambda: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setitem(_pmus._pos_cache, "ts", _t.time() - 3600)
+    monkeypatch.setitem(_pmus._pos_cache, "slugs", frozenset())
+    assert _pmus.account_holds("tsc-anything") is True
+    monkeypatch.setitem(_pmus._pos_cache, "ts", _t.time() - 60)
+    assert _pmus.account_holds("tsc-anything") is False,         "a fresh-enough snapshot still answers normally"

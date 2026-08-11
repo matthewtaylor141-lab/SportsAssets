@@ -721,6 +721,27 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 "UPDATE live_orders SET us_market_slug=$2 WHERE id=$1",
                 row_id, mapping["market_slug"],
             )
+            # NEVER-ADD, DB-SIDE (incident 2026-08-11 afternoon, the $318
+            # Over-2.5 position): the venue-side no-stack below answers
+            # from a positions snapshot that goes silently stale through
+            # a venue outage — Polymarket's maintenance morning left it
+            # hours old and every re-entry passed. Our OWN order ledger
+            # is postgres: it survives deploys and outages, and one
+            # market copied once is one row. Any filled or in-flight
+            # order on this exact market refuses another, whatever
+            # identity or asset id proposes it.
+            prior = await pool.fetchval(
+                "SELECT 1 FROM live_orders "
+                "WHERE us_market_slug = $2 AND id <> $1 "
+                "AND status IN ('filled', 'submitting') "
+                "AND placed_at > now() - interval '48 hours' LIMIT 1",
+                row_id, mapping["market_slug"])
+            if prior:
+                await pool.execute(
+                    "UPDATE live_orders SET status='rejected', error=$2 "
+                    "WHERE id=$1", row_id,
+                    "never-add: this market was already copied")
+                return
             # ONE LINE PER LADDER (owner approval 2026-08-11): a whale
             # laddering one game across nested totals or spread lines
             # (O1.5/O2.5/O3.5) is ONE correlated bet wearing several
