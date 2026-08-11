@@ -292,32 +292,65 @@ class ChainListener:
         val = await pool.fetchval("SELECT value FROM ingestion_state WHERE key='chain.last_block'")
         return int(json.loads(val)) if val is not None else None
 
+    async def _get_logs(self, start: int, end: int) -> list[dict]:
+        resp = await self._http.post(
+            self._http_url,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_getLogs",
+                "params": [
+                    {
+                        "fromBlock": hex(start),
+                        "toBlock": hex(end),
+                        "address": self._addresses,
+                        "topics": self._topics,
+                    }
+                ],
+            },
+        )
+        if resp.status_code >= 400:
+            # Surface the provider's own explanation — a bare "400 Bad
+            # Request" burned an hour of Path A downtime on 2026-08-11
+            # because the reason (range/response cap? param shape?) was
+            # discarded here and only Alchemy's dashboard showed the
+            # rejects.
+            raise RuntimeError(
+                f"eth_getLogs {start}..{end} -> HTTP {resp.status_code}: "
+                f"{resp.text[:300]}")
+        body = resp.json()
+        if body.get("error"):
+            raise RuntimeError(
+                f"eth_getLogs {start}..{end} -> RPC error: "
+                f"{str(body['error'])[:300]}")
+        return body.get("result") or []
+
     async def backfill(self, from_block: int, to_block: int) -> int:
-        """eth_getLogs over a gap (reconnect recovery). Returns log count processed."""
+        """eth_getLogs over a gap (reconnect recovery). Returns log count processed.
+
+        Providers cap getLogs differently (block span, log count, response
+        bytes) and answer an over-cap query with 400 — so a rejected chunk
+        retries at smaller spans before giving up, and the final failure
+        carries the provider's error text.
+        """
         count = 0
         step = 2000
-        for start in range(from_block, to_block + 1, step):
+        start = from_block
+        while start <= to_block:
             end = min(start + step - 1, to_block)
-            resp = await self._http.post(
-                self._http_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "eth_getLogs",
-                    "params": [
-                        {
-                            "fromBlock": hex(start),
-                            "toBlock": hex(end),
-                            "address": self._addresses,
-                            "topics": self._topics,
-                        }
-                    ],
-                },
-            )
-            resp.raise_for_status()
-            for entry in resp.json().get("result") or []:
+            try:
+                entries = await self._get_logs(start, end)
+            except RuntimeError:
+                if step > 10:
+                    step = max(10, step // 10)
+                    log.warning("backfill chunk %s..%s rejected — retrying "
+                                "at %s-block spans", start, end, step)
+                    continue
+                raise
+            for entry in entries:
                 await self._handle_log(entry)
                 count += 1
+            start = end + 1
         return count
 
     async def _current_block(self) -> int:
@@ -336,13 +369,33 @@ class ChainListener:
         while True:
             try:
                 await self.refresh_roster()
-                # Recover any gap before subscribing.
+                # Recover any gap before subscribing — but NEVER let the
+                # catch-up block the live stream. On 2026-08-11 a rejected
+                # getLogs threw here, so every reconnect died before
+                # eth_subscribe and Path A stayed down for an hour while
+                # the subscription itself would have worked fine. The
+                # poller + reconciler own gap coverage; a skipped backfill
+                # costs nothing but duplicate-suppressed rows.
                 cursor = await self._load_cursor()
                 if cursor is not None:
                     tip = await self._current_block()
                     if tip > cursor:
-                        n = await self.backfill(cursor + 1, tip)
-                        log.info("backfilled %s logs over blocks %s..%s", n, cursor + 1, tip)
+                        try:
+                            n = await self.backfill(cursor + 1, tip)
+                            log.info("backfilled %s logs over blocks %s..%s",
+                                     n, cursor + 1, tip)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("backfill %s..%s failed (%s) — "
+                                        "skipping catch-up, subscribing live",
+                                        cursor + 1, tip, exc)
+                            await heartbeat(
+                                "chain_listener", "ok",
+                                {"backfill_skipped": str(exc)[:300],
+                                 "gap_blocks": tip - cursor})
+                            # Move past the poisoned range so the next
+                            # reconnect doesn't re-fight the same rejection
+                            # forever; the poller covers the gap.
+                            await self._save_cursor(tip)
 
                 async with websockets.connect(self._ws_url, ping_interval=15, ping_timeout=10) as ws:
                     await ws.send(
