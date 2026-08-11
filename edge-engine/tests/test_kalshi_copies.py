@@ -32,8 +32,9 @@ def _fresh_discovery_cache():
 class _Kalshi:
     name = "kalshi"
 
-    def __init__(self, ask, outcomes=None):
+    def __init__(self, ask, outcomes=None, ask_size=500.0):
         self.ask = ask
+        self.ask_size = ask_size
         self.orders = []
         self._outcomes = outcomes or {"Dallas Wings": "T-DAL",
                                       "Chicago Sky": "T-CHI"}
@@ -49,7 +50,8 @@ class _Kalshi:
     def get_book(self, market_id, ticker):
         return MarketBook(venue=self.name, market_id=market_id,
                           outcome_id=ticker, bids=[],
-                          asks=[BookLevel(self.ask, 60)], ts=time.time())
+                          asks=[BookLevel(self.ask, self.ask_size)],
+                          ts=time.time())
 
     def place_order(self, ticker, price, count, **kw):
         self.orders.append((ticker, price, count))
@@ -113,9 +115,9 @@ def test_sport_assignments_gate_the_sweep():
     row3 = {**_ROW, "whale": "RN1"}
     st3, ka3, _ = _run(0.48, rows=[row3])
     assert st3["copied"] == 1
-    # RN1 clips at $100 on Kalshi (owner directive 2026-08-10):
-    # floor(100/0.48) = 208 contracts.
-    assert ka3.orders == [("T-DAL", 0.48, 208)]
+    # RN1 clips at $150 on Kalshi (owner approval 2026-08-11 round 4):
+    # floor(150/0.48) = 312 contracts.
+    assert ka3.orders == [("T-DAL", 0.48, 312)]
 
 
 def test_swisstony_kalshi_clip_is_200():
@@ -554,11 +556,11 @@ def test_rn1_is_exempt_from_the_day_budget_and_does_not_eat_it():
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka = _Kalshi(0.48)
     rn1 = {**_ROW, "whale": "RN1"}
-    # Budget of $50: one $100 RN1 clip blows straight past it.
+    # Budget of $50: one $150 RN1 clip blows straight past it.
     st = sweep(kalshi=ka, ledger=led, identities=[rn1], live=True,
                day_usd=50.0)
     assert st["copied"] == 1 and st.get("skipped_day_cap") is None
-    assert ka.orders[0][2] == 208          # full $100 clip placed
+    assert ka.orders[0][2] == 312          # full $150 clip placed
     # A capped whale on a FRESH matchup still has the whole $50 budget:
     # RN1's ~$99.84 spend is excluded from the cap arithmetic.
     ka2 = _Kalshi(0.48, outcomes={"Atlanta Dream": "T-ATL",
@@ -661,3 +663,19 @@ def test_venue_guard_lets_a_fresh_copy_through():
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
     assert st["copied"] == 1
     assert ka.orders == [("T-DAL", 0.48, 104)]
+
+
+def test_thin_book_is_never_taken():
+    """Liquidity floor (owner approval 2026-08-11): a top-of-book showing
+    less than HALF our size is a market our own taker order would move —
+    the overnight thin-book bleed. $50 at 48c wants 104 contracts; a
+    book showing 40 is skipped, one showing 52 trades."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _Kalshi(0.48, ask_size=40)
+    st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
+    assert st.get("skipped_thin_book") == 1
+    assert not ka.orders
+    led2 = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka2 = _Kalshi(0.48, ask_size=52)
+    st2 = sweep(kalshi=ka2, ledger=led2, identities=[dict(_ROW)], live=True)
+    assert st2["copied"] == 1

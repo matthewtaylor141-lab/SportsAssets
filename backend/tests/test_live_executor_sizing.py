@@ -1,4 +1,5 @@
-"""Per-whale copy sizing. RN1 clips at $100 on his own settled record;
+"""Per-whale copy sizing. RN1 clips at $150 (owner approval
+2026-08-11 round 4 - profitable every day since Aug 3);
 SwissTony at $200 (owner decision 2026-08-11, profitability round 3 —
 strongest measured earner, +$760 on 345 settled at $100); everyone else
 (the paused HRH, out-of-season kch123, the newly promoted 0x2c33
@@ -9,8 +10,8 @@ from sportsassets.live_executor import per_fill_usd
 
 
 def test_proven_sleeves_clip_at_their_owner_set_sizes():
-    assert per_fill_usd("RN1") == 100.00
-    assert per_fill_usd("rn1") == 100.00
+    assert per_fill_usd("RN1") == 150.00
+    assert per_fill_usd("rn1") == 150.00
     assert per_fill_usd("SwissTony") == 200.00
     assert per_fill_usd("swisstony") == 200.00
 

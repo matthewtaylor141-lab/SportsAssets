@@ -85,7 +85,7 @@ class _Kalshi:
         from edge.venues.base import BookLevel, MarketBook
         return MarketBook(venue=self.name, market_id=market_id,
                           outcome_id=ticker, bids=[],
-                          asks=[BookLevel(self.ask, 60)], ts=time.time())
+                          asks=[BookLevel(self.ask, 500)], ts=time.time())
 
     def place_order(self, ticker, price, count, **kw):
         self.orders.append((ticker, price, count))

@@ -73,7 +73,9 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # settled). The $1,200 breaker floor now represents ~6 full swisstony
 # losses; kept deliberately (tighter protection during the scale-up),
 # EDGE_KCOPY_HALT_USD overrides if it proves too twitchy.
-PER_COPY_USD = {"rn1": 100.00, "swisstony": 200.00}
+# Same day, round 4: RN1 to $150 — profitable every single day since
+# Aug 3 (+$250 lifetime on 332 settled at $100).
+PER_COPY_USD = {"rn1": 150.00, "swisstony": 200.00}
 PER_COPY_DEFAULT = 50.00
 # A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
 # decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.
@@ -639,6 +641,15 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             continue
         count = int(per / ask)
         if count < 1:
+            continue
+        # LIQUIDITY FLOOR (owner approval 2026-08-11): only copy when
+        # the top of book shows at least HALF our size. The overnight
+        # bleed came from thin 3am books (table tennis, low-tier
+        # challengers) where our taker order WAS the market — a whale's
+        # entry edge does not survive us moving the price to buy it.
+        if book.asks[0].size < count / 2:
+            stats["skipped_thin_book"] = \
+                stats.get("skipped_thin_book", 0) + 1
             continue
         # Same-event guard: never build both sides of one market unless
         # the completed pair locks profit, and then only pair-matched.

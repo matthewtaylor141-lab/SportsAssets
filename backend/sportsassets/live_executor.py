@@ -285,8 +285,9 @@ PENNY_TRIAL_TOTAL_USD = float(os.environ.get("COPY_TOTAL_USD", "inf"))
 # $1 constant (workers/underdog.py PER_FILL_USD).
 PENNY_TRIAL_PER_FILL_USD = 50.00
 # Per-whale override map; keys are lowercased usernames; anyone absent
-# gets the default.
-PER_FILL_BY_WHALE = {"rn1": 100.00, "swisstony": 200.00}
+# gets the default. RN1 $100 -> $150 2026-08-11 (owner approval,
+# round 4): profitable every single day since Aug 3.
+PER_FILL_BY_WHALE = {"rn1": 150.00, "swisstony": 200.00}
 
 
 def per_fill_usd(whale_username: str | None) -> float:
