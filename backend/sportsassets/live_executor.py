@@ -295,6 +295,31 @@ def per_fill_usd(whale_username: str | None) -> float:
                                  PENNY_TRIAL_PER_FILL_USD)
 
 
+def _ladder_kind(us_slug: str) -> str | None:
+    """Venue-grammar kind prefix when the market belongs to a LADDERED
+    family (many nested lines per game): 'tsc' totals, 'asc' spreads.
+    Moneylines/events (atc/aec) have one market per game — no ladder."""
+    kind = (us_slug or "").lower().split("-", 1)[0]
+    return kind if kind in ("tsc", "asc") else None
+
+
+def _us_game_key(us_slug: str) -> str | None:
+    """Game identity of a venue-grammar slug: league + teams + date,
+    kind prefix and line suffix stripped — 'tsc-epl-ars-che-2026-08-15-
+    o2pt5' and 'tsc-epl-ars-che-2026-08-15-o3pt5' are the SAME game.
+    None when the slug has no recognizable date (fail open: an
+    unparseable slug must not block a legitimate copy)."""
+    parts = [p for p in (us_slug or "").lower().split("-") if p]
+    if len(parts) < 5:
+        return None
+    parts = parts[1:]                     # drop the kind prefix
+    for i in range(len(parts) - 2):
+        if (len(parts[i]) == 4 and parts[i].isdigit()
+                and parts[i + 1].isdigit() and parts[i + 2].isdigit()):
+            return "-".join(parts[:i + 3])
+    return None
+
+
 # ── Manual trade desk (owner directive 2026-08-07) ───────────────────
 # An admin directs trades ("$50 on Yankees ML") executed by the live
 # account as the 'manual' sleeve: its own budget, its own P&L line,
@@ -696,6 +721,31 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 "UPDATE live_orders SET us_market_slug=$2 WHERE id=$1",
                 row_id, mapping["market_slug"],
             )
+            # ONE LINE PER LADDER (owner approval 2026-08-11): a whale
+            # laddering one game across nested totals or spread lines
+            # (O1.5/O2.5/O3.5) is ONE correlated bet wearing several
+            # tickets — a 2-goal game wins O1.5 and loses the other two
+            # at once, and for a pair-capture whale some rungs are half
+            # of a hedge we don't hold. The first line a whale entered
+            # (his primary signal) is copied; later rungs on the same
+            # game and family are refused, account-wide.
+            lk = _ladder_kind(mapping["market_slug"])
+            if lk is not None:
+                gk = _us_game_key(mapping["market_slug"])
+                if gk is not None:
+                    held = await pool.fetch(
+                        "SELECT us_market_slug FROM live_orders "
+                        "WHERE status IN ('filled', 'submitting') "
+                        "AND id <> $1 AND us_market_slug LIKE $2 "
+                        "AND placed_at > now() - interval '48 hours'",
+                        row_id, lk + "-%")
+                    if any(_us_game_key(r["us_market_slug"]) == gk
+                           for r in held):
+                        await pool.execute(
+                            "UPDATE live_orders SET status='rejected', "
+                            "error=$2 WHERE id=$1", row_id,
+                            "same-game ladder: one line per game")
+                        return
             # NO-STACK (owner 2026-08-08: "trades are higher than $10 per
             # trade"): the engine, the desk, and this copy path each cap
             # their own tickets but shared no ledger, so two sleeves could
