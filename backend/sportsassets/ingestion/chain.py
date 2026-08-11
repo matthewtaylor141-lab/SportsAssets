@@ -376,26 +376,33 @@ class ChainListener:
                 # the subscription itself would have worked fine. The
                 # poller + reconciler own gap coverage; a skipped backfill
                 # costs nothing but duplicate-suppressed rows.
-                cursor = await self._load_cursor()
-                if cursor is not None:
-                    tip = await self._current_block()
-                    if tip > cursor:
-                        try:
+                # The WHOLE catch-up (tip check included) is optional:
+                # a throttled eth_blockNumber (429, 2026-08-11 afternoon)
+                # used to throw here and kill every reconnect before the
+                # subscribe, exactly like the rejected backfill before it.
+                try:
+                    cursor = await self._load_cursor()
+                    if cursor is not None:
+                        tip = await self._current_block()
+                        if tip > cursor:
                             n = await self.backfill(cursor + 1, tip)
                             log.info("backfilled %s logs over blocks %s..%s",
                                      n, cursor + 1, tip)
-                        except Exception as exc:  # noqa: BLE001
-                            log.warning("backfill %s..%s failed (%s) — "
-                                        "skipping catch-up, subscribing live",
-                                        cursor + 1, tip, exc)
-                            await heartbeat(
-                                "chain_listener", "ok",
-                                {"backfill_skipped": str(exc)[:300],
-                                 "gap_blocks": tip - cursor})
-                            # Move past the poisoned range so the next
-                            # reconnect doesn't re-fight the same rejection
-                            # forever; the poller covers the gap.
                             await self._save_cursor(tip)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("catch-up failed (%s) — skipping, "
+                                "subscribing live", exc)
+                    await heartbeat(
+                        "chain_listener", "ok",
+                        {"backfill_skipped": str(exc)[:300]})
+                    # Move past any poisoned range so the next reconnect
+                    # doesn't re-fight the same rejection; the poller
+                    # covers the gap. Best-effort — under a 429 the tip
+                    # itself may be unknowable, and that's fine.
+                    try:
+                        await self._save_cursor(await self._current_block())
+                    except Exception:  # noqa: BLE001
+                        pass
 
                 async with websockets.connect(self._ws_url, ping_interval=15, ping_timeout=10) as ws:
                     await ws.send(
@@ -415,6 +422,7 @@ class ChainListener:
                     await ws.recv()  # subscription ack
                     log.info("Path A subscribed to OrderFilled on %s", self._addresses)
                     await heartbeat("chain_listener", "ok", self._beat_detail())
+                    self._fail_streak = 0
                     roster_refreshed = time.time()
                     while True:
                         raw = await asyncio.wait_for(ws.recv(), timeout=60)
@@ -435,6 +443,17 @@ class ChainListener:
                 log.info("no WS traffic for 60s — resubscribing")
                 await heartbeat("chain_listener", "ok", {"resubscribe": "quiet"})
             except Exception as exc:  # noqa: BLE001
-                log.warning("chain listener error: %s — reconnecting in 2s", exc)
-                await heartbeat("chain_listener", "down", {"error": str(exc)})
-                await asyncio.sleep(2)
+                # Exponential backoff, capped at 2 minutes. A fixed 2s
+                # retry against a rate-limiting provider (429, 2026-08-11)
+                # is a denial-of-service on our own quota: ~1,800 rejected
+                # calls per hour that keep the throttle pinned. Reset on
+                # every successful subscribe.
+                self._fail_streak = getattr(self, "_fail_streak", 0) + 1
+                delay = min(2 * (2 ** min(self._fail_streak - 1, 6)), 120)
+                log.warning("chain listener error: %s — reconnecting in %ss",
+                            exc, delay)
+                await heartbeat("chain_listener", "down",
+                                {"error": str(exc)[:300],
+                                 "fail_streak": self._fail_streak,
+                                 "retry_in_s": delay})
+                await asyncio.sleep(delay)
