@@ -18,10 +18,15 @@ from edge.venues.mapper import VenueMarket
 def _fresh_discovery_cache():
     """League discovery is cached ACROSS sweeps in production; between
     tests a recycled fake-adapter id must never serve another test's
-    market list."""
+    market list. Same for the venue-guard cache and the once-per-boot
+    orphan reconcile flag."""
     _kc._DISCO_CACHE.clear()
+    _kc._VENUE_GUARD_CACHE.clear()
+    _kc._ORPHANS_RECONCILED["done"] = False
     yield
     _kc._DISCO_CACHE.clear()
+    _kc._VENUE_GUARD_CACHE.clear()
+    _kc._ORPHANS_RECONCILED["done"] = False
 
 
 class _Kalshi:
@@ -576,3 +581,83 @@ def test_day_budget_zero_means_no_cap_at_all():
     st = sweep(kalshi=ka, ledger=led, identities=[hrh], live=True,
                day_usd=0.0)
     assert st["copied"] == 1 and st.get("skipped_day_cap") is None
+
+
+class _GuardedKalshi(_Kalshi):
+    """Fake with the venue-portfolio surface (the real adapter's
+    open_ticker_map): what the VENUE says we hold and have resting."""
+
+    def __init__(self, ask, positions=None, resting_buys=None,
+                 unavailable=False, **kw):
+        super().__init__(ask, **kw)
+        self.positions = set(positions or [])
+        self.resting_buys = dict(resting_buys or {})
+        self.unavailable = unavailable
+        self.cancelled = []
+
+    def open_ticker_map(self):
+        if self.unavailable:
+            return None
+        return {"positions": set(self.positions),
+                "resting_buys": {t: list(v)
+                                 for t, v in self.resting_buys.items()}}
+
+    def cancel_order(self, order_id):
+        self.cancelled.append(order_id)
+        return "cancelled"
+
+
+def test_venue_held_position_blocks_the_copy_after_ledger_amnesia():
+    """Incident 2026-08-11: deploys wiped the sqlite ledger, so claims
+    and the ledger-side never-add went blind while the venue still held
+    the position — the same dog was re-copied every boot to $606. The
+    VENUE's portfolio must refuse the buy even with an empty ledger."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")  # fresh = post-deploy
+    ka = _GuardedKalshi(0.48, positions={"T-DAL"})
+    st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
+    assert st.get("skipped_held_ticker") == 1
+    assert not ka.orders, "venue-held ticker re-bought after ledger wipe"
+
+
+def test_venue_resting_buy_blocks_the_copy_too():
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _GuardedKalshi(0.48, resting_buys={"T-DAL": ["o-orphan"]})
+    st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
+    assert st.get("skipped_held_ticker") == 1
+    assert not ka.orders
+
+
+def test_unreadable_venue_portfolio_refuses_all_buys():
+    """Fail CLOSED: if the venue's answer cannot be read, the sweep
+    places no buys at all rather than trusting the amnesiac ledger."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _GuardedKalshi(0.48, unavailable=True)
+    st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
+    assert st.get("venue_guard_unavailable") == 1
+    assert st.get("skipped_no_guard") == 1
+    assert st["copied"] == 0 and not ka.orders
+
+
+def test_orphan_resting_buys_are_cancelled_once_per_boot():
+    """A resting BUY the venue holds with no ledger context is a
+    pre-deploy orphan: cancel it before it fills as an unclaimed,
+    unattributed position. An order THIS boot placed keeps resting."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    led.set_state("kalshi_order:o-mine", {"market_key": "kalshi:T-X"})
+    ka = _GuardedKalshi(
+        0.48, resting_buys={"T-X": ["o-mine"], "T-ORPHAN": ["o-orphan"]})
+    sweep(kalshi=ka, ledger=led, identities=[], live=True)
+    assert ka.cancelled == ["o-orphan"]
+    # Second sweep same process: reconcile must not re-run.
+    sweep(kalshi=ka, ledger=led, identities=[], live=True)
+    assert ka.cancelled == ["o-orphan"]
+
+
+def test_venue_guard_lets_a_fresh_copy_through():
+    """The guard blocks re-buys, not first buys: clean venue portfolio,
+    clean ledger -> the copy places normally."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _GuardedKalshi(0.48)
+    st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
+    assert st["copied"] == 1
+    assert ka.orders == [("T-DAL", 0.48, 104)]

@@ -230,6 +230,44 @@ def _pmus_ask(pmus, slug: str, outcome: str) -> float | None:
     return book.asks[0].price
 
 
+# Venue portfolio reads are two REST calls — cache briefly. Keyed by
+# adapter id like _DISCO_CACHE so tests with fresh fakes never share.
+_VENUE_GUARD_CACHE: dict = {}
+_VENUE_GUARD_TTL_S = 60.0
+# Once per PROCESS: cancel resting BUY orders the venue holds that this
+# boot's ledger has no context for — they are pre-deploy orphans whose
+# fills would land as unattributed, unclaimed positions.
+_ORPHANS_RECONCILED: dict = {"done": False}
+
+
+def _venue_guard(kalshi) -> dict | None:
+    key = id(kalshi)
+    hit = _VENUE_GUARD_CACHE.get(key)
+    if hit and time.time() - hit["at"] < _VENUE_GUARD_TTL_S:
+        return hit["map"]
+    m = kalshi.open_ticker_map()
+    if m is not None:
+        _VENUE_GUARD_CACHE[key] = {"at": time.time(), "map": m}
+    return m
+
+
+def _reconcile_orphan_rests(kalshi, ledger, guard: dict, stats: dict) -> None:
+    if _ORPHANS_RECONCILED["done"]:
+        return
+    _ORPHANS_RECONCILED["done"] = True
+    for _ticker, oids in (guard.get("resting_buys") or {}).items():
+        for oid in oids:
+            if ledger.get_state(f"kalshi_order:{oid}"):
+                continue          # this boot placed it — legitimate
+            try:
+                kalshi.cancel_order(oid)
+                stats["orphan_rests_cancelled"] = \
+                    stats.get("orphan_rests_cancelled", 0) + 1
+            except Exception:  # noqa: BLE001 — venue TTL reaps it anyway
+                stats["orphan_cancel_fail"] = \
+                    stats.get("orphan_cancel_fail", 0) + 1
+
+
 def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
           day_usd: float = 200.0, max_age_s: float | None = None,
           pmus=None, on_copied=None) -> dict:
@@ -260,6 +298,20 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         if blocked:
             stats["blocked"] = blocked
             return stats
+    # VENUE-SIDE guard (incident 2026-08-11: the ledger below lives in a
+    # build-dir sqlite that every deploy wipes, while the venue keeps
+    # our positions and 15-minute resting buys alive — three same-day
+    # deploys re-copied the same dog to $606 against a $100 clip). The
+    # venue's portfolio is the one memory a deploy cannot erase, so
+    # LIVE buys additionally check it, and if it cannot be read this
+    # sweep places NO buys at all: fail closed, never amnesiac.
+    venue_guard = None
+    if live and hasattr(kalshi, "open_ticker_map"):
+        venue_guard = _venue_guard(kalshi)
+        if venue_guard is None:
+            stats["venue_guard_unavailable"] = 1
+        else:
+            _reconcile_orphan_rests(kalshi, ledger, venue_guard, stats)
     sides = open_kalshi_sides(ledger)
     day = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     spend = ledger.get_state("kcopy_day") or {}
@@ -413,6 +465,20 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             stats["skipped_held_ticker"] = \
                 stats.get("skipped_held_ticker", 0) + 1
             continue
+        # ...and the VENUE's own answer, which survives deploys
+        # (incident 2026-08-11): a position or resting buy the venue
+        # reports refuses the copy even when this boot's ledger has
+        # never heard of it — and an unreadable venue refuses ALL buys.
+        if live and hasattr(kalshi, "open_ticker_map"):
+            if venue_guard is None:
+                stats["skipped_no_guard"] = \
+                    stats.get("skipped_no_guard", 0) + 1
+                continue
+            if (target_ticker in venue_guard["positions"]
+                    or target_ticker in venue_guard["resting_buys"]):
+                stats["skipped_held_ticker"] = \
+                    stats.get("skipped_held_ticker", 0) + 1
+                continue
         book = kalshi.get_book(target_ticker, target_ticker)
         if book is None or not book.asks or book.asks[0].size < 1:
             continue
@@ -523,6 +589,9 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                     ledger.set_state(rest_key, {"until": now + 900,
                                                 "order_id": rr["order_id"],
                                                 "px": mpx})
+                    if venue_guard is not None:
+                        venue_guard["resting_buys"].setdefault(
+                            target_ticker, []).append(rr["order_id"])
                     stats["maker_rested"] = \
                         stats.get("maker_rested", 0) + 1
                     _dc["rested"] += 1
@@ -605,6 +674,10 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 ledger.set_state(f"kalshi_inline:{r['order_id']}",
                                  {"ts": time.time()})
             note_fill(sides, target_ticker, ask, filled)
+            if venue_guard is not None:
+                # The cached venue view is up to 60s stale — teach it our
+                # own fill so a second identity THIS sweep sees it held.
+                venue_guard["positions"].add(target_ticker)
             stats["copied"] += 1
             # Claim the position back to the platform so the PMUS paths
             # never buy it a second time (one copy ACROSS venues). Best

@@ -600,6 +600,50 @@ class KalshiAdapter(VenueAdapter):
             out["orders_error"] = f"{type(exc).__name__}"
         return out
 
+    def open_ticker_map(self) -> dict | None:
+        """Venue-side never-add source: tickers the VENUE says we hold or
+        have resting BUY orders on, straight from the portfolio API.
+
+        Exists because the local ledger's memory does not survive a
+        deploy (2026-08-11: three same-day deploys wiped the claims and
+        the never-add veto each time while the venue kept the positions
+        and 15-minute rests alive — the same dog was re-copied every
+        boot, stacking one ticker to $606 against a $100 clip). Returns
+        None on ANY fetch failure — callers must fail CLOSED and refuse
+        buys, never fall back to the amnesiac local view."""
+        try:
+            path = "/trade-api/v2/portfolio/positions"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/positions", params={"limit": 200},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code != 200:
+                return None
+            positions = set()
+            for r in (resp.json() or {}).get("market_positions") or []:
+                qty = abs(float(r.get("position_fp")
+                                or r.get("position") or 0))
+                t = str(r.get("ticker") or "")
+                if t and qty > 0:
+                    positions.add(t)
+            path = "/trade-api/v2/portfolio/orders"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/orders",
+                params={"status": "resting", "limit": 100},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code != 200:
+                return None
+            resting_buys: dict[str, list[str]] = {}
+            for o in (resp.json() or {}).get("orders") or []:
+                if str(o.get("action") or "").lower() != "buy":
+                    continue          # sells are exits — never cancel/veto
+                t = str(o.get("ticker") or "")
+                oid = str(o.get("order_id") or o.get("id") or "")
+                if t and oid:
+                    resting_buys.setdefault(t, []).append(oid)
+            return {"positions": positions, "resting_buys": resting_buys}
+        except requests.RequestException:
+            return None
+
     def cancel_order(self, order_id: str) -> str:
         """DELETE a resting order. Returns 'cancelled' (confirmed dead,
         safe to repost), 'gone' (404 — already filled or expired: do NOT
