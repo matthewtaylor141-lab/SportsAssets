@@ -102,7 +102,7 @@ def test_copy_sweep_refuses_the_second_side_of_a_losing_pair():
                     mode="LIVE_BETA", category="kalshi_copy", decision={})
     ka = _Kalshi(0.50)   # Baltimore ask 50c: 0.50+0.55 > 1 -> refuse
     row = {"slug": "wnba-dal-chi-2026-08-04", "outcome": "Dallas Wings",
-           "price": 0.55, "whale": "HomeRunHazard",
+           "price": 0.55, "whale": "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563-1759935795465",  # HRH paused 2026-08-11
            "entered_ts": time.time() - 60}
     st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
     assert st.get("skipped_cross_side") == 1
@@ -118,7 +118,7 @@ def test_copy_sweep_completes_a_guaranteed_pair_matched():
                     mode="LIVE_BETA", category="kalshi_copy", decision={})
     ka = _Kalshi(0.50)
     row = {"slug": "wnba-dal-chi-2026-08-04", "outcome": "Dallas Wings",
-           "price": 0.55, "whale": "HomeRunHazard",
+           "price": 0.55, "whale": "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563-1759935795465",  # HRH paused 2026-08-11
            "entered_ts": time.time() - 60}
     st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
     assert st["copied"] == 1

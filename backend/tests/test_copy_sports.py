@@ -27,12 +27,8 @@ def test_allowed_cells_route_to_their_accounts():
     assert copy_allowed("kch123", "tsc-cbb-duke-unc-2026-12-01-o150pt5")
     assert copy_allowed("kch123", "asc-nfl-kc-buf-2026-09-10-kc-3pt5")
     assert copy_allowed("kch123", "atc-nhl-tor-mtl-2026-10-12-tor")
-    assert copy_allowed("HomeRunHazard", "tsc-mlb-sf-tex-2026-08-05-o8pt5",
-                        price=0.55)
-    assert copy_allowed("homerunhazard", "tsc-wnba-dal-wsh-2026-08-05-o160",
-                        price=0.62)
-    assert copy_allowed("homerunhazard", "atc-wnba-dal-wsh-2026-08-05-wsh",
-                        price=0.50)
+    # HomeRunHazard's cells moved to test_paused_whale_copies_nothing —
+    # he is PAUSED (owner 2026-08-11) and copies nothing anywhere.
     assert copy_allowed("swisstony", "atc-lgscup-mia-asl-2026-08-05-mia")
     assert copy_allowed("swisstony", "asc-epl-ars-che-2026-08-15-ars-1pt5")
     assert copy_allowed("swisstony", "uslc-tul-srp-2026-08-05-srp")
@@ -64,17 +60,33 @@ def test_disallowed_cells_fail_closed():
     assert not copy_allowed("swisstony", "")
 
 
-def test_homerunhazard_entry_band_50_to_95():
-    slug = "tsc-mlb-sf-tex-2026-08-05-o8pt5"
-    assert copy_allowed("homerunhazard", slug, price=0.50)
-    assert copy_allowed("homerunhazard", slug, price=0.95)
-    assert not copy_allowed("homerunhazard", slug, price=0.49), \
-        "every sub-50c band in his book loses"
-    assert not copy_allowed("homerunhazard", slug, price=0.97), \
-        ">95c fails the $1M sample floor"
-    # No band constraint for the others.
+def test_paused_whale_copies_nothing():
+    """Owner directive 2026-08-11 (profitability review): HomeRunHazard
+    paused — flat-negative live record, prop-heavy flow. Every cell that
+    used to pass now refuses, including his strongest, at any price."""
+    assert not copy_allowed("HomeRunHazard", "tsc-mlb-sf-tex-2026-08-05-o8pt5",
+                            price=0.55)
+    assert not copy_allowed("homerunhazard", "tsc-wnba-dal-wsh-2026-08-05-o160",
+                            price=0.62)
+    assert not copy_allowed("homerunhazard", "atc-wnba-dal-wsh-2026-08-05-wsh",
+                            price=0.50)
+    assert not copy_allowed("homerunhazard", "mlb-tor-hou-2026-08-08-o8pt5",
+                            price=0.60)
+    # No band constraint for the unpaused (band-less) whales.
     assert copy_allowed("swisstony", "atc-epl-ars-che-2026-08-15-ars",
                         price=0.12)
+
+
+def test_prop_markets_blocked_for_everyone():
+    """Owner directive 2026-08-11: live prop copies graded 3W/16L
+    (-64% ROI) — the type is blocked even for UNRESTRICTED whales."""
+    prop = "astatc-mlb-kc-lad-2026-08-11-hr-tomedm-gte1"
+    assert not copy_allowed("rn1", prop)
+    assert not copy_allowed(
+        "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465", prop)
+    assert not copy_allowed("swisstony", prop, price=0.60)
+    # Non-prop derivative types still governed by cells, not the blocklist:
+    assert copy_allowed("rn1", "mlb-nyy-bos-2026-07-22-o8pt5")
 
 
 def test_kalshi_fee_floor_for_thin_edge_cells():
@@ -104,14 +116,15 @@ def test_kindless_feed_grammar_market_types():
 def test_kindless_cells_route_correctly():
     # Strongest cells now reachable on production-shaped slugs:
     assert copy_allowed("kch123", "nba-lal-bos-2026-11-01-lal-5pt5")
-    assert copy_allowed("homerunhazard", "mlb-tor-hou-2026-08-08-o8pt5",
-                        price=0.60)
+    # (HomeRunHazard kindless-grammar cell now refused — he is paused;
+    # covered in test_paused_whale_copies_nothing.)
     # Audit fail-open scenarios refused:
     assert not copy_allowed("kch123", "nhl-tor-mtl-2026-10-12-tor-1pt5")
     assert not copy_allowed("homerunhazard",
                             "wnba-dal-wsh-2026-08-05-dal-3pt5", price=0.55)
     assert not copy_allowed("swisstony", "epl-ars-che-2026-08-15-es-2-0")
-    # Banded whale with missing/garbage price: refused.
+    # Paused whale with missing/garbage price: refused (pause precedes
+    # the band check, so these stay closed for two reasons).
     assert not copy_allowed("homerunhazard", "mlb-tor-hou-2026-08-08-o8pt5")
     assert not copy_allowed("homerunhazard", "mlb-tor-hou-2026-08-08-o8pt5",
                             price="n/a")

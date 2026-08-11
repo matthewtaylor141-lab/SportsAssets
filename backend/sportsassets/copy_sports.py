@@ -63,6 +63,19 @@ UNRESTRICTED = frozenset({
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465",
 })
 
+# Whales copied NOWHERE right now (owner directive 2026-08-11 during the
+# profitability review): HomeRunHazard measured flat-negative on his own
+# live record (33 fills, 10 settled, -$0.80) while his prop-heavy flow
+# fed the losing prop cohort below. Pausing is reversible; his cells and
+# band stay defined above so un-pausing is a one-line delete.
+PAUSED = frozenset({"homerunhazard"})
+
+# Market types copied for NOBODY — including UNRESTRICTED whales (owner
+# directive 2026-08-11): live prop copies graded 3W/16L, -64% ROI.
+# Blocked at the type level so the bleed cannot re-enter through any
+# whale. btts/exact_score stay governed by the cell table.
+BLOCKED_TYPES = frozenset({"prop"})
+
 # whale -> allowed (sport, market_type) cells. Fail-closed.
 CELLS: dict[str, frozenset] = {
     "kch123": frozenset({("basketball", "spread"), ("basketball", "total"),
@@ -237,6 +250,10 @@ def copy_allowed(whale: str, slug: str, price: float | None = None) -> bool:
     Cell-level gate; fails closed on anything unrecognized."""
     w = (whale or "").strip().lower()
     if not w:
+        return False
+    if w in PAUSED:
+        return False
+    if market_type_of(slug) in BLOCKED_TYPES:
         return False
     if w in UNRESTRICTED:
         return True

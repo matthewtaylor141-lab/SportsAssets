@@ -160,10 +160,22 @@ def sweep(*, kalshi, ledger, base: str, token: str, live: bool) -> dict:
     except Exception as exc:  # noqa: BLE001
         stats["queue_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
         tasks = []
+    # ENTRIES PAUSED by default (owner directive 2026-08-11, profitability
+    # review): the +20% exit sell has never once filled on this venue —
+    # zero cash-outs lifetime — so every $1 dog degraded into
+    # hold-to-resolution and the sleeve graded 12W/39L, -72% ROI. The
+    # PMUS underdog sleeve (whose exits DO fill) is untouched, and
+    # sections 1 and 3 here keep draining exit events and re-resting
+    # sells for positions already held. Re-arm with EDGE_KUD_ENTRIES=1
+    # only once the exit mechanics are proven.
+    entries_live = os.environ.get("EDGE_KUD_ENTRIES", "0") == "1"
     discovered: dict[str, list | None] = {}
     sides = open_kalshi_sides(ledger) if tasks else {}
     for t in tasks:
         stats["tasks"] += 1
+        if not entries_live:
+            stats["entries_paused"] = stats.get("entries_paused", 0) + 1
+            continue
         blocked = live_blocked(ledger, scope="underdog")
         if blocked:
             stats["blocked"] = blocked

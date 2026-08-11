@@ -30,7 +30,13 @@ class _FakePool:
 
 
 def _payload(**over):
-    p = {"id": 1, "whale_id": 2, "whale_username": "HomeRunHazard",
+    # Fixture whale must PASS the cell gate so the plumbing under test
+    # (slug resolution, claims, venue split) is reachable — the 0x2c33
+    # wallet is unrestricted. (Was HomeRunHazard until the owner paused
+    # him 2026-08-11; a paused whale refuses before any of this runs.)
+    p = {"id": 1, "whale_id": 2,
+         "whale_username": "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563"
+                           "-1759935795465",
          "asset": "123", "condition_id": "0xc", "side": "BUY",
          "outcome": "Dallas Wings", "outcome_index": 0, "size": 10.0,
          "price": 0.55, "notional": 5.5,
@@ -92,7 +98,11 @@ def test_unresolvable_market_still_fails_closed(monkeypatch):
         "market_slug": None, "event_slug": None, "market_title": None,
         "event_title": None, "outcome": None,
     })
-    asyncio.run(live_executor.maybe_execute(_payload(), None))
+    # A CELL-GATED whale: fail-closed means no slug -> no sport -> refused
+    # before the pool. (Unrestricted whales legitimately pass this gate
+    # and get rejected later at mapping.)
+    asyncio.run(live_executor.maybe_execute(
+        _payload(whale_username="kch123"), None))
     assert pool.fetchval_calls == 0
 
 

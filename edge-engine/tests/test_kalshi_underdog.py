@@ -82,9 +82,29 @@ def _run(ask, tasks=None, led=None, monkeypatch=None):
     ka = _Kalshi(ask)
     sess = _Sess([dict(_TASK)] if tasks is None else tasks)
     monkeypatch.setattr(requests, "Session", lambda: sess)
+    # Entry tests exercise the armed sleeve; the shipped default is
+    # paused (owner 2026-08-11) — covered by its own test below.
+    monkeypatch.setenv("EDGE_KUD_ENTRIES", "1")
     st = sweep(kalshi=ka, ledger=led, base="http://api", token="t",
                live=True)
     return st, ka, led, sess
+
+
+def test_entries_are_paused_by_default(monkeypatch):
+    """Owner directive 2026-08-11: zero cash-outs lifetime — the +20%
+    exit never fills on this venue, so entries are OFF by default. The
+    sweep still runs (exit drain + re-rest), places nothing, and does
+    not report the task missed — the pause must not burn queue rows."""
+    monkeypatch.delenv("EDGE_KUD_ENTRIES", raising=False)
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _Kalshi(0.30)
+    sess = _Sess([dict(_TASK)])
+    monkeypatch.setattr(requests, "Session", lambda: sess)
+    st = sweep(kalshi=ka, ledger=led, base="http://api", token="t",
+               live=True)
+    assert st["placed"] == 0 and ka.orders == []
+    assert st.get("entries_paused") == 1
+    assert sess.posts == [], "paused is not missed — no report"
 
 
 def test_threshold_is_twenty_percent_capped_at_99c():
@@ -208,6 +228,7 @@ def test_discovery_failure_is_retryable_even_for_oneshot(monkeypatch):
     ka.discover_markets = _boom
     sess = _Sess([dict(_TASK)])
     monkeypatch.setattr(requests, "Session", lambda: sess)
+    monkeypatch.setenv("EDGE_KUD_ENTRIES", "1")   # armed; pause has its own test
     st = sweep(kalshi=ka, ledger=led, base="http://api", token="t",
                live=True)
     assert st.get("retry_discovery") == 1

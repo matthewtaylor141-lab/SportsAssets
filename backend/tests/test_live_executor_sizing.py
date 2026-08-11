@@ -1,18 +1,18 @@
-"""Per-whale copy sizing (owner directive 2026-08-10 evening: the
-Polymarket deposit landed — PMUS clips match the Kalshi leg). RN1 and
-SwissTony clip at $100 on their own settled records; everyone else
-(HRH's young widened cells, out-of-season kch123, the newly promoted
-0x2c33 wallet, any future whale) takes the $50 default. The underdog
-cash-out sleeve is a separate $1 constant and must never inherit these."""
+"""Per-whale copy sizing. RN1 clips at $100 on his own settled record;
+SwissTony at $200 (owner decision 2026-08-11, profitability round 3 —
+strongest measured earner, +$760 on 345 settled at $100); everyone else
+(the paused HRH, out-of-season kch123, the newly promoted 0x2c33
+wallet, any future whale) takes the $50 default. The underdog cash-out
+sleeve is a separate $1 constant and must never inherit these."""
 
 from sportsassets.live_executor import per_fill_usd
 
 
-def test_proven_sleeves_clip_at_one_hundred_dollars():
+def test_proven_sleeves_clip_at_their_owner_set_sizes():
     assert per_fill_usd("RN1") == 100.00
     assert per_fill_usd("rn1") == 100.00
-    assert per_fill_usd("SwissTony") == 100.00
-    assert per_fill_usd("swisstony") == 100.00
+    assert per_fill_usd("SwissTony") == 200.00
+    assert per_fill_usd("swisstony") == 200.00
 
 
 def test_default_is_fifty_dollars():

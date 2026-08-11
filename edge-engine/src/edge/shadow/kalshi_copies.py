@@ -68,7 +68,12 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # — his settled Kalshi-leg record (+$673 on $1,648 deployed) is the
 # stronger of the two proven books. His soccer cell's 0.70 Kalshi ask
 # floor still binds: only >=70c entries reach this venue at any clip.
-PER_COPY_USD = {"rn1": 100.00, "swisstony": 100.00}
+# 2026-08-11 (owner decision, profitability round 3): swisstony to $200
+# — strongest measured earner across both venues (+$760 on 345
+# settled). The $1,200 breaker floor now represents ~6 full swisstony
+# losses; kept deliberately (tighter protection during the scale-up),
+# EDGE_KCOPY_HALT_USD overrides if it proves too twitchy.
+PER_COPY_USD = {"rn1": 100.00, "swisstony": 200.00}
 PER_COPY_DEFAULT = 50.00
 # A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
 # decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.

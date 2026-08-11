@@ -52,8 +52,13 @@ class _Kalshi:
                 "status": "filled"}
 
 
+# Fixture whale is the promoted 0x2c33 wallet: unrestricted, $50 default
+# clip, no band or fee-floor special-casing. (It was HomeRunHazard until
+# the owner paused him 2026-08-11 — a paused whale copies nothing, which
+# is the pause test's job to prove, not every test's.)
 _ROW = {"slug": "wnba-dal-chi-2026-08-04", "outcome": "Dallas Wings",
-        "price": 0.50, "whale": "HomeRunHazard", "entered_ts": time.time() - 60}
+        "price": 0.50, "whale": "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563-1759935795465",
+        "entered_ts": time.time() - 60}
 
 
 def _run(ask, rows=None, live=True, led=None):
@@ -87,16 +92,19 @@ def test_outside_tolerance_is_not_a_copy():
 def test_sport_assignments_gate_the_sweep():
     """Owner directive 2026-08-06: cell-gated whales copy ONLY their
     assigned sport(s) — swisstony is soccer-only, so his WNBA identity
-    is refused; the WNBA assignee (HomeRunHazard, the default fixture
-    whale) trades. RN1 is UNRESTRICTED (owner decision the same
-    evening, on the live sleeve's own +$170.95 record) and copies
-    anywhere."""
+    is refused. RN1 and the 0x2c33 wallet are UNRESTRICTED (owner
+    decisions 2026-08-06/10, each on his own live record) and copy
+    anywhere; the paused HomeRunHazard copies nowhere at all."""
     row = {**_ROW, "whale": "swisstony"}
     st, ka, _ = _run(0.48, rows=[row])
     assert st.get("skipped_sport") == 1
     assert not ka.orders
-    st2, ka2, _ = _run(0.48)     # HomeRunHazard + wnba ML: assigned cell
+    st2, ka2, _ = _run(0.48)     # 0x2c33 + wnba ML: unrestricted
     assert ka2.orders == [("T-DAL", 0.48, 104)]  # $50 -> 104 contracts
+    hrh = {**_ROW, "whale": "HomeRunHazard"}
+    sth, kah, _ = _run(0.48, rows=[hrh])
+    assert sth.get("skipped_sport") == 1 and not kah.orders, \
+        "paused whale refused even in his formerly-assigned cell"
     row3 = {**_ROW, "whale": "RN1"}
     st3, ka3, _ = _run(0.48, rows=[row3])
     assert st3["copied"] == 1
@@ -105,11 +113,11 @@ def test_sport_assignments_gate_the_sweep():
     assert ka3.orders == [("T-DAL", 0.48, 208)]
 
 
-def test_swisstony_kalshi_clip_is_100():
-    """Owner approval 2026-08-10 (profitability round 2): swisstony joins
-    RN1 at $100/clip on the Kalshi leg. His soccer cell's 0.70 ask floor
-    still binds, so the fixture is a 72c EPL entry: floor(100/0.72) = 138
-    contracts."""
+def test_swisstony_kalshi_clip_is_200():
+    """Owner decision 2026-08-11 (profitability round 3): swisstony to
+    $200/clip — strongest measured earner. His soccer cell's 0.70 ask
+    floor still binds, so the fixture is a 72c EPL entry:
+    floor(200/0.72) = 277 contracts."""
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka = _Kalshi(0.72, outcomes={"Arsenal": "T-ARS", "Chelsea": "T-CHE"})
     row = {"slug": "epl-ars-che-2026-08-15", "outcome": "Arsenal",
@@ -117,7 +125,7 @@ def test_swisstony_kalshi_clip_is_100():
            "entered_ts": time.time() - 60}
     st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
     assert st["copied"] == 1
-    assert ka.orders == [("T-ARS", 0.72, 138)]
+    assert ka.orders == [("T-ARS", 0.72, 277)]
 
 
 def test_promoted_whale_0x2c33_copies_at_the_default_clip():
@@ -396,7 +404,7 @@ def test_filled_copy_claims_the_position_back():
     sweep(kalshi=ka, ledger=led,
           identities=[{**_ROW, "asset": "777"}], live=True,
           on_copied=lambda a, t, w: claims.append((a, t, w)))
-    assert claims == [("777", "T-DAL", "HomeRunHazard")]
+    assert claims == [("777", "T-DAL", "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563-1759935795465")]
 
 
 def test_claim_post_failure_never_blocks_the_copy():
