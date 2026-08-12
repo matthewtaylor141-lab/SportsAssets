@@ -25,6 +25,9 @@ class _MapPool:
     async def fetchrow(self, sql, *a):
         return {"day": 0.0, "total": 0.0}
 
+    async def fetch(self, sql, *a):
+        return []          # one-per-game check: nothing held
+
     async def execute(self, sql, *a):
         self.updates.append((" ".join(sql.split()), a))
 

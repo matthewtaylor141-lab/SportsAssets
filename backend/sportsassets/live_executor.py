@@ -742,31 +742,29 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     "WHERE id=$1", row_id,
                     "never-add: this market was already copied")
                 return
-            # ONE LINE PER LADDER (owner approval 2026-08-11): a whale
-            # laddering one game across nested totals or spread lines
-            # (O1.5/O2.5/O3.5) is ONE correlated bet wearing several
-            # tickets — a 2-goal game wins O1.5 and loses the other two
-            # at once, and for a pair-capture whale some rungs are half
-            # of a hedge we don't hold. The first line a whale entered
-            # (his primary signal) is copied; later rungs on the same
-            # game and family are refused, account-wide.
-            lk = _ladder_kind(mapping["market_slug"])
-            if lk is not None:
-                gk = _us_game_key(mapping["market_slug"])
-                if gk is not None:
-                    held = await pool.fetch(
-                        "SELECT us_market_slug FROM live_orders "
-                        "WHERE status IN ('filled', 'submitting') "
-                        "AND id <> $1 AND us_market_slug LIKE $2 "
-                        "AND placed_at > now() - interval '48 hours'",
-                        row_id, lk + "-%")
-                    if any(_us_game_key(r["us_market_slug"]) == gk
-                           for r in held):
-                        await pool.execute(
-                            "UPDATE live_orders SET status='rejected', "
-                            "error=$2 WHERE id=$1", row_id,
-                            "same-game ladder: one line per game")
-                        return
+            # ONE POSITION PER GAME (owner audit order 2026-08-11
+            # evening, superseding the ladder-only rule from the same
+            # afternoon): a game is ONE bet. Ladder rungs are the same
+            # bet several times; opposite-side moneylines (the Halys+
+            # Kwon guaranteed-loss shape — RN1 completes pairs, we must
+            # not) are the same bet against itself. The first market a
+            # whale entered on a game is copied; every later market on
+            # that game — any type, any side, any whale — is refused.
+            gk = _us_game_key(mapping["market_slug"])
+            if gk is not None:
+                held = await pool.fetch(
+                    "SELECT us_market_slug FROM live_orders "
+                    "WHERE status IN ('filled', 'submitting') "
+                    "AND id <> $1 AND us_market_slug IS NOT NULL "
+                    "AND placed_at > now() - interval '48 hours'",
+                    row_id)
+                if any(_us_game_key(r["us_market_slug"]) == gk
+                       for r in held):
+                    await pool.execute(
+                        "UPDATE live_orders SET status='rejected', "
+                        "error=$2 WHERE id=$1", row_id,
+                        "one position per game")
+                    return
             # NO-STACK (owner 2026-08-08: "trades are higher than $10 per
             # trade"): the engine, the desk, and this copy path each cap
             # their own tickets but shared no ledger, so two sleeves could

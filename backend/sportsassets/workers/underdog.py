@@ -316,6 +316,15 @@ async def _entry_sweep(pool) -> dict:
 
     stats = {"games": 0, "entered": 0, "skipped_held": 0,
              "skipped_band": 0, "skipped_done": 0, "unmapped": 0}
+    # SLEEVE CUT (owner order 2026-08-11 evening: "cut the $1 underdog
+    # cash out sleeve completely" — profitability review; the sleeve's
+    # live record never earned its keep and its Kalshi exit leg never
+    # filled once). Entries are OFF unless explicitly re-armed with
+    # UNDERDOG_SLEEVE=1; the exit sweep below keeps managing whatever
+    # positions are already held so nothing is stranded.
+    if os.environ.get("UNDERDOG_SLEEVE", "0") != "1":
+        stats["off"] = "sleeve cut (owner order 2026-08-11)"
+        return stats
     if active_venue() != "polymarket-us":
         stats["off"] = "venue not armed"
         return stats

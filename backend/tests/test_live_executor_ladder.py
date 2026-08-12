@@ -1,7 +1,8 @@
-"""One line per ladder (owner approval 2026-08-11): a whale laddering
-one game across nested totals/spread lines (O1.5/O2.5/O3.5) is ONE
-correlated bet wearing several tickets — the first line copies, later
-rungs on the same game and family are refused account-wide."""
+"""One POSITION per game (owner audit order 2026-08-11 evening): a
+game is one bet. Ladder rungs (O1.5/O2.5/O3.5), opposite-side
+moneylines (the Halys+Kwon guaranteed-loss shape), and any other
+second market on a held game are refused account-wide; only the first
+market a whale entered copies."""
 
 import asyncio
 from datetime import date
@@ -49,7 +50,7 @@ class _LadderPool:
         return {"day": 0.0, "total": 0.0}
 
     async def fetch(self, sql, *a):
-        assert "us_market_slug LIKE" in sql
+        assert "us_market_slug IS NOT NULL" in sql
         self.ladder_queries += 1
         return [{"us_market_slug": s} for s in self.held]
 
@@ -115,7 +116,7 @@ def test_second_rung_of_a_ladder_is_refused(monkeypatch):
     asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
     assert pool.ladder_queries == 1
     assert not submitted, "the O3.5 rung must not stack on the O2.5"
-    assert any("same-game ladder" in str(a) for _, a in pool.updates)
+    assert any("one position per game" in str(a) for _, a in pool.updates)
 
 
 def test_other_games_lines_do_not_block(monkeypatch):
@@ -128,12 +129,24 @@ def test_other_games_lines_do_not_block(monkeypatch):
         "a first line on a fresh game copies normally"
 
 
-def test_moneylines_skip_the_ladder_query_entirely(monkeypatch):
+def test_moneyline_on_a_held_game_is_refused_too(monkeypatch):
+    """The Halys+Kwon shape: a held total (or the other side's
+    moneyline) on this game refuses the new moneyline — one position
+    per game covers every market type."""
     pool = _LadderPool([f"tsc-epl-ars-che-{TODAY}-o2pt5"])
     submitted = _wire(monkeypatch, pool,
                       f"atc-epl-ars-che-{TODAY}-ars")
     asyncio.run(live_executor.maybe_execute(_payload(outcome="Arsenal"), 5.0))
-    assert pool.ladder_queries == 0, "moneylines are not a ladder family"
+    assert pool.ladder_queries == 1
+    assert not submitted
+    assert any("one position per game" in str(a) for _, a in pool.updates)
+
+
+def test_moneyline_on_a_fresh_game_copies(monkeypatch):
+    pool = _LadderPool([f"tsc-epl-liv-mci-{TODAY}-o2pt5"])
+    submitted = _wire(monkeypatch, pool,
+                      f"atc-epl-ars-che-{TODAY}-ars")
+    asyncio.run(live_executor.maybe_execute(_payload(outcome="Arsenal"), 5.0))
     assert submitted
 
 
