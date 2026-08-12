@@ -288,6 +288,13 @@ PENNY_TRIAL_PER_FILL_USD = 50.00
 # gets the default. RN1 $100 -> $150 2026-08-11 (owner approval,
 # round 4): profitable every single day since Aug 3.
 PER_FILL_BY_WHALE = {"rn1": 150.00, "swisstony": 200.00}
+# 24H ROLLING-LOSS BREAKER (owner 2026-08-12, threshold his call:
+# "$1500"): when the copy sleeve's realized losses over any rolling
+# 24 hours reach this, copying pauses by itself until the window
+# rolls off — a bad day self-limits instead of compounding. Manual
+# desk and the independent $2 underdog sleeve are outside it.
+PMUS_LOSS_BREAKER_USD = float(
+    os.environ.get("PMUS_LOSS_BREAKER_USD", "1500"))
 
 
 def per_fill_usd(whale_username: str | None) -> float:
@@ -608,6 +615,26 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         except Exception:  # noqa: BLE001
             taken = None
     if taken:
+        return
+    # The rolling-loss breaker gates every copy BEFORE any row is
+    # written: realized copy P&L (settled + cashed out, copies only)
+    # over the last 24h at or past -$1500 pauses the sleeve. The
+    # query answers from Postgres so a deploy cannot amnesia it.
+    try:
+        lost_24h = float(await pool.fetchval(
+            "SELECT COALESCE(sum(pnl), 0) FROM live_orders "
+            "WHERE settled_at > now() - interval '24 hours' "
+            "AND status IN ('settled', 'cashed_out') "
+            "AND COALESCE(whale_username, '') NOT IN "
+            "('manual', 'underdog')") or 0)
+    except Exception:  # noqa: BLE001 — an unreadable ledger must not
+        lost_24h = 0.0  # be the thing that blocks copies; caps below
+        # and the venue guards still bound every order.
+    if lost_24h <= -PMUS_LOSS_BREAKER_USD:
+        log.warning(
+            "LOSS BREAKER: copy sleeve realized %.2f in 24h "
+            "(threshold -%.0f) — copying paused until the window "
+            "rolls off", lost_24h, PMUS_LOSS_BREAKER_USD)
         return
     day_room, total_room = await _caps_room(pool)
     if COPY_MODE == "penny_trial":

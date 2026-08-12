@@ -42,6 +42,8 @@ class _LadderPool:
     async def fetchval(self, sql, *a):
         if "INSERT INTO live_orders" in sql:
             return 101
+        if "sum(pnl)" in sql:
+            return getattr(self, "lost_24h", 0.0)
         if "bool_or" in sql:
             return getattr(self, "dog_owned", None)
         if "SELECT 1 FROM live_orders" in sql and "us_market_slug = $2" in sql:
@@ -192,6 +194,26 @@ def test_unexplained_venue_holding_still_fails_closed(monkeypatch):
     asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
     assert not submitted
     assert any("no-stack" in str(a) for _, a in pool.updates)
+
+
+def test_rolling_loss_breaker_pauses_copies(monkeypatch):
+    """Owner 2026-08-12 ($1500 threshold): realized copy losses of
+    -$1500 over any rolling 24h pause the sleeve before any order or
+    audit row is written; a smaller drawdown trades normally."""
+    pool = _LadderPool([])
+    pool.lost_24h = -1500.0
+    submitted = _wire(monkeypatch, pool,
+                      f"tsc-epl-ars-che-{TODAY}-o3pt5")
+    asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
+    assert not submitted
+    assert not pool.updates, "breaker fires before any row exists"
+
+    pool2 = _LadderPool([])
+    pool2.lost_24h = -1499.0
+    submitted2 = _wire(monkeypatch, pool2,
+                       f"tsc-epl-ars-che-{TODAY}-o3pt5")
+    asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
+    assert submitted2, "under the threshold the sleeve trades normally"
 
 
 def test_stale_positions_snapshot_fails_closed(monkeypatch):
