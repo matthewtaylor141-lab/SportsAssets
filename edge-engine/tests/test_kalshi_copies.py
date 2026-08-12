@@ -209,9 +209,12 @@ def test_paper_counts_but_never_orders():
     assert not led.get_state("kcopy:wnba-dal-chi-2026-08-04:Dallas Wings")
 
 
-def test_smoke_order_fires_exactly_once_ever():
-    import os
-    os.environ["EDGE_STRATEGY_LIVE"] = "1"   # smoke is engine-class
+def test_smoke_order_fires_exactly_once_ever(monkeypatch):
+    # Smoke is engine-class, and the engine class is RETIRED by default
+    # (owner 2026-08-12). monkeypatch, not os.environ: setting it raw
+    # leaked an armed strategy into every test that ran afterwards.
+    monkeypatch.setenv("EDGE_STRATEGY_LIVE", "1")
+    monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
     from edge.shadow.runner import _kalshi_smoke
 
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
@@ -255,9 +258,9 @@ def test_accepted_ioc_with_zero_fill_does_not_burn_the_claim():
     assert st2.get("skipped_claimed", 0) == 0
 
 
-def test_smoke_zero_fill_is_not_done():
-    import os
-    os.environ["EDGE_STRATEGY_LIVE"] = "1"   # smoke is engine-class
+def test_smoke_zero_fill_is_not_done(monkeypatch):
+    monkeypatch.setenv("EDGE_STRATEGY_LIVE", "1")
+    monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
     from edge.shadow.runner import _kalshi_smoke
 
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")

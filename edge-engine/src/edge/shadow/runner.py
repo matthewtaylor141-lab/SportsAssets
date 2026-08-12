@@ -85,8 +85,16 @@ def _strategy_live() -> bool:
     entries are OFF — the live book is whale copies plus guaranteed
     arbitrage only. Strategy intents still PAPER-log every cycle (the
     shadow record keeps grading the model for the day it earns its seat
-    back); they place no live orders. EDGE_STRATEGY_LIVE=1 re-arms."""
-    return os.environ.get("EDGE_STRATEGY_LIVE", "0") == "1"
+    back); they place no live orders. EDGE_STRATEGY_LIVE=1 re-arms.
+
+    RETIRED AGAIN 2026-08-12 (owner: "remove the software plays, and
+    just have the copies running"). The class was re-armed on 08-10 by
+    setting EDGE_STRATEGY_LIVE=1 in the environment and lost money on
+    every day it ran since, so the retirement had to be a gate that the
+    live environment does not already override — see strategy_gate."""
+    from edge.shadow.strategy_gate import strategy_live
+
+    return strategy_live()
 
 
 def _post_status(status: str, detail: dict) -> None:

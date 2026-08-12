@@ -518,7 +518,16 @@ class XVCryptoWatch:
         # arb sleeves 1-9 lifetime; second legs not completing). Config
         # cross_venue.enabled covers the sports watcher; this covers the
         # crypto one even where EDGE_XV_CRYPTO_LIVE=1 is set in the env.
+        # Owner 2026-08-12 ("just have the copies running"): this scanner
+        # is software class — an engine-chosen trade, not a mirrored one —
+        # so it rides the same retirement as the sports strategy. It was
+        # already outside the EDGE_STRATEGY_LIVE switch, which is exactly
+        # the kind of gap "turn the strategy off" is assumed to have
+        # closed and had not (fired 0 to date, so nothing is lost here).
+        from edge.shadow.strategy_gate import strategy_retired
+
         live = (bool(self._is_live())
+                and not strategy_retired()
                 and os.environ.get("EDGE_XV_CRYPTO_LIVE", "0") == "1"
                 and os.environ.get("EDGE_ARB_PAUSE", "1") != "1")
         if not live:

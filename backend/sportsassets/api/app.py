@@ -21,6 +21,7 @@ from ..bus import CH_HEALTH, CH_TRADES_ENRICHED, CH_TRADES_NEW, get_redis
 from ..config import settings
 from ..db import close_pool, get_pool
 from . import queries
+from .grading import grade_rows
 
 log = logging.getLogger(__name__)
 
@@ -1293,48 +1294,7 @@ async def api_fill_vs_miss(days: int = Query(7, ge=1, le=30)) -> dict:
               NOT IN ('manual', 'underdog')
           AND lo.status IN ('filled', 'settled', 'unfilled')
         """, days)
-    out: dict = {"days": days, "whales": {}}
-    for r in rows:
-        w = (r["whale"] or "?").lower()
-        b = out["whales"].setdefault(w, {
-            "filled_n": 0, "filled_staked": 0.0, "filled_pnl": 0.0,
-            "filled_settled": 0, "missed_n": 0, "missed_staked": 0.0,
-            "missed_pnl": 0.0, "missed_resolved": 0,
-            "missed_unresolved": 0})
-        if r["status"] in ("filled", "settled"):
-            b["filled_n"] += 1
-            b["filled_staked"] += r["filled_usd"] or 0.0
-            if r["pnl"] is not None:
-                b["filled_settled"] += 1
-                b["filled_pnl"] += r["pnl"]
-            continue
-        # An 'unfilled' FOK is a price-refused copy: score what HIS
-        # price would have returned on the actual resolution.
-        b["missed_n"] += 1
-        stake = r["req_usd"] or 0.0
-        prices = r["resolved_prices"]
-        idx = r["outcome_index"]
-        if (prices is None or idx is None
-                or not (0 <= idx < len(prices))
-                or not r["his_price"]):
-            b["missed_unresolved"] += 1
-            continue
-        b["missed_resolved"] += 1
-        b["missed_staked"] += stake
-        payout = float(prices[idx])
-        his = float(r["his_price"])
-        # $stake at his price buys stake/his contracts, each worth
-        # `payout` at settlement.
-        b["missed_pnl"] += round(stake / his * payout - stake, 4)
-    for b in out["whales"].values():
-        b["filled_roi"] = (round(b["filled_pnl"] / b["filled_staked"], 4)
-                           if b["filled_staked"] else None)
-        b["missed_roi"] = (round(b["missed_pnl"] / b["missed_staked"], 4)
-                           if b["missed_staked"] else None)
-        for k in ("filled_staked", "filled_pnl", "missed_staked",
-                  "missed_pnl"):
-            b[k] = round(b[k], 2)
-    return out
+    return {"days": days, "whales": grade_rows(rows)}
 
 
 class ManualTradeBody(BaseModel):

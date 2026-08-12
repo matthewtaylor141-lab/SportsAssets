@@ -545,6 +545,9 @@ def test_live_cycle_rests_inside_the_spread_instead_of_crossing(tmp_path, monkey
 
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("EDGE_STRATEGY_LIVE", "1")
+    # Software class is RETIRED by default since 2026-08-12; a test of
+    # the live mechanics has to un-retire it explicitly.
+    monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
     monkeypatch.setenv("EDGE_LIVE_VENUES", "polymarket-us")
     policy = Policy.load()
     # mechanics test: lift the measured moneyline quarantine

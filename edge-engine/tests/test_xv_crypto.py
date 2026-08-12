@@ -257,6 +257,9 @@ def test_live_needs_both_the_env_flag_and_a_live_engine(tmp_path,
                                                         monkeypatch):
     # env flag alone, engine not live: measure-only.
     monkeypatch.setenv("EDGE_XV_CRYPTO_LIVE", "1")
+    # The crypto scanner is software class and RETIRED by default
+    # (owner 2026-08-12); a live-mechanics test un-retires it.
+    monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
     # Live-path tests must lift the owner arb pause (2026-08-08).
     monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, _ = _watch(tmp_path, 0.45, 0.50, live=False)
@@ -265,9 +268,32 @@ def test_live_needs_both_the_env_flag_and_a_live_engine(tmp_path,
     assert not ka.orders and not pm.orders
 
 
+def test_retirement_keeps_the_scanner_measure_only(tmp_path, monkeypatch):
+    """Owner 2026-08-12: "just have the copies running".
+
+    Every OTHER gate here says fire — engine live, EDGE_XV_CRYPTO_LIVE=1,
+    arb pause lifted. The software-class retirement alone must hold it to
+    measurement. This scanner sat outside EDGE_STRATEGY_LIVE entirely,
+    which is exactly the gap "the strategy is off" is assumed to cover.
+    """
+    monkeypatch.setenv("EDGE_XV_CRYPTO_LIVE", "1")
+    monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
+    monkeypatch.delenv("EDGE_STRATEGY_RETIRED", raising=False)
+    w, led, ka, pm, _pair = _watch(tmp_path, 0.45, 0.50, live=True)
+    w._tick()
+    assert w.stats["would_fire"] == 1, "the dislocation is still measured"
+    assert w.stats["fired"] == 0
+    assert w.stats["spent"] == 0.0
+    assert not ka.orders and not pm.orders, "no real order on either venue"
+    assert w.stats["last_hit"]["mode"] == "measure"
+
+
 def test_live_fires_through_execute_cross_venue_with_atomic_claim(
         tmp_path, monkeypatch):
     monkeypatch.setenv("EDGE_XV_CRYPTO_LIVE", "1")
+    # The crypto scanner is software class and RETIRED by default
+    # (owner 2026-08-12); a live-mechanics test un-retires it.
+    monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
     # Live-path tests must lift the owner arb pause (2026-08-08).
     monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, pair = _watch(tmp_path, 0.45, 0.50, live=True)
@@ -288,6 +314,9 @@ def test_live_fires_through_execute_cross_venue_with_atomic_claim(
 def test_clean_miss_releases_the_claim_so_the_pair_stays_retryable(
         tmp_path, monkeypatch):
     monkeypatch.setenv("EDGE_XV_CRYPTO_LIVE", "1")
+    # The crypto scanner is software class and RETIRED by default
+    # (owner 2026-08-12); a live-mechanics test un-retires it.
+    monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
     # Live-path tests must lift the owner arb pause (2026-08-08).
     monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, pair = _watch(tmp_path, 0.45, 0.50, live=True)
@@ -308,6 +337,9 @@ def test_day_cap_stops_the_class(tmp_path, monkeypatch):
     from datetime import datetime, timezone
 
     monkeypatch.setenv("EDGE_XV_CRYPTO_LIVE", "1")
+    # The crypto scanner is software class and RETIRED by default
+    # (owner 2026-08-12); a live-mechanics test un-retires it.
+    monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
     # Live-path tests must lift the owner arb pause (2026-08-08).
     monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, _ = _watch(tmp_path, 0.45, 0.50, live=True)
@@ -322,6 +354,9 @@ def test_day_cap_stops_the_class(tmp_path, monkeypatch):
 
 def test_account_level_stops_block_the_live_path(tmp_path, monkeypatch):
     monkeypatch.setenv("EDGE_XV_CRYPTO_LIVE", "1")
+    # The crypto scanner is software class and RETIRED by default
+    # (owner 2026-08-12); a live-mechanics test un-retires it.
+    monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
     # Live-path tests must lift the owner arb pause (2026-08-08).
     monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, _ = _watch(tmp_path, 0.45, 0.50, live=True)
