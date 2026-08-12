@@ -290,6 +290,114 @@ def slug_ask(us_slug: str) -> float | None:
     return None
 
 
+_LINE_TOKEN = re.compile(r"^(?:o|u)?(?:pos-|neg-)?(\d+(?:pt\d)?)$")
+
+
+def _feed_derivative(global_slug: str) -> dict | None:
+    """Parse a kindless feed slug's derivative suffix. Returns
+    {base, kind ('total'|'spread'), line ('8pt5'), side ('o'/'u' for
+    totals, 'pos'/'neg'/None for spreads), team (code or None)} or
+    None when the slug is not a recognizable single-line derivative."""
+    s = (global_slug or "").lower()
+    m = re.search(r"\d{4}-\d{2}-\d{2}", s)
+    if not m:
+        return None
+    base = s[: m.end()].strip("-")
+    if len([t for t in base[: m.start()].strip("-").split("-") if t]) != 3:
+        return None
+    suffix = [t for t in s[m.end():].strip("-").split("-") if t]
+    if not suffix:
+        return None
+    # totals: single token 'o8pt5' / 'u10'
+    if len(suffix) == 1 and suffix[0][:1] in ("o", "u"):
+        mt = _LINE_TOKEN.match(suffix[0])
+        if mt and suffix[0][1:] == mt.group(1):
+            return {"base": base, "kind": "total",
+                    "line": mt.group(1), "side": suffix[0][0],
+                    "team": None}
+    # spreads: [team]? (pos|neg)? line — the feed's own side encoding
+    team = None
+    toks = list(suffix)
+    if len(toks) >= 2 and toks[0].isalpha() and toks[0] not in ("pos",
+                                                               "neg"):
+        team, toks = toks[0], toks[1:]
+    side = None
+    if toks and toks[0] in ("pos", "neg"):
+        side, toks = toks[0], toks[1:]
+    if len(toks) == 1 and re.fullmatch(r"\d+(?:pt\d)?", toks[0]):
+        return {"base": base, "kind": "spread", "line": toks[0],
+                "side": side, "team": team}
+    return None
+
+
+def resolve_derivative_exact(global_slug: str,
+                             outcome: str | None) -> dict | None:
+    """Deterministic spread/total mapping (owner order 2026-08-12:
+    'fix the mapping errors... without any leaks'). The funnel's own
+    diagnostics show the venue LISTS these markets while the fuzzy
+    pipeline fails to address them; this resolver goes grammar-to-
+    grammar and accepts a side only when every fact corroborates:
+
+      totals:  candidate 'tsc-<base>-<line>' — the line lives IN the
+               slug (wrong-line is impossible); Over/Under chosen by
+               the side description matching the feed outcome word.
+      spreads: candidate 'asc-<base>-[team-][pos|neg-]<line>' with
+               the feed's OWN side encoding preserved verbatim (his
+               slug IS his side); the resolved side must repeat the
+               line digits, and when the outcome is a team name the
+               parent title/question must contain it.
+
+    Anything short of full corroboration returns None and the fuzzy
+    pipeline (with its own line-consistency guard) remains the
+    fallback — this path can only ADD correctly-mapped copies, never
+    substitute a guess."""
+    fd = _feed_derivative(global_slug)
+    if fd is None:
+        return None
+    client = _get_client()
+    if fd["kind"] == "total":
+        cands = [f"tsc-{fd['base']}-{fd['line']}"]
+        want_word = "over" if fd["side"] == "o" else "under"
+    else:
+        suffix = "-".join(t for t in (fd["team"], fd["side"],
+                                      fd["line"]) if t)
+        cands = [f"asc-{fd['base']}-{suffix}"]
+        want_word = None
+    ol = _norm(outcome)
+    for slug in cands:
+        try:
+            m = (client.markets.retrieve_by_slug(slug) or {}).get(
+                "market") or {}
+        except Exception:  # noqa: BLE001 — 404 is an answer
+            continue
+        if not m.get("slug") or m.get("closed"):
+            continue
+        title = m.get("question") or m.get("title") or ""
+        sides = [s for s in (m.get("marketSides") or [])
+                 if isinstance(s, dict) and s.get("identifier")
+                 and s.get("description")]
+        if fd["kind"] == "total":
+            for s in sides:
+                if want_word in _norm(s["description"]):
+                    return {"market_slug": s["identifier"],
+                            "title": title, "outcome": s["description"],
+                            "matched_by": "derivative_exact",
+                            "score": 1.0}
+            continue
+        # spread: the candidate slug already IS one side; require the
+        # line digits to survive in what the venue resolved, and the
+        # whale's team to appear in the parent text when we know it.
+        if fd["line"] not in (m.get("slug") or slug):
+            continue
+        if ol and not any(w in _norm(title) for w in ol.split()
+                          if len(w) > 3):
+            continue
+        return {"market_slug": m.get("slug") or slug, "title": title,
+                "outcome": m.get("outcome") or outcome,
+                "matched_by": "derivative_exact", "score": 1.0}
+    return None
+
+
 def resolve_market_exact(candidate_slugs: list[str],
                          outcome: str | None) -> dict | None:
     """Deterministic US-market resolution for the manual desk: try each

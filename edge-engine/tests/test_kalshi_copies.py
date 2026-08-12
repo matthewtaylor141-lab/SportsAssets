@@ -76,22 +76,25 @@ def _run(ask, rows=None, live=True, led=None):
     return st, ka, led
 
 
-def test_limit_is_his_price_plus_two_percent_min_one_tick():
-    assert _limit_for(0.50) == 0.51
-    assert _limit_for(0.30) == 0.31, "sub-50c copies get a full tick"
-    assert _limit_for(0.97) == 0.99
-    assert _limit_for(0.985) == 0.99
+def test_limit_is_his_price_same_or_better():
+    """Owner order 2026-08-12: a copy may only cost his price or less
+    (fee included) — the +2% chase allowance is retired."""
+    assert _limit_for(0.50) == 0.50
+    assert _limit_for(0.30) == 0.30
+    assert _limit_for(0.29) == 0.29      # float-floor regression guard
+    assert _limit_for(0.985) == 0.98
+    assert _limit_for(0.997) == 0.99
 
 
 def test_copies_when_kalshi_is_inside_his_tolerance():
-    st, ka, led = _run(0.48)   # eff = 0.48 + fee(0.0175) <= limit 0.51
+    st, ka, led = _run(0.48)   # eff = 0.48 + fee(0.0175) <= his 0.50
     assert st["matched"] == 1 and st["copied"] == 1
     assert ka.orders == [("T-DAL", 0.48, 104)]  # $50 -> 104 contracts
     assert led.get_state("kcopy:wnba-dal-chi-2026-08-04:Dallas Wings")
 
 
 def test_outside_tolerance_is_not_a_copy():
-    st, ka, _ = _run(0.505)  # his 0.50: eff 0.505+fee > limit 0.51
+    st, ka, _ = _run(0.505)  # his 0.50: eff 0.505+fee > his price
     assert st["matched"] == 1 and st["copied"] == 0
     assert not ka.orders
 
@@ -503,21 +506,14 @@ def test_stale_rest_reprices_only_on_confirmed_cancel(monkeypatch):
     row = {**_ROW, "asset": _asset(True)}
     sweep(kalshi=ka, ledger=led, identities=[row], live=True)
     assert len(ka.orders) == 1                     # initial rest at 0.50
-    # Book moves a step: ask 0.53, our 0.50 bid is >2c behind but the
-    # his+2% limit (0.51) can still sit within 2c — cancel and requote.
+    # Book moves away (ask 0.53): under same-or-better (owner order
+    # 2026-08-12) the limit IS his 0.50 — the stale rest is cancelled
+    # and there is nothing competitive to requote (dead-rest rule).
     ka.ask = 0.53
     st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
     assert st.get("reprice_cancelled") == 1 and ka.cancels
-    assert len(ka.orders) == 2                     # requoted fresh
-    assert ka.orders[1][1] == 0.51                 # his 0.50 + 2% limit
-    # Book RUNS AWAY (0.56): cancel the stale rest but never chase — the
-    # limit can't sit competitively, so no repost (dead-rest rule).
-    ka.cancel_results.append("cancelled")
-    ka.ask = 0.56
-    st_run = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
-    assert st_run.get("reprice_cancelled") == 1
-    assert st_run.get("skipped_dead_rest") == 1
-    assert len(ka.orders) == 2                     # no chase
+    assert st.get("skipped_dead_rest") == 1
+    assert len(ka.orders) == 1                     # never chases past him
     # Ambiguous cancel: no repost, rest context cleared for next look.
     ka2 = _MakerKalshi(0.51)
     ka2.cancel_order = lambda oid: "error"

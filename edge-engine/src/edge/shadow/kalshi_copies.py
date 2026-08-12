@@ -81,6 +81,11 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 PER_COPY_USD = {"rn1": 150.00, "swisstony": 200.00}
 PER_COPY_USD_SPORT = {("swisstony", "soccer"): 100.00}
 PER_COPY_DEFAULT = 50.00
+# Inverse volume<->size scaling (owner order 2026-08-12): past this
+# many fills in a venue-day, the clip shrinks proportionally — 10x
+# the fills spends the same dollars at 1/10 the size.
+KALSHI_BASELINE_FILLS = {"rn1": 15, "swisstony": 10}
+KALSHI_BASELINE_DEFAULT = 8
 
 
 def _per_copy_usd(whale: str, slug: str) -> float:
@@ -196,15 +201,14 @@ def check_copy_breaker(ledger) -> str | None:
 
 
 def _limit_for(his_price: float) -> float:
-    """His price + 2%, floored to AT LEAST one tick of tolerance.
+    """SAME-OR-BETTER (owner order 2026-08-12, superseding the his+2%
+    tolerance of 2026-08-04): a copy may only cost his price or less,
+    fee included — the effective taker cost (ask + fee) is compared
+    against HIS price floored to the venue tick. A book that ran past
+    him is a skipped copy, never a chased one."""
+    import math
 
-    Cent-flooring the raw 2% gave sub-50c copies ZERO room (0.30*1.02
-    floors back to 0.30), which failed exactly when his edge was
-    confirming (price drifting toward him) and filled preferentially
-    when it moved against him — manufactured adverse selection
-    (audit 2026-08-04)."""
-    tol = max(0.01, his_price * 0.02)
-    return round(min(his_price + tol, 0.99), 2)
+    return min(math.floor(round(his_price * 100, 6)) / 100.0, 0.99)
 
 
 def _pmus_ask(pmus, slug: str, outcome: str) -> float | None:
@@ -345,6 +349,19 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
     # copy fills but appeared in no P&L or heartbeat view).
     _dc["fees"] = (round(float(spend.get("fees", 0.0)), 4)
                    if spend.get("day") == day else 0.0)
+    # Per-whale day fill counts: the inverse volume<->size scaler's
+    # denominator (owner order 2026-08-12: 10x fills -> 1/10 size).
+    _nw: dict = (dict(spend.get("nw") or {})
+                 if spend.get("day") == day else {})
+    _dc["nw"] = _nw
+
+    def _scaled_per(base: float, whale: str) -> float:
+        w = (whale or "").lower()
+        baseline = KALSHI_BASELINE_FILLS.get(w, KALSHI_BASELINE_DEFAULT)
+        n = int(_nw.get(w, 0))
+        if n <= baseline:
+            return base
+        return max(5.0, round(base * baseline / n, 2))
     # RN1 is EXEMPT from the day budget (owner directive 2026-08-10:
     # "remove day budget for RN1 on Kalshi"). His spend is tracked so it
     # can be EXCLUDED from the cap arithmetic — an uncapped whale must
@@ -583,7 +600,9 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                         stats["maker_resting"] = \
                             stats.get("maker_resting", 0) + 1
                         continue
-                per_m = _per_copy_usd(row.get("whale") or "", slug)
+                per_m = _scaled_per(
+                    _per_copy_usd(row.get("whale") or "", slug),
+                    row.get("whale") or "")
                 if (day_usd > 0 and not _uncapped(row.get("whale") or "")
                         and (spent - rn1_spent) + per_m > day_usd):
                     continue
@@ -668,7 +687,8 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 stats["routed_pmus_better"] = \
                     stats.get("routed_pmus_better", 0) + 1
                 continue
-        per = _per_copy_usd(row.get("whale") or "", slug)
+        per = _scaled_per(_per_copy_usd(row.get("whale") or "", slug),
+                          row.get("whale") or "")
         # EDGE_KCOPY_DAY_USD <= 0 = NO day cap (owner 2026-08-10: "I dont
         # want trades missing if they are being placed by our copied and
         # tested accounts"). The copy circuit breaker and account cash
@@ -748,6 +768,8 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             _dc["taker_fills"] += 1
             _dc["fees"] = round(
                 _dc.get("fees", 0.0) + kalshi.taker_fee(ask) * filled, 4)
+            _w = (row.get("whale") or "").lower()
+            _nw[_w] = int(_nw.get(_w, 0)) + 1
             _save_day()
             # The smoke probe's whole job is "prove the live order
             # path works"; a real copy fill IS that proof. Refresh the

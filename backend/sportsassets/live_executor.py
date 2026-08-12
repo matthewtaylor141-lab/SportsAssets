@@ -315,6 +315,38 @@ def per_fill_usd(whale_username: str | None,
     return PER_FILL_BY_WHALE.get(w, PENNY_TRIAL_PER_FILL_USD)
 
 
+# INVERSE VOLUME<->SIZE SCALING (owner order 2026-08-12, alongside the
+# mapping recovery: "if we increase total trades by 10x sizing of each
+# trade decreases by 10x"). Each whale has a day-dollar envelope of
+# base_clip x baseline fills; while the day's fill count sits at or
+# under baseline the clip is the base clip, and past baseline the clip
+# shrinks proportionally so 10x the fills spends the same dollars at
+# 1/10 the size. Never scales UP, floors at $5 so a copy stays a whole
+# contract, and an unreadable count degrades to the base clip (sizing
+# must not depend on a flaky read).
+BASELINE_FILLS_PER_DAY = {"rn1": 40.0, "swisstony": 30.0}
+BASELINE_FILLS_DEFAULT = 20.0
+MIN_CLIP_USD = 5.0
+
+
+async def volume_normalized_clip(pool, whale_username: str | None,
+                                 slug: str | None = None) -> float:
+    base = per_fill_usd(whale_username, slug)
+    w = (whale_username or "").lower()
+    baseline = BASELINE_FILLS_PER_DAY.get(w, BASELINE_FILLS_DEFAULT)
+    try:
+        n = int(await pool.fetchval(
+            "SELECT count(*) FROM live_orders "
+            "WHERE lower(COALESCE(whale_username, '')) = $1 "
+            "AND status IN ('filled', 'submitting') "
+            "AND placed_at > now() - interval '24 hours'", w) or 0)
+    except Exception:  # noqa: BLE001 — degrade to base, never block
+        n = 0
+    if n <= baseline:
+        return base
+    return max(MIN_CLIP_USD, round(base * baseline / n, 2))
+
+
 def _ladder_kind(us_slug: str) -> str | None:
     """Venue-grammar kind prefix when the market belongs to a LADDERED
     family (many nested lines per game): 'tsc' totals, 'asc' spreads.
@@ -754,22 +786,22 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         return
 
     if COPY_MODE == "penny_trial":
-        # $3 target per copy: whole contracts at his price +2% RELATIVE,
-        # floored to the venue's cent tick (owner tolerance:
-        # same/better/within-2%-worse). Whole-unit FOK fills all or kills.
         import math
 
-        # His price + 2%, floored to AT LEAST one tick: cent-flooring gave
-        # sub-50c copies zero tolerance, failing exactly when his edge was
-        # confirming and filling when price moved against him — manufactured
-        # adverse selection (audit 2026-08-04).
-        limit = round(min(his_price + max(0.01, his_price * 0.02), 0.99), 2)
+        # SAME-OR-BETTER (owner order 2026-08-12, superseding the
+        # 2026-08-04 his+2% tolerance): "every trade... copied as long
+        # as the price available at the time of execution is the same
+        # or better." The FOK limit is HIS price floored to the venue
+        # tick — the order fills only at his price or cheaper, never
+        # worse. A book that ran past him is a skipped copy, not a
+        # chased one.
+        limit = math.floor(round(his_price * 100, 6)) / 100.0
         if limit <= 0:
             return
-        shares = float(int(per_fill_usd(
-            payload.get("whale_username"),
-            payload.get("market_slug") or payload.get("event_slug") or "",
-        ) / limit))
+        per = await volume_normalized_clip(
+            pool, payload.get("whale_username"),
+            payload.get("market_slug") or payload.get("event_slug") or "")
+        shares = float(int(per / limit))
         if shares < 1:
             return
         usd = round(shares * limit, 2)
@@ -829,10 +861,23 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             from .copy_sports import market_type_of
             src_slug = ctx.get("market_slug") or ctx.get("event_slug") or ""
             mapping = None
-            if market_type_of(src_slug) == "moneyline":
+            mtype = market_type_of(src_slug)
+            if mtype == "moneyline":
                 mapping = await asyncio.to_thread(
                     pmus.resolve_market_exact,
                     _us_slug_candidates(src_slug, ctx.get("outcome") or ""),
+                    ctx.get("outcome"))
+            elif mtype in ("spread", "total"):
+                # MAPPING RECOVERY (owner order 2026-08-12: spreads +
+                # moneylines were 94.5% of the 34k-row unmapped
+                # funnel): grammar-to-grammar exact resolution with
+                # the line preserved IN the candidate slug — the
+                # failure mode that once mapped a spread onto its
+                # moneyline is designed out, and anything short of
+                # full corroboration falls through to the fuzzy
+                # pipeline exactly as before.
+                mapping = await asyncio.to_thread(
+                    pmus.resolve_derivative_exact, src_slug,
                     ctx.get("outcome"))
             if mapping is None:
                 mapping = await asyncio.to_thread(
