@@ -67,6 +67,12 @@ MAX_ASK = float(os.environ.get("UNDERDOG_MAX_ASK", "0.50"))
 # $1/+20% test's rows never mix into the $2/+35% read. A datetime,
 # not a string — asyncpg refuses implicit text->timestamptz.
 V2_SINCE = datetime.fromisoformat("2026-08-12T12:00:00+00:00")
+# Per-sweep cap on uncached start-time fetches (repair 2026-08-12
+# evening): unbounded priming at 8s timeouts made one sweep outlast
+# the 5-minute entry window. Uncovered games prime a few per sweep;
+# entries always run first on what is already cached.
+START_PRIME_PER_SWEEP = int(os.environ.get("UNDERDOG_PRIME_PER_SWEEP",
+                                           "15"))
 # Minute cadence: the T-minus-5 window needs minute resolution.
 ENTRY_SWEEP_S = float(os.environ.get("UNDERDOG_ENTRY_SWEEP_S", "60"))
 ENTRY_LEAD_S = float(os.environ.get("UNDERDOG_LEAD_S", "300"))
@@ -295,7 +301,7 @@ async def _game_start_ts(cfg, condition_id: str) -> float | None:
 
     try:
         async with httpx.AsyncClient(base_url=cfg.clob_api_base,
-                                     timeout=8) as http:
+                                     timeout=5) as http:
             resp = await http.get(f"/markets/{condition_id}")
         if resp.status_code != 200:
             return None
@@ -372,15 +378,6 @@ async def _entry_sweep(pool) -> dict:
         "WHERE whale_username = 'underdog' "
         "AND placed_at > now() - interval '24 hours'") or 0)
     today = datetime.now(ET).strftime("%Y-%m-%d")
-    # Slate discovery: the catalog only knows whale-traded markets, so
-    # tennis was invisible. Refresh it from the venue every 15 minutes.
-    import time as _tt
-    if _tt.time() - _discover_state["ts"] >= _DISCOVER_EVERY_S:
-        try:
-            d = await _discover_games(today)
-            stats["discover"] = d
-        except Exception as exc:  # noqa: BLE001 — catalog rows still serve
-            stats["discover_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
     # A game moneyline is the BARE slug: league-led and ENDING at the
     # date — every derivative (total, spread, prop, segment) carries a
     # suffix after it.
@@ -397,6 +394,119 @@ async def _entry_sweep(pool) -> dict:
     for r in rows:
         games.setdefault(r["slug"], []).append(r)
     cfg = settings()
+    import time as _t
+
+    attempted: set[str] = set()
+
+    async def _try_enter(slug: str, sides: list) -> None:
+        nonlocal day_spent
+        attempted.add(slug)
+        if day_spent + PER_FILL_USD > DAILY_USD:
+            stats["skipped_day_cap"] = stats.get("skipped_day_cap", 0) + 1
+            return
+        quotes = []
+        for s in sides:
+            quotes.append((str(s["token_id"]),
+                           await _clob_best_ask(cfg, str(s["token_id"]))))
+        dog = pick_underdog(quotes)
+        if dog is None:
+            stats["skipped_band"] += 1
+            return
+        token, ask = dog
+        outcome = next((s["outcome"] for s in sides
+                        if str(s["token_id"]) == token), None)
+        # NON-INTERFERENCE and one-entry-per-game in one check: any
+        # existing row on either token — any sleeve INCLUDING our own,
+        # any status that ever held inventory — vetoes entry. (An
+        # 'unfilled' FOK does retry at the next sweep's fresh price,
+        # deliberately.)
+        held = await pool.fetchval(
+            "SELECT 1 FROM live_orders WHERE asset = ANY($1::text[]) "
+            "AND status IN ('submitting','filled','settled','cashed_out') "
+            "LIMIT 1", [str(s["token_id"]) for s in sides])
+        if held:
+            stats["skipped_held"] += 1
+            return
+        n = shares_for(PER_FILL_USD, ask)
+        if n < 1:
+            return
+        # US mapping first — the manual desk's exact pipeline. No US
+        # market, no trade: mapped-or-refused, never guessed.
+        mapping = await asyncio.to_thread(
+            pmus.resolve_market_exact,
+            _us_slug_candidates(slug, outcome or ""), outcome)
+        if mapping is None:
+            stats["unmapped"] += 1
+            return
+        # NO-STACK: the token-level veto above only sees OUR sleeves'
+        # rows; the engine's own fills live in its ledger. The account
+        # is the referee — never add to a market it already holds.
+        if await asyncio.to_thread(pmus.account_holds,
+                                   mapping["market_slug"]):
+            stats["skipped_held"] += 1
+            return
+        limit = round(min(ask + 0.02, 0.99), 2)
+        n = shares_for(PER_FILL_USD, limit)
+        if n < 1:
+            return
+        row_id = await pool.fetchval(
+            """
+            INSERT INTO live_orders (whale_username, asset, condition_id,
+                                     side, his_price, limit_price,
+                                     requested_usd, requested_shares,
+                                     status, venue, us_market_slug)
+            VALUES ('underdog', $1, $2, 'BUY', $3, $4, $5, $6,
+                    'submitting', 'polymarket-us', $7)
+            RETURNING id
+            """, token, next(iter(sides))["condition_id"], ask, limit,
+            round(n * limit, 2), float(n), mapping["market_slug"])
+        try:
+            r = await asyncio.to_thread(pmus.submit_fok,
+                                        mapping["market_slug"], limit, n)
+        except Exception as exc:  # noqa: BLE001
+            await pool.execute(
+                "UPDATE live_orders SET status='error', error=$2 "
+                "WHERE id=$1", row_id, str(exc)[:300])
+            return
+        filled = float(r.get("filled_shares") or 0)
+        if r.get("ok") and filled > 0:
+            px = float(r.get("fill_price") or limit)
+            await pool.execute(
+                """UPDATE live_orders SET status='filled', order_id=$2,
+                   fill_price=$3, filled_shares=$4, filled_usd=$5
+                   WHERE id=$1""",
+                row_id, r.get("order_id"), px, filled,
+                round(filled * px, 2))
+            day_spent += filled * px
+            stats["entered"] += 1
+            log.warning("UNDERDOG entry %s (%s) x%d @ %.2f",
+                        mapping["market_slug"], outcome, int(filled), px)
+        else:
+            await pool.execute(
+                "UPDATE live_orders SET status='unfilled', error=$2 "
+                "WHERE id=$1", row_id,
+                str(r.get("status") or "unfilled")[:200])
+
+    # PASS 1 — WINDOWS FIRST (repair 2026-08-12 evening: the sleeve
+    # took ZERO entries all day while 42 games rolled wait->missed.
+    # The sweep's slow work — uncached start fetches at 8s timeouts
+    # each, plus tag discovery — ran BEFORE the window check, so one
+    # sweep could outlast the 5-minute window itself. In-window games
+    # now trade FIRST, on cached starts, before any slow work runs.)
+    for slug, sides in games.items():
+        if len(sides) != 2:
+            continue
+        st_ts = _starts.get(slug)
+        if st_ts and entry_window(st_ts, _t.time()) == "enter":
+            stats["windows_open_now"] = stats.get("windows_open_now",
+                                                  0) + 1
+            await _try_enter(slug, sides)
+
+    # PASS 2 — bookkeeping and BOUNDED priming: per-sweep start
+    # fetches are capped so this pass can never outlast a window; a
+    # game already inside its window when first primed enters NOW
+    # (its five minutes may be half spent already).
+    primed = 0
     for slug, sides in games.items():
         if len(sides) != 2:
             continue
@@ -405,13 +515,14 @@ async def _entry_sweep(pool) -> dict:
         # from the heartbeat, not inferred from a bare total.
         _lg = "games_mlb" if slug.startswith("mlb-") else "games_tennis"
         stats[_lg] = stats.get(_lg, 0) + 1
-        if day_spent + PER_FILL_USD > DAILY_USD:
-            stats["skipped_day_cap"] = stats.get("skipped_day_cap", 0) + 1
-            continue
-        if slug not in _starts:
+        if slug not in _starts and primed < START_PRIME_PER_SWEEP:
             _starts[slug] = await _game_start_ts(
                 cfg, next(iter(sides))["condition_id"])
-        import time as _t
+            primed += 1
+            st_ts = _starts.get(slug)
+            if (st_ts and slug not in attempted
+                    and entry_window(st_ts, _t.time()) == "enter"):
+                await _try_enter(slug, sides)
         # KALSHI LEG (owner 2026-08-09: "firing every single mlb game
         # and every single tennis match"): EVERY catalogued game queues
         # at first sight — before the window, the band, the quotes, and
@@ -439,97 +550,33 @@ async def _entry_sweep(pool) -> dict:
             PER_FILL_USD, TAKE_PROFIT, _start)
         if queued:
             stats["kud_queued"] = stats.get("kud_queued", 0) + 1
-        # T-MINUS-5 WINDOW: only games starting within the lead fire;
-        # everything else waits for its own five-minute window.
         win = entry_window(_starts.get(slug), _t.time())
         if win != "enter":
             k = f"skipped_{win}"
             stats[k] = stats.get(k, 0) + 1
-            continue
-        quotes = []
-        for s in sides:
-            quotes.append((str(s["token_id"]),
-                           await _clob_best_ask(cfg, str(s["token_id"]))))
-        dog = pick_underdog(quotes)
-        if dog is None:
-            stats["skipped_band"] += 1
-            continue
-        token, ask = dog
-        outcome = next((s["outcome"] for s in sides
-                        if str(s["token_id"]) == token), None)
-        other = next((s["outcome"] for s in sides
-                      if str(s["token_id"]) != token), None)
-        # NON-INTERFERENCE and one-entry-per-game in one check: any
-        # existing row on either token — any sleeve INCLUDING our own,
-        # any status that ever held inventory — vetoes entry. (An
-        # 'unfilled' FOK does retry at the next sweep's fresh price,
-        # deliberately.)
-        held = await pool.fetchval(
-            "SELECT 1 FROM live_orders WHERE asset = ANY($1::text[]) "
-            "AND status IN ('submitting','filled','settled','cashed_out') "
-            "LIMIT 1", [str(s["token_id"]) for s in sides])
-        if held:
-            stats["skipped_held"] += 1
-            continue
-        n = shares_for(PER_FILL_USD, ask)
-        if n < 1:
-            continue
-        # US mapping first — the manual desk's exact pipeline. No US
-        # market, no trade: mapped-or-refused, never guessed.
-        mapping = await asyncio.to_thread(
-            pmus.resolve_market_exact,
-            _us_slug_candidates(slug, outcome or ""), outcome)
-        if mapping is None:
-            stats["unmapped"] += 1
-            continue
-        # NO-STACK: the token-level veto above only sees OUR sleeves'
-        # rows; the engine's own fills live in its ledger. The account
-        # is the referee — never add to a market it already holds.
-        if await asyncio.to_thread(pmus.account_holds,
-                                   mapping["market_slug"]):
-            stats["skipped_held"] += 1
-            continue
-        limit = round(min(ask + 0.02, 0.99), 2)
-        n = shares_for(PER_FILL_USD, limit)
-        if n < 1:
-            continue
-        row_id = await pool.fetchval(
-            """
-            INSERT INTO live_orders (whale_username, asset, condition_id,
-                                     side, his_price, limit_price,
-                                     requested_usd, requested_shares,
-                                     status, venue, us_market_slug)
-            VALUES ('underdog', $1, $2, 'BUY', $3, $4, $5, $6,
-                    'submitting', 'polymarket-us', $7)
-            RETURNING id
-            """, token, next(iter(sides))["condition_id"], ask, limit,
-            round(n * limit, 2), float(n), mapping["market_slug"])
-        try:
-            r = await asyncio.to_thread(pmus.submit_fok,
-                                        mapping["market_slug"], limit, n)
-        except Exception as exc:  # noqa: BLE001
-            await pool.execute(
-                "UPDATE live_orders SET status='error', error=$2 "
-                "WHERE id=$1", row_id, str(exc)[:300])
-            continue
-        filled = float(r.get("filled_shares") or 0)
-        if r.get("ok") and filled > 0:
-            px = float(r.get("fill_price") or limit)
-            await pool.execute(
-                """UPDATE live_orders SET status='filled', order_id=$2,
-                   fill_price=$3, filled_shares=$4, filled_usd=$5
-                   WHERE id=$1""",
-                row_id, r.get("order_id"), px, filled,
-                round(filled * px, 2))
-            day_spent += filled * px
-            stats["entered"] += 1
-            log.warning("UNDERDOG entry %s (%s) x%d @ %.2f",
-                        mapping["market_slug"], outcome, int(filled), px)
+
+    # Slate discovery LAST — and deferred while any window is open or
+    # opening soon, so pagination can never eat a window. Deferral is
+    # bounded (a busy tennis afternoon must not starve the catalog of
+    # NEW games): after 5 consecutive deferrals it runs regardless.
+    import time as _tt
+    if _tt.time() - _discover_state["ts"] >= _DISCOVER_EVERY_S:
+        imminent = any(
+            (st is not None and
+             -ENTRY_GRACE_S <= st - _tt.time() <= ENTRY_LEAD_S + 120)
+            for st in (_starts.get(s) for s in games))
+        if imminent and _discover_state.get("deferrals", 0) < 5:
+            _discover_state["deferrals"] = \
+                _discover_state.get("deferrals", 0) + 1
+            stats["discover_deferred"] = _discover_state["deferrals"]
         else:
-            await pool.execute(
-                "UPDATE live_orders SET status='unfilled', error=$2 "
-                "WHERE id=$1", row_id,
-                str(r.get("status") or "unfilled")[:200])
+            _discover_state["deferrals"] = 0
+            try:
+                d = await _discover_games(today)
+                stats["discover"] = d
+            except Exception as exc:  # noqa: BLE001 — catalog still serves
+                stats["discover_error"] = \
+                    f"{type(exc).__name__}: {str(exc)[:120]}"
     return stats
 
 

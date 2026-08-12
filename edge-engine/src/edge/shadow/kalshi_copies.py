@@ -351,14 +351,27 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                    if spend.get("day") == day else 0.0)
     # Per-whale day fill counts: the inverse volume<->size scaler's
     # denominator (owner order 2026-08-12: 10x fills -> 1/10 size).
-    # KNOWN LIMIT (review 2026-08-12): this ledger is build-dir sqlite,
-    # so a BUILD deploy resets the counts and the clip returns to the
-    # base for the rest of the day — it fails toward today's status
-    # quo (base-clip sizing), never toward oversizing, which is the
-    # safe direction. The Kalshi day-dollar budget still bounds spend.
+    # KNOWN LIMIT (review 2026-08-12, corrected): this ledger is
+    # build-dir sqlite, so a BUILD deploy resets the counts and the
+    # clip returns to the base for the rest of the venue-day — never
+    # ABOVE base, so it fails toward pre-scaler sizing. NOTE the
+    # day-dollar budget does NOT backstop RN1 (he is budget-exempt by
+    # owner directive) — for him the reset re-arms full clips until
+    # the count rebuilds, so a reset must be VISIBLE, not silent: the
+    # day_state_reset counter below rides the heartbeat whenever
+    # today's state is missing mid-day.
     _nw: dict = (dict(spend.get("nw") or {})
                  if spend.get("day") == day else {})
     _dc["nw"] = _nw
+    if spend and spend.get("day") != day:
+        pass                              # ordinary midnight rollover
+    elif not spend and datetime.now(tz=timezone.utc).hour >= 1:
+        # No state at all after 01:00Z = a deploy wiped the ledger
+        # mid-day (midnight boots legitimately start empty).
+        _dc["day_state_reset"] = 1
+        log.warning("kcopy day state EMPTY mid-day — ledger wiped by a "
+                    "deploy; per-whale fill counts rebuilding from 0 "
+                    "(clips at base until they recover)")
 
     def _scaled_per(base: float, whale: str) -> float:
         w = (whale or "").lower()
@@ -399,6 +412,11 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         stats["copied"] += 1
         stats["copied_maker"] = stats.get("copied_maker", 0) + 1
         _dc["maker_fills"] += 1
+        # Maker fills count toward the inverse-scaling denominator too
+        # (review 2026-08-12): every fill is a fill, whichever side of
+        # the book it landed on — the 10x->1/10 envelope must see all.
+        _mw = str(ev.get("whale") or "").lower()
+        _nw[_mw] = int(_nw.get(_mw, 0)) + 1
         note_fill(sides, ev.get("ticker") or "", px, int(qty))
         if on_copied is not None:
             try:

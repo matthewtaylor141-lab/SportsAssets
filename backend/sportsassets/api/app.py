@@ -1266,6 +1266,77 @@ async def api_desk_game(venue: str = Query(...),
             "positions": positions}
 
 
+@app.get("/api/admin/fill-vs-miss", dependencies=[Depends(require_admin)])
+async def api_fill_vs_miss(days: int = Query(7, ge=1, le=30)) -> dict:
+    """The direct test of the copy thesis (owner 2026-08-12: 'same or
+    better price -> same or better margin'): grade the FILLED cohort's
+    realized ROI against the counterfactual ROI of the copies the
+    price rule made us SKIP ('unfilled' FOK kills), each miss scored
+    at HIS price against the market's actual resolution. If misses
+    grade far above fills, same-or-better is selecting away his best
+    trades (adverse selection) and the tolerance question gets decided
+    on this number, not on theory."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT lo.whale_username AS whale, lo.status,
+               lo.his_price::float8 AS his_price,
+               lo.requested_usd::float8 AS req_usd,
+               lo.filled_usd::float8 AS filled_usd,
+               lo.pnl::float8 AS pnl,
+               mt.outcome_index, m.resolved_prices
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.placed_at > now() - make_interval(days => $1)
+          AND COALESCE(lo.whale_username, '')
+              NOT IN ('manual', 'underdog')
+          AND lo.status IN ('filled', 'settled', 'unfilled')
+        """, days)
+    out: dict = {"days": days, "whales": {}}
+    for r in rows:
+        w = (r["whale"] or "?").lower()
+        b = out["whales"].setdefault(w, {
+            "filled_n": 0, "filled_staked": 0.0, "filled_pnl": 0.0,
+            "filled_settled": 0, "missed_n": 0, "missed_staked": 0.0,
+            "missed_pnl": 0.0, "missed_resolved": 0,
+            "missed_unresolved": 0})
+        if r["status"] in ("filled", "settled"):
+            b["filled_n"] += 1
+            b["filled_staked"] += r["filled_usd"] or 0.0
+            if r["pnl"] is not None:
+                b["filled_settled"] += 1
+                b["filled_pnl"] += r["pnl"]
+            continue
+        # An 'unfilled' FOK is a price-refused copy: score what HIS
+        # price would have returned on the actual resolution.
+        b["missed_n"] += 1
+        stake = r["req_usd"] or 0.0
+        prices = r["resolved_prices"]
+        idx = r["outcome_index"]
+        if (prices is None or idx is None
+                or not (0 <= idx < len(prices))
+                or not r["his_price"]):
+            b["missed_unresolved"] += 1
+            continue
+        b["missed_resolved"] += 1
+        b["missed_staked"] += stake
+        payout = float(prices[idx])
+        his = float(r["his_price"])
+        # $stake at his price buys stake/his contracts, each worth
+        # `payout` at settlement.
+        b["missed_pnl"] += round(stake / his * payout - stake, 4)
+    for b in out["whales"].values():
+        b["filled_roi"] = (round(b["filled_pnl"] / b["filled_staked"], 4)
+                           if b["filled_staked"] else None)
+        b["missed_roi"] = (round(b["missed_pnl"] / b["missed_staked"], 4)
+                           if b["missed_staked"] else None)
+        for k in ("filled_staked", "filled_pnl", "missed_staked",
+                  "missed_pnl"):
+            b[k] = round(b[k], 2)
+    return out
+
+
 class ManualTradeBody(BaseModel):
     asset: str = ""            # Polymarket token id
     usd: float
@@ -1795,6 +1866,9 @@ async def admin_live_switch(action: str) -> dict:
     return {"ok": True, "paused": action == "pause"}
 
 
+_FVM_CACHE: dict = {"ts": 0.0, "data": None}
+
+
 @app.get("/api/live-status")
 async def live_status() -> dict:
     """LIVE beta account state: config, kill switch, bankroll usage, orders."""
@@ -1853,11 +1927,31 @@ async def live_status() -> dict:
         """
     )
     venue = active_venue()
+    # Fill-vs-miss aggregate rides the public status (5-min cache) so
+    # the hourly probe reads the copy thesis' direct test without an
+    # admin credential (owner 2026-08-12: same-or-better must be
+    # judged on the graded number, not on theory).
+    import time as _time
+    fvm = None
+    try:
+        if (_FVM_CACHE.get("data") is not None
+                and _time.time() - _FVM_CACHE.get("ts", 0) < 300):
+            fvm = _FVM_CACHE["data"]
+        else:
+            full = await api_fill_vs_miss(days=7)
+            fvm = {w: {"f_n": b["filled_n"], "f_roi": b["filled_roi"],
+                       "m_n": b["missed_n"], "m_roi": b["missed_roi"],
+                       "m_unres": b["missed_unresolved"]}
+                   for w, b in full["whales"].items()}
+            _FVM_CACHE.update({"ts": _time.time(), "data": fvm})
+    except Exception:  # noqa: BLE001 — status must serve regardless
+        fvm = _FVM_CACHE.get("data")
     return {
         "enabled": venue is not None,
         "venue": venue,
         "paused": paused,
         "by_whale": [dict(r) for r in by_whale],
+        "fill_vs_miss_7d": fvm,
         "caps": {"per_fill": cfg.live_max_per_fill_usd, "daily": cfg.live_max_daily_usd,
                  "total": cfg.live_max_total_usd,
                  "max_slippage_cents": cfg.live_max_slippage_cents},
