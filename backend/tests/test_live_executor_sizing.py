@@ -12,8 +12,8 @@ from sportsassets.live_executor import per_fill_usd
 def test_proven_sleeves_clip_at_their_owner_set_sizes():
     assert per_fill_usd("RN1") == 150.00
     assert per_fill_usd("rn1") == 150.00
-    assert per_fill_usd("SwissTony") == 200.00
-    assert per_fill_usd("swisstony") == 200.00
+    assert per_fill_usd("SwissTony") == 100.00
+    assert per_fill_usd("swisstony") == 100.00
 
 
 def test_default_is_fifty_dollars():

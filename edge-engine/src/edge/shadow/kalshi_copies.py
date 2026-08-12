@@ -75,7 +75,10 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # EDGE_KCOPY_HALT_USD overrides if it proves too twitchy.
 # Same day, round 4: RN1 to $150 — profitable every single day since
 # Aug 3 (+$250 lifetime on 332 settled at $100).
-PER_COPY_USD = {"rn1": 150.00, "swisstony": 200.00}
+# 2026-08-12 (owner order, the soccer resume): swisstony $200 -> $100
+# per soccer copy — his cells are all soccer, so the whale clip IS the
+# soccer clip.
+PER_COPY_USD = {"rn1": 150.00, "swisstony": 100.00}
 PER_COPY_DEFAULT = 50.00
 # A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
 # decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.

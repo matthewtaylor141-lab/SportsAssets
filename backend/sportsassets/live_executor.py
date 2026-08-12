@@ -287,7 +287,10 @@ PENNY_TRIAL_PER_FILL_USD = 50.00
 # Per-whale override map; keys are lowercased usernames; anyone absent
 # gets the default. RN1 $100 -> $150 2026-08-11 (owner approval,
 # round 4): profitable every single day since Aug 3.
-PER_FILL_BY_WHALE = {"rn1": 150.00, "swisstony": 200.00}
+# swisstony $200 -> $100 (owner order 2026-08-12, the soccer resume:
+# "$100 per soccer copy" — his cells are all soccer, so the whale clip
+# IS the soccer clip).
+PER_FILL_BY_WHALE = {"rn1": 150.00, "swisstony": 100.00}
 # 24H ROLLING-LOSS BREAKER (owner 2026-08-12, threshold his call:
 # "$1500"): when the copy sleeve's realized losses over any rolling
 # 24 hours reach this, copying pauses by itself until the window
