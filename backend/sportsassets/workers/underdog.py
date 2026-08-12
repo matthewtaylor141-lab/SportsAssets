@@ -64,8 +64,9 @@ TAKE_PROFIT = float(os.environ.get("UNDERDOG_TAKE_PROFIT", "0.35"))
 MIN_ASK = float(os.environ.get("UNDERDOG_MIN_ASK", "0.03"))
 MAX_ASK = float(os.environ.get("UNDERDOG_MAX_ASK", "0.50"))
 # The v2 era boundary: scorecard stats start here so the retired
-# $1/+20% test's rows never mix into the $2/+35% read.
-V2_SINCE = "2026-08-12T12:00:00+00:00"
+# $1/+20% test's rows never mix into the $2/+35% read. A datetime,
+# not a string — asyncpg refuses implicit text->timestamptz.
+V2_SINCE = datetime.fromisoformat("2026-08-12T12:00:00+00:00")
 # Minute cadence: the T-minus-5 window needs minute resolution.
 ENTRY_SWEEP_S = float(os.environ.get("UNDERDOG_ENTRY_SWEEP_S", "60"))
 ENTRY_LEAD_S = float(os.environ.get("UNDERDOG_LEAD_S", "300"))
@@ -622,7 +623,7 @@ async def _record(pool) -> dict:
                      'America/New_York'), 0)::float8 AS pnl_today
             FROM live_orders
             WHERE whale_username = 'underdog'
-              AND placed_at >= $1::timestamptz
+              AND placed_at >= $1
               AND status IN ('filled', 'cashed_out', 'settled')
             GROUP BY 1, 2
             """, V2_SINCE)

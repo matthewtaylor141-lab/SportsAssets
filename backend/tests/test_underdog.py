@@ -47,6 +47,12 @@ def test_v2_defaults_are_two_dollars_and_thirty_five_percent():
     assert ud.PER_FILL_USD == 2.00
     assert ud.TAKE_PROFIT == 0.35
     assert ud.ENTRY_GRACE_S == 0.0
+    # asyncpg refuses a string for a timestamptz param — the era
+    # boundary must be a tz-aware datetime (first deploy shipped a
+    # string and the whole ud2_* scorecard silently vanished).
+    from datetime import datetime
+    assert isinstance(ud.V2_SINCE, datetime)
+    assert ud.V2_SINCE.tzinfo is not None
 
 
 def test_sizing_never_exceeds_the_stake():
