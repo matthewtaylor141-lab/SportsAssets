@@ -2770,6 +2770,12 @@ def _main_impl() -> None:
             # "is the Kalshi account actually connected?".
             if _ACCOUNT_LINK:
                 funnel["account_link"] = _ACCOUNT_LINK
+            # "Is the software class off?" must be a probe READ, never an
+            # inference from the absence of new fills. It was armed for
+            # two days by an environment variable while the code default
+            # said otherwise, and nothing on the wire said so.
+            funnel["strategy_class"] = ("retired" if not _strategy_live()
+                                        else "LIVE — placing real orders")
             if _XV_WATCH is not None:
                 funnel["xv_watch"] = {**_XV_WATCH.stats,
                                       "registered": _XV_WATCH.registered()}

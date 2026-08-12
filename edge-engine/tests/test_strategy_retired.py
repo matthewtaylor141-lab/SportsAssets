@@ -102,3 +102,21 @@ def test_crypto_scanner_rides_the_retirement():
     assert "strategy_retired" in src
     live_block = src[src.index("live = (bool(self._is_live())"):]
     assert "not strategy_retired()" in live_block[:400]
+
+
+def test_cycle_telemetry_reports_the_class_state():
+    """"Is the software off?" must be a probe READ, not an inference.
+
+    The class ran live for two days on an environment variable while the
+    code default said otherwise, and no line on the wire contradicted
+    it. The engine now posts its own gate every cycle.
+    """
+    import pathlib
+
+    runner = (pathlib.Path(__file__).resolve().parents[1] / "src" / "edge"
+              / "shadow" / "runner.py").read_text()
+    assert 'funnel["strategy_class"]' in runner
+    block = runner[runner.index('funnel["strategy_class"]'):][:220]
+    assert "_strategy_live()" in block, \
+        "the readout must come from the real gate, not a constant"
+    assert "retired" in block and "LIVE" in block

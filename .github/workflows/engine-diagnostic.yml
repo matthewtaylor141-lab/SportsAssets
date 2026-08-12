@@ -515,6 +515,12 @@ jobs:
           # The one state that means we are holding a position nobody chose.
           jq -r '.detail.arb_exposed // [] | .[] | "   !! EXPOSED \(.event) holding \(.holding)"' \
              /tmp/status.json 2>/dev/null || true
+          # Owner 2026-08-12: "just have the copies running". The software
+          # class ran for two days on an env var while the code default
+          # said otherwise, and no probe line contradicted it. This one
+          # does, straight from the engine's own gate.
+          jq -r '"SOFTWARE CLASS: \(.detail.strategy_class // "unknown — engine has not posted a cycle yet")"' \
+             /tmp/status.json 2>/dev/null || true
           echo "SPREAD COST (per fill, cents):"
           jq -r '.detail.spread_cost // {} | if length == 0 then "   (no book snapshots yet)"
                  else to_entries[] | "   \(.key): n=\(.value.n)  spread \(.value.spread_c)c  paid over mid \(.value.paid_over_mid_c)c  claimed edge \(.value.edge_c)c  NET \(.value.net_c)c" end' \
