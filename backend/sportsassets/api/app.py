@@ -797,6 +797,15 @@ async def _kalshi_fetch(series_list: list[str], q: str = "",
     if max_close_h is not None:
         base_params["max_close_ts"] = int(_time.time()) + max_close_h * 3600
 
+    def _keep(m: dict, series: str) -> None:
+        title = m.get("title") or ""
+        sub = m.get("yes_sub_title") or m.get("subtitle") or ""
+        # Alias-aware: 'braves' finds the game Kalshi titles
+        # 'Atlanta at ...' (owner report 2026-08-07).
+        if ql and not _team_match(ql, [title, sub, m.get("ticker")]):
+            return
+        out.append(_kalshi_shape(m, series))
+
     async def _series(client: httpx.AsyncClient, series: str) -> None:
         try:
             resp = await client.get("/markets", params={
@@ -804,14 +813,41 @@ async def _kalshi_fetch(series_list: list[str], q: str = "",
             if resp.status_code != 200:
                 return
             for m in (resp.json().get("markets") or []):
-                title = m.get("title") or ""
-                sub = m.get("yes_sub_title") or m.get("subtitle") or ""
-                # Alias-aware: 'braves' finds the game Kalshi titles
-                # 'Atlanta at ...' (owner report 2026-08-07).
-                if ql and not _team_match(ql, [title, sub,
-                                               m.get("ticker")]):
-                    continue
-                out.append(_kalshi_shape(m, series))
+                _keep(m, series)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return
+
+    async def _series_events(client: httpx.AsyncClient,
+                             series: str) -> None:
+        # Fallback surface (owner report 2026-08-12: Kalshi mode showed
+        # an empty board): /markets came back empty for EVERY series
+        # while the diagnostic census — which queries /events with
+        # nested markets — was listing live matches at the same moment.
+        # A silent venue-side rejection of the /markets param shape
+        # must degrade to the call shape proven working, not to an
+        # empty desk. Window/price filters re-applied client-side.
+        try:
+            resp = await client.get("/events", params={
+                "series_ticker": series, "status": "open",
+                "with_nested_markets": "true", "limit": 200})
+            if resp.status_code != 200:
+                return
+            hi = base_params.get("max_close_ts")
+            for ev in (resp.json().get("events") or []):
+                for m in (ev.get("markets") or []):
+                    if m.get("status") not in (None, "open", "active"):
+                        continue
+                    ct = m.get("close_time") or ""
+                    if hi and ct:
+                        try:
+                            from datetime import datetime as _dt
+                            if _dt.fromisoformat(
+                                    ct.replace("Z", "+00:00")
+                            ).timestamp() > hi:
+                                continue
+                        except ValueError:
+                            pass
+                    _keep(m, series)
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             return
 
@@ -820,6 +856,9 @@ async def _kalshi_fetch(series_list: list[str], q: str = "",
                                      timeout=10) as client:
             await _asyncio.gather(*(_series(client, s)
                                     for s in series_list))
+            if not out:
+                await _asyncio.gather(*(_series_events(client, s)
+                                        for s in series_list))
     except Exception:  # noqa: BLE001
         pass
     out.sort(key=lambda m: (m.get("close_time") or ""))
