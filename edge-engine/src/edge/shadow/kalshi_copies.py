@@ -340,6 +340,11 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             for k in ("rested", "maker_fills", "taker_fills")}
            if spend.get("day") == day
            else {"rested": 0, "maker_fills": 0, "taker_fills": 0})
+    # Fee counter (owner audit 2026-08-12: fees were the one execution
+    # cost with zero telemetry — taker fees are paid on 100% of Kalshi
+    # copy fills but appeared in no P&L or heartbeat view).
+    _dc["fees"] = (round(float(spend.get("fees", 0.0)), 4)
+                   if spend.get("day") == day else 0.0)
     # RN1 is EXEMPT from the day budget (owner directive 2026-08-10:
     # "remove day budget for RN1 on Kalshi"). His spend is tracked so it
     # can be EXCLUDED from the cap arithmetic — an uncapped whale must
@@ -534,6 +539,18 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             # defers them) young enough that the resting window ends
             # before the PMUS sweep's one-hour reclaim can overlap it:
             # no cross-venue double-copy is possible by construction.
+            # TAKER-ONLY DEFAULT (owner audit 2026-08-12): the maker
+            # experiment finished 0-for-55 on its final day and 0
+            # maker fills in every hourly snapshot — rests never
+            # fill; they park capital and sweep attention. The rest
+            # path sits behind EDGE_KCOPY_MAKER=1 for the day it
+            # earns a retry; fee-out-of-tolerance copies are skipped
+            # and counted instead of rested.
+            import os as _os2
+            if _os2.environ.get("EDGE_KCOPY_MAKER", "0") != "1":
+                stats["skipped_fee_out"] = \
+                    stats.get("skipped_fee_out", 0) + 1
+                continue
             from edge.shadow.copy_sports import kalshi_first as _kf
             young = (now - entered) < (max_age_s - 900)
             if (live and _kf(str(row.get("asset") or "")) and young
@@ -729,6 +746,8 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 rn1_spent += cost
             stats["spent"] = round(stats["spent"] + cost, 2)
             _dc["taker_fills"] += 1
+            _dc["fees"] = round(
+                _dc.get("fees", 0.0) + kalshi.taker_fee(ask) * filled, 4)
             _save_day()
             ledger.record_fill(
                 fill_uid=f"kcopy-{claim}-{int(time.time())}",

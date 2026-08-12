@@ -467,10 +467,11 @@ class _MakerKalshi(_Kalshi):
                 "order_id": f"ord-{len(self.orders)}"}
 
 
-def test_taker_priced_out_rests_a_fee_free_maker_on_kalshi_first():
+def test_taker_priced_out_rests_a_fee_free_maker_on_kalshi_first(monkeypatch):
     """At his 0.50 the limit is 0.51; ask 0.51 + fee ≈ 0.527 > limit, so
     the taker path refuses — the maker path must rest at the limit (one
     tick inside the ask), GTC, without burning the once-ever claim."""
+    monkeypatch.setenv("EDGE_KCOPY_MAKER", "1")   # taker-only default (2026-08-12)
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka = _MakerKalshi(0.51)
     row = {**_ROW, "asset": _asset(True)}
@@ -487,11 +488,12 @@ def test_taker_priced_out_rests_a_fee_free_maker_on_kalshi_first():
     assert len(ka.orders) == 1
 
 
-def test_stale_rest_reprices_only_on_confirmed_cancel():
+def test_stale_rest_reprices_only_on_confirmed_cancel(monkeypatch):
     """The book ran away from a resting bid (ask moved >2c above our
     price): cancel and requote at the fresh book. 'gone'/'error' cancel
     results must NOT repost — a filled-then-reposted rest is a doubled
     copy, an ambiguous one is a stacked order."""
+    monkeypatch.setenv("EDGE_KCOPY_MAKER", "1")   # taker-only default (2026-08-12)
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka = _MakerKalshi(0.51)
     ka.cancel_results = ["cancelled"]
