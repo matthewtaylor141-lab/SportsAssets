@@ -249,6 +249,11 @@ export function TradeDesk() {
     }
   }
 
+  // Hooks must all run before the auth gate's early return (React
+  // #310: the tree unmounts to black if the hook count changes when
+  // auth flips — caught by the headless render check on first deploy).
+  const strip = useMemo(() => games.slice(0, 6), [games])
+
   const amount = parseFloat(usd)
   const estLimit = pick ? Math.min(pick.ask + 0.02, 0.99) : 0
   const estContracts = pick && amount > 0 ? Math.floor(amount / estLimit) : 0
@@ -678,8 +683,6 @@ export function TradeDesk() {
       </div>
     )
   )
-
-  const strip = useMemo(() => games.slice(0, 6), [games])
 
   return (
     <>
