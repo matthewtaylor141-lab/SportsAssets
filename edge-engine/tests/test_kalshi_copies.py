@@ -120,10 +120,11 @@ def test_sport_assignments_gate_the_sweep():
     assert ka3.orders == [("T-DAL", 0.48, 312)]
 
 
-def test_swisstony_is_dark_while_soccer_is_halted():
-    """Owner order 2026-08-11: soccer halted — and swisstony's cells are
-    ALL soccer, so his sleeve places nothing anywhere. His $200 clip
-    (round 3) stays configured for the resume."""
+def test_swisstony_resumes_behind_the_soccer_price_floor():
+    """Owner order 2026-08-12: soccer resumed (halt of 2026-08-11
+    lifted) behind the 40c price floor. His $200 clip fires on a
+    qualifying moneyline; a ladder's improbable sub-40c rung still
+    refuses for everyone."""
     from edge.shadow.kalshi_copies import PER_COPY_USD
     assert PER_COPY_USD["swisstony"] == 200.00
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
@@ -132,8 +133,15 @@ def test_swisstony_is_dark_while_soccer_is_halted():
            "price": 0.74, "whale": "swisstony",
            "entered_ts": time.time() - 60}
     st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
-    assert st.get("skipped_sport") == 1
-    assert not ka.orders
+    assert st["copied"] == 1
+    assert ka.orders == [("T-ARS", 0.72, 277)]   # floor($200 / 0.72)
+    # The improbable rung (his price 22c) refuses at the policy gate:
+    led2 = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka2 = _Kalshi(0.20, outcomes={"Arsenal": "T-ARS", "Chelsea": "T-CHE"})
+    st2 = sweep(kalshi=ka2, ledger=led2,
+                identities=[{**row, "price": 0.22}], live=True)
+    assert st2.get("skipped_sport") == 1
+    assert not ka2.orders
 
 
 def test_promoted_whale_0x2c33_copies_at_the_default_clip():

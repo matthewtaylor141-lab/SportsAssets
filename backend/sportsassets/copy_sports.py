@@ -63,15 +63,23 @@ UNRESTRICTED = frozenset({
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465",
 })
 
-# ALL soccer copying HALTED (owner order 2026-08-11 ~3:40pm ET: "halt
-# all soccer trading until this issue is tested and resolved" — the
-# PMUS same-market stacking incident). Checked before every other gate,
-# both venues. NOTE: sport_of buckets every league outside the named US
-# majors and tennis into 'soccer', so this also halts the misc bucket
-# (table tennis, cricket, esports) — conservative and intended. NOTE
-# ALSO: swisstony's cells are all soccer, so this halts him entirely
-# until the owner lifts it.
-HALTED_SPORTS = frozenset({"soccer"})
+# Soccer halt LIFTED (owner order 2026-08-12 ~10am ET, after ~18h of
+# verified guard refusals with zero stacked positions). History: halted
+# 2026-08-11 ~3:40pm ET on the PMUS same-market stacking incident. The
+# resume rides three protections: one position per game, the venue
+# never-add, and the SOCCER_PRICE_FLOOR below. Re-halting is putting
+# "soccer" back in this set.
+HALTED_SPORTS = frozenset()
+
+# SOCCER PRICE FLOOR (owner-approved resume design 2026-08-12): a
+# soccer entry only copies when HIS fill price is >= this — the
+# improbable rungs of a ladder (O3.5 at 22c) are skipped, and because
+# a skip writes no row it does NOT consume the game's one-position
+# slot, so the copy taken is always his most probable line that
+# clears the floor. Binds EVERY whale including UNRESTRICTED ones;
+# an unreadable price refuses (the floor is the protection, and an
+# absent price must not disable it).
+SOCCER_PRICE_FLOOR = 0.40
 
 # Whales copied NOWHERE right now (owner directive 2026-08-11 during the
 # profitability review): HomeRunHazard measured flat-negative on his own
@@ -267,6 +275,12 @@ def copy_allowed(whale: str, slug: str, price: float | None = None) -> bool:
         return False
     if market_type_of(slug) in BLOCKED_TYPES:
         return False
+    if sport_of(slug) == "soccer":
+        try:
+            if price is None or float(price) < SOCCER_PRICE_FLOOR:
+                return False
+        except (TypeError, ValueError):
+            return False
     if w in UNRESTRICTED:
         return True
     cells = CELLS.get(w)

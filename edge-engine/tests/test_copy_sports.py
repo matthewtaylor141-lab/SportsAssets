@@ -29,8 +29,9 @@ def test_allowed_cells_route_to_their_accounts():
     assert copy_allowed("kch123", "atc-nhl-tor-mtl-2026-10-12-tor")
     # HomeRunHazard's cells moved to test_paused_whale_copies_nothing —
     # he is PAUSED (owner 2026-08-11) and copies nothing anywhere.
-    # swisstony's soccer cells are HALTED with the sport (owner order
-    # 2026-08-11) — his positives moved to test_soccer_halt_blocks_everyone.
+    # swisstony's soccer positives live in
+    # test_soccer_price_floor_governs_the_resume (halt lifted 2026-08-12;
+    # his copies now require price >= the 40c floor).
 
 
 def test_disallowed_cells_fail_closed():
@@ -166,21 +167,35 @@ def test_copy_sports_twins_are_byte_identical():
     assert a == b, "edit both copies together — they are one policy"
 
 
-def test_soccer_halt_blocks_everyone():
-    """Owner order 2026-08-11 ("halt all soccer trading until this issue
-    is tested and resolved" — the PMUS stacking incident): soccer copies
-    refuse for EVERY whale, including swisstony's own measured cells and
-    the unrestricted wallets. The misc bucket (table tennis, cricket)
-    rides the same halt; US majors and tennis are untouched."""
-    assert not copy_allowed("swisstony", "atc-epl-ars-che-2026-08-15-ars")
-    assert not copy_allowed("swisstony", "asc-epl-ars-che-2026-08-15-ars-1pt5")
-    assert not copy_allowed("swisstony", "uslc-tul-srp-2026-08-05-srp")
-    assert not copy_allowed("rn1", "epl-ars-che-2026-08-15")
+def test_soccer_price_floor_governs_the_resume():
+    """Soccer RESUMED 2026-08-12 (owner order, stacking fixes verified
+    live) behind a 40c price floor: only his >= 40% lines copy, so a
+    ladder's improbable rung (O3.5 at 22c) is skipped — and because a
+    skip writes no row, the one-position-per-game slot stays free for
+    his safest qualifying line. Binds EVERY whale incl. UNRESTRICTED;
+    an unreadable price refuses; the misc bucket (table tennis,
+    cricket) rides the same rule; US majors and tennis untouched."""
+    # swisstony's measured cells, back on above the floor:
+    assert copy_allowed("swisstony", "atc-epl-ars-che-2026-08-15-ars",
+                        price=0.55)
+    assert copy_allowed("swisstony", "asc-epl-ars-che-2026-08-15-ars-1pt5",
+                        price=0.44)
+    # The improbable rung refuses for every identity:
+    assert not copy_allowed("swisstony", "atc-epl-ars-che-2026-08-15-ars",
+                            price=0.22)
+    assert not copy_allowed("rn1", "epl-ars-che-2026-08-15", price=0.39)
+    assert copy_allowed("rn1", "epl-ars-che-2026-08-15", price=0.40)
     assert not copy_allowed(
         "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465",
-        "tsc-epl-ars-che-2026-08-15-o2pt5")
-    assert not copy_allowed("rn1", "setkameua-pakser-sydand-2026-08-11"), \
-        "the misc bucket halts with soccer"
-    # Non-soccer flow unaffected:
+        "atc-epl-ars-che-2026-08-15-ars", price=0.30)
+    # No readable price: the floor is the protection — refuse.
+    assert not copy_allowed("swisstony", "atc-epl-ars-che-2026-08-15-ars")
+    assert not copy_allowed("rn1", "epl-ars-che-2026-08-15", price="junk")
+    # Misc bucket rides the same floor:
+    assert not copy_allowed("rn1", "setkameua-pakser-sydand-2026-08-11",
+                            price=0.30)
+    assert copy_allowed("rn1", "setkameua-pakser-sydand-2026-08-11",
+                        price=0.55)
+    # Non-soccer flow needs no price:
     assert copy_allowed("rn1", "aec-atp-rafjod-cormou-2026-08-06")
     assert copy_allowed("rn1", "mlb-nyy-bos-2026-07-22-o8pt5")
