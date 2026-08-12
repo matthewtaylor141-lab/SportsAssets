@@ -354,48 +354,50 @@ def resolve_derivative_exact(global_slug: str,
     fd = _feed_derivative(global_slug)
     if fd is None:
         return None
+    # SPREADS DELIBERATELY EXCLUDED for now (adversarial review
+    # 2026-08-12): the venue's pos/neg-vs-team side convention is not
+    # yet verified from live fills, and a same-suffix candidate could
+    # buy the MIRROR side of the whale's bet — a leak, not a copy.
+    # Spreads keep the fuzzy pipeline (whose line-consistency guard is
+    # the proven defense) until the convention is confirmed from data.
+    if fd["kind"] != "total":
+        return None
     client = _get_client()
-    if fd["kind"] == "total":
-        cands = [f"tsc-{fd['base']}-{fd['line']}"]
-        want_word = "over" if fd["side"] == "o" else "under"
-    else:
-        suffix = "-".join(t for t in (fd["team"], fd["side"],
-                                      fd["line"]) if t)
-        cands = [f"asc-{fd['base']}-{suffix}"]
-        want_word = None
-    ol = _norm(outcome)
-    for slug in cands:
-        try:
-            m = (client.markets.retrieve_by_slug(slug) or {}).get(
-                "market") or {}
-        except Exception:  # noqa: BLE001 — 404 is an answer
-            continue
-        if not m.get("slug") or m.get("closed"):
-            continue
-        title = m.get("question") or m.get("title") or ""
-        sides = [s for s in (m.get("marketSides") or [])
-                 if isinstance(s, dict) and s.get("identifier")
-                 and s.get("description")]
-        if fd["kind"] == "total":
-            for s in sides:
-                if want_word in _norm(s["description"]):
-                    return {"market_slug": s["identifier"],
-                            "title": title, "outcome": s["description"],
-                            "matched_by": "derivative_exact",
-                            "score": 1.0}
-            continue
-        # spread: the candidate slug already IS one side; require the
-        # line digits to survive in what the venue resolved, and the
-        # whale's team to appear in the parent text when we know it.
-        if fd["line"] not in (m.get("slug") or slug):
-            continue
-        if ol and not any(w in _norm(title) for w in ol.split()
-                          if len(w) > 3):
-            continue
-        return {"market_slug": m.get("slug") or slug, "title": title,
-                "outcome": m.get("outcome") or outcome,
-                "matched_by": "derivative_exact", "score": 1.0}
-    return None
+    slug = f"tsc-{fd['base']}-{fd['line']}"
+    slug_word = "over" if fd["side"] == "o" else "under"
+    try:
+        m = (client.markets.retrieve_by_slug(slug) or {}).get(
+            "market") or {}
+    except Exception:  # noqa: BLE001 — 404 is an answer
+        return None
+    if not m.get("slug") or m.get("closed"):
+        return None
+    title = m.get("question") or m.get("title") or ""
+    sides = [s for s in (m.get("marketSides") or [])
+             if isinstance(s, dict) and s.get("identifier")
+             and s.get("description")]
+    # The side is chosen by the WHALE'S OUTCOME against the venue's
+    # side descriptions (same floor as every exact path) — never by
+    # the slug token alone (review: the outcome must drive the side).
+    best, best_score = None, 0.0
+    for s in sides:
+        sc = _outcome_score({"outcome": s["description"]}, outcome)
+        if sc > best_score:
+            best, best_score = s, sc
+    if best is None or best_score < MATCH_FLOOR:
+        return None
+    # Cross-check: the chosen side's over/under word must agree with
+    # the feed slug's o/u token — WORD-boundary matched, so 'overtime'
+    # can never read as 'over'. Disagreement refuses outright.
+    side_words = set(re.findall(r"[a-z]+", _norm(best["description"])))
+    if slug_word not in side_words:
+        return None
+    other_word = "under" if slug_word == "over" else "over"
+    if other_word in side_words:
+        return None
+    return {"market_slug": best["identifier"], "title": title,
+            "outcome": best["description"],
+            "matched_by": "derivative_exact", "score": best_score}
 
 
 def resolve_market_exact(candidate_slugs: list[str],

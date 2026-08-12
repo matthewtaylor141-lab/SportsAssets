@@ -335,10 +335,16 @@ async def volume_normalized_clip(pool, whale_username: str | None,
     w = (whale_username or "").lower()
     baseline = BASELINE_FILLS_PER_DAY.get(w, BASELINE_FILLS_DEFAULT)
     try:
+        # Statuses (adversarial review 2026-08-12): 'settled' and
+        # 'cashed_out' STAY in the count — a fill that resolved is
+        # still a fill this day, and dropping it let the clip scale
+        # back UP as games settled. 'submitting' is excluded so a
+        # stranded in-flight row can never permanently shrink the
+        # clip; real submits become 'filled' within seconds.
         n = int(await pool.fetchval(
             "SELECT count(*) FROM live_orders "
             "WHERE lower(COALESCE(whale_username, '')) = $1 "
-            "AND status IN ('filled', 'submitting') "
+            "AND status IN ('filled', 'settled', 'cashed_out') "
             "AND placed_at > now() - interval '24 hours'", w) or 0)
     except Exception:  # noqa: BLE001 — degrade to base, never block
         n = 0

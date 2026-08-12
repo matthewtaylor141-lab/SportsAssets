@@ -351,6 +351,11 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                    if spend.get("day") == day else 0.0)
     # Per-whale day fill counts: the inverse volume<->size scaler's
     # denominator (owner order 2026-08-12: 10x fills -> 1/10 size).
+    # KNOWN LIMIT (review 2026-08-12): this ledger is build-dir sqlite,
+    # so a BUILD deploy resets the counts and the clip returns to the
+    # base for the rest of the day — it fails toward today's status
+    # quo (base-clip sizing), never toward oversizing, which is the
+    # safe direction. The Kalshi day-dollar budget still bounds spend.
     _nw: dict = (dict(spend.get("nw") or {})
                  if spend.get("day") == day else {})
     _dc["nw"] = _nw

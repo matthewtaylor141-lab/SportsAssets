@@ -18,6 +18,11 @@ class _CountPool:
 
     async def fetchval(self, sql, *a):
         assert "count(*)" in sql
+        # Review 2026-08-12: settled fills stay in the day's count
+        # (else the clip scales back UP as games resolve) and
+        # stranded 'submitting' rows must never shrink it.
+        assert "'settled'" in sql and "'cashed_out'" in sql
+        assert "submitting" not in sql
         return self.n
 
 
@@ -110,17 +115,20 @@ class _Client:
         self.markets = _Markets(table)
 
 
-def test_total_resolves_to_the_right_side(monkeypatch):
-    table = {"tsc-mlb-nyy-bos-2026-07-22-8pt5": {
-        "slug": "tsc-mlb-nyy-bos-2026-07-22-8pt5", "closed": False,
-        "question": "Yankees vs Red Sox: O/U 8.5",
-        "marketSides": [
-            {"identifier": "tsc-mlb-nyy-bos-2026-07-22-8pt5-over",
-             "description": "Over"},
-            {"identifier": "tsc-mlb-nyy-bos-2026-07-22-8pt5-under",
-             "description": "Under"},
-        ]}}
-    monkeypatch.setattr(pmus, "_get_client", lambda: _Client(table))
+_TOTALS_TABLE = {"tsc-mlb-nyy-bos-2026-07-22-8pt5": {
+    "slug": "tsc-mlb-nyy-bos-2026-07-22-8pt5", "closed": False,
+    "question": "Yankees vs Red Sox: O/U 8.5",
+    "marketSides": [
+        {"identifier": "tsc-mlb-nyy-bos-2026-07-22-8pt5-over",
+         "description": "Over"},
+        {"identifier": "tsc-mlb-nyy-bos-2026-07-22-8pt5-under",
+         "description": "Under"},
+    ]}}
+
+
+def test_total_side_is_driven_by_his_outcome(monkeypatch):
+    monkeypatch.setattr(pmus, "_get_client",
+                        lambda: _Client(_TOTALS_TABLE))
     r = pmus.resolve_derivative_exact("mlb-nyy-bos-2026-07-22-o8pt5",
                                       "Over 8.5")
     assert r and r["market_slug"].endswith("-over")
@@ -130,19 +138,33 @@ def test_total_resolves_to_the_right_side(monkeypatch):
     assert r2 and r2["market_slug"].endswith("-under")
 
 
-def test_spread_requires_team_corroboration(monkeypatch):
-    table = {"asc-mlb-kc-laa-2026-08-14-pos-1pt5": {
-        "slug": "asc-mlb-kc-laa-2026-08-14-pos-1pt5", "closed": False,
-        "question": "Spread: Kansas City Royals (+1.5)",
-        "marketSides": []}}
-    monkeypatch.setattr(pmus, "_get_client", lambda: _Client(table))
-    ok = pmus.resolve_derivative_exact("mlb-kc-laa-2026-08-14-pos-1pt5",
-                                       "Kansas City Royals")
-    assert ok and ok["market_slug"] == "asc-mlb-kc-laa-2026-08-14-pos-1pt5"
-    # Wrong team in the outcome: the parent text does not corroborate.
-    bad = pmus.resolve_derivative_exact("mlb-kc-laa-2026-08-14-pos-1pt5",
-                                        "Texas Rangers")
-    assert bad is None
+def test_total_refuses_when_outcome_and_slug_disagree(monkeypatch):
+    """Review 2026-08-12: the whale's outcome drives the side, and the
+    slug's o/u token must AGREE — a disagreement (or an outcome that
+    matches neither side) refuses rather than guesses."""
+    monkeypatch.setattr(pmus, "_get_client",
+                        lambda: _Client(_TOTALS_TABLE))
+    # His outcome says Under, the feed slug token says over: refuse.
+    assert pmus.resolve_derivative_exact(
+        "mlb-nyy-bos-2026-07-22-o8pt5", "Under 8.5") is None
+    # An outcome matching neither side description: refuse.
+    assert pmus.resolve_derivative_exact(
+        "mlb-nyy-bos-2026-07-22-o8pt5", "New York Yankees") is None
+
+
+def test_spreads_stay_on_the_fuzzy_pipeline_for_now(monkeypatch):
+    """Review 2026-08-12 (wrong-side risk): until the venue's pos/neg
+    side convention is verified from live fills, the exact resolver
+    refuses spreads outright — the fuzzy pipeline with its line-
+    consistency guard remains their only mapper."""
+    monkeypatch.setattr(pmus, "_get_client", lambda: _Client({
+        "asc-mlb-kc-laa-2026-08-14-pos-1pt5": {
+            "slug": "asc-mlb-kc-laa-2026-08-14-pos-1pt5",
+            "closed": False,
+            "question": "Spread: Kansas City Royals (+1.5)",
+            "marketSides": []}}))
+    assert pmus.resolve_derivative_exact(
+        "mlb-kc-laa-2026-08-14-pos-1pt5", "Kansas City Royals") is None
 
 
 def test_unlisted_candidate_falls_through(monkeypatch):
