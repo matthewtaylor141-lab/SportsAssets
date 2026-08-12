@@ -468,18 +468,27 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 stats.get("skipped_held_ticker", 0) + 1
             continue
         # ...and the VENUE's own answer, which survives deploys
-        # (incident 2026-08-11): a position or resting buy the venue
-        # reports refuses the copy even when this boot's ledger has
-        # never heard of it — and an unreadable venue refuses ALL buys.
+        # (incident 2026-08-11): EVENT-level, not just ticker-level.
+        # The evening's guaranteed-loss pairs (owner screenshot: Halys
+        # YES + Kwon YES summing over $1/pair) formed because the
+        # cross-side pair math below reads the SAME wipeable local
+        # ledger the never-add did — post-deploy it saw no opposite
+        # side and skipped the pair constraint entirely. Owner
+        # directive: copies NEVER take an offsetting position; locked
+        # pairs belong to the arb sleeve alone. So any venue-held
+        # position or resting buy anywhere on this EVENT refuses the
+        # copy, and an unreadable venue refuses ALL buys.
         if live and hasattr(kalshi, "open_ticker_map"):
             if venue_guard is None:
                 stats["skipped_no_guard"] = \
                     stats.get("skipped_no_guard", 0) + 1
                 continue
-            if (target_ticker in venue_guard["positions"]
-                    or target_ticker in venue_guard["resting_buys"]):
-                stats["skipped_held_ticker"] = \
-                    stats.get("skipped_held_ticker", 0) + 1
+            held_any = (set(venue_guard["positions"])
+                        | set(venue_guard["resting_buys"]))
+            tgt_event = game_of(target_ticker)
+            if any(game_of(t) == tgt_event for t in held_any):
+                stats["skipped_held_event"] = \
+                    stats.get("skipped_held_event", 0) + 1
                 continue
         book = kalshi.get_book(target_ticker, target_ticker)
         if book is None or not book.asks or book.asks[0].size < 1:

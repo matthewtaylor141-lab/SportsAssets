@@ -618,7 +618,7 @@ def test_venue_held_position_blocks_the_copy_after_ledger_amnesia():
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")  # fresh = post-deploy
     ka = _GuardedKalshi(0.48, positions={"T-DAL"})
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
-    assert st.get("skipped_held_ticker") == 1
+    assert st.get("skipped_held_event") == 1
     assert not ka.orders, "venue-held ticker re-bought after ledger wipe"
 
 
@@ -626,7 +626,7 @@ def test_venue_resting_buy_blocks_the_copy_too():
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka = _GuardedKalshi(0.48, resting_buys={"T-DAL": ["o-orphan"]})
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
-    assert st.get("skipped_held_ticker") == 1
+    assert st.get("skipped_held_event") == 1
     assert not ka.orders
 
 
@@ -680,3 +680,20 @@ def test_thin_book_is_never_taken():
     ka2 = _Kalshi(0.48, ask_size=52)
     st2 = sweep(kalshi=ka2, ledger=led2, identities=[dict(_ROW)], live=True)
     assert st2["copied"] == 1
+
+
+def test_opposite_side_of_a_held_event_is_refused():
+    """Owner directive 2026-08-11 evening (the Halys+Kwon guaranteed-
+    loss pairs): copies NEVER take an offsetting position. A venue-held
+    position on the OTHER side of the event refuses the copy outright —
+    no pair-completion math, no local-ledger dependence. Locked pairs
+    are the arb sleeve's job."""
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")  # amnesiac
+    ka = _GuardedKalshi(
+        0.30,
+        outcomes={"Dallas Wings": "KXWNBAGAME-26AUG04DALCHI-DAL",
+                  "Chicago Sky": "KXWNBAGAME-26AUG04DALCHI-CHI"},
+        positions={"KXWNBAGAME-26AUG04DALCHI-CHI"})  # we hold Chicago
+    st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
+    assert st.get("skipped_held_event") == 1
+    assert not ka.orders, "bought the opposite side of a held event"
