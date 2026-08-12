@@ -1083,36 +1083,94 @@ async def api_desk_game(venue: str = Query(...),
     if venue == "kalshi":
         # The game id IS the venue's event_ticker (SERIES-EVENTCODE):
         # ask for the event directly — precise, and immune to any cap
-        # or window on the shared browse list.
+        # or window on the shared browse list. The venue lists a
+        # game's OTHER market families under SIBLING series (census
+        # ground truth: ...GAME pairs with ...SPREAD/TOTAL/TEAMTOTAL/
+        # 1HTOTAL/1HSPREAD; ...MATCH pairs with ...SETWINNER/GWINNER/
+        # EXACTMATCH), each with its own event ticker sharing the
+        # event code — sweep them all so the full board shows (owner
+        # order 2026-08-12). Unknown siblings 404/empty harmlessly.
+        import asyncio as _asyncio
+
         import httpx
 
+        series0 = id.split("-", 1)[0]
+        code = id.split("-", 1)[1] if "-" in id else ""
+        sibs: list[str] = []
+        if series0.endswith("MATCH"):
+            stem = series0[: -len("MATCH")]
+            sibs = [stem + s for s in ("SETWINNER", "GWINNER",
+                                       "EXACTMATCH")]
+        elif series0.endswith("GAME"):
+            stem = series0[: -len("GAME")]
+            sibs = [stem + s for s in ("SPREAD", "TOTAL", "TEAMTOTAL",
+                                       "1HTOTAL", "1HSPREAD")]
         raw_markets: list[dict] = []
+
+        async def _event_direct(client: httpx.AsyncClient) -> None:
+            try:
+                resp = await client.get("/markets", params={
+                    "event_ticker": id, "status": "open", "limit": 200})
+                if resp.status_code == 200:
+                    raw_markets.extend(resp.json().get("markets") or [])
+            except Exception:  # noqa: BLE001
+                pass
+
+        async def _sibling(client: httpx.AsyncClient, sib: str) -> None:
+            try:
+                resp = await client.get("/events", params={
+                    "series_ticker": sib, "status": "open",
+                    "with_nested_markets": "true", "limit": 200})
+                if resp.status_code != 200:
+                    return
+                for ev in (resp.json().get("events") or []):
+                    et = ev.get("event_ticker") or ""
+                    if code and code in et:
+                        raw_markets.extend(ev.get("markets") or [])
+            except Exception:  # noqa: BLE001
+                pass
+
         try:
             async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
                                          timeout=10) as client:
-                resp = await client.get("/markets", params={
-                    "event_ticker": id, "status": "open", "limit": 200})
-            if resp.status_code == 200:
-                raw_markets = resp.json().get("markets") or []
+                await _asyncio.gather(_event_direct(client),
+                                      *(_sibling(client, s)
+                                        for s in sibs))
         except Exception:  # noqa: BLE001
-            raw_markets = []
+            pass
         groups: dict[str, list] = {}
         title = id
         for rm in raw_markets:
             series = (rm.get("ticker") or "").split("-", 1)[0]
             m = _kalshi_shape(rm, series)
-            label = ("Moneyline" if series.endswith("GAME")
+            label = ("Exact Score" if series.endswith("EXACTMATCH") else
+                     "Set Winners" if series.endswith("SETWINNER") else
+                     "Game Props" if series.endswith("GWINNER") else
+                     "Moneyline" if series.endswith("GAME")
                      or series.endswith("MATCH") else
                      "Spreads" if "SPREAD" in series else
                      "Totals" if "TOTAL" in series else "More")
+            row_label = m.get("sub_title") or m.get("title")
+            if label not in ("Moneyline",):
+                # Sibling markets repeat the matchup in the title —
+                # keep the distinguishing part readable on one row.
+                row_label = (f"{(m.get('title') or '').strip()} — "
+                             f"{m.get('sub_title')}"
+                             if m.get("sub_title") else row_label)
             groups.setdefault(label, []).append({
-                "label": m.get("sub_title") or m.get("title"),
+                "label": row_label,
                 "ticker": m.get("ticker"), "price": m.get("yes_ask"),
                 "no_price": m.get("no_ask")})
-            title = (m.get("title") or title).replace(" Winner?", "")
+            if series == series0:
+                title = (m.get("title") or title).replace(" Winner?", "")
+        korder = ["Moneyline", "Spreads", "Totals", "Set Winners",
+                  "Game Props", "Exact Score", "More"]
         return {"id": id, "venue": "kalshi", "title": title,
-                "groups": [{"name": k, "markets": v}
-                           for k, v in groups.items()], "positions": []}
+                "groups": [{"name": k, "markets": groups[k]}
+                           for k in korder if k in groups]
+                + [{"name": k, "markets": v} for k, v in groups.items()
+                   if k not in korder],
+                "positions": []}
 
     pool = await get_pool()
     rows = await pool.fetch(
@@ -1145,6 +1203,37 @@ async def api_desk_game(venue: str = Query(...),
     for g in groups.values():
         for mk in g:
             mk["price"] = (quotes.get(mk["asset"]) or {}).get("ask")
+    # VENUE-FIRST BOARD (owner order 2026-08-12: "All markets that are
+    # available on Kalshi or Polymarket for every single game needs to
+    # be shown and able to be executed"): the catalog only knows
+    # whale-traded + discovery markets, which left tennis games showing
+    # a bare moneyline. The venue's own event listing is the truth —
+    # everything it lists beyond the catalog joins the board as a
+    # slug-orderable row. Moneyline stays catalog-only when the catalog
+    # already has it (those rows carry book depth); labels dedupe the
+    # rest, and a rare duplicate row is just the same market twice,
+    # bounded by the manual sleeve's own caps.
+    from .. import pmus as _pmus
+    try:
+        board = await asyncio.to_thread(_pmus.event_board, id)
+    except Exception:  # noqa: BLE001 — the catalog view still serves
+        board = []
+    if board:
+        have_labels = {(mk.get("label") or "").strip().lower()
+                       for g in groups.values() for mk in g}
+        have_ml = "Moneyline" in groups
+        kind_group = {"aec": "Moneyline", "atc": "Moneyline",
+                      "asc": "Spreads", "tsc": "Totals"}
+        for r in board:
+            kind = (r["us_slug"] or "").split("-", 1)[0]
+            grp = kind_group.get(kind, "Props & More")
+            if grp == "Moneyline" and have_ml:
+                continue
+            if (r["label"] or "").strip().lower() in have_labels:
+                continue
+            groups.setdefault(grp, []).append({
+                "label": r["label"], "us_slug": r["us_slug"],
+                "price": r["price"]})
     # The desk's own open positions in this game (manual sleeve).
     pos_rows = await pool.fetch(
         """
@@ -1185,6 +1274,8 @@ class ManualTradeBody(BaseModel):
     ticker: str = ""           # Kalshi market ticker
     side: str = "yes"          # Kalshi side
     title: str = ""
+    us_slug: str = ""          # PM: venue-board row, orderable by slug
+    ask: float | None = None   # PM slug rows: bounded fallback quote
 
 
 @app.post("/api/admin/manual-trade", dependencies=[Depends(require_admin)])
@@ -1197,7 +1288,9 @@ async def api_manual_trade(body: ManualTradeBody) -> dict:
                                  execute_manual)
 
     if body.venue == "polymarket-us":
-        return await execute_manual(body.asset, body.usd, body.note)
+        return await execute_manual(
+            body.asset, body.usd, body.note or body.title,
+            us_slug=body.us_slug, ask_hint=body.ask)
     if body.venue != "kalshi":
         return {"ok": False, "error": "unknown venue"}
     if not (0 < body.usd <= MANUAL_MAX_PER_ORDER_USD):

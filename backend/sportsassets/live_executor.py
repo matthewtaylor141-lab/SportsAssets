@@ -407,22 +407,31 @@ def _us_slug_candidates(global_slug: str, outcome: str) -> list[str]:
     return out
 
 
-async def execute_manual(asset: str, usd: float, note: str = "") -> dict:
+async def execute_manual(asset: str, usd: float, note: str = "",
+                         us_slug: str = "",
+                         ask_hint: float | None = None) -> dict:
     """Place an admin-directed BUY: FOK limit at the live ask +2c
     protection, whole contracts rounded down so the ticket never
     exceeds the requested budget. Returns a UI-ready result dict —
     every refusal is a named reason, never an exception (an unhandled
     500 loses its CORS headers and reads as a blank network failure on
-    the desk — observed 2026-08-07)."""
+    the desk — observed 2026-08-07).
+
+    us_slug (owner order 2026-08-12, the full game board): a desk row
+    sourced from the venue's own event listing executes DIRECTLY by
+    its orderable slug — no catalog asset required."""
     try:
-        return await _execute_manual(asset, usd, note)
+        return await _execute_manual(asset, usd, note, us_slug=us_slug,
+                                     ask_hint=ask_hint)
     except Exception as exc:  # noqa: BLE001 — the desk reports, never 500s
         log.exception("manual order failed pre-flight")
         return {"ok": False,
                 "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
 
 
-async def _execute_manual(asset: str, usd: float, note: str = "") -> dict:
+async def _execute_manual(asset: str, usd: float, note: str = "",
+                          us_slug: str = "",
+                          ask_hint: float | None = None) -> dict:
     cfg = settings()
     venue = active_venue()
     if venue != "polymarket-us":
@@ -442,6 +451,9 @@ async def _execute_manual(asset: str, usd: float, note: str = "") -> dict:
                 "error": (f"manual day budget exhausted "
                           f"(${day_spent:.2f} of ${MANUAL_DAILY_USD:.0f} "
                           "in 24h)")}
+    if us_slug and not asset:
+        return await _execute_manual_slug(pool, us_slug, usd, note,
+                                          ask_hint, venue)
     # Double-click / impatient-retry guard: placement takes tens of
     # seconds (market resolution + preview + FOK), and a retried request
     # while the first is in flight would buy twice.
@@ -528,6 +540,83 @@ async def _execute_manual(asset: str, usd: float, note: str = "") -> dict:
                           "order did not fill at the protected limit")}
     except Exception as exc:  # noqa: BLE001 — the desk reports, never crashes
         log.exception("manual order failed (row %s)", row_id)
+        await pool.execute(
+            "UPDATE live_orders SET status='error', error=$2 WHERE id=$1",
+            row_id, str(exc)[:300])
+        return {"ok": False, "row_id": row_id,
+                "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+
+async def _execute_manual_slug(pool, us_slug: str, usd: float, note: str,
+                               ask_hint: float | None, venue: str) -> dict:
+    """Slug-direct manual BUY (owner order 2026-08-12: every venue
+    market on a game's board must be executable). The row came from
+    the venue's OWN event listing, so there is no catalog asset —
+    the quote is re-read server-side from the slug; the client's
+    price is accepted only as a bounded fallback, and either way the
+    FOK limit caps what can actually be paid."""
+    from . import pmus
+
+    surrogate = f"slug:{us_slug}"[:120]
+    inflight = await pool.fetchval(
+        "SELECT 1 FROM live_orders WHERE whale_username = 'manual' "
+        "AND asset = $1 AND status = 'submitting' "
+        "AND placed_at > now() - interval '3 minutes' LIMIT 1", surrogate)
+    if inflight:
+        return {"ok": False,
+                "error": "an order for this market is already in flight "
+                         "— check the blotter in a few seconds"}
+    ask = await asyncio.to_thread(pmus.slug_ask, us_slug)
+    if ask is None and ask_hint and 0 < float(ask_hint) < 1:
+        ask = float(ask_hint)
+    if ask is None or not (0 < ask < 1):
+        return {"ok": False, "error": "no live quote for this market"}
+    limit = round(min(ask + 0.02, 0.99), 2)
+    shares = int(usd / limit)
+    if shares < 1:
+        return {"ok": False, "error": "budget buys zero whole contracts"}
+    row_id = await pool.fetchval(
+        """
+        INSERT INTO live_orders (trade_id, whale_username, asset,
+                                 condition_id, side, his_price, limit_price,
+                                 requested_usd, requested_shares, status,
+                                 venue, us_market_slug)
+        VALUES (NULL, 'manual', $1, $2, 'BUY', $3, $4, $5, $6,
+                'submitting', $7, $8)
+        RETURNING id
+        """,
+        surrogate, None, ask, limit, round(shares * limit, 2),
+        float(shares), venue, us_slug)
+    try:
+        result = await asyncio.to_thread(pmus.submit_fok, us_slug,
+                                         limit, shares)
+        filled = float(result["filled_shares"]) if result["ok"] else 0.0
+        fill_price = float(result["fill_price"]) if result["ok"] else None
+        await pool.execute(
+            """
+            UPDATE live_orders
+            SET status=$2, order_id=$3, filled_shares=$4, fill_price=$5,
+                filled_usd=$6, raw=$7::jsonb, error=$8
+            WHERE id=$1
+            """,
+            row_id,
+            "filled" if result["ok"] and filled > 0 else "unfilled",
+            result.get("order_id"), filled, fill_price,
+            round(filled * (fill_price or 0), 2),
+            json.dumps(result.get("raw"), default=str),
+            None if result["ok"] else str(result.get("raw"))[:300])
+        log.info("MANUAL slug order %s: %.0f shares @ %.2f (%s)",
+                 "FILLED" if filled > 0 else "unfilled", filled,
+                 fill_price or limit, us_slug)
+        return {"ok": bool(result["ok"] and filled > 0), "row_id": row_id,
+                "filled_shares": filled, "fill_price": fill_price,
+                "limit_price": limit, "quoted_ask": ask,
+                "us_market_slug": us_slug,
+                "title": note[:120] or us_slug, "outcome": None,
+                "error": (None if result["ok"] and filled > 0 else
+                          "order did not fill at the protected limit")}
+    except Exception as exc:  # noqa: BLE001 — the desk reports, never crashes
+        log.exception("manual slug order failed (row %s)", row_id)
         await pool.execute(
             "UPDATE live_orders SET status='error', error=$2 WHERE id=$1",
             row_id, str(exc)[:300])

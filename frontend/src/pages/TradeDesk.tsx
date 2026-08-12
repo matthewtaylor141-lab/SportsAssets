@@ -18,7 +18,7 @@ import { adminApi } from '../lib/api'
 
 type Venue = 'polymarket' | 'kalshi'
 
-interface Outcome { label: string; asset?: string; ticker?: string; price: number | null; no_price?: number | null }
+interface Outcome { label: string; asset?: string; ticker?: string; us_slug?: string; price: number | null; no_price?: number | null }
 interface GameCard { id: string; venue: Venue; league: string; title: string; outcomes: Outcome[]; markets_n?: number }
 interface GameGroup { name: string; markets: Outcome[] }
 interface Position {
@@ -35,6 +35,7 @@ interface Pick {
   ask: number
   asset?: string
   ticker?: string
+  usSlug?: string
   kalshiSide?: 'yes' | 'no'
 }
 
@@ -225,7 +226,7 @@ export function TradeDesk() {
     setResult(null)
     try {
       const body = pick.venue === 'polymarket'
-        ? { venue: 'polymarket-us', asset: pick.asset, usd: amount }
+        ? { venue: 'polymarket-us', asset: pick.asset || '', us_slug: pick.usSlug || '', ask: pick.ask, title: `${pick.label} — ${pick.side}`, usd: amount }
         : { venue: 'kalshi', ticker: pick.ticker, side: pick.kalshiSide || 'yes', title: `${pick.label} — ${pick.side}`, usd: amount }
       const r = await adminApi<any>('/api/admin/manual-trade', token, {
         method: 'POST', body: JSON.stringify(body),
@@ -255,8 +256,11 @@ export function TradeDesk() {
   const strip = useMemo(() => games.slice(0, 6), [games])
 
   const amount = parseFloat(usd)
-  const estLimit = pick ? Math.min(pick.ask + 0.02, 0.99) : 0
-  const estContracts = pick && amount > 0 ? Math.floor(amount / estLimit) : 0
+  // A venue-board slug row can arrive unquoted (ask 0) — the server
+  // re-quotes at execution; the ticket must not invent numbers.
+  const askKnown = !!pick && pick.ask > 0
+  const estLimit = askKnown ? Math.min(pick!.ask + 0.02, 0.99) : 0
+  const estContracts = askKnown && amount > 0 ? Math.floor(amount / estLimit) : 0
   const estCost = estContracts * estLimit
   const estPayout = estContracts * 1
   const available = blotter ? Math.max(0, blotter.day_budget - blotter.day_spent) : null
@@ -351,7 +355,9 @@ export function TradeDesk() {
               </div>
             ) : (
               <div className="vd-yesno">
-                <button className="vd-pill yes on">Yes {cents(pick.ask)}</button>
+                <button className="vd-pill yes on">
+                  Yes{askKnown ? ` ${cents(pick.ask)}` : ' — quoted at execution'}
+                </button>
               </div>
             )}
 
@@ -381,7 +387,9 @@ export function TradeDesk() {
 
             {isK ? (
               <>
-                <div className="vd-line"><span>Odds</span><b>{pct(pick.ask)} chance</b></div>
+                {askKnown && (
+                  <div className="vd-line"><span>Odds</span><b>{pct(pick.ask)} chance</b></div>
+                )}
                 <div className="vd-line">
                   <span>Max payout</span>
                   <b className="vd-big">{estContracts > 0 ? money(estPayout) : '$0'}</b>
@@ -596,13 +604,14 @@ export function TradeDesk() {
                 </>
               ) : (
                 <button
-                  className={`vd-mini yes${pick?.asset === mk.asset ? ' on' : ''}`}
-                  disabled={mk.price == null}
-                  onClick={() => mk.price != null && choose({
+                  className={`vd-mini yes${(mk.asset && pick?.asset === mk.asset)
+                    || (mk.us_slug && pick?.usSlug === mk.us_slug) ? ' on' : ''}`}
+                  disabled={mk.price == null && !mk.us_slug}
+                  onClick={() => (mk.price != null || mk.us_slug) && choose({
                     venue: 'polymarket', label: game.title, side: mk.label || 'Yes',
-                    ask: mk.price, asset: mk.asset,
+                    ask: mk.price ?? 0, asset: mk.asset, usSlug: mk.us_slug,
                   })}
-                >Buy {cents(mk.price)}</button>
+                >Buy{mk.price != null ? ` ${cents(mk.price)}` : ''}</button>
               )}
             </div>
           ))}

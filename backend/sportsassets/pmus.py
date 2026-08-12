@@ -205,6 +205,91 @@ def _surname_matchup(t: str | None) -> str | None:
     return None
 
 
+def event_board(event_slug: str) -> list[dict]:
+    """Every ACTIVE market the US venue lists for one event — the full
+    game board (moneyline, spreads, totals, segments, props), each row
+    orderable by its OWN slug (owner order 2026-08-12: "All markets
+    that are available on Kalshi or Polymarket for every single game
+    needs to be shown"). Two-sided markets expand one row per
+    marketSide: the side identifier IS the orderable slug (the tennis
+    path's discovery, 2026-08-04). The venue quietly ignores filters
+    it doesn't recognize, so positive eventSlug mismatches are dropped
+    exactly like resolve_market does."""
+    client = _get_client()
+    try:
+        resp = client.markets.list({"eventSlug": [event_slug],
+                                    "active": True})
+        got = list((resp or {}).get("markets") or [])
+    except Exception:  # noqa: BLE001 — an empty board, never a 500
+        return []
+    rows: list[dict] = []
+
+    def _px(v) -> float | None:
+        try:
+            f = float(v)
+            return f if 0 < f < 1 else None
+        except (TypeError, ValueError):
+            return None
+
+    for m in got:
+        if (m.get("eventSlug") or m.get("event_slug")) not in (None,
+                                                               event_slug):
+            continue
+        if m.get("closed"):
+            continue
+        title = (_clean_title(m.get("question") or m.get("title"))
+                 or m.get("slug") or "")
+        sides = [s for s in (m.get("marketSides") or [])
+                 if isinstance(s, dict)]
+        if sides:
+            for s in sides:
+                ident, desc = s.get("identifier"), s.get("description")
+                if not ident or not desc:
+                    continue
+                rows.append({"us_slug": ident,
+                             "label": f"{title} — {desc}",
+                             "price": _px(s.get("price"))})
+        elif m.get("slug"):
+            px = next((p for p in (_px(m.get(k)) for k in
+                                   ("bestAsk", "best_ask", "price"))
+                       if p is not None), None)
+            label = (f"{title} — {m['outcome']}" if m.get("outcome")
+                     else title)
+            rows.append({"us_slug": m["slug"], "label": label,
+                         "price": px})
+    return rows
+
+
+def slug_ask(us_slug: str) -> float | None:
+    """Live ask for one orderable US slug, tolerant of both market
+    shapes (marketSide identifier or plain market). None when the
+    venue has no readable quote — the caller refuses, never guesses."""
+    client = _get_client()
+    try:
+        m = (client.markets.retrieve_by_slug(us_slug) or {}).get(
+            "market") or {}
+    except Exception:  # noqa: BLE001 — 404s are an answer
+        return None
+    for s in (m.get("marketSides") or []):
+        if isinstance(s, dict) and s.get("identifier") == us_slug:
+            try:
+                px = float(s.get("price"))
+                if 0 < px < 1:
+                    return px
+            except (TypeError, ValueError):
+                pass
+    for k in ("bestAsk", "best_ask", "ask", "price"):
+        try:
+            v = m.get(k)
+            if v is not None:
+                px = float(v)
+                if 0 < px < 1:
+                    return px
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def resolve_market_exact(candidate_slugs: list[str],
                          outcome: str | None) -> dict | None:
     """Deterministic US-market resolution for the manual desk: try each
