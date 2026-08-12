@@ -429,6 +429,10 @@ async def _entry_sweep(pool) -> dict:
             return
         n = shares_for(PER_FILL_USD, ask)
         if n < 1:
+            # The only two exits in this function that counted nothing.
+            # A silent return is indistinguishable from "never called",
+            # which is how "0 entries" stayed undiagnosable all day.
+            stats["skipped_dust"] = stats.get("skipped_dust", 0) + 1
             return
         # US mapping first — the manual desk's exact pipeline. No US
         # market, no trade: mapped-or-refused, never guessed.
@@ -448,6 +452,7 @@ async def _entry_sweep(pool) -> dict:
         limit = round(min(ask + 0.02, 0.99), 2)
         n = shares_for(PER_FILL_USD, limit)
         if n < 1:
+            stats["skipped_dust"] = stats.get("skipped_dust", 0) + 1
             return
         row_id = await pool.fetchval(
             """
@@ -697,6 +702,35 @@ async def _record(pool) -> dict:
                 r["n"] for r in v2
                 if r["sport"] == sport and r["status"] == "cashed_out")
     except Exception:  # noqa: BLE001 — the scorecard never blocks trading
+        pass
+    # ATTEMPTS, era-scoped. The scorecard above counts only rows that
+    # HELD inventory, so a sleeve taking zero entries reads identically
+    # whether it never tried or tried and was refused every time — which
+    # is exactly the hole the 2026-08-12 "0 entries all day" sat in for
+    # nine hours. The per-sweep stats can't answer it either: they are a
+    # fresh dict each sweep, and a 5-minute window is almost never open
+    # at the instant the probe samples. These four keys are the history.
+    try:
+        att = await pool.fetch(
+            "SELECT status, count(*)::int AS n FROM live_orders "
+            "WHERE whale_username = 'underdog' AND placed_at >= $1 "
+            "GROUP BY status", V2_SINCE)
+        out["ud2_attempts"] = sum(r["n"] for r in att)
+        for r in att:
+            if r["status"] in ("unfilled", "error", "submitting"):
+                out[f"ud2_{r['status']}"] = r["n"]
+        last = await pool.fetchrow(
+            "SELECT status, error, limit_price::float8 AS limit_price "
+            "FROM live_orders WHERE whale_username = 'underdog' "
+            "  AND placed_at >= $1 AND status IN ('unfilled', 'error') "
+            "ORDER BY placed_at DESC LIMIT 1", V2_SINCE)
+        if last is not None:
+            # Truncated hard: the health endpoint's sanitizer cuts
+            # strings at 80 chars and a longer one arrives unreadable.
+            out["ud2_last_refusal"] = (
+                f"{last['status']}@{last['limit_price']}:"
+                f"{str(last['error'] or '')}")[:78]
+    except Exception:  # noqa: BLE001 — telemetry never blocks trading
         pass
     try:
         krows = await pool.fetch(

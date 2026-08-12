@@ -169,3 +169,47 @@ def test_copy_guards_scope_around_the_sleeve():
         no_stack - 1800:no_stack], (
         "a venue holding explained ONLY by the sleeve must not refuse "
         "the copy; unexplained holdings still fail closed")
+
+
+def test_attempt_telemetry_separates_never_tried_from_refused():
+    """A sleeve at zero entries must say WHICH zero it is.
+
+    2026-08-12: the sleeve took no entries for nine hours and the
+    heartbeat could not distinguish "never reached the entry" from
+    "tried every window and the venue refused" — the scorecard counts
+    only rows that held inventory, and the per-sweep stats are a fresh
+    dict sampled almost never inside a 5-minute window.
+    """
+    src = open("sportsassets/workers/underdog.py").read()
+    att = src.index('out["ud2_attempts"]')
+    window = src[att - 700:att + 900]
+    assert "placed_at >= $1" in window, "attempts must be era-scoped"
+    assert "V2_SINCE" in window
+    # The refusal statuses are the whole point: an attempt that never
+    # filled still writes a row, and its status is the diagnosis.
+    for status in ("unfilled", "error", "submitting"):
+        assert status in window
+    assert 'out["ud2_last_refusal"]' in src, \
+        "the newest refusal's reason must ride the heartbeat"
+
+
+def test_no_silent_exit_can_swallow_an_entry():
+    """Every early return in _try_enter leaves a trace.
+
+    Two `n < 1` returns counted nothing and wrote nothing, so an entry
+    lost there was indistinguishable from an entry never attempted —
+    which is the state the sleeve sat in all of 2026-08-12. A return is
+    acceptable if it either increments a sweep stat or writes the row's
+    outcome to live_orders; both are readable afterwards.
+    """
+    src = open("sportsassets/workers/underdog.py").read()
+    body = src[src.index("async def _try_enter"):src.index("# PASS 1")]
+    assert body.count('stats["skipped_dust"]') == 2, \
+        "both sub-contract exits must be counted"
+    lines = [ln.strip() for ln in body.split("\n")]
+    for i, ln in enumerate(lines):
+        if ln != "return":
+            continue
+        prior = " ".join(lines[max(0, i - 4):i])
+        assert "stats[" in prior or "UPDATE live_orders" in prior, \
+            f"untraceable return near: {prior[:80]!r}"
