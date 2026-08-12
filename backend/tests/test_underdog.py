@@ -213,3 +213,40 @@ def test_no_silent_exit_can_swallow_an_entry():
         prior = " ".join(lines[max(0, i - 4):i])
         assert "stats[" in prior or "UPDATE live_orders" in prior, \
             f"untraceable return near: {prior[:80]!r}"
+
+
+def test_entry_prices_on_the_venue_it_actually_trades():
+    """The limit must come from Polymarket US, not the global CLOB.
+
+    2026-08-12: the dog was quoted on the global book and the order sent
+    to Polymarket US — a different venue with a different book — so the
+    limit was a price that venue never agreed to. Five entries, five
+    "unfilled@0.51:expired", zero positions all day. The cash-out leg
+    already re-quotes the US slug; the entry has to as well.
+    """
+    src = open("sportsassets/workers/underdog.py").read()
+    body = src[src.index("async def _try_enter"):src.index("# PASS 1")]
+    submit = body.index("pmus.submit_fok")
+    requote = body.index("pmus.slug_ask")
+    mapped = body.index("resolve_market_exact")
+    assert mapped < requote < submit, \
+        "re-quote the mapped US slug BEFORE the order is sent"
+    # The limit and the stored entry reference both ride the US price.
+    limit_line = body[body.index("limit = round(min("):][:60]
+    assert "us_ask" in limit_line, "limit must be built from the US ask"
+    assert "'BUY', $3" in body and "], us_ask, limit," in body, \
+        "his_price must record the venue's ask, not the global one"
+    # No US quote is a refusal, never a guess.
+    gap = body[requote:submit]
+    assert "if us_ask is None" in gap and "return" in gap
+
+
+def test_venue_price_must_clear_the_band_too():
+    """A side that is the dog globally can be priced past the band on
+    the venue; a 70c 'underdog' is not the bet that was ordered."""
+    src = open("sportsassets/workers/underdog.py").read()
+    body = src[src.index("async def _try_enter"):src.index("# PASS 1")]
+    gap = body[body.index("pmus.slug_ask"):body.index("pmus.submit_fok")]
+    assert "MIN_ASK <= us_ask <= MAX_ASK" in gap, \
+        "the venue's own price must clear the underdog band"
+    assert 'stats["skipped_band"]' in gap

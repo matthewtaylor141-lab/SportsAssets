@@ -449,7 +449,29 @@ async def _entry_sweep(pool) -> dict:
                                    mapping["market_slug"]):
             stats["skipped_held"] += 1
             return
-        limit = round(min(ask + 0.02, 0.99), 2)
+        # PRICE ON THE BOOK WE ACTUALLY TRADE.
+        # The dog is CHOSEN on the global CLOB (both sides quoted there,
+        # so the cheaper side is a fair comparison), but the order goes
+        # to Polymarket US — a different venue with a different book. The
+        # limit was being set from the global ask + 2c and sent to a
+        # venue that never agreed to it: every entry today came back
+        # "unfilled@0.51:expired", 5 for 5, and the sleeve booked zero
+        # positions all day. The cash-out leg already re-quotes the US
+        # slug for exactly this reason; the entry now does too. No US
+        # quote, no trade — mapped-and-priced or refused, never guessed.
+        us_ask = await asyncio.to_thread(pmus.slug_ask,
+                                         mapping["market_slug"])
+        if us_ask is None:
+            stats["skipped_no_us_quote"] = \
+                stats.get("skipped_no_us_quote", 0) + 1
+            return
+        # The venue's own price has to clear the same band: a side that
+        # is the dog globally can be priced past the band here, and a
+        # 70c "underdog" is not the bet the owner asked for.
+        if not (MIN_ASK <= us_ask <= MAX_ASK):
+            stats["skipped_band"] += 1
+            return
+        limit = round(min(us_ask + 0.02, 0.99), 2)
         n = shares_for(PER_FILL_USD, limit)
         if n < 1:
             stats["skipped_dust"] = stats.get("skipped_dust", 0) + 1
@@ -463,7 +485,7 @@ async def _entry_sweep(pool) -> dict:
             VALUES ('underdog', $1, $2, 'BUY', $3, $4, $5, $6,
                     'submitting', 'polymarket-us', $7)
             RETURNING id
-            """, token, next(iter(sides))["condition_id"], ask, limit,
+            """, token, next(iter(sides))["condition_id"], us_ask, limit,
             round(n * limit, 2), float(n), mapping["market_slug"])
         try:
             r = await asyncio.to_thread(pmus.submit_fok,
