@@ -2,7 +2,37 @@
 
 from datetime import datetime, timezone
 
+import pytest
+
 from sportsassets.api.track_record import build, classify_slug
+
+
+@pytest.fixture(autouse=True)
+def _no_database(monkeypatch):
+    """Keep track_record() off the database.
+
+    Every DB helper here opens a real asyncpg connection, and with no
+    database reachable the call does not fail — it HANGS, which wedged
+    the entire backend suite (the run never finished, so nothing after
+    this module was ever verified). These tests are about record
+    assembly and the hydrate guard; persistence has its own coverage.
+    """
+    from sportsassets import db
+    from sportsassets.api import track_record as tr
+
+    async def _none(*_a, **_k):
+        return None
+
+    async def _no_pool(*_a, **_k):
+        raise RuntimeError("no database in tests")
+
+    # Every DB helper in track_record imports get_pool at CALL time, so
+    # one patch here closes all of them; the module's own try/except
+    # treats an unreachable database as "not hydrated" and carries on.
+    monkeypatch.setattr(db, "get_pool", _no_pool)
+    for fn in ("_load_persisted", "_load_legacy_persisted",
+               "_persist_payload"):
+        monkeypatch.setattr(tr, fn, _none, raising=False)
 
 TS_AUG1 = 1785542400.0     # 2026-08-01T00:00:00Z (raw window boundary)
 # Day bucketing is Eastern now, so activity timestamps sit MID-DAY in both
