@@ -25,7 +25,9 @@ def test_default_is_fifty_dollars():
         "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563-1759935795465") == 50.00
 
 
-def test_underdog_sleeve_keeps_its_own_dollar():
+def test_underdog_sleeve_keeps_its_own_stake():
+    """v2 (owner 2026-08-12): the sleeve's flat stake is $2, and it is
+    NOT the copy sizing map — changing whale clips never touches it."""
     from sportsassets.workers.underdog import PER_FILL_USD
 
-    assert PER_FILL_USD == 1.00
+    assert PER_FILL_USD == 2.00

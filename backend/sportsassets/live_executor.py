@@ -282,7 +282,7 @@ PENNY_TRIAL_TOTAL_USD = float(os.environ.get("COPY_TOTAL_USD", "inf"))
 # else $50. SwissTony raised to $200 in the 2026-08-11 profitability
 # review — strongest measured earner (+$760 on 345 settled at $100).
 # The underdog cash-out sleeve is NOT this map — it stays at its own
-# $1 constant (workers/underdog.py PER_FILL_USD).
+# $2 constant (workers/underdog.py PER_FILL_USD, v2 2026-08-12).
 PENNY_TRIAL_PER_FILL_USD = 50.00
 # Per-whale override map; keys are lowercased usernames; anyone absent
 # gets the default. RN1 $100 -> $150 2026-08-11 (owner approval,
@@ -730,10 +730,15 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # market copied once is one row. Any filled or in-flight
             # order on this exact market refuses another, whatever
             # identity or asset id proposes it.
+            # The $2 underdog sleeve is scoped OUT (owner 2026-08-12:
+            # the restarted sleeve is "completely independent" — its
+            # rows must not veto copies; copy-vs-copy never-add is
+            # unchanged).
             prior = await pool.fetchval(
                 "SELECT 1 FROM live_orders "
                 "WHERE us_market_slug = $2 AND id <> $1 "
                 "AND status IN ('filled', 'submitting') "
+                "AND COALESCE(whale_username, '') <> 'underdog' "
                 "AND placed_at > now() - interval '48 hours' LIMIT 1",
                 row_id, mapping["market_slug"])
             if prior:
@@ -752,10 +757,14 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # that game — any type, any side, any whale — is refused.
             gk = _us_game_key(mapping["market_slug"])
             if gk is not None:
+                # 'underdog' rows excluded: the $2 sleeve buying a
+                # game's dog at T-5 must not consume that game's ONE
+                # copy slot (owner 2026-08-12 independence order).
                 held = await pool.fetch(
                     "SELECT us_market_slug FROM live_orders "
                     "WHERE status IN ('filled', 'submitting') "
                     "AND id <> $1 AND us_market_slug IS NOT NULL "
+                    "AND COALESCE(whale_username, '') <> 'underdog' "
                     "AND placed_at > now() - interval '48 hours'",
                     row_id)
                 if any(_us_game_key(r["us_market_slug"]) == gk
@@ -772,11 +781,31 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # an outcome the account already holds is never added to.
             if await asyncio.to_thread(pmus.account_holds,
                                        mapping["market_slug"]):
-                await pool.execute(
-                    "UPDATE live_orders SET status='rejected', error=$2 "
-                    "WHERE id=$1", row_id,
-                    "no-stack: account already holds this market")
-                return
+                # SLEEVE CARVE-OUT (owner 2026-08-12: the $2 underdog
+                # sleeve is "completely independent"): it buys EVERY
+                # MLB/tennis dog at T-5, so post-start the account
+                # "holds" nearly every game market. A venue holding
+                # whose ONLY Postgres explanation is the sleeve is the
+                # sleeve's $2, not a copy stack — the copy proceeds
+                # (its own never-add above already vetoed real copy
+                # duplicates). Any other explanation — a copy row, or
+                # NO row at all (unexplained venue state) — still
+                # refuses, exactly as the leak fix demands.
+                dog_owned = await pool.fetchval(
+                    "SELECT bool_or(whale_username = 'underdog') "
+                    "AND NOT bool_or(COALESCE(whale_username, '') "
+                    "                <> 'underdog') "
+                    "FROM live_orders WHERE us_market_slug = $2 "
+                    "AND id <> $1 "
+                    "AND status IN ('filled', 'submitting') "
+                    "AND placed_at > now() - interval '48 hours'",
+                    row_id, mapping["market_slug"])
+                if not dog_owned:
+                    await pool.execute(
+                        "UPDATE live_orders SET status='rejected', "
+                        "error=$2 WHERE id=$1", row_id,
+                        "no-stack: account already holds this market")
+                    return
             # Cross-venue claim RE-CHECK at the last instant (review
             # 2026-08-10): the event-woken Kalshi leg can fire and claim
             # this asset during the seconds this mapping/no-stack cycle

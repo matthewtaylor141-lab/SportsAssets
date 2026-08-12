@@ -1,23 +1,28 @@
-"""Underdog cash-out sleeve — a live tandem test (owner directive
-2026-08-08): $1 on EVERY MLB and tennis underdog moneyline on the US
-venue, sold back the moment the book bids a 20% profit on the entry.
+"""Underdog cash-out sleeve v2 — RESTARTED by owner order 2026-08-12:
+$2 on EVERY tennis underdog (ATP, WTA, Challenger, ITF — every tour)
+and EVERY MLB underdog MONEYLINE on the US venue, entered in the five
+minutes before the scheduled start, sold back the moment the book bids
+a 35% profit on the entry. The owner's yardstick: what percentage of
+entries cash out (reported daily).
 
 The sleeve's contract, in order of importance:
-  1. NON-INTERFERENCE. Rows carry whale_username='underdog'; the
-     one-fill-per-asset claim, the copy taken-checks and the copy caps
-     all scope around this sleeve (migration 016) — it neither blocks
-     nor is blocked by the copy or manual paths. It also refuses to
-     ENTER any asset the account already holds through any other
-     sleeve, so its sells can never touch someone else's inventory
-     (positions pool at the venue; selling from a shared position
-     would realize another sleeve's basis).
-  2. One entry per GAME, ever — $1 a game bounds the test regardless
-     of how long the game stays cheap. Entries fire in a T-MINUS-5
-     window (owner directive 2026-08-08 evening): each game is bought
-     in the five minutes before its scheduled start, so the sleeve
-     never carries a whole day's slate as outstanding exposure at
-     once. A game with no venue start time cannot honor the window
-     and is skipped, counted, never guessed.
+  1. COMPLETE INDEPENDENCE (owner 2026-08-12: "completely independent
+     from everything we do"). Rows carry whale_username='underdog';
+     the one-fill-per-asset claim, the copy taken-checks, the copy
+     never-add, the one-position-per-game rule and the copy caps all
+     scope around this sleeve — it neither blocks nor is blocked by
+     the copy or manual paths. It still refuses to ENTER any asset
+     the account already holds through any other sleeve, so its sells
+     can never touch someone else's inventory (positions pool at the
+     venue; selling from a shared position would realize another
+     sleeve's basis).
+  2. One entry per GAME, ever — $2 a game bounds the test regardless
+     of how long the game stays cheap. Entries fire in the window
+     [T-5min, start] (owner 2026-08-12: "exactly 5 minutes before"):
+     the minute-cadence sweep lands the buy inside T-5:00..T-4:00 in
+     normal operation, and never after the scheduled start. A game
+     with no venue start time cannot honor the window and is skipped,
+     counted, never guessed.
   3. Cash-out is a SELL FOK at the live best bid, only when
      bid >= entry * (1 + UNDERDOG_TAKE_PROFIT). A missed FOK simply
      waits for the next look at the fresh book (repricing each cycle,
@@ -42,22 +47,31 @@ log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
 ENABLED = os.environ.get("UNDERDOG_ENABLED", "1") != "0"
-PER_FILL_USD = float(os.environ.get("UNDERDOG_PER_FILL_USD", "1.00"))
+# v2 stake (owner 2026-08-12): $2 flat on every dog.
+PER_FILL_USD = float(os.environ.get("UNDERDOG_PER_FILL_USD", "2.00"))
 # No day cap (owner directive 2026-08-08: "every MLB and tennis match").
-# Natural bound: $1 x one-entry-per-game x the day's slate. The env knob
+# Natural bound: $2 x one-entry-per-game x the day's slate. The env knob
 # stays for the day a ceiling is wanted back.
 DAILY_USD = float(os.environ.get("UNDERDOG_DAILY_USD", "inf"))
-TAKE_PROFIT = float(os.environ.get("UNDERDOG_TAKE_PROFIT", "0.20"))
+# v2 exit (owner 2026-08-12): auto cash-out at +35% profit on entry
+# (~$0.70 on a full $2 fill).
+TAKE_PROFIT = float(os.environ.get("UNDERDOG_TAKE_PROFIT", "0.35"))
 # Entry band. Widened 2026-08-09 (owner: "this should be firing every
 # single mlb game and every single tennis match") — a 49c dog is still
 # the cheaper side, and near-even games were the single biggest silent
-# skip. The 3c floor only drops dogs whose 1c tick makes +20% ambiguous.
+# skip. The 3c floor only drops dogs whose 1c tick makes the take-profit
+# trigger ambiguous.
 MIN_ASK = float(os.environ.get("UNDERDOG_MIN_ASK", "0.03"))
 MAX_ASK = float(os.environ.get("UNDERDOG_MAX_ASK", "0.50"))
+# The v2 era boundary: scorecard stats start here so the retired
+# $1/+20% test's rows never mix into the $2/+35% read.
+V2_SINCE = "2026-08-12T12:00:00+00:00"
 # Minute cadence: the T-minus-5 window needs minute resolution.
 ENTRY_SWEEP_S = float(os.environ.get("UNDERDOG_ENTRY_SWEEP_S", "60"))
 ENTRY_LEAD_S = float(os.environ.get("UNDERDOG_LEAD_S", "300"))
-ENTRY_GRACE_S = float(os.environ.get("UNDERDOG_GRACE_S", "60"))
+# v2: "exactly 5 minutes before" — the window is [T-5min, start] and
+# entries never fire after the scheduled start (grace 0).
+ENTRY_GRACE_S = float(os.environ.get("UNDERDOG_GRACE_S", "0"))
 CASHOUT_SWEEP_S = float(os.environ.get("UNDERDOG_CASHOUT_SWEEP_S", "60"))
 # The ENGINE's Kalshi-leg entry window, mirrored here ONLY so the
 # k_windows_open / k_next_window_s heartbeat counters describe what the
@@ -73,7 +87,9 @@ K_GRACE_S = float(os.environ.get("EDGE_KUD_GRACE_S", "3600"))
 # BARE kindless slug ("mlb-tor-phi-2026-08-08") carrying both sides as
 # two tokens. Execution maps to the US venue exactly like the manual
 # desk (resolve_market_exact -> pmus.submit_fok) — the proven path.
-_LEAGUES = ("mlb", "atp", "wta")
+# v2 leagues (owner 2026-08-12: "wta, atp, challenger, etc."): every
+# tennis tour the catalog can name, plus MLB moneylines.
+_LEAGUES = ("mlb", "atp", "wta", "itf", "chal")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 # ── Slate discovery (owner report 2026-08-08: "Tennis match plays for
@@ -135,7 +151,7 @@ def _parse_start(raw: str | None) -> float | None:
 # to wade through thousands of 15-minute crypto expiries first and was
 # reaching 3 of ~15 MLB games (owner 2026-08-09 evening: "this should be
 # firing every single mlb game and every single tennis match").
-_TAG_SLUGS = ("mlb", "tennis", "atp", "wta")
+_TAG_SLUGS = ("mlb", "tennis", "atp", "wta", "itf")
 _tag_ids: dict[str, int | None] = {}
 
 
@@ -316,14 +332,12 @@ async def _entry_sweep(pool) -> dict:
 
     stats = {"games": 0, "entered": 0, "skipped_held": 0,
              "skipped_band": 0, "skipped_done": 0, "unmapped": 0}
-    # SLEEVE CUT (owner order 2026-08-11 evening: "cut the $1 underdog
-    # cash out sleeve completely" — profitability review; the sleeve's
-    # live record never earned its keep and its Kalshi exit leg never
-    # filled once). Entries are OFF unless explicitly re-armed with
-    # UNDERDOG_SLEEVE=1; the exit sweep below keeps managing whatever
-    # positions are already held so nothing is stranded.
-    if os.environ.get("UNDERDOG_SLEEVE", "0") != "1":
-        stats["off"] = "sleeve cut (owner order 2026-08-11)"
+    # SLEEVE v2 RESTART (owner order 2026-08-12 morning: "restart
+    # number 4... $2 on every underdog... cashed out when the profit
+    # hits 35%"). The 2026-08-11 cut is superseded; UNDERDOG_SLEEVE=0
+    # is the kill switch if it needs to go dark again.
+    if os.environ.get("UNDERDOG_SLEEVE", "1") == "0":
+        stats["off"] = "sleeve off (UNDERDOG_SLEEVE=0)"
         return stats
     if active_venue() != "polymarket-us":
         stats["off"] = "venue not armed"
@@ -374,11 +388,10 @@ async def _entry_sweep(pool) -> dict:
         SELECT m.slug, m.title, m.condition_id, mt.outcome, mt.token_id
         FROM markets m JOIN market_tokens mt USING (condition_id)
         WHERE COALESCE(m.resolved, false) = false
-          AND (m.slug LIKE 'mlb-%' OR m.slug LIKE 'atp-%'
-               OR m.slug LIKE 'wta-%')
+          AND split_part(m.slug, '-', 1) = ANY($2::text[])
           AND m.slug LIKE '%' || $1
         ORDER BY m.slug, mt.outcome_index
-        """, today)
+        """, today, list(_LEAGUES))
     games: dict[str, list] = {}
     for r in rows:
         games.setdefault(r["slug"], []).append(r)
@@ -586,6 +599,57 @@ async def _record(pool) -> dict:
         out[f"pm_{r['status']}_usd"] = round(r["usd"], 2)
         if r["pnl"]:
             out[f"pm_{r['status']}_pnl"] = round(r["pnl"], 2)
+    # v2 SCORECARD (owner 2026-08-12: "I want to see how many we cash
+    # out by percentage. I need a full daily report on this every
+    # day"). Era-scoped at the restart moment so the retired $1/+20%
+    # rows never dilute the $2/+35% test's read. Cash-out % is
+    # cashed / all entries ever filled (open ones simply haven't
+    # decided yet), split by sport, plus today-in-ET counts for the
+    # daily report.
+    try:
+        v2 = await pool.fetch(
+            """
+            SELECT CASE WHEN us_market_slug LIKE '%-mlb-%' THEN 'mlb'
+                        ELSE 'tennis' END AS sport,
+                   status, count(*)::int AS n,
+                   COALESCE(sum(pnl), 0)::float8 AS pnl,
+                   count(*) FILTER (WHERE placed_at >= date_trunc('day',
+                     now() AT TIME ZONE 'America/New_York')
+                     AT TIME ZONE 'America/New_York')::int AS n_today,
+                   COALESCE(sum(pnl) FILTER (WHERE placed_at >=
+                     date_trunc('day', now() AT TIME ZONE
+                     'America/New_York') AT TIME ZONE
+                     'America/New_York'), 0)::float8 AS pnl_today
+            FROM live_orders
+            WHERE whale_username = 'underdog'
+              AND placed_at >= $1::timestamptz
+              AND status IN ('filled', 'cashed_out', 'settled')
+            GROUP BY 1, 2
+            """, V2_SINCE)
+        ent = sum(r["n"] for r in v2)
+        cashed = sum(r["n"] for r in v2 if r["status"] == "cashed_out")
+        out["ud2_entries"] = ent
+        out["ud2_open"] = sum(r["n"] for r in v2 if r["status"] == "filled")
+        out["ud2_cashed"] = cashed
+        out["ud2_cashed_pct"] = (round(100.0 * cashed / ent, 1)
+                                 if ent else 0.0)
+        out["ud2_settled_lost"] = sum(
+            r["n"] for r in v2 if r["status"] == "settled" and r["pnl"] <= 0)
+        out["ud2_settled_won"] = sum(
+            r["n"] for r in v2 if r["status"] == "settled" and r["pnl"] > 0)
+        out["ud2_pnl"] = round(sum(r["pnl"] for r in v2), 2)
+        out["ud2_today_entries"] = sum(r["n_today"] for r in v2)
+        out["ud2_today_cashed"] = sum(
+            r["n_today"] for r in v2 if r["status"] == "cashed_out")
+        out["ud2_today_pnl"] = round(sum(r["pnl_today"] for r in v2), 2)
+        for sport in ("mlb", "tennis"):
+            out[f"ud2_{sport}_entries"] = sum(
+                r["n"] for r in v2 if r["sport"] == sport)
+            out[f"ud2_{sport}_cashed"] = sum(
+                r["n"] for r in v2
+                if r["sport"] == sport and r["status"] == "cashed_out")
+    except Exception:  # noqa: BLE001 — the scorecard never blocks trading
+        pass
     try:
         krows = await pool.fetch(
             "SELECT status, count(*)::int AS n, "

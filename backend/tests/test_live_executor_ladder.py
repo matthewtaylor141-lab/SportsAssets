@@ -42,6 +42,8 @@ class _LadderPool:
     async def fetchval(self, sql, *a):
         if "INSERT INTO live_orders" in sql:
             return 101
+        if "bool_or" in sql:
+            return getattr(self, "dog_owned", None)
         if "SELECT 1 FROM live_orders" in sql and "us_market_slug = $2" in sql:
             return 1 if getattr(self, "prior_market", None) == a[1] else None
         return None
@@ -51,6 +53,8 @@ class _LadderPool:
 
     async def fetch(self, sql, *a):
         assert "us_market_slug IS NOT NULL" in sql
+        assert "<> 'underdog'" in sql, \
+            "the $2 sleeve must not consume a game's one copy slot"
         self.ladder_queries += 1
         return [{"us_market_slug": s} for s in self.held]
 
@@ -161,6 +165,33 @@ def test_same_market_never_adds_even_when_venue_is_blind(monkeypatch):
     asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
     assert not submitted
     assert any("never-add" in str(a) for _, a in pool.updates)
+
+
+def test_venue_holding_explained_by_sleeve_does_not_block_copy(monkeypatch):
+    """Owner 2026-08-12 (sleeve v2 restart, 'completely independent'):
+    the $2 sleeve buys EVERY MLB/tennis dog at T-5, so the venue holds
+    nearly every game market. A holding whose only Postgres explanation
+    is the sleeve must not read as a copy stack."""
+    pool = _LadderPool([])
+    pool.dog_owned = True
+    submitted = _wire(monkeypatch, pool,
+                      f"tsc-epl-ars-che-{TODAY}-o3pt5")
+    monkeypatch.setattr(pmus, "account_holds", lambda slug: True)
+    asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
+    assert submitted, "sleeve-owned holding must not veto the copy"
+
+
+def test_unexplained_venue_holding_still_fails_closed(monkeypatch):
+    """The carve-out is for sleeve-owned holdings ONLY: a venue holding
+    with no Postgres row behind it (or a copy row) still refuses."""
+    pool = _LadderPool([])
+    pool.dog_owned = None
+    submitted = _wire(monkeypatch, pool,
+                      f"tsc-epl-ars-che-{TODAY}-o3pt5")
+    monkeypatch.setattr(pmus, "account_holds", lambda slug: True)
+    asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
+    assert not submitted
+    assert any("no-stack" in str(a) for _, a in pool.updates)
 
 
 def test_stale_positions_snapshot_fails_closed(monkeypatch):

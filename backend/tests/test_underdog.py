@@ -1,5 +1,6 @@
-"""Underdog cash-out sleeve: dog selection, sizing, the +20% trigger,
-and the non-interference contract's pure pieces."""
+"""Underdog cash-out sleeve v2 ($2 / +35%, owner restart 2026-08-12):
+dog selection, sizing, the take-profit trigger, the strict pre-start
+entry window, and the independence contract's pure pieces."""
 
 from sportsassets.workers.underdog import (
     cash_out_threshold,
@@ -32,18 +33,27 @@ def test_band_edges_are_inclusive_where_they_should_be():
     assert pick_underdog([("a", 0.03), ("b", 0.96)]) == ("a", 0.03)
 
 
-def test_cash_out_threshold_is_twenty_percent_on_entry():
-    assert cash_out_threshold(0.30) == 0.36
-    assert cash_out_threshold(0.45) == 0.54
-    # $1 at 0.25 -> 4 contracts; selling at 0.30 realizes $0.20 on $1.00.
-    assert cash_out_threshold(0.25) == 0.30
+def test_cash_out_threshold_is_thirty_five_percent_on_entry():
+    """v2 (owner 2026-08-12): +35% — roughly $0.70 on a full $2 fill."""
+    assert cash_out_threshold(0.20) == 0.27
+    assert cash_out_threshold(0.40) == 0.54
+    # $2 at 0.25 -> 8 contracts; selling at 0.3375 realizes $0.70.
+    assert cash_out_threshold(0.25) == 0.3375
 
 
-def test_sizing_never_exceeds_the_dollar():
-    assert shares_for(1.00, 0.25) == 4     # exactly $1.00
-    assert shares_for(1.00, 0.30) == 3     # $0.90, never $1.20
-    assert shares_for(1.00, 0.48) == 2     # $0.96
-    assert shares_for(1.00, 0.0) == 0
+def test_v2_defaults_are_two_dollars_and_thirty_five_percent():
+    from sportsassets.workers import underdog as ud
+
+    assert ud.PER_FILL_USD == 2.00
+    assert ud.TAKE_PROFIT == 0.35
+    assert ud.ENTRY_GRACE_S == 0.0
+
+
+def test_sizing_never_exceeds_the_stake():
+    assert shares_for(2.00, 0.25) == 8     # exactly $2.00
+    assert shares_for(2.00, 0.30) == 6     # $1.80, never $2.10
+    assert shares_for(2.00, 0.48) == 4     # $1.92
+    assert shares_for(2.00, 0.0) == 0
 
 
 def test_one_fill_index_ignores_the_underdog_sleeve():
@@ -123,12 +133,33 @@ def test_gamma_start_times_parse_or_refuse():
 
 
 def test_entries_fire_only_in_the_t_minus_five_window():
+    """v2: 'exactly 5 minutes before' — the window is [T-5min, start];
+    a game already underway is never entered (grace 0)."""
     from sportsassets.workers.underdog import entry_window
 
     start = 1_000_000.0
     assert entry_window(start, start - 600) == "wait"     # 10 min out
     assert entry_window(start, start - 300) == "enter"    # window opens
     assert entry_window(start, start - 30) == "enter"     # 30s before
-    assert entry_window(start, start + 30) == "enter"     # grace
+    assert entry_window(start, start + 30) == "missed"    # in play
     assert entry_window(start, start + 120) == "missed"   # in play
     assert entry_window(None, start) == "unknown"         # no venue time
+
+
+def test_copy_guards_scope_around_the_sleeve():
+    """Owner 2026-08-12: the restarted sleeve is 'completely
+    independent from everything we do'. The copy path's never-add,
+    one-position-per-game and venue no-stack must all scope around
+    whale_username='underdog' — the sleeve's $2 dogs neither consume
+    a game's one copy slot nor read as a copy stack."""
+    src = open("sportsassets/live_executor.py").read()
+    never_add = src.index("never-add: this market was already copied")
+    one_per_game = src.index("one position per game")
+    no_stack = src.index("no-stack: account already holds")
+    for anchor in (never_add, one_per_game):
+        window = src[anchor - 1500:anchor]
+        assert "<> 'underdog'" in window, "guard must exclude the sleeve"
+    assert "bool_or(whale_username = 'underdog')" in src[
+        no_stack - 1800:no_stack], (
+        "a venue holding explained ONLY by the sleeve must not refuse "
+        "the copy; unexplained holdings still fail closed")
