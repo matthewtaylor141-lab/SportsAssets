@@ -122,11 +122,18 @@ def test_sport_assignments_gate_the_sweep():
 
 def test_swisstony_resumes_behind_the_soccer_price_floor():
     """Owner order 2026-08-12: soccer resumed (halt of 2026-08-11
-    lifted) behind the 40c price floor, with swisstony's clip cut to
-    $100 per soccer copy (same order). A qualifying moneyline fires;
-    a ladder's improbable sub-40c rung still refuses for everyone."""
-    from edge.shadow.kalshi_copies import PER_COPY_USD
-    assert PER_COPY_USD["swisstony"] == 100.00
+    lifted) behind the 40c price floor. swisstony keeps his $200 whale
+    clip but soccer limits at $100 per event (same order) via the
+    (whale, sport) override. A qualifying moneyline fires at the $100
+    soccer clip; a ladder's improbable sub-40c rung still refuses."""
+    from edge.shadow.kalshi_copies import (PER_COPY_USD,
+                                           PER_COPY_USD_SPORT,
+                                           _per_copy_usd)
+    assert PER_COPY_USD["swisstony"] == 200.00
+    assert PER_COPY_USD_SPORT[("swisstony", "soccer")] == 100.00
+    assert _per_copy_usd("SwissTony", "epl-ars-che-2026-08-15") == 100.00
+    assert _per_copy_usd("SwissTony", "aec-atp-a-b-2026-08-15") == 200.00
+    assert _per_copy_usd("rn1", "epl-ars-che-2026-08-15") == 150.00
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka = _Kalshi(0.72, outcomes={"Arsenal": "T-ARS", "Chelsea": "T-CHE"})
     row = {"slug": "epl-ars-che-2026-08-15", "outcome": "Arsenal",

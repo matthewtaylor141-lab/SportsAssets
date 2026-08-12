@@ -287,10 +287,11 @@ PENNY_TRIAL_PER_FILL_USD = 50.00
 # Per-whale override map; keys are lowercased usernames; anyone absent
 # gets the default. RN1 $100 -> $150 2026-08-11 (owner approval,
 # round 4): profitable every single day since Aug 3.
-# swisstony $200 -> $100 (owner order 2026-08-12, the soccer resume:
-# "$100 per soccer copy" — his cells are all soccer, so the whale clip
-# IS the soccer clip).
-PER_FILL_BY_WHALE = {"rn1": 150.00, "swisstony": 100.00}
+# swisstony (owner orders 2026-08-12, the soccer resume): $200 clip
+# everywhere EXCEPT soccer, which limits at $100 per event — the
+# per-(whale, sport) override map carries the exception.
+PER_FILL_BY_WHALE = {"rn1": 150.00, "swisstony": 200.00}
+PER_FILL_BY_WHALE_SPORT = {("swisstony", "soccer"): 100.00}
 # 24H ROLLING-LOSS BREAKER (owner 2026-08-12, threshold his call:
 # "$1500"): when the copy sleeve's realized losses over any rolling
 # 24 hours reach this, copying pauses by itself until the window
@@ -300,9 +301,18 @@ PMUS_LOSS_BREAKER_USD = float(
     os.environ.get("PMUS_LOSS_BREAKER_USD", "1500"))
 
 
-def per_fill_usd(whale_username: str | None) -> float:
-    return PER_FILL_BY_WHALE.get((whale_username or "").lower(),
-                                 PENNY_TRIAL_PER_FILL_USD)
+def per_fill_usd(whale_username: str | None,
+                 slug: str | None = None) -> float:
+    """Clip for this whale on this market: the (whale, sport) override
+    wins, then the whale clip, then the default."""
+    w = (whale_username or "").lower()
+    if slug:
+        from .copy_sports import sport_of
+
+        ov = PER_FILL_BY_WHALE_SPORT.get((w, sport_of(slug)))
+        if ov is not None:
+            return ov
+    return PER_FILL_BY_WHALE.get(w, PENNY_TRIAL_PER_FILL_USD)
 
 
 def _ladder_kind(us_slug: str) -> str | None:
@@ -667,7 +677,10 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         limit = round(min(his_price + max(0.01, his_price * 0.02), 0.99), 2)
         if limit <= 0:
             return
-        shares = float(int(per_fill_usd(payload.get("whale_username")) / limit))
+        shares = float(int(per_fill_usd(
+            payload.get("whale_username"),
+            payload.get("market_slug") or payload.get("event_slug") or "",
+        ) / limit))
         if shares < 1:
             return
         usd = round(shares * limit, 2)

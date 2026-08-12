@@ -75,11 +75,22 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # EDGE_KCOPY_HALT_USD overrides if it proves too twitchy.
 # Same day, round 4: RN1 to $150 — profitable every single day since
 # Aug 3 (+$250 lifetime on 332 settled at $100).
-# 2026-08-12 (owner order, the soccer resume): swisstony $200 -> $100
-# per soccer copy — his cells are all soccer, so the whale clip IS the
-# soccer clip.
-PER_COPY_USD = {"rn1": 150.00, "swisstony": 100.00}
+# 2026-08-12 (owner orders, the soccer resume): swisstony stays $200
+# everywhere EXCEPT soccer, which clips at $100 per event — the
+# per-(whale, sport) override below carries the exception.
+PER_COPY_USD = {"rn1": 150.00, "swisstony": 200.00}
+PER_COPY_USD_SPORT = {("swisstony", "soccer"): 100.00}
 PER_COPY_DEFAULT = 50.00
+
+
+def _per_copy_usd(whale: str, slug: str) -> float:
+    """Clip for this whale on this market: the (whale, sport) override
+    wins, then the whale clip, then the default."""
+    from edge.shadow.copy_sports import sport_of
+
+    w = (whale or "").lower()
+    ov = PER_COPY_USD_SPORT.get((w, sport_of(slug or "")))
+    return ov if ov is not None else PER_COPY_USD.get(w, PER_COPY_DEFAULT)
 # A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
 # decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.
 # Copying an old position at today's price is buying fair value minus
@@ -555,8 +566,7 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                         stats["maker_resting"] = \
                             stats.get("maker_resting", 0) + 1
                         continue
-                per_m = PER_COPY_USD.get((row.get("whale") or "").lower(),
-                                         PER_COPY_DEFAULT)
+                per_m = _per_copy_usd(row.get("whale") or "", slug)
                 if (day_usd > 0 and not _uncapped(row.get("whale") or "")
                         and (spent - rn1_spent) + per_m > day_usd):
                     continue
@@ -641,8 +651,7 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 stats["routed_pmus_better"] = \
                     stats.get("routed_pmus_better", 0) + 1
                 continue
-        per = PER_COPY_USD.get((row.get("whale") or "").lower(),
-                               PER_COPY_DEFAULT)
+        per = _per_copy_usd(row.get("whale") or "", slug)
         # EDGE_KCOPY_DAY_USD <= 0 = NO day cap (owner 2026-08-10: "I dont
         # want trades missing if they are being placed by our copied and
         # tested accounts"). The copy circuit breaker and account cash
