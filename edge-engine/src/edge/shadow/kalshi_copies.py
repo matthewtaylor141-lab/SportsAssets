@@ -749,6 +749,18 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             _dc["fees"] = round(
                 _dc.get("fees", 0.0) + kalshi.taker_fee(ask) * filled, 4)
             _save_day()
+            # The smoke probe's whole job is "prove the live order
+            # path works"; a real copy fill IS that proof. Refresh the
+            # state the heartbeat serves so an 8-day-old delisted-
+            # ticker failure (http_410, 2026-08-04) stops masquerading
+            # as the path's current health (owner audit 2026-08-12).
+            try:
+                ledger.set_state("kalshi_smoke_last", {
+                    "ts": time.time(), "ticker": target_ticker,
+                    "price": ask, "ok": True, "filled": int(filled),
+                    "status": "proven_by_copy_fill"})
+            except Exception:  # noqa: BLE001 — telemetry only
+                pass
             ledger.record_fill(
                 fill_uid=f"kcopy-{claim}-{int(time.time())}",
                 venue="kalshi", market_key=f"kalshi:{target_ticker}",
