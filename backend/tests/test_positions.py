@@ -81,3 +81,71 @@ def test_perfect_hedge_is_scratch():
     yes = build_position([Fill("BUY", 100, 0.50)], payout=1.0)
     no = build_position([Fill("BUY", 100, 0.50)], payout=0.0)
     assert market_result(yes.realized_pnl + no.realized_pnl) == "scratch"
+
+
+def test_one_null_condition_id_cannot_freeze_the_snapshot(monkeypatch):
+    """Incident 2026-08-11/12: a single un-enriched trade (null
+    condition_id) made the batch insert throw, the transaction rolled
+    back, and the WHOLE positions snapshot froze for days — RN1's new
+    settles landed as 'unattributed'. The persist path must (a) rescue
+    the id from the token catalog when it knows the token, and (b)
+    dead-letter anything still unknown while the rest persists."""
+    import asyncio
+
+    from sportsassets.analytics import engine as eng
+
+    class _Ctx:
+        def __init__(self, obj=None):
+            self.obj = obj
+
+        async def __aenter__(self):
+            return self.obj
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Conn:
+        def __init__(self, sink):
+            self.sink = sink
+
+        def transaction(self):
+            return _Ctx()
+
+        async def execute(self, sql, *a):
+            self.sink["deleted"] = True
+
+        async def executemany(self, sql, rows):
+            self.sink["rows"] = rows
+
+    class _Pool:
+        def __init__(self):
+            self.sink = {}
+
+        async def fetch(self, sql, toks):
+            assert "market_tokens" in sql
+            # The catalog knows tok-b only.
+            return [{"token_id": "tok-b", "condition_id": "0xrescued"}]
+
+        def acquire(self):
+            return _Ctx(_Conn(self.sink))
+
+    pool = _Pool()
+
+    async def fake_get_pool():
+        return pool
+
+    monkeypatch.setattr(eng, "get_pool", fake_get_pool)
+
+    def st(cid, tok):
+        return eng.PositionState(
+            whale_id=2, condition_id=cid, token_id=tok, outcome="X",
+            outcome_index=0, sport="tennis",
+            position=build_position([Fill("BUY", 10, 0.5)]))
+
+    states = [st("0xok", "tok-a"),      # already enriched
+              st(None, "tok-b"),        # rescued from the catalog
+              st(None, "tok-c")]        # unknown: dead-lettered
+    asyncio.run(eng._persist_positions(states))
+    rows = pool.sink["rows"]
+    assert len(rows) == 2, "good rows persist; only the orphan drops"
+    assert {r[1] for r in rows} == {"0xok", "0xrescued"}

@@ -146,12 +146,43 @@ async def rebuild_positions() -> list[PositionState]:
 
 async def _persist_positions(states: list[PositionState]) -> None:
     pool = await get_pool()
+    # NOT NULL rescue (incident 2026-08-11/12): a single un-enriched
+    # trade row (null condition_id — always the same RN1 asset) made
+    # ONE tuple violate positions.condition_id NOT NULL, the batch
+    # insert threw, and the surrounding transaction rolled back — so
+    # the WHOLE positions snapshot froze, every cycle, for days. The
+    # whale's new fills kept settling but attribution read the stale
+    # snapshot and dumped them in 'unattributed'. Recover the id from
+    # the token catalog when it knows the token; anything still
+    # unknown is dead-lettered LOUDLY while the rest of the book
+    # persists — one bad row must never freeze 7,000 good ones.
+    missing = [st for st in states if not st.condition_id and st.token_id]
+    if missing:
+        try:
+            found = await pool.fetch(
+                "SELECT token_id, condition_id FROM market_tokens "
+                "WHERE token_id = ANY($1::text[])",
+                [str(st.token_id) for st in missing])
+            by_tok = {str(r["token_id"]): r["condition_id"] for r in found}
+            for st in missing:
+                st.condition_id = by_tok.get(str(st.token_id))
+        except Exception:  # noqa: BLE001 — rescue is best-effort
+            pass
+    persistable = [st for st in states if st.condition_id]
+    dropped = len(states) - len(persistable)
+    if dropped:
+        log.warning(
+            "positions persist: %d row(s) still missing condition_id "
+            "after token-catalog rescue — dead-lettered (tokens: %s); "
+            "the snapshot persists without them",
+            dropped,
+            [st.token_id for st in states if not st.condition_id][:5])
     rows = [
         (st.whale_id, st.condition_id, st.token_id, st.outcome, st.outcome_index,
          round(st.position.shares, 6), round(st.position.avg_cost, 6),
          round(st.position.realized_pnl, 6), round(st.position.notional_in, 6),
          st.position.resolved, st.first_ts, st.last_ts)
-        for st in states
+        for st in persistable
     ]
     async with pool.acquire() as conn:
         async with conn.transaction():
