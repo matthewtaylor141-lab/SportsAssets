@@ -316,3 +316,20 @@ def test_in_window_games_are_marked_seen():
     src = open("sportsassets/workers/underdog.py").read()
     p1 = src[src.index("# PASS 1 — WINDOWS FIRST"):src.index("# PASS 2")]
     assert "_seen_open.add(slug)" in p1
+
+
+def test_prime_lag_is_measured():
+    """Third theory, measured before it is believed.
+
+    Sweep speed was wrong (208ms vs a 300s window). Moving start times
+    were wrong (start_drift_s: 0). What remains is that a game can be
+    UNKNOWABLE during its window: priming is capped per sweep and the
+    tennis slate grows all day, so a match listed shortly before it
+    starts can sit unprimed until after its window shut.
+    """
+    src = open("sportsassets/workers/underdog.py").read()
+    assert 'stats["unprimed"]' in src, "backlog size must be visible"
+    assert 'stats["primed_late"]' in src
+    late = src[src.index('stats["primed_late"]') - 400:]
+    assert 'entry_window(st_ts, _t.time()) == "missed"' in late[:600], \
+        "late means: already past start the first time we learned it"

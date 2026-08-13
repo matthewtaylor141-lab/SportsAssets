@@ -563,11 +563,23 @@ async def _entry_sweep(pool) -> dict:
         # from the heartbeat, not inferred from a bare total.
         _lg = "games_mlb" if slug.startswith("mlb-") else "games_tennis"
         stats[_lg] = stats.get(_lg, 0) + 1
+        if slug not in _starts:
+            stats["unprimed"] = stats.get("unprimed", 0) + 1
         if slug not in _starts and primed < START_PRIME_PER_SWEEP:
             _starts[slug] = await _game_start_ts(
                 cfg, next(iter(sides))["condition_id"])
             primed += 1
             st_ts = _starts.get(slug)
+            # PRIMED TOO LATE: the first time we ever learned this
+            # game's start, the start had already passed. No sweep could
+            # have entered it — the window closed before the game was
+            # knowable. Priming is capped per sweep, and the tennis
+            # slate ADDS matches all day (65 -> 77 games in one hour),
+            # so a match listed shortly before it begins can sit
+            # unprimed through its whole window. Baseball never hits
+            # this: two games, catalogued hours ahead.
+            if st_ts and entry_window(st_ts, _t.time()) == "missed":
+                stats["primed_late"] = stats.get("primed_late", 0) + 1
             if (st_ts and slug not in attempted
                     and entry_window(st_ts, _t.time()) == "enter"):
                 await _try_enter(slug, sides)
