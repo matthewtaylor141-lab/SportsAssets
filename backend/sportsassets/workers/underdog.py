@@ -311,6 +311,12 @@ _missed_logged: set[str] = set()
 # as lt_*, so a day's worth of refusals is one read.
 _lifetime: dict[str, int] = {}
 
+# The unmapped counter says HOW MANY windows the mapper refused, never
+# WHICH — 15 lifetime refusals on 2026-08-13 were undiagnosable from a
+# probe because the failing titles existed only in the moment. Last few
+# refused titles, newest first, emitted on the heartbeat as unmapped_ex.
+_unmapped_recent: list[str] = []
+
 
 def _tally(stats: dict) -> None:
     """Fold a finished sweep's counters into the lifetime tally."""
@@ -487,6 +493,8 @@ async def _entry_sweep(pool) -> dict:
             + _us_slug_candidates(slug, outcome or ""), outcome)
         if mapping is None:
             stats["unmapped"] += 1
+            _unmapped_recent.insert(0, f"{_title[:60]}|{slug[:40]}")
+            del _unmapped_recent[5:]
             return
         # NO-STACK: the token-level veto above only sees OUR sleeves'
         # rows; the engine's own fills live in its ledger. The account
@@ -701,6 +709,8 @@ async def _entry_sweep(pool) -> dict:
     for _k, _v in _lifetime.items():
         if _v:
             stats[f"lt_{_k}"] = _v
+    if _unmapped_recent:
+        stats["unmapped_ex"] = list(_unmapped_recent)
     # A sweep longer than the window it is hunting cannot catch one.
     if stats["sweep_ms"] > ENTRY_LEAD_S * 1000:
         log.warning("UNDERDOG sweep %dms EXCEEDS the %ds entry window "
