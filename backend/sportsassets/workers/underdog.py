@@ -349,6 +349,15 @@ async def _entry_sweep(pool) -> dict:
     if active_venue() != "polymarket-us":
         stats["off"] = "venue not armed"
         return stats
+    # SWEEP CLOCK. A 5-minute entry window can only be caught by a sweep
+    # that RUNS inside it. On 2026-08-13 tennis missed 13 windows with
+    # zero attempts and every refusal counter at 0 — the signature of
+    # _try_enter never being reached, not of a guard refusing. If a
+    # sweep costs longer than the window is open, a whole cluster of
+    # starts falls between two PASS 1 runs and is never seen. Measure
+    # before changing anything: these are wall-clock milliseconds.
+    import time as _clk
+    _t_sweep = _clk.monotonic()
     # KALSHI-LEG BACKFILL (owner 2026-08-08: "make sure we aren't
     # missing any"): every OPEN $1 position this sleeve holds on
     # Polymarket must have its Kalshi task queued — including games
@@ -514,6 +523,7 @@ async def _entry_sweep(pool) -> dict:
                 "WHERE id=$1", row_id,
                 str(r.get("status") or "unfilled")[:200])
 
+    _t_pass1 = _clk.monotonic()
     # PASS 1 — WINDOWS FIRST (repair 2026-08-12 evening: the sleeve
     # took ZERO entries all day while 42 games rolled wait->missed.
     # The sweep's slow work — uncached start fetches at 8s timeouts
@@ -529,6 +539,8 @@ async def _entry_sweep(pool) -> dict:
                                                   0) + 1
             await _try_enter(slug, sides)
 
+    stats["pass1_ms"] = int((_clk.monotonic() - _t_pass1) * 1000)
+    _t_pass2 = _clk.monotonic()
     # PASS 2 — bookkeeping and BOUNDED priming: per-sweep start
     # fetches are capped so this pass can never outlast a window; a
     # game already inside its window when first primed enters NOW
@@ -582,6 +594,8 @@ async def _entry_sweep(pool) -> dict:
             k = f"skipped_{win}"
             stats[k] = stats.get(k, 0) + 1
 
+    stats["pass2_ms"] = int((_clk.monotonic() - _t_pass2) * 1000)
+    _t_disc = _clk.monotonic()
     # Slate discovery LAST — and deferred while any window is open or
     # opening soon, so pagination can never eat a window. Deferral is
     # bounded (a busy tennis afternoon must not starve the catalog of
@@ -604,6 +618,17 @@ async def _entry_sweep(pool) -> dict:
             except Exception as exc:  # noqa: BLE001 — catalog still serves
                 stats["discover_error"] = \
                     f"{type(exc).__name__}: {str(exc)[:120]}"
+    stats["discover_ms"] = int((_clk.monotonic() - _t_disc) * 1000)
+    stats["sweep_ms"] = int((_clk.monotonic() - _t_sweep) * 1000)
+    # A sweep longer than the window it is hunting cannot catch one.
+    if stats["sweep_ms"] > ENTRY_LEAD_S * 1000:
+        log.warning("UNDERDOG sweep %dms EXCEEDS the %ds entry window "
+                    "(pass1 %sms pass2 %sms discover %sms, %d games) — "
+                    "starts can fall between sweeps unseen",
+                    stats["sweep_ms"], int(ENTRY_LEAD_S),
+                    stats.get("pass1_ms"), stats.get("pass2_ms"),
+                    stats.get("discover_ms"), stats.get("games", 0))
+        stats["sweep_over_window"] = 1
     return stats
 
 

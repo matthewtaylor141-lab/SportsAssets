@@ -250,3 +250,34 @@ def test_venue_price_must_clear_the_band_too():
     assert "MIN_ASK <= us_ask <= MAX_ASK" in gap, \
         "the venue's own price must clear the underdog band"
     assert 'stats["skipped_band"]' in gap
+
+
+def test_sweep_is_timed_against_the_window_it_hunts():
+    """A sweep slower than the entry window cannot catch one.
+
+    2026-08-13: tennis missed 13 windows with zero attempts and every
+    refusal counter at 0 — the signature of _try_enter never being
+    REACHED. With 64 clustered tennis starts, a sweep costing more than
+    the 5-minute window drops whole clusters between consecutive PASS 1
+    runs. The heartbeat now carries the sweep's own cost so that is a
+    measurement rather than a theory.
+    """
+    src = open("sportsassets/workers/underdog.py").read()
+    for key in ("pass1_ms", "pass2_ms", "discover_ms", "sweep_ms"):
+        assert f'stats["{key}"]' in src, f"{key} must ride the heartbeat"
+    # The alarm compares against the window, not a hard-coded number, so
+    # it stays true if the lead time is ever retuned.
+    alarm = src[src.index('if stats["sweep_ms"] >'):][:200]
+    assert "ENTRY_LEAD_S" in alarm
+    assert 'stats["sweep_over_window"]' in src
+
+
+def test_timers_bracket_the_real_phases():
+    """Ordering: clock starts before PASS 1 and closes after discovery."""
+    src = open("sportsassets/workers/underdog.py").read()
+    starts = src.index("_t_sweep = _clk.monotonic()")
+    p1 = src.index("# PASS 1 — WINDOWS FIRST")
+    p2 = src.index("# PASS 2 — bookkeeping")
+    disc = src.index("# Slate discovery LAST")
+    closes = src.index('stats["sweep_ms"] =')
+    assert starts < p1 < p2 < disc < closes
