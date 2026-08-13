@@ -299,6 +299,12 @@ _ROTATION = {"i": 0}
 _NEAR_THRESHOLD: dict[str, float] = {}
 _LAST_SETTLE: dict = {}
 _ACCOUNT_LINK: dict = {}
+# When the account-link snapshot was last verified against the venue. The
+# boot-time check alone is not enough: on a quiet service the balance line
+# serves a day-old figure as if it were live (17h frozen on 2026-08-13 read
+# as a broken account link; it was only this snapshot's age).
+_ACCOUNT_LINK_AT = {"ts": 0.0}
+_ACCOUNT_LINK_TTL_S = float(os.environ.get("EDGE_ACCOUNT_LINK_TTL_S", "3600"))
 # Max age for the per-event payload (segments + props) behind a live order.
 _PROP_MAX_AGE_S = float(os.environ.get("EDGE_PROP_MAX_AGE_S", "600"))
 
@@ -2094,6 +2100,37 @@ def kalshi_open_snapshot(ledger, adapters) -> dict:
             "rows": rows}
 
 
+def _check_account_link(adapters) -> dict:
+    """Verify venue credentials and read the live balance. Never logs keys.
+
+    Runs at startup and then on a TTL from the cycle loop — the balance in
+    this snapshot is the only account figure on the wire, so it must not
+    age silently.
+    """
+    account_link: dict = {}
+    for a in adapters:
+        if not hasattr(a, "has_credentials"):
+            continue
+        if not a.has_credentials():
+            account_link[a.name] = {"ok": False, "detail": "no credentials set"}
+            continue
+        try:
+            auth = a.check_auth()
+            account_link[a.name] = {
+                "ok": bool(auth.get("ok")),
+                "detail": auth.get("error")
+                or (f"balance ${auth['balance_usd']:.2f}" if "balance_usd" in auth
+                    else "authenticated"),
+                "checked_at": int(time.time()),
+            }
+        except Exception as exc:  # noqa: BLE001
+            account_link[a.name] = {"ok": False,
+                                    "detail": f"{type(exc).__name__}: {str(exc)[:120]}",
+                                    "checked_at": int(time.time())}
+        log.info("account link %s: %s", a.name, account_link[a.name])
+    return account_link
+
+
 def main() -> None:
     # Crash-visible wrapper. The 2026-08-04 restart loop taught us that a
     # death outside the cycle try/except (boot code, MemoryError, any
@@ -2212,26 +2249,9 @@ def _main_impl() -> None:
     # Account-link self check: verify venue credentials at startup and surface
     # the result in cycle telemetry (Engine tab) — the operator's confirmation
     # that live keys are valid and the account is reachable. Never logs keys.
-    account_link: dict = {}
-    for a in adapters:
-        if not hasattr(a, "has_credentials"):
-            continue
-        if not a.has_credentials():
-            account_link[a.name] = {"ok": False, "detail": "no credentials set"}
-            continue
-        try:
-            auth = a.check_auth()
-            account_link[a.name] = {
-                "ok": bool(auth.get("ok")),
-                "detail": auth.get("error")
-                or (f"balance ${auth['balance_usd']:.2f}" if "balance_usd" in auth
-                    else "authenticated"),
-            }
-        except Exception as exc:  # noqa: BLE001
-            account_link[a.name] = {"ok": False,
-                                    "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}
-        log.info("account link %s: %s", a.name, account_link[a.name])
+    account_link = _check_account_link(adapters)
     _ACCOUNT_LINK.update(account_link)
+    _ACCOUNT_LINK_AT["ts"] = time.time()
     _post_status("startup", {"mode": risk.mode, "account_link": account_link,
                              "venues": [a.name for a in adapters],
                              "sports": len(sport_keys),
@@ -2768,6 +2788,18 @@ def _main_impl() -> None:
             # credential check posts once as "startup" and scrolls away —
             # a probe that reads only recent heartbeats could never answer
             # "is the Kalshi account actually connected?".
+            if (_ACCOUNT_LINK
+                    and time.time() - _ACCOUNT_LINK_AT["ts"] > _ACCOUNT_LINK_TTL_S):
+                # Stamp first so a failing venue can't turn this into a
+                # per-cycle hammer; a failed refresh keeps the last good
+                # reading alongside the error instead of erasing it.
+                _ACCOUNT_LINK_AT["ts"] = time.time()
+                for name, entry in _check_account_link(adapters).items():
+                    old = _ACCOUNT_LINK.get(name) or {}
+                    if not entry.get("ok") and old.get("ok"):
+                        entry["last_ok"] = {"detail": old.get("detail"),
+                                            "checked_at": old.get("checked_at")}
+                    _ACCOUNT_LINK[name] = entry
             if _ACCOUNT_LINK:
                 funnel["account_link"] = _ACCOUNT_LINK
             # "Is the software class off?" must be a probe READ, never an
