@@ -291,7 +291,15 @@ def entry_window(start_ts: float | None, now: float,
 
 # slug -> venue-reported start ts, cached per process (a game's start
 # does not move minute to minute; entries happen once).
+# 2026-08-13: that sentence is true of baseball and NOT of tennis, where
+# a match starts when the previous one on its court ends. If a cached
+# start is stale, a game crosses wait -> missed with no window in
+# between and _try_enter is never reached — which is exactly what the
+# tennis counters look like. _seen_open records the slugs some sweep DID
+# observe in-window, so a miss can be classified rather than guessed at.
 _starts: dict[str, float | None] = {}
+_seen_open: set[str] = set()
+_missed_logged: set[str] = set()
 
 
 async def _game_start_ts(cfg, condition_id: str) -> float | None:
@@ -537,6 +545,7 @@ async def _entry_sweep(pool) -> dict:
         if st_ts and entry_window(st_ts, _t.time()) == "enter":
             stats["windows_open_now"] = stats.get("windows_open_now",
                                                   0) + 1
+            _seen_open.add(slug)
             await _try_enter(slug, sides)
 
     stats["pass1_ms"] = int((_clk.monotonic() - _t_pass1) * 1000)
@@ -593,6 +602,33 @@ async def _entry_sweep(pool) -> dict:
         if win != "enter":
             k = f"skipped_{win}"
             stats[k] = stats.get(k, 0) + 1
+        # A game that reached "missed" without ANY sweep seeing it open
+        # never had a window we could act on. With the sweep at ~200ms
+        # and a 60s cadence, five sweeps should land inside every five
+        # minute window — so a silent miss means the START MOVED under
+        # the cache. Re-read it once per game (capped) and report the
+        # drift; that is the number that settles the tennis question.
+        if (win == "missed" and slug not in _seen_open
+                and slug not in _missed_logged
+                and stats.get("start_rechecks", 0) < 3):
+            _missed_logged.add(slug)
+            stats["missed_never_open"] = \
+                stats.get("missed_never_open", 0) + 1
+            stats["start_rechecks"] = stats.get("start_rechecks", 0) + 1
+            fresh = await _game_start_ts(
+                cfg, next(iter(sides))["condition_id"])
+            cached = _starts.get(slug)
+            if fresh and cached:
+                drift = int(fresh - cached)
+                stats["start_drift_s"] = drift
+                if abs(drift) > ENTRY_LEAD_S:
+                    log.warning(
+                        "UNDERDOG start MOVED %+ds on %s (cached %.0f "
+                        "fresh %.0f) — the window was never real",
+                        drift, slug, cached, fresh)
+                    stats["start_moved"] = stats.get("start_moved", 0) + 1
+                # Trust the venue's current answer from here on.
+                _starts[slug] = fresh
 
     stats["pass2_ms"] = int((_clk.monotonic() - _t_pass2) * 1000)
     _t_disc = _clk.monotonic()

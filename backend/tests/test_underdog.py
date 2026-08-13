@@ -281,3 +281,38 @@ def test_timers_bracket_the_real_phases():
     disc = src.index("# Slate discovery LAST")
     closes = src.index('stats["sweep_ms"] =')
     assert starts < p1 < p2 < disc < closes
+
+
+def test_a_silent_miss_is_classified_not_guessed_at():
+    """"Missed with no window" vs "missed after refusing" are different
+    failures and must not print the same.
+
+    With the sweep measured at ~200ms on a 60s cadence, five sweeps land
+    inside every five-minute window. A game that reaches 'missed' having
+    never been seen open therefore did not have a window we could act
+    on — the start moved under the cache. That is the tennis case.
+    """
+    src = open("sportsassets/workers/underdog.py").read()
+    assert "_seen_open" in src, "in-window observations must be recorded"
+    assert 'stats["missed_never_open"]' in src
+    assert 'stats["start_drift_s"]' in src
+    # The recheck is bounded — this runs inside the entry sweep.
+    guard = src[src.index('if (win == "missed"'):][:400]
+    assert "start_rechecks" in guard and "< 3" in guard
+    assert "_missed_logged" in guard, "recheck each game at most once"
+
+
+def test_a_moved_start_is_adopted_not_argued_with():
+    """The venue's current answer wins; a stale cache is the bug."""
+    src = open("sportsassets/workers/underdog.py").read()
+    block = src[src.index('stats["start_drift_s"]'):][:700]
+    assert "_starts[slug] = fresh" in block
+    assert "ENTRY_LEAD_S" in block, \
+        "drift is judged against the window, not a magic number"
+
+
+def test_in_window_games_are_marked_seen():
+    """PASS 1 must record the observation, or every miss reads silent."""
+    src = open("sportsassets/workers/underdog.py").read()
+    p1 = src[src.index("# PASS 1 — WINDOWS FIRST"):src.index("# PASS 2")]
+    assert "_seen_open.add(slug)" in p1
