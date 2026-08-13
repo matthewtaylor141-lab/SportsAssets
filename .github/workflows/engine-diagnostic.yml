@@ -174,7 +174,12 @@ jobs:
           jq -r '.daily // [] | .[0:3][] | "  day \(.date)  pnl \(.pnl)  settled \(.settled)  open \(.open // 0)"' /tmp/tr.json 2>/dev/null || true
           # ...and the most recent days — "how is TODAY looking" must be
           # answerable from a probe without shipping anything.
-          jq -r '.daily // [] | .[-3:][] | "  day(recent) \(.date)  pnl \(.pnl)  settled \(.settled)  open \(.open // 0)"' /tmp/tr.json 2>/dev/null || true
+          # `deployed` and `trades` are the VOLUME line — the record has
+          # carried them per day all along and the probe printed only
+          # P&L, so "how much have we traded this week" was unanswerable
+          # from a heartbeat (owner question 2026-08-12). Five days, so a
+          # Monday-to-date question is one read.
+          jq -r '.daily // [] | .[-5:][] | "  day(recent) \(.date)  pnl \(.pnl)  settled \(.settled)  open \(.open // 0)  VOLUME $\(.deployed // 0) over \(.trades // 0) trades"' /tmp/tr.json 2>/dev/null || true
           echo ""
           echo "#   DAILY BREAKDOWN BY CATEGORY (owner report)             #"
           curl -sS --max-time 90 -o /tmp/db.json "$BASE/api/daily-breakdown" || true
