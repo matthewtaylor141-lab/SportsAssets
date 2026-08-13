@@ -1539,7 +1539,22 @@ async def track_record(since: str | None = None,
         agree = (len(s3) >= 3 and max(s3) > 0
                  and (max(s3) - min(s3)) <= 0.01 * max(s3)
                  and (max(n3) - min(n3)) <= 2)
-        if agree:
+        # SECOND WAY OUT: a record that is GROWING is not a record that is
+        # corrupt. The stability test above assumes a refused build sits
+        # still, so it can only fire when trading is quiet — and on the
+        # night of 2026-08-12 it never fired at all: settled climbed
+        # 1473 -> 1480 -> 1491 across three cycles as the overnight slate
+        # resolved, never holding within +/-2, while the page served
+        # 3-hour-old numbers showing FEWER settled trades than the truth.
+        # Data loss wobbles DOWN and jitters; three builds each adding
+        # settled rows and stake is trading, not corruption. Both series
+        # must be non-decreasing, so a single shrinking build still stops
+        # here (that is the 2026-08-07 fake-negatives case).
+        growing = (len(s3) >= 3
+                   and all(b >= a for a, b in zip(n3, n3[1:]))
+                   and all(b >= a for a, b in zip(s3, s3[1:]))
+                   and n3[-1] > n3[0])
+        if agree or growing:
             logging.getLogger(__name__).warning(
                 "track-record re-baseline after %d consistent refused "
                 "builds: settled %s->%s stake %.2f->%.2f",
@@ -1549,8 +1564,10 @@ async def track_record(since: str | None = None,
             _persist_state["stake"] = _stake_of(payload)
             _persist_state["ts"] = 0.0     # let the next persist through
             _refused.update(streak=0, stakes=[], settled=[])
-            payload["rebaselined"] = {"refused_builds": 3,
-                                      "reason": "consistent lower basis"}
+            payload["rebaselined"] = {
+                "refused_builds": 3,
+                "reason": ("consistent lower basis" if agree
+                           else "growing record, not data loss")}
         else:
             persisted = await _load_persisted()
             if persisted is not None:
