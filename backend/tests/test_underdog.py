@@ -333,3 +333,41 @@ def test_prime_lag_is_measured():
     late = src[src.index('stats["primed_late"]') - 400:]
     assert 'entry_window(st_ts, _t.time()) == "missed"' in late[:600], \
         "late means: already past start the first time we learned it"
+
+
+def test_refusals_accumulate_across_sweeps():
+    """Per-sweep counters made a day of refusals invisible.
+
+    The stats dict is rebuilt every sweep, so the heartbeat shows only
+    the ~200ms slice the probe landed on. Three tennis theories each
+    died at "every counter is zero" — zero because the dict was new,
+    not because nothing was refused. lt_* is the day's tally.
+    """
+    from sportsassets.workers import underdog as ud
+
+    ud._lifetime.clear()
+    ud._tally({"skipped_band": 2, "entered": 1, "sweep_ms": 208})
+    ud._tally({"skipped_band": 3, "unmapped": 1})
+    assert ud._lifetime["skipped_band"] == 5
+    assert ud._lifetime["entered"] == 1
+    assert ud._lifetime["unmapped"] == 1
+    assert "sweep_ms" not in ud._lifetime, "timings are not refusals"
+
+
+def test_lifetime_keys_ride_the_heartbeat():
+    src = open("sportsassets/workers/underdog.py").read()
+    assert 'stats[f"lt_{_k}"]' in src
+    tail = src[src.index('stats["sweep_ms"] ='):][:400]
+    assert "_tally(stats)" in tail, "fold AFTER the sweep completes"
+
+
+def test_zero_counters_are_not_emitted():
+    """A wall of lt_*: 0 keys would bury the ones that matter."""
+    from sportsassets.workers import underdog as ud
+
+    ud._lifetime.clear()
+    ud._tally({"skipped_band": 0, "entered": 4})
+    assert ud._lifetime.get("skipped_band") == 0
+    src = open("sportsassets/workers/underdog.py").read()
+    emit = src[src.index("for _k, _v in _lifetime.items():"):][:160]
+    assert "if _v:" in emit

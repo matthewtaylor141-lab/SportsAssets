@@ -301,6 +301,27 @@ _starts: dict[str, float | None] = {}
 _seen_open: set[str] = set()
 _missed_logged: set[str] = set()
 
+# LIFETIME refusal tally. Every skip counter in the entry sweep lives in
+# a dict that is rebuilt each sweep, so the heartbeat only ever shows the
+# ~200ms slice the probe happened to land on. A five-minute window that
+# was refused four hours ago leaves no trace anywhere. That is why three
+# separate tennis theories each died at "the counters are all zero" —
+# they were zero because they had just been created, not because nothing
+# happened. These accumulate since process start and ride the heartbeat
+# as lt_*, so a day's worth of refusals is one read.
+_lifetime: dict[str, int] = {}
+
+
+def _tally(stats: dict) -> None:
+    """Fold a finished sweep's counters into the lifetime tally."""
+    for k, v in stats.items():
+        if isinstance(v, int) and (k.startswith("skipped_")
+                                   or k in ("entered", "unmapped",
+                                            "windows_open_now",
+                                            "missed_never_open",
+                                            "primed_late", "unprimed")):
+            _lifetime[k] = _lifetime.get(k, 0) + v
+
 
 async def _game_start_ts(cfg, condition_id: str) -> float | None:
     import httpx
@@ -668,6 +689,10 @@ async def _entry_sweep(pool) -> dict:
                     f"{type(exc).__name__}: {str(exc)[:120]}"
     stats["discover_ms"] = int((_clk.monotonic() - _t_disc) * 1000)
     stats["sweep_ms"] = int((_clk.monotonic() - _t_sweep) * 1000)
+    _tally(stats)
+    for _k, _v in _lifetime.items():
+        if _v:
+            stats[f"lt_{_k}"] = _v
     # A sweep longer than the window it is hunting cannot catch one.
     if stats["sweep_ms"] > ENTRY_LEAD_S * 1000:
         log.warning("UNDERDOG sweep %dms EXCEEDS the %ds entry window "
