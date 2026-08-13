@@ -363,7 +363,8 @@ async def _best_bid(cfg, asset: str) -> float | None:
 
 async def _entry_sweep(pool) -> dict:
     from ..config import settings
-    from ..live_executor import _clob_best_ask, _us_slug_candidates, active_venue
+    from ..live_executor import (_clob_best_ask, _tennis_candidates,
+                                 _us_slug_candidates, active_venue)
     from .. import pmus
 
     stats = {"games": 0, "entered": 0, "skipped_held": 0,
@@ -474,9 +475,16 @@ async def _entry_sweep(pool) -> dict:
             return
         # US mapping first — the manual desk's exact pipeline. No US
         # market, no trade: mapped-or-refused, never guessed.
+        # Tennis candidates come from the TITLE's player names (owner
+        # order 2026-08-13): the internal surname slug cannot hit the
+        # US first3+last3 grammar, which is why every one of the day's
+        # 15 tennis windows was reached and refused unmapped while the
+        # MLB grammar mapped first try.
+        _title = next(iter(sides)).get("title") or ""
         mapping = await asyncio.to_thread(
             pmus.resolve_market_exact,
-            _us_slug_candidates(slug, outcome or ""), outcome)
+            _tennis_candidates(_title, slug)
+            + _us_slug_candidates(slug, outcome or ""), outcome)
         if mapping is None:
             stats["unmapped"] += 1
             return

@@ -252,6 +252,13 @@ jobs:
           curl -sS --max-time 60 -o /tmp/unm.json "$BASE/api/copy-unmapped" || true
           jq -r '"  rows=\(.totals.rows // "?")  recent_7d=\(.totals.recent_7d // "?")"' \
              /tmp/unm.json 2>/dev/null || echo "  (endpoint not deployed yet)"
+          # The number the owner asked for (2026-08-13): of the unmapped
+          # rows, how many did the venue LIST (our bug, winnable) vs not
+          # carry at all (unwinnable by code)?
+          jq -r '.winnable // {} | "  WINNABLE listed_mapper_fail=\(.listed_mapper_fail // "?") (7d \(.listed_mapper_fail_7d // "?"))  venue_unlisted=\(.venue_unlisted // "?") (7d \(.venue_unlisted_7d // "?"))  undiagnosed=\(.undiagnosed // "?")"' \
+             /tmp/unm.json 2>/dev/null || true
+          jq -r '.no_slug // {} | "  NOSLUG rows=\(.rows // "?")  catalog_has_token=\(.catalog_has_token // "?")  token_unknown=\(.token_unknown // "?")"' \
+             /tmp/unm.json 2>/dev/null || echo "  (endpoint not deployed yet)"
           jq -r '.by_reason // [] | .[] | "  RSN \(.reason): \(.n)"' \
              /tmp/unm.json 2>/dev/null | head -5 || true
           jq -r '.by_market_type // [] | .[] | "  TYP \(.market_type): \(.n)"' \
@@ -287,6 +294,11 @@ jobs:
           # swap POLYGON_WS_URL; events without decodes means a roster
           # or decode mismatch — a code problem.
           echo "  chain detail: $(jq -c '.[] | select(.service == "chain_listener") | .detail' /tmp/hb.json 2>/dev/null)"
+          # Enrichment health (the '(no slug)' bucket's supply line):
+          # re_enriched should be >0 when a backlog exists, unenriched_1k
+          # should trend DOWN after the dead-token fix, dead_tokens is
+          # the permanently-unknowable set being skipped.
+          echo "  metadata detail: $(jq -c '.[] | select(.service == "metadata") | .detail | {re_enriched, unenriched_1k, dead_tokens, active_sports_markets}' /tmp/hb.json 2>/dev/null)"
 
           echo ""
           echo "#   WHALE INGESTION RAW (shape + freshness, no jq guessing) #"

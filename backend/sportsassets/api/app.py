@@ -1940,12 +1940,40 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
         SELECT lower(COALESCE(lo.whale_username, '?')) AS whale,
                COALESCE(t.market_slug, t.event_slug, '') AS slug,
                CASE WHEN lo.error LIKE 'no-stack%' THEN 'no_stack'
+                    WHEN lo.error LIKE 'never-add%' THEN 'never_add'
+                    WHEN lo.error LIKE 'one position per game%'
+                         THEN 'one_per_game'
                     WHEN lo.error LIKE 'unmapped%' THEN 'unmapped'
                     ELSE 'no_us_market' END AS reason,
                count(*)::int AS n,
                count(*) FILTER
                    (WHERE lo.placed_at > now() - interval '7 days')::int
-                   AS n_7d
+                   AS n_7d,
+               -- WINNABLE SPLIT (owner question 2026-08-13: 'how do we
+               -- fix the unmapping error'). The mapper's own diag
+               -- strings already say which failure this was:
+               --   'sides:[' = the venue LISTED the event and handed us
+               --   its markets — every one of these is OUR bug, fixable.
+               --   every search 0ev (and none positive: the !~ guard
+               --   below) with no sides seen = the venue does not
+               --   carry it — unwinnable by code. A diag where a LATER
+               --   query found events is a mapper failure, not a venue
+               --   gap, and lands in undiagnosed.
+               -- Undiagnosed remainder stays its own bucket, never
+               -- guessed into either.
+               count(*) FILTER (WHERE lo.error LIKE '%sides:[%')::int
+                   AS n_listed,
+               count(*) FILTER (WHERE lo.error LIKE '%0ev%'
+                   AND lo.error NOT LIKE '%sides:[%'
+                   AND lo.error !~ ':[1-9][0-9]*ev')::int AS n_0ev,
+               count(*) FILTER (WHERE lo.error LIKE '%sides:[%'
+                   AND lo.placed_at > now() - interval '7 days')::int
+                   AS n_listed_7d,
+               count(*) FILTER (WHERE lo.error LIKE '%0ev%'
+                   AND lo.error NOT LIKE '%sides:[%'
+                   AND lo.error !~ ':[1-9][0-9]*ev'
+                   AND lo.placed_at > now() - interval '7 days')::int
+                   AS n_0ev_7d
         FROM live_orders lo
         LEFT JOIN trades t ON t.id = lo.trade_id
         WHERE lo.status = 'rejected' {where_days}
@@ -1953,10 +1981,29 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
         """,
         *args,
     )
+    # '(no slug)' enrichability: a rejected row whose trade STILL has no
+    # metadata either has a token our catalog now knows (the hourly
+    # sweep will map it on retry once enrichment lands) or a token
+    # nothing knows (the enrichment gap itself). Separate query — tiny.
+    noslug = await pool.fetchrow(
+        f"""
+        SELECT count(*)::int AS rows,
+               count(*) FILTER (WHERE mt.token_id IS NOT NULL)::int
+                   AS catalog_has_token
+        FROM live_orders lo
+        LEFT JOIN trades t ON t.id = lo.trade_id
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        WHERE lo.status = 'rejected'
+          AND COALESCE(t.market_slug, t.event_slug, '') = ''
+          {where_days}
+        """, *args)
     by_reason: dict[str, int] = {}
     by_whale: dict[str, int] = {}
     by_league: dict[str, dict] = {}
     by_type: dict[str, int] = {}
+    winnable = {"listed_mapper_fail": 0, "venue_unlisted": 0,
+                "undiagnosed": 0, "listed_mapper_fail_7d": 0,
+                "venue_unlisted_7d": 0}
     total = 0
     total_7d = 0
     for r in rows:
@@ -1964,6 +2011,12 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
         total += n
         total_7d += r["n_7d"]
         by_reason[r["reason"]] = by_reason.get(r["reason"], 0) + n
+        if r["reason"] == "unmapped":
+            winnable["listed_mapper_fail"] += r["n_listed"]
+            winnable["venue_unlisted"] += r["n_0ev"]
+            winnable["undiagnosed"] += n - r["n_listed"] - r["n_0ev"]
+            winnable["listed_mapper_fail_7d"] += r["n_listed_7d"]
+            winnable["venue_unlisted_7d"] += r["n_0ev_7d"]
         by_whale[r["whale"]] = by_whale.get(r["whale"], 0) + n
         slug = r["slug"] or ""
         league = league_of(slug) if slug else "(no slug)"
@@ -1976,6 +2029,11 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
     leagues = sorted(by_league.items(), key=lambda kv: -kv[1]["n"])[:30]
     return {
         "totals": {"rows": total, "recent_7d": total_7d},
+        "winnable": winnable,
+        "no_slug": {"rows": noslug["rows"],
+                    "catalog_has_token": noslug["catalog_has_token"],
+                    "token_unknown": noslug["rows"]
+                    - noslug["catalog_has_token"]},
         "by_reason": [{"reason": k, "n": v}
                       for k, v in sorted(by_reason.items(),
                                          key=lambda kv: -kv[1])],

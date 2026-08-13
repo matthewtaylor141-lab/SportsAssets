@@ -330,8 +330,177 @@ def _feed_derivative(global_slug: str) -> dict | None:
     return None
 
 
+_SIGNED_LINE = re.compile(r"[+−-]\s?\d+(?:\.\d+)?")
+
+
+def _signed_lines(text: str | None) -> set[float]:
+    """Every signed handicap token in a string, as floats. '+1.5',
+    '-1.5' and the unicode minus all normalize; unsigned numbers
+    (scores, dates, 'O/U 8.5') never match — the sign IS the datum."""
+    out: set[float] = set()
+    for tok in _SIGNED_LINE.findall(text or ""):
+        try:
+            out.add(float(tok.replace("−", "-").replace(" ", "")))
+        except ValueError:
+            continue
+    return out
+
+
+def _line_value(line_token: str) -> float | None:
+    """'1pt5' -> 1.5, '2' -> 2.0."""
+    try:
+        return float(line_token.replace("pt", "."))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _spread_exact(fd: dict, outcome: str | None,
+                  his_title: str | None) -> dict | None:
+    """Spread mapping WITHOUT interpreting the venue's pos/neg token.
+
+    The 2026-08-12 review excluded spreads from the exact resolver
+    because the feed's pos/neg-vs-team convention was unverified, and a
+    misread buys the MIRROR of the whale's bet. This branch never
+    answers that question — it refuses to rely on the token at all.
+    Every accepted mapping is corroborated text-to-text between the
+    whale's OWN metadata and the venue's OWN words:
+
+      1. His market_title must carry exactly ONE signed line ('-1.5'),
+         and its magnitude must equal the line in his slug. No signed
+         line in his title -> refuse (fuzzy keeps the trade).
+      2. The candidate's question must carry exactly ONE signed line,
+         EQUAL to his — sign included. '+1.5' vs '-1.5' refuses.
+      3. The question with its line stripped must match his outcome
+         team at the same floor as every exact path. A question naming
+         BOTH teams ('A vs B: handicap') dilutes below the floor and
+         refuses — the review's title-names-both-teams defeat is the
+         DESIGNED-IN refusal here, not a blind spot.
+      4. The side ordered is the one whose description matches his
+         outcome, or the literal 'Yes' side of a corroborated
+         question. No such side -> refuse.
+
+    pos/neg appears ONLY in candidate slug enumeration (his suffix
+    verbatim, never the flipped sign), where a wrong guess is a 404,
+    not a trade."""
+    his_lines = _signed_lines(his_title)
+    if len(his_lines) != 1:
+        return None
+    his_line = next(iter(his_lines))
+    mag = _line_value(fd["line"])
+    if mag is None or abs(his_line) != abs(mag):
+        return None
+    # HIS TITLE MUST FRAME HIS OUTCOME (review 2026-08-13, confirmed
+    # critical): spread titles frame ONE side ('Spread: Nationals
+    # (-1.5)') while the whale can buy EITHER outcome token. When he
+    # buys the non-title side (Mets +1.5), the title's -1.5 is the
+    # WRONG sign for his bet — and the only venue question able to
+    # pass a sign check anchored to it is his team at the mirror
+    # line. So the exact path handles ONLY title-side buys, where the
+    # sign provably belongs to his team; non-title buys refuse here
+    # and keep the fuzzy pipeline, exactly as before this feature.
+    on = _norm(outcome)
+    t_body = (his_title or "").split(":", 1)[-1]
+    t_team = _norm(_SIGNED_LINE.sub(" ", t_body))
+    if not on or not t_team or \
+            SequenceMatcher(None, t_team, on).ratio() < MATCH_FLOOR:
+        return None
+    # Unknown suffix qualifiers refuse OUTRIGHT (review 2026-08-13,
+    # confirmed major): 'corners'/'cards'/segment tokens parse into
+    # fd['team'], and dropping them from a candidate maps a corners
+    # handicap onto the GAME's goal spread at the same line. A team
+    # token is only a team token if it appears in the slug base.
+    base_head = fd["base"].split("-")
+    base_teams = set(base_head[1:3]) if len(base_head) >= 4 else set()
+    if fd["team"] and fd["team"] not in base_teams:
+        return None
+    parts = [fd["team"], fd["side"], fd["line"]]
+    suffix_full = "-".join(p for p in parts if p)
+    cands = [f"asc-{fd['base']}-{suffix_full}"]
+    if fd["team"]:
+        cands.append(f"asc-{fd['base']}-" + "-".join(
+            p for p in (fd["side"], fd["line"]) if p))
+    if fd["side"]:
+        cands.append(f"asc-{fd['base']}-" + "-".join(
+            p for p in (fd["team"], fd["line"]) if p))
+    if fd["team"] and fd["side"]:
+        cands.append(f"asc-{fd['base']}-{fd['line']}")
+    client = _get_client()
+    for slug in dict.fromkeys(cands):
+        try:
+            m = (client.markets.retrieve_by_slug(slug) or {}).get(
+                "market") or {}
+        except Exception:  # noqa: BLE001 — 404 is an answer
+            continue
+        if not m.get("slug") or m.get("closed"):
+            continue
+        q = m.get("question") or m.get("title") or ""
+        q_lines = _signed_lines(q)
+        if len(q_lines) != 1 or next(iter(q_lines)) != his_line:
+            continue
+        # Team anchoring — STRICTER than _outcome_score, deliberately.
+        # Its two leniencies are exactly this branch's leaks (both
+        # caught by this change's own tests before shipping):
+        #   - the shared-word token boost scores 'Leeds United' 0.9
+        #     against 'Manchester United' via 'united';
+        #   - _sim's containment rule scores a question naming BOTH
+        #     teams 1.0 because his team is a substring of it.
+        # So: matchup-format questions refuse outright, and the
+        # remainder must BE his team by raw ratio — no boost, no
+        # substring shortcut. 'Will X cover ...' extracts X first.
+        qn = _norm(_SIGNED_LINE.sub(" ", q))
+        if " vs " in f" {qn} ":
+            continue
+        q_texts = [qn]
+        mq = re.search(r"will (?:the )?(.+?) (?:cover|win)", qn)
+        if mq:
+            q_texts.append(mq.group(1))
+        q_team = q_texts[-1]
+        if not any(SequenceMatcher(None, t, on).ratio() >= MATCH_FLOOR
+                   for t in q_texts if t):
+            continue
+        # SIDE SELECTION with the same strictness as the question
+        # check (review 2026-08-13, confirmed critical: reusing
+        # _outcome_score here let 'Leeds United +1.5' score 0.9
+        # against 'Manchester United' via the shared token, and
+        # first-past-the-floor made the VENUE'S ORDERING pick the
+        # side). Raw ratio on the line-stripped description, every
+        # side scored, and the winner must be UNIQUE — two passing
+        # sides is ambiguity, and ambiguity refuses. A side carrying
+        # its own signed line must carry HIS.
+        named = []
+        yes_side = None
+        for s in (m.get("marketSides") or []):
+            if not (isinstance(s, dict) and s.get("identifier")
+                    and s.get("description")):
+                continue
+            desc = s["description"]
+            d_lines = _signed_lines(desc)
+            if d_lines and d_lines != {his_line}:
+                continue
+            stripped = _norm(_SIGNED_LINE.sub(" ", desc))
+            if stripped == "yes":
+                yes_side = s
+                continue
+            if stripped and SequenceMatcher(
+                    None, stripped, on).ratio() >= MATCH_FLOOR:
+                named.append(s)
+        if len(named) == 1:
+            return {"market_slug": named[0]["identifier"], "title": q,
+                    "outcome": named[0]["description"],
+                    "matched_by": "spread_exact", "score": 1.0}
+        if not named and yes_side is not None:
+            # The question IS his statement (team + signed line both
+            # corroborated above); 'Yes' is its affirmative side.
+            return {"market_slug": yes_side["identifier"], "title": q,
+                    "outcome": q_team.strip() or outcome,
+                    "matched_by": "spread_exact_yes", "score": 1.0}
+        return None
+    return None
+
+
 def resolve_derivative_exact(global_slug: str,
-                             outcome: str | None) -> dict | None:
+                             outcome: str | None,
+                             his_title: str | None = None) -> dict | None:
     """Deterministic spread/total mapping (owner order 2026-08-12:
     'fix the mapping errors... without any leaks'). The funnel's own
     diagnostics show the venue LISTS these markets while the fuzzy
@@ -341,11 +510,10 @@ def resolve_derivative_exact(global_slug: str,
       totals:  candidate 'tsc-<base>-<line>' — the line lives IN the
                slug (wrong-line is impossible); Over/Under chosen by
                the side description matching the feed outcome word.
-      spreads: candidate 'asc-<base>-[team-][pos|neg-]<line>' with
-               the feed's OWN side encoding preserved verbatim (his
-               slug IS his side); the resolved side must repeat the
-               line digits, and when the outcome is a team name the
-               parent title/question must contain it.
+      spreads: (owner order 2026-08-13, unmapping recovery) mapped by
+               _spread_exact — signed-line + team text corroboration
+               between HIS metadata and the venue's question, never by
+               interpreting the pos/neg token. See its docstring.
 
     Anything short of full corroboration returns None and the fuzzy
     pipeline (with its own line-consistency guard) remains the
@@ -354,12 +522,8 @@ def resolve_derivative_exact(global_slug: str,
     fd = _feed_derivative(global_slug)
     if fd is None:
         return None
-    # SPREADS DELIBERATELY EXCLUDED for now (adversarial review
-    # 2026-08-12): the venue's pos/neg-vs-team side convention is not
-    # yet verified from live fills, and a same-suffix candidate could
-    # buy the MIRROR side of the whale's bet — a leak, not a copy.
-    # Spreads keep the fuzzy pipeline (whose line-consistency guard is
-    # the proven defense) until the convention is confirmed from data.
+    if fd["kind"] == "spread":
+        return _spread_exact(fd, outcome, his_title)
     if fd["kind"] != "total":
         return None
     client = _get_client()
@@ -426,7 +590,14 @@ def resolve_market_exact(candidate_slugs: list[str],
         # Two-sided markets (tennis aec- especially) score near zero on
         # the PARENT outcome — the tradable sides live in marketSides,
         # each side its own orderable slug (the copy sleeve's tennis
-        # path since 2026-08-04). Order the side that IS the outcome.
+        # path since 2026-08-04). Order the side that IS the outcome —
+        # and ONLY when exactly one side is (review 2026-08-13,
+        # confirmed: first-past-the-floor let a surname-only outcome
+        # like 'Ito' score 1.0 against BOTH 'Aoi Ito' and 'Mai Saito'
+        # via _sim's containment rule, so the venue's side ORDERING
+        # picked the player). Ambiguity refuses; the fuzzy pipeline
+        # or nothing is strictly better than a coin flip.
+        best_side, best_sc, second_sc = None, 0.0, 0.0
         for side in (m.get("marketSides") or []):
             if not isinstance(side, dict):
                 continue
@@ -434,11 +605,16 @@ def resolve_market_exact(candidate_slugs: list[str],
             if not desc or not ident:
                 continue
             sscore = _outcome_score({"outcome": desc}, outcome)
-            if sscore >= MATCH_FLOOR:
-                return {"market_slug": ident,
-                        "title": m.get("question") or m.get("title"),
-                        "outcome": desc,
-                        "matched_by": "desk_exact_side", "score": sscore}
+            if sscore > best_sc:
+                best_side, best_sc, second_sc = side, sscore, best_sc
+            elif sscore > second_sc:
+                second_sc = sscore
+        if (best_side is not None and best_sc >= MATCH_FLOOR
+                and second_sc < MATCH_FLOOR):
+            return {"market_slug": best_side["identifier"],
+                    "title": m.get("question") or m.get("title"),
+                    "outcome": best_side["description"],
+                    "matched_by": "desk_exact_side", "score": best_sc}
     return None
 
 

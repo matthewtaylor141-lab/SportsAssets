@@ -72,6 +72,11 @@ async def main() -> None:
 
         try:
             detail["re_enriched"] = await backfill_unenriched()
+            # The '(no slug)' diagnosis rides the heartbeat: how many of
+            # the newest 1k trades are unenriched, and how many tokens
+            # the backfill has written off as Gamma-unknowable.
+            from ..ingestion.pipeline import enrich_stats
+            detail.update(enrich_stats)
             pool = await get_pool()
             # Retroactive market reclassification: classification is
             # deterministic and re-runnable, so classifier improvements apply

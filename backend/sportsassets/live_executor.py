@@ -408,6 +408,78 @@ async def _clob_best_ask(cfg, asset: str) -> float | None:
         return None
 
 
+# Tennis league code translation, feed -> US venue. The US venue splits
+# ITF by tour ('itfwo' women / 'itfme' men) where the feed says 'itf';
+# unknown codes are enumerated (a wrong guess is a 404, never a trade).
+_TENNIS_LEAGUES = {"atp", "wta", "itf", "itfwo", "itfme", "chal"}
+_TENNIS_US_CODES = {"itf": ["itfwo", "itfme", "itf"],
+                    "chal": ["chal", "atpchal"]}
+
+
+def _abbrev_player(name: str) -> str | None:
+    """US-venue tennis token: first 3 of first name + first 3 of last.
+    Proven against live fills — 'Dusan Lajovic' is 'duslaj' in
+    aec-atp-duslaj-benbon-2026-08-11, 'Rafael Jodar' is 'rafjod',
+    'Sinja Kraus' is 'sinkra'. Unicode folds ('João' -> 'joa');
+    single-token names refuse (no grammar evidence for them)."""
+    import re as _re
+    import unicodedata as _ud
+
+    folded = _ud.normalize("NFKD", name or "").encode(
+        "ascii", "ignore").decode().lower()
+    toks = _re.findall(r"[a-z]+", folded)
+    if len(toks) < 2 or len(toks[0]) < 3 or len(toks[-1]) < 3:
+        return None
+    return toks[0][:3] + toks[-1][:3]
+
+
+def _tennis_candidates(title: str | None, global_slug: str) -> list[str]:
+    """US aec- candidates for a tennis match, built from the PLAYER
+    NAMES in the title — the feed's slug uses surnames while the US
+    grammar abbreviates 'First Last' to 6 chars, so slug-to-slug
+    translation cannot work for tennis (1,730 ITF + 1,249 ATP + 623
+    WTA moneylines dead in the funnel, 2026-08-13). Both player orders
+    are generated (home/away order is the venue's choice, not the
+    title's) and the outcome-similarity floor downstream remains the
+    side authority — a colliding abbreviation still has to present the
+    right player NAME to be ordered."""
+    import re as _re
+
+    s = (global_slug or "").lower()
+    m = _re.search(r"\d{4}-\d{2}-\d{2}", s)
+    head = [t for t in s[:m.start()].strip("-").split("-") if t] if m \
+        else []
+    if not m or not head or head[0] not in _TENNIS_LEAGUES:
+        return []
+    date = m.group(0)
+    # LAST colon: 'Tennis: ATP Cincinnati: A vs B' keeps only the
+    # matchup (review 2026-08-13 — a first-colon split swallowed the
+    # tournament word into the first player's token).
+    body = (title or "").rsplit(":", 1)[-1]
+    # Doubles refuse outright: 'A / B vs C / D' has no singles grammar,
+    # and a fabricated token is a live probe into the 6-char slug space.
+    if "/" in body:
+        return []
+    players = _re.split(r"\s+vs\.?\s+", body, flags=_re.I)
+    if len(players) != 2:
+        return []
+    a, b = (_abbrev_player(p) for p in players)
+    if not a or not b or a == b:
+        return []
+    codes = list(_TENNIS_US_CODES.get(head[0], [head[0]]))
+    if head[0] == "itf":
+        # Tour hint from the title ('ITF W15 ...' / 'Women' vs 'M25' /
+        # 'Men') puts the likelier code first; both are still tried.
+        tl = (title or "").lower()
+        if _re.search(r"\bm\d{2}\b|\bmen\b", tl) and "women" not in tl:
+            codes = ["itfme", "itfwo", "itf"]
+    out: list[str] = []
+    for lg in codes:
+        out.append(f"aec-{lg}-{a}-{b}-{date}")
+        out.append(f"aec-{lg}-{b}-{a}-{date}")
+    return out
+
+
 def _us_slug_candidates(global_slug: str, outcome: str) -> list[str]:
     """US-venue slug candidates for a global market, most exact first.
 
@@ -868,11 +940,30 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             src_slug = ctx.get("market_slug") or ctx.get("event_slug") or ""
             mapping = None
             mtype = market_type_of(src_slug)
+            # The exact phase is TIME-BOXED (review 2026-08-13): the
+            # tennis candidates triple its worst-case serial lookups,
+            # and copy_sweep cancels the whole row at 60s — which
+            # strands the audit row in 'submitting' and permanently
+            # burns that asset's copy. 20s here leaves the fuzzy
+            # pipeline its full budget; a timeout falls through, it
+            # never rejects.
+            _EXACT_BOX_S = 20.0
             if mtype == "moneyline":
-                mapping = await asyncio.to_thread(
-                    pmus.resolve_market_exact,
-                    _us_slug_candidates(src_slug, ctx.get("outcome") or ""),
-                    ctx.get("outcome"))
+                # Tennis first (owner order 2026-08-13): the feed's
+                # surname slugs can never hit the US first3+last3
+                # player grammar, so tennis candidates come from the
+                # TITLE's player names. Non-tennis slugs add nothing.
+                cands = (_tennis_candidates(ctx.get("market_title"),
+                                            src_slug)
+                         + _us_slug_candidates(src_slug,
+                                               ctx.get("outcome") or ""))
+                try:
+                    mapping = await asyncio.wait_for(
+                        asyncio.to_thread(pmus.resolve_market_exact,
+                                          cands, ctx.get("outcome")),
+                        timeout=_EXACT_BOX_S)
+                except asyncio.TimeoutError:
+                    mapping = None
             elif mtype in ("spread", "total"):
                 # MAPPING RECOVERY (owner order 2026-08-12: spreads +
                 # moneylines were 94.5% of the 34k-row unmapped
@@ -882,9 +973,14 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 # moneyline is designed out, and anything short of
                 # full corroboration falls through to the fuzzy
                 # pipeline exactly as before.
-                mapping = await asyncio.to_thread(
-                    pmus.resolve_derivative_exact, src_slug,
-                    ctx.get("outcome"))
+                try:
+                    mapping = await asyncio.wait_for(
+                        asyncio.to_thread(pmus.resolve_derivative_exact,
+                                          src_slug, ctx.get("outcome"),
+                                          ctx.get("market_title")),
+                        timeout=_EXACT_BOX_S)
+                except asyncio.TimeoutError:
+                    mapping = None
             if mapping is None:
                 mapping = await asyncio.to_thread(
                     pmus.resolve_market, ctx.get("market_slug"), ctx.get("event_slug"),

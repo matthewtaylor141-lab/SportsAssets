@@ -241,3 +241,94 @@ def test_execute_copy_staleness_ceiling_and_side_gate(monkeypatch):
     # SELLs never execute.
     asyncio.run(live_executor.execute_copy({"id": 4, "side": "SELL"}))
     assert not seen
+
+
+# ── tennis candidates from player names (owner order 2026-08-13) ─────
+def test_tennis_candidates_use_the_us_player_grammar():
+    """'Dusan Lajovic' is 'duslaj' on the venue (live fill
+    aec-atp-duslaj-benbon-2026-08-11) — first3(first)+first3(last),
+    built from the TITLE because the feed slug only has surnames."""
+    from sportsassets.live_executor import _tennis_candidates
+
+    cands = _tennis_candidates(
+        "ATP Cincinnati: Dusan Lajovic vs Benjamin Bonzi",
+        "atp-lajovic-bonzi-2026-08-11")
+    assert "aec-atp-duslaj-benbon-2026-08-11" in cands
+    # Home/away order is the venue's choice: both orders generated.
+    assert "aec-atp-benbon-duslaj-2026-08-11" in cands
+
+
+def test_tennis_candidates_fold_unicode_and_split_itf():
+    from sportsassets.live_executor import _tennis_candidates
+
+    cands = _tennis_candidates(
+        "ITF W35 Vigo Women: Yufei Ren vs Melisa Ercan",
+        "itf-ren-ercan-2026-08-13")
+    assert "aec-itfwo-yufren-melerc-2026-08-13" in cands
+    # men's hint reorders, never removes
+    m = _tennis_candidates("ITF M25 Lima: João Fonseca vs Casper Ruud",
+                           "itf-fonseca-ruud-2026-08-13")
+    assert m[0].startswith("aec-itfme-")
+    # first3 of "Ruud" is "ruu" — same rule that makes "Fils" 'fil'
+    assert "aec-itfme-joafon-casruu-2026-08-13" in m
+
+
+def test_tennis_candidates_refuse_junk():
+    from sportsassets.live_executor import _tennis_candidates
+
+    # not tennis
+    assert _tennis_candidates("Yankees vs Red Sox",
+                              "mlb-nyy-bos-2026-08-13") == []
+    # no parseable pair
+    assert _tennis_candidates("ATP Cincinnati doubles chaos",
+                              "atp-x-y-2026-08-13") == []
+    # single-token name has no grammar evidence
+    assert _tennis_candidates("ATP: Sinner vs Carlos Alcaraz",
+                              "atp-sinner-alcaraz-2026-08-13") == []
+    # no title at all
+    assert _tennis_candidates(None, "atp-a-b-2026-08-13") == []
+
+
+def test_tennis_candidates_ride_the_moneyline_branch():
+    """Source pin: the copy path prepends tennis candidates, and the
+    dog sleeve builds them from the game's title."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "sportsassets"
+    le = (root / "live_executor.py").read_text()
+    branch = le[le.index('if mtype == "moneyline"'):]
+    assert "_tennis_candidates(ctx.get(\"market_title\")" in branch[:600]
+    ud = (root / "workers" / "underdog.py").read_text()
+    assert "_tennis_candidates(_title, slug)" in ud
+
+
+def test_tennis_candidates_refuse_doubles_and_split_on_last_colon():
+    """Review 2026-08-13: 'A / B vs C / D' fabricated singles tokens
+    (a live probe into the 6-char slug space), and a first-colon split
+    swallowed tournament words into player one's token."""
+    from sportsassets.live_executor import _tennis_candidates
+
+    assert _tennis_candidates(
+        "WTA Doubles: Gabriela Dabrowski / Erin Routliffe vs "
+        "Taylor Townsend / Katerina Siniakova",
+        "wta-dabrowski-townsend-2026-08-13") == []
+    cands = _tennis_candidates(
+        "Tennis: ATP Cincinnati: Alex de Minaur vs Karen Khachanov",
+        "atp-deminaur-khachanov-2026-08-13")
+    assert "aec-atp-alemin-karkha-2026-08-13" in cands, \
+        "last-colon split must isolate the matchup"
+
+
+def test_exact_mapping_phase_is_time_boxed():
+    """Review 2026-08-13: 9 serial venue lookups could outlast
+    copy_sweep's 60s row timeout and strand 'submitting' audit rows.
+    The exact phase gets 20s and a timeout falls through to fuzzy."""
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1] / "sportsassets"
+           / "live_executor.py").read_text()
+    branch = src[src.index("_EXACT_BOX_S = 20.0"):]
+    assert branch.count("asyncio.wait_for") >= 2, \
+        "both exact resolvers ride the box"
+    assert branch.count("except asyncio.TimeoutError") >= 2
+    assert "mapping = None" in branch, "a timeout falls through, never rejects"

@@ -171,3 +171,210 @@ def test_unlisted_candidate_falls_through(monkeypatch):
     monkeypatch.setattr(pmus, "_get_client", lambda: _Client({}))
     assert pmus.resolve_derivative_exact(
         "mlb-nyy-bos-2026-07-22-o8pt5", "Over") is None
+
+
+# ── spread exact resolution (owner order 2026-08-13) ─────────────────
+_SPREAD_TABLE = {"asc-epl-mun-lee-2026-08-16-mun-neg-1pt5": {
+    "slug": "asc-epl-mun-lee-2026-08-16-mun-neg-1pt5", "closed": False,
+    "question": "Manchester United -1.5",
+    "marketSides": [
+        {"identifier": "asc-epl-mun-lee-2026-08-16-mun-neg-1pt5-yes",
+         "description": "Yes"},
+        {"identifier": "asc-epl-mun-lee-2026-08-16-mun-neg-1pt5-no",
+         "description": "No"},
+    ]}}
+
+
+def test_spread_maps_when_every_fact_corroborates(monkeypatch):
+    """His title's signed line == the question's signed line, the
+    question names HIS team, the Yes side is ordered."""
+    monkeypatch.setattr(pmus, "_get_client",
+                        lambda: _Client(_SPREAD_TABLE))
+    r = pmus.resolve_derivative_exact(
+        "epl-mun-lee-2026-08-16-mun-neg-1pt5", "Manchester United",
+        his_title="Manchester United -1.5")
+    assert r is not None and r["market_slug"].endswith("-yes")
+    assert r["matched_by"] == "spread_exact_yes"
+
+
+def test_spread_sign_mismatch_refuses(monkeypatch):
+    """The venue's '+1.5' against his '-1.5' is the MIRROR bet — the
+    exact leak the 2026-08-12 review excluded spreads over. Sign is
+    compared, never inferred from pos/neg."""
+    table = {"asc-epl-mun-lee-2026-08-16-mun-neg-1pt5": {
+        **_SPREAD_TABLE["asc-epl-mun-lee-2026-08-16-mun-neg-1pt5"],
+        "question": "Manchester United +1.5"}}
+    monkeypatch.setattr(pmus, "_get_client", lambda: _Client(table))
+    assert pmus.resolve_derivative_exact(
+        "epl-mun-lee-2026-08-16-mun-neg-1pt5", "Manchester United",
+        his_title="Manchester United -1.5") is None
+
+
+def test_spread_refuses_without_his_signed_line(monkeypatch):
+    """No signed line in HIS title -> nothing to corroborate against
+    -> fuzzy keeps the trade. Never guessed from the slug token."""
+    monkeypatch.setattr(pmus, "_get_client",
+                        lambda: _Client(_SPREAD_TABLE))
+    assert pmus.resolve_derivative_exact(
+        "epl-mun-lee-2026-08-16-mun-neg-1pt5", "Manchester United",
+        his_title="Man United vs Leeds - More Markets") is None
+    assert pmus.resolve_derivative_exact(
+        "epl-mun-lee-2026-08-16-mun-neg-1pt5", "Manchester United",
+        his_title=None) is None
+
+
+def test_spread_refuses_the_other_team(monkeypatch):
+    """His outcome is Leeds, the question is about Manchester United:
+    the corroboration is team-anchored, so this refuses."""
+    monkeypatch.setattr(pmus, "_get_client",
+                        lambda: _Client(_SPREAD_TABLE))
+    assert pmus.resolve_derivative_exact(
+        "epl-mun-lee-2026-08-16-mun-neg-1pt5", "Leeds United",
+        his_title="Leeds United -1.5") is None
+
+
+def test_spread_refuses_both_teams_question(monkeypatch):
+    """Review 2026-08-12's defeat case: a question naming BOTH teams
+    cannot anchor a side. The line-stripped remainder dilutes below
+    the outcome floor and refuses by construction."""
+    table = {"asc-epl-mun-lee-2026-08-16-mun-neg-1pt5": {
+        **_SPREAD_TABLE["asc-epl-mun-lee-2026-08-16-mun-neg-1pt5"],
+        "question": "Manchester United vs Leeds United: handicap -1.5"}}
+    monkeypatch.setattr(pmus, "_get_client", lambda: _Client(table))
+    assert pmus.resolve_derivative_exact(
+        "epl-mun-lee-2026-08-16-mun-neg-1pt5", "Manchester United",
+        his_title="Manchester United -1.5") is None
+
+
+def test_spread_line_magnitude_must_match_his_slug(monkeypatch):
+    """His title says -2.5 while his slug says 1pt5: inconsistent
+    metadata maps nothing."""
+    monkeypatch.setattr(pmus, "_get_client",
+                        lambda: _Client(_SPREAD_TABLE))
+    assert pmus.resolve_derivative_exact(
+        "epl-mun-lee-2026-08-16-mun-neg-1pt5", "Manchester United",
+        his_title="Manchester United -2.5") is None
+
+
+def test_spread_prefers_named_side_over_yes(monkeypatch):
+    """When the venue's sides carry team names, the named match wins
+    (and would catch a mislabeled Yes/No)."""
+    table = {"asc-epl-mun-lee-2026-08-16-mun-neg-1pt5": {
+        **_SPREAD_TABLE["asc-epl-mun-lee-2026-08-16-mun-neg-1pt5"],
+        "marketSides": [
+            {"identifier": "side-mun", "description":
+             "Manchester United -1.5"},
+            {"identifier": "side-lee", "description":
+             "Leeds United +1.5"},
+        ]}}
+    monkeypatch.setattr(pmus, "_get_client", lambda: _Client(table))
+    r = pmus.resolve_derivative_exact(
+        "epl-mun-lee-2026-08-16-mun-neg-1pt5", "Manchester United",
+        his_title="Manchester United -1.5")
+    assert r is not None and r["market_slug"] == "side-mun"
+    assert r["matched_by"] == "spread_exact"
+
+
+def test_signed_line_parser_ignores_unsigned_numbers():
+    assert pmus._signed_lines("O/U 8.5 in game 7") == set()
+    assert pmus._signed_lines("Eagles -7.5") == {-7.5}
+    assert pmus._signed_lines("Reds +1.5 (game 2)") == {1.5}
+    assert pmus._signed_lines("A -1.5 or B +1.5") == {-1.5, 1.5}
+    # unicode minus folds
+    assert pmus._signed_lines("Ajax −2.5") == {-2.5}
+
+
+# ── review 2026-08-13: the confirmed spread leaks, pinned ────────────
+def test_spread_refuses_non_title_side_buy(monkeypatch):
+    """CONFIRMED CRITICAL: titles frame ONE side ('Spread: Nationals
+    (-1.5)') while the whale can buy EITHER outcome. When he buys the
+    non-title side (Mets +1.5), the title's sign is the WRONG sign for
+    his bet — and the only venue question that could pass a sign check
+    anchored to it is his team at the MIRROR line. The exact path must
+    therefore refuse every non-title-side buy outright."""
+    table = {"asc-mlb-wsn-nym-2026-08-13-1pt5": {
+        "slug": "asc-mlb-wsn-nym-2026-08-13-1pt5", "closed": False,
+        "question": ("Will the New York Mets cover -1.5 against the "
+                     "Washington Nationals?"),
+        "marketSides": [
+            {"identifier": "trap-yes", "description": "Yes"},
+            {"identifier": "trap-no", "description": "No"},
+        ]}}
+    monkeypatch.setattr(pmus, "_get_client", lambda: _Client(table))
+    assert pmus.resolve_derivative_exact(
+        "mlb-wsn-nym-2026-08-13-wsn-neg-1pt5", "New York Mets",
+        his_title="Spread: Washington Nationals (-1.5)") is None
+
+
+def test_spread_side_choice_ignores_venue_ordering(monkeypatch):
+    """CONFIRMED CRITICAL: first-past-the-floor + the shared-token
+    boost let 'Leeds United +1.5' win when the venue listed it first.
+    Side choice must be order-independent and boost-free."""
+    for order in ([0, 1], [1, 0]):
+        sides = [{"identifier": "side-mun",
+                  "description": "Manchester United -1.5"},
+                 {"identifier": "side-lee",
+                  "description": "Leeds United +1.5"}]
+        table = {"asc-epl-mun-lee-2026-08-16-mun-neg-1pt5": {
+            **_SPREAD_TABLE["asc-epl-mun-lee-2026-08-16-mun-neg-1pt5"],
+            "marketSides": [sides[i] for i in order]}}
+        monkeypatch.setattr(pmus, "_get_client", lambda t=table: _Client(t))
+        r = pmus.resolve_derivative_exact(
+            "epl-mun-lee-2026-08-16-mun-neg-1pt5", "Manchester United",
+            his_title="Manchester United -1.5")
+        assert r is not None and r["market_slug"] == "side-mun", \
+            f"venue ordering {order} changed the side"
+
+
+def test_spread_ambiguous_sides_refuse(monkeypatch):
+    """Two sides that both read as his team is ambiguity, and
+    ambiguity refuses — never the venue's ordering."""
+    table = {"asc-epl-mun-lee-2026-08-16-mun-neg-1pt5": {
+        **_SPREAD_TABLE["asc-epl-mun-lee-2026-08-16-mun-neg-1pt5"],
+        "marketSides": [
+            {"identifier": "a", "description": "Manchester United -1.5"},
+            {"identifier": "b", "description": "Manchester Utd -1.5"},
+        ]}}
+    monkeypatch.setattr(pmus, "_get_client", lambda: _Client(table))
+    assert pmus.resolve_derivative_exact(
+        "epl-mun-lee-2026-08-16-mun-neg-1pt5", "Manchester United",
+        his_title="Manchester United -1.5") is None
+
+
+def test_spread_refuses_unknown_qualifier_tokens(monkeypatch):
+    """CONFIRMED MAJOR: 'corners' parsed as a team token and was then
+    DROPPED from candidates — mapping a corners handicap onto the
+    game's goal spread at the same line. A team token that is not one
+    of the slug base's two team codes refuses outright."""
+    table = {"asc-epl-ars-che-2026-08-16-neg-2pt5": {
+        "slug": "asc-epl-ars-che-2026-08-16-neg-2pt5", "closed": False,
+        "question": "Will Arsenal cover -2.5 against Chelsea?",
+        "marketSides": [{"identifier": "y", "description": "Yes"},
+                        {"identifier": "n", "description": "No"}]}}
+    monkeypatch.setattr(pmus, "_get_client", lambda: _Client(table))
+    assert pmus.resolve_derivative_exact(
+        "epl-ars-che-2026-08-16-corners-neg-2pt5", "Arsenal",
+        his_title="Corner Handicap: Arsenal (-2.5)") is None
+
+
+def test_exact_side_ambiguity_refuses_for_moneylines(monkeypatch):
+    """CONFIRMED (pre-existing, newly load-bearing for tennis): _sim's
+    containment rule scores a surname-only outcome 1.0 against BOTH
+    'Aoi Ito' and 'Mai Saito' — the venue's side ORDER picked the
+    player. A unique winner is now required."""
+    table = {"aec-itfwo-aoiito-maisai-2026-08-13": {
+        "slug": "aec-itfwo-aoiito-maisai-2026-08-13", "closed": False,
+        "question": "Aoi Ito vs Mai Saito",
+        "marketSides": [
+            {"identifier": "s-saito", "description": "Mai Saito"},
+            {"identifier": "s-ito", "description": "Aoi Ito"},
+        ]}}
+    monkeypatch.setattr(pmus, "_get_client", lambda: _Client(table))
+    # Surname-only outcome matches both sides -> refuse.
+    assert pmus.resolve_market_exact(
+        ["aec-itfwo-aoiito-maisai-2026-08-13"], "Ito") is None
+    # The full player name is unambiguous -> maps to HER side even
+    # though the venue lists the opponent first.
+    r = pmus.resolve_market_exact(
+        ["aec-itfwo-aoiito-maisai-2026-08-13"], "Aoi Ito")
+    assert r is not None and r["market_slug"] == "s-ito"

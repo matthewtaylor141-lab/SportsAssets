@@ -237,17 +237,67 @@ async def _enrich(trade_id: int, ev: TradeEvent, detected_at: datetime) -> None:
         log.exception("enrichment failed for trade %s", trade_id)
 
 
+# Enrichment dead-token ledger (owner order 2026-08-13, the '(no
+# slug)' funnel bucket: 1,978 rejected copies in 7 days with no
+# metadata at all). The backfill window is `newest 200 unenriched`,
+# so a standing population of tokens Gamma will NEVER know — other
+# asset classes, delisted markets — eventually fills the entire
+# window, and every fresh enrichable trade behind it is never retried
+# while every cycle re-asks Gamma the same 200 dead questions.
+# Review 2026-08-13 tuned two things: the write-off threshold is 30
+# cycles (~30 min at the refresher's 60s cadence — 5 was faster than
+# the catalog's own supply lag, so a merely-late token got branded
+# dead), and a dead entry is AMNESTIED after 24h so a catalog that
+# learns late still gets its hearing without waiting for a deploy.
+MAX_ENRICH_FAILS = 30
+ENRICH_AMNESTY_S = 24 * 3600.0
+_enrich_fails: dict[str, tuple[int, float]] = {}   # asset -> (n, last_ts)
+enrich_stats: dict[str, int] = {}
+
+
 async def backfill_unenriched(limit: int = 200) -> int:
     """Re-attempt enrichment for trades that missed the cache (metadata worker calls this)."""
+    import time as _t
+
     pool = await get_pool()
+    now = _t.time()
+    for k in [k for k, (_, ts) in _enrich_fails.items()
+              if now - ts > ENRICH_AMNESTY_S]:
+        _enrich_fails.pop(k, None)
+    if len(_enrich_fails) > 8000:
+        # Bounded — and the DEAD entries are the memory worth keeping
+        # (review: trimming oldest-first evicted exactly the confirmed
+        # -dead tokens and let the clog rebuild). Low-count entries
+        # are cheap to relearn; drop those first.
+        alive = [k for k, (n, _) in _enrich_fails.items()
+                 if n < MAX_ENRICH_FAILS]
+        for k in alive[:len(_enrich_fails) - 6000]:
+            _enrich_fails.pop(k, None)
+        while len(_enrich_fails) > 8000:
+            _enrich_fails.pop(next(iter(_enrich_fails)), None)
+    dead = [a for a, (n, _) in _enrich_fails.items()
+            if n >= MAX_ENRICH_FAILS]
     rows = await pool.fetch(
-        "SELECT id, asset FROM trades WHERE enriched_at IS NULL ORDER BY id DESC LIMIT $1", limit
+        "SELECT id, asset FROM trades WHERE enriched_at IS NULL "
+        "AND NOT (asset = ANY($2::text[])) "
+        "ORDER BY id DESC LIMIT $1", limit, dead[:4000]
     )
+    # Visibility for the heartbeat: how big is the standing backlog in
+    # the newest slice, and how much of it is known-dead.
+    backlog = await pool.fetchval(
+        "SELECT count(*) FROM (SELECT 1 FROM trades "
+        "WHERE enriched_at IS NULL ORDER BY id DESC LIMIT 1000) t")
+    enrich_stats.update(unenriched_1k=int(backlog or 0),
+                        dead_tokens=len(dead))
     fixed = 0
     for row in rows:
         meta = await gamma.lookup_token(row["asset"])
         if meta is None:
+            a = str(row["asset"])
+            n, _ts = _enrich_fails.get(a, (0, 0.0))
+            _enrich_fails[a] = (n + 1, now)
             continue
+        _enrich_fails.pop(str(row["asset"]), None)
         await pool.execute(
             """
             UPDATE trades SET condition_id=$2, outcome=$3, outcome_index=$4, market_title=$5,
