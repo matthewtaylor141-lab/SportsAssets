@@ -55,3 +55,15 @@ def test_retry_cap_runs_before_order_insert():
     cap_at = src.index("skipped_retry_cap")
     insert_at = src.index("INSERT INTO live_orders (whale_username, asset")
     assert cap_at < insert_at
+
+
+def test_scorecard_won_lost_is_row_level():
+    """14W-5L flipped to 0W-20L between two probes (2026-08-14) with one
+    $1.68 settle in between: the split classified whole sport-groups by
+    summed pnl. Pin the row-level FILTER counts."""
+    src = _entry_src()
+    assert "FILTER (WHERE pnl > 0)" in src
+    assert 'r["n_won"] for r in v2 if r["status"] == "settled"' in src
+    assert 'r["n_lost"] for r in v2 if r["status"] == "settled"' in src
+    # the group-total classification must be gone
+    assert 'r["status"] == "settled" and r["pnl"] > 0' not in src

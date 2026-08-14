@@ -822,6 +822,9 @@ async def _record(pool) -> dict:
             SELECT CASE WHEN us_market_slug LIKE '%-mlb-%' THEN 'mlb'
                         ELSE 'tennis' END AS sport,
                    status, count(*)::int AS n,
+                   count(*) FILTER (WHERE pnl > 0)::int AS n_won,
+                   count(*) FILTER (WHERE COALESCE(pnl, 0) <= 0)::int
+                       AS n_lost,
                    COALESCE(sum(pnl), 0)::float8 AS pnl,
                    count(*) FILTER (WHERE placed_at >= date_trunc('day',
                      now() AT TIME ZONE 'America/New_York')
@@ -843,10 +846,16 @@ async def _record(pool) -> dict:
         out["ud2_cashed"] = cashed
         out["ud2_cashed_pct"] = (round(100.0 * cashed / ent, 1)
                                  if ent else 0.0)
+        # ROW-level won/lost. The old split classified the whole GROUP by
+        # its summed pnl: two groups (mlb, tennis), so the instant the
+        # tennis group's total dipped negative, every settled tennis
+        # ticket flipped from "won" to "lost" at once (14W-5L became
+        # 0W-20L between two probes on 2026-08-14 with only one $1.68
+        # settle in between). The record is per ticket, never per group.
         out["ud2_settled_lost"] = sum(
-            r["n"] for r in v2 if r["status"] == "settled" and r["pnl"] <= 0)
+            r["n_lost"] for r in v2 if r["status"] == "settled")
         out["ud2_settled_won"] = sum(
-            r["n"] for r in v2 if r["status"] == "settled" and r["pnl"] > 0)
+            r["n_won"] for r in v2 if r["status"] == "settled")
         out["ud2_pnl"] = round(sum(r["pnl"] for r in v2), 2)
         out["ud2_today_entries"] = sum(r["n_today"] for r in v2)
         out["ud2_today_cashed"] = sum(
