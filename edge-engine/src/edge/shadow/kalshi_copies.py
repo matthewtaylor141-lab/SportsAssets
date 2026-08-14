@@ -349,6 +349,16 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
     # copy fills but appeared in no P&L or heartbeat view).
     _dc["fees"] = (round(float(spend.get("fees", 0.0)), 4)
                    if spend.get("day") == day else 0.0)
+    # Rolling-24h graded scorecard (owner question 2026-08-14: "lost
+    # almost every tennis trade today on Kalshi" was only answerable
+    # from lifetime numbers). Same window and category attribution as
+    # the copy circuit breaker above it.
+    _sc = getattr(ledger, "day_scorecard_for_category", None)
+    if _sc is not None:
+        try:
+            _dc["graded_24h"] = _sc(time.time() - 86_400, "kalshi_copy")
+        except Exception:  # noqa: BLE001 — telemetry never blocks copies
+            pass
     # Per-whale day fill counts: the inverse volume<->size scaler's
     # denominator (owner order 2026-08-12: 10x fills -> 1/10 size).
     # KNOWN LIMIT (review 2026-08-12, corrected): this ledger is

@@ -1119,6 +1119,31 @@ class Ledger:
                 """, (ts, category)).fetchone()
         return float(row[0])
 
+    def day_scorecard_for_category(self, ts: float, category: str) -> dict:
+        """Settled / W / L / realized since ts for one category. 'How is
+        the Kalshi copy sleeve doing TODAY' was only answerable from
+        lifetime numbers when a red tennis slate hit (owner question
+        2026-08-14) — the rolling window turns it into one probe read.
+        Same category attribution as realized_pnl_since_for_category."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT count(*),
+                       COALESCE(sum(CASE WHEN r.pnl > 0 THEN 1
+                                         ELSE 0 END), 0),
+                       COALESCE(sum(CASE WHEN r.pnl <= 0 THEN 1
+                                         ELSE 0 END), 0),
+                       COALESCE(sum(r.pnl), 0)
+                FROM realizations r
+                WHERE r.ts >= ? AND r.kind = 'resolution'
+                  AND EXISTS (SELECT 1 FROM fills f
+                              WHERE f.market_key = r.market_key
+                                AND f.side = 'BUY' AND f.mode != 'PAPER'
+                                AND f.category = ?)
+                """, (ts, category)).fetchone()
+        return {"settled": int(row[0]), "won": int(row[1]),
+                "lost": int(row[2]), "realized": round(float(row[3]), 2)}
+
     def live_fill_count_since(self, ts: float) -> int:
         """Real-money fills in the window (bogus-halt detection input)."""
         with self._conn() as conn:
