@@ -317,6 +317,17 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             live_blocked(ledger, scope="copy")
         if blocked:
             stats["blocked"] = blocked
+            # The scorecard rides even (ESPECIALLY) through a halt: the
+            # first tripped breaker (2026-08-14) hid the very W/L line
+            # that explained the halt, because the early return skipped
+            # the day-counter block below.
+            _sc = getattr(ledger, "day_scorecard_for_category", None)
+            if _sc is not None:
+                try:
+                    stats["graded_24h"] = _sc(time.time() - 86_400,
+                                              "kalshi_copy")
+                except Exception:  # noqa: BLE001
+                    pass
             return stats
     # VENUE-SIDE guard (incident 2026-08-11: the ledger below lives in a
     # build-dir sqlite that every deploy wipes, while the venue keeps

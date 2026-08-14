@@ -69,3 +69,13 @@ def test_heartbeat_carries_graded_24h():
     block = src[src.index("day_scorecard_for_category"):]
     block = block[:block.index("_nw")]
     assert "except Exception" in block
+
+
+def test_scorecard_rides_through_a_halt():
+    """The first tripped breaker (2026-08-14) hid the W/L line that
+    explained the halt — the blocked early-return skipped the day
+    counters. The scorecard must be attached BEFORE that return."""
+    src = inspect.getsource(kalshi_copies)
+    halt = src[src.index('stats["blocked"] = blocked'):]
+    halt = halt[:halt.index("return stats")]
+    assert 'stats["graded_24h"]' in halt
