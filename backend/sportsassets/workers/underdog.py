@@ -472,6 +472,25 @@ async def _entry_sweep(pool) -> dict:
         if held:
             stats["skipped_held"] += 1
             return
+        # RETRY CAP (owner screenshot 2026-08-14 07:03 ET: SIX $2 tickets
+        # on the same match, each bought and cashed out). A FOK the venue
+        # reports expired can still fill moments later: the row says
+        # 'unfilled', the veto above ignores unfilled BY DESIGN (genuine
+        # in-window retries), and the venue-holdings check below lags
+        # real positions by minutes — so the sweep re-bought the same
+        # dog every pass until the positions API caught up. Two rows per
+        # market per day is the ceiling: one genuine retry, never a
+        # stack. Counts EVERY status — an attempt is an attempt.
+        attempts = await pool.fetchval(
+            "SELECT count(*) FROM live_orders "
+            "WHERE asset = ANY($1::text[]) "
+            "AND whale_username = 'underdog' "
+            "AND placed_at > now() - interval '1 day'",
+            [str(s["token_id"]) for s in sides])
+        if attempts is not None and int(attempts) >= 2:
+            stats["skipped_retry_cap"] = \
+                stats.get("skipped_retry_cap", 0) + 1
+            return
         n = shares_for(PER_FILL_USD, ask)
         if n < 1:
             # The only two exits in this function that counted nothing.
