@@ -127,15 +127,17 @@ COLLAPSE_FLOOR = 0.85
 # full losses — the exact mistake the scaling rule exists to prevent.
 COPY_HALT_USD_DEFAULT = 1200.0
 COPY_HALT_HOURS_DEFAULT = 24.0
-# Owner amnesty 2026-08-06 ("Let's get Kalshi going now"): the halt
-# tripped ~01:00Z on Wednesday-evening losses was ordered lifted early.
-# A halt tripped BEFORE this instant is cleared, and losses realized
-# before it stop counting toward a re-trip (they already bought one
-# halt; without the floor the same losses re-trip a fresh 24h the
-# moment the old one clears). The floor self-expires: 24h past the
-# amnesty, the rolling window no longer reaches behind it. Halts
-# tripped on NEW losses after the amnesty are honored in full.
-COPY_BREAKER_AMNESTY_TS = 1786053600.0   # 2026-08-06T22:00:00Z
+# Owner amnesty (latest 2026-08-14, "Unlock Kalshi trading and let's
+# get trades firing again!", lifting the first-ever copy-breaker trip
+# on the red Cincinnati slate; previously 2026-08-06 "Let's get Kalshi
+# going now"). A halt tripped BEFORE this instant is cleared, and
+# losses realized before it stop counting toward a re-trip (they
+# already bought one halt; without the floor the same losses re-trip a
+# fresh 24h the moment the old one clears). The floor self-expires:
+# 24h past the amnesty, the rolling window no longer reaches behind
+# it. Halts tripped on NEW losses after the amnesty are honored in
+# full.
+COPY_BREAKER_AMNESTY_TS = 1786734600.0   # 2026-08-14T19:10:00Z
 
 # League discovery cached ACROSS sweeps (2026-08-10, reaction-time work):
 # the sweep now also wakes on fresh-fill events, and re-running paginated
