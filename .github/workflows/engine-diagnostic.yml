@@ -290,6 +290,17 @@ jobs:
           jq -r '.detail.kalshi_export.settlements // [] | .[] | "KXS|\(.)"' /tmp/status.json 2>/dev/null || true
 
           echo ""
+          echo "# EXPORT BLOBS (gzip+base64, one line each — the log pipeline"
+          echo "# caps at ~5k lines, so row-per-line tables get clipped) #"
+          if [ -s /tmp/px.json ]; then
+            echo "PXBLOB $(gzip -c /tmp/px.json | base64 -w0)"
+          fi
+          jq -c '.detail.kalshi_export // empty' /tmp/status.json 2>/dev/null > /tmp/kx.json || true
+          if [ -s /tmp/kx.json ]; then
+            echo "KXBLOB $(gzip -c /tmp/kx.json | base64 -w0)"
+          fi
+
+          echo ""
           echo "#   MEMORY WATCH (rss_mb over 2 min — where does it die?)    #"
           for i in $(seq 1 24); do
             # A dead API must print DOWN, not exit the step (bash -e turns
