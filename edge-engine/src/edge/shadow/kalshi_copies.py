@@ -495,6 +495,10 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         stats["league_listed"] += 1
         gkey = game_key(slug)
         if gkey is None:
+            # Silent exits between league_listed and matched hid a
+            # 4-hour no-fire window (owner report 2026-08-15) — every
+            # refusal in this stretch is counted from here on.
+            stats["skipped_no_gkey"] = stats.get("skipped_no_gkey", 0) + 1
             continue
         if league not in discovered:
             try:
@@ -503,8 +507,14 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 # is already enforced in the adds sweep. Here the join
                 # is name-first: index every market by its outcome set.
                 discovered[league] = _discover_cached(kalshi, league)
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
                 discovered[league] = {}
+                stats["disco_err"] = stats.get("disco_err", 0) + 1
+                stats["disco_err_ex"] = f"{league}: {type(e).__name__}"
+            # Per-league market counts answer "is discovery returning
+            # anything" without a log line per market.
+            dc = stats.setdefault("disco_counts", {})
+            dc[league] = len(discovered[league])
         target_ticker = None
         for vm in discovered[league].values():
             names = list(vm.outcome_tokens)
@@ -530,6 +540,10 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             target_ticker = vm.outcome_tokens[hit]
             break
         if target_ticker is None:
+            stats["skipped_unmapped"] = stats.get("skipped_unmapped", 0) + 1
+            ex = stats.setdefault("unmapped_ex", [])
+            if len(ex) < 6:
+                ex.append(f"{league}:{slug}:{str(outcome)[:32]}")
             continue
         stats["matched"] += 1
         claim = f"kcopy:{slug}:{outcome[:24]}"
@@ -574,6 +588,7 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 continue
         book = kalshi.get_book(target_ticker, target_ticker)
         if book is None or not book.asks or book.asks[0].size < 1:
+            stats["skipped_no_book"] = stats.get("skipped_no_book", 0) + 1
             continue
         ask = book.asks[0].price
         # Fee-viability carve-out: thin-edge cells (donor ROI ~2-3.5%)
