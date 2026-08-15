@@ -408,6 +408,23 @@ def aggregate_tennis_week(activities: list[dict],
     }
 
 
+def _any_ts(act: dict) -> float:
+    """Activity timestamp wherever the venue put it: top level or
+    nested under trade/positionResolution (observed 2026-08-15: trade
+    rows carry createTime inside the trade object only, which made the
+    pager's min() crash on an all-zero page)."""
+    ts = _act_ts(act)
+    if ts:
+        return ts
+    for k in ("trade", "positionResolution"):
+        sub = act.get(k)
+        if isinstance(sub, dict):
+            ts = _act_ts(sub)
+            if ts:
+                return ts
+    return 0.0
+
+
 def _fetch_week_activities_sync(oldest_day: str) -> list[dict]:
     """Every activity row back to oldest_day (paged DESC, bounded)."""
     from polymarket_us import PolymarketUS
@@ -427,9 +444,9 @@ def _fetch_week_activities_sync(oldest_day: str) -> list[dict]:
         acts.extend(page)
         if page:
             import datetime as _dt
-            oldest = min(_act_ts(a) for a in page if _act_ts(a))
-            if oldest and _dt.datetime.fromtimestamp(
-                    oldest, tz=_dt.timezone.utc
+            stamps = [t for t in (_any_ts(a) for a in page) if t]
+            if stamps and _dt.datetime.fromtimestamp(
+                    min(stamps), tz=_dt.timezone.utc
                     ).strftime("%Y-%m-%d") < oldest_day:
                 break
         cursor = resp.get("nextCursor") or ""
@@ -475,7 +492,7 @@ async def venue_export(since_day: str) -> dict:
                 f"{type(exc).__name__}: {str(exc)[:200]}"}
     rows = []
     for act in acts:
-        ts = _act_ts(act)
+        ts = _any_ts(act)
         when = ""
         if ts:
             import datetime as _dt
