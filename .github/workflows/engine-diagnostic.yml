@@ -268,7 +268,7 @@ jobs:
 
           echo ""
           echo "# TENNIS WEEK (venue ledgers — owner question 2026-08-14) #"
-          curl -sS --max-time 120 -o /tmp/tw.json "$BASE/api/tennis-week" || true
+          curl -sS --max-time 280 -o /tmp/tw.json "$BASE/api/tennis-week" || true
           jq -r '"PM TENNIS WEEK: markets \(.markets // "?")  settled \(.settled // "?") (\(.won // "?")W-\(.lost // "?")L)  realized $\(.realized_total // "?")  settled_cost $\(.settled_cost // "?")  open \(.open // "?") ($\(.open_cost // "?"))"' \
              /tmp/tw.json 2>/dev/null || echo "  (tennis-week endpoint not deployed yet)"
           jq -r '.rows // [] | .[] | "  PMT \(.market_slug)  cost \(.cost)  realized \(.realized)\(if .open then "  OPEN" else "" end)"' \
@@ -280,8 +280,8 @@ jobs:
 
           echo ""
           echo "# VENUE EXPORT (every trade, both accounts, verbatim) #"
-          curl -sS --max-time 180 -o /tmp/px.json "$BASE/api/venue-export" || true
-          jq -r '"PMX COUNT \(.count // "?") since \(.since // "?")"' /tmp/px.json 2>/dev/null || echo "  (venue-export not deployed yet)"
+          curl -sS --max-time 280 -o /tmp/px.json "$BASE/api/venue-export" || true
+          jq -r '"PMX COUNT \(.count // "?") since \(.since // "?")  err \(.error // "none")"' /tmp/px.json 2>/dev/null || echo "  (venue-export not deployed yet)"
           jq -r '.rows // [] | .[] | "PMX|\(.time)|\(.kind)|\(.slug)|\(.side // "")|\(.qty)|\(.price)|\(.realized_pnl)|\(.title // "")"' \
              /tmp/px.json 2>/dev/null || true
           jq -r '.detail.kalshi_export // {} | "KX COUNTS fills \(.fills // [] | length)  settlements \(.settlements // [] | length)  trunc \(.fills_truncated // "?")/\(.settle_truncated // "?")  err \(.error // .fills_error // .settle_error // "none")"' \

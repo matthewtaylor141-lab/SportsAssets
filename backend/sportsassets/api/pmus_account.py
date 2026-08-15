@@ -438,6 +438,28 @@ def _fetch_week_activities_sync(oldest_day: str) -> list[dict]:
     return acts
 
 
+# The week-activities crawl pages ~80 venue calls and takes minutes on
+# a busy week; two report endpoints doing it back-to-back timed out the
+# probe (observed 2026-08-15 01:00Z). One shared fetch, cached briefly.
+_acts_cache: dict = {"ts": 0.0, "since": None, "acts": None}
+_ACTS_TTL = 600.0
+_acts_lock = asyncio.Lock()
+
+
+async def _week_activities(since_day: str, timeout: float = 240) -> list:
+    async with _acts_lock:
+        now = time.time()
+        if (_acts_cache["acts"] is not None
+                and _acts_cache["since"] == since_day
+                and now - _acts_cache["ts"] < _ACTS_TTL):
+            return _acts_cache["acts"]
+        acts = await asyncio.wait_for(
+            asyncio.to_thread(_fetch_week_activities_sync, since_day),
+            timeout=timeout)
+        _acts_cache.update(ts=now, since=since_day, acts=acts)
+        return acts
+
+
 async def venue_export(since_day: str) -> dict:
     """EVERY activity row since a date, verbatim-flat for CSV export.
     Owner order 2026-08-14: every trade on the account, perfect — no
@@ -446,9 +468,11 @@ async def venue_export(since_day: str) -> dict:
     cfg = settings()
     if not (cfg.pmus_key_id and cfg.pmus_secret_key):
         return {"configured": False}
-    acts = await asyncio.wait_for(
-        asyncio.to_thread(_fetch_week_activities_sync, since_day),
-        timeout=180)
+    try:
+        acts = await _week_activities(since_day)
+    except Exception as exc:  # noqa: BLE001 — name it, never 500
+        return {"since": since_day, "error":
+                f"{type(exc).__name__}: {str(exc)[:200]}"}
     rows = []
     for act in acts:
         ts = _act_ts(act)
@@ -496,9 +520,11 @@ async def tennis_week_report(days: list[str]) -> dict:
     cfg = settings()
     if not (cfg.pmus_key_id and cfg.pmus_secret_key):
         return {"configured": False}
-    acts = await asyncio.wait_for(
-        asyncio.to_thread(_fetch_week_activities_sync, min(days)),
-        timeout=120)
+    try:
+        acts = await _week_activities(min(days))
+    except Exception as exc:  # noqa: BLE001 — name it, never 500
+        return {"days": days, "error":
+                f"{type(exc).__name__}: {str(exc)[:200]}"}
     out = aggregate_tennis_week(acts, days)
     out["activities_scanned"] = len(acts)
     return out
