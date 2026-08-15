@@ -271,23 +271,20 @@ jobs:
           curl -sS --max-time 280 -o /tmp/tw.json "$BASE/api/tennis-week" || true
           jq -r '"PM TENNIS WEEK: markets \(.markets // "?")  settled \(.settled // "?") (\(.won // "?")W-\(.lost // "?")L)  realized $\(.realized_total // "?")  settled_cost $\(.settled_cost // "?")  open \(.open // "?") ($\(.open_cost // "?"))"' \
              /tmp/tw.json 2>/dev/null || echo "  (tennis-week endpoint not deployed yet)"
-          jq -r '.rows // [] | .[] | "  PMT \(.market_slug)  cost \(.cost)  realized \(.realized)\(if .open then "  OPEN" else "" end)"' \
-             /tmp/tw.json 2>/dev/null | head -300 || true
           jq -r '.detail.kalshi_tennis_week // {} | "K TENNIS WEEK: settled \(.settled // "?") (\(.won // "?")W-\(.lost // "?")L)  realized $\(.realized_total // "?")  cost $\(.cost_total // "?")  err \(.error // "none")"' \
              /tmp/status.json 2>/dev/null || true
-          jq -r '.detail.kalshi_tennis_week.rows // [] | .[] | "  KT \(.ticker)  cost \(.cost)  pnl \(.pnl)  \(.result // "")"' \
-             /tmp/status.json 2>/dev/null | head -300 || true
+          # per-row PMT/KT tables removed 2026-08-15 — they grew past the
+          # ~5k-line log cap and clipped the heartbeat sections; full row
+          # data ships in the EXPORT BLOBS below.
 
           echo ""
           echo "# VENUE EXPORT (every trade, both accounts, verbatim) #"
           curl -sS --max-time 280 -o /tmp/px.json "$BASE/api/venue-export" || true
           jq -r '"PMX COUNT \(.count // "?") since \(.since // "?")  err \(.error // "none")"' /tmp/px.json 2>/dev/null || echo "  (venue-export not deployed yet)"
-          jq -r '.rows // [] | .[] | "PMX|\(.time)|\(.kind)|\(.slug)|\(.side // "")|\(.qty)|\(.price)|\(.realized_pnl)|\(.title // "")"' \
-             /tmp/px.json 2>/dev/null || true
           jq -r '.detail.kalshi_export // {} | "KX COUNTS fills \(.fills // [] | length)  settlements \(.settlements // [] | length)  trunc \(.fills_truncated // "?")/\(.settle_truncated // "?")  err \(.error // .fills_error // .settle_error // "none")"' \
              /tmp/status.json 2>/dev/null || true
-          jq -r '.detail.kalshi_export.fills // [] | .[] | "KXF|\(.)"' /tmp/status.json 2>/dev/null || true
-          jq -r '.detail.kalshi_export.settlements // [] | .[] | "KXS|\(.)"' /tmp/status.json 2>/dev/null || true
+          # per-row PMX/KXF/KXS tables removed 2026-08-15 — same log-cap
+          # reason as above; the blobs carry every row.
 
           echo ""
           echo "# EXPORT BLOBS (gzip+base64, one line each — the log pipeline"
