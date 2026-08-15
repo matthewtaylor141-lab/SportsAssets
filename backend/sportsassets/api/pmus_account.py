@@ -319,33 +319,76 @@ def _fetch_all_positions_sync() -> dict[str, dict]:
     return positions
 
 
-async def tennis_week_report(days: list[str]) -> dict:
-    """Owner question 2026-08-14: P&L on EVERY tennis play this week,
-    straight from the venue ledger — manual and AI alike. Source is the
-    venue's own per-market `realized` (sells + resolutions, its math,
-    not ours); a market belongs to the week when its slug carries one
-    of the given dates. Open positions are listed at cost with no P&L
-    claimed — they haven't paid out yet."""
-    cfg = settings()
-    if not (cfg.pmus_key_id and cfg.pmus_secret_key):
-        return {"configured": False}
-    positions = await asyncio.wait_for(
-        asyncio.to_thread(_fetch_all_positions_sync), timeout=90)
-    rows = []
-    for slug, p in (positions or {}).items():
-        if not _is_tennis_slug(slug):
-            continue
+def aggregate_tennis_week(activities: list[dict],
+                          days: list[str]) -> dict:
+    """Pure aggregation of the venue ACTIVITIES ledger into per-market
+    tennis P&L. The positions endpoint prunes settled markets (observed
+    2026-08-15: a full tennis week returned 3 rows), so the activities
+    feed — every fill and every resolution — is the only venue source
+    that actually covers a week.
+
+    Per market: buy cost summed from BUY trades; realized is the
+    venue's own math — the resolution row's cumulative `realized`
+    (which already includes earlier sells) when resolved, else the sum
+    of sell-trade realizedPnl. Open = bought more than sold with no
+    resolution yet; listed at cost, no P&L claimed."""
+    per: dict[str, dict] = {}
+
+    def _bucket(slug: str) -> dict | None:
+        if not slug or not _is_tennis_slug(slug):
+            return None
         if not any(d in slug for d in days):
-            continue
-        meta = p.get("marketMetadata") or {}
-        qty = _amt(p.get("netPosition"))
+            return None
+        return per.setdefault(slug, {
+            "market_slug": slug, "title": None, "cost": 0.0,
+            "sell_rp": 0.0, "res_realized": None, "resolved": False,
+            "bought": 0.0, "sold": 0.0})
+
+    for act in activities or []:
+        kind = act.get("type")
+        if kind == "ACTIVITY_TYPE_TRADE":
+            t = act.get("trade") or {}
+            b = _bucket(t.get("marketSlug") or "")
+            if b is None:
+                continue
+            meta = t.get("marketMetadata") or {}
+            b["title"] = b["title"] or meta.get("title")
+            qty, px = _amt(t.get("qty")), _amt(t.get("price"))
+            rp = _amt(t.get("realizedPnl"))
+            side = str(t.get("side") or "").upper()
+            is_sell = "SELL" in side or rp != 0
+            if is_sell:
+                b["sell_rp"] += rp
+                b["sold"] += qty
+            else:
+                b["cost"] += qty * px
+                b["bought"] += qty
+        elif kind == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+            res = act.get("positionResolution") or {}
+            b = _bucket(res.get("marketSlug") or "")
+            if b is None:
+                continue
+            after = res.get("afterPosition") or {}
+            before = res.get("beforePosition") or {}
+            b["resolved"] = True
+            b["res_realized"] = (_amt(after.get("realized"))
+                                 or _amt(before.get("realized")))
+            b["cost"] = b["cost"] or _amt(before.get("cost"))
+            meta = (after.get("marketMetadata") or {})
+            b["title"] = b["title"] or meta.get("title")
+
+    rows = []
+    for b in per.values():
+        realized = (b["res_realized"] if b["resolved"]
+                    else round(b["sell_rp"], 2))
+        is_open = (not b["resolved"]
+                   and b["bought"] > b["sold"] + 1e-9)
         rows.append({
-            "market_slug": slug,
-            "title": meta.get("title") or slug,
-            "cost": round(_amt(p.get("cost")), 2),
-            "realized": round(_amt(p.get("realized")), 2),
-            "open": bool(qty > 0 and not p.get("expired")),
-            "qty": qty,
+            "market_slug": b["market_slug"],
+            "title": b["title"] or b["market_slug"],
+            "cost": round(b["cost"], 2),
+            "realized": round(realized or 0.0, 2),
+            "open": is_open,
         })
     settled = [r for r in rows if not r["open"]]
     open_rows = [r for r in rows if r["open"]]
@@ -356,13 +399,57 @@ async def tennis_week_report(days: list[str]) -> dict:
         "markets": len(rows),
         "settled": len(settled),
         "open": len(open_rows),
-        "realized_total": round(sum(r["realized"] for r in rows), 2),
+        "realized_total": round(sum(r["realized"] for r in settled), 2),
         "settled_cost": round(sum(r["cost"] for r in settled), 2),
         "open_cost": round(sum(r["cost"] for r in open_rows), 2),
         "won": sum(1 for r in settled if r["realized"] > 0),
         "lost": sum(1 for r in settled if r["realized"] <= 0),
         "rows": settled + open_rows,
     }
+
+
+def _fetch_week_activities_sync(oldest_day: str) -> list[dict]:
+    """Every activity row back to oldest_day (paged DESC, bounded)."""
+    from polymarket_us import PolymarketUS
+
+    cfg = settings()
+    client = PolymarketUS(key_id=cfg.pmus_key_id,
+                          secret_key=cfg.pmus_secret_key)
+    acts: list[dict] = []
+    cursor = ""
+    for _ in range(80):
+        resp = client.portfolio.activities(
+            {"limit": 100, "sortOrder": "SORT_ORDER_DESCENDING",
+             "types": ["ACTIVITY_TYPE_TRADE",
+                       "ACTIVITY_TYPE_POSITION_RESOLUTION"],
+             **({"cursor": cursor} if cursor else {})}) or {}
+        page = resp.get("activities") or []
+        acts.extend(page)
+        if page:
+            import datetime as _dt
+            oldest = min(_act_ts(a) for a in page if _act_ts(a))
+            if oldest and _dt.datetime.fromtimestamp(
+                    oldest, tz=_dt.timezone.utc
+                    ).strftime("%Y-%m-%d") < oldest_day:
+                break
+        cursor = resp.get("nextCursor") or ""
+        if resp.get("eof") or not cursor:
+            break
+    return acts
+
+
+async def tennis_week_report(days: list[str]) -> dict:
+    """Owner question 2026-08-14: P&L on EVERY tennis play this week,
+    straight from the venue ledger — manual and AI alike."""
+    cfg = settings()
+    if not (cfg.pmus_key_id and cfg.pmus_secret_key):
+        return {"configured": False}
+    acts = await asyncio.wait_for(
+        asyncio.to_thread(_fetch_week_activities_sync, min(days)),
+        timeout=120)
+    out = aggregate_tennis_week(acts, days)
+    out["activities_scanned"] = len(acts)
+    return out
 
 
 async def account_snapshot() -> dict:

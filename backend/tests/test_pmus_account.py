@@ -145,3 +145,63 @@ def test_tennis_slug_matcher_covers_all_tours():
     assert not _is_tennis_slug("aec-mlb-cle-det-2026-08-12")
     assert not _is_tennis_slug("tsc-ucl-skpu-fen-2026-08-11-2pt5")
     assert not _is_tennis_slug("")
+
+
+def _trade(slug, qty, price, rp=0.0, side="BUY"):
+    return {"type": "ACTIVITY_TYPE_TRADE",
+            "trade": {"marketSlug": slug, "qty": qty, "price": price,
+                      "realizedPnl": rp, "side": side,
+                      "marketMetadata": {"title": slug}}}
+
+
+def _resolution(slug, realized, cost):
+    return {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+            "positionResolution": {
+                "marketSlug": slug,
+                "afterPosition": {"realized": realized,
+                                  "marketMetadata": {"title": slug}},
+                "beforePosition": {"cost": cost}}}
+
+
+def test_tennis_week_aggregates_resolutions_and_sells():
+    from sportsassets.api.pmus_account import aggregate_tennis_week
+    days = ["2026-08-12", "2026-08-13", "2026-08-14"]
+    acts = [
+        # resolved winner: bought 100 @ .40, resolved, venue realized +60
+        _trade("aec-atp-aaa-bbb-2026-08-12", 100, 0.40),
+        _resolution("aec-atp-aaa-bbb-2026-08-12", 60.0, 40.0),
+        # sold-out loser: bought 50 @ .60, sold with venue rp -10
+        _trade("aec-wta-ccc-ddd-2026-08-13", 50, 0.60),
+        _trade("aec-wta-ccc-ddd-2026-08-13", 50, 0.40, rp=-10.0,
+               side="SELL"),
+        # open position: bought, not sold, not resolved
+        _trade("aec-itfwo-eee-fff-2026-08-14", 10, 0.30),
+        # non-tennis and out-of-week rows are ignored
+        _trade("aec-mlb-cle-det-2026-08-12", 100, 0.5),
+        _trade("aec-atp-old-old-2026-08-05", 100, 0.5),
+    ]
+    out = aggregate_tennis_week(acts, days)
+    assert out["markets"] == 3
+    assert out["settled"] == 2 and out["open"] == 1
+    assert out["won"] == 1 and out["lost"] == 1
+    assert out["realized_total"] == 50.0          # +60 - 10
+    assert out["open_cost"] == 3.0                # 10 @ .30
+    slugs = {r["market_slug"]: r for r in out["rows"]}
+    assert slugs["aec-atp-aaa-bbb-2026-08-12"]["realized"] == 60.0
+    assert slugs["aec-wta-ccc-ddd-2026-08-13"]["realized"] == -10.0
+    assert slugs["aec-itfwo-eee-fff-2026-08-14"]["open"] is True
+
+
+def test_tennis_week_resolution_realized_wins_over_sell_sum():
+    """The resolution row's cumulative realized already includes earlier
+    sells — adding sell_rp on top would double-count them."""
+    from sportsassets.api.pmus_account import aggregate_tennis_week
+    days = ["2026-08-14"]
+    acts = [
+        _trade("aec-atp-ggg-hhh-2026-08-14", 100, 0.50),
+        _trade("aec-atp-ggg-hhh-2026-08-14", 40, 0.70, rp=8.0,
+               side="SELL"),
+        _resolution("aec-atp-ggg-hhh-2026-08-14", 38.0, 50.0),
+    ]
+    out = aggregate_tennis_week(acts, days)
+    assert out["realized_total"] == 38.0
