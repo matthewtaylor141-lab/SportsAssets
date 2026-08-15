@@ -438,6 +438,58 @@ def _fetch_week_activities_sync(oldest_day: str) -> list[dict]:
     return acts
 
 
+async def venue_export(since_day: str) -> dict:
+    """EVERY activity row since a date, verbatim-flat for CSV export.
+    Owner order 2026-08-14: every trade on the account, perfect — no
+    filtering, no attribution, no math beyond flattening the venue's
+    own fields."""
+    cfg = settings()
+    if not (cfg.pmus_key_id and cfg.pmus_secret_key):
+        return {"configured": False}
+    acts = await asyncio.wait_for(
+        asyncio.to_thread(_fetch_week_activities_sync, since_day),
+        timeout=180)
+    rows = []
+    for act in acts:
+        ts = _act_ts(act)
+        when = ""
+        if ts:
+            import datetime as _dt
+            when = _dt.datetime.fromtimestamp(
+                ts, tz=_dt.timezone.utc).isoformat()
+            if when[:10] < since_day:
+                continue
+        if act.get("type") == "ACTIVITY_TYPE_TRADE":
+            t = act.get("trade") or {}
+            meta = t.get("marketMetadata") or {}
+            rows.append({
+                "time": when, "kind": "trade",
+                "slug": t.get("marketSlug"),
+                "title": meta.get("title"),
+                "outcome": meta.get("outcome"),
+                "side": t.get("side"),
+                "qty": _amt(t.get("qty")),
+                "price": _amt(t.get("price")),
+                "realized_pnl": _amt(t.get("realizedPnl")),
+            })
+        elif act.get("type") == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+            res = act.get("positionResolution") or {}
+            after = res.get("afterPosition") or {}
+            before = res.get("beforePosition") or {}
+            meta = after.get("marketMetadata") or {}
+            rows.append({
+                "time": when, "kind": "resolution",
+                "slug": res.get("marketSlug"),
+                "title": meta.get("title"),
+                "outcome": meta.get("outcome"),
+                "side": "", "qty": 0.0, "price": 0.0,
+                "realized_pnl": (_amt(after.get("realized"))
+                                 or _amt(before.get("realized"))),
+                "cost": _amt(before.get("cost")),
+            })
+    return {"since": since_day, "rows": rows, "count": len(rows)}
+
+
 async def tennis_week_report(days: list[str]) -> dict:
     """Owner question 2026-08-14: P&L on EVERY tennis play this week,
     straight from the venue ledger — manual and AI alike."""

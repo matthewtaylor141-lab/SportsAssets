@@ -2782,16 +2782,26 @@ def _main_impl() -> None:
                 # settle cadence, carried forward like _LAST_SETTLE so
                 # every probe can read it.
                 for a in adapters:
-                    if a.name == "kalshi" and hasattr(
-                            a, "tennis_settlements_since"):
+                    if a.name != "kalshi":
+                        continue
+                    _now = time.gmtime()
+                    monday = time.strftime("%Y-%m-%d", time.gmtime(
+                        time.time() - _now.tm_wday * 86_400))
+                    if hasattr(a, "tennis_settlements_since"):
                         try:
-                            _now = time.gmtime()
-                            monday = time.strftime("%Y-%m-%d", time.gmtime(
-                                time.time() - _now.tm_wday * 86_400))
                             _LAST_SETTLE["kalshi_tennis_week"] = \
                                 a.tennis_settlements_since(monday)
                         except Exception as exc:  # noqa: BLE001
                             _LAST_SETTLE["kalshi_tennis_week"] = {
+                                "error": f"{type(exc).__name__}"}
+                    # Full trade export (owner order 2026-08-14: every
+                    # trade on the account, perfect) — same cadence.
+                    if hasattr(a, "export_since"):
+                        try:
+                            _LAST_SETTLE["kalshi_export"] = \
+                                a.export_since(monday)
+                        except Exception as exc:  # noqa: BLE001
+                            _LAST_SETTLE["kalshi_export"] = {
                                 "error": f"{type(exc).__name__}"}
             # The funnel is per-cycle but settlement runs 1-in-10 cycles —
             # without carrying the last pass forward, 90% of heartbeats
@@ -2803,6 +2813,8 @@ def _main_impl() -> None:
                 if _LAST_SETTLE.get("kalshi_tennis_week") is not None:
                     funnel["kalshi_tennis_week"] = \
                         _LAST_SETTLE["kalshi_tennis_week"]
+                if _LAST_SETTLE.get("kalshi_export") is not None:
+                    funnel["kalshi_export"] = _LAST_SETTLE["kalshi_export"]
             # Same carry-forward logic for the account link: the boot-time
             # credential check posts once as "startup" and scrolls away —
             # a probe that reads only recent heartbeats could never answer

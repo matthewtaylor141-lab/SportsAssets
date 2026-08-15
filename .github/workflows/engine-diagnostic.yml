@@ -279,6 +279,17 @@ jobs:
              /tmp/status.json 2>/dev/null | head -300 || true
 
           echo ""
+          echo "# VENUE EXPORT (every trade, both accounts, verbatim) #"
+          curl -sS --max-time 180 -o /tmp/px.json "$BASE/api/venue-export" || true
+          jq -r '"PMX COUNT \(.count // "?") since \(.since // "?")"' /tmp/px.json 2>/dev/null || echo "  (venue-export not deployed yet)"
+          jq -r '.rows // [] | .[] | "PMX|\(.time)|\(.kind)|\(.slug)|\(.side // "")|\(.qty)|\(.price)|\(.realized_pnl)|\(.title // "")"' \
+             /tmp/px.json 2>/dev/null || true
+          jq -r '.detail.kalshi_export // {} | "KX COUNTS fills \(.fills // [] | length)  settlements \(.settlements // [] | length)  trunc \(.fills_truncated // "?")/\(.settle_truncated // "?")  err \(.error // .fills_error // .settle_error // "none")"' \
+             /tmp/status.json 2>/dev/null || true
+          jq -r '.detail.kalshi_export.fills // [] | .[] | "KXF|\(.)"' /tmp/status.json 2>/dev/null || true
+          jq -r '.detail.kalshi_export.settlements // [] | .[] | "KXS|\(.)"' /tmp/status.json 2>/dev/null || true
+
+          echo ""
           echo "#   MEMORY WATCH (rss_mb over 2 min — where does it die?)    #"
           for i in $(seq 1 24); do
             # A dead API must print DOWN, not exit the step (bash -e turns

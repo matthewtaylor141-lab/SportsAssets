@@ -671,6 +671,92 @@ class KalshiAdapter(VenueAdapter):
             out["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
         return out
 
+    def export_since(self, since_iso: str, max_pages: int = 20) -> dict:
+        """EVERY fill and EVERY settlement since a date, compact rows
+        for the cycle funnel (owner order 2026-08-14: every trade on
+        the account, perfect). Fill rows: 'time|ticker|side|action|
+        count|price'. Settlement rows: 'time|ticker|result|cost|
+        revenue'. Verbatim venue fields, dollar dialect first."""
+        def _usd(row: dict, key: str) -> float:
+            if row.get(f"{key}_dollars") is not None:
+                return float(row[f"{key}_dollars"])
+            return float(row.get(key) or 0) / 100.0
+
+        out: dict = {"since": since_iso, "fills": [], "settlements": [],
+                     "fills_truncated": False, "settle_truncated": False}
+        try:
+            cursor = ""
+            for page in range(max_pages):
+                path = "/trade-api/v2/portfolio/fills"
+                params: dict = {"limit": 200}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = self._sess.get(
+                    f"{BASE}/portfolio/fills", params=params,
+                    headers=self._auth_headers("GET", path), timeout=15)
+                if resp.status_code != 200:
+                    out["fills_error"] = f"http_{resp.status_code}"
+                    break
+                body = resp.json() or {}
+                rows = body.get("fills") or []
+                stop = False
+                for f in rows:
+                    when = str(f.get("created_time") or "")
+                    if when and when < since_iso:
+                        stop = True
+                        break
+                    qty = float(f.get("count_fp") or f.get("count") or 0)
+                    if f.get("yes_price_dollars") is not None:
+                        px = float(f["yes_price_dollars"])
+                    else:
+                        px = float(f.get("yes_price") or 0) / 100.0
+                    out["fills"].append(
+                        f"{when[:19]}|{f.get('ticker')}|{f.get('side')}|"
+                        f"{f.get('action')}|{qty:g}|{px}")
+                if stop:
+                    break
+                cursor = body.get("cursor") or ""
+                if not cursor or not rows:
+                    break
+            else:
+                out["fills_truncated"] = True
+            cursor = ""
+            for page in range(max_pages):
+                path = "/trade-api/v2/portfolio/settlements"
+                params = {"limit": 200}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = self._sess.get(
+                    f"{BASE}/portfolio/settlements", params=params,
+                    headers=self._auth_headers("GET", path), timeout=15)
+                if resp.status_code != 200:
+                    out["settle_error"] = f"http_{resp.status_code}"
+                    break
+                body = resp.json() or {}
+                rows = body.get("settlements") or []
+                stop = False
+                for r in rows:
+                    when = str(r.get("settled_time") or "")
+                    if when and when < since_iso:
+                        stop = True
+                        break
+                    cost = (_usd(r, "yes_total_cost")
+                            + _usd(r, "no_total_cost"))
+                    out["settlements"].append(
+                        f"{when[:19]}|{r.get('ticker')}|"
+                        f"{r.get('market_result')}|{round(cost, 2)}|"
+                        f"{round(_usd(r, 'revenue'), 2)}")
+                if stop:
+                    break
+                cursor = body.get("cursor") or ""
+                if not cursor or not rows:
+                    break
+            else:
+                out["settle_truncated"] = True
+        except requests.RequestException as exc:
+            out["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        return out
+
     def open_ticker_map(self) -> dict | None:
         """Venue-side never-add source: tickers the VENUE says we hold or
         have resting BUY orders on, straight from the portfolio API.

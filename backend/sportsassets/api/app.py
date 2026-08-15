@@ -2416,6 +2416,23 @@ async def api_tennis_week(days: str | None = Query(None)) -> dict:
     return await tennis_week_report(want)
 
 
+@app.get("/api/venue-export")
+async def api_venue_export(since: str | None = Query(None)) -> dict:
+    """RAW Polymarket activities ledger since a date (default Monday of
+    the current ET week): every trade and every resolution row, all
+    sports, verbatim venue fields. Owner order 2026-08-14: every trade
+    on the account, perfect — so no interpretation happens here at all."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from .pmus_account import venue_export
+
+    if not since:
+        today = datetime.now(tz=ZoneInfo("America/New_York")).date()
+        since = (today - timedelta(days=today.weekday())).isoformat()
+    return await venue_export(since)
+
+
 @app.get("/api/pmus-account")
 async def api_pmus_account() -> dict:
     """The REAL Polymarket US account, live from the venue's portfolio API:
