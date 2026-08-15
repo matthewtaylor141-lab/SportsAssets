@@ -52,7 +52,11 @@ jobs:
             echo "HTTP ${code:-000}  ($(wc -c </tmp/body.json 2>/dev/null || echo 0) bytes)"
             if [ -s /tmp/err ]; then echo "transport: $(cat /tmp/err)"; fi
             if [ -s /tmp/body.json ]; then
-              jq '.' /tmp/body.json 2>/dev/null || head -c 4000 /tmp/body.json
+              # Bulk arrays (kalshi_export, tennis-week rows) are thousands of
+              # pretty-printed lines and evict the funnel/balances from the
+              # ~5k-line retrievable tail — they ship compactly further down.
+              jq 'del(.detail.kalshi_export, .detail.kalshi_tennis_week.rows)' \
+                 /tmp/body.json 2>/dev/null || head -c 4000 /tmp/body.json
             fi
           }
 
