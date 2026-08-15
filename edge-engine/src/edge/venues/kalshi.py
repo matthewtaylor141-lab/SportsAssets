@@ -68,7 +68,12 @@ _DEFAULT_SERIES = {
     # {league}GAME grammar — a wrong one fails loudly as a named census
     # entry, never silently; 3-way soccer copies are still refused by
     # the exactly-2-outcomes join, so soccer widens ARBITRAGE first.
-    "itf": "KXATPCHALLENGERMATCH+KXWTACHALLENGERMATCH+KXCHALLENGERMATCH",
+    # KXITFMATCH/KXITFWMATCH are Kalshi's actual ITF series — the
+    # challenger tickers alone missed a listed match RN1 bet on
+    # 2026-08-15 (KXITFWMATCH-26AUG15KUCJAK, probe census) while the
+    # copy funnel showed 9/9 candidates skipped_unmapped.
+    "itf": "KXATPCHALLENGERMATCH+KXWTACHALLENGERMATCH+KXCHALLENGERMATCH"
+           "+KXITFMATCH+KXITFWMATCH",
     "lal": "KXLALIGAGAME",
     "sea": "KXSERIEAGAME",
     "fl1": "KXLIGUE1GAME",
