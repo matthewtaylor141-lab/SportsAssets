@@ -435,11 +435,21 @@ def _fetch_week_activities_sync(oldest_day: str) -> list[dict]:
     acts: list[dict] = []
     cursor = ""
     for _ in range(80):
-        resp = client.portfolio.activities(
-            {"limit": 100, "sortOrder": "SORT_ORDER_DESCENDING",
-             "types": ["ACTIVITY_TYPE_TRADE",
-                       "ACTIVITY_TYPE_POSITION_RESOLUTION"],
-             **({"cursor": cursor} if cursor else {})}) or {}
+        # Throttle + backoff: an unthrottled 80-page burst hit the
+        # venue's rate limit (RateLimitError, 2026-08-15 01:42Z).
+        time.sleep(0.4)
+        for attempt in range(3):
+            try:
+                resp = client.portfolio.activities(
+                    {"limit": 100, "sortOrder": "SORT_ORDER_DESCENDING",
+                     "types": ["ACTIVITY_TYPE_TRADE",
+                               "ACTIVITY_TYPE_POSITION_RESOLUTION"],
+                     **({"cursor": cursor} if cursor else {})}) or {}
+                break
+            except Exception as exc:  # noqa: BLE001
+                if "RateLimit" not in type(exc).__name__ or attempt == 2:
+                    raise
+                time.sleep(8 * (attempt + 1))
         page = resp.get("activities") or []
         acts.extend(page)
         if page:
