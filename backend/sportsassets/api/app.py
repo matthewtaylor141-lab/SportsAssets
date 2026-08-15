@@ -2396,6 +2396,26 @@ async def api_report(period: str = Query("weekly"),
     return content
 
 
+@app.get("/api/tennis-week")
+async def api_tennis_week(days: str | None = Query(None)) -> dict:
+    """Venue-ledger tennis P&L for the given slug-dates (default: this
+    ET week, Monday onward). Owner question 2026-08-14 — every tennis
+    play, manual and AI, priced by the venue's own realized figures."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from .pmus_account import tennis_week_report
+
+    if days:
+        want = [d.strip() for d in days.split(",") if d.strip()]
+    else:
+        today = datetime.now(tz=ZoneInfo("America/New_York")).date()
+        monday = today - timedelta(days=today.weekday())
+        want = [(monday + timedelta(days=i)).isoformat()
+                for i in range((today - monday).days + 1)]
+    return await tennis_week_report(want)
+
+
 @app.get("/api/pmus-account")
 async def api_pmus_account() -> dict:
     """The REAL Polymarket US account, live from the venue's portfolio API:

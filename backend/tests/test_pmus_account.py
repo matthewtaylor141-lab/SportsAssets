@@ -133,3 +133,15 @@ def test_the_size_boundary_is_explicit_and_reported():
                     system_max_cost=5.0)
     assert out["system_max_cost"] == 5.0
     assert out["system"]["positions"] == 1 and out["manual"]["positions"] == 1
+
+
+def test_tennis_slug_matcher_covers_all_tours():
+    from sportsassets.api.pmus_account import _is_tennis_slug
+    assert _is_tennis_slug("aec-atp-jiecui-azidou-2026-08-14")
+    assert _is_tennis_slug("aec-wta-kamrak-kimbir-2026-08-13")
+    assert _is_tennis_slug("aec-itfwo-marvog-laivla-2026-08-14")
+    assert _is_tennis_slug("aec-itfme-briboz-johlit-2026-08-14")
+    assert _is_tennis_slug("tsc-atp-doubles-kaleser-gorwal-2026-08-14")
+    assert not _is_tennis_slug("aec-mlb-cle-det-2026-08-12")
+    assert not _is_tennis_slug("tsc-ucl-skpu-fen-2026-08-11-2pt5")
+    assert not _is_tennis_slug("")

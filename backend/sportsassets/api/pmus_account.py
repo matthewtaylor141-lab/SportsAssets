@@ -284,6 +284,87 @@ def _fetch_sync() -> dict:
     return normalize(balances, positions, acts)
 
 
+_TENNIS_SLUG = None  # compiled on first use
+
+
+def _is_tennis_slug(slug: str) -> bool:
+    """Tennis by tour token anywhere in the venue slug: atp (incl.
+    challengers and doubles), wta, itf men/women. Matches aec-/tsc-/asc-
+    prefixes alike — the tour token is the invariant, the prefix is not."""
+    global _TENNIS_SLUG
+    import re
+    if _TENNIS_SLUG is None:
+        _TENNIS_SLUG = re.compile(r"-(atp|wta|itf\w*|chal\w*)-")
+    return bool(_TENNIS_SLUG.search(slug or ""))
+
+
+def _fetch_all_positions_sync() -> dict[str, dict]:
+    """EVERY venue position, paged to eof (bounded at 50 pages). The
+    account card's 5-page bound is fine for a snapshot; a ledger report
+    that says 'every trade' must actually finish the book."""
+    from polymarket_us import PolymarketUS
+
+    cfg = settings()
+    client = PolymarketUS(key_id=cfg.pmus_key_id,
+                          secret_key=cfg.pmus_secret_key)
+    positions: dict[str, dict] = {}
+    cursor = ""
+    for _ in range(50):
+        resp = client.portfolio.positions(
+            {"limit": 100, **({"cursor": cursor} if cursor else {})}) or {}
+        positions.update(resp.get("positions") or {})
+        cursor = resp.get("nextCursor") or ""
+        if resp.get("eof") or not cursor:
+            break
+    return positions
+
+
+async def tennis_week_report(days: list[str]) -> dict:
+    """Owner question 2026-08-14: P&L on EVERY tennis play this week,
+    straight from the venue ledger — manual and AI alike. Source is the
+    venue's own per-market `realized` (sells + resolutions, its math,
+    not ours); a market belongs to the week when its slug carries one
+    of the given dates. Open positions are listed at cost with no P&L
+    claimed — they haven't paid out yet."""
+    cfg = settings()
+    if not (cfg.pmus_key_id and cfg.pmus_secret_key):
+        return {"configured": False}
+    positions = await asyncio.wait_for(
+        asyncio.to_thread(_fetch_all_positions_sync), timeout=90)
+    rows = []
+    for slug, p in (positions or {}).items():
+        if not _is_tennis_slug(slug):
+            continue
+        if not any(d in slug for d in days):
+            continue
+        meta = p.get("marketMetadata") or {}
+        qty = _amt(p.get("netPosition"))
+        rows.append({
+            "market_slug": slug,
+            "title": meta.get("title") or slug,
+            "cost": round(_amt(p.get("cost")), 2),
+            "realized": round(_amt(p.get("realized")), 2),
+            "open": bool(qty > 0 and not p.get("expired")),
+            "qty": qty,
+        })
+    settled = [r for r in rows if not r["open"]]
+    open_rows = [r for r in rows if r["open"]]
+    settled.sort(key=lambda r: r["realized"])
+    open_rows.sort(key=lambda r: -r["cost"])
+    return {
+        "days": days,
+        "markets": len(rows),
+        "settled": len(settled),
+        "open": len(open_rows),
+        "realized_total": round(sum(r["realized"] for r in rows), 2),
+        "settled_cost": round(sum(r["cost"] for r in settled), 2),
+        "open_cost": round(sum(r["cost"] for r in open_rows), 2),
+        "won": sum(1 for r in settled if r["realized"] > 0),
+        "lost": sum(1 for r in settled if r["realized"] <= 0),
+        "rows": settled + open_rows,
+    }
+
+
 async def account_snapshot() -> dict:
     cfg = settings()
     if not (cfg.pmus_key_id and cfg.pmus_secret_key):

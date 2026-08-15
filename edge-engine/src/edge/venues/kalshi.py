@@ -600,6 +600,77 @@ class KalshiAdapter(VenueAdapter):
             out["orders_error"] = f"{type(exc).__name__}"
         return out
 
+    def tennis_settlements_since(self, since_iso: str,
+                                 max_pages: int = 10) -> dict:
+        """Tennis settlements straight from the venue's ledger (owner
+        question 2026-08-14: per-play tennis P&L, venue numbers only).
+        Pages /portfolio/settlements newest-first until a row predates
+        since_iso. Dollar dialect first (revenue_dollars), cents-int
+        fallback — same defensive shape rule as portfolio_truth. pnl
+        per settlement = revenue - (yes_total_cost + no_total_cost)."""
+        out: dict = {"since": since_iso, "rows": [], "settled": 0,
+                     "won": 0, "lost": 0, "realized_total": 0.0,
+                     "cost_total": 0.0}
+
+        def _usd(row: dict, key: str) -> float:
+            if row.get(f"{key}_dollars") is not None:
+                return float(row[f"{key}_dollars"])
+            return float(row.get(key) or 0) / 100.0
+
+        cursor = ""
+        last_rows: list = []
+        try:
+            for _ in range(max_pages):
+                path = "/trade-api/v2/portfolio/settlements"
+                params: dict = {"limit": 200}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = self._sess.get(
+                    f"{BASE}/portfolio/settlements", params=params,
+                    headers=self._auth_headers("GET", path), timeout=15)
+                if resp.status_code != 200:
+                    out["error"] = f"http_{resp.status_code}"
+                    return out
+                body = resp.json() or {}
+                rows = body.get("settlements") or []
+                last_rows = rows or last_rows
+                if not rows:
+                    break
+                stop = False
+                for r in rows:
+                    when = str(r.get("settled_time") or "")
+                    if when and when < since_iso:
+                        stop = True
+                        break
+                    ticker = str(r.get("ticker") or "")
+                    if not ticker.startswith(("KXATP", "KXWTA")):
+                        continue
+                    cost = _usd(r, "yes_total_cost") + _usd(r, "no_total_cost")
+                    revenue = _usd(r, "revenue")
+                    pnl = round(revenue - cost, 2)
+                    out["rows"].append({
+                        "ticker": ticker, "settled_time": when,
+                        "cost": round(cost, 2), "revenue": round(revenue, 2),
+                        "pnl": pnl, "result": r.get("market_result")})
+                    out["settled"] += 1
+                    out["won" if pnl > 0 else "lost"] += 1
+                    out["realized_total"] = round(
+                        out["realized_total"] + pnl, 2)
+                    out["cost_total"] = round(out["cost_total"] + cost, 2)
+                if stop:
+                    break
+                cursor = body.get("cursor") or ""
+                if not cursor:
+                    break
+            if out["settled"] == 0 and not out.get("error") and last_rows:
+                # Shape self-diagnosis: an empty tennis week with rows
+                # present means the dialect or prefix guess is wrong —
+                # name it instead of reporting a silent zero.
+                out["raw_sample"] = str(last_rows[0])[:240]
+        except requests.RequestException as exc:
+            out["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        return out
+
     def open_ticker_map(self) -> dict | None:
         """Venue-side never-add source: tickers the VENUE says we hold or
         have resting BUY orders on, straight from the portfolio API.

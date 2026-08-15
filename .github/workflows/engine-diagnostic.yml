@@ -267,6 +267,18 @@ jobs:
              /tmp/unm.json 2>/dev/null | head -20 || true
 
           echo ""
+          echo "# TENNIS WEEK (venue ledgers — owner question 2026-08-14) #"
+          curl -sS --max-time 120 -o /tmp/tw.json "$BASE/api/tennis-week" || true
+          jq -r '"PM TENNIS WEEK: markets \(.markets // "?")  settled \(.settled // "?") (\(.won // "?")W-\(.lost // "?")L)  realized $\(.realized_total // "?")  settled_cost $\(.settled_cost // "?")  open \(.open // "?") ($\(.open_cost // "?"))"' \
+             /tmp/tw.json 2>/dev/null || echo "  (tennis-week endpoint not deployed yet)"
+          jq -r '.rows // [] | .[] | "  PMT \(.market_slug)  cost \(.cost)  realized \(.realized)\(if .open then "  OPEN" else "" end)"' \
+             /tmp/tw.json 2>/dev/null | head -120 || true
+          jq -r '.detail.kalshi_tennis_week // {} | "K TENNIS WEEK: settled \(.settled // "?") (\(.won // "?")W-\(.lost // "?")L)  realized $\(.realized_total // "?")  cost $\(.cost_total // "?")  err \(.error // "none")"' \
+             /tmp/status.json 2>/dev/null || true
+          jq -r '.detail.kalshi_tennis_week.rows // [] | .[] | "  KT \(.ticker)  cost \(.cost)  pnl \(.pnl)  \(.result // "")"' \
+             /tmp/status.json 2>/dev/null | head -80 || true
+
+          echo ""
           echo "#   MEMORY WATCH (rss_mb over 2 min — where does it die?)    #"
           for i in $(seq 1 24); do
             # A dead API must print DOWN, not exit the step (bash -e turns
