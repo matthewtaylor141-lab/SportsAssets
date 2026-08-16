@@ -125,20 +125,26 @@ COLLAPSE_FLOOR = 0.85
 # the $100 clip: with BOTH high-volume whales at $100 the dominant clip
 # doubled, and an unchanged floor would have halved tolerance to ~6
 # full losses — the exact mistake the scaling rule exists to prevent.
-COPY_HALT_USD_DEFAULT = 1200.0
+# 1200 -> 2500 (owner 2026-08-16, "Unlock Kalshi trading and make sure
+# trades keep flowing"): two 1200-floor trips inside 24h each stopped
+# flow within hours at current clip sizes; the wider default keeps the
+# catastrophic stop while letting ordinary slate variance ride.
+# EDGE_KCOPY_HALT_USD still overrides.
+COPY_HALT_USD_DEFAULT = 2500.0
 COPY_HALT_HOURS_DEFAULT = 24.0
-# Owner amnesty (latest 2026-08-16, "Get Kalshi firing", lifting the
-# second trip — Friday afternoon's post-unlock losses crossed the
-# floor ~2pm ET 08-15; previously 2026-08-14 "Unlock Kalshi trading
-# and let's get trades firing again!" and 2026-08-06 "Let's get Kalshi
-# going now"). A halt tripped BEFORE this instant is cleared, and
+# Owner amnesty (latest 2026-08-16 ~12:45pm ET, "Unlock Kalshi trading
+# and make sure trades keep flowing", lifting the third trip; earlier
+# the same day "Get Kalshi firing"; previously 2026-08-14 "Unlock
+# Kalshi trading and let's get trades firing again!" and 2026-08-06
+# "Let's get Kalshi going now"). A halt tripped BEFORE this instant is
+# cleared, and
 # losses realized before it stop counting toward a re-trip (they
 # already bought one halt; without the floor the same losses re-trip a
 # fresh 24h the moment the old one clears). The floor self-expires:
 # 24h past the amnesty, the rolling window no longer reaches behind
 # it. Halts tripped on NEW losses after the amnesty are honored in
 # full.
-COPY_BREAKER_AMNESTY_TS = 1786877100.0   # 2026-08-16T10:45:00Z
+COPY_BREAKER_AMNESTY_TS = 1786898700.0   # 2026-08-16T16:45:00Z
 
 # League discovery cached ACROSS sweeps (2026-08-10, reaction-time work):
 # the sweep now also wakes on fresh-fill events, and re-running paginated
