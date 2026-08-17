@@ -647,8 +647,8 @@ jobs:
             && echo "SITEHTML bytes=$(wc -c </tmp/bt.html)" || echo "SITEHTML FAILED"
           if [ -s /tmp/bt.html ]; then
             echo "BTHTMLBLOB $(gzip -c /tmp/bt.html | base64 -w0)"
-            LOGO=$(grep -oE '(content|src|href)="[^"]*(logo|icon)[^"]*"' /tmp/bt.html \
-                   | grep -oE 'https?://[^"]+|/[^"]+' | head -3)
+            LOGO="/assets/bt-logo-mark.png /og/home.png $(grep -oE '(content|src|href)="[^"]*(logo|icon)[^"]*"' /tmp/bt.html \
+                   | grep -oE 'https?://[^"]+|/[^"]+' | head -3)"
             i=0
             for u in $LOGO; do
               case "$u" in /*) u="https://www.bettortoken.com$u";; esac
