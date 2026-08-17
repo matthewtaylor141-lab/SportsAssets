@@ -548,10 +548,40 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             # anything" without a log line per market.
             dc = stats.setdefault("disco_counts", {})
             dc[league] = len(discovered[league])
+        from edge.shadow.kalshi_adds import _kalshi_date_token
+
+        # DATE ANCHOR (capture-leak trace 2026-08-17): a dated slug only
+        # name-matches venue events carrying the same date token — the
+        # adds sweep always had this; the copies join could match a
+        # stale row onto TODAY'S game between the same teams.
+        date_tok = _kalshi_date_token(slug)
+        # NAME CANDIDATES: his side label plus, when the identity row
+        # carries the market title ('A vs B'), the full title name that
+        # corresponds to it — the PMUS tennis path has always matched on
+        # title names; the Kalshi join was name-blind by omission
+        # (capture-leak trace 2026-08-17).
+        cands = [outcome]
+        _title = str(row.get("market_title") or "")
+        for _sep in (" vs. ", " vs ", " v "):
+            if _sep in _title:
+                for _side in (x.strip() for x in _title.split(_sep, 1)):
+                    if _side and _side.lower() != outcome.lower() and (
+                            team_score(_side, outcome) >= 0.6
+                            or outcome.lower() in _side.lower()):
+                        cands.append(_side)
+                break
         target_ticker = None
+        near_miss = None
         for vm in discovered[league].values():
+            if date_tok and date_tok not in (vm.market_id or ""):
+                continue
             names = list(vm.outcome_tokens)
             if len(names) != 2:
+                # Same-date event with the wrong shape: record WHY the
+                # join failed — the whale side alone never says.
+                if date_tok:
+                    near_miss = {"ev": (vm.market_id or "")[-28:],
+                                 "n_outcomes": len(names)}
                 continue
             # His side must hit one outcome at the mapper bar AND the
             # OTHER outcome must belong to the same matchup we hold —
@@ -559,16 +589,29 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             # keeps "same player, different match" out.
             hit = None
             for name in names:
-                if team_score(name, outcome) >= 0.95:
+                if any(team_score(name, c) >= 0.95 for c in cands):
                     hit = name
                     break
             if hit is None:
+                # Same-date event where the VENUE strings missed the
+                # bar: emit them with their scores so a mapper mismatch
+                # is fixed against real forms, not guesses.
+                if date_tok:
+                    near_miss = {
+                        "ev": (vm.market_id or "")[-28:],
+                        "outcomes": [n[:24] for n in names],
+                        "scores": sorted(
+                            (round(max(team_score(n, c) for c in cands),
+                                   2) for n in names), reverse=True)}
                 continue
             other = [n for n in names if n != hit][0]
             toks = [t for t in gkey.split("|")[0].split("-") if t]
             other_ok = any(team_score(other, t) >= 0.6 for t in toks) \
                 or any(t.lower() in other.lower() for t in toks)
             if not other_ok:
+                if date_tok:
+                    near_miss = {"ev": (vm.market_id or "")[-28:],
+                                 "other": other[:24], "other_ok": False}
                 continue
             target_ticker = vm.outcome_tokens[hit]
             break
@@ -576,7 +619,10 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             stats["skipped_unmapped"] = stats.get("skipped_unmapped", 0) + 1
             ex = stats.setdefault("unmapped_ex", [])
             if len(ex) < 6:
-                ex.append(f"{league}:{slug}:{str(outcome)[:32]}")
+                entry = f"{league}:{slug}:{str(outcome)[:32]}"
+                if near_miss:
+                    entry += f" near={near_miss}"
+                ex.append(entry)
             continue
         stats["matched"] += 1
         claim = f"kcopy:{slug}:{outcome[:24]}"

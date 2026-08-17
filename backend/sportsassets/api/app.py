@@ -339,7 +339,8 @@ async def _compute_whale_idents() -> dict:
                    COALESCE(t.market_slug, t.event_slug, '') AS slug,
                    t.outcome, t.price::float8 AS price,
                    w.username AS whale,
-                   extract(epoch FROM t.ts)::float8 AS entered_ts
+                   extract(epoch FROM t.ts)::float8 AS entered_ts,
+                   m.title AS market_title
             FROM trades t
             JOIN whales w ON w.id = t.whale_id
             LEFT JOIN markets m ON m.condition_id = t.condition_id
@@ -350,6 +351,7 @@ async def _compute_whale_idents() -> dict:
             ORDER BY t.asset, t.ts DESC
         )
         SELECT l.asset, l.slug, l.outcome, l.price, l.whale, l.entered_ts,
+               l.market_title,
                EXISTS (SELECT 1 FROM live_orders lo
                        WHERE lo.asset = l.asset
                          -- 'submitting' counts as copied (review
@@ -384,6 +386,10 @@ async def _compute_whale_idents() -> dict:
                            "slug": r["slug"], "outcome": r["outcome"],
                            "price": r["price"], "whale": r["whale"],
                            "entered_ts": r["entered_ts"],
+                           # Full market title rides along (2026-08-17):
+                           # the venue-name join can use real player
+                           # names instead of slug-truncated surnames.
+                           "market_title": r["market_title"],
                            "pmus_copied": bool(r["pmus_copied"])}
                           for r in rows if r["slug"] and r["outcome"]],
            "as_of": now}
@@ -422,7 +428,8 @@ async def _fresh_whale_idents(fresh_s: float) -> list[dict]:
                    COALESCE(t.market_slug, t.event_slug, '') AS slug,
                    t.outcome, t.price::float8 AS price,
                    w.username AS whale,
-                   extract(epoch FROM t.ts)::float8 AS entered_ts
+                   extract(epoch FROM t.ts)::float8 AS entered_ts,
+                   m.title AS market_title
             FROM trades t
             JOIN whales w ON w.id = t.whale_id
             LEFT JOIN markets m ON m.condition_id = t.condition_id
@@ -433,6 +440,7 @@ async def _fresh_whale_idents(fresh_s: float) -> list[dict]:
             ORDER BY t.asset, t.ts DESC
         )
         SELECT l.asset, l.slug, l.outcome, l.price, l.whale, l.entered_ts,
+               l.market_title,
                EXISTS (SELECT 1 FROM live_orders lo
                        WHERE lo.asset = l.asset
                          -- 'submitting' holds the claim here too — this
@@ -449,6 +457,7 @@ async def _fresh_whale_idents(fresh_s: float) -> list[dict]:
     return [{"asset": str(r["asset"]), "slug": r["slug"],
              "outcome": r["outcome"], "price": r["price"],
              "whale": r["whale"], "entered_ts": r["entered_ts"],
+             "market_title": r["market_title"],
              "pmus_copied": bool(r["pmus_copied"])}
             for r in rows if r["slug"] and r["outcome"]]
 

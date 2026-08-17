@@ -1,0 +1,85 @@
+# Lifetime whale extraction + calibration (owner green-light 2026-08-17
+# evening, upgrade #2). The engine container has no egress except GitHub;
+# this runner has open internet — it pulls each roster wallet's FULL fill
+# history from the Polymarket data-api using the same windowed-cursor
+# method that produced the 5.35M-fill swisstony study (reference_pull.py:
+# /activity honors start/end; NEVER the offset param, which caps at
+# ~5000), aggregates it into the study's calibration tables on the
+# runner, and ships the small tables back as gzip+base64 blob lines.
+# Raw fill dumps additionally land in an Actions artifact for provenance.
+name: whale-full-history
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "History start (YYYY-MM-DD, UTC)"
+        default: "2024-06-01"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - wallet: rn1
+            address: "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
+            workers: "5"
+          - wallet: w2c33
+            address: "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563"
+            workers: "3"
+          - wallet: homerunhazard
+            address: "0x5268527977f700f9bf9b6d5cd843859e4e70135d"
+            workers: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet requests pandas numpy
+      - name: Pull full history (windowed cursor — no offset param)
+        env:
+          PULL_WALLET: ${{ matrix.address }}
+          PULL_WORKERS: ${{ matrix.workers }}
+          PULL_DATA_DIR: /tmp/whale/${{ matrix.wallet }}
+          PULL_MAX_FILLS: "6000000"
+        run: |
+          set -e
+          mkdir -p "$PULL_DATA_DIR"
+          START="${{ github.event.inputs.start_date }}"
+          export PULL_START_TS=$(date -u -d "${START:-2024-06-01}" +%s)
+          echo "WALLET ${{ matrix.wallet }} $PULL_WALLET start=$PULL_START_TS"
+          python edge-engine/src/edge/ledger/reference_pull.py
+          wc -l "$PULL_DATA_DIR/trades_raw.csv" "$PULL_DATA_DIR/markets_meta.csv"
+      - name: Calibrate (5c bands / league prefix / size buckets)
+        env:
+          PULL_WALLET: ${{ matrix.wallet }}
+          PULL_DATA_DIR: /tmp/whale/${{ matrix.wallet }}
+        run: |
+          set -e
+          python edge-engine/scripts/gen_calib.py
+      - name: Emit calibration blobs (the log IS the return channel)
+        run: |
+          D=/tmp/whale/${{ matrix.wallet }}
+          W=$(echo "${{ matrix.wallet }}" | tr a-z A-Z)
+          echo "# calibration tables, gzip+base64, one line each #"
+          echo "CALIBPX_${W} $(gzip -c $D/calib_price.csv | base64 -w0)"
+          echo "CALIBLG_${W} $(gzip -c $D/calib_league.csv | base64 -w0)"
+          echo "CALIBSZ_${W} $(gzip -c $D/calib_size.csv | base64 -w0)"
+          echo "SUMMARY_${W} $(gzip -c $D/calib_summary.json | base64 -w0)"
+      - name: Archive raw pull (provenance / re-runs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: whale-history-${{ matrix.wallet }}
+          path: |
+            /tmp/whale/${{ matrix.wallet }}/trades_raw.csv
+            /tmp/whale/${{ matrix.wallet }}/markets_meta.csv
+            /tmp/whale/${{ matrix.wallet }}/calib_*.csv
+            /tmp/whale/${{ matrix.wallet }}/calib_summary.json
+          retention-days: 14
+          compression-level: 9

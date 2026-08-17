@@ -159,7 +159,19 @@ class KalshiAdapter(VenueAdapter):
             for ev in data.get("events") or []:
                 outcomes = {}
                 for m in ev.get("markets") or []:
-                    raw_name = m.get("yes_sub_title") or m.get("subtitle") or m.get("ticker", "")
+                    # No ticker fallback (capture-leak trace 2026-08-17):
+                    # a market with no subtitle used to key its outcome
+                    # by the raw TICKER STRING, which scores ~0.26
+                    # against any real name — every name join on that
+                    # event failed silently as 'unmapped'. A missing
+                    # subtitle is now a named census fact instead of a
+                    # poisoned key. (FSC iterates tokens without name-
+                    # matching, so a booked FSC position on an event
+                    # never proved the copy join could see it.)
+                    raw_name = m.get("yes_sub_title") or m.get("subtitle")
+                    if not raw_name:
+                        self._census("no_subtitle")
+                        continue
                     if raw_name and m.get("ticker"):
                         # Canonical form carries the line: "Over 45.5",
                         # "Eagles -7.5", or a plain team for moneyline.

@@ -32,18 +32,20 @@ def _fresh_discovery_cache():
 class _Kalshi:
     name = "kalshi"
 
-    def __init__(self, ask, outcomes=None, ask_size=500.0):
+    def __init__(self, ask, outcomes=None, ask_size=500.0,
+                 market_id="KXWNBAGAME-26AUG04DALCHI"):
         self.ask = ask
         self.ask_size = ask_size
         self.orders = []
         self._outcomes = outcomes or {"Dallas Wings": "T-DAL",
                                       "Chicago Sky": "T-CHI"}
+        self._market_id = market_id
 
     def taker_fee(self, price):
         return 0.07 * price * (1 - price)
 
     def discover_markets(self, league_codes):
-        return [VenueMarket(market_id="KXWNBAGAME-26AUG04DALCHI",
+        return [VenueMarket(market_id=self._market_id,
                             title="Wings at Sky", league_code="wnba",
                             outcome_tokens=dict(self._outcomes))]
 
@@ -138,7 +140,8 @@ def test_swisstony_resumes_behind_the_soccer_price_floor():
     assert _per_copy_usd("SwissTony", "aec-atp-a-b-2026-08-15") == 300.00
     assert _per_copy_usd("rn1", "epl-ars-che-2026-08-15") == 300.00  # soccer cell (2026-08-17)
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
-    ka = _Kalshi(0.72, outcomes={"Arsenal": "T-ARS", "Chelsea": "T-CHE"})
+    ka = _Kalshi(0.72, outcomes={"Arsenal": "T-ARS", "Chelsea": "T-CHE"},
+                 market_id="KXEPLGAME-26AUG15ARSCHE")
     row = {"slug": "epl-ars-che-2026-08-15", "outcome": "Arsenal",
            "price": 0.74, "whale": "swisstony",
            "entered_ts": time.time() - 60}
@@ -147,7 +150,8 @@ def test_swisstony_resumes_behind_the_soccer_price_floor():
     assert ka.orders == [("T-ARS", 0.72, 208)]   # floor($150 / 0.72)
     # The improbable rung (his price 22c) refuses at the policy gate:
     led2 = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
-    ka2 = _Kalshi(0.20, outcomes={"Arsenal": "T-ARS", "Chelsea": "T-CHE"})
+    ka2 = _Kalshi(0.20, outcomes={"Arsenal": "T-ARS", "Chelsea": "T-CHE"},
+                  market_id="KXEPLGAME-26AUG15ARSCHE")
     st2 = sweep(kalshi=ka2, ledger=led2,
                 identities=[{**row, "price": 0.22}], live=True)
     assert st2.get("skipped_sport") == 1

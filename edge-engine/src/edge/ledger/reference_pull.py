@@ -19,6 +19,7 @@ Outputs: data/trades_raw.csv, data/markets_meta.csv, data/sample_raw_trade.json
 
 import csv
 import json
+import os
 import queue
 import threading
 import time
@@ -28,16 +29,27 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-WALLET = "0x204f72f35326db932158cba6adff0b9a1da95e14"  # swisstony
+# Wallet-agnostic since 2026-08-17 (lifetime calibration of the copy
+# roster): every knob the Actions matrix needs is env-overridable, and
+# the defaults reproduce the original swisstony pull exactly.
+WALLET = os.environ.get(
+    "PULL_WALLET", "0x204f72f35326db932158cba6adff0b9a1da95e14")  # swisstony
 DATA_API = "https://data-api.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 PAGE_SIZE = 500
-N_WORKERS = 5
+N_WORKERS = int(os.environ.get("PULL_WORKERS", "5"))
 WINDOW_SEC = 4 * 86400
-HISTORY_START = int(datetime(2025, 7, 1, tzinfo=timezone.utc).timestamp())
+HISTORY_START = int(os.environ.get(
+    "PULL_START_TS",
+    str(int(datetime(2025, 7, 1, tzinfo=timezone.utc).timestamp()))))
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
+# NOTE the historical default resolves to src/edge/data (the flat layout
+# this was vendored from) — Actions callers pass PULL_DATA_DIR.
+DATA_DIR = Path(os.environ.get("PULL_DATA_DIR", str(ROOT / "data")))
 SHARD_DIR = DATA_DIR / "shards"
+# Degrade-to-partial guard: an unexpectedly huge wallet stops at a known
+# cutoff instead of eating the whole job timeout with nothing emitted.
+MAX_FILLS = int(os.environ.get("PULL_MAX_FILLS", "6000000"))
 
 FIELDS = ["timestamp", "condition_id", "market_slug", "market_question", "side",
           "outcome", "outcome_index", "price", "size", "usdc_size", "asset_id", "tx_hash"]
@@ -122,6 +134,12 @@ def trade_worker(wq, wid):
                 ws, we = wq.get_nowait()
             except queue.Empty:
                 return
+            with lock:
+                if counters["fills"] >= MAX_FILLS:
+                    print(f"[w{wid}] MAX_FILLS {MAX_FILLS:,} reached — "
+                          "stopping with a partial pull (known cutoff)",
+                          flush=True)
+                    return
             try:
                 n = pull_window(ws, we, w)
                 f.flush()

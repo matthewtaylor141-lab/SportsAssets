@@ -233,10 +233,29 @@ def market_type_of(slug: str) -> str:
         return "moneyline"        # bare event slug
     if "ftts" in suffix or "btts" in suffix:
         return "btts"
-    if suffix[0] == "es":
+    if suffix[0] == "es" or ("exact" in suffix and "score" in suffix):
         return "exact_score"
+    # WORD-FORM derivatives (capture-leak trace 2026-08-17): the feed
+    # also spells types out — 'exact-score-2-3', 'team-total-home-1pt5',
+    # 'corners-over-9pt5', 'player-points-x-25pt5'. These used to fall
+    # through to the bare-line fallback and classify as SPREAD, which
+    # let exact-scores through spread cells and props past the prop
+    # block. Team totals and corners/cards/player lines are PROP class
+    # (a team total is not the game-total bet); a spelled-out 'total'
+    # without 'team' is the game total.
+    if "player" in suffix or "corners" in suffix or "cards" in suffix:
+        return "prop"
+    if "team" in suffix and "total" in suffix:
+        return "prop"
+    if "total" in suffix:
+        return "total"
     if any(_TOTAL_RE.match(t) for t in suffix):
         return "total"
+    # A line token is a spread ONLY in the company of nothing but short
+    # team codes — any longer unrecognized word beside it means a market
+    # type this parser does not know, and unknown is never tradeable.
+    if any(t.isalpha() and len(t) > 4 for t in suffix):
+        return "unknown"
     if any(_LINE_RE.match(t) for t in suffix):
         return "spread"
     if len(suffix) == 1 and suffix[0].isalpha():
