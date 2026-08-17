@@ -541,6 +541,37 @@ async def venue_export(since_day: str) -> dict:
     return {"since": since_day, "rows": rows, "count": len(rows)}
 
 
+async def venue_export_raw(since_day: str) -> dict:
+    """VERBATIM venue activities since a date — no flattening at all.
+
+    Exists because the flattened export proved lossy on 2026-08-17: its
+    trade rows carry side=None (the venue's field name differs from the
+    flattener's guess) and its resolution rows reduce the position
+    objects to two numbers, which made the weekly report's realized
+    P&L unverifiable against the account balance. Raw rows carry every
+    field the venue sends, so the report can rebuild cash truth with
+    no interpretation and reconcile to the dollar."""
+    cfg = settings()
+    if not (cfg.pmus_key_id and cfg.pmus_secret_key):
+        return {"configured": False}
+    try:
+        acts = await _week_activities(since_day)
+    except Exception as exc:  # noqa: BLE001 — name it, never 500
+        return {"since": since_day, "error":
+                f"{type(exc).__name__}: {str(exc)[:200]}"}
+    rows = []
+    for act in acts:
+        ts = _any_ts(act)
+        if ts:
+            import datetime as _dt
+            when = _dt.datetime.fromtimestamp(
+                ts, tz=_dt.timezone.utc).isoformat()
+            if when[:10] < since_day:
+                continue
+        rows.append(act)
+    return {"since": since_day, "rows": rows, "count": len(rows)}
+
+
 async def tennis_week_report(days: list[str]) -> dict:
     """Owner question 2026-08-14: P&L on EVERY tennis play this week,
     straight from the venue ledger — manual and AI alike."""

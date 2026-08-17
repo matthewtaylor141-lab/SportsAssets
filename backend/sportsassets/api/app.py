@@ -2490,6 +2490,25 @@ async def api_venue_export(since: str | None = Query(None)) -> dict:
     return await venue_export(since)
 
 
+@app.get("/api/venue-export-raw")
+async def api_venue_export_raw(since: str | None = Query(None)) -> dict:
+    """Verbatim venue activities (no flattening) — the weekly report's
+    cash-truth source after the 2026-08-17 reconciliation found the
+    flat export drops the trade side and reduces resolution position
+    objects to two numbers. Public on the same precedent as
+    /api/venue-export (owner order 2026-08-14: every trade on the
+    account, served plainly); carries no credentials or keys."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from .pmus_account import venue_export_raw
+
+    if not since:
+        today = datetime.now(tz=ZoneInfo("America/New_York")).date()
+        since = (today - timedelta(days=today.weekday())).isoformat()
+    return await venue_export_raw(since)
+
+
 @app.get("/api/pmus-account")
 async def api_pmus_account() -> dict:
     """The REAL Polymarket US account, live from the venue's portfolio API:

@@ -307,6 +307,14 @@ jobs:
           if [ -s /tmp/kxraw.json ]; then
             echo "KXRAWBLOB $(gzip -c /tmp/kxraw.json | base64 -w0)"
           fi
+          # PM raw activities (verbatim venue rows) for the weekly report
+          curl -sS --max-time 280 -o /tmp/pxraw.json \
+            "$BASE/api/venue-export-raw?since=2026-08-10" || true
+          if [ -s /tmp/pxraw.json ] && jq -e '.rows' /tmp/pxraw.json >/dev/null 2>&1; then
+            echo "PXRAWBLOB $(gzip -c /tmp/pxraw.json | base64 -w0)"
+          else
+            echo "PXRAWBLOB FAILED $(head -c 120 /tmp/pxraw.json 2>/dev/null)"
+          fi
           # Category split (site accounting, ±$100 display cap applies) —
           # weekly management report needs the per-day sleeve/manual shape.
           curl -sS --max-time 30 -o /tmp/rr.json \
