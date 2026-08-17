@@ -799,8 +799,14 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     # (his+2% fee-loaded, fee floors, collapse guard); whatever Kalshi
     # cannot price is reclaimed by the hourly sweep here — which is why
     # sweep-recovery rows never defer: they ARE the reclaim.
+    # OWNER ORDER 2026-08-17 night: "All copies should happen on
+    # POLYMARKET." The Kalshi first-claim deference is OFF by default —
+    # PMUS executes every copy; the Kalshi copy sweep is dark behind
+    # its own EDGE_KCOPY_PM_ONLY gate. Restore the split (deliberately)
+    # with PMUS_ALL_COPIES=0.
     from .copy_sports import KALSHI_FIRST_SPORTS, kalshi_first, sport_of
-    if (not payload.get("sweep_recovery")
+    if (os.environ.get("PMUS_ALL_COPIES", "1") == "0"
+            and not payload.get("sweep_recovery")
             and kalshi_first(str(payload.get("asset") or ""))
             and sport_of(payload.get("market_slug")
                          or payload.get("event_slug") or "")

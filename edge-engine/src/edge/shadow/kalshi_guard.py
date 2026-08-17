@@ -68,6 +68,20 @@ def live_blocked(ledger, scope: str = "engine") -> str | None:
     return None
 
 
+# OWNER ORDER 2026-08-17 night: on Kalshi, the first-set-comeback
+# sleeve is the ONLY permitted tennis trader — "There should not be any
+# other tennis plays at all." Every other Kalshi order path must refuse
+# tennis; these are the shared identifiers they refuse by.
+TENNIS_LEAGUES = frozenset({
+    "atp", "wta", "itf", "ch", "atpch", "wtach", "challenger",
+    "atpcq", "wtacq", "itfwo", "itfme", "tennis"})
+_TENNIS_TICKER_PREFIXES = ("KXATP", "KXWTA", "KXITF", "KXCHALLENGER")
+
+
+def is_tennis_ticker(ticker: str) -> bool:
+    return str(ticker or "").upper().startswith(_TENNIS_TICKER_PREFIXES)
+
+
 def event_of(ticker: str) -> str:
     """'KXWTAMATCH-26AUG04ANDPLI-AND' -> 'KXWTAMATCH-26AUG04ANDPLI'."""
     parts = (ticker or "").rsplit("-", 1)

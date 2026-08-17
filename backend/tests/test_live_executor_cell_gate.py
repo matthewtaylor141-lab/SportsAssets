@@ -80,15 +80,18 @@ def test_unenriched_fresh_payload_resolves_slug_before_cell_gate(monkeypatch):
 
 
 def test_resolved_slug_outside_cells_is_dropped(monkeypatch):
-    # HomeRunHazard has no basketball cell — resolution must not weaken
-    # the policy, only inform it.
+    # The paused HomeRunHazard copies nothing — a RESOLVED slug must
+    # not weaken that policy, only inform it. (The old fixture only
+    # "dropped" via the Kalshi-first deference, which is now off —
+    # PM-only routing, owner 2026-08-17 night.)
     pool = _FakePool()
     _wire(monkeypatch, pool, {
         "market_slug": f"nba-bos-lal-{date.today().isoformat()}",
         "event_slug": None, "market_title": "Celtics v Lakers",
         "event_title": None, "outcome": "Boston Celtics",
     })
-    asyncio.run(live_executor.maybe_execute(_payload(), None))
+    asyncio.run(live_executor.maybe_execute(
+        _payload(whale_username="HomeRunHazard"), None))
     assert pool.fetchval_calls == 0
 
 
@@ -130,14 +133,28 @@ def _wnba_ctx():
 
 
 def test_kalshi_first_fresh_copy_defers_to_the_engine(monkeypatch):
-    """Half the fresh flow in Kalshi-listed sports belongs to the
-    Kalshi leg — the PMUS executor steps aside before writing rows so
-    the engine's sweep can claim it."""
+    """The venue-split machinery, testable behind its re-arm switch:
+    with PMUS_ALL_COPIES=0 half the fresh flow in Kalshi-listed sports
+    still defers to the Kalshi leg. The DEFAULT is PM-only routing
+    (owner 2026-08-17 night) — see the test below."""
+    monkeypatch.setenv("PMUS_ALL_COPIES", "0")
     pool = _FakePool()
     _wire(monkeypatch, pool, _wnba_ctx())
     asyncio.run(live_executor.maybe_execute(
         _payload(asset=_asset(True)), None))
     assert pool.fetchval_calls == 0
+
+
+def test_default_routing_executes_every_copy_on_pmus(monkeypatch):
+    """Owner 2026-08-17 night: "All copies should happen on
+    POLYMARKET." A kalshi-first asset in a Kalshi-listed sport no
+    longer defers — PMUS proceeds to the order plumbing."""
+    monkeypatch.delenv("PMUS_ALL_COPIES", raising=False)
+    pool = _FakePool()
+    _wire(monkeypatch, pool, _wnba_ctx())
+    asyncio.run(live_executor.maybe_execute(
+        _payload(asset=_asset(True)), None))
+    assert pool.fetchval_calls > 0
 
 
 def test_sweep_recovery_rows_never_defer(monkeypatch):

@@ -213,6 +213,16 @@ def sweep(*, kalshi, ledger, base: str, token: str, live: bool) -> dict:
                 stats[k] = stats.get(k, 0) + 1
 
         league = str(t.get("league") or "").lower()
+        # OWNER ORDER 2026-08-17 night: on Kalshi, tennis belongs to
+        # the first-set-comeback sleeve ALONE. A tennis task is refused
+        # terminally — even if this sleeve is later unpaused, it can
+        # never place a Kalshi tennis order again.
+        from edge.shadow.kalshi_guard import TENNIS_LEAGUES
+        if league in TENNIS_LEAGUES:
+            _report(t["id"], "tennis_blocked",
+                    error="Kalshi tennis is FSC-only (owner 2026-08-17)")
+            stats["tennis_blocked"] = stats.get("tennis_blocked", 0) + 1
+            continue
         if league not in discovered:
             try:
                 discovered[league] = kalshi.discover_markets({league})

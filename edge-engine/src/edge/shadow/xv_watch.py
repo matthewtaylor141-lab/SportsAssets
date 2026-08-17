@@ -65,6 +65,17 @@ class XVWatch:
                 legs[team] = dict(sides)
         if len(legs) != 2:
             return
+        # OWNER ORDER 2026-08-17 night: no Kalshi tennis outside the
+        # FSC sleeve — a tennis pair is never registered, so the watch
+        # can never fire a tennis leg on Kalshi. (Tennis arbs are
+        # therefore off; the owner can re-open them by widening this.)
+        from edge.shadow.kalshi_guard import TENNIS_LEAGUES, \
+            is_tennis_ticker
+        if (str(league or "").lower() in TENNIS_LEAGUES
+                or any(is_tennis_ticker(leg.token)
+                       for sides in legs.values()
+                       for leg in sides.values())):
+            return
         with self._lock:
             self._registry[event_key] = {
                 "label": label, "league": league, "legs": legs,

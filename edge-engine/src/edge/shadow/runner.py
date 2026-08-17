@@ -2517,13 +2517,26 @@ def _main_impl() -> None:
                             headers={"X-Engine-Token": token},
                             timeout=10)
 
-                    # pmus rides along for the pm-first deference peek
-                    # (stream-cache-only read; needs no credentials).
-                    st = kcopy(kalshi=kalshi_c, ledger=ledger,
-                               identities=rows, live=risk.is_live,
-                               pmus=pmus_c, on_copied=_claim_back,
-                               day_usd=float(os.environ.get(
-                                   "EDGE_KCOPY_DAY_USD", "inf")))
+                    # OWNER ORDER 2026-08-17 night: "All copies should
+                    # happen on POLYMARKET." The Kalshi copy sweep is
+                    # OFF by default — this loop keeps running because
+                    # the FSC sleeve and venue-truth telemetry ride it,
+                    # but no copy orders are placed on Kalshi. Re-arm
+                    # (deliberately, no deploy) with
+                    # EDGE_KCOPY_PM_ONLY=0.
+                    if os.environ.get("EDGE_KCOPY_PM_ONLY", "1") != "0":
+                        st = {"pm_only":
+                              "copies route to Polymarket "
+                              "(owner 2026-08-17 night)",
+                              "identities_seen": len(rows)}
+                    else:
+                        # pmus rides along for the pm-first deference
+                        # peek (stream-cache-only read; no credentials).
+                        st = kcopy(kalshi=kalshi_c, ledger=ledger,
+                                   identities=rows, live=risk.is_live,
+                                   pmus=pmus_c, on_copied=_claim_back,
+                                   day_usd=float(os.environ.get(
+                                       "EDGE_KCOPY_DAY_USD", "inf")))
                     # VENUE TRUTH rides with every heartbeat (owner
                     # report 2026-08-10 evening): the account's actual
                     # open positions / today's fills, refreshed every
