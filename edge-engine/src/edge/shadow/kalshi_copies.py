@@ -78,15 +78,26 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # 2026-08-12 (owner orders, the soccer resume): swisstony stays $200
 # everywhere EXCEPT soccer, which clips at $100 per event — the
 # per-(whale, sport) override below carries the exception.
-PER_COPY_USD = {"rn1": 150.00, "swisstony": 200.00}
-# 2026-08-17 (owner order: integrate weekly-report recommendations, R2 —
-# sport-aware copy allocation): RN1's own tennis book lost ~$100k of its
-# own money in the Aug 10-16 week while its MLB (+$64.8k) and soccer
-# (+$49.3k) carried its profit, so RN1 tennis copies clip at HALF until
-# its tennis grade turns. 0x2c33's soccer raise to $150 waits out the
-# verification week the same recommendation specifies.
+_W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
+# 2026-08-17 pm (owner order: "maximize the copy trades and maximize the
+# profit margin on dollar spend"): clip dollars follow the whales' own
+# measured per-sport edge from the Aug 10-16 tracker week, net of our
+# ~1.5c reaction decay. 0x2c33 ran +$1.19M at 10.6% ROI (soccer-led) —
+# raised to $150 base. RN1's profit lives in baseball (+$64.8k) and
+# soccer (+$49.3k) — raised there; its tennis (-$100k own money) stays
+# half. HomeRunHazard's MLB (+$145k at 3.2% ROI) earns $150; its NFL
+# (-$27k) drops to $25. A 0.00 cell is a BLOCK: 0x2c33 tennis (-$273k
+# of its own money) is not copied at all. Breakers, day budgets and
+# never-add are untouched.
+PER_COPY_USD = {"rn1": 150.00, "swisstony": 200.00,
+                _W2C33: 150.00, "homerunhazard": 50.00}
 PER_COPY_USD_SPORT = {("swisstony", "soccer"): 100.00,
-                      ("rn1", "tennis"): 75.00}
+                      ("rn1", "tennis"): 75.00,
+                      ("rn1", "baseball"): 250.00,
+                      ("rn1", "soccer"): 200.00,
+                      (_W2C33, "tennis"): 0.00,
+                      ("homerunhazard", "baseball"): 150.00,
+                      ("homerunhazard", "football"): 25.00}
 PER_COPY_DEFAULT = 50.00
 # Inverse volume<->size scaling (owner order 2026-08-12): past this
 # many fills in a venue-day, the clip shrinks proportionally — 10x
@@ -675,9 +686,12 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                         stats["maker_resting"] = \
                             stats.get("maker_resting", 0) + 1
                         continue
-                per_m = _scaled_per(
-                    _per_copy_usd(row.get("whale") or "", slug),
-                    row.get("whale") or "")
+                _base_m = _per_copy_usd(row.get("whale") or "", slug)
+                if _base_m <= 0:      # blocked (whale, sport) cell
+                    stats["skipped_cell_blocked"] = \
+                        stats.get("skipped_cell_blocked", 0) + 1
+                    continue
+                per_m = _scaled_per(_base_m, row.get("whale") or "")
                 if (day_usd > 0 and not _uncapped(row.get("whale") or "")
                         and (spent - rn1_spent) + per_m > day_usd):
                     continue
@@ -762,8 +776,12 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 stats["routed_pmus_better"] = \
                     stats.get("routed_pmus_better", 0) + 1
                 continue
-        per = _scaled_per(_per_copy_usd(row.get("whale") or "", slug),
-                          row.get("whale") or "")
+        _base = _per_copy_usd(row.get("whale") or "", slug)
+        if _base <= 0:                # blocked (whale, sport) cell
+            stats["skipped_cell_blocked"] = \
+                stats.get("skipped_cell_blocked", 0) + 1
+            continue
+        per = _scaled_per(_base, row.get("whale") or "")
         # EDGE_KCOPY_DAY_USD <= 0 = NO day cap (owner 2026-08-10: "I dont
         # want trades missing if they are being placed by our copied and
         # tested accounts"). The copy circuit breaker and account cash

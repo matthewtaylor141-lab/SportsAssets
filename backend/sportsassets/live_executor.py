@@ -290,8 +290,19 @@ PENNY_TRIAL_PER_FILL_USD = 50.00
 # swisstony (owner orders 2026-08-12, the soccer resume): $200 clip
 # everywhere EXCEPT soccer, which limits at $100 per event — the
 # per-(whale, sport) override map carries the exception.
-PER_FILL_BY_WHALE = {"rn1": 150.00, "swisstony": 200.00}
-PER_FILL_BY_WHALE_SPORT = {("swisstony", "soccer"): 100.00}
+# 2026-08-17 pm (owner order: maximize copy capture + margin per dollar):
+# clips follow the whales' measured per-sport edge from the tracker week —
+# see kalshi_copies.py for the numbers. A 0.00 cell is a BLOCK (skip).
+_W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
+PER_FILL_BY_WHALE = {"rn1": 150.00, "swisstony": 200.00,
+                     _W2C33: 150.00, "homerunhazard": 50.00}
+PER_FILL_BY_WHALE_SPORT = {("swisstony", "soccer"): 100.00,
+                           ("rn1", "tennis"): 75.00,
+                           ("rn1", "baseball"): 250.00,
+                           ("rn1", "soccer"): 200.00,
+                           (_W2C33, "tennis"): 0.00,
+                           ("homerunhazard", "baseball"): 150.00,
+                           ("homerunhazard", "football"): 25.00}
 # 24H ROLLING-LOSS BREAKER (owner 2026-08-12, threshold his call:
 # "$1500"): when the copy sleeve's realized losses over any rolling
 # 24 hours reach this, copying pauses by itself until the window
@@ -332,6 +343,8 @@ MIN_CLIP_USD = 5.0
 async def volume_normalized_clip(pool, whale_username: str | None,
                                  slug: str | None = None) -> float:
     base = per_fill_usd(whale_username, slug)
+    if base <= 0:      # blocked (whale, sport) cell — caller must skip
+        return 0.0
     w = (whale_username or "").lower()
     baseline = BASELINE_FILLS_PER_DAY.get(w, BASELINE_FILLS_DEFAULT)
     try:
