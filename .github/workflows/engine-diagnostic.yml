@@ -332,6 +332,30 @@ jobs:
               done
             done
             echo "WDBLOB $(gzip -c /tmp/wdays.json | base64 -w0)"
+            # Retry lane for the heavy histories that time out at 20s
+            # (swisstony full ledger replay; RN1 busiest days).
+            echo '[]' > /tmp/wretry.json
+            for pair in "1:2026-08-10" "1:2026-08-11" "1:2026-08-12" "1:2026-08-13" \
+                        "1:2026-08-14" "1:2026-08-15" "1:2026-08-16" \
+                        "2:2026-08-10" "2:2026-08-12" "2:2026-08-13"; do
+              id="${pair%%:*}"; d="${pair##*:}"
+              for try in 1 2; do
+                curl -sS --max-time 110 -o /tmp/wd.json "$BASE/api/whales/$id/day/$d" && break
+                sleep 3
+              done
+              [ -s /tmp/wd.json ] || continue
+              jq -c --argjson id "$id" '. as $o | {id: $id, date: $o.date, pnl: $o.pnl,
+                stake: $o.stake, wins: $o.wins, losses: $o.losses,
+                settled: $o.settled_count, trades: $o.trades_placed,
+                volume: $o.volume_placed,
+                sports: [($o.sports // [])[] | {sport, pnl, stake, wins, losses,
+                  top: ((.bets // [])[:3] | map({t: (.market_title // .event_title // ""), pnl}))}]}' \
+                /tmp/wd.json > /tmp/wd1.json 2>/dev/null || continue
+              jq -c -s '.[0] + [.[1]]' /tmp/wretry.json /tmp/wd1.json > /tmp/wr2.json \
+                && mv /tmp/wr2.json /tmp/wretry.json
+              rm -f /tmp/wd.json
+            done
+            echo "WRETRYBLOB $(gzip -c /tmp/wretry.json | base64 -w0)"
           fi
 
           echo ""
