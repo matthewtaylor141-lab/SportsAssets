@@ -3,6 +3,7 @@ markets are excluded from /markets?condition_ids= unless closed=true is
 passed. Query closed=true first (most of a year of history is resolved),
 then retry the remainder with the default filter for still-open markets."""
 import json
+import os
 import queue
 import threading
 import time
@@ -12,8 +13,11 @@ import pandas as pd
 import requests
 
 GAMMA = "https://gamma-api.polymarket.com/markets"
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-N_WORKERS, CHUNK = 5, 40
+# Env-overridable since 2026-08-17 (lifetime roster calibration on the
+# Actions runner); the default keeps the vendored flat-layout path.
+DATA_DIR = Path(os.environ.get(
+    "PULL_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data")))
+N_WORKERS, CHUNK = int(os.environ.get("PULL_WORKERS", "5")), 40
 _local = threading.local()
 
 

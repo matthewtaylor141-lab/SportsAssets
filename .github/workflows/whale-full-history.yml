@@ -55,6 +55,11 @@ jobs:
           export PULL_START_TS=$(date -u -d "${START:-2024-06-01}" +%s)
           echo "WALLET ${{ matrix.wallet }} $PULL_WALLET start=$PULL_START_TS"
           python edge-engine/src/edge/ledger/reference_pull.py
+          # Gamma drift repair (July 2026): closed markets are excluded
+          # from /markets?condition_ids= unless closed=true — and a
+          # lifetime history is ~all closed markets. The first run
+          # resolved 14 of 7,246 ids without this. Two-pass re-pull:
+          python edge-engine/src/edge/ledger/reference_meta.py
           wc -l "$PULL_DATA_DIR/trades_raw.csv" "$PULL_DATA_DIR/markets_meta.csv"
       - name: Calibrate (5c bands / league prefix / size buckets)
         env:
