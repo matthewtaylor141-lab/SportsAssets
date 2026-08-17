@@ -18,16 +18,18 @@ CONFIRMED by a second sweep still in the band >= CONFIRM_MIN_S later.
 The match-day gate keeps a days-ahead listing from arming (Kalshi lists
 tennis well in advance, and a pre-match news drop on Tuesday must not
 read as a Thursday set loss); the confirmation sweep refuses one-print
-blips and a retirement/walkover collapse passing THROUGH the band; below
-TRIG_LO is worse news than one set and is skipped. Every knob is
+blips and collapses moving too fast to hold the band across two sweeps;
+below TRIG_LO is worse news than one set and is skipped. Every knob is
 env-tunable; a scores feed can replace the trigger later and nothing
 else changes.
 
-KNOWN RESIDUALS of price-only inference, accepted for v1: a same-day
-pre-match collapse that parks in the band for two sweeps can still buy
-before first serve, and a deploy landing mid-match can snapshot the
-current leader as "favorite". Both are bounded at PER_ENTRY_USD and
-surface in the funnel's decision record.
+KNOWN RESIDUALS of price-only inference, accepted for v1 (each bounded
+at PER_ENTRY_USD and stamped into the fill's decision record): a
+same-day pre-match collapse that parks in the band for two sweeps can
+buy before first serve; a SLOW in-match collapse (medical timeout,
+creeping retirement risk) that sits in the band across two sweeps reads
+as a set loss; and a deploy landing mid-match can snapshot the current
+leader as "favorite".
 
 Entries are IOC taker buys of PER_ENTRY_USD at the live ask, whole
 contracts, one per match EVER, held to settlement (no exit logic).
