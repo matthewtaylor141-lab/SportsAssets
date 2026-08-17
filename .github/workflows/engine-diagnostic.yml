@@ -603,6 +603,62 @@ jobs:
                  else .[] | "   \(.day)  \(.settled) settled  W\(.wins)/L\(.losses)  staked $\(.staked)  realized $\(.realized)  ROI \(.roi // "n/a")" end' \
              /tmp/acct.json 2>/dev/null || true
 
+      - name: Weekly report data (whale on-chain activity + branding, via runner)
+        if: always()
+        run: |
+          # Management weekly report inputs (owner order 2026-08-17).
+          # The runner has open internet; the analysis container does not,
+          # so raw whale activity ships as gzip blobs like the exports.
+          set +e
+          D="https://data-api.polymarket.com/activity"
+          CUT=$(date -u -d '15 days ago' +%s)
+          crawl () {  # $1 name  $2 address
+            # Pages accumulate as one JSON array; offset advances by the
+            # ROWS ACTUALLY RETURNED (the server may cap below our ask —
+            # advancing by the ask would silently skip rows).
+            local out="/tmp/w_$1.json" n=0 off=0 rows cnt oldest first=1
+            echo "[" > "$out"
+            while [ $n -lt 60 ]; do
+              rows=$(curl -sS --max-time 25 "$D?user=$2&limit=500&offset=$off")
+              cnt=$(echo "$rows" | jq 'length' 2>/dev/null || echo 0)
+              if [ -z "$cnt" ] || [ "$cnt" = "0" ] || [ "$cnt" = "null" ]; then break; fi
+              if [ $first -eq 1 ]; then first=0; else echo "," >> "$out"; fi
+              echo "$rows" | jq -c '.[]' | paste -sd, - >> "$out"
+              oldest=$(echo "$rows" | jq '[.[].timestamp] | min' 2>/dev/null || echo 0)
+              n=$((n+1)); off=$((off+cnt))
+              if [ "$oldest" != "null" ] && [ "$oldest" -lt "$CUT" ]; then break; fi
+              sleep 0.4
+            done
+            echo "]" >> "$out"
+            echo "WHALE $1: pages=$n rows_offset=$off bytes=$(wc -c <"$out")"
+          }
+          crawl rn1        0x2005d16a84ceefa912d4e380cd32e7ff827875ea
+          crawl swisstony  0x204f72f35326db932158cba6adff0b9a1da95e14
+          crawl w2c33      0x2c335066fe58fe9237c3d3dc7b275c2a034a0563
+          for w in rn1 swisstony w2c33; do
+            if [ -s /tmp/w_$w.json ] && jq -e 'length' /tmp/w_$w.json >/dev/null 2>&1; then
+              echo "WBLOB_$w $(gzip -c /tmp/w_$w.json | base64 -w0)"
+            else
+              echo "WBLOB_$w FAILED"
+            fi
+          done
+          # BettorToken branding: homepage + logo, best-effort.
+          curl -sSL --max-time 30 -o /tmp/bt.html "https://www.bettortoken.com" \
+            && echo "SITEHTML bytes=$(wc -c </tmp/bt.html)" || echo "SITEHTML FAILED"
+          if [ -s /tmp/bt.html ]; then
+            echo "BTHTMLBLOB $(gzip -c /tmp/bt.html | base64 -w0)"
+            LOGO=$(grep -oE '(content|src|href)="[^"]*(logo|icon)[^"]*"' /tmp/bt.html \
+                   | grep -oE 'https?://[^"]+|/[^"]+' | head -3)
+            i=0
+            for u in $LOGO; do
+              case "$u" in /*) u="https://www.bettortoken.com$u";; esac
+              i=$((i+1))
+              curl -sSL --max-time 20 -o /tmp/logo_$i "$u" \
+                && echo "LOGOBLOB_$i url=$u type=$(file -b --mime-type /tmp/logo_$i) $(base64 -w0 </tmp/logo_$i | head -c 400000)" \
+                || echo "LOGOBLOB_$i FAILED $u"
+            done
+          fi
+
       - name: Kalshi series census (runner has open internet; the container does not)
         if: always()
         run: |
