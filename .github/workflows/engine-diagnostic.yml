@@ -310,6 +310,29 @@ jobs:
           if [ -s /tmp/rr.json ]; then
             echo "RRBLOB $(gzip -c /tmp/rr.json | base64 -w0)"
           fi
+          # Whale week performance from the platform's own tracker (the
+          # data-api activity feed caps at offset 5000 — ~16h for RN1 —
+          # so the DB replay is the only complete 7-day source).
+          curl -sS --max-time 30 -o /tmp/whales.json "$BASE/api/whales" || true
+          if [ -s /tmp/whales.json ]; then
+            echo "WHROSTER $(jq -c '[.[] | {id, username, address, active}]' /tmp/whales.json 2>/dev/null | gzip -c | base64 -w0)"
+            echo '[]' > /tmp/wdays.json
+            for id in $(jq -r '.[].id' /tmp/whales.json 2>/dev/null | head -8); do
+              for d in 2026-08-10 2026-08-11 2026-08-12 2026-08-13 2026-08-14 2026-08-15 2026-08-16; do
+                curl -sS --max-time 20 -o /tmp/wd.json "$BASE/api/whales/$id/day/$d" || continue
+                jq -c --argjson id "$id" '. as $o | {id: $id, date: $o.date, pnl: $o.pnl,
+                  stake: $o.stake, wins: $o.wins, losses: $o.losses,
+                  settled: $o.settled_count, trades: $o.trades_placed,
+                  volume: $o.volume_placed,
+                  sports: [($o.sports // [])[] | {sport, pnl, stake, wins, losses,
+                    top: ((.bets // [])[:3] | map({t: (.market_title // .event_title // ""), pnl}))}]}' \
+                  /tmp/wd.json > /tmp/wd1.json 2>/dev/null || continue
+                jq -c -s '.[0] + [.[1]]' /tmp/wdays.json /tmp/wd1.json > /tmp/wdays2.json \
+                  && mv /tmp/wdays2.json /tmp/wdays.json
+              done
+            done
+            echo "WDBLOB $(gzip -c /tmp/wdays.json | base64 -w0)"
+          fi
 
           echo ""
           echo "#   MEMORY WATCH (rss_mb over 2 min — where does it die?)    #"
