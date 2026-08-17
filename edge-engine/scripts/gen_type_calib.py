@@ -146,11 +146,12 @@ def main() -> None:
     t["pnl"] = t["size"] * (t["payout"] - t["price"])
 
     # Classify once per MARKET, map onto fills (the 5.35M-fill lesson).
+    # One groupby, not a frame scan per market: the per-cid .loc scan
+    # was quadratic (observed: RN1's 110k markets x 4.36M rows).
+    slug_of = t.groupby("condition_id")["market_slug"].first()
     per_mkt = {}
-    for cid in t["condition_id"].unique():
-        slug_rows = t.loc[t["condition_id"] == cid, "market_slug"]
-        text = f"{q_map.get(cid, '')} {slug_rows.iloc[0] if len(slug_rows) else ''}"
-        per_mkt[cid] = classify(text)
+    for cid, slug in slug_of.items():
+        per_mkt[cid] = classify(f"{q_map.get(cid, '')} {slug or ''}")
     t["category"] = t["condition_id"].map(lambda c: per_mkt[c][0])
     t["subtype"] = t["condition_id"].map(lambda c: per_mkt[c][1])
 
