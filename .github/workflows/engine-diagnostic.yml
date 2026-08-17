@@ -303,6 +303,13 @@ jobs:
           if [ -s /tmp/kx.json ]; then
             echo "KXBLOB $(gzip -c /tmp/kx.json | base64 -w0)"
           fi
+          # Category split (site accounting, ±$100 display cap applies) —
+          # weekly management report needs the per-day sleeve/manual shape.
+          curl -sS --max-time 30 -o /tmp/rr.json \
+            "$BASE/api/report/range?from=2026-08-10&to=2026-08-17" || true
+          if [ -s /tmp/rr.json ]; then
+            echo "RRBLOB $(gzip -c /tmp/rr.json | base64 -w0)"
+          fi
 
           echo ""
           echo "#   MEMORY WATCH (rss_mb over 2 min — where does it die?)    #"
