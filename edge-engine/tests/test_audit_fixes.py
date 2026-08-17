@@ -133,6 +133,7 @@ def test_live_orders_route_to_the_venue_with_the_better_price(monkeypatch):
 
     monkeypatch.setenv("EDGE_STRATEGY_LIVE", "1")
     monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
+    monkeypatch.setenv("EDGE_ENGINE_TRADES", "1")  # 08-17 hard-off open
     monkeypatch.setenv("EDGE_LIVE_VENUES", "kalshi,polymarket-us")
     tmp = pathlib.Path(__import__("tempfile").mkdtemp())
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp))
@@ -187,6 +188,7 @@ def test_quarantined_band_paper_logs_instead_of_paying(monkeypatch):
 
     monkeypatch.setenv("EDGE_STRATEGY_LIVE", "1")
     monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
+    monkeypatch.setenv("EDGE_ENGINE_TRADES", "1")  # 08-17 hard-off open
     monkeypatch.setenv("EDGE_LIVE_VENUES", "polymarket-us")
     tmp = pathlib.Path(tempfile.mkdtemp())
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp))

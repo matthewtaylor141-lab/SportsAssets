@@ -1,0 +1,281 @@
+"""Kalshi FIRST-SET COMEBACK sleeve (owner order 2026-08-17 evening).
+
+"For all tennis: ATP, WTA, and ITF (identify favorites before the match
+begins). Monitor the match and any favorite that loses the first set
+automatically place a $100 trade on Kalshi on that player. Let the trade
+play out until settlement."
+
+Isolated by construction: its own claims (fsc:<event>), its own grading
+category (kalshi_fsc), its own kill switch, day cap and thread. It never
+touches the copy sleeves' state and nothing here runs on Polymarket.
+
+SET-1 DETECTION (v1, price-inferred — no set-score feed exists in our
+stack): the favorite is snapshotted from Kalshi's own book (ask inside
+[FAV_MIN, FAV_MAX]) on MATCH DAY, and "lost the first set" is the same
+market trading down into [TRIG_LO, TRIG_HI], having dropped >= MIN_DROP
+from the snapshot, >= ARMED_AGE_S after the snapshot first qualified,
+CONFIRMED by a second sweep still in the band >= CONFIRM_MIN_S later.
+The match-day gate keeps a days-ahead listing from arming (Kalshi lists
+tennis well in advance, and a pre-match news drop on Tuesday must not
+read as a Thursday set loss); the confirmation sweep refuses one-print
+blips and a retirement/walkover collapse passing THROUGH the band; below
+TRIG_LO is worse news than one set and is skipped. Every knob is
+env-tunable; a scores feed can replace the trigger later and nothing
+else changes.
+
+KNOWN RESIDUALS of price-only inference, accepted for v1: a same-day
+pre-match collapse that parks in the band for two sweeps can still buy
+before first serve, and a deploy landing mid-match can snapshot the
+current leader as "favorite". Both are bounded at PER_ENTRY_USD and
+surface in the funnel's decision record.
+
+Entries are IOC taker buys of PER_ENTRY_USD at the live ask, whole
+contracts, one per match EVER, held to settlement (no exit logic).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+import uuid
+
+log = logging.getLogger(__name__)
+
+# The venue series map's tennis keys. "itf" overlaps atp/wta on the
+# challenger series but uniquely carries KXITFMATCH/KXITFWMATCH (there
+# is no "ch" key); the per-sweep seen-set below absorbs the overlap.
+LEAGUES = ("atp", "wta", "itf")
+
+PER_ENTRY_USD = float(os.environ.get("EDGE_FSC_USD", "100"))
+FAV_MIN = float(os.environ.get("EDGE_FSC_FAV_MIN", "0.55"))
+FAV_MAX = float(os.environ.get("EDGE_FSC_FAV_MAX", "0.90"))
+TRIG_LO = float(os.environ.get("EDGE_FSC_TRIG_LO", "0.20"))
+# 0.50, not 0.45: a 0.80-0.90 favorite who drops the first set reprices
+# to ~0.50-0.65, and 0.45 would have excluded that whole cohort from
+# "any favorite that loses the first set".
+TRIG_HI = float(os.environ.get("EDGE_FSC_TRIG_HI", "0.50"))
+MIN_DROP = float(os.environ.get("EDGE_FSC_MIN_DROP", "0.12"))
+# Minimum seconds between the snapshot first qualifying and any trigger:
+# the proxy for "a first set has actually been contested".
+ARMED_AGE_S = float(os.environ.get("EDGE_FSC_ARMED_AGE_S", "1500"))
+# The trigger must hold across two sweeps this far apart before money
+# moves — one book print is a blip, not a set.
+CONFIRM_MIN_S = float(os.environ.get("EDGE_FSC_CONFIRM_MIN_S", "60"))
+CONFIRM_MAX_S = float(os.environ.get("EDGE_FSC_CONFIRM_MAX_S", "900"))
+# A snapshot older than this is a different session of play (rain delay,
+# next-day carryover) — re-arm rather than trigger on stale state.
+SNAP_MAX_AGE_S = float(os.environ.get("EDGE_FSC_SNAP_MAX_AGE_S", "28800"))
+DAY_USD = float(os.environ.get("EDGE_FSC_DAY_USD", "2500"))
+
+_MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+           "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+
+
+def _day_key(now: float) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(now - 4 * 3600))  # ET-ish
+
+
+def _date_token(now: float) -> str:
+    """'26AUG17' — the date prefix Kalshi tickers embed, in ET-ish.
+    Built by hand: strftime %b is locale-dependent."""
+    tm = time.gmtime(now - 4 * 3600)
+    return f"{tm.tm_year % 100:02d}{_MONTHS[tm.tm_mon - 1]}{tm.tm_mday:02d}"
+
+
+def _match_day_ok(event: str, now: float) -> bool:
+    """True when the event's embedded date is today or yesterday (ET) —
+    yesterday stays eligible so a night match live past midnight is not
+    abandoned mid-monitor. Future-dated listings are the important
+    refusal: they cannot have played a first set."""
+    return event[:7] in (_date_token(now), _date_token(now - 86400.0))
+
+
+def sweep(*, kalshi, ledger, live: bool) -> dict:
+    """One monitoring pass. Reuses the copy sweep's cached league
+    discovery (one REST hit per league per TTL) and the venue book
+    reader; everything else is FSC-private state."""
+    from edge.shadow.kalshi_copies import _discover_cached
+    from edge.shadow.kalshi_guard import game_of, live_blocked
+
+    stats: dict = {"scanned": 0, "armed": 0, "entered": 0, "spent": 0.0}
+    if os.environ.get("EDGE_FSC", "1") == "0":
+        return {"disabled": True}
+    # Account-level stops (kill switch / watchdog) bind every live
+    # spender. Sleeve/strategy halts do not pause this fixed-dollar
+    # experiment — see kalshi_guard.live_blocked scope="fsc".
+    if live:
+        blocked = live_blocked(ledger, scope="fsc")
+        if blocked:
+            return {"blocked": blocked}
+
+    now = time.time()
+    day = ledger.get_state("fsc_day") or {}
+    if day.get("date") != _day_key(now):
+        day = {"date": _day_key(now), "spent": 0.0, "entries": 0}
+    spent_today = float(day.get("spent") or 0.0)
+
+    # Venue-held events are skipped so this sleeve cannot stack exposure
+    # onto (or in front of) a copy position. open_ticker_map's contract
+    # is fail-CLOSED: on None (fetch failure) we keep scanning/arming
+    # (stateful, order-free) but place no entries this sweep — falling
+    # back to "nothing held" is exactly the amnesia the venue guard
+    # exists to prevent.
+    held_events: set = set()
+    guard_down = False
+    if live and hasattr(kalshi, "open_ticker_map"):
+        vg = kalshi.open_ticker_map()
+        if vg is None:
+            guard_down = True
+            stats["venue_guard_down"] = True
+        else:
+            held_events = {game_of(t) for t in
+                           (set(vg["positions"]) | set(vg["resting_buys"]))}
+
+    seen: set = set()
+    for league in LEAGUES:
+        try:
+            markets = _discover_cached(kalshi, league)
+        except Exception:  # noqa: BLE001 — discovery retries next sweep
+            stats["disco_err"] = stats.get("disco_err", 0) + 1
+            continue
+        for vm in markets.values():
+            for _outcome, ticker in (vm.outcome_tokens or {}).items():
+                if ticker in seen:
+                    continue    # challenger series appear in two leagues
+                seen.add(ticker)
+                event = game_of(ticker)
+                # Match-day gate BEFORE any state or book read: Kalshi
+                # lists tennis days ahead, and a future match can't have
+                # played a set — skipping it here is also what keeps the
+                # scan to a book read per live-day ticker.
+                if not _match_day_ok(event, now):
+                    stats["skipped_offday"] = \
+                        stats.get("skipped_offday", 0) + 1
+                    continue
+                stats["scanned"] += 1
+                key = f"fsc:{event}"
+                st = ledger.get_state(key) or {}
+                if st.get("entered"):
+                    continue
+                if event in held_events:
+                    stats["skipped_held"] = stats.get("skipped_held", 0) + 1
+                    continue
+                fav_ticker = st.get("fav_ticker")
+                if fav_ticker and ticker != fav_ticker:
+                    continue    # armed: only the favorite's book is read
+                book = kalshi.get_book(ticker, ticker)
+                if book is None or not book.asks or book.asks[0].size < 1:
+                    continue
+                ask = book.asks[0].price
+
+                if not fav_ticker:
+                    # MATCH-DAY SNAPSHOT: first side seen trading as the
+                    # favorite. One favorite per match by arithmetic —
+                    # two sides rarely both ask >= 0.55, and when a wide
+                    # ITF spread lets them, "favorite" is simply the
+                    # first side quoted there — a coin-flip either way.
+                    if FAV_MIN <= ask <= FAV_MAX:
+                        ledger.set_state(key, {
+                            "fav_ticker": ticker, "fav_px": ask,
+                            "armed_ts": now})
+                        stats["armed"] += 1
+                    continue
+
+                armed_ts = float(st.get("armed_ts") or 0)
+                age = now - armed_ts
+                if age > SNAP_MAX_AGE_S:
+                    ledger.set_state(key, {})      # stale session — re-arm
+                    stats["rearmed"] = stats.get("rearmed", 0) + 1
+                    continue
+                if age < ARMED_AGE_S:
+                    continue
+                fav_px = float(st.get("fav_px") or 0)
+                if ask > TRIG_HI or (fav_px - ask) < MIN_DROP:
+                    if st.get("pend_ts"):
+                        # Blip: the band didn't hold to confirmation.
+                        st.pop("pend_ts", None)
+                        st.pop("pend_px", None)
+                        ledger.set_state(key, st)
+                        stats["confirm_reset"] = \
+                            stats.get("confirm_reset", 0) + 1
+                    continue          # set not (yet) lost by price
+                if ask < TRIG_LO:
+                    stats["skipped_deep"] = stats.get("skipped_deep", 0) + 1
+                    continue          # worse than one set — not this trade
+                # TWO-SWEEP CONFIRMATION: the first qualifying look only
+                # arms the pending stamp; money moves when a later sweep
+                # (>= CONFIRM_MIN_S, <= CONFIRM_MAX_S) still qualifies.
+                pend_ts = float(st.get("pend_ts") or 0)
+                if not pend_ts or now - pend_ts > CONFIRM_MAX_S:
+                    ledger.set_state(key, {**st, "pend_ts": now,
+                                           "pend_px": ask})
+                    stats["pending_confirm"] = \
+                        stats.get("pending_confirm", 0) + 1
+                    continue
+                if now - pend_ts < CONFIRM_MIN_S:
+                    continue
+                if spent_today + PER_ENTRY_USD > DAY_USD:
+                    stats["skipped_day_cap"] = \
+                        stats.get("skipped_day_cap", 0) + 1
+                    continue
+                count = int(PER_ENTRY_USD / ask)
+                if count < 1:
+                    continue
+                if book.asks[0].size < count:
+                    stats["skipped_thin"] = stats.get("skipped_thin", 0) + 1
+                    continue
+                if not live:
+                    stats["entered"] += 1          # dry-run telemetry
+                    continue
+                if guard_down:
+                    stats["skipped_guard_down"] = \
+                        stats.get("skipped_guard_down", 0) + 1
+                    continue
+                r = kalshi.place_order(ticker, ask, count,
+                                       client_order_id=str(uuid.uuid4()),
+                                       taker=True)
+                filled = int(float(r.get("count") or 0)) if r.get("ok") else 0
+                if filled <= 0:
+                    if r.get("ok"):
+                        stats["ioc_zero_fill"] = \
+                            stats.get("ioc_zero_fill", 0) + 1
+                    else:
+                        stats["order_err"] = stats.get("order_err", 0) + 1
+                        stats["last_order_error"] = {
+                            "ticker": ticker,
+                            "status": str(r.get("status"))[:200],
+                            "raw": str((r.get("raw") or {}).get("error"))[:300]}
+                    continue
+                # Mark the order id so sync_kalshi_fills knows this fill
+                # is already recorded inline — the unmarked path doubled
+                # every position once (2x caps, 2x P&L; audit 2026-08-04).
+                if r.get("order_id"):
+                    ledger.set_state(f"kalshi_inline:{r['order_id']}",
+                                     {"ts": now})
+                cost = round(filled * ask, 2)
+                ledger.set_state(key, {
+                    "fav_ticker": fav_ticker, "fav_px": fav_px,
+                    "armed_ts": armed_ts, "entered": True,
+                    "entry_px": ask, "filled": filled, "ts": now})
+                held_events.add(event)   # same event, later series: held
+                spent_today = round(spent_today + cost, 2)
+                day = {"date": _day_key(now), "spent": spent_today,
+                       "entries": int(day.get("entries") or 0) + 1}
+                ledger.set_state("fsc_day", day)
+                stats["entered"] += 1
+                stats["spent"] = round(stats["spent"] + cost, 2)
+                ledger.record_fill(
+                    fill_uid=f"fsc-{event}-{int(now)}",
+                    venue="kalshi", market_key=f"kalshi:{ticker}",
+                    side="BUY", qty=float(filled), price=ask,
+                    fee=round(kalshi.taker_fee(ask) * filled, 4),
+                    league=league, mode="LIVE_BETA", category="kalshi_fsc",
+                    decision={"fsc": True, "fav_px": fav_px,
+                              "trigger_ask": ask, "armed_age_s": int(age),
+                              "confirm_s": int(now - pend_ts)})
+                log.warning("FSC ENTRY %s: %d @ %.2f (fav was %.2f, "
+                            "armed %dm ago)", ticker, filled, ask, fav_px,
+                            int(age / 60))
+    stats["day"] = dict(day) if day else {}
+    return stats

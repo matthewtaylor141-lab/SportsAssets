@@ -215,6 +215,7 @@ def test_smoke_order_fires_exactly_once_ever(monkeypatch):
     # leaked an armed strategy into every test that ran afterwards.
     monkeypatch.setenv("EDGE_STRATEGY_LIVE", "1")
     monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
+    monkeypatch.setenv("EDGE_ENGINE_TRADES", "1")  # 08-17 hard-off open
     from edge.shadow.runner import _kalshi_smoke
 
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
@@ -261,6 +262,7 @@ def test_accepted_ioc_with_zero_fill_does_not_burn_the_claim():
 def test_smoke_zero_fill_is_not_done(monkeypatch):
     monkeypatch.setenv("EDGE_STRATEGY_LIVE", "1")
     monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
+    monkeypatch.setenv("EDGE_ENGINE_TRADES", "1")  # 08-17 hard-off open
     from edge.shadow.runner import _kalshi_smoke
 
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")

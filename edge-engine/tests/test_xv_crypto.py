@@ -260,6 +260,7 @@ def test_live_needs_both_the_env_flag_and_a_live_engine(tmp_path,
     # The crypto scanner is software class and RETIRED by default
     # (owner 2026-08-12); a live-mechanics test un-retires it.
     monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
+    monkeypatch.setenv("EDGE_ENGINE_TRADES", "1")  # 08-17 hard-off open
     # Live-path tests must lift the owner arb pause (2026-08-08).
     monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, _ = _watch(tmp_path, 0.45, 0.50, live=False)
@@ -294,6 +295,7 @@ def test_live_fires_through_execute_cross_venue_with_atomic_claim(
     # The crypto scanner is software class and RETIRED by default
     # (owner 2026-08-12); a live-mechanics test un-retires it.
     monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
+    monkeypatch.setenv("EDGE_ENGINE_TRADES", "1")  # 08-17 hard-off open
     # Live-path tests must lift the owner arb pause (2026-08-08).
     monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, pair = _watch(tmp_path, 0.45, 0.50, live=True)
@@ -317,6 +319,7 @@ def test_clean_miss_releases_the_claim_so_the_pair_stays_retryable(
     # The crypto scanner is software class and RETIRED by default
     # (owner 2026-08-12); a live-mechanics test un-retires it.
     monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
+    monkeypatch.setenv("EDGE_ENGINE_TRADES", "1")  # 08-17 hard-off open
     # Live-path tests must lift the owner arb pause (2026-08-08).
     monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, pair = _watch(tmp_path, 0.45, 0.50, live=True)
@@ -340,6 +343,7 @@ def test_day_cap_stops_the_class(tmp_path, monkeypatch):
     # The crypto scanner is software class and RETIRED by default
     # (owner 2026-08-12); a live-mechanics test un-retires it.
     monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
+    monkeypatch.setenv("EDGE_ENGINE_TRADES", "1")  # 08-17 hard-off open
     # Live-path tests must lift the owner arb pause (2026-08-08).
     monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, _ = _watch(tmp_path, 0.45, 0.50, live=True)
@@ -357,6 +361,7 @@ def test_account_level_stops_block_the_live_path(tmp_path, monkeypatch):
     # The crypto scanner is software class and RETIRED by default
     # (owner 2026-08-12); a live-mechanics test un-retires it.
     monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
+    monkeypatch.setenv("EDGE_ENGINE_TRADES", "1")  # 08-17 hard-off open
     # Live-path tests must lift the owner arb pause (2026-08-08).
     monkeypatch.setenv("EDGE_ARB_PAUSE", "0")
     w, led, ka, pm, _ = _watch(tmp_path, 0.45, 0.50, live=True)

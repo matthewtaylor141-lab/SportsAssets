@@ -50,10 +50,14 @@ def live_blocked(ledger, scope: str = "engine") -> str | None:
     a fixed-dollar experiment the owner wants on every game; neither the
     engine's nor the copy sleeve's loss breaker pauses it. Global stops
     still apply.
+    scope="fsc": the $100 first-set-comeback sleeve (owner 2026-08-17) —
+    same class as underdog: a fixed-dollar experiment with its own day
+    cap and kill switch (EDGE_FSC), riding no strategy or sleeve halt.
+    Global stops still apply.
     """
     if ledger.get_state("kill_switch", False):
         return "kill_switch"
-    if scope not in ("arb", "manual", "underdog"):
+    if scope not in ("arb", "manual", "underdog", "fsc"):
         halt_key = "copy_halt_until" if scope == "copy" else "halt_until"
         halt = ledger.get_state(halt_key)
         if halt and float(halt.get("until", 0)) > time.time():

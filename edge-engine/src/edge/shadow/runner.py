@@ -318,6 +318,8 @@ _XV_CRYPTO = None
 _KADD_STATS: dict = {}
 _KCOPY_STATS: dict = {}
 _KUD_STATS: dict = {}
+# First-set comeback sleeve (kalshi_fsc.py, owner order 2026-08-17).
+_FSC_STATS: dict = {}
 # {game_key: [whale outcome names]} — refreshed on the discovery clock.
 _WHALE_MAP: dict = {}
 
@@ -2406,7 +2408,10 @@ def _main_impl() -> None:
             # sweeps (kalshi_copies._discover_cached) a pass costs one
             # identities GET plus live book reads, so the timer alone
             # carries most of the latency win when the stream is down.
-            every = float(os.environ.get("EDGE_KCOPY_EVERY_S", "30"))
+            # 30 -> 15 (2026-08-17, profitability round): halves worst-case
+            # copy reaction time on timer-driven wakes; discovery stays
+            # cached so the extra cost is book reads only.
+            every = float(os.environ.get("EDGE_KCOPY_EVERY_S", "15"))
             while True:
                 try:
                     # fresh_s: the platform merges a fresh-tail query over
@@ -2478,7 +2483,7 @@ def _main_impl() -> None:
 
         threading.Thread(target=_kcopy_loop, daemon=True,
                          name="kalshi-copies").start()
-        log.warning("kalshi copy leg armed (30s sweep + fresh-fill wake, "
+        log.warning("kalshi copy leg armed (15s sweep + fresh-fill wake, "
                     "strategy-independent)")
 
         # Manual desk relay (owner directive 2026-08-07): admin-directed
@@ -2557,6 +2562,40 @@ def _main_impl() -> None:
         threading.Thread(target=_desk_relay_loop, daemon=True,
                          name="desk-relay").start()
         log.warning("manual desk relay armed (10s poll)")
+
+    # First-set comeback sleeve (owner order 2026-08-17): its own thread
+    # and cadence, never inside the copy loop — an FSC pass reads a book
+    # per live-day tennis ticker and must not delay a copy sweep, and
+    # EDGE_KCOPY=0 must not silently disarm it (the 2026-08-07/08-10
+    # silent-disarm class). The module import lives INSIDE the loop's
+    # try: kalshi_fsc parses its env knobs at import, and a mistyped
+    # knob must surface in the funnel every sweep, not kill a thread
+    # once and silently.
+    if kalshi_c is not None and kalshi_c.has_credentials():
+        def _fsc_loop() -> None:
+            time.sleep(75)   # after the first copy sweep has settled in
+            while True:
+                try:
+                    from edge.shadow.kalshi_fsc import sweep as fsc_sweep
+
+                    fst = fsc_sweep(kalshi=kalshi_c, ledger=ledger,
+                                    live=risk.is_live)
+                    _FSC_STATS.clear()
+                    _FSC_STATS.update(fst, at=time.time())
+                    if fst.get("entered") or fst.get("pending_confirm"):
+                        log.warning("kalshi fsc sweep: %s", fst)
+                except Exception as exc:  # noqa: BLE001 — never fatal
+                    log.warning("kalshi fsc sweep failed: %s", exc)
+                    _FSC_STATS.clear()
+                    _FSC_STATS.update(
+                        error=f"{type(exc).__name__}: {str(exc)[:140]}",
+                        at=time.time())
+                time.sleep(float(os.environ.get("EDGE_FSC_EVERY_S",
+                                                "120")))
+
+        threading.Thread(target=_fsc_loop, daemon=True,
+                         name="kalshi-fsc").start()
+        log.warning("kalshi first-set comeback sleeve armed (120s sweep)")
 
     # Kalshi leg of the $1 underdog sleeve (owner 2026-08-08): the
     # platform worker queues one task per game at T-minus-5; this
@@ -2855,8 +2894,12 @@ def _main_impl() -> None:
             # inference from the absence of new fills. It was armed for
             # two days by an environment variable while the code default
             # said otherwise, and nothing on the wire said so.
-            funnel["strategy_class"] = ("retired" if not _strategy_live()
-                                        else "LIVE — placing real orders")
+            from edge.shadow.strategy_gate import engine_trades_off
+            funnel["strategy_class"] = (
+                "OFF — owner order 2026-08-17 (copies only)"
+                if engine_trades_off()
+                else "retired" if not _strategy_live()
+                else "LIVE — placing real orders")
             if _XV_WATCH is not None:
                 funnel["xv_watch"] = {**_XV_WATCH.stats,
                                       "registered": _XV_WATCH.registered()}
@@ -2866,6 +2909,8 @@ def _main_impl() -> None:
                 funnel["kalshi_adds"] = dict(_KADD_STATS)
             if _KCOPY_STATS:
                 funnel["kalshi_copies"] = dict(_KCOPY_STATS)
+            if _FSC_STATS:
+                funnel["kalshi_fsc"] = dict(_FSC_STATS)
             if _KUD_STATS:
                 funnel["kalshi_underdog"] = dict(_KUD_STATS)
             # The venue's own response to our order attempts — the one

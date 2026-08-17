@@ -23,6 +23,16 @@ Re-arming is deliberate and needs no deploy: set EDGE_STRATEGY_RETIRED=0
 on the engine service, and the class returns to whatever
 EDGE_STRATEGY_LIVE says.
 
+OWNER DIRECTIVE 2026-08-17: "Shut off the 'engine trades' completely and
+only have our trades be copied." This is a THIRD, independent switch
+(EDGE_ENGINE_TRADES, default off) layered under the two above, for the
+same reason the second one exists: the environment may already hold
+EDGE_STRATEGY_RETIRED=0 + EDGE_STRATEGY_LIVE=1 from the last re-arm, so
+only a fresh variable the environment has never seen can guarantee the
+class is dark on deploy. Re-arming the engine now requires all three to
+agree: EDGE_ENGINE_TRADES=1, EDGE_STRATEGY_RETIRED=0,
+EDGE_STRATEGY_LIVE=1.
+
 Strategy intents keep PAPER-logging every cycle. The model stays graded
 against the shadow record for the day it earns its seat back; it just
 stops spending money to be measured.
@@ -33,13 +43,28 @@ from __future__ import annotations
 import os
 
 
+def engine_trades_off() -> bool:
+    """Owner order 2026-08-17: engine (software-class) trades are OFF.
+
+    Only the literal EDGE_ENGINE_TRADES=1 turns them back on. Read at
+    call time, never cached — flippable without a redeploy.
+    """
+    return os.environ.get("EDGE_ENGINE_TRADES", "0") != "1"
+
+
 def strategy_retired() -> bool:
     """True when the software class may place no real orders at all.
 
     Read at CALL time, never cached at import: the engine is a
     long-lived process and an operator must be able to flip this
     without a redeploy.
+
+    The 2026-08-17 hard-off folds in HERE, not only in strategy_live():
+    xv_crypto consults strategy_retired() directly, and any future
+    caller of either predicate must see the same truth.
     """
+    if engine_trades_off():
+        return True
     return os.environ.get("EDGE_STRATEGY_RETIRED", "1") != "0"
 
 

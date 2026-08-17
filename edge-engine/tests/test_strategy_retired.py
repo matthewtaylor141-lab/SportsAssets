@@ -31,7 +31,12 @@ def test_retired_by_default_with_no_env_at_all(monkeypatch):
 
 
 def test_owner_can_rearm_without_a_deploy(monkeypatch):
-    """Un-retiring restores the ORIGINAL switch, it does not bypass it."""
+    """Un-retiring restores the ORIGINAL switch, it does not bypass it.
+
+    Since the 2026-08-17 hard-off (test_engine_trades_off.py) re-arming
+    also needs EDGE_ENGINE_TRADES=1 — set here so this test keeps
+    proving what it always proved, one layer down."""
+    monkeypatch.setenv("EDGE_ENGINE_TRADES", "1")
     monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
     monkeypatch.setenv("EDGE_STRATEGY_LIVE", "1")
     assert strategy_live() is True
@@ -43,6 +48,7 @@ def test_owner_can_rearm_without_a_deploy(monkeypatch):
 
 def test_gate_is_read_at_call_time_not_import_time(monkeypatch):
     """The engine is long-lived; an operator must not need a redeploy."""
+    monkeypatch.setenv("EDGE_ENGINE_TRADES", "1")   # 08-17 hard-off open
     monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "1")
     assert strategy_live() is False
     monkeypatch.setenv("EDGE_STRATEGY_RETIRED", "0")
