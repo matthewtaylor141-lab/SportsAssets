@@ -2803,6 +2803,21 @@ def _main_impl() -> None:
                         except Exception as exc:  # noqa: BLE001
                             _LAST_SETTLE["kalshi_export"] = {
                                 "error": f"{type(exc).__name__}"}
+                    # Raw-fidelity export (2026-08-17: the compact rows
+                    # proved lossy — trade_id dedupe + full settlement
+                    # cost components are required for the weekly
+                    # report's cash-truth rebuild). 15-day window so a
+                    # full report week stays readable after rollover.
+                    if hasattr(a, "export_raw_since"):
+                        try:
+                            _raw_since = time.strftime(
+                                "%Y-%m-%d", time.gmtime(
+                                    time.time() - 15 * 86_400))
+                            _LAST_SETTLE["kalshi_export_raw"] = \
+                                a.export_raw_since(_raw_since)
+                        except Exception as exc:  # noqa: BLE001
+                            _LAST_SETTLE["kalshi_export_raw"] = {
+                                "error": f"{type(exc).__name__}"}
             # The funnel is per-cycle but settlement runs 1-in-10 cycles —
             # without carrying the last pass forward, 90% of heartbeats
             # (and every probe that read them) showed no settle evidence
@@ -2815,6 +2830,9 @@ def _main_impl() -> None:
                         _LAST_SETTLE["kalshi_tennis_week"]
                 if _LAST_SETTLE.get("kalshi_export") is not None:
                     funnel["kalshi_export"] = _LAST_SETTLE["kalshi_export"]
+                if _LAST_SETTLE.get("kalshi_export_raw") is not None:
+                    funnel["kalshi_export_raw"] = \
+                        _LAST_SETTLE["kalshi_export_raw"]
             # Same carry-forward logic for the account link: the boot-time
             # credential check posts once as "startup" and scrolls away —
             # a probe that reads only recent heartbeats could never answer

@@ -55,7 +55,7 @@ jobs:
               # Bulk arrays (kalshi_export, tennis-week rows) are thousands of
               # pretty-printed lines and evict the funnel/balances from the
               # ~5k-line retrievable tail — they ship compactly further down.
-              jq 'del(.detail.kalshi_export, .detail.kalshi_tennis_week.rows)' \
+              jq 'del(.detail.kalshi_export, .detail.kalshi_export_raw, .detail.kalshi_tennis_week.rows)' \
                  /tmp/body.json 2>/dev/null || head -c 4000 /tmp/body.json
             fi
           }
@@ -302,6 +302,10 @@ jobs:
           jq -c '.detail.kalshi_export // empty' /tmp/status.json 2>/dev/null > /tmp/kx.json || true
           if [ -s /tmp/kx.json ]; then
             echo "KXBLOB $(gzip -c /tmp/kx.json | base64 -w0)"
+          fi
+          jq -c '.detail.kalshi_export_raw // empty' /tmp/status.json 2>/dev/null > /tmp/kxraw.json || true
+          if [ -s /tmp/kxraw.json ]; then
+            echo "KXRAWBLOB $(gzip -c /tmp/kxraw.json | base64 -w0)"
           fi
           # Category split (site accounting, ±$100 display cap applies) —
           # weekly management report needs the per-day sleeve/manual shape.

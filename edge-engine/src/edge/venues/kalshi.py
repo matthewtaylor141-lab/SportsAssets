@@ -762,6 +762,74 @@ class KalshiAdapter(VenueAdapter):
             out["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
         return out
 
+    # Raw-fidelity export keys — everything needed to reconstruct P&L
+    # without interpretation. Kept explicit so a schema change on the
+    # venue side surfaces as missing keys, not silent drift.
+    _RAW_FILL_KEYS = (
+        "trade_id", "order_id", "ticker", "side", "action", "count",
+        "count_fp", "yes_price", "no_price", "yes_price_dollars",
+        "no_price_dollars", "is_taker", "fee", "fee_dollars",
+        "created_time")
+    _RAW_SETTLE_KEYS = (
+        "ticker", "market_result", "yes_count", "no_count",
+        "yes_count_fp", "no_count_fp", "yes_total_cost", "no_total_cost",
+        "yes_total_cost_dollars", "no_total_cost_dollars", "revenue",
+        "revenue_dollars", "settled_time")
+
+    def export_raw_since(self, since_iso: str, max_pages: int = 30) -> dict:
+        """Verbatim venue rows for fills and settlements since a date.
+
+        Exists because the compact export proved lossy in two ways the
+        2026-08-17 weekly report paid for: (1) rows truncated to
+        second-resolution strings collapse identical sliced fills, and
+        (2) 'cost' = yes_total_cost + no_total_cost does NOT equal our
+        cash for maker/mixed-side positions (for winners it came back
+        equal to revenue minus our actual outlay). This export keeps
+        trade_id (dedupe truth), both price sides, fee fields, and every
+        settlement cost component so the report can rebuild cash truth
+        with no guessing."""
+        out: dict = {"since": since_iso, "fills": [], "settlements": [],
+                     "fills_truncated": False, "settle_truncated": False}
+        try:
+            for name, path_tail, rows_key, keys, time_key in (
+                    ("fills", "fills", "fills",
+                     self._RAW_FILL_KEYS, "created_time"),
+                    ("settlements", "settlements", "settlements",
+                     self._RAW_SETTLE_KEYS, "settled_time")):
+                cursor = ""
+                for _page in range(max_pages):
+                    path = f"/trade-api/v2/portfolio/{path_tail}"
+                    params: dict = {"limit": 200}
+                    if cursor:
+                        params["cursor"] = cursor
+                    resp = self._sess.get(
+                        f"{BASE}/portfolio/{path_tail}", params=params,
+                        headers=self._auth_headers("GET", path), timeout=15)
+                    if resp.status_code != 200:
+                        out[f"{name}_error"] = f"http_{resp.status_code}"
+                        break
+                    body = resp.json() or {}
+                    rows = body.get(rows_key) or []
+                    stop = False
+                    for r in rows:
+                        when = str(r.get(time_key) or "")
+                        if when and when < since_iso:
+                            stop = True
+                            break
+                        out[name].append(
+                            {k: r[k] for k in keys if r.get(k) is not None})
+                    if stop:
+                        break
+                    cursor = body.get("cursor") or ""
+                    if not cursor or not rows:
+                        break
+                else:
+                    out["fills_truncated" if name == "fills"
+                        else "settle_truncated"] = True
+        except requests.RequestException as exc:
+            out["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        return out
+
     def open_ticker_map(self) -> dict | None:
         """Venue-side never-add source: tickers the VENUE says we hold or
         have resting BUY orders on, straight from the portfolio API.
