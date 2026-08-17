@@ -320,6 +320,26 @@ _KCOPY_STATS: dict = {}
 _KUD_STATS: dict = {}
 # First-set comeback sleeve (kalshi_fsc.py, owner order 2026-08-17).
 _FSC_STATS: dict = {}
+
+
+def _merge_fresh_identity_rows(fresh: list, rows: list) -> list:
+    """SSE fast-lane merge (owner green-light 2026-08-17 evening).
+
+    Fresh assets move to the FRONT of the sweep so the fill that woke
+    the pass is priced first — but where the identities fetch already
+    knows the asset, ITS row wins: it carries the real pmus_copied
+    claim state, and the synthetic row's hard-coded False must never
+    overrule a PMUS copy already in flight (double-copy)."""
+    known = {r.get("asset"): r for r in rows}
+    head: list = []
+    seen: set = set()
+    for fr in fresh:
+        a = fr.get("asset")
+        if a in seen:
+            continue
+        seen.add(a)
+        head.append(known.get(a, fr))
+    return head + [r for r in rows if r.get("asset") not in seen]
 # {game_key: [whale outcome names]} — refreshed on the discovery clock.
 _WHALE_MAP: dict = {}
 
@@ -2374,8 +2394,21 @@ def _main_impl() -> None:
         # reactor: no stream (API restarting, no base URL) means no wakes
         # and the loop degrades to exactly the timer cadence below.
         kcopy_wake = threading.Event()
+        # FAST LANE (owner green-light 2026-08-17 evening, reaction-time
+        # upgrade #1): the SSE 'data:' line already carries the whole
+        # fill (asset, slug, outcome, price, whale, ts) — the listener
+        # used to throw it away and the sweep re-bought the same facts
+        # through a 30s-timeout identities GET. Now the payload becomes
+        # a synthetic identity row the woken sweep prices FIRST; the
+        # identities fetch still runs for everything else. Rows missing
+        # slug/outcome (Path-A chain fills pre-enrichment) are useless
+        # to the sweep and are dropped — those keep the old path.
+        kcopy_fresh: list = []
+        kcopy_fresh_lock = threading.Lock()
 
         def _kcopy_stream_listener() -> None:
+            import json as _json
+
             import requests
 
             base = os.environ.get("EDGE_PLATFORM_API", "")
@@ -2386,11 +2419,45 @@ def _main_impl() -> None:
                     with requests.get(f"{base.rstrip('/')}/stream",
                                       stream=True, timeout=(10, 90)) as r:
                         if r.status_code == 200:
+                            saw_trade = False
                             for line in r.iter_lines(decode_unicode=True):
+                                s = (line or "").strip()
                                 # Exact match: 'event: trade_update'
                                 # (enrichment) would double every wake.
-                                if line and line.strip() == "event: trade":
+                                if s == "event: trade":
+                                    saw_trade = True
                                     kcopy_wake.set()
+                                    continue
+                                if saw_trade and s.startswith("data: "):
+                                    saw_trade = False
+                                    try:
+                                        p = _json.loads(s[6:])
+                                    except Exception:  # noqa: BLE001
+                                        continue
+                                    slug = (p.get("market_slug")
+                                            or p.get("event_slug") or "")
+                                    if (str(p.get("side", "")).upper()
+                                            == "BUY" and slug
+                                            and p.get("outcome")
+                                            and p.get("whale_username")):
+                                        row = {
+                                            "asset": str(p.get("asset")
+                                                         or ""),
+                                            "slug": slug,
+                                            "outcome": p["outcome"],
+                                            "price": float(
+                                                p.get("price") or 0),
+                                            "whale":
+                                                p["whale_username"],
+                                            "entered_ts": float(
+                                                p.get("ts_epoch") or 0),
+                                            "pmus_copied": False,
+                                        }
+                                        with kcopy_fresh_lock:
+                                            kcopy_fresh.append(row)
+                                            del kcopy_fresh[:-50]
+                                elif s and not s.startswith(":"):
+                                    saw_trade = False
                 except Exception:  # noqa: BLE001 — reconnect forever
                     pass
                 time.sleep(5)
@@ -2414,6 +2481,14 @@ def _main_impl() -> None:
             every = float(os.environ.get("EDGE_KCOPY_EVERY_S", "15"))
             while True:
                 try:
+                    # FAST LANE: rows the SSE wake itself delivered are
+                    # priced first, ahead of (and deduped against) the
+                    # identities fetch — the sweep no longer depends on
+                    # that GET's round trip (30s timeout worst case) to
+                    # see the fill that woke it.
+                    with kcopy_fresh_lock:
+                        fresh_rows = list(kcopy_fresh)
+                        kcopy_fresh.clear()
                     # fresh_s: the platform merges a fresh-tail query over
                     # its 90s-TTL identities snapshot, so a just-detected
                     # fill is copyable on the wake that announced it.
@@ -2421,6 +2496,9 @@ def _main_impl() -> None:
                         os.environ.get("EDGE_PLATFORM_API", ""),
                         os.environ.get("EDGE_INGEST_TOKEN", ""),
                         fresh_s=300)
+                    if fresh_rows:
+                        rows = _merge_fresh_identity_rows(fresh_rows,
+                                                          rows)
 
                     def _claim_back(asset: str, ticker: str,
                                     whale: str) -> None:
@@ -2475,16 +2553,25 @@ def _main_impl() -> None:
                         error=f"{type(exc).__name__}: {str(exc)[:140]}",
                         at=time.time())
                 # Timer OR fresh-fill wake, whichever lands first. The
-                # debounce coalesces a whale's burst of fills into one
-                # pass and floors the sweep rate under constant flow.
+                # wake-clear coalesces a whale's burst of fills into one
+                # pass. The old unconditional sleep(5) here taxed EVERY
+                # event-woken pass ~5s — roughly half the leg's best-case
+                # reaction (latency map 2026-08-17); the floor is now
+                # conditional: only sleep off whatever remains of a
+                # minimum gap since the LAST pass started, so a wake
+                # arriving after a quiet stretch prices immediately.
+                pass_started = time.time()
                 kcopy_wake.wait(timeout=every)
                 kcopy_wake.clear()
-                time.sleep(5)
+                gap = float(os.environ.get("EDGE_KCOPY_MIN_GAP_S", "2"))
+                left = gap - (time.time() - pass_started)
+                if left > 0:
+                    time.sleep(left)
 
         threading.Thread(target=_kcopy_loop, daemon=True,
                          name="kalshi-copies").start()
-        log.warning("kalshi copy leg armed (15s sweep + fresh-fill wake, "
-                    "strategy-independent)")
+        log.warning("kalshi copy leg armed (15s sweep + SSE fast-lane "
+                    "wake, strategy-independent)")
 
         # Manual desk relay (owner directive 2026-08-07): admin-directed
         # Kalshi orders queue on the platform (only this process holds

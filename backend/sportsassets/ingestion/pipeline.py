@@ -128,7 +128,6 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
 
     # Fire fan-out NOW on the provisional record.
     await publish(CH_TRADES_NEW, payload)
-    await _write_outbox(trade_id, payload)
 
     # Copy-trade feasibility: snapshot the residual book at exactly the moment
     # an executor would react. Fire-and-forget; never delays ingestion.
@@ -156,6 +155,12 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
         # forfeited every slower detection to the 10-minute sweep.
         asyncio.get_running_loop().create_task(probe_trade(payload))
         asyncio.get_running_loop().create_task(execute_copy(payload))
+
+    # Notification bookkeeping runs OFF the hot path (latency map
+    # 2026-08-17): its 2-4 sequential inserts used to sit awaited between
+    # the publish and the copy-execution spawn, taxing both copy legs to
+    # write webpush/telegram rows neither leg reads.
+    asyncio.get_running_loop().create_task(_write_outbox(trade_id, payload))
 
     if not pre_enriched:
         # Enrich off the hot path; never blocks the next detection.
