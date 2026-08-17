@@ -526,6 +526,140 @@ def test_contradicted_arm_is_refused(fast_gates):
     assert st["armed"] == 0 and st.get("arm_contradicted", 0) >= 1
 
 
+# ── Pre-match odds verification + $100 top-up (owner 2026-08-17:
+# "use the odds verification... they are traded for $100 (even the
+# fills need to be close to $100 not $37)") ──────────────────────────
+
+
+def _with_feed(monkeypatch, fav_name, prob=0.65, commence_delta=-3600.0):
+    from edge.shadow import fsc_scores
+    monkeypatch.setattr(
+        fsc_scores, "prematch_favorite",
+        lambda a, b: {"fav_name": fav_name, "prob": prob,
+                      "commence_ts": time.time() + commence_delta,
+                      "frozen": True})
+
+
+def test_feed_favorite_is_authoritative(monkeypatch, fast_gates):
+    """Covered tour: the sportsbook consensus names the favorite. The
+    old FAV band no longer bounds it — a 0.93 heavy is still 'every
+    single favorite' — and the feed probability lands in state."""
+    _with_feed(monkeypatch, "Andreeva", prob=0.93)
+    ka = _Kalshi({T_FAV: (0.94, 500.0), T_DOG: (0.07, 500.0)})
+    led = _led()
+    st = sweep(kalshi=ka, ledger=led, live=True)
+    assert st["armed"] == 1 and st.get("armed_feed") == 1
+    saved = led.get_state(KEY)
+    assert saved["fav_ticker"] == T_FAV
+    assert saved["feed_prob"] == 0.93 and saved["commence_ts"]
+
+
+def test_feed_names_the_true_favorite_not_kalshis_board(
+        monkeypatch, fast_gates):
+    """TONGEE-class refusal, feed edition: Kalshi's board prints the
+    WRONG player as favorite; the feed overrules it. The feed's dog can
+    never arm and the feed's favorite arms despite the board."""
+    _with_feed(monkeypatch, "Pliskova", prob=0.70)
+    ka = _Kalshi({T_FAV: (0.60, 500.0), T_DOG: (0.72, 500.0)})
+    led = _led()
+    st = sweep(kalshi=ka, ledger=led, live=True)
+    assert st.get("arm_feed_dog") == 1 and st["armed"] == 1
+    saved = led.get_state(KEY)
+    assert saved["fav_ticker"] == T_DOG and saved["feed_prob"] == 0.70
+
+
+def test_feed_coinflip_has_no_favorite(monkeypatch, fast_gates):
+    _with_feed(monkeypatch, "Andreeva", prob=0.505)
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    st = sweep(kalshi=ka, ledger=_led(), live=True)
+    assert st["armed"] == 0 and st.get("arm_feed_coinflip", 0) >= 1
+
+
+def test_commence_anchor_blocks_a_prematch_collapse(
+        monkeypatch, fast_gates):
+    """Feed-covered matches anchor the trigger to the REAL start time:
+    before commence + START_MIN_S no first set can be over, so a
+    pre-match price collapse can never buy — the residual the price-only
+    design documented is closed wherever the feed reaches."""
+    _with_feed(monkeypatch, "Andreeva", commence_delta=600.0)
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)          # arm (feed)
+    ka.asks[T_FAV] = (0.33, 500.0)                   # pre-match dump
+    s1 = sweep(kalshi=ka, ledger=led, live=True)
+    s2 = sweep(kalshi=ka, ledger=led, live=True)
+    assert s2["entered"] == 0 and not ka.orders
+    assert (s1.get("skipped_prestart", 0)
+            + s2.get("skipped_prestart", 0)) >= 1
+
+
+def test_commence_anchor_lets_a_midmatch_deploy_enter(monkeypatch):
+    """A deploy landing mid-match arms with commence already in the
+    past — entry no longer waits out the ARMED_AGE_S proxy (default
+    25 min) because the match's own clock says a set has had time to
+    finish."""
+    monkeypatch.setattr(_fsc, "CONFIRM_MIN_S", 0.0)
+    _with_feed(monkeypatch, "Andreeva", commence_delta=-3600.0)
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)          # arm (feed)
+    ka.asks[T_FAV] = (0.33, 500.0)
+    sweep(kalshi=ka, ledger=led, live=True)          # pend
+    st = sweep(kalshi=ka, ledger=led, live=True)     # confirm: enter
+    assert st["entered"] == 1 and len(ka.orders) == 1
+
+
+def test_partial_fill_tops_up_to_the_hundred(fast_gates):
+    """Owner: fills 'need to be close to $100 not $37'. The thin-book
+    partial takes what shows; the next sweep buys the remainder when
+    liquidity returns, and buying stops once less than the $5 floor is
+    left to spend."""
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)          # arm
+    ka.asks[T_FAV] = (0.33, 114.0)      # $37.62 showing < $100 want
+    sweep(kalshi=ka, ledger=led, live=True)          # pend
+    st = sweep(kalshi=ka, ledger=led, live=True)     # partial entry
+    assert st["entered"] == 1 and ka.orders == [(T_FAV, 0.33, 114)]
+    ka.asks[T_FAV] = (0.34, 500.0)      # liquidity returns
+    st2 = sweep(kalshi=ka, ledger=led, live=True)
+    assert st2.get("topup_fills") == 1
+    # $100 - $37.62 = $62.38 remaining -> floor(62.38/0.34) = 183
+    assert ka.orders[1] == (T_FAV, 0.34, 183)
+    saved = led.get_state(KEY)
+    assert saved["filled"] == 114 + 183
+    assert saved["spent_usd"] == pytest.approx(37.62 + 183 * 0.34)
+    day = led.get_state("fsc_day")
+    assert day["entries"] == 1      # a top-up is not a new entry
+    assert day["spent"] == pytest.approx(99.84)
+    # ~$99.84 in: the remainder is under the floor — no further buys.
+    s3 = sweep(kalshi=ka, ledger=led, live=True)
+    assert not s3.get("topup_fills") and len(ka.orders) == 2
+    with led._conn() as conn:
+        rows = conn.execute(
+            "SELECT qty, price FROM fills ORDER BY id").fetchall()
+    assert [(r["qty"], r["price"]) for r in rows] == \
+        [(114.0, 0.33), (183.0, 0.34)]
+
+
+def test_topup_window_closes(fast_gates):
+    """A remainder left after the window (default 30 min from first
+    fill) stays unbought — a top-up an hour later would be a different
+    trade at a different match state, not the owner's $100 entry."""
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)
+    ka.asks[T_FAV] = (0.33, 114.0)
+    sweep(kalshi=ka, ledger=led, live=True)
+    sweep(kalshi=ka, ledger=led, live=True)          # partial entry
+    st = led.get_state(KEY)
+    st["ts"] = time.time() - 7200
+    led.set_state(KEY, st)
+    ka.asks[T_FAV] = (0.34, 500.0)
+    s = sweep(kalshi=ka, ledger=led, live=True)
+    assert not s.get("topup_fills") and len(ka.orders) == 1
+
+
 def test_pre_fix_armed_state_is_cleared_not_trusted(fast_gates):
     led = _led()
     led.set_state(KEY, {"fav_ticker": T_FAV, "fav_px": 0.60,

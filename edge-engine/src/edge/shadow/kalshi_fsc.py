@@ -9,12 +9,22 @@ Isolated by construction: its own claims (fsc:<event>), its own grading
 category (kalshi_fsc), its own kill switch, day cap and thread. It never
 touches the copy sleeves' state and nothing here runs on Polymarket.
 
-SET-1 DETECTION (v1, price-inferred — no set-score feed exists in our
-stack): the favorite is snapshotted from Kalshi's own book (ask inside
-[FAV_MIN, FAV_MAX]) on MATCH DAY, and "lost the first set" is the same
-market trading down into [TRIG_LO, TRIG_HI], having dropped >= MIN_DROP
-from the snapshot, >= ARMED_AGE_S after the snapshot first qualified,
-CONFIRMED by a second sweep still in the band >= CONFIRM_MIN_S later.
+FAVORITE IDENTIFICATION (owner 2026-08-17: "use the odds verification
+... they have to be a pre-match favorite"): where the licensed odds
+feed covers the pairing (ATP/WTA main tours, fsc_scores.poll_prematch)
+the sportsbook-consensus pre-match favorite is AUTHORITATIVE — frozen
+at the last pre-commence observation — and Kalshi's book is only a
+pricing venue. Uncovered tiers (ITF/challenger) fall back to the
+price-inferred snapshot: the favorite is the side whose two-sided MID
+sits inside [FAV_MIN, FAV_MAX] on MATCH DAY, uncontradicted by the
+opponent's book.
+
+SET-1 DETECTION: "lost the first set" is either a set-score fact from
+fsc_scores (enter immediately) or the favorite's market trading down
+into [TRIG_LO, TRIG_HI], having dropped >= MIN_DROP from the snapshot
+— no earlier than commence + START_MIN_S when the feed knows the start
+time, else >= ARMED_AGE_S after arming — CONFIRMED by a second sweep
+still in the band >= CONFIRM_MIN_S later.
 The match-day gate keeps a days-ahead listing from arming (Kalshi lists
 tennis well in advance, and a pre-match news drop on Tuesday must not
 read as a Thursday set loss); the confirmation sweep refuses one-print
@@ -33,6 +43,9 @@ leader as "favorite".
 
 Entries are IOC taker buys of PER_ENTRY_USD at the live ask, whole
 contracts, one per match EVER, held to settlement (no exit logic).
+A thin book takes a PARTIAL first fill, then later sweeps TOP UP the
+position toward the full PER_ENTRY_USD while TOPUP_WINDOW_S is open
+(owner: fills "need to be close to $100 not $37").
 """
 
 from __future__ import annotations
@@ -86,6 +99,20 @@ SCORE_HI = float(os.environ.get("EDGE_FSC_SCORE_HI", "0.85"))
 # "favorite"). Both arming and triggering require bid AND ask within
 # this spread; the favorite test and drop run on the MID.
 SPREAD_MAX = float(os.environ.get("EDGE_FSC_SPREAD_MAX", "0.12"))
+# Sportsbook-consensus favorite floor for the feed-covered path — a
+# 0.51 rounding artifact is a coin flip, not a favorite.
+FEED_FAV_MIN = float(os.environ.get("EDGE_FSC_FEED_FAV_MIN", "0.52"))
+# Feed-covered matches anchor the price trigger to the REAL match
+# start: no trigger before commence + this many seconds (a first set
+# is never over sooner). Replaces the armed-age proxy, which measured
+# our own clock, not the match's.
+START_MIN_S = float(os.environ.get("EDGE_FSC_START_MIN_S", "1200"))
+# $100 means $100 (owner 2026-08-17: fills "need to be close to $100
+# not $37"): a partial IOC entry keeps buying the remainder on later
+# sweeps while this window (from first fill) is open, until less than
+# TOPUP_MIN_USD is left to spend.
+TOPUP_WINDOW_S = float(os.environ.get("EDGE_FSC_TOPUP_WINDOW_S", "1800"))
+TOPUP_MIN_USD = float(os.environ.get("EDGE_FSC_TOPUP_MIN_USD", "5"))
 
 # Poll scores only while tennis is actually in play (last sweep saw
 # match-day tickers) — credits are shared with the fair-value feed.
@@ -159,10 +186,18 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
     # verification from one of our apis"). Fail-soft: empty rows keep
     # the price-only trigger exactly as before.
     from edge.shadow import fsc_scores
+    from edge.venues.mapper import team_score
     score_rows, score_stats = fsc_scores.poll(
         active_hint=bool(_ACTIVE["hint"]))
     if score_stats:
         stats["scores"] = score_stats
+    # Pre-match favorites by sportsbook consensus (owner 2026-08-17:
+    # "use the odds verification... they have to be a pre-match
+    # favorite"). Same fail-soft contract: an empty map leaves the
+    # price-only favorite test in charge.
+    pm_stats = fsc_scores.poll_prematch(active_hint=bool(_ACTIVE["hint"]))
+    if pm_stats:
+        stats["prematch"] = pm_stats
 
     seen: set = set()
     for league in LEAGUES:
@@ -189,6 +224,89 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                 key = f"fsc:{event}"
                 st = ledger.get_state(key) or {}
                 if st.get("entered"):
+                    # $100 means $100 (owner 2026-08-17: fills "need to
+                    # be close to $100 not $37"): an entry that IOC-
+                    # filled short keeps buying the remainder while the
+                    # top-up window is open. Must run BEFORE the held-
+                    # events skip — our own entry makes the event
+                    # venue-held.
+                    if ticker != st.get("fav_ticker"):
+                        continue
+                    spent_st = float(
+                        st.get("spent_usd")
+                        or float(st.get("filled") or 0)
+                        * float(st.get("entry_px") or 0))
+                    remaining = round(PER_ENTRY_USD - spent_st, 2)
+                    first_ts = float(st.get("ts") or 0)
+                    if remaining < TOPUP_MIN_USD \
+                            or now - first_ts > TOPUP_WINDOW_S:
+                        continue
+                    if not live:
+                        continue
+                    if guard_down:
+                        stats["skipped_guard_down"] = \
+                            stats.get("skipped_guard_down", 0) + 1
+                        continue
+                    book = kalshi.get_book(ticker, ticker)
+                    if book is None or not book.asks or not book.bids \
+                            or book.asks[0].size < 1 \
+                            or book.bids[0].size < 1:
+                        continue
+                    ask = book.asks[0].price
+                    if ask - book.bids[0].price > SPREAD_MAX:
+                        continue
+                    if not (SCORE_LO <= ask <= SCORE_HI):
+                        continue
+                    count = min(int(remaining / ask),
+                                int(book.asks[0].size))
+                    if count < 1:
+                        continue
+                    if spent_today + count * ask > DAY_USD:
+                        stats["skipped_day_cap"] = \
+                            stats.get("skipped_day_cap", 0) + 1
+                        continue
+                    r = kalshi.place_order(
+                        ticker, ask, count,
+                        client_order_id=str(uuid.uuid4()), taker=True)
+                    filled = int(float(r.get("count") or 0)) \
+                        if r.get("ok") else 0
+                    if filled <= 0:
+                        if r.get("ok"):
+                            stats["ioc_zero_fill"] = \
+                                stats.get("ioc_zero_fill", 0) + 1
+                        else:
+                            stats["order_err"] = \
+                                stats.get("order_err", 0) + 1
+                        continue
+                    if r.get("order_id"):
+                        ledger.set_state(
+                            f"kalshi_inline:{r['order_id']}", {"ts": now})
+                    cost = round(filled * ask, 2)
+                    spent_st = round(spent_st + cost, 2)
+                    ledger.set_state(key, {
+                        **st, "spent_usd": spent_st,
+                        "filled": int(st.get("filled") or 0) + filled,
+                        "topups": int(st.get("topups") or 0) + 1})
+                    spent_today = round(spent_today + cost, 2)
+                    day = {"date": _day_key(now), "spent": spent_today,
+                           "entries": int(day.get("entries") or 0)}
+                    ledger.set_state("fsc_day", day)
+                    stats["topup_fills"] = \
+                        stats.get("topup_fills", 0) + 1
+                    stats["spent"] = round(stats["spent"] + cost, 2)
+                    ledger.record_fill(
+                        fill_uid=f"fsc-{event}-topup-{int(now)}",
+                        venue="kalshi", market_key=f"kalshi:{ticker}",
+                        side="BUY", qty=float(filled), price=ask,
+                        fee=round(kalshi.taker_fee(ask) * filled, 4),
+                        league=league, mode="LIVE_BETA",
+                        category="kalshi_fsc",
+                        decision={"fsc": True, "topup": True,
+                                  "spent_usd": spent_st,
+                                  "entry_px": st.get("entry_px")})
+                    log.warning("FSC TOPUP %s: %d @ %.2f (position now "
+                                "$%.2f of $%.0f)", ticker, filled, ask,
+                                spent_st, PER_ENTRY_USD)
                     continue
                 if st.get("set1_won"):
                     # Score fact: the favorite WON the first set — this
@@ -231,6 +349,46 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                 mid = round((ask + bid) / 2, 4)
 
                 if not fav_ticker:
+                    # PRE-MATCH FAVORITE. Where the odds feed covers
+                    # the pairing (ATP/WTA main tours), the sportsbook
+                    # consensus IS the favorite oracle (owner
+                    # 2026-08-17: "use the odds verification... they
+                    # have to be a pre-match favorite") — Kalshi's own
+                    # book is a pricing venue, never the identifier,
+                    # and the feed snapshot is frozen pre-commence so
+                    # in-play drift can't rewrite it. Uncovered tiers
+                    # (ITF/challenger) keep the two-sided book rules.
+                    other_name = next(
+                        (n for n in (vm.outcome_tokens or {})
+                         if n != _outcome), "")
+                    feed = fsc_scores.prematch_favorite(
+                        _outcome, other_name) if other_name else None
+                    if feed is not None:
+                        if team_score(_outcome, feed["fav_name"]) < 0.9:
+                            # This side is the feed's DOG: never
+                            # armable, whatever a thin Kalshi board
+                            # prints (the TONGEE class of error).
+                            stats["arm_feed_dog"] = \
+                                stats.get("arm_feed_dog", 0) + 1
+                            continue
+                        if feed["prob"] < FEED_FAV_MIN:
+                            stats["arm_feed_coinflip"] = \
+                                stats.get("arm_feed_coinflip", 0) + 1
+                            continue
+                        # No FAV band on the mid here — "every single
+                        # favorite" includes the 0.92 heavy the band
+                        # excluded; the mid is kept only as the drop
+                        # reference.
+                        ledger.set_state(key, {
+                            "fav_ticker": ticker, "fav_px": mid,
+                            "armed_ts": now,
+                            "feed_prob": feed["prob"],
+                            "commence_ts": feed["commence_ts"],
+                            "v": 2})
+                        stats["armed"] += 1
+                        stats["armed_feed"] = \
+                            stats.get("armed_feed", 0) + 1
+                        continue
                     # MATCH-DAY SNAPSHOT — the favorite test runs on the
                     # MID of a two-sided book, and the opponent's book
                     # must not contradict it (both mids near or above
@@ -300,8 +458,21 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                                 stats.get("score_veto", 0) + 1
                         continue
 
-                if not score_entry and age < ARMED_AGE_S:
-                    continue
+                cts = float(st.get("commence_ts") or 0)
+                if not score_entry:
+                    if cts:
+                        # Real match-start anchor (feed-covered): a
+                        # first set cannot be over before commence +
+                        # START_MIN_S, so no price trigger can fire —
+                        # this kills the pre-match-collapse residual
+                        # outright and lets a deploy that lands mid-
+                        # match enter without waiting out ARMED_AGE_S.
+                        if now < cts + START_MIN_S:
+                            stats["skipped_prestart"] = \
+                                stats.get("skipped_prestart", 0) + 1
+                            continue
+                    elif age < ARMED_AGE_S:
+                        continue
                 if not score_entry and (
                         mid > TRIG_HI or (fav_px - mid) < MIN_DROP):
                     if st.get("pend_ts"):
@@ -379,10 +550,13 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                     ledger.set_state(f"kalshi_inline:{r['order_id']}",
                                      {"ts": now})
                 cost = round(filled * ask, 2)
+                st.pop("pend_ts", None)
+                st.pop("pend_px", None)
+                # spent_usd/ts seed the top-up loop: later sweeps keep
+                # buying toward PER_ENTRY_USD while the window is open.
                 ledger.set_state(key, {
-                    "fav_ticker": fav_ticker, "fav_px": fav_px,
-                    "armed_ts": armed_ts, "entered": True,
-                    "entry_px": ask, "filled": filled, "ts": now})
+                    **st, "entered": True, "entry_px": ask,
+                    "filled": filled, "spent_usd": cost, "ts": now})
                 held_events.add(event)   # same event, later series: held
                 spent_today = round(spent_today + cost, 2)
                 day = {"date": _day_key(now), "spent": spent_today,
@@ -398,6 +572,7 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                     league=league, mode="LIVE_BETA", category="kalshi_fsc",
                     decision={"fsc": True, "fav_px": fav_px,
                               "trigger_ask": ask, "armed_age_s": int(age),
+                              "feed_prob": st.get("feed_prob"),
                               "score_confirmed": bool(score_entry),
                               "sets": (f"{sst['fav_sets']}-"
                                        f"{sst['opp_sets']}") if sst else None,

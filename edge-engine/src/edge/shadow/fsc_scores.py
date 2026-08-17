@@ -165,3 +165,145 @@ def set_state(rows: list[dict], fav_name: str,
                 "fresh": now - r["last_update_ts"] <= FRESH_S,
                 "completed": r["completed"]}
     return None
+
+
+# ── Pre-match favorite verification (owner 2026-08-17 late night:
+# "use the odds verification... they have to be a pre-match favorite").
+# The h2h odds for the covered tennis tours define the favorite by
+# SPORTSBOOK CONSENSUS, frozen at the last observation BEFORE the
+# match's commence time — Kalshi's own book (which armed the wrong
+# player on an empty ITF board, the TONGEE incident) is demoted to a
+# pricing venue, never the favorite oracle, wherever the feed reaches.
+
+ODDS_EVERY_S = float(os.environ.get("EDGE_FSC_ODDS_EVERY_S", "300"))
+_odds_cache: dict = {"at": 0.0, "stats": {}}
+# {frozenset(lowered names): {"names": [...], "probs": {name: p},
+#   "commence_ts": ts, "frozen": bool}} — probs update while pre-match,
+# freeze at the last pre-commence observation.
+_prematch: dict = {}
+
+
+def _implied_pair(bookmakers: list) -> dict | None:
+    """Consensus implied probabilities for a two-player event: mean of
+    1/decimal across books, pair-normalized (the de-vig)."""
+    sums: dict = {}
+    n = 0
+    for bm in bookmakers or []:
+        for mkt in bm.get("markets") or []:
+            if mkt.get("key") != "h2h":
+                continue
+            outs = mkt.get("outcomes") or []
+            if len(outs) != 2:
+                continue
+            try:
+                pair = {str(o["name"]).strip(): 1.0 / float(o["price"])
+                        for o in outs}
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                continue
+            for k, v in pair.items():
+                sums[k] = sums.get(k, 0.0) + v
+            n += 1
+    if n == 0 or len(sums) != 2:
+        return None
+    tot = sum(sums.values())
+    if tot <= 0:
+        return None
+    return {k: round(v / tot, 4) for k, v in sums.items()}
+
+
+def poll_prematch(active_hint: bool = True) -> dict:
+    """Refresh the pre-match favorites map from the odds feed (h2h,
+    covered tennis tours). Returns stats; the map itself is served by
+    prematch_favorite(). Fail-soft: errors leave the map as-is."""
+    import requests
+
+    now = time.time()
+    with _lock:
+        if now - _odds_cache["at"] < ODDS_EVERY_S:
+            return _odds_cache["stats"]
+        _odds_cache["at"] = now
+
+    api_key = os.environ.get("EDGE_ODDS_API_KEY", "")
+    stats: dict = {}
+    if os.environ.get("EDGE_FSC_ODDS", "1") == "0":
+        stats["disabled"] = True
+    elif not api_key:
+        stats["no_key"] = True
+    elif not active_hint:
+        stats["idle"] = True
+    elif _quota["remaining"] is not None and _quota["remaining"] < RESERVE:
+        stats["quota_hold"] = _quota["remaining"]
+    else:
+        sess = requests.Session()
+        keys = _tennis_keys(sess, api_key, now)
+        stats["sports"] = len(keys)
+        fresh = 0
+        for k in keys:
+            batch = _get(sess, f"/sports/{k}/odds",
+                         {"apiKey": api_key, "markets": "h2h",
+                          "regions": "us,eu", "oddsFormat": "decimal"})
+            if batch is None:
+                stats["errors"] = stats.get("errors", 0) + 1
+                continue
+            for ev in batch:
+                names = [str(ev.get("home_team") or "").strip(),
+                         str(ev.get("away_team") or "").strip()]
+                if not all(names):
+                    continue
+                try:
+                    from datetime import datetime, timezone
+                    cts = datetime.fromisoformat(
+                        str(ev.get("commence_time")).replace(
+                            "Z", "+00:00")).astimezone(
+                        timezone.utc).timestamp()
+                except (TypeError, ValueError):
+                    continue
+                key2 = frozenset(n.lower() for n in names)
+                rec = _prematch.get(key2)
+                if rec and rec.get("frozen"):
+                    continue          # pre-match snapshot already final
+                probs = _implied_pair(ev.get("bookmakers"))
+                if not probs:
+                    continue
+                _prematch[key2] = {
+                    "names": names, "probs": probs, "commence_ts": cts,
+                    # The LAST observation taken pre-commence is the
+                    # pre-match truth; once the clock passes commence
+                    # it freezes and in-play drift can't rewrite it.
+                    "frozen": now >= cts, "at": now}
+                fresh += 1
+        stats["events"] = len(_prematch)
+        stats["updated"] = fresh
+        if _quota["remaining"] is not None:
+            stats["quota_remaining"] = _quota["remaining"]
+    # Drop events long finished so the map cannot grow unbounded.
+    cutoff = now - 2 * 86400
+    for k2 in [k2 for k2, r in _prematch.items()
+               if r["commence_ts"] < cutoff]:
+        _prematch.pop(k2, None)
+    with _lock:
+        _odds_cache["stats"] = stats
+    return stats
+
+
+def prematch_favorite(name_a: str, name_b: str) -> dict | None:
+    """The sportsbook-consensus pre-match favorite for this pairing, or
+    None when the feed does not cover it (ITF/challenger tiers).
+    Returns {'fav_name', 'prob', 'commence_ts', 'frozen'} with
+    fav_name spelled as the FEED spells it — callers name-match."""
+    from edge.venues.mapper import team_score
+
+    best = None
+    for rec in _prematch.values():
+        fa, fb = rec["names"]
+        direct = min(team_score(fa, name_a), team_score(fb, name_b))
+        cross = min(team_score(fa, name_b), team_score(fb, name_a))
+        score = max(direct, cross)
+        if score >= 0.9 and (best is None or score > best[0]):
+            best = (score, rec)
+    if best is None:
+        return None
+    rec = best[1]
+    fav = max(rec["probs"], key=rec["probs"].get)
+    return {"fav_name": fav, "prob": rec["probs"][fav],
+            "commence_ts": rec["commence_ts"], "frozen": rec["frozen"]}
