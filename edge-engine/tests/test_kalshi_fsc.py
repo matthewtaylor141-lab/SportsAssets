@@ -84,8 +84,12 @@ class _Kalshi:
         px, size = self.asks.get(ticker, (None, 0.0))
         if px is None:
             return None
+        # Two-sided by default (the sleeve refuses one-sided books
+        # since the TONGEE incident); tests force a one-sided book by
+        # setting self.no_bids.
+        bids = [] if getattr(self, "no_bids", False) else             [BookLevel(round(max(px - 0.02, 0.01), 2), size)]
         return MarketBook(venue=self.name, market_id=market_id,
-                          outcome_id=ticker, bids=[],
+                          outcome_id=ticker, bids=bids,
                           asks=[BookLevel(px, size)], ts=time.time())
 
     def place_order(self, ticker, price, count, **kw):
@@ -108,7 +112,8 @@ def test_arms_the_match_day_favorite():
     st = sweep(kalshi=ka, ledger=led, live=True)
     assert st["armed"] == 1 and st["entered"] == 0
     saved = led.get_state(KEY)
-    assert saved["fav_ticker"] == T_FAV and saved["fav_px"] == 0.62
+    # fav_px is the MID of the two-sided book (0.62 ask / 0.60 bid).
+    assert saved["fav_ticker"] == T_FAV and saved["fav_px"] == 0.61
     assert not ka.orders
 
 
@@ -469,3 +474,66 @@ def test_stale_or_absent_scores_leave_the_price_path_untouched(
     sweep(kalshi=ka, ledger=led, live=True)          # pend (price path)
     st = sweep(kalshi=ka, ledger=led, live=True)     # confirm: enter
     assert st["entered"] == 1 and not st.get("score_confirmed")
+
+
+def test_one_sided_book_never_arms_the_dog(fast_gates):
+    """TONGEE incident regression (owner screenshot 2026-08-17 night):
+    a lone 60c offer with NO BIDS on an empty ITF book must not read as
+    'the favorite trades at 60c' — the real favorite was the OTHER
+    player. One-sided books neither arm nor trigger."""
+    ka = _Kalshi({T_FAV: (0.60, 40.0), T_DOG: (0.95, 12.0)})
+    ka.no_bids = True
+    led = _led()
+    st = sweep(kalshi=ka, ledger=led, live=True)
+    assert st["armed"] == 0 and st.get("skipped_one_sided", 0) >= 1
+    assert led.get_state(KEY) is None
+    # Liquidity arrives and the phantom 'collapse' prints — still no
+    # armed state, so nothing can ever trigger.
+    ka.asks[T_FAV] = (0.28, 300.0)
+    sweep(kalshi=ka, ledger=led, live=True)
+    st3 = sweep(kalshi=ka, ledger=led, live=True)
+    assert st3["entered"] == 0 and not ka.orders
+
+
+def test_wide_spread_is_not_a_price(fast_gates):
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)          # arm two-sided
+    # The 'collapse' is a 0.28 ask over a 0.05 bid — a 23c-wide book,
+    # not a set loss.
+    ka.asks[T_FAV] = (0.28, 500.0)
+    orig = ka.get_book
+
+    def wide(market_id, ticker):
+        b = orig(market_id, ticker)
+        if b and ticker == T_FAV and b.asks[0].price == 0.28:
+            b.bids[0] = type(b.bids[0])(0.05, 500.0)
+        return b
+    ka.get_book = wide
+    s1 = sweep(kalshi=ka, ledger=led, live=True)
+    s2 = sweep(kalshi=ka, ledger=led, live=True)
+    assert s2["entered"] == 0 and not ka.orders
+    assert (s1.get("skipped_wide_spread", 0)
+            + s2.get("skipped_wide_spread", 0)) >= 1
+
+
+def test_contradicted_arm_is_refused(fast_gates):
+    """Both mids can't be favorites: if the opponent's two-sided book
+    says THEY are above 50%, the arm is book noise and is refused."""
+    ka = _Kalshi({T_FAV: (0.60, 500.0), T_DOG: (0.72, 500.0)})
+    led = _led()
+    st = sweep(kalshi=ka, ledger=led, live=True)
+    assert st["armed"] == 0 and st.get("arm_contradicted", 0) >= 1
+
+
+def test_pre_fix_armed_state_is_cleared_not_trusted(fast_gates):
+    led = _led()
+    led.set_state(KEY, {"fav_ticker": T_FAV, "fav_px": 0.60,
+                        "armed_ts": time.time() - 3600})   # no "v": 2
+    ka = _Kalshi({T_FAV: (0.28, 500.0), T_DOG: (0.75, 500.0)})
+    st = sweep(kalshi=ka, ledger=led, live=True)
+    assert st.get("rearmed_v1") == 1 and not ka.orders
+    st2 = led.get_state(KEY) or {}
+    assert st2.get("v") == 2 and st2.get("fav_ticker") == T_DOG, \
+        "the re-arm must be v2 and on the side that actually trades " \
+        "as the favorite — not the phantom the old state named"

@@ -81,6 +81,11 @@ PARTIAL_MIN_USD = float(os.environ.get("EDGE_FSC_PARTIAL_MIN_USD", "25"))
 # not an entry.
 SCORE_LO = float(os.environ.get("EDGE_FSC_SCORE_LO", "0.03"))
 SCORE_HI = float(os.environ.get("EDGE_FSC_SCORE_HI", "0.85"))
+# A book wider than this is not a price (TONGEE incident 2026-08-17:
+# a lone resting offer on an empty ITF book armed the dog as the
+# "favorite"). Both arming and triggering require bid AND ask within
+# this spread; the favorite test and drop run on the MID.
+SPREAD_MAX = float(os.environ.get("EDGE_FSC_SPREAD_MAX", "0.12"))
 
 # Poll scores only while tennis is actually in play (last sweep saw
 # match-day tickers) — credits are shared with the fair-value feed.
@@ -194,23 +199,59 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                     stats["skipped_held"] = stats.get("skipped_held", 0) + 1
                     continue
                 fav_ticker = st.get("fav_ticker")
+                if fav_ticker and st.get("v") != 2:
+                    # Pre-fix armed state (TONGEE incident 2026-08-17
+                    # evening: an ask-only snapshot on a one-sided ITF
+                    # book armed the DOG as "favorite"). Never trusted:
+                    # cleared and re-armed under the two-sided rules.
+                    ledger.set_state(key, {})
+                    stats["rearmed_v1"] = stats.get("rearmed_v1", 0) + 1
+                    continue
                 if fav_ticker and ticker != fav_ticker:
                     continue    # armed: only the favorite's book is read
                 book = kalshi.get_book(ticker, ticker)
                 if book is None or not book.asks or book.asks[0].size < 1:
                     continue
                 ask = book.asks[0].price
+                # A price is only a price with BOTH sides present and a
+                # sane spread. On Kalshi's thin ITF boards a lone 60c
+                # offer with no bid read as "favorite at 60c" while the
+                # player really traded ~30c — the sleeve then bought the
+                # dog's "collapse". Ask-only books neither arm nor
+                # trigger anything.
+                if not book.bids or book.bids[0].size < 1:
+                    stats["skipped_one_sided"] = \
+                        stats.get("skipped_one_sided", 0) + 1
+                    continue
+                bid = book.bids[0].price
+                if ask - bid > SPREAD_MAX:
+                    stats["skipped_wide_spread"] = \
+                        stats.get("skipped_wide_spread", 0) + 1
+                    continue
+                mid = round((ask + bid) / 2, 4)
 
                 if not fav_ticker:
-                    # MATCH-DAY SNAPSHOT: first side seen trading as the
-                    # favorite. One favorite per match by arithmetic —
-                    # two sides rarely both ask >= 0.55, and when a wide
-                    # ITF spread lets them, "favorite" is simply the
-                    # first side quoted there — a coin-flip either way.
-                    if FAV_MIN <= ask <= FAV_MAX:
+                    # MATCH-DAY SNAPSHOT — the favorite test runs on the
+                    # MID of a two-sided book, and the opponent's book
+                    # must not contradict it (both mids near or above
+                    # 0.5 is book noise, not a favorite).
+                    if FAV_MIN <= mid <= FAV_MAX:
+                        opp_ticker = next(
+                            (t for t in (vm.outcome_tokens or {}).values()
+                             if t != ticker), None)
+                        if opp_ticker:
+                            ob = kalshi.get_book(opp_ticker, opp_ticker)
+                            if ob is not None and ob.asks and ob.bids:
+                                omid = (ob.asks[0].price
+                                        + ob.bids[0].price) / 2
+                                if omid > 0.5:
+                                    stats["arm_contradicted"] = \
+                                        stats.get("arm_contradicted",
+                                                  0) + 1
+                                    continue
                         ledger.set_state(key, {
-                            "fav_ticker": ticker, "fav_px": ask,
-                            "armed_ts": now})
+                            "fav_ticker": ticker, "fav_px": mid,
+                            "armed_ts": now, "v": 2})
                         stats["armed"] += 1
                     continue
 
@@ -262,7 +303,7 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                 if not score_entry and age < ARMED_AGE_S:
                     continue
                 if not score_entry and (
-                        ask > TRIG_HI or (fav_px - ask) < MIN_DROP):
+                        mid > TRIG_HI or (fav_px - mid) < MIN_DROP):
                     if st.get("pend_ts"):
                         # Blip: the band didn't hold to confirmation.
                         st.pop("pend_ts", None)
@@ -271,7 +312,7 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                         stats["confirm_reset"] = \
                             stats.get("confirm_reset", 0) + 1
                     continue          # set not (yet) lost by price
-                if not score_entry and ask < TRIG_LO:
+                if not score_entry and mid < TRIG_LO:
                     stats["skipped_deep"] = stats.get("skipped_deep", 0) + 1
                     continue          # worse than one set — not this trade
                 # TWO-SWEEP CONFIRMATION: the first qualifying look only
