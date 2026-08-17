@@ -1690,7 +1690,7 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
                                               consensus_books=eff_books,
                                               drift_penalty=drift_pen.get(
                                                   drift_cat, drift_pen.get("*", 0.0)),
-                                              keep=keep)
+                                              keep=keep, venue=adapter.name)
                     # Second look at a free sample taken a minute or more ago.
                     # Closed out on the PRICING path, not the study path: the
                     # study bucket only comes round once an hour, which is far

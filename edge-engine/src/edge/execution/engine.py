@@ -96,6 +96,35 @@ class Policy:
         blocks = self.leagues.get("category_blocks") or {}
         return category in (blocks.get(league_code or "") or [])
 
+    def venue_league_blocked(self, venue: str | None,
+                             code: str | None) -> bool:
+        """Per-VENUE league quarantine (owner order 2026-08-17, weekly
+        report R1): the bands were calibrated on Polymarket fills and the
+        venue transfer is unproven per venue — the Aug 10-16 Kalshi
+        tennis book lost heavily while Polymarket tennis was positive
+        the same week. Env-driven and reversible:
+        EDGE_VENUE_LEAGUE_BLOCKS="kalshi:atp+wta+itf+ch;venue2:..."
+        (set empty to clear). Copies are NOT gated here — this stops
+        only engine-initiated entries."""
+        if not venue or not code:
+            return False
+        import os
+        raw = os.environ.get(
+            "EDGE_VENUE_LEAGUE_BLOCKS",
+            "kalshi:atp+wta+itf+ch+atpch+wtach+challenger")
+        cached = getattr(self, "_venue_league_blocks", None)
+        if cached is None or cached[0] != raw:
+            table: dict[str, set] = {}
+            for part in raw.split(";"):
+                if ":" not in part:
+                    continue
+                v, leagues = part.split(":", 1)
+                table[v.strip().lower()] = {
+                    x.strip().lower() for x in leagues.split("+") if x.strip()}
+            cached = (raw, table)
+            self._venue_league_blocks = cached
+        return code.lower() in cached[1].get(venue.lower(), set())
+
     def league_allowed(self, code: str | None) -> str:
         """'allow' | 'block' | 'shadow_only' (unknown)."""
         if not code:
@@ -149,7 +178,7 @@ def strategy_filter(
     policy: Policy, league_code: str | None, price: float, fair: float,
     venue_fee: float = 0.0, category: str = "moneyline",
     consensus_books: int | None = None, drift_penalty: float = 0.0,
-    keep: float | None = None,
+    keep: float | None = None, venue: str | None = None,
 ) -> StrategyVerdict:
     """The entry rule alone: fair - price - fee >= threshold(band, category),
     plus dead zones, league allow/block, and league x category blocks.
@@ -181,6 +210,10 @@ def strategy_filter(
         keep, edge = 1.0, raw_edge
     if policy.league_allowed(league_code) == "block":
         return StrategyVerdict(False, f"league {league_code} blocked", band, None, edge, raw_edge=raw_edge, keep=keep)
+    if policy.venue_league_blocked(venue, league_code):
+        return StrategyVerdict(
+            False, f"league {league_code} blocked on {venue}",
+            band, None, edge, raw_edge=raw_edge, keep=keep)
     if policy.category_blocked(league_code, category):
         return StrategyVerdict(
             False, f"category {category} blocked for {league_code}", band, None, edge, raw_edge=raw_edge, keep=keep)

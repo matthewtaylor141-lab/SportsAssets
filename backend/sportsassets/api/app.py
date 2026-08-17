@@ -2236,6 +2236,63 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
                      "remainder (identity method, owner ops PDF v1.1)")}
 
 
+@app.get("/api/admin/order-audit", dependencies=[Depends(require_admin)])
+async def api_admin_order_audit(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+) -> dict:
+    """UNCAPPED order-level attribution (owner order 2026-08-17, weekly
+    report R5). The public record's ±$100 single-trade display cap made
+    every derived report blind to big winners AND big losers — the
+    2026-08-10 week read -$4,984 capped against a materially different
+    uncapped book, and sleeve attributions were biased positive because
+    copy clips losing more than $100 vanished. This surface is the
+    management truth: every settled live order, no exclusions, split by
+    ET day x sleeve x venue. Admin-token gated — the cap stays on for
+    the public site only."""
+    from_day = _parse_day(from_, "2026-08-01")
+    to_day = _parse_day(to, _today_et())
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT lower(COALESCE(whale_username, '?')) AS category,
+               COALESCE(venue, '?') AS venue,
+               to_char(settled_at AT TIME ZONE 'America/New_York',
+                       'YYYY-MM-DD') AS day,
+               count(*)::int AS settled,
+               count(*) FILTER (WHERE pnl > 0)::int AS wins,
+               count(*) FILTER (WHERE pnl < 0)::int AS losses,
+               COALESCE(sum(pnl), 0)::float8 AS pnl,
+               COALESCE(sum(filled_usd), 0)::float8 AS filled_usd,
+               COALESCE(sum(pnl) FILTER (WHERE abs(pnl) > 100), 0)::float8
+                   AS over_cap_pnl,
+               count(*) FILTER (WHERE abs(COALESCE(pnl, 0)) > 100)::int
+                   AS over_cap_n
+        FROM live_orders
+        WHERE status = 'settled' AND settled_at IS NOT NULL
+        GROUP BY 1, 2, 3
+        """)
+    days: dict[str, list] = {}
+    totals: dict[str, dict] = {}
+    for r in rows:
+        if not (from_day <= r["day"] <= to_day):
+            continue
+        d = dict(r)
+        days.setdefault(r["day"], []).append(d)
+        t = totals.setdefault(r["category"], {
+            "pnl": 0.0, "settled": 0, "wins": 0, "losses": 0,
+            "filled_usd": 0.0, "over_cap_pnl": 0.0, "over_cap_n": 0})
+        t["pnl"] = round(t["pnl"] + r["pnl"], 4)
+        t["filled_usd"] = round(t["filled_usd"] + r["filled_usd"], 2)
+        t["over_cap_pnl"] = round(t["over_cap_pnl"] + r["over_cap_pnl"], 4)
+        for k in ("settled", "wins", "losses", "over_cap_n"):
+            t[k] += r[k]
+    return {"from": from_day, "to": to_day, "capped": False,
+            "days": [{"date": k, "rows": v} for k, v in sorted(days.items())],
+            "totals": totals,
+            "net_pnl": round(sum(t["pnl"] for t in totals.values()), 2)}
+
+
 @app.get("/api/daily-breakdown")
 async def api_daily_breakdown() -> dict:
     """Month-to-date category breakdown (kept for existing consumers)."""

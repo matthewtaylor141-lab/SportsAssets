@@ -79,7 +79,14 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # everywhere EXCEPT soccer, which clips at $100 per event — the
 # per-(whale, sport) override below carries the exception.
 PER_COPY_USD = {"rn1": 150.00, "swisstony": 200.00}
-PER_COPY_USD_SPORT = {("swisstony", "soccer"): 100.00}
+# 2026-08-17 (owner order: integrate weekly-report recommendations, R2 —
+# sport-aware copy allocation): RN1's own tennis book lost ~$100k of its
+# own money in the Aug 10-16 week while its MLB (+$64.8k) and soccer
+# (+$49.3k) carried its profit, so RN1 tennis copies clip at HALF until
+# its tennis grade turns. 0x2c33's soccer raise to $150 waits out the
+# verification week the same recommendation specifies.
+PER_COPY_USD_SPORT = {("swisstony", "soccer"): 100.00,
+                      ("rn1", "tennis"): 75.00}
 PER_COPY_DEFAULT = 50.00
 # Inverse volume<->size scaling (owner order 2026-08-12): past this
 # many fills in a venue-day, the clip shrinks proportionally — 10x

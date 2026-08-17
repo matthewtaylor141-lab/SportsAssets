@@ -612,6 +612,10 @@ def test_tennis_games_total_prices_end_to_end(tmp_path, monkeypatch):
             return [ev]
 
     monkeypatch.setenv("EDGE_DATA_DIR", str(tmp_path))
+    # This test exercises the games-total PRICING path; clear the
+    # kalshi-tennis venue quarantine (R1, 2026-08-17) so the gate does
+    # not shadow what is being tested here.
+    monkeypatch.setenv("EDGE_VENUE_LEAGUE_BLOCKS", "")
     ledger = Ledger(db_path=str(tmp_path / "l.sqlite3"))
     risk = RiskManager(ledger, {**POLICY.risk, "mode": "PAPER"})
     funnel = run_cycle([TennisVenue()], Feed(), POLICY, risk, ledger,
@@ -749,3 +753,22 @@ def test_explicit_whole_line_props_are_refused():
     assert bet is None and why == "whole_line_push_risk"
     bet, why = parse_prop("Aaron Judge over 5.5 strikeouts")
     assert bet is not None and bet.point == 5.5
+
+
+def test_kalshi_tennis_engine_entries_blocked_by_default():
+    """R1 (owner order 2026-08-17): engine-initiated Kalshi tennis is
+    quarantined by default, reversible via EDGE_VENUE_LEAGUE_BLOCKS."""
+    import os
+    from edge.execution.engine import strategy_filter
+    os.environ.pop("EDGE_VENUE_LEAGUE_BLOCKS", None)
+    for code in ("atp", "wta", "itf", "ch"):
+        v = strategy_filter(POLICY, code, 0.10, 0.20, venue="kalshi")
+        assert not v.ok and "blocked on kalshi" in v.reason, (code, v.reason)
+    v = strategy_filter(POLICY, "wta", 0.10, 0.20, venue="polymarket-us")
+    assert "blocked on" not in v.reason
+    os.environ["EDGE_VENUE_LEAGUE_BLOCKS"] = ""
+    try:
+        v = strategy_filter(POLICY, "wta", 0.10, 0.20, venue="kalshi")
+        assert "blocked on" not in v.reason
+    finally:
+        os.environ.pop("EDGE_VENUE_LEAGUE_BLOCKS", None)
