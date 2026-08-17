@@ -75,6 +75,16 @@ DAY_USD = float(os.environ.get("EDGE_FSC_DAY_USD", "5000"))
 # Thin books take a PARTIAL entry down to this floor instead of
 # skipping (same order): $40 on the favorite beats missing the match.
 PARTIAL_MIN_USD = float(os.environ.get("EDGE_FSC_PARTIAL_MIN_USD", "25"))
+# Sanity bounds for SCORE-CONFIRMED entries (fsc_scores): when the feed
+# says the first set is lost as a fact, the price bands stop being the
+# trigger — but an ask outside these bounds is a broken/settled book,
+# not an entry.
+SCORE_LO = float(os.environ.get("EDGE_FSC_SCORE_LO", "0.03"))
+SCORE_HI = float(os.environ.get("EDGE_FSC_SCORE_HI", "0.85"))
+
+# Poll scores only while tennis is actually in play (last sweep saw
+# match-day tickers) — credits are shared with the fair-value feed.
+_ACTIVE = {"hint": True}
 
 _MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
            "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
@@ -140,6 +150,15 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
             held_events = {game_of(t) for t in
                            (set(vg["positions"]) | set(vg["resting_buys"]))}
 
+    # Set-score ground truth (owner 2026-08-17 night: "can there be
+    # verification from one of our apis"). Fail-soft: empty rows keep
+    # the price-only trigger exactly as before.
+    from edge.shadow import fsc_scores
+    score_rows, score_stats = fsc_scores.poll(
+        active_hint=bool(_ACTIVE["hint"]))
+    if score_stats:
+        stats["scores"] = score_stats
+
     seen: set = set()
     for league in LEAGUES:
         try:
@@ -165,6 +184,11 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                 key = f"fsc:{event}"
                 st = ledger.get_state(key) or {}
                 if st.get("entered"):
+                    continue
+                if st.get("set1_won"):
+                    # Score fact: the favorite WON the first set — this
+                    # match can never qualify ("loses the first set"),
+                    # whatever the price later does.
                     continue
                 if event in held_events:
                     stats["skipped_held"] = stats.get("skipped_held", 0) + 1
@@ -196,10 +220,49 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                     ledger.set_state(key, {})      # stale session — re-arm
                     stats["rearmed"] = stats.get("rearmed", 0) + 1
                     continue
-                if age < ARMED_AGE_S:
-                    continue
                 fav_px = float(st.get("fav_px") or 0)
-                if ask > TRIG_HI or (fav_px - ask) < MIN_DROP:
+
+                # SCORE GROUND TRUTH (three verdicts, all fail-soft to
+                # the price path when the feed has no fresh row):
+                #   fav 0 sets / opp >=1  -> first set LOST, fact: enter
+                #   fav >=1 / opp 0       -> first set WON: never enter
+                #   0-0 (fresh)           -> set 1 undecided: VETO any
+                #                            price trigger (injury news
+                #                            is not a set loss)
+                score_entry = False
+                sst = None
+                if score_rows and len(vm.outcome_tokens or {}) == 2:
+                    other_name = next(
+                        (n for n, t in vm.outcome_tokens.items()
+                         if t != fav_ticker), "")
+                    sst = fsc_scores.set_state(score_rows, _outcome,
+                                               other_name, now)
+                if sst is not None and sst["fresh"] \
+                        and not sst["completed"]:
+                    if sst["fav_sets"] == 0 and sst["opp_sets"] >= 1:
+                        if SCORE_LO <= ask <= SCORE_HI:
+                            score_entry = True
+                            stats["score_confirmed"] = \
+                                stats.get("score_confirmed", 0) + 1
+                        else:
+                            stats["score_out_of_band"] = \
+                                stats.get("score_out_of_band", 0) + 1
+                            continue
+                    elif sst["fav_sets"] >= 1 and sst["opp_sets"] == 0:
+                        ledger.set_state(key, {**st, "set1_won": True})
+                        stats["score_set1_won"] = \
+                            stats.get("score_set1_won", 0) + 1
+                        continue
+                    else:       # 0-0: first set still in progress
+                        if ask <= TRIG_HI:
+                            stats["score_veto"] = \
+                                stats.get("score_veto", 0) + 1
+                        continue
+
+                if not score_entry and age < ARMED_AGE_S:
+                    continue
+                if not score_entry and (
+                        ask > TRIG_HI or (fav_px - ask) < MIN_DROP):
                     if st.get("pend_ts"):
                         # Blip: the band didn't hold to confirmation.
                         st.pop("pend_ts", None)
@@ -208,21 +271,24 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                         stats["confirm_reset"] = \
                             stats.get("confirm_reset", 0) + 1
                     continue          # set not (yet) lost by price
-                if ask < TRIG_LO:
+                if not score_entry and ask < TRIG_LO:
                     stats["skipped_deep"] = stats.get("skipped_deep", 0) + 1
                     continue          # worse than one set — not this trade
                 # TWO-SWEEP CONFIRMATION: the first qualifying look only
                 # arms the pending stamp; money moves when a later sweep
                 # (>= CONFIRM_MIN_S, <= CONFIRM_MAX_S) still qualifies.
+                # A SCORE-confirmed set loss is already a fact — it
+                # skips the price confirmation entirely.
                 pend_ts = float(st.get("pend_ts") or 0)
-                if not pend_ts or now - pend_ts > CONFIRM_MAX_S:
-                    ledger.set_state(key, {**st, "pend_ts": now,
-                                           "pend_px": ask})
-                    stats["pending_confirm"] = \
-                        stats.get("pending_confirm", 0) + 1
-                    continue
-                if now - pend_ts < CONFIRM_MIN_S:
-                    continue
+                if not score_entry:
+                    if not pend_ts or now - pend_ts > CONFIRM_MAX_S:
+                        ledger.set_state(key, {**st, "pend_ts": now,
+                                               "pend_px": ask})
+                        stats["pending_confirm"] = \
+                            stats.get("pending_confirm", 0) + 1
+                        continue
+                    if now - pend_ts < CONFIRM_MIN_S:
+                        continue
                 if spent_today + PER_ENTRY_USD > DAY_USD:
                     stats["skipped_day_cap"] = \
                         stats.get("skipped_day_cap", 0) + 1
@@ -291,9 +357,14 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                     league=league, mode="LIVE_BETA", category="kalshi_fsc",
                     decision={"fsc": True, "fav_px": fav_px,
                               "trigger_ask": ask, "armed_age_s": int(age),
-                              "confirm_s": int(now - pend_ts)})
+                              "score_confirmed": bool(score_entry),
+                              "sets": (f"{sst['fav_sets']}-"
+                                       f"{sst['opp_sets']}") if sst else None,
+                              "confirm_s": int(now - pend_ts)
+                              if pend_ts else None})
                 log.warning("FSC ENTRY %s: %d @ %.2f (fav was %.2f, "
                             "armed %dm ago)", ticker, filled, ask, fav_px,
                             int(age / 60))
+    _ACTIVE["hint"] = bool(stats["scanned"])
     stats["day"] = dict(day) if day else {}
     return stats

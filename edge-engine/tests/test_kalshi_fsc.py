@@ -395,3 +395,77 @@ def test_thin_book_takes_a_partial_entry(fast_gates):
     st = sweep(kalshi=ka, ledger=led, live=True)     # confirmed: enter
     assert st["entered"] == 1 and st.get("partial_entries") == 1
     assert ka.orders == [(T_FAV, 0.33, 150)]
+
+
+# ── Score verification (owner 2026-08-17 night) ─────────────────────
+
+
+def _srows(fav_sets, opp_sets, fresh=True, completed=False):
+    return [{"names": ["Andreeva", "Pliskova"],
+             "sets": {"Andreeva": fav_sets, "Pliskova": opp_sets},
+             "completed": completed,
+             "last_update_ts": time.time() - (60 if fresh else 7200)}]
+
+
+def _with_scores(monkeypatch, rows):
+    from edge.shadow import fsc_scores
+    monkeypatch.setattr(fsc_scores, "poll", lambda active_hint=True:
+                        (rows, {"rows": len(rows)}))
+
+
+def test_score_confirmed_set_loss_enters_without_price_confirmation(
+        monkeypatch, fast_gates):
+    """Feed says 0-1 in sets: fact. Entry fires on the SAME sweep, no
+    second-sweep wait, even though the price never hit the band."""
+    _with_scores(monkeypatch, _srows(0, 1))
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)          # arm at 0.62
+    ka.asks[T_FAV] = (0.55, 500.0)   # above TRIG_HI — price path silent
+    st = sweep(kalshi=ka, ledger=led, live=True)
+    assert st.get("score_confirmed") == 1 and st["entered"] == 1
+    assert ka.orders and ka.orders[0][0] == T_FAV
+
+
+def test_score_zero_zero_vetoes_a_price_collapse(monkeypatch, fast_gates):
+    """0-0 fresh: the first set is still being played — a price
+    collapse into the band is news, not a set loss. No entry."""
+    _with_scores(monkeypatch, _srows(0, 0))
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)
+    ka.asks[T_FAV] = (0.33, 500.0)
+    s1 = sweep(kalshi=ka, ledger=led, live=True)
+    s2 = sweep(kalshi=ka, ledger=led, live=True)
+    assert s1.get("score_veto") == 1 and s2.get("score_veto") == 1
+    assert not ka.orders
+
+
+def test_score_set1_won_disqualifies_the_match_forever(
+        monkeypatch, fast_gates):
+    """Favorite won set 1: 'loses the first set' can never happen —
+    the match is closed out even if the price later collapses."""
+    _with_scores(monkeypatch, _srows(1, 0))
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)
+    ka.asks[T_FAV] = (0.33, 500.0)
+    st = sweep(kalshi=ka, ledger=led, live=True)
+    assert st.get("score_set1_won") == 1
+    assert (led.get_state(KEY) or {}).get("set1_won") is True
+    _with_scores(monkeypatch, [])    # feed goes quiet; price collapses
+    s2 = sweep(kalshi=ka, ledger=led, live=True)
+    s3 = sweep(kalshi=ka, ledger=led, live=True)
+    assert not ka.orders and s3["entered"] == 0
+
+
+def test_stale_or_absent_scores_leave_the_price_path_untouched(
+        monkeypatch, fast_gates):
+    _with_scores(monkeypatch, _srows(0, 1, fresh=False))
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)
+    ka.asks[T_FAV] = (0.33, 500.0)
+    sweep(kalshi=ka, ledger=led, live=True)          # pend (price path)
+    st = sweep(kalshi=ka, ledger=led, live=True)     # confirm: enter
+    assert st["entered"] == 1 and not st.get("score_confirmed")
