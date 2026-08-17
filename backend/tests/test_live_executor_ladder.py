@@ -197,11 +197,13 @@ def test_unexplained_venue_holding_still_fails_closed(monkeypatch):
 
 
 def test_rolling_loss_breaker_pauses_copies(monkeypatch):
-    """Owner 2026-08-12 ($1500 threshold): realized copy losses of
-    -$1500 over any rolling 24h pause the sleeve before any order or
-    audit row is written; a smaller drawdown trades normally."""
+    """Owner 2026-08-12 ($1500 threshold at the then-current clips;
+    default scaled to $2250 with the +50% clip order 2026-08-17):
+    realized copy losses at the floor over any rolling 24h pause the
+    sleeve before any order or audit row is written; a smaller
+    drawdown trades normally."""
     pool = _LadderPool([])
-    pool.lost_24h = -1500.0
+    pool.lost_24h = -2250.0
     submitted = _wire(monkeypatch, pool,
                       f"tsc-epl-ars-che-{TODAY}-o3pt5")
     asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
@@ -209,7 +211,7 @@ def test_rolling_loss_breaker_pauses_copies(monkeypatch):
     assert not pool.updates, "breaker fires before any row exists"
 
     pool2 = _LadderPool([])
-    pool2.lost_24h = -1499.0
+    pool2.lost_24h = -2249.0
     submitted2 = _wire(monkeypatch, pool2,
                        f"tsc-epl-ars-che-{TODAY}-o3pt5")
     asyncio.run(live_executor.maybe_execute(_payload(), 5.0))

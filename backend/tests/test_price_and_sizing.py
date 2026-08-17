@@ -31,25 +31,25 @@ def _clip(whale, n, slug=None):
 
 
 def test_clip_is_base_at_or_under_baseline():
-    assert _clip("rn1", 0) == 150.00
-    assert _clip("rn1", 40) == 150.00           # exactly baseline
-    assert _clip("swisstony", 30) == 200.00
+    assert _clip("rn1", 0) == 225.00
+    assert _clip("rn1", 40) == 225.00           # exactly baseline
+    assert _clip("swisstony", 30) == 300.00
 
 
 def test_ten_x_fills_means_one_tenth_size():
-    assert _clip("rn1", 400) == pytest.approx(15.00)      # 150 * 40/400
-    assert _clip("swisstony", 300) == pytest.approx(20.00)  # 200 * 30/300
+    assert _clip("rn1", 400) == pytest.approx(22.50)      # 225 * 40/400
+    assert _clip("swisstony", 300) == pytest.approx(30.00)  # 300 * 30/300
 
 
 def test_clip_floors_at_five_dollars_and_never_scales_up():
     assert _clip("rn1", 100000) == 5.00
-    assert _clip("rn1", 41) < 150.00
+    assert _clip("rn1", 41) < 225.00
 
 
 def test_sport_override_is_the_scaling_base():
-    # swisstony soccer base is $100 (owner order): 10x -> $10.
+    # swisstony soccer base is $150 (+50% order 2026-08-17): 10x -> $15.
     assert _clip("swisstony", 300, "epl-ars-che-2026-08-15") == \
-        pytest.approx(10.00)
+        pytest.approx(15.00)
 
 
 def test_unreadable_count_degrades_to_base_clip():
@@ -57,7 +57,7 @@ def test_unreadable_count_degrades_to_base_clip():
         async def fetchval(self, sql, *a):
             raise RuntimeError("db down")
 
-    assert asyncio.run(volume_normalized_clip(_Boom(), "rn1")) == 150.00
+    assert asyncio.run(volume_normalized_clip(_Boom(), "rn1")) == 225.00
 
 
 # ── same-or-better limit (float-floor regression) ───────────────────

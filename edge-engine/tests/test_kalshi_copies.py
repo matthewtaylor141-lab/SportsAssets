@@ -89,7 +89,7 @@ def test_limit_is_his_price_same_or_better():
 def test_copies_when_kalshi_is_inside_his_tolerance():
     st, ka, led = _run(0.48)   # eff = 0.48 + fee(0.0175) <= his 0.50
     assert st["matched"] == 1 and st["copied"] == 1
-    assert ka.orders == [("T-DAL", 0.48, 312)]  # $150 -> 312 contracts
+    assert ka.orders == [("T-DAL", 0.48, 468)]  # $225 -> 468 contracts
     assert led.get_state("kcopy:wnba-dal-chi-2026-08-04:Dallas Wings")
 
 
@@ -110,7 +110,7 @@ def test_sport_assignments_gate_the_sweep():
     assert st.get("skipped_sport") == 1
     assert not ka.orders
     st2, ka2, _ = _run(0.48)     # 0x2c33 + wnba ML: unrestricted
-    assert ka2.orders == [("T-DAL", 0.48, 312)]  # $150 -> 312 contracts
+    assert ka2.orders == [("T-DAL", 0.48, 468)]  # $225 -> 468 contracts
     hrh = {**_ROW, "whale": "HomeRunHazard"}
     sth, kah, _ = _run(0.48, rows=[hrh])
     assert sth.get("skipped_sport") == 1 and not kah.orders, \
@@ -118,9 +118,9 @@ def test_sport_assignments_gate_the_sweep():
     row3 = {**_ROW, "whale": "RN1"}
     st3, ka3, _ = _run(0.48, rows=[row3])
     assert st3["copied"] == 1
-    # RN1 clips at $150 on Kalshi (owner approval 2026-08-11 round 4):
-    # floor(150/0.48) = 312 contracts.
-    assert ka3.orders == [("T-DAL", 0.48, 312)]
+    # RN1 clips at $225 on Kalshi (owner +50% order 2026-08-17 evening):
+    # floor(225/0.48) = 468 contracts.
+    assert ka3.orders == [("T-DAL", 0.48, 468)]
 
 
 def test_swisstony_resumes_behind_the_soccer_price_floor():
@@ -132,11 +132,11 @@ def test_swisstony_resumes_behind_the_soccer_price_floor():
     from edge.shadow.kalshi_copies import (PER_COPY_USD,
                                            PER_COPY_USD_SPORT,
                                            _per_copy_usd)
-    assert PER_COPY_USD["swisstony"] == 200.00
-    assert PER_COPY_USD_SPORT[("swisstony", "soccer")] == 100.00
-    assert _per_copy_usd("SwissTony", "epl-ars-che-2026-08-15") == 100.00
-    assert _per_copy_usd("SwissTony", "aec-atp-a-b-2026-08-15") == 200.00
-    assert _per_copy_usd("rn1", "epl-ars-che-2026-08-15") == 200.00  # soccer cell (2026-08-17)
+    assert PER_COPY_USD["swisstony"] == 300.00
+    assert PER_COPY_USD_SPORT[("swisstony", "soccer")] == 150.00
+    assert _per_copy_usd("SwissTony", "epl-ars-che-2026-08-15") == 150.00
+    assert _per_copy_usd("SwissTony", "aec-atp-a-b-2026-08-15") == 300.00
+    assert _per_copy_usd("rn1", "epl-ars-che-2026-08-15") == 300.00  # soccer cell (2026-08-17)
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka = _Kalshi(0.72, outcomes={"Arsenal": "T-ARS", "Chelsea": "T-CHE"})
     row = {"slug": "epl-ars-che-2026-08-15", "outcome": "Arsenal",
@@ -144,7 +144,7 @@ def test_swisstony_resumes_behind_the_soccer_price_floor():
            "entered_ts": time.time() - 60}
     st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
     assert st["copied"] == 1
-    assert ka.orders == [("T-ARS", 0.72, 138)]   # floor($100 / 0.72)
+    assert ka.orders == [("T-ARS", 0.72, 208)]   # floor($150 / 0.72)
     # The improbable rung (his price 22c) refuses at the policy gate:
     led2 = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka2 = _Kalshi(0.20, outcomes={"Arsenal": "T-ARS", "Chelsea": "T-CHE"})
@@ -156,14 +156,14 @@ def test_swisstony_resumes_behind_the_soccer_price_floor():
 
 def test_promoted_whale_0x2c33_copies_at_the_default_clip():
     """Owner approval 2026-08-10: the vetted wallet copies UNRESTRICTED
-    (like RN1) at the $150 base (owner maximize order 2026-08-17) — floor(150/0.48) = 312 contracts on
-    the standard fixture."""
+    (like RN1) at the $225 base (+50% order 2026-08-17 evening) —
+    floor(225/0.48) = 468 contracts on the standard fixture."""
     row = {**_ROW,
            "whale": "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563"
                     "-1759935795465"}
     st, ka, _ = _run(0.48, rows=[row])
     assert st["copied"] == 1
-    assert ka.orders == [("T-DAL", 0.48, 312)]
+    assert ka.orders == [("T-DAL", 0.48, 468)]
 
 
 def test_held_ticker_refuses_a_second_buy_from_any_identity():
@@ -357,7 +357,7 @@ def test_kalshi_keeps_the_copy_when_prefer_kalshi_is_pinned(monkeypatch):
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
                pmus=pm)
     assert st.get("routed_pmus_better") is None
-    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 312)]
+    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 468)]
 
 
 def test_kalshi_places_when_it_is_cheaper_fee_loaded():
@@ -369,7 +369,7 @@ def test_kalshi_places_when_it_is_cheaper_fee_loaded():
                pmus=pm)
     assert st.get("routed_pmus_better") is None
     assert st["copied"] == 1
-    assert ka.orders == [("T-DAL", 0.48, 312)]
+    assert ka.orders == [("T-DAL", 0.48, 468)]
 
 
 def test_no_pmus_book_falls_through_to_kalshi(monkeypatch):
@@ -382,7 +382,7 @@ def test_no_pmus_book_falls_through_to_kalshi(monkeypatch):
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
                pmus=pm)
     assert pm.peeked, "the peek must have been attempted"
-    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 312)]
+    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 468)]
 
 
 # ── Venue split (owner directive 2026-08-07): Kalshi first claim on
@@ -487,7 +487,7 @@ def test_taker_priced_out_rests_a_fee_free_maker_on_kalshi_first(monkeypatch):
     assert st["copied"] == 0                       # nothing filled yet
     assert st.get("maker_rested") == 1
     # 0x2c33 fixture clips $150 (2026-08-17): floor(150/0.50) = 300, maker.
-    assert ka.orders == [("T-DAL", 0.50, 300, False)]
+    assert ka.orders == [("T-DAL", 0.50, 450, False)]
     claim = "kcopy:wnba-dal-chi-2026-08-04:Dallas Wings"
     assert not led.get_state(claim), "claim burns on FILL, not on rest"
     # Second sweep while the rest is live: no duplicate order.
@@ -575,19 +575,20 @@ def test_rn1_is_exempt_from_the_day_budget_and_does_not_eat_it():
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka = _Kalshi(0.48)
     rn1 = {**_ROW, "whale": "RN1"}
-    # Budget of $50: one $150 RN1 clip blows straight past it.
+    # Budget of $300: one $225 RN1 clip fits, but the point is the
+    # exemption — his spend never eats the capped whales' budget.
     st = sweep(kalshi=ka, ledger=led, identities=[rn1], live=True,
-               day_usd=150.0)
+               day_usd=300.0)
     assert st["copied"] == 1 and st.get("skipped_day_cap") is None
-    assert ka.orders[0][2] == 312          # full $150 clip placed
-    # A capped whale on a FRESH matchup still has the whole $150 budget:
-    # RN1's ~$99.84 spend is excluded from the cap arithmetic.
+    assert ka.orders[0][2] == 468          # full $225 clip placed
+    # A capped whale on a FRESH matchup still has the whole $300 budget:
+    # RN1's ~$224.64 spend is excluded from the cap arithmetic.
     ka2 = _Kalshi(0.48, outcomes={"Atlanta Dream": "T-ATL",
                                   "Indiana Fever": "T-IND"})
     hrh = {**_ROW, "slug": "wnba-atl-ind-2026-08-04",
            "outcome": "Atlanta Dream"}
     st2 = sweep(kalshi=ka2, ledger=led, identities=[hrh], live=True,
-                day_usd=150.0)
+                day_usd=300.0)
     assert st2["copied"] == 1 and st2.get("skipped_day_cap") is None
 
 
@@ -681,21 +682,21 @@ def test_venue_guard_lets_a_fresh_copy_through():
     ka = _GuardedKalshi(0.48)
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
     assert st["copied"] == 1
-    assert ka.orders == [("T-DAL", 0.48, 312)]
+    assert ka.orders == [("T-DAL", 0.48, 468)]
 
 
 def test_thin_book_is_never_taken():
     """Liquidity floor (owner approval 2026-08-11): a top-of-book showing
     less than HALF our size is a market our own taker order would move —
-    the overnight thin-book bleed. $150 at 48c wants 312 contracts; a
-    book showing 130 is skipped, one showing 170 trades."""
+    the overnight thin-book bleed. $225 at 48c wants 468 contracts; a
+    book showing 195 is skipped, one showing 255 trades."""
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
-    ka = _Kalshi(0.48, ask_size=130)
+    ka = _Kalshi(0.48, ask_size=195)
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True)
     assert st.get("skipped_thin_book") == 1
     assert not ka.orders
     led2 = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
-    ka2 = _Kalshi(0.48, ask_size=170)
+    ka2 = _Kalshi(0.48, ask_size=255)
     st2 = sweep(kalshi=ka2, ledger=led2, identities=[dict(_ROW)], live=True)
     assert st2["copied"] == 1
 

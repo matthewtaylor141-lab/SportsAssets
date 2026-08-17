@@ -89,16 +89,20 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 # (-$27k) drops to $25. A 0.00 cell is a BLOCK: 0x2c33 tennis (-$273k
 # of its own money) is not copied at all. Breakers, day budgets and
 # never-add are untouched.
-PER_COPY_USD = {"rn1": 150.00, "swisstony": 200.00,
-                _W2C33: 150.00, "homerunhazard": 50.00}
-PER_COPY_USD_SPORT = {("swisstony", "soccer"): 100.00,
-                      ("rn1", "tennis"): 75.00,
-                      ("rn1", "baseball"): 250.00,
-                      ("rn1", "soccer"): 200.00,
+# 2026-08-17 evening (owner order): "increase all copy trades by 50%" —
+# every cell, whale clip and default x1.5. Blocked 0.00 cells stay
+# blocked (a block is a decision, not a size). Breaker floors scale
+# with the clip per the standing sensitivity rule below.
+PER_COPY_USD = {"rn1": 225.00, "swisstony": 300.00,
+                _W2C33: 225.00, "homerunhazard": 75.00}
+PER_COPY_USD_SPORT = {("swisstony", "soccer"): 150.00,
+                      ("rn1", "tennis"): 112.50,
+                      ("rn1", "baseball"): 375.00,
+                      ("rn1", "soccer"): 300.00,
                       (_W2C33, "tennis"): 0.00,
-                      ("homerunhazard", "baseball"): 150.00,
-                      ("homerunhazard", "football"): 25.00}
-PER_COPY_DEFAULT = 50.00
+                      ("homerunhazard", "baseball"): 225.00,
+                      ("homerunhazard", "football"): 37.50}
+PER_COPY_DEFAULT = 75.00
 # Inverse volume<->size scaling (owner order 2026-08-12): past this
 # many fills in a venue-day, the clip shrinks proportionally — 10x
 # the fills spends the same dollars at 1/10 the size.
@@ -148,7 +152,11 @@ COLLAPSE_FLOOR = 0.85
 # flow within hours at current clip sizes; the wider default keeps the
 # catastrophic stop while letting ordinary slate variance ride.
 # EDGE_KCOPY_HALT_USD still overrides.
-COPY_HALT_USD_DEFAULT = 2500.0
+# 2500 -> 3750 (2026-08-17 evening, alongside the owner's "increase all
+# copy trades by 50%"): same sensitivity rule as every prior clip
+# promotion — the floor scales with the clip or the same ordinary
+# variance that rode yesterday trips the halt today.
+COPY_HALT_USD_DEFAULT = 3750.0
 COPY_HALT_HOURS_DEFAULT = 24.0
 # Owner amnesty (latest 2026-08-16 ~12:45pm ET, "Unlock Kalshi trading
 # and make sure trades keep flowing", lifting the third trip; earlier
@@ -316,7 +324,7 @@ def _reconcile_orphan_rests(kalshi, ledger, guard: dict, stats: dict) -> None:
 
 
 def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
-          day_usd: float = 200.0, max_age_s: float | None = None,
+          day_usd: float = 300.0, max_age_s: float | None = None,
           pmus=None, on_copied=None) -> dict:
     """One pass: whale open positions -> Kalshi orders where listed."""
     from edge.shadow.kalshi_guard import (cross_side_cap, game_of,

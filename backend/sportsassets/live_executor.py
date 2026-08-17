@@ -283,7 +283,9 @@ PENNY_TRIAL_TOTAL_USD = float(os.environ.get("COPY_TOTAL_USD", "inf"))
 # review — strongest measured earner (+$760 on 345 settled at $100).
 # The underdog cash-out sleeve is NOT this map — it stays at its own
 # $2 constant (workers/underdog.py PER_FILL_USD, v2 2026-08-12).
-PENNY_TRIAL_PER_FILL_USD = 50.00
+# 2026-08-17 evening (owner order): "increase all copy trades by 50%" —
+# default and every cell below x1.5; blocked 0.00 cells stay blocked.
+PENNY_TRIAL_PER_FILL_USD = 75.00
 # Per-whale override map; keys are lowercased usernames; anyone absent
 # gets the default. RN1 $100 -> $150 2026-08-11 (owner approval,
 # round 4): profitable every single day since Aug 3.
@@ -294,22 +296,27 @@ PENNY_TRIAL_PER_FILL_USD = 50.00
 # clips follow the whales' measured per-sport edge from the tracker week —
 # see kalshi_copies.py for the numbers. A 0.00 cell is a BLOCK (skip).
 _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
-PER_FILL_BY_WHALE = {"rn1": 150.00, "swisstony": 200.00,
-                     _W2C33: 150.00, "homerunhazard": 50.00}
-PER_FILL_BY_WHALE_SPORT = {("swisstony", "soccer"): 100.00,
-                           ("rn1", "tennis"): 75.00,
-                           ("rn1", "baseball"): 250.00,
-                           ("rn1", "soccer"): 200.00,
+PER_FILL_BY_WHALE = {"rn1": 225.00, "swisstony": 300.00,
+                     _W2C33: 225.00, "homerunhazard": 75.00}
+PER_FILL_BY_WHALE_SPORT = {("swisstony", "soccer"): 150.00,
+                           ("rn1", "tennis"): 112.50,
+                           ("rn1", "baseball"): 375.00,
+                           ("rn1", "soccer"): 300.00,
                            (_W2C33, "tennis"): 0.00,
-                           ("homerunhazard", "baseball"): 150.00,
-                           ("homerunhazard", "football"): 25.00}
+                           ("homerunhazard", "baseball"): 225.00,
+                           ("homerunhazard", "football"): 37.50}
 # 24H ROLLING-LOSS BREAKER (owner 2026-08-12, threshold his call:
 # "$1500"): when the copy sleeve's realized losses over any rolling
 # 24 hours reach this, copying pauses by itself until the window
 # rolls off — a bad day self-limits instead of compounding. Manual
 # desk and the independent $2 underdog sleeve are outside it.
+# 1500 -> 2250 (2026-08-17 evening, alongside the owner's "increase all
+# copy trades by 50%"): the same clip-sensitivity rule the Kalshi-leg
+# breaker has followed at every promotion — an unchanged floor at x1.5
+# clips would trip on the ordinary variance that rode yesterday. The
+# env var still overrides for an owner-set absolute.
 PMUS_LOSS_BREAKER_USD = float(
-    os.environ.get("PMUS_LOSS_BREAKER_USD", "1500"))
+    os.environ.get("PMUS_LOSS_BREAKER_USD", "2250"))
 
 
 def per_fill_usd(whale_username: str | None,
