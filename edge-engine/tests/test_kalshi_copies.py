@@ -376,17 +376,19 @@ def test_kalshi_places_when_it_is_cheaper_fee_loaded():
     assert ka.orders == [("T-DAL", 0.48, 468)]
 
 
-def test_no_pmus_book_falls_through_to_kalshi(monkeypatch):
-    """peek_book cache miss (returns None): no PMUS price is visible
-    cheaply, so Kalshi places — PMUS couldn't fill/map. (Legacy routing
-    so the peek path is exercised at all.)"""
+def test_no_pmus_book_means_no_kalshi_copy(monkeypatch):
+    """FIRM RULE (owner 2026-08-17 late night): Kalshi trades only when
+    its price PROVABLY beats a visible Polymarket ask. A peek_book
+    cache miss is not proof — the copy defers to the PMUS leg (which
+    executes every copy immediately)."""
     monkeypatch.setenv("EDGE_KCOPY_PREFER_KALSHI", "0")
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka, pm = _Kalshi(0.48), _Pmus(None)
     st = sweep(kalshi=ka, ledger=led, identities=[dict(_ROW)], live=True,
                pmus=pm)
     assert pm.peeked, "the peek must have been attempted"
-    assert st["copied"] == 1 and ka.orders == [("T-DAL", 0.48, 468)]
+    assert st.get("skipped_no_pm_view") == 1
+    assert st["copied"] == 0 and not ka.orders
 
 
 # ── Venue split (owner directive 2026-08-07): Kalshi first claim on

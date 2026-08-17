@@ -523,6 +523,17 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
             stats["skipped_stale"] = stats.get("skipped_stale", 0) + 1
             continue
         league = slug.split("-", 1)[0].lower()
+        # OWNER ORDER 2026-08-17 night (clarified late night): tennis
+        # is NEVER traded on Kalshi outside the first-set-comeback
+        # sleeve — tennis copies belong to Polymarket. This venue-level
+        # block outranks every cell value (an rn1 tennis clip still
+        # copies, on PMUS), and a second check at placement refuses any
+        # tennis ticker that reaches an order some other way.
+        from edge.shadow.kalshi_guard import TENNIS_LEAGUES
+        if league in TENNIS_LEAGUES:
+            stats["skipped_tennis_venue"] = \
+                stats.get("skipped_tennis_venue", 0) + 1
+            continue
         if league not in series:
             continue
         stats["league_listed"] += 1
@@ -625,6 +636,14 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
                 ex.append(entry)
             continue
         stats["matched"] += 1
+        # Placement-side tennis refusal (defense in depth): whatever
+        # path produced this ticker, a tennis ticker never becomes a
+        # Kalshi copy order.
+        from edge.shadow.kalshi_guard import is_tennis_ticker
+        if is_tennis_ticker(target_ticker):
+            stats["skipped_tennis_venue"] = \
+                stats.get("skipped_tennis_venue", 0) + 1
+            continue
         claim = f"kcopy:{slug}:{outcome[:24]}"
         if ledger.get_state(claim):
             stats["skipped_claimed"] += 1
@@ -815,18 +834,22 @@ def sweep(*, kalshi, ledger, identities: list[dict], live: bool,
         prefer_kalshi = _os.environ.get("EDGE_KCOPY_PREFER_KALSHI",
                                         "0") == "1"
         if pmus is not None and not prefer_kalshi:
-            # Best-venue-at-placement, EVERY copy (owner directive
-            # 2026-08-10 night: "copies firing on both venues, best
-            # price"). If PMUS visibly shows a better ask than Kalshi's
-            # fee-loaded effective price, the copy defers and the
-            # 2-minute PMUS reclaim sweep takes it at the better venue;
-            # no visible PMUS book means Kalshi keeps it. This peek used
-            # to skip Kalshi-first assets (2026-08-09 "volume on Kalshi"
-            # default) — now it prices them too. The one-copy rule is
+            # FIRM RULE (owner 2026-08-17 late night: "I just want
+            # trades placed on Kalshi when the price is better on
+            # Kalshi than polymarket"): a Kalshi copy must PROVE it —
+            # the fee-loaded Kalshi price has to strictly beat a
+            # VISIBLE Polymarket ask. PMUS-better defers (the PMUS leg
+            # executes every copy immediately, so nothing waits), and
+            # no visible PMUS book now also defers — an unproven
+            # comparison is not "better". The one-copy rule is
             # untouched (pmus_copied skip, claim-back, never-add veto).
             # EDGE_KCOPY_PREFER_KALSHI=1 restores keep-when-qualifying.
             pask = _pmus_ask(pmus, slug, outcome)
-            if pask is not None and pask < eff:
+            if pask is None:
+                stats["skipped_no_pm_view"] = \
+                    stats.get("skipped_no_pm_view", 0) + 1
+                continue
+            if pask <= eff:
                 stats["routed_pmus_better"] = \
                     stats.get("routed_pmus_better", 0) + 1
                 continue

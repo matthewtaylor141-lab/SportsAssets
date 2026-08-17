@@ -381,3 +381,17 @@ def test_order_rejects_are_not_zero_fills(fast_gates):
     st = sweep(kalshi=ka, ledger=led, live=True)
     assert st.get("order_err") == 1 and "ioc_zero_fill" not in st
     assert st["last_order_error"]["status"] == "insufficient_balance"
+
+
+def test_thin_book_takes_a_partial_entry(fast_gates):
+    """Owner 2026-08-17 late night ("never miss a favorite who loses
+    the first set"): a book showing less than the full $100 takes a
+    partial entry down to the $25 floor instead of skipping."""
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)          # arm
+    ka.asks[T_FAV] = (0.33, 150.0)      # $49.50 showing < $100 want
+    sweep(kalshi=ka, ledger=led, live=True)          # pend
+    st = sweep(kalshi=ka, ledger=led, live=True)     # confirmed: enter
+    assert st["entered"] == 1 and st.get("partial_entries") == 1
+    assert ka.orders == [(T_FAV, 0.33, 150)]

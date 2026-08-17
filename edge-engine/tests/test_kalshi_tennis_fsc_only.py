@@ -19,17 +19,37 @@ def test_tennis_ticker_identifier():
     assert "atp" in TENNIS_LEAGUES and "itf" in TENNIS_LEAGUES
 
 
-def test_kalshi_copy_sweep_is_dark_by_default():
-    """PM-only routing: the copy loop keeps running (FSC and venue
-    truth ride it) but the kcopy sweep call sits behind
-    EDGE_KCOPY_PM_ONLY, default ON."""
+def test_kalshi_copy_sweep_runs_but_tennis_never_places():
+    """Owner clarification 2026-08-17 late night: ex-tennis copies stay
+    on Kalshi; tennis never trades there. The sweep runs by default
+    (EDGE_KCOPY_PM_ONLY=1 remains the whole-leg dark switch) and its
+    own venue-level tennis block refuses every tennis row."""
+    import tempfile
+    import time as _time
+
+    from edge.ledger.service import Ledger
+    from edge.shadow.kalshi_copies import sweep
+    from tests.test_kalshi_copies import _ROW, _Kalshi
+
     runner = (SRC / "shadow" / "runner.py").read_text()
-    gate = 'os.environ.get("EDGE_KCOPY_PM_ONLY", "1")'
-    assert gate in runner, \
-        "PM-only must be the DEFAULT — env-proof, no deploy to re-arm"
-    block = runner[runner.index(gate):][:800]
-    assert "st = kcopy(" in block, \
-        "the sweep call must still exist behind the gate"
+    assert 'os.environ.get("EDGE_KCOPY_PM_ONLY", "0")' in runner, \
+        "the sweep must RUN by default (ex-tennis stays on Kalshi)"
+
+    led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
+    ka = _Kalshi(0.48, outcomes={"Jannik Sinner": "T-SIN",
+                                 "Carlos Alcaraz": "T-ALC"},
+                 market_id="KXATPMATCH-26AUG17SINALC")
+    row = {**_ROW, "slug": "atp-sinner-alcaraz-2026-08-17",
+           "outcome": "Jannik Sinner",
+           "entered_ts": _time.time() - 60, "whale": "RN1"}
+    st = sweep(kalshi=ka, ledger=led, identities=[row], live=True)
+    assert st.get("skipped_tennis_venue") == 1
+    assert not ka.orders, "a tennis copy must NEVER place on Kalshi"
+
+    # Non-tennis rows still copy exactly as before.
+    st2, ka2, _ = __import__("tests.test_kalshi_copies",
+                             fromlist=["_run"])._run(0.48)
+    assert st2["copied"] == 1 and ka2.orders
 
 
 def test_underdog_sleeve_refuses_tennis_terminally():

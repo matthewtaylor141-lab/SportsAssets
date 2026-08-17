@@ -133,10 +133,12 @@ def _wnba_ctx():
 
 
 def test_kalshi_first_fresh_copy_defers_to_the_engine(monkeypatch):
-    """The venue-split machinery, testable behind its re-arm switch:
-    with PMUS_ALL_COPIES=0 half the fresh flow in Kalshi-listed sports
-    still defers to the Kalshi leg. The DEFAULT is PM-only routing
-    (owner 2026-08-17 night) — see the test below."""
+    """Half the fresh flow in Kalshi-listed sports belongs to the
+    Kalshi leg — the split MACHINERY, testable behind its re-arm
+    switch (PMUS_ALL_COPIES=0). The DEFAULT since the firm price rule
+    (owner 2026-08-17 late night) is no deference: PMUS executes every
+    copy immediately and the engine's sweep takes only positions whose
+    Kalshi price provably beats the visible PMUS ask."""
     monkeypatch.setenv("PMUS_ALL_COPIES", "0")
     pool = _FakePool()
     _wire(monkeypatch, pool, _wnba_ctx())
@@ -145,11 +147,26 @@ def test_kalshi_first_fresh_copy_defers_to_the_engine(monkeypatch):
     assert pool.fetchval_calls == 0
 
 
-def test_default_routing_executes_every_copy_on_pmus(monkeypatch):
-    """Owner 2026-08-17 night: "All copies should happen on
-    POLYMARKET." A kalshi-first asset in a Kalshi-listed sport no
-    longer defers — PMUS proceeds to the order plumbing."""
+def test_tennis_never_defers_to_kalshi(monkeypatch):
+    """Owner 2026-08-17: tennis is never traded on Kalshi — a tennis
+    copy executes PMUS-side immediately, even on a kalshi-first asset
+    (tennis is out of KALSHI_FIRST_SPORTS)."""
     monkeypatch.delenv("PMUS_ALL_COPIES", raising=False)
+    pool = _FakePool()
+    _wire(monkeypatch, pool, {
+        "market_slug": f"atp-sinner-alcaraz-{date.today().isoformat()}",
+        "event_slug": None, "market_title": "Sinner v Alcaraz",
+        "event_title": None, "outcome": "Jannik Sinner",
+    })
+    asyncio.run(live_executor.maybe_execute(
+        _payload(asset=_asset(True), outcome="Jannik Sinner"), None))
+    assert pool.fetchval_calls > 0,         "tennis must reach the PMUS order plumbing, never defer"
+
+
+def test_pm_only_switch_routes_everything_to_pmus(monkeypatch):
+    """PMUS_ALL_COPIES=1 remains the whole-book switch: every copy
+    (any sport) executes here."""
+    monkeypatch.setenv("PMUS_ALL_COPIES", "1")
     pool = _FakePool()
     _wire(monkeypatch, pool, _wnba_ctx())
     asyncio.run(live_executor.maybe_execute(

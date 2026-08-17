@@ -2517,14 +2517,15 @@ def _main_impl() -> None:
                             headers={"X-Engine-Token": token},
                             timeout=10)
 
-                    # OWNER ORDER 2026-08-17 night: "All copies should
-                    # happen on POLYMARKET." The Kalshi copy sweep is
-                    # OFF by default — this loop keeps running because
-                    # the FSC sleeve and venue-truth telemetry ride it,
-                    # but no copy orders are placed on Kalshi. Re-arm
-                    # (deliberately, no deploy) with
-                    # EDGE_KCOPY_PM_ONLY=0.
-                    if os.environ.get("EDGE_KCOPY_PM_ONLY", "1") != "0":
+                    # OWNER CLARIFICATION 2026-08-17 late night: "I
+                    # still want ex-tennis to be traded on kalshi. I
+                    # just do not want tennis being traded on kalshi."
+                    # The sweep therefore runs by default — its own
+                    # venue-level tennis block (kalshi_copies) refuses
+                    # every tennis row — and EDGE_KCOPY_PM_ONLY=1
+                    # remains the switch to dark the whole Kalshi copy
+                    # leg if ever ordered again.
+                    if os.environ.get("EDGE_KCOPY_PM_ONLY", "0") == "1":
                         st = {"pm_only":
                               "copies route to Polymarket "
                               "(owner 2026-08-17 night)",

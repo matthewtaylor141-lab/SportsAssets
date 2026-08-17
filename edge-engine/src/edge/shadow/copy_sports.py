@@ -146,8 +146,12 @@ import re as _re
 # Kalshi cannot price is reclaimed by the hourly PMUS sweep. Soccer
 # stays PMUS-first: Kalshi's soccer coverage is thin and the 70c fee
 # floor already routes most of it to the fee-free venue.
+# Tennis removed 2026-08-17 late night (owner: "I just do not want
+# tennis being traded on kalshi") — tennis copies never defer to the
+# Kalshi leg; they execute PMUS-side immediately. The Kalshi sweep
+# additionally refuses tennis rows at the venue level.
 KALSHI_FIRST_SPORTS = frozenset({"baseball", "wnba", "basketball",
-                                 "football", "hockey", "tennis"})
+                                 "football", "hockey"})
 
 
 def kalshi_first(asset: str) -> bool:

@@ -68,7 +68,13 @@ CONFIRM_MAX_S = float(os.environ.get("EDGE_FSC_CONFIRM_MAX_S", "900"))
 # A snapshot older than this is a different session of play (rain delay,
 # next-day carryover) — re-arm rather than trigger on stale state.
 SNAP_MAX_AGE_S = float(os.environ.get("EDGE_FSC_SNAP_MAX_AGE_S", "28800"))
-DAY_USD = float(os.environ.get("EDGE_FSC_DAY_USD", "2500"))
+# 2500 -> 5000 (owner 2026-08-17 late night: "never miss a favorite
+# who loses the first set") — the cap is a runaway backstop, not a
+# budget that should ever bind on a real slate (50 entries/day).
+DAY_USD = float(os.environ.get("EDGE_FSC_DAY_USD", "5000"))
+# Thin books take a PARTIAL entry down to this floor instead of
+# skipping (same order): $40 on the favorite beats missing the match.
+PARTIAL_MIN_USD = float(os.environ.get("EDGE_FSC_PARTIAL_MIN_USD", "25"))
 
 _MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
            "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
@@ -225,8 +231,18 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                 if count < 1:
                     continue
                 if book.asks[0].size < count:
-                    stats["skipped_thin"] = stats.get("skipped_thin", 0) + 1
-                    continue
+                    # PARTIAL ENTRY (owner 2026-08-17 late night:
+                    # "never miss a favorite who loses the first
+                    # set"): take what the book shows, down to the
+                    # $ floor — a smaller position beats a miss.
+                    part = int(book.asks[0].size)
+                    if part * ask < PARTIAL_MIN_USD:
+                        stats["skipped_thin"] = \
+                            stats.get("skipped_thin", 0) + 1
+                        continue
+                    count = part
+                    stats["partial_entries"] = \
+                        stats.get("partial_entries", 0) + 1
                 if not live:
                     stats["entered"] += 1          # dry-run telemetry
                     continue
