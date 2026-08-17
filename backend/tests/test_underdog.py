@@ -371,3 +371,22 @@ def test_zero_counters_are_not_emitted():
     src = open("sportsassets/workers/underdog.py").read()
     emit = src[src.index("for _k, _v in _lifetime.items():"):][:160]
     assert "if _v:" in emit
+
+
+def test_copy_exit_gain_floor_and_threshold(monkeypatch):
+    """R4 (2026-08-17): copy exits trigger only at +20% AND >= $500
+    unrealized gain judged at the sale limit, never for underdog/manual
+    rows (those have their own paths)."""
+    from sportsassets.workers import underdog as ud
+
+    want = ud.cash_out_threshold(0.50, take=ud.COPY_EXIT_TAKE)
+    assert want == 0.60
+    # $500 floor at the sale limit: 0.10 * qty >= 500 -> qty >= 5000
+    assert (want - 0.50) * 4990 < ud.COPY_EXIT_MIN_GAIN_USD - 1e-6
+    assert (want - 0.50) * 5001 >= ud.COPY_EXIT_MIN_GAIN_USD - 1e-6
+    # kill switch honored
+    monkeypatch.setattr(ud, "COPY_EXIT_ENABLED", False)
+    import asyncio
+
+    stats = asyncio.run(ud._copy_exit_sweep(None))
+    assert stats == {"copyexit_open": 0, "copyexit_cashed": 0}

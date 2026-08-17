@@ -789,6 +789,67 @@ async def _cashout_sweep(pool) -> dict:
     return stats
 
 
+# R4 (owner order 2026-08-17, weekly report): extend the +20% resting
+# exit to COPY positions with a real unrealized gain. The desk's manual
+# selling of winners was the single most profitable behavior of the
+# Aug 10-16 week (+$9.2k Saturday); this systematizes it for the copy
+# sleeves only, above a floor big enough that clips never churn.
+# SA_COPY_EXIT=0 is the desk override (kill switch).
+COPY_EXIT_ENABLED = os.environ.get("SA_COPY_EXIT", "1") != "0"
+COPY_EXIT_TAKE = float(os.environ.get("SA_COPY_EXIT_TAKE", "0.20"))
+COPY_EXIT_MIN_GAIN_USD = float(
+    os.environ.get("SA_COPY_EXIT_MIN_GAIN", "500"))
+
+
+async def _copy_exit_sweep(pool) -> dict:
+    from ..config import settings
+    from ..live_executor import active_venue
+    from .. import pmus
+
+    stats = {"copyexit_open": 0, "copyexit_cashed": 0}
+    if not COPY_EXIT_ENABLED or active_venue() != "polymarket-us":
+        return stats
+    rows = await pool.fetch(
+        "SELECT id, asset, us_market_slug, whale_username, "
+        "fill_price::float8 AS entry, filled_shares::float8 AS qty "
+        "FROM live_orders "
+        "WHERE status = 'filled' AND us_market_slug IS NOT NULL "
+        "AND whale_username NOT IN ('underdog', 'manual')")
+    cfg = settings()
+    for r in rows:
+        stats["copyexit_open"] += 1
+        want = cash_out_threshold(r["entry"], take=COPY_EXIT_TAKE)
+        bid = await _best_bid(cfg, r["asset"])
+        if bid is None or bid < want:
+            continue
+        # The gain floor is judged at the SALE price we will actually
+        # demand, not the trigger bid — a FOK at `want` can only fill
+        # at >= want, so the realized gain clears the floor too.
+        if (want - r["entry"]) * r["qty"] < COPY_EXIT_MIN_GAIN_USD - 1e-6:
+            continue
+        try:
+            res = await asyncio.to_thread(
+                pmus.submit_fok, r["us_market_slug"],
+                round(min(want, 0.99), 2), int(r["qty"]), True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("copy exit failed (%s): %s",
+                        r["us_market_slug"], exc)
+            continue
+        sold = float(res.get("filled_shares") or 0)
+        if res.get("ok") and sold >= r["qty"]:
+            px = float(res.get("fill_price") or want)
+            pnl = round((px - r["entry"]) * r["qty"], 4)
+            await pool.execute(
+                """UPDATE live_orders SET status='cashed_out', pnl=$2,
+                   settled_at=now() WHERE id=$1""", r["id"], pnl)
+            stats["copyexit_cashed"] += 1
+            log.warning("COPY EXIT %s (%s): %d @ %.2f (entry %.2f) "
+                        "pnl +%.2f", r["us_market_slug"],
+                        r["whale_username"], int(r["qty"]), px,
+                        r["entry"], pnl)
+    return stats
+
+
 async def _record(pool) -> dict:
     """The sleeve's cumulative scorecard, on every heartbeat: 'how is
     the 20% selling sleeve performing' must be a probe read, not an
@@ -964,6 +1025,9 @@ async def main() -> None:
             cs = await _cashout_sweep(pool)
             if cs.get("cashed"):
                 log.info("underdog cashout sweep: %s", cs)
+            ce = await _copy_exit_sweep(pool)
+            if ce.get("copyexit_cashed"):
+                log.info("copy exit sweep: %s", ce)
         except Exception:  # noqa: BLE001 — the supervisor restarts us
             log.exception("underdog sweep failed")
         await asyncio.sleep(CASHOUT_SWEEP_S)
