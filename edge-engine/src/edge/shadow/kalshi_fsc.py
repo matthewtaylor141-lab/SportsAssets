@@ -19,12 +19,15 @@ price-inferred snapshot: the favorite is the side whose two-sided MID
 sits inside [FAV_MIN, FAV_MAX] on MATCH DAY, uncontradicted by the
 opponent's book.
 
-SET-1 DETECTION: "lost the first set" is either a set-score fact from
-fsc_scores (enter immediately) or the favorite's market trading down
-into [TRIG_LO, TRIG_HI], having dropped >= MIN_DROP from the snapshot
-— no earlier than commence + START_MIN_S when the feed knows the start
-time, else >= ARMED_AGE_S after arming — CONFIRMED by a second sweep
-still in the band >= CONFIRM_MIN_S later.
+SET-1 DETECTION: "lost the first set" is a set-score FACT from
+fsc_scores — verification is mandatory (owner 2026-08-18: phantom
+"set losses" on thin uncovered books kept trading; now no score row,
+no trade). The price path (drop into [TRIG_LO, TRIG_HI] by >=
+MIN_DROP, commence/armed-age anchored, two-sweep confirmed) still
+runs the funnel but moves no money on its own; its skipped_unverified
+counter measures what mandatory verification declines. SCOPE: main
+ATP/WTA draws only (SERIES allowlist) — ITF/Challenger/qualifying are
+never armed, traded, or topped up.
 The match-day gate keeps a days-ahead listing from arming (Kalshi lists
 tennis well in advance, and a pre-match news drop on Tuesday must not
 read as a Thursday set loss); the confirmation sweep refuses one-print
@@ -57,10 +60,18 @@ import uuid
 
 log = logging.getLogger(__name__)
 
-# The venue series map's tennis keys. "itf" overlaps atp/wta on the
-# challenger series but uniquely carries KXITFMATCH/KXITFWMATCH (there
-# is no "ch" key); the per-sweep seen-set below absorbs the overlap.
-LEAGUES = ("atp", "wta", "itf")
+# MAIN TOURS ONLY (owner 2026-08-18 morning, after two more phantom
+# "set losses" on Challenger Sion and M15 Lambermont: "can we just do
+# the Kalshi favorite tennis sleeve on WTA/ATP and ignore ITF
+# completely (there is not enough liquidity in ITF and the
+# 'favorites' are wrong)"). ITF/Challenger books are too thin to name
+# a favorite or price a set, and the odds feed that verifies both
+# does not cover them.
+LEAGUES = ("atp", "wta")
+# Ticker allowlist: the atp/wta discovery keys also serve challenger
+# and ITF series — only the main-draw series may arm or trade.
+SERIES = tuple(s.strip() for s in os.environ.get(
+    "EDGE_FSC_SERIES", "KXATPMATCH-,KXWTAMATCH-").split(",") if s.strip())
 
 PER_ENTRY_USD = float(os.environ.get("EDGE_FSC_USD", "100"))
 FAV_MIN = float(os.environ.get("EDGE_FSC_FAV_MIN", "0.55"))
@@ -218,6 +229,12 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                 if ticker in seen:
                     continue    # challenger series appear in two leagues
                 seen.add(ticker)
+                if not ticker.startswith(SERIES):
+                    # Challenger/ITF/qualifying tier: never armed,
+                    # never traded, never topped up (owner 2026-08-18).
+                    stats["skipped_tier"] = \
+                        stats.get("skipped_tier", 0) + 1
+                    continue
                 event = game_of(ticker)
                 # Match-day gate BEFORE any state or book read: Kalshi
                 # lists tennis days ahead, and a future match can't have
@@ -510,6 +527,18 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                         continue
                     if now - pend_ts < CONFIRM_MIN_S:
                         continue
+                    # SCORE VERIFICATION IS MANDATORY (owner 2026-08-18
+                    # morning, after phantom "set losses" kept trading:
+                    # "The favorite did not lose the first set in these
+                    # matches... and then they are still being
+                    # traded"). A price trigger the score feed cannot
+                    # confirm moves NO money: it waits armed, and the
+                    # moment the feed shows the set actually lost the
+                    # score path enters on that sweep. A match the feed
+                    # never covers is not traded at all.
+                    stats["skipped_unverified"] = \
+                        stats.get("skipped_unverified", 0) + 1
+                    continue
                 if spent_today + PER_ENTRY_USD > DAY_USD:
                     stats["skipped_day_cap"] = \
                         stats.get("skipped_day_cap", 0) + 1

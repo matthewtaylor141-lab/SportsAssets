@@ -157,14 +157,14 @@ def test_no_arm_outside_the_favorite_band():
     assert st2["armed"] == 0
 
 
-def test_confirmed_set_loss_places_the_hundred_dollar_entry(fast_gates):
+def test_confirmed_set_loss_places_the_hundred_dollar_entry(
+        monkeypatch, fast_gates):
+    _with_scores(monkeypatch, _srows(0, 1))          # set 1 lost: fact
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)          # arm at 0.62
     ka.asks[T_FAV] = (0.33, 500.0)                   # set-1 loss print
-    st1 = sweep(kalshi=ka, ledger=led, live=True)    # pend, no money
-    assert st1.get("pending_confirm") == 1 and not ka.orders
-    st2 = sweep(kalshi=ka, ledger=led, live=True)    # confirmed: enter
+    st2 = sweep(kalshi=ka, ledger=led, live=True)    # verified: enter
     assert st2["entered"] == 1
     assert ka.orders == [(T_FAV, 0.33, 303)]         # floor(100/0.33)
     saved = led.get_state(KEY)
@@ -233,14 +233,15 @@ def test_shallow_or_high_price_is_not_a_lost_set(fast_gates):
     assert st["entered"] == 0 and not ka.orders
 
 
-def test_heavy_favorite_set_loss_lands_at_fifty_cents(fast_gates):
-    """TRIG_HI=0.50 exists for this cohort: a 0.85 favorite who drops
-    set 1 reprices to ~0.50, and 0.45 would have refused the entry."""
+def test_heavy_favorite_set_loss_lands_at_fifty_cents(
+        monkeypatch, fast_gates):
+    """A 0.85 favorite who drops set 1 reprices to ~0.50 — the entry
+    fires there on the score fact."""
+    _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.85, 500.0), T_DOG: (0.17, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)          # arm at 0.85
     ka.asks[T_FAV] = (0.50, 500.0)
-    sweep(kalshi=ka, ledger=led, live=True)          # pend
     st = sweep(kalshi=ka, ledger=led, live=True)
     assert st["entered"] == 1
     assert ka.orders == [(T_FAV, 0.50, 200)]         # floor(100/0.50)
@@ -256,12 +257,12 @@ def test_deep_collapse_is_worse_than_one_set(fast_gates):
     assert not ka.orders
 
 
-def test_one_entry_per_match_ever(fast_gates):
+def test_one_entry_per_match_ever(monkeypatch, fast_gates):
+    _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)
     ka.asks[T_FAV] = (0.33, 500.0)
-    sweep(kalshi=ka, ledger=led, live=True)
     sweep(kalshi=ka, ledger=led, live=True)          # enters
     st = sweep(kalshi=ka, ledger=led, live=True)     # still at 0.33
     assert st["entered"] == 0 and len(ka.orders) == 1
@@ -269,6 +270,11 @@ def test_one_entry_per_match_ever(fast_gates):
 
 def test_day_cap_holds_across_matches(fast_gates, monkeypatch):
     monkeypatch.setattr(_fsc, "DAY_USD", 150.0)
+    _with_scores(monkeypatch,
+                 _srows(0, 1) + [{"names": ["Swiatek", "Gauff"],
+                                  "sets": {"Swiatek": 0, "Gauff": 1},
+                                  "completed": False,
+                                  "last_update_ts": time.time() - 60}])
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0),
                   T2_FAV: (0.70, 500.0), T2_DOG: (0.32, 500.0)},
                  markets=[_M1, _M2])
@@ -276,7 +282,6 @@ def test_day_cap_holds_across_matches(fast_gates, monkeypatch):
     sweep(kalshi=ka, ledger=led, live=True)          # arm both
     ka.asks[T_FAV] = (0.33, 500.0)
     ka.asks[T2_FAV] = (0.40, 500.0)
-    sweep(kalshi=ka, ledger=led, live=True)          # pend both
     st = sweep(kalshi=ka, ledger=led, live=True)
     assert st["entered"] == 1 and st.get("skipped_day_cap") == 1
     assert len(ka.orders) == 1
@@ -294,17 +299,17 @@ def test_venue_held_event_is_left_alone(fast_gates):
     assert led.get_state(KEY) is None
 
 
-def test_guard_down_scans_but_places_nothing(fast_gates):
+def test_guard_down_scans_but_places_nothing(monkeypatch, fast_gates):
     """open_ticker_map is fail-CLOSED: on None the sweep keeps arming
     (order-free state) but refuses entries rather than trusting an
     amnesiac 'nothing held' view."""
+    _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)},
                  guard_ok=False)
     led = _led()
     st = sweep(kalshi=ka, ledger=led, live=True)
     assert st["armed"] == 1 and st.get("venue_guard_down") is True
     ka.asks[T_FAV] = (0.33, 500.0)
-    sweep(kalshi=ka, ledger=led, live=True)          # pend
     st2 = sweep(kalshi=ka, ledger=led, live=True)
     assert st2["entered"] == 0 and st2.get("skipped_guard_down") == 1
     assert not ka.orders
@@ -321,51 +326,51 @@ def test_kill_switches(monkeypatch):
     assert sweep(kalshi=ka, ledger=_led(), live=True) == {"disabled": True}
 
 
-def test_engine_halt_does_not_pause_the_sleeve(fast_gates):
+def test_engine_halt_does_not_pause_the_sleeve(monkeypatch, fast_gates):
     """Fixed-dollar experiment class: the engine's daily-loss halt must
     not pause it (kalshi_guard scope='fsc'); only global stops do."""
+    _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     led.set_state("halt_until", {"until": time.time() + 3600})
     sweep(kalshi=ka, ledger=led, live=True)
     ka.asks[T_FAV] = (0.33, 500.0)
-    sweep(kalshi=ka, ledger=led, live=True)
     st = sweep(kalshi=ka, ledger=led, live=True)
     assert st["entered"] == 1 and len(ka.orders) == 1
 
 
-def test_dry_run_places_no_orders(fast_gates):
+def test_dry_run_places_no_orders(monkeypatch, fast_gates):
+    _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=False)
     ka.asks[T_FAV] = (0.33, 500.0)
-    sweep(kalshi=ka, ledger=led, live=False)
     st = sweep(kalshi=ka, ledger=led, live=False)
     assert st["entered"] == 1 and not ka.orders
     assert not (led.get_state(KEY) or {}).get("entered")
 
 
-def test_thin_book_is_not_entered(fast_gates):
+def test_thin_book_is_not_entered(monkeypatch, fast_gates):
     """Same liquidity floor philosophy as the copy sleeve: a 303-lot
     entry needs 303 showing at the ask, or the IOC would part-fill into
     a worse effective price."""
+    _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)
     ka.asks[T_FAV] = (0.33, 50.0)
-    sweep(kalshi=ka, ledger=led, live=True)          # pend
     st = sweep(kalshi=ka, ledger=led, live=True)
     assert st["entered"] == 0 and st.get("skipped_thin") == 1
     assert not ka.orders
 
 
-def test_ioc_zero_fill_keeps_the_match_armed(fast_gates):
+def test_ioc_zero_fill_keeps_the_match_armed(monkeypatch, fast_gates):
+    _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     ka.fill_count = 0
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)
     ka.asks[T_FAV] = (0.33, 500.0)
-    sweep(kalshi=ka, ledger=led, live=True)          # pend
     st = sweep(kalshi=ka, ledger=led, live=True)
     assert st["entered"] == 0 and st.get("ioc_zero_fill") == 1
     assert not (led.get_state(KEY) or {}).get("entered"), \
@@ -373,31 +378,31 @@ def test_ioc_zero_fill_keeps_the_match_armed(fast_gates):
     assert (led.get_state("fsc_day") or {}).get("entries") in (None, 0)
 
 
-def test_order_rejects_are_not_zero_fills(fast_gates):
+def test_order_rejects_are_not_zero_fills(monkeypatch, fast_gates):
     """An order the venue REFUSED (auth, balance, 4xx) must be visible
     as its own failure class in the funnel, not disguised as an
     accepted-but-unmatched IOC."""
+    _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     ka.order_ok = False
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)
     ka.asks[T_FAV] = (0.33, 500.0)
-    sweep(kalshi=ka, ledger=led, live=True)          # pend
     st = sweep(kalshi=ka, ledger=led, live=True)
     assert st.get("order_err") == 1 and "ioc_zero_fill" not in st
     assert st["last_order_error"]["status"] == "insufficient_balance"
 
 
-def test_thin_book_takes_a_partial_entry(fast_gates):
+def test_thin_book_takes_a_partial_entry(monkeypatch, fast_gates):
     """Owner 2026-08-17 late night ("never miss a favorite who loses
     the first set"): a book showing less than the full $100 takes a
     partial entry down to the $25 floor instead of skipping."""
+    _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)          # arm
     ka.asks[T_FAV] = (0.33, 150.0)      # $49.50 showing < $100 want
-    sweep(kalshi=ka, ledger=led, live=True)          # pend
-    st = sweep(kalshi=ka, ledger=led, live=True)     # confirmed: enter
+    st = sweep(kalshi=ka, ledger=led, live=True)     # verified: enter
     assert st["entered"] == 1 and st.get("partial_entries") == 1
     assert ka.orders == [(T_FAV, 0.33, 150)]
 
@@ -464,16 +469,24 @@ def test_score_set1_won_disqualifies_the_match_forever(
     assert not ka.orders and s3["entered"] == 0
 
 
-def test_stale_or_absent_scores_leave_the_price_path_untouched(
+def test_stale_or_absent_scores_block_the_entry(
         monkeypatch, fast_gates):
+    """Score verification is MANDATORY (owner 2026-08-18: phantom 'set
+    losses' kept trading). A stale row confirms nothing: the price
+    trigger runs its full pend/confirm funnel and is then refused —
+    the match stays armed and enters the moment a fresh 0-1 appears."""
     _with_scores(monkeypatch, _srows(0, 1, fresh=False))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)
     ka.asks[T_FAV] = (0.33, 500.0)
     sweep(kalshi=ka, ledger=led, live=True)          # pend (price path)
-    st = sweep(kalshi=ka, ledger=led, live=True)     # confirm: enter
-    assert st["entered"] == 1 and not st.get("score_confirmed")
+    st = sweep(kalshi=ka, ledger=led, live=True)     # confirm: REFUSED
+    assert st["entered"] == 0 and st.get("skipped_unverified") == 1
+    assert not ka.orders
+    _with_scores(monkeypatch, _srows(0, 1))          # fresh fact lands
+    st2 = sweep(kalshi=ka, ledger=led, live=True)
+    assert st2["entered"] == 1 and st2.get("score_confirmed") == 1
 
 
 def test_one_sided_book_never_arms_the_dog(fast_gates):
@@ -593,32 +606,30 @@ def test_commence_anchor_blocks_a_prematch_collapse(
             + s2.get("skipped_prestart", 0)) >= 1
 
 
-def test_commence_anchor_lets_a_midmatch_deploy_enter(monkeypatch):
-    """A deploy landing mid-match arms with commence already in the
-    past — entry no longer waits out the ARMED_AGE_S proxy (default
-    25 min) because the match's own clock says a set has had time to
-    finish."""
-    monkeypatch.setattr(_fsc, "CONFIRM_MIN_S", 0.0)
+def test_midmatch_deploy_enters_on_the_score_fact(monkeypatch):
+    """A deploy landing mid-match arms off the feed and enters on the
+    score fact the same sweep — no ARMED_AGE_S wait, no price-path
+    confirmation dance."""
     _with_feed(monkeypatch, "Andreeva", commence_delta=-3600.0)
+    _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)          # arm (feed)
     ka.asks[T_FAV] = (0.33, 500.0)
-    sweep(kalshi=ka, ledger=led, live=True)          # pend
-    st = sweep(kalshi=ka, ledger=led, live=True)     # confirm: enter
+    st = sweep(kalshi=ka, ledger=led, live=True)     # score fact: enter
     assert st["entered"] == 1 and len(ka.orders) == 1
 
 
-def test_partial_fill_tops_up_to_the_hundred(fast_gates):
+def test_partial_fill_tops_up_to_the_hundred(monkeypatch, fast_gates):
     """Owner: fills 'need to be close to $100 not $37'. The thin-book
     partial takes what shows; the next sweep buys the remainder when
     liquidity returns, and buying stops once less than the $5 floor is
     left to spend."""
+    _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)          # arm
     ka.asks[T_FAV] = (0.33, 114.0)      # $37.62 showing < $100 want
-    sweep(kalshi=ka, ledger=led, live=True)          # pend
     st = sweep(kalshi=ka, ledger=led, live=True)     # partial entry
     assert st["entered"] == 1 and ka.orders == [(T_FAV, 0.33, 114)]
     ka.asks[T_FAV] = (0.34, 500.0)      # liquidity returns
@@ -642,15 +653,15 @@ def test_partial_fill_tops_up_to_the_hundred(fast_gates):
         [(114.0, 0.33), (183.0, 0.34)]
 
 
-def test_topup_window_closes(fast_gates):
+def test_topup_window_closes(monkeypatch, fast_gates):
     """A remainder left after the window (default 30 min from first
     fill) stays unbought — a top-up an hour later would be a different
     trade at a different match state, not the owner's $100 entry."""
+    _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)
     ka.asks[T_FAV] = (0.33, 114.0)
-    sweep(kalshi=ka, ledger=led, live=True)
     sweep(kalshi=ka, ledger=led, live=True)          # partial entry
     st = led.get_state(KEY)
     st["ts"] = time.time() - 7200
@@ -658,6 +669,28 @@ def test_topup_window_closes(fast_gates):
     ka.asks[T_FAV] = (0.34, 500.0)
     s = sweep(kalshi=ka, ledger=led, live=True)
     assert not s.get("topup_fills") and len(ka.orders) == 1
+
+
+def test_itf_and_challenger_tiers_are_never_traded(
+        monkeypatch, fast_gates):
+    """Owner 2026-08-18 (Challenger Sion / M15 Lambermont phantom 'set
+    losses'): 'just do the Kalshi favorite tennis sleeve on WTA/ATP
+    and ignore ITF completely'. Off-tier tickers are refused before
+    any state or book read — never armed, never traded, never topped
+    up — even when the score feed would have confirmed an entry."""
+    _with_scores(monkeypatch, _srows(0, 1))
+    tf = f"KXATPCHALLENGERMATCH-{TOK}ANDPLI-AND"
+    td = f"KXATPCHALLENGERMATCH-{TOK}ANDPLI-PLI"
+    ka = _Kalshi({tf: (0.62, 500.0), td: (0.40, 500.0)},
+                 markets=[_mkt(f"KXATPCHALLENGERMATCH-{TOK}ANDPLI",
+                               {"Andreeva": tf, "Pliskova": td})])
+    led = _led()
+    st = sweep(kalshi=ka, ledger=led, live=True)
+    assert st["armed"] == 0 and st.get("skipped_tier") == 2
+    assert led.get_state(f"fsc:{TOK}ANDPLI") is None
+    ka.asks[tf] = (0.33, 500.0)
+    st2 = sweep(kalshi=ka, ledger=led, live=True)
+    assert st2["entered"] == 0 and not ka.orders
 
 
 def test_pre_fix_armed_state_is_cleared_not_trusted(fast_gates):
