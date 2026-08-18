@@ -81,10 +81,12 @@ CONFIRM_MAX_S = float(os.environ.get("EDGE_FSC_CONFIRM_MAX_S", "900"))
 # A snapshot older than this is a different session of play (rain delay,
 # next-day carryover) — re-arm rather than trigger on stale state.
 SNAP_MAX_AGE_S = float(os.environ.get("EDGE_FSC_SNAP_MAX_AGE_S", "28800"))
-# 2500 -> 5000 (owner 2026-08-17 late night: "never miss a favorite
-# who loses the first set") — the cap is a runaway backstop, not a
-# budget that should ever bind on a real slate (50 entries/day).
-DAY_USD = float(os.environ.get("EDGE_FSC_DAY_USD", "5000"))
+# 2500 -> 5000 -> 15000: a real qualifying-week slate hit $4.7k by
+# 7:45am ET (2026-08-18, 47 entries) and the owner's order is "never
+# miss a favorite who loses the first set" — the cap exists ONLY as a
+# runaway backstop (~150 entries/day) and must never bind on a real
+# slate.
+DAY_USD = float(os.environ.get("EDGE_FSC_DAY_USD", "15000"))
 # Thin books take a PARTIAL entry down to this floor instead of
 # skipping (same order): $40 on the favorite beats missing the match.
 PARTIAL_MIN_USD = float(os.environ.get("EDGE_FSC_PARTIAL_MIN_USD", "25"))
@@ -113,6 +115,11 @@ START_MIN_S = float(os.environ.get("EDGE_FSC_START_MIN_S", "1200"))
 # TOPUP_MIN_USD is left to spend.
 TOPUP_WINDOW_S = float(os.environ.get("EDGE_FSC_TOPUP_WINDOW_S", "1800"))
 TOPUP_MIN_USD = float(os.environ.get("EDGE_FSC_TOPUP_MIN_USD", "5"))
+# Polite gap between Kalshi book reads: the big tennis slates push the
+# shared REST budget into 429s (observed 8 -> 318/sweep across a
+# night, 2026-08-18). Retries absorb them, but smoothing the burst is
+# cheaper than retrying it. 0 disables.
+READ_GAP_S = float(os.environ.get("EDGE_FSC_READ_GAP_S", "0.05"))
 
 # Poll scores only while tennis is actually in play (last sweep saw
 # match-day tickers) — credits are shared with the fair-value feed.
@@ -327,6 +334,8 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                     continue
                 if fav_ticker and ticker != fav_ticker:
                     continue    # armed: only the favorite's book is read
+                if READ_GAP_S > 0:
+                    time.sleep(READ_GAP_S)
                 book = kalshi.get_book(ticker, ticker)
                 if book is None or not book.asks or book.asks[0].size < 1:
                     continue
