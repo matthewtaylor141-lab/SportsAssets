@@ -1135,7 +1135,8 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
 # 21:35Z's payload for 16h; a poisoned baseline is discarded, not argued
 # with. A basis or baseline reset starts its own history.
 _PERSIST_KEY = "track_record_last_payload_ai3"
-_persist_state: dict[str, float] = {"ts": 0.0, "settled": -1.0, "stake": -1.0}
+_persist_state: dict[str, float] = {"ts": 0.0, "settled": -1.0,
+                                    "stake": -1.0, "total": 0.0}
 
 # A degraded build can GROW the settled count while losing half its
 # activities (missing redemptions turn wins into losses; missing fills
@@ -1155,6 +1156,15 @@ _refused: dict = {"streak": 0, "stakes": [], "settled": []}
 
 def _stake_of(payload: dict) -> float:
     return float((payload.get("summary") or {}).get("settled_stake") or 0)
+
+
+def _total_of(payload: dict) -> float:
+    """Whole-account settled stake regardless of attribution: the
+    attributed headline plus the excluded_unattributed bucket. Lost
+    activities shrink this; a row merely re-binned between cohorts
+    does not."""
+    return _stake_of(payload) + float(
+        (payload.get("excluded_unattributed") or {}).get("stake") or 0)
 
 
 def _looks_degraded(payload: dict) -> bool:
@@ -1183,6 +1193,8 @@ async def _persist_payload(payload: dict) -> None:
         _persist_state["settled"] = settled
         _persist_state["stake"] = max(_persist_state["stake"],
                                       _stake_of(payload))
+        _persist_state["total"] = max(_persist_state.get("total", 0.0),
+                                      _total_of(payload))
     except Exception:  # noqa: BLE001 — persistence is an upgrade, not a gate
         logging.getLogger(__name__).debug("payload persist failed",
                                           exc_info=True)
@@ -1205,6 +1217,8 @@ async def _load_persisted() -> dict | None:
                 float((payload.get("summary") or {}).get("settled") or 0))
             _persist_state["stake"] = max(_persist_state["stake"],
                                           _stake_of(payload))
+            _persist_state["total"] = max(_persist_state.get("total", 0.0),
+                                          _total_of(payload))
         return payload
     except Exception:  # noqa: BLE001
         return None
@@ -1554,7 +1568,20 @@ async def track_record(since: str | None = None,
                    and all(b >= a for a, b in zip(n3, n3[1:]))
                    and all(b >= a for a, b in zip(s3, s3[1:]))
                    and n3[-1] > n3[0])
-        if agree or growing:
+        # THIRD WAY OUT (2026-08-19 overnight deadlock, streak stuck at
+        # 4+): settled GREW past the high-water while attributed stake
+        # shrank — archive absorption re-binned copy rows into
+        # excluded_unattributed, so 'agree' (needs settled within ±2)
+        # and 'growing' (needs stake non-decreasing) could never fire
+        # while trading continued. Row count is the real loss detector:
+        # lost activities cannot ADD settled rows. When no row was lost
+        # AND the missing stake is visible in the unattributed bucket,
+        # this is recomposition, not corruption — re-baseline.
+        recomposed = (fresh_settled >= _persist_state["settled"]
+                      and _persist_state.get("total", 0.0) > 0
+                      and _total_of(payload)
+                      >= _persist_state["total"] * _STAKE_SHRINK_FLOOR)
+        if agree or growing or recomposed:
             logging.getLogger(__name__).warning(
                 "track-record re-baseline after %d consistent refused "
                 "builds: settled %s->%s stake %.2f->%.2f",
@@ -1562,12 +1589,16 @@ async def track_record(since: str | None = None,
                 fresh_settled, _persist_state["stake"], _stake_of(payload))
             _persist_state["settled"] = fresh_settled
             _persist_state["stake"] = _stake_of(payload)
+            _persist_state["total"] = _total_of(payload)
             _persist_state["ts"] = 0.0     # let the next persist through
             _refused.update(streak=0, stakes=[], settled=[])
             payload["rebaselined"] = {
-                "refused_builds": 3,
+                "refused_builds": _refused["streak"],
                 "reason": ("consistent lower basis" if agree
-                           else "growing record, not data loss")}
+                           else "growing record, not data loss"
+                           if growing
+                           else "recomposition: stake moved to "
+                                "unattributed, no rows lost")}
         else:
             persisted = await _load_persisted()
             if persisted is not None:

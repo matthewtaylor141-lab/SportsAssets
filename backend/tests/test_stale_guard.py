@@ -81,3 +81,47 @@ def test_growth_needs_a_real_increase_not_a_flat_line():
                and all(b >= a for a, b in zip(s3, s3[1:]))
                and n3[-1] > n3[0])
     assert growing is False
+
+
+def _recomposed(payload):
+    """Replicate the third escape hatch's decision (2026-08-19)."""
+    fresh_settled = float(payload["summary"]["settled"])
+    return (fresh_settled >= tr._persist_state["settled"]
+            and tr._persist_state.get("total", 0.0) > 0
+            and tr._total_of(payload)
+            >= tr._persist_state["total"] * tr._STAKE_SHRINK_FLOOR)
+
+
+def test_recomposition_unfreezes_on_the_first_build():
+    """2026-08-19 overnight deadlock (streak stuck at 4+): settled grew
+    past the high-water while attributed stake shrank — archive
+    absorption re-binned copy rows into excluded_unattributed. The
+    stability hatch needs settled within +/-2 and the growth hatch
+    needs stake non-decreasing, so neither ever fired. The
+    whole-account total held up: recomposition, not loss."""
+    _reset(2154.0, 88652.8)
+    tr._persist_state["total"] = 88652.8 + 58080.42
+    payload = {"summary": {"settled": 2166.0, "settled_stake": 86172.37},
+               "excluded_unattributed": {"stake": 67001.43}}
+    assert _recomposed(payload) is True
+
+
+def test_real_loss_with_growing_rows_still_refuses():
+    """Lost activities can add NEW settled rows while dropping old
+    stake — the whole-account total collapses with them, so the
+    recomposition hatch must not fire on a genuine loss."""
+    _reset(2154.0, 88652.8)
+    tr._persist_state["total"] = 146733.0
+    payload = {"summary": {"settled": 2166.0, "settled_stake": 40000.0},
+               "excluded_unattributed": {"stake": 30000.0}}
+    assert _recomposed(payload) is False
+
+
+def test_recomposition_needs_a_total_baseline():
+    """Before any total high-water exists the hatch stays closed —
+    fresh processes fall back to the original two hatches."""
+    _reset(2154.0, 88652.8)
+    tr._persist_state["total"] = 0.0
+    payload = {"summary": {"settled": 2166.0, "settled_stake": 86172.37},
+               "excluded_unattributed": {"stake": 67001.43}}
+    assert _recomposed(payload) is False
