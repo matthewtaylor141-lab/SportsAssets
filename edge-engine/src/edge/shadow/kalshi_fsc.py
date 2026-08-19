@@ -73,7 +73,10 @@ LEAGUES = ("atp", "wta")
 SERIES = tuple(s.strip() for s in os.environ.get(
     "EDGE_FSC_SERIES", "KXATPMATCH-,KXWTAMATCH-").split(",") if s.strip())
 
-PER_ENTRY_USD = float(os.environ.get("EDGE_FSC_USD", "100"))
+# 100 -> 200 (owner 2026-08-19 morning: "increase the WTA/ATP favorite
+# losing the first set sleeve from $100 per trade to $200 per trade").
+# Entries, partials and top-ups all scale off this one number.
+PER_ENTRY_USD = float(os.environ.get("EDGE_FSC_USD", "200"))
 FAV_MIN = float(os.environ.get("EDGE_FSC_FAV_MIN", "0.55"))
 FAV_MAX = float(os.environ.get("EDGE_FSC_FAV_MAX", "0.90"))
 TRIG_LO = float(os.environ.get("EDGE_FSC_TRIG_LO", "0.20"))

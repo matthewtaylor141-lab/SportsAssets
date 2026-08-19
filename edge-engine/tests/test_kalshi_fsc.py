@@ -157,29 +157,29 @@ def test_no_arm_outside_the_favorite_band():
     assert st2["armed"] == 0
 
 
-def test_confirmed_set_loss_places_the_hundred_dollar_entry(
+def test_confirmed_set_loss_places_the_two_hundred_dollar_entry(
         monkeypatch, fast_gates):
     _with_scores(monkeypatch, _srows(0, 1))          # set 1 lost: fact
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)          # arm at 0.62
-    ka.asks[T_FAV] = (0.33, 500.0)                   # set-1 loss print
+    ka.asks[T_FAV] = (0.33, 700.0)                   # set-1 loss print
     st2 = sweep(kalshi=ka, ledger=led, live=True)    # verified: enter
     assert st2["entered"] == 1
-    assert ka.orders == [(T_FAV, 0.33, 303)]         # floor(100/0.33)
+    assert ka.orders == [(T_FAV, 0.33, 606)]         # floor(200/0.33)
     saved = led.get_state(KEY)
-    assert saved["entered"] is True and saved["filled"] == 303
+    assert saved["entered"] is True and saved["filled"] == 606
     day = led.get_state("fsc_day")
-    assert day["entries"] == 1 and day["spent"] == pytest.approx(99.99)
+    assert day["entries"] == 1 and day["spent"] == pytest.approx(199.98)
     pos = led.open_positions(live_only=True)
     assert len(pos) == 1
     p = pos[0]
     assert p["market_key"] == f"kalshi:{T_FAV}"
-    assert p["shares"] == 303 and p["mode"] == "LIVE_BETA"
+    assert p["shares"] == 606 and p["mode"] == "LIVE_BETA"
     with led._conn() as conn:
         rows = conn.execute("SELECT category, qty, price FROM fills").fetchall()
     assert [(r["category"], r["qty"], r["price"]) for r in rows] == \
-        [("kalshi_fsc", 303.0, 0.33)]
+        [("kalshi_fsc", 606.0, 0.33)]
     # sync_kalshi_fills must see this order as already-recorded-inline,
     # or the venue fill pull doubles the position (audit 2026-08-04).
     assert led.get_state("kalshi_inline:ord-1")
@@ -244,7 +244,7 @@ def test_heavy_favorite_set_loss_lands_at_fifty_cents(
     ka.asks[T_FAV] = (0.50, 500.0)
     st = sweep(kalshi=ka, ledger=led, live=True)
     assert st["entered"] == 1
-    assert ka.orders == [(T_FAV, 0.50, 200)]         # floor(100/0.50)
+    assert ka.orders == [(T_FAV, 0.50, 400)]         # floor(200/0.50)
 
 
 def test_deep_collapse_is_worse_than_one_set(fast_gates):
@@ -262,14 +262,14 @@ def test_one_entry_per_match_ever(monkeypatch, fast_gates):
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)
-    ka.asks[T_FAV] = (0.33, 500.0)
+    ka.asks[T_FAV] = (0.33, 700.0)
     sweep(kalshi=ka, ledger=led, live=True)          # enters
     st = sweep(kalshi=ka, ledger=led, live=True)     # still at 0.33
     assert st["entered"] == 0 and len(ka.orders) == 1
 
 
 def test_day_cap_holds_across_matches(fast_gates, monkeypatch):
-    monkeypatch.setattr(_fsc, "DAY_USD", 150.0)
+    monkeypatch.setattr(_fsc, "DAY_USD", 300.0)
     _with_scores(monkeypatch,
                  _srows(0, 1) + [{"names": ["Swiatek", "Gauff"],
                                   "sets": {"Swiatek": 0, "Gauff": 1},
@@ -351,8 +351,8 @@ def test_dry_run_places_no_orders(monkeypatch, fast_gates):
 
 
 def test_thin_book_is_not_entered(monkeypatch, fast_gates):
-    """Same liquidity floor philosophy as the copy sleeve: a 303-lot
-    entry needs 303 showing at the ask, or the IOC would part-fill into
+    """Same liquidity floor philosophy as the copy sleeve: a 606-lot
+    entry needs 606 showing at the ask, or the IOC would part-fill into
     a worse effective price."""
     _with_scores(monkeypatch, _srows(0, 1))
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
@@ -401,7 +401,7 @@ def test_thin_book_takes_a_partial_entry(monkeypatch, fast_gates):
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)          # arm
-    ka.asks[T_FAV] = (0.33, 150.0)      # $49.50 showing < $100 want
+    ka.asks[T_FAV] = (0.33, 150.0)      # $49.50 showing < $200 want
     st = sweep(kalshi=ka, ledger=led, live=True)     # verified: enter
     assert st["entered"] == 1 and st.get("partial_entries") == 1
     assert ka.orders == [(T_FAV, 0.33, 150)]
@@ -629,20 +629,20 @@ def test_partial_fill_tops_up_to_the_hundred(monkeypatch, fast_gates):
     ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
     led = _led()
     sweep(kalshi=ka, ledger=led, live=True)          # arm
-    ka.asks[T_FAV] = (0.33, 114.0)      # $37.62 showing < $100 want
+    ka.asks[T_FAV] = (0.33, 114.0)      # $37.62 showing < $200 want
     st = sweep(kalshi=ka, ledger=led, live=True)     # partial entry
     assert st["entered"] == 1 and ka.orders == [(T_FAV, 0.33, 114)]
     ka.asks[T_FAV] = (0.34, 500.0)      # liquidity returns
     st2 = sweep(kalshi=ka, ledger=led, live=True)
     assert st2.get("topup_fills") == 1
-    # $100 - $37.62 = $62.38 remaining -> floor(62.38/0.34) = 183
-    assert ka.orders[1] == (T_FAV, 0.34, 183)
+    # $200 - $37.62 = $162.38 remaining -> floor(162.38/0.34) = 477
+    assert ka.orders[1] == (T_FAV, 0.34, 477)
     saved = led.get_state(KEY)
-    assert saved["filled"] == 114 + 183
-    assert saved["spent_usd"] == pytest.approx(37.62 + 183 * 0.34)
+    assert saved["filled"] == 114 + 477
+    assert saved["spent_usd"] == pytest.approx(37.62 + 477 * 0.34)
     day = led.get_state("fsc_day")
     assert day["entries"] == 1      # a top-up is not a new entry
-    assert day["spent"] == pytest.approx(99.84)
+    assert day["spent"] == pytest.approx(199.8)
     # ~$99.84 in: the remainder is under the floor — no further buys.
     s3 = sweep(kalshi=ka, ledger=led, live=True)
     assert not s3.get("topup_fills") and len(ka.orders) == 2
@@ -650,7 +650,7 @@ def test_partial_fill_tops_up_to_the_hundred(monkeypatch, fast_gates):
         rows = conn.execute(
             "SELECT qty, price FROM fills ORDER BY id").fetchall()
     assert [(r["qty"], r["price"]) for r in rows] == \
-        [(114.0, 0.33), (183.0, 0.34)]
+        [(114.0, 0.33), (477.0, 0.34)]
 
 
 def test_topup_window_closes(monkeypatch, fast_gates):
