@@ -293,3 +293,43 @@ class TestDayLedgerPersistence:
         ])
         assert pm[0]["settled_at"] is None
         assert persistable_day_rows(pm, "polymarket-us", "2026-08-10") == []
+
+
+class TestSlugDateFallback:
+    def test_pm_settlement_without_timestamp_buckets_by_slug_date(self):
+        # Observed 2026-08-19: the venue's raw resolution rows carry no
+        # usable timestamp — every PM settlement landed in 'undated'.
+        acts = [
+            {"type": "ACTIVITY_TYPE_TRADE",
+             "trade": {"marketSlug": "aec-atp-a-b-2026-08-18", "qty": 100,
+                       "price": 0.40, "side": "SIDE_BUY", "realizedPnl": 0}},
+            {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+             "positionResolution": {
+                 "marketSlug": "aec-atp-a-b-2026-08-18",
+                 "afterPosition": {"realized": {"value": 60.0}},
+                 "beforePosition": {"cost": {"value": 40.0}}}},
+        ]
+        rows = pm_positions(acts)
+        assert rows[0]["settled_at"] is None
+        assert rows[0]["day_hint"] == "2026-08-18"
+        days = daily_series(rows)
+        assert [d["day"] for d in days] == ["2026-08-18"]
+        from sportsassets.api.venue_truth import persistable_day_rows
+        frozen = persistable_day_rows(rows, "polymarket-us", "2026-08-10")
+        assert frozen == [("2026-08-18", "polymarket-us", 1, 1, 0,
+                           40.0, 60.0)]
+
+    def test_slug_date_before_window_is_excluded_from_totals(self):
+        acts = [
+            {"type": "ACTIVITY_TYPE_TRADE",
+             "trade": {"marketSlug": "aec-mlb-x-y-2026-08-04", "qty": 100,
+                       "price": 0.40, "side": "SIDE_BUY", "realizedPnl": 0}},
+            {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+             "positionResolution": {
+                 "marketSlug": "aec-mlb-x-y-2026-08-04",
+                 "afterPosition": {"realized": {"value": 60.0}},
+                 "beforePosition": {"cost": {"value": 40.0}}}},
+        ]
+        p = build_payload(pm_positions(acts), [], "2026-08-10")
+        assert p["total"]["settled"] == 0
+        assert p["total"]["realized"] == 0.0

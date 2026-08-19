@@ -231,12 +231,21 @@ def pm_positions(activities: list[dict]) -> list[dict]:
             meta = after.get("marketMetadata") or {}
             b["title"] = b["title"] or meta.get("title")
 
+    import re as _re
+
     rows = []
     for b in per.values():
         resolved = b["resolved"]
         realized = (b["res_realized"] if resolved
                     else round(b["sell_rp"], 2))
         is_open = (not resolved) and b["bought"] > b["sold"] + 1e-9
+        # The venue's raw resolution rows carry no usable timestamp
+        # (observed 2026-08-19: every PM settlement bucketed 'undated').
+        # The slug embeds the event date (aec-...-2026-08-19), which is
+        # the reporting day the tennis-week report already keys on — a
+        # stable fallback, labeled distinctly so it is never mistaken
+        # for a venue-stamped settlement time.
+        m = _re.search(r"(\d{4}-\d{2}-\d{2})", b["market_slug"])
         rows.append({
             "market_slug": b["market_slug"],
             "title": b["title"] or b["market_slug"],
@@ -244,6 +253,7 @@ def pm_positions(activities: list[dict]) -> list[dict]:
             "realized": round(realized or 0.0, 2),
             "settled": resolved,
             "settled_at": b["settled_at"] or None,
+            "day_hint": m.group(1) if m else None,
             "open": is_open,
         })
     return rows
@@ -277,7 +287,8 @@ def daily_series(rows: list[dict]) -> list[dict]:
         if not r["settled"]:
             continue
         ts = r.get("settled_at") or 0.0
-        day = _et_day(ts) if ts else "undated"
+        day = (_et_day(ts) if ts
+               else r.get("day_hint") or "undated")
         buckets.setdefault(day, []).append(r)
     ordered = sorted((d for d in buckets if d != "undated"), reverse=True)
     if "undated" in buckets:
@@ -312,9 +323,14 @@ def build_payload(pm_rows: list[dict], kx_rows: list[dict],
     # Days before the window opened belong to frozen history, not this
     # rolling rebuild — a settlement backfilled by the venue with an
     # old stamp must not re-open a closed reporting day.
+    def _settle_day(r: dict) -> str | None:
+        if r.get("settled_at"):
+            return _et_day(r["settled_at"])
+        return r.get("day_hint")
+
     in_window = [r for r in tagged
-                 if not r["settled"] or not r.get("settled_at")
-                 or _et_day(r["settled_at"]) >= since_day]
+                 if not r["settled"]
+                 or (_settle_day(r) or since_day) >= since_day]
     settled = [r for r in in_window if r["settled"]]
     payload = {
         "methodology": "venue-truth",
