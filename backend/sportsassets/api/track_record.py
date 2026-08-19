@@ -145,13 +145,29 @@ def build(positions: dict[str, dict], activities: list[dict],
         ts = _act_ts(act) or _act_ts(t)
         qty, price = _amt(t.get("qty")), _amt(t.get("price"))
         rp = _amt(t.get("realizedPnl"))
-        is_sell = "SELL" in str(t.get("side") or "").upper() or rp != 0
-        if is_sell:
+        # Side truth, in order of reliability (raw-feed audit 2026-08-19,
+        # 6,747 trades): the top-level side is ALWAYS None in the venue
+        # feed; the definitive side lives on the nested execution order.
+        # The rp!=0 fallback alone misread 444 zero-P&L sells as buys
+        # (inflated entry VWAPs) and booked 23 short-CLOSING BUYS as
+        # sales — their qty*price padded "proceeds" with cash that never
+        # came in, while their realized loss is real and must count.
+        side = str(t.get("side") or "").upper()
+        if not side:
+            for k in ("aggressorExecution", "passiveExecution"):
+                o = ((t.get(k) or {}).get("order") or {})
+                if o.get("side"):
+                    side = str(o["side"]).upper()
+                    break
+        is_sell = ("SELL" in side) if side else rp != 0
+        closes_position = is_sell or rp != 0
+        if closes_position:
             if qty > 0 and 0 < price < 1:
                 s = sold.setdefault(slug, {"qty": 0.0, "proceeds": 0.0,
                                            "realized": 0.0, "last_ts": 0.0})
-                s["qty"] += qty
-                s["proceeds"] += qty * price
+                if is_sell:            # only actual sales are cash in
+                    s["qty"] += qty
+                    s["proceeds"] += qty * price
                 s["realized"] += rp
                 if ts:
                     s["last_ts"] = max(s["last_ts"], ts)
@@ -822,9 +838,21 @@ def _slim(a: dict) -> dict:
         # owner directive 2026-08-08). Dropping them here silently turned
         # every ARCHIVED sell back into a buy once it scrolled out of the
         # venue's fresh window — wrong VWAP, lost cash-out P&L.
+        #
+        # The top-level side is ALWAYS None in the venue feed (raw audit
+        # 2026-08-19); the real side lives on the nested execution order,
+        # which the slim row would otherwise discard forever. Capture it
+        # here so archived history keeps the truth build() classifies on.
+        side = t.get("side")
+        if not side:
+            for k in ("aggressorExecution", "passiveExecution"):
+                o = ((t.get(k) or {}).get("order") or {})
+                if o.get("side"):
+                    side = o["side"]
+                    break
         out["trade"] = {"marketSlug": _i(t.get("marketSlug")),
                         "qty": t.get("qty"), "price": t.get("price"),
-                        "side": _i(t.get("side")),
+                        "side": _i(side),
                         "realizedPnl": t.get("realizedPnl"),
                         "createTime": _act_ts(t) or None}
     elif a.get("type") == "ACTIVITY_TYPE_POSITION_RESOLUTION":

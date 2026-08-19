@@ -711,3 +711,66 @@ def test_snapshot_roundtrip_preserves_the_slim_archive():
                        "realizedPnl": None, "createTime": 1000.0 + i}}
             for i in range(500)]
     assert _unpack_rows(_pack_rows(rows)) == rows
+
+
+class TestSoldLedgerClassification:
+    """Task #69 fixes, from the 2026-08-19 raw-feed audit (6,747 trades):
+    the venue's top-level trade side is ALWAYS None — the truth lives on
+    the nested execution order — and the old rp!=0 fallback misbooked
+    zero-P&L sells as buys and short-closing BUYS as sales."""
+
+    @staticmethod
+    def _deep_trade(slug, ts, qty, price, side, rp=0.0):
+        return {"type": "ACTIVITY_TYPE_TRADE",
+                "trade": {"marketSlug": slug, "qty": qty,
+                          "price": {"value": price},
+                          "createTime": ts * 1000,
+                          "side": None,
+                          "realizedPnl": {"value": rp},
+                          "aggressorExecution": {
+                              "order": {"side": side}}}}
+
+    def test_zero_pnl_sell_is_a_sale_not_a_buy(self):
+        # Sold at exactly avg cost: rp == 0. The old heuristic booked
+        # this as a BUY, inflating the entry VWAP and hiding the sale.
+        acts = [_trade("mlb-z", TS_AUG2, 100, 0.50),
+                self._deep_trade("mlb-z", TS_AUG2 + 60, 100, 0.50,
+                                 "ORDER_SIDE_SELL", rp=0.0)]
+        out = build({}, acts, TS_AUG1)
+        srow = next(s for s in out["sold_markets"] if s["slug"] == "mlb-z")
+        assert srow["qty"] == 100
+        assert srow["proceeds"] == 50.0
+
+    def test_short_closing_buy_realizes_but_adds_no_proceeds(self):
+        # ORDER_SIDE_BUY with realized P&L (closing a short): the loss is
+        # real cash and must count, but the buy's qty*price is money OUT,
+        # not sale proceeds — the old code padded proceeds with it.
+        acts = [self._deep_trade("wta-x", TS_AUG2, 587, 0.09,
+                                 "ORDER_SIDE_BUY", rp=-435.07)]
+        out = build({}, acts, TS_AUG1)
+        srow = next(s for s in out["sold_markets"] if s["slug"] == "wta-x")
+        assert srow["proceeds"] == 0.0
+        assert srow["qty"] == 0.0
+        assert srow["realized"] == -435.07
+
+    def test_rp_fallback_still_works_when_no_side_anywhere(self):
+        # Slim-archive rows from before the deep-side capture carry
+        # side=None and no execution objects; nonzero rp still marks
+        # them as position-closing so archived cash-outs keep counting.
+        acts = [{"type": "ACTIVITY_TYPE_TRADE",
+                 "trade": {"marketSlug": "ten-y", "qty": 50,
+                           "price": {"value": 0.60},
+                           "createTime": (TS_AUG2 + 60) * 1000,
+                           "side": None,
+                           "realizedPnl": {"value": 5.0}}}]
+        out = build({}, acts, TS_AUG1)
+        srow = next(s for s in out["sold_markets"] if s["slug"] == "ten-y")
+        assert srow["realized"] == 5.0
+        assert srow["proceeds"] == 30.0
+
+    def test_slim_archive_captures_the_deep_side(self):
+        from sportsassets.api.track_record import _slim
+
+        slim = _slim(self._deep_trade(
+            "mlb-q", TS_AUG2, 10, 0.40, "ORDER_SIDE_SELL", rp=1.0))
+        assert slim["trade"]["side"] == "ORDER_SIDE_SELL"
