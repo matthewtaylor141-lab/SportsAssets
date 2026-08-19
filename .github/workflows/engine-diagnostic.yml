@@ -113,6 +113,22 @@ jobs:
           jq -r '.hydrate_err // empty | "  HYDRATE: chunks=\(.chunks) err=\(.err // "none")"' /tmp/tr.json 2>/dev/null || true
           jq -r '"  generated_age_s: \((now - (.generated_at // now)) | round)"' /tmp/tr.json 2>/dev/null || true
           jq -r '.snapshot // {} | "  snapshot: age_s=\(.age_s // "?") pos_pages=\(.positions_pages // "?") complete=\(.positions_complete // "?") refresh_err=\(.refresh_error // "none") streak=\(.refresh_error_streak // 0)"' /tmp/tr.json 2>/dev/null || true
+          # Venue-truth rebuild (task #74) — first call kicks the
+          # background build; the summary line is what the probe grades.
+          echo "VENUE-TRUTH (uncapped, from venue ledgers):"
+          curl -sS --max-time 30 -o /tmp/vt.json "$BASE/api/venue-truth" || true
+          jq -r 'if .building then "  building (first request since boot)"
+                 else "  since \(.since)  settled \(.total.settled) (\(.total.wins)W-\(.total.losses)L)  realized $\(.total.realized)  cost $\(.total.settled_cost)  partial=\(.partial)  age_s=\(.age_s)" end' \
+             /tmp/vt.json 2>/dev/null || true
+          jq -r '.polymarket_us // {} | if .error then "  PM: ERROR \(.error)" else "  PM: settled \(.settled // "?") realized $\(.realized // "?") open \(.open // "?") ($\(.open_cost // "?"))" end' \
+             /tmp/vt.json 2>/dev/null || true
+          jq -r '.kalshi // {} | if .error then "  KX: ERROR \(.error)" else "  KX: settled \(.settled // "?") realized $\(.realized // "?") open \(.open // "?") ($\(.open_cost // "?"))" end' \
+             /tmp/vt.json 2>/dev/null || true
+          jq -r '.kalshi_window_incomplete // empty | "  KX-WINDOW-INCOMPLETE: n=\(.n) \(.tickers | join(","))"' \
+             /tmp/vt.json 2>/dev/null || true
+          jq -r '.kalshi_note // empty | "  KX-NOTE: \(.)"' /tmp/vt.json 2>/dev/null || true
+          jq -r '.daily[]? | "  vt-day \(.day)  realized $\(.realized)  \(.wins)W-\(.losses)L of \(.settled)"' \
+             /tmp/vt.json 2>/dev/null | head -8 || true
           # Cash-out ledger (owner 2026-08-08 night: "I see a bunch of
           # cash outs" — name them from the venue's own sell records, so
           # sleeve exits and manual sells are never conflated again).

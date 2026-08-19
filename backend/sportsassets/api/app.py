@@ -2518,6 +2518,19 @@ async def api_venue_export_raw(since: str | None = Query(None)) -> dict:
     return await venue_export_raw(since)
 
 
+@app.get("/api/venue-truth")
+async def api_venue_truth() -> dict:
+    """Venue-truth P&L (task #74): the record rebuilt continuously from
+    the venues' own ledgers — PM afterPosition.realized per resolution,
+    Kalshi signed cash over raw fills+settlements with exact fees — so
+    the site's numbers reconcile to the accounts, uncapped. Rolling
+    window (Kalshi raw export carries 15 days); served stale-while-
+    refreshing so the homepage never waits on the venue crawl."""
+    from .venue_truth import snapshot
+
+    return await snapshot()
+
+
 @app.get("/api/pmus-account")
 async def api_pmus_account() -> dict:
     """The REAL Polymarket US account, live from the venue's portfolio API:
