@@ -4,7 +4,8 @@ import { PnlCalendar } from '../components/PnlCalendar'
 import { LiveToday } from '../components/LiveToday'
 import { ReportsCard } from '../components/ReportsCard'
 import { fmtAgo, fmtCents, fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
-import { KalshiOpen, SINCE, TRRow, useKalshiOpen, useTrackRecord } from '../lib/record'
+import { KalshiOpen, SINCE, TRRow, useKalshiOpen, useTrackRecord,
+  useVenueTruth, VenueTruthData } from '../lib/record'
 
 /* The AI trader's account, told from the venue's own records. Every number
  * is fetched from /api/track-record — real positions, real entry prices
@@ -273,6 +274,80 @@ function KalshiBook({ k }: { k: KalshiOpen }) {
 type Status = 'all' | 'won' | 'lost' | 'open'
 type SortKey = 'time' | 'stake' | 'pnl'
 
+/** The uncapped record straight from the venues' own ledgers (task #74):
+ * PM's afterPosition.realized, Kalshi rebuilt from raw fills+settlements
+ * with exact fees. No display cap, no attribution — the number that must
+ * match the venue apps to the dollar over its window. */
+function VenueTruthCard({ vt }: { vt: VenueTruthData }) {
+  if (vt.building) return (
+    <div className="card">
+      <div className="card-title">VENUE TRUTH · RECONCILED P&amp;L</div>
+      <EmptyState>First rebuild since server start is running — numbers
+        appear within a few minutes.</EmptyState>
+    </div>
+  )
+  const t = vt.total
+  if (!t) return null
+  const pm = vt.polymarket_us || {}
+  const kx = vt.kalshi || {}
+  return (
+    <div className="card">
+      <div className="tr-ledger-head">
+        <div className="card-title">VENUE TRUTH · RECONCILED P&amp;L · since {vt.since}</div>
+        <span className={`tr-chip ${t.realized >= 0 ? 'won' : 'lost'}`}>
+          {fmtSignedUsd(t.realized)}
+        </span>
+      </div>
+      <div className="tr-slip-nums mono" style={{ flexWrap: 'wrap', gap: 12 }}>
+        <span>{t.wins}W – {t.losses}L · {t.settled} settled</span>
+        <span className="muted">on {fmtUsd(t.settled_cost, 2)} settled cost</span>
+        {pm.error
+          ? <span className="neg" title={pm.error}>Polymarket: unavailable</span>
+          : <span>
+              Polymarket <span className={(pm.realized ?? 0) >= 0 ? 'pos' : 'neg'}>
+                {fmtSignedUsd(pm.realized ?? 0)}</span>
+              {' '}· {pm.open ?? 0} open ({fmtUsd(pm.open_cost ?? 0, 2)})
+            </span>}
+        {kx.error
+          ? <span className="neg" title={kx.error}>Kalshi: unavailable</span>
+          : <span>
+              Kalshi <span className={(kx.realized ?? 0) >= 0 ? 'pos' : 'neg'}>
+                {fmtSignedUsd(kx.realized ?? 0)}</span>
+              {' '}· {kx.open ?? 0} open ({fmtUsd(kx.open_cost ?? 0, 2)})
+            </span>}
+      </div>
+      {(vt.daily || []).length > 0 && (
+        <div className="tr-slips" style={{ marginTop: 10 }}>
+          {(vt.daily || []).slice(0, 8).map((d) => (
+            <div key={d.day} className="tr-slip-nums mono"
+              style={{ justifyContent: 'space-between', padding: '2px 0' }}>
+              <span className="muted">{d.day}</span>
+              <span>{d.wins}W–{d.losses}L</span>
+              <span className="muted">{fmtUsd(d.cost, 2)}</span>
+              <span className={d.realized >= 0 ? 'pos' : 'neg'}>
+                {fmtSignedUsd(d.realized)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="tr-foot muted">
+        Computed from the venues&apos; own books — Polymarket&apos;s
+        per-market realized on each resolution, Kalshi rebuilt from raw
+        fills and settlements with exact fees. Uncapped: every position,
+        every size, manual and AI alike. Rolling window.
+        {vt.partial && <> ⚠️ One venue is currently unavailable — totals
+          cover the venue(s) shown only.</>}
+        {vt.kalshi_note && <> ⚠️ Kalshi figures: {vt.kalshi_note}.</>}
+        {vt.kalshi_window_incomplete && (
+          <> {vt.kalshi_window_incomplete.n} Kalshi settlement(s) whose
+          entries predate the window are excluded rather than guessed.</>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function fmtAge(s: number): string {
   if (s < 90) return `${Math.round(s)}s`
   if (s < 5400) return `${Math.round(s / 60)}m`
@@ -282,6 +357,7 @@ function fmtAge(s: number): string {
 export function TrackRecord() {
   const { data, err } = useTrackRecord()
   const { data: kalshi } = useKalshiOpen()
+  const { data: venueTruth } = useVenueTruth()
   const [status, setStatus] = useState<Status>('all')
   const [sport, setSport] = useState('all')
   const [cat, setCat] = useState('all')
@@ -522,6 +598,8 @@ export function TrackRecord() {
           <SportBreakdown rows={data.trades} />
         </div>
       </div>
+
+      {venueTruth && <VenueTruthCard vt={venueTruth} />}
 
       <ReportsCard />
 

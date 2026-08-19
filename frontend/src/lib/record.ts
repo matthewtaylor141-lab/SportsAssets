@@ -124,6 +124,51 @@ export function useKalshiOpen(refreshMs = 30_000) {
   return usePolled<KalshiOpen>('/api/kalshi-open', refreshMs)
 }
 
+/* Venue-truth rebuild (task #74): the uncapped record computed straight
+ * from the venues' own ledgers — PM's afterPosition.realized, Kalshi's
+ * raw fills+settlements with exact fees. Rolling window; the number that
+ * reconciles to the venue apps to the dollar. */
+
+export interface VTVenueSummary {
+  error?: string
+  markets?: number
+  settled?: number
+  wins?: number
+  losses?: number
+  realized?: number
+  settled_cost?: number
+  open?: number
+  open_cost?: number
+}
+
+export interface VTDay {
+  day: string
+  settled: number
+  wins: number
+  losses: number
+  cost: number
+  realized: number
+}
+
+export interface VenueTruthData {
+  methodology: 'venue-truth'
+  building?: boolean
+  since: string
+  polymarket_us?: VTVenueSummary
+  kalshi?: VTVenueSummary
+  total?: { settled: number; wins: number; losses: number
+            realized: number; settled_cost: number }
+  daily?: VTDay[]
+  partial?: boolean
+  kalshi_note?: string
+  kalshi_window_incomplete?: { n: number; tickers: string[] }
+  age_s?: number
+}
+
+export function useVenueTruth(refreshMs = 60_000) {
+  return usePolled<VenueTruthData>('/api/venue-truth', refreshMs)
+}
+
 export const SINCE = '2026-08-01'
 // No stake cap (owner directive 2026-08-11: "include the excluded bucket").
 // The $100 cap dated from the $1-$5 ticket era, when a larger position could
