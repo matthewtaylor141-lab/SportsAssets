@@ -3012,6 +3012,19 @@ def _main_impl() -> None:
                 funnel["kalshi_copies"] = dict(_KCOPY_STATS)
             if _FSC_STATS:
                 funnel["kalshi_fsc"] = dict(_FSC_STATS)
+                # Clean-cohort verdict (owner promise 2026-08-19): only
+                # entries placed AFTER the main-tour + mandatory-score-
+                # verification deploy count — the pre-fix record carries
+                # the phantom Challenger/ITF entries the fix exists to
+                # kill, and blending them would hide whether the thesis
+                # pays. Cutoff = 30e7474 deploy (2026-08-18T14:15Z).
+                try:
+                    funnel["fsc_clean"] = ledger.category_entry_cohort(
+                        "kalshi_fsc",
+                        float(os.environ.get("EDGE_FSC_CLEAN_TS",
+                                             "1787062500")))
+                except Exception as exc:  # noqa: BLE001 — telemetry only
+                    funnel["fsc_clean"] = {"error": f"{type(exc).__name__}"}
             if _KUD_STATS:
                 funnel["kalshi_underdog"] = dict(_KUD_STATS)
             # The venue's own response to our order attempts — the one

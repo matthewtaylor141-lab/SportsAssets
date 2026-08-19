@@ -618,6 +618,46 @@ class Ledger:
                     b["sigma"] = round(abs(mean) / ((var ** 0.5) / n ** 0.5), 2)
         return out
 
+    def category_entry_cohort(self, category: str,
+                              entry_since: float,
+                              live_only: bool = True) -> dict:
+        """Settled scorecard for one category, entries AFTER a cutoff.
+
+        performance_by_category windows on SETTLEMENT time, which cannot
+        answer "is the sleeve profitable since the fix" — a position
+        entered under the old defective rules but settling today lands
+        inside the window and pollutes the verdict. This filters on the
+        ENTRY (earliest BUY fill) instead, so a deploy timestamp cleanly
+        splits dirty history from the cohort the fix produced."""
+        mode_clause = "AND f.mode != 'PAPER'" if live_only else ""
+        with self._conn() as conn:
+            rows = [dict(x) for x in conn.execute(
+                f"""
+                SELECT r.pnl AS pnl,
+                       COALESCE(sum(f.qty * f.price), 0) AS staked,
+                       min(f.ts) AS entered_ts
+                FROM realizations r
+                JOIN fills f ON f.market_key = r.market_key AND f.side = 'BUY'
+                WHERE r.kind = 'resolution' AND f.category = ? {mode_clause}
+                GROUP BY r.id
+                """, (category,)).fetchall()]
+        out = {"category": category, "entry_since": entry_since,
+               "settled": 0, "wins": 0, "losses": 0,
+               "staked": 0.0, "realized": 0.0}
+        for r in rows:
+            if r["staked"] <= 0 or (r["entered_ts"] or 0) < entry_since:
+                continue
+            out["settled"] += 1
+            out["wins"] += 1 if r["pnl"] > 0 else 0
+            out["losses"] += 1 if r["pnl"] < 0 else 0
+            out["staked"] += r["staked"]
+            out["realized"] += r["pnl"]
+        out["staked"] = round(out["staked"], 2)
+        out["realized"] = round(out["realized"], 2)
+        out["roi"] = (round(out["realized"] / out["staked"], 4)
+                      if out["staked"] else None)
+        return out
+
     def performance(self, days: int = 7, live_only: bool = True,
                     since: float | None = None) -> dict:
         """Settled scorecard straight from the engine's OWN ledger.

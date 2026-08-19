@@ -184,3 +184,30 @@ def test_sell_at_exact_avg_cost_is_a_zero_pnl_event(tmp_path):
     assert r["realized"] == 0.0
     days = led.daily_pnl()
     assert sum(d["events"] for d in days) == 1  # journaled despite $0
+
+
+def test_entry_cohort_splits_on_fill_time_not_settlement_time(tmp_path):
+    """The clean-cohort verdict must exclude a position ENTERED before
+    the cutoff even when it settles after it — settlement-windowed
+    scorecards blend defect-era entries into the post-fix record."""
+    led = Ledger(str(tmp_path / "l.db"))
+    CUT = 1_000_000.0
+    # Dirty: entered before the cutoff, settles after.
+    led.record_fill("f-dirty", "kalshi", "kx:DIRTY", "BUY", 100, 0.40,
+                    ts=CUT - 500, mode="LIVE_BETA", category="kalshi_fsc")
+    led.record_resolution("kx:DIRTY", 1.0, ts=CUT + 5_000)
+    # Clean: entered and settled after the cutoff.
+    led.record_fill("f-clean", "kalshi", "kx:CLEAN", "BUY", 100, 0.50,
+                    ts=CUT + 100, mode="LIVE_BETA", category="kalshi_fsc")
+    led.record_resolution("kx:CLEAN", 0.0, ts=CUT + 6_000)
+    # Different category, after cutoff: not this sleeve's evidence.
+    led.record_fill("f-other", "kalshi", "kx:OTHER", "BUY", 10, 0.50,
+                    ts=CUT + 100, mode="LIVE_BETA", category="copy")
+    led.record_resolution("kx:OTHER", 1.0, ts=CUT + 6_000)
+
+    out = led.category_entry_cohort("kalshi_fsc", CUT)
+    assert out["settled"] == 1
+    assert out["wins"] == 0 and out["losses"] == 1
+    assert out["staked"] == 50.0
+    assert out["realized"] == -50.0
+    assert out["roi"] == -1.0

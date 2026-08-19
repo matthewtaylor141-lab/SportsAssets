@@ -225,6 +225,11 @@ jobs:
                "$BASE/api/engine/fills?limit=500" || true
           curl -sS --max-time 120 -o /tmp/status.json \
                "$BASE/api/engine/status" || true
+          # FSC clean cohort: entries AFTER the main-tour + mandatory
+          # verification deploy only — the number the sleeve's thesis is
+          # judged on (owner promise 2026-08-19).
+          jq -r '.detail.fsc_clean // empty | "FSC-CLEAN: settled \(.settled) (\(.wins)W-\(.losses)L)  realized $\(.realized)  staked $\(.staked)  roi \(.roi // "n/a")"' \
+             /tmp/status.json 2>/dev/null || true
 
           echo ""
           echo "###########################################################"
