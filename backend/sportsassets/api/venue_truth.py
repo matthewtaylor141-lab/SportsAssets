@@ -402,6 +402,61 @@ async def _kalshi_raw_from_heartbeat() -> tuple[dict | None, str | None]:
     return raw, None
 
 
+def persistable_day_rows(rows: list[dict], venue: str,
+                         since_day: str) -> list[tuple]:
+    """Upsert tuples (day, venue, settled, wins, losses, cost, realized)
+    for one venue's rows — in-window ET days only. Undated settlements
+    are a data problem to display, never rows to freeze into history."""
+    per_day = daily_series([r for r in rows
+                            if r.get("window_complete", True)])
+    out = []
+    for d in per_day:
+        if d["day"] == "undated" or d["day"] < since_day:
+            continue
+        out.append((d["day"], venue, d["settled"], d["wins"],
+                    d["losses"], d["cost"], d["realized"]))
+    return out
+
+
+async def _persist_days(pm_rows: list[dict], kx_rows: list[dict],
+                        since: str, pm_ok: bool, kx_ok: bool) -> None:
+    """Upsert the live window's per-day aggregates. A venue that failed
+    to fetch must not overwrite its rows with zeros — only venues that
+    actually produced data write."""
+    from ..db import get_pool
+
+    tuples = []
+    if pm_ok:
+        tuples += persistable_day_rows(pm_rows, "polymarket-us", since)
+    if kx_ok:
+        tuples += persistable_day_rows(kx_rows, "kalshi", since)
+    if not tuples:
+        return
+    pool = await get_pool()
+    await pool.executemany(
+        """
+        INSERT INTO venue_truth_days
+            (day, venue, settled, wins, losses, cost, realized, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+        ON CONFLICT (day, venue) DO UPDATE SET
+            settled = EXCLUDED.settled, wins = EXCLUDED.wins,
+            losses = EXCLUDED.losses, cost = EXCLUDED.cost,
+            realized = EXCLUDED.realized, updated_at = now()
+        """, tuples)
+
+
+async def _frozen_days(before_day: str) -> list[dict]:
+    """History the window has rolled past — read-only from the ledger."""
+    from ..db import get_pool
+
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT day, venue, settled, wins, losses, cost, realized "
+        "FROM venue_truth_days WHERE day < $1 ORDER BY day DESC",
+        before_day)
+    return [dict(r) for r in rows]
+
+
 async def _build() -> dict:
     since = _since_day()
     kx_raw, kx_err = await _kalshi_raw_from_heartbeat()
@@ -421,6 +476,45 @@ async def _build() -> dict:
                             kx_error=None if kx_rows else kx_err)
     if kx_rows and kx_err:
         payload["kalshi_note"] = kx_err   # stale-but-served, labeled
+
+    # Accrete: freeze this window's days into the ledger, then splice
+    # rolled-past history in front of the live window so the record
+    # never shortens as the sources roll forward.
+    try:
+        await _persist_days(pm_rows, kx_rows, since,
+                            pm_ok=pm_err is None, kx_ok=bool(kx_rows))
+        frozen = await _frozen_days(since)
+    except Exception as exc:  # noqa: BLE001 — a DB flake must not
+        # take down the live rebuild; the payload just loses history.
+        payload["history_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        frozen = []
+    if frozen:
+        by_day: dict[str, dict] = {}
+        for r in frozen:
+            d = by_day.setdefault(r["day"], {
+                "day": r["day"], "settled": 0, "wins": 0, "losses": 0,
+                "cost": 0.0, "realized": 0.0})
+            for k in ("settled", "wins", "losses"):
+                d[k] += r[k]
+            d["cost"] = round(d["cost"] + r["cost"], 2)
+            d["realized"] = round(d["realized"] + r["realized"], 2)
+        payload["frozen_days"] = sorted(by_day.values(),
+                                        key=lambda d: d["day"], reverse=True)
+        t = payload["total"]
+        payload["all_time"] = {
+            "since": min(by_day),
+            "settled": t["settled"] + sum(d["settled"]
+                                          for d in by_day.values()),
+            "wins": t["wins"] + sum(d["wins"] for d in by_day.values()),
+            "losses": t["losses"] + sum(d["losses"]
+                                        for d in by_day.values()),
+            "realized": round(t["realized"]
+                              + sum(d["realized"]
+                                    for d in by_day.values()), 2),
+            "settled_cost": round(t["settled_cost"]
+                                  + sum(d["cost"]
+                                        for d in by_day.values()), 2),
+        }
     payload["as_of"] = _time.time()
     return payload
 

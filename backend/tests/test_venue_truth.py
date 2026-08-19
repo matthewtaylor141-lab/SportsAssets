@@ -194,6 +194,11 @@ class TestSnapshotAssembly:
         monkeypatch.setattr(vt, "_kalshi_raw_from_heartbeat", fake_kx)
         monkeypatch.setattr(pmus_account, "_week_activities", fake_acts)
 
+        async def no_db(*a, **k):
+            return []
+        monkeypatch.setattr(vt, "_persist_days", no_db)
+        monkeypatch.setattr(vt, "_frozen_days", no_db)
+
         async def scenario():
             first = await vt.snapshot()
             assert first.get("building") is True
@@ -231,6 +236,11 @@ class TestSnapshotAssembly:
         monkeypatch.setattr(vt, "_kalshi_raw_from_heartbeat", fake_kx)
         monkeypatch.setattr(pmus_account, "_week_activities", fake_acts)
 
+        async def no_db(*a, **k):
+            return []
+        monkeypatch.setattr(vt, "_persist_days", no_db)
+        monkeypatch.setattr(vt, "_frozen_days", no_db)
+
         async def scenario():
             await vt.snapshot()
             for _ in range(50):
@@ -243,3 +253,43 @@ class TestSnapshotAssembly:
         assert out["partial"] is True
         assert "kalshi_export_raw" in out["kalshi"]["error"]
         assert out["polymarket_us"]["settled"] == 1
+
+
+class TestDayLedgerPersistence:
+    def test_persistable_rows_are_per_day_in_window_only(self):
+        from sportsassets.api.venue_truth import persistable_day_rows
+
+        kx = kalshi_positions({
+            "fills": [
+                _kx_fill("KXT-H", "yes", "buy", 100, 0.50),
+                _kx_fill("KXT-I", "yes", "buy", 100, 0.40, fee=0.7),
+            ],
+            "settlements": [
+                _kx_settle("KXT-H", "yes", 100.0,
+                           when="2026-08-18T20:00:00Z"),
+                # Before the window: must not be frozen by this build.
+                _kx_settle("KXT-I", "no", 0.0,
+                           when="2026-08-05T20:00:00Z"),
+            ],
+        })
+        rows = persistable_day_rows(kx, "kalshi", "2026-08-10")
+        assert rows == [("2026-08-18", "kalshi", 1, 1, 0, 50.0, 50.0)]
+
+    def test_undated_and_incomplete_rows_never_freeze(self):
+        from sportsassets.api.venue_truth import persistable_day_rows
+
+        kx = kalshi_positions({
+            "fills": [],
+            # No fills in window: window_complete=False.
+            "settlements": [_kx_settle("KXT-J", "yes", 200.0)],
+        })
+        assert persistable_day_rows(kx, "kalshi", "2026-08-10") == []
+        pm = pm_positions([
+            {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+             "positionResolution": {
+                 "marketSlug": "undated-x",
+                 "afterPosition": {"realized": {"value": 10.0}},
+                 "beforePosition": {"cost": {"value": 5.0}}}},
+        ])
+        assert pm[0]["settled_at"] is None
+        assert persistable_day_rows(pm, "polymarket-us", "2026-08-10") == []

@@ -299,6 +299,13 @@ function VenueTruthCard({ vt }: { vt: VenueTruthData }) {
         </span>
       </div>
       <div className="tr-slip-nums mono" style={{ flexWrap: 'wrap', gap: 12 }}>
+        {vt.all_time && (
+          <span title={`Frozen day ledger + live window, since ${vt.all_time.since}`}>
+            all-time <span className={vt.all_time.realized >= 0 ? 'pos' : 'neg'}>
+              {fmtSignedUsd(vt.all_time.realized)}</span>
+            {' '}({vt.all_time.wins}W–{vt.all_time.losses}L)
+          </span>
+        )}
         <span>{t.wins}W – {t.losses}L · {t.settled} settled</span>
         <span className="muted">on {fmtUsd(t.settled_cost, 2)} settled cost</span>
         {pm.error

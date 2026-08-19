@@ -160,6 +160,12 @@ export interface VenueTruthData {
             realized: number; settled_cost: number }
   daily?: VTDay[]
   partial?: boolean
+  /** Days the rolling window has moved past, frozen in the day ledger. */
+  frozen_days?: VTDay[]
+  /** Window + frozen history combined — the accreting record. */
+  all_time?: { since: string; settled: number; wins: number; losses: number
+               realized: number; settled_cost: number }
+  history_error?: string
   kalshi_note?: string
   kalshi_window_incomplete?: { n: number; tickers: string[] }
   age_s?: number
