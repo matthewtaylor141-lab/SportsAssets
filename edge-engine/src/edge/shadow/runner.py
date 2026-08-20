@@ -320,6 +320,12 @@ _KCOPY_STATS: dict = {}
 _KUD_STATS: dict = {}
 # First-set comeback sleeve (kalshi_fsc.py, owner order 2026-08-17).
 _FSC_STATS: dict = {}
+# When the FSC thread was launched. A sweep that HANGS (vs raises)
+# leaves _FSC_STATS empty forever and the funnel simply omitted the
+# block — observed 2026-08-20 10:37Z boot: the thread wedged inside its
+# first sweep and the sleeve silently traded nothing for an hour with
+# no remote signal. The funnel now says "stalled" instead of nothing.
+_FSC_STARTED: dict = {"ts": 0.0}
 
 
 def _merge_fresh_identity_rows(fresh: list, rows: list) -> list:
@@ -2694,6 +2700,7 @@ def _main_impl() -> None:
                 time.sleep(float(os.environ.get("EDGE_FSC_EVERY_S",
                                                 "120")))
 
+        _FSC_STARTED["ts"] = time.time()
         threading.Thread(target=_fsc_loop, daemon=True,
                          name="kalshi-fsc").start()
         log.warning("kalshi first-set comeback sleeve armed (120s sweep)")
@@ -3011,7 +3018,19 @@ def _main_impl() -> None:
             if _KCOPY_STATS:
                 funnel["kalshi_copies"] = dict(_KCOPY_STATS)
             if _FSC_STATS:
+                # A last update older than several sweep periods means
+                # the loop is wedged mid-sweep (network hang survives
+                # the try/except, which only catches raises).
+                _fsc_age = time.time() - float(_FSC_STATS.get("at") or 0)
                 funnel["kalshi_fsc"] = dict(_FSC_STATS)
+                if _fsc_age > 900:
+                    funnel["kalshi_fsc"]["stalled_s"] = int(_fsc_age)
+            elif _FSC_STARTED["ts"] and \
+                    time.time() - _FSC_STARTED["ts"] > 600:
+                funnel["kalshi_fsc"] = {
+                    "stalled": True,
+                    "stalled_s": int(time.time() - _FSC_STARTED["ts"]),
+                    "note": "thread launched but no sweep has completed"}
                 # Clean-cohort verdict (owner promise 2026-08-19): only
                 # entries placed AFTER the main-tour + mandatory-score-
                 # verification deploy count — the pre-fix record carries
