@@ -32,18 +32,20 @@ def _clip(whale, n, slug=None):
 
 def test_clip_is_base_at_or_under_baseline():
     assert _clip("rn1", 0) == 225.00
-    assert _clip("rn1", 40) == 225.00           # exactly baseline
+    # rn1 baseline 40 -> 110 (owner go 2026-08-20): full size through
+    # his real ~109-fill day instead of shrinking from fill 41.
+    assert _clip("rn1", 110) == 225.00          # exactly baseline
     assert _clip("swisstony", 30) == 300.00
 
 
 def test_ten_x_fills_means_one_tenth_size():
-    assert _clip("rn1", 400) == pytest.approx(22.50)      # 225 * 40/400
+    assert _clip("rn1", 1100) == pytest.approx(22.50)     # 225 * 110/1100
     assert _clip("swisstony", 300) == pytest.approx(30.00)  # 300 * 30/300
 
 
 def test_clip_floors_at_five_dollars_and_never_scales_up():
     assert _clip("rn1", 100000) == 5.00
-    assert _clip("rn1", 41) < 225.00
+    assert _clip("rn1", 111) < 225.00
 
 
 def test_sport_override_is_the_scaling_base():

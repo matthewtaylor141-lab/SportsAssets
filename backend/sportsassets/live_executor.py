@@ -377,7 +377,13 @@ def per_fill_usd(whale_username: str | None,
 # 1/10 the size. Never scales UP, floors at $5 so a copy stays a whole
 # contract, and an unreadable count degrades to the base clip (sizing
 # must not depend on a flaky read).
-BASELINE_FILLS_PER_DAY = {"rn1": 40.0, "swisstony": 30.0}
+# rn1 40 -> 110 (owner go 2026-08-20 morning): he averages ~109 copied
+# fills/day and the 40-fill baseline was shrinking his clip to ~$80 by
+# midday — throttling exactly the whale whose filled copies grade
+# +24.6% ROI (7d fill-vs-miss). The envelope rule is unchanged; only
+# his baseline is recalibrated to his real volume (day envelope
+# ~$9k -> ~$25k at the $225 clip).
+BASELINE_FILLS_PER_DAY = {"rn1": 110.0, "swisstony": 30.0}
 BASELINE_FILLS_DEFAULT = 20.0
 MIN_CLIP_USD = 5.0
 
