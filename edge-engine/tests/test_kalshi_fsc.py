@@ -755,3 +755,26 @@ def test_unknown_venue_cost_refuses_the_topup(monkeypatch, fast_gates):
     assert not s2.get("topup_fills")
     assert s2.get("skipped_cost_unknown") == 1
     assert len(ka.orders) == 1
+
+
+def test_every_placed_order_lands_in_the_durable_journal(
+        monkeypatch, fast_gates):
+    """Post-mortem gap 2026-08-20: venue fills ran to 2x the clip and
+    nothing durable could attribute the orders. Every entry AND top-up
+    now journals (order_id, kind, ask, count, filled) into per-day
+    ledger state, surfaced as orders_today in the funnel."""
+    _with_scores(monkeypatch, _srows(0, 1))
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)          # arm
+    ka.asks[T_FAV] = (0.33, 114.0)
+    sweep(kalshi=ka, ledger=led, live=True)          # partial entry
+    ka.asks[T_FAV] = (0.34, 500.0)
+    s = sweep(kalshi=ka, ledger=led, live=True)      # top-up
+    rows = s.get("orders_today") or []
+    assert [r["kind"] for r in rows] == ["entry", "topup"]
+    assert rows[0]["ticker"] == T_FAV and rows[0]["filled"] == 114
+    assert rows[1]["filled"] == 477
+    assert all(r["order_id"] for r in rows)
+    j = led.get_state(f"fsc_orders:{_fsc._day_key(time.time())}")
+    assert len(j["rows"]) == 2

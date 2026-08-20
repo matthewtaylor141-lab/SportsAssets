@@ -154,6 +154,30 @@ def _date_token(now: float) -> str:
     return f"{tm.tm_year % 100:02d}{_MONTHS[tm.tm_mon - 1]}{tm.tm_mday:02d}"
 
 
+def _journal_order(ledger, now: float, order_id, ticker: str,
+                   kind: str, ask: float, count: int, filled: int) -> None:
+    """Durable per-day journal of every order THIS sleeve placed.
+
+    Exists because of the 2026-08-20 runaway post-mortem gap: venue
+    fills on TIAAUG/SABBEJ ran to 2x the clip and nothing durable could
+    say which orders were this sleeve's vs another path (the internal
+    spent counter had already proven unreliable). Any venue fill on an
+    FSC ticker whose order id is missing here is NOT this sleeve; a
+    journal row whose (count, filled) disagree with the venue's fill
+    quantity exposes response undercounting directly. Read via the
+    fsc_orders state key in the funnel; capped so state stays small."""
+    try:
+        jk = f"fsc_orders:{_day_key(now)}"
+        j = ledger.get_state(jk) or {"rows": []}
+        j["rows"] = (j.get("rows") or [])[-39:] + [{
+            "at": int(now), "order_id": str(order_id or "")[:40],
+            "ticker": ticker, "kind": kind, "ask": ask,
+            "count": count, "filled": filled}]
+        ledger.set_state(jk, j)
+    except Exception:  # noqa: BLE001 — telemetry must never block a fill
+        log.debug("fsc order journal write failed", exc_info=True)
+
+
 def _match_day_ok(event: str, now: float) -> bool:
     """True when the event's embedded date is today or yesterday (ET) —
     yesterday stays eligible so a night match live past midnight is not
@@ -327,6 +351,8 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                     if r.get("order_id"):
                         ledger.set_state(
                             f"kalshi_inline:{r['order_id']}", {"ts": now})
+                    _journal_order(ledger, now, r.get("order_id"), ticker,
+                                   "topup", ask, count, filled)
                     cost = round(filled * ask, 2)
                     spent_st = round(spent_st + cost, 2)
                     ledger.set_state(key, {
@@ -609,6 +635,8 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                 if r.get("order_id"):
                     ledger.set_state(f"kalshi_inline:{r['order_id']}",
                                      {"ts": now})
+                _journal_order(ledger, now, r.get("order_id"), ticker,
+                               "entry", ask, count, filled)
                 cost = round(filled * ask, 2)
                 st.pop("pend_ts", None)
                 st.pop("pend_px", None)
@@ -643,4 +671,12 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                             int(age / 60))
     _ACTIVE["hint"] = bool(stats["scanned"])
     stats["day"] = dict(day) if day else {}
+    # Today's order journal rides the funnel so a probe can attribute
+    # every venue fill on an FSC ticker without engine-log access.
+    try:
+        j = ledger.get_state(f"fsc_orders:{_day_key(now)}")
+        if j and j.get("rows"):
+            stats["orders_today"] = j["rows"][-12:]
+    except Exception:  # noqa: BLE001
+        pass
     return stats
