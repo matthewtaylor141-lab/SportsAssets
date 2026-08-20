@@ -861,12 +861,34 @@ class KalshiAdapter(VenueAdapter):
             if resp.status_code != 200:
                 return None
             positions = set()
+            position_costs: dict[str, float] = {}
             for r in (resp.json() or {}).get("market_positions") or []:
                 qty = abs(float(r.get("position_fp")
                                 or r.get("position") or 0))
                 t = str(r.get("ticker") or "")
                 if t and qty > 0:
                     positions.add(t)
+                    # Venue-stated cost of the position, dollar dialect
+                    # first (FSC runaway 2026-08-20: the sleeve's internal
+                    # spent counter read $199.88 while the venue held
+                    # $435 — sizing MUST be judged against the venue's
+                    # own number). Field name varies by payload version;
+                    # a ticker with no recognizable cost field is simply
+                    # absent from the map and callers treat it as
+                    # unknown, never as zero.
+                    cost = None
+                    for k in ("market_exposure_dollars",
+                              "total_traded_dollars"):
+                        if r.get(k) is not None:
+                            cost = float(r[k])
+                            break
+                    if cost is None:
+                        for k in ("market_exposure", "total_traded"):
+                            if r.get(k) is not None:
+                                cost = float(r[k]) / 100.0
+                                break
+                    if cost is not None:
+                        position_costs[t] = round(cost, 2)
             path = "/trade-api/v2/portfolio/orders"
             resp = self._sess.get(
                 f"{BASE}/portfolio/orders",
@@ -882,7 +904,8 @@ class KalshiAdapter(VenueAdapter):
                 oid = str(o.get("order_id") or o.get("id") or "")
                 if t and oid:
                     resting_buys.setdefault(t, []).append(oid)
-            return {"positions": positions, "resting_buys": resting_buys}
+            return {"positions": positions, "resting_buys": resting_buys,
+                    "position_costs": position_costs}
         except requests.RequestException:
             return None
 

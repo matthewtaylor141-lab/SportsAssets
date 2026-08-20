@@ -66,6 +66,11 @@ class _Kalshi:
         self.orders = []
         self.fill_count = None          # None -> fill what was asked
         self.order_ok = True
+        # Venue-side truth of what THIS account holds, accumulated from
+        # the fake's own fills — the sizing authority the sleeve reads
+        # (runaway 2026-08-20). Tests tamper with it to simulate fills
+        # the engine's internal counter never saw.
+        self.venue_cost: dict = {}
 
     def taker_fee(self, price):
         return 0.07 * price * (1 - price)
@@ -78,7 +83,11 @@ class _Kalshi:
     def open_ticker_map(self):
         if not self.guard_ok:
             return None
-        return {"positions": set(self.held), "resting_buys": {}}
+        held = set(self.held) | {t for t, c in self.venue_cost.items()
+                                 if c > 0}
+        return {"positions": held, "resting_buys": {},
+                "position_costs": {t: round(c, 2)
+                                   for t, c in self.venue_cost.items()}}
 
     def get_book(self, market_id, ticker):
         px, size = self.asks.get(ticker, (None, 0.0))
@@ -98,6 +107,8 @@ class _Kalshi:
             return {"ok": False, "status": "insufficient_balance",
                     "raw": {"error": "insufficient_balance"}}
         n = count if self.fill_count is None else self.fill_count
+        self.venue_cost[ticker] = round(
+            self.venue_cost.get(ticker, 0.0) + n * price, 2)
         return {"ok": True, "count": n, "order_id": f"ord-{len(self.orders)}",
                 "status": "filled"}
 
@@ -704,3 +715,43 @@ def test_pre_fix_armed_state_is_cleared_not_trusted(fast_gates):
     assert st2.get("v") == 2 and st2.get("fav_ticker") == T_DOG, \
         "the re-arm must be v2 and on the side that actually trades " \
         "as the favorite — not the phantom the old state named"
+
+
+def test_venue_cost_is_the_topup_sizing_authority(monkeypatch, fast_gates):
+    """Runaway 2026-08-20 (~03:00Z): the sleeve's internal spent counter
+    read $199.88 while the venue held $435.49 (TIAAUG) / $399.09
+    (SABBEJ) — >2x the clip. A top-up must size off the venue's OWN
+    stated position cost, so fills the internal counter never saw still
+    count against the clip."""
+    _with_scores(monkeypatch, _srows(0, 1))
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)          # arm
+    ka.asks[T_FAV] = (0.33, 114.0)
+    st = sweep(kalshi=ka, ledger=led, live=True)     # partial $37.62
+    assert st["entered"] == 1 and len(ka.orders) == 1
+    # Fills the engine never recorded (the runaway signature): the venue
+    # says the position is already at the full clip.
+    ka.venue_cost[T_FAV] = 199.9
+    ka.asks[T_FAV] = (0.34, 500.0)
+    s2 = sweep(kalshi=ka, ledger=led, live=True)
+    assert not s2.get("topup_fills")
+    assert len(ka.orders) == 1        # no second buy — the venue is full
+
+
+def test_unknown_venue_cost_refuses_the_topup(monkeypatch, fast_gates):
+    """A held ticker with no recognizable cost field in the venue
+    payload refuses the top-up (fail closed): a partial position left
+    partial is bounded, another blind buy is not."""
+    _with_scores(monkeypatch, _srows(0, 1))
+    ka = _Kalshi({T_FAV: (0.62, 500.0), T_DOG: (0.40, 500.0)})
+    led = _led()
+    sweep(kalshi=ka, ledger=led, live=True)          # arm
+    ka.asks[T_FAV] = (0.33, 114.0)
+    sweep(kalshi=ka, ledger=led, live=True)          # partial entry
+    del ka.venue_cost[T_FAV]          # payload variant without cost
+    ka.asks[T_FAV] = (0.34, 500.0)
+    s2 = sweep(kalshi=ka, ledger=led, live=True)
+    assert not s2.get("topup_fills")
+    assert s2.get("skipped_cost_unknown") == 1
+    assert len(ka.orders) == 1

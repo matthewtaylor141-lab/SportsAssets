@@ -193,6 +193,7 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
     # back to "nothing held" is exactly the amnesia the venue guard
     # exists to prevent.
     held_events: set = set()
+    venue_costs: dict[str, float] = {}
     guard_down = False
     if live and hasattr(kalshi, "open_ticker_map"):
         vg = kalshi.open_ticker_map()
@@ -202,6 +203,7 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
         else:
             held_events = {game_of(t) for t in
                            (set(vg["positions"]) | set(vg["resting_buys"]))}
+            venue_costs = dict(vg.get("position_costs") or {})
 
     # Set-score ground truth (owner 2026-08-17 night: "can there be
     # verification from one of our apis"). Fail-soft: empty rows keep
@@ -263,16 +265,33 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
                         st.get("spent_usd")
                         or float(st.get("filled") or 0)
                         * float(st.get("entry_px") or 0))
-                    remaining = round(PER_ENTRY_USD - spent_st, 2)
                     first_ts = float(st.get("ts") or 0)
-                    if remaining < TOPUP_MIN_USD \
-                            or now - first_ts > TOPUP_WINDOW_S:
+                    if now - first_ts > TOPUP_WINDOW_S:
                         continue
                     if not live:
                         continue
                     if guard_down:
                         stats["skipped_guard_down"] = \
                             stats.get("skipped_guard_down", 0) + 1
+                        continue
+                    # THE VENUE IS THE SIZING AUTHORITY (runaway
+                    # 2026-08-20 ~03:00Z: internal spent read $199.88
+                    # while the venue held $435.49 on TIAAUG and $399.09
+                    # on SABBEJ — both >2x the clip; the internal counter
+                    # lied, the venue did not). A top-up may only buy the
+                    # gap between the venue's OWN stated cost and the
+                    # clip. A held ticker whose venue cost is unknown
+                    # (payload variant without a cost field) refuses the
+                    # top-up outright — a partial fill left partial is
+                    # bounded; another blind buy is not.
+                    venue_cost = venue_costs.get(ticker)
+                    if venue_cost is None:
+                        stats["skipped_cost_unknown"] = \
+                            stats.get("skipped_cost_unknown", 0) + 1
+                        continue
+                    spent_st = max(spent_st, venue_cost)
+                    remaining = round(PER_ENTRY_USD - spent_st, 2)
+                    if remaining < TOPUP_MIN_USD:
                         continue
                     book = kalshi.get_book(ticker, ticker)
                     if book is None or not book.asks or not book.bids \
