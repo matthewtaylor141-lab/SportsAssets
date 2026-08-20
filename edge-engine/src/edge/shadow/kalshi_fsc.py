@@ -194,6 +194,15 @@ def sweep(*, kalshi, ledger, live: bool) -> dict:
     from edge.shadow.kalshi_guard import game_of, live_blocked
 
     stats: dict = {"scanned": 0, "armed": 0, "entered": 0, "spent": 0.0}
+    # OWNER ORDER 2026-08-20 midday: "Lets turn off the FSC and only use
+    # the trades that we are copying. There should be zero 'software'
+    # trades." The sleeve is OFF and re-arming requires the NEW explicit
+    # knob below — deliberately not the old EDGE_FSC env, so a stale
+    # service-config value can never re-arm it. (Clean-cohort verdict at
+    # shutdown: 1W-4L, -$446 tagged / ~-$1,021 real incl. the two
+    # pre-guard runaways.)
+    if os.environ.get("EDGE_FSC_FORCE_ON", "0") != "1":
+        return {"disabled": True, "off": "owner order 2026-08-20"}
     if os.environ.get("EDGE_FSC", "1") == "0":
         return {"disabled": True}
     # Account-level stops (kill switch / watchdog) bind every live

@@ -375,6 +375,16 @@ async def _entry_sweep(pool) -> dict:
 
     stats = {"games": 0, "entered": 0, "skipped_held": 0,
              "skipped_band": 0, "skipped_done": 0, "unmapped": 0}
+    # ENTRIES OFF (owner order 2026-08-20 midday: "only use the trades
+    # that we are copying. There should be zero 'software' trades").
+    # The dog sleeve is our own strategy, not a copy, so NEW entries
+    # stop; the cash-out sweep and the copy-exit sweep keep running so
+    # positions already held are still managed. Re-arming requires the
+    # NEW explicit knob — deliberately not the old UNDERDOG_SLEEVE env,
+    # so a stale service-config value can never re-arm it.
+    if os.environ.get("UNDERDOG_ENTRIES_FORCE_ON", "0") != "1":
+        stats["off"] = "entries off (owner order 2026-08-20)"
+        return stats
     # SLEEVE v2 RESTART (owner order 2026-08-12 morning: "restart
     # number 4... $2 on every underdog... cashed out when the profit
     # hits 35%"). The 2026-08-11 cut is superseded; UNDERDOG_SLEEVE=0

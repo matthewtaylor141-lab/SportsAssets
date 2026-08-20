@@ -47,6 +47,24 @@ def _fresh_discovery_cache():
     _kc._DISCO_CACHE.clear()
 
 
+@pytest.fixture(autouse=True)
+def _arm_fsc(monkeypatch):
+    """The sleeve is OFF by owner order 2026-08-20 (zero software
+    trades); the suite arms it explicitly so the machinery it guards
+    stays tested for the day it is ever re-armed."""
+    monkeypatch.setenv("EDGE_FSC_FORCE_ON", "1")
+
+
+def test_off_by_default_owner_order_2026_08_20(monkeypatch):
+    """Without the explicit force-on knob the sweep refuses — and the
+    OLD EDGE_FSC env cannot re-arm it."""
+    monkeypatch.delenv("EDGE_FSC_FORCE_ON", raising=False)
+    monkeypatch.setenv("EDGE_FSC", "1")
+    st = sweep(kalshi=None, ledger=None, live=True)
+    assert st.get("disabled") is True
+    assert "owner order" in str(st.get("off", ""))
+
+
 @pytest.fixture
 def fast_gates(monkeypatch):
     """Collapse the two wall-clock gates so a trigger can complete in

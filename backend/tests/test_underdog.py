@@ -9,6 +9,27 @@ from sportsassets.workers.underdog import (
 )
 
 
+def test_entries_are_off_by_owner_order_2026_08_20(monkeypatch):
+    """Owner 2026-08-20 midday: zero 'software' trades — the dog sleeve
+    stops ENTERING (exits and the copy-exit sweep keep running). The old
+    UNDERDOG_SLEEVE env must not be able to re-arm it; only the new
+    explicit knob does."""
+    import asyncio
+
+    from sportsassets.workers import underdog as ud
+
+    monkeypatch.delenv("UNDERDOG_ENTRIES_FORCE_ON", raising=False)
+    monkeypatch.setenv("UNDERDOG_SLEEVE", "1")
+
+    class _Pool:  # the gate must fire before any query
+        def fetch(self, *a, **k):
+            raise AssertionError("entry sweep touched the db while off")
+
+    st = asyncio.run(ud._entry_sweep(_Pool()))
+    assert "off" in st and "2026-08-20" in st["off"]
+    assert st["entered"] == 0
+
+
 def test_the_dog_is_the_cheaper_side_inside_the_band():
     assert pick_underdog([("fav", 0.62), ("dog", 0.36)]) == ("dog", 0.36)
     # Order of sides must not matter.

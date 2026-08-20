@@ -93,8 +93,14 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 # every cell, whale clip and default x1.5. Blocked 0.00 cells stay
 # blocked (a block is a decision, not a size). Breaker floors scale
 # with the clip per the standing sensitivity rule below.
+# 2026-08-20 midday (owner mandate, maximum-profitability pass —
+# parity with the PMUS leg shipped the same day): 0x2c33 to $300 (best
+# residual ROI at our latency), HomeRunHazard to $112.50 (12W-8L).
 PER_COPY_USD = {"rn1": 225.00, "swisstony": 300.00,
-                _W2C33: 225.00, "homerunhazard": 75.00}
+                _W2C33: 300.00, "homerunhazard": 112.50,
+                # kch123 pre-sized for his (out-of-season) NBA/NFL/NHL
+                # cells, matching the PMUS leg (owner go 2026-08-20).
+                "kch123": 150.00}
 PER_COPY_USD_SPORT = {("swisstony", "soccer"): 150.00,
                       ("rn1", "tennis"): 112.50,
                       ("rn1", "baseball"): 375.00,
@@ -110,14 +116,29 @@ KALSHI_BASELINE_FILLS = {"rn1": 15, "swisstony": 10}
 KALSHI_BASELINE_DEFAULT = 8
 
 
+# Market-type multipliers (owner go 2026-08-20 morning on the PMUS leg,
+# extended here the same day for venue parity): spreads x1.5 for every
+# whale — the one edge that held across all five lifetime type
+# calibrations — and RN1's BTTS x1.5 (+7.2%, his best type). Multipliers
+# scale the resolved clip; a blocked 0.00 cell stays blocked.
+TYPE_MULT = {("*", "spread"): 1.5, ("kch123", "spread"): 2.0,
+             ("rn1", "btts"): 1.5}
+
+
 def _per_copy_usd(whale: str, slug: str) -> float:
     """Clip for this whale on this market: the (whale, sport) override
-    wins, then the whale clip, then the default."""
-    from edge.shadow.copy_sports import sport_of
+    wins, then the whale clip, then the default — scaled by the
+    market-type multiplier when one applies."""
+    from edge.shadow.copy_sports import market_type_of, sport_of
 
     w = (whale or "").lower()
     ov = PER_COPY_USD_SPORT.get((w, sport_of(slug or "")))
-    return ov if ov is not None else PER_COPY_USD.get(w, PER_COPY_DEFAULT)
+    base = ov if ov is not None else PER_COPY_USD.get(w, PER_COPY_DEFAULT)
+    if base <= 0:
+        return base
+    mtype = market_type_of(slug or "")
+    mult = TYPE_MULT.get((w, mtype)) or TYPE_MULT.get(("*", mtype)) or 1.0
+    return base * mult
 # A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
 # decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.
 # Copying an old position at today's price is buying fair value minus
@@ -156,7 +177,11 @@ COLLAPSE_FLOOR = 0.85
 # copy trades by 50%"): same sensitivity rule as every prior clip
 # promotion — the floor scales with the clip or the same ordinary
 # variance that rode yesterday trips the halt today.
-COPY_HALT_USD_DEFAULT = 3750.0
+# 3750 -> 4500 (2026-08-20 midday, alongside the spread x1.5 multiplier
+# and the 0x2c33/HRH clip raises): the effective dominant clip on spread
+# markets is now ~1.2x yesterday's, so the floor scales with it — same
+# sensitivity rule as every prior clip promotion.
+COPY_HALT_USD_DEFAULT = 4500.0
 COPY_HALT_HOURS_DEFAULT = 24.0
 # Owner amnesty (latest 2026-08-16 ~12:45pm ET, "Unlock Kalshi trading
 # and make sure trades keep flowing", lifting the third trip; earlier
