@@ -36,7 +36,13 @@ class Settings(BaseSettings):
 
     # Ingestion
     poll_interval_seconds: float = 5.0
-    data_api_max_rps: float = 4.0  # combined ceiling across all Data-API callers
+    # Fast-lane cycle for the pinned COPY whales (owner latency push
+    # 2026-08-20): each pinned wallet re-polled every ~this many seconds
+    # on top of the roster rotation. 0 disables the lane.
+    poll_priority_seconds: float = 2.5
+    # 4.0 -> 6.0 with the fast lane (its ~2 rps rides on top of the
+    # roster pass); polite_get's 429 backoff still owns the true ceiling.
+    data_api_max_rps: float = 6.0  # combined ceiling across all Data-API callers
     positions_sync_interval_seconds: int = 300
     history_max_trades: int = 500_000  # deep-backfill cap per wallet
     history_start_date: str = "2025-07-01"  # earliest fill date to import

@@ -50,14 +50,30 @@ async def _sport_for_condition(condition_id: str | None) -> str | None:
     return await pool.fetchval("SELECT sport FROM markets WHERE condition_id=$1", condition_id)
 
 
+def priority_whales(whales: list[dict]) -> list[dict]:
+    """The pinned COPY whales out of the tracked roster — the wallets the
+    executor actually trades on, and therefore the only ones whose
+    detection latency is worth paying extra request budget for."""
+    from ..api.copies_record import COPY_WHALES
+
+    return [w for w in whales
+            if (w.get("username") or "").lower() in COPY_WHALES]
+
+
 class Poller:
     def __init__(self) -> None:
         cfg = settings()
         self._http = httpx.AsyncClient(base_url=cfg.data_api_base, timeout=10)
         self._interval = cfg.poll_interval_seconds
+        self._priority_interval = cfg.poll_priority_seconds
         self._fail_threshold = cfg.poll_failure_alert_threshold
         self._consecutive_failures = 0
         self.on_alert = None  # callable(str) set by the worker (Telegram admin alert)
+        # Detection-lag telemetry (owner latency push 2026-08-20): venue
+        # trade timestamp -> our ingest, for the LAST new trade this
+        # process detected. The number that says whether copy latency is
+        # ours to fix or the venue's publication lag.
+        self.last_lag_s: float | None = None
 
     async def tracked_whales(self) -> list[dict]:
         pool = await get_pool()
@@ -86,7 +102,39 @@ class Poller:
                 ev.sport = sport
             if await ingest_trade(ev) is not None:
                 new += 1
+                if ev.ts_epoch:
+                    import time as _t
+
+                    self.last_lag_s = round(_t.time() - ev.ts_epoch, 1)
         return new
+
+    async def _priority_loop(self) -> None:
+        """Fast lane (owner latency push 2026-08-20): the pinned copy
+        whales are re-polled on their own short cycle, on top of the
+        full-roster rotation. Every second of detection lag is ~1.5c/90s
+        of copy edge decaying, so the wallets we actually trade get
+        polled every ~poll_priority_seconds instead of waiting out a
+        full roster pass. Duplicates lose the ingest dedupe and cost
+        nothing; the shared Data-API throttle still bounds total rps."""
+        while True:
+            try:
+                whales = priority_whales(await self.tracked_whales())
+                if not whales:
+                    await asyncio.sleep(10)
+                    continue
+                stagger = max(self._priority_interval / len(whales), 0.25)
+                for whale in whales:
+                    try:
+                        await self.poll_wallet(whale)
+                    except Exception as exc:  # noqa: BLE001 — one bad wallet
+                        # must never stall the fast lane; the main loop's
+                        # failure accounting owns alerting.
+                        log.warning("fast-lane poll failed for %s: %s",
+                                    whale["address"], exc)
+                    await asyncio.sleep(stagger)
+            except Exception:  # noqa: BLE001 — roster fetch etc.
+                log.exception("fast-lane pass failed; retrying")
+                await asyncio.sleep(5)
 
     async def _history_loop(self) -> None:
         """One-time deep history import per whale — background, never blocks
@@ -110,9 +158,12 @@ class Poller:
         Run inside the API service's memory limit it OOM-cycled the whole
         API every ~10 minutes (observed 2026-08-02 23:30Z, minutes after
         the ingestion fallback first deployed with it enabled)."""
-        log.info("Path B poller starting (interval=%ss)", self._interval)
+        log.info("Path B poller starting (interval=%ss, fast lane=%ss)",
+                 self._interval, self._priority_interval)
         if history:
             asyncio.get_running_loop().create_task(self._history_loop())
+        if self._priority_interval > 0:
+            asyncio.get_running_loop().create_task(self._priority_loop())
         while True:
             whales = await self.tracked_whales()
             if not whales:
@@ -124,7 +175,10 @@ class Poller:
                 try:
                     new = await self.poll_wallet(whale)
                     self._consecutive_failures = 0
-                    await heartbeat("poller", "ok", {"last_wallet": whale["address"], "new": new})
+                    await heartbeat("poller", "ok",
+                                    {"last_wallet": whale["address"],
+                                     "new": new,
+                                     "detect_lag_s": self.last_lag_s})
                 except Exception as exc:  # noqa: BLE001 — one bad wallet/payload
                     # must never kill live detection for the others
                     self._consecutive_failures += 1

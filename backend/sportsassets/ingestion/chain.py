@@ -223,6 +223,11 @@ class ChainListener:
         self.events_seen = 0    # raw OrderFilled logs delivered by the WS
         self.decoded = 0        # logs that decoded to a roster wallet
         self.ingested = 0       # decoded fills that won the dedupe
+        # Venue block time -> our ingest, for the last fill this path
+        # won (owner latency push 2026-08-20). NOTE this measures from
+        # on-chain SETTLEMENT, which itself lags the off-chain CLOB
+        # match — the poller's detect_lag_s is the comparable number.
+        self.last_lag_s: float | None = None
 
     def _beat_detail(self) -> dict:
         return {"subscribed": True,
@@ -230,6 +235,7 @@ class ChainListener:
                 "events_seen": self.events_seen,
                 "decoded": self.decoded,
                 "ingested": self.ingested,
+                "detect_lag_s": self.last_lag_s,
                 "roster": len(self._roster)}
 
     async def refresh_roster(self) -> None:
@@ -265,6 +271,7 @@ class ChainListener:
         trade_id = await ingest_trade(ev)
         if trade_id:
             self.ingested += 1
+            self.last_lag_s = round(time.time() - ts_epoch, 1)
             log.info(
                 "chain fill: %s %s %s %.2f @ %.3f (trade %s)",
                 whale["username"] or fill.wallet,
