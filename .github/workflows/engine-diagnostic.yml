@@ -970,9 +970,20 @@ jobs:
                       out.append((p, q))
               return sorted(out)
 
+          # Stratify: listings are dominated by far-out football
+          # markets; cap each (sport, type) cell so baseball/tennis/
+          # soccer — the cells actually trading — are always sampled.
+          bucket, picked = {}, []
+          for sl in slugs:
+              k = (sport_of(sl), type_of(sl))
+              if bucket.get(k, 0) < 25:
+                  bucket[k] = bucket.get(k, 0) + 1
+                  picked.append(sl)
+          print("stratified sample:", len(picked), dict(
+              (f"{a}|{b}", n) for (a, b), n in sorted(bucket.items())))
           probed, cells = 0, {}
           err = {}
-          for sl in slugs[:240]:
+          for sl in picked[:300]:
               try:
                   raw = pub.markets.book(sl) or {}
               except Exception as e:
