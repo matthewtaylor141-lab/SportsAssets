@@ -34,16 +34,18 @@ def test_swisstony_soccer_limits_at_one_hundred():
 
 
 def test_default_is_fifty_dollars():
-    assert per_fill_usd("homerunhazard") == 75.00
+    # HRH graduated to $112.50 (owner mandate 2026-08-20 midday).
+    assert per_fill_usd("homerunhazard") == 112.50
     # kch123 graduated from the default to a studied $150 clip
     # (owner go 2026-08-20, allocation re-cut).
     assert per_fill_usd("kch123") == 150.00
     assert per_fill_usd(None) == 75.00
     assert per_fill_usd("someone-new") == 75.00
-    # 0x2c33 promoted to $150 base + tennis cell BLOCK (owner maximize
-    # order 2026-08-17, from its +$1.19M / 10.6% ROI tracker week):
+    # 0x2c33: $225 -> $300 (owner mandate 2026-08-20 midday — best
+    # residual ROI at our latency on the board); tennis cell BLOCK
+    # unchanged.
     assert per_fill_usd(
-        "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563-1759935795465") == 225.00
+        "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563-1759935795465") == 300.00
     assert per_fill_usd(
         "0x2c335066FE58fe9237c3d3Dc7b275C2a034a0563-1759935795465",
         "aec-atp-rafjod-artfil-2026-08-11") == 0.00
@@ -99,3 +101,29 @@ class TestTypeMultipliers:
 
         assert per_fill_usd(
             _W2C33, "asc-atp-rafjod-artfil-2026-08-21-neg-1pt5") == 0.00
+
+
+class TestCopyLimitPrice:
+    """RN1 capture tolerance (owner mandate 2026-08-20): his +2c, RN1
+    only — misses on every other whale graded negative, so the strict
+    same-or-better limit stays everywhere it is saving money."""
+
+    def test_everyone_else_stays_same_or_better(self):
+        from sportsassets.live_executor import copy_limit_price
+
+        assert copy_limit_price("swisstony", 0.474) == 0.47
+        assert copy_limit_price("0xwhoever", 0.50) == 0.50
+        assert copy_limit_price(None, 0.335) == 0.33
+
+    def test_rn1_gets_two_cents_of_capture(self):
+        from sportsassets.live_executor import copy_limit_price
+
+        assert copy_limit_price("rn1", 0.474) == 0.49   # floor 47 + 2
+        assert copy_limit_price("RN1", 0.50) == 0.52
+        assert copy_limit_price("rn1", 0.985) == 0.99   # capped below 1
+
+    def test_env_zero_restores_strict_rule(self, monkeypatch):
+        from sportsassets import live_executor as le
+
+        monkeypatch.setattr(le, "RN1_TOL_CENTS", 0.0)
+        assert le.copy_limit_price("rn1", 0.474) == 0.47

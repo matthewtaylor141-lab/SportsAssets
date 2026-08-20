@@ -302,8 +302,15 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 # idle only because his cells (NBA/NFL spreads+totals, NHL moneyline)
 # are out of season; sized now so the first ball of his season copies
 # at the studied clip, not the $75 default.
+# 0x2c33 225 -> 300 and HRH 75 -> 112.50 (owner mandate 2026-08-20
+# midday, maximum-profitability pass): 0x2c33 carries the best residual
+# ROI at our real latency on the whole board (+0.27%/$1k over 4,620
+# 30-day probes; vetting graded +0.76%/$1k over 1,712) and his settled
+# copies are positive; HRH's cell-gated book is 12W-8L with the 50-95c
+# band guard doing its job. Both raises are bounded (+33%/+50%), not
+# leaps — the settled samples are still small.
 PER_FILL_BY_WHALE = {"rn1": 225.00, "swisstony": 300.00,
-                     _W2C33: 225.00, "homerunhazard": 75.00,
+                     _W2C33: 300.00, "homerunhazard": 112.50,
                      "kch123": 150.00}
 
 # PER-MARKET-TYPE MULTIPLIERS (owner go 2026-08-20 morning, from the
@@ -338,8 +345,38 @@ PER_FILL_BY_WHALE_SPORT = {("swisstony", "soccer"): 150.00,
 # breaker has followed at every promotion — an unchanged floor at x1.5
 # clips would trip on the ordinary variance that rode yesterday. The
 # env var still overrides for an owner-set absolute.
+# 2250 -> 3500 (2026-08-20 midday, alongside the envelope raise +
+# spread multipliers): the same clip-sensitivity rule as every prior
+# promotion — deployed copy dollars roughly +55% today, and an
+# unchanged floor would trip on ordinary variance and halt the
+# profitable sleeve mid-weekend. The env var still overrides.
 PMUS_LOSS_BREAKER_USD = float(
-    os.environ.get("PMUS_LOSS_BREAKER_USD", "2250"))
+    os.environ.get("PMUS_LOSS_BREAKER_USD", "3500"))
+
+
+# RN1 CAPTURE TOLERANCE (owner mandate 2026-08-20 midday: "make any and
+# all changes... most likely to make us the most money"): RN1 only, his
+# price + 2c. The 7-day fill-vs-miss grading is the evidence — 2,102
+# missed RN1 copies graded +5.3% while the missed cohorts on every
+# other whale graded NEGATIVE (swisstony -16.8%, 0x2c33 -24.6%), so the
+# strict same-or-better rule stays exactly where it is saving money and
+# loosens only where it is provably leaving profit. The FOK still fills
+# at the best price at/below the limit, so the extra cents are paid
+# only when the book actually moved. The tolerance cohort is measurable
+# in live_orders as limit_price > his_price; if its settled record
+# grades negative the knob goes back to 0 (env override, no deploy).
+RN1_TOL_CENTS = float(os.environ.get("PMUS_RN1_TOL_CENTS", "2"))
+
+
+def copy_limit_price(whale_username: str | None, his_price: float) -> float:
+    """FOK limit for a copy: his price floored to the venue tick —
+    same-or-better — plus the per-whale capture tolerance (RN1 +2c)."""
+    import math
+
+    limit = math.floor(round(his_price * 100, 6)) / 100.0
+    if (whale_username or "").lower() == "rn1" and RN1_TOL_CENTS > 0:
+        limit = min(0.99, round(limit + RN1_TOL_CENTS / 100.0, 2))
+    return limit
 
 
 def per_fill_usd(whale_username: str | None,
@@ -943,8 +980,9 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         # or better." The FOK limit is HIS price floored to the venue
         # tick — the order fills only at his price or cheaper, never
         # worse. A book that ran past him is a skipped copy, not a
-        # chased one.
-        limit = math.floor(round(his_price * 100, 6)) / 100.0
+        # chased one. RN1 carries a bounded +2c capture tolerance
+        # (owner mandate 2026-08-20 — see copy_limit_price).
+        limit = copy_limit_price(payload.get("whale_username"), his_price)
         if limit <= 0:
             return
         per = await volume_normalized_clip(
