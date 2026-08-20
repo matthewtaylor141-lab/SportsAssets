@@ -35,7 +35,9 @@ def test_swisstony_soccer_limits_at_one_hundred():
 
 def test_default_is_fifty_dollars():
     assert per_fill_usd("homerunhazard") == 75.00
-    assert per_fill_usd("kch123") == 75.00
+    # kch123 graduated from the default to a studied $150 clip
+    # (owner go 2026-08-20, allocation re-cut).
+    assert per_fill_usd("kch123") == 150.00
     assert per_fill_usd(None) == 75.00
     assert per_fill_usd("someone-new") == 75.00
     # 0x2c33 promoted to $150 base + tennis cell BLOCK (owner maximize
@@ -53,3 +55,47 @@ def test_underdog_sleeve_keeps_its_own_stake():
     from sportsassets.workers.underdog import PER_FILL_USD
 
     assert PER_FILL_USD == 2.00
+
+
+class TestTypeMultipliers:
+    """Allocation re-cut (owner go 2026-08-20 morning): spreads x1.5 for
+    every whale — the one invariant that held across all five lifetime
+    type calibrations — RN1 BTTS x1.5 (+7.2%, his best type), kch123
+    spreads to the studied $300. Multipliers scale the resolved clip;
+    they never unblock a 0.00 cell."""
+
+    def test_spreads_scale_up_for_every_whale(self):
+        # swisstony soccer spread: $150 soccer cap x 1.5.
+        assert per_fill_usd(
+            "swisstony", "asc-epl-ars-che-2026-08-20-neg-1pt5") == 225.00
+        # rn1 whale-feed spread grammar (bare line after date): his
+        # $300 soccer sport-override x 1.5.
+        assert per_fill_usd(
+            "rn1", "epl-ars-che-2026-08-20-1pt5") == 450.00
+        # Unknown whale: default $75 x 1.5.
+        assert per_fill_usd(
+            "someone-new", "asc-epl-ars-che-2026-08-20-neg-1pt5") == 112.50
+
+    def test_kch123_spread_hits_the_studied_three_hundred(self):
+        assert per_fill_usd(
+            "kch123", "asc-nba-lal-bos-2026-11-01-neg-2pt5") == 300.00
+        # His non-spread cells ride the $150 base.
+        assert per_fill_usd(
+            "kch123", "atc-nhl-tor-mtl-2026-10-15-tor") == 150.00
+
+    def test_rn1_btts_scales_up(self):
+        # $300 soccer override x 1.5 — BTTS is a soccer market.
+        assert per_fill_usd(
+            "rn1", "astatc-epl-ars-che-2026-08-20-ftts") == 450.00
+
+    def test_moneylines_are_untouched(self):
+        assert per_fill_usd(
+            "rn1", "aec-atp-rafjod-artfil-2026-08-21-raf") == 112.50
+        assert per_fill_usd("swisstony",
+                            "atc-epl-ars-che-2026-08-20-ars") == 150.00
+
+    def test_a_blocked_cell_is_never_unblocked_by_a_multiplier(self):
+        from sportsassets.live_executor import _W2C33
+
+        assert per_fill_usd(
+            _W2C33, "asc-atp-rafjod-artfil-2026-08-21-neg-1pt5") == 0.00

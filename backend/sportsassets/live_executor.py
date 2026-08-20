@@ -296,8 +296,31 @@ PENNY_TRIAL_PER_FILL_USD = 75.00
 # clips follow the whales' measured per-sport edge from the tracker week —
 # see kalshi_copies.py for the numbers. A 0.00 cell is a BLOCK (skip).
 _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
+# kch123 $150 (owner go 2026-08-20 morning, allocation re-cut): the
+# highest-ROI whale on the roster (+7.21% lifetime, +24.55% on spreads
+# at $28.1M donor scale) — already active+pinned since migration 012,
+# idle only because his cells (NBA/NFL spreads+totals, NHL moneyline)
+# are out of season; sized now so the first ball of his season copies
+# at the studied clip, not the $75 default.
 PER_FILL_BY_WHALE = {"rn1": 225.00, "swisstony": 300.00,
-                     _W2C33: 225.00, "homerunhazard": 75.00}
+                     _W2C33: 225.00, "homerunhazard": 75.00,
+                     "kch123": 150.00}
+
+# PER-MARKET-TYPE MULTIPLIERS (owner go 2026-08-20 morning, from the
+# five-whale lifetime type calibration, 2026-08-18): spreads beat every
+# single whale's own blended average — the one invariant that held
+# across all $2.3B of donor volume — and RN1's BTTS is his best type
+# (+7.20% on $7.6M). Applied ON TOP of the whale/sport clip the maps
+# above resolve, specific (whale, type) cell first, then the "*" type
+# row. A 0.00 sport-cell block stays a block (0 x anything = 0).
+# swisstony exact-score/BTTS down-weights from the same study need no
+# row here: the copy_sports cell table already copies neither.
+# kch123 spread 2.0: $150 base x 2.0 = the studied $300 spread clip.
+TYPE_MULT: dict[tuple[str, str], float] = {
+    ("*", "spread"): 1.5,
+    ("kch123", "spread"): 2.0,
+    ("rn1", "btts"): 1.5,
+}
 PER_FILL_BY_WHALE_SPORT = {("swisstony", "soccer"): 150.00,
                            ("rn1", "tennis"): 112.50,
                            ("rn1", "baseball"): 375.00,
@@ -322,15 +345,27 @@ PMUS_LOSS_BREAKER_USD = float(
 def per_fill_usd(whale_username: str | None,
                  slug: str | None = None) -> float:
     """Clip for this whale on this market: the (whale, sport) override
-    wins, then the whale clip, then the default."""
+    wins, then the whale clip, then the default — scaled by the
+    market-type multiplier (spreads x1.5 everywhere, owner go
+    2026-08-20). A 0.00 cell stays a block."""
     w = (whale_username or "").lower()
+    base = None
     if slug:
         from .copy_sports import sport_of
 
         ov = PER_FILL_BY_WHALE_SPORT.get((w, sport_of(slug)))
         if ov is not None:
-            return ov
-    return PER_FILL_BY_WHALE.get(w, PENNY_TRIAL_PER_FILL_USD)
+            base = ov
+    if base is None:
+        base = PER_FILL_BY_WHALE.get(w, PENNY_TRIAL_PER_FILL_USD)
+    if slug and base > 0:
+        from .copy_sports import market_type_of
+
+        mt = market_type_of(slug)
+        mult = TYPE_MULT.get((w, mt), TYPE_MULT.get(("*", mt)))
+        if mult is not None:
+            return round(base * mult, 2)
+    return base
 
 
 # INVERSE VOLUME<->SIZE SCALING (owner order 2026-08-12, alongside the
