@@ -211,3 +211,41 @@ def test_entry_cohort_splits_on_fill_time_not_settlement_time(tmp_path):
     assert out["staked"] == 50.0
     assert out["realized"] == -50.0
     assert out["roi"] == -1.0
+
+
+def test_category_whale_scorecard_splits_by_decision_whale(tmp_path):
+    """Owner question 2026-08-20: per-whale accountability inside one
+    category. The whale rides in each fill's decision JSON; PAPER fills
+    and other categories never leak in."""
+    import time as _t
+
+    led = Ledger(db_path=str(tmp_path / "x.sqlite3"))
+    now = _t.time()
+    led.record_fill("k1", "kalshi", "kalshi:T1", "BUY", 100, 0.80, ts=now - 60,
+                    mode="LIVE_BETA", category="kalshi_copy",
+                    decision={"whale": "RN1"})
+    led.record_fill("k2", "kalshi", "kalshi:T2", "BUY", 100, 0.70, ts=now - 60,
+                    mode="LIVE_BETA", category="kalshi_copy",
+                    decision={"whale": "rn1"})
+    led.record_fill("k3", "kalshi", "kalshi:T3", "BUY", 100, 0.75, ts=now - 60,
+                    mode="LIVE_BETA", category="kalshi_copy",
+                    decision={"whale": "swisstony"})
+    # PAPER and foreign-category fills are excluded.
+    led.record_fill("k4", "kalshi", "kalshi:T4", "BUY", 100, 0.75, ts=now - 60,
+                    mode="PAPER", category="kalshi_copy",
+                    decision={"whale": "rn1"})
+    led.record_fill("k5", "kalshi", "kalshi:T5", "BUY", 100, 0.75, ts=now - 60,
+                    mode="LIVE_BETA", category="kalshi_fsc",
+                    decision={"whale": "rn1"})
+    for key, payout in [("kalshi:T1", 1.0), ("kalshi:T2", 0.0),
+                        ("kalshi:T3", 1.0), ("kalshi:T4", 1.0),
+                        ("kalshi:T5", 1.0)]:
+        led.record_resolution(key, payout, ts=now - 30)
+    out = led.category_whale_scorecard("kalshi_copy", days=30)
+    assert set(out) == {"rn1", "swisstony"}
+    rn1 = out["rn1"]
+    assert rn1["settled"] == 2 and rn1["wins"] == 1 and rn1["losses"] == 1
+    assert rn1["staked"] == pytest.approx(150.0)   # 100*0.80 + 100*0.70
+    assert rn1["realized"] == pytest.approx(20.0 - 70.0)
+    st = out["swisstony"]
+    assert st["settled"] == 1 and st["realized"] == pytest.approx(25.0)

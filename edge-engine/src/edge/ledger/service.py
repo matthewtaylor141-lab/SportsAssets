@@ -618,6 +618,47 @@ class Ledger:
                     b["sigma"] = round(abs(mean) / ((var ** 0.5) / n ** 0.5), 2)
         return out
 
+    def category_whale_scorecard(self, category: str, days: int = 30,
+                                 live_only: bool = True) -> dict:
+        """Settled scorecard for one category split by the WHALE recorded
+        in each fill's decision JSON (owner question 2026-08-20 evening:
+        'how many trades did we copy from RN1 on Kalshi?'). The blended
+        category line cannot answer per-whale accountability; this can."""
+        since = window_start(days)
+        mode_clause = "AND f.mode != 'PAPER'" if live_only else ""
+        with self._conn() as conn:
+            rows = [dict(x) for x in conn.execute(
+                f"""
+                SELECT COALESCE(json_extract(f.decision, '$.whale'),
+                                'unattributed') AS whale,
+                       r.pnl AS pnl,
+                       COALESCE(sum(f.qty * f.price), 0) AS staked
+                FROM realizations r
+                JOIN fills f ON f.market_key = r.market_key
+                            AND f.side = 'BUY'
+                WHERE r.ts >= ? AND r.kind = 'resolution'
+                  AND f.category = ? {mode_clause}
+                GROUP BY r.id
+                """, (since, category)).fetchall()]
+        out: dict[str, dict] = {}
+        for r in rows:
+            if r["staked"] <= 0:
+                continue
+            b = out.setdefault(str(r["whale"]).lower(), {
+                "settled": 0, "wins": 0, "losses": 0,
+                "staked": 0.0, "realized": 0.0})
+            b["settled"] += 1
+            b["wins"] += 1 if r["pnl"] > 0 else 0
+            b["losses"] += 1 if r["pnl"] < 0 else 0
+            b["staked"] += r["staked"]
+            b["realized"] += r["pnl"]
+        for b in out.values():
+            b["staked"] = round(b["staked"], 2)
+            b["realized"] = round(b["realized"], 2)
+            b["roi"] = (round(b["realized"] / b["staked"], 4)
+                        if b["staked"] else None)
+        return out
+
     def category_entry_cohort(self, category: str,
                               entry_since: float,
                               live_only: bool = True) -> dict:

@@ -2026,6 +2026,11 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         funnel["price_drift"] = ledger.price_drift_report(days=7)
         funnel["by_cat_performance"] = ledger.performance_by_category(
             days=7, live_only=risk.is_live)
+        # Per-whale accountability for the Kalshi copy leg (owner
+        # question 2026-08-20 evening) — 30d window covers the leg's
+        # whole live era.
+        funnel["kalshi_copy_whales"] = ledger.category_whale_scorecard(
+            "kalshi_copy", days=30, live_only=risk.is_live)
         funnel["spread_cost"] = ledger.spread_report(days=7, live_only=risk.is_live)
         funnel["by_band"] = ledger.performance_by_band(days=7, live_only=risk.is_live)
         funnel["reversion"] = rev
@@ -2531,10 +2536,22 @@ def _main_impl() -> None:
                     # every tennis row — and EDGE_KCOPY_PM_ONLY=1
                     # remains the switch to dark the whole Kalshi copy
                     # leg if ever ordered again.
-                    if os.environ.get("EDGE_KCOPY_PM_ONLY", "0") == "1":
+                    # PAUSED 2026-08-20 evening under the owner's
+                    # maximum-profitability mandate: the leg's last-7-day
+                    # settled record graded 79W-138L, -$5,032 on $18,906
+                    # staked (-26.6%) — a 36% win rate on >=70c entries
+                    # that need ~75% to break even, corroborated by the
+                    # week's repeated copy-breaker trips. The ex-tennis
+                    # arming (owner 2026-08-17 night) predates this
+                    # evidence; EDGE_KCOPY_PM_ONLY=0 re-arms the leg the
+                    # moment the owner says so, and the per-whale
+                    # scorecard (kalshi_copy_whales) now exists to judge
+                    # any re-arm cell by cell.
+                    if os.environ.get("EDGE_KCOPY_PM_ONLY", "1") == "1":
                         st = {"pm_only":
-                              "copies route to Polymarket "
-                              "(owner 2026-08-17 night)",
+                              "copies route to Polymarket (paused "
+                              "2026-08-20: 7d graded -$5,032 at 36% "
+                              "win rate; EDGE_KCOPY_PM_ONLY=0 re-arms)",
                               "identities_seen": len(rows)}
                     else:
                         # pmus rides along for the pm-first deference
