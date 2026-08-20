@@ -897,7 +897,7 @@ jobs:
           pip install --quiet polymarket-us 2>/dev/null || pip install polymarket-us
           echo "###########################################################"
           echo "#   PMUS DEPTH CENSUS (owner ask 2026-08-20: per-cell     #"
-          echo "#   clip proposal — how much book survives near best ask) #"
+          echo "#   clip proposal - how much book survives near best ask) #"
           echo "###########################################################"
           python - <<'PY'
           import re, time, statistics as st
@@ -907,11 +907,11 @@ jobs:
 
           def sport_of(slug):
               s = (slug or "").lower()
-              if re.search(r'-(mlb)-', s): return "baseball"
+              if "-mlb-" in s: return "baseball"
               if re.search(r'-(nfl|cfb|ncaaf)-', s): return "football"
               if re.search(r'-(atp|wta|itf\w*|chal)-', s): return "tennis"
               if re.search(r'-(wnba|nba|ncaab)-', s): return "basketball"
-              if re.search(r'-(nhl)-', s): return "hockey"
+              if "-nhl-" in s: return "hockey"
               return "soccer"
 
           def type_of(slug):
@@ -919,86 +919,87 @@ jobs:
               return {"atc": "moneyline", "aec": "moneyline",
                       "asc": "spread", "tsc": "total"}.get(k, "other")
 
-          # 1) collect active sports markets (slug + token) from events
-          mkts = []
-          try:
-              resp = pub.events.list({"limit": 250, "active": True,
-                                      "closed": False}) or {}
-              for ev in (resp.get("events") or []):
+          # Discovery mirrors edge/venues/polymarket_us.py: events.list
+          # pages of 100; each market's own `slug` is the orderable id.
+          slugs = []
+          variant = None
+          for v in ({"active": True, "closed": False}, {}):
+              try:
+                  r = pub.events.list({"limit": 100, **v}) or {}
+                  if r.get("events"):
+                      variant = v
+                      break
+              except Exception as e:
+                  print("variant", v, "->", type(e).__name__, str(e)[:120])
+          print("variant:", variant)
+          offset = 0
+          for _ in range(6):
+              try:
+                  r = pub.events.list({"limit": 100, "offset": offset,
+                                       **(variant or {})}) or {}
+              except Exception as e:
+                  print("page failed:", type(e).__name__, str(e)[:120]); break
+              evs = r.get("events") or []
+              for ev in evs:
                   for m in (ev.get("markets") or []):
-                      slug = m.get("slug") or m.get("marketSlug") or ""
-                      if type_of(slug) == "other":
+                      sl = m.get("slug") or ""
+                      if m.get("closed") or type_of(sl) == "other":
                           continue
-                      toks = (m.get("tokens") or m.get("outcomes") or
-                              m.get("marketSides") or [])
-                      tid = None
-                      for t in toks:
-                          if isinstance(t, dict):
-                              tid = (t.get("tokenId") or t.get("token_id")
-                                     or t.get("id"))
-                              if tid: break
-                      if tid:
-                          mkts.append((slug, str(tid)))
-          except Exception as e:
-              print("event listing failed:", type(e).__name__, str(e)[:200])
-          print("markets with tokens:", len(mkts))
-          if not mkts:
-              print("SDK surfaces:", [a for a in dir(pub)
-                                      if not a.startswith("_")])
+                      slugs.append(sl)
+              if len(evs) < 100:
+                  break
+              offset += 100
+          print("candidate markets:", len(slugs))
 
-          # 2) fetch books; try the likely SDK/book surfaces defensively
-          def get_book(tid):
-              for attr, key in (("markets", "book"),
-                                ("markets", "orderbook"),
-                                ("books", "get"), ("book", None)):
+          # Book shape mirrors the adapter: payload under marketData/
+          # book/top-level; levels are {"px": {"value": p}, "qty": q};
+          # asks under offers/asks.
+          def parse_asks(raw):
+              body = raw or {}
+              for key in ("marketData", "book"):
+                  if isinstance(body.get(key), dict):
+                      body = body[key]
+              out = []
+              for lvl in (body.get("offers") or body.get("asks") or []):
                   try:
-                      obj = getattr(pub, attr, None)
-                      if obj is None: continue
-                      fn = getattr(obj, key, None) if key else obj
-                      if fn is None: continue
-                      b = fn({"tokenId": tid}) if key else fn(tid)
-                      if b: return b
-                  except Exception:
+                      p = float((lvl.get("px") or {}).get("value") or 0)
+                      q = float(lvl.get("qty") or 0)
+                  except (TypeError, ValueError, AttributeError):
                       continue
-              return None
+                  if 0 < p < 1 and q > 0:
+                      out.append((p, q))
+              return sorted(out)
 
-          probed = 0
-          cells = {}
-          for slug, tid in mkts[:220]:
-              b = get_book(tid)
-              if not b:
+          probed, cells = 0, {}
+          err = {}
+          for sl in slugs[:240]:
+              try:
+                  raw = pub.markets.book(sl) or {}
+              except Exception as e:
+                  err[type(e).__name__] = err.get(type(e).__name__, 0) + 1
                   continue
-              asks = (b.get("asks") or (b.get("book") or {}).get("asks")
-                      or [])
-              lv = []
-              for a in asks:
-                  try:
-                      if isinstance(a, dict):
-                          p = float(a.get("price")); q = float(
-                              a.get("size") or a.get("quantity") or 0)
-                      else:
-                          p, q = float(a[0]), float(a[1])
-                      if 0 < p < 1 and q > 0: lv.append((p, q))
-                  except Exception:
-                      continue
+              lv = parse_asks(raw)
               if not lv:
                   continue
-              lv.sort()
               best = lv[0][0]
               d0 = sum(p*q for p, q in lv if p <= best + 1e-9)
               d2 = sum(p*q for p, q in lv if p <= best + 0.02 + 1e-9)
               probed += 1
-              c = cells.setdefault((sport_of(slug), type_of(slug)),
+              c = cells.setdefault((sport_of(sl), type_of(sl)),
                                    {"d0": [], "d2": []})
               c["d0"].append(d0); c["d2"].append(d2)
-              time.sleep(0.15)
-          print("books probed:", probed)
+              time.sleep(0.1)
+          print("books probed:", probed, " errors:", err)
           if probed and probed < 25:
-              print("WARNING: small sample — treat medians as indicative")
+              print("WARNING: small sample - treat medians as indicative")
+
+          def q(xs, k):
+              if len(xs) >= 4:
+                  return round(st.quantiles(xs, n=4)[k])
+              return round(sorted(xs)[len(xs)//2])
           for (sp, ty), c in sorted(cells.items()):
-              n = len(c["d0"])
-              q = lambda xs, k: round(st.quantiles(xs, n=4)[k], 0) if len(xs) >= 4 else round(sorted(xs)[len(xs)//2], 0)
-              print(f"DEPTH {sp}|{ty}  n={n}  bestask$ p25={q(c['d0'],0)} med={q(c['d0'],1)} p75={q(c['d0'],2)}  "
+              print(f"DEPTH {sp}|{ty}  n={len(c['d0'])}  "
+                    f"bestask$ p25={q(c['d0'],0)} med={q(c['d0'],1)} p75={q(c['d0'],2)}  "
                     f"within2c$ p25={q(c['d2'],0)} med={q(c['d2'],1)} p75={q(c['d2'],2)}")
           PY
 
