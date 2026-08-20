@@ -53,3 +53,44 @@ def test_daily_series_newest_first_and_no_undated():
     # The undated row still counts in totals (it settled; the venue just
     # gave no usable stamp) — it only stays out of the calendar.
     assert out["total"]["settled"] == 3
+
+
+def test_per_sport_and_per_whale_daily_splits():
+    rows = [
+        dict(_row("rn1", "2026-08-18", 40.0), sport="baseball"),
+        dict(_row("rn1", "2026-08-18", -25.0, 50.0), sport="tennis"),
+        dict(_row("rn1", "2026-08-19", 10.0), sport="baseball"),
+        dict(_row("swisstony", "2026-08-18", 60.0, 200.0), sport="soccer"),
+    ]
+    out = scorecard(rows)
+    ws = {(w["whale"], w["sport"]): w for w in out["by_whale_sport"]}
+    assert ws[("RN1", "baseball")]["pnl"] == 50.0
+    assert ws[("RN1", "baseball")]["settled"] == 2
+    assert ws[("RN1", "baseball")]["roi"] == 0.25
+    assert ws[("RN1", "tennis")]["losses"] == 1
+    assert ws[("SwissTony", "soccer")]["staked"] == 200.0
+    dw = {(d["day"], d["whale"]): d for d in out["daily_by_whale"]}
+    assert dw[("2026-08-18", "RN1")]["pnl"] == 15.0
+    assert dw[("2026-08-18", "RN1")]["staked"] == 150.0
+    assert dw[("2026-08-19", "RN1")]["settled"] == 1
+
+
+def test_software_cohort_is_the_complement():
+    from sportsassets.api.copies_record import software_scorecard
+
+    rows = [
+        _row("rn1", "2026-08-18", 40.0),          # copy: excluded
+        _row("underdog", "2026-08-18", 5.0),      # named sleeve: excluded
+        _row("arb", "2026-08-18", 5.0),
+        _row("manual", "2026-08-18", 5.0),
+        _row("", "2026-08-18", -300.0),           # unattributed: counted
+        _row("", "2026-08-19", -100.0, 200.0),
+        _row("retired-engine", "2026-08-19", 50.0),
+    ]
+    out = software_scorecard(rows)
+    assert out["total"]["settled"] == 3
+    assert out["total"]["pnl"] == -350.0
+    days = {d["day"]: d for d in out["daily"]}
+    assert days["2026-08-18"]["pnl"] == -300.0
+    assert days["2026-08-19"]["pnl"] == -50.0
+    assert days["2026-08-19"]["staked"] == 300.0

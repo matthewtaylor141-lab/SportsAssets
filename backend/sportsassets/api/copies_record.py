@@ -39,25 +39,75 @@ DISPLAY = {
 }
 
 
-def scorecard(rows: list[dict]) -> dict:
-    """rows: settled live_orders rows with keys whale (lowercased),
-    day (ET YYYY-MM-DD), pnl, filled_usd. Returns the copies payload."""
-    rows = [r for r in rows if (r.get("whale") or "") in COPY_WHALES]
+# Sleeves that are neither copies nor "software": their P&L is its own
+# story (dog experiment, arb class, the desk's manual relay tickets).
+NON_COPY_SLEEVES = frozenset({"underdog", "arb", "manual"})
+
+
+def software_scorecard(rows: list[dict]) -> dict:
+    """The complement cohort (partner report, owner order 2026-08-20
+    evening): every settled order that is NOT a whale copy and NOT a
+    named non-copy sleeve — the retired engine's book plus unattributed
+    residue. Uncapped daily series so 'what the software cost us, day by
+    day' is a served number instead of a capped display artifact."""
+    rows = [r for r in rows
+            if (r.get("whale") or "") not in COPY_WHALES
+            and (r.get("whale") or "") not in NON_COPY_SLEEVES]
     total = {"settled": 0, "wins": 0, "losses": 0,
              "pnl": 0.0, "staked": 0.0}
-    by_whale: dict[str, dict] = {}
     by_day: dict[str, dict] = {}
     for r in rows:
         pnl = float(r.get("pnl") or 0)
         stake = float(r.get("filled_usd") or 0)
         for b in (total,
-                  by_whale.setdefault(r["whale"], {
-                      "whale": DISPLAY.get(r["whale"], r["whale"]),
-                      "settled": 0, "wins": 0, "losses": 0,
-                      "pnl": 0.0, "staked": 0.0}),
                   by_day.setdefault(r.get("day") or "undated", {
                       "day": r.get("day") or "undated",
-                      "settled": 0, "wins": 0, "losses": 0, "pnl": 0.0})):
+                      "settled": 0, "wins": 0, "losses": 0,
+                      "pnl": 0.0, "staked": 0.0})):
+            b["settled"] += 1
+            b["wins"] += 1 if pnl > 0 else 0
+            b["losses"] += 1 if pnl < 0 else 0
+            b["pnl"] = round(b["pnl"] + pnl, 2)
+            b["staked"] = round(b["staked"] + stake, 2)
+    return {"cohort": "software", "uncapped": True, "total": total,
+            "daily": sorted((d for d in by_day.values()
+                             if d["day"] != "undated"),
+                            key=lambda d: d["day"], reverse=True)[:62]}
+
+
+def scorecard(rows: list[dict]) -> dict:
+    """rows: settled live_orders rows with keys whale (lowercased),
+    day (ET YYYY-MM-DD), pnl, filled_usd, and optionally sport.
+    Returns the copies payload."""
+    rows = [r for r in rows if (r.get("whale") or "") in COPY_WHALES]
+    total = {"settled": 0, "wins": 0, "losses": 0,
+             "pnl": 0.0, "staked": 0.0}
+    by_whale: dict[str, dict] = {}
+    by_day: dict[str, dict] = {}
+    by_ws: dict[tuple, dict] = {}
+    by_dw: dict[tuple, dict] = {}
+    for r in rows:
+        pnl = float(r.get("pnl") or 0)
+        stake = float(r.get("filled_usd") or 0)
+        disp = DISPLAY.get(r["whale"], r["whale"])
+        day = r.get("day") or "undated"
+        sport = r.get("sport") or "unknown"
+        for b in (total,
+                  by_whale.setdefault(r["whale"], {
+                      "whale": disp,
+                      "settled": 0, "wins": 0, "losses": 0,
+                      "pnl": 0.0, "staked": 0.0}),
+                  by_day.setdefault(day, {
+                      "day": day,
+                      "settled": 0, "wins": 0, "losses": 0, "pnl": 0.0}),
+                  by_ws.setdefault((disp, sport), {
+                      "whale": disp, "sport": sport,
+                      "settled": 0, "wins": 0, "losses": 0,
+                      "pnl": 0.0, "staked": 0.0}),
+                  by_dw.setdefault((day, disp), {
+                      "day": day, "whale": disp,
+                      "settled": 0, "wins": 0, "losses": 0,
+                      "pnl": 0.0, "staked": 0.0})):
             b["settled"] += 1
             b["wins"] += 1 if pnl > 0 else 0
             b["losses"] += 1 if pnl < 0 else 0
@@ -71,14 +121,23 @@ def scorecard(rows: list[dict]) -> dict:
     for w in by_whale.values():
         w["roi"] = (round(w["pnl"] / w["staked"], 4)
                     if w["staked"] else None)
+    for w in by_ws.values():
+        w["roi"] = (round(w["pnl"] / w["staked"], 4)
+                    if w["staked"] else None)
     return {
         "cohort": "copies",
         "uncapped": True,
         "total": total,
         "by_whale": sorted(by_whale.values(), key=lambda w: -w["pnl"]),
+        "by_whale_sport": sorted(by_ws.values(),
+                                 key=lambda w: (w["whale"], -w["pnl"])),
         "daily": sorted((d for d in by_day.values()
                          if d["day"] != "undated"),
                         key=lambda d: d["day"], reverse=True)[:31],
+        "daily_by_whale": sorted((d for d in by_dw.values()
+                                  if d["day"] != "undated"),
+                                 key=lambda d: (d["day"], d["whale"]),
+                                 reverse=True)[:186],
     }
 
 
@@ -86,18 +145,30 @@ async def build(since_day: str) -> dict:
     """Endpoint assembly: settled copy orders from the audit table."""
     from ..db import get_pool
 
+    from ..copy_sports import sport_of
+
     pool = await get_pool()
     rows = await pool.fetch(
         """
         SELECT lower(COALESCE(whale_username, '')) AS whale,
                to_char(settled_at AT TIME ZONE 'America/New_York',
                        'YYYY-MM-DD') AS day,
-               pnl, filled_usd
+               pnl, filled_usd, us_market_slug
         FROM live_orders
         WHERE status = 'settled' AND settled_at IS NOT NULL
         """)
-    out = scorecard([dict(r) for r in rows
-                     if (dict(r).get("day") or "") >= since_day])
+    windowed = []
+    for r in rows:
+        d = dict(r)
+        if (d.get("day") or "") < since_day:
+            continue
+        d["sport"] = sport_of(d.get("us_market_slug") or "")
+        windowed.append(d)
+    out = scorecard(windowed)
+    # The complement cohort rides along so the partner report's
+    # "software cost, day by day" is served uncapped from the same
+    # audit table as the copies record.
+    out["software"] = software_scorecard(windowed)
     out["since"] = since_day
     out["generated_at"] = datetime.now(RECORD_TZ).isoformat()
     return out

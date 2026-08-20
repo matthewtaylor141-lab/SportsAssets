@@ -121,6 +121,17 @@ jobs:
              /tmp/cop.json 2>/dev/null || true
           jq -r '.by_whale[]? | "  COPYW \(.whale)  \(.wins)W-\(.losses)L  $\(.pnl)  roi \(.roi // "n/a")"' \
              /tmp/cop.json 2>/dev/null || true
+          # Partner-report splits (owner order 2026-08-20 evening):
+          # per-(whale, sport) return on capital, per-(day, whale)
+          # series, and the software complement's uncapped daily cost.
+          jq -r '.by_whale_sport[]? | "  COPYS \(.whale)|\(.sport)  \(.wins)W-\(.losses)L  pnl \(.pnl)  staked \(.staked)  roi \(.roi // "n/a")"' \
+             /tmp/cop.json 2>/dev/null || true
+          jq -r '.daily_by_whale[]? | "  COPYD \(.day)|\(.whale)  \(.wins)W-\(.losses)L  pnl \(.pnl)  staked \(.staked)"' \
+             /tmp/cop.json 2>/dev/null || true
+          jq -r '.software.total // {} | "  SOFT-TOT settled \(.settled) (\(.wins)W-\(.losses)L)  pnl \(.pnl)  staked \(.staked)"' \
+             /tmp/cop.json 2>/dev/null || true
+          jq -r '.software.daily[]? | "  SOFTD \(.day)  \(.wins)W-\(.losses)L  pnl \(.pnl)  staked \(.staked)"' \
+             /tmp/cop.json 2>/dev/null || true
           # Venue-truth rebuild (task #74) — first call kicks the
           # background build; the summary line is what the probe grades.
           echo "VENUE-TRUTH (uncapped, from venue ledgers):"
