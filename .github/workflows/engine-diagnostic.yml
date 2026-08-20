@@ -891,6 +891,117 @@ jobs:
                     [a for a in dir(pub) if not a.startswith("_")])
           PY
 
+      - name: PMUS depth census (dollar depth at/near best ask, per cell)
+        if: always()
+        run: |
+          pip install --quiet polymarket-us 2>/dev/null || pip install polymarket-us
+          echo "###########################################################"
+          echo "#   PMUS DEPTH CENSUS (owner ask 2026-08-20: per-cell     #"
+          echo "#   clip proposal — how much book survives near best ask) #"
+          echo "###########################################################"
+          python - <<'PY'
+          import re, time, statistics as st
+          from polymarket_us import PolymarketUS
+
+          pub = PolymarketUS()
+
+          def sport_of(slug):
+              s = (slug or "").lower()
+              if re.search(r'-(mlb)-', s): return "baseball"
+              if re.search(r'-(nfl|cfb|ncaaf)-', s): return "football"
+              if re.search(r'-(atp|wta|itf\w*|chal)-', s): return "tennis"
+              if re.search(r'-(wnba|nba|ncaab)-', s): return "basketball"
+              if re.search(r'-(nhl)-', s): return "hockey"
+              return "soccer"
+
+          def type_of(slug):
+              k = (slug or "").split("-", 1)[0]
+              return {"atc": "moneyline", "aec": "moneyline",
+                      "asc": "spread", "tsc": "total"}.get(k, "other")
+
+          # 1) collect active sports markets (slug + token) from events
+          mkts = []
+          try:
+              resp = pub.events.list({"limit": 250, "active": True,
+                                      "closed": False}) or {}
+              for ev in (resp.get("events") or []):
+                  for m in (ev.get("markets") or []):
+                      slug = m.get("slug") or m.get("marketSlug") or ""
+                      if type_of(slug) == "other":
+                          continue
+                      toks = (m.get("tokens") or m.get("outcomes") or
+                              m.get("marketSides") or [])
+                      tid = None
+                      for t in toks:
+                          if isinstance(t, dict):
+                              tid = (t.get("tokenId") or t.get("token_id")
+                                     or t.get("id"))
+                              if tid: break
+                      if tid:
+                          mkts.append((slug, str(tid)))
+          except Exception as e:
+              print("event listing failed:", type(e).__name__, str(e)[:200])
+          print("markets with tokens:", len(mkts))
+          if not mkts:
+              print("SDK surfaces:", [a for a in dir(pub)
+                                      if not a.startswith("_")])
+
+          # 2) fetch books; try the likely SDK/book surfaces defensively
+          def get_book(tid):
+              for attr, key in (("markets", "book"),
+                                ("markets", "orderbook"),
+                                ("books", "get"), ("book", None)):
+                  try:
+                      obj = getattr(pub, attr, None)
+                      if obj is None: continue
+                      fn = getattr(obj, key, None) if key else obj
+                      if fn is None: continue
+                      b = fn({"tokenId": tid}) if key else fn(tid)
+                      if b: return b
+                  except Exception:
+                      continue
+              return None
+
+          probed = 0
+          cells = {}
+          for slug, tid in mkts[:220]:
+              b = get_book(tid)
+              if not b:
+                  continue
+              asks = (b.get("asks") or (b.get("book") or {}).get("asks")
+                      or [])
+              lv = []
+              for a in asks:
+                  try:
+                      if isinstance(a, dict):
+                          p = float(a.get("price")); q = float(
+                              a.get("size") or a.get("quantity") or 0)
+                      else:
+                          p, q = float(a[0]), float(a[1])
+                      if 0 < p < 1 and q > 0: lv.append((p, q))
+                  except Exception:
+                      continue
+              if not lv:
+                  continue
+              lv.sort()
+              best = lv[0][0]
+              d0 = sum(p*q for p, q in lv if p <= best + 1e-9)
+              d2 = sum(p*q for p, q in lv if p <= best + 0.02 + 1e-9)
+              probed += 1
+              c = cells.setdefault((sport_of(slug), type_of(slug)),
+                                   {"d0": [], "d2": []})
+              c["d0"].append(d0); c["d2"].append(d2)
+              time.sleep(0.15)
+          print("books probed:", probed)
+          if probed and probed < 25:
+              print("WARNING: small sample — treat medians as indicative")
+          for (sp, ty), c in sorted(cells.items()):
+              n = len(c["d0"])
+              q = lambda xs, k: round(st.quantiles(xs, n=4)[k], 0) if len(xs) >= 4 else round(sorted(xs)[len(xs)//2], 0)
+              print(f"DEPTH {sp}|{ty}  n={n}  bestask$ p25={q(c['d0'],0)} med={q(c['d0'],1)} p75={q(c['d0'],2)}  "
+                    f"within2c$ p25={q(c['d2'],0)} med={q(c['d2'],1)} p75={q(c['d2'],2)}")
+          PY
+
       - name: Kalshi raw orderbook (what shape does the API actually return)
         if: always()
         run: |
