@@ -2518,6 +2518,17 @@ async def api_venue_export_raw(since: str | None = Query(None)) -> dict:
     return await venue_export_raw(since)
 
 
+@app.get("/api/copies-record")
+async def api_copies_record(since: str | None = Query(None)) -> dict:
+    """The COPIES cohort, uncapped, from the order-level audit table —
+    the record the copy-trading thesis stands on (owner order
+    2026-08-20: show that the system is profitable). Public: these are
+    our own settled orders, venue-backed, no credentials involved."""
+    from .copies_record import build as build_copies
+
+    return await build_copies(_parse_day(since, "2026-08-01"))
+
+
 @app.get("/api/venue-truth")
 async def api_venue_truth() -> dict:
     """Venue-truth P&L (task #74): the record rebuilt continuously from

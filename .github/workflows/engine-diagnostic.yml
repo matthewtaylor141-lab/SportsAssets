@@ -113,6 +113,14 @@ jobs:
           jq -r '.hydrate_err // empty | "  HYDRATE: chunks=\(.chunks) err=\(.err // "none")"' /tmp/tr.json 2>/dev/null || true
           jq -r '"  generated_age_s: \((now - (.generated_at // now)) | round)"' /tmp/tr.json 2>/dev/null || true
           jq -r '.snapshot // {} | "  snapshot: age_s=\(.age_s // "?") pos_pages=\(.positions_pages // "?") complete=\(.positions_complete // "?") refresh_err=\(.refresh_error // "none") streak=\(.refresh_error_streak // 0)"' /tmp/tr.json 2>/dev/null || true
+          # Copies cohort — the record the copy thesis stands on (owner
+          # order 2026-08-20: show that the system is profitable).
+          echo "COPIES RECORD (uncapped, order audit):"
+          curl -sS --max-time 30 -o /tmp/cop.json "$BASE/api/copies-record" || true
+          jq -r '.total // {} | "  COPIES: settled \(.settled) (\(.wins)W-\(.losses)L)  pnl $\(.pnl)  staked $\(.staked)  roi \(.roi // "n/a")"' \
+             /tmp/cop.json 2>/dev/null || true
+          jq -r '.by_whale[]? | "  COPYW \(.whale)  \(.wins)W-\(.losses)L  $\(.pnl)  roi \(.roi // "n/a")"' \
+             /tmp/cop.json 2>/dev/null || true
           # Venue-truth rebuild (task #74) — first call kicks the
           # background build; the summary line is what the probe grades.
           echo "VENUE-TRUTH (uncapped, from venue ledgers):"

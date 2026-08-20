@@ -4,8 +4,9 @@ import { PnlCalendar } from '../components/PnlCalendar'
 import { LiveToday } from '../components/LiveToday'
 import { ReportsCard } from '../components/ReportsCard'
 import { fmtAgo, fmtCents, fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
-import { KalshiOpen, SINCE, TRRow, useKalshiOpen, useTrackRecord,
-  useVenueTruth, VenueTruthData } from '../lib/record'
+import { CopiesRecord, KalshiOpen, SINCE, TRRow, useCopiesRecord,
+  useKalshiOpen, useTrackRecord, useVenueTruth,
+  VenueTruthData } from '../lib/record'
 
 /* The AI trader's account, told from the venue's own records. Every number
  * is fetched from /api/track-record — real positions, real entry prices
@@ -274,6 +275,56 @@ function KalshiBook({ k }: { k: KalshiOpen }) {
 type Status = 'all' | 'won' | 'lost' | 'open'
 type SortKey = 'time' | 'stake' | 'pnl'
 
+/** The COPY TRADING record — the cohort the whole thesis stands on
+ * (owner order 2026-08-20: show that the system is profitable).
+ * Uncapped, from the order-level audit, per-whale split. */
+function CopiesCard({ c }: { c: CopiesRecord }) {
+  const t = c.total
+  if (!t || !t.settled) return null
+  return (
+    <div className="card">
+      <div className="tr-ledger-head">
+        <div className="card-title">
+          COPY TRADING · THE CORE RECORD · since {c.since}
+        </div>
+        <span className={`tr-chip ${t.pnl >= 0 ? 'won' : 'lost'}`}>
+          {fmtSignedUsd(t.pnl)}
+        </span>
+      </div>
+      <div className="tr-slip-nums mono" style={{ flexWrap: 'wrap', gap: 12 }}>
+        <span>{t.wins}W – {t.losses}L · {t.settled.toLocaleString()} settled</span>
+        {t.win_rate !== null && <span>{fmtPct(t.win_rate, 0)} win rate</span>}
+        {t.roi !== null && (
+          <span className={t.roi >= 0 ? 'pos' : 'neg'}>
+            {fmtPct(t.roi)} ROI on {fmtUsd(t.staked, 0)} settled stake
+          </span>
+        )}
+      </div>
+      <div className="tr-slips" style={{ marginTop: 10 }}>
+        {c.by_whale.map((w) => (
+          <div key={w.whale} className="tr-slip-nums mono"
+            style={{ justifyContent: 'space-between', padding: '2px 0' }}>
+            <span>{w.whale}</span>
+            <span className="muted">{w.wins}W–{w.losses}L</span>
+            <span className="muted">
+              {w.roi !== null ? fmtPct(w.roi) : '—'}
+            </span>
+            <span className={w.pnl >= 0 ? 'pos' : 'neg'}>
+              {fmtSignedUsd(w.pnl)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="tr-foot muted">
+        Whale-copy sleeves only — every settled copy order, uncapped, from
+        the order-level audit. Engine, arbitrage, underdog and manual
+        trading are excluded: this is the copy-trading thesis on its own
+        record.
+      </div>
+    </div>
+  )
+}
+
 /** The uncapped record straight from the venues' own ledgers (task #74):
  * PM's afterPosition.realized, Kalshi rebuilt from raw fills+settlements
  * with exact fees. No display cap, no attribution — the number that must
@@ -365,6 +416,7 @@ export function TrackRecord() {
   const { data, err } = useTrackRecord()
   const { data: kalshi } = useKalshiOpen()
   const { data: venueTruth } = useVenueTruth()
+  const { data: copies } = useCopiesRecord()
   const [status, setStatus] = useState<Status>('all')
   const [sport, setSport] = useState('all')
   const [cat, setCat] = useState('all')
@@ -584,6 +636,8 @@ export function TrackRecord() {
 
         <EquityCurve daily={data.daily} />
       </div>
+
+      {copies && <CopiesCard c={copies} />}
 
       <LiveToday />
 

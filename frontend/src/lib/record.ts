@@ -175,6 +175,42 @@ export function useVenueTruth(refreshMs = 60_000) {
   return usePolled<VenueTruthData>('/api/venue-truth', refreshMs)
 }
 
+/* The COPIES cohort — the record the copy-trading thesis stands on
+ * (owner order 2026-08-20): uncapped, venue-backed, per-whale split. */
+
+export interface CopiesWhale {
+  whale: string
+  settled: number
+  wins: number
+  losses: number
+  pnl: number
+  staked: number
+  roi: number | null
+}
+
+export interface CopiesDay {
+  day: string
+  settled: number
+  wins: number
+  losses: number
+  pnl: number
+}
+
+export interface CopiesRecord {
+  cohort: 'copies'
+  uncapped: boolean
+  since: string
+  total: { settled: number; wins: number; losses: number
+           pnl: number; staked: number; roi: number | null
+           win_rate: number | null }
+  by_whale: CopiesWhale[]
+  daily: CopiesDay[]
+}
+
+export function useCopiesRecord(refreshMs = 60_000) {
+  return usePolled<CopiesRecord>('/api/copies-record', refreshMs)
+}
+
 export const SINCE = '2026-08-01'
 // No stake cap (owner directive 2026-08-11: "include the excluded bucket").
 // The $100 cap dated from the $1-$5 ticket era, when a larger position could
