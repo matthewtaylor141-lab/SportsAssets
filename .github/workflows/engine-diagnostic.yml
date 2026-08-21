@@ -1133,114 +1133,168 @@ jobs:
 
       - name: Whale candidate census (sports leaderboard, via runner)
         if: always()
-        timeout-minutes: 14
+        timeout-minutes: 25
         run: |
           echo "###########################################################"
-          echo "#   WHALE CANDIDATE CENSUS v2 (owner roster-expansion ask #"
-          echo "#   2026-08-20 night: full metrics per candidate)         #"
+          echo "#   WHALE CANDIDATE CENSUS v3 — co-trader mining + deep   #"
+          echo "#   settlement audit (owner roster-expansion ask)          #"
           echo "###########################################################"
           python - <<'PY'
-          import json, re, statistics as st, time, urllib.request
+          import json, statistics as st, time, urllib.request, collections
+
+          SEEDS = {  # current roster wallets — the pond definition + exclusions
+            "swisstony": "0x204f72f35326db932158cba6adff0b9a1da95e14",
+            "rn1": "0x2005d16a84ceefa912d4e380cd32e7ff827875ea",
+            "kch123": "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee",
+            "0x2c33": "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563"}
+          DATA = "https://data-api.polymarket.com"
+          GAMMA = "https://gamma-api.polymarket.com"
 
           def get(url, timeout=25):
               req = urllib.request.Request(url, headers={
-                  "User-Agent": "sportsassets-census/1.0"})
+                  "User-Agent": "sportsassets-census/3.0"})
               with urllib.request.urlopen(req, timeout=timeout) as r:
                   return json.loads(r.read().decode())
 
-          def lb(window, limit=50):
-              for cat in ("&category=sports", ""):
+          def trades(params, pages, per=100):
+              out = []
+              for pg in range(pages):
                   try:
-                      rows = get(f"https://lb-api.polymarket.com/profit"
-                                 f"?window={window}&limit={limit}{cat}")
-                      if rows:
-                          return rows, bool(cat)
-                  except Exception as e:
-                      print(f"lb {window}{cat} failed:",
-                            type(e).__name__, str(e)[:80])
-              return [], False
+                      b = get(f"{DATA}/trades?{params}&limit={per}"
+                              f"&offset={pg*per}&takerOnly=false", 20)
+                  except Exception:
+                      break
+                  if not b:
+                      break
+                  out.extend(b)
+                  if len(b) < per:
+                      break
+                  time.sleep(0.1)
+              return out
 
-          allrows, sports_cat = lb("all")
-          rows30, _ = lb("30d", 30)
-          print("leaderboard rows:", len(allrows),
-                "sports-category:", sports_cat, " 30d rows:", len(rows30))
-          p30 = {}
-          for r in rows30:
-              w = (r.get("proxyWallet") or r.get("walletAddress")
-                   or r.get("address") or "").lower()
-              if w:
-                  p30[w] = float(r.get("amount") or r.get("profit") or 0)
+          # A) The pond: markets our whales traded most recently.
+          cids = collections.OrderedDict()
+          for name, w in SEEDS.items():
+              for t in trades(f"user={w}", 3):
+                  c = t.get("conditionId")
+                  if c:
+                      cids.setdefault(c, name)
+          cids = list(cids)[:150]
+          print("pond markets:", len(cids))
 
-          SPORT = (("mlb","baseball"),("nba","basketball"),("wnba","basketball"),
-                   ("cbb","basketball"),("nfl","football"),("cfb","football"),
-                   ("nhl","hockey"),("atp","tennis"),("wta","tennis"),
-                   ("itf","tennis"),("tennis","tennis"),("ufc","mma"),
-                   ("epl","soccer"),("liga","soccer"),("serie","soccer"),
-                   ("bundes","soccer"),("ligue","soccer"),("ucl","soccer"),
-                   ("uel","soccer"),("mls","soccer"),("fifa","soccer"),
-                   ("world-cup","soccer"),("fc-","soccer"),("-vs-","game"))
-          def sport_of(slug, title):
-              s = (slug or "").lower() + " " + (title or "").lower()
-              for k, v in SPORT:
+          # B) Co-traders: wallets active across MANY of those markets.
+          seen = collections.Counter()
+          names = {}
+          for i, cid in enumerate(cids):
+              for t in trades(f"market={cid}", 1):
+                  w = (t.get("proxyWallet") or "").lower()
+                  if w and w not in SEEDS.values():
+                      seen[w] += 0  # ensure key
+              # count DISTINCT markets per wallet
+              for w in {(t.get("proxyWallet") or "").lower()
+                        for t in trades(f"market={cid}", 1)}:
+                  if w and w not in SEEDS.values():
+                      seen[w] += 1
+              if i % 25 == 0:
+                  print(f"  mined {i}/{len(cids)} markets, wallets {len(seen)}")
+          cand = [w for w, n in seen.most_common(60) if n >= 6]
+          print("co-trader candidates (>=6 shared markets):", len(cand))
+
+          # C) Fingerprint + deep settlement audit per candidate.
+          def sport_of(t):
+              s = ((t.get("slug") or "") + " " + (t.get("title") or "")).lower()
+              for k, v in (("mlb","baseball"),("baseball","baseball"),
+                           ("nba","basketball"),("wnba","basketball"),
+                           ("basketball","basketball"),("nfl","football"),
+                           ("cfb","football"),("football","football"),
+                           ("nhl","hockey"),("hockey","hockey"),
+                           ("atp","tennis"),("wta","tennis"),("itf","tennis"),
+                           ("tennis","tennis"),("open","tennis"),
+                           ("ufc","mma"),("epl","soccer"),("laliga","soccer"),
+                           ("serie","soccer"),("bundes","soccer"),
+                           ("ligue","soccer"),("ucl","soccer"),("uel","soccer"),
+                           ("mls","soccer"),("fc ","soccer"),("cf ","soccer"),
+                           (" fc","soccer"),("united","soccer"),("city","soccer")):
                   if k in s:
                       return v
               return "other"
 
-          out = []
-          for r in allrows[:40]:
-              w = (r.get("proxyWallet") or r.get("walletAddress")
-                   or r.get("address") or "").lower()
-              name = (r.get("name") or r.get("userName")
-                      or r.get("pseudonym") or "?")
-              profit = float(r.get("amount") or r.get("profit") or 0)
-              if not w:
-                  continue
-              trades, err = [], ""
-              for page in range(10):
+          def audit(w):
+              tr = trades(f"user={w}", 30)
+              if len(tr) < 200:
+                  return None
+              ts = sorted(int(t.get("timestamp") or 0) for t in tr
+                          if t.get("timestamp"))
+              sizes = [float(t.get("size") or 0)*float(t.get("price") or 0)
+                       for t in tr]
+              buys = [t for t in tr
+                      if str(t.get("side","" )).upper() == "BUY"]
+              pos = {}
+              for t in buys:
+                  cid = t.get("conditionId")
+                  if not cid:
+                      continue
+                  k = (cid, t.get("outcomeIndex"))
+                  p = pos.setdefault(k, {"cost":0.0,"sh":0.0,
+                      "sport":sport_of(t),"cid":cid,
+                      "oi":t.get("outcomeIndex")})
+                  p["cost"] += float(t.get("size") or 0)*float(t.get("price") or 0)
+                  p["sh"] += float(t.get("size") or 0)
+              res = {}
+              allc = list({p["cid"] for p in pos.values()})
+              for i in range(0, len(allc), 20):
+                  chunk = ",".join(allc[i:i+20])
                   try:
-                      batch = get("https://data-api.polymarket.com/trades"
-                                  f"?user={w}&limit=100&offset={page*100}"
-                                  "&takerOnly=false", timeout=20)
-                  except Exception as e:
-                      err = type(e).__name__
-                      break
-                  if not batch:
-                      break
-                  trades.extend(batch)
-                  if len(batch) < 100:
-                      break
-                  time.sleep(0.12)
-              m = {"name": name, "wallet": w, "profit_all": round(profit),
-                   "profit_30d": round(p30.get(w, 0)),
-                   "sample_n": len(trades), "err": err}
-              if trades:
-                  ts = [int(t.get("timestamp") or 0) for t in trades]
-                  ts = [x for x in ts if x > 0]
-                  sizes = [float(t.get("size") or 0) * float(t.get("price") or 0)
-                           for t in trades]
-                  sizes = [x for x in sizes if x > 0]
-                  mkts = {t.get("conditionId") or t.get("slug") for t in trades}
-                  buys = sum(1 for t in trades
-                             if str(t.get("side", "")).upper() == "BUY")
-                  mix = {}
-                  for t in trades:
-                      sp = sport_of(t.get("slug"), t.get("title"))
-                      mix[sp] = mix.get(sp, 0) + 1
-                  span_d = (max(ts) - min(ts)) / 86400 if len(ts) > 1 else 0
-                  m.update({
-                      "span_days": round(span_d, 1),
-                      "fills_per_day": round(len(trades)/span_d, 1) if span_d > 0.2 else None,
-                      "med_fill_usd": round(st.median(sizes), 2) if sizes else None,
-                      "p90_fill_usd": round(sorted(sizes)[int(len(sizes)*0.9)], 2) if sizes else None,
-                      "max_fill_usd": round(max(sizes), 2) if sizes else None,
-                      "uniq_markets": len(mkts),
-                      "fills_per_market": round(len(trades)/max(len(mkts),1), 1),
-                      "buy_share": round(buys/len(trades), 2),
-                      "newest_ts": max(ts) if ts else None,
-                      "days_since_last": round((time.time()-max(ts))/86400, 1) if ts else None,
-                      "mix": dict(sorted(mix.items(), key=lambda kv: -kv[1])[:5]),
-                  })
-              print("WHALECAND " + json.dumps(m, separators=(",", ":")))
+                      for mkt in get(f"{GAMMA}/markets?condition_ids={chunk}", 20):
+                          try:
+                              prices = json.loads(mkt.get("outcomePrices") or "[]")
+                          except Exception:
+                              prices = []
+                          res[mkt.get("conditionId")] = {
+                              "closed": bool(mkt.get("closed")),
+                              "prices": [float(x) for x in prices]}
+                  except Exception:
+                      pass
+                  time.sleep(0.1)
+              W=L=0; staked=won_usd=0.0
+              by_sport = {}
+              for p in pos.values():
+                  r = res.get(p["cid"])
+                  oi = p["oi"]
+                  if not r or not r["closed"] or oi is None                      or oi >= len(r["prices"]):
+                      continue
+                  win = r["prices"][int(oi)] > 0.5
+                  pnl = p["sh"] - p["cost"] if win else -p["cost"]
+                  W += win; L += (not win)
+                  staked += p["cost"]; won_usd += pnl
+                  b = by_sport.setdefault(p["sport"],
+                      {"n":0,"w":0,"staked":0.0,"pnl":0.0})
+                  b["n"] += 1; b["w"] += win
+                  b["staked"] = round(b["staked"]+p["cost"],2)
+                  b["pnl"] = round(b["pnl"]+pnl,2)
+              span = (ts[-1]-ts[0])/86400 if len(ts) > 1 else 0
+              return {"wallet": w, "sample_n": len(tr),
+                  "span_days": round(span,1),
+                  "fills_per_day": round(len(tr)/span,1) if span>0.5 else None,
+                  "med_fill": round(st.median(sizes),2) if sizes else None,
+                  "p90_fill": round(sorted(sizes)[int(len(sizes)*.9)],2) if sizes else None,
+                  "buy_share": round(len(buys)/len(tr),2),
+                  "uniq_mkts": len({p["cid"] for p in pos.values()}),
+                  "shared_with_roster": seen.get(w,0),
+                  "graded": {"settled": W+L, "w": W, "l": L,
+                      "staked": round(staked,2), "pnl": round(won_usd,2),
+                      "roi": round(won_usd/staked,4) if staked else None},
+                  "by_sport": by_sport,
+                  "newest_age_d": round((time.time()-ts[-1])/86400,2) if ts else None}
+
+          for w in cand[:18]:
+              try:
+                  a = audit(w)
+              except Exception as e:
+                  print("audit failed", w[:10], type(e).__name__)
+                  continue
+              if a:
+                  print("AUDIT " + json.dumps(a, separators=(",",":")))
           PY
 
       - name: BTC 15-min OVER/UNDER census (365d, via runner)
