@@ -1136,124 +1136,107 @@ jobs:
         timeout-minutes: 25
         run: |
           echo "###########################################################"
-          echo "#   WHALE CANDIDATE CENSUS v5 — settlement grading of the  #"
-          echo "#   nine v4 finalists, with resolution-endpoint probing    #"
+          echo "#   WHALE CANDIDATE CENSUS v6 — graded audits (singular   #"
+          echo "#   condition_id resolver, oldest-first sampling)          #"
           echo "###########################################################"
           python - <<'PY'
           import json, statistics as st, time, urllib.request
 
           FINAL = [
-            ("0xE30E7459-1772612985000","0xe30e74595517de48f1fb19f4553dd3d9f1e96b87"),
-            ("Djdjdjekekek","0x6d20c35f65d9899b6d6b74f8466e824580f9a165"),
-            ("Sassy-Bucket","0x4bff30af91642dc7d2b19a8664378fe55c45fc26"),
-            ("SDTrading","0x16bb9951a36fce71e2ef57890b786145e0ba8492"),
-            ("casualbet2020","0x65c18d740c8246af3353741c0b32e4b6da552988"),
-            ("0x1b20a007-1785189457930","0x1b20a00709dfe648afd26b326394b5e031f83ab0"),
-            ("ferrariChampions2026","0xfe787d2da716d60e8acff57fb87eb13cd4d10319"),
-            ("0x076daa87","0x076daa87c4fe1a85402a9b6b8e0a866224388d4c"),
-            ("0x99a09377","0x6e2c0e9474af7d720e5aba2a5b0bb6f723b7787c")]
+            ("0xE30E7459","0xe30e74595517de48f1fb19f4553dd3d9f1e96b87",120),
+            ("Djdjdjekekek","0x6d20c35f65d9899b6d6b74f8466e824580f9a165",120),
+            ("Sassy-Bucket","0x4bff30af91642dc7d2b19a8664378fe55c45fc26",120),
+            ("SDTrading","0x16bb9951a36fce71e2ef57890b786145e0ba8492",30),
+            ("casualbet2020","0x65c18d740c8246af3353741c0b32e4b6da552988",60),
+            ("0x1b20a007","0x1b20a00709dfe648afd26b326394b5e031f83ab0",60),
+            ("ferrariChampions2026","0xfe787d2da716d60e8acff57fb87eb13cd4d10319",60),
+            ("0x076daa87","0x076daa87c4fe1a85402a9b6b8e0a866224388d4c",60),
+            ("0x99a09377","0x6e2c0e9474af7d720e5aba2a5b0bb6f723b7787c",60)]
           DATA = "https://data-api.polymarket.com"
           GAMMA = "https://gamma-api.polymarket.com"
 
           def get(url, timeout=25):
               req = urllib.request.Request(url, headers={
-                  "User-Agent": "sportsassets-census/5.0"})
+                  "User-Agent": "sportsassets-census/6.0"})
               with urllib.request.urlopen(req, timeout=timeout) as r:
                   return json.loads(r.read().decode())
 
-          def trades(w, pages, start_page=0):
+          def trades(w, pages):
               out = []
-              for pg in range(start_page, start_page + pages):
+              for pg in range(pages):
                   try:
                       b = get(f"{DATA}/trades?user={w}&limit=100"
                               f"&offset={pg*100}&takerOnly=false", 20)
-                  except Exception as e:
-                      print("  trades page fail", pg, type(e).__name__)
+                  except Exception:
                       break
                   if not b:
                       break
                   out.extend(b)
                   if len(b) < 100:
                       break
-                  time.sleep(0.09)
+                  time.sleep(0.08)
               return out
 
-          # DIAGNOSTIC 1: what does one trade row actually carry?
-          t0 = trades(FINAL[0][1], 1)[:1]
-          if t0:
-              print("TRADE-KEYS " + json.dumps(sorted(t0[0].keys())))
-              print("TRADE-SAMPLE " + json.dumps(
-                  {k: t0[0].get(k) for k in ("conditionId","outcomeIndex",
-                   "outcome","side","size","price","timestamp","slug")},
-                  default=str))
+          RES_CACHE = {}
+          def resolve(cid):
+              if cid in RES_CACHE:
+                  return RES_CACHE[cid]
+              out = None
+              try:
+                  mk = get(f"{GAMMA}/markets?condition_id={cid}", 15)
+                  if isinstance(mk, list) and mk:
+                      m = mk[0]
+                      if m.get("closed"):
+                          try:
+                              out = [float(x) for x in
+                                     json.loads(m.get("outcomePrices") or "[]")]
+                          except Exception:
+                              out = None
+              except Exception:
+                  pass
+              RES_CACHE[cid] = out
+              time.sleep(0.05)
+              return out
 
-          # DIAGNOSTIC 2: which gamma spelling returns markets?
-          probe_cid = t0[0].get("conditionId") if t0 else None
-          resolver = None
-          if probe_cid:
-              for var in (f"{GAMMA}/markets?condition_ids={probe_cid}",
-                          f"{GAMMA}/markets?condition_id={probe_cid}",
-                          f"{GAMMA}/markets?conditionId={probe_cid}"):
-                  try:
-                      mk = get(var, 20)
-                      if isinstance(mk, list) and mk:
-                          resolver = var.split("?")[1].split("=")[0]
-                          print("RESOLVER-OK param:", resolver,
-                                " sample keys:", sorted(mk[0].keys())[:14])
-                          print("RESOLVER-SAMPLE closed:", mk[0].get("closed"),
-                                " outcomePrices:", str(mk[0].get("outcomePrices"))[:60],
-                                " conditionId:", str(mk[0].get("conditionId"))[:20])
-                          break
-                  except Exception as e:
-                      print("  resolver", var[-40:], "->", type(e).__name__)
-          if not resolver:
-              print("NO RESOLVER FOUND — aborting grading")
-              raise SystemExit(0)
+          def sport(slug, title):
+              s = (slug + " " + title).lower()
+              for k, v in (("mlb","baseball"),("nba","basketball"),
+                  ("wnba","basketball"),("nfl","football"),("cfb","football"),
+                  ("nhl","hockey"),("atp","tennis"),("wta","tennis"),
+                  ("itf","tennis"),("open","tennis"),("epl","soccer"),
+                  ("liga","soccer"),("serie","soccer"),("bundes","soccer"),
+                  ("ligue","soccer"),("ucl","soccer"),("mls","soccer")):
+                  if k in s:
+                      return v
+              return "game"
 
-          def grade(name, w):
-              tr = trades(w, 50)
+          for name, w, pages in FINAL:
+              tr = trades(w, pages)
+              if not tr:
+                  print(f"  {name}: no trades"); continue
+              ts = [int(t.get("timestamp") or 0) for t in tr]
+              sizes = [float(t.get("size") or 0)*float(t.get("price") or 0)
+                       for t in tr]
               pos = {}
-              nobuy = nooi = 0
+              first_ts = {}
               for t in tr:
                   if str(t.get("side","")).upper() != "BUY":
-                      nobuy += 1; continue
+                      continue
                   cid = t.get("conditionId"); oi = t.get("outcomeIndex")
-                  if not cid: continue
-                  if oi is None:
-                      nooi += 1; continue
+                  if not cid or oi is None:
+                      continue
                   p = pos.setdefault((cid, int(oi)), {"cost":0.0,"sh":0.0,
                       "slug": t.get("slug") or "", "title": t.get("title") or ""})
                   p["cost"] += float(t.get("size") or 0)*float(t.get("price") or 0)
                   p["sh"] += float(t.get("size") or 0)
-              allc = list({cid for (cid,_) in pos})
-              print(f"  {name}: trades={len(tr)} positions={len(pos)} "
-                    f"markets={len(allc)} skipped(sell)={nobuy} skipped(no-oi)={nooi}")
-              res = {}
-              for i in range(0, len(allc), 20):
-                  chunk = ",".join(allc[i:i+20])
-                  try:
-                      for m in get(f"{GAMMA}/markets?{resolver}={chunk}", 20):
-                          try:
-                              pr = [float(x) for x in
-                                    json.loads(m.get("outcomePrices") or "[]")]
-                          except Exception:
-                              pr = []
-                          if m.get("closed") and pr:
-                              res[m.get("conditionId")] = pr
-                  except Exception:
-                      pass
-                  time.sleep(0.07)
-              print(f"    resolutions: {len(res)}/{len(allc)} closed")
-              def sport(slug, title):
-                  s = (slug + " " + title).lower()
-                  for k,v in (("mlb","baseball"),("nba","basketball"),
-                      ("wnba","basketball"),("nfl","football"),("cfb","football"),
-                      ("nhl","hockey"),("atp","tennis"),("wta","tennis"),
-                      ("itf","tennis"),("open","tennis"),("epl","soccer"),
-                      ("liga","soccer"),("serie","soccer"),("bundes","soccer"),
-                      ("ligue","soccer"),("ucl","soccer"),("mls","soccer")):
-                      if k in s: return v
-                  return "game"
+                  tt = int(t.get("timestamp") or 0)
+                  if tt and (cid not in first_ts or tt < first_ts[cid]):
+                      first_ts[cid] = tt
+              # grade OLDEST markets first — they are the resolvable ones
+              order = sorted({cid for (cid,_) in pos},
+                             key=lambda c: first_ts.get(c, 1e18))[:250]
+              res = {c: resolve(c) for c in order}
+              closed = sum(1 for v in res.values() if v)
               W=L=0; staked=pnl=0.0; by_sport={}
               for (cid, oi), p in pos.items():
                   pr = res.get(cid)
@@ -1268,18 +1251,15 @@ jobs:
                   b["n"] += 1; b["w"] += win
                   b["staked"] = round(b["staked"]+p["cost"],2)
                   b["pnl"] = round(b["pnl"]+d,2)
-              print("AUDIT5 " + json.dumps({"name": name, "wallet": w,
-                  "trades_sampled": len(tr),
+              span = (max(ts)-min(ts))/86400 if len(ts)>1 else 0
+              print("AUDIT6 " + json.dumps({"name": name, "wallet": w,
+                  "trades_sampled": len(tr), "span_days": round(span,1),
+                  "med_fill": round(st.median(sizes),2) if sizes else None,
+                  "markets_checked": len(order), "markets_closed": closed,
                   "graded": {"settled": W+L, "w": W, "l": L,
                       "staked": round(staked,2), "pnl": round(pnl,2),
                       "roi": round(pnl/staked,4) if staked else None},
                   "by_sport": by_sport}, separators=(",",":")))
-
-          for name, w in FINAL:
-              try:
-                  grade(name, w)
-              except Exception as e:
-                  print("grade failed", name, type(e).__name__, str(e)[:80])
           PY
 
       - name: BTC 15-min OVER/UNDER census (365d, via runner)
