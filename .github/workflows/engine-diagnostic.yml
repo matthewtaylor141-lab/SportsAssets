@@ -308,6 +308,16 @@ jobs:
           # displays it — the session's own words, versioned in git.
           BASE_URL="$BASE" python3 ops/publish_journal.py || true
 
+          # MERIDIAN conversation mirror: unseen voice turns land in the
+          # engine session's context here (owner order 2026-08-21: one
+          # continuous record across voice and console).
+          echo "MERIDIAN EXCHANGE (unseen voice turns):"
+          curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               "$BASE/api/admin/meridian-exchange?unseen=1&mark=1&limit=60" \
+               -o /tmp/mx.json || true
+          jq -r '(.turns // []) | .[] | "  MX [\(.at)] \(.role): \(.text)"' \
+             /tmp/mx.json 2>/dev/null || true
+
           # JARVIS notes bridge: unread voice-cockpit notes for the
           # engine session, printed then marked delivered.
           echo "JARVIS NOTES:"

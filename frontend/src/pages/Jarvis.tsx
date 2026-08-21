@@ -18,7 +18,7 @@ import {
   britishVoices, DEFAULT_ELEVEN_VOICE, Ears, Mouth, pickBritishVoice, sttSupported,
 } from '../jarvis/speech'
 import { createToolExecutor, JARVIS_TOOLS } from '../jarvis/tools'
-import { api } from '../lib/api'
+import { adminApi, api } from '../lib/api'
 import '../jarvis/jarvis.css'
 
 /* ── config (localStorage; keys never leave the browser except to their own APIs) ── */
@@ -216,6 +216,56 @@ export default function Jarvis() {
   const historyRef = useRef<MessageParam[]>([])
   const abortRef = useRef<AbortController | null>(null)
   const keyHeld = useRef(false)
+  /** Hands-free attention window: after a wake-only "Meridian" → "Yes?",
+   * the next utterance is accepted without the wake word until this. */
+  const attentionUntilRef = useRef(0)
+  /** Recap of prior mirrored conversation, folded into the system prompt
+   * so MERIDIAN remembers across visits and devices. */
+  const recapRef = useRef('')
+  /** -1 until the first today-live read baselines the settle counter. */
+  const prevSettledRef = useRef(-1)
+
+  // ── conversation mirror: voice turns → the shared engine-session record ──
+  const mirrorTurns = useCallback((turns: { role: string; text: string }[]) => {
+    const token = cfgRef.current.adminToken
+    if (!token) return
+    void adminApi('/api/admin/meridian-exchange', token, {
+      method: 'POST', body: JSON.stringify({ turns }),
+    }).catch(() => { /* the mirror is best-effort, never the conversation */ })
+  }, [])
+
+  // The journal archive: tap the card, read the history.
+  const openJournalArchive = useCallback(async () => {
+    try {
+      const j = await api<{ entries: { entry: string; mood: string; at: string }[] }>(
+        '/api/meridian/journal?limit=20')
+      const md = (j.entries || []).map((e) =>
+        `**${new Date(e.at).toLocaleDateString('en-US', {
+          month: 'long', day: 'numeric',
+        })}** · _${e.mood}_\n\n${e.entry}`).join('\n\n---\n\n')
+      setPanel({ title: 'MERIDIAN — journal', kind: 'md',
+                 body: md || '_No entries yet._' })
+    } catch { /* the card itself still shows the latest */ }
+  }, [])
+
+  // Restore memory: seed the recap from the mirrored record on mount.
+  useEffect(() => {
+    const token = cfgRef.current.adminToken
+    if (!token) return
+    void adminApi<{ turns: { role: string; text: string; at: string }[] }>(
+      '/api/admin/meridian-exchange?limit=24', token,
+    ).then((r) => {
+      if (!r.turns?.length) return
+      recapRef.current = r.turns
+        .map((t) => `${t.role === 'user' ? 'Matt' : 'You'}: ${t.text.slice(0, 280)}`)
+        .join('\n')
+      setLog(r.turns.map((t) => ({
+        role: (t.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+        text: t.text, at: new Date(t.at).getTime(),
+      })))
+    }).catch(() => { /* memory is a bonus, never a blocker */ })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   /** Set on barge-in: the interrupted turn keeps streaming captions but must
    * not enqueue any further speech. Cleared when the next turn starts. */
   const mutedRef = useRef(false)
@@ -274,6 +324,7 @@ export default function Jarvis() {
     trimHistory(msgs)
 
     setLog((l) => [...l, { role: 'user', text, at: Date.now() }])
+    mirrorTurns([{ role: 'user', text }])
     setLiveText('')
     setHint('')
     setBusy(true)
@@ -283,7 +334,7 @@ export default function Jarvis() {
     try {
       const finalText = await runConversation({
         apiKey: config.anthropicKey,
-        system: buildSystemPrompt(!!config.adminToken),
+        system: buildSystemPrompt(!!config.adminToken, recapRef.current),
         tools: JARVIS_TOOLS,
         messages: msgs,
         executeTool: createToolExecutor({
@@ -300,7 +351,10 @@ export default function Jarvis() {
       chunker.flush()
       setHint('')
       setLiveText('')
-      if (finalText) setLog((l) => [...l, { role: 'assistant', text: finalText, at: Date.now() }])
+      if (finalText) {
+        setLog((l) => [...l, { role: 'assistant', text: finalText, at: Date.now() }])
+        mirrorTurns([{ role: 'assistant', text: finalText }])
+      }
     } catch (e) {
       if ((e as { name?: string })?.name === 'AbortError') return
       historyRef.current = base // keep history valid for the next turn
@@ -321,9 +375,11 @@ export default function Jarvis() {
     setUserInterim(t)
     const mouth = mouthRef.current!
     if (mouth.speaking) {
-      // Barge-in. In hands-free mode require the wake word so the mic
-      // picking up JARVIS's own voice on open speakers can't self-interrupt.
-      if (!handsFreeRef.current || WAKE.test(t)) {
+      // Barge-in. In hands-free mode require the wake word (or an open
+      // attention window) so the mic picking up MERIDIAN's own voice on
+      // open speakers can't self-interrupt.
+      if (!handsFreeRef.current || WAKE.test(t)
+          || Date.now() < attentionUntilRef.current) {
         mouth.flush()
         mutedRef.current = true // captions continue; speech stays stopped
       }
@@ -335,10 +391,25 @@ export default function Jarvis() {
     let text = t.trim()
     if (handsFreeRef.current) {
       const m = WAKE.exec(text)
-      if (!m) return // not addressed to JARVIS — ignore
-      text = text.slice(m.index + m[0].length).replace(/^[\s,.!?:;-]+/, '').trim()
+      // ATTENTION WINDOW (owner bug report 2026-08-21: "no verbal
+      // responses other than yes"): saying just "Meridian" earned a
+      // "Yes?" — and then the actual question, arriving as its own
+      // utterance WITHOUT the wake word, was thrown away here. After a
+      // wake-only address, the next utterance is accepted bare for 9s.
+      const attentive = Date.now() < attentionUntilRef.current
+      if (!m && !attentive) return // not addressed to MERIDIAN — ignore
+      if (m) {
+        text = text.slice(m.index + m[0].length)
+          .replace(/^[\s,.!?:;-]+/, '').trim()
+      }
       const mouth = mouthRef.current!
-      if (!text) { mouth.flush(); mouth.ensureAudio(); mouth.speak('Yes?'); return }
+      if (!text) {
+        attentionUntilRef.current = Date.now() + 9000
+        mouth.flush(); mouth.ensureAudio(); mouth.speak('Yes?')
+        setHint('Listening — go ahead.')
+        return
+      }
+      attentionUntilRef.current = 0
     }
     void send(text)
   }
@@ -412,6 +483,20 @@ export default function Jarvis() {
         api<{ beat_at?: string }>('/api/engine/status').catch(() => null),
       ])
       if (dead) return
+      // Spoken arrivals: settlements announce themselves in hands-free
+      // mode (the walk-into-the-office experience). First load only
+      // baselines; never interrupt an active exchange.
+      if (today && prevSettledRef.current >= 0
+          && today.settled > prevSettledRef.current) {
+        const n = today.settled - prevSettledRef.current
+        const dir = today.pnl >= 0 ? 'up' : 'down'
+        const amt = Math.abs(Math.round(today.pnl))
+        const line = `${n === 1 ? 'One more trade' : `${n} more trades`} just settled — ${dir} $${amt} on the day.`
+        setHint(line)
+        const mouth = mouthRef.current
+        if (handsFreeRef.current && mouth && !mouth.speaking) mouth.speak(line)
+      }
+      if (today) prevSettledRef.current = today.settled
       setPills({
         loaded: !!(today || live || engine),
         pnl: today ? today.pnl : null,
@@ -521,7 +606,10 @@ export default function Jarvis() {
         </div>
         <TelemetryRibbon items={ribbon} />
         {journal && (
-          <aside className="jv-journal" aria-label="Journal">
+          <aside className="jv-journal" aria-label="Journal" role="button"
+                 tabIndex={0}
+                 onClick={() => void openJournalArchive()}
+                 onKeyDown={(e) => { if (e.key === 'Enter') void openJournalArchive() }}>
             <span className={`jv-journal-mood jv-journal-${journal.mood}`} />
             <div className="jv-journal-body">
               <span className="jv-journal-head">MERIDIAN · journal · {

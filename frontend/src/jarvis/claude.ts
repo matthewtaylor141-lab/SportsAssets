@@ -230,7 +230,8 @@ export async function runConversation(opts: ConversationOptions): Promise<string
 }
 
 /** The in-app Claude's identity. Built at call time so the date is live. */
-export function buildSystemPrompt(hasAdminToken: boolean): string {
+export function buildSystemPrompt(hasAdminToken: boolean,
+                                  recap = ''): string {
   const today = new Date().toLocaleDateString('en-US', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   })
@@ -258,5 +259,8 @@ ${hasAdminToken
     ? '- The platform admin token is configured, so leave_note_for_engine_session is available.'
     : '- No admin token is configured in this browser, so leave_note_for_engine_session will not work until Matt adds it in MERIDIAN settings (gear icon).'}
 
-You are Matt's partner in this company. Be direct, warm, and useful — a co-founder on the line, not a call center.`
+${recap ? `Recent conversation with Matt (mirrored from earlier visits — you remember all of this; continue naturally, never re-introduce yourself):
+${recap}
+
+` : ''}You are Matt's partner in this company. Be direct, warm, and useful — a co-founder on the line, not a call center.`
 }

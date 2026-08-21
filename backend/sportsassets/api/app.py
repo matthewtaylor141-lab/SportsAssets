@@ -1397,6 +1397,59 @@ async def api_meridian_journal(limit: int = Query(5, ge=1, le=20)) -> dict:
                          "at": r["created_at"].isoformat()} for r in rows]}
 
 
+class MeridianTurn(BaseModel):
+    role: str
+    text: str
+
+
+class MeridianExchangeBody(BaseModel):
+    turns: list[MeridianTurn]
+
+
+@app.post("/api/admin/meridian-exchange",
+          dependencies=[Depends(require_admin)])
+async def api_meridian_exchange_post(body: MeridianExchangeBody) -> dict:
+    """Mirror voice turns from the MERIDIAN page into the shared
+    conversation record the engine session reads at its check-ins."""
+    pool = await get_pool()
+    n = 0
+    for t in body.turns[:20]:
+        role = t.role if t.role in ("user", "assistant") else None
+        text = (t.text or "").strip()
+        if not role or not text:
+            continue
+        await pool.execute(
+            "INSERT INTO meridian_exchange (role, text) VALUES ($1, $2)",
+            role, text[:4000])
+        n += 1
+    return {"ok": True, "stored": n}
+
+
+@app.get("/api/admin/meridian-exchange",
+         dependencies=[Depends(require_admin)])
+async def api_meridian_exchange(unseen: int = 0, mark: int = 0,
+                                limit: int = Query(40, ge=1, le=200)) -> dict:
+    """The conversation record. unseen=1&mark=1 is the engine session's
+    probe consumption (reads new turns, marks them delivered); the
+    MERIDIAN page uses the plain newest-N form to restore its memory
+    across visits."""
+    pool = await get_pool()
+    if unseen:
+        rows = await pool.fetch(
+            "SELECT id, role, text, at FROM meridian_exchange "
+            "WHERE seen_at IS NULL ORDER BY id LIMIT $1", limit)
+        if mark and rows:
+            await pool.execute(
+                "UPDATE meridian_exchange SET seen_at = now() "
+                "WHERE id = ANY($1::bigint[])", [r["id"] for r in rows])
+    else:
+        rows = list(reversed(await pool.fetch(
+            "SELECT id, role, text, at FROM meridian_exchange "
+            "ORDER BY id DESC LIMIT $1", limit)))
+    return {"turns": [{"id": r["id"], "role": r["role"], "text": r["text"],
+                       "at": r["at"].isoformat()} for r in rows]}
+
+
 class JarvisNoteBody(BaseModel):
     note: str
 

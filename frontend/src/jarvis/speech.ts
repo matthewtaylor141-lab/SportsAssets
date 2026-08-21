@@ -178,6 +178,12 @@ export class Mouth {
   private analyserLive = false
   private pulseAt = 0
 
+  /** Holds the active utterance so Chrome cannot GC it before onend. */
+  // eslint-disable-next-line no-unused-private-class-members
+  private gcGuard: SpeechSynthesisUtterance | null = null
+
+  /** Read by nothing — existing is the point (GC anchor). */
+  hasPendingUtterance(): boolean { return this.gcGuard !== null }
   onSpeakingChange: ((speaking: boolean) => void) | null = null
   onError: ((message: string) => void) | null = null
 
@@ -266,9 +272,31 @@ export class Mouth {
     }
   }
 
+  /** ElevenLabs free tier allows 2 concurrent requests; enqueueing a long
+   * reply fired one per sentence at once — everything past the first 429'd
+   * and fell to the fallback path. Gate to 2 in flight, retry a 429 once. */
+  private elevenInFlight = 0
   private async synthEleven(text: string, cfg: VoiceConfig): Promise<Blob | null> {
+    while (this.elevenInFlight >= 2) {
+      await new Promise((r) => setTimeout(r, 120))
+    }
+    this.elevenInFlight++
+    try {
+      let resp = await this.elevenFetch(text, cfg)
+      if (resp.status === 429) {
+        await new Promise((r) => setTimeout(r, 450))
+        resp = await this.elevenFetch(text, cfg)
+      }
+      if (!resp.ok) throw new Error(`ElevenLabs ${resp.status} — falling back to the browser voice`)
+      return await resp.blob()
+    } finally {
+      this.elevenInFlight--
+    }
+  }
+
+  private async elevenFetch(text: string, cfg: VoiceConfig): Promise<Response> {
     const voice = cfg.voiceId || DEFAULT_ELEVEN_VOICE
-    const resp = await fetch(
+    return await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice)}/stream`,
       {
         method: 'POST',
@@ -281,8 +309,6 @@ export class Mouth {
         signal: AbortSignal.timeout(30000),
       },
     )
-    if (!resp.ok) throw new Error(`ElevenLabs ${resp.status} — falling back to the browser voice`)
-    return await resp.blob()
   }
 
   private async pump(): Promise<void> {
@@ -296,8 +322,16 @@ export class Mouth {
         let blob: Blob | null = null
         try { blob = await item.audio } catch { blob = null }
         if (item.epoch !== this.epoch) continue
-        if (blob && this.el) await this.playBlob(blob, item.epoch)
-        else await this.playSynthesis(item.text, item.epoch)
+        // Watchdog: a lost 'ended'/'onend' event must never wedge the
+        // queue (owner report 2026-08-21: replies died after the first
+        // sentence). Generous bound scaled to the sentence length.
+        const maxMs = Math.min(30000, 6000 + item.text.length * 110)
+        const play = blob && this.el
+          ? this.playBlob(blob, item.epoch)
+          : this.playSynthesis(item.text, item.epoch)
+        await Promise.race([
+          play, new Promise<void>((r) => setTimeout(r, maxMs)),
+        ])
       }
     } finally {
       this.pumping = false
@@ -349,8 +383,13 @@ export class Mouth {
       utter.pitch = 0.92
       utter.onboundary = () => { if (epoch === this.epoch) this.pulseAt = performance.now() }
       utter.onstart = () => { this.pulseAt = performance.now() }
-      utter.onend = () => resolve()
-      utter.onerror = () => resolve()
+      // Chrome quirks: a cancel() can leave the synth paused (speak()
+      // then queues silently forever), and an unreferenced utterance
+      // can be garbage-collected before onend fires.
+      this.gcGuard = utter
+      utter.onend = () => { this.gcGuard = null; resolve() }
+      utter.onerror = () => { this.gcGuard = null; resolve() }
+      try { synth.resume() } catch { /* noop */ }
       try { synth.speak(utter) } catch { resolve() }
     })
   }
