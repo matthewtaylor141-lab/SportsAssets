@@ -1194,7 +1194,7 @@ jobs:
         timeout-minutes: 18
         run: |
           echo "###########################################################"
-          echo "#   NON-SPORTS WHALE CENSUS v1 — owner order 2026-08-21:   #"
+          echo "#   NON-SPORTS WHALE CENSUS v2 — active accounts only:         #"
           echo "#   systematic + market-maker accounts with proven edge    #"
           echo "#   OUTSIDE sports (politics, crypto, finance, ...)        #"
           echo "###########################################################"
@@ -1336,11 +1336,24 @@ jobs:
                   cands.append(d)
               time.sleep(0.05)
 
-          # ---- finalists: lifetime curve + 30d flows ----
-          cands.sort(key=lambda d: -(d["p30"] + d["pall"]/12))
+          # ---- finalists: v2 pins the ACTIVE accounts (the v1 rank let
+          # dormant 2024-election legends crowd them out) and samples
+          # example slugs so the 'other' bucket gets a name ----
+          ACTIVE = [
+            ("sainttroplay","0x9319a045cdd0c2180e5eb7ad44374383db9a6410"),
+            ("JnStrtPrdctnMrkts","0x1465b79bff7992bc703e1aafb3683b1089647072"),
+            ("donthackme","0x03805a13a0b3e058f55f6c6af95389d4f431073d"),
+            ("Mysaria","0xe40aaa5ce1dac0b7dc24c9d0284f27e17c3fe4a2"),
+            ("balthazar","0x5a218c7ad04135830a45c41aaed7294df7809318"),
+            ("plz-send-an-email","0xb0c85813a7a4428f1139ff91d3118a92c391fe7f"),
+            ("0xf705fa04","0xf705fa045201391d9632b7f3cde06a5e24453ca7"),
+            ("Longdemshiuchiha","0xab51c55eb5cefec49c52a174acc10b3cd69e2473"),
+            ("WTSA","0x04d5524a0a5af2eca6e39e03defc261d42fe66d8"),
+            ("betterfasterstronger","0x13fa4ce1b8a27dd0b7a72db6205a50ee6ff0954c"),
+            ("3edmond.dantes","0x983eedfbd75803602e4a6e6ea9aab6dc6b9c6748")]
           NOW = int(time.time()); T30 = NOW - 30*86400
-          for d in cands[:12]:
-              w = d["wallet"]
+          for nm, w in ACTIVE:
+              d = {"name": nm, "wallet": w}
               try:
                   b = get(f"{PNL}?user_address={w}&interval=all"
                           "&fidelity=1d", 20)
@@ -1393,12 +1406,18 @@ jobs:
               wonm = {r.get("conditionId") for r in flows["REDEEM"]
                       if float(r.get("usdcSize") or 0) > 0}
               bym = {}
+              ex = {}
               for r in buys:
                   c = category(r.get("slug"), r.get("title"))
                   m = bym.setdefault(c, {"buys": 0, "staked": 0.0})
                   m["buys"] += 1
                   m["staked"] = round(m["staked"]
                                       + float(r.get("usdcSize") or 0), 2)
+                  s = r.get("slug") or r.get("title") or ""
+                  b = ex.setdefault(c, {})
+                  key = s[:60]
+                  if len(b) < 8 and key not in b:
+                      b[key] = round(float(r.get("usdcSize") or 0), 2)
               print("NSAUDIT " + json.dumps({"name": d["name"],
                   "wallet": w, "buys_30d": len(buys),
                   "sells_30d": len(sells),
@@ -1407,7 +1426,8 @@ jobs:
                   "redeems_30d": len(flows["REDEEM"]),
                   "payout_30d": round(payout, 2),
                   "won_markets_30d": len(wonm),
-                  "by_cat": bym}, separators=(",", ":")))
+                  "by_cat": bym,
+                  "examples": ex}, separators=(",", ":")))
           PY
 
       - name: BTC 15-min OVER/UNDER census (365d, via runner)
