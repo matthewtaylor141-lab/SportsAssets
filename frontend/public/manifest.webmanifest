@@ -1,0 +1,25 @@
+{
+  "name": "JARVIS — BettorToken",
+  "short_name": "JARVIS",
+  "description": "Voice cockpit for the BettorToken trading platform — talk to your AI co-CEO.",
+  "start_url": "/jarvis",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#05070b",
+  "theme_color": "#05070b",
+  "icons": [
+    {
+      "src": "/jarvis-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/jarvis-icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}
