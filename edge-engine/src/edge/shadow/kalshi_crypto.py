@@ -391,14 +391,18 @@ def sweep(client, ledger, risk, candidates: list[dict]) -> None:
     if realized_24h <= -HALT_USD:
         funnel["halted"] = f"leg breaker: {realized_24h:.2f} <= -{HALT_USD}"
         return
-    # LIVE GATE (audit 2026-08-21): every sibling leg passes live= or
-    # refuses outright; this sweep placed REAL orders regardless of
-    # engine mode and labeled the fills PAPER — which the leg breaker
-    # (realized_pnl filters PAPER out) could then never see. A demoted
-    # engine must mean a silent leg, not an unbreakered one.
-    if not risk.is_live:
-        funnel["halted"] = "engine not live — crypto copy leg holds"
-        return
+    # NO strategy-mode gate, LIVE labels always (audit 2026-08-21, then
+    # root-caused the same evening): the audit's real finding was that
+    # this leg placed real orders while LABELING the fills PAPER — the
+    # leg breaker (realized_pnl filters PAPER out) could never see the
+    # losses. The first fix held the leg whenever the engine strategy
+    # sat in PAPER, but the ENGINE class defers to paper on a stale
+    # odds-feed checklist that has nothing to do with this leg (its
+    # candidates and prices come from the platform, not the feed) — and
+    # the owner armed it explicitly. So: the leg runs regardless of
+    # strategy mode, every fill is recorded LIVE_BETA (it IS real
+    # money), and the breaker always sees it. Kill switch and watchdog
+    # (live_blocked above) still stop it cold.
     funnel["halted"] = False
     markets = None
     now = time.time()
@@ -406,7 +410,7 @@ def sweep(client, ledger, risk, candidates: list[dict]) -> None:
     # full table query per CANDIDATE for the event-cross guard. Fills
     # within this sweep append to it manually below.
     open_keys = [p["market_key"]
-                 for p in ledger.open_positions(live_only=risk.is_live)]
+                 for p in ledger.open_positions(live_only=True)]
     for c in candidates:
         funnel["seen"] += 1
         w = (c.get("username") or "").lower()
@@ -482,7 +486,7 @@ def sweep(client, ledger, risk, candidates: list[dict]) -> None:
                 market_key=f"kalshi:{m['ticker']}",
                 side="BUY", qty=float(filled), price=limit, fee=fee,
                 league=cand["asset"].lower(),
-                mode="LIVE_BETA" if risk.is_live else "PAPER",
+                mode="LIVE_BETA",
                 category="kalshi_crypto",
                 decision={"whale": w, "his_price": price,
                           "his_notional": notional,

@@ -313,6 +313,13 @@ jobs:
           jq -r '"  JNOTE-REMAINING \(.unread_remaining // 0)"' \
              /tmp/jnotes.json 2>/dev/null || true
 
+          # WHY the engine is not armed, from its own heartbeat — the
+          # 2026-08-21 evening incident: PAPER for hours, reason only
+          # in Render logs nobody was reading.
+          jq -r '.detail.not_armed // empty |
+                 "  NOTARMED want \(.want) blocked_by: \((.blocked_by // []) | join(" | "))"' \
+             /tmp/status.json 2>/dev/null || true
+
           echo "KALSHI CRYPTO LEG (owner order 2026-08-21):"
           jq -r '.detail.kalshi_crypto // {} |
                  "  KCRYPTO seen \(.seen // 0) placed \(.placed // 0) filled \(.filled // 0) contracts \(.contracts // 0) deployed $\(.deployed_usd // 0) fees $\(.fees_usd // 0) halted \(.halted // false) err \(.last_error // "none")"' \

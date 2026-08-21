@@ -230,17 +230,20 @@ def test_leg_breaker_halts_all_orders():
     assert "leg breaker" in str(kc.funnel["halted"])
 
 
-def test_sweep_holds_when_engine_not_live():
-    """Audit 2026-08-21: the sweep placed REAL orders regardless of
-    engine mode and labeled the fills PAPER — invisible to the leg
-    breaker. A demoted engine must mean a silent leg."""
+def test_sweep_runs_in_any_mode_and_labels_live():
+    """Root-caused 2026-08-21 evening: the ENGINE class defers to PAPER
+    on a stale odds-feed checklist that has nothing to do with this
+    leg, and an is_live hold silently disarmed the owner's explicit
+    order. The leg now runs regardless of strategy mode — and every
+    fill is LIVE_BETA (real money is never PAPER-labeled, so the leg
+    breaker always sees it)."""
     class _Paper:
         is_live = False
 
     cl, led = _Client(), _Ledger()
     kc.sweep(cl, led, _Paper(), [_cand()])
-    assert cl.orders == []
-    assert "not live" in str(kc.funnel["halted"])
+    assert cl.orders, "leg places regardless of engine strategy mode"
+    assert led.fills[0]["mode"] == "LIVE_BETA"
 
 
 def test_sweep_refuses_sells_and_missing_id():

@@ -2695,10 +2695,17 @@ def _main_impl() -> None:
                         if blocked:
                             res.update(status="error",
                                        error=f"blocked: {blocked}")
-                        elif not risk.is_live:
-                            res.update(status="error",
-                                       error="engine not in a live mode")
                         else:
+                            # NO strategy-mode gate (root-caused
+                            # 2026-08-21 evening): a human's deliberate
+                            # desk ticket rides no strategy halt — the
+                            # kalshi_guard doctrine — yet this relay
+                            # refused whenever the ENGINE class sat in
+                            # PAPER, and a stale odds-feed checklist
+                            # (irrelevant to a manual Kalshi order) had
+                            # the whole desk answering "engine not in a
+                            # live mode" for hours. Kill switch and
+                            # watchdog above still stop everything.
                             # The venue is YES-denominated per outcome
                             # ticker — every desk buy is the YES side of
                             # the ticker the admin picked; the opposite
