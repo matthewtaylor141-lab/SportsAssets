@@ -1189,6 +1189,227 @@ jobs:
               time.sleep(0.1)
           PY
 
+      - name: Non-sports whale census (politics/crypto/finance, via runner)
+        if: always()
+        timeout-minutes: 18
+        run: |
+          echo "###########################################################"
+          echo "#   NON-SPORTS WHALE CENSUS v1 — owner order 2026-08-21:   #"
+          echo "#   systematic + market-maker accounts with proven edge    #"
+          echo "#   OUTSIDE sports (politics, crypto, finance, ...)        #"
+          echo "###########################################################"
+          python - <<'PY'
+          import json, statistics as st, time, urllib.request
+
+          LB = "https://lb-api.polymarket.com"
+          DATA = "https://data-api.polymarket.com"
+          PNL = "https://user-pnl-api.polymarket.com/user-pnl"
+
+          def get(url, timeout=25):
+              req = urllib.request.Request(url, headers={
+                  "User-Agent": "sportsassets-nscensus/1.0"})
+              with urllib.request.urlopen(req, timeout=timeout) as r:
+                  return json.loads(r.read().decode())
+
+          SPORT_KEYS = ("mlb","nba","nfl","nhl","wnba","atp","wta","itf",
+              " vs ","vs.","epl","liga","serie-a","bundes","ligue","ucl",
+              "mls","tennis","cricket","ufc","boxing","f1","nascar","pga",
+              "open-golf","laliga","match","game-","-spread","moneyline")
+          CATS = (
+            ("politics", ("election","president","senate","house-",
+              "governor","mayor","trump","biden","harris","vance",
+              "primary","nominee","impeach","scotus","supreme-court",
+              "congress","shutdown","cabinet","poll","vote","democrat",
+              "republican","parliament","chancellor","minister")),
+            ("crypto", ("btc","bitcoin","eth","ethereum","solana","sol-",
+              "xrp","doge","crypto","binance","coinbase","satoshi",
+              "microstrategy","memecoin")),
+            ("finance", ("fed-","fomc","rate-cut","rate-hike","cpi",
+              "inflation","gdp","recession","s-p-500","sp500","nasdaq",
+              "treasury","tariff","jobs-report","unemployment","nvidia",
+              "tesla","apple","earnings","stock","ipo","market-cap")),
+            ("geopolitics", ("ukraine","russia","israel","iran","gaza",
+              "ceasefire","nato","war","strike","north-korea","taiwan")),
+            ("ai_tech", ("openai","gpt-","claude","gemini","ai-model",
+              "spacex","starship","iphone")),
+            ("culture", ("oscar","grammy","emmy","box-office","movie",
+              "spotify","billboard","taylor","gta","time-person",
+              "rotten")),
+            ("weather", ("temperature","hurricane","heat-","rainfall")),
+          )
+
+          def category(slug, title):
+              s = ((slug or "") + " " + (title or "")).lower()
+              for k in SPORT_KEYS:
+                  if k in s:
+                      return "sports"
+              for cat, keys in CATS:
+                  for k in keys:
+                      if k in s:
+                          return cat
+              return "other"
+
+          # ---- screen: 30d + all-time profit boards ----
+          seen = {}
+          for win in ("30d", "all"):
+              for path in (f"/profit?window={win}&limit=100",
+                           f"/leaderboard?window={win}&limit=100"):
+                  try:
+                      board = get(LB + path)
+                  except Exception:
+                      continue
+                  if isinstance(board, dict):
+                      board = (board.get("leaderboard") or
+                               board.get("data") or [])
+                  if not board:
+                      continue
+                  for e in board:
+                      w = (e.get("proxyWallet") or e.get("walletAddress")
+                           or e.get("address") or "").lower()
+                      if not w:
+                          continue
+                      d = seen.setdefault(w, {"wallet": w,
+                          "name": e.get("name") or e.get("userName")
+                                  or w[:10], "p30": 0.0, "pall": 0.0})
+                      amt = float(e.get("amount") or e.get("profit") or 0)
+                      if win == "30d":
+                          d["p30"] = max(d["p30"], amt)
+                      else:
+                          d["pall"] = max(d["pall"], amt)
+                  break
+          print(f"boards: {len(seen)} unique accounts")
+
+          # ---- fingerprint: activity sample, category mix ----
+          ROSTER = {"0x204f72f35326db932158cba6adff0b9a1da95e14",
+                    "0x2005d16a84ceefa912d4e380cd32e7ff827875ea",
+                    "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee",
+                    "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563",
+                    "0xfe787d2da716d60e8acff57fb87eb13cd4d10319",
+                    "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c"}
+          cands = []
+          ranked = sorted(seen.values(),
+                          key=lambda d: -(d["p30"] + d["pall"]/12))
+          for d in ranked[:60]:
+              if d["wallet"] in ROSTER:
+                  continue
+              rows = []
+              for off in (0, 500, 1000, 1500):
+                  try:
+                      b = get(f"{DATA}/activity?user={d['wallet']}"
+                              f"&limit=500&offset={off}", 20)
+                  except Exception:
+                      break
+                  if not b:
+                      break
+                  rows.extend(b)
+                  if len(b) < 500:
+                      break
+                  time.sleep(0.05)
+              trades = [r for r in rows if r.get("type") == "TRADE"]
+              if len(trades) < 50:
+                  continue
+              mix = {}
+              buys = 0
+              sizes = []
+              for r in trades:
+                  c = category(r.get("slug"), r.get("title"))
+                  mix[c] = mix.get(c, 0) + 1
+                  if (r.get("side") or "BUY").upper() == "BUY":
+                      buys += 1
+                  sizes.append(float(r.get("usdcSize") or 0))
+              n = len(trades)
+              ns_share = 1 - mix.get("sports", 0) / n
+              ts = sorted(int(r.get("timestamp") or 0) for r in trades)
+              span_d = max(0.04, (ts[-1] - ts[0]) / 86400)
+              d.update({
+                  "n": n, "nonsports_share": round(ns_share, 3),
+                  "mix": {k: v for k, v in sorted(mix.items(),
+                          key=lambda kv: -kv[1])},
+                  "fills_per_day": round(n / span_d, 1),
+                  "med_fill": round(st.median(sizes), 2) if sizes else 0,
+                  "p90_fill": round(sorted(sizes)[int(len(sizes)*0.9)], 2)
+                              if sizes else 0,
+                  "buy_share": round(buys / n, 3),
+                  "days_span": round(span_d, 1)})
+              print("NSCAND " + json.dumps(d, separators=(",", ":")))
+              if ns_share >= 0.55 and d["fills_per_day"] >= 15:
+                  cands.append(d)
+              time.sleep(0.05)
+
+          # ---- finalists: lifetime curve + 30d flows ----
+          cands.sort(key=lambda d: -(d["p30"] + d["pall"]/12))
+          NOW = int(time.time()); T30 = NOW - 30*86400
+          for d in cands[:12]:
+              w = d["wallet"]
+              try:
+                  b = get(f"{PNL}?user_address={w}&interval=all"
+                          "&fidelity=1d", 20)
+                  if isinstance(b, list) and b:
+                      if len(b) > 240:
+                          stp = len(b) / 239.0
+                          keep = [b[int(i*stp)] for i in range(239)]
+                          keep.append(b[-1])
+                          b = keep
+                      print("NSPNL " + json.dumps(
+                          {"name": d["name"], "wallet": w, "n": len(b),
+                           "series": b}, separators=(",", ":")))
+              except Exception as e:
+                  print("NSPNL fail", d["name"], type(e).__name__)
+              # 30d flow: TRADE + REDEEM cursor windows (proven method)
+              flows = {}
+              for typ in ("TRADE", "REDEEM"):
+                  rows, end, seenk = [], NOW + 60, set()
+                  for _ in range(24):
+                      try:
+                          b = get(f"{DATA}/activity?user={w}&type={typ}"
+                                  f"&limit=500&start={T30}&end={end}", 25)
+                      except Exception:
+                          break
+                      if not b:
+                          break
+                      fresh = 0
+                      for r in b:
+                          k = (r.get("transactionHash"),
+                               r.get("conditionId"),
+                               r.get("timestamp"), r.get("usdcSize"))
+                          if k in seenk:
+                              continue
+                          seenk.add(k); rows.append(r); fresh += 1
+                      tss = [int(r.get("timestamp") or 0) for r in b]
+                      oldest = min(tss) if tss else T30
+                      end = oldest if fresh else oldest - 1
+                      if len(b) < 500 or end <= T30:
+                          break
+                      time.sleep(0.05)
+                  flows[typ] = rows
+              buys = [r for r in flows["TRADE"]
+                      if (r.get("side") or "BUY").upper() == "BUY"]
+              sells = [r for r in flows["TRADE"]
+                       if (r.get("side") or "").upper() == "SELL"]
+              staked = sum(float(r.get("usdcSize") or 0) for r in buys)
+              sold = sum(float(r.get("usdcSize") or 0) for r in sells)
+              payout = sum(float(r.get("usdcSize") or 0)
+                           for r in flows["REDEEM"])
+              wonm = {r.get("conditionId") for r in flows["REDEEM"]
+                      if float(r.get("usdcSize") or 0) > 0}
+              bym = {}
+              for r in buys:
+                  c = category(r.get("slug"), r.get("title"))
+                  m = bym.setdefault(c, {"buys": 0, "staked": 0.0})
+                  m["buys"] += 1
+                  m["staked"] = round(m["staked"]
+                                      + float(r.get("usdcSize") or 0), 2)
+              print("NSAUDIT " + json.dumps({"name": d["name"],
+                  "wallet": w, "buys_30d": len(buys),
+                  "sells_30d": len(sells),
+                  "staked_30d": round(staked, 2),
+                  "sold_30d": round(sold, 2),
+                  "redeems_30d": len(flows["REDEEM"]),
+                  "payout_30d": round(payout, 2),
+                  "won_markets_30d": len(wonm),
+                  "by_cat": bym}, separators=(",", ":")))
+          PY
+
       - name: BTC 15-min OVER/UNDER census (365d, via runner)
         if: always()
         timeout-minutes: 8
