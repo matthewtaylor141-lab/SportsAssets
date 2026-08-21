@@ -1985,6 +1985,21 @@ async def live_status() -> dict:
         GROUP BY 1 ORDER BY deployed_24h DESC
         """
     )
+    # Manual-desk diagnostics (owner report 2026-08-21: "trades aren't
+    # being processed"): the sleeve's status counts and its last rows
+    # WITH their errors ride the public status so the probe reads the
+    # exact failure mode instead of a lifetime zero.
+    manual_desk = {
+        "by_status": {r["status"]: r["n"] for r in await pool.fetch(
+            "SELECT status, count(*)::int AS n FROM live_orders "
+            "WHERE whale_username = 'manual' GROUP BY 1")},
+        "recent": [dict(r) for r in await pool.fetch(
+            "SELECT placed_at, status, requested_usd::float8 AS req, "
+            "filled_usd::float8 AS filled, venue, "
+            "left(COALESCE(error, ''), 200) AS error "
+            "FROM live_orders WHERE whale_username = 'manual' "
+            "ORDER BY placed_at DESC LIMIT 5")],
+    }
     venue = active_venue()
     # Fill-vs-miss aggregate rides the public status (5-min cache) so
     # the hourly probe reads the copy thesis' direct test without an
@@ -2011,6 +2026,7 @@ async def live_status() -> dict:
         "paused": paused,
         "by_whale": [dict(r) for r in by_whale],
         "sizing_24h": [dict(r) for r in sizing],
+        "manual_desk": manual_desk,
         "fill_vs_miss_7d": fvm,
         "caps": {"per_fill": cfg.live_max_per_fill_usd, "daily": cfg.live_max_daily_usd,
                  "total": cfg.live_max_total_usd,

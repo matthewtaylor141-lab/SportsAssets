@@ -284,6 +284,12 @@ jobs:
           jq -r '.fill_vs_miss_7d // {} | to_entries[] |
                  "  FVM \(.key): filled \(.value.f_n) roi \(.value.f_roi // "n/a") | missed \(.value.m_n) roi \(.value.m_roi // "n/a") (\(.value.m_unres) unresolved)"' \
             /tmp/live.json 2>/dev/null || true
+          echo "MANUAL DESK (owner report 2026-08-21):"
+          jq -r '.manual_desk.by_status // {} | to_entries[] | "  MDESK-N \(.key): \(.value)"' \
+             /tmp/live.json 2>/dev/null || true
+          jq -r '.manual_desk.recent // [] | .[] | "  MDESK \(.placed_at // "?") \(.status) req $\(.req // 0) filled $\(.filled // 0) [\(.venue // "?")] \(.error // "")"' \
+             /tmp/live.json 2>/dev/null || true
+
           echo "KALSHI CRYPTO LEG (owner order 2026-08-21):"
           jq -r '.detail.kalshi_crypto // {} |
                  "  KCRYPTO seen \(.seen // 0) placed \(.placed // 0) filled \(.filled // 0) contracts \(.contracts // 0) deployed $\(.deployed_usd // 0) fees $\(.fees_usd // 0) halted \(.halted // false) err \(.last_error // "none")"' \
