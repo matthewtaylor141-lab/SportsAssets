@@ -54,10 +54,11 @@ def priority_whales(whales: list[dict]) -> list[dict]:
     """The pinned COPY whales out of the tracked roster — the wallets the
     executor actually trades on, and therefore the only ones whose
     detection latency is worth paying extra request budget for."""
-    from ..api.copies_record import COPY_WHALES
+    from ..api.copies_record import COPY_WHALES, CRYPTO_WHALES
 
     return [w for w in whales
-            if (w.get("username") or "").lower() in COPY_WHALES]
+            if (w.get("username") or "").lower()
+            in (COPY_WHALES | CRYPTO_WHALES)]
 
 
 class Poller:

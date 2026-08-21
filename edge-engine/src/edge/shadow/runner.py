@@ -2031,6 +2031,14 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         # whole live era.
         funnel["kalshi_copy_whales"] = ledger.category_whale_scorecard(
             "kalshi_copy", days=30, live_only=risk.is_live)
+        try:
+            from edge.shadow import kalshi_crypto as _kcr
+            funnel["kalshi_crypto"] = dict(_kcr.funnel)
+            funnel["kalshi_crypto_whales"] = \
+                ledger.category_whale_scorecard(
+                    "kalshi_crypto", days=30, live_only=risk.is_live)
+        except Exception as exc:  # noqa: BLE001
+            funnel["kalshi_crypto"] = {"error": type(exc).__name__}
         funnel["spread_cost"] = ledger.spread_report(days=7, live_only=risk.is_live)
         funnel["by_band"] = ledger.performance_by_band(days=7, live_only=risk.is_live)
         funnel["reversion"] = rev
@@ -2724,6 +2732,43 @@ def _main_impl() -> None:
         threading.Thread(target=_fsc_loop, daemon=True,
                          name="kalshi-fsc").start()
         log.warning("kalshi first-set comeback sleeve armed (120s sweep)")
+
+    # Kalshi CRYPTO copy leg (owner order 2026-08-21: the two crypto
+    # systematics from the non-sports dossier, 1/10th sizing, fee-
+    # loaded same-or-better, exact-twin mapping only). Candidates come
+    # from the platform's crypto-copy feed; every fill grades under
+    # ledger category 'kalshi_crypto'. Armed independently of every
+    # other leg (the silent-disarm class); EDGE_KCRYPTO=0 kills it.
+    if os.environ.get("EDGE_KCRYPTO", "1") != "0" and kalshi_c is not None             and kalshi_c.has_credentials():
+        def _kcrypto_loop() -> None:
+            import requests
+
+            from edge.shadow import kalshi_crypto as kcr
+
+            base = os.environ.get("EDGE_PLATFORM_API", "")
+            token = os.environ.get("EDGE_INGEST_TOKEN", "")
+            if not base or not token:
+                return
+            sess = requests.Session()
+            hdrs = {"X-Engine-Token": token}
+            time.sleep(45)
+            while True:
+                try:
+                    r = sess.get(
+                        f"{base}/api/engine/crypto-copy-candidates",
+                        headers=hdrs, timeout=10)
+                    cands = (r.json().get("candidates") or [])                         if r.status_code == 200 else []
+                    if cands:
+                        kcr.sweep(kalshi_c, ledger, risk, cands)
+                except Exception as exc:  # noqa: BLE001 — never fatal
+                    kcr.funnel["last_error"] =                         f"{type(exc).__name__}: {str(exc)[:120]}"
+                time.sleep(float(os.environ.get(
+                    "EDGE_KCRYPTO_POLL_S", "2.5")))
+
+        threading.Thread(target=_kcrypto_loop, daemon=True,
+                         name="kalshi-crypto").start()
+        log.warning("kalshi CRYPTO copy leg armed (2.5s poll, 1/10 "
+                    "sizing, fee-loaded same-or-better)")
 
     # Kalshi leg of the $1 underdog sleeve (owner 2026-08-08): the
     # platform worker queues one task per game at T-minus-5; this

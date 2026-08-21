@@ -1410,6 +1410,38 @@ async def api_manual_trade(body: ManualTradeBody) -> dict:
             "detail": "queued — the engine places it within ~10 seconds"}
 
 
+@app.get("/api/engine/crypto-copy-candidates")
+async def api_crypto_copy_candidates(
+    x_engine_token: str = Header(default="")
+) -> dict:
+    """Fresh BUY fills from the CRYPTO copy sources (owner order
+    2026-08-21) for the engine's Kalshi crypto leg. Stateless: the
+    engine dedupes by trade id in its own ledger (fill_uid), so this
+    endpoint just serves the last few minutes of flow. Freshness is
+    enforced HERE as well as engine-side — a stale crypto price is a
+    different bet, and staleness must not depend on one process's
+    clock."""
+    cfg = settings()
+    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
+        raise HTTPException(status_code=401, detail="engine token required")
+    from .copies_record import CRYPTO_WHALES
+
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT t.id, lower(COALESCE(w.username, '')) AS username,
+               t.market_slug, t.market_title, t.side,
+               t.price::float8 AS price, t.notional::float8 AS notional,
+               EXTRACT(EPOCH FROM t.ts)::float8 AS ts_epoch
+        FROM trades t JOIN whales w ON w.id = t.whale_id
+        WHERE lower(COALESCE(w.username, '')) = ANY($1::text[])
+          AND t.side = 'BUY'
+          AND t.ts > now() - interval '10 minutes'
+        ORDER BY t.ts DESC LIMIT 100
+        """, list(CRYPTO_WHALES))
+    return {"candidates": [dict(r) for r in rows]}
+
+
 @app.get("/api/engine/manual-kalshi-queue")
 async def api_manual_kalshi_queue(
     x_engine_token: str = Header(default="")

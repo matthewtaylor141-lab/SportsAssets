@@ -43,6 +43,13 @@ DISPLAY = {
 }
 
 
+# CRYPTO copy sources (owner order 2026-08-21): detected by the fast
+# lane and served to the engine's Kalshi crypto leg — deliberately NOT
+# in COPY_WHALES, so the Polymarket sports record and executor never
+# see them.
+CRYPTO_WHALES = frozenset({"0xf705fa04", "jnstrtprdctnmrkts"})
+
+
 # Sleeves that are neither copies nor "software": their P&L is its own
 # story (dog experiment, arb class, the desk's manual relay tickets).
 NON_COPY_SLEEVES = frozenset({"underdog", "arb", "manual"})
