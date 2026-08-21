@@ -25,6 +25,8 @@ interface Props {
   state: AvatarState
   /** 0..1 speech amplitude (analyser or boundary pulse). */
   getLevel: () => number
+  /** 0..1 journal-mood tint: 0 steady (cool), 1 alert (warm, restless). */
+  tone?: number
 }
 
 /* ── shaders ─────────────────────────────────────────────────────── */
@@ -43,6 +45,7 @@ uniform float u_listen;  // eased state weights 0..1
 uniform float u_think;
 uniform float u_speak;
 uniform float u_boot;    // 0..1 iris-in
+uniform float u_tone;    // journal mood: 0 steady .. 1 alert
 
 float hash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -77,7 +80,7 @@ void main() {
 
   float boot  = smoothstep(0.0, 1.0, u_boot);
   float R     = 0.285 * boot + 0.015;
-  float churn = 1.0 + u_think * 1.6 + u_speak * 0.6;
+  float churn = 1.0 + u_think * 1.6 + u_speak * 0.6 + u_tone * 0.35;
 
   vec3 col = vec3(0.0);
 
@@ -109,7 +112,7 @@ void main() {
     // gold ignites through the convection while speaking
     float fleck = smoothstep(0.76, 0.9, fbm(q * 6.0 + vec2(t * 0.2, -t * 0.15)));
     col += vec3(0.95, 0.78, 0.38) * fleck
-           * (0.1 + u_speak * 0.95 + u_level * 0.85);
+           * (0.1 + u_tone * 0.28 + u_speak * 0.95 + u_level * 0.85);
 
     // limb darkening + a specular pole up-left
     col *= 0.3 + 0.8 * z;
@@ -121,7 +124,7 @@ void main() {
   // ── fresnel rim, with an orbiting sweep while listening ──
   float rim = exp(-pow((r - R) * (46.0 + u_listen * 26.0), 2.0));
   float sweep = 0.6 + 0.4 * sin(ang - t * (0.7 + u_listen * 2.4));
-  col += vec3(0.35, 0.9, 1.0) * rim
+  col += mix(vec3(0.35, 0.9, 1.0), vec3(0.95, 0.75, 0.4), u_tone * 0.4) * rim
          * (0.85 + u_listen * 1.5 * sweep + u_level * 1.3) * boot;
 
   // ── corona filaments ──
@@ -233,13 +236,15 @@ function drawFallbackCore(
 
 /* ── component ───────────────────────────────────────────────────── */
 
-export function JarvisAvatar({ state, getLevel }: Props) {
+export function JarvisAvatar({ state, getLevel, tone = 0 }: Props) {
   const glRef = useRef<HTMLCanvasElement | null>(null)
   const ringRef = useRef<HTMLCanvasElement | null>(null)
   const stateRef = useRef<AvatarState>(state)
   const levelRef = useRef<() => number>(getLevel)
+  const toneRef = useRef(tone)
   stateRef.current = state
   levelRef.current = getLevel
+  toneRef.current = tone
 
   useEffect(() => {
     const glCanvas = glRef.current
@@ -281,7 +286,7 @@ export function JarvisAvatar({ state, getLevel }: Props) {
         gl.enableVertexAttribArray(loc)
         gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0)
         for (const n of ['u_res', 'u_time', 'u_level', 'u_listen',
-                         'u_think', 'u_speak', 'u_boot'])
+                         'u_think', 'u_speak', 'u_boot', 'u_tone'])
           uni[n] = gl.getUniformLocation(program, n)
       }
     }
@@ -327,6 +332,7 @@ export function JarvisAvatar({ state, getLevel }: Props) {
         gl.uniform1f(uni.u_think, think)
         gl.uniform1f(uni.u_speak, speak)
         gl.uniform1f(uni.u_boot, boot)
+        gl.uniform1f(uni.u_tone, Math.max(0, Math.min(1, toneRef.current)))
         gl.clearColor(0, 0, 0, 0)
         gl.clear(gl.COLOR_BUFFER_BIT)
         gl.drawArrays(gl.TRIANGLES, 0, 3)

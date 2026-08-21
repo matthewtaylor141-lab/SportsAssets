@@ -1354,6 +1354,49 @@ async def api_fill_vs_miss(days: int = Query(7, ge=1, le=30)) -> dict:
     return {"days": days, "whales": grade_rows(rows)}
 
 
+class MeridianJournalBody(BaseModel):
+    entry: str
+    mood: str = "steady"
+
+
+@app.post("/api/admin/meridian-journal",
+          dependencies=[Depends(require_admin)])
+async def api_meridian_journal_post(body: MeridianJournalBody) -> dict:
+    """MERIDIAN's journal intake: the co-CEO session authors entries in
+    the repo; the diagnostic workflow publishes the newest one here.
+    entry_hash dedupe makes republishing a no-op."""
+    import hashlib
+
+    entry = (body.entry or "").strip()
+    if not entry:
+        return {"ok": False, "error": "empty entry"}
+    mood = body.mood if body.mood in ("steady", "focused", "alert") \
+        else "steady"
+    h = hashlib.sha256(entry.encode()).hexdigest()[:32]
+    pool = await get_pool()
+    nid = await pool.fetchval(
+        """
+        INSERT INTO meridian_journal (entry, mood, entry_hash)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (entry_hash) DO NOTHING
+        RETURNING id
+        """, entry[:2000], mood, h)
+    return {"ok": True, "id": nid, "new": nid is not None}
+
+
+@app.get("/api/meridian/journal")
+async def api_meridian_journal(limit: int = Query(5, ge=1, le=20)) -> dict:
+    """Public: MERIDIAN's latest journal entries. The author controls
+    the content (repo-reviewed before publish), so this is public-safe
+    by construction — it is the voice of the page."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT entry, mood, created_at FROM meridian_journal "
+        "ORDER BY id DESC LIMIT $1", limit)
+    return {"entries": [{"entry": r["entry"], "mood": r["mood"],
+                         "at": r["created_at"].isoformat()} for r in rows]}
+
+
 class JarvisNoteBody(BaseModel):
     note: str
 

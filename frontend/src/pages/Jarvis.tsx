@@ -162,7 +162,9 @@ const TOOL_NOTES: Record<string, string> = {
   leave_note_for_engine_session: 'Leaving the note…',
 }
 
-const WAKE = /\bjarvis\b/i
+// The presence answers to its chosen name first; "jarvis" stays for
+// muscle memory, and "claude" because that is who is actually here.
+const WAKE = /\b(meridian|jarvis|claude)\b/i
 
 /* ── the page ────────────────────────────────────────────────────────── */
 
@@ -191,6 +193,21 @@ export default function Jarvis() {
   const [pills, setPills] = useState<Pills>({
     loaded: false, pnl: null, settled: null, wins: null, armed: null, paused: false, engineAgeS: null,
   })
+  const [journal, setJournal] = useState<{ entry: string; mood: string; at: string } | null>(null)
+
+  useEffect(() => {
+    let dead = false
+    const load = async () => {
+      try {
+        const j = await api<{ entries: { entry: string; mood: string; at: string }[] }>(
+          '/api/meridian/journal?limit=1')
+        if (!dead && j.entries?.length) setJournal(j.entries[0])
+      } catch { /* journal is a garnish — never an error state */ }
+    }
+    void load()
+    const t = setInterval(load, 300000)
+    return () => { dead = true; clearInterval(t) }
+  }, [])
 
   const [sttOk] = useState(() => sttSupported())
 
@@ -377,7 +394,7 @@ export default function Jarvis() {
     if (next) {
       mouth.ensureAudio()
       earsRef.current!.start(true)
-      setHint('Hands-free on — say "JARVIS", then your question.')
+      setHint('Hands-free on — say "MERIDIAN", then your question.')
     } else {
       earsRef.current!.stop()
       setHint('')
@@ -416,11 +433,14 @@ export default function Jarvis() {
 
   const avatarState: AvatarState =
     speaking ? 'speaking' : busy ? 'thinking' : listening ? 'listening' : 'idle'
+  // Journal mood tints the core: steady cool, focused warmer, alert restless.
+  const tone = journal?.mood === 'alert' ? 1
+    : journal?.mood === 'focused' ? 0.45 : 0
 
   const stateLabel =
     speaking ? 'Speaking' : busy ? 'Thinking' : listening
-      ? (handsFree ? 'Listening — say "JARVIS…"' : 'Listening')
-      : handsFree ? 'Standing by — say "JARVIS…"' : 'Standing by'
+      ? (handsFree ? 'Listening — say "MERIDIAN…"' : 'Listening')
+      : handsFree ? 'Standing by — say "MERIDIAN…"' : 'Standing by'
 
   const submitTyped = (e: React.FormEvent) => {
     e.preventDefault()
@@ -455,7 +475,7 @@ export default function Jarvis() {
     <div className="jv-root">
       {/* ── status strip ── */}
       <header className="jv-top">
-        <span className="jv-brand">J.A.R.V.I.S.<em>BettorToken</em></span>
+        <span className="jv-brand">M E R I D I A N<em>BettorToken · Claude</em></span>
         <div className="jv-pills">
           {pills.pnl != null && (
             <span className={`jv-pill ${pills.pnl >= 0 ? 'jv-pos' : 'jv-neg'}`}>
@@ -494,11 +514,23 @@ export default function Jarvis() {
         <Starfield />
         <div className="jv-orb-wrap">
           <HudRing state={avatarState} />
-          <JarvisAvatar state={avatarState} getLevel={() => mouthRef.current?.level() ?? 0} />
+          <JarvisAvatar state={avatarState} tone={tone}
+                        getLevel={() => mouthRef.current?.level() ?? 0} />
           <div className={`jv-state jv-state-${avatarState}`}>{stateLabel}</div>
           <BootSequence />
         </div>
         <TelemetryRibbon items={ribbon} />
+        {journal && (
+          <aside className="jv-journal" aria-label="Journal">
+            <span className={`jv-journal-mood jv-journal-${journal.mood}`} />
+            <div className="jv-journal-body">
+              <span className="jv-journal-head">MERIDIAN · journal · {
+                new Date(journal.at).toLocaleDateString('en-US',
+                  { month: 'short', day: 'numeric' })}</span>
+              <p>{journal.entry}</p>
+            </div>
+          </aside>
+        )}
 
         <div className="jv-captions" aria-live="polite">
           {userInterim && <p className="jv-cap-user">{userInterim}</p>}
@@ -521,8 +553,8 @@ export default function Jarvis() {
               className="jv-typed-input"
               value={typed}
               onChange={(e) => setTyped(e.target.value)}
-              placeholder="Type to JARVIS…"
-              aria-label="Type to JARVIS"
+              placeholder="Type to MERIDIAN…"
+              aria-label="Type to MERIDIAN"
             />
           </form>
           <button
@@ -694,7 +726,7 @@ function SetupPanel(props: {
   return (
     <div className="jv-setup-scrim">
       <div className="jv-setup" role="dialog" aria-label="JARVIS setup">
-        <h2>Bring JARVIS online</h2>
+        <h2>Bring MERIDIAN online</h2>
         <p className="jv-setup-note">
           Keys are stored only in this browser (localStorage) and are sent nowhere except
           directly to their own APIs — Anthropic, ElevenLabs, and your platform.

@@ -303,6 +303,11 @@ jobs:
           jq -r '"  DESKG pm games \(.games // [] | length) counts \(.counts // {} | to_entries | map("\(.key):\(.value)") | join(" "))"' \
              /tmp/deskg.json 2>/dev/null || true
 
+          # MERIDIAN journal publish: the top entry of the repo journal
+          # goes to the platform (idempotent by content hash). The page
+          # displays it — the session's own words, versioned in git.
+          BASE_URL="$BASE" python3 ops/publish_journal.py || true
+
           # JARVIS notes bridge: unread voice-cockpit notes for the
           # engine session, printed then marked delivered.
           echo "JARVIS NOTES:"

@@ -724,3 +724,50 @@
   .jv-stage { transition: none; }
   .jv-root * { transition-duration: 0.01ms !important; }
 }
+
+/* ── MERIDIAN journal — the session's own words on the page ──────── */
+.jv-journal {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  max-width: min(520px, calc(100vw - 48px));
+  margin: 2px auto 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--jv-border);
+  border-radius: 12px;
+  background: rgba(8, 13, 20, 0.6);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.jv-journal-mood {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--jv-cyan);
+  box-shadow: 0 0 10px var(--jv-cyan-soft);
+}
+.jv-journal-focused { background: var(--jv-gold); box-shadow: 0 0 10px var(--jv-gold-soft); }
+.jv-journal-alert { background: var(--jv-warn); box-shadow: 0 0 10px rgba(250, 178, 25, 0.6); animation: jv-think-pulse 1.4s ease-in-out infinite; }
+.jv-journal-head {
+  display: block;
+  font-family: var(--jv-mono);
+  font-size: 9px;
+  letter-spacing: 0.26em;
+  color: var(--jv-muted);
+  margin-bottom: 4px;
+}
+.jv-journal-body p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: rgba(222, 238, 248, 0.82);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+@media (max-height: 700px) { .jv-journal { display: none; } }

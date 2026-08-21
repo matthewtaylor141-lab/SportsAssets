@@ -1,6 +1,6 @@
 {
-  "name": "JARVIS — BettorToken",
-  "short_name": "JARVIS",
+  "name": "MERIDIAN — BettorToken",
+  "short_name": "MERIDIAN",
   "description": "Voice cockpit for the BettorToken trading platform — talk to your AI co-CEO.",
   "start_url": "/jarvis",
   "scope": "/",
