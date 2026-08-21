@@ -1136,8 +1136,8 @@ jobs:
         timeout-minutes: 25
         run: |
           echo "###########################################################"
-          echo "#   WHALE CANDIDATE CENSUS v6 — graded audits (singular   #"
-          echo "#   condition_id resolver, oldest-first sampling)          #"
+          echo "#   WHALE CANDIDATE CENSUS v7 — graded audits (repeated    #"
+          echo "#   condition_ids params, the proven gamma encoding)       #"
           echo "###########################################################"
           python - <<'PY'
           import json, statistics as st, time, urllib.request
@@ -1178,25 +1178,33 @@ jobs:
               return out
 
           RES_CACHE = {}
-          def resolve(cid):
-              if cid in RES_CACHE:
-                  return RES_CACHE[cid]
-              out = None
-              try:
-                  mk = get(f"{GAMMA}/markets?condition_id={cid}", 15)
-                  if isinstance(mk, list) and mk:
-                      m = mk[0]
-                      if m.get("closed"):
-                          try:
-                              out = [float(x) for x in
-                                     json.loads(m.get("outcomePrices") or "[]")]
-                          except Exception:
-                              out = None
-              except Exception:
-                  pass
-              RES_CACHE[cid] = out
-              time.sleep(0.05)
-              return out
+          def resolve_many(cids):
+              # Proven encoding (backend/sportsassets/gamma.py): REPEATED
+              # condition_ids params plus an explicit limit; the API
+              # ignores comma-joined and singular spellings silently.
+              todo = [c for c in cids if c not in RES_CACHE]
+              for i in range(0, len(todo), 40):
+                  chunk = todo[i:i+40]
+                  qs = "&".join(f"condition_ids={c}" for c in chunk)
+                  try:
+                      for m in get(f"{GAMMA}/markets?{qs}&limit={len(chunk)}", 20):
+                          cid = m.get("conditionId") or m.get("condition_id")
+                          if not cid:
+                              continue
+                          out = None
+                          if m.get("closed"):
+                              try:
+                                  out = [float(x) for x in
+                                         json.loads(m.get("outcomePrices") or "[]")]
+                              except Exception:
+                                  out = None
+                          RES_CACHE[cid] = out
+                  except Exception as e:
+                      print("  gamma chunk fail:", type(e).__name__)
+                  time.sleep(0.08)
+              for c in todo:
+                  RES_CACHE.setdefault(c, None)
+              return {c: RES_CACHE.get(c) for c in cids}
 
           def sport(slug, title):
               s = (slug + " " + title).lower()
@@ -1234,8 +1242,8 @@ jobs:
                       first_ts[cid] = tt
               # grade OLDEST markets first — they are the resolvable ones
               order = sorted({cid for (cid,_) in pos},
-                             key=lambda c: first_ts.get(c, 1e18))[:250]
-              res = {c: resolve(c) for c in order}
+                             key=lambda c: first_ts.get(c, 1e18))[:400]
+              res = resolve_many(order)
               closed = sum(1 for v in res.values() if v)
               W=L=0; staked=pnl=0.0; by_sport={}
               for (cid, oi), p in pos.items():
