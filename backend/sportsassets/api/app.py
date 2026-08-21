@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -786,7 +787,55 @@ async def api_market_search(q: str = Query(min_length=2)) -> dict:
                                     for m in out for o in m["outcomes"]))
     except Exception:  # noqa: BLE001 — quotes are an upgrade, not a gate
         pass
+    _mirror_dead_prop_sides(out)
     return {"markets": out}
+
+
+_MIRROR_SUFFIX = re.compile(r"(.*?)\s*[—–-]\s*(yes|no)\s*$", re.IGNORECASE)
+
+
+def _mirror_dead_prop_sides(mkts: list[dict]) -> None:
+    """Route bookless sides through their mirrored sibling listing.
+
+    Owner report 2026-08-21 evening: every prop's No button was dead on
+    the desk. The venue lists props as mirrored pairs ('Q — Yes' and
+    'Q — No') and only carries a book on the Yes token of each listing —
+    the No token's book is empty, so the desk quoted None and disabled
+    the side. But No on 'Q — Yes' IS Yes on 'Q — No' (and vice versa):
+    identical bet, live book, proven order path. For any outcome with no
+    ask whose sibling listing quotes the complementary side, substitute
+    the sibling's token/quotes in place — the pick then executes on the
+    token that actually trades. Priced outcomes are never touched, and
+    with no live sibling the side stays honestly dead."""
+    by_base: dict[str, dict[str, dict]] = {}
+    for m in mkts:
+        mm = _MIRROR_SUFFIX.match(m.get("title") or "")
+        if mm:
+            by_base.setdefault(mm.group(1).strip().lower(),
+                               {})[mm.group(2).lower()] = m
+    for pair in by_base.values():
+        if "yes" not in pair or "no" not in pair:
+            continue
+        for mine, sib in ((pair["yes"], pair["no"]),
+                          (pair["no"], pair["yes"])):
+            for o in mine.get("outcomes") or []:
+                if o.get("ask") is not None:
+                    continue
+                side = (o.get("outcome") or "").strip().lower()
+                if side not in ("yes", "no"):
+                    continue
+                want = "no" if side == "yes" else "yes"
+                twin = next(
+                    (so for so in (sib.get("outcomes") or [])
+                     if (so.get("outcome") or "").strip().lower() == want
+                     and so.get("ask") is not None
+                     and not so.get("via_sibling")), None)
+                if twin is None:
+                    continue
+                o["asset"] = twin["asset"]
+                o["ask"] = twin["ask"]
+                o["bid"] = twin.get("bid")
+                o["via_sibling"] = True
 
 
 # Public Kalshi market data (no auth needed for market/book reads).
