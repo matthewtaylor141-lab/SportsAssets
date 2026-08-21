@@ -27,6 +27,8 @@ RECORD_TZ = ZoneInfo("America/New_York")
 COPY_WHALES = frozenset({
     "rn1", "swisstony", "kch123", "homerunhazard",
     "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465",
+    # Dossier promotions (owner order 2026-08-21): $100 probation clips.
+    "ferrarichampions2026", "0x076daa87",
 })
 
 # Display names for the per-whale split (addresses are unreadable).
@@ -36,6 +38,8 @@ DISPLAY = {
     "swisstony": "SwissTony",
     "kch123": "kch123",
     "homerunhazard": "HomeRunHazard",
+    "ferrarichampions2026": "ferrariChampions2026",
+    "0x076daa87": "0x076daa87",
 }
 
 

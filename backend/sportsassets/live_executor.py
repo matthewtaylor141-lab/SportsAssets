@@ -311,7 +311,13 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 # leaps — the settled samples are still small.
 PER_FILL_BY_WHALE = {"rn1": 225.00, "swisstony": 300.00,
                      _W2C33: 300.00, "homerunhazard": 112.50,
-                     "kch123": 150.00}
+                     "kch123": 150.00,
+                     # Dossier promotions (owner order 2026-08-21):
+                     # "$100 per order" probation clips. The FOK takes
+                     # $100 at his price or better, or nothing — the
+                     # same contract every whale trades under.
+                     "ferrarichampions2026": 100.00,
+                     "0x076daa87": 100.00}
 
 # PER-MARKET-TYPE MULTIPLIERS (owner go 2026-08-20 morning, from the
 # five-whale lifetime type calibration, 2026-08-18): spreads beat every
@@ -350,8 +356,11 @@ PER_FILL_BY_WHALE_SPORT = {("swisstony", "soccer"): 150.00,
 # promotion — deployed copy dollars roughly +55% today, and an
 # unchanged floor would trip on ordinary variance and halt the
 # profitable sleeve mid-weekend. The env var still overrides.
+# 3500 -> 5000 (2026-08-21, dossier promotions): two new $100-clip
+# whales add up to $12k/day of probation envelope on top of ~$10k —
+# same rule, same env override for an owner-set absolute.
 PMUS_LOSS_BREAKER_USD = float(
-    os.environ.get("PMUS_LOSS_BREAKER_USD", "3500"))
+    os.environ.get("PMUS_LOSS_BREAKER_USD", "5000"))
 
 
 # RN1 CAPTURE TOLERANCE (owner mandate 2026-08-20 midday: "make any and
@@ -420,7 +429,16 @@ def per_fill_usd(whale_username: str | None,
 # +24.6% ROI (7d fill-vs-miss). The envelope rule is unchanged; only
 # his baseline is recalibrated to his real volume (day envelope
 # ~$9k -> ~$25k at the $225 clip).
-BASELINE_FILLS_PER_DAY = {"rn1": 110.0, "swisstony": 30.0}
+BASELINE_FILLS_PER_DAY = {"rn1": 110.0, "swisstony": 30.0,
+                          # Probation envelopes for the 2026-08-21
+                          # promotions, from the 30-day flow study:
+                          # mapped-cell entries collapse ~2.2x by the
+                          # one-per-market rule, then ~25-35% capture →
+                          # expected ~40-60 and ~60-90 fills/day. The
+                          # baseline x $100 clip bounds each at
+                          # $4.5k/$7.5k a day while probation grades.
+                          "ferrarichampions2026": 45.0,
+                          "0x076daa87": 75.0}
 BASELINE_FILLS_DEFAULT = 20.0
 MIN_CLIP_USD = 5.0
 

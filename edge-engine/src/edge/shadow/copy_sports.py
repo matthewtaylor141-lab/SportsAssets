@@ -115,6 +115,25 @@ CELLS: dict[str, frozenset] = {
                                 ("basketball", "total"),
                                 ("hockey", "total")}),
     "swisstony": frozenset({("soccer", "moneyline"), ("soccer", "spread")}),
+    # Dossier promotions (owner order 2026-08-21, $100 probation clips):
+    # cells are the sports the 30-day flow study actually measured for
+    # each — tennis/soccer/baseball/basketball. Their in-game bucket
+    # (~55% of flow) is deliberately NOT a cell: unmapped by design.
+    # Two weeks of settled fills decide raise-or-drop.
+    "ferrarichampions2026": frozenset({
+        ("tennis", "moneyline"), ("tennis", "spread"), ("tennis", "total"),
+        ("soccer", "moneyline"), ("soccer", "spread"), ("soccer", "total"),
+        ("baseball", "moneyline"), ("baseball", "spread"),
+        ("baseball", "total"),
+        ("basketball", "moneyline"), ("basketball", "spread"),
+        ("basketball", "total")}),
+    "0x076daa87": frozenset({
+        ("tennis", "moneyline"), ("tennis", "spread"), ("tennis", "total"),
+        ("soccer", "moneyline"), ("soccer", "spread"), ("soccer", "total"),
+        ("baseball", "moneyline"), ("baseball", "spread"),
+        ("baseball", "total"),
+        ("basketball", "moneyline"), ("basketball", "spread"),
+        ("basketball", "total")}),
 }
 
 # whale -> (entry floor, entry ceiling) on HIS price, dollars.
