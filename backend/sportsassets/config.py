@@ -116,9 +116,21 @@ class Settings(BaseSettings):
     # usernames, matched against the tracked roster.
     ai_trader_vetting: str = ""
 
+    # Dossier promotions (owner order 2026-08-21: "get the 2 recommended
+    # traders added immediately and starting to be fired immediately").
+    # The env list stays the primary arming switch; this field adds the
+    # code-promoted probation whales so a promotion ships as one deploy
+    # instead of code + a manual env edit that can be forgotten (which
+    # is exactly what left them detecting but never firing for 2h on
+    # promotion day). Env AI_TRADER_SOURCE_EXTRA="" disarms them.
+    ai_trader_source_extra: str = "ferrarichampions2026,0x076daa87"
+
     def source_whales(self) -> set[str]:
-        return {s.strip().lower() for s in self.ai_trader_source.split(",")
-                if s.strip()}
+        return ({s.strip().lower() for s in self.ai_trader_source.split(",")
+                 if s.strip()}
+                | {s.strip().lower()
+                   for s in self.ai_trader_source_extra.split(",")
+                   if s.strip()})
 
     def vetting_whales(self) -> set[str]:
         return {s.strip().lower() for s in self.ai_trader_vetting.split(",")
