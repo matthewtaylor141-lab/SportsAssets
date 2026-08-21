@@ -1895,6 +1895,26 @@ async def live_status() -> dict:
         FROM live_orders GROUP BY 1 ORDER BY deployed DESC
         """
     )
+    # Sizing audit (owner question 2026-08-21: why is the average settled
+    # copy ~$30 against $225 clip caps?): per-whale 24h requested-vs-
+    # filled stats make the volume-normalized clip's behavior a served
+    # number — n_24h against the whale's baseline explains the shrink,
+    # and avg_filled == avg_requested rules out partial fills.
+    sizing = await pool.fetch(
+        """
+        SELECT COALESCE(whale_username, '?') AS whale,
+               count(*)::int AS n_24h,
+               round(avg(requested_usd), 2)::float8 AS avg_req,
+               round(avg(filled_usd), 2)::float8 AS avg_filled,
+               round(max(requested_usd), 2)::float8 AS max_req,
+               round(sum(filled_usd), 2)::float8 AS deployed_24h
+        FROM live_orders
+        WHERE status IN ('filled', 'settled', 'cashed_out')
+          AND placed_at > now() - interval '24 hours'
+          AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+        GROUP BY 1 ORDER BY deployed_24h DESC
+        """
+    )
     venue = active_venue()
     # Fill-vs-miss aggregate rides the public status (5-min cache) so
     # the hourly probe reads the copy thesis' direct test without an
@@ -1920,6 +1940,7 @@ async def live_status() -> dict:
         "venue": venue,
         "paused": paused,
         "by_whale": [dict(r) for r in by_whale],
+        "sizing_24h": [dict(r) for r in sizing],
         "fill_vs_miss_7d": fvm,
         "caps": {"per_fill": cfg.live_max_per_fill_usd, "daily": cfg.live_max_daily_usd,
                  "total": cfg.live_max_total_usd,
