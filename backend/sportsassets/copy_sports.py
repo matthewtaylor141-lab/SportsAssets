@@ -46,7 +46,17 @@ _KINDS = {"atc", "aec", "asc", "tsc", "astatc", "cpc"}
 SPORT_OF = {"nba": "basketball", "cbb": "basketball",
             "nfl": "football", "cfb": "football",
             "nhl": "hockey", "mlb": "baseball", "wnba": "wnba",
-            "atp": "tennis", "wta": "tennis", "itf": "tennis"}
+            "atp": "tennis", "wta": "tennis", "itf": "tennis",
+            # Esports out of the soccer/other bucket (leak found
+            # 2026-08-21 wiring the dossier promotions: 'aec-cs2-…'
+            # classified as soccer, so any whale with a soccer cell
+            # could copy esports). Named 'esports' = in nobody's CELLS,
+            # so cell-gated whales never copy it; UNRESTRICTED whales
+            # keep copying it exactly as before (their record on it is
+            # +$582 settled), now graded under its own label instead of
+            # polluting the soccer rows.
+            "cs2": "esports", "csgo": "esports", "dota2": "esports",
+            "lol": "esports", "valorant": "esports", "val": "esports"}
 
 # Whales copied WITHOUT a cell gate — the live sleeve's own record of
 # the first-entry-per-market rule is the governing measurement (owner
@@ -317,7 +327,10 @@ def copy_allowed(whale: str, slug: str, price: float | None = None) -> bool:
         return False
     if market_type_of(slug) in BLOCKED_TYPES:
         return False
-    if sport_of(slug) == "soccer":
+    if sport_of(slug) in ("soccer", "esports"):
+        # esports rode the soccer bucket until 2026-08-21; keeping the
+        # floor on it preserves the exact pre-split behavior for the
+        # UNRESTRICTED whales that copy it.
         try:
             if price is None or float(price) < SOCCER_PRICE_FLOOR:
                 return False
