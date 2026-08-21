@@ -1136,165 +1136,162 @@ jobs:
         timeout-minutes: 25
         run: |
           echo "###########################################################"
-          echo "#   WHALE CANDIDATE CENSUS v3 — co-trader mining + deep   #"
-          echo "#   settlement audit (owner roster-expansion ask)          #"
+          echo "#   WHALE CANDIDATE CENSUS v4 — 30d board, sports-filtered,#"
+          echo "#   settlement-graded (closed markets only)                #"
           echo "###########################################################"
           python - <<'PY'
-          import json, statistics as st, time, urllib.request, collections
+          import json, statistics as st, time, urllib.request
 
-          SEEDS = {  # current roster wallets — the pond definition + exclusions
-            "swisstony": "0x204f72f35326db932158cba6adff0b9a1da95e14",
-            "rn1": "0x2005d16a84ceefa912d4e380cd32e7ff827875ea",
-            "kch123": "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee",
-            "0x2c33": "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563"}
+          ROSTER = {"0x204f72f35326db932158cba6adff0b9a1da95e14",
+                    "0x2005d16a84ceefa912d4e380cd32e7ff827875ea",
+                    "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee",
+                    "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563"}
           DATA = "https://data-api.polymarket.com"
           GAMMA = "https://gamma-api.polymarket.com"
 
           def get(url, timeout=25):
               req = urllib.request.Request(url, headers={
-                  "User-Agent": "sportsassets-census/3.0"})
+                  "User-Agent": "sportsassets-census/4.0"})
               with urllib.request.urlopen(req, timeout=timeout) as r:
                   return json.loads(r.read().decode())
 
-          def trades(params, pages, per=100):
+          def board(window, limit=50):
+              try:
+                  return get(f"https://lb-api.polymarket.com/profit"
+                             f"?window={window}&limit={limit}")
+              except Exception as e:
+                  print(f"board {window} failed:", type(e).__name__)
+                  return []
+
+          rows = board("30d", 50)
+          wk = {(r.get("proxyWallet") or "").lower():
+                float(r.get("amount") or 0) for r in board("1w", 50)}
+          print("30d board:", len(rows), " 1w board:", len(wk))
+
+          SPORTKW = (("mlb","baseball"),("yankees","baseball"),("orioles","baseball"),
+              ("dodgers","baseball"),("nba","basketball"),("wnba","basketball"),
+              ("nfl","football"),("cfb","football"),("college football","football"),
+              ("nhl","hockey"),("atp","tennis"),("wta","tennis"),("itf","tennis"),
+              ("open","tennis"),("ufc","mma"),("epl","soccer"),("la liga","soccer"),
+              ("serie a","soccer"),("bundesliga","soccer"),("ligue","soccer"),
+              ("champions","soccer"),("europa","soccer"),("mls","soccer"),
+              ("premier","soccer"),("liga","soccer"))
+          def classify(t):
+              s = ((t.get("slug") or "") + " | " + (t.get("title") or "")).lower()
+              for k, v in SPORTKW:
+                  if k in s:
+                      return v
+              if " vs. " in s or " vs " in s or "-vs-" in s or " @ " in s:
+                  return "game"
+              return "nonsport"
+
+          def trades(w, pages, start_page=0):
               out = []
-              for pg in range(pages):
+              for pg in range(start_page, start_page + pages):
                   try:
-                      b = get(f"{DATA}/trades?{params}&limit={per}"
-                              f"&offset={pg*per}&takerOnly=false", 20)
+                      b = get(f"{DATA}/trades?user={w}&limit=100"
+                              f"&offset={pg*100}&takerOnly=false", 20)
                   except Exception:
                       break
                   if not b:
                       break
                   out.extend(b)
-                  if len(b) < per:
+                  if len(b) < 100:
                       break
-                  time.sleep(0.1)
+                  time.sleep(0.09)
               return out
 
-          # A) The pond: markets our whales traded most recently.
-          cids = collections.OrderedDict()
-          for name, w in SEEDS.items():
-              for t in trades(f"user={w}", 3):
-                  c = t.get("conditionId")
-                  if c:
-                      cids.setdefault(c, name)
-          cids = list(cids)[:150]
-          print("pond markets:", len(cids))
-
-          # B) Co-traders: wallets active across MANY of those markets.
-          seen = collections.Counter()
-          names = {}
-          for i, cid in enumerate(cids):
-              for t in trades(f"market={cid}", 1):
-                  w = (t.get("proxyWallet") or "").lower()
-                  if w and w not in SEEDS.values():
-                      seen[w] += 0  # ensure key
-              # count DISTINCT markets per wallet
-              for w in {(t.get("proxyWallet") or "").lower()
-                        for t in trades(f"market={cid}", 1)}:
-                  if w and w not in SEEDS.values():
-                      seen[w] += 1
-              if i % 25 == 0:
-                  print(f"  mined {i}/{len(cids)} markets, wallets {len(seen)}")
-          cand = [w for w, n in seen.most_common(60) if n >= 6]
-          print("co-trader candidates (>=6 shared markets):", len(cand))
-
-          # C) Fingerprint + deep settlement audit per candidate.
-          def sport_of(t):
-              s = ((t.get("slug") or "") + " " + (t.get("title") or "")).lower()
-              for k, v in (("mlb","baseball"),("baseball","baseball"),
-                           ("nba","basketball"),("wnba","basketball"),
-                           ("basketball","basketball"),("nfl","football"),
-                           ("cfb","football"),("football","football"),
-                           ("nhl","hockey"),("hockey","hockey"),
-                           ("atp","tennis"),("wta","tennis"),("itf","tennis"),
-                           ("tennis","tennis"),("open","tennis"),
-                           ("ufc","mma"),("epl","soccer"),("laliga","soccer"),
-                           ("serie","soccer"),("bundes","soccer"),
-                           ("ligue","soccer"),("ucl","soccer"),("uel","soccer"),
-                           ("mls","soccer"),("fc ","soccer"),("cf ","soccer"),
-                           (" fc","soccer"),("united","soccer"),("city","soccer")):
-                  if k in s:
-                      return v
-              return "other"
-
-          def audit(w):
-              tr = trades(f"user={w}", 30)
-              if len(tr) < 200:
-                  return None
+          for r in rows:
+              w = (r.get("proxyWallet") or "").lower()
+              name = r.get("name") or r.get("userName") or w[:10]
+              p30 = float(r.get("amount") or 0)
+              if not w or w in ROSTER or p30 < 250_000:
+                  continue
+              tr = trades(w, 30)
+              if len(tr) < 300:
+                  print(f"SKIP {name} thin sample {len(tr)}")
+                  continue
+              mix = {}
+              for t in tr:
+                  c = classify(t)
+                  mix[c] = mix.get(c, 0) + 1
+              sports_n = sum(v for k, v in mix.items() if k != "nonsport")
+              sports_share = sports_n / len(tr)
               ts = sorted(int(t.get("timestamp") or 0) for t in tr
                           if t.get("timestamp"))
+              span = (ts[-1] - ts[0]) / 86400 if len(ts) > 1 else 0
+              fpd = len(tr) / span if span > 0.3 else None
               sizes = [float(t.get("size") or 0)*float(t.get("price") or 0)
                        for t in tr]
-              buys = [t for t in tr
-                      if str(t.get("side","" )).upper() == "BUY"]
+              med = st.median(sizes) if sizes else 0
+              buys = [t for t in tr if str(t.get("side","")).upper()=="BUY"]
+              flags = []
+              if sports_share < 0.5: flags.append("non-sports")
+              if med < 2: flags.append("dust-mm")
+              if fpd and fpd > 2000: flags.append("hft-mm")
+              if len(buys)/len(tr) < 0.9: flags.append("two-sided")
+              base = {"name": name, "wallet": w, "profit_30d": round(p30),
+                  "profit_1w": round(wk.get(w, 0)), "sample_n": len(tr),
+                  "span_days": round(span,1),
+                  "fills_per_day": round(fpd,1) if fpd else None,
+                  "med_fill": round(med,2),
+                  "p90_fill": round(sorted(sizes)[int(len(sizes)*.9)],2) if sizes else None,
+                  "buy_share": round(len(buys)/len(tr),2),
+                  "sports_share": round(sports_share,2),
+                  "mix": dict(sorted(mix.items(), key=lambda kv:-kv[1])[:5]),
+                  "flags": flags}
+              if flags:
+                  print("CAND4 " + json.dumps(base, separators=(",",":")))
+                  continue
+              # deep grading pool: extend with older pages so closed
+              # markets exist; grade buy-only positions on CLOSED markets
+              tr2 = tr + trades(w, 20, start_page=30)
               pos = {}
-              for t in buys:
-                  cid = t.get("conditionId")
-                  if not cid:
+              for t in tr2:
+                  if str(t.get("side","")).upper() != "BUY":
                       continue
-                  k = (cid, t.get("outcomeIndex"))
-                  p = pos.setdefault(k, {"cost":0.0,"sh":0.0,
-                      "sport":sport_of(t),"cid":cid,
-                      "oi":t.get("outcomeIndex")})
+                  cid = t.get("conditionId"); oi = t.get("outcomeIndex")
+                  if not cid or oi is None:
+                      continue
+                  p = pos.setdefault((cid, oi), {"cost":0.0,"sh":0.0,
+                      "sport":classify(t)})
                   p["cost"] += float(t.get("size") or 0)*float(t.get("price") or 0)
                   p["sh"] += float(t.get("size") or 0)
               res = {}
-              allc = list({p["cid"] for p in pos.values()})
+              allc = list({cid for (cid, _) in pos})
               for i in range(0, len(allc), 20):
                   chunk = ",".join(allc[i:i+20])
                   try:
-                      for mkt in get(f"{GAMMA}/markets?condition_ids={chunk}", 20):
+                      for m in get(f"{GAMMA}/markets?condition_ids={chunk}", 20):
                           try:
-                              prices = json.loads(mkt.get("outcomePrices") or "[]")
+                              pr = [float(x) for x in
+                                    json.loads(m.get("outcomePrices") or "[]")]
                           except Exception:
-                              prices = []
-                          res[mkt.get("conditionId")] = {
-                              "closed": bool(mkt.get("closed")),
-                              "prices": [float(x) for x in prices]}
+                              pr = []
+                          if m.get("closed") and pr:
+                              res[m.get("conditionId")] = pr
                   except Exception:
                       pass
-                  time.sleep(0.1)
-              W=L=0; staked=won_usd=0.0
-              by_sport = {}
-              for p in pos.values():
-                  r = res.get(p["cid"])
-                  oi = p["oi"]
-                  if not r or not r["closed"] or oi is None                      or oi >= len(r["prices"]):
+                  time.sleep(0.08)
+              W=L=0; staked=pnl=0.0; by_sport={}
+              for (cid, oi), p in pos.items():
+                  pr = res.get(cid)
+                  if not pr or int(oi) >= len(pr):
                       continue
-                  win = r["prices"][int(oi)] > 0.5
-                  pnl = p["sh"] - p["cost"] if win else -p["cost"]
+                  win = pr[int(oi)] > 0.5
+                  d = p["sh"] - p["cost"] if win else -p["cost"]
                   W += win; L += (not win)
-                  staked += p["cost"]; won_usd += pnl
+                  staked += p["cost"]; pnl += d
                   b = by_sport.setdefault(p["sport"],
                       {"n":0,"w":0,"staked":0.0,"pnl":0.0})
                   b["n"] += 1; b["w"] += win
                   b["staked"] = round(b["staked"]+p["cost"],2)
-                  b["pnl"] = round(b["pnl"]+pnl,2)
-              span = (ts[-1]-ts[0])/86400 if len(ts) > 1 else 0
-              return {"wallet": w, "sample_n": len(tr),
-                  "span_days": round(span,1),
-                  "fills_per_day": round(len(tr)/span,1) if span>0.5 else None,
-                  "med_fill": round(st.median(sizes),2) if sizes else None,
-                  "p90_fill": round(sorted(sizes)[int(len(sizes)*.9)],2) if sizes else None,
-                  "buy_share": round(len(buys)/len(tr),2),
-                  "uniq_mkts": len({p["cid"] for p in pos.values()}),
-                  "shared_with_roster": seen.get(w,0),
-                  "graded": {"settled": W+L, "w": W, "l": L,
-                      "staked": round(staked,2), "pnl": round(won_usd,2),
-                      "roi": round(won_usd/staked,4) if staked else None},
-                  "by_sport": by_sport,
-                  "newest_age_d": round((time.time()-ts[-1])/86400,2) if ts else None}
-
-          for w in cand[:18]:
-              try:
-                  a = audit(w)
-              except Exception as e:
-                  print("audit failed", w[:10], type(e).__name__)
-                  continue
-              if a:
-                  print("AUDIT " + json.dumps(a, separators=(",",":")))
+                  b["pnl"] = round(b["pnl"]+d,2)
+              base["graded"] = {"settled": W+L, "w": W, "l": L,
+                  "staked": round(staked,2), "pnl": round(pnl,2),
+                  "roi": round(pnl/staked,4) if staked else None}
+              base["by_sport"] = by_sport
+              print("AUDIT4 " + json.dumps(base, separators=(",",":")))
           PY
 
       - name: BTC 15-min OVER/UNDER census (365d, via runner)
