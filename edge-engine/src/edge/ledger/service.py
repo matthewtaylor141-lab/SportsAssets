@@ -264,6 +264,44 @@ class Ledger:
 
     # ── writes ──────────────────────────────────────────────────────────
 
+    def reverse_spurious_sync_fills(self) -> int:
+        """One-time repair (2026-08-21): sync_kalshi_fills was dead code
+        while it parsed the venue's old field dialect, so NO fill row with
+        the 'kalshi-fill-' uid prefix can legitimately exist before the
+        sync cutover state is first written. Any such row was recorded by
+        the brief window in which the dialect fix deployed WITHOUT the
+        cutover guard — a re-record of an inline-recorded fill, i.e. a
+        doubled position. Reverse them: delete the fill row and back the
+        buy out of the (still-open) position at the fill's own recorded
+        price, clamped at zero. Resolved positions are left alone — a
+        buy applied to a resolved position was swallowed by
+        Position.apply and never changed shares. Caller guards this with
+        the kalshi_sync_cutover state so it runs exactly once."""
+        n = 0
+        with self._lock, self._conn() as conn:
+            rows = conn.execute(
+                "SELECT fill_uid, market_key, qty, price, fee FROM fills "
+                "WHERE fill_uid LIKE 'kalshi-fill-%' AND side = 'BUY'"
+            ).fetchall()
+            for uid, mkey, qty, price, fee in rows:
+                conn.execute("DELETE FROM fills WHERE fill_uid = ?", (uid,))
+                pos = conn.execute(
+                    "SELECT shares, cost_in, fees_paid, resolved "
+                    "FROM positions WHERE market_key = ?", (mkey,)
+                ).fetchone()
+                if pos and not pos[3]:
+                    shares = max(0.0, float(pos[0]) - float(qty))
+                    cost_in = max(0.0, float(pos[1]) - float(qty) * float(price))
+                    fees = max(0.0, float(pos[2]) - float(fee))
+                    conn.execute(
+                        "UPDATE positions SET shares=?, cost_in=?, "
+                        "avg_cost=?, fees_paid=? WHERE market_key=?",
+                        (shares, cost_in,
+                         (cost_in / shares) if shares > 1e-9 else 0.0,
+                         fees, mkey))
+                n += 1
+        return n
+
     def record_fill(
         self,
         fill_uid: str,

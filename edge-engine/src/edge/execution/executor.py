@@ -612,8 +612,48 @@ def sync_kalshi_fills(adapter, ledger: Ledger, mode: str) -> int:
             headers=adapter._auth_headers("GET", path), timeout=10)
         if resp.status_code != 200:
             return 0
+        # SYNC CUTOVER (audit follow-up 2026-08-21): this reconciler was
+        # dead code for its whole life (old field dialect parsed every
+        # fill as qty 0), so the venue's last-100 window is full of fills
+        # that were inline-recorded BEFORE the kalshi_inline marker
+        # existed. Recording history would double those positions. On
+        # first live pass: reverse anything the brief unguarded build
+        # already re-recorded, stamp the cutover, and only ever record
+        # fills that happen AFTER it. Fills with no parseable timestamp
+        # are skipped — fail closed, never "assume it's new".
+        cut = ledger.get_state("kalshi_sync_cutover")
+        if not cut:
+            repaired = 0
+            try:
+                repaired = ledger.reverse_spurious_sync_fills()
+            except Exception:  # noqa: BLE001 — repair must not stop sync
+                log.exception("spurious sync-fill repair failed")
+            cut = {"ts": time.time(), "repaired": repaired}
+            ledger.set_state("kalshi_sync_cutover", cut)
+            if repaired:
+                log.warning("reversed %d spurious sync re-records", repaired)
+        cut_ts = float(cut.get("ts") or 0)
+
+        def _fill_ts(f: dict) -> float:
+            v = f.get("created_time_ts")
+            if v is not None:
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return 0.0
+            raw = str(f.get("created_time") or "")
+            try:
+                from datetime import datetime
+                return datetime.fromisoformat(
+                    raw.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return 0.0
+
         n = 0
         for f in (resp.json() or {}).get("fills") or []:
+            fts = _fill_ts(f)
+            if fts <= cut_ts:
+                continue
             if f.get("side") != "yes":
                 continue
             # Both venue dialects (audit 2026-08-21): live responses

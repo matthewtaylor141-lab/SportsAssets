@@ -289,15 +289,20 @@ def test_sell_fill_sync_books_the_cash_out(monkeypatch):
                     status_code = 200
 
                     def json(inner):
+                        # created_time_ts sits AFTER the sync cutover:
+                        # fills with no parseable timestamp are skipped
+                        # fail-closed since the 2026-08-21 cutover guard.
                         return {"fills": [
                             {"action": "sell", "side": "yes",
                              "ticker": tk, "order_id": "x9",
                              "count": 3, "yes_price": 38,
+                             "created_time_ts": time.time() + 60,
                              "trade_id": "t1"},
                             # A sell this process never placed: ignored.
                             {"action": "sell", "side": "yes",
                              "ticker": "KXOTHER-1-A", "order_id": "zz",
                              "count": 2, "yes_price": 50,
+                             "created_time_ts": time.time() + 60,
                              "trade_id": "t2"},
                         ]}
                 return R()
@@ -316,3 +321,24 @@ def test_sell_fill_sync_books_the_cash_out(monkeypatch):
     pos = {p["market_key"]: p for p in led.open_positions(live_only=True)}
     assert f"kalshi:{tk}" not in pos or \
         float(pos[f"kalshi:{tk}"].get("shares") or 0) == 0
+
+
+def test_sync_cutover_reverses_spurious_rerecords(tmp_path):
+    """2026-08-21 cutover repair: a kalshi-fill-* BUY row existing before
+    the cutover state is first written is by definition a re-record of an
+    inline fill (sync was dead-dialect its whole life) — it is deleted
+    and backed out of the open position at its own recorded price."""
+    from edge.ledger.service import Ledger
+
+    led = Ledger(str(tmp_path / "l.db"))
+    led.record_fill(fill_uid="desk-9", venue="kalshi",
+                    market_key="kalshi:KXT-1", side="BUY", qty=10.0,
+                    price=0.40, mode="LIVE_BETA", category="manual")
+    led.record_fill(fill_uid="kalshi-fill-t9", venue="kalshi",
+                    market_key="kalshi:KXT-1", side="BUY", qty=10.0,
+                    price=0.40, mode="LIVE_BETA", category=None)
+    assert led.position("kalshi:KXT-1")["shares"] == 20.0
+    assert led.reverse_spurious_sync_fills() == 1
+    pos = led.position("kalshi:KXT-1")
+    assert pos["shares"] == 10.0
+    assert abs(pos["cost_in"] - 4.0) < 1e-9
