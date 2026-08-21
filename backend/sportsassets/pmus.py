@@ -293,12 +293,38 @@ def list_desk_events() -> list[dict]:
         except (TypeError, ValueError):
             return None
 
+    # The venue's event listing answers EMPTY without the right param
+    # variant (the edge adapter's census proved this in production —
+    # its _list_variants probe exists for exactly this reason). Probe
+    # the same ladder, most specific first, then page with the winner.
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    _iso = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    _now2 = _dt.now(_tz.utc)
+    variants = (
+        {"active": True, "closed": False,
+         "startTimeMin": _iso(_now2 - _td(hours=12)),
+         "startTimeMax": _iso(_now2 + _td(hours=96))},
+        {"active": True, "closed": False},
+        {"active": True},
+        {},
+    )
+    variant = None
+    for v in variants:
+        try:
+            probe = client.events.list({"limit": 100, **v}) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if probe.get("events"):
+            variant = v
+            break
+    if variant is None:
+        return _desk_cache["events"]
     events: dict[str, dict] = {}
     offset = 0
     for _ in range(14):                      # bounded paging
         try:
             resp = client.events.list(
-                {"limit": 100, "offset": offset}) or {}
+                {"limit": 100, "offset": offset, **variant}) or {}
         except Exception:  # noqa: BLE001 — stale cache beats a 500
             break
         got = resp.get("events") or []
