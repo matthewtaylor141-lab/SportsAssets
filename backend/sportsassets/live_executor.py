@@ -736,8 +736,12 @@ async def _execute_manual(asset: str, usd: float, note: str = "",
         await pool.execute(
             "UPDATE live_orders SET us_market_slug=$2 WHERE id=$1",
             row_id, mapping["market_slug"])
+        # Desk orders take the book's available size at the protected
+        # limit and cancel the rest (owner order 2026-08-21) — same
+        # partial-take contract as the copy path.
         result = await asyncio.to_thread(
-            pmus.submit_fok, mapping["market_slug"], limit, shares)
+            pmus.submit_fok, mapping["market_slug"], limit, shares,
+            False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
         filled = float(result["filled_shares"]) if result["ok"] else 0.0
         fill_price = float(result["fill_price"]) if result["ok"] else None
         await pool.execute(
@@ -814,8 +818,9 @@ async def _execute_manual_slug(pool, us_slug: str, usd: float, note: str,
         surrogate, None, ask, limit, round(shares * limit, 2),
         float(shares), venue, us_slug)
     try:
-        result = await asyncio.to_thread(pmus.submit_fok, us_slug,
-                                         limit, shares)
+        result = await asyncio.to_thread(
+            pmus.submit_fok, us_slug, limit, shares,
+            False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
         filled = float(result["filled_shares"]) if result["ok"] else 0.0
         fill_price = float(result["fill_price"]) if result["ok"] else None
         await pool.execute(

@@ -260,6 +260,100 @@ def event_board(event_slug: str) -> list[dict]:
     return rows
 
 
+# ── Venue-native desk listing (owner order 2026-08-21: the desk must
+# navigate like the venue itself) ────────────────────────────────────
+# The catalog-first board joined venue events against GLOBAL slugs and
+# silently dropped every event whose slug spelling differed — tennis
+# most of all (alternate totals and game/set spreads never rendered).
+# The venue's own event listing is the desk's source of truth now:
+# every event it lists, every market on each event, labeled with the
+# venue's own words. 30s cache: the desk re-quotes at order time, so
+# browse staleness is cosmetic.
+_desk_cache: dict = {"ts": 0.0, "events": []}
+_DESK_TTL_S = 30.0
+
+
+def list_desk_events() -> list[dict]:
+    """Every active event on the US venue with its full market board.
+
+    [{slug, title, league, markets: [{us_slug, label, price, kind}]}]
+    kind is the venue slug-grammar prefix (atc/aec moneyline, asc
+    spread, tsc total, astatc prop, ...) — the desk groups by it."""
+    import time as _t
+
+    now = _t.time()
+    if now - _desk_cache["ts"] < _DESK_TTL_S and _desk_cache["events"]:
+        return _desk_cache["events"]
+    client = _get_client()
+
+    def _px(v) -> float | None:
+        try:
+            f = float(v)
+            return f if 0 < f < 1 else None
+        except (TypeError, ValueError):
+            return None
+
+    events: dict[str, dict] = {}
+    offset = 0
+    for _ in range(14):                      # bounded paging
+        try:
+            resp = client.events.list(
+                {"limit": 100, "offset": offset}) or {}
+        except Exception:  # noqa: BLE001 — stale cache beats a 500
+            break
+        got = resp.get("events") or []
+        if not got:
+            break
+        for ev in got:
+            eslug = ev.get("slug") or ev.get("eventSlug") or ""
+            if not eslug:
+                continue
+            e = events.setdefault(eslug, {
+                "slug": eslug,
+                "title": _clean_title(ev.get("title")) or eslug,
+                "league": (eslug.split("-", 1)[0] or "").lower(),
+                "start": ev.get("startTime") or ev.get("startDate"),
+                "markets": []})
+            for m in ev.get("markets") or []:
+                if m.get("closed"):
+                    continue
+                title = (_clean_title(m.get("question")
+                                      or m.get("title"))
+                         or m.get("slug") or "")
+                sides = [x for x in (m.get("marketSides") or [])
+                         if isinstance(x, dict)]
+                if sides:
+                    for x in sides:
+                        ident = x.get("identifier")
+                        desc = x.get("description")
+                        if not ident or not desc:
+                            continue
+                        e["markets"].append({
+                            "us_slug": ident,
+                            "kind": (ident.split("-", 1)[0]
+                                     or "").lower(),
+                            "label": f"{title} — {desc}",
+                            "price": _px(x.get("price"))})
+                elif m.get("slug"):
+                    px = next((p for p in (_px(m.get(k)) for k in
+                               ("bestAsk", "best_ask", "price"))
+                               if p is not None), None)
+                    e["markets"].append({
+                        "us_slug": m["slug"],
+                        "kind": (m["slug"].split("-", 1)[0]
+                                 or "").lower(),
+                        "label": (f"{title} — {m['outcome']}"
+                                  if m.get("outcome") else title),
+                        "price": px})
+        if len(got) < 100:
+            break
+        offset += 100
+    out = [e for e in events.values() if e["markets"]]
+    if out:
+        _desk_cache.update(ts=now, events=out)
+    return _desk_cache["events"] if _desk_cache["events"] else out
+
+
 def slug_ask(us_slug: str) -> float | None:
     """Live ask for one orderable US slug, tolerant of both market
     shapes (marketSide identifier or plain market). None when the

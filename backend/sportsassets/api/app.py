@@ -942,6 +942,20 @@ async def api_admin_book(venue: str = Query(...),
 #    game populates, grouped the way the venues group them. Data is the
 #    venues' own (metadata + live books); the skin is ours. ──────────────
 
+def _desk_league_of(prefix: str) -> str:
+    """Venue event-slug prefix -> desk navigation bucket."""
+    p = (prefix or "").lower()
+    if p in ("mlb",): return "mlb"
+    if p in ("wnba",): return "wnba"
+    if p in ("nba", "cbb"): return "nba"
+    if p in ("nfl", "cfb"): return "nfl"
+    if p in ("nhl",): return "nhl"
+    if p.startswith(("atp", "wta", "itf")): return "tennis"
+    if p in ("cs2", "csgo", "dota2", "lol", "valorant", "val"):
+        return "esports"
+    return "soccer"
+
+
 _DESK_LEAGUES = {
     "mlb": ("mlb",), "wnba": ("wnba",), "nba": ("nba",),
     "nfl": ("nfl",), "nhl": ("nhl",),
@@ -1032,51 +1046,49 @@ async def api_desk_games(venue: str = Query("polymarket"),
             g["outcomes"].append({
                 "label": m.get("sub_title") or m.get("title"),
                 "ticker": t, "price": m.get("yes_ask")})
-        return {"games": [g for g in games.values()
-                          if g["outcomes"]][:20]}
+        out = [g for g in games.values() if g["outcomes"]]
+        counts = {}
+        for g in out:
+            counts[g["league"]] = counts.get(g["league"], 0) + 1
+        counts["all"] = len(out)
+        return {"games": out[:60], "counts": counts}
 
-    prefixes = _DESK_LEAGUES.get(league, ()) if league != "all" else ()
-    pool = await get_pool()
-    rows = await pool.fetch(
-        """
-        SELECT m.slug, m.title, mt.outcome, mt.outcome_index, mt.token_id
-        FROM markets m
-        JOIN market_tokens mt ON mt.condition_id = m.condition_id
-        WHERE COALESCE(m.resolved, false) = false
-        ORDER BY m.slug, mt.outcome_index
-        LIMIT 4000
-        """)
-    games: dict[str, dict] = {}
-    for r in rows:
-        slug = r["slug"] or ""
-        base = _game_base(slug)
-        if base is None or base[-10:] not in days:
+    # VENUE-NATIVE BOARD (owner order 2026-08-21: the desk must
+    # navigate like the venue itself — the catalog join dropped every
+    # event whose slug spelling differed, tennis worst of all). The
+    # venue's own event listing is the source of truth: every event it
+    # lists renders as a card, moneyline sides quoted from the listing
+    # itself, and the per-league counts come back in one response so
+    # the navigation reads like the venue's own category rail.
+    from .. import pmus as _pmus
+    try:
+        events = await asyncio.to_thread(_pmus.list_desk_events)
+    except Exception:  # noqa: BLE001
+        events = []
+    league_of_ev = _desk_league_of
+    counts: dict[str, int] = {}
+    cards = []
+    for ev in events:
+        lg = league_of_ev(ev["league"])
+        counts[lg] = counts.get(lg, 0) + 1
+        if league != "all" and lg != league:
             continue
-        lg = base.split("-", 1)[0]
-        if prefixes and lg not in prefixes:
-            continue
-        if league == "all" and lg not in {p for ps in
-                                          _DESK_LEAGUES.values()
-                                          for p in ps}:
-            continue
-        g = games.setdefault(base, {
-            "id": base, "venue": "polymarket", "league": lg,
-            "title": None, "markets_n": 0, "outcomes": []})
-        g["markets_n"] += 1
-        # The bare (suffix-free) slug IS the game's moneyline market.
-        if slug == base and market_type_of(slug) == "moneyline":
-            g["title"] = r["title"]
-            g["outcomes"].append({"label": r["outcome"],
-                                  "asset": str(r["token_id"]),
-                                  "price": None})
-    picked = [g for g in games.values() if g["outcomes"]][:14]
-    quotes = await _pm_quote_many(
-        [o["asset"] for g in picked for o in g["outcomes"]])
-    for g in picked:
-        for o in g["outcomes"]:
-            o["price"] = (quotes.get(o["asset"]) or {}).get("ask")
-        g["title"] = g["title"] or g["id"]
-    return {"games": picked}
+        ml = [m for m in ev["markets"] if m["kind"] in ("aec", "atc")]
+        outs = [{"label": (m["label"].split("—")[-1].strip()
+                           or m["label"]),
+                 "us_slug": m["us_slug"], "price": m["price"]}
+                for m in ml[:3]]
+        if not outs:
+            m0 = ev["markets"][0]
+            outs = [{"label": m0["label"], "us_slug": m0["us_slug"],
+                     "price": m0["price"]}]
+        cards.append({
+            "id": ev["slug"], "venue": "polymarket", "league": lg,
+            "title": ev["title"], "markets_n": len(ev["markets"]),
+            "outcomes": outs})
+    counts["all"] = len(events)
+    cards.sort(key=lambda g: (g["id"][-10:], g["id"]))
+    return {"games": cards[:80], "counts": counts}
 
 
 @app.get("/api/admin/desk-game", dependencies=[Depends(require_admin)])
@@ -1182,97 +1194,84 @@ async def api_desk_game(venue: str = Query(...),
                    if k not in korder],
                 "positions": []}
 
-    pool = await get_pool()
-    rows = await pool.fetch(
-        """
-        SELECT m.slug, m.title, mt.outcome, mt.outcome_index, mt.token_id
-        FROM markets m
-        JOIN market_tokens mt ON mt.condition_id = m.condition_id
-        WHERE COALESCE(m.resolved, false) = false
-          AND m.slug LIKE $1 || '%'
-        ORDER BY m.slug, mt.outcome_index
-        LIMIT 300
-        """, id)
-    groups: dict[str, list] = {}
-    title = id
-    for r in rows:
-        slug = r["slug"] or ""
-        if _game_base(slug) != id:
-            continue
-        mtype = market_type_of(slug)
-        label = group_label.get(mtype, "Props & More")
-        if slug == id:
-            title = r["title"] or title
-        groups.setdefault(label, []).append({
-            "label": (r["outcome"] if slug == id
-                      else f"{r['title']} — {r['outcome']}"
-                      if r["title"] else r["outcome"]),
-            "asset": str(r["token_id"]), "slug": slug, "price": None})
-    all_assets = [mk["asset"] for g in groups.values() for mk in g]
-    quotes = await _pm_quote_many(all_assets)
-    for g in groups.values():
-        for mk in g:
-            mk["price"] = (quotes.get(mk["asset"]) or {}).get("ask")
-    # VENUE-FIRST BOARD (owner order 2026-08-12: "All markets that are
-    # available on Kalshi or Polymarket for every single game needs to
-    # be shown and able to be executed"): the catalog only knows
-    # whale-traded + discovery markets, which left tennis games showing
-    # a bare moneyline. The venue's own event listing is the truth —
-    # everything it lists beyond the catalog joins the board as a
-    # slug-orderable row. Moneyline stays catalog-only when the catalog
-    # already has it (those rows carry book depth); labels dedupe the
-    # rest, and a rare duplicate row is just the same market twice,
-    # bounded by the manual sleeve's own caps.
+    # VENUE-NATIVE FULL BOARD (owner order 2026-08-21): the event id
+    # IS the venue's own eventSlug from the desk listing — every market
+    # the venue lists for it renders, grouped by the venue slug grammar
+    # with the venue's own market titles (tennis alternate totals and
+    # game/set spreads included, because nothing filters them anymore).
     from .. import pmus as _pmus
     try:
-        board = await asyncio.to_thread(_pmus.event_board, id)
-    except Exception:  # noqa: BLE001 — the catalog view still serves
-        board = []
-    if board:
-        have_labels = {(mk.get("label") or "").strip().lower()
-                       for g in groups.values() for mk in g}
-        have_ml = "Moneyline" in groups
-        kind_group = {"aec": "Moneyline", "atc": "Moneyline",
-                      "asc": "Spreads", "tsc": "Totals"}
-        for r in board:
-            kind = (r["us_slug"] or "").split("-", 1)[0]
-            grp = kind_group.get(kind, "Props & More")
-            if grp == "Moneyline" and have_ml:
-                continue
-            if (r["label"] or "").strip().lower() in have_labels:
-                continue
-            groups.setdefault(grp, []).append({
-                "label": r["label"], "us_slug": r["us_slug"],
-                "price": r["price"]})
-    # The desk's own open positions in this game (manual sleeve).
+        events = await asyncio.to_thread(_pmus.list_desk_events)
+    except Exception:  # noqa: BLE001
+        events = []
+    ev = next((e for e in events if e["slug"] == id), None)
+    if ev is None:
+        try:
+            board = await asyncio.to_thread(_pmus.event_board, id)
+        except Exception:  # noqa: BLE001
+            board = []
+        ev = {"slug": id, "title": id,
+              "markets": [{"us_slug": r["us_slug"],
+                           "kind": (r["us_slug"] or "").split("-", 1)[0],
+                           "label": r["label"], "price": r["price"]}
+                          for r in board]}
+    kind_group = {"aec": "Moneyline", "atc": "Moneyline",
+                  "asc": "Spreads", "tsc": "Totals",
+                  "astatc": "Props & Specials"}
+
+    def _grp(mk: dict) -> str:
+        g = kind_group.get(mk["kind"], "More Markets")
+        lbl = (mk["label"] or "").lower()
+        # The venue's own wording decides the tennis subgroups the
+        # trader expects to see (game/set spreads, set winners).
+        if "set" in lbl and g in ("Spreads", "Moneyline",
+                                  "More Markets"):
+            return "Set Markets"
+        return g
+
+    groups: dict[str, list] = {}
+    for mk in ev["markets"]:
+        groups.setdefault(_grp(mk), []).append({
+            "label": mk["label"], "us_slug": mk["us_slug"],
+            "price": mk["price"]})
+    # The desk's own open positions on this event (manual sleeve),
+    # matched by venue slug — the game key both sides share.
+    pool = await get_pool()
     pos_rows = await pool.fetch(
         """
-        SELECT lo.asset, lo.fill_price::float8 AS fill_price,
+        SELECT lo.asset, lo.us_market_slug,
+               lo.fill_price::float8 AS fill_price,
                lo.filled_shares::float8 AS shares,
                lo.filled_usd::float8 AS cost, lo.status,
                lo.pnl::float8 AS pnl, mt.outcome
         FROM live_orders lo
         LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
-        LEFT JOIN markets m ON m.condition_id = mt.condition_id
         WHERE lo.whale_username = 'manual'
           AND lo.status IN ('filled', 'settled')
-          AND m.slug LIKE $1 || '%'
-        """, id)
+        ORDER BY lo.placed_at DESC LIMIT 200
+        """)
+    from ..live_executor import _us_game_key
+    ev_key = _us_game_key(f"atc-{id}") or id
     positions = []
     for p in pos_rows:
-        cur = (quotes.get(str(p["asset"])) or {}).get("bid")
+        us = p["us_market_slug"] or ""
+        if (_us_game_key(us) or "") != ev_key:
+            continue
         positions.append({
-            "asset": str(p["asset"]), "outcome": p["outcome"],
+            "asset": str(p["asset"] or us),
+            "outcome": p["outcome"] or us,
             "cost": p["cost"], "fill_price": p["fill_price"],
             "shares": p["shares"], "status": p["status"],
-            "current_value": (round(cur * p["shares"], 2)
-                              if cur and p["shares"] else None),
+            "current_value": None,
             "to_win": round(p["shares"], 2) if p["shares"] else None,
             "pnl": p["pnl"]})
-    order = ["Moneyline", "Spreads", "Totals", "Props & More"]
-    return {"id": id, "venue": "polymarket", "title": title,
+    order = ["Moneyline", "Spreads", "Totals", "Set Markets",
+             "Props & Specials", "More Markets"]
+    return {"id": id, "venue": "polymarket", "title": ev["title"],
             "groups": [{"name": k, "markets": groups[k]}
-                       for k in order if k in groups],
+                       for k in order if k in groups]
+            + [{"name": k, "markets": v} for k, v in groups.items()
+               if k not in order],
             "positions": positions}
 
 
@@ -1532,6 +1531,35 @@ async def api_kud_result(
         body.exit_price, body.pnl,
         (body.error or None) and body.error[:300])
     return {"ok": True}
+
+
+@app.get("/api/admin/manual-order", dependencies=[Depends(require_admin)])
+async def api_manual_order(id: int = Query(...)) -> dict:
+    """Live status of ONE desk order — the ticket polls this at 1s
+    until terminal so the trader watches the AI counterparty execute
+    in real time (owner order 2026-08-21: confirmation must be
+    instant, not a blotter refresh)."""
+    pool = await get_pool()
+    r = await pool.fetchrow(
+        """
+        SELECT lo.id, lo.status, lo.error, lo.venue,
+               lo.placed_at, lo.us_market_slug,
+               lo.limit_price::float8 AS limit_price,
+               lo.fill_price::float8 AS fill_price,
+               lo.requested_usd::float8 AS requested_usd,
+               lo.filled_usd::float8 AS filled_usd,
+               lo.filled_shares::float8 AS filled_shares
+        FROM live_orders lo
+        WHERE lo.id = $1 AND lo.whale_username = 'manual'
+        """, id)
+    if r is None:
+        return {"found": False}
+    d = dict(r)
+    d["found"] = True
+    d["terminal"] = d["status"] in ("filled", "settled", "unfilled",
+                                    "rejected", "error", "cashed_out")
+    d["placed_at"] = d["placed_at"].isoformat() if d["placed_at"] else None
+    return d
 
 
 @app.get("/api/admin/manual-trades", dependencies=[Depends(require_admin)])

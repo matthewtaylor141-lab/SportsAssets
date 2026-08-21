@@ -2681,11 +2681,14 @@ def _main_impl() -> None:
                             json=res, headers=hdrs, timeout=10)
                 except Exception as exc:  # noqa: BLE001 — relay never dies
                     log.warning("desk relay pass failed: %s", exc)
-                time.sleep(10)
+                # 10s -> 2s (owner order 2026-08-21: desk confirmation
+                # must feel instant; one light GET to our own API).
+                time.sleep(float(os.environ.get(
+                    "EDGE_DESK_RELAY_POLL_S", "2")))
 
         threading.Thread(target=_desk_relay_loop, daemon=True,
                          name="desk-relay").start()
-        log.warning("manual desk relay armed (10s poll)")
+        log.warning("manual desk relay armed (2s poll)")
 
     # First-set comeback sleeve (owner order 2026-08-17): its own thread
     # and cadence, never inside the copy loop — an FSC pass reads a book
