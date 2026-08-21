@@ -549,6 +549,32 @@ jobs:
             || echo "  (unavailable)"
 
           echo ""
+          echo "#   KCR-PROV: crypto-whale detection provenance            #"
+          # The crypto leg refuses everything as stale (>90s). This says
+          # WHY: per crypto whale, are trades arriving source=chain
+          # (sub-second, fresh) or source=poll (3-6 min Data-API lag,
+          # always stale at the 90s bar)? latency_s = detected_at - ts.
+          curl -sS --max-time 60 -o /tmp/whales.json "$BASE/api/whales" || true
+          for W in 0xf705fa04 jnstrtprdctnmrkts; do
+            WID=$(jq -r --arg w "$W" \
+              '(.whales // .) | .[] | select((.username // "" | ascii_downcase) == $w) | .id' \
+              /tmp/whales.json 2>/dev/null | head -1)
+            if [ -z "$WID" ]; then
+              echo "  KCR-PROV $W: NOT IN ROSTER (/api/whales has no such username)"
+              continue
+            fi
+            curl -sS --max-time 60 "$BASE/api/feed?whale_id=$WID&limit=8" 2>/dev/null | \
+              jq -r --arg w "$W" '. as $rows
+                | if (type=="array" and length > 0) then
+                    ($rows | map(select(.source=="chain")) | length) as $ch
+                    | ($rows | map(select(.source=="poll")) | length) as $po
+                    | "  KCR-PROV \($w) (id \(.[0].whale_id)): last \(length) rows — chain \($ch) / poll \($po)",
+                      (.[0:4][] | "    \(.ts)  src=\(.source // "?")  lat=\(.latency_s // "?")s  \(.side) $\(.notional)")
+                  else "  KCR-PROV \($w) (id ?): no trade rows in feed" end' \
+              || echo "  KCR-PROV $W: feed fetch failed"
+          done
+
+          echo ""
           echo "###########################################################"
           echo "#                 EDGE DISTRIBUTION                       #"
           echo "###########################################################"
