@@ -1000,6 +1000,14 @@ jobs:
                                    {"d0": [], "d2": []})
               c["d0"].append(d0); c["d2"].append(d2)
               time.sleep(0.1)
+          # Acceptance ladder (owner report ask): share of books whose
+          # within-2c depth absorbs each stake size in full.
+          LADDER = (75, 225, 450, 1000, 2000, 3000)
+          for (sp, ty), c in sorted(cells.items()):
+              xs = c["d2"]; n = len(xs)
+              pct = " ".join(f"@{k}={round(100*sum(1 for x in xs if x >= k)/n)}%"
+                             for k in LADDER)
+              print(f"ACCEPT {sp}|{ty}  n={n}  {pct}")
           print("books probed:", probed, " errors:", err)
           if probed and probed < 25:
               print("WARNING: small sample - treat medians as indicative")
