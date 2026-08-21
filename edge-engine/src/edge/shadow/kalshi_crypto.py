@@ -402,6 +402,11 @@ def sweep(client, ledger, risk, candidates: list[dict]) -> None:
     funnel["halted"] = False
     markets = None
     now = time.time()
+    # One snapshot per sweep (audit 2026-08-21): open_positions ran a
+    # full table query per CANDIDATE for the event-cross guard. Fills
+    # within this sweep append to it manually below.
+    open_keys = [p["market_key"]
+                 for p in ledger.open_positions(live_only=risk.is_live)]
     for c in candidates:
         funnel["seen"] += 1
         w = (c.get("username") or "").lower()
@@ -450,10 +455,9 @@ def sweep(client, ledger, risk, candidates: list[dict]) -> None:
             _refuse("never-add")
             continue
         held_event = any(
-            p["market_key"].startswith("kalshi:")
-            and _event_key(p["market_key"].split(":", 1)[1])
-            == _event_key(m["ticker"])
-            for p in ledger.open_positions(live_only=risk.is_live))
+            k.startswith("kalshi:")
+            and _event_key(k.split(":", 1)[1]) == _event_key(m["ticker"])
+            for k in open_keys)
         if held_event:
             _refuse("event-cross")
             continue
@@ -484,6 +488,7 @@ def sweep(client, ledger, risk, candidates: list[dict]) -> None:
                           "his_notional": notional,
                           "limit": limit, "klass": cand["klass"],
                           "pm_slug": c.get("market_slug")})
+            open_keys.append(f"kalshi:{m['ticker']}")
             funnel["filled"] += 1
             funnel["contracts"] += filled
             funnel["deployed_usd"] = round(

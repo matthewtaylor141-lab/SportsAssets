@@ -20,10 +20,12 @@ def test_tennis_ticker_identifier():
 
 
 def test_kalshi_copy_sweep_runs_but_tennis_never_places():
-    """Owner clarification 2026-08-17 late night: ex-tennis copies stay
-    on Kalshi; tennis never trades there. The sweep runs by default
-    (EDGE_KCOPY_PM_ONLY=1 remains the whole-leg dark switch) and its
-    own venue-level tennis block refuses every tennis row."""
+    """Owner clarification 2026-08-17 late night: tennis never trades
+    on Kalshi. Since the 2026-08-19 leg pause, EDGE_KCOPY_PM_ONLY
+    defaults ON — an UNSET env means the whole Kalshi copy leg is dark
+    (7d record 79W-138L, -$5,032; audit 2026-08-21 confirmed the pause
+    stands) — and the venue-level tennis block refuses every tennis
+    row whenever the leg is re-armed."""
     import tempfile
     import time as _time
 
@@ -32,8 +34,8 @@ def test_kalshi_copy_sweep_runs_but_tennis_never_places():
     from tests.test_kalshi_copies import _ROW, _Kalshi
 
     runner = (SRC / "shadow" / "runner.py").read_text()
-    assert 'os.environ.get("EDGE_KCOPY_PM_ONLY", "0")' in runner, \
-        "the sweep must RUN by default (ex-tennis stays on Kalshi)"
+    assert 'os.environ.get("EDGE_KCOPY_PM_ONLY", "1")' in runner, \
+        "missing env must mean the Kalshi copy leg is PAUSED (fail dark)"
 
     led = Ledger(db_path=tempfile.mkdtemp() + "/l.sqlite3")
     ka = _Kalshi(0.48, outcomes={"Jannik Sinner": "T-SIN",

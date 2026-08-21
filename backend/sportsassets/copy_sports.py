@@ -98,12 +98,15 @@ HALTED_SPORTS = frozenset()
 # absent price must not disable it).
 SOCCER_PRICE_FLOOR = 0.40
 
-# Whales copied NOWHERE right now (owner directive 2026-08-11 during the
-# profitability review): HomeRunHazard measured flat-negative on his own
-# live record (33 fills, 10 settled, -$0.80) while his prop-heavy flow
-# fed the losing prop cohort below. Pausing is reversible; his cells and
-# band stay defined above so un-pausing is a one-line delete.
-PAUSED = frozenset({"homerunhazard"})
+# Whales copied NOWHERE right now. HomeRunHazard's 2026-08-11 pause
+# cited 10 settled at -$0.80 with prop-heavy flow feeding the losing
+# prop cohort; both facts are superseded (owner review 2026-08-21):
+# his settled book reached 12W-8L, +$275.50 on $263.51 (+104.6% ROI,
+# tennis 7W-3L +$197.56, baseball 5W-4L +$118.89) and the prop bleed
+# is now structurally blocked for everyone via BLOCKED_TYPES. Vetting
+# base: 14,383 probes at +1.14% per-$1k at our real latency. Un-paused
+# on that evidence; his cells and band still gate every fill.
+PAUSED: frozenset[str] = frozenset()
 
 # Market types copied for NOBODY — including UNRESTRICTED whales (owner
 # directive 2026-08-11): live prop copies graded 3W/16L, -64% ROI.

@@ -113,10 +113,12 @@ def test_sport_assignments_gate_the_sweep():
     assert not ka.orders
     st2, ka2, _ = _run(0.48)     # 0x2c33 + wnba ML: unrestricted
     assert ka2.orders == [("T-DAL", 0.48, 625)]  # $300 -> 625 contracts
+    # HomeRunHazard un-paused 2026-08-21 (12W-8L, +104.6% ROI settled):
+    # his wnba ML flow now copies again on this leg's gates too. The
+    # PAUSED mechanism itself is covered in test_copy_sports.
     hrh = {**_ROW, "whale": "HomeRunHazard"}
     sth, kah, _ = _run(0.48, rows=[hrh])
-    assert sth.get("skipped_sport") == 1 and not kah.orders, \
-        "paused whale refused even in his formerly-assigned cell"
+    assert kah.orders, "un-paused whale copies in his assigned cell"
     row3 = {**_ROW, "whale": "RN1"}
     st3, ka3, _ = _run(0.48, rows=[row3])
     assert st3["copied"] == 1

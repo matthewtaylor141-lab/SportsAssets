@@ -12,46 +12,58 @@ from sportsassets.pmus import _feed_derivative
 
 
 # ── inverse volume<->size scaling ───────────────────────────────────
-class _CountPool:
-    def __init__(self, n):
-        self.n = n
+class _SpentPool:
+    def __init__(self, spent):
+        self.spent = spent
 
     async def fetchval(self, sql, *a):
-        assert "count(*)" in sql
-        # Review 2026-08-12: settled fills stay in the day's count
+        assert "sum(filled_usd)" in sql
+        # Review 2026-08-12: settled fills stay in the day's sum
         # (else the clip scales back UP as games resolve) and
         # stranded 'submitting' rows must never shrink it.
         assert "'settled'" in sql and "'cashed_out'" in sql
         assert "submitting" not in sql
-        return self.n
+        return self.spent
 
 
-def _clip(whale, n, slug=None):
-    return asyncio.run(volume_normalized_clip(_CountPool(n), whale, slug))
+def _clip(whale, spent, slug=None):
+    return asyncio.run(volume_normalized_clip(_SpentPool(spent), whale, slug))
 
 
-def test_clip_is_base_at_or_under_baseline():
+def test_clip_is_base_at_or_under_envelope():
+    """Dollars, not row count (audit 2026-08-21): the governor scales by
+    money actually deployed against the whale's dollar envelope
+    (baseline fills x clip), so partial IOC takes no longer burn a full
+    baseline slot."""
     assert _clip("rn1", 0) == 225.00
-    # rn1 baseline 40 -> 110 (owner go 2026-08-20): full size through
-    # his real ~109-fill day instead of shrinking from fill 41.
-    assert _clip("rn1", 110) == 225.00          # exactly baseline
-    assert _clip("swisstony", 30) == 300.00
+    # rn1 baseline 150 (owner go 2026-08-21, audit lever 1): envelope
+    # 150 x $225 = $33,750 — full size to the envelope's edge.
+    assert _clip("rn1", 150 * 225.00) == 225.00
+    assert _clip("swisstony", 30 * 300.00) == 300.00
 
 
-def test_ten_x_fills_means_one_tenth_size():
-    assert _clip("rn1", 1100) == pytest.approx(22.50)     # 225 * 110/1100
-    assert _clip("swisstony", 300) == pytest.approx(30.00)  # 300 * 30/300
+def test_partial_takes_do_not_burn_full_slots():
+    # 300 partial takes of ~$9 = $2,700 deployed — nowhere near the
+    # $33,750 envelope. The old count-based governor shrank the clip to
+    # $82.50 here; the dollar governor keeps full size.
+    assert _clip("rn1", 300 * 9.0) == 225.00
+
+
+def test_ten_x_dollars_means_one_tenth_size():
+    assert _clip("rn1", 10 * 150 * 225.00) == pytest.approx(22.50)
+    assert _clip("swisstony", 10 * 30 * 300.00) == pytest.approx(30.00)
 
 
 def test_clip_floors_at_five_dollars_and_never_scales_up():
-    assert _clip("rn1", 100000) == 5.00
-    assert _clip("rn1", 111) < 225.00
+    assert _clip("rn1", 10_000_000) == 5.00
+    assert _clip("rn1", 150 * 225.00 + 500) < 225.00
 
 
 def test_sport_override_is_the_scaling_base():
-    # swisstony soccer base is $150 (+50% order 2026-08-17): 10x -> $15.
-    assert _clip("swisstony", 300, "epl-ars-che-2026-08-15") == \
-        pytest.approx(15.00)
+    # swisstony soccer base is $225 (audit lever 2, 2026-08-21): 10x the
+    # soccer envelope -> $22.50.
+    assert _clip("swisstony", 10 * 30 * 225.00, "epl-ars-che-2026-08-15") == \
+        pytest.approx(22.50)
 
 
 def test_unreadable_count_degrades_to_base_clip():

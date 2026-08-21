@@ -807,8 +807,13 @@ async def _cashout_sweep(pool) -> dict:
 # SA_COPY_EXIT=0 is the desk override (kill switch).
 COPY_EXIT_ENABLED = os.environ.get("SA_COPY_EXIT", "1") != "0"
 COPY_EXIT_TAKE = float(os.environ.get("SA_COPY_EXIT_TAKE", "0.20"))
+# 500 -> 15 (owner go 2026-08-21): the $500 floor made this sweep
+# provably dead code — copy clips cap ~$75-225 and never-add prevents
+# accumulation, so max gain at the +20% trigger is ~$20-45. $15 lets
+# the systematized take-profit actually fire on real copy positions
+# while still refusing dust exits the fees would eat.
 COPY_EXIT_MIN_GAIN_USD = float(
-    os.environ.get("SA_COPY_EXIT_MIN_GAIN", "500"))
+    os.environ.get("SA_COPY_EXIT_MIN_GAIN", "15"))
 
 
 async def _copy_exit_sweep(pool) -> dict:

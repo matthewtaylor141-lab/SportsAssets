@@ -336,7 +336,12 @@ TYPE_MULT: dict[tuple[str, str], float] = {
     ("kch123", "spread"): 2.0,
     ("rn1", "btts"): 1.5,
 }
-PER_FILL_BY_WHALE_SPORT = {("swisstony", "soccer"): 150.00,
+# swisstony soccer 150 -> 225 (owner go 2026-08-21, audit lever 2):
+# his filled copies grade +25.2% ROI (30d fill-vs-miss) while his
+# missed cohort grades -26.8% — the selectivity is doing the work, so
+# the fills that DO pass the gates earn a bigger clip. Same +50% step
+# discipline as every prior raise.
+PER_FILL_BY_WHALE_SPORT = {("swisstony", "soccer"): 225.00,
                            ("rn1", "tennis"): 112.50,
                            ("rn1", "baseball"): 375.00,
                            ("rn1", "soccer"): 300.00,
@@ -379,13 +384,19 @@ PMUS_LOSS_BREAKER_USD = float(
 RN1_TOL_CENTS = float(os.environ.get("PMUS_RN1_TOL_CENTS", "2"))
 
 
-def copy_limit_price(whale_username: str | None, his_price: float) -> float:
+def copy_limit_price(whale_username: str | None, his_price: float,
+                     fresh: bool = True) -> float:
     """FOK limit for a copy: his price floored to the venue tick —
-    same-or-better — plus the per-whale capture tolerance (RN1 +2c)."""
+    same-or-better — plus the per-whale capture tolerance (RN1 +2c).
+
+    fresh=False (the sweep's reclaims, audit 2026-08-21): NO tolerance.
+    The +2c evidence base is fresh-capture misses grading +5.3%; paying
+    2c over a days-old entry price is adverse selection, not capture."""
     import math
 
     limit = math.floor(round(his_price * 100, 6)) / 100.0
-    if (whale_username or "").lower() == "rn1" and RN1_TOL_CENTS > 0:
+    if fresh and (whale_username or "").lower() == "rn1" \
+            and RN1_TOL_CENTS > 0:
         limit = min(0.99, round(limit + RN1_TOL_CENTS / 100.0, 2))
     return limit
 
@@ -431,7 +442,12 @@ def per_fill_usd(whale_username: str | None,
 # +24.6% ROI (7d fill-vs-miss). The envelope rule is unchanged; only
 # his baseline is recalibrated to his real volume (day envelope
 # ~$9k -> ~$25k at the $225 clip).
-BASELINE_FILLS_PER_DAY = {"rn1": 110.0, "swisstony": 30.0,
+# rn1 110 -> 150 (owner go 2026-08-21, audit lever 1): the 30-day
+# fill-vs-miss grades his MISSED copies +10.1% ROI on 1,086 resolved —
+# the misses themselves are profitable trades, so the volume governor
+# was throttling provable edge. 150 keeps the envelope rule while
+# letting his real flow through (~$34k day envelope at the $225 clip).
+BASELINE_FILLS_PER_DAY = {"rn1": 150.0, "swisstony": 30.0,
                           # Probation envelopes for the 2026-08-21
                           # promotions, from the 30-day flow study:
                           # mapped-cell entries collapse ~2.2x by the
@@ -453,22 +469,27 @@ async def volume_normalized_clip(pool, whale_username: str | None,
     w = (whale_username or "").lower()
     baseline = BASELINE_FILLS_PER_DAY.get(w, BASELINE_FILLS_DEFAULT)
     try:
+        # DOLLARS, not row count (audit 2026-08-21): since the IOC
+        # partial-take change a $9 partial fill burned the same
+        # baseline slot as a full $225 fill, systematically shrinking
+        # clips on exactly the thin-book days partial-take exists for.
+        # The governor now scales by dollars actually deployed against
+        # the whale's dollar envelope (baseline fills x this clip).
         # Statuses (adversarial review 2026-08-12): 'settled' and
-        # 'cashed_out' STAY in the count — a fill that resolved is
-        # still a fill this day, and dropping it let the clip scale
-        # back UP as games settled. 'submitting' is excluded so a
-        # stranded in-flight row can never permanently shrink the
-        # clip; real submits become 'filled' within seconds.
-        n = int(await pool.fetchval(
-            "SELECT count(*) FROM live_orders "
+        # 'cashed_out' STAY in the sum — money deployed today is still
+        # deployed after it resolves; 'submitting' is excluded so a
+        # stranded in-flight row can never permanently shrink the clip.
+        spent = float(await pool.fetchval(
+            "SELECT COALESCE(sum(filled_usd), 0) FROM live_orders "
             "WHERE lower(COALESCE(whale_username, '')) = $1 "
             "AND status IN ('filled', 'settled', 'cashed_out') "
             "AND placed_at > now() - interval '24 hours'", w) or 0)
     except Exception:  # noqa: BLE001 — degrade to base, never block
-        n = 0
-    if n <= baseline:
+        spent = 0.0
+    envelope = baseline * base
+    if envelope <= 0 or spent <= envelope:
         return base
-    return max(MIN_CLIP_USD, round(base * baseline / n, 2))
+    return max(MIN_CLIP_USD, round(base * envelope / spent, 2))
 
 
 def _ladder_kind(us_slug: str) -> str | None:
@@ -1041,7 +1062,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         # worse. A book that ran past him is a skipped copy, not a
         # chased one. RN1 carries a bounded +2c capture tolerance
         # (owner mandate 2026-08-20 — see copy_limit_price).
-        limit = copy_limit_price(payload.get("whale_username"), his_price)
+        limit = copy_limit_price(payload.get("whale_username"), his_price,
+                                 fresh=reaction is not None)
         if limit <= 0:
             return
         per = await volume_normalized_clip(

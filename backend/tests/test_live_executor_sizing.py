@@ -19,14 +19,15 @@ def test_proven_sleeves_clip_at_their_owner_set_sizes():
 
 
 def test_swisstony_soccer_limits_at_one_hundred():
-    """Owner order 2026-08-12: '$100 per event on soccer' — the sport
-    override beats his $200 whale clip on soccer slugs only; other
-    sports and other whales are untouched by it."""
-    assert per_fill_usd("SwissTony", "atc-epl-ars-che-2026-08-15-ars") == 150.00
-    assert per_fill_usd("swisstony", "epl-ars-che-2026-08-15") == 150.00
+    """Soccer sport override: $150 -> $225 (owner go 2026-08-21, audit
+    lever 2 — his filled copies grade +25.2% while his missed cohort
+    grades -26.8%; selectivity earns the bigger clip). The override
+    still beats his whale clip on soccer slugs only."""
+    assert per_fill_usd("SwissTony", "atc-epl-ars-che-2026-08-15-ars") == 225.00
+    assert per_fill_usd("swisstony", "epl-ars-che-2026-08-15") == 225.00
     # The misc bucket (table tennis etc.) classifies as soccer — the
     # conservative clip rides along:
-    assert per_fill_usd("swisstony", "setkameua-pakser-sydand-2026-08-11") == 150.00
+    assert per_fill_usd("swisstony", "setkameua-pakser-sydand-2026-08-11") == 225.00
     # Non-soccer swisstony stays $200; other whales ignore the override.
     assert per_fill_usd("swisstony", "aec-atp-rafjod-artfil-2026-08-11") == 300.00
     assert per_fill_usd("rn1", "atc-epl-ars-che-2026-08-15-ars") == 300.00  # soccer cell (2026-08-17)
@@ -67,9 +68,10 @@ class TestTypeMultipliers:
     they never unblock a 0.00 cell."""
 
     def test_spreads_scale_up_for_every_whale(self):
-        # swisstony soccer spread: $150 soccer cap x 1.5.
+        # swisstony soccer spread: $225 soccer cap x 1.5 (cap raised
+        # 150 -> 225, owner go 2026-08-21 audit lever 2).
         assert per_fill_usd(
-            "swisstony", "asc-epl-ars-che-2026-08-20-neg-1pt5") == 225.00
+            "swisstony", "asc-epl-ars-che-2026-08-20-neg-1pt5") == 337.50
         # rn1 whale-feed spread grammar (bare line after date): his
         # $300 soccer sport-override x 1.5.
         assert per_fill_usd(
@@ -94,7 +96,7 @@ class TestTypeMultipliers:
         assert per_fill_usd(
             "rn1", "aec-atp-rafjod-artfil-2026-08-21-raf") == 112.50
         assert per_fill_usd("swisstony",
-                            "atc-epl-ars-che-2026-08-20-ars") == 150.00
+                            "atc-epl-ars-che-2026-08-20-ars") == 225.00
 
     def test_a_blocked_cell_is_never_unblocked_by_a_multiplier(self):
         from sportsassets.live_executor import _W2C33

@@ -39,6 +39,10 @@ jobs:
         env:
           DEFAULT_BASE: https://sportsassets-api.onrender.com
           OVERRIDE: ${{ github.event.inputs.api_base }}
+          # Optional repo secret: enables the DESKG board-count and
+          # JARVIS-notes probe lines (admin-gated endpoints). Absent
+          # secret -> those curls 401 and the lines print nothing.
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
         run: |
           BASE="${OVERRIDE:-$DEFAULT_BASE}"
           echo "API base: $BASE"
@@ -289,6 +293,25 @@ jobs:
              /tmp/live.json 2>/dev/null || true
           jq -r '.manual_desk.recent // [] | .[] | "  MDESK \(.placed_at // "?") \(.status) req $\(.req // 0) filled $\(.filled // 0) [\(.venue // "?")] \(.error // "")"' \
              /tmp/live.json 2>/dev/null || true
+
+          # Desk board health (owner report 2026-08-21 "no markets
+          # carrying"): non-zero counts prove the venue-native listing
+          # variant probe is returning events end-to-end.
+          echo "DESK BOARD:"
+          curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               "$BASE/api/admin/desk-games?venue=polymarket" -o /tmp/deskg.json || true
+          jq -r '"  DESKG pm games \(.games // [] | length) counts \(.counts // {} | to_entries | map("\(.key):\(.value)") | join(" "))"' \
+             /tmp/deskg.json 2>/dev/null || true
+
+          # JARVIS notes bridge: unread voice-cockpit notes for the
+          # engine session, printed then marked delivered.
+          echo "JARVIS NOTES:"
+          curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               "$BASE/api/admin/jarvis-notes?mark=1" -o /tmp/jnotes.json || true
+          jq -r '(.notes // []) | .[] | "  JNOTE #\(.id) [\(.created_at)] \(.note)"' \
+             /tmp/jnotes.json 2>/dev/null || true
+          jq -r '"  JNOTE-REMAINING \(.unread_remaining // 0)"' \
+             /tmp/jnotes.json 2>/dev/null || true
 
           echo "KALSHI CRYPTO LEG (owner order 2026-08-21):"
           jq -r '.detail.kalshi_crypto // {} |
@@ -785,6 +808,24 @@ jobs:
                 || echo "LOGOBLOB_$i FAILED $u"
             done
           fi
+
+      - name: Kalshi crypto strike shapes (below-band ground truth)
+        if: always()
+        run: |
+          B="https://api.elections.kalshi.com/trade-api/v2"
+          echo "###########################################################"
+          echo "#   CRYPTO STRIKE SHAPES (does the ladder list below-bands?)"
+          echo "###########################################################"
+          # Audit 2026-08-21: the crypto copy leg refuses whale 'below X'
+          # bets as unsupported. If these ladders list cap-only (less-
+          # than) markets, buying YES on one is a LONG — an exact twin
+          # for that whole flow. Evidence first, then the leg extends.
+          for S in KXBTC KXBTCD KXETH KXETHD; do
+            curl -sS --max-time 30 "$B/events?series_ticker=$S&status=open&with_nested_markets=true&limit=2" -o /tmp/ss.json || true
+            jq -r --arg s "$S" '.events[]? | .event_ticker as $e |
+                   .markets[]? | "  STRIKE \($s) \(.ticker) type=\(.strike_type // "none") floor=\(.floor_strike // "-") cap=\(.cap_strike // "-")"' \
+               /tmp/ss.json 2>/dev/null | head -30 || true
+          done
 
       - name: Kalshi series census (runner has open internet; the container does not)
         if: always()

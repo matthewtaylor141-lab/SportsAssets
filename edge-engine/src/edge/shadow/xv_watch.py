@@ -102,6 +102,15 @@ class XVWatch:
             keys = sorted(self._registry)
         if not keys:
             return
+        # Freeze check BEFORE any book work (audit 2026-08-21): a frozen
+        # watcher was still paying up to 100+ REST reads per 3s tick just
+        # to discover, per pair, that it may not fire. One state read
+        # skips the whole scan while the freeze holds.
+        frozen = self._ledger.get_state("xv_exposed_block") or {}
+        if float(frozen.get("until", 0)) > now:
+            self.stats["blocked_exposed"] = \
+                self.stats.get("blocked_exposed", 0) + 1
+            return
         self.stats["scans"] += 1
         start, n = self._rr, len(keys)
         batch = [keys[(start + i) % n] for i in range(min(self.scan_cap, n))]

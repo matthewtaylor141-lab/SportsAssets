@@ -93,10 +93,32 @@ class Poller:
             params={"user": whale["address"], "limit": 100, "takerOnly": "false"},
         )
         resp.raise_for_status()
-        new = 0
+        events = []
         for raw in resp.json():
             ev = parse_data_api_trade(raw, whale["id"], whale["username"])
             if not ev.tx_hash or ev.size <= 0:
+                continue
+            events.append(ev)
+        if not events:
+            return 0
+        # BATCH PRE-DEDUPE (audit 2026-08-21): nearly every returned row
+        # is already ingested, and the old path paid a sport SELECT plus
+        # an INSERT-conflict round trip PER ROW — hundreds of wasted
+        # queries/sec across the fast lane, on the same Postgres the
+        # executor prices against. One ANY() probe drops the known rows;
+        # the INSERT ... ON CONFLICT stays as the authoritative gate for
+        # anything that races in between.
+        pool = await get_pool()
+        keys = [ev.dedupe_key() for ev in events]
+        try:
+            seen = {r["dedupe_key"] for r in await pool.fetch(
+                "SELECT dedupe_key FROM trades "
+                "WHERE dedupe_key = ANY($1::text[])", keys)}
+        except Exception:  # noqa: BLE001 — pre-filter is an optimization
+            seen = set()
+        new = 0
+        for ev, key in zip(events, keys):
+            if key in seen:
                 continue
             sport = await _sport_for_condition(ev.condition_id)
             if sport:
@@ -123,16 +145,30 @@ class Poller:
                 if not whales:
                     await asyncio.sleep(10)
                     continue
-                stagger = max(self._priority_interval / len(whales), 0.25)
-                for whale in whales:
+
+                # CONCURRENT pass, time-boxed cycle (audit 2026-08-21):
+                # the sequential loop added the stagger ON TOP of each
+                # poll's duration, so 9 priority wallets ran a real
+                # cycle of ~8-11s against the configured 2.5s. Polls now
+                # fire together — the shared Data-API throttle still
+                # serializes the HTTP starts and bounds total rps — and
+                # the sleep is whatever remains of the interval, not a
+                # fixed add-on.
+                async def _one(whale: dict) -> None:
                     try:
                         await self.poll_wallet(whale)
-                    except Exception as exc:  # noqa: BLE001 — one bad wallet
-                        # must never stall the fast lane; the main loop's
-                        # failure accounting owns alerting.
+                    except Exception as exc:  # noqa: BLE001 — one bad
+                        # wallet must never stall the fast lane; the
+                        # main loop's failure accounting owns alerting.
                         log.warning("fast-lane poll failed for %s: %s",
                                     whale["address"], exc)
-                    await asyncio.sleep(stagger)
+
+                import time as _t
+                t0 = _t.monotonic()
+                await asyncio.gather(*(_one(w) for w in whales))
+                elapsed = _t.monotonic() - t0
+                await asyncio.sleep(
+                    max(0.25, self._priority_interval - elapsed))
             except Exception:  # noqa: BLE001 — roster fetch etc.
                 log.exception("fast-lane pass failed; retrying")
                 await asyncio.sleep(5)

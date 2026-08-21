@@ -60,18 +60,22 @@ def test_disallowed_cells_fail_closed():
     assert not copy_allowed("swisstony", "")
 
 
-def test_paused_whale_copies_nothing():
-    """Owner directive 2026-08-11 (profitability review): HomeRunHazard
-    paused — flat-negative live record, prop-heavy flow. Every cell that
-    used to pass now refuses, including his strongest, at any price."""
+def test_paused_whale_copies_nothing(monkeypatch):
+    """The PAUSED mechanism refuses every cell for a paused whale, at
+    any price. HomeRunHazard came OFF this list 2026-08-21 (12W-8L,
+    +$275.50, +104.6% ROI settled; prop bleed now blocked at the type
+    level for everyone) — the mechanism is exercised with a synthetic
+    entry, and HRH's strongest cell is asserted COPYABLE again."""
+    from sportsassets import copy_sports as cs
+
+    monkeypatch.setattr(cs, "PAUSED", frozenset({"homerunhazard"}))
     assert not copy_allowed("HomeRunHazard", "tsc-mlb-sf-tex-2026-08-05-o8pt5",
                             price=0.55)
-    assert not copy_allowed("homerunhazard", "tsc-wnba-dal-wsh-2026-08-05-o160",
-                            price=0.62)
-    assert not copy_allowed("homerunhazard", "atc-wnba-dal-wsh-2026-08-05-wsh",
-                            price=0.50)
     assert not copy_allowed("homerunhazard", "mlb-tor-hou-2026-08-08-o8pt5",
                             price=0.60)
+    monkeypatch.setattr(cs, "PAUSED", frozenset())
+    assert copy_allowed("HomeRunHazard", "tsc-mlb-sf-tex-2026-08-05-o8pt5",
+                        price=0.55)
     # No band constraint for the unpaused (band-less) whales.
     assert copy_allowed("rn1", "aec-atp-rafjod-cormou-2026-08-06",
                         price=0.12)

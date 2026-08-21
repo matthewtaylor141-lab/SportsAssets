@@ -395,16 +395,23 @@ def test_zero_counters_are_not_emitted():
 
 
 def test_copy_exit_gain_floor_and_threshold(monkeypatch):
-    """R4 (2026-08-17): copy exits trigger only at +20% AND >= $500
-    unrealized gain judged at the sale limit, never for underdog/manual
-    rows (those have their own paths)."""
+    """R4 (2026-08-17): copy exits trigger only at +20% AND >= the gain
+    floor judged at the sale limit, never for underdog/manual rows.
+    Floor 500 -> 15 (owner go 2026-08-21): $500 was provably dead code
+    against $75-225 clips (max gain at trigger ~$20-45); $15 lets the
+    systematized take-profit fire on real copy positions while still
+    refusing dust exits."""
     from sportsassets.workers import underdog as ud
 
     want = ud.cash_out_threshold(0.50, take=ud.COPY_EXIT_TAKE)
     assert want == 0.60
-    # $500 floor at the sale limit: 0.10 * qty >= 500 -> qty >= 5000
-    assert (want - 0.50) * 4990 < ud.COPY_EXIT_MIN_GAIN_USD - 1e-6
-    assert (want - 0.50) * 5001 >= ud.COPY_EXIT_MIN_GAIN_USD - 1e-6
+    assert ud.COPY_EXIT_MIN_GAIN_USD == 15.0
+    # $15 floor at the sale limit: 0.10 * qty >= 15 -> qty >= 150.
+    assert (want - 0.50) * 149 < ud.COPY_EXIT_MIN_GAIN_USD - 1e-6
+    assert (want - 0.50) * 151 >= ud.COPY_EXIT_MIN_GAIN_USD - 1e-6
+    # A real copy clip now clears the floor: $100 @ 0.50 = 200 shares,
+    # +20% = $20 gain — the sweep can actually fire.
+    assert (want - 0.50) * 200 >= ud.COPY_EXIT_MIN_GAIN_USD
     # kill switch honored
     monkeypatch.setattr(ud, "COPY_EXIT_ENABLED", False)
     import asyncio

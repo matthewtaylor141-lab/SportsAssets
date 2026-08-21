@@ -166,7 +166,8 @@ async def build(since_day: str) -> dict:
                        'YYYY-MM-DD') AS day,
                pnl, filled_usd, us_market_slug
         FROM live_orders
-        WHERE status = 'settled' AND settled_at IS NOT NULL
+        WHERE status IN ('settled', 'cashed_out')
+          AND settled_at IS NOT NULL
         """)
     windowed = []
     for r in rows:

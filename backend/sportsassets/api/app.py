@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -153,6 +154,19 @@ def require_admin(x_admin_token: str = Header(default="")) -> None:
         raise HTTPException(status_code=401, detail="admin token required")
 
 
+def check_engine_token(supplied: str | None) -> None:
+    """Engine-feed auth (audit 2026-08-21): every engine endpoint was
+    comparing with != — non-constant-time, and unlike the admin path,
+    unstripped (a trailing-newline env var silently 401'd the whole
+    engine). Same discipline as require_admin, one place."""
+    import hmac
+
+    got = (supplied or "").strip()
+    expected = (settings().engine_ingest_token or "").strip()
+    if not expected or not hmac.compare_digest(got, expected):
+        raise HTTPException(status_code=401, detail="engine token required")
+
+
 # ── Health & config ─────────────────────────────────────────────────
 
 
@@ -223,14 +237,35 @@ async def health_services() -> list[dict]:
     return out
 
 
+# Ping throttle (audit 2026-08-21): the unlock diagnostic is a public
+# yes/no oracle for token guesses and the app has no other rate limit.
+# 10 attempts/min/IP is far above any human retyping a token and far
+# below a useful brute force.
+_PING_HITS: dict[str, list[float]] = {}
+
+
 @app.post("/api/admin/ping")
-async def admin_ping(x_admin_token: str = Header(default="")) -> dict:
+async def admin_ping(request: Request,
+                     x_admin_token: str = Header(default="")) -> dict:
     """Unlock diagnostic. Reveals nothing about the token's value — only
     whether a non-default token is configured on the server and whether this
     attempt matched, so the UI can say 'wrong token' vs 'env not applied'
     instead of one ambiguous failure message."""
     import hmac
+    import time as _t
 
+    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
+        or (request.client.host if request.client else "?")
+    now = _t.time()
+    hits = [t for t in _PING_HITS.get(ip, []) if now - t < 60]
+    if len(hits) >= 10:
+        raise HTTPException(status_code=429, detail="slow down")
+    hits.append(now)
+    _PING_HITS[ip] = hits
+    if len(_PING_HITS) > 1000:      # bound the map; drop stale IPs
+        for k in [k for k, v in _PING_HITS.items()
+                  if not v or now - v[-1] > 300][:500]:
+            _PING_HITS.pop(k, None)
     supplied = (x_admin_token or "").strip()
     expected = (settings().admin_token or "").strip()
     return {
@@ -293,7 +328,7 @@ async def stream(request: Request) -> StreamingResponse:
 
 @app.get("/api/feed")
 async def api_feed(
-    limit: int = Query(50, le=200),
+    limit: int = Query(50, ge=1, le=200),
     before_id: int | None = None,
     whale_id: int | None = None,
     sport: str | None = None,
@@ -463,7 +498,10 @@ async def _fresh_whale_idents(fresh_s: float) -> list[dict]:
 
 
 @app.get("/api/whale-open-identities")
-async def api_whale_open_identities(fresh_s: float | None = None) -> dict:
+async def api_whale_open_identities(
+        fresh_s: float | None = None,
+        x_engine_token: str = Header(default=""),
+        authorization: str = Header(default="")) -> dict:
     """Source whales' open BUY positions as identity rows for the engine's
     whale-alignment tagging: [{slug, outcome}]. Moneyline-shaped consumers
     only — the engine joins on game key + team name at the mapper bar.
@@ -476,7 +514,16 @@ async def api_whale_open_identities(fresh_s: float | None = None) -> dict:
     this snapshot's 90s TTL. When set, a bounded fresh-tail query is
     merged over the snapshot (fresh rows win by asset) so the woken sweep
     can actually price the position that woke it. Tail failures serve the
-    plain snapshot — freshness is an upgrade, never an outage."""
+    plain snapshot — freshness is an upgrade, never an outage.
+
+    ENGINE-ONLY (audit 2026-08-21): this feed is, in real time, the list
+    of positions the engine is about to copy — publicly it was a
+    front-runner's dream. Gated on the engine token; the engine's
+    whale_align client sends it as a Bearer header, so both header
+    shapes are accepted."""
+    bearer = authorization.removeprefix("Bearer ").strip() \
+        if authorization.startswith("Bearer ") else ""
+    check_engine_token(x_engine_token or bearer)
     data = _whale_idents_cache["data"]
     if data is None:
         return {"identities": [], "as_of": None, "warming": True}
@@ -521,7 +568,12 @@ async def api_whale_day(whale_id: int, day: str) -> dict:
         d = _date.fromisoformat(day)
     except ValueError:
         raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD") from None
-    bets = [b for b in await settled_bets(whale_id) if b["settled_at"].date() == d]
+    # ET day, not UTC (audit 2026-08-21): the platform's reporting day
+    # is US/Eastern everywhere else (track_record.RECORD_TZ) — a 9:30pm
+    # ET settlement was landing on tomorrow's drill-down.
+    from .track_record import RECORD_TZ
+    bets = [b for b in await settled_bets(whale_id)
+            if b["settled_at"].astimezone(RECORD_TZ).date() == d]
     pool = await get_pool()
     activity = await pool.fetchrow(
         "SELECT count(*)::int AS trades, COALESCE(sum(notional),0)::float8 AS volume "
@@ -579,8 +631,7 @@ class EngineFillBody(BaseModel):
 @app.post("/api/engine/fills")
 async def engine_fill_ingest(body: EngineFillBody, x_engine_token: str = Header(default="")) -> dict:
     cfg = settings()
-    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
-        raise HTTPException(status_code=401, detail="engine token required")
+    check_engine_token(x_engine_token)
     import hashlib
 
     from datetime import datetime, timezone
@@ -626,8 +677,7 @@ async def engine_status_ingest(
     body: EngineStatusBody, x_engine_token: str = Header(default="")
 ) -> dict:
     cfg = settings()
-    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
-        raise HTTPException(status_code=401, detail="engine token required")
+    check_engine_token(x_engine_token)
     if not (body.detail or {}).get("boot"):
         _unstamped_drops["n"] += 1
         _unstamped_drops["last_at"] = time.time()
@@ -652,8 +702,7 @@ async def kalshi_claim_ingest(
     PMUS paths never buy the same whale position twice (one copy per
     position ACROSS venues — owner rule). Idempotent by asset."""
     cfg = settings()
-    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
-        raise HTTPException(status_code=401, detail="engine token required")
+    check_engine_token(x_engine_token)
     if not body.asset.strip():
         return {"ok": False, "ignored": "empty asset"}
     pool = await get_pool()
@@ -1305,6 +1354,46 @@ async def api_fill_vs_miss(days: int = Query(7, ge=1, le=30)) -> dict:
     return {"days": days, "whales": grade_rows(rows)}
 
 
+class JarvisNoteBody(BaseModel):
+    note: str
+
+
+@app.post("/api/admin/jarvis-note", dependencies=[Depends(require_admin)])
+async def api_jarvis_note(body: JarvisNoteBody) -> dict:
+    """The JARVIS voice cockpit's one-way bridge to the autonomous engine
+    session: notes queue here and the engine session reads them at its
+    check-ins (probe prints unread + marks delivered)."""
+    note = (body.note or "").strip()
+    if not note:
+        return {"ok": False, "error": "empty note"}
+    pool = await get_pool()
+    nid = await pool.fetchval(
+        "INSERT INTO jarvis_notes (note) VALUES ($1) RETURNING id",
+        note[:4000])
+    return {"ok": True, "id": nid,
+            "detail": "queued — the engine session reads notes at its "
+                      "next check-in (within the hour)"}
+
+
+@app.get("/api/admin/jarvis-notes", dependencies=[Depends(require_admin)])
+async def api_jarvis_notes(mark: int = 0,
+                           limit: int = Query(20, ge=1, le=100)) -> dict:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id, note, created_at FROM jarvis_notes "
+        "WHERE read_at IS NULL ORDER BY id LIMIT $1", limit)
+    if mark and rows:
+        await pool.execute(
+            "UPDATE jarvis_notes SET read_at = now() "
+            "WHERE id = ANY($1::bigint[])", [r["id"] for r in rows])
+    remaining = int(await pool.fetchval(
+        "SELECT count(*) FROM jarvis_notes WHERE read_at IS NULL") or 0)
+    return {"notes": [{"id": r["id"], "note": r["note"],
+                       "created_at": r["created_at"].isoformat()}
+                      for r in rows],
+            "unread_remaining": remaining}
+
+
 class ManualTradeBody(BaseModel):
     asset: str = ""            # Polymarket token id
     usd: float
@@ -1440,8 +1529,7 @@ async def api_crypto_copy_candidates(
     different bet, and staleness must not depend on one process's
     clock."""
     cfg = settings()
-    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
-        raise HTTPException(status_code=401, detail="engine token required")
+    check_engine_token(x_engine_token)
     from .copies_record import CRYPTO_WHALES
 
     pool = await get_pool()
@@ -1466,8 +1554,7 @@ async def api_manual_kalshi_queue(
 ) -> dict:
     """Pending desk orders for the engine's Kalshi relay."""
     cfg = settings()
-    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
-        raise HTTPException(status_code=401, detail="engine token required")
+    check_engine_token(x_engine_token)
     pool = await get_pool()
     rows = await pool.fetch(
         "SELECT id, ticker, side, limit_price::float8 AS limit_price, "
@@ -1490,8 +1577,7 @@ async def api_manual_kalshi_result(
     body: KalshiRelayResult, x_engine_token: str = Header(default="")
 ) -> dict:
     cfg = settings()
-    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
-        raise HTTPException(status_code=401, detail="engine token required")
+    check_engine_token(x_engine_token)
     if body.status not in ("placed", "filled", "unfilled", "error"):
         raise HTTPException(status_code=400, detail="bad status")
     pool = await get_pool()
@@ -1514,8 +1600,7 @@ async def api_held_assets(x_engine_token: str = Header(default="")) -> dict:
     (owner 2026-08-08: 'trades are higher than $10 per trade' — each
     sleeve capped its own ticket while stacking one position)."""
     cfg = settings()
-    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
-        raise HTTPException(status_code=401, detail="engine token required")
+    check_engine_token(x_engine_token)
     pool = await get_pool()
     rows = await pool.fetch(
         "SELECT DISTINCT asset FROM live_orders "
@@ -1533,8 +1618,7 @@ async def api_kud_queue(x_engine_token: str = Header(default="")) -> dict:
     first so a full day's slate can never starve an open window behind
     tonight's waiting games."""
     cfg = settings()
-    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
-        raise HTTPException(status_code=401, detail="engine token required")
+    check_engine_token(x_engine_token)
     pool = await get_pool()
     rows = await pool.fetch(
         "SELECT id, game_slug, league, dog_outcome, other_outcome, "
@@ -1562,8 +1646,7 @@ async def api_kud_result(
     body: KudResult, x_engine_token: str = Header(default="")
 ) -> dict:
     cfg = settings()
-    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
-        raise HTTPException(status_code=401, detail="engine token required")
+    check_engine_token(x_engine_token)
     if body.status not in ("filled", "cashed_out", "no_market", "band_fail",
                            "held", "unfilled", "error", "missed"):
         raise HTTPException(status_code=400, detail="bad status")
@@ -1712,8 +1795,7 @@ async def engine_methodology_ingest(
     always describes the system that produced it.
     """
     cfg = settings()
-    if not cfg.engine_ingest_token or x_engine_token != cfg.engine_ingest_token:
-        raise HTTPException(status_code=401, detail="engine token required")
+    check_engine_token(x_engine_token)
     from ..db import heartbeat
 
     await heartbeat("edge_methodology", "ok", {
@@ -1771,6 +1853,16 @@ async def kalshi_open() -> dict:
     return {"updated_at": updated, **ko}
 
 
+# Heartbeat-detail keys that must never reach the public GET (audit
+# 2026-08-21): the raw venue account exports let anyone reconstruct the
+# entire book, and raw error strings can embed internal URLs. The System
+# page reads the rest of the detail (funnel counters, budgets) — strip,
+# don't gate. venue_truth reads the DB row directly and is unaffected.
+_ENGINE_STATUS_PRIVATE_KEYS = ("kalshi_export_raw", "pmus_export_raw",
+                               "venue_export_raw", "kalshi_export",
+                               "positions_raw_sample", "fills_raw_sample")
+
+
 @app.get("/api/engine/status")
 async def engine_status() -> dict:
     pool = await get_pool()
@@ -1781,6 +1873,14 @@ async def engine_status() -> dict:
     d = dict(row)
     if isinstance(d.get("detail"), str):
         d["detail"] = json.loads(d["detail"])
+    if isinstance(d.get("detail"), dict):
+        det = dict(d["detail"])
+        for k in list(det):
+            if k in _ENGINE_STATUS_PRIVATE_KEYS or k.endswith("_raw"):
+                det.pop(k, None)
+        if det.get("last_error"):
+            det["last_error"] = str(det["last_error"])[:120]
+        d["detail"] = det
     # How often a stale (unstamped) engine process is still posting — a
     # nonzero, growing count means a stray instance is alive somewhere.
     d["unstamped_drops"] = dict(_unstamped_drops)
@@ -1916,9 +2016,32 @@ async def admin_live_switch(action: str) -> dict:
 _FVM_CACHE: dict = {"ts": 0.0, "data": None}
 
 
+# 15s payload cache (audit 2026-08-21): this endpoint is polled by every
+# open page and ran ~9 queries per request including lifetime full-table
+# aggregates over live_orders — the exact load class that OOM-flapped
+# this instance before. One viewer's compute serves everyone for 15s.
+_LIVE_STATUS_CACHE: dict = {"ts": 0.0, "data": None}
+_LIVE_STATUS_LOCK = asyncio.Lock()
+
+
 @app.get("/api/live-status")
 async def live_status() -> dict:
     """LIVE beta account state: config, kill switch, bankroll usage, orders."""
+    now = time.time()
+    if _LIVE_STATUS_CACHE["data"] is not None \
+            and now - _LIVE_STATUS_CACHE["ts"] < 15:
+        return _LIVE_STATUS_CACHE["data"]
+    async with _LIVE_STATUS_LOCK:
+        now = time.time()
+        if _LIVE_STATUS_CACHE["data"] is not None \
+                and now - _LIVE_STATUS_CACHE["ts"] < 15:
+            return _LIVE_STATUS_CACHE["data"]
+        data = await _live_status_uncached()
+        _LIVE_STATUS_CACHE.update(ts=time.time(), data=data)
+        return data
+
+
+async def _live_status_uncached() -> dict:
     from ..live_executor import PAUSE_KEY, active_venue
 
     cfg = settings()
@@ -2451,6 +2574,10 @@ async def api_today_live() -> dict:
     except Exception:  # noqa: BLE001
         return {"pnl": 0.0, "settled": 0, "wins": 0, "recent": [],
                 "warming": True}
+    # Sargable ET-day predicate (audit 2026-08-21): the to_char()-equals
+    # form is a function of the column — unindexable, so every 12s poll
+    # scanned all settled rows. A half-open range on settled_at uses the
+    # migration-024 partial index; identical ET-midnight semantics.
     day = await pool.fetchrow(
         """
         SELECT COALESCE(sum(pnl), 0)::float8 AS pnl,
@@ -2458,9 +2585,9 @@ async def api_today_live() -> dict:
                count(*) FILTER (WHERE pnl > 0)::int AS wins
         FROM live_orders
         WHERE status = 'settled' AND settled_at IS NOT NULL
-          AND to_char(settled_at AT TIME ZONE 'America/New_York',
-                      'YYYY-MM-DD')
-              = to_char(now() AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')
+          AND settled_at >= date_trunc('day',
+                now() AT TIME ZONE 'America/New_York')
+              AT TIME ZONE 'America/New_York'
           AND abs(COALESCE(pnl, 0)) <= $1
         """, PNL_DISPLAY_CAP)
     recent = await pool.fetch(
@@ -3007,7 +3134,7 @@ async def api_matrix(window: str = Query("all", pattern="^(7d|30d|all)$")) -> di
 
 
 @app.get("/api/events")
-async def api_events(limit: int = Query(50, le=200)) -> list[dict]:
+async def api_events(limit: int = Query(50, ge=1, le=200)) -> list[dict]:
     return await queries.events_view(limit)
 
 
