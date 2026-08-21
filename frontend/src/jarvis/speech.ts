@@ -137,13 +137,33 @@ export class Ears {
 
 /* ── TTS ─────────────────────────────────────────────────────────────── */
 
-export const DEFAULT_ELEVEN_VOICE = 'onwK4e9ZLuTAKqWW03F9' // Daniel — deep calm British
+// Owner's pick 2026-08-21 ("use this voice id from eleven labs").
+export const DEFAULT_ELEVEN_VOICE = 'vBKc2FfBKJfcZNyEt1n6'
+/** The previous default — stored configs carrying it are migrated to
+ * the owner's pick on load. */
+export const LEGACY_DEFAULT_VOICE = 'onwK4e9ZLuTAKqWW03F9'
+
+/** Curated ElevenLabs voices — the owner's pick first, then premade
+ * voices picked for clarity (owner request 2026-08-21: "change your
+ * voice for easy communication"). */
+export const VOICE_PRESETS: { id: string; name: string; blurb: string }[] = [
+  { id: 'vBKc2FfBKJfcZNyEt1n6', name: "Matt's pick", blurb: 'the voice Matt chose' },
+  { id: 'ErXwobaYiN019PkySvjV', name: 'Antoni', blurb: 'clear, friendly American' },
+  { id: 'nPczCjzI2devNBz1zQrb', name: 'Brian', blurb: 'smooth, easy American' },
+  { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', blurb: 'deep American' },
+  { id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel', blurb: 'clear American female' },
+  { id: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel', blurb: 'deep, calm British' },
+  { id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George', blurb: 'warm British' },
+  { id: 'XB0fDUnXU5powFXDhCwa', name: 'Charlotte', blurb: 'warm European female' },
+]
 
 export interface VoiceConfig {
   elevenKey: string
   voiceId: string
   /** speechSynthesis voiceURI for the fallback path. */
   browserVoiceURI: string
+  /** 0.8–1.2 speaking speed (both engines). */
+  speed?: number
 }
 
 interface QueueItem {
@@ -304,7 +324,10 @@ export class Mouth {
         body: JSON.stringify({
           text,
           model_id: 'eleven_turbo_v2_5',
-          voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+          voice_settings: {
+            stability: 0.5, similarity_boost: 0.75,
+            speed: Math.min(1.2, Math.max(0.8, cfg.speed ?? 1.0)),
+          },
         }),
         signal: AbortSignal.timeout(30000),
       },
@@ -379,7 +402,8 @@ export class Mouth {
       const chosen = voices.find((v) => v.voiceURI === uri) || pickBritishVoice(voices)
       if (chosen) utter.voice = chosen
       utter.lang = chosen?.lang || 'en-GB'
-      utter.rate = 1.02
+      utter.rate = 1.02 * Math.min(1.2, Math.max(0.8,
+        this.getConfig().speed ?? 1.0))
       utter.pitch = 0.92
       utter.onboundary = () => { if (epoch === this.epoch) this.pulseAt = performance.now() }
       utter.onstart = () => { this.pulseAt = performance.now() }

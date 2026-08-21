@@ -15,9 +15,10 @@ import { BootSequence, HudRing, Starfield, TelemetryRibbon } from '../jarvis/sta
 import { buildSystemPrompt, runConversation, type MessageParam, type TextBlock, type ToolResultBlock } from '../jarvis/claude'
 import { renderMarkdown } from '../jarvis/markdown'
 import {
-  britishVoices, DEFAULT_ELEVEN_VOICE, Ears, Mouth, pickBritishVoice, sttSupported,
+  britishVoices, DEFAULT_ELEVEN_VOICE, Ears, LEGACY_DEFAULT_VOICE, Mouth,
+  pickBritishVoice, sttSupported, VOICE_PRESETS,
 } from '../jarvis/speech'
-import { createToolExecutor, JARVIS_TOOLS } from '../jarvis/tools'
+import { createToolExecutor, JARVIS_TOOLS, type StagedTicket } from '../jarvis/tools'
 import { adminApi, api } from '../lib/api'
 import '../jarvis/jarvis.css'
 
@@ -29,6 +30,7 @@ interface JarvisConfig {
   voiceId: string
   browserVoice: string
   adminToken: string
+  voiceSpeed: number
 }
 
 const LS = {
@@ -37,18 +39,25 @@ const LS = {
   voice: 'jarvis_eleven_voice',
   browserVoice: 'jarvis_browser_voice',
   admin: 'jarvis_admin_token',
+  speed: 'jarvis_voice_speed',
 }
 
 function loadConfig(): JarvisConfig {
   const g = (k: string) => { try { return localStorage.getItem(k) || '' } catch { return '' } }
   let admin = g(LS.admin)
   if (!admin) { try { admin = sessionStorage.getItem('sa_admin_token') || '' } catch { /* noop */ } }
+  // Stored old-default voice migrates to the owner's chosen voice.
+  const storedVoice = g(LS.voice)
+  const voiceId = !storedVoice || storedVoice === LEGACY_DEFAULT_VOICE
+    ? DEFAULT_ELEVEN_VOICE : storedVoice
+  const speed = parseFloat(g(LS.speed))
   return {
     anthropicKey: g(LS.anthropic),
     elevenKey: g(LS.eleven),
-    voiceId: g(LS.voice) || DEFAULT_ELEVEN_VOICE,
+    voiceId,
     browserVoice: g(LS.browserVoice),
     adminToken: admin,
+    voiceSpeed: Number.isFinite(speed) && speed > 0 ? speed : 1.0,
   }
 }
 
@@ -58,6 +67,7 @@ function saveConfig(c: JarvisConfig): void {
     localStorage.setItem(LS.eleven, c.elevenKey)
     localStorage.setItem(LS.voice, c.voiceId)
     localStorage.setItem(LS.browserVoice, c.browserVoice)
+    localStorage.setItem(LS.speed, String(c.voiceSpeed))
     localStorage.setItem(LS.admin, c.adminToken)
     // Mirror the admin token where the Desk/Ops pages already look for it.
     if (c.adminToken) sessionStorage.setItem('sa_admin_token', c.adminToken)
@@ -160,6 +170,10 @@ const TOOL_NOTES: Record<string, string> = {
   get_whale: 'Looking that whale up…',
   show_markdown: 'Putting it on screen…',
   leave_note_for_engine_session: 'Leaving the note…',
+  search_desk_markets: 'Searching the desk…',
+  stage_desk_order: 'Staging the ticket…',
+  confirm_staged_order: 'Placing the order…',
+  cancel_staged_order: 'Tearing the ticket up…',
 }
 
 // The presence answers to its chosen name first; "jarvis" stays for
@@ -224,6 +238,12 @@ export default function Jarvis() {
   const recapRef = useRef('')
   /** -1 until the first today-live read baselines the settle counter. */
   const prevSettledRef = useRef(-1)
+  /** The staged (unconfirmed) desk ticket + the money gate's evidence:
+   * Matt's most recent utterance, verbatim, with its timestamp. */
+  const stagedRef = useRef<StagedTicket | null>(null)
+  const [stagedView, setStagedView] = useState<StagedTicket | null>(null)
+  const lastFinalRef = useRef<{ text: string; at: number }>({ text: '', at: 0 })
+  const CONFIRM_RE = /\b(yes|yeah|yep|confirm|confirmed|do it|place it|send it|go ahead|approved?)\b/i
 
   // ── conversation mirror: voice turns → the shared engine-session record ──
   const mirrorTurns = useCallback((turns: { role: string; text: string }[]) => {
@@ -279,6 +299,7 @@ export default function Jarvis() {
       elevenKey: cfgRef.current.elevenKey,
       voiceId: cfgRef.current.voiceId,
       browserVoiceURI: cfgRef.current.browserVoice,
+      speed: cfgRef.current.voiceSpeed,
     }))
   }
   if (!earsRef.current) {
@@ -292,7 +313,16 @@ export default function Jarvis() {
 
   useEffect(() => {
     const mouth = mouthRef.current!
-    mouth.onSpeakingChange = setSpeaking
+    mouth.onSpeakingChange = (v) => {
+      setSpeaking(v)
+      // Conversational flow (owner report: "communication is very
+      // difficult"): when MERIDIAN finishes speaking in hands-free
+      // mode, the next utterance needs no wake word for 8s — a reply
+      // is a reply, not a fresh summons.
+      if (!v && handsFreeRef.current) {
+        attentionUntilRef.current = Date.now() + 8000
+      }
+    }
     mouth.onError = (m) => setHint(m)
     const ears = earsRef.current!
     return () => {
@@ -307,6 +337,8 @@ export default function Jarvis() {
   const send = useCallback(async (raw: string) => {
     const text = raw.trim()
     if (!text) return
+    // Money-gate evidence: the verbatim utterance (spoken or typed).
+    lastFinalRef.current = { text, at: Date.now() }
     const mouth = mouthRef.current!
     mouth.ensureAudio()
     mouth.flush()
@@ -342,6 +374,15 @@ export default function Jarvis() {
           ui: {
             showMarkdown: (title, md) => setPanel({ title, kind: 'md', body: md }),
             showPdf: (title, url) => setPanel({ title, kind: 'pdf', body: url }),
+            stageTicket: (t) => { stagedRef.current = t; setStagedView(t) },
+          },
+          getStaged: () => stagedRef.current,
+          // THE MONEY GATE: read from the actual transcript, not the
+          // model's claim — the last thing Matt said (spoken or typed)
+          // must be an explicit confirmation no older than 90s.
+          lastUtteranceConfirms: () => {
+            const u = lastFinalRef.current
+            return Date.now() - u.at < 90000 && CONFIRM_RE.test(u.text)
           },
         }),
         signal: ctrl.signal,
@@ -635,6 +676,21 @@ export default function Jarvis() {
         </div>
 
         {/* ── dock ── */}
+        {stagedView && (
+          <div className="jv-ticket" role="alertdialog" aria-label="Order confirmation">
+            <div className="jv-ticket-head">CONFIRM ORDER — real money</div>
+            <div className="jv-ticket-body">
+              <strong>${stagedView.usd.toFixed(2)}</strong> on{' '}
+              <strong>{stagedView.outcome}</strong>
+              {stagedView.price != null && <> · ~{Math.round(stagedView.price * 100)}¢</>}
+              {' '}· {stagedView.venue === 'kalshi' ? 'Kalshi' : 'Polymarket'}
+              <div className="jv-ticket-title">{stagedView.title}</div>
+            </div>
+            <div className="jv-ticket-hint">
+              Say <em>"confirm"</em> to place · <em>"cancel"</em> to tear it up
+            </div>
+          </div>
+        )}
         <div className="jv-dock">
           <form className="jv-typed" onSubmit={submitTyped}>
             <input
@@ -789,6 +845,7 @@ function SetupPanel(props: {
   const [browserVoice, setBrowserVoice] = useState(
     () => props.cfg.browserVoice || pickBritishVoice()?.voiceURI || '',
   )
+  const [voiceSpeed, setVoiceSpeed] = useState(props.cfg.voiceSpeed || 1.0)
 
   useEffect(() => {
     const refresh = () => {
@@ -809,6 +866,7 @@ function SetupPanel(props: {
     voiceId: voiceId.trim() || DEFAULT_ELEVEN_VOICE,
     browserVoice,
     adminToken: adminToken.trim(),
+    voiceSpeed,
   })
 
   return (
@@ -833,11 +891,35 @@ function SetupPanel(props: {
         </label>
 
         {elevenKey.trim() ? (
-          <label className="jv-field">
-            <span>ElevenLabs voice id <em>default: Daniel — deep, calm, British</em></span>
-            <input type="text" autoComplete="off"
-                   value={voiceId} onChange={(e) => setVoiceId(e.target.value)} />
-          </label>
+          <>
+            <div className="jv-field">
+              <span>Voice <em>tap ▶ to hear each one</em></span>
+              <div className="jv-voices">
+                {VOICE_PRESETS.map((v) => (
+                  <div key={v.id}
+                       className={`jv-voice${voiceId === v.id ? ' jv-voice-on' : ''}`}
+                       onClick={() => setVoiceId(v.id)}>
+                    <button
+                      className="jv-voice-play"
+                      aria-label={`Preview ${v.name}`}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        props.onTest({ ...form(), voiceId: v.id })
+                      }}>▶</button>
+                    <div>
+                      <strong>{v.name}</strong>
+                      <small>{v.blurb}</small>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <label className="jv-field">
+              <span>Custom voice id <em>optional — overrides the picker</em></span>
+              <input type="text" autoComplete="off" placeholder="ElevenLabs voice id"
+                     value={voiceId} onChange={(e) => setVoiceId(e.target.value)} />
+            </label>
+          </>
         ) : (
           <label className="jv-field">
             <span>Browser voice <em>en-GB via speechSynthesis</em></span>
@@ -851,7 +933,14 @@ function SetupPanel(props: {
         )}
 
         <label className="jv-field">
-          <span>Platform admin token <em>optional — unlocks engine notes</em></span>
+          <span>Speaking speed <em>{voiceSpeed.toFixed(2)}×</em></span>
+          <input type="range" min={0.8} max={1.2} step={0.05}
+                 value={voiceSpeed}
+                 onChange={(e) => setVoiceSpeed(parseFloat(e.target.value))} />
+        </label>
+
+        <label className="jv-field">
+          <span>Platform admin token <em>unlocks the desk, notes &amp; memory</em></span>
           <input type="password" autoComplete="off" placeholder="X-Admin-Token"
                  value={adminToken} onChange={(e) => setAdminToken(e.target.value)} />
         </label>

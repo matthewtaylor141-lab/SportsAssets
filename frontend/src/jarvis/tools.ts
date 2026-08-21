@@ -13,11 +13,34 @@ import type { ToolSchema } from './claude'
 export interface JarvisUI {
   showMarkdown: (title: string, markdown: string) => void
   showPdf: (title: string, url: string) => void
+  /** Show/replace the staged-ticket confirmation card (null clears it). */
+  stageTicket: (t: StagedTicket | null) => void
+}
+
+export interface StagedTicket {
+  venue: 'polymarket' | 'kalshi'
+  title: string
+  outcome: string
+  usd: number
+  price: number | null
+  /** venue payload: PM asset/us_slug; Kalshi ticker + yes/no side. */
+  asset?: string
+  usSlug?: string
+  ticker?: string
+  kalshiSide?: 'yes' | 'no'
+  stagedAt: number
 }
 
 export interface ToolContext {
   adminToken: string
   ui: JarvisUI
+  /** The currently staged (unconfirmed) desk ticket, if any. */
+  getStaged: () => StagedTicket | null
+  /** THE MONEY GATE: true only when Matt's most recent utterance was an
+   * explicit confirmation ("yes" / "confirm" / "place it" / "send it" /
+   * "do it") spoken within the last 90s. The model cannot fabricate
+   * this — it is read from the actual speech transcript. */
+  lastUtteranceConfirms: () => boolean
 }
 
 /* ── schemas ─────────────────────────────────────────────────────────── */
@@ -113,6 +136,50 @@ export const JARVIS_TOOLS: ToolSchema[] = [
       },
       required: ['title', 'markdown'],
     },
+  },
+  {
+    name: 'search_desk_markets',
+    description:
+      'Search the over-the-counter desk for tradeable markets. venue "polymarket" searches sports markets by team/player/market text; venue "kalshi" searches Kalshi sports events. Returns candidate markets with live prices. Use this FIRST when Matt wants to place a trade, then read him the best match and its price before staging anything.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        venue: { type: 'string', enum: ['polymarket', 'kalshi'] },
+        query: { type: 'string', description: 'team, player, or market text, e.g. "braves ml" or "sinner"' },
+      },
+      required: ['venue', 'query'],
+    },
+  },
+  {
+    name: 'stage_desk_order',
+    description:
+      'Stage a REAL-MONEY desk order for confirmation. This does NOT place the trade — it puts the exact ticket on screen and returns the read-back script. Protocol (mandatory): only stage after Matt has named the market, the side, and the dollar amount; then READ THE TICKET BACK to him word for word ("Confirm: fifty dollars on Atlanta Braves moneyline at fifty-eight cents on Polymarket — yes or no?") and WAIT for his answer. Never assume the amount; never stage more than one ticket at a time.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        venue: { type: 'string', enum: ['polymarket', 'kalshi'] },
+        title: { type: 'string', description: 'human market title for the read-back' },
+        outcome: { type: 'string', description: 'the outcome being bought, e.g. "Atlanta Braves"' },
+        usd: { type: 'number', description: 'dollar amount Matt explicitly named' },
+        asset: { type: 'string', description: 'polymarket: the outcome asset/token id from search' },
+        us_slug: { type: 'string', description: 'polymarket: the market slug from search' },
+        ticker: { type: 'string', description: 'kalshi: the market ticker from search' },
+        kalshi_side: { type: 'string', enum: ['yes', 'no'], description: 'kalshi only' },
+        price: { type: 'number', description: 'the live ask from search, for the read-back' },
+      },
+      required: ['venue', 'title', 'outcome', 'usd'],
+    },
+  },
+  {
+    name: 'confirm_staged_order',
+    description:
+      'Execute the staged desk order. HARD GATE: this only works if Matt\'s most recent spoken words were an explicit confirmation (yes / confirm / place it / send it). Call it ONLY immediately after he confirms the read-back. If it refuses, tell him what it said — never retry without a fresh confirmation. Returns the fill result to speak.',
+    input_schema: none,
+  },
+  {
+    name: 'cancel_staged_order',
+    description: 'Discard the staged desk ticket (Matt said no, changed his mind, or wants different terms).',
+    input_schema: none,
   },
   {
     name: 'leave_note_for_engine_session',
@@ -381,6 +448,129 @@ async function leaveNote(input: Dict, ctx: ToolContext): Promise<string> {
 }
 
 /** Bind a tool executor to its UI + credentials context. */
+/* ── the over-the-counter desk, by voice ─────────────────────────── */
+
+const NEED_TOKEN = JSON.stringify({
+  error: 'The desk needs the platform admin token — Matt can add it in MERIDIAN settings (gear icon).',
+})
+
+async function searchDeskMarkets(input: Dict, ctx: ToolContext): Promise<string> {
+  if (!ctx.adminToken) return NEED_TOKEN
+  const venue = String(input.venue ?? 'polymarket')
+  const q = String(input.query ?? '').trim()
+  if (q.length < 2) return JSON.stringify({ error: 'query too short' })
+  try {
+    if (venue === 'kalshi') {
+      const r = await adminApi<{ markets: {
+        ticker: string; title: string; sub_title: string
+        yes_ask: number | null; no_ask: number | null
+      }[] }>(`/api/admin/kalshi-markets?q=${encodeURIComponent(q)}`, ctx.adminToken)
+      return pack({ venue, markets: (r.markets || []).slice(0, 8).map((m) => ({
+        ticker: m.ticker, title: m.title, sub: m.sub_title,
+        yes_ask: m.yes_ask, no_ask: m.no_ask,
+      })) })
+    }
+    const r = await adminApi<{ markets: {
+      slug: string; title: string; event_title: string | null
+      outcomes: { outcome: string; asset: string; ask: number | null; bid: number | null }[]
+    }[] }>(`/api/admin/market-search?q=${encodeURIComponent(q)}`, ctx.adminToken)
+    return pack({ venue, markets: (r.markets || []).slice(0, 6).map((m) => ({
+      slug: m.slug, title: m.title, event: m.event_title,
+      outcomes: (m.outcomes || []).slice(0, 4).map((o) => ({
+        outcome: o.outcome, asset: o.asset, ask: o.ask,
+      })),
+    })) })
+  } catch (e) {
+    return fail('the desk market search', e)
+  }
+}
+
+async function stageDeskOrder(input: Dict, ctx: ToolContext): Promise<string> {
+  if (!ctx.adminToken) return NEED_TOKEN
+  const venue = input.venue === 'kalshi' ? 'kalshi' as const : 'polymarket' as const
+  const usd = Number(input.usd)
+  if (!(usd > 0) || usd > 1000) {
+    return JSON.stringify({ error: 'usd must be a positive amount Matt explicitly named (max $1000 by voice)' })
+  }
+  const t: StagedTicket = {
+    venue,
+    title: String(input.title ?? ''),
+    outcome: String(input.outcome ?? ''),
+    usd: Math.round(usd * 100) / 100,
+    price: input.price != null ? Number(input.price) : null,
+    asset: input.asset != null ? String(input.asset) : undefined,
+    usSlug: input.us_slug != null ? String(input.us_slug) : undefined,
+    ticker: input.ticker != null ? String(input.ticker) : undefined,
+    kalshiSide: input.kalshi_side === 'no' ? 'no' : 'yes',
+    stagedAt: Date.now(),
+  }
+  if (venue === 'polymarket' && !t.asset && !t.usSlug) {
+    return JSON.stringify({ error: 'polymarket ticket needs asset or us_slug from search_desk_markets' })
+  }
+  if (venue === 'kalshi' && !t.ticker) {
+    return JSON.stringify({ error: 'kalshi ticket needs a ticker from search_desk_markets' })
+  }
+  ctx.ui.stageTicket(t)
+  return JSON.stringify({
+    staged: true,
+    read_back: `Confirm: $${t.usd} on ${t.outcome} — ${t.title}` +
+      (t.price != null ? ` at about ${Math.round(t.price * 100)} cents` : '') +
+      ` on ${venue === 'kalshi' ? 'Kalshi' : 'Polymarket'}. Yes or no?`,
+    note: 'Read this back to Matt WORD FOR WORD and wait for his answer. Only call confirm_staged_order after an explicit yes.',
+  })
+}
+
+async function confirmStagedOrder(ctx: ToolContext): Promise<string> {
+  if (!ctx.adminToken) return NEED_TOKEN
+  const t = ctx.getStaged()
+  if (!t) return JSON.stringify({ error: 'No staged ticket. Stage one first and read it back.' })
+  if (Date.now() - t.stagedAt > 180000) {
+    ctx.ui.stageTicket(null)
+    return JSON.stringify({ error: 'The staged ticket expired (3 minutes). Stage it again and re-confirm.' })
+  }
+  if (!ctx.lastUtteranceConfirms()) {
+    return JSON.stringify({
+      refused: "Money gate: Matt's most recent spoken words were not an explicit confirmation. Read the ticket back and wait for his yes.",
+    })
+  }
+  try {
+    const body = t.venue === 'kalshi'
+      ? { venue: 'kalshi', ticker: t.ticker, side: t.kalshiSide || 'yes',
+          title: `${t.title} — ${t.outcome}`, usd: t.usd, note: 'via MERIDIAN voice' }
+      : { venue: 'polymarket-us', asset: t.asset || '', us_slug: t.usSlug || '',
+          ask: t.price ?? undefined, title: `${t.title} — ${t.outcome}`,
+          usd: t.usd, note: 'via MERIDIAN voice' }
+    const r = await adminApi<Dict>('/api/admin/manual-trade', ctx.adminToken, {
+      method: 'POST', body: JSON.stringify(body),
+    })
+    ctx.ui.stageTicket(null)
+    if (r.ok === false) return pack({ placed: false, error: r.error })
+    if (r.queued && r.row_id) {
+      // Kalshi relays through the engine — poll the row briefly so the
+      // spoken answer is the real outcome, not "probably".
+      for (let i = 0; i < 12; i++) {
+        await new Promise((res) => setTimeout(res, 2000))
+        const st = await adminApi<Dict>(
+          `/api/admin/manual-order?id=${r.row_id}`, ctx.adminToken).catch(() => null)
+        if (st && st.found && st.terminal) return pack({ placed: true, result: st })
+      }
+      return pack({ placed: true, result: 'queued — the engine is relaying it; check the blotter in a moment' })
+    }
+    return pack({ placed: true, result: {
+      status: r.status ?? (r.filled_shares ? 'filled' : 'unknown'),
+      filled_shares: r.filled_shares, fill_price: r.fill_price, error: r.error,
+    } })
+  } catch (e) {
+    ctx.ui.stageTicket(null)
+    return fail('the desk order', e)
+  }
+}
+
+async function cancelStagedOrder(ctx: ToolContext): Promise<string> {
+  ctx.ui.stageTicket(null)
+  return JSON.stringify({ cancelled: true })
+}
+
 export function createToolExecutor(ctx: ToolContext) {
   return async (name: string, rawInput: unknown): Promise<string> => {
     const input = (rawInput && typeof rawInput === 'object' ? rawInput : {}) as Dict
@@ -394,6 +584,10 @@ export function createToolExecutor(ctx: ToolContext) {
       case 'get_engine_status': return getEngineStatus()
       case 'get_whale': return getWhale(input)
       case 'show_markdown': return showMarkdownTool(input, ctx)
+      case 'search_desk_markets': return searchDeskMarkets(input, ctx)
+      case 'stage_desk_order': return stageDeskOrder(input, ctx)
+      case 'confirm_staged_order': return confirmStagedOrder(ctx)
+      case 'cancel_staged_order': return cancelStagedOrder(ctx)
       case 'leave_note_for_engine_session': return leaveNote(input, ctx)
       default: return JSON.stringify({ error: `Unknown tool: ${name}` })
     }
