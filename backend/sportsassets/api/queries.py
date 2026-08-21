@@ -130,9 +130,22 @@ async def whale_profile(whale_id: int) -> dict | None:
         "open_positions": [dict(r) for r in open_positions],
         "recent_trades": recent,
         "equity_curve": curve,
-        "daily": perf.group_daily(replay["realizations"], replay["trade_events"]),
+        "daily": _group_daily_et(replay["realizations"],
+                                 replay["trade_events"]),
         "sport_mix": [dict(r) for r in mix],
     }
+
+
+def _group_daily_et(realizations, trade_events):
+    """perf.group_daily with events moved into the platform's ET
+    reporting day first (audit 2026-08-21 — last site of the UTC
+    day-bucketing class; mirrors reports.group_daily_et). Deferred
+    import: reports/track_record import this module."""
+    from .track_record import RECORD_TZ
+
+    return perf.group_daily(
+        [(ts.astimezone(RECORD_TZ), v) for ts, v in realizations],
+        [(ts.astimezone(RECORD_TZ), v) for ts, v in trade_events])
 
 
 def _stats_row(r: Any) -> dict:
