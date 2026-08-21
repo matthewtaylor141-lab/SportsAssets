@@ -281,3 +281,29 @@ def test_market_sides_map_to_the_named_sides_own_slug(monkeypatch):
     assert r is not None
     assert r["market_slug"] == "aec-wta-ellsei-dalgal-2026-08-03"
     assert r["outcome"] == "Ella Seidel"
+
+
+def test_submit_ioc_partial_fill(monkeypatch):
+    """Owner order 2026-08-21 (partial-take copies): an IOC order takes
+    the book's available size at or below the limit and cancels the
+    rest — a thin book yields a smaller position, not a killed order.
+    Default tif stays FOK so every other caller is unchanged."""
+    orders = _StubOrders(
+        preview_order={"cashOrderQty": {"value": "53.00", "currency": "USD"},
+                       "price": {"value": "0.53", "currency": "USD"},
+                       "quantity": 100},
+        create_resp={"id": "ord-2", "executions": [{
+            "type": "EXECUTION_TYPE_PARTIAL_FILL",
+            "lastPx": {"value": "0.53", "currency": "USD"},
+            "lastShares": "37",
+            "order": {"state": "ORDER_STATE_PARTIALLY_FILLED"},
+        }]},
+    )
+    monkeypatch.setattr(pmus, "_get_client",
+                        lambda: type("C", (), {"orders": orders})())
+    r = pmus.submit_fok("g1-red-sox", 0.53, 100, False,
+                        "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+    assert r["ok"] is True
+    assert r["filled_shares"] == 37.0
+    assert r["fill_price"] == pytest.approx(0.53)
+    assert orders.created[0]["tif"] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"

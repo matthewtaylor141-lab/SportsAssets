@@ -803,8 +803,9 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
 
 
 def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
-               sell: bool = False) -> dict:
-    """Preview then place a FOK limit order. Returns the same normalized
+               sell: bool = False,
+               tif: str = "TIME_IN_FORCE_FILL_OR_KILL") -> dict:
+    """Preview then place a limit order. Returns the same normalized
     shape the global executor uses:
     {ok, order_id, status, fill_price, filled_shares, raw}.
 
@@ -812,7 +813,14 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
     2026-08-08) — the limit is then the MINIMUM acceptable price, so a
     fill can only ever realize at least the requested profit. The
     preview cost-tolerance guard is buy-shaped (it bounds what we PAY);
-    a sell's preview reports proceeds, so the guard is skipped."""
+    a sell's preview reports proceeds, so the guard is skipped.
+
+    tif=TIME_IN_FORCE_IMMEDIATE_OR_CANCEL takes whatever quantity rests
+    at or below the limit and cancels the remainder (owner order
+    2026-08-21: a copy takes the book's available size at his price or
+    better, up to the clip, instead of all-or-nothing). The preview
+    guard stays valid: an IOC can only cost LESS than the full-quantity
+    preview it was checked against."""
     client = _get_client()
     params = {
         "marketSlug": us_market_slug,
@@ -821,7 +829,7 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
         "type": "ORDER_TYPE_LIMIT",
         "price": _amount(limit_price),
         "quantity": int(quantity),
-        "tif": "TIME_IN_FORCE_FILL_OR_KILL",
+        "tif": tif,
         "synchronousExecution": True,
     }
 

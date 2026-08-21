@@ -105,7 +105,10 @@ def _wire(monkeypatch, pool, mapped_slug):
     monkeypatch.setattr(pmus, "account_holds", lambda slug: False)
     submitted = []
 
-    def fake_submit(slug, limit, shares):
+    def fake_submit(slug, limit, shares, sell=False,
+                    tif="TIME_IN_FORCE_FILL_OR_KILL"):
+        # Copies must ask for partial-take (owner order 2026-08-21).
+        assert tif == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
         submitted.append(slug)
         return {"ok": True, "filled_shares": float(shares),
                 "fill_price": limit, "order_id": "o1", "raw": {}}

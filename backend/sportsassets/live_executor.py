@@ -1228,8 +1228,16 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     return
             except Exception:  # noqa: BLE001
                 pass
+            # PARTIAL-TAKE COPIES (owner order 2026-08-21: "if there was
+            # only $100 of liquidity at the price that fit within our
+            # rules, fill the $100; if there was more, fill up to the
+            # clip"): IOC takes what rests at his price or better and
+            # cancels the rest. The same-or-better limit is unchanged —
+            # only the all-or-nothing constraint is dropped, so a thin
+            # book yields a smaller position instead of a killed order.
             result = await asyncio.to_thread(
-                pmus.submit_fok, mapping["market_slug"], limit, int(shares))
+                pmus.submit_fok, mapping["market_slug"], limit,
+                int(shares), False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
         else:
             result = await asyncio.to_thread(
                 _submit_fok, str(payload["asset"]), limit, shares)

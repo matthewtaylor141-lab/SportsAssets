@@ -87,7 +87,8 @@ def test_exact_grammar_maps_first_and_fuzzy_never_runs(monkeypatch):
 
     submitted = []
 
-    def fake_submit(slug, limit, shares):
+    def fake_submit(slug, limit, shares, sell=False,
+                    tif="TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"):
         submitted.append((slug, limit, shares))
         return {"ok": True, "filled_shares": float(shares),
                 "fill_price": limit, "order_id": "o1", "raw": {}}
@@ -190,7 +191,8 @@ def test_kalshi_claim_landing_mid_flight_blocks_the_order(monkeypatch):
 
     submitted = []
 
-    def fake_submit(slug, limit, shares):
+    def fake_submit(slug, limit, shares, sell=False,
+                    tif="TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"):
         submitted.append(slug)
         return {"ok": True, "filled_shares": float(shares),
                 "fill_price": limit, "order_id": "o1", "raw": {}}
