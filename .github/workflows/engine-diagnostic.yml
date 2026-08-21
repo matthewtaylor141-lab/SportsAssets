@@ -1276,26 +1276,36 @@ jobs:
                   "lost_staked": round(lost_staked,2),
                   "open_n": open_n, "open_value": round(open_val,2),
                   "by_sport": by_sport}, separators=(",",":")))
-          for name, w in FINAL:
-              # Venue's own profile P&L curve, best-effort (endpoint used
-              # by the profile chart; print whichever host answers).
+          ROSTER = [
+            ("swisstony","0x204f72f35326db932158cba6adff0b9a1da95e14"),
+            ("rn1","0x2005d16a84ceefa912d4e380cd32e7ff827875ea"),
+            ("kch123","0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee"),
+            ("0x2c33","0x2c335066fe58fe9237c3d3dc7b275c2a034a0563")]
+          for name, w in FINAL + ROSTER:
+              # Venue's own profile P&L curve (the profile chart's
+              # source), LIFETIME: last point = lifetime cumulative pnl,
+              # the anti-mirage check the 30d board cannot give.
               for host in ("https://user-pnl-api.polymarket.com/user-pnl"
-                           f"?user_address={w}&interval=1m&fidelity=1d",
-                           f"{DATA}/user-pnl?user={w}&interval=1m"
+                           f"?user_address={w}&interval=all&fidelity=1d",
+                           f"{DATA}/user-pnl?user={w}&interval=all"
                            "&fidelity=1d"):
                   try:
-                      b = get(host, 15)
+                      b = get(host, 20)
                       if isinstance(b, list) and b:
-                          print("PNLCURVE " + json.dumps(
+                          if len(b) > 240:
+                              step = len(b) / 239.0
+                              keep = [b[int(i*step)] for i in range(239)]
+                              keep.append(b[-1])
+                              b = keep
+                          print("PNLALL " + json.dumps(
                               {"name": name, "n": len(b),
-                               "first": b[0], "last": b[-1],
-                               "series": b[-35:]},
-                              separators=(",",":")))
+                               "series": b}, separators=(",",":")))
                           break
                   except Exception:
                       continue
               else:
-                  print(f"PNLCURVE none for {name}")
+                  print("PNLALL none " + name)
+              time.sleep(0.1)
           PY
 
       - name: BTC 15-min OVER/UNDER census (365d, via runner)
