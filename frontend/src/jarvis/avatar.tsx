@@ -1,10 +1,20 @@
-/* The JARVIS avatar: an abstract luminous orb on canvas.
+/* The JARVIS presence — "the core".
  *
- * Slow-breathing gradient sphere + an orbiting particle ring (cyan with gold
- * accents). While speaking it ripples with the TTS amplitude fed in through
- * getLevel(); while listening it shows a soft outer ring; while thinking the
- * ring spins faster and shimmers. Runs its own rAF loop at 60fps, honors
- * prefers-reduced-motion by rendering a static frame instead.
+ * A real-time WebGL fragment shader, not a sprite: a turbulent plasma
+ * sphere (five-octave fbm interior with a hot pole and limb darkening),
+ * a fresnel rim, and a filamented corona that flares with the actual
+ * TTS amplitude. State is expressed physically, not with labels:
+ *   idle       slow interior convection, faint corona breathing
+ *   listening  the rim tightens and a bright sweep orbits it; a focus
+ *              ring condenses just outside the surface
+ *   thinking   the interior churns ~2.6x faster and the corona quickens
+ *   speaking   gold ignites through the plasma and the corona throws
+ *              flares that track the voice's live amplitude
+ * A tilted particle ring (2D canvas overlay, depth-shaded) orbits the
+ * core. On boot the core irises up from a point over ~1.6s.
+ *
+ * No dependencies. If WebGL is unavailable the 2D fallback renders a
+ * simpler orb; prefers-reduced-motion renders a single still frame.
  */
 
 import { useEffect, useRef } from 'react'
@@ -17,207 +27,325 @@ interface Props {
   getLevel: () => number
 }
 
-interface Particle { angle: number; speed: number; radius: number; size: number; gold: boolean; drift: number }
+/* ── shaders ─────────────────────────────────────────────────────── */
 
-const CYAN = { r: 105, g: 224, b: 255 }
-const GOLD = { r: 232, g: 200, b: 119 }
+const VERT = `
+attribute vec2 a_pos;
+void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }
+`
+
+const FRAG = `
+precision highp float;
+uniform vec2  u_res;
+uniform float u_time;
+uniform float u_level;   // live speech amplitude 0..1
+uniform float u_listen;  // eased state weights 0..1
+uniform float u_think;
+uniform float u_speak;
+uniform float u_boot;    // 0..1 iris-in
+
+float hash(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = hash(i);
+  float b = hash(i + vec2(1.0, 0.0));
+  float c = hash(i + vec2(0.0, 1.0));
+  float d = hash(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+float fbm(vec2 p) {
+  float v = 0.0, amp = 0.55;
+  for (int i = 0; i < 5; i++) {
+    v += amp * noise(p);
+    p = rot(0.6) * p * 2.02 + 11.7;
+    amp *= 0.55;
+  }
+  return v;
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / min(u_res.x, u_res.y);
+  float t = u_time;
+  float r = length(uv);
+  float ang = atan(uv.y, uv.x);
+
+  float boot  = smoothstep(0.0, 1.0, u_boot);
+  float R     = 0.285 * boot + 0.015;
+  float churn = 1.0 + u_think * 1.6 + u_speak * 0.6;
+
+  vec3 col = vec3(0.0);
+
+  // faint interior nebula so the square never reads as a dead field
+  float neb = fbm(uv * 2.2 + vec2(t * 0.008, -t * 0.005));
+  col += vec3(0.012, 0.026, 0.045) * neb * 1.15 * boot;
+
+  // ── plasma interior ──
+  if (r < R) {
+    vec2 p = uv / R;
+    float z = sqrt(max(0.0, 1.0 - dot(p, p)));
+    vec2 q = rot(t * 0.05 * churn) * (p * 1.6);
+    float n1 = fbm(q * 2.4 + vec2(t * 0.16 * churn, t * 0.11 * churn));
+    float n2 = fbm(q * 4.4 - vec2(t * 0.09 * churn, t * 0.14 * churn) + n1 * 1.8);
+    float plasma = n1 * 0.65 + n2 * 0.6;
+
+    vec3 deep = vec3(0.006, 0.04, 0.1);
+    vec3 blue = vec3(0.03, 0.24, 0.58);
+    vec3 cyan = vec3(0.16, 0.75, 1.0);
+    vec3 hot  = vec3(0.93, 0.99, 1.0);
+    // Deep body, luminous veins: heat lives only in the noise ridges
+    // (and rises with the voice) — never a blown-out white ball.
+    float heat = smoothstep(0.62, 1.3, plasma * 0.95 + z * 0.2
+                            + u_level * 0.55 + u_speak * 0.12);
+    col = mix(deep, blue, smoothstep(0.18, 0.62, plasma));
+    col = mix(col, cyan, smoothstep(0.55, 0.98, plasma));
+    col = mix(col, hot, heat * heat);
+
+    // gold ignites through the convection while speaking
+    float fleck = smoothstep(0.76, 0.9, fbm(q * 6.0 + vec2(t * 0.2, -t * 0.15)));
+    col += vec3(0.95, 0.78, 0.38) * fleck
+           * (0.1 + u_speak * 0.95 + u_level * 0.85);
+
+    // limb darkening + a specular pole up-left
+    col *= 0.3 + 0.8 * z;
+    float spec = pow(max(0.0, dot(normalize(vec3(p, z)),
+                                  normalize(vec3(-0.5, 0.6, 0.62)))), 9.0);
+    col += hot * spec * 0.35;
+  }
+
+  // ── fresnel rim, with an orbiting sweep while listening ──
+  float rim = exp(-pow((r - R) * (46.0 + u_listen * 26.0), 2.0));
+  float sweep = 0.6 + 0.4 * sin(ang - t * (0.7 + u_listen * 2.4));
+  col += vec3(0.35, 0.9, 1.0) * rim
+         * (0.85 + u_listen * 1.5 * sweep + u_level * 1.3) * boot;
+
+  // ── corona filaments ──
+  if (r > R * 0.98) {
+    float fil = fbm(vec2(ang * 2.6 + t * 0.12 * churn,
+                         (r - R) * 5.0 - t * (0.35 + u_speak * 0.9)));
+    float flame = pow(max(0.0, fil - 0.36), 1.6);
+    float fall = exp(-(r - R) * (6.8 - u_level * 2.6 - u_speak * 1.2));
+    col += mix(vec3(0.2, 0.75, 1.0), vec3(0.95, 0.8, 0.45), u_speak * 0.55 * fil)
+           * flame * fall * (0.8 + u_level * 2.3 + u_think * 0.5) * boot;
+  }
+
+  // listening: a focus ring condenses just outside the surface
+  float ring2 = exp(-pow((r - (R + 0.055 + 0.012 * sin(t * 2.2))) * 120.0, 2.0));
+  col += vec3(0.5, 0.95, 1.0) * ring2 * u_listen * 0.8;
+
+  // vignette + dither (kills gradient banding)
+  col *= 1.0 - smoothstep(0.55, 1.0, r) * 0.72;
+  col += hash(uv * vec2(917.3, 533.7) + t) * 0.03 - 0.015;
+  col = max(col, 0.0);
+
+  float alpha = clamp(max(col.r, max(col.g, col.b)) * 1.6, 0.0, 1.0);
+  gl_FragColor = vec4(col * alpha, alpha);   // premultiplied over the stage
+}
+`
+
+/* ── tilted particle ring (2D overlay, depth-shaded) ─────────────── */
+
+interface Particle {
+  angle: number; speed: number; radius: number; size: number
+  gold: boolean; wobble: number
+}
 
 function makeParticles(n: number): Particle[] {
   const out: Particle[] = []
   for (let i = 0; i < n; i++) {
     out.push({
-      angle: (i / n) * Math.PI * 2 + Math.random() * 0.12,
-      speed: 0.25 + Math.random() * 0.35,
-      radius: 0.92 + Math.random() * 0.22,
-      size: 0.8 + Math.random() * 1.6,
-      gold: i % 9 === 0,
-      drift: Math.random() * Math.PI * 2,
+      angle: (i / n) * Math.PI * 2 + Math.random() * 0.2,
+      speed: 0.22 + Math.random() * 0.3,
+      radius: 1.06 + Math.random() * 0.3,
+      size: 0.7 + Math.random() * 1.5,
+      gold: i % 8 === 0,
+      wobble: Math.random() * Math.PI * 2,
     })
   }
   return out
 }
 
+function drawRing(
+  ctx: CanvasRenderingContext2D, w: number, h: number, t: number,
+  particles: Particle[], spinMul: number, level: number,
+  clearFirst = true,
+) {
+  if (clearFirst) ctx.clearRect(0, 0, w, h)
+  const cx = w / 2, cy = h / 2
+  const R = Math.min(w, h) * 0.285
+  const tiltY = 0.34                       // ring plane squash
+  const planeRot = t * 0.05                // the whole plane precesses
+  for (const p of particles) {
+    const a = p.angle + t * p.speed * spinMul
+    const rr = p.radius * R * (1 + 0.03 * Math.sin(t * 0.7 + p.wobble))
+    let x = Math.cos(a) * rr
+    let y = Math.sin(a) * rr * tiltY
+    const depth = (Math.sin(a) + 1) / 2     // 0 far → 1 near
+    const xr = x * Math.cos(planeRot) - y * Math.sin(planeRot)
+    const yr = x * Math.sin(planeRot) + y * Math.cos(planeRot)
+    // occluded behind the core: far-side particles inside the disc hide
+    const px = cx + xr, py = cy + yr
+    const insideCore = Math.hypot(xr, yr) < R * 0.96
+    if (depth < 0.5 && insideCore) continue
+    const s = p.size * (0.55 + depth * 0.9) * (1 + level * 0.5)
+    const alpha = (0.14 + depth * 0.5) * (p.gold ? 1.0 : 0.85)
+    ctx.beginPath()
+    ctx.arc(px, py, s, 0, Math.PI * 2)
+    ctx.fillStyle = p.gold
+      ? `rgba(232, 200, 119, ${alpha})`
+      : `rgba(120, 220, 255, ${alpha})`
+    ctx.shadowBlur = 6 * depth
+    ctx.shadowColor = p.gold ? 'rgba(232,200,119,.8)' : 'rgba(105,224,255,.8)'
+    ctx.fill()
+    ctx.shadowBlur = 0
+  }
+}
+
+/* ── 2D fallback core (no WebGL) ─────────────────────────────────── */
+
+function drawFallbackCore(
+  ctx: CanvasRenderingContext2D, w: number, h: number, t: number,
+  level: number, listen: number,
+) {
+  const cx = w / 2, cy = h / 2
+  const R = Math.min(w, h) * 0.285 * (1 + level * 0.05)
+  const g = ctx.createRadialGradient(
+    cx - R * 0.35, cy - R * 0.35, R * 0.05, cx, cy, R * 1.05)
+  g.addColorStop(0, 'rgba(235,250,255,.95)')
+  g.addColorStop(0.35, 'rgba(105,224,255,.85)')
+  g.addColorStop(0.8, 'rgba(10,40,80,.9)')
+  g.addColorStop(1, 'rgba(2,10,24,0)')
+  ctx.fillStyle = g
+  ctx.beginPath()
+  ctx.arc(cx, cy, R * 1.05, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.strokeStyle = `rgba(105,224,255,${0.35 + listen * 0.5 + level * 0.4})`
+  ctx.lineWidth = 1.5
+  ctx.beginPath()
+  ctx.arc(cx, cy, R * (1.12 + 0.02 * Math.sin(t * 2)), 0, Math.PI * 2)
+  ctx.stroke()
+}
+
+/* ── component ───────────────────────────────────────────────────── */
+
 export function JarvisAvatar({ state, getLevel }: Props) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const glRef = useRef<HTMLCanvasElement | null>(null)
+  const ringRef = useRef<HTMLCanvasElement | null>(null)
   const stateRef = useRef<AvatarState>(state)
   const levelRef = useRef<() => number>(getLevel)
   stateRef.current = state
   levelRef.current = getLevel
 
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    const particles = makeParticles(84)
+    const glCanvas = glRef.current
+    const ringCanvas = ringRef.current
+    if (!glCanvas || !ringCanvas) return
+    const ring2d = ringCanvas.getContext('2d')
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const particles = makeParticles(72)
+
+    /* WebGL setup (fallback to 2D if unavailable) */
+    const gl = glCanvas.getContext('webgl', {
+      alpha: true, premultipliedAlpha: true, antialias: true,
+    }) as WebGLRenderingContext | null
+    let program: WebGLProgram | null = null
+    let uni: Record<string, WebGLUniformLocation | null> = {}
+    if (gl) {
+      const mk = (type: number, src: string) => {
+        const s = gl.createShader(type)!
+        gl.shaderSource(s, src)
+        gl.compileShader(s)
+        return gl.getShaderParameter(s, gl.COMPILE_STATUS) ? s : null
+      }
+      const vs = mk(gl.VERTEX_SHADER, VERT)
+      const fs = mk(gl.FRAGMENT_SHADER, FRAG)
+      if (vs && fs) {
+        program = gl.createProgram()!
+        gl.attachShader(program, vs)
+        gl.attachShader(program, fs)
+        gl.linkProgram(program)
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) program = null
+      }
+      if (program) {
+        gl.useProgram(program)
+        const buf = gl.createBuffer()
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+        gl.bufferData(gl.ARRAY_BUFFER,
+          new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW)
+        const loc = gl.getAttribLocation(program, 'a_pos')
+        gl.enableVertexAttribArray(loc)
+        gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0)
+        for (const n of ['u_res', 'u_time', 'u_level', 'u_listen',
+                         'u_think', 'u_speak', 'u_boot'])
+          uni[n] = gl.getUniformLocation(program, n)
+      }
+    }
+
+    const fit = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      const rect = glCanvas.getBoundingClientRect()
+      for (const c of [glCanvas, ringCanvas]) {
+        c.width = Math.round(rect.width * dpr)
+        c.height = Math.round(rect.height * dpr)
+      }
+      gl?.viewport(0, 0, glCanvas.width, glCanvas.height)
+    }
+    fit()
+    const ro = new ResizeObserver(fit)
+    ro.observe(glCanvas)
+
+    /* eased state weights + smoothed amplitude */
+    let listen = 0, think = 0, speak = 0, level = 0
+    const t0 = performance.now()
     let raf = 0
     let running = true
-    // Smoothed values so state changes glide instead of snapping.
-    let level = 0
-    let listenGlow = 0
-    let thinkSpin = 0
-    let last = performance.now()
 
-    const resize = () => {
-      const rect = canvas.getBoundingClientRect()
-      const dpr = Math.min(window.devicePixelRatio || 1, 2)
-      canvas.width = Math.max(1, Math.round(rect.width * dpr))
-      canvas.height = Math.max(1, Math.round(rect.height * dpr))
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    }
-    resize()
-    const ro = new ResizeObserver(resize)
-    ro.observe(canvas)
-
-    const draw = (now: number) => {
-      const dt = Math.min(0.05, (now - last) / 1000)
-      last = now
-      const t = now / 1000
-      const st = stateRef.current
-      const anim = !reduced.matches
-
-      const rect = canvas.getBoundingClientRect()
-      const w = rect.width
-      const h = rect.height
-      const cx = w / 2
-      const cy = h / 2
-      const R = Math.min(w, h) * 0.26 // core radius
-
-      // smooth inputs
-      const targetLevel = st === 'speaking' ? levelRef.current() : 0
-      level += (targetLevel - level) * (anim ? 0.35 : 1)
-      listenGlow += ((st === 'listening' ? 1 : 0) - listenGlow) * 0.12
-      thinkSpin += ((st === 'thinking' ? 1 : 0) - thinkSpin) * 0.08
-
-      ctx.clearRect(0, 0, w, h)
-
-      const breathe = anim ? 1 + 0.028 * Math.sin(t * 0.9) : 1
-      const coreR = R * breathe * (1 + level * 0.14)
-
-      // ambient halo
-      const halo = ctx.createRadialGradient(cx, cy, coreR * 0.2, cx, cy, coreR * 3.1)
-      halo.addColorStop(0, `rgba(${CYAN.r},${CYAN.g},${CYAN.b},${0.13 + level * 0.1 + thinkSpin * 0.04})`)
-      halo.addColorStop(0.55, `rgba(${CYAN.r},${CYAN.g},${CYAN.b},0.035)`)
-      halo.addColorStop(1, 'rgba(0,0,0,0)')
-      ctx.fillStyle = halo
-      ctx.fillRect(0, 0, w, h)
-
-      // speech ripples: expanding rings whose brightness rides the amplitude
-      if ((st === 'speaking' || level > 0.02) && anim) {
-        for (let i = 0; i < 3; i++) {
-          const phase = ((t * 0.55 + i / 3) % 1)
-          const rr = coreR * (1.15 + phase * 1.9)
-          const alpha = (1 - phase) * 0.28 * (0.25 + level)
-          ctx.beginPath()
-          ctx.arc(cx, cy, rr, 0, Math.PI * 2)
-          ctx.strokeStyle = `rgba(${CYAN.r},${CYAN.g},${CYAN.b},${alpha.toFixed(3)})`
-          ctx.lineWidth = 1.4
-          ctx.stroke()
-        }
-      }
-
-      // listening ring: steady soft ring + slow sweep arc
-      if (listenGlow > 0.02) {
-        const lr = coreR * 1.55
-        ctx.beginPath()
-        ctx.arc(cx, cy, lr, 0, Math.PI * 2)
-        ctx.strokeStyle = `rgba(${CYAN.r},${CYAN.g},${CYAN.b},${(0.22 * listenGlow).toFixed(3)})`
-        ctx.lineWidth = 1.2
-        ctx.stroke()
-        if (anim) {
-          const sweep = t * 1.6
-          ctx.beginPath()
-          ctx.arc(cx, cy, lr, sweep, sweep + Math.PI * 0.45)
-          ctx.strokeStyle = `rgba(${GOLD.r},${GOLD.g},${GOLD.b},${(0.55 * listenGlow).toFixed(3)})`
-          ctx.lineWidth = 2
-          ctx.lineCap = 'round'
-          ctx.stroke()
-        }
-      }
-
-      // orbiting particle ring (tilted ellipse)
-      const tilt = 0.42
-      const orbitR = coreR * 1.62
-      const speedMul = 1 + thinkSpin * 2.6 + level * 1.4
-      for (const p of particles) {
-        if (anim) p.angle += p.speed * speedMul * dt
-        const wob = anim ? Math.sin(t * 1.3 + p.drift) * 0.05 : 0
-        const pr = orbitR * (p.radius + wob + level * 0.06)
-        const x = cx + Math.cos(p.angle) * pr
-        const y = cy + Math.sin(p.angle) * pr * tilt
-        const behind = Math.sin(p.angle) < 0
-        const c = p.gold ? GOLD : CYAN
-        const alpha = (behind ? 0.28 : 0.75) * (0.5 + 0.5 * Math.abs(Math.cos(p.angle))) * (0.6 + thinkSpin * 0.4 + level * 0.4)
-        if (behind) {
-          ctx.beginPath()
-          ctx.arc(x, y, p.size, 0, Math.PI * 2)
-          ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${alpha.toFixed(3)})`
-          ctx.fill()
-        }
-      }
-
-      // the core orb
-      const grad = ctx.createRadialGradient(
-        cx - coreR * 0.28, cy - coreR * 0.32, coreR * 0.08,
-        cx, cy, coreR,
-      )
-      grad.addColorStop(0, 'rgba(235, 252, 255, 0.95)')
-      grad.addColorStop(0.22, `rgba(${CYAN.r},${CYAN.g},${CYAN.b},0.82)`)
-      grad.addColorStop(0.62, 'rgba(24, 108, 148, 0.55)')
-      grad.addColorStop(1, 'rgba(6, 18, 30, 0.05)')
-      ctx.beginPath()
-      ctx.arc(cx, cy, coreR, 0, Math.PI * 2)
-      ctx.fillStyle = grad
-      ctx.fill()
-
-      // inner shimmer while thinking
-      if (thinkSpin > 0.02 && anim) {
-        for (let i = 0; i < 3; i++) {
-          const a = t * (2.2 + i * 0.6) + (i * Math.PI * 2) / 3
-          ctx.beginPath()
-          ctx.ellipse(cx, cy, coreR * 0.82, coreR * (0.3 + i * 0.16), a, 0, Math.PI * 2)
-          ctx.strokeStyle = `rgba(${GOLD.r},${GOLD.g},${GOLD.b},${(0.16 * thinkSpin).toFixed(3)})`
-          ctx.lineWidth = 1
-          ctx.stroke()
-        }
-      }
-
-      // rim light
-      ctx.beginPath()
-      ctx.arc(cx, cy, coreR, 0, Math.PI * 2)
-      ctx.strokeStyle = `rgba(${CYAN.r},${CYAN.g},${CYAN.b},${(0.35 + level * 0.4).toFixed(3)})`
-      ctx.lineWidth = 1.1
-      ctx.stroke()
-
-      // foreground particles (in front of the orb)
-      for (const p of particles) {
-        if (Math.sin(p.angle) < 0) continue
-        const wob = anim ? Math.sin(t * 1.3 + p.drift) * 0.05 : 0
-        const pr = orbitR * (p.radius + wob + level * 0.06)
-        const x = cx + Math.cos(p.angle) * pr
-        const y = cy + Math.sin(p.angle) * pr * tilt
-        const c = p.gold ? GOLD : CYAN
-        const alpha = 0.8 * (0.5 + 0.5 * Math.abs(Math.cos(p.angle))) * (0.65 + thinkSpin * 0.35 + level * 0.35)
-        ctx.beginPath()
-        ctx.arc(x, y, p.size, 0, Math.PI * 2)
-        ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${alpha.toFixed(3)})`
-        ctx.fill()
-      }
-    }
-
-    const loop = (now: number) => {
+    const frame = () => {
       if (!running) return
-      draw(now)
-      if (reduced.matches) {
-        // static-ish: repaint at 2fps so state changes still show
-        setTimeout(() => { if (running) raf = requestAnimationFrame(loop) }, 500)
-      } else {
-        raf = requestAnimationFrame(loop)
+      const t = (performance.now() - t0) / 1000
+      const st = stateRef.current
+      const ease = (v: number, target: number) => v + (target - v) * 0.08
+      listen = ease(listen, st === 'listening' ? 1 : 0)
+      think = ease(think, st === 'thinking' ? 1 : 0)
+      speak = ease(speak, st === 'speaking' ? 1 : 0)
+      const raw = Math.max(0, Math.min(1, levelRef.current()))
+      level = raw > level ? level + (raw - level) * 0.5    // fast attack
+                          : level + (raw - level) * 0.12   // slow decay
+      const boot = Math.min(1, t / 1.6)
+
+      if (gl && program) {
+        gl.useProgram(program)
+        gl.uniform2f(uni.u_res, glCanvas.width, glCanvas.height)
+        gl.uniform1f(uni.u_time, t)
+        gl.uniform1f(uni.u_level, level)
+        gl.uniform1f(uni.u_listen, listen)
+        gl.uniform1f(uni.u_think, think)
+        gl.uniform1f(uni.u_speak, speak)
+        gl.uniform1f(uni.u_boot, boot)
+        gl.clearColor(0, 0, 0, 0)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+        gl.drawArrays(gl.TRIANGLES, 0, 3)
+        if (ring2d)
+          drawRing(ring2d, ringCanvas.width, ringCanvas.height, t,
+                   particles, 1 + think * 2.2 + speak * 0.6, level)
+      } else if (ring2d) {
+        // no WebGL: clear once, 2D core as base layer, ring on top
+        ring2d.clearRect(0, 0, ringCanvas.width, ringCanvas.height)
+        drawFallbackCore(ring2d, ringCanvas.width, ringCanvas.height,
+                         t, level, listen)
+        drawRing(ring2d, ringCanvas.width, ringCanvas.height, t,
+                 particles, 1, level, false)
       }
+
+      if (reduced.matches && t > 1.7) return   // settle into a still frame
+      raf = requestAnimationFrame(frame)
     }
-    raf = requestAnimationFrame(loop)
+    raf = requestAnimationFrame(frame)
 
     return () => {
       running = false
@@ -226,5 +354,10 @@ export function JarvisAvatar({ state, getLevel }: Props) {
     }
   }, [])
 
-  return <canvas ref={canvasRef} className="jv-avatar" aria-hidden />
+  return (
+    <div className="jv-core">
+      <canvas ref={glRef} className="jv-core-gl" aria-hidden />
+      <canvas ref={ringRef} className="jv-core-ring" aria-hidden />
+    </div>
+  )
 }

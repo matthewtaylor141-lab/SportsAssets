@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { JarvisAvatar, type AvatarState } from '../jarvis/avatar'
+import { BootSequence, HudRing, Starfield, TelemetryRibbon } from '../jarvis/stage'
 import { buildSystemPrompt, runConversation, type MessageParam, type TextBlock, type ToolResultBlock } from '../jarvis/claude'
 import { renderMarkdown } from '../jarvis/markdown'
 import {
@@ -437,6 +438,19 @@ export default function Jarvis() {
   const engineFresh = pills.engineAgeS != null && pills.engineAgeS < 180
   const engineOk = pills.engineAgeS != null && pills.engineAgeS < 900
 
+  // Live figures breathing through the stage — real numbers only,
+  // nothing invented while the platform is still loading.
+  const ribbon: string[] = []
+  if (pills.pnl != null)
+    ribbon.push(`today ${pills.pnl >= 0 ? '+' : '−'}$${Math.abs(pills.pnl).toFixed(0)}`)
+  if (pills.settled != null)
+    ribbon.push(`${pills.wins ?? 0}W – ${(pills.settled ?? 0) - (pills.wins ?? 0)}L settled`)
+  if (pills.armed != null)
+    ribbon.push(pills.paused ? 'copies paused' : pills.armed ? 'copy engine armed' : 'copy engine off')
+  if (pills.engineAgeS != null)
+    ribbon.push(`engine heartbeat ${pills.engineAgeS < 120
+      ? `${pills.engineAgeS}s` : `${Math.round(pills.engineAgeS / 60)}m`} ago`)
+
   return (
     <div className="jv-root">
       {/* ── status strip ── */}
@@ -477,10 +491,14 @@ export default function Jarvis() {
 
       {/* ── stage ── */}
       <div className={`jv-stage${panel ? ' jv-with-panel' : ''}`}>
+        <Starfield />
         <div className="jv-orb-wrap">
+          <HudRing state={avatarState} />
           <JarvisAvatar state={avatarState} getLevel={() => mouthRef.current?.level() ?? 0} />
           <div className={`jv-state jv-state-${avatarState}`}>{stateLabel}</div>
+          <BootSequence />
         </div>
+        <TelemetryRibbon items={ribbon} />
 
         <div className="jv-captions" aria-live="polite">
           {userInterim && <p className="jv-cap-user">{userInterim}</p>}

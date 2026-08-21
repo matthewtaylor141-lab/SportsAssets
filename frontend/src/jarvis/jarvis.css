@@ -17,6 +17,7 @@
   --jv-pos: #3ddc97;
   --jv-neg: #ff6b6b;
   --jv-warn: #fab219;
+  --jv-mono: 'JetBrains Mono', ui-monospace, monospace;
 
   position: fixed;
   inset: 0;
@@ -124,6 +125,7 @@
 /* ── stage ────────────────────────────────────────────────────────────── */
 
 .jv-stage {
+  position: relative;   /* stars + boot anchor to the stage, not the root */
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -145,6 +147,103 @@
   height: 100%;
   display: block;
 }
+
+/* ── the core: WebGL plasma sphere + particle-ring overlay ───────── */
+.jv-core { position: absolute; inset: 0; }
+.jv-core-gl,
+.jv-core-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.jv-core-ring { pointer-events: none; }
+
+/* ── starfield behind everything on the stage ────────────────────── */
+.jv-stars {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.9;
+}
+
+/* ── HUD ring around the core ────────────────────────────────────── */
+.jv-hud {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(56vmin, 520px);
+  height: min(56vmin, 520px);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  stroke: rgba(105, 224, 255, 0.22);
+  opacity: 0.85;
+  transition: stroke 600ms ease, opacity 600ms ease;
+}
+.jv-hud-listening { stroke: rgba(105, 224, 255, 0.45); }
+.jv-hud-speaking  { stroke: rgba(232, 200, 119, 0.4); }
+.jv-hud-thinking  { opacity: 1; }
+.jv-hud-slow,
+.jv-hud-fast { transform-origin: 100px 100px; }
+.jv-hud-slow { animation: jv-spin 140s linear infinite; }
+.jv-hud-fast { animation: jv-spin 46s linear infinite reverse; }
+.jv-hud-thinking .jv-hud-fast { animation-duration: 9s; }
+.jv-hud-arc { stroke: rgba(105, 224, 255, 0.5); }
+.jv-hud-speaking .jv-hud-arc { stroke: rgba(232, 200, 119, 0.65); }
+@keyframes jv-spin { to { transform: rotate(360deg); } }
+
+/* ── boot sequence ───────────────────────────────────────────────── */
+.jv-boot {
+  position: absolute;
+  left: 50%;
+  bottom: 22%;
+  transform: translateX(-50%);
+  z-index: 5;
+  font-family: var(--jv-mono, ui-monospace, monospace);
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  color: rgba(150, 225, 255, 0.75);
+  text-transform: uppercase;
+  animation: jv-boot-fade 600ms ease 2.2s forwards;
+  cursor: default;
+}
+.jv-boot p { margin: 4px 0; }
+.jv-boot-new { animation: jv-boot-line 320ms ease; }
+.jv-boot-tick { color: rgba(232, 200, 119, 0.8); }
+@keyframes jv-boot-line { from { opacity: 0; transform: translateX(-6px); } }
+@keyframes jv-boot-fade { to { opacity: 0; visibility: hidden; } }
+
+/* ── telemetry ribbon ────────────────────────────────────────────── */
+.jv-ribbon {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 20px;
+  padding: 2px 0 12px;
+  font-family: var(--jv-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: rgba(140, 210, 245, 0.6);
+}
+.jv-ribbon-rule {
+  width: min(90px, 12vw);
+  height: 1px;
+  background: linear-gradient(90deg, transparent,
+              rgba(105, 224, 255, 0.35), transparent);
+}
+.jv-ribbon-text {
+  white-space: nowrap;
+  text-shadow: 0 0 14px rgba(105, 224, 255, 0.35);
+  transition: opacity 380ms ease, transform 380ms ease;
+}
+.jv-ribbon-out { opacity: 0; transform: translateY(4px); }
 .jv-state {
   position: absolute;
   left: 0;
@@ -159,7 +258,30 @@
   pointer-events: none;
 }
 .jv-state-listening { color: var(--jv-cyan); text-shadow: 0 0 14px rgba(105, 224, 255, 0.5); }
-.jv-state-speaking { color: var(--jv-cyan-soft); }
+.jv-state-speaking { color: var(--jv-gold-soft); text-shadow: 0 0 16px rgba(232, 200, 119, 0.4); }
+.jv-state-thinking { color: var(--jv-cyan-soft); animation: jv-think-pulse 1.6s ease-in-out infinite; }
+@keyframes jv-think-pulse { 50% { opacity: 0.45; } }
+
+/* mic gains a slow conic sweep while live */
+.jv-mic { position: relative; }
+.jv-mic::before {
+  content: '';
+  position: absolute;
+  inset: -7px;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0 78%,
+              rgba(105, 224, 255, 0.55) 92%, transparent 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+  opacity: 0;
+  transition: opacity 300ms ease;
+  pointer-events: none;
+}
+.jv-mic-live::before { opacity: 1; animation: jv-spin 2.4s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .jv-mic-live::before,
+  .jv-hud-slow, .jv-hud-fast, .jv-state-thinking { animation: none; }
+}
 .jv-state-thinking { color: var(--jv-gold-soft); }
 
 /* ── captions ─────────────────────────────────────────────────────────── */
