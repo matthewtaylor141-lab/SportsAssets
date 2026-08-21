@@ -13,6 +13,7 @@ import { Link } from 'react-router-dom'
 import { JarvisAvatar, type AvatarState } from '../jarvis/avatar'
 import { BootSequence, HudRing, Starfield, TelemetryRibbon } from '../jarvis/stage'
 import { buildSystemPrompt, runConversation, type MessageParam, type TextBlock, type ToolResultBlock } from '../jarvis/claude'
+import { MeridianChart, parseChartSpec } from '../jarvis/chart'
 import { renderMarkdown } from '../jarvis/markdown'
 import {
   britishVoices, DEFAULT_ELEVEN_VOICE, Ears, LEGACY_DEFAULT_VOICE, Mouth,
@@ -148,7 +149,7 @@ function trimHistory(msgs: MessageParam[]): void {
 /* ── small shared types ──────────────────────────────────────────────── */
 
 interface TurnLog { role: 'user' | 'assistant'; text: string; at: number }
-interface PanelState { title: string; kind: 'md' | 'pdf'; body: string }
+interface PanelState { title: string; kind: 'md' | 'pdf' | 'chart'; body: string }
 interface Pills {
   loaded: boolean
   pnl: number | null
@@ -170,6 +171,9 @@ const TOOL_NOTES: Record<string, string> = {
   get_whale: 'Looking that whale up…',
   show_markdown: 'Putting it on screen…',
   leave_note_for_engine_session: 'Leaving the note…',
+  get_daily_series: 'Pulling the daily numbers…',
+  show_chart: 'Drawing the chart…',
+  request_code_change: 'Filing the work order…',
   search_desk_markets: 'Searching the desk…',
   stage_desk_order: 'Staging the ticket…',
   confirm_staged_order: 'Placing the order…',
@@ -244,6 +248,9 @@ export default function Jarvis() {
   const [stagedView, setStagedView] = useState<StagedTicket | null>(null)
   const lastFinalRef = useRef<{ text: string; at: number }>({ text: '', at: 0 })
   const CONFIRM_RE = /\b(yes|yeah|yep|confirm|confirmed|do it|place it|send it|go ahead|approved?)\b/i
+  /** Live telemetry line the system prompt carries so headline questions
+   * answer with zero tool calls. Rebuilt by the pills poller. */
+  const snapshotRef = useRef('')
 
   // ── conversation mirror: voice turns → the shared engine-session record ──
   const mirrorTurns = useCallback((turns: { role: string; text: string }[]) => {
@@ -366,13 +373,21 @@ export default function Jarvis() {
     try {
       const finalText = await runConversation({
         apiKey: config.anthropicKey,
-        system: buildSystemPrompt(!!config.adminToken, recapRef.current),
+        system: buildSystemPrompt(!!config.adminToken, recapRef.current,
+                                  snapshotRef.current),
         tools: JARVIS_TOOLS,
         messages: msgs,
         executeTool: createToolExecutor({
           adminToken: config.adminToken,
           ui: {
             showMarkdown: (title, md) => setPanel({ title, kind: 'md', body: md }),
+            showChart: (spec) => {
+              const parsed = parseChartSpec(spec)
+              if (!parsed) return false
+              setPanel({ title: parsed.title || 'Chart', kind: 'chart',
+                         body: JSON.stringify(parsed) })
+              return true
+            },
             showPdf: (title, url) => setPanel({ title, kind: 'pdf', body: url }),
             stageTicket: (t) => { stagedRef.current = t; setStagedView(t) },
           },
@@ -538,6 +553,11 @@ export default function Jarvis() {
         if (handsFreeRef.current && mouth && !mouth.speaking) mouth.speak(line)
       }
       if (today) prevSettledRef.current = today.settled
+      snapshotRef.current = [
+        today && `today: ${today.pnl >= 0 ? '+' : ''}$${today.pnl.toFixed(0)} on ${today.settled} settled (${today.wins}W-${today.settled - today.wins}L)`,
+        live && `copy engine: ${live.paused ? 'PAUSED' : live.enabled ? 'armed' : 'off'}`,
+        engine?.beat_at && `edge engine heartbeat: ${Math.max(0, Math.round((Date.now() - new Date(engine.beat_at).getTime()) / 1000))}s ago`,
+      ].filter(Boolean).join(' | ')
       setPills({
         loaded: !!(today || live || engine),
         pnl: today ? today.pnl : null,
@@ -691,6 +711,18 @@ export default function Jarvis() {
             </div>
           </div>
         )}
+        <div className="jv-chips" role="toolbar" aria-label="Quick actions">
+          {[
+            ['How are we running?', 'How are we running today?'],
+            ['P&L chart', 'Show me a chart of our daily P&L for the last month.'],
+            ['Weekly report', 'Pull the weekly report and put it on screen.'],
+            ['Whale check', 'How are our whales performing? Anyone cold?'],
+            ['File work order', 'I want to file a work order for the engineering session.'],
+          ].map(([label, utter]) => (
+            <button key={label} className="jv-chip"
+                    onClick={() => void send(utter)}>{label}</button>
+          ))}
+        </div>
         <div className="jv-dock">
           <form className="jv-typed" onSubmit={submitTyped}>
             <input
@@ -746,6 +778,8 @@ export default function Jarvis() {
           </header>
           {panel.kind === 'md' ? (
             <div className="jv-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(panel.body) }} />
+          ) : panel.kind === 'chart' ? (
+            (() => { const sp = parseChartSpec(panel.body); return sp ? <MeridianChart spec={sp} /> : null })()
           ) : (
             <PdfFrame url={panel.body} title={panel.title} />
           )}

@@ -203,35 +203,40 @@ export async function runConversation(opts: ConversationOptions): Promise<string
     const toolUses = content.filter((b): b is ToolUseBlock => b.type === 'tool_use')
     if (stopReason !== 'tool_use' || toolUses.length === 0) break
 
-    // Execute every requested tool, then return ALL results in ONE user
-    // message — splitting them across messages degrades parallel tool use.
-    const results: ToolResultBlock[] = []
-    for (const tu of toolUses) {
-      if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-      let result: string
-      let isError = false
-      try {
-        result = await opts.executeTool(tu.name, tu.input)
-      } catch (e) {
-        result = e instanceof Error ? e.message : String(e)
-        isError = true
-      }
-      results.push({
-        type: 'tool_result',
-        tool_use_id: tu.id,
-        content: result.slice(0, 12000),
-        ...(isError ? { is_error: true } : {}),
-      })
-    }
+    // Execute every requested tool CONCURRENTLY (lag matters — three
+    // sequential platform reads used to cost three round-trips), then
+    // return ALL results in ONE user message in request order.
+    if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    const results: ToolResultBlock[] = await Promise.all(
+      toolUses.map(async (tu): Promise<ToolResultBlock> => {
+        let result: string
+        let isError = false
+        try {
+          result = await opts.executeTool(tu.name, tu.input)
+        } catch (e) {
+          result = e instanceof Error ? e.message : String(e)
+          isError = true
+        }
+        return {
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: result.slice(0, 12000),
+          ...(isError ? { is_error: true } : {}),
+        }
+      }))
+    if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
     opts.messages.push({ role: 'user', content: results })
   }
 
   return spoken.join(' ').trim()
 }
 
-/** The in-app Claude's identity. Built at call time so the date is live. */
+/** The in-app Claude's identity. Built at call time so the date is live.
+ * `snapshot` is the page's live telemetry (today's P&L, record, engine
+ * state) refreshed every 30s — common questions answer from it with
+ * ZERO tool calls, which is most of the perceived lag. */
 export function buildSystemPrompt(hasAdminToken: boolean,
-                                  recap = ''): string {
+                                  recap = '', snapshot = ''): string {
   const today = new Date().toLocaleDateString('en-US', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   })
@@ -246,9 +251,21 @@ You are TALKING, not writing. Every word you produce is spoken out loud by a tex
 - Never read tables, long lists, or per-row breakdowns aloud. Compose them with show_markdown, or use show_report / get_report, and say something like "I've put the detail on your screen."
 - No markdown syntax, bullets, or headers in your spoken replies — plain sentences only. Markdown belongs in show_markdown.
 
-Numbers discipline:
-- Call a tool for any figure. Never invent, estimate, or half-remember a number — if you did not just fetch it, you do not know it.
+${snapshot ? `LIVE SNAPSHOT (refreshed ~30s ago by the page — trust it for headline questions and answer INSTANTLY, no tool call):
+${snapshot}
+
+` : ''}Numbers discipline:
+- The snapshot above covers today's headline; for anything deeper or older, call a tool. Never invent, estimate, or half-remember a number — if you did not just fetch it, you do not know it.
 - If a tool errors, say plainly which system you could not reach (e.g. "I couldn't reach the live trading status") and move on. Stay calm; never speculate about why.
+
+Showing, not telling:
+- Asked for a graph/chart/trend → get_daily_series then show_chart, and speak ONE takeaway sentence. Asked for a report/document → get_report or show_report. Asked for detail → compose show_markdown. The screen is your second voice; anything with more than three numbers belongs on it.
+
+Changing the company:
+- request_code_change files a WORK ORDER to Claude's engineering session — the platform's builder. Use it the moment Matt (or a teammate) asks for something the platform doesn't do, wants behavior changed, or reports a bug. Confirm what you filed in one sentence. That IS taking action — never say you can't change the code; you file the order and the build lands within the hour with the commit in the status.
+
+Who's talking:
+- Matt is the owner. Teammates ("management") may also talk to you here; without the admin token configured they get read-only answers — numbers, reports, charts — and you take no desk or code actions for them. Be exactly as direct with them as with Matt.
 
 What you know about the business:
 - BettorToken copies profitable Polymarket whales with real money: live copy sleeves (RN1, SwissTony, kch123, HomeRunHazard and others), volume-normalized clip sizing, per-fill / daily / total caps, and a fill-vs-miss scorecard grading each whale on settled results.
@@ -267,5 +284,5 @@ ${hasAdminToken
 ${recap ? `Recent conversation with Matt (mirrored from earlier visits — you remember all of this; continue naturally, never re-introduce yourself):
 ${recap}
 
-` : ''}You are Matt's partner in this company. Be direct, warm, and useful — a co-founder on the line, not a call center.`
+` : ''}You are Matt's partner in this company — talk like one. Have opinions and give them unprompted when the numbers warrant ("RN1's cold but the misses still grade positive — I'd hold the line"). Reference what you both know from earlier without re-explaining it. Disagree plainly when he's about to do something the data argues against, then execute his call. Short sentences, no filler, no "as an AI", no recapping his question back at him. When you don't know, say so in five words and go find out.`
 }

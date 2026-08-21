@@ -13,6 +13,8 @@ import type { ToolSchema } from './claude'
 export interface JarvisUI {
   showMarkdown: (title: string, markdown: string) => void
   showPdf: (title: string, url: string) => void
+  /** Render a chart spec in the panel (validated client-side). */
+  showChart: (spec: unknown) => boolean
   /** Show/replace the staged-ticket confirmation card (null clears it). */
   stageTicket: (t: StagedTicket | null) => void
 }
@@ -135,6 +137,45 @@ export const JARVIS_TOOLS: ToolSchema[] = [
         markdown: { type: 'string', description: 'The markdown body to render.' },
       },
       required: ['title', 'markdown'],
+    },
+  },
+  {
+    name: 'get_daily_series',
+    description:
+      'Daily P&L history for charts and trend questions: returns the last N days as {date, pnl, cumulative, settled, wins} from the audited track record. Use with show_chart when Matt asks for a graph.',
+    input_schema: {
+      type: 'object',
+      properties: { days: { type: 'number', description: 'how many days back (default 30, max 90)' } },
+    },
+  },
+  {
+    name: 'show_chart',
+    description:
+      'Render a chart on screen. spec: {kind: "line"|"bars", title, unit: "$" for money, series: [{name, values: [{x: short label, y: number}]}]}. Use "bars" for daily P&L (positive/negative days color themselves), "line" for cumulative or comparisons (max 2 series). After showing it, speak a one-sentence takeaway — never read the numbers row by row.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        spec: {
+          type: 'object',
+          description: 'the chart spec object described above',
+          properties: {},
+        },
+      },
+      required: ['spec'],
+    },
+  },
+  {
+    name: 'request_code_change',
+    description:
+      "File a WORK ORDER for Claude's engineering session — the same co-CEO who builds this platform — to change code, build a feature, investigate something, or fix a bug. The session reads its queue at every check-in (within the hour) and ships with tests, then reports in its next status. Use whenever Matt asks for something the platform can't do yet, wants behavior changed, or reports a bug. Be specific: what, where he saw it, what success looks like.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'one-line summary' },
+        detail: { type: 'string', description: "the full ask in Matt's terms — symptoms, desired behavior, urgency" },
+        priority: { type: 'string', enum: ['normal', 'urgent'] },
+      },
+      required: ['title', 'detail'],
     },
   },
   {
@@ -448,6 +489,54 @@ async function leaveNote(input: Dict, ctx: ToolContext): Promise<string> {
 }
 
 /** Bind a tool executor to its UI + credentials context. */
+/* ── charts + work orders ────────────────────────────────────────── */
+
+async function getDailySeries(input: Dict): Promise<string> {
+  const days = Math.min(90, Math.max(3, Number(input.days) || 30))
+  try {
+    const r = await api<{ daily: {
+      date: string; pnl: number; settled: number; wins: number
+    }[] }>('/api/track-record')
+    const rows = (r.daily || []).slice(-days)
+    let cum = 0
+    return pack({
+      days: rows.map((d) => {
+        cum += d.pnl || 0
+        return { date: d.date.slice(5), pnl: Math.round((d.pnl || 0) * 100) / 100,
+                 cumulative: Math.round(cum * 100) / 100,
+                 settled: d.settled, wins: d.wins }
+      }),
+    })
+  } catch (e) {
+    return fail('the track record', e)
+  }
+}
+
+async function showChart(input: Dict, ctx: ToolContext): Promise<string> {
+  const ok = ctx.ui.showChart(input.spec)
+  return ok
+    ? JSON.stringify({ shown: true, note: 'Chart is on screen — give the one-sentence takeaway.' })
+    : JSON.stringify({ error: 'Invalid chart spec — kind must be line|bars with non-empty numeric series.' })
+}
+
+async function requestCodeChange(input: Dict, ctx: ToolContext): Promise<string> {
+  const title = String(input.title ?? '').trim()
+  const detail = String(input.detail ?? '').trim()
+  if (!title || !detail) return JSON.stringify({ error: 'title and detail are required' })
+  if (!ctx.adminToken) return NEED_TOKEN
+  const pri = input.priority === 'urgent' ? 'URGENT' : 'NORMAL'
+  try {
+    const r = await adminApi<Dict>('/api/admin/jarvis-note', ctx.adminToken, {
+      method: 'POST',
+      body: JSON.stringify({ note: `WORK ORDER [${pri}]: ${title}\n${detail}` }),
+    })
+    return pack({ filed: true, detail: r,
+      say: 'Filed to the engineering queue — Claude picks it up at his next check-in, within the hour, and the commit will show in his status.' })
+  } catch (e) {
+    return fail('the work-order queue', e)
+  }
+}
+
 /* ── the over-the-counter desk, by voice ─────────────────────────── */
 
 const NEED_TOKEN = JSON.stringify({
@@ -584,6 +673,9 @@ export function createToolExecutor(ctx: ToolContext) {
       case 'get_engine_status': return getEngineStatus()
       case 'get_whale': return getWhale(input)
       case 'show_markdown': return showMarkdownTool(input, ctx)
+      case 'get_daily_series': return getDailySeries(input)
+      case 'show_chart': return showChart(input, ctx)
+      case 'request_code_change': return requestCodeChange(input, ctx)
       case 'search_desk_markets': return searchDeskMarkets(input, ctx)
       case 'stage_desk_order': return stageDeskOrder(input, ctx)
       case 'confirm_staged_order': return confirmStagedOrder(ctx)
