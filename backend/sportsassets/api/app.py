@@ -1866,7 +1866,8 @@ async def live_status() -> dict:
     )
     recent = await pool.fetch(
         """
-        SELECT lo.placed_at, lo.status, lo.his_price::float8 AS his_price,
+        SELECT lo.placed_at, lo.status, lo.whale_username AS whale,
+               lo.his_price::float8 AS his_price,
                lo.limit_price::float8 AS limit_price, lo.fill_price::float8 AS fill_price,
                lo.filled_usd::float8 AS filled_usd, lo.requested_usd::float8 AS requested_usd,
                lo.reaction_s::float8 AS reaction_s, lo.pnl::float8 AS pnl, lo.error,
@@ -1903,14 +1904,23 @@ async def live_status() -> dict:
     sizing = await pool.fetch(
         """
         SELECT COALESCE(whale_username, '?') AS whale,
-               count(*)::int AS n_24h,
-               round(avg(requested_usd), 2)::float8 AS avg_req,
-               round(avg(filled_usd), 2)::float8 AS avg_filled,
+               count(*) FILTER (WHERE status IN
+                   ('filled', 'settled', 'cashed_out'))::int AS n_24h,
+               count(*) FILTER (WHERE status = 'unfilled')::int
+                   AS unfilled_24h,
+               count(*) FILTER (WHERE status = 'rejected')::int
+                   AS rejected_24h,
+               round(avg(requested_usd) FILTER (WHERE status IN
+                   ('filled', 'settled', 'cashed_out')), 2)::float8
+                   AS avg_req,
+               round(avg(filled_usd) FILTER (WHERE status IN
+                   ('filled', 'settled', 'cashed_out')), 2)::float8
+                   AS avg_filled,
                round(max(requested_usd), 2)::float8 AS max_req,
-               round(sum(filled_usd), 2)::float8 AS deployed_24h
+               round(COALESCE(sum(filled_usd), 0), 2)::float8
+                   AS deployed_24h
         FROM live_orders
-        WHERE status IN ('filled', 'settled', 'cashed_out')
-          AND placed_at > now() - interval '24 hours'
+        WHERE placed_at > now() - interval '24 hours'
           AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
         GROUP BY 1 ORDER BY deployed_24h DESC
         """

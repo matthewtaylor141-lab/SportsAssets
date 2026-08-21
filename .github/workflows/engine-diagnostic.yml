@@ -285,13 +285,13 @@ jobs:
                  "  FVM \(.key): filled \(.value.f_n) roi \(.value.f_roi // "n/a") | missed \(.value.m_n) roi \(.value.m_roi // "n/a") (\(.value.m_unres) unresolved)"' \
             /tmp/live.json 2>/dev/null || true
           jq -r '.sizing_24h // [] | .[] |
-                 "  SIZING \(.whale): n24 \(.n_24h) avg_req $\(.avg_req // "?") avg_filled $\(.avg_filled // "?") max_req $\(.max_req // "?") deployed24 $\(.deployed_24h // 0)"' \
+                 "  SIZING \(.whale): n24 \(.n_24h) unf \(.unfilled_24h // 0) rej \(.rejected_24h // 0) avg_req $\(.avg_req // "?") avg_filled $\(.avg_filled // "?") max_req $\(.max_req // "?") deployed24 $\(.deployed_24h // 0)"' \
             /tmp/live.json 2>/dev/null || true
           jq -r '"  enabled(api env): \(.enabled // .config.enabled // "?")  paused: \(.paused // "?")",
                  (.by_whale // [] | .[] | "  whale \(.whale): fills \(.fills) deployed $\(.deployed) settled \(.settled) pnl $\(.pnl)"),
                  (.orders // .summary // {} | to_entries[] | "  \(.key): \(.value)"),
-                 (.recent // [] | .[0:8][] |
-                   "  \(.placed_at // "?")  \(.status // "?")  limit \(.limit_price // "?")  $\(.filled_usd // 0)  \(.market_title // "?") / \(.outcome // "?")  \(.error // "" | .[0:300])")' \
+                 (.recent // [] | .[0:12][] |
+                   "  \(.placed_at // "?")  \(.whale // "?")  \(.status // "?")  limit \(.limit_price // "?")  $\(.filled_usd // 0)  \(.market_title // "?") / \(.outcome // "?")  \(.error // "" | .[0:300])")' \
              /tmp/live.json 2>/dev/null | head -25 || echo "  (unavailable)"
 
           echo ""
