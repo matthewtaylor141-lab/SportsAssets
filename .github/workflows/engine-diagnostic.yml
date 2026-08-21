@@ -35,6 +35,10 @@ jobs:
     # timeout, cancelling it mid-log four runs in a row.
     timeout-minutes: 20
     steps:
+      # The journal publisher (ops/publish_journal.py) runs from the
+      # repo — without a checkout the probe job has no files at all
+      # (found the hard way 2026-08-21: 'No such file or directory').
+      - uses: actions/checkout@v4
       - name: Probe the live engine
         env:
           DEFAULT_BASE: https://sportsassets-api.onrender.com
@@ -294,12 +298,23 @@ jobs:
           jq -r '.manual_desk.recent // [] | .[] | "  MDESK \(.placed_at // "?") \(.status) req $\(.req // 0) filled $\(.filled // 0) [\(.venue // "?")] \(.error // "")"' \
              /tmp/live.json 2>/dev/null || true
 
+          # Admin-token sanity FIRST: DESKG/JNOTE/MX lines silently
+          # defaulted to zeros on a 401, so "games 0" was ambiguous
+          # between an empty board and a missing repo secret. The ping
+          # oracle answers definitively.
+          AUTH=$(curl -sS --max-time 20 -X POST \
+                 -H "X-Admin-Token: $ADMIN_TOKEN" \
+                 "$BASE/api/admin/ping" 2>/dev/null || echo '{}')
+          echo "ADMINAUTH: $(echo "$AUTH" | jq -r '"configured \(.configured // "?") match \(.match // "?")"' 2>/dev/null)"
+
           # Desk board health (owner report 2026-08-21 "no markets
           # carrying"): non-zero counts prove the venue-native listing
           # variant probe is returning events end-to-end.
           echo "DESK BOARD:"
-          curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
-               "$BASE/api/admin/desk-games?venue=polymarket" -o /tmp/deskg.json || true
+          DGCODE=$(curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/deskg.json -w '%{http_code}' \
+               "$BASE/api/admin/desk-games?venue=polymarket" || echo 000)
+          echo "  DESKG-HTTP $DGCODE"
           jq -r '"  DESKG pm games \(.games // [] | length) counts \(.counts // {} | to_entries | map("\(.key):\(.value)") | join(" "))"' \
              /tmp/deskg.json 2>/dev/null || true
 
