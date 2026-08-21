@@ -13,14 +13,15 @@ from sportsassets.api.venue_truth import (
 )
 
 
-def _kx_fill(ticker, side, action, count, px, fee=0.0, tid=None):
+def _kx_fill(ticker, side, action, count, px, fee=0.0, tid=None,
+             when="2026-08-18T14:00:00Z"):
     return {
         "trade_id": tid or f"t-{ticker}-{side}-{action}-{count}-{px}",
         "ticker": ticker, "side": side, "action": action,
         "count": count,
         f"{side}_price_dollars": px,
         "fee_dollars": fee,
-        "created_time": "2026-08-18T14:00:00Z",
+        "created_time": when,
     }
 
 
@@ -85,11 +86,12 @@ class TestKalshiSignedCash:
         assert "KXT-E" in payload["kalshi_window_incomplete"]["tickers"]
 
 
-def _pm_trade(slug, qty, px, side="SIDE_BUY", rp=0.0):
+def _pm_trade(slug, qty, px, side="SIDE_BUY", rp=0.0,
+              when="2026-08-18T15:00:00Z"):
     return {"type": "ACTIVITY_TYPE_TRADE",
             "trade": {"marketSlug": slug, "qty": qty, "price": px,
                       "side": side, "realizedPnl": rp,
-                      "createTime": "2026-08-18T15:00:00Z"}}
+                      "createTime": when}}
 
 
 def _pm_resolution(slug, realized, cost, when="2026-08-18T21:00:00Z"):
@@ -293,6 +295,123 @@ class TestDayLedgerPersistence:
         ])
         assert pm[0]["settled_at"] is None
         assert persistable_day_rows(pm, "polymarket-us", "2026-08-10") == []
+
+
+class TestCashedOutFlat:
+    """A market fully sold before resolution (sold-to-flat, unresolved)
+    is final cash. The module rule — 'unresolved markets contribute the
+    sum of their sell-trade realizedPnl only when flat' — was stated
+    but never implemented: such a market is neither settled nor open,
+    so its cash never reached realized/total or the daily series and
+    the 'exact and true' endpoint understated every cash-out day. The
+    row keeps settled=False/open=False (cashed_out=True is its state);
+    the aggregates count it with settled money on the ET day of its
+    LAST sell, matching track_record's `sold` ledger."""
+
+    def test_pm_cashout_reaches_totals_on_the_last_sell_et_day(self):
+        # Dateless slug: the day must come from the sell timestamp,
+        # not the slug's day_hint. 2026-08-19T01:30Z = 9:30pm ET Aug 18.
+        acts = [_pm_trade("nba-cashout-flat", 100, 0.50),
+                _pm_trade("nba-cashout-flat", 100, 0.60,
+                          side="SIDE_SELL", rp=10.0,
+                          when="2026-08-19T01:30:00Z")]
+        rows = pm_positions(acts)
+        r = rows[0]
+        # Neither settled (no venue resolution) nor open (flat)...
+        assert r["settled"] is False
+        assert r["open"] is False
+        assert r["cashed_out"] is True
+        assert r["realized"] == 10.0
+        assert r["cost"] == 50.0
+        assert r["settled_at"] is not None
+        # ...but the money is in every aggregate, on the last-sell ET day.
+        days = daily_series(rows)
+        assert [d["day"] for d in days] == ["2026-08-18"]
+        assert days[0]["realized"] == 10.0
+        assert days[0]["wins"] == 1
+        p = build_payload(rows, [], "2026-08-10")
+        assert p["total"]["settled"] == 1
+        assert p["total"]["realized"] == 10.0
+        assert p["polymarket_us"]["realized"] == 10.0
+        assert p["polymarket_us"]["settled_cost"] == 50.0
+        assert p["polymarket_us"]["open"] == 0
+
+    def test_kalshi_cashout_realizes_proceeds_minus_outlay_minus_fees(self):
+        raw = {"fills": [
+            _kx_fill("KXT-CO", "yes", "buy", 100, 0.50, fee=0.4),
+            _kx_fill("KXT-CO", "yes", "sell", 100, 0.60, fee=0.4,
+                     when="2026-08-19T01:30:00Z"),
+        ], "settlements": []}
+        r = kalshi_positions(raw)[0]
+        assert r["settled"] is False
+        assert r["open"] is False
+        assert r["cashed_out"] is True
+        assert r["window_complete"] is True
+        assert r["realized"] == 9.2      # 60 - 50 - 0.80 in fees
+        days = daily_series([r])
+        assert [d["day"] for d in days] == ["2026-08-18"]
+        assert days[0]["realized"] == 9.2
+        p = build_payload([], [r], "2026-08-10")
+        assert p["total"]["settled"] == 1
+        assert p["total"]["realized"] == 9.2
+        assert p["kalshi"]["realized"] == 9.2
+
+    def test_partially_sold_but_still_open_market_stays_open(self):
+        acts = [_pm_trade("nhl-partial-sell", 100, 0.50),
+                _pm_trade("nhl-partial-sell", 40, 0.60,
+                          side="SIDE_SELL", rp=4.0)]
+        rows = pm_positions(acts)
+        r = rows[0]
+        assert r["open"] is True
+        assert r["cashed_out"] is False
+        p = build_payload(rows, [], "2026-08-10")
+        # Open money claims no P&L; nothing reaches the totals.
+        assert p["total"]["settled"] == 0
+        assert p["total"]["realized"] == 0.0
+        assert p["polymarket_us"]["open"] == 1
+
+    def test_kalshi_sell_only_cashout_is_window_incomplete(self):
+        # Sells whose buys predate the export window: realized would be
+        # pure proceeds — flagged and excluded, exactly like the
+        # settlement-without-fills case.
+        raw = {"fills": [_kx_fill("KXT-SO", "yes", "sell", 100, 0.60)],
+               "settlements": []}
+        r = kalshi_positions(raw)[0]
+        assert r["cashed_out"] is True
+        assert r["window_complete"] is False
+        p = build_payload([], [r], "2026-08-10")
+        assert p["total"]["settled"] == 0
+        assert p["total"]["realized"] == 0.0
+        assert p["kalshi_window_incomplete"]["n"] == 1
+        assert "KXT-SO" in p["kalshi_window_incomplete"]["tickers"]
+
+    def test_cashout_before_window_stays_frozen_history(self):
+        # Last sell Aug 5 ET, window since Aug 10: that day is frozen
+        # ledger history — the cash-out must not enter the live totals
+        # and must not produce an upsert row that would rewrite it.
+        acts = [_pm_trade("mlb-old-cashout", 100, 0.50,
+                          when="2026-08-04T18:00:00Z"),
+                _pm_trade("mlb-old-cashout", 100, 0.60,
+                          side="SIDE_SELL", rp=10.0,
+                          when="2026-08-05T18:00:00Z")]
+        rows = pm_positions(acts)
+        assert rows[0]["cashed_out"] is True
+        p = build_payload(rows, [], "2026-08-10")
+        assert p["total"]["settled"] == 0
+        assert p["total"]["realized"] == 0.0
+        from sportsassets.api.venue_truth import persistable_day_rows
+        assert persistable_day_rows(rows, "polymarket-us",
+                                    "2026-08-10") == []
+
+    def test_cashout_day_is_persisted_for_newly_computed_days(self):
+        acts = [_pm_trade("atp-cashout-freeze", 100, 0.50),
+                _pm_trade("atp-cashout-freeze", 100, 0.60,
+                          side="SIDE_SELL", rp=10.0,
+                          when="2026-08-19T01:30:00Z")]
+        rows = pm_positions(acts)
+        from sportsassets.api.venue_truth import persistable_day_rows
+        assert persistable_day_rows(rows, "polymarket-us", "2026-08-10") \
+            == [("2026-08-18", "polymarket-us", 1, 1, 0, 50.0, 10.0)]
 
 
 class TestSlugDateFallback:

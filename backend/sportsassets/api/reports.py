@@ -29,6 +29,7 @@ from ..analytics.positions import EPS, Fill, Position
 from ..betting import american_odds, bet_label, bet_type, result_word
 from ..db import get_pool
 from . import queries
+from .track_record import RECORD_TZ
 
 INK = colors.HexColor("#141414")
 MUTED = colors.HexColor("#6b6b66")
@@ -72,8 +73,16 @@ def _pct(v: float | None) -> str:
 
 
 def period_bounds(period: str, end: date | None = None) -> tuple[datetime, datetime, str]:
-    """Weekly = trailing 7 days; monthly = the end date's calendar month."""
-    end = end or datetime.now(tz=timezone.utc).date()
+    """Weekly = trailing 7 days; monthly = the end date's calendar month.
+
+    Bounds are EASTERN midnights (track_record.RECORD_TZ): the platform's
+    reporting day is an ET calendar day. UTC-midnight bounds shifted every
+    boundary 4-5 hours early, so a settlement after 8pm ET fell into the
+    neighboring period (same defect as the track record's calendar,
+    owner report 2026-08-05). Returned datetimes are timezone-aware and
+    compare correctly against the aware settled_at timestamps downstream.
+    """
+    end = end or datetime.now(tz=RECORD_TZ).date()
     if period == "weekly":
         start = end - timedelta(days=6)
         label = f"Weekly report — {start.strftime('%b %d')} to {end.strftime('%b %d, %Y')}"
@@ -81,9 +90,27 @@ def period_bounds(period: str, end: date | None = None) -> tuple[datetime, datet
         start = end.replace(day=1)
         label = f"Monthly report — {end.strftime('%B %Y')}"
     return (
-        datetime.combine(start, time.min, tzinfo=timezone.utc),
-        datetime.combine(end, time.max, tzinfo=timezone.utc),
+        datetime.combine(start, time.min, tzinfo=RECORD_TZ),
+        datetime.combine(end, time.max, tzinfo=RECORD_TZ),
         label,
+    )
+
+
+def _record_day(ts: datetime) -> str:
+    """Timestamp -> the platform's reporting day (ET calendar day)."""
+    return ts.astimezone(RECORD_TZ).strftime("%Y-%m-%d")
+
+
+def group_daily_et(
+    realizations: list[tuple[datetime, float]],
+    trades: list[tuple[datetime, float]],
+) -> list[dict]:
+    """perf.group_daily with every event first moved into RECORD_TZ, so
+    per-day rows bucket by the platform's ET reporting day rather than UTC
+    (a 9:30pm ET settlement was landing on the next day's calendar box)."""
+    return perf.group_daily(
+        [(ts.astimezone(RECORD_TZ), v) for ts, v in realizations],
+        [(ts.astimezone(RECORD_TZ), v) for ts, v in trades],
     )
 
 
@@ -338,7 +365,7 @@ def _settled_sections(bets: list[dict], daily: list[dict]) -> list:
             chunk = rows[i : i + 400]
             story.append(_table(
                 ["Settled", "Bet", "Odds", "Stake", "Result", "P&L"],
-                [[b["settled_at"].strftime("%Y-%m-%d"), b["label"][:52], b["odds"],
+                [[_record_day(b["settled_at"]), b["label"][:52], b["odds"],
                   _usd(b["stake"]), b["result"], _signed(b["pnl"])] for b in chunk],
                 [0.85, 2.9, 0.6, 0.85, 1.0, 0.95],
                 color_col=5, raw_values=[b["pnl"] for b in chunk],
@@ -444,7 +471,7 @@ async def build_settled_report(whale_id: int) -> tuple[bytes, str]:
 
     bets = await settled_bets(whale_id)
     replay = await queries.whale_replay(whale_id)
-    daily = perf.group_daily(replay["realizations"], [])
+    daily = group_daily_et(replay["realizations"], [])
     dd = perf.max_drawdown(replay["realizations"])
 
     total_pnl = sum(b["pnl"] for b in bets)
@@ -500,7 +527,7 @@ async def build_report(whale_id: int, period: str, end: date | None = None) -> t
     bets = [b for b in await settled_bets(whale_id) if start_dt <= b["settled_at"] <= end_dt]
     replay = await queries.whale_replay(whale_id)
     p_real = [(ts, a) for ts, a in replay["realizations"] if start_dt <= ts <= end_dt]
-    daily = perf.group_daily(p_real, [])
+    daily = group_daily_et(p_real, [])
     dd = perf.max_drawdown(p_real)
 
     activity = await pool.fetchrow(
@@ -556,7 +583,7 @@ async def build_report(whale_id: int, period: str, end: date | None = None) -> t
         story.append(Paragraph("Largest trades placed in period", H2))
         story.append(_table(
             ["Date", "Side", "Bet", "Price", "Notional"],
-            [[r["ts"].strftime("%m-%d %H:%M"), r["side"],
+            [[r["ts"].astimezone(RECORD_TZ).strftime("%m-%d %H:%M"), r["side"],
               bet_label(r["outcome"], r["title"], r["event_title"])[:46],
               f"{round(r['price'] * 100)}¢", _usd(r["notional"])] for r in largest],
             [1.0, 0.6, 3.3, 0.7, 1.0],

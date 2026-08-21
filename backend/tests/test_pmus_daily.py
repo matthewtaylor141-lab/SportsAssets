@@ -19,7 +19,7 @@ def _row(realized, cost=1.0, ago_s=3600, settled=True, dated=True):
     return r
 
 
-def test_settlements_bucket_by_utc_day():
+def test_settlements_bucket_by_reporting_day():
     rows = [_row(3.0, ago_s=3600), _row(-1.0, ago_s=3600),
             _row(-1.0, ago_s=90_000)]
     days = _daily(rows)
@@ -27,6 +27,18 @@ def test_settlements_bucket_by_utc_day():
     assert days[0]["wins"] == 1 and days[0]["losses"] == 1
     assert days[0]["realized"] == 2.0
     assert days[0]["roi"] == 1.0
+
+
+def test_regression_0130z_settlement_lands_on_the_prior_et_day():
+    """The reporting day is Eastern (track_record.RECORD_TZ):
+    2026-08-05T01:30Z is Aug 4, 9:30pm ET and belongs on the Aug 4 row.
+    UTC bucketing put it on Aug 5 — the exact defect the track record's
+    calendar fixed (owner report 2026-08-05)."""
+    ts = datetime(2026, 8, 5, 1, 30, tzinfo=timezone.utc).timestamp()
+    days = _daily([{"settled": True, "cost": 5.0, "realized": 2.5,
+                    "settled_at": ts}], days=100_000)
+    assert [d["day"] for d in days] == ["2026-08-04"]
+    assert days[0]["realized"] == 2.5
 
 
 def test_open_positions_are_not_pnl():

@@ -92,8 +92,8 @@ def kalshi_positions(raw: dict) -> list[dict]:
     """Per-ticker cash truth from a raw export.
 
     Returns rows: ticker, cost (buy outlay), proceeds (sell credits),
-    fees, revenue (settlement payout), realized (settled only),
-    settled, settled_at, result.
+    fees, revenue (settlement payout), realized (settled or cashed-out
+    flat pre-settlement), settled, settled_at, result, cashed_out.
     """
     per: dict[str, dict] = {}
 
@@ -102,6 +102,7 @@ def kalshi_positions(raw: dict) -> list[dict]:
             "ticker": ticker, "cost": 0.0, "proceeds": 0.0, "fees": 0.0,
             "revenue": 0.0, "bought": 0.0, "sold": 0.0,
             "settled": False, "settled_at": 0.0, "result": None,
+            "last_sell_ts": 0.0,
         })
 
     seen_trades: set[str] = set()
@@ -122,6 +123,9 @@ def kalshi_positions(raw: dict) -> list[dict]:
         if str(f.get("action") or "buy").lower() == "sell":
             b["proceeds"] += qty * px
             b["sold"] += qty
+            b["last_sell_ts"] = max(
+                b["last_sell_ts"],
+                _iso_ts(str(f.get("created_time") or "")))
         else:
             b["cost"] += qty * px
             b["bought"] += qty
@@ -143,13 +147,23 @@ def kalshi_positions(raw: dict) -> list[dict]:
     rows = []
     for b in per.values():
         settled = b["settled"]
-        # A settlement can arrive for a ticker whose fills predate the
-        # export window; its buy cost is then unknown and the realized
-        # number would be pure revenue. Flag rather than fabricate.
-        window_complete = not (settled and b["bought"] == 0.0)
+        is_open = (not settled) and b["bought"] > b["sold"] + 1e-9
+        # Sold flat before settlement (the desk cashed out): no
+        # settlement row will ever arrive, but the cash is final —
+        # proceeds minus outlay minus fees. Mirrors track_record's
+        # `sold` ledger: the sale IS the settlement, dated by the last
+        # sell fill. Rows stay settled=False/open=False; the aggregates
+        # count their realized with settled money.
+        cashed_out = (not settled) and (not is_open) and b["sold"] > 0
+        # A settlement (or cash-out) for a ticker whose fills predate
+        # the export window has unknown buy outlay; the realized number
+        # would be pure revenue (or pure proceeds). Flag rather than
+        # fabricate.
+        window_complete = not ((settled or cashed_out)
+                               and b["bought"] == 0.0)
         realized = (round(b["revenue"] + b["proceeds"]
                           - b["cost"] - b["fees"], 2)
-                    if settled else 0.0)
+                    if settled or cashed_out else 0.0)
         rows.append({
             "ticker": b["ticker"],
             "cost": round(b["cost"], 2),
@@ -157,10 +171,13 @@ def kalshi_positions(raw: dict) -> list[dict]:
             "fees": round(b["fees"], 4),
             "revenue": round(b["revenue"], 2),
             "settled": settled,
-            "settled_at": b["settled_at"] or None,
+            "settled_at": (b["settled_at"]
+                           or (b["last_sell_ts"] if cashed_out else 0.0)
+                           or None),
             "result": b["result"],
             "realized": realized,
-            "open": (not settled) and b["bought"] > b["sold"] + 1e-9,
+            "open": is_open,
+            "cashed_out": cashed_out,
             "window_complete": window_complete,
         })
     return rows
@@ -176,7 +193,11 @@ def pm_positions(activities: list[dict]) -> list[dict]:
     Same aggregation the tennis-week report uses, market-universal:
     realized on resolved markets is the venue's own cumulative number
     from the resolution row; unresolved markets realize only their
-    sell-trade P&L and stay open while shares remain.
+    sell-trade P&L and stay open while shares remain. Sold flat before
+    resolution is a cash-out (track_record's `sold` ledger semantics):
+    the sale is the settlement, dated by the last sell — the row stays
+    settled=False/open=False but carries cashed_out=True and its sell
+    realizedPnl counts with settled money.
     """
     per: dict[str, dict] = {}
 
@@ -187,6 +208,7 @@ def pm_positions(activities: list[dict]) -> list[dict]:
             "market_slug": slug, "title": None, "cost": 0.0,
             "sell_rp": 0.0, "res_realized": None, "resolved": False,
             "bought": 0.0, "sold": 0.0, "settled_at": 0.0,
+            "last_sell_ts": 0.0,
         })
 
     def _amt(a: Any) -> float:
@@ -213,6 +235,7 @@ def pm_positions(activities: list[dict]) -> list[dict]:
             if "SELL" in side or rp != 0:
                 b["sell_rp"] += rp
                 b["sold"] += qty
+                b["last_sell_ts"] = max(b["last_sell_ts"], _any_ts(act))
             else:
                 b["cost"] += qty * px
                 b["bought"] += qty
@@ -239,6 +262,10 @@ def pm_positions(activities: list[dict]) -> list[dict]:
         realized = (b["res_realized"] if resolved
                     else round(b["sell_rp"], 2))
         is_open = (not resolved) and b["bought"] > b["sold"] + 1e-9
+        # Sold flat before resolution: WE closed the position, so no
+        # resolution row will ever arrive — the cumulative sell
+        # realizedPnl is final cash, dated by the last sell.
+        cashed_out = (not resolved) and (not is_open) and b["sold"] > 0
         # The venue's raw resolution rows carry no usable timestamp
         # (observed 2026-08-19: every PM settlement bucketed 'undated').
         # The slug embeds the event date (aec-...-2026-08-19), which is
@@ -252,9 +279,12 @@ def pm_positions(activities: list[dict]) -> list[dict]:
             "cost": round(b["cost"], 2),
             "realized": round(realized or 0.0, 2),
             "settled": resolved,
-            "settled_at": b["settled_at"] or None,
+            "settled_at": (b["settled_at"]
+                           or (b["last_sell_ts"] if cashed_out else 0.0)
+                           or None),
             "day_hint": m.group(1) if m else None,
             "open": is_open,
+            "cashed_out": cashed_out,
         })
     return rows
 
@@ -263,8 +293,19 @@ def pm_positions(activities: list[dict]) -> list[dict]:
 # Combined payload
 # ---------------------------------------------------------------------------
 
+def _closed(r: dict) -> bool:
+    """Final-cash rows: venue-settled OR cashed out flat pre-resolution.
+
+    Both are settled money for every aggregate (the module rule: an
+    unresolved market contributes its sell realizedPnl when flat) —
+    matching how track_record counts its `sold` ledger. Row-level
+    settled/open flags are untouched; cash-outs stay a distinct state.
+    """
+    return bool(r["settled"] or r.get("cashed_out"))
+
+
 def _venue_summary(rows: list[dict]) -> dict:
-    settled = [r for r in rows if r["settled"]]
+    settled = [r for r in rows if _closed(r)]
     open_rows = [r for r in rows if r.get("open")]
     return {
         "markets": len(rows),
@@ -281,10 +322,11 @@ def _venue_summary(rows: list[dict]) -> dict:
 def daily_series(rows: list[dict]) -> list[dict]:
     """Settled cash per ET day, newest first; undated rows surfaced as
     their own bucket (a data problem to show, never to guess into a
-    day)."""
+    day). Cash-outs count on the ET day of their last sell (their
+    settled_at)."""
     buckets: dict[str, list[dict]] = {}
     for r in rows:
-        if not r["settled"]:
+        if not _closed(r):
             continue
         ts = r.get("settled_at") or 0.0
         day = (_et_day(ts) if ts
@@ -329,9 +371,9 @@ def build_payload(pm_rows: list[dict], kx_rows: list[dict],
         return r.get("day_hint")
 
     in_window = [r for r in tagged
-                 if not r["settled"]
+                 if not _closed(r)
                  or (_settle_day(r) or since_day) >= since_day]
-    settled = [r for r in in_window if r["settled"]]
+    settled = [r for r in in_window if _closed(r)]
     payload = {
         "methodology": "venue-truth",
         "since": since_day,

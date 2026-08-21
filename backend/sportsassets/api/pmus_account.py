@@ -63,14 +63,20 @@ def _act_ts(act: dict) -> float:
 
 
 def _daily(rows: list[dict], days: int = 7) -> list[dict]:
-    """Settled P&L per UTC day, newest first.
+    """Settled P&L per ET day (track_record.RECORD_TZ), newest first.
 
     The cohort scorecard is cumulative, which cannot answer "how did we do
     yesterday" without subtracting two readings taken at arbitrary times —
     and those boundaries never line up with a day. This is the lookup.
+    The platform's reporting day is Eastern: bucketing by UTC put every
+    settlement after 8pm ET on the next day's row (same defect the track
+    record fixed, owner report 2026-08-05).
     """
     import time
-    from datetime import datetime, timezone
+    from datetime import datetime
+
+    # Deferred import: track_record imports this module at its top level.
+    from .track_record import RECORD_TZ
 
     cutoff = time.time() - days * 86_400
     buckets: dict[str, list[dict]] = {}
@@ -83,7 +89,7 @@ def _daily(rows: list[dict], days: int = 7) -> list[dict]:
             continue
         if ts < cutoff:
             continue
-        day = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+        day = datetime.fromtimestamp(ts, RECORD_TZ).strftime("%Y-%m-%d")
         buckets.setdefault(day, []).append(r)
 
     out = []
