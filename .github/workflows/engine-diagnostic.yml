@@ -1136,8 +1136,10 @@ jobs:
         timeout-minutes: 20
         run: |
           echo "###########################################################"
-          echo "#   WHALE CANDIDATE CENSUS v8 — venue-computed P&L via     #"
-          echo "#   /positions (proven fields from positions_sync.py)      #"
+          echo "#   WHALE CANDIDATE CENSUS v9 — 30d record from activity   #"
+          echo "#   REDEEM=wins, lingering worthless positions=losses,     #"
+          echo "#   TRADE flow=staked. /positions alone is inverted        #"
+          echo "#   survivorship: redeemed winners vanish from it.         #"
           echo "###########################################################"
           python - <<'PY'
           import json, statistics as st, time, urllib.request
@@ -1172,8 +1174,65 @@ jobs:
                       return v
               return "game"
 
+          NOW = int(time.time()); T30 = NOW - 30*86400
+
+          def activity(w, typ):
+              # newest->oldest time-window cursor, the proven /activity
+              # method from ingestion/history.py (offset paging caps out).
+              rows, end, seen = [], NOW + 60, set()
+              for _ in range(40):
+                  url = (f"{DATA}/activity?user={w}&type={typ}"
+                         f"&limit=500&start={T30}&end={end}")
+                  try:
+                      b = get(url, 25)
+                  except Exception as e:
+                      print(f"  {typ} page fail", type(e).__name__)
+                      break
+                  if not b:
+                      break
+                  fresh = 0
+                  for r in b:
+                      k = (r.get("transactionHash"), r.get("conditionId"),
+                           r.get("timestamp"), r.get("usdcSize"))
+                      if k in seen:
+                          continue
+                      seen.add(k); rows.append(r); fresh += 1
+                  ts = [int(r.get("timestamp") or 0) for r in b]
+                  oldest = min(ts) if ts else T30
+                  end = oldest if fresh else oldest - 1
+                  if len(b) < 500 or end <= T30:
+                      break
+                  time.sleep(0.08)
+              return rows
+
           for name, w in FINAL:
-              rows = []
+              trades = activity(w, "TRADE")
+              redeems = activity(w, "REDEEM")
+              buys = [r for r in trades
+                      if (r.get("side") or "BUY").upper() == "BUY"]
+              staked = sum(float(r.get("usdcSize") or 0) for r in buys)
+              sizes = sorted(float(r.get("usdcSize") or 0) for r in buys)
+              payout = sum(float(r.get("usdcSize") or 0) for r in redeems)
+              won_c = {r.get("conditionId") for r in redeems
+                       if float(r.get("usdcSize") or 0) > 0}
+              by_sport = {}
+              for r in buys:
+                  b = by_sport.setdefault(
+                      sport(r.get("slug"), r.get("title")),
+                      {"buys":0,"staked":0.0,"redeemed":0.0,"wins":0})
+                  b["buys"] += 1
+                  b["staked"] = round(b["staked"]
+                                      + float(r.get("usdcSize") or 0), 2)
+              for r in redeems:
+                  b = by_sport.setdefault(
+                      sport(r.get("slug"), r.get("title")),
+                      {"buys":0,"staked":0.0,"redeemed":0.0,"wins":0})
+                  b["redeemed"] = round(b["redeemed"]
+                                        + float(r.get("usdcSize") or 0), 2)
+                  b["wins"] += 1 if float(r.get("usdcSize") or 0) > 0 else 0
+              # Losses: resolved-worthless positions still on the wallet
+              # (winners vanish once redeemed; these do not).
+              L = 0; lost_staked = 0.0; open_n = 0; open_val = 0.0
               for off in range(0, 3000, 100):
                   try:
                       b = get(f"{DATA}/positions?user={w}&limit=100"
@@ -1184,41 +1243,59 @@ jobs:
                       break
                   if not b:
                       break
-                  rows.extend(b)
+                  for r in b:
+                      cur = r.get("curPrice")
+                      cur = float(cur) if cur is not None else None
+                      end_d = str(r.get("endDate") or "")
+                      dead = cur is not None and cur <= 0.001
+                      if dead:
+                          fresh30 = end_d[:10] >= time.strftime(
+                              "%Y-%m-%d", time.gmtime(T30))
+                          if fresh30:
+                              L += 1
+                              lost_staked += float(
+                                  r.get("initialValue") or 0)
+                              s = by_sport.setdefault(
+                                  sport(r.get("slug"), r.get("title")),
+                                  {"buys":0,"staked":0.0,
+                                   "redeemed":0.0,"wins":0})
+                              s["losses"] = s.get("losses", 0) + 1
+                      elif cur is not None and 0.001 < cur < 0.999:
+                          open_n += 1
+                          open_val += float(r.get("currentValue") or 0)
                   if len(b) < 100:
                       break
                   time.sleep(0.08)
-              if rows and off == 0:
-                  print("POS-KEYS " + json.dumps(sorted(rows[0].keys())))
-              W=L=0; staked=pnl=0.0; open_n=0; open_val=0.0
-              by_sport = {}
-              for r in rows:
-                  cur = r.get("curPrice")
-                  cash = float(r.get("cashPnl") or 0)
-                  init = float(r.get("initialValue") or 0)
-                  redeem = bool(r.get("redeemable"))
-                  cur = float(cur) if cur is not None else None
-                  won = redeem or (cur is not None and cur >= 0.999)
-                  lost = (not won) and cur is not None and cur <= 0.001
-                  if won or lost:
-                      W += won; L += lost
-                      staked += init; pnl += cash
-                      b = by_sport.setdefault(
-                          sport(r.get("slug"), r.get("title")),
-                          {"n":0,"w":0,"staked":0.0,"pnl":0.0})
-                      b["n"] += 1; b["w"] += int(won)
-                      b["staked"] = round(b["staked"]+init,2)
-                      b["pnl"] = round(b["pnl"]+cash,2)
-                  else:
-                      open_n += 1
-                      open_val += float(r.get("currentValue") or 0)
-              print("AUDIT8 " + json.dumps({"name": name, "wallet": w,
-                  "positions": len(rows), "open_n": open_n,
-                  "open_value": round(open_val,2),
-                  "graded": {"settled": W+L, "w": W, "l": L,
-                      "staked": round(staked,2), "pnl": round(pnl,2),
-                      "roi": round(pnl/staked,4) if staked else None},
+              med = sizes[len(sizes)//2] if sizes else None
+              p90 = sizes[int(len(sizes)*0.9)] if sizes else None
+              print("AUDIT9 " + json.dumps({"name": name, "wallet": w,
+                  "window_d": 30, "buys": len(buys), "staked": round(staked,2),
+                  "med_buy": med, "p90_buy": p90,
+                  "redeems": len(redeems), "payout": round(payout,2),
+                  "wins_markets": len(won_c), "losses_pos": L,
+                  "lost_staked": round(lost_staked,2),
+                  "open_n": open_n, "open_value": round(open_val,2),
                   "by_sport": by_sport}, separators=(",",":")))
+          for name, w in FINAL:
+              # Venue's own profile P&L curve, best-effort (endpoint used
+              # by the profile chart; print whichever host answers).
+              for host in ("https://user-pnl-api.polymarket.com/user-pnl"
+                           f"?user_address={w}&interval=1m&fidelity=1d",
+                           f"{DATA}/user-pnl?user={w}&interval=1m"
+                           "&fidelity=1d"):
+                  try:
+                      b = get(host, 15)
+                      if isinstance(b, list) and b:
+                          print("PNLCURVE " + json.dumps(
+                              {"name": name, "n": len(b),
+                               "first": b[0], "last": b[-1],
+                               "series": b[-35:]},
+                              separators=(",",":")))
+                          break
+                  except Exception:
+                      continue
+              else:
+                  print(f"PNLCURVE none for {name}")
           PY
 
       - name: BTC 15-min OVER/UNDER census (365d, via runner)
