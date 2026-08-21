@@ -616,8 +616,16 @@ def sync_kalshi_fills(adapter, ledger: Ledger, mode: str) -> int:
         for f in (resp.json() or {}).get("fills") or []:
             if f.get("side") != "yes":
                 continue
-            qty = float(f.get("count") or 0)
-            price = float(f.get("yes_price") or 0) / 100.0
+            # Both venue dialects (audit 2026-08-21): live responses
+            # carry count_fp ('263.00') and yes_price_dollars — the
+            # bare count/yes_price parse read every live fill as qty 0
+            # and skipped it, so this reconciler has been dead code in
+            # production. Same accessor pair portfolio_truth uses.
+            qty = float(f.get("count_fp") or f.get("count") or 0)
+            if f.get("yes_price_dollars") is not None:
+                price = float(f["yes_price_dollars"])
+            else:
+                price = float(f.get("yes_price") or 0) / 100.0
             if qty <= 0 or not (0 < price < 1):
                 continue
             if f.get("action") == "sell":

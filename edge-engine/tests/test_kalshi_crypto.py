@@ -136,13 +136,21 @@ class _Client:
 
     def place_order(self, ticker, price, count, client_order_id, taker):
         self.orders.append((ticker, price, count, client_order_id, taker))
-        return {"ok": True, "filled_count": count}
+        return {"ok": True, "filled_count": count,
+                "order_id": f"ord-{client_order_id}"}
 
 
 class _Ledger:
     def __init__(self):
         self.fills = []
         self.positions = {}
+        self.state = {}
+
+    def set_state(self, key, value):
+        self.state[key] = value
+
+    def get_state(self, key, default=None):
+        return self.state.get(key, default)
 
     def realized_pnl_since_for_category(self, ts, category):
         return 0.0
@@ -220,3 +228,83 @@ def test_leg_breaker_halts_all_orders():
     kc.sweep(cl, led, _Risk(), [_cand()])
     assert cl.orders == []
     assert "leg breaker" in str(kc.funnel["halted"])
+
+
+def test_sweep_holds_when_engine_not_live():
+    """Audit 2026-08-21: the sweep placed REAL orders regardless of
+    engine mode and labeled the fills PAPER — invisible to the leg
+    breaker. A demoted engine must mean a silent leg."""
+    class _Paper:
+        is_live = False
+
+    cl, led = _Client(), _Ledger()
+    kc.sweep(cl, led, _Paper(), [_cand()])
+    assert cl.orders == []
+    assert "not live" in str(kc.funnel["halted"])
+
+
+def test_sweep_refuses_sells_and_missing_id():
+    """Direction and identity are fail-closed (audit 2026-08-21): a
+    SELL copied as our BUY is the opposite bet, and a missing id would
+    collapse every candidate onto fill_uid 'kcr-None'."""
+    cl, led = _Client(), _Ledger()
+    kc.sweep(cl, led, _Risk(), [
+        _cand(id=1, side="SELL"),
+        _cand(id=2, side=""),
+        _cand(id=None),
+    ])
+    assert cl.orders == []
+    assert kc.funnel["refused"]["not-a-buy"] == 2
+    assert kc.funnel["refused"]["no-id"] == 1
+
+
+def test_fill_marks_kalshi_inline_before_recording():
+    """The inline marker is what stops sync_kalshi_fills re-recording
+    the same contracts under kalshi-fill-{trade_id} — the doubled-
+    position class from the 2026-08-04 engine audit."""
+    cl, led = _Client(), _Ledger()
+    kc.sweep(cl, led, _Risk(), [_cand()])
+    assert led.fills, "fill should have recorded"
+    assert led.get_state("kalshi_inline:ord-kcr-7")["uid"] == "kcr-7"
+
+
+def test_strike_tolerance_is_relative_at_every_scale():
+    """The old $0.02 absolute floor matched DOGE $0.12 against $0.13 —
+    a strictly different bet. Purely relative 2bp covers every cent
+    convention and never spans a neighboring band."""
+    assert not kc._strike_eq(0.12, 0.13)          # DOGE neighbor bands
+    assert not kc._strike_eq(1.60, 1.62)          # XRP neighbor bands
+    assert kc._strike_eq(0.12999, 0.13)           # sub-dollar convention
+    assert kc._strike_eq(2.9999, 3.00)            # XRP convention
+    assert kc._strike_eq(67499.99, 67500.0)       # BTC convention
+
+
+def test_unparsed_clock_time_refused_not_defaulted():
+    """A slug naming a clock time the parser did not understand must
+    refuse, never default to daily-noon (audit 2026-08-21: the 8pm bet
+    was matching the noon market)."""
+    for slug in ("bitcoin-above-67500-at-8pm-on-august-21-2026",
+                 "bitcoin-above-67500-at-8pm-est-on-august-21-2026"):
+        assert kc.parse_candidate(slug, "") is None
+    assert kc.funnel["refused"]["deadline:unparsed-hour"] == 2
+    # Minutes in the explicit form parse exactly, not approximately.
+    c = kc.parse_candidate(
+        "bitcoin-above-67500-at-4-30pm-et-on-august-21-2026", "")
+    assert c is not None and c["klass"] == "explicit-hour"
+    half_past = kc.parse_candidate(
+        "bitcoin-above-67500-at-4pm-et-on-august-21-2026", "")
+    assert c["deadline_ts"] - half_past["deadline_ts"] == 30 * 60
+
+
+def test_ambiguous_strike_match_refused():
+    """Two listed strikes inside tolerance = ambiguity = refusal;
+    otherwise listing order silently decides which bet we copy."""
+    close = kc.parse_candidate(
+        "bitcoin-above-67500-on-august-21-2026", "")["deadline_ts"]
+    twin = {"asset": "BTC", "kind": "above", "close_ts": close}
+    ms = [{**twin, "ticker": "A", "strikes": (67499.99,)},
+          {**twin, "ticker": "B", "strikes": (67500.01,)}]
+    cand = {"asset": "BTC", "kind": "above", "strikes": (67500.0,),
+            "deadline_ts": close}
+    assert kc.match_market(cand, ms) is None
+    assert kc.match_market(cand, ms[:1])["ticker"] == "A"

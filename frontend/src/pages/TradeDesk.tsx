@@ -125,6 +125,7 @@ export function TradeDesk() {
   const [pmResults, setPmResults] = useState<PMSearchMarket[]>([])
   const [kResults, setKResults] = useState<KalshiSearchRow[]>([])
   const pollRef = useRef<number | null>(null)
+  const placingRef = useRef(false)
 
   const isK = venue === 'kalshi'
 
@@ -227,7 +228,17 @@ export function TradeDesk() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pick])
 
-  const choose = (p: Pick) => { setPick(p); setRun(null); setReviewing(false) }
+  // While an order is in flight, re-picking is locked (audit 2026-08-21):
+  // choose() reset `run`, which un-hid the Trade button mid-submit — a
+  // second click fired a second real-money POST, and the first order's
+  // response then grafted onto (or was silently swallowed by) the new
+  // ticket. The lock lifts the moment the run reaches a terminal phase.
+  const inFlight = () =>
+    run?.phase === 'submitting' || run?.phase === 'relaying'
+  const choose = (p: Pick) => {
+    if (inFlight()) return
+    setPick(p); setRun(null); setReviewing(false)
+  }
 
   // ── Live order lifecycle ─────────────────────────────────────────
   // The ticket streams the AI counterparty's execution: a Polymarket
@@ -269,9 +280,14 @@ export function TradeDesk() {
   }
 
   const place = async () => {
-    if (!pick || run?.phase === 'submitting' || run?.phase === 'relaying') return
+    // Synchronous re-entry lock: two clicks in the same tick both see
+    // the pre-setRun state, so the state-based guard alone can double-
+    // POST a real order. The ref closes that window; the phase guard
+    // covers everything after the next render.
+    if (!pick || placingRef.current || inFlight()) return
     const amount = parseFloat(usd)
     if (!(amount > 0)) { setErr('Enter a dollar amount.'); return }
+    placingRef.current = true
     const t0 = performance.now()
     setRun({ phase: 'submitting', t0, title: pick.label, outcome: pick.side })
     try {
@@ -283,6 +299,7 @@ export function TradeDesk() {
         signal: AbortSignal.timeout(90000),
       })
       const ms = Math.round(performance.now() - t0)
+      placingRef.current = false
       setReviewing(false)
       loadBlotter(token)
       if (r.ok && r.queued && r.row_id) {
@@ -304,6 +321,7 @@ export function TradeDesk() {
         }))
       }
     } catch (e: any) {
+      placingRef.current = false
       setReviewing(false)
       loadBlotter(token)
       setRun((prev) => prev && ({
@@ -458,7 +476,10 @@ export function TradeDesk() {
                 className="dx-amount-in" inputMode="decimal" placeholder="$0"
                 value={usd ? `$${usd}` : ''}
                 disabled={busy}
-                onChange={(e) => setUsd(e.target.value.replace(/[^0-9.]/g, ''))}
+                onChange={(e) => setUsd(
+                  // Comma is a decimal point, never deleted: stripping it
+                  // turned "12,50" into a $1,250 request (audit 2026-08-21).
+                  e.target.value.replace(/,/g, '.').replace(/[^0-9.]/g, ''))}
                 aria-label="Dollar amount"
               />
               <div className="dx-quick">
@@ -796,7 +817,10 @@ export function TradeDesk() {
             <button
               key={v}
               className={`vd-venue${venue === v ? ' on' : ''} ${v}`}
-              onClick={() => { setVenue(v); setGame(null); setPick(null); setQ(''); setRun(null) }}
+              onClick={() => {
+                if (inFlight()) return
+                setVenue(v); setGame(null); setPick(null); setQ(''); setRun(null)
+              }}
             >
               {v === 'polymarket' ? 'Polymarket' : 'Kalshi'} mode
             </button>

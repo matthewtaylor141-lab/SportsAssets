@@ -65,6 +65,11 @@ ROW_TIMEOUT_S = 60.0
 
 async def sweep_once() -> dict:
     pool = await get_pool()
+    # Phantom 'submitting' rows (process died mid-order) hold the
+    # one-fill-per-asset claim forever and silently retire the asset
+    # from copying (audit 2026-08-21) — reap them every pass.
+    from ..live_executor import _reap_stale_submitting
+    await _reap_stale_submitting(pool)
     whales = sorted(settings().source_whales())
     rows = await pool.fetch(
         """

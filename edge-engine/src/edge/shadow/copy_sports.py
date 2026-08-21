@@ -47,6 +47,13 @@ SPORT_OF = {"nba": "basketball", "cbb": "basketball",
             "nfl": "football", "cfb": "football",
             "nhl": "hockey", "mlb": "baseball", "wnba": "wnba",
             "atp": "tennis", "wta": "tennis", "itf": "tennis",
+            # Tennis's third tours (audit 2026-08-21): the executor's
+            # own _TENNIS_LEAGUES names chal/itfwo/itfme, but this map
+            # didn't, so challenger and ITF slugs defaulted to soccer —
+            # defeating 0x2c33's tennis block and RN1's tennis clip,
+            # the same leak class the esports entries below closed.
+            "chal": "tennis", "atpchal": "tennis",
+            "itfwo": "tennis", "itfme": "tennis",
             # Esports out of the soccer/other bucket (leak found
             # 2026-08-21 wiring the dossier promotions: 'aec-cs2-…'
             # classified as soccer, so any whale with a soccer cell

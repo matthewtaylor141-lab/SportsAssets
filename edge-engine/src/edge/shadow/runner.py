@@ -876,21 +876,63 @@ def _try_cross_venue(*, ledger, ev, pool, min_profit, max_usd, dry_run,
         {"event": f"{ev.home} v {ev.away}", "cost": best_cost,
          "profit_per_set": profit,
          "venues": [getattr(l.adapter, "name", "?") for l in best]})
+    if not dry_run:
+        # Audit 2026-08-21: this path had none of the watcher's three
+        # order-time guards — it traded through kill switch/watchdog,
+        # through the post-exposure freeze, and raced the 3s watcher on
+        # a get-then-set claim (each could buy the full set). Same
+        # guards, same shared events_traded claim, in the same order.
+        from edge.shadow.kalshi_guard import live_blocked
+
+        frozen = ledger.get_state("xv_exposed_block") or {}
+        if float(frozen.get("until", 0)) > time.time():
+            funnel["xv_blocked_exposed"] = \
+                funnel.get("xv_blocked_exposed", 0) + 1
+            return False
+        blocked = live_blocked(ledger, scope="arb")
+        if blocked:
+            funnel["xv_blocked_" + blocked] = \
+                funnel.get("xv_blocked_" + blocked, 0) + 1
+            return False
+        if not ledger.claim_event(claim, ev.event_key(), "xv"):
+            return False
+    # Same-venue complements — the relock path's raw material. Without
+    # them a failed closer strands a naked leg (INCOMPLETE_EXPOSED)
+    # with no attempt to complete the set on the first leg's own venue.
+    l1, l2 = best
+    _v1 = getattr(l1.adapter, "name", "")
+    _v2 = getattr(l2.adapter, "name", "")
+    comps: dict = {}
+    if sides2.get(_v1) is not None:
+        comps[l1.token] = sides2[_v1]
+    if sides1.get(_v2) is not None:
+        comps[l2.token] = sides1[_v2]
     res = execute_cross_venue(
         event=f"{claim}", legs=best,
-        max_sets=max(1, int(max_usd / best_cost)), dry_run=dry_run)
+        max_sets=max(1, int(max_usd / best_cost)), dry_run=dry_run,
+        complements=comps)
     funnel.setdefault("xv_status", {}).setdefault(res.status, 0)
     funnel["xv_status"][res.status] += 1
     if res.status == "INCOMPLETE_EXPOSED":
         funnel.setdefault("xv_exposed", []).append(
             {"event": f"{ev.home} v {ev.away}", "holding": res.exposed})
+        if not dry_run:
+            # Self-freeze, exactly like the watcher: an exposure means
+            # both the closer and the relock failed — do not fire this
+            # class again into the same condition.
+            ledger.set_state("xv_exposed_block", {
+                "until": time.time() + 6 * 3600,
+                "event": f"{ev.home} v {ev.away}", "at": time.time()})
     if dry_run:
         return True
-    # Claim AFTER the attempt, and only when venue money moved (audit:
-    # claim-before-execution turned every transient no-fill into a
-    # permanent blacklist). A clean miss may retry next sweep.
-    if res.status not in ("no_fills", "nothing_to_do", "not_cross_venue",
-                          "implausible_profit"):
+    # The atomic claim was taken BEFORE execution (shared with the 3s
+    # watcher). A clean miss gives it back so the pair may retry next
+    # sweep — the watcher's exact semantics; money moved keeps the
+    # claim and stamps the legacy state for telemetry.
+    if res.status in ("no_fills", "nothing_to_do", "not_cross_venue",
+                      "implausible_profit"):
+        ledger.release_event(claim)
+    else:
         ledger.set_state(claim, {"ts": time.time(), "status": res.status})
     legs_by_token = {l.token: l for l in best}
     for o in res.orders:
@@ -2232,10 +2274,15 @@ def _main_impl() -> None:
         live_fills = ledger.live_fill_count_since(window_start)
         live_staked = ledger.live_staked_since(window_start)
         recorded_loss = abs(float(halt.get("day_pnl", 0) or 0))
-        # A real loss is bounded by real money staked. If the recorded loss
-        # exceeds what was ever put at risk live (or there were no live
-        # fills at all), the halt provably came from paper numbers.
-        bogus = live_fills == 0 or recorded_loss > live_staked + 0.01
+        # Audit 2026-08-21: the staked-bound test was wrong for a
+        # hold-to-resolution book — the breaker reads realized P&L from
+        # positions bought DAYS ago plus marks, so a quiet buying day
+        # ($80 staked) with a heavy settlement day (-$400 realized on
+        # older positions) tripped legitimately and a redeploy cleared
+        # it as "bogus". Only the zero-live-fills case is provably
+        # paper contamination; a halt with any live fill in its window
+        # keeps its full 72h. No override.
+        bogus = live_fills == 0
         if bogus:
             ledger.set_state("halt_until", {
                 "until": 0, "reason": "cleared",
@@ -2669,6 +2716,18 @@ def _main_impl() -> None:
                                            fill_count=filled,
                                            fill_price=float(
                                                o["limit_price"]))
+                                # Inline-recorded marker BEFORE the
+                                # record: without it sync_kalshi_fills
+                                # re-recorded every desk fill under its
+                                # kalshi-fill-{trade_id} uid — doubled
+                                # positions and P&L (audit 2026-08-21,
+                                # same class as the 2026-08-04 bug).
+                                if pr.get("order_id"):
+                                    ledger.set_state(
+                                        "kalshi_inline:"
+                                        f"{pr['order_id']}",
+                                        {"ts": time.time(),
+                                         "uid": f"desk-{o['id']}"})
                                 ledger.record_fill(
                                     fill_uid=f"desk-{o['id']}",
                                     venue="kalshi",
@@ -3135,11 +3194,16 @@ def _main_impl() -> None:
                 if not a.has_credentials():
                     continue
                 if a.name == "kalshi":
-                    if risk.is_live:
-                        funnel["kalshi_fill_sync"] = sync_kalshi_fills(a, ledger, risk.mode)
-                        from edge.execution.executor import reap_kalshi_makers
-                        funnel["kalshi_reap"] = reap_kalshi_makers(ledger,
-                                                                   adapter=a)
+                    # EVERY mode, per the rule three lines up — this
+                    # branch was still gated on risk.is_live, so a PAPER
+                    # demotion left Kalshi resting orders (underdog
+                    # exits, maker rests) filling with nothing syncing
+                    # them into the ledger (audit 2026-08-21).
+                    funnel["kalshi_fill_sync"] = sync_kalshi_fills(
+                        a, ledger, risk.mode)
+                    from edge.execution.executor import reap_kalshi_makers
+                    funnel["kalshi_reap"] = reap_kalshi_makers(ledger,
+                                                               adapter=a)
                 elif a.name == "polymarket-us":
                         # Order matters, and getting it wrong cost us four
                         # runaway positions on 2026-08-02.

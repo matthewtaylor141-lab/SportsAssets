@@ -1393,6 +1393,24 @@ async def api_manual_trade(body: ManualTradeBody) -> dict:
     count = int(body.usd / limit)
     if count < 1:
         return {"ok": False, "error": "budget buys zero whole contracts"}
+    # Double-submit guard (audit 2026-08-21): this branch does seconds of
+    # venue HTTP before the insert, so a double-click / client auto-retry
+    # queued TWO real orders and the relay placed both. A same-ticket row
+    # queued in the last 30s means the first click already went through —
+    # refuse the second and point at the blotter instead of double-buying.
+    dup_id = await pool.fetchval(
+        """
+        SELECT id FROM manual_kalshi_queue
+        WHERE ticker = $1 AND side = $2
+          AND status IN ('pending', 'placed')
+          AND created_at > now() - interval '30 seconds'
+        ORDER BY id DESC LIMIT 1
+        """, ticker, side)
+    if dup_id is not None:
+        return {"ok": False,
+                "error": (f"an identical ticket (#{dup_id}) was queued "
+                          "seconds ago — check the blotter before "
+                          "submitting again")}
     row_id = await pool.fetchval(
         """
         INSERT INTO manual_kalshi_queue
@@ -2266,6 +2284,7 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
         if r["whale"] not in ("rn1", "swisstony", "kch123",
                               "homerunhazard", "manual",
                               "underdog",
+                              "ferrarichampions2026", "0x076daa87",
                               "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563"
                               "-1759935795465"):
             continue

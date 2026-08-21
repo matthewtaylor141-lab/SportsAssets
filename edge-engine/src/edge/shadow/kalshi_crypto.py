@@ -150,10 +150,18 @@ def _deadline(s: str) -> tuple[float | None, str]:
     'on-august-21(-2026)' is the venue's daily class, which resolves
     at 12:00 ET — tagged 'daily-noon' so grading can split the cohort.
     Anything else (monthly, 'by-<date>' windows) returns None."""
-    m = re.search(r"at-(\d{1,2})(?:-)?(am|pm)-et", s)
+    m = re.search(r"at-(\d{1,2})(?:-(\d{2}))?-?(am|pm)-et(?:-|\b)", s)
     hour = None
+    minute = 0
     if m:
-        hour = int(m.group(1)) % 12 + (12 if m.group(2) == "pm" else 0)
+        hour = int(m.group(1)) % 12 + (12 if m.group(3) == "pm" else 0)
+        minute = int(m.group(2) or 0)
+    elif re.search(r"\d-?(am|pm)(-|\b)", s):
+        # The slug names a clock time this parser did NOT understand
+        # (format drift: missing -et, new separator, …). Defaulting to
+        # daily-noon here matched the whale's 8pm bet onto the noon
+        # market (audit 2026-08-21) — refuse instead; fail closed.
+        return None, "unparsed-hour"
     dm = re.search(
         r"on-(" + "|".join(_MONTHS) + r")-(\d{1,2})(?:-(\d{4}))?", s)
     if not dm:
@@ -166,7 +174,7 @@ def _deadline(s: str) -> tuple[float | None, str]:
         hour = 12
     try:
         from zoneinfo import ZoneInfo
-        dt = datetime(year, month, day, hour, 0,
+        dt = datetime(year, month, day, hour, minute,
                       tzinfo=ZoneInfo("America/New_York"))
     except ValueError:
         return None, "bad-date"
@@ -303,11 +311,23 @@ def kalshi_crypto_markets(client) -> list[dict]:
 
 def _strike_eq(a: float, b: float) -> bool:
     """Equal within 2bp of the strike (venue cent conventions like
-    67,499.99 vs 67,500), never a neighboring band."""
-    return abs(a - b) <= max(0.02, abs(b) * STRIKE_TOL_BP / 10_000.0)
+    67,499.99 vs 67,500), never a neighboring band.
+
+    Purely RELATIVE (audit 2026-08-21): the old $0.02 absolute floor
+    was sized for the cent convention at BTC scale but spanned real
+    strike spacing on sub-dollar assets — DOGE $0.12 vs $0.13 matched,
+    i.e. a strictly different bet. 2bp of the strike covers every cent
+    convention at every scale (67,499.99 vs 67,500 is 0.15bp; 0.12999
+    vs 0.13 is 0.8bp) and can never reach a neighboring band."""
+    return abs(a - b) <= abs(b) * STRIKE_TOL_BP / 10_000.0 + 1e-9
 
 
 def match_market(cand: dict, markets: list[dict]) -> dict | None:
+    """The CLOSEST passing twin, never merely the first (audit
+    2026-08-21): with a tolerance that admits more than one listed
+    strike, listing order must not decide which bet we copy — a tie
+    inside tolerance is ambiguity, and ambiguity is a refusal."""
+    hits: list[tuple[float, dict]] = []
     for m in markets:
         if m["asset"] != cand["asset"] or m["kind"] != cand["kind"]:
             continue
@@ -315,12 +335,22 @@ def match_market(cand: dict, markets: list[dict]) -> dict | None:
             continue
         if cand["kind"] == "above":
             if _strike_eq(m["strikes"][0], cand["strikes"][0]):
-                return m
+                hits.append((abs(m["strikes"][0] - cand["strikes"][0]), m))
         else:
             if _strike_eq(m["strikes"][0], cand["strikes"][0]) and \
                     _strike_eq(m["strikes"][1], cand["strikes"][1]):
-                return m
-    return None
+                hits.append((abs(m["strikes"][0] - cand["strikes"][0])
+                             + abs(m["strikes"][1] - cand["strikes"][1]), m))
+    if not hits:
+        return None
+    hits.sort(key=lambda h: h[0])
+    # Tie = ambiguity = refusal. The threshold is relative to the
+    # strike so float noise at BTC scale (0.01 vs 0.01 computed as
+    # 1.0000000002e-2 vs 9.999999997e-3) still reads as a tie.
+    tie_eps = max(1e-9, abs(cand["strikes"][0]) * 1e-9)
+    if len(hits) > 1 and abs(hits[0][0] - hits[1][0]) < tie_eps:
+        return None
+    return hits[0][1]
 
 
 def plan(cand_price: float, cand_notional: float) -> tuple[float, int] | None:
@@ -361,6 +391,14 @@ def sweep(client, ledger, risk, candidates: list[dict]) -> None:
     if realized_24h <= -HALT_USD:
         funnel["halted"] = f"leg breaker: {realized_24h:.2f} <= -{HALT_USD}"
         return
+    # LIVE GATE (audit 2026-08-21): every sibling leg passes live= or
+    # refuses outright; this sweep placed REAL orders regardless of
+    # engine mode and labeled the fills PAPER — which the leg breaker
+    # (realized_pnl filters PAPER out) could then never see. A demoted
+    # engine must mean a silent leg, not an unbreakered one.
+    if not risk.is_live:
+        funnel["halted"] = "engine not live — crypto copy leg holds"
+        return
     funnel["halted"] = False
     markets = None
     now = time.time()
@@ -372,9 +410,22 @@ def sweep(client, ledger, risk, candidates: list[dict]) -> None:
         if w not in WHALES:
             _refuse("unknown-whale")
             continue
+        # Direction is the one field that inverts the bet: the platform
+        # endpoint filters side='BUY' in SQL, but this leg must not be
+        # fail-open on it (audit 2026-08-21) — a SELL copied as our BUY
+        # is the opposite of the whale's intent.
+        if (c.get("side") or "").upper() != "BUY":
+            _refuse("not-a-buy")
+            continue
         ts = float(c.get("ts_epoch") or 0)
         if not ts or now - ts > MAX_AGE_S:
             _refuse("stale")
+            continue
+        # A missing id would collapse every candidate onto fill_uid
+        # 'kcr-None': the first fill records, later ones are silently
+        # dropped by INSERT OR IGNORE and never-add can't see them.
+        if c.get("id") is None:
+            _refuse("no-id")
             continue
         fill_uid = f"kcr-{c.get('id')}"
         cand = parse_candidate(c.get("market_slug") or "",
@@ -414,6 +465,14 @@ def sweep(client, ledger, risk, candidates: list[dict]) -> None:
         if pr.get("ok") and filled > 0:
             fee = round(math.ceil(taker_fee(limit) * filled * 100)
                         / 100, 2)
+            # Mark the order as inline-recorded BEFORE record_fill so
+            # sync_kalshi_fills never re-records the same contracts
+            # under its own kalshi-fill-{trade_id} uid — the exact
+            # double-position bug the 2026-08-04 audit fixed for the
+            # engine class (audit 2026-08-21 found this leg missing it).
+            if pr.get("order_id"):
+                ledger.set_state(f"kalshi_inline:{pr['order_id']}",
+                                 {"ts": time.time(), "uid": fill_uid})
             ledger.record_fill(
                 fill_uid=fill_uid, venue="kalshi",
                 market_key=f"kalshi:{m['ticker']}",

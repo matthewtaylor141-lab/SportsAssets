@@ -954,7 +954,12 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
     }
 
     # The venue's own cost calculation must agree with ours before we commit.
+    # prev_order must exist on every path: the sell branch skips the preview,
+    # and referencing it unbound AFTER orders.create would raise with a real
+    # sell already executed at the venue (audit 2026-08-21 — the cash-out
+    # sweep sold, crashed, left the row 'filled', and retried the sell).
     expected_cost = limit_price * quantity
+    prev_order: dict = {}
     if not sell:
         preview = client.orders.preview(
             {"request": {k: v for k, v in params.items()
@@ -980,7 +985,13 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
         if ex.get("type") in ("EXECUTION_TYPE_FILL", "EXECUTION_TYPE_PARTIAL_FILL") and px:
             filled += sh
             notional += sh * px
-    ok = filled > 0 and state in ("ORDER_STATE_FILLED", "ORDER_STATE_PARTIALLY_FILLED")
+    # Shares that explicitly executed ARE the fill, whatever the order's
+    # terminal state: an IOC that partially fills and then cancels the
+    # remainder ends CANCELED, and keying ok on the last execution's state
+    # turned that real fill into filled=0 — the row read 'unfilled', the
+    # sweep bought the market again, and never-add was violated (audit
+    # 2026-08-21). The edge adapter has always used filled > 0 alone.
+    ok = filled > 0
     fill_price = round(notional / filled, 4) if filled > 0 else None
     return {"ok": ok, "order_id": order_id,
             "status": state.replace("ORDER_STATE_", "").lower() or "unknown",

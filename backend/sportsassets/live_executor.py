@@ -29,6 +29,8 @@ import asyncio
 import json
 import logging
 import os
+
+import asyncpg
 from datetime import datetime, timezone
 from typing import Any
 
@@ -633,6 +635,23 @@ def _us_slug_candidates(global_slug: str, outcome: str) -> list[str]:
     return out
 
 
+async def _reap_stale_submitting(pool) -> None:
+    """Terminal-ize 'submitting' rows whose process died mid-order
+    (audit 2026-08-21). A phantom submitting row is load-bearing in two
+    bad ways: copy rows hold the one-fill-per-asset claim forever (the
+    asset can never be copied again), and manual rows would wedge the
+    migration-023 in-flight index. Ten minutes is far past any real
+    submit (mapping + preview + IOC is tens of seconds); if the orphaned
+    venue order did fill, the money is at the venue either way and the
+    row's error text says exactly what to reconcile."""
+    await pool.execute(
+        "UPDATE live_orders SET status = 'error', "
+        "error = 'stale submitting row reaped — process died mid-order; "
+        "reconcile against the venue account' "
+        "WHERE status = 'submitting' "
+        "AND placed_at < now() - interval '10 minutes'")
+
+
 async def execute_manual(asset: str, usd: float, note: str = "",
                          us_slug: str = "",
                          ask_hint: float | None = None) -> dict:
@@ -682,7 +701,12 @@ async def _execute_manual(asset: str, usd: float, note: str = "",
                                           ask_hint, venue)
     # Double-click / impatient-retry guard: placement takes tens of
     # seconds (market resolution + preview + FOK), and a retried request
-    # while the first is in flight would buy twice.
+    # while the first is in flight would buy twice. This SELECT is the
+    # friendly fast path; the race-proof backstop is the partial unique
+    # index live_orders_manual_one_inflight (migration 023) enforced at
+    # the INSERT below — two concurrent submits cannot both pass a
+    # check-then-act SELECT, but they cannot both win the index.
+    await _reap_stale_submitting(pool)
     inflight = await pool.fetchval(
         "SELECT 1 FROM live_orders WHERE whale_username = 'manual' "
         "AND asset = $1 AND status = 'submitting' "
@@ -704,18 +728,23 @@ async def _execute_manual(asset: str, usd: float, note: str = "",
         return {"ok": False, "error": "budget buys zero whole contracts"}
     from . import pmus
 
-    row_id = await pool.fetchval(
-        """
-        INSERT INTO live_orders (trade_id, whale_username, asset,
-                                 condition_id, side, his_price, limit_price,
-                                 requested_usd, requested_shares, status,
-                                 venue)
-        VALUES (NULL, 'manual', $1, $2, 'BUY', $3, $4, $5, $6,
-                'submitting', $7)
-        RETURNING id
-        """,
-        str(asset), None, ask, limit, round(shares * limit, 2),
-        float(shares), venue)
+    try:
+        row_id = await pool.fetchval(
+            """
+            INSERT INTO live_orders (trade_id, whale_username, asset,
+                                     condition_id, side, his_price,
+                                     limit_price, requested_usd,
+                                     requested_shares, status, venue)
+            VALUES (NULL, 'manual', $1, $2, 'BUY', $3, $4, $5, $6,
+                    'submitting', $7)
+            RETURNING id
+            """,
+            str(asset), None, ask, limit, round(shares * limit, 2),
+            float(shares), venue)
+    except asyncpg.UniqueViolationError:
+        return {"ok": False,
+                "error": "an order for this market is already in flight "
+                         "— check the blotter in a few seconds"}
     try:
         # Deterministic mapping ONLY (no fuzzy fallback): the desk's
         # first ticket mapped onto a player prop via the full-text
@@ -788,6 +817,7 @@ async def _execute_manual_slug(pool, us_slug: str, usd: float, note: str,
     from . import pmus
 
     surrogate = f"slug:{us_slug}"[:120]
+    await _reap_stale_submitting(pool)
     inflight = await pool.fetchval(
         "SELECT 1 FROM live_orders WHERE whale_username = 'manual' "
         "AND asset = $1 AND status = 'submitting' "
@@ -805,18 +835,24 @@ async def _execute_manual_slug(pool, us_slug: str, usd: float, note: str,
     shares = int(usd / limit)
     if shares < 1:
         return {"ok": False, "error": "budget buys zero whole contracts"}
-    row_id = await pool.fetchval(
-        """
-        INSERT INTO live_orders (trade_id, whale_username, asset,
-                                 condition_id, side, his_price, limit_price,
-                                 requested_usd, requested_shares, status,
-                                 venue, us_market_slug)
-        VALUES (NULL, 'manual', $1, $2, 'BUY', $3, $4, $5, $6,
-                'submitting', $7, $8)
-        RETURNING id
-        """,
-        surrogate, None, ask, limit, round(shares * limit, 2),
-        float(shares), venue, us_slug)
+    try:
+        row_id = await pool.fetchval(
+            """
+            INSERT INTO live_orders (trade_id, whale_username, asset,
+                                     condition_id, side, his_price,
+                                     limit_price, requested_usd,
+                                     requested_shares, status,
+                                     venue, us_market_slug)
+            VALUES (NULL, 'manual', $1, $2, 'BUY', $3, $4, $5, $6,
+                    'submitting', $7, $8)
+            RETURNING id
+            """,
+            surrogate, None, ask, limit, round(shares * limit, 2),
+            float(shares), venue, us_slug)
+    except asyncpg.UniqueViolationError:
+        return {"ok": False,
+                "error": "an order for this market is already in flight "
+                         "— check the blotter in a few seconds"}
     try:
         result = await asyncio.to_thread(
             pmus.submit_fok, us_slug, limit, shares,

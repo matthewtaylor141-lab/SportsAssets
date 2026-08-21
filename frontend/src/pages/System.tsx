@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { usePolled } from '../lib/poll'
+import { API_BASE } from '../lib/api'
 import { EmptyState } from '../components/EmptyState'
 import { fmtUsd } from '../lib/format'
 
@@ -14,7 +15,9 @@ interface EngineStatus {
   detail?: Record<string, any>
 }
 
-const API_BASE = '' // api() prefixes
+// API_BASE comes from lib/api (audit 2026-08-21): the local '' constant
+// sent the Reports fetch/links to the Netlify origin, whose SPA fallback
+// answers 200 with index.html — "Copy for AI review" was copying MARKUP.
 
 function useEngine() {
   const { data: status, err } = usePolled<EngineStatus>('/api/engine/status')
@@ -248,7 +251,7 @@ function Reports() {
             <div className="sy-report-links">
               {FORMATS.map((f) => (
                 <a key={f.key} className="tr-chipbtn"
-                  href={`/api/report?period=${p}&format=${f.key}`}
+                  href={`${API_BASE}/api/report?period=${p}&format=${f.key}`}
                   target="_blank" rel="noreferrer">
                   {f.label}
                 </a>
