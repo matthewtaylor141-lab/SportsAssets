@@ -205,7 +205,10 @@ async def test_kalshi_league_param_picks_series(monkeypatch):
     monkeypatch.setattr(app_mod, "_kalshi_fetch", fake_fetch)
     out = await app_mod.api_desk_feed(venue="kalshi", league="tennis")
     assert seen["series"] == ["KXATPMATCH", "KXWTAMATCH"]
-    assert seen["max_close_h"] == 48
+    # 48h -> 168h (2026-08-22): a between-tournaments weekend left the
+    # venue with ~5 open sports markets, all beyond 48h — the desk
+    # showed All=0. The board now always shows the coming week.
+    assert seen["max_close_h"] == 168
     assert out["cards"] == [] and out["counts"]["all"] == 0
 
 
