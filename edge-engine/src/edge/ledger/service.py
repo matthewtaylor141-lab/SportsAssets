@@ -750,8 +750,25 @@ class Ledger:
                 b["losses"] += 1 if pnl < 0 else 0
                 b["pnl"] = round(b["pnl"] + pnl, 2)
                 b["staked"] = round(b["staked"] + float(r["staked"]), 2)
+        # Open exposure for the same categories (owner 2026-08-22: the
+        # homepage deployed tile must include Kalshi copy volume ON the
+        # table, not just settled). Positions carry no category, so
+        # membership comes from the fills that built them.
+        with self._conn() as conn:
+            open_row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS n,
+                       COALESCE(sum(p.shares * p.avg_cost), 0) AS stake
+                FROM positions p
+                WHERE p.resolved = 0 AND p.shares > ? AND p.mode != 'PAPER'
+                  AND EXISTS (SELECT 1 FROM fills f
+                              WHERE f.market_key = p.market_key
+                                AND f.category IN ({ph}))
+                """, (EPS, *categories)).fetchone()
         return {"since": since_day, "categories": list(categories),
                 "total": total, "by_whale": by_whale,
+                "open": {"count": int(open_row["n"] or 0),
+                         "stake": round(float(open_row["stake"] or 0), 2)},
                 "daily": sorted(by_day.values(),
                                 key=lambda d: d["day"], reverse=True)}
 

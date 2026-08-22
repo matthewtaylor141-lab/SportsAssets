@@ -251,6 +251,12 @@ async def build(since_day: str) -> dict:
                      "kalshi": (kexp or {}).get("total")}
     out["kalshi_included"] = bool(kexp)
     if kexp:
+        kopen = kexp.get("open") or {}
+        if kopen.get("count") or kopen.get("stake"):
+            out["open"] = {
+                "count": out["open"]["count"] + int(kopen.get("count") or 0),
+                "stake": round(out["open"]["stake"]
+                               + float(kopen.get("stake") or 0), 2)}
         out["total"] = merge_totals(out["total"], kexp.get("total") or {})
         out["daily"] = merge_daily(out["daily"], kexp.get("daily") or [])
         out["by_whale"] = merge_by_whale(out["by_whale"],

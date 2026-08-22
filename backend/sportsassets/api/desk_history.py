@@ -160,6 +160,40 @@ def fetch_kalshi_history(ticker: str, hours: int) -> list[dict]:
 # ── Entry point (the app.py route is a thin wrapper over this) ───────
 
 
+async def _pm_token_for_slug(slug: str) -> str | None:
+    """us_slug -> CLOB yes-token, from data we already hold.
+
+    1. gamma metadata (markets.slug -> market_tokens, outcome_index 0 —
+       the venue's boards mirror the global markets for sports, so the
+       slugs usually align);
+    2. the order ledger (anything the desk or the copy engine ever
+       traded on the slug carries its token).
+    None when neither knows — the chart stays honestly empty."""
+    from ..db import get_pool
+
+    try:
+        pool = await get_pool()
+        tok = await pool.fetchval(
+            """
+            SELECT mt.token_id
+            FROM markets m JOIN market_tokens mt USING (condition_id)
+            WHERE m.slug = $1
+            ORDER BY mt.outcome_index ASC LIMIT 1
+            """, slug)
+        if tok:
+            return str(tok)
+        tok = await pool.fetchval(
+            """
+            SELECT asset FROM live_orders
+            WHERE us_market_slug = $1 AND asset IS NOT NULL
+              AND asset ~ '^[0-9]+$'
+            ORDER BY id DESC LIMIT 1
+            """, slug)
+        return str(tok) if tok else None
+    except Exception:  # noqa: BLE001 — resolution is best-effort
+        return None
+
+
 async def history(venue: str, id: str, hours: int,
                   now: float | None = None) -> dict:
     """The contract payload for one (venue, id, hours). Never raises:
@@ -177,7 +211,22 @@ async def history(venue: str, id: str, hours: int,
     fetch = (fetch_pm_history if venue == "polymarket-us"
              else fetch_kalshi_history)
     try:
-        pts = await asyncio.to_thread(fetch, id, hours)
+        chart_id = id
+        if venue == "polymarket-us" and not id.isdigit():
+            # SLUG -> CLOB TOKEN BRIDGE (owner 2026-08-22: "no chart on
+            # any per-market view"): venue-native PM boards address
+            # markets by us_slug, but prices-history wants the global
+            # CLOB token. Resolve through our own data — gamma metadata
+            # first, then any order we ever placed on the slug. A slug
+            # neither source knows keeps the quiet empty state.
+            token = await _pm_token_for_slug(id)
+            if token is None:
+                payload = {**base, "points": [],
+                           "error": "no price history for this market"}
+                _cache[key] = (ts, payload)
+                return payload
+            chart_id = token
+        pts = await asyncio.to_thread(fetch, chart_id, hours)
         payload = {**base, "points": downsample(pts)}
     except Exception as exc:  # noqa: BLE001 — charts degrade, desks never break
         log.warning("desk history %s %s (%sh) failed: %s",

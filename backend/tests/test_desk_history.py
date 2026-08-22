@@ -133,3 +133,66 @@ async def test_history_clamps_hours(monkeypatch):
     monkeypatch.setattr(dh, "fetch_pm_history", fake_fetch)
     r = await dh.history("polymarket-us", "12345", 9999, now=1000.0)
     assert seen["hours"] == 336 and r["hours"] == 336
+
+
+# ── us_slug -> token bridge (owner 2026-08-22: PM charts were empty on
+# every venue-native market view because boards address by slug) ──────
+
+
+def _run(coro):
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def test_slug_bridge_resolves_and_charts(monkeypatch):
+    from sportsassets.api import desk_history as dh
+
+    async def fake_resolve(slug):
+        assert slug == "pegula-swiatek-ml"
+        return "123456789"
+
+    seen = {}
+
+    def fake_fetch(token, hours):
+        seen["token"] = token
+        return [{"t": 1, "p": 0.5}]
+
+    monkeypatch.setattr(dh, "_pm_token_for_slug", fake_resolve)
+    monkeypatch.setattr(dh, "fetch_pm_history", fake_fetch)
+    dh._cache.clear()
+    out = _run(dh.history("polymarket-us", "pegula-swiatek-ml", 24))
+    assert seen["token"] == "123456789"
+    assert out["points"] and out["id"] == "pegula-swiatek-ml"
+
+
+def test_slug_bridge_unknown_slug_stays_empty(monkeypatch):
+    from sportsassets.api import desk_history as dh
+
+    async def fake_resolve(slug):
+        return None
+
+    monkeypatch.setattr(dh, "_pm_token_for_slug", fake_resolve)
+    dh._cache.clear()
+    out = _run(dh.history("polymarket-us", "mystery-slug", 24))
+    assert out["points"] == [] and "no price history" in out["error"]
+
+
+def test_numeric_token_skips_bridge(monkeypatch):
+    from sportsassets.api import desk_history as dh
+
+    def fake_fetch(token, hours):
+        return [{"t": 1, "p": 0.4}]
+
+    async def boom(slug):
+        raise AssertionError("bridge must not run for token ids")
+
+    monkeypatch.setattr(dh, "_pm_token_for_slug", boom)
+    monkeypatch.setattr(dh, "fetch_pm_history", fake_fetch)
+    dh._cache.clear()
+    out = _run(dh.history("polymarket-us", "987654321", 24))
+    assert out["points"]
