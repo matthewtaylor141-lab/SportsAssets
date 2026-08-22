@@ -239,6 +239,107 @@ async def build(since_day: str) -> dict:
     out["trades"] = trades_list(windowed)
     out["today"] = today_stats(
         windowed, datetime.now(RECORD_TZ).strftime("%Y-%m-%d"))
+    # KALSHI COPY SLEEVE MERGE (owner order 2026-08-22: "include volume
+    # and pnl from Kalshi — we copied closer to double the volume listed
+    # and lost a little on Kalshi"). The platform ledger only sees the
+    # Polymarket executor; the Kalshi copy legs live in the ENGINE's
+    # ledger and arrive via its heartbeat export. Merge is additive and
+    # fail-open: no export -> Polymarket-only record, flagged.
+    pm_total = dict(out["total"])
+    kexp = await _kalshi_copies_export(pool)
+    out["venues"] = {"polymarket": pm_total,
+                     "kalshi": (kexp or {}).get("total")}
+    out["kalshi_included"] = bool(kexp)
+    if kexp:
+        out["total"] = merge_totals(out["total"], kexp.get("total") or {})
+        out["daily"] = merge_daily(out["daily"], kexp.get("daily") or [])
+        out["by_whale"] = merge_by_whale(out["by_whale"],
+                                         kexp.get("by_whale") or {})
+        ktoday = next((d for d in (kexp.get("daily") or [])
+                       if d.get("day") == datetime.now(RECORD_TZ)
+                       .strftime("%Y-%m-%d")), None)
+        if ktoday:
+            out["today"] = merge_totals(out["today"], ktoday,
+                                        keys=("pnl", "settled", "wins",
+                                              "losses"))
     out["since"] = since_day
     out["generated_at"] = datetime.now(RECORD_TZ).isoformat()
     return out
+
+
+def merge_totals(a: dict, b: dict,
+                 keys: tuple = ("settled", "wins", "losses",
+                                "pnl", "staked")) -> dict:
+    """Additive venue merge; ROI/win-rate recomputed. Pure; tested."""
+    m = dict(a)
+    for k in keys:
+        m[k] = round(float(a.get(k) or 0) + float(b.get(k) or 0), 2)
+        if k in ("settled", "wins", "losses"):
+            m[k] = int(m[k])
+    if "staked" in m:
+        m["roi"] = (round(m["pnl"] / m["staked"], 4)
+                    if m.get("staked") else None)
+    if m.get("settled"):
+        m["win_rate"] = round(m.get("wins", 0) / m["settled"], 4)
+    return m
+
+
+def merge_daily(pm_daily: list[dict], k_daily: list[dict]) -> list[dict]:
+    """Merge the two venues' ET-day series (newest first). Pure."""
+    by_day = {d["day"]: dict(d) for d in pm_daily}
+    for kd in k_daily:
+        day = kd.get("day")
+        if not day:
+            continue
+        if day in by_day:
+            by_day[day] = merge_totals(by_day[day], kd)
+            by_day[day]["day"] = day
+        else:
+            by_day[day] = {"day": day,
+                           **{k: kd.get(k, 0) for k in
+                              ("settled", "wins", "losses",
+                               "pnl", "staked")}}
+    return sorted(by_day.values(), key=lambda d: d["day"], reverse=True)
+
+
+def merge_by_whale(pm_bw: list[dict], k_bw: dict) -> list[dict]:
+    """Fold the engine's per-whale Kalshi record into the display list.
+    Engine keys are lowercase usernames; only COPY_WHALES merge (the
+    crypto sleeve is not copies and its whales never appear here)."""
+    by_name = {w["whale"]: dict(w) for w in pm_bw}
+    for uname, kb in k_bw.items():
+        if uname not in COPY_WHALES:
+            continue
+        disp = DISPLAY.get(uname, uname)
+        krow = {"settled": kb.get("settled", 0),
+                "wins": kb.get("wins", 0),
+                "losses": kb.get("losses", 0),
+                "pnl": kb.get("pnl", kb.get("realized", 0)) or 0,
+                "staked": kb.get("staked", 0) or 0}
+        if disp in by_name:
+            merged = merge_totals(by_name[disp], krow)
+            merged["whale"] = disp
+            by_name[disp] = merged
+        else:
+            by_name[disp] = {"whale": disp, **krow,
+                             "roi": (round(krow["pnl"] / krow["staked"], 4)
+                                     if krow["staked"] else None)}
+    return sorted(by_name.values(), key=lambda w: -float(w["pnl"] or 0))
+
+
+async def _kalshi_copies_export(pool) -> dict | None:
+    """The engine heartbeat's kalshi_copies_record block, or None."""
+    try:
+        raw = await pool.fetchval(
+            "SELECT detail FROM service_heartbeats "
+            "WHERE service = 'edge_engine'")
+        if not raw:
+            return None
+        import json as _json
+        detail = raw if isinstance(raw, dict) else _json.loads(raw)
+        exp = detail.get("kalshi_copies_record")
+        if not isinstance(exp, dict) or "total" not in exp:
+            return None
+        return exp
+    except Exception:  # noqa: BLE001 — record serves PM-only, flagged
+        return None

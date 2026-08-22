@@ -697,6 +697,64 @@ class Ledger:
                         if b["staked"] else None)
         return out
 
+    def copies_record_export(self,
+                             categories: tuple[str, ...] = (
+                                 "kalshi_copy", "kalshi_add"),
+                             since_day: str = "2026-08-01") -> dict:
+        """The Kalshi COPY sleeve's whole record, shaped for the
+        platform's public copies feed (owner order 2026-08-22: the
+        homepage must include Kalshi copy volume and P&L — the platform
+        ledger only sees the Polymarket executor, so roughly half the
+        copy volume was invisible). ET-day bucketing to match the
+        platform's calendar; live fills only; crypto/fsc/underdog
+        sleeves are NOT copies and stay out."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        et = ZoneInfo("America/New_York")
+        since_ts = datetime.strptime(since_day, "%Y-%m-%d").replace(
+            tzinfo=et).timestamp()
+        ph = ",".join("?" for _ in categories)
+        with self._conn() as conn:
+            rows = [dict(x) for x in conn.execute(
+                f"""
+                SELECT COALESCE(json_extract(f.decision, '$.whale'),
+                                'unattributed') AS whale,
+                       r.pnl AS pnl, r.ts AS ts,
+                       COALESCE(sum(f.qty * f.price), 0) AS staked
+                FROM realizations r
+                JOIN fills f ON f.market_key = r.market_key
+                            AND f.side = 'BUY'
+                WHERE r.ts >= ? AND r.kind = 'resolution'
+                  AND f.category IN ({ph}) AND f.mode != 'PAPER'
+                GROUP BY r.id
+                """, (since_ts, *categories)).fetchall()]
+        total = {"settled": 0, "wins": 0, "losses": 0,
+                 "pnl": 0.0, "staked": 0.0}
+        by_whale: dict[str, dict] = {}
+        by_day: dict[str, dict] = {}
+        for r in rows:
+            if r["staked"] <= 0:
+                continue
+            day = datetime.fromtimestamp(r["ts"], et).strftime("%Y-%m-%d")
+            pnl = float(r["pnl"])
+            for b in (total,
+                      by_whale.setdefault(str(r["whale"]).lower(), {
+                          "settled": 0, "wins": 0, "losses": 0,
+                          "pnl": 0.0, "staked": 0.0}),
+                      by_day.setdefault(day, {
+                          "day": day, "settled": 0, "wins": 0,
+                          "losses": 0, "pnl": 0.0, "staked": 0.0})):
+                b["settled"] += 1
+                b["wins"] += 1 if pnl > 0 else 0
+                b["losses"] += 1 if pnl < 0 else 0
+                b["pnl"] = round(b["pnl"] + pnl, 2)
+                b["staked"] = round(b["staked"] + float(r["staked"]), 2)
+        return {"since": since_day, "categories": list(categories),
+                "total": total, "by_whale": by_whale,
+                "daily": sorted(by_day.values(),
+                                key=lambda d: d["day"], reverse=True)}
+
     def category_entry_cohort(self, category: str,
                               entry_since: float,
                               live_only: bool = True) -> dict:

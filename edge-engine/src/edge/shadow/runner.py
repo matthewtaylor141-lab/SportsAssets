@@ -2078,6 +2078,14 @@ def run_cycle(adapters, feed_client, policy, risk, ledger, sport_keys: list[str]
         # whole live era.
         funnel["kalshi_copy_whales"] = ledger.category_whale_scorecard(
             "kalshi_copy", days=30, live_only=risk.is_live)
+        # The Kalshi copy sleeve's WHOLE record for the platform's
+        # public copies feed (owner order 2026-08-22: homepage copy
+        # numbers must include Kalshi volume + P&L). Cheap aggregate
+        # (one SQL pass), refreshed with the funnel; fail-closed.
+        try:
+            funnel["kalshi_copies_record"] = ledger.copies_record_export()
+        except Exception as exc:  # noqa: BLE001 — telemetry never stalls
+            funnel["kalshi_copies_record"] = {"error": type(exc).__name__}
         try:
             from edge.shadow import kalshi_crypto as _kcr
             funnel["kalshi_crypto"] = dict(_kcr.funnel)

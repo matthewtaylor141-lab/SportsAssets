@@ -152,3 +152,52 @@ def test_software_cohort_is_the_complement():
     assert days["2026-08-18"]["pnl"] == -300.0
     assert days["2026-08-19"]["pnl"] == -50.0
     assert days["2026-08-19"]["staked"] == 300.0
+
+
+# ── Kalshi copy-sleeve merge (owner order 2026-08-22: homepage must
+# include Kalshi copy volume + P&L; PM ledger alone showed ~half) ──
+
+
+def test_merge_totals_adds_and_recomputes_ratios():
+    from sportsassets.api.copies_record import merge_totals
+
+    pm = {"settled": 100, "wins": 60, "losses": 40,
+          "pnl": 1000.0, "staked": 5000.0, "roi": 0.2, "win_rate": 0.6}
+    k = {"settled": 80, "wins": 35, "losses": 45,
+         "pnl": -120.5, "staked": 4200.0}
+    m = merge_totals(pm, k)
+    assert m["settled"] == 180 and m["wins"] == 95 and m["losses"] == 85
+    assert m["pnl"] == 879.5 and m["staked"] == 9200.0
+    assert m["roi"] == round(879.5 / 9200.0, 4)
+    assert m["win_rate"] == round(95 / 180, 4)
+
+
+def test_merge_daily_unions_days():
+    from sportsassets.api.copies_record import merge_daily
+
+    pm = [{"day": "2026-08-21", "settled": 10, "wins": 6, "losses": 4,
+           "pnl": 100.0, "staked": 2000.0}]
+    k = [{"day": "2026-08-21", "settled": 5, "wins": 2, "losses": 3,
+          "pnl": -40.0, "staked": 900.0},
+         {"day": "2026-08-20", "settled": 3, "wins": 3, "losses": 0,
+          "pnl": 60.0, "staked": 500.0}]
+    out = merge_daily(pm, k)
+    assert [d["day"] for d in out] == ["2026-08-21", "2026-08-20"]
+    assert out[0]["settled"] == 15 and out[0]["pnl"] == 60.0
+    assert out[1]["staked"] == 500.0
+
+
+def test_merge_by_whale_folds_copy_whales_only():
+    from sportsassets.api.copies_record import merge_by_whale
+
+    pm = [{"whale": "RN1", "settled": 10, "wins": 6, "losses": 4,
+           "pnl": 500.0, "staked": 2000.0, "roi": 0.25}]
+    k = {"rn1": {"settled": 4, "wins": 1, "losses": 3,
+                 "pnl": -80.0, "staked": 700.0},
+         "0xf705fa04": {"settled": 99, "wins": 99, "losses": 0,
+                        "pnl": 9999.0, "staked": 9999.0}}
+    out = merge_by_whale(pm, k)
+    rn1 = next(w for w in out if w["whale"] == "RN1")
+    assert rn1["settled"] == 14 and rn1["pnl"] == 420.0
+    assert not any("f705" in str(w["whale"]).lower() for w in out), \
+        "crypto whales are not copies and must never merge in"
