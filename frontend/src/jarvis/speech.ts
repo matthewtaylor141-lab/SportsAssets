@@ -87,7 +87,7 @@ export class Ears {
     rec.onerror = (e) => {
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
         this.wantActive = false
-        this.handlers.onError('Microphone access was denied — allow it in the browser to talk to JARVIS.')
+        this.handlers.onError('Microphone access was denied — allow it in the browser to talk to MERIDIAN.')
       } else if (e.error !== 'no-speech' && e.error !== 'aborted') {
         this.handlers.onError(`Speech recognition error: ${e.error}`)
       }

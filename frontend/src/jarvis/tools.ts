@@ -20,9 +20,12 @@ export interface JarvisUI {
 }
 
 export interface StagedTicket {
+  /** buy = stake `usd` on the outcome; sell = cash out `qty` contracts. */
+  action: 'buy' | 'sell'
   venue: 'polymarket' | 'kalshi'
   title: string
   outcome: string
+  /** buy: the stake. sell: estimated proceeds (0 when no live mark). */
   usd: number
   price: number | null
   /** venue payload: PM asset/us_slug; Kalshi ticker + yes/no side. */
@@ -30,6 +33,8 @@ export interface StagedTicket {
   usSlug?: string
   ticker?: string
   kalshiSide?: 'yes' | 'no'
+  /** sell only: contracts to cash out ('all' = everything held). */
+  qty?: number | 'all'
   stagedAt: number
 }
 
@@ -223,6 +228,39 @@ export const JARVIS_TOOLS: ToolSchema[] = [
     input_schema: none,
   },
   {
+    name: 'get_accounts',
+    description:
+      'Both live venue accounts on one card: Polymarket (account value, cash, buying power, open positions with unrealized P&L, recent trades) ' +
+      'and Kalshi (balance, exposure, resting orders, positions with marks), plus combined totals. ' +
+      'Call this for "what are we holding", "how much cash", position-level detail, or before staging a cash-out. The live snapshot already carries the headline totals.',
+    input_schema: none,
+  },
+  {
+    name: 'get_desk_blotter',
+    description:
+      "The manual desk blotter: Matt's own tickets across both venues with status, fills, settled P&L, and the desk's 24h budget usage. " +
+      'Call this for "what did I trade", open manual orders, or a queued cash-out he wants to check on.',
+    input_schema: none,
+  },
+  {
+    name: 'stage_cash_out',
+    description:
+      'Stage a REAL-MONEY SELL of a held position for confirmation. Does NOT place it — puts the CASH OUT ticket on screen and returns the read-back script. ' +
+      'Protocol (mandatory): only stage after Matt has named the position and how much (a contract count, or all of it); find the position with get_accounts first if needed; ' +
+      'then READ THE TICKET BACK word for word and WAIT for his answer. The platform refuses sells above what is held and sells with no live bid.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        venue: { type: 'string', enum: ['polymarket', 'kalshi'] },
+        ticker: { type: 'string', description: 'kalshi: the held market ticker from get_accounts' },
+        us_slug: { type: 'string', description: 'polymarket: the held market_slug from get_accounts' },
+        outcome: { type: 'string', description: 'polymarket: the held outcome, for the read-back' },
+        qty: { type: 'string', description: 'contracts to sell: an integer, or "all" (default) for the whole position' },
+      },
+      required: ['venue'],
+    },
+  },
+  {
     name: 'leave_note_for_engine_session',
     description:
       "Queue a note for the autonomous engine session — the co-CEO's main coding session that runs the platform — which reads its " +
@@ -325,6 +363,8 @@ async function getCopiesRecord(): Promise<string> {
       since: d.since,
       uncapped: d.uncapped,
       total: d.total,
+      today: d.today,
+      open: d.open,
       by_whale: ((d.by_whale as Dict[]) || []).slice(0, 8),
       last_7_days: ((d.daily as Dict[]) || []).slice(-7),
     })
@@ -543,6 +583,85 @@ const NEED_TOKEN = JSON.stringify({
   error: 'The desk needs the platform admin token — Matt can add it in MERIDIAN settings (gear icon).',
 })
 
+/* ── the book: accounts + blotter ────────────────────────────────── */
+
+interface PmPosition {
+  market_slug: string | null; title: string | null; outcome: string | null
+  qty: number | null; cost: number | null; value: number | null; unrealized: number | null
+}
+interface KalshiPosition {
+  ticker: string | null; qty: number | null; cost_usd: number | null
+  mark_bid: number | null; value_usd: number | null; unrealized: number | null
+}
+interface DeskAccounts {
+  as_of: number
+  polymarket: {
+    configured: boolean; account_value: number | null; cash: number | null
+    buying_power: number | null; open_value: number | null
+    unsettled_funds: number | null; realized_pnl: number | null
+    positions: PmPosition[]; recent_trades: unknown[]; error?: string
+  }
+  kalshi: {
+    configured: boolean; degraded?: boolean; balance_usd: number | null
+    stale_s: number | null; exposure_usd: number | null; resting: number
+    positions: KalshiPosition[]
+  }
+  totals: { value: number; cash: number; unrealized: number }
+}
+
+async function getAccounts(ctx: ToolContext): Promise<string> {
+  if (!ctx.adminToken) return NEED_TOKEN
+  try {
+    const d = await adminApi<DeskAccounts>('/api/desk/accounts', ctx.adminToken)
+    return pack({
+      totals: d.totals,
+      polymarket: {
+        configured: d.polymarket.configured,
+        account_value: d.polymarket.account_value,
+        cash: d.polymarket.cash,
+        buying_power: d.polymarket.buying_power,
+        unsettled_funds: d.polymarket.unsettled_funds,
+        realized_pnl: d.polymarket.realized_pnl,
+        positions: (d.polymarket.positions || []).slice(0, 12),
+        error: d.polymarket.error,
+      },
+      kalshi: {
+        configured: d.kalshi.configured,
+        degraded: d.kalshi.degraded,
+        balance_usd: d.kalshi.balance_usd,
+        stale_s: d.kalshi.stale_s,
+        exposure_usd: d.kalshi.exposure_usd,
+        resting: d.kalshi.resting,
+        positions: (d.kalshi.positions || []).slice(0, 12),
+      },
+    })
+  } catch (e) {
+    return fail('the venue accounts', e)
+  }
+}
+
+async function getDeskBlotter(ctx: ToolContext): Promise<string> {
+  if (!ctx.adminToken) return NEED_TOKEN
+  try {
+    const d = await adminApi<{ trades: Dict[]; day_spent: number
+      day_budget: number; max_per_order: number }>('/api/admin/manual-trades', ctx.adminToken)
+    return pack({
+      day_spent: d.day_spent,
+      day_budget: d.day_budget,
+      max_per_order: d.max_per_order,
+      recent: (d.trades || []).slice(0, 12).map((t) => ({
+        id: t.id, when: String(t.placed_at || '').slice(0, 16),
+        title: t.title, outcome: t.outcome, venue: t.venue,
+        status: t.status, requested_usd: t.requested_usd,
+        filled_usd: t.filled_usd, fill_price: t.fill_price,
+        pnl: t.pnl, error: t.error,
+      })),
+    })
+  } catch (e) {
+    return fail('the desk blotter', e)
+  }
+}
+
 async function searchDeskMarkets(input: Dict, ctx: ToolContext): Promise<string> {
   if (!ctx.adminToken) return NEED_TOKEN
   const venue = String(input.venue ?? 'polymarket')
@@ -582,6 +701,7 @@ async function stageDeskOrder(input: Dict, ctx: ToolContext): Promise<string> {
     return JSON.stringify({ error: 'usd must be a positive amount Matt explicitly named (max $1000 by voice)' })
   }
   const t: StagedTicket = {
+    action: 'buy',
     venue,
     title: String(input.title ?? ''),
     outcome: String(input.outcome ?? ''),
@@ -609,6 +729,95 @@ async function stageDeskOrder(input: Dict, ctx: ToolContext): Promise<string> {
   })
 }
 
+async function stageCashOut(input: Dict, ctx: ToolContext): Promise<string> {
+  if (!ctx.adminToken) return NEED_TOKEN
+  const venue = input.venue === 'kalshi' ? 'kalshi' as const : 'polymarket' as const
+  const qtyRaw = String(input.qty ?? 'all').trim().toLowerCase()
+  const wantAll = qtyRaw === '' || qtyRaw === 'all'
+  const qtyNum = wantAll ? 0 : Math.floor(Number(qtyRaw))
+  if (!wantAll && !(qtyNum >= 1)) {
+    return JSON.stringify({ error: 'qty must be a whole number of contracts, or "all"' })
+  }
+  let acct: DeskAccounts
+  try {
+    acct = await adminApi<DeskAccounts>('/api/desk/accounts', ctx.adminToken)
+  } catch (e) {
+    return fail('the venue accounts', e)
+  }
+  let held: number
+  let price: number | null
+  let title: string
+  let outcome: string
+  const t: Partial<StagedTicket> = { action: 'sell', venue }
+  if (venue === 'kalshi') {
+    const ticker = String(input.ticker ?? '').trim()
+    if (!ticker) return JSON.stringify({ error: 'kalshi cash-out needs the ticker from get_accounts' })
+    const pos = (acct.kalshi.positions || []).find((p) => p.ticker === ticker)
+    if (!pos || !((pos.qty ?? 0) > 0)) {
+      return JSON.stringify({ error: `Nothing held on ${ticker} — get_accounts shows the open book.` })
+    }
+    held = pos.qty!
+    price = pos.mark_bid
+    title = ticker
+    outcome = ticker
+    t.ticker = ticker
+  } else {
+    const slug = String(input.us_slug ?? '').trim()
+    const wantOutcome = String(input.outcome ?? '').trim().toLowerCase()
+    if (!slug) return JSON.stringify({ error: 'polymarket cash-out needs us_slug from get_accounts' })
+    const pos = (acct.polymarket.positions || []).find((p) =>
+      p.market_slug === slug && (!wantOutcome || (p.outcome || '').toLowerCase() === wantOutcome))
+    if (!pos || !((pos.qty ?? 0) > 0)) {
+      return JSON.stringify({ error: `Nothing held on ${slug} — get_accounts shows the open book.` })
+    }
+    held = pos.qty!
+    price = pos.value != null && pos.qty ? pos.value / pos.qty : null
+    title = pos.title || slug
+    outcome = pos.outcome || 'held position'
+    t.usSlug = slug
+  }
+  const n = wantAll ? Math.floor(held) : qtyNum
+  if (n > held) {
+    // Fail closed here too — the platform would refuse anyway, but the
+    // read-back must never promise more contracts than the book holds.
+    return JSON.stringify({ error: `Only ${Math.floor(held)} contracts held — can't cash out ${n}.` })
+  }
+  const proceeds = price != null ? Math.round(n * price * 100) / 100 : 0
+  const ticket: StagedTicket = {
+    ...t as StagedTicket,
+    title, outcome,
+    usd: proceeds,
+    price,
+    qty: wantAll ? 'all' : n,
+    stagedAt: Date.now(),
+  }
+  ctx.ui.stageTicket(ticket)
+  return JSON.stringify({
+    staged: true,
+    read_back: `CASH OUT ${wantAll ? `all ${n}` : n} contracts of ${outcome}` +
+      (venue === 'polymarket' ? ` — ${title}` : '') +
+      (price != null
+        ? ` at about ${Math.round(price * 100)} cents — proceeds about $${proceeds}`
+        : ' at the live bid — no fresh mark, the venue prices it') +
+      '. Yes or no?',
+    note: 'Read this back to Matt WORD FOR WORD and wait for his answer. Only call confirm_staged_order after an explicit yes.',
+  })
+}
+
+/** Kalshi relays through the engine — poll the queue row briefly so the
+ * spoken answer is the real outcome, not "probably". */
+async function pollKalshiRow(rowId: unknown, ctx: ToolContext,
+                             verb: 'placed' | 'cashed_out'): Promise<string> {
+  for (let i = 0; i < 12; i++) {
+    await new Promise((res) => setTimeout(res, 2000))
+    const st = await adminApi<Dict>(
+      `/api/admin/manual-order?id=${rowId}&venue=kalshi`, ctx.adminToken).catch(() => null)
+    if (st && st.found && st.terminal) return pack({ [verb]: true, result: st })
+  }
+  return pack({ [verb]: true,
+    result: 'queued — the engine is relaying it; check the blotter in a moment' })
+}
+
 async function confirmStagedOrder(ctx: ToolContext): Promise<string> {
   if (!ctx.adminToken) return NEED_TOKEN
   const t = ctx.getStaged()
@@ -622,6 +831,30 @@ async function confirmStagedOrder(ctx: ToolContext): Promise<string> {
       refused: "Money gate: Matt's most recent spoken words were not an explicit confirmation. Read the ticket back and wait for his yes.",
     })
   }
+  if (t.action === 'sell') {
+    // CASH OUT: the platform re-quotes the bid server-side, clamps to
+    // held, and fails closed — this call only carries the intent.
+    try {
+      const body = t.venue === 'kalshi'
+        ? { venue: 'kalshi', ticker: t.ticker || '',
+            ...(typeof t.qty === 'number' ? { qty: t.qty } : {}) }
+        : { venue: 'polymarket-us', us_slug: t.usSlug || '', outcome: t.outcome,
+            ...(typeof t.qty === 'number' ? { qty: t.qty } : {}) }
+      const r = await adminApi<Dict>('/api/desk/cash-out', ctx.adminToken, {
+        method: 'POST', body: JSON.stringify(body),
+      })
+      ctx.ui.stageTicket(null)
+      if (r.ok === false) return pack({ cashed_out: false, error: r.error })
+      if (r.queued && r.row_id) return pollKalshiRow(r.row_id, ctx, 'cashed_out')
+      return pack({ cashed_out: true, result: {
+        filled_shares: r.filled_shares, avg_price: r.avg_price,
+        proceeds_usd: r.proceeds_usd, detail: r.detail,
+      } })
+    } catch (e) {
+      ctx.ui.stageTicket(null)
+      return fail('the cash-out', e)
+    }
+  }
   try {
     const body = t.venue === 'kalshi'
       ? { venue: 'kalshi', ticker: t.ticker, side: t.kalshiSide || 'yes',
@@ -634,17 +867,7 @@ async function confirmStagedOrder(ctx: ToolContext): Promise<string> {
     })
     ctx.ui.stageTicket(null)
     if (r.ok === false) return pack({ placed: false, error: r.error })
-    if (r.queued && r.row_id) {
-      // Kalshi relays through the engine — poll the row briefly so the
-      // spoken answer is the real outcome, not "probably".
-      for (let i = 0; i < 12; i++) {
-        await new Promise((res) => setTimeout(res, 2000))
-        const st = await adminApi<Dict>(
-          `/api/admin/manual-order?id=${r.row_id}`, ctx.adminToken).catch(() => null)
-        if (st && st.found && st.terminal) return pack({ placed: true, result: st })
-      }
-      return pack({ placed: true, result: 'queued — the engine is relaying it; check the blotter in a moment' })
-    }
+    if (r.queued && r.row_id) return pollKalshiRow(r.row_id, ctx, 'placed')
     return pack({ placed: true, result: {
       status: r.status ?? (r.filled_shares ? 'filled' : 'unknown'),
       filled_shares: r.filled_shares, fill_price: r.fill_price, error: r.error,
@@ -677,7 +900,10 @@ export function createToolExecutor(ctx: ToolContext) {
       case 'show_chart': return showChart(input, ctx)
       case 'request_code_change': return requestCodeChange(input, ctx)
       case 'search_desk_markets': return searchDeskMarkets(input, ctx)
+      case 'get_accounts': return getAccounts(ctx)
+      case 'get_desk_blotter': return getDeskBlotter(ctx)
       case 'stage_desk_order': return stageDeskOrder(input, ctx)
+      case 'stage_cash_out': return stageCashOut(input, ctx)
       case 'confirm_staged_order': return confirmStagedOrder(ctx)
       case 'cancel_staged_order': return cancelStagedOrder(ctx)
       case 'leave_note_for_engine_session': return leaveNote(input, ctx)

@@ -175,7 +175,10 @@ const TOOL_NOTES: Record<string, string> = {
   show_chart: 'Drawing the chart…',
   request_code_change: 'Filing the work order…',
   search_desk_markets: 'Searching the desk…',
+  get_accounts: 'Opening the book…',
+  get_desk_blotter: 'Pulling the blotter…',
   stage_desk_order: 'Staging the ticket…',
+  stage_cash_out: 'Staging the cash-out…',
   confirm_staged_order: 'Placing the order…',
   cancel_staged_order: 'Tearing the ticket up…',
 }
@@ -212,14 +215,24 @@ export default function Jarvis() {
     loaded: false, pnl: null, settled: null, wins: null, armed: null, paused: false, engineAgeS: null,
   })
   const [journal, setJournal] = useState<{ entry: string; mood: string; at: string } | null>(null)
+  /** Last few journal entries, folded into the system prompt — the
+   * presence references its own written continuity. */
+  const journalRecapRef = useRef('')
 
   useEffect(() => {
     let dead = false
     const load = async () => {
       try {
         const j = await api<{ entries: { entry: string; mood: string; at: string }[] }>(
-          '/api/meridian/journal?limit=1')
-        if (!dead && j.entries?.length) setJournal(j.entries[0])
+          '/api/meridian/journal?limit=3')
+        if (dead || !j.entries?.length) return
+        setJournal(j.entries[0])
+        // Continuity: the last few entries fold into the system prompt so
+        // the presence can reference what it wrote in its own journal.
+        journalRecapRef.current = j.entries
+          .map((e) => `${new Date(e.at).toLocaleDateString('en-US',
+            { month: 'short', day: 'numeric' })} (${e.mood}): ${e.entry.slice(0, 320)}`)
+          .join('\n')
       } catch { /* journal is a garnish — never an error state */ }
     }
     void load()
@@ -296,6 +309,9 @@ export default function Jarvis() {
   /** Set on barge-in: the interrupted turn keeps streaming captions but must
    * not enqueue any further speech. Cleared when the next turn starts. */
   const mutedRef = useRef(false)
+  /** Set when Matt cut MERIDIAN off mid-sentence; the next turn carries a
+   * history marker so the reply acknowledges it and gets shorter. */
+  const bargedRef = useRef(false)
 
   // Latest-callback refs so long-lived Ears/keyboard handlers never go stale.
   const onInterimRef = useRef<(t: string) => void>(() => {})
@@ -359,7 +375,12 @@ export default function Jarvis() {
     const msgs = historyRef.current
     repairHistory(msgs)
     const base = msgs.slice()
-    pushUserText(msgs, text)
+    // Barge-in awareness: the model sees that its last reply was cut off
+    // mid-sentence, so it acknowledges and answers shorter. Marker goes to
+    // the model only — the visible log and mirror keep Matt's clean words.
+    const barged = bargedRef.current
+    bargedRef.current = false
+    pushUserText(msgs, barged ? `[Matt cut you off mid-sentence] ${text}` : text)
     trimHistory(msgs)
 
     setLog((l) => [...l, { role: 'user', text, at: Date.now() }])
@@ -374,7 +395,7 @@ export default function Jarvis() {
       const finalText = await runConversation({
         apiKey: config.anthropicKey,
         system: buildSystemPrompt(!!config.adminToken, recapRef.current,
-                                  snapshotRef.current),
+                                  snapshotRef.current, journalRecapRef.current),
         tools: JARVIS_TOOLS,
         messages: msgs,
         executeTool: createToolExecutor({
@@ -438,6 +459,7 @@ export default function Jarvis() {
           || Date.now() < attentionUntilRef.current) {
         mouth.flush()
         mutedRef.current = true // captions continue; speech stays stopped
+        bargedRef.current = true
       }
     }
   }
@@ -474,7 +496,7 @@ export default function Jarvis() {
     if (handsFreeRef.current || !sttOk) return
     const mouth = mouthRef.current!
     mouth.ensureAudio()
-    if (mouth.speaking) { mouth.flush(); mutedRef.current = true }
+    if (mouth.speaking) { mouth.flush(); mutedRef.current = true; bargedRef.current = true }
     earsRef.current!.start(false)
   }, [sttOk])
 
@@ -522,6 +544,17 @@ export default function Jarvis() {
       mouth.ensureAudio()
       earsRef.current!.start(true)
       setHint('Hands-free on — say "MERIDIAN", then your question.')
+      // The walk-in brief: on the FIRST hands-free activation of the day,
+      // MERIDIAN speaks first — today so far, yesterday's close, whale
+      // form, anything red. A synthetic user turn drives it so the whole
+      // reply flows through the normal speech pipeline.
+      const today = new Date().toLocaleDateString('en-CA') // local YYYY-MM-DD
+      let lastBrief = ''
+      try { lastBrief = localStorage.getItem('meridian_last_brief') || '' } catch { /* noop */ }
+      if (lastBrief !== today && cfgRef.current.anthropicKey) {
+        try { localStorage.setItem('meridian_last_brief', today) } catch { /* noop */ }
+        void send('give me the walk-in brief')
+      }
     } else {
       earsRef.current!.stop()
       setHint('')
@@ -533,10 +566,17 @@ export default function Jarvis() {
   useEffect(() => {
     let dead = false
     const load = async () => {
-      const [today, live, engine] = await Promise.all([
+      const token = cfgRef.current.adminToken
+      const [today, live, engine, accounts] = await Promise.all([
         api<{ pnl: number; settled: number; wins: number }>('/api/today-live').catch(() => null),
         api<{ enabled: boolean; paused: boolean }>('/api/live-status').catch(() => null),
         api<{ beat_at?: string }>('/api/engine/status').catch(() => null),
+        // Account awareness: with a desk-capable token, "how much cash do
+        // we have" answers straight from the snapshot — zero tool calls.
+        token
+          ? adminApi<{ totals: { value: number; cash: number; unrealized: number } }>(
+              '/api/desk/accounts', token).catch(() => null)
+          : Promise.resolve(null),
       ])
       if (dead) return
       // Spoken arrivals: settlements announce themselves in hands-free
@@ -555,6 +595,7 @@ export default function Jarvis() {
       if (today) prevSettledRef.current = today.settled
       snapshotRef.current = [
         today && `today: ${today.pnl >= 0 ? '+' : ''}$${today.pnl.toFixed(0)} on ${today.settled} settled (${today.wins}W-${today.settled - today.wins}L)`,
+        accounts?.totals && `accounts (both venues): total value $${accounts.totals.value.toFixed(0)}, cash $${accounts.totals.cash.toFixed(0)}, unrealized ${accounts.totals.unrealized >= 0 ? '+' : ''}$${accounts.totals.unrealized.toFixed(0)}`,
         live && `copy engine: ${live.paused ? 'PAUSED' : live.enabled ? 'armed' : 'off'}`,
         engine?.beat_at && `edge engine heartbeat: ${Math.max(0, Math.round((Date.now() - new Date(engine.beat_at).getTime()) / 1000))}s ago`,
       ].filter(Boolean).join(' | ')
@@ -697,17 +738,36 @@ export default function Jarvis() {
 
         {/* ── dock ── */}
         {stagedView && (
-          <div className="jv-ticket" role="alertdialog" aria-label="Order confirmation">
-            <div className="jv-ticket-head">CONFIRM ORDER — real money</div>
+          <div className={`jv-ticket${stagedView.action === 'sell' ? ' jv-ticket-sell' : ''}`}
+               role="alertdialog" aria-label="Order confirmation"
+               style={stagedView.action === 'sell'
+                 ? { borderColor: 'rgba(255,176,32,.55)' } : undefined}>
+            <div className="jv-ticket-head"
+                 style={stagedView.action === 'sell' ? { color: '#ffb020' } : undefined}>
+              {stagedView.action === 'sell'
+                ? 'CASH OUT — real money' : 'CONFIRM ORDER — real money'}
+            </div>
             <div className="jv-ticket-body">
-              <strong>${stagedView.usd.toFixed(2)}</strong> on{' '}
-              <strong>{stagedView.outcome}</strong>
-              {stagedView.price != null && <> · ~{Math.round(stagedView.price * 100)}¢</>}
+              {stagedView.action === 'sell' ? (
+                <>
+                  <strong>{stagedView.qty === 'all' ? 'ALL' : stagedView.qty} contracts</strong> of{' '}
+                  <strong>{stagedView.outcome}</strong>
+                  {stagedView.price != null && <> · ~{Math.round(stagedView.price * 100)}¢</>}
+                  {stagedView.usd > 0 && <> · proceeds ~${stagedView.usd.toFixed(2)}</>}
+                </>
+              ) : (
+                <>
+                  <strong>${stagedView.usd.toFixed(2)}</strong> on{' '}
+                  <strong>{stagedView.outcome}</strong>
+                  {stagedView.price != null && <> · ~{Math.round(stagedView.price * 100)}¢</>}
+                </>
+              )}
               {' '}· {stagedView.venue === 'kalshi' ? 'Kalshi' : 'Polymarket'}
               <div className="jv-ticket-title">{stagedView.title}</div>
             </div>
             <div className="jv-ticket-hint">
-              Say <em>"confirm"</em> to place · <em>"cancel"</em> to tear it up
+              Say <em>"confirm"</em> to {stagedView.action === 'sell' ? 'cash out' : 'place'} ·{' '}
+              <em>"cancel"</em> to tear it up
             </div>
           </div>
         )}
@@ -797,7 +857,7 @@ export default function Jarvis() {
             {log.length === 0 && <p className="jv-dim-text">Nothing yet — say something.</p>}
             {log.map((t, i) => (
               <div key={`${t.at}-${i}`} className={`jv-turn jv-turn-${t.role}`}>
-                <span className="jv-turn-who">{t.role === 'user' ? 'MATT' : 'JARVIS'}</span>
+                <span className="jv-turn-who">{t.role === 'user' ? 'MATT' : 'MERIDIAN'}</span>
                 <p>{t.text}</p>
               </div>
             ))}
