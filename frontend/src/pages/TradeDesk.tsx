@@ -862,9 +862,7 @@ export function TradeDesk() {
           <span>
             {isK
               ? `${money(acct.kalshi.balance_usd)} cash`
-              : (acct.polymarket.cash != null
-                  ? `${money(acct.polymarket.cash)} cash · ${money(acct.polymarket.open_value)} open`
-                  : `${money(acct.polymarket.trading_capital)} trading capital · ${money(acct.polymarket.open_value)} open`)}
+              : `${money(acct.polymarket.trading_capital ?? acct.polymarket.cash)} trading capital · ${money(acct.polymarket.open_value)} open`}
           </span>
         )}
       </div>
@@ -1266,7 +1264,7 @@ export function TradeDesk() {
               <small>capital</small>
               <b>{isK
                 ? money(acct.kalshi.balance_usd)
-                : money(acct.polymarket.cash ?? acct.polymarket.trading_capital)}</b>
+                : money(acct.polymarket.trading_capital ?? acct.polymarket.cash)}</b>
             </span>
           )}
           <div className="vd-venues">
@@ -1333,16 +1331,11 @@ export function TradeDesk() {
                 <>Kalshi cash <b>{money(acct.kalshi.balance_usd)}</b> ·
                   buying power <b>{money(acct.kalshi.balance_usd)}</b></>
               ) : (
-                <>{acct.polymarket.cash != null ? (
-                    <>Polymarket cash <b>{money(acct.polymarket.cash)}</b> ·
-                      buying power <b>{money(acct.polymarket.buying_power)}</b></>
-                  ) : (
-                    <>Polymarket trading capital{' '}
-                      <b>{money(acct.polymarket.trading_capital)}</b>
-                      {(acct.polymarket.committed_usd ?? 0) > 0 &&
-                        <span className="vd-cc-note"> incl. committed capital</span>}
-                    </>
-                  )}</>
+                <>Polymarket trading capital{' '}
+                  <b>{money(acct.polymarket.trading_capital ?? acct.polymarket.cash)}</b>
+                  {(acct.polymarket.committed_usd ?? 0) > 0 &&
+                    <span className="vd-cc-note"> incl. committed capital</span>}
+                </>
               )}
             </span>
           </>

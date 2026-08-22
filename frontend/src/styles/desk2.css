@@ -748,3 +748,12 @@
 @media (prefers-reduced-motion: reduce) {
   .dx-booktoggle i { transition: none; }
 }
+
+/* Accounts hero (option-2 single-number display, 2026-08-22) */
+.ac-hero { padding: 14px 0 10px; }
+.ac-hero-num { font-size: 34px; font-weight: 700; letter-spacing: -0.5px; }
+.ac-hero-l { font-size: 10px; letter-spacing: .14em; color: var(--muted); margin-top: 4px; }
+.ac-hero-note { margin-left: 8px; text-transform: none; letter-spacing: .02em; opacity: .8; }
+.ac-details { margin: 6px 0 2px; }
+.ac-details summary { font-size: 11px; color: var(--muted); cursor: pointer; letter-spacing: .04em; }
+.ac-details[open] summary { margin-bottom: 6px; }

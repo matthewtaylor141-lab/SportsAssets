@@ -2478,11 +2478,20 @@ async def api_desk_accounts(role: str = Depends(require_desk)) -> dict:
             "unrealized": (round(value - cost, 2)
                            if value is not None and cost is not None
                            else None)})
+    # The venue's assetNotional intermittently reads 0 while positions
+    # plainly carry value (observed 2026-08-22) — fall back to summing
+    # the marked positions so "Open value $0.00" can't sit beside a
+    # list of valued holdings.
+    open_value = snap.get("open_value")
+    if not open_value:
+        marked = [p["value"] for p in pm_positions
+                  if p.get("value") is not None]
+        open_value = round(sum(marked), 2) if marked else open_value
     pm = {"configured": bool(snap.get("configured")),
           "account_value": snap.get("account_value"),
           "cash": snap.get("cash"),
           "buying_power": snap.get("buying_power"),
-          "open_value": snap.get("open_value"),
+          "open_value": open_value,
           "unsettled_funds": snap.get("unsettled_funds"),
           "realized_pnl": snap.get("realized_pnl"),
           "positions": pm_positions,

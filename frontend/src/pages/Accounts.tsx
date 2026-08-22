@@ -151,14 +151,11 @@ export function Accounts() {
             <div className="ac-tile-v mono">{money(data.totals.value)}</div>
           </div>
           <div className="ac-tile">
-            <div className="ac-tile-l">
-              {data.totals.cash != null ? 'Total cash' : 'Trading capital'}
-            </div>
+            <div className="ac-tile-l">Trading capital</div>
             <div className="ac-tile-v mono">
-              {money(data.totals.cash ?? data.totals.trading_capital)}
+              {money(data.totals.trading_capital ?? data.totals.cash)}
             </div>
-            {data.totals.cash == null
-              && (data.totals.committed_usd ?? 0) > 0 && (
+            {(data.totals.committed_usd ?? 0) > 0 && (
               <div className="ac-tile-note">incl. committed capital</div>
             )}
           </div>
@@ -198,23 +195,16 @@ export function Accounts() {
                 {pm?.configured ? 'connected' : 'not configured'}
               </span>
             </div>
+            <div className="ac-hero">
+              <div className="ac-hero-num mono">{money(pm?.trading_capital ?? pm?.cash)}</div>
+              <div className="ac-hero-l">
+                TRADING CAPITAL
+                {(pm?.committed_usd ?? 0) > 0 && (
+                  <span className="ac-hero-note">incl. committed capital</span>
+                )}
+              </div>
+            </div>
             <div className="ac-stats">
-              {pm?.trading_capital != null && (
-                <div className="ac-stat ac-stat-wide">
-                  <span>Trading capital{(pm?.committed_usd ?? 0) > 0
-                    ? ' · incl. committed capital' : ''}</span>
-                  <b>{money(pm?.trading_capital)}</b>
-                </div>
-              )}
-              {pm?.account_value != null && (
-                <div className="ac-stat"><span>Account value</span><b>{money(pm?.account_value)}</b></div>
-              )}
-              {pm?.cash != null && (
-                <div className="ac-stat"><span>Cash</span><b>{money(pm?.cash)}</b></div>
-              )}
-              {pm?.buying_power != null && (
-                <div className="ac-stat"><span>Buying power</span><b>{money(pm?.buying_power)}</b></div>
-              )}
               <div className="ac-stat"><span>Open value</span><b>{money(pm?.open_value)}</b></div>
               <div className="ac-stat"><span>Unsettled</span><b>{money(pm?.unsettled_funds)}</b></div>
               <div className="ac-stat">
@@ -222,6 +212,17 @@ export function Accounts() {
                 <b className={pnlCls(pm?.realized_pnl)}>{signed(pm?.realized_pnl)}</b>
               </div>
             </div>
+            {pm?.cash != null && (
+              <details className="ac-details">
+                <summary>details</summary>
+                <div className="ac-stats">
+                  <div className="ac-stat"><span>Live cash</span><b>{money(pm?.cash)}</b></div>
+                  <div className="ac-stat"><span>Committed</span><b>{money(pm?.committed_usd)}</b></div>
+                  <div className="ac-stat"><span>Buying power</span><b>{money(pm?.buying_power)}</b></div>
+                  <div className="ac-stat"><span>Account value</span><b>{money(pm?.account_value)}</b></div>
+                </div>
+              </details>
+            )}
             <div className="ac-tabs">
               <button className={pmTab === 'positions' ? 'on' : ''} onClick={() => setPmTab('positions')}>
                 Positions {pm?.positions?.length ? `(${pm.positions.length})` : ''}
