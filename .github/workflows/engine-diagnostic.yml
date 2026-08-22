@@ -549,6 +549,22 @@ jobs:
             || echo "  (unavailable)"
 
           echo ""
+          echo "#   KALSHI DESK BOARDS (owner report 2026-08-22: All=0)    #"
+          for URL in "desk-feed?venue=kalshi&league=all" \
+                     "desk-feed?venue=kalshi&league=tennis" \
+                     "desk-games?venue=kalshi&league=all"; do
+            CODE=$(curl -sS --max-time 60 -o /tmp/kb.json -w '%{http_code}' \
+              -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE/api/admin/$URL" || echo ERR)
+            N=$(jq -r '(.cards // .games // []) | length' /tmp/kb.json 2>/dev/null || echo '?')
+            ERR=$(jq -r '.detail // .error // empty' /tmp/kb.json 2>/dev/null | head -c 160)
+            echo "  KDESKG $URL -> HTTP $CODE rows $N $ERR"
+          done
+          # The venue itself, from the runner (open internet): is the
+          # sports series listing alive at all?
+          KAPI=$(curl -sS --max-time 20 "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXATPMATCH&status=open&limit=5" | jq -r '.markets | length' 2>/dev/null || echo ERR)
+          echo "  KDESKG venue-direct KXATPMATCH open rows: $KAPI"
+
+          echo ""
           echo "#   SOCCER FORENSIC (work order 2026-08-21: soccer -6.2k   #"
           echo "#   on the venue account vs profitable soccer copy whales) #"
           curl -sS --max-time 90 -o /tmp/tr.json "$BASE/api/track-record?since=2026-08-01" || true
