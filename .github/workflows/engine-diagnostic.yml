@@ -565,6 +565,25 @@ jobs:
           echo "  KDESKG venue-direct KXATPMATCH open rows: $KAPI"
 
           echo ""
+          echo "#   PMBOARD (owner report 2026-08-22: moneyline sides at   #"
+          echo "#   31c/32c — complements must sum ~100c)                  #"
+          # The platform's own game board for the reported match, then the
+          # raw side rows: label, orderable slug, price. If both sides
+          # carry ~the same price, the wrongness is in the venue payload
+          # or our side extraction — the raw rows say which.
+          GID=$(curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
+            "$BASE/api/admin/market-search?q=pegula" 2>/dev/null | \
+            jq -r '.markets[0].event_slug // empty' 2>/dev/null)
+          echo "  PMBOARD event: ${GID:-not-found-via-search}"
+          for Q in "pegula" "swiatek"; do
+            curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
+              "$BASE/api/admin/market-search?q=$Q" 2>/dev/null | \
+              jq -r '.markets[]? | .title as $t | .outcomes[]?
+                     | "  PMBOARD \($t) :: \(.label // .outcome) ask=\(.ask) bid=\(.bid) asset=\((.asset // "")[0:12])"' \
+              2>/dev/null | head -8
+          done
+
+          echo ""
           echo "#   SOCCER FORENSIC (work order 2026-08-21: soccer -6.2k   #"
           echo "#   on the venue account vs profitable soccer copy whales) #"
           curl -sS --max-time 90 -o /tmp/tr.json "$BASE/api/track-record?since=2026-08-01" || true
