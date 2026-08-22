@@ -240,25 +240,34 @@
   color: rgba(140, 210, 245, 0.6);
 }
 .jv-ribbon-rule {
+  flex: none;
   width: min(90px, 12vw);
   height: 1px;
   background: linear-gradient(90deg, transparent,
               rgba(105, 224, 255, 0.35), transparent);
 }
 .jv-ribbon-text {
+  min-width: 0;               /* a long telemetry line must never push the
+                                 stage wider than the phone — it ellipsizes */
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   text-shadow: 0 0 14px rgba(105, 224, 255, 0.35);
   transition: opacity 380ms ease, transform 380ms ease;
+}
+@media (max-width: 520px) {
+  .jv-ribbon { gap: 10px; }
+  .jv-ribbon-text { font-size: 9.5px; letter-spacing: 0.2em; }
 }
 .jv-ribbon-out { opacity: 0; transform: translateY(4px); }
 
 /* ── exposure ribbon: the open book cycling under the telemetry ──── */
 .jv-exposure .jv-ribbon {
-  margin-top: 0;
+  margin-top: -6px;           /* snug under the telemetry line — one block */
   padding: 0 0 10px;
   font-size: 10px;
   letter-spacing: 0.24em;
-  color: rgba(232, 200, 119, 0.55);
+  color: rgba(232, 200, 119, 0.62);
 }
 .jv-exposure .jv-ribbon-rule {
   width: min(64px, 9vw);
@@ -304,7 +313,6 @@
   .jv-mic-live::before,
   .jv-hud-slow, .jv-hud-fast, .jv-state-thinking { animation: none; }
 }
-.jv-state-thinking { color: var(--jv-gold-soft); }
 
 /* ── captions ─────────────────────────────────────────────────────────── */
 
@@ -481,7 +489,12 @@
   min-height: 0;
   min-width: 0;
 }
-.jv-panel + .jv-panel { border-top: 1px solid var(--jv-border); }
+/* each lower panel sits "under" the one above: hairline + inset drop so
+ * a 3-stack reads as layered sheets, not one striped sheet */
+.jv-panel + .jv-panel {
+  border-top: 1px solid var(--jv-border);
+  box-shadow: inset 0 14px 18px -16px rgba(0, 0, 0, 0.75);
+}
 .jv-panel-chart { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 6px; }
 
 /* mobile-first: slide-up sheets */
@@ -949,6 +962,19 @@
   border-color: var(--jv-cyan-soft);
   color: var(--jv-cyan);
   background: rgba(105, 224, 255, 0.07);
+}
+/* narrow browsers get the same one-row thumb scroll as pocket mode —
+ * five chips wrapped three rows deep were eating the caption area */
+@media (max-width: 520px) {
+  .jv-chips {
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .jv-chips::-webkit-scrollbar { display: none; }
+  .jv-chip { flex: none; }
 }
 
 /* ── "on my mind" — the page notices something by itself ─────────── */

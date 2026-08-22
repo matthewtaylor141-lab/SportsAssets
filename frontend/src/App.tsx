@@ -137,8 +137,14 @@ export default function App() {
   // on every route change — navigation feels composed, not swapped.
   const { pathname } = useLocation()
   useStandaloneClass()
+  // The MERIDIAN cockpit is a full-screen room with its own chrome (brand
+  // strip, exit ✕). Site nav/tabbar must not float over it — and the
+  // page-fade animation would trap its position:fixed root in a stacking
+  // context under them — so /jarvis gets a bare, chrome-less main.
+  const cockpit = pathname === '/jarvis'
   return (
     <div className="app">
+      {!cockpit && (
       <nav className="nav">
         <Brand />
         {TABS.map((t) => (
@@ -153,7 +159,8 @@ export default function App() {
         ))}
         <span className="spacer" />
       </nav>
-      <main className="main page-fade" key={pathname}>
+      )}
+      <main className={cockpit ? 'main' : 'main page-fade'} key={pathname}>
         <Routes>
           <Route path="/" element={<TrackRecord />} />
           <Route path="/analytics" element={<Analytics />} />
@@ -164,6 +171,7 @@ export default function App() {
           <Route path="/admin" element={<Admin />} />
           <Route path="/jarvis" element={<Suspense fallback={null}><Jarvis /></Suspense>} />
         </Routes>
+        {!cockpit && (
         <p className="notice">
           Performance shown is the whale copy portfolio: every settled copy trade,
           uncapped. Full account statements available to investors on request.
@@ -172,8 +180,9 @@ export default function App() {
           or investment advice. Not affiliated with any prediction market operator.
           {' '}<span style={{ opacity: 0.55 }}>build {__BUILD_SHA__.replace('bsha_', '')}</span>
         </p>
+        )}
       </main>
-      <TabBar />
+      {!cockpit && <TabBar />}
     </div>
   )
 }
