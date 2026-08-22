@@ -1,13 +1,15 @@
 import { useMemo, useState } from 'react'
 import { EmptyState } from '../components/EmptyState'
 import { fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
-import { TRRow, useTrackRecord } from '../lib/record'
+import { CopiesDayWhale, CopiesWhaleSport, useCopiesRecord } from '../lib/record'
+import { sportMeta } from './TrackRecord'
 
-/* Financial-grade analytics on the SAME account rows the Performance page
- * shows: equity + drawdown, daily P&L vs capital deployed, breakdowns by
- * bet type and sport. One series per axis, polarity in the status pair,
- * identity in labels — and any figure the sample cannot support reports
- * its n instead of a verdict. */
+/* Financial-grade analytics on the SAME copies record the Performance
+ * page headlines (owner order 2026-08-22: copy-whale numbers only, no
+ * software/blended cohorts anywhere public): equity + drawdown, daily
+ * P&L, per-whale form, ROI by sport. One series per axis, polarity in
+ * the status pair, identity in labels — and any figure the sample
+ * cannot support reports its n instead of a verdict. */
 
 const MIN_N = 12
 
@@ -39,7 +41,7 @@ function EquityAndDrawdown({ daily }: { daily: { date: string; pnl: number }[] }
   return (
     <div>
       <div className="an-row-title">
-        <span>EQUITY &amp; DRAWDOWN</span>
+        <span>EQUITY &amp; DRAWDOWN · COPY PORTFOLIO</span>
         <span className="muted">max drawdown <b className="neg mono">{fmtSignedUsd(maxDD)}</b></span>
       </div>
       <svg viewBox={`0 0 ${W} ${H + DH}`} className="an-svg"
@@ -50,7 +52,7 @@ function EquityAndDrawdown({ daily }: { daily: { date: string; pnl: number }[] }
           setHover(Math.max(0, Math.min(pts.length - 1,
             Math.round(((fx - PAD) / (W - PAD * 2)) * (pts.length - 1)))))
         }}
-        role="img" aria-label="Cumulative profit and drawdown by day">
+        role="img" aria-label="Cumulative copy profit and drawdown by day">
         <line x1={PAD} x2={W - PAD} y1={y(0)} y2={y(0)} stroke="var(--baseline)" />
         <path d={line} fill="none" stroke="var(--accent)" strokeWidth="2.5"
           strokeLinejoin="round" strokeLinecap="round" />
@@ -82,7 +84,7 @@ function EquityAndDrawdown({ daily }: { daily: { date: string; pnl: number }[] }
 }
 
 function DailyColumns({ daily }: {
-  daily: { date: string; pnl: number; deployed: number; settled: number }[]
+  daily: { date: string; pnl: number; settled: number; wins: number }[]
 }) {
   const [hover, setHover] = useState<number | null>(null)
   if (!daily.length) return <EmptyState>No settled days yet.</EmptyState>
@@ -110,7 +112,8 @@ function DailyColumns({ daily }: {
               {fmtSignedUsd(daily[hover].pnl)}
             </span>
             <span className="muted">
-              {daily[hover].settled} settled · deployed {fmtUsd(daily[hover].deployed, 2)}
+              {daily[hover].wins}W–{daily[hover].settled - daily[hover].wins}L
+              {' '}· {daily[hover].settled} settled
             </span>
           </>
         ) : <span className="muted">hover a day</span>}
@@ -119,84 +122,71 @@ function DailyColumns({ daily }: {
   )
 }
 
-function DeployedColumns({ daily }: { daily: { date: string; deployed: number; trades: number }[] }) {
-  const [hover, setHover] = useState<number | null>(null)
-  if (!daily.length) return <EmptyState>No entries yet.</EmptyState>
-  const max = Math.max(...daily.map((d) => d.deployed), 0.01)
+/** Cumulative-P&L sparkline for one whale's daily series (chronological). */
+function Spark({ days }: { days: { day: string; pnl: number }[] }) {
+  const pts = useMemo(() => {
+    let acc = 0
+    return days.map((d) => (acc += d.pnl))
+  }, [days])
+  if (pts.length < 2) return <span className="muted mono">n={pts.length}</span>
+  const W = 120, H = 28, PAD = 2
+  const min = Math.min(0, ...pts)
+  const max = Math.max(0.01, ...pts)
+  const x = (i: number) => PAD + (i / (pts.length - 1)) * (W - PAD * 2)
+  const y = (v: number) => H - PAD - ((v - min) / (max - min || 1)) * (H - PAD * 2)
+  const path = pts.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ')
+  const up = pts[pts.length - 1] >= 0
   return (
-    <div>
-      <div className="an-row-title"><span>CAPITAL DEPLOYED PER DAY</span></div>
-      <div className="an-cols an-cols-up" onMouseLeave={() => setHover(null)}>
-        {daily.map((d, i) => (
-          <div key={d.date} className="an-col-slot" onMouseEnter={() => setHover(i)}>
-            <div className="an-col-track">
-              <div className="an-col an-col-acc"
-                style={{ height: `${(d.deployed / max) * 92}%`, bottom: 0 }} />
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="tr-curve-tip">
-        {hover !== null ? (
-          <>
-            <span className="mono">{daily[hover].date}</span>
-            <span>{fmtUsd(daily[hover].deployed, 2)}</span>
-            <span className="muted">{daily[hover].trades} positions entered</span>
-          </>
-        ) : <span className="muted">hover a day</span>}
-      </div>
-    </div>
+    <svg className="an-spark" viewBox={`0 0 ${W} ${H}`} aria-hidden>
+      <line x1={PAD} x2={W - PAD} y1={y(0)} y2={y(0)} stroke="var(--baseline)" />
+      <path d={path} fill="none"
+        stroke={up ? 'var(--good)' : 'var(--critical)'}
+        strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={x(pts.length - 1)} cy={y(pts[pts.length - 1])} r="2.2"
+        fill={up ? 'var(--good)' : 'var(--critical)'} />
+    </svg>
   )
 }
 
-function GroupTable({ rows, by, title }: {
-  rows: TRRow[]
-  by: (r: TRRow) => string
-  title: string
+/** Per-whale form: full-window record plus each whale's own curve. */
+function WhaleForm({ whales, dailyByWhale }: {
+  whales: { whale: string; settled: number; wins: number; losses: number
+            pnl: number; staked: number; roi: number | null }[]
+  dailyByWhale: CopiesDayWhale[]
 }) {
-  const groups = useMemo(() => {
-    const m = new Map<string, { staked: number; pnl: number; n: number; wins: number; open: number }>()
-    for (const r of rows) {
-      const g = m.get(by(r)) || { staked: 0, pnl: 0, n: 0, wins: 0, open: 0 }
-      if (r.settled && r.pnl !== null) {
-        g.staked += r.stake; g.pnl += r.pnl; g.n += 1
-        if (r.pnl > 0) g.wins += 1
-      } else g.open += 1
-      m.set(by(r), g)
+  const series = useMemo(() => {
+    const by = new Map<string, { day: string; pnl: number }[]>()
+    // Served newest-first; sparkline wants chronological.
+    for (let i = dailyByWhale.length - 1; i >= 0; i--) {
+      const d = dailyByWhale[i]
+      const arr = by.get(d.whale) || []
+      arr.push({ day: d.day, pnl: d.pnl })
+      by.set(d.whale, arr)
     }
-    return [...m.entries()].sort((a, b) => b[1].pnl - a[1].pnl)
-  }, [rows, by])
-  if (!groups.length) return <EmptyState>No trades yet.</EmptyState>
-  const maxAbs = Math.max(...groups.map(([, g]) => Math.abs(g.pnl)), 0.01)
+    return by
+  }, [dailyByWhale])
+  if (!whales.length) return <EmptyState>No settled copy trades yet.</EmptyState>
   return (
     <div>
       <div className="an-row-title">
-        <span>{title}</span>
-        <span className="muted">groups under n={MIN_N} report the sample, not a verdict</span>
+        <span>PER-WHALE FORM</span>
+        <span className="muted">curve = cumulative P&amp;L, recent window</span>
       </div>
       <table className="an-table">
         <thead>
-          <tr><th></th><th>settled</th><th>W–L</th><th>open</th><th>staked</th><th></th><th>P&amp;L</th><th>ROI</th></tr>
+          <tr><th></th><th>form</th><th>settled</th><th>W–L</th><th>staked</th><th>P&amp;L</th><th>ROI</th></tr>
         </thead>
         <tbody>
-          {groups.map(([name, g]) => (
-            <tr key={name} className={g.n && g.n < MIN_N ? 'thin' : ''}>
-              <td>{name}</td>
-              <td className="mono">{g.n}</td>
-              <td className="mono">{g.wins}–{g.n - g.wins}</td>
-              <td className="mono muted">{g.open}</td>
-              <td className="mono">{fmtUsd(g.staked, 2)}</td>
-              <td className="an-cell-bar">
-                <div className="tr-sport-bar">
-                  <div className="tr-sport-zero" />
-                  <div className={`tr-sport-fill ${g.pnl >= 0 ? 'pos-bg' : 'neg-bg'}`}
-                    style={{ width: `${(Math.abs(g.pnl) / maxAbs) * 50}%`,
-                             [g.pnl >= 0 ? 'left' : 'right' as any]: '50%' }} />
-                </div>
-              </td>
-              <td className={`mono ${g.pnl >= 0 ? 'pos' : 'neg'}`}>{fmtSignedUsd(g.pnl)}</td>
-              <td className={`mono ${g.pnl >= 0 ? 'pos' : 'neg'}`}>
-                {g.n >= MIN_N && g.staked > 0 ? fmtPct(g.pnl / g.staked) : g.n ? `n=${g.n}` : '—'}
+          {whales.map((w) => (
+            <tr key={w.whale} className={w.settled < MIN_N ? 'thin' : ''}>
+              <td>{w.whale}</td>
+              <td><Spark days={series.get(w.whale) || []} /></td>
+              <td className="mono">{w.settled}</td>
+              <td className="mono">{w.wins}–{w.losses}</td>
+              <td className="mono">{fmtUsd(w.staked, 2)}</td>
+              <td className={`mono ${w.pnl >= 0 ? 'pos' : 'neg'}`}>{fmtSignedUsd(w.pnl)}</td>
+              <td className={`mono ${w.pnl >= 0 ? 'pos' : 'neg'}`}>
+                {w.settled >= MIN_N && w.roi !== null ? fmtPct(w.roi) : `n=${w.settled}`}
               </td>
             </tr>
           ))}
@@ -206,9 +196,99 @@ function GroupTable({ rows, by, title }: {
   )
 }
 
+/** ROI by sport, aggregated across whales from the whale×sport split. */
+function SportRoi({ rows }: { rows: CopiesWhaleSport[] }) {
+  const sports = useMemo(() => {
+    const m = new Map<string, { staked: number; pnl: number; n: number; wins: number }>()
+    for (const r of rows) {
+      const g = m.get(r.sport) || { staked: 0, pnl: 0, n: 0, wins: 0 }
+      g.staked += r.staked; g.pnl += r.pnl; g.n += r.settled; g.wins += r.wins
+      m.set(r.sport, g)
+    }
+    return [...m.entries()].sort((a, b) => b[1].pnl - a[1].pnl)
+  }, [rows])
+  if (!sports.length) return <EmptyState>No settled copy trades yet.</EmptyState>
+  const maxAbs = Math.max(...sports.map(([, g]) => Math.abs(g.pnl)), 0.01)
+  return (
+    <div>
+      <div className="an-row-title">
+        <span>ROI BY SPORT</span>
+        <span className="muted">groups under n={MIN_N} report the sample, not a verdict</span>
+      </div>
+      <table className="an-table">
+        <thead>
+          <tr><th></th><th>settled</th><th>W–L</th><th>staked</th><th></th><th>P&amp;L</th><th>ROI</th></tr>
+        </thead>
+        <tbody>
+          {sports.map(([sport, g]) => {
+            const m = sportMeta(sport)
+            return (
+              <tr key={sport} className={g.n && g.n < MIN_N ? 'thin' : ''}>
+                <td>{m.icon} {m.label}</td>
+                <td className="mono">{g.n}</td>
+                <td className="mono">{g.wins}–{g.n - g.wins}</td>
+                <td className="mono">{fmtUsd(g.staked, 2)}</td>
+                <td className="an-cell-bar">
+                  <div className="tr-sport-bar">
+                    <div className="tr-sport-zero" />
+                    <div className={`tr-sport-fill ${g.pnl >= 0 ? 'pos-bg' : 'neg-bg'}`}
+                      style={{ width: `${(Math.abs(g.pnl) / maxAbs) * 50}%`,
+                               [g.pnl >= 0 ? 'left' : 'right' as any]: '50%' }} />
+                  </div>
+                </td>
+                <td className={`mono ${g.pnl >= 0 ? 'pos' : 'neg'}`}>{fmtSignedUsd(g.pnl)}</td>
+                <td className={`mono ${g.pnl >= 0 ? 'pos' : 'neg'}`}>
+                  {g.n >= MIN_N && g.staked > 0 ? fmtPct(g.pnl / g.staked) : g.n ? `n=${g.n}` : '—'}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/** The full whale × sport split — where each whale actually earns. */
+function WhaleSportTable({ rows }: { rows: CopiesWhaleSport[] }) {
+  if (!rows.length) return <EmptyState>No settled copy trades yet.</EmptyState>
+  return (
+    <div>
+      <div className="an-row-title">
+        <span>WHALE × SPORT</span>
+        <span className="muted">every cell of the copy record</span>
+      </div>
+      <table className="an-table">
+        <thead>
+          <tr><th>whale</th><th>sport</th><th>settled</th><th>W–L</th><th>staked</th><th>P&amp;L</th><th>ROI</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const m = sportMeta(r.sport)
+            return (
+              <tr key={`${r.whale}-${r.sport}`} className={r.settled < MIN_N ? 'thin' : ''}>
+                <td>{r.whale}</td>
+                <td>{m.icon} {m.label}</td>
+                <td className="mono">{r.settled}</td>
+                <td className="mono">{r.wins}–{r.losses}</td>
+                <td className="mono">{fmtUsd(r.staked, 2)}</td>
+                <td className={`mono ${r.pnl >= 0 ? 'pos' : 'neg'}`}>{fmtSignedUsd(r.pnl)}</td>
+                <td className={`mono ${r.pnl >= 0 ? 'pos' : 'neg'}`}>
+                  {r.settled >= MIN_N && r.roi !== null ? fmtPct(r.roi) : `n=${r.settled}`}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 export function Analytics() {
-  const { data, err } = useTrackRecord()
-  if (err && !data) return <EmptyState>{`Account API unreachable: ${err}`}</EmptyState>
+  const { data, err } = useCopiesRecord()
+  const chrono = useMemo(() => [...(data?.daily || [])].reverse(), [data])
+  if (err && !data) return <EmptyState>{`Record API unreachable: ${err}`}</EmptyState>
   if (!data) return (
     <div className="page tr-page">
       <div className="card tr-skel" style={{ height: 280 }} />
@@ -221,16 +301,28 @@ export function Analytics() {
 
   return (
     <div className="page tr-page">
-      <div className="card"><EquityAndDrawdown daily={data.daily} /></div>
+      <div className="card">
+        <EquityAndDrawdown daily={chrono.map((d) => ({ date: d.day, pnl: d.pnl }))} />
+      </div>
       <div className="tr-columns">
-        <div className="card"><DailyColumns daily={data.daily} /></div>
-        <div className="card"><DeployedColumns daily={data.daily} /></div>
+        <div className="card">
+          <DailyColumns daily={chrono.map((d) => ({
+            date: d.day, pnl: d.pnl, settled: d.settled, wins: d.wins }))} />
+        </div>
+        <div className="card">
+          <SportRoi rows={data.by_whale_sport || []} />
+        </div>
       </div>
       <div className="card">
-        <GroupTable rows={data.trades} by={(r) => r.category} title="P&L BY BET TYPE" />
+        <WhaleForm whales={data.by_whale} dailyByWhale={data.daily_by_whale || []} />
       </div>
       <div className="card">
-        <GroupTable rows={data.trades} by={(r) => `${r.icon} ${r.sport}`} title="P&L BY SPORT" />
+        <WhaleSportTable rows={data.by_whale_sport || []} />
+      </div>
+      <div className="tr-foot muted" style={{ padding: '0 4px' }}>
+        Performance shown is the whale copy portfolio: every settled copy
+        trade, uncapped. Full account statements available to investors on
+        request.
       </div>
     </div>
   )

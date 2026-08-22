@@ -2,19 +2,44 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { EmptyState } from '../components/EmptyState'
 import { PnlCalendar } from '../components/PnlCalendar'
 import { LiveToday } from '../components/LiveToday'
-import { ReportsCard } from '../components/ReportsCard'
-import { fmtAgo, fmtCents, fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
-import { CopiesRecord, KalshiOpen, SINCE, TRRow, useCopiesRecord,
-  useKalshiOpen, useTrackRecord, useVenueTruth,
-  VenueTruthData } from '../lib/record'
+import { fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
+import { CopiesRecord, CopiesTrade, CopiesWhaleSport, SINCE,
+  useCopiesRecord } from '../lib/record'
 
-/* The AI trader's account, told from the venue's own records. Every number
- * is fetched from /api/track-record — real positions, real entry prices
- * (the venue's own VWAP), real settlements — windowed from Aug 1. When the
- * settled sample is thin the page says so; a record must be trustable
- * before it is impressive. */
+/* THE public record — the whale copy portfolio and nothing else (owner
+ * order 2026-08-22: "the performance data must exclusively show the
+ * copy whales numbers — that is what we sell to investors"). Every
+ * number on this page binds to /api/copies-record: uncapped, settled
+ * copy trades from the order-level audit, per-whale split, full-window
+ * daily series. Engine, arbitrage, manual and software trading render
+ * nowhere here. When the settled sample is thin the page says so; a
+ * record must be trustable before it is impressive. */
 
 const MIN_SETTLED = 30
+
+/** Sport buckets as the backend's sport_of() names them. */
+const SPORT_META: Record<string, { icon: string; label: string }> = {
+  basketball: { icon: '🏀', label: 'Basketball' },
+  wnba: { icon: '🏀', label: 'WNBA' },
+  football: { icon: '🏈', label: 'Football' },
+  baseball: { icon: '⚾', label: 'Baseball' },
+  hockey: { icon: '🏒', label: 'Hockey' },
+  tennis: { icon: '🎾', label: 'Tennis' },
+  soccer: { icon: '⚽', label: 'Soccer / Intl' },
+  esports: { icon: '🎮', label: 'Esports' },
+  unknown: { icon: '🎯', label: 'Other' },
+}
+export function sportMeta(sport: string): { icon: string; label: string } {
+  return SPORT_META[sport] || { icon: '🎯', label: sport || 'Other' }
+}
+
+/** 'mlb-nyy-bos-2026-08-20-nyy' -> 'MLB · nyy bos 2026-08-20 nyy' */
+function prettySlug(slug: string | null): string {
+  if (!slug) return '—'
+  const parts = slug.split('-')
+  if (parts.length < 2) return slug
+  return `${parts[0].toUpperCase()} · ${parts.slice(1).join(' ')}`
+}
 
 /* Pointer-tracked 3D tilt for the hero tiles: writes --rx/--ry custom
  * properties the CSS consumes under a perspective parent. Pure transform,
@@ -52,20 +77,20 @@ function useCountUp(target: number, ms = 1100): number {
   return v
 }
 
-/** Scrolling ticker of the latest settled results — the sportsbook pulse. */
-function ResultsTicker({ rows }: { rows: TRRow[] }) {
-  const settled = rows.filter((r) => r.settled && r.pnl !== null).slice(0, 24)
+/** Scrolling ticker of the latest settled copy results. */
+function ResultsTicker({ trades }: { trades: CopiesTrade[] }) {
+  const settled = trades.slice(0, 24)
   if (settled.length < 3) return null
   const items = [...settled, ...settled] // seamless loop
   return (
     <div className="tk-wrap" aria-hidden>
       <div className="tk-track">
-        {items.map((r, i) => (
+        {items.map((t, i) => (
           <span key={i} className="tk-item">
-            <span>{r.icon}</span>
-            <span className="tk-title">{r.outcome || r.title}</span>
-            <span className={`mono ${r.pnl! > 0 ? 'pos' : 'neg'}`}>
-              {fmtSignedUsd(r.pnl)}
+            <span className="tk-whale">{t.whale}</span>
+            <span className="tk-title">{prettySlug(t.slug)}</span>
+            <span className={`mono ${t.pnl > 0 ? 'pos' : 'neg'}`}>
+              {fmtSignedUsd(t.pnl)}
             </span>
           </span>
         ))}
@@ -103,7 +128,7 @@ function EquityCurve({ daily }: { daily: { date: string; pnl: number }[] }) {
   const barW = Math.max(1.5, ((W - PAD * 2) / pts.length) * 0.55)
   const barBase = H - 6
   return (
-    <div className="tr-curve" role="img" aria-label="Cumulative realized profit by day, with daily P&L bars">
+    <div className="tr-curve" role="img" aria-label="Cumulative realized copy profit by day, with daily P&L bars">
       <div className="tr-curve-stage">
       <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
         onMouseLeave={() => setHover(null)}
@@ -182,229 +207,91 @@ function EquityCurve({ daily }: { daily: { date: string; pnl: number }[] }) {
   )
 }
 
-function SportBreakdown({ rows }: { rows: TRRow[] }) {
+function SportBreakdown({ rows }: { rows: CopiesWhaleSport[] }) {
   const sports = useMemo(() => {
-    const by = new Map<string, { pnl: number; staked: number; n: number; wins: number; open: number; icon: string }>()
+    const by = new Map<string, { pnl: number; staked: number; n: number; wins: number }>()
     for (const r of rows) {
-      const b = by.get(r.sport) || { pnl: 0, staked: 0, n: 0, wins: 0, open: 0, icon: r.icon }
-      if (r.settled && r.pnl !== null) {
-        b.pnl += r.pnl; b.n += 1
-        b.staked += r.stake
-        if (r.pnl > 0) b.wins += 1
-      } else b.open += 1
+      const b = by.get(r.sport) || { pnl: 0, staked: 0, n: 0, wins: 0 }
+      b.pnl += r.pnl; b.staked += r.staked; b.n += r.settled; b.wins += r.wins
       by.set(r.sport, b)
     }
     return [...by.entries()].sort((a, b) => b[1].pnl - a[1].pnl)
   }, [rows])
-  if (!sports.length) return <EmptyState>The board fills in as games settle.</EmptyState>
+  if (!sports.length) return <EmptyState>The board fills in as copy trades settle.</EmptyState>
   const maxAbs = Math.max(...sports.map(([, r]) => Math.abs(r.pnl)), 0.01)
   return (
     <div className="tr-sports">
-      {sports.map(([name, r]) => (
-        <div key={name} className="tr-sport-row"
-          title={`${name}: ${r.n} settled (${r.wins} won), ${r.open} open, staked ${fmtUsd(r.staked, 2)}`}>
-          <span className="tr-sport-name">
-            <span className="tr-sport-ico">{r.icon}</span> {name}
-            <span className="muted mono"> {r.wins}–{r.n - r.wins}{r.open ? ` · ${r.open} open` : ''}</span>
-          </span>
-          <div className="tr-sport-bar">
-            <div className="tr-sport-zero" />
-            <div className={`tr-sport-fill ${r.pnl >= 0 ? 'pos-bg' : 'neg-bg'}`}
-              style={{ width: `${(Math.abs(r.pnl) / maxAbs) * 50}%`,
-                       ['--org' as string]: r.pnl >= 0 ? 'left' : 'right',
-                       [r.pnl >= 0 ? 'left' : 'right' as any]: '50%' }} />
-          </div>
-          <span className={`tr-sport-val mono ${r.pnl >= 0 ? 'pos' : 'neg'}`}>
-            {fmtSignedUsd(r.pnl)}
-          </span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-/** 'KXWTAMATCH-26AUG04ANDPLI-AND' -> { series: 'WTA MATCH', tail: '26AUG04ANDPLI · AND' } */
-function prettyTicker(t: string): { series: string; tail: string } {
-  const parts = (t || '').split('-')
-  const series = (parts[0] || '').replace(/^KX/, '').replace(/([A-Z]+?)(MATCH|GAME)$/, '$1 $2')
-  return { series, tail: parts.slice(1).join(' · ') }
-}
-
-function KalshiBook({ k }: { k: KalshiOpen }) {
-  if (!k || k.n === 0) return null
-  return (
-    <div className="card">
-      <div className="card-title">
-        KALSHI · LIVE BOOK · {k.n} open · {fmtUsd(k.cost, 2)} at cost
-        {k.updated_at && <span className="muted"> · as of {fmtAgo(k.updated_at)}</span>}
-      </div>
-      <div className="kx-grid">
-        {k.rows.map((r) => {
-          const p = prettyTicker(r.ticker)
-          return (
-            <div key={r.ticker} className="kx-pos">
-              <div className="kx-top">
-                <span className="kx-series">{p.series}</span>
-                {r.venue_status ? (
-                  <span className="tr-chip settling"
-                    title={`Venue status: ${r.venue_status} — game over, awaiting settlement`}>
-                    ◌ SETTLING
-                  </span>
-                ) : (
-                  <span className="tr-chip open">● LIVE</span>
-                )}
-              </div>
-              <div className="kx-tail mono">{p.tail}</div>
-              <div className="kx-nums mono">
-                {r.qty}× @{fmtCents(r.avg_cost)}
-                <span className="muted"> · cost {fmtUsd(r.cost, 2)}</span>
-              </div>
+      {sports.map(([sport, r]) => {
+        const m = sportMeta(sport)
+        return (
+          <div key={sport} className="tr-sport-row"
+            title={`${m.label}: ${r.n} settled (${r.wins} won), staked ${fmtUsd(r.staked, 2)}`}>
+            <span className="tr-sport-name">
+              <span className="tr-sport-ico">{m.icon}</span> {m.label}
+              <span className="muted mono"> {r.wins}–{r.n - r.wins}</span>
+            </span>
+            <div className="tr-sport-bar">
+              <div className="tr-sport-zero" />
+              <div className={`tr-sport-fill ${r.pnl >= 0 ? 'pos-bg' : 'neg-bg'}`}
+                style={{ width: `${(Math.abs(r.pnl) / maxAbs) * 50}%`,
+                         ['--org' as string]: r.pnl >= 0 ? 'left' : 'right',
+                         [r.pnl >= 0 ? 'left' : 'right' as any]: '50%' }} />
             </div>
-          )
-        })}
-      </div>
-      <div className="tr-foot muted">
-        Positions on the Kalshi venue account, read from the engine ledger —
-        only venue-accepted fills are recorded. Settled Kalshi results join
-        the record as they resolve.
-      </div>
+            <span className={`tr-sport-val mono ${r.pnl >= 0 ? 'pos' : 'neg'}`}>
+              {fmtSignedUsd(r.pnl)}
+            </span>
+          </div>
+        )
+      })}
     </div>
   )
 }
 
-type Status = 'all' | 'won' | 'lost' | 'open'
-type SortKey = 'time' | 'stake' | 'pnl'
-
-/** The COPY TRADING record — the cohort the whole thesis stands on
- * (owner order 2026-08-20: show that the system is profitable).
- * Uncapped, from the order-level audit, per-whale split. */
-function CopiesCard({ c }: { c: CopiesRecord }) {
-  const t = c.total
-  if (!t || !t.settled) return null
+/** Per-whale split of the copy record — who earns the capital. */
+function WhalesCard({ c }: { c: CopiesRecord }) {
+  if (!c.by_whale.length) return null
+  const maxAbs = Math.max(...c.by_whale.map((w) => Math.abs(w.pnl)), 0.01)
   return (
     <div className="card">
       <div className="tr-ledger-head">
-        <div className="card-title">
-          COPY TRADING · THE CORE RECORD · since {c.since}
-        </div>
-        <span className={`tr-chip ${t.pnl >= 0 ? 'won' : 'lost'}`}>
-          {fmtSignedUsd(t.pnl)}
+        <div className="card-title">BY WHALE · WHO WE COPY · since {c.since}</div>
+        <span className={`tr-chip ${c.total.pnl >= 0 ? 'won' : 'lost'}`}>
+          {fmtSignedUsd(c.total.pnl)}
         </span>
       </div>
-      <div className="tr-slip-nums mono" style={{ flexWrap: 'wrap', gap: 12 }}>
-        <span>{t.wins}W – {t.losses}L · {t.settled.toLocaleString()} settled</span>
-        {t.win_rate !== null && <span>{fmtPct(t.win_rate, 0)} win rate</span>}
-        {t.roi !== null && (
-          <span className={t.roi >= 0 ? 'pos' : 'neg'}>
-            {fmtPct(t.roi)} ROI on {fmtUsd(t.staked, 0)} settled stake
-          </span>
-        )}
-      </div>
-      <div className="tr-slips" style={{ marginTop: 10 }}>
+      <div className="tr-whales">
         {c.by_whale.map((w) => (
-          <div key={w.whale} className="tr-slip-nums mono"
-            style={{ justifyContent: 'space-between', padding: '2px 0' }}>
-            <span>{w.whale}</span>
-            <span className="muted">{w.wins}W–{w.losses}L</span>
-            <span className="muted">
-              {w.roi !== null ? fmtPct(w.roi) : '—'}
+          <div key={w.whale} className="tr-whale-row">
+            <span className="tr-whale-name">{w.whale}</span>
+            <span className="muted mono">{w.wins}W–{w.losses}L</span>
+            <span className="muted mono">{fmtUsd(w.staked, 0)} staked</span>
+            <div className="tr-sport-bar">
+              <div className="tr-sport-zero" />
+              <div className={`tr-sport-fill ${w.pnl >= 0 ? 'pos-bg' : 'neg-bg'}`}
+                style={{ width: `${(Math.abs(w.pnl) / maxAbs) * 50}%`,
+                         ['--org' as string]: w.pnl >= 0 ? 'left' : 'right',
+                         [w.pnl >= 0 ? 'left' : 'right' as any]: '50%' }} />
+            </div>
+            <span className={`mono ${w.roi === null ? 'muted' : w.roi >= 0 ? 'pos' : 'neg'}`}>
+              {w.roi === null ? '—' : fmtPct(w.roi)}
             </span>
-            <span className={w.pnl >= 0 ? 'pos' : 'neg'}>
+            <span className={`tr-sport-val mono ${w.pnl >= 0 ? 'pos' : 'neg'}`}>
               {fmtSignedUsd(w.pnl)}
             </span>
           </div>
         ))}
       </div>
       <div className="tr-foot muted">
-        Whale-copy sleeves only — every settled copy order, uncapped, from
-        the order-level audit. Engine, arbitrage, underdog and manual
-        trading are excluded: this is the copy-trading thesis on its own
-        record.
+        Every settled copy order attributed to its source whale, uncapped,
+        from the order-level audit. A whale joins this board only when
+        promoted to the copy roster.
       </div>
     </div>
   )
 }
 
-/** The uncapped record straight from the venues' own ledgers (task #74):
- * PM's afterPosition.realized, Kalshi rebuilt from raw fills+settlements
- * with exact fees. No display cap, no attribution — the number that must
- * match the venue apps to the dollar over its window. */
-function VenueTruthCard({ vt }: { vt: VenueTruthData }) {
-  if (vt.building) return (
-    <div className="card">
-      <div className="card-title">VENUE TRUTH · RECONCILED P&amp;L</div>
-      <EmptyState>First rebuild since server start is running — numbers
-        appear within a few minutes.</EmptyState>
-    </div>
-  )
-  const t = vt.total
-  if (!t) return null
-  const pm = vt.polymarket_us || {}
-  const kx = vt.kalshi || {}
-  return (
-    <div className="card">
-      <div className="tr-ledger-head">
-        <div className="card-title">VENUE TRUTH · RECONCILED P&amp;L · since {vt.since}</div>
-        <span className={`tr-chip ${t.realized >= 0 ? 'won' : 'lost'}`}>
-          {fmtSignedUsd(t.realized)}
-        </span>
-      </div>
-      <div className="tr-slip-nums mono" style={{ flexWrap: 'wrap', gap: 12 }}>
-        {vt.all_time && (
-          <span title={`Frozen day ledger + live window, since ${vt.all_time.since}`}>
-            all-time <span className={vt.all_time.realized >= 0 ? 'pos' : 'neg'}>
-              {fmtSignedUsd(vt.all_time.realized)}</span>
-            {' '}({vt.all_time.wins}W–{vt.all_time.losses}L)
-          </span>
-        )}
-        <span>{t.wins}W – {t.losses}L · {t.settled} settled</span>
-        <span className="muted">on {fmtUsd(t.settled_cost, 2)} settled cost</span>
-        {pm.error
-          ? <span className="neg" title={pm.error}>Polymarket: unavailable</span>
-          : <span>
-              Polymarket <span className={(pm.realized ?? 0) >= 0 ? 'pos' : 'neg'}>
-                {fmtSignedUsd(pm.realized ?? 0)}</span>
-              {' '}· {pm.open ?? 0} open ({fmtUsd(pm.open_cost ?? 0, 2)})
-            </span>}
-        {kx.error
-          ? <span className="neg" title={kx.error}>Kalshi: unavailable</span>
-          : <span>
-              Kalshi <span className={(kx.realized ?? 0) >= 0 ? 'pos' : 'neg'}>
-                {fmtSignedUsd(kx.realized ?? 0)}</span>
-              {' '}· {kx.open ?? 0} open ({fmtUsd(kx.open_cost ?? 0, 2)})
-            </span>}
-      </div>
-      {(vt.daily || []).length > 0 && (
-        <div className="tr-slips" style={{ marginTop: 10 }}>
-          {(vt.daily || []).slice(0, 8).map((d) => (
-            <div key={d.day} className="tr-slip-nums mono"
-              style={{ justifyContent: 'space-between', padding: '2px 0' }}>
-              <span className="muted">{d.day}</span>
-              <span>{d.wins}W–{d.losses}L</span>
-              <span className="muted">{fmtUsd(d.cost, 2)}</span>
-              <span className={d.realized >= 0 ? 'pos' : 'neg'}>
-                {fmtSignedUsd(d.realized)}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-      <div className="tr-foot muted">
-        Computed from the venues&apos; own books — Polymarket&apos;s
-        per-market realized on each resolution, Kalshi rebuilt from raw
-        fills and settlements with exact fees. Uncapped: every position,
-        every size, manual and AI alike. Rolling window.
-        {vt.partial && <> ⚠️ One venue is currently unavailable — totals
-          cover the venue(s) shown only.</>}
-        {vt.kalshi_note && <> ⚠️ Kalshi figures: {vt.kalshi_note}.</>}
-        {vt.kalshi_window_incomplete && (
-          <> {vt.kalshi_window_incomplete.n} Kalshi settlement(s) whose
-          entries predate the window are excluded rather than guessed.</>
-        )}
-      </div>
-    </div>
-  )
-}
+type Status = 'all' | 'won' | 'lost'
+type SortKey = 'time' | 'stake' | 'pnl'
 
 function fmtAge(s: number): string {
   if (s < 90) return `${Math.round(s)}s`
@@ -413,69 +300,61 @@ function fmtAge(s: number): string {
 }
 
 export function TrackRecord() {
-  const { data, err } = useTrackRecord()
-  const { data: kalshi } = useKalshiOpen()
-  const { data: venueTruth } = useVenueTruth()
-  const { data: copies } = useCopiesRecord()
+  const { data, err } = useCopiesRecord()
   const [status, setStatus] = useState<Status>('all')
-  const [sport, setSport] = useState('all')
-  const [cat, setCat] = useState('all')
+  const [whale, setWhale] = useState('all')
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<SortKey>('time')
   const [limit, setLimit] = useState(60)
 
-  const s = data?.summary
-  const heroPnl = useCountUp(s?.net_pnl ?? 0)
-  const heroDeployed = useCountUp(s?.deployed ?? 0)
+  const t = data?.total
+  const heroPnl = useCountUp(t?.pnl ?? 0)
+  const heroOpen = useCountUp(data?.open?.stake ?? 0)
 
-  const sports = useMemo(() => [...new Set((data?.trades || []).map((r) => r.sport))].sort(), [data])
-  const cats = useMemo(() => [...new Set((data?.trades || []).map((r) => r.category))].sort(), [data])
+  // Chronological daily series (the API serves newest-first).
+  const chrono = useMemo(() => [...(data?.daily || [])].reverse(), [data])
+  const trades = data?.trades || []
+  const whales = useMemo(
+    () => [...new Set(trades.map((r) => r.whale))].sort(), [trades])
 
   // Headline KPIs, all derived from the same daily calendar the page
   // already shows — nothing here is a new claim, just a sharper lens.
   const kpis = useMemo(() => {
-    const days = data?.daily || []
-    if (!days.length) return null
-    let best = days[0]
-    for (const d of days) if (d.pnl > best.pnl) best = d
-    const green = days.filter((d) => d.pnl > 0).length
+    if (!chrono.length) return null
+    let best = chrono[0]
+    for (const d of chrono) if (d.pnl > best.pnl) best = d
+    const green = chrono.filter((d) => d.pnl > 0).length
     let streak = 0
-    for (let i = days.length - 1; i >= 0; i--) {
-      if (days[i].pnl > 0) streak++
+    for (let i = chrono.length - 1; i >= 0; i--) {
+      if (chrono[i].pnl > 0) streak++
       else break
     }
-    // "today" chip only when the newest calendar day IS the viewer's
-    // trading day (ET) — a stale label would be a lie.
-    const todayEt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
-    const last = days[days.length - 1]
-    return {
-      best, green, total: days.length, streak,
-      today: last.date === todayEt ? last.pnl : null,
-    }
-  }, [data])
+    return { best, green, total: chrono.length, streak }
+  }, [chrono])
+
+  // "today" chip only when the server's ET scoreline has settled money.
+  const today = (data?.today?.settled ?? 0) > 0 ? data!.today!.pnl : null
 
   const ledger = useMemo(() => {
-    let rows = data?.trades || []
-    if (status === 'won') rows = rows.filter((r) => r.settled && (r.pnl || 0) > 0)
-    if (status === 'lost') rows = rows.filter((r) => r.settled && (r.pnl || 0) <= 0)
-    if (status === 'open') rows = rows.filter((r) => !r.settled)
-    if (sport !== 'all') rows = rows.filter((r) => r.sport === sport)
-    if (cat !== 'all') rows = rows.filter((r) => r.category === cat)
+    let rows = trades
+    if (status === 'won') rows = rows.filter((r) => r.pnl > 0)
+    if (status === 'lost') rows = rows.filter((r) => r.pnl <= 0)
+    if (whale !== 'all') rows = rows.filter((r) => r.whale === whale)
     if (q.trim()) {
       const needle = q.trim().toLowerCase()
       rows = rows.filter((r) =>
-        (r.title + ' ' + (r.outcome || '') + ' ' + r.market_slug).toLowerCase().includes(needle))
+        `${r.slug || ''} ${r.whale}`.toLowerCase().includes(needle))
     }
-    const key = (r: TRRow) =>
-      sort === 'time' ? (r.entry_ts || 0) : sort === 'stake' ? r.stake : (r.pnl ?? r.unrealized ?? 0)
+    if (sort === 'time') return rows // served newest-first already
+    const key = (r: CopiesTrade) => (sort === 'stake' ? r.stake : r.pnl)
     return [...rows].sort((a, b) => key(b) - key(a))
-  }, [data, status, sport, cat, q, sort])
+  }, [trades, status, whale, q, sort])
 
   // Cached numbers beat an error screen: only surface the failure when
   // there is nothing at all to show — a refresh hiccup on a page already
   // full of data should be invisible.
-  if (err && (!data || !s)) return <EmptyState>{`Account API unreachable: ${err}`}</EmptyState>
-  if (!data || !s) return (
+  if (err && (!data || !t)) return <EmptyState>{`Record API unreachable: ${err}`}</EmptyState>
+  if (!data || !t) return (
     <div className="page tr-page">
       <div className="tr-hero tr-skel" style={{ height: 340 }} />
       <div className="tr-columns">
@@ -485,45 +364,34 @@ export function TrackRecord() {
     </div>
   )
 
-  const early = s.settled < MIN_SETTLED
+  const early = t.settled < MIN_SETTLED
 
-  // Snapshot freshness drives the badge: green under 2 minutes, amber to
-  // 10, red past that. A page that cannot admit it is stale trains its
-  // owner to distrust every number on it.
-  //
-  // The age comes from generated_at — when the PAYLOAD was built — not
-  // from the embedded snapshot age. The server can serve a persisted
-  // payload whose snapshot block froze along with it: on 2026-08-09 the
-  // page showed 16-hour-old numbers under a green "SYNCED · 35s AGO"
-  // badge because it trusted the frozen block's own claim.
-  const genAt = (data as { generated_at?: number }).generated_at
-  const payloadAge = genAt ? Math.max(0, Date.now() / 1000 - genAt) : null
-  const snapAge = data.snapshot?.age_s ?? null
-  const age = payloadAge !== null
-    ? Math.max(payloadAge, snapAge ?? 0)
-    : snapAge
-  const refreshErr = data.snapshot?.refresh_error || null
-  // Thresholds track the server's snapshot cadence (raw TTL 180s): under
-  // ~5 min is simply "current"; amber and red mean something is wrong.
+  // Freshness badge from the payload's own build stamp: green under 5
+  // minutes, amber to 15, red past that. A page that cannot admit it is
+  // stale trains its owner to distrust every number on it.
+  const genAt = data.generated_at ? Date.parse(data.generated_at) : NaN
+  const age = Number.isFinite(genAt)
+    ? Math.max(0, (Date.now() - genAt) / 1000)
+    : null
   const sync: 'ok' | 'lag' | 'stale' =
     age === null ? 'ok' : age < 300 ? 'ok' : age < 900 ? 'lag' : 'stale'
+
+  const openCount = data.open?.count ?? 0
 
   return (
     <div className="page tr-page">
       <div className="tr-hero">
         <div className="tr-hero-head">
           <div className="tr-ident">
-            <span className="tr-bot">🤖</span>
+            <span className="tr-bot">🐋</span>
             <div>
-              <div className="tr-name">BETTOR<span>EDGE</span> AI</div>
+              <div className="tr-name">BETTOR<span>TOKEN</span></div>
               <div className="tr-sub muted">
-                live from the trading account · window {SINCE} → today
+                whale copy portfolio · live from the order ledger · window {SINCE} → today
               </div>
             </div>
           </div>
-          <div
-            className={`tr-live${sync !== 'ok' ? ` tr-live-${sync}` : ''}`}
-            title={refreshErr ? `last refresh error: ${refreshErr}` : undefined}>
+          <div className={`tr-live${sync !== 'ok' ? ` tr-live-${sync}` : ''}`}>
             <span className="tr-pulse" />
             {sync === 'ok'
               ? <>SYNCED{age !== null && <> · {fmtAge(age)} AGO</>}</>
@@ -536,49 +404,47 @@ export function TrackRecord() {
         <div className="tr-hero-grid">
           <div className="tr-stat tr-stat-main" onMouseMove={tilt} onMouseLeave={untilt}>
             <span className="tr-sheen" aria-hidden />
-            <div className="tr-stat-label">NET P&amp;L · AI TRADER</div>
-            <div className={`tr-stat-value tr-grad ${s.net_pnl >= 0 ? 'pos' : 'neg'}`}>
+            <div className="tr-stat-label">NET P&amp;L · COPY PORTFOLIO</div>
+            <div className={`tr-stat-value tr-grad ${t.pnl >= 0 ? 'pos' : 'neg'}`}>
               {fmtSignedUsd(heroPnl)}
             </div>
             <div className="tr-stat-foot muted">
-              {s.wins}W – {s.losses}L
-              {s.win_rate !== null && <> · {fmtPct(s.win_rate, 0)} win rate</>}
-              {' '}· {s.settled} settled
-              {kpis?.today !== null && kpis?.today !== undefined && (
-                <span className={`tr-today ${kpis.today >= 0 ? 'pos-bg' : 'neg-bg'}`}>
-                  {kpis.today >= 0 ? '▲' : '▼'} {fmtSignedUsd(kpis.today)} today
+              {t.wins}W – {t.losses}L
+              {t.win_rate !== null && <> · {fmtPct(t.win_rate, 0)} win rate</>}
+              {' '}· {t.settled.toLocaleString()} settled
+              {today !== null && (
+                <span className={`tr-today ${today >= 0 ? 'pos-bg' : 'neg-bg'}`}>
+                  {today >= 0 ? '▲' : '▼'} {fmtSignedUsd(today)} today
                 </span>
               )}
             </div>
           </div>
           <div className="tr-stat" onMouseMove={tilt} onMouseLeave={untilt}>
             <span className="tr-sheen" aria-hidden />
-            <div className="tr-stat-label">CAPITAL DEPLOYED</div>
-            <div className="tr-stat-value">{fmtUsd(heroDeployed, 2)}</div>
+            <div className="tr-stat-label">CAPITAL DEPLOYED · LIVE</div>
+            <div className="tr-stat-value">{fmtUsd(heroOpen, 2)}</div>
             <div className="tr-stat-foot muted">
-              {s.trades.toLocaleString()} positions · {s.open} open worth {fmtUsd(s.open_value, 2)}
-              {kalshi && kalshi.n > 0 && (
-                <> · +{fmtUsd(kalshi.cost, 2)} live on Kalshi ({kalshi.n})</>
-              )}
+              {openCount} open cop{openCount === 1 ? 'y' : 'ies'} on the table
+              {' '}· {fmtUsd(t.staked, 0)} staked &amp; settled since {SINCE.slice(5)}
             </div>
           </div>
           <div className="tr-stat" onMouseMove={tilt} onMouseLeave={untilt}>
             <span className="tr-sheen" aria-hidden />
-            <div className="tr-stat-label">ROI · TRADED CAPITAL</div>
+            <div className="tr-stat-label">ROI · SETTLED STAKE</div>
             <div className="tr-ring-wrap">
-              {s.roi !== null && (
+              {t.roi !== null && (
                 <div
-                  className={`tr-ring${s.roi < 0 ? ' neg' : ''}`}
-                  style={{ ['--v' as string]: Math.min(100, Math.abs(s.roi) * 1000) }}
+                  className={`tr-ring${t.roi < 0 ? ' neg' : ''}`}
+                  style={{ ['--v' as string]: Math.min(100, Math.abs(t.roi) * 1000) }}
                   title="Dial spans 0–10% ROI"
                   aria-hidden
                 />
               )}
               <div>
-                <div className={`tr-stat-value ${s.roi === null ? '' : s.roi >= 0 ? 'pos' : 'neg'}`}>
-                  {s.roi === null ? '—' : fmtPct(s.roi)}
+                <div className={`tr-stat-value ${t.roi === null ? '' : t.roi >= 0 ? 'pos' : 'neg'}`}>
+                  {t.roi === null ? '—' : fmtPct(t.roi)}
                 </div>
-                <div className="tr-stat-foot muted">on {fmtUsd(s.settled_stake, 2)} settled stake</div>
+                <div className="tr-stat-foot muted">on {fmtUsd(t.staked, 2)} settled stake</div>
               </div>
             </div>
           </div>
@@ -591,7 +457,7 @@ export function TrackRecord() {
               <span className={`tr-kpi-v ${kpis.best.pnl >= 0 ? 'pos' : 'neg'}`}>
                 {fmtSignedUsd(kpis.best.pnl)}
               </span>
-              <span className="tr-kpi-s">{kpis.best.date.slice(5)}</span>
+              <span className="tr-kpi-s">{kpis.best.day.slice(5)}</span>
             </div>
             <div className="tr-kpi">
               <span className="tr-kpi-k">GREEN DAYS</span>
@@ -604,83 +470,59 @@ export function TrackRecord() {
               </div>
             )}
             <div className="tr-kpi">
-              <span className="tr-kpi-k">VENUES LIVE</span>
-              <span className="tr-kpi-v">{kalshi && kalshi.n > 0 ? 2 : 1}</span>
-              <span className="tr-kpi-s">
-                {kalshi && kalshi.n > 0 ? 'Polymarket + Kalshi' : 'Polymarket'}
-              </span>
+              <span className="tr-kpi-k">WHALES COPIED</span>
+              <span className="tr-kpi-v">{data.by_whale.length}</span>
+              <span className="tr-kpi-s">promoted sources</span>
             </div>
-          </div>
-        )}
-
-        {/* WHOLE ACCOUNT strip removed (owner 2026-08-09: "remove the
-            full account balance from the frontend") — the page shows
-            the AI's trading only; account-wide figures stay available
-            in the API payload for reports and probes. */}
-
-        {data.snapshot && data.snapshot.positions_complete === false && (
-          <div className="tr-honesty">
-            ⚠️ POSITION LIST TRUNCATED — the venue returned more open positions than
-            one sync fetches ({data.snapshot.positions_pages} pages). Open counts are
-            a floor, not a total.
           </div>
         )}
 
         {early && (
           <div className="tr-honesty">
-            ⚖️ EARLY SAMPLE — {s.settled} of the {MIN_SETTLED} settlements this record
-            requires before its return means anything. The AI holds itself to the same
-            bar: no size increases until the record is earned.
+            ⚖️ EARLY SAMPLE — {t.settled} of the {MIN_SETTLED} settlements this record
+            requires before its return means anything. The platform holds itself to
+            the same bar: no size increases until the record is earned.
           </div>
         )}
 
-        <EquityCurve daily={data.daily} />
+        <EquityCurve daily={chrono.map((d) => ({ date: d.day, pnl: d.pnl }))} />
       </div>
-
-      {copies && <CopiesCard c={copies} />}
 
       <LiveToday />
 
-      <ResultsTicker rows={data.trades} />
+      <ResultsTicker trades={trades} />
 
-      {kalshi && <KalshiBook k={kalshi} />}
+      <WhalesCard c={data} />
 
       <div className="tr-columns">
         <div className="card">
           <div className="card-title">DAILY P&amp;L</div>
           {data.daily.length ? (
-            <PnlCalendar days={data.daily.map((d) => ({
-              date: d.date, pnl: d.pnl, volume: d.deployed, trades: d.trades,
-              settled: d.settled, open: d.open }))} />
+            <PnlCalendar days={chrono.map((d) => ({
+              date: d.day, pnl: d.pnl, trades: d.settled, settled: d.settled }))} />
           ) : <EmptyState>First settlement day pending.</EmptyState>}
         </div>
         <div className="card">
           <div className="card-title">P&amp;L BY SPORT</div>
-          <SportBreakdown rows={data.trades} />
+          <SportBreakdown rows={data.by_whale_sport || []} />
         </div>
       </div>
 
-      {venueTruth && <VenueTruthCard vt={venueTruth} />}
-
-      <ReportsCard />
-
       <div className="card">
         <div className="tr-ledger-head">
-          <div className="card-title">TRADE LEDGER · {ledger.length.toLocaleString()} positions</div>
+          <div className="card-title">
+            COPY LEDGER · {ledger.length.toLocaleString()} settled trades
+          </div>
           <div className="tr-filters">
-            <input className="tr-search" placeholder="Search team, player, market…"
+            <input className="tr-search" placeholder="Search market or whale…"
               value={q} onChange={(e) => setQ(e.target.value)} />
-            {(['all', 'won', 'lost', 'open'] as Status[]).map((f) => (
+            {(['all', 'won', 'lost'] as Status[]).map((f) => (
               <button key={f} className={`tr-chipbtn ${status === f ? 'on' : ''}`}
                 onClick={() => setStatus(f)}>{f.toUpperCase()}</button>
             ))}
-            <select className="tr-select" value={sport} onChange={(e) => setSport(e.target.value)}>
-              <option value="all">All sports</option>
-              {sports.map((x) => <option key={x} value={x}>{x}</option>)}
-            </select>
-            <select className="tr-select" value={cat} onChange={(e) => setCat(e.target.value)}>
-              <option value="all">All bet types</option>
-              {cats.map((x) => <option key={x} value={x}>{x}</option>)}
+            <select className="tr-select" value={whale} onChange={(e) => setWhale(e.target.value)}>
+              <option value="all">All whales</option>
+              {whales.map((x) => <option key={x} value={x}>{x}</option>)}
             </select>
             <select className="tr-select" value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
               <option value="time">Newest</option>
@@ -695,52 +537,26 @@ export function TrackRecord() {
         ) : (
           <div className="tr-slips">
             {ledger.slice(0, limit).map((r, i) => {
-              const won = r.settled && (r.pnl || 0) > 0
-              const st = !r.settled ? 'open' : won ? 'won' : 'lost'
-              const toWin = r.entry_price && r.entry_price > 0
-                ? r.stake / r.entry_price - r.stake : null
+              const won = r.pnl > 0
+              const st = won ? 'won' : 'lost'
               return (
-                <div key={r.market_slug} className={`tr-slip ${st}`}
+                <div key={`${r.slug}-${r.whale}-${i}`} className={`tr-slip ${st}`}
                   style={{ ['--i' as string]: Math.min(i, 14) }}>
                   <div className="tr-slip-edge" aria-hidden />
                   <div className="tr-slip-main">
                     <div className="tr-slip-top">
-                      <span className="tr-slip-sport">{r.icon}</span>
-                      <span className="tr-slip-title">{r.title}</span>
-                      <span className="tr-tag">{r.category}</span>
-                      {r.sleeve === 'copy' && <span className="tr-tag">COPY</span>}
-                      {r.cohort === 'manual' && <span className="tr-tag">MANUAL</span>}
-                      {r.cohort === 'unattributed' && <span className="tr-tag">OWNER</span>}
-                      {(r.cohort === 'over_pnl' || r.cohort === 'over_limit') && (
-                        <span className="tr-tag">LARGE</span>
-                      )}
-                      {r.cashed_out && <span className="tr-tag">CASHED OUT</span>}
+                      <span className="tr-slip-title">{prettySlug(r.slug)}</span>
+                      <span className="tr-tag">{r.whale}</span>
+                      {r.status === 'cashed_out' && <span className="tr-tag">CASHED OUT</span>}
                       <span className={`tr-chip ${st}`}>
-                        {st === 'open' ? '● LIVE' : st === 'won' ? '✓ WON' : '✕ LOST'}
+                        {won ? '✓ WON' : '✕ LOST'}
                       </span>
                     </div>
-                    <div className="tr-slip-mid">
-                      <span className="tr-slip-outcome">{r.outcome || r.market_slug}</span>
-                      {r.entry_ts && (
-                        <span className="muted mono">
-                          {new Date(r.entry_ts * 1000).toLocaleString(undefined,
-                            { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                        </span>
-                      )}
-                      {r.fills > 1 && <span className="tr-tag mono">{r.fills} fills</span>}
-                    </div>
                     <div className="tr-slip-nums mono">
-                      {r.entry_price && <span title="Venue VWAP entry">@{fmtCents(r.entry_price)}</span>}
-                      <span title="Stake at cost">stake {fmtUsd(r.stake, 2)}</span>
-                      {toWin !== null && <span className="muted">to win {fmtUsd(toWin, 2)}</span>}
-                      {!r.settled && r.unrealized !== null && (
-                        <span className={r.unrealized >= 0 ? 'pos' : 'neg'}
-                          title="Mark-to-market vs cost">
-                          mkt {fmtSignedUsd(r.unrealized)}
-                        </span>
-                      )}
-                      <span className={`tr-slip-pnl ${!r.settled ? 'muted' : won ? 'pos' : 'neg'}`}>
-                        {r.settled ? fmtSignedUsd(r.pnl) : '· · ·'}
+                      {r.day && <span className="muted">{r.day}</span>}
+                      <span title="Stake at fill">stake {fmtUsd(r.stake, 2)}</span>
+                      <span className={`tr-slip-pnl ${won ? 'pos' : 'neg'}`}>
+                        {fmtSignedUsd(r.pnl)}
                       </span>
                     </div>
                   </div>
@@ -755,28 +571,12 @@ export function TrackRecord() {
           </button>
         )}
         <div className="tr-foot muted">
-          Source: the live venue account (positions + its own trade activities),
-          window {SINCE} → today, refreshed every 30s. Entry prices are the venue's
-          own VWAP. This record is the AI's trading only — engine, copies and the
-          underdog cash-out sleeve, with cash-outs counted at sale; manual/owner
-          trades are excluded from every figure on this page.
-          {data.excluded_over_limit && data.excluded_over_limit.count > 0 && (
-            <> {data.excluded_over_limit.count} larger position(s) are excluded from
-            every figure above — combined stake{' '}
-            {fmtUsd(data.excluded_over_limit.stake, 2)}, settled net{' '}
-            {fmtSignedUsd(data.excluded_over_limit.net_pnl)}.</>
-          )}
-          {data.copy_sleeve && data.copy_sleeve.count > 0 && (
-            <> Includes the whale-copy sleeve ({data.copy_sleeve.count} positions,
-            settled net {fmtSignedUsd(data.copy_sleeve.net_pnl)}), tagged COPY in
-            the ledger.</>
-          )}
-          {data.excluded_unattributed && data.excluded_unattributed.count > 0 && (
-            <> {data.excluded_unattributed.count} non-AI account position(s)
-            excluded (settled net {fmtSignedUsd(data.excluded_unattributed.net_pnl)}).</>
-          )}
-          {' '}{data.excluded_undatable > 0 &&
-            `${data.excluded_undatable} position(s) excluded: the venue reported no datable entry.`}
+          Performance shown is the whale copy portfolio: every settled copy
+          trade, uncapped, from the order-level audit — window {SINCE} →
+          today, refreshed every 30s. Cash-outs are counted at sale. The
+          ledger lists the {trades.length.toLocaleString()} newest settled
+          copies; the totals above cover the full window. Full account
+          statements available to investors on request.
         </div>
       </div>
     </div>

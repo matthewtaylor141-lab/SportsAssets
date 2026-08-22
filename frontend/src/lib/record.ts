@@ -175,11 +175,24 @@ export function useVenueTruth(refreshMs = 60_000) {
   return usePolled<VenueTruthData>('/api/venue-truth', refreshMs)
 }
 
-/* The COPIES cohort — the record the copy-trading thesis stands on
- * (owner order 2026-08-20): uncapped, venue-backed, per-whale split. */
+/* The COPIES cohort — THE public record (owner order 2026-08-22: "the
+ * performance data must exclusively show the copy whales numbers").
+ * Uncapped, venue-backed via the order-level audit, per-whale split,
+ * full-window daily series, row-level ledger, live open book. */
 
 export interface CopiesWhale {
   whale: string
+  settled: number
+  wins: number
+  losses: number
+  pnl: number
+  staked: number
+  roi: number | null
+}
+
+export interface CopiesWhaleSport {
+  whale: string
+  sport: string
   settled: number
   wins: number
   losses: number
@@ -196,19 +209,57 @@ export interface CopiesDay {
   pnl: number
 }
 
+export interface CopiesDayWhale {
+  day: string
+  whale: string
+  settled: number
+  wins: number
+  losses: number
+  pnl: number
+  staked: number
+}
+
+/** One settled/cashed-out copy row from the public ledger (≤400 newest). */
+export interface CopiesTrade {
+  day: string | null
+  whale: string
+  slug: string | null
+  stake: number
+  pnl: number
+  status: string
+}
+
 export interface CopiesRecord {
   cohort: 'copies'
   uncapped: boolean
   since: string
+  generated_at?: string
   total: { settled: number; wins: number; losses: number
            pnl: number; staked: number; roi: number | null
            win_rate: number | null }
   by_whale: CopiesWhale[]
+  by_whale_sport?: CopiesWhaleSport[]
+  /** Newest-first, FULL since-window (31-day truncation lifted). */
   daily: CopiesDay[]
+  daily_by_whale?: CopiesDayWhale[]
+  /** What the copy sleeves have on the table right now. */
+  open?: { count: number; stake: number }
+  trades?: CopiesTrade[]
+  today?: { pnl: number; settled: number; wins: number; losses: number }
 }
 
-export function useCopiesRecord(refreshMs = 60_000) {
-  return usePolled<CopiesRecord>('/api/copies-record', refreshMs)
+export function useCopiesRecord(refreshMs = 30_000) {
+  return usePolled<CopiesRecord>(
+    '/api/copies-record',
+    refreshMs,
+    undefined,
+    // Same monotone guard as the account record: settlements since a
+    // fixed start only grow, so a payload whose settled count collapses
+    // is a degraded snapshot (mid-boot, partial hydrate) — hold the
+    // last good numbers instead of shrinking the public headline.
+    (prev, next) =>
+      (next.total?.settled ?? 0) >= (prev.total?.settled ?? 0) * 0.9,
+  )
 }
 
 export const SINCE = '2026-08-01'

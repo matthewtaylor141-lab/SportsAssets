@@ -4,7 +4,8 @@ import { fmtSignedUsd, fmtUsd } from '../lib/format'
 export interface DayStat {
   date: string // YYYY-MM-DD
   pnl: number
-  volume: number
+  /** Stake/volume for the day — omitted by feeds that don't track it. */
+  volume?: number
   trades: number
   settled?: number
   open?: number
@@ -120,7 +121,8 @@ export function PnlCalendar({
         <div className="tooltip" style={{ left: hover.x + 12, top: hover.y + 12 }}>
           <div>{hover.d.date}</div>
           <strong className={hover.d.pnl >= 0 ? 'pos' : 'neg'}>{fmtSignedUsd(hover.d.pnl)}</strong>{' '}
-          realized · {hover.d.trades} trades · {fmtUsd(hover.d.volume)} volume
+          realized · {hover.d.trades} trades
+          {hover.d.volume !== undefined && <> · {fmtUsd(hover.d.volume)} volume</>}
           {(hover.d.open ?? 0) > 0 && (
             <div className="muted">{hover.d.open} still open — settles when games finish</div>
           )}

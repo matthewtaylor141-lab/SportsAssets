@@ -5,7 +5,7 @@ self.addEventListener('push', (event) => {
   try {
     data = event.data ? event.data.json() : {}
   } catch {
-    data = { title: 'SportsAssets Hub', body: event.data && event.data.text() }
+    data = { title: 'BettorToken', body: event.data && event.data.text() }
   }
   event.waitUntil(
     self.registration.showNotification(data.title || 'Whale trade', {

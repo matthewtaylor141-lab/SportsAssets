@@ -4,7 +4,9 @@ import { api } from '../lib/api'
 // Second-latency settlement strip (owner report 2026-08-07: "won 4
 // trades, page didn't move"). Fed by /api/today-live — our own ledger,
 // not the venue snapshot — so wins appear within seconds of resolution,
-// slide in, and the day P&L ticks live.
+// slide in, and the day P&L ticks live. Copy-whales only and uncapped
+// server-side (owner order 2026-08-22): the strip is the live edge of
+// the copy record the site headlines.
 
 interface Settle {
   title: string
@@ -59,7 +61,7 @@ export function LiveToday() {
     <div className={`live-strip${flash ? ' live-flash' : ''}`}>
       <div className="live-head">
         <span className="live-dot" />
-        <span className="live-label">LIVE · TODAY'S SETTLEMENTS</span>
+        <span className="live-label">LIVE · TODAY'S COPY SETTLEMENTS</span>
         <span className={`live-pnl ${live.pnl >= 0 ? 'pos' : 'neg'}`}>{money(live.pnl)}</span>
         <span className="live-sub">{live.wins}W–{live.settled - live.wins}L · updates in seconds</span>
       </div>
@@ -70,7 +72,7 @@ export function LiveToday() {
               {r.pnl >= 0 ? 'WIN' : 'LOSS'}
             </span>
             <span className="live-title">
-              {r.title}{r.outcome ? ` — ${r.outcome}` : ''}
+              {r.whale ? `${r.whale} · ` : ''}{r.title}{r.outcome ? ` — ${r.outcome}` : ''}
             </span>
             <span className={`live-amt ${r.pnl >= 0 ? 'pos' : 'neg'}`}>{money(r.pnl)}</span>
             <span className="live-when">{ago(r.at)}</span>

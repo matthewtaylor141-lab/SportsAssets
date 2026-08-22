@@ -1451,3 +1451,61 @@ body { -webkit-tap-highlight-color: transparent; }
   .pmx-ticket, .kx-ticket { position: static; }
   .vd-rail:not(.has-pick) { display: none; }
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   BettorToken v6 — copy-record public site (owner order 2026-08-22).
+   Same override-layer discipline as v3/v4: appended, cascade-winning,
+   reversible as one block. No new colors — everything draws on the
+   validated token families already defined above.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── BETTORTOKEN wordmark lockup ── */
+.nav .bt-brand {
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-weight: 700; font-size: 16.5px; letter-spacing: -0.035em;
+  /* Solid ink beats the old sheen: a wordmark is an identity, not an
+     animation. BETTOR in ink, TOKEN in the accent family. */
+  background: none; color: var(--ink); animation: none;
+}
+.nav .bt-brand span {
+  background: linear-gradient(92deg, #58a1f5, var(--accent) 60%, #7fc0ff);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+/* Slot for the real SVG logo (src/assets/logo.svg) when it lands. */
+.nav .brand-logo { height: 22px; width: auto; display: block; }
+
+/* Subtle top gradient wash behind the whole app — refined, financial. */
+body {
+  background:
+    linear-gradient(180deg, rgba(57, 135, 229, 0.06), transparent 340px),
+    radial-gradient(1200px 400px at 50% -200px, rgba(57, 135, 229, 0.07), transparent),
+    var(--page);
+}
+
+/* Ticker: whale attribution chip inside each item. */
+.tk-whale {
+  font-size: 10px; font-weight: 800; letter-spacing: 0.08em;
+  color: var(--accent); text-transform: uppercase; white-space: nowrap;
+}
+
+/* By-whale board on the Performance page. */
+.tr-whales { display: flex; flex-direction: column; gap: 10px; padding: 6px 0 2px; }
+.tr-whale-row {
+  display: grid; grid-template-columns: 150px 70px 96px 1fr 64px 84px;
+  gap: 10px; align-items: center; font-size: 13px;
+}
+.tr-whale-name {
+  font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+}
+@media (max-width: 700px) {
+  /* Phone: name · W-L · P&L — the bar, staked and ROI cells drop out. */
+  .tr-whale-row { grid-template-columns: 1fr 68px 84px; }
+  .tr-whale-row > .tr-sport-bar,
+  .tr-whale-row > *:nth-child(3),
+  .tr-whale-row > *:nth-child(5) { display: none; }
+}
+
+/* Analytics: per-whale form sparkline. */
+.an-spark { width: 120px; height: 28px; display: block; }
+.an-table td { vertical-align: middle; }

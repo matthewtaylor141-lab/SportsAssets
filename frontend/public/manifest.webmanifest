@@ -1,7 +1,7 @@
 {
-  "name": "MERIDIAN — BettorToken",
-  "short_name": "MERIDIAN",
-  "description": "Voice cockpit for the BettorToken trading platform — talk to your AI co-CEO.",
+  "name": "BettorToken",
+  "short_name": "BettorToken",
+  "description": "BettorToken — whale copy trading. Includes the MERIDIAN voice cockpit.",
   "start_url": "/jarvis",
   "scope": "/",
   "display": "standalone",
