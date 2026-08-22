@@ -236,9 +236,11 @@ export function PriceChart({ points, hours, entry, compact, caption }: {
   )
 }
 
-/* ── Sparkline — browse-card trend hint, ~120×36, stroke only ────── */
-export function Sparkline({ points, w = 120, h = 36 }: {
-  points: HistoryPoint[]; w?: number; h?: number
+/* ── Sparkline — browse-card trend hint, ~120×36, stroke only ──────
+   v8 extension: optional `tone` ('pos'|'neg') adds a class so the feed's
+   full-width card charts can tint by trend; untinted callers unchanged. */
+export function Sparkline({ points, w = 120, h = 36, tone }: {
+  points: HistoryPoint[]; w?: number; h?: number; tone?: 'pos' | 'neg'
 }) {
   const path = useMemo(() => {
     const n = points.length
@@ -258,7 +260,8 @@ export function Sparkline({ points, w = 120, h = 36 }: {
   }, [points, w, h])
   if (!path) return null
   return (
-    <svg className="pc-sparkline" viewBox={`0 0 ${w} ${h}`} width={w} height={h}
+    <svg className={`pc-sparkline${tone ? ` ${tone}` : ''}`}
+         viewBox={`0 0 ${w} ${h}`} width={w} height={h}
          aria-hidden="true" focusable="false">
       <polyline className="pc-line" points={path} fill="none"
                 strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />

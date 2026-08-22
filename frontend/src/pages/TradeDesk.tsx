@@ -6,34 +6,37 @@ import {
   type DeskAccounts,
 } from '../lib/desk'
 import {
-  PriceChart, Sparkline, fetchHistory, useDeskHistory,
+  PriceChart, useDeskHistory,
   type HistoryPoint, type HistoryVenue,
 } from '../components/PriceChart'
+import { MarketFeed, Spark, type FeedCard } from '../components/MarketFeed'
+import { MarketPage, type MarketMeta } from '../components/MarketPage'
 import '../styles/desk2.css'
 
-// Desk v6 (owner order 2026-08-22, on top of the v5 venue skins): the
-// team uses both venues "identically as if they were logged in on the
-// native apps — better than the venues". New in v6: shared desk-password
-// session (admin token still accepted), live account balances in the
-// header, an account-wide positions panel with marks + unrealized and a
-// protected CASH OUT flow (limit = bid − 2¢, floored at 1¢, IOC), cancel
-// on pending Kalshi tickets, and the full 5-level book with spread/mid.
-// Execution is UNCHANGED: the walled-off 'manual' sleeve endpoints, all
-// v5 money locks intact (placingRef, dup guards, comma normalization).
+// Desk v8 (owner order 2026-08-22, via questionnaire): the desk IS the
+// venue app — opening it shows a venue-style FEED of large market cards
+// (MarketFeed.tsx); tapping a card opens a FULL MARKET PAGE shaped like
+// the real app's market screen (MarketPage.tsx); Markets / Positions /
+// Activity tabs mirror venue navigation (bottom bar on the phone). This
+// file is now the SHELL and the single owner of every money path — the
+// v5→v7 machinery is here VERBATIM: desk gate, accounts poll + LIVE
+// strip, the entire order placement flow (placingRef, review→confirm,
+// watchRow relay polling, execution timeline), the entire cash-out flow
+// (coPlacingRef, watchCoRow, protective-limit modal), blotter + cancel,
+// toasts/haptics. Only the navigation/layout around them changed.
 
-type Venue = 'polymarket' | 'kalshi'
+export type Venue = 'polymarket' | 'kalshi'
 
-interface Outcome { label: string; asset?: string; ticker?: string; us_slug?: string; price: number | null; no_price?: number | null }
-interface GameCard { id: string; venue: Venue; league: string; title: string; outcomes: Outcome[]; markets_n?: number }
-interface GameGroup { name: string; markets: Outcome[] }
-interface Position {
+export interface Outcome { label: string; asset?: string; ticker?: string; us_slug?: string; price: number | null; no_price?: number | null }
+export interface GameGroup { name: string; markets: Outcome[] }
+export interface Position {
   asset: string; outcome: string | null; cost: number; fill_price: number
   shares: number; status: string; current_value: number | null
   to_win: number | null; pnl: number | null
 }
-interface GameView { id: string; venue: Venue; title: string; groups: GameGroup[]; positions: Position[] }
+export interface GameView { id: string; venue: Venue; title: string; groups: GameGroup[]; positions: Position[] }
 
-interface Pick {
+export interface Pick {
   venue: Venue
   label: string
   side: string
@@ -65,7 +68,7 @@ interface OrderRun {
 // A cash-out target: one held position, either venue. Built from the
 // /api/desk/accounts snapshot — the server re-quotes and re-clamps to
 // held at execution, so these numbers are display-grade only.
-interface CoTarget {
+export interface CoTarget {
   venue: Venue
   title: string
   outcome?: string
@@ -78,7 +81,7 @@ interface CoTarget {
   unrealized: number | null
 }
 
-interface ManualTrade {
+export interface ManualTrade {
   id: number | string
   placed_at: string | null
   title: string
@@ -118,79 +121,8 @@ const signed = (v: number | null | undefined) =>
 const kalshiFee = (count: number, price: number) =>
   0.07 * count * price * (1 - price)
 
-const LEAGUES: { key: string; label: string; icon: string }[] = [
-  { key: 'all', label: 'All', icon: '' },
-  // Wave-2: the full open universe on both venues, not just sports.
-  { key: 'everything', label: 'Everything', icon: '🌐' },
-  { key: 'tennis', label: 'Tennis', icon: '🎾' },
-  { key: 'mlb', label: 'MLB', icon: '⚾' },
-  { key: 'soccer', label: 'Soccer', icon: '⚽' },
-  { key: 'wnba', label: 'WNBA', icon: '🏀' },
-  { key: 'nba', label: 'NBA', icon: '🏀' },
-  { key: 'nfl', label: 'NFL', icon: '🏈' },
-  { key: 'nhl', label: 'NHL', icon: '🏒' },
-  { key: 'esports', label: 'Esports', icon: '🎮' },
-]
-const SPORT_NAME: Record<string, string> = {
-  mlb: 'BASEBALL', wnba: 'BASKETBALL', nba: 'BASKETBALL',
-  nfl: 'FOOTBALL', nhl: 'HOCKEY', tennis: 'TENNIS',
-  soccer: 'SOCCER', esports: 'ESPORTS',
-}
-
-// ── Lazy card sparklines (Wave-2) ────────────────────────────────────
-// A browse/search card only fetches history once it scrolls into view
-// (IntersectionObserver, 120px lookahead), through a 12-slot limiter so
-// a big grid never floods the API, into a ref-map cache owned by the
-// page — re-renders and revisits are free. Read-only decoration: an
-// error just leaves the reserved slot empty.
-const SPARK_MAX = 12
-let sparkActive = 0
-const sparkQ: (() => void)[] = []
-const sparkNext = () => {
-  if (sparkActive >= SPARK_MAX) return
-  const job = sparkQ.shift()
-  if (job) { sparkActive++; job() }
-}
-const sparkSlot = <T,>(job: () => Promise<T>): Promise<T> =>
-  new Promise<T>((resolve, reject) => {
-    sparkQ.push(() => {
-      job().then(resolve, reject).finally(() => { sparkActive--; sparkNext() })
-    })
-    sparkNext()
-  })
-
-function Spark({ venue, id, cacheRef }: {
-  venue: HistoryVenue
-  id: string
-  cacheRef: { current: Map<string, HistoryPoint[]> }
-}) {
-  const key = `${venue}|${id}`
-  const boxRef = useRef<HTMLSpanElement | null>(null)
-  const [pts, setPts] = useState<HistoryPoint[] | null>(
-    () => cacheRef.current.get(key) || null)
-  useEffect(() => {
-    const cached = cacheRef.current.get(key)
-    if (cached) { setPts(cached); return }
-    const el = boxRef.current
-    if (!el || typeof IntersectionObserver === 'undefined') return
-    let dead = false
-    const io = new IntersectionObserver((entries) => {
-      if (!entries.some((x) => x.isIntersecting)) return
-      io.disconnect()
-      sparkSlot(() => fetchHistory(venue, id, 24))
-        .then((p) => { cacheRef.current.set(key, p); if (!dead) setPts(p) })
-        .catch(() => { cacheRef.current.set(key, []); if (!dead) setPts([]) })
-    }, { rootMargin: '120px' })
-    io.observe(el)
-    return () => { dead = true; io.disconnect() }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key])
-  return (
-    <span className="pc-spark" ref={boxRef}>
-      {pts && pts.length >= 2 ? <Sparkline points={pts} /> : null}
-    </span>
-  )
-}
+// v8: the league list + lazy card-chart machinery (Spark) moved whole
+// into components/MarketFeed.tsx — the feed owns browsing now.
 
 export function TradeDesk() {
   const [authed, setAuthed] = useState(() => deskToken() != null)
@@ -199,9 +131,14 @@ export function TradeDesk() {
   const [err, setErr] = useState('')
   const [venue, setVenue] = useState<Venue>('polymarket')
   const [league, setLeague] = useState('all')
-  const [games, setGames] = useState<GameCard[]>([])
-  const [counts, setCounts] = useState<Record<string, Record<string, number>>>({})
+  // v8 shell route: which desk screen is showing (venue-app tabs).
+  const [tab, setTab] = useState<'markets' | 'positions' | 'activity'>('markets')
   const [game, setGame] = useState<GameView | null>(null)
+  // Display-grade card meta (close time / volume / chartable id) handed
+  // over by the feed card that opened the market page. Non-null marks
+  // "market page open" even while the board detail is still loading.
+  const [gameMeta, setGameMeta] = useState<MarketMeta | null>(null)
+  const [bookOpen, setBookOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [pick, setPick] = useState<Pick | null>(null)
   const [usd, setUsd] = useState('')
@@ -241,9 +178,10 @@ export function TradeDesk() {
   const isK = venue === 'kalshi'
 
   // ── Price history (Wave-2): venue + id straight from the pick ────
-  // One hook feeds both the game-view chart and the compact ticket
-  // chart (fetchHistory dedupes the wire call); 60s refresh inside.
-  const [histHours, setHistHours] = useState<24 | 168>(24)
+  // v8: the big market-page chart owns its own range toggles inside
+  // MarketPage.tsx; the ticket's compact chart stays on a fixed 24h
+  // window (fetchHistory's module cache dedupes any shared id).
+  const histHours = 24
   const sparkCache = useRef(new Map<string, HistoryPoint[]>())
   const histVenue: HistoryVenue | undefined =
     pick ? (pick.venue === 'polymarket' ? 'polymarket-us' : 'kalshi') : undefined
@@ -326,23 +264,8 @@ export function TradeDesk() {
     return () => clearInterval(t)
   }, [authed, loadAcct])
 
-  const loadGames = useCallback((v: Venue, lg: string) => {
-    setLoading(true)
-    deskApi<{ games: GameCard[]; counts?: Record<string, number> }>(
-      `/api/admin/desk-games?venue=${v}&league=${lg}`)
-      .then((r) => {
-        setGames(r.games)
-        if (r.counts) setCounts((c) => ({ ...c, [v]: r.counts! }))
-        setErr(r.games.length ? '' : 'No games in this window — try another sport.')
-      })
-      .catch(() => setErr('Games failed to load — pull to retry.'))
-      .finally(() => setLoading(false))
-  }, [])
-
-  useEffect(() => {
-    if (authed) loadGames(venue, league)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authed, venue, league])
+  // v8: feed loading (desk-feed, 30s poll, league counts) lives inside
+  // MarketFeed.tsx — the shell only owns the market-page detail fetch.
 
   useEffect(() => {
     const query = q.trim()
@@ -374,6 +297,29 @@ export function TradeDesk() {
       .catch(() => { if (!keepRun) setErr('Game failed to load.') })
       .finally(() => { if (!keepRun) setLoading(false) })
   }
+
+  // ── v8 navigation (presentation only — openGame stays the loader) ──
+  const openFeedCard = (c: FeedCard) => {
+    setGameMeta({
+      close_time: c.close_time ?? null,
+      volume_usd: c.volume_usd ?? null,
+      history_id: c.history_id ?? null,
+    })
+    setQ('')
+    openGame({ id: c.id, venue: c.venue })
+  }
+  // Kalshi search rows carry the full market ticker; its first two
+  // segments ARE the desk-game event id (same derivation the board
+  // uses), so a search result can open the real market page.
+  const openFromKalshiSearch = (ticker: string) => {
+    const id = ticker.split('-').slice(0, 2).join('-')
+    if (!id) return
+    setGameMeta({ close_time: null, volume_usd: null, history_id: ticker })
+    setQ('')
+    openGame({ id, venue: 'kalshi' })
+  }
+  const backToFeed = () => { setGame(null); setGameMeta(null) }
+  const onMarketPage = game != null || gameMeta != null
 
   useEffect(() => {
     setDepth(null)
@@ -778,9 +724,6 @@ export function TradeDesk() {
     if (side === 'sell') setSide('buy')
   }
 
-  const sportTag = (lg: string) => SPORT_NAME[lg] || 'SPORTS'
-  const countFor = (lg: string) => counts[venue]?.[lg]
-
   if (!authed) {
     return (
       <>
@@ -1107,6 +1050,21 @@ export function TradeDesk() {
             )}
 
             {depth && (depth.asks.length > 0 || depth.bids.length > 0) && (
+              <div className="dx-bookwrap">
+                {/* v8: the ladder is collapsible like the venue apps'
+                    market screens — wrapper only, ladder untouched. */}
+                <button
+                  className="dx-booktoggle"
+                  onClick={() => setBookOpen((o) => !o)}
+                  aria-expanded={bookOpen}
+                >
+                  Order book
+                  {bestBid != null && bestAsk != null && (
+                    <span>spread {((bestAsk - bestBid) * 100).toFixed(1)}¢</span>
+                  )}
+                  <i className={bookOpen ? 'up' : ''}>▾</i>
+                </button>
+                {bookOpen && (
               <div className="dx-book">
                 <div>
                   <div className="dx-book-h">Asks</div>
@@ -1131,6 +1089,8 @@ export function TradeDesk() {
                     <span>Spread {((bestAsk - bestBid) * 100).toFixed(1)}¢</span>
                     <span>Mid {(((bestAsk + bestBid) / 2) * 100).toFixed(1)}¢</span>
                   </div>
+                )}
+              </div>
                 )}
               </div>
             )}
@@ -1175,171 +1135,9 @@ export function TradeDesk() {
     </aside>
   )
 
-  // ── Kalshi-skin market card ──────────────────────────────────────
-  const kCard = (g: GameCard) => (
-    <div className="kx-card" key={`${g.venue}-${g.id}`}>
-      <div className="kx-card-top">
-        <span className="kx-sport">{sportTag(g.league)}</span>
-        <span className="kx-series">{g.league.toUpperCase()}</span>
-      </div>
-      <button className="kx-title" onClick={() => openGame(g)}>{g.title}</button>
-      <div className="kx-outcomes">
-        {g.outcomes.slice(0, 2).map((o) => (
-          <div className="kx-outcome" key={o.label}>
-            <span className="kx-oname">{o.label}</span>
-            <button
-              className={`kx-pct${pick?.ticker != null && pick?.ticker === o.ticker ? ' on' : ''}`}
-              disabled={o.price == null}
-              onClick={() => o.price != null && choose({
-                venue: 'kalshi', label: g.title, side: o.label, ask: o.price,
-                ticker: o.ticker, kalshiSide: 'yes',
-              })}
-            >{pct(o.price)}</button>
-          </div>
-        ))}
-      </div>
-      <div className="kx-card-foot">
-        <button className="kx-more" onClick={() => openGame(g)}>
-          {g.markets_n ? `${g.markets_n} markets` : 'All markets'}
-        </button>
-        {(() => {
-          const t = g.outcomes.find((o) => o.ticker)?.ticker
-          return t ? <Spark venue="kalshi" id={t} cacheRef={sparkCache} /> : null
-        })()}
-      </div>
-    </div>
-  )
-
-  // ── Polymarket-skin market card ──────────────────────────────────
-  const pCard = (g: GameCard) => {
-    const other = (o: Outcome) => g.outcomes.find((x) => x !== o)
-    const sel = (o: Outcome | undefined) =>
-      !!o && ((o.us_slug && pick?.usSlug === o.us_slug) || (o.asset && pick?.asset === o.asset))
-    const buy = (o: Outcome) => choose({
-      venue: 'polymarket', label: g.title, side: o.label,
-      ask: o.price ?? 0, asset: o.asset, usSlug: o.us_slug,
-    })
-    return (
-      <div className="pmx-card" key={`${g.venue}-${g.id}`}>
-        <div className="pmx-card-head">
-          <span className="pmx-icon">{LEAGUES.find((l) => l.key === g.league)?.icon || '🏟'}</span>
-          <button className="pmx-title" onClick={() => openGame(g)}>{g.title}</button>
-        </div>
-        {g.outcomes.slice(0, 2).map((o) => {
-          const alt = other(o)
-          return (
-            <div className="pmx-row" key={o.label}>
-              <span className="pmx-oname">{o.label}</span>
-              <span className="pmx-opct">{pct(o.price)}</span>
-              <button
-                className={`pmx-btn yes${sel(o) ? ' on' : ''}`}
-                disabled={o.price == null && !o.us_slug}
-                onClick={() => buy(o)}
-              >Yes {o.price != null ? cents(o.price) : ''}</button>
-              <button
-                className={`pmx-btn no${sel(alt) ? ' on' : ''}`}
-                disabled={!alt || (alt.price == null && !alt.us_slug)}
-                onClick={() => alt && buy(alt)}
-              >No {alt?.price != null ? cents(alt.price) : ''}</button>
-            </div>
-          )
-        })}
-        <div className="pmx-card-foot">
-          <button className="pmx-more" onClick={() => openGame(g)}>
-            {g.markets_n ? `${g.markets_n} markets →` : 'All markets →'}
-          </button>
-          {(() => {
-            const a = g.outcomes.find((x) => x.asset)?.asset
-            return a ? <Spark venue="polymarket-us" id={a} cacheRef={sparkCache} /> : null
-          })()}
-        </div>
-      </div>
-    )
-  }
-
-  // ── Full game view (both skins) ──────────────────────────────────
-  const gameView = game && (
-    <div className={isK ? 'kx-game' : 'pmx-game'}>
-      <button className="dx-back" onClick={() => { setGame(null) }}>← Back to all games</button>
-      <h2 className="dx-game-title">{game.title}</h2>
-
-      {pick && histId && pick.label === game.title && (
-        <div className="pc-block">
-          <div className="pc-head">
-            <span className="pc-title">
-              {pick.side}
-              {isK && pick.kalshiSide === 'no' ? ' · market yes price' : ''}
-              {' — price history'}
-            </span>
-            <div className="pc-hours" role="group" aria-label="History range">
-              <button className={histHours === 24 ? 'on' : ''}
-                      onClick={() => setHistHours(24)}>24h</button>
-              <button className={histHours === 168 ? 'on' : ''}
-                      onClick={() => setHistHours(168)}>7d</button>
-            </div>
-          </div>
-          <PriceChart points={histPoints} hours={histHours} />
-        </div>
-      )}
-
-      {game.positions.length > 0 && (
-        <div className="dx-pos">
-          <div className="dx-pos-h">Your positions</div>
-          {game.positions.map((p) => (
-            <div className="dx-pos-row" key={p.asset}>
-              <b>{p.outcome || 'position'}</b>
-              <span>Cost {money(p.cost)} @ {cents(p.fill_price)}</span>
-              <span>To win <b>{money(p.to_win)}</b></span>
-              {p.pnl != null && (
-                <span className={p.pnl >= 0 ? 'pos' : 'neg'}>settled {money(p.pnl)}</span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {game.groups.map((grp) => (
-        <div className="dx-group" key={grp.name}>
-          <div className="dx-group-h">{grp.name}<span className="dx-group-n">{grp.markets.length}</span></div>
-          {grp.markets.map((mk) => (
-            <div className="dx-group-row" key={mk.us_slug || mk.asset || mk.ticker || mk.label}>
-              <span className="dx-group-label">{mk.label}</span>
-              {isK ? (
-                <>
-                  <button
-                    className={`dx-mini yes${pick?.ticker === mk.ticker && pick?.kalshiSide !== 'no' ? ' on' : ''}`}
-                    disabled={mk.price == null}
-                    onClick={() => mk.price != null && choose({
-                      venue: 'kalshi', label: game.title, side: mk.label || 'YES',
-                      ask: mk.price, ticker: mk.ticker, kalshiSide: 'yes',
-                    })}
-                  >Yes {cents(mk.price)}</button>
-                  <button
-                    className={`dx-mini no${pick?.ticker === mk.ticker && pick?.kalshiSide === 'no' ? ' on' : ''}`}
-                    disabled={mk.no_price == null}
-                    onClick={() => mk.no_price != null && choose({
-                      venue: 'kalshi', label: game.title, side: `NO ${mk.label}`,
-                      ask: mk.no_price!, ticker: mk.ticker, kalshiSide: 'no',
-                    })}
-                  >No {cents(mk.no_price)}</button>
-                </>
-              ) : (
-                <button
-                  className={`dx-mini yes${(mk.asset && pick?.asset === mk.asset)
-                    || (mk.us_slug && pick?.usSlug === mk.us_slug) ? ' on' : ''}`}
-                  disabled={mk.price == null && !mk.us_slug}
-                  onClick={() => (mk.price != null || mk.us_slug) && choose({
-                    venue: 'polymarket', label: game.title, side: mk.label || 'Yes',
-                    ask: mk.price ?? 0, asset: mk.asset, usSlug: mk.us_slug,
-                  })}
-                >Buy{mk.price != null ? ` ${cents(mk.price)}` : ''}</button>
-              )}
-            </div>
-          ))}
-        </div>
-      ))}
-    </div>
-  )
+  // v8: the old kCard/pCard browse cards and the inline gameView were
+  // replaced by MarketFeed.tsx (venue-style feed cards) and
+  // MarketPage.tsx (full venue-style market page).
 
   // ── Search results ───────────────────────────────────────────────
   const searchBlock = q.trim().length >= 2 && (
@@ -1350,7 +1148,9 @@ export function TradeDesk() {
         {kResults.map((m) => (
           <div className="kx-card" key={m.ticker}>
             <div className="kx-card-top"><span className="kx-sport">SEARCH</span></div>
-            <div className="kx-title as-text">{m.title.replace(' Winner?', '')}</div>
+            <button className="kx-title" onClick={() => openFromKalshiSearch(m.ticker)}>
+              {m.title.replace(' Winner?', '')}
+            </button>
             <div className="kx-outcomes">
               <div className="kx-outcome">
                 <span className="kx-oname">{m.sub_title || 'YES'}</span>
@@ -1458,7 +1258,7 @@ export function TradeDesk() {
 
   return (
     <>
-      <div className="dx-topbar">
+      <div className={`dx-topbar${onMarketPage ? ' mp-mode' : ''}`}>
         <div className="vd-pagehead">
           <h1>Trade Desk</h1>
           {acct && (
@@ -1477,6 +1277,7 @@ export function TradeDesk() {
                 onClick={() => {
                   if (inFlight()) return
                   setVenue(v); setGame(null); setPick(null); setQ(''); setRun(null)
+                  setGameMeta(null)
                 }}
               >
                 {v === 'polymarket' ? 'Polymarket' : 'Kalshi'} mode
@@ -1491,8 +1292,8 @@ export function TradeDesk() {
               <><b>RECONNECTING</b> · live {isK ? 'Kalshi' : 'Polymarket'} account feed
                 unreachable — retrying</>
             ) : (
-              <><b>LIVE</b> · connected to the real {isK ? 'Kalshi' : 'Polymarket'} account
-                · executed by the AI trader</>
+              <><b className="dx-conn-bt">BETTORTOKEN</b> · <b>LIVE</b> · executed by
+                the AI trader · real {isK ? 'Kalshi' : 'Polymarket'} account</>
             )}
           </span>
           <span className="dx-conn-age">
@@ -1500,6 +1301,21 @@ export function TradeDesk() {
               : acctAgeS == null ? 'syncing…'
                 : acctAgeS < 3 ? 'synced just now' : `synced ${acctAgeS}s ago`}
           </span>
+        </div>
+        <div className="v8-searchrow">
+          <input
+            className="v8-search" type="search"
+            placeholder={`Search ${isK ? 'Kalshi' : 'Polymarket'} markets…`}
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value)
+              if (e.target.value.trim().length >= 2 && tab !== 'markets') setTab('markets')
+            }}
+            aria-label="Search markets"
+          />
+          {q !== '' && (
+            <button className="v8-search-x" onClick={() => setQ('')} aria-label="Clear search">✕</button>
+          )}
         </div>
       </div>
       <p style={{ opacity: 0.75, marginTop: 0 }}>
@@ -1533,87 +1349,72 @@ export function TradeDesk() {
         )}
       </p>
 
-      <div className={`vdesk ${isK ? 'vdesk--kx' : 'vdesk--pmx'}`}>
-        {isK ? (
-          <div className="kx-body">
-            <nav className="kx-side">
-              {LEAGUES.map((l) => {
-                const n = countFor(l.key)
-                return (
-                  <button
-                    key={l.key}
-                    className={`kx-side-row${league === l.key ? ' on' : ''}`}
-                    onClick={() => { setLeague(l.key); setGame(null) }}
-                  >
-                    <span>{l.icon && `${l.icon} `}{l.label}</span>
-                    <span className="kx-side-n">{n != null ? n : '›'}</span>
-                  </button>
-                )
-              })}
-            </nav>
-            <main className="kx-main">
-              <div className="kx-main-h">
-                <h2>Sports</h2>
-                <input
-                  className="kx-search" placeholder="Search markets…"
-                  value={q} onChange={(e) => setQ(e.target.value)}
-                  aria-label="Search markets"
+      {/* ── v8 section tabs: venue-app navigation (bottom bar <720px) ── */}
+      <nav className="v8-tabs" aria-label="Desk sections">
+        <button
+          className={tab === 'markets' ? 'on' : ''}
+          onClick={() => { setTab('markets'); setGame(null); setGameMeta(null) }}
+        >
+          <span className="v8-tab-l">Markets</span>
+        </button>
+        <button
+          className={tab === 'positions' ? 'on' : ''}
+          onClick={() => setTab('positions')}
+        >
+          <span className="v8-tab-l">Positions</span>
+          {venuePositions.length > 0 && (
+            <span className="v8-tab-n">{venuePositions.length}</span>
+          )}
+        </button>
+        <button
+          className={tab === 'activity' ? 'on' : ''}
+          onClick={() => setTab('activity')}
+        >
+          <span className="v8-tab-l">Activity</span>
+          {openTrades.length > 0 && (
+            <span className="v8-tab-n">{openTrades.length}</span>
+          )}
+        </button>
+      </nav>
+
+      <div className={`vdesk vdesk--v8 ${isK ? 'vdesk--kx' : 'vdesk--pmx'}`}>
+        {tab === 'markets' && (
+          <div className="v8-body">
+            <main className="v8-main">
+              {q.trim().length >= 2 ? searchBlock : onMarketPage ? (
+                <MarketPage
+                  venue={venue}
+                  game={game}
+                  meta={gameMeta}
+                  loading={loading}
+                  pick={pick}
+                  choose={choose}
+                  onBack={backToFeed}
+                  positions={venuePositions}
+                  openCashOut={openCashOut}
+                  coBusy={coBusy}
+                  trades={blotter?.trades || []}
                 />
-              </div>
-              {q.trim().length >= 2 ? searchBlock : game ? gameView : (
-                loading && games.length === 0 ? (
-                  <div className="dx-skel-grid" aria-label="Loading markets">
-                    <div className="tr-skel" /><div className="tr-skel" />
-                    <div className="tr-skel" /><div className="tr-skel" />
-                  </div>
-                ) : (
-                  <div className="kx-list">{games.map(kCard)}</div>
-                )
+              ) : (
+                <MarketFeed
+                  venue={venue}
+                  league={league}
+                  onLeague={setLeague}
+                  pick={pick}
+                  choose={choose}
+                  onOpen={openFeedCard}
+                  sparkCache={sparkCache}
+                />
               )}
               {err && q.trim().length < 2 && <p className="vd-empty">{err}</p>}
-              {acctPanel}
             </main>
             {rail}
           </div>
-        ) : (
-          <>
-            <div className="pmx-tabs">
-              {LEAGUES.map((l) => {
-                const n = countFor(l.key)
-                return (
-                  <button
-                    key={l.key}
-                    className={`pmx-tabbtn${league === l.key ? ' on' : ''}`}
-                    onClick={() => { setLeague(l.key); setGame(null) }}
-                  >
-                    {l.icon && `${l.icon} `}{l.label}{n != null ? ` ${n}` : ''}
-                  </button>
-                )
-              })}
-              <input
-                className="pmx-search" placeholder="Search markets…"
-                value={q} onChange={(e) => setQ(e.target.value)}
-                aria-label="Search markets"
-              />
-            </div>
-            <div className="pmx-body">
-              <main className="pmx-main">
-                {q.trim().length >= 2 ? searchBlock : game ? gameView : (
-                  loading && games.length === 0 ? (
-                    <div className="dx-skel-grid" aria-label="Loading markets">
-                    <div className="tr-skel" /><div className="tr-skel" />
-                    <div className="tr-skel" /><div className="tr-skel" />
-                  </div>
-                  ) : (
-                    <div className="pmx-grid">{games.map(pCard)}</div>
-                  )
-                )}
-                {err && q.trim().length < 2 && <p className="vd-empty">{err}</p>}
-                {acctPanel}
-              </main>
-              {rail}
-            </div>
-          </>
+        )}
+        {tab === 'positions' && (
+          <div className="v8-body">
+            <main className="v8-main">{acctPanel}</main>
+          </div>
         )}
 
         {/* ── Cash-out modal (self-skinned by the position's venue) ── */}
@@ -1716,10 +1517,11 @@ export function TradeDesk() {
         )}
       </div>
 
+      {tab === 'activity' && (
       <div className="card">
         <div className="dx-blot-tabs">
           <button className={blotTab === 'open' ? 'on' : ''} onClick={() => setBlotTab('open')}>
-            Positions {openTrades.length ? `(${openTrades.length})` : ''}
+            Open {openTrades.length ? `(${openTrades.length})` : ''}
           </button>
           <button className={blotTab === 'history' ? 'on' : ''} onClick={() => setBlotTab('history')}>
             History
@@ -1821,6 +1623,9 @@ export function TradeDesk() {
           </div>
         ) : <p style={{ opacity: 0.6 }}>{blotTab === 'open' ? 'No open positions.' : 'No settled trades yet.'}</p>}
       </div>
+      )}
+
+      <div className="v8-tabspace" aria-hidden="true" />
 
       {toast && (
         <div className={`dx-toast${toast.ok ? '' : ' bad'}`} role="status">{toast.msg}</div>

@@ -978,6 +978,27 @@ def _kcents(m: dict, key: str) -> float | None:
     return None
 
 
+def _kvol(m: dict) -> float | None:
+    """Kalshi traded volume in DOLLARS — the _kcents discipline without
+    the 0-1 clamp: the venue's '*_dollars' string twin wins, the plain
+    field is cents /100. Total volume preferred, 24h as fallback; None
+    when the venue doesn't say (the feed never invents volume)."""
+    for key in ("volume", "volume_24h"):
+        v = m.get(f"{key}_dollars")
+        try:
+            if v is not None and str(v).strip():
+                return float(v)
+        except (TypeError, ValueError):
+            pass
+        try:
+            c = m.get(key)
+            if c is not None:
+                return float(c) / 100.0
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def _kalshi_shape(m: dict, series: str) -> dict:
     return {
         "ticker": m.get("ticker"),
@@ -989,6 +1010,7 @@ def _kalshi_shape(m: dict, series: str) -> dict:
         "no_ask": _kcents(m, "no_ask"),
         "no_bid": _kcents(m, "no_bid"),
         "close_time": m.get("close_time"),
+        "volume_usd": _kvol(m),
     }
 
 
@@ -1416,6 +1438,148 @@ async def api_desk_games(venue: str = Query("polymarket"),
     cards.sort(key=lambda g: (g["id"][-10:], g["id"]))
     return {"games": cards[:400 if league == "everything" else 80],
             "counts": counts}
+
+
+# ── Desk v8 (owner contract 2026-08-22): the venue-style FEED ────────
+# Large market cards for the home feed — same venue listings and caches
+# as desk-games (never a second venue sweep), plus the fields the card
+# skin needs: volume_usd (from the venue payloads where present, null
+# when absent, NEVER invented), close_time, and history_id = the first
+# outcome's chartable id so a card charts without a second lookup.
+# Sorted volume desc nulls-last, cap 60.
+
+_DESK_FEED_CAP = 60
+
+
+def _feed_finish(cards: list[dict], counts: dict) -> dict:
+    """history_id, volume-desc-nulls-last sort, cap — every venue path
+    funnels through here so the card contract has one spelling."""
+    for c in cards:
+        c["history_id"] = (c["outcomes"][0]["id"] if c["outcomes"]
+                           else None)
+    cards.sort(key=lambda c: (c.get("volume_usd") is None,
+                              -(c.get("volume_usd") or 0.0),
+                              c.get("close_time") or "~"))
+    return {"cards": cards[:_DESK_FEED_CAP], "counts": counts}
+
+
+@app.get("/api/admin/desk-feed", dependencies=[Depends(require_desk)])
+async def api_desk_feed(venue: str = Query("polymarket"),
+                        league: str = Query("all")) -> dict:
+    """Market cards for the v8 venue-style feed. Card shape:
+    {id, venue, title, league, volume_usd|null, close_time|null,
+     outcomes: [{label, id, price}], history_id} — the outcome id is
+    the venue-native orderable/chartable identifier (PM: the us-slug
+    the whole desk orders by — the venue listing carries no CLOB
+    token; Kalshi: the market ticker)."""
+    if venue == "kalshi" and league == "everything":
+        # Full-universe cards from the SAME 5-min cached sweep
+        # desk-games uses: one card per open event, volume summed
+        # over the event's open markets (null when none reported).
+        evs = await _kalshi_all_open_events()
+        cards = []
+        for ev in evs:
+            et = ev.get("event_ticker") or ""
+            mkts = [m for m in (ev.get("markets") or [])
+                    if m.get("status") in (None, "open", "active")]
+            if not et or not mkts:
+                continue
+            series = et.split("-", 1)[0]
+            shaped = [_kalshi_shape(m, series) for m in mkts]
+            vols = [s["volume_usd"] for s in shaped
+                    if s["volume_usd"] is not None]
+            closes = [s["close_time"] for s in shaped
+                      if s["close_time"]]
+            cards.append({
+                "id": et, "venue": "kalshi", "league": "everything",
+                "title": ((ev.get("title") or et)
+                          .replace(" Winner?", "")),
+                "volume_usd": round(sum(vols), 2) if vols else None,
+                "close_time": min(closes) if closes else None,
+                "outcomes": [
+                    {"label": s["sub_title"] or s["title"],
+                     "id": s["ticker"], "price": s["yes_ask"]}
+                    for s in shaped[:3]]})
+        return _feed_finish(cards, {"everything": len(cards),
+                                    "all": len(cards)})
+    if venue == "kalshi":
+        # Sports cards from the same per-league series fetch as
+        # desk-games (48h window, each side its own ticker), grouped
+        # to one card per game; volume summed across the game's sides.
+        series_by_league = {
+            "mlb": ["KXMLBGAME"], "wnba": ["KXWNBAGAME"],
+            "nba": ["KXNBAGAME"], "nfl": ["KXNFLGAME"],
+            "nhl": ["KXNHLGAME"], "tennis": ["KXATPMATCH", "KXWTAMATCH"],
+        }
+        series_list = (_DESK_KALSHI_SERIES if league == "all"
+                       else series_by_league.get(league, []))
+        mkts = await _kalshi_fetch(series_list, max_close_h=48, cap=None)
+        games: dict[str, dict] = {}
+        for m in mkts:
+            t = m.get("ticker") or ""
+            parts = t.split("-")
+            if len(parts) < 3:
+                continue
+            gkey = "-".join(parts[:2])
+            lg = {"KXMLBGAME": "mlb", "KXWNBAGAME": "wnba",
+                  "KXNBAGAME": "nba", "KXNFLGAME": "nfl",
+                  "KXNHLGAME": "nhl"}.get(m.get("series") or "",
+                                          "tennis")
+            g = games.setdefault(gkey, {
+                "id": gkey, "venue": "kalshi", "league": lg,
+                "title": (m.get("title") or "").replace(" Winner?", ""),
+                "volume_usd": None, "close_time": None,
+                "outcomes": []})
+            g["outcomes"].append({
+                "label": m.get("sub_title") or m.get("title"),
+                "id": t, "price": m.get("yes_ask")})
+            v = m.get("volume_usd")
+            if v is not None:
+                g["volume_usd"] = round((g["volume_usd"] or 0.0) + v, 2)
+            ct = m.get("close_time")
+            if ct and (g["close_time"] is None or ct < g["close_time"]):
+                g["close_time"] = ct
+        cards = [g for g in games.values() if g["outcomes"]]
+        counts: dict[str, int] = {}
+        for g in cards:
+            counts[g["league"]] = counts.get(g["league"], 0) + 1
+        counts["all"] = len(cards)
+        return _feed_finish(cards, counts)
+
+    # Polymarket: the venue-native event listing (30s cache in pmus),
+    # one card per event, moneyline sides as the card outcomes —
+    # exactly desk-games' card builder plus volume/close_time, which
+    # now ride on the listing rows themselves.
+    from .. import pmus as _pmus
+    try:
+        events = await asyncio.to_thread(_pmus.list_desk_events)
+    except Exception:  # noqa: BLE001 — an empty feed, never a 500
+        events = []
+    counts = {}
+    cards = []
+    for ev in events:
+        lg = _desk_league_of(ev["league"])
+        counts[lg] = counts.get(lg, 0) + 1
+        if league not in ("all", "everything") and lg != league:
+            continue
+        ml = [m for m in ev["markets"] if m["kind"] in ("aec", "atc")]
+        outs = [{"label": (m["label"].split("—")[-1].strip()
+                           or m["label"]),
+                 "id": m["us_slug"], "price": m["price"]}
+                for m in ml[:3]]
+        if not outs:
+            m0 = ev["markets"][0]
+            outs = [{"label": m0["label"], "id": m0["us_slug"],
+                     "price": m0["price"]}]
+        cards.append({
+            "id": ev["slug"], "venue": "polymarket", "league": lg,
+            "title": ev["title"],
+            "volume_usd": ev.get("volume_usd"),
+            "close_time": ev.get("close_time"),
+            "outcomes": outs})
+    counts["all"] = len(events)
+    counts["everything"] = len(events)
+    return _feed_finish(cards, counts)
 
 
 @app.get("/api/admin/desk-game", dependencies=[Depends(require_desk)])

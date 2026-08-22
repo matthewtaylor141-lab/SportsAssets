@@ -200,7 +200,7 @@
    The SVG carries no literal colors — every mark reads a --pc-* slot.
    Defaults map the dark app theme tokens (--s1/--ink/--muted); inside
    the light .vdesk skins (the cash-out .dxm modal lives inside .vdesk
-   and re-scopes --vda-*/--vd-* itself) the same slots remap to the
+   and re-scopes the --vda- / --vd- slots itself) the same slots remap to the
    venue inks, so one chart is legible on every desk surface. */
 .pc-chart, .pc-sparkline {
   --pc-accent: var(--s1, #3987e5);
@@ -503,4 +503,248 @@
 @keyframes dx-sheet-up {
   from { transform: translateY(24px); opacity: 0.6; }
   to { transform: none; opacity: 1; }
+}
+
+/* ═══ Desk v8 (owner order 2026-08-22, questionnaire): the VENUE-APP
+   paradigm. Feed of large market cards → full market page → order
+   panel; Markets / Positions / Activity tabs (bottom bar in the hand).
+   Everything below is presentation-only chrome around the untouched
+   money surfaces. Venue hexes reuse the values already established in
+   this file / theme.css (--vda families); no new palettes. ═══ */
+
+/* ── Topbar search (dark chrome, both venues) ────────────────────── */
+.v8-searchrow { display: flex; gap: 8px; margin-top: 8px; }
+.v8-search {
+  flex: 1; min-width: 0; border: 1px solid var(--border); background: var(--surface);
+  color: var(--ink); border-radius: 999px; padding: 8px 14px; font-size: 13.5px;
+  -webkit-appearance: none; appearance: none;
+}
+.v8-search:focus { outline: 2px solid var(--s1, #3987e5); outline-offset: 1px; }
+.v8-search-x {
+  border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  border-radius: 50%; width: 36px; height: 36px; flex: none; cursor: pointer; font-size: 13px;
+}
+.v8-search-x:hover { color: var(--ink); }
+.dx-conn-bt { color: var(--ink, #f4f5f2); letter-spacing: 0.1em; }
+
+/* ── Section tabs: segmented row on desktop, bottom bar on phones ── */
+.v8-tabs { display: flex; gap: 6px; margin: 10px 0 2px; }
+.v8-tabs button {
+  border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  border-radius: 999px; padding: 8px 18px; font-size: 13px; font-weight: 700;
+  cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+}
+.v8-tabs button.on {
+  background: var(--surface-3, #23262b); color: var(--ink);
+  border-color: var(--border-strong);
+}
+.v8-tab-n {
+  font-size: 10.5px; font-weight: 800; border-radius: 999px; padding: 1px 7px;
+  background: rgba(45, 92, 246, 0.2); color: #7ea0ff; font-variant-numeric: tabular-nums;
+}
+.v8-tabspace { display: none; }
+
+/* ── Shell body: feed/market-page column + the existing order rail ── */
+.v8-body { display: flex; gap: 18px; align-items: flex-start; }
+.v8-main { flex: 1 1 auto; min-width: 0; }
+.v8-body .vd-rail { width: 340px; flex: none; }
+.v8-body .vd-rail:not(.has-pick) { display: none; }
+
+/* ── Feed: league chips + large market cards ─────────────────────── */
+.mf-chips {
+  display: flex; gap: 6px; overflow-x: auto; padding-bottom: 10px; margin-bottom: 12px;
+  border-bottom: 1px solid var(--vd-line); -webkit-overflow-scrolling: touch;
+}
+.mf-chip {
+  border: 1px solid var(--vd-line); background: var(--vd-bg); color: var(--vd-mut);
+  border-radius: 999px; padding: 7px 13px; font-size: 13px; font-weight: 600;
+  white-space: nowrap; cursor: pointer; flex: none;
+}
+.mf-chip.on { background: var(--vda); border-color: var(--vda); color: #fff; }
+.vdesk--kx .mf-chip.on { color: #04241a; }
+.vdesk--kx .mf-chip { border-radius: 7px; }
+.mf-feed { display: grid; grid-template-columns: 1fr; gap: 14px; }
+@media (min-width: 980px) {
+  .mf-feed { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
+}
+.mf-skel { height: 220px; border-radius: 14px; }
+.mf-card { display: flex; flex-direction: column; gap: 10px; background: var(--vd-bg); border: 1px solid var(--vd-line); }
+.mf-head { cursor: pointer; min-width: 0; }
+.mf-tags {
+  display: flex; gap: 8px; align-items: center; font-size: 10.5px; font-weight: 700;
+  letter-spacing: 0.05em; color: var(--vd-mut); text-transform: uppercase;
+}
+.mf-close { font-variant-numeric: tabular-nums; }
+.mf-vol { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 800; color: var(--vd-mut); }
+.mf-title { margin: 7px 0 0; font-size: 16.5px; font-weight: 700; line-height: 1.3; color: var(--vd-ink); }
+.mf-chartrow { width: 100%; cursor: pointer; }
+.mf-spark { display: block; width: 100%; height: 56px; }
+.mf-spark svg { width: 100%; height: 56px; display: block; opacity: 1; }
+.pc-sparkline.pos .pc-line { stroke: var(--vd-good, #14833b); }
+.pc-sparkline.neg .pc-line { stroke: var(--vd-bad, #c92a2a); }
+.mf-outcomes { display: flex; flex-direction: column; gap: 7px; }
+.mf-row { display: flex; align-items: center; gap: 10px; }
+.mf-oname {
+  flex: 1; min-width: 0; font-size: 13.5px; font-weight: 600; color: var(--vd-ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mf-opct { font-size: 13px; font-weight: 700; color: var(--vd-mut); font-variant-numeric: tabular-nums; }
+.mf-split { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mf-foot {
+  display: flex; justify-content: space-between; align-items: center;
+  border-top: 1px solid var(--vd-line); padding-top: 8px; margin-top: auto;
+}
+.mf-open { border: 0; background: none; color: var(--vd-mut); font-size: 12px; font-weight: 600; cursor: pointer; padding: 0; }
+.mf-open:hover { color: var(--vda); }
+
+/* ── pm8: Polymarket near-clone (white, rounded, blue family) ────── */
+.pm8-card { border-radius: 14px; padding: 14px 16px; transition: box-shadow 0.12s, border-color 0.12s; }
+.pm8-card:hover { border-color: #cfd6e4; box-shadow: 0 4px 18px rgba(23, 43, 99, 0.09); }
+.pm8-tag { background: var(--vda-soft); color: var(--vda-ink); border-radius: 5px; padding: 2px 7px; }
+.pm8-buy {
+  border: 0; border-radius: 9px; padding: 10px 12px; font-weight: 700; font-size: 13px;
+  cursor: pointer; font-variant-numeric: tabular-nums; transition: filter 0.1s;
+  display: inline-flex; justify-content: center; align-items: baseline; gap: 6px;
+}
+.pm8-buy b { font-weight: 800; }
+.pm8-buy.g { background: #e8f7ee; color: #14833b; }
+.pm8-buy.r { background: #fdecec; color: #c92a2a; }
+.pm8-buy.g:hover:not(:disabled) { filter: brightness(0.96); }
+.pm8-buy.r:hover:not(:disabled) { filter: brightness(0.97); }
+.pm8-buy.g.on { background: #14833b; color: #fff; }
+.pm8-buy.r.on { background: #c92a2a; color: #fff; }
+.pm8-buy:disabled { opacity: 0.45; cursor: default; }
+.mf-split .pm8-buy { width: 100%; justify-content: space-between; padding: 12px 14px; }
+.mf-split .pm8-buy span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mf-row .pm8-buy { min-width: 100px; flex: none; }
+
+/* ── kx8: Kalshi near-clone (flatter, compact, teal accent) ──────── */
+.kx8-card { border-radius: 8px; padding: 12px 14px; box-shadow: none; }
+.kx8-card .mf-title { font-size: 15.5px; }
+.kx8-card:hover { border-color: #bfe7d6; }
+.kx8-tag { color: var(--vda-ink); background: var(--vda-soft); border-radius: 4px; padding: 2px 6px; }
+.kx8-buy {
+  border: 1px solid var(--vd-line); background: var(--vd-soft); border-radius: 6px;
+  min-width: 88px; padding: 9px 0; font-weight: 800; font-size: 13.5px; flex: none;
+  color: var(--vd-ink); cursor: pointer; font-variant-numeric: tabular-nums; transition: all 0.1s;
+}
+.kx8-buy:hover:not(:disabled) { border-color: var(--vda); color: var(--vda-ink); }
+.kx8-buy.on { background: var(--vda); border-color: var(--vda); color: #04241a; }
+.kx8-buy:disabled { opacity: 0.45; cursor: default; }
+
+/* ── Market page (venue market screen) ───────────────────────────── */
+.mp { display: flex; flex-direction: column; gap: 14px; }
+.mp-head {
+  position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 10px;
+  background: var(--vd-bg); padding: 8px 0; border-bottom: 1px solid var(--vd-line);
+}
+.mp-back {
+  border: 1px solid var(--vd-line); background: var(--vd-bg); color: var(--vd-ink);
+  width: 36px; height: 36px; border-radius: 50%; font-size: 22px; line-height: 1;
+  cursor: pointer; flex: none; display: grid; place-items: center; padding: 0 0 3px;
+}
+.mp-back:hover { border-color: var(--vda); color: var(--vda-ink); }
+.mp-title { min-width: 0; font-size: 16px; font-weight: 800; line-height: 1.25; color: var(--vd-ink); }
+.mp-title small { display: block; font-size: 11.5px; font-weight: 600; color: var(--vd-mut); margin-top: 2px; }
+.mp-last {
+  margin-left: auto; font-size: 20px; font-weight: 800; color: var(--vd-ink);
+  font-variant-numeric: tabular-nums; text-align: right; flex: none;
+}
+.mp-last small { display: block; font-size: 11px; font-weight: 700; }
+.mp-last small.pos { color: var(--vd-good); }
+.mp-last small.neg { color: var(--vd-bad); }
+.mp-chart { border: 1px solid var(--vd-line); border-radius: 12px; padding: 12px 14px; background: var(--vd-bg); }
+.vdesk--kx .mp-chart { border-radius: 8px; }
+.mp-ranges { display: flex; gap: 4px; justify-content: flex-end; margin-bottom: 6px; }
+.mp-ranges button {
+  border: 1px solid var(--vd-line); background: transparent; color: var(--vd-mut);
+  border-radius: 999px; padding: 4px 13px; font-size: 11.5px; font-weight: 700; cursor: pointer;
+}
+.mp-ranges button.on { border-color: var(--vda); background: var(--vda-soft); color: var(--vda-ink); }
+.mp-chart-sub {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--vd-mut); margin-top: 6px;
+}
+.mp-pos {
+  border: 1.5px solid var(--vda); border-radius: 12px; padding: 12px 14px;
+  background: var(--vda-soft); display: flex; flex-direction: column; gap: 10px;
+}
+.mp-pos-h {
+  font-size: 11px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--vda-ink); display: flex; justify-content: space-between; gap: 10px;
+}
+.mp-pos-h span {
+  font-weight: 700; text-transform: none; letter-spacing: 0; color: var(--vd-ink);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mp-pos-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: 6px 12px; font-size: 11.5px; color: var(--vd-mut);
+}
+.mp-pos-grid b { display: block; font-size: 14.5px; color: var(--vd-ink); font-variant-numeric: tabular-nums; }
+.mp-pos-grid b.pos { color: var(--vd-good); }
+.mp-pos-grid b.neg { color: var(--vd-bad); }
+.mp-trades { border: 1px solid var(--vd-line); border-radius: 12px; overflow: hidden; }
+.mp-trades-h {
+  font-size: 11px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--vd-mut); background: var(--vd-soft); padding: 8px 12px;
+}
+.mp-trade {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  border-top: 1px solid var(--vd-line); font-size: 12.5px; font-variant-numeric: tabular-nums;
+}
+.mp-trade-t { color: var(--vd-mut); flex: none; }
+.mp-trade-o { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--vd-ink); }
+.mp-trade-n { color: var(--vd-mut); }
+/* Status chips legible on the light venue surfaces */
+.vdesk .dx-blot-st { color: var(--vd-mut); border-color: var(--vd-line); }
+.vdesk .dx-blot-st.filled, .vdesk .dx-blot-st.settled { color: var(--vd-good); border-color: rgba(20, 131, 59, 0.4); }
+.vdesk .dx-blot-st.queued, .vdesk .dx-blot-st.submitting { color: #9a6700; border-color: rgba(154, 103, 0, 0.4); }
+.vdesk .dx-blot-st.error, .vdesk .dx-blot-st.unfilled, .vdesk .dx-blot-st.cancelled { color: var(--vd-bad); border-color: rgba(201, 42, 42, 0.4); }
+
+/* ── Collapsible order book in the ticket (ladder unchanged) ─────── */
+.dx-bookwrap { border: 1px solid var(--vd-line); border-radius: 10px; overflow: hidden; }
+.dx-booktoggle {
+  width: 100%; display: flex; align-items: center; gap: 8px; border: 0;
+  background: var(--vd-soft); color: var(--vd-mut); font-size: 11px; font-weight: 800;
+  letter-spacing: 0.05em; text-transform: uppercase; padding: 8px 11px; cursor: pointer;
+}
+.dx-booktoggle span { margin-left: auto; font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; font-weight: 700; }
+.dx-booktoggle i { font-style: normal; transition: transform 0.12s; }
+.dx-booktoggle i.up { transform: rotate(180deg); }
+.dx-bookwrap .dx-book { padding: 8px 11px; }
+
+/* ── Phone (<720px): the venue app in the hand ───────────────────── */
+@media (max-width: 720px) {
+  .v8-search { min-height: 40px; }
+  /* Market page: page chrome cedes to the market header (venue-app
+     behavior) — the topbar unsticks, the mp header takes the top. */
+  .dx-topbar.mp-mode { position: static; margin: 0 -16px 10px; }
+  .mp-head { top: 52px; margin: 0 -16px; padding: 8px 12px; border-radius: 0; }
+  .mp-back { width: 40px; height: 40px; }
+  /* Bottom tab bar over the safe area; the order sheet (z50) and its
+     scrim (z49) cover it while a ticket is open. */
+  .v8-tabs {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 45; margin: 0;
+    background: rgba(16, 20, 26, 0.97); backdrop-filter: blur(12px);
+    border-top: 1px solid var(--border);
+    padding: 6px 10px calc(6px + env(safe-area-inset-bottom)); gap: 4px;
+  }
+  .v8-tabs button {
+    flex: 1; flex-direction: column; gap: 3px; border: 0; background: none;
+    border-radius: 10px; padding: 7px 0; font-size: 11px; min-height: 48px;
+  }
+  .v8-tabs button.on { background: rgba(255, 255, 255, 0.07); color: var(--ink); }
+  .v8-tabspace { display: block; height: calc(66px + env(safe-area-inset-bottom)); }
+  /* Touch targets on the new surfaces. */
+  .mf-chip { min-height: 40px; }
+  .mf-row .pm8-buy, .kx8-buy { min-height: 44px; }
+  .mf-split .pm8-buy { min-height: 52px; }
+  .mp-ranges button { min-height: 36px; }
+  .mp-pos .dx-cashout { min-height: 44px; }
+  .dx-booktoggle { min-height: 40px; }
+  .mf-title { font-size: 17.5px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dx-booktoggle i { transition: none; }
 }

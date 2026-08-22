@@ -1,0 +1,335 @@
+// Desk v8 (owner order 2026-08-22): the venue-style FEED — the desk
+// home is a scrolling feed of LARGE market cards (chart preview, live
+// prices, volume, league chips), the shape of the real venue apps'
+// home screens. Data: GET /api/admin/desk-feed (30s poll), which is
+// built on the desk-games internals server-side; until that endpoint
+// deploys the feed falls back to /api/admin/desk-games mapped into the
+// same card shape (volume/close null — never invented). Pure browse
+// surface: outcome buttons hand a Pick UP to TradeDesk's choose() and
+// card taps hand the card up to the market page — no money logic here.
+
+import { useEffect, useRef, useState } from 'react'
+import { deskApi } from '../lib/desk'
+import {
+  Sparkline, fetchHistory,
+  type HistoryPoint, type HistoryVenue,
+} from './PriceChart'
+import type { Pick as DeskPick, Venue } from '../pages/TradeDesk'
+
+export const LEAGUES: { key: string; label: string; icon: string }[] = [
+  { key: 'all', label: 'All', icon: '' },
+  // Wave-2: the full open universe on both venues, not just sports.
+  { key: 'everything', label: 'Everything', icon: '🌐' },
+  { key: 'tennis', label: 'Tennis', icon: '🎾' },
+  { key: 'mlb', label: 'MLB', icon: '⚾' },
+  { key: 'soccer', label: 'Soccer', icon: '⚽' },
+  { key: 'wnba', label: 'WNBA', icon: '🏀' },
+  { key: 'nba', label: 'NBA', icon: '🏀' },
+  { key: 'nfl', label: 'NFL', icon: '🏈' },
+  { key: 'nhl', label: 'NHL', icon: '🏒' },
+  { key: 'esports', label: 'Esports', icon: '🎮' },
+]
+const SPORT_NAME: Record<string, string> = {
+  mlb: 'BASEBALL', wnba: 'BASKETBALL', nba: 'BASKETBALL',
+  nfl: 'FOOTBALL', nhl: 'HOCKEY', tennis: 'TENNIS',
+  soccer: 'SOCCER', esports: 'ESPORTS',
+}
+
+// ── Lazy card charts (Wave-2 machinery, relocated from TradeDesk) ──
+// A card only fetches history once it scrolls into view
+// (IntersectionObserver, 120px lookahead), through a 12-slot limiter so
+// a big feed never floods the API, into a ref-map cache owned by the
+// page — re-renders and revisits are free. Read-only decoration: an
+// error just leaves the reserved slot empty.
+const SPARK_MAX = 12
+let sparkActive = 0
+const sparkQ: (() => void)[] = []
+const sparkNext = () => {
+  if (sparkActive >= SPARK_MAX) return
+  const job = sparkQ.shift()
+  if (job) { sparkActive++; job() }
+}
+const sparkSlot = <T,>(job: () => Promise<T>): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    sparkQ.push(() => {
+      job().then(resolve, reject).finally(() => { sparkActive--; sparkNext() })
+    })
+    sparkNext()
+  })
+
+export function Spark({ venue, id, cacheRef, wide }: {
+  venue: HistoryVenue
+  id: string
+  cacheRef: { current: Map<string, HistoryPoint[]> }
+  /** v8: full-card-width × 56px feed chart, tinted by trend. */
+  wide?: boolean
+}) {
+  const key = `${venue}|${id}`
+  const boxRef = useRef<HTMLSpanElement | null>(null)
+  const [pts, setPts] = useState<HistoryPoint[] | null>(
+    () => cacheRef.current.get(key) || null)
+  useEffect(() => {
+    const cached = cacheRef.current.get(key)
+    if (cached) { setPts(cached); return }
+    const el = boxRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    let dead = false
+    const io = new IntersectionObserver((entries) => {
+      if (!entries.some((x) => x.isIntersecting)) return
+      io.disconnect()
+      sparkSlot(() => fetchHistory(venue, id, 24))
+        .then((p) => { cacheRef.current.set(key, p); if (!dead) setPts(p) })
+        .catch(() => { cacheRef.current.set(key, []); if (!dead) setPts([]) })
+    }, { rootMargin: '120px' })
+    io.observe(el)
+    return () => { dead = true; io.disconnect() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key])
+  const tone = wide && pts && pts.length >= 2
+    ? (pts[pts.length - 1].p >= pts[0].p ? 'pos' as const : 'neg' as const)
+    : undefined
+  return (
+    <span className={wide ? 'mf-spark' : 'pc-spark'} ref={boxRef}>
+      {pts && pts.length >= 2
+        ? (wide
+            ? <Sparkline points={pts} w={344} h={56} tone={tone} />
+            : <Sparkline points={pts} />)
+        : null}
+    </span>
+  )
+}
+
+// ── Feed card shape (DESK v8 CONTRACT) ─────────────────────────────
+export interface FeedOutcome {
+  label: string
+  /** pm token (asset) or kalshi ticker */
+  id: string
+  price: number | null
+  /** carried through the desk-games fallback so PM orders keep working */
+  us_slug?: string
+}
+export interface FeedCard {
+  id: string
+  venue: Venue
+  title: string
+  league: string
+  volume_usd: number | null
+  close_time: string | null
+  outcomes: FeedOutcome[]
+  history_id: string | null
+  markets_n?: number
+}
+
+/** PM CLOB token ids are long digit strings; venue slugs never are. */
+export const TOKEN_RE = /^\d{6,}$/
+
+const cents = (v: number | null | undefined) => (v == null ? '—' : `${Math.round(v * 100)}¢`)
+const pct = (v: number | null | undefined) => (v == null ? '—' : `${Math.round(v * 100)}%`)
+const fmtVol = (v: number | null | undefined): string | null =>
+  v == null ? null
+    : v >= 1e6 ? `$${(v / 1e6).toFixed(1)}M Vol`
+      : v >= 1e3 ? `$${Math.round(v / 1e3)}K Vol`
+        : `$${Math.round(v)} Vol`
+const fmtClose = (iso: string | null | undefined): string | null => {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return null
+  const sameDay = d.toDateString() === new Date().toDateString()
+  return sameDay
+    ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    : d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
+// desk-games card → feed card (fallback path only; volume/close stay
+// null — the desk never invents numbers).
+interface LegacyGame {
+  id: string; venue: Venue; league: string; title: string; markets_n?: number
+  outcomes: { label: string; asset?: string; ticker?: string; us_slug?: string; price: number | null }[]
+}
+const mapLegacy = (g: LegacyGame): FeedCard => ({
+  id: g.id, venue: g.venue, title: g.title, league: g.league,
+  volume_usd: null, close_time: null, markets_n: g.markets_n,
+  outcomes: (g.outcomes || []).map((o) => ({
+    label: o.label, id: o.ticker || o.asset || '', price: o.price, us_slug: o.us_slug,
+  })),
+  history_id: (g.outcomes || []).map((o) => o.ticker || o.asset).find(Boolean) || null,
+})
+
+// Last-good cards per (venue,league) so returning from a market page
+// paints instantly instead of flashing a skeleton; the 30s poll then
+// refreshes in place.
+const feedCache = new Map<string, { cards: FeedCard[]; counts?: Record<string, number> }>()
+
+export function MarketFeed({ venue, league, onLeague, pick, choose, onOpen, sparkCache }: {
+  venue: Venue
+  league: string
+  onLeague: (l: string) => void
+  pick: DeskPick | null
+  choose: (p: DeskPick) => void
+  onOpen: (c: FeedCard) => void
+  sparkCache: { current: Map<string, HistoryPoint[]> }
+}) {
+  const isK = venue === 'kalshi'
+  const cacheKey = `${venue}|${league}`
+  const [cards, setCards] = useState<FeedCard[] | null>(
+    () => feedCache.get(cacheKey)?.cards ?? null)
+  const [counts, setCounts] = useState<Record<string, number>>(
+    () => feedCache.get(cacheKey)?.counts ?? {})
+  const [err, setErr] = useState('')
+
+  useEffect(() => {
+    let dead = false
+    const key = `${venue}|${league}`
+    const hit = feedCache.get(key)
+    setCards(hit ? hit.cards : null)
+    if (hit?.counts) setCounts(hit.counts)
+    setErr('')
+    const apply = (cs: FeedCard[], cn?: Record<string, number>) => {
+      feedCache.set(key, { cards: cs, counts: cn })
+      if (dead) return
+      setCards(cs)
+      if (cn) setCounts(cn)
+      setErr(cs.length ? '' : 'No markets in this window — try another category.')
+    }
+    const load = () => {
+      deskApi<{ cards: FeedCard[]; counts?: Record<string, number> }>(
+        `/api/admin/desk-feed?venue=${venue}&league=${league}`)
+        .then((r) => apply(r.cards || [], r.counts))
+        .catch(() =>
+          // Feed endpoint unreachable (or not deployed yet): the board
+          // cards keep the desk alive in the same card grammar.
+          deskApi<{ games: LegacyGame[]; counts?: Record<string, number> }>(
+            `/api/admin/desk-games?venue=${venue}&league=${league}`)
+            .then((r) => apply((r.games || []).map(mapLegacy), r.counts))
+            .catch(() => { if (!dead) setErr('Markets failed to load — retrying in 30s.') }))
+    }
+    load()
+    const t = window.setInterval(load, 30_000)
+    return () => { dead = true; window.clearInterval(t) }
+  }, [venue, league])
+
+  const hv: HistoryVenue = isK ? 'kalshi' : 'polymarket-us'
+  // A PM outcome id may be a CLOB token (contract shape) or the venue
+  // us_slug (what the live listing actually carries) — tokens are long
+  // digit strings, slugs never are. Orders must put each in the right
+  // Pick field: asset feeds the book/history/API asset param, us_slug
+  // feeds the manual-trade slug param.
+  const pmParts = (o: FeedOutcome) => TOKEN_RE.test(o.id)
+    ? { asset: o.id, usSlug: o.us_slug }
+    : { asset: undefined, usSlug: o.us_slug || o.id || undefined }
+  const sel = (o: FeedOutcome) => {
+    if (isK) return !!o.id && pick?.ticker === o.id
+    const p = pmParts(o)
+    return (!!p.asset && pick?.asset === p.asset)
+      || (!!p.usSlug && pick?.usSlug === p.usSlug)
+  }
+  const buyable = (o: FeedOutcome) =>
+    isK ? o.price != null : (o.price != null || !!o.us_slug || !!o.id)
+  const buy = (c: FeedCard, o: FeedOutcome) => {
+    if (!buyable(o)) return
+    if (isK) {
+      choose({
+        venue: 'kalshi', label: c.title, side: o.label,
+        ask: o.price as number, ticker: o.id, kalshiSide: 'yes',
+      })
+    } else {
+      choose({
+        venue: 'polymarket', label: c.title, side: o.label,
+        ask: o.price ?? 0, ...pmParts(o),
+      })
+    }
+  }
+
+  const card = (c: FeedCard) => {
+    const volTxt = fmtVol(c.volume_usd)
+    const closeTxt = fmtClose(c.close_time)
+    const two = !isK && c.outcomes.length === 2
+    // Chartable id: any Kalshi ticker; PM only when the feed carries a
+    // real CLOB token (a us_slug can't be charted — no blank strip, no
+    // doomed fetches; lights up the moment the feed ships tokens).
+    const chartId = c.history_id && (isK || TOKEN_RE.test(c.history_id))
+      ? c.history_id : null
+    return (
+      <article className={`mf-card ${isK ? 'kx8-card' : 'pm8-card'}`} key={`${c.venue}-${c.id}`}>
+        <header
+          className="mf-head" role="button" tabIndex={0}
+          onClick={() => onOpen(c)}
+          onKeyDown={(e) => { if (e.key === 'Enter') onOpen(c) }}
+        >
+          <div className="mf-tags">
+            <span className={isK ? 'kx8-tag' : 'pm8-tag'}>
+              {(SPORT_NAME[c.league] || c.league).toUpperCase()}
+            </span>
+            {closeTxt && <span className="mf-close">{closeTxt}</span>}
+            {volTxt && <span className="mf-vol">{volTxt}</span>}
+          </div>
+          <h3 className="mf-title">{c.title}</h3>
+        </header>
+        {chartId && (
+          <div className="mf-chartrow" onClick={() => onOpen(c)} aria-hidden="true">
+            <Spark venue={hv} id={chartId} cacheRef={sparkCache} wide />
+          </div>
+        )}
+        <div className="mf-outcomes">
+          {two ? (
+            <div className="mf-split">
+              {c.outcomes.map((o, i) => (
+                <button
+                  key={o.id || o.label}
+                  className={`pm8-buy ${i === 0 ? 'g' : 'r'}${sel(o) ? ' on' : ''}`}
+                  disabled={!buyable(o)}
+                  onClick={() => buy(c, o)}
+                >
+                  <span>{o.label}</span><b>{o.price != null ? cents(o.price) : '—'}</b>
+                </button>
+              ))}
+            </div>
+          ) : c.outcomes.slice(0, 3).map((o) => (
+            <div className="mf-row" key={o.id || o.label}>
+              <span className="mf-oname">{o.label}</span>
+              <span className="mf-opct">{pct(o.price)}</span>
+              <button
+                className={`${isK ? 'kx8-buy' : 'pm8-buy g'}${sel(o) ? ' on' : ''}`}
+                disabled={!buyable(o)}
+                onClick={() => buy(c, o)}
+              >{isK ? pct(o.price) : `Buy ${o.price != null ? cents(o.price) : ''}`}</button>
+            </div>
+          ))}
+        </div>
+        <footer className="mf-foot">
+          <button className="mf-open" onClick={() => onOpen(c)}>
+            {c.markets_n ? `${c.markets_n} markets ›` : 'View market ›'}
+          </button>
+        </footer>
+      </article>
+    )
+  }
+
+  return (
+    <div className="mf">
+      <div className="mf-chips" role="tablist" aria-label="Leagues">
+        {LEAGUES.map((l) => {
+          const n = counts[l.key]
+          return (
+            <button
+              key={l.key} role="tab" aria-selected={league === l.key}
+              className={`mf-chip${league === l.key ? ' on' : ''}`}
+              onClick={() => onLeague(l.key)}
+            >
+              {l.icon && `${l.icon} `}{l.label}{n != null ? ` · ${n}` : ''}
+            </button>
+          )
+        })}
+      </div>
+      {cards === null ? (
+        <div className="mf-feed" aria-label="Loading markets">
+          <div className="tr-skel mf-skel" /><div className="tr-skel mf-skel" />
+          <div className="tr-skel mf-skel" /><div className="tr-skel mf-skel" />
+        </div>
+      ) : (
+        <div className="mf-feed">{cards.map(card)}</div>
+      )}
+      {err && <p className="vd-empty">{err}</p>}
+    </div>
+  )
+}

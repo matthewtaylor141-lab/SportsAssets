@@ -273,12 +273,33 @@ _desk_cache: dict = {"ts": 0.0, "events": []}
 _DESK_TTL_S = 30.0
 
 
+def _ev_volume_usd(ev: dict) -> float | None:
+    """Traded volume in dollars from the venue's own event row (desk v8
+    feed cards sort on it). The listing payloads have carried the figure
+    under several spellings across venue revisions — probe them
+    defensively, TOTAL volume preferred, liquidity as the last resort.
+    None when the venue doesn't say: volume is never invented."""
+    for k in ("volume", "volumeNum", "volume24hr", "liquidity"):
+        v = ev.get(k)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def list_desk_events() -> list[dict]:
     """Every active event on the US venue with its full market board.
 
-    [{slug, title, league, markets: [{us_slug, label, price, kind}]}]
+    [{slug, title, league, volume_usd, close_time,
+      markets: [{us_slug, label, price, kind}]}]
     kind is the venue slug-grammar prefix (atc/aec moneyline, asc
-    spread, tsc total, astatc prop, ...) — the desk groups by it."""
+    spread, tsc total, astatc prop, ...) — the desk groups by it.
+    volume_usd/close_time come straight off the venue's event row
+    (null when absent) — the v8 feed sorts and labels cards with
+    them."""
     import time as _t
 
     now = _t.time()
@@ -339,6 +360,9 @@ def list_desk_events() -> list[dict]:
                 "title": _clean_title(ev.get("title")) or eslug,
                 "league": (eslug.split("-", 1)[0] or "").lower(),
                 "start": ev.get("startTime") or ev.get("startDate"),
+                "volume_usd": _ev_volume_usd(ev),
+                "close_time": (ev.get("endTime") or ev.get("endDate")
+                               or None),
                 "markets": []})
             for m in ev.get("markets") or []:
                 if m.get("closed"):
