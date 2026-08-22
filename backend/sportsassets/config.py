@@ -86,6 +86,11 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     admin_token: str = "change-me"
+    # Trading-desk unlock password (owner directive 2026-08-22): the desk
+    # gets its own credential so the admin token never has to live in a
+    # phone browser. Compared constant-time; a successful unlock mints a
+    # short-lived HMAC token derived from admin_token (see api/app.py).
+    desk_password: str = "bt"
     # Shared secret the edge-engine uses to record its shadow fills here.
     engine_ingest_token: str = ""
 

@@ -862,12 +862,17 @@ class KalshiAdapter(VenueAdapter):
                 return None
             positions = set()
             position_costs: dict[str, float] = {}
+            position_qty: dict[str, int] = {}
             for r in (resp.json() or {}).get("market_positions") or []:
                 qty = abs(float(r.get("position_fp")
                                 or r.get("position") or 0))
                 t = str(r.get("ticker") or "")
                 if t and qty > 0:
                     positions.add(t)
+                    # Contract count, venue-stated — the desk sell relay
+                    # clamps every cash-out to this number so a manual
+                    # ticket can never sell more than the account holds.
+                    position_qty[t] = int(qty)
                     # Venue-stated cost of the position, dollar dialect
                     # first (FSC runaway 2026-08-20: the sleeve's internal
                     # spent counter read $199.88 while the venue held
@@ -905,9 +910,87 @@ class KalshiAdapter(VenueAdapter):
                 if t and oid:
                     resting_buys.setdefault(t, []).append(oid)
             return {"positions": positions, "resting_buys": resting_buys,
-                    "position_costs": position_costs}
+                    "position_costs": position_costs,
+                    "position_qty": position_qty}
         except requests.RequestException:
             return None
+
+    def account_snapshot(self, max_marks: int = 40) -> dict:
+        """Desk accounts export (platform /api/desk/accounts): balance plus
+        per-ticker holdings with a live mark, in one venue-truth object —
+        funnel["kalshi_account"] per the 2026-08-22 desk contract.
+
+        FAIL CLOSED, telemetry-grade: any venue error leaves nulls in
+        place of numbers and this method NEVER raises — the desk page
+        must show "unknown", not a zeroed account, and the runner's
+        heartbeat must never die for a balance read. Marks come from
+        get_book for HELD tickers only, capped at max_marks so a wide
+        book cannot turn one snapshot into hundreds of REST calls; a
+        ticker whose book read fails carries mark_bid null and its
+        value_usd stays null (unknown, never zero)."""
+        out: dict = {"balance_usd": None, "at": time.time(), "resting": 0,
+                     "exposure_usd": None, "positions": []}
+        try:
+            auth = self.check_auth()
+            if auth.get("ok") and auth.get("balance_usd") is not None:
+                out["balance_usd"] = round(float(auth["balance_usd"]), 2)
+        except Exception:  # noqa: BLE001 — fail closed, null balance
+            pass
+        try:
+            path = "/trade-api/v2/portfolio/positions"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/positions", params={"limit": 200},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code == 200:
+                exposure = 0.0
+                for r in (resp.json() or {}).get("market_positions") or []:
+                    qty = abs(float(r.get("position_fp")
+                                    or r.get("position") or 0))
+                    t = str(r.get("ticker") or "")
+                    if not t or qty <= 0:
+                        continue
+                    # Same cost-field dialect ladder as open_ticker_map:
+                    # dollars first, cents fallback, unknown stays null.
+                    cost = None
+                    for k in ("market_exposure_dollars",
+                              "total_traded_dollars"):
+                        if r.get(k) is not None:
+                            cost = float(r[k])
+                            break
+                    if cost is None:
+                        for k in ("market_exposure", "total_traded"):
+                            if r.get(k) is not None:
+                                cost = float(r[k]) / 100.0
+                                break
+                    if cost is not None:
+                        exposure += cost
+                        cost = round(cost, 2)
+                    out["positions"].append(
+                        {"ticker": t, "qty": int(qty), "cost_usd": cost,
+                         "mark_bid": None, "value_usd": None})
+                out["exposure_usd"] = round(exposure, 2)
+            for row in out["positions"][:int(max_marks)]:
+                try:
+                    book = self.get_book("", row["ticker"])
+                except Exception:  # noqa: BLE001 — a bad book is a null mark
+                    book = None
+                if book is not None and book.bids:
+                    row["mark_bid"] = round(float(book.bids[0].price), 2)
+                    row["value_usd"] = round(
+                        row["qty"] * row["mark_bid"], 2)
+        except Exception:  # noqa: BLE001 — fail closed, null positions
+            pass
+        try:
+            path = "/trade-api/v2/portfolio/orders"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/orders",
+                params={"status": "resting", "limit": 100},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code == 200:
+                out["resting"] = len((resp.json() or {}).get("orders") or [])
+        except Exception:  # noqa: BLE001 — fail closed, zero resting
+            pass
+        return out
 
     def cancel_order(self, order_id: str) -> str:
         """DELETE a resting order. Returns 'cancelled' (confirmed dead,

@@ -75,6 +75,64 @@ def test_per_sport_and_per_whale_daily_splits():
     assert dw[("2026-08-19", "RN1")]["settled"] == 1
 
 
+def test_daily_covers_the_full_window():
+    """Owner order 2026-08-22: the 31-day truncation silently cut the
+    calendar once the window outgrew a month."""
+    rows = [_row("rn1", f"2026-06-{d:02d}", 1.0) for d in range(1, 31)] \
+        + [_row("rn1", f"2026-07-{d:02d}", 1.0) for d in range(1, 11)]
+    out = scorecard(rows)
+    assert len(out["daily"]) == 40
+    assert out["daily"][0]["day"] == "2026-07-10"    # newest first
+    assert out["daily"][-1]["day"] == "2026-06-01"
+
+
+def test_trades_list_copy_rows_only_display_named():
+    from sportsassets.api.copies_record import trades_list
+
+    rows = [
+        dict(_row("swisstony", "2026-08-19", 60.0, 200.0),
+             us_market_slug="atc-epl-a-b-2026-08-19-a", status="settled"),
+        dict(_row("manual", "2026-08-19", 500.0),
+             us_market_slug="x", status="settled"),
+        dict(_row("rn1", "2026-08-18", -25.0, 75.0),
+             us_market_slug="tsc-mlb-c-d-2026-08-18-o8pt5",
+             status="cashed_out"),
+    ]
+    out = trades_list(rows)
+    assert out == [
+        {"day": "2026-08-19", "whale": "SwissTony",
+         "slug": "atc-epl-a-b-2026-08-19-a", "stake": 200.0,
+         "pnl": 60.0, "status": "settled"},
+        {"day": "2026-08-18", "whale": "RN1",
+         "slug": "tsc-mlb-c-d-2026-08-18-o8pt5", "stake": 75.0,
+         "pnl": -25.0, "status": "cashed_out"},
+    ]
+
+
+def test_trades_list_caps_at_limit_preserving_order():
+    from sportsassets.api.copies_record import trades_list
+
+    rows = [dict(_row("rn1", "2026-08-18", float(i)), status="settled")
+            for i in range(450)]
+    out = trades_list(rows)
+    assert len(out) == 400
+    assert out[0]["pnl"] == 0.0        # newest-first input order kept
+
+
+def test_today_stats_scoreline():
+    from sportsassets.api.copies_record import today_stats
+
+    rows = [
+        _row("rn1", "2026-08-22", 150.0),       # uncapped: counts whole
+        _row("rn1", "2026-08-22", -10.0),
+        _row("swisstony", "2026-08-22", 0.0),   # push: neither W nor L
+        _row("rn1", "2026-08-21", 99.0),        # yesterday: excluded
+        _row("manual", "2026-08-22", 500.0),    # not a copy: excluded
+    ]
+    out = today_stats(rows, "2026-08-22")
+    assert out == {"pnl": 140.0, "settled": 3, "wins": 1, "losses": 1}
+
+
 def test_software_cohort_is_the_complement():
     from sportsassets.api.copies_record import software_scorecard
 

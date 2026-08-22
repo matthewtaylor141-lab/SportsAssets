@@ -317,6 +317,11 @@ _XV_WATCH = None
 _XV_CRYPTO = None
 _KADD_STATS: dict = {}
 _KCOPY_STATS: dict = {}
+# Desk accounts export cache (platform /api/desk/accounts): the venue
+# balance + marked holdings snapshot, refreshed on its own TTL so the
+# heartbeat carries it every cycle without re-reading books each pass.
+_KACCT: dict = {}
+_KACCT_TTL_S = float(os.environ.get("EDGE_KACCT_TTL_S", "120"))
 _KUD_STATS: dict = {}
 # First-set comeback sleeve (kalshi_fsc.py, owner order 2026-08-17).
 _FSC_STATS: dict = {}
@@ -2183,6 +2188,116 @@ def kalshi_open_snapshot(ledger, adapters) -> dict:
             "rows": rows}
 
 
+def kalshi_account_funnel(adapters, cache: dict,
+                          ttl_s: float = 120.0) -> dict | None:
+    """funnel["kalshi_account"] (desk contract 2026-08-22): the venue's
+    balance + per-ticker holdings with live marks, refreshed on a ~120s
+    TTL and carried on EVERY heartbeat in between — the backend's
+    /api/desk/accounts reads this key, so it must not blink on the
+    cycles that skip the refresh. Fail-closed end to end: the adapter's
+    account_snapshot nulls its numbers on any venue error and never
+    raises; a refresh that comes back null REPLACES the cache (a stale
+    good number presented as current is worse than an honest unknown).
+    Returns None only when no credentialed Kalshi adapter exists."""
+    a = next((x for x in adapters
+              if getattr(x, "name", "") == "kalshi"
+              and hasattr(x, "account_snapshot")), None)
+    if a is None or not a.has_credentials():
+        return dict(cache) if cache else None
+    if time.time() - float(cache.get("at") or 0) >= ttl_s:
+        snap = a.account_snapshot()
+        cache.clear()
+        cache.update(snap)
+    return dict(cache) if cache else None
+
+
+def desk_execute_order(kalshi_c, ledger, o: dict) -> dict:
+    """One manual desk ticket -> the result payload POSTed back to
+    /api/engine/manual-kalshi-queue's result endpoint. Queue rows carry
+    action 'buy'|'sell'; rows written before migration 027 have no
+    action field and are buys — the default keeps them working.
+
+    NO strategy-mode gate (root-caused 2026-08-21 evening): a human's
+    deliberate desk ticket rides no strategy halt — the kalshi_guard
+    doctrine — yet this relay refused whenever the ENGINE class sat in
+    PAPER, and a stale odds-feed checklist (irrelevant to a manual
+    Kalshi order) had the whole desk answering "engine not in a live
+    mode" for hours. Kill switch and watchdog still stop everything.
+
+    SELLS FAIL CLOSED (desk cash-out, 2026-08-22): sized against the
+    venue's own position count at execution time — never the platform's
+    snapshot, which may be minutes old. No venue answer means no order;
+    nothing held means refusal, never a short (the venue books an
+    oversized 'ask' as a NO position, i.e. a brand-new bet)."""
+    from edge.shadow.kalshi_guard import live_blocked
+
+    res: dict = {"id": int(o["id"])}
+    blocked = live_blocked(ledger, scope="manual")
+    if blocked:
+        res.update(status="error", error=f"blocked: {blocked}")
+        return res
+    action = str(o.get("action") or "buy").lower()
+    sell = action == "sell"
+    count = int(float(o.get("count") or 0))
+    if sell:
+        try:
+            held_map = kalshi_c.open_ticker_map()
+        except Exception:  # noqa: BLE001 — ambiguous venue = no order
+            held_map = None
+        if held_map is None:
+            res.update(status="error",
+                       error="venue positions unavailable — not sold")
+            return res
+        held = int((held_map.get("position_qty") or {})
+                   .get(o["ticker"]) or 0)
+        if held <= 0:
+            res.update(status="error", error="nothing held")
+            return res
+        # count<=0 = "all held" (platform omits qty); otherwise clamp.
+        count = held if count <= 0 else min(count, held)
+        if count <= 0:
+            res.update(status="error", error="clamped to 0")
+            return res
+    elif count <= 0:
+        res.update(status="error", error="count must be positive")
+        return res
+    # The venue is YES-denominated per outcome ticker — every desk buy
+    # is the YES side of the ticker the admin picked (the opposite side
+    # of a game is its own ticker row), and a desk sell is the 'ask'
+    # side of that same YES book, only ever sized to held contracts.
+    pr = kalshi_c.place_order(
+        o["ticker"], float(o["limit_price"]), count,
+        client_order_id=f"desk-{o['id']}", taker=True, sell=sell)
+    filled = int(float(pr.get("count") or 0)) if pr.get("ok") else 0
+    if pr.get("ok") and filled > 0:
+        res.update(status="filled", order_id=pr.get("order_id"),
+                   fill_count=filled,
+                   fill_price=float(o["limit_price"]))
+        # Inline-recorded marker BEFORE the record: without it
+        # sync_kalshi_fills re-recorded every desk fill under its
+        # kalshi-fill-{trade_id} uid — doubled positions and P&L
+        # (audit 2026-08-21, same class as the 2026-08-04 bug). Sells
+        # use the same marker; the sync's sell branch honors it the
+        # way its buy branch always has.
+        if pr.get("order_id"):
+            ledger.set_state(
+                f"kalshi_inline:{pr['order_id']}",
+                {"ts": time.time(), "uid": f"desk-{o['id']}"})
+        ledger.record_fill(
+            fill_uid=f"desk-{o['id']}",
+            venue="kalshi",
+            market_key=f"kalshi:{o['ticker']}",
+            side="SELL" if sell else "BUY", qty=float(filled),
+            price=float(o["limit_price"]),
+            league="manual", mode="LIVE_BETA",
+            category="manual")
+    elif pr.get("ok"):
+        res.update(status="unfilled", error="did not fill at limit")
+    else:
+        res.update(status="error", error=str(pr.get("status"))[:200])
+    return res
+
+
 def _check_account_link(adapters) -> dict:
     """Verify venue credentials and read the live balance. Never logs keys.
 
@@ -2674,8 +2789,6 @@ def _main_impl() -> None:
         def _desk_relay_loop() -> None:
             import requests
 
-            from edge.shadow.kalshi_guard import live_blocked
-
             base = os.environ.get("EDGE_PLATFORM_API", "")
             token = os.environ.get("EDGE_INGEST_TOKEN", "")
             if not base or not token:
@@ -2690,66 +2803,11 @@ def _main_impl() -> None:
                     orders = (r.json().get("orders") or []) \
                         if r.status_code == 200 else []
                     for o in orders:
-                        res = {"id": int(o["id"])}
-                        blocked = live_blocked(ledger, scope="manual")
-                        if blocked:
-                            res.update(status="error",
-                                       error=f"blocked: {blocked}")
-                        else:
-                            # NO strategy-mode gate (root-caused
-                            # 2026-08-21 evening): a human's deliberate
-                            # desk ticket rides no strategy halt — the
-                            # kalshi_guard doctrine — yet this relay
-                            # refused whenever the ENGINE class sat in
-                            # PAPER, and a stale odds-feed checklist
-                            # (irrelevant to a manual Kalshi order) had
-                            # the whole desk answering "engine not in a
-                            # live mode" for hours. Kill switch and
-                            # watchdog above still stop everything.
-                            # The venue is YES-denominated per outcome
-                            # ticker — every desk buy is the YES side of
-                            # the ticker the admin picked; the opposite
-                            # side of a game is its own ticker row.
-                            pr = kalshi_c.place_order(
-                                o["ticker"], float(o["limit_price"]),
-                                int(o["count"]),
-                                client_order_id=f"desk-{o['id']}",
-                                taker=True)
-                            filled = int(float(pr.get("count") or 0)) \
-                                if pr.get("ok") else 0
-                            if pr.get("ok") and filled > 0:
-                                res.update(status="filled",
-                                           order_id=pr.get("order_id"),
-                                           fill_count=filled,
-                                           fill_price=float(
-                                               o["limit_price"]))
-                                # Inline-recorded marker BEFORE the
-                                # record: without it sync_kalshi_fills
-                                # re-recorded every desk fill under its
-                                # kalshi-fill-{trade_id} uid — doubled
-                                # positions and P&L (audit 2026-08-21,
-                                # same class as the 2026-08-04 bug).
-                                if pr.get("order_id"):
-                                    ledger.set_state(
-                                        "kalshi_inline:"
-                                        f"{pr['order_id']}",
-                                        {"ts": time.time(),
-                                         "uid": f"desk-{o['id']}"})
-                                ledger.record_fill(
-                                    fill_uid=f"desk-{o['id']}",
-                                    venue="kalshi",
-                                    market_key=f"kalshi:{o['ticker']}",
-                                    side="BUY", qty=float(filled),
-                                    price=float(o["limit_price"]),
-                                    league="manual", mode="LIVE_BETA",
-                                    category="manual")
-                            elif pr.get("ok"):
-                                res.update(status="unfilled",
-                                           error="did not fill at limit")
-                            else:
-                                res.update(
-                                    status="error",
-                                    error=str(pr.get("status"))[:200])
+                        # buy AND sell tickets since migration 027; the
+                        # per-ticket doctrine (no strategy gate, sells
+                        # clamped to venue-held, inline-record marker)
+                        # lives with desk_execute_order.
+                        res = desk_execute_order(kalshi_c, ledger, o)
                         sess.post(
                             f"{base}/api/engine/manual-kalshi-result",
                             json=res, headers=hdrs, timeout=10)
@@ -3188,6 +3246,17 @@ def _main_impl() -> None:
             # unresolved games are flagged instead of shown as LIVE.
             try:
                 funnel["kalshi_open"] = kalshi_open_snapshot(ledger, adapters)
+            except Exception:  # noqa: BLE001 — telemetry never stalls trading
+                pass
+            # Desk accounts export (platform /api/desk/accounts): venue
+            # balance + marked holdings on a ~120s TTL, fail-closed —
+            # account_snapshot nulls its numbers rather than raise, and
+            # the cached copy rides every heartbeat in between.
+            try:
+                kacct = kalshi_account_funnel(adapters, _KACCT,
+                                              ttl_s=_KACCT_TTL_S)
+                if kacct:
+                    funnel["kalshi_account"] = kacct
             except Exception:  # noqa: BLE001 — telemetry never stalls trading
                 pass
             # Account maintenance runs in EVERY mode, not just live ones.

@@ -109,8 +109,11 @@ def scorecard(rows: list[dict]) -> dict:
                       "settled": 0, "wins": 0, "losses": 0,
                       "pnl": 0.0, "staked": 0.0}),
                   by_day.setdefault(day, {
-                      "day": day,
-                      "settled": 0, "wins": 0, "losses": 0, "pnl": 0.0}),
+                      "day": day, "settled": 0, "wins": 0, "losses": 0,
+                      # per-day deployed (owner asked MERIDIAN "how much
+                      # did we deploy yesterday in copies" 2026-08-22
+                      # and it had no clean answer — now it does).
+                      "pnl": 0.0, "staked": 0.0}),
                   by_ws.setdefault((disp, sport), {
                       "whale": disp, "sport": sport,
                       "settled": 0, "wins": 0, "losses": 0,
@@ -142,14 +145,51 @@ def scorecard(rows: list[dict]) -> dict:
         "by_whale": sorted(by_whale.values(), key=lambda w: -w["pnl"]),
         "by_whale_sport": sorted(by_ws.values(),
                                  key=lambda w: (w["whale"], -w["pnl"])),
+        # Full since-window (owner order 2026-08-22): the 31-day
+        # truncation silently cut the record's own calendar once the
+        # window outgrew a month.
         "daily": sorted((d for d in by_day.values()
                          if d["day"] != "undated"),
-                        key=lambda d: d["day"], reverse=True)[:31],
+                        key=lambda d: d["day"], reverse=True),
         "daily_by_whale": sorted((d for d in by_dw.values()
                                   if d["day"] != "undated"),
                                  key=lambda d: (d["day"], d["whale"]),
                                  reverse=True)[:186],
     }
+
+
+def trades_list(rows: list[dict], limit: int = 400) -> list[dict]:
+    """The public copy ledger (owner order 2026-08-22): the newest
+    settled/cashed-out copy rows, one line each, display-named. Pure —
+    rows must arrive newest-first (build() orders by settled_at)."""
+    out = []
+    for r in rows:
+        if (r.get("whale") or "") not in COPY_WHALES:
+            continue
+        out.append({"day": r.get("day"),
+                    "whale": DISPLAY.get(r["whale"], r["whale"]),
+                    "slug": r.get("slug") or r.get("us_market_slug"),
+                    "stake": round(float(r.get("filled_usd") or 0), 2),
+                    "pnl": round(float(r.get("pnl") or 0), 2),
+                    "status": r.get("status") or "settled"})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def today_stats(rows: list[dict], today: str) -> dict:
+    """Today's copy scoreline (ET), uncapped. Pure; tested."""
+    t = {"pnl": 0.0, "settled": 0, "wins": 0, "losses": 0}
+    for r in rows:
+        if (r.get("whale") or "") not in COPY_WHALES \
+                or r.get("day") != today:
+            continue
+        pnl = float(r.get("pnl") or 0)
+        t["pnl"] = round(t["pnl"] + pnl, 2)
+        t["settled"] += 1
+        t["wins"] += 1 if pnl > 0 else 0
+        t["losses"] += 1 if pnl < 0 else 0
+    return t
 
 
 async def build(since_day: str) -> dict:
@@ -164,10 +204,11 @@ async def build(since_day: str) -> dict:
         SELECT lower(COALESCE(whale_username, '')) AS whale,
                to_char(settled_at AT TIME ZONE 'America/New_York',
                        'YYYY-MM-DD') AS day,
-               pnl, filled_usd, us_market_slug
+               pnl, filled_usd, us_market_slug, status
         FROM live_orders
         WHERE status IN ('settled', 'cashed_out')
           AND settled_at IS NOT NULL
+        ORDER BY settled_at DESC
         """)
     windowed = []
     for r in rows:
@@ -181,6 +222,23 @@ async def build(since_day: str) -> dict:
     # "software cost, day by day" is served uncapped from the same
     # audit table as the copies record.
     out["software"] = software_scorecard(windowed)
+    # Live edge of the record (owner order 2026-08-22): what the copy
+    # sleeves have ON the table right now, today's scoreline, and the
+    # row-level ledger behind the aggregates.
+    open_row = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS count,
+               COALESCE(sum(COALESCE(NULLIF(filled_usd, 0),
+                                     requested_usd)), 0)::float8 AS stake
+        FROM live_orders
+        WHERE status IN ('submitting', 'filled')
+          AND lower(COALESCE(whale_username, '')) = ANY($1::text[])
+        """, list(COPY_WHALES))
+    out["open"] = {"count": open_row["count"],
+                   "stake": round(open_row["stake"], 2)}
+    out["trades"] = trades_list(windowed)
+    out["today"] = today_stats(
+        windowed, datetime.now(RECORD_TZ).strftime("%Y-%m-%d"))
     out["since"] = since_day
     out["generated_at"] = datetime.now(RECORD_TZ).isoformat()
     return out

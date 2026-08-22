@@ -410,6 +410,41 @@ def slug_ask(us_slug: str) -> float | None:
     return None
 
 
+def slug_bid(us_slug: str) -> float | None:
+    """Live best BID for one orderable US slug (desk cash-out, owner
+    directive 2026-08-22). Explicit bid fields first; on a two-sided
+    market with no bid field the sibling side's quoted price mirrors
+    through $1 (a resting YES bid IS a NO ask). None when the venue has
+    no readable bid — the caller refuses, never guesses."""
+    client = _get_client()
+    try:
+        m = (client.markets.retrieve_by_slug(us_slug) or {}).get(
+            "market") or {}
+    except Exception:  # noqa: BLE001 — 404s are an answer
+        return None
+    for k in ("bestBid", "best_bid", "bid"):
+        try:
+            v = m.get(k)
+            if v is not None:
+                px = float(v)
+                if 0 < px < 1:
+                    return px
+        except (TypeError, ValueError):
+            continue
+    sides = [s for s in (m.get("marketSides") or []) if isinstance(s, dict)]
+    if len(sides) == 2:
+        other = next((s for s in sides
+                      if s.get("identifier") != us_slug), None)
+        if other is not None:
+            try:
+                px = float(other.get("price"))
+                if 0 < px < 1:
+                    return round(1 - px, 4)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
 _LINE_TOKEN = re.compile(r"^(?:o|u)?(?:pos-|neg-)?(\d+(?:pt\d)?)$")
 
 

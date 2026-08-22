@@ -1486,11 +1486,17 @@ async def track_record(since: str | None = None,
         # would zero the whole record. None disables the filter; the old
         # size-cap behavior stands until the mirror speaks.
         attributed = {r["outcome_id"] for r in eng} or None
+        # POSITIVE membership, not a blocklist (owner order 2026-08-22):
+        # "not manual/underdog" let every retired-engine and arb row
+        # wear the copy-sleeve tag; the copy cohort is exactly the
+        # promoted COPY_WHALES roster, one source of truth.
+        from .copies_record import COPY_WHALES
+
         cp = await pool.fetch(
             "SELECT DISTINCT us_market_slug FROM live_orders "
             "WHERE us_market_slug IS NOT NULL "
-            "AND COALESCE(whale_username, '') NOT IN "
-            "('manual', 'underdog')")
+            "AND lower(COALESCE(whale_username, '')) = ANY($1::text[])",
+            list(COPY_WHALES))
         copy_slugs = {r["us_market_slug"] for r in cp}
         # The underdog sleeve is the AI's own trading (not a whale copy,
         # not the owner): its slugs count as ATTRIBUTED so the rows wear

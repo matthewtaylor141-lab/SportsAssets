@@ -912,6 +912,123 @@ async def _execute_manual_slug(pool, us_slug: str, usd: float, note: str,
                 "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
 
 
+def sell_limit_price(bid: float, min_price: float | None = None) -> float:
+    """Protective cash-out limit (owner directive 2026-08-22): the live
+    best bid minus 2c of book-motion protection, floored at the venue's
+    $0.01 tick — and never below the caller's own min_price. Pure;
+    tested. The IOC can only fill AT OR ABOVE this limit, so the floor
+    is the worst realizable price, not a hope."""
+    limit = max(0.01, round(bid - 0.02, 2))
+    if min_price is not None and min_price > 0:
+        limit = max(limit, round(float(min_price), 2))
+    return round(min(limit, 0.99), 2)
+
+
+async def _pm_held(us_slug: str) -> tuple[int, float | None]:
+    """(held whole contracts, avg cost) for one US market, from the
+    venue's OWN positions payload — the account is the referee for what
+    can be sold, exactly as it is for no-stack on the buy side."""
+    from .api.pmus_account import _amt, _fetch_all_positions_sync
+
+    positions = await asyncio.wait_for(
+        asyncio.to_thread(_fetch_all_positions_sync), timeout=30)
+    p = (positions or {}).get(us_slug) or {}
+    qty = _amt(p.get("netPosition"))
+    if qty <= 0 or p.get("expired"):
+        return 0, None
+    cost = _amt(p.get("cost"))
+    return int(qty), (round(cost / qty, 4) if cost > 0 else None)
+
+
+async def execute_manual_sell(us_slug: str, qty: int | None = None,
+                              min_price: float | None = None) -> dict:
+    """Platform-side cash-out of a held Polymarket US position (owner
+    directive 2026-08-22): sell up to the HELD quantity at a protective
+    limit under the live bid, IOC — takes what rests, cancels the rest.
+    Every refusal is a named reason, never an exception (same desk
+    contract as execute_manual). Fails closed: refuses more than held,
+    refuses with no live bid, limit floored at $0.01."""
+    try:
+        return await _execute_manual_sell(us_slug, qty, min_price)
+    except Exception as exc:  # noqa: BLE001 — the desk reports, never 500s
+        log.exception("manual sell failed pre-flight")
+        return {"ok": False,
+                "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+
+async def _execute_manual_sell(us_slug: str, qty: int | None,
+                               min_price: float | None) -> dict:
+    from . import pmus
+
+    venue = active_venue()
+    if venue != "polymarket-us":
+        return {"ok": False, "error": "live venue not armed"}
+    us_slug = (us_slug or "").strip()
+    if not us_slug:
+        return {"ok": False, "error": "pick a market"}
+    held, avg_cost = await _pm_held(us_slug)
+    if held < 1:
+        return {"ok": False,
+                "error": "nothing held on this market — nothing to sell"}
+    if qty is None:
+        qty = held
+    qty = int(qty)
+    if qty < 1:
+        return {"ok": False, "error": "qty must be a positive contract count"}
+    if qty > held:
+        return {"ok": False,
+                "error": f"qty {qty} exceeds held {held} — selling more "
+                         "than the position is refused"}
+    bid = await asyncio.to_thread(pmus.slug_bid, us_slug)
+    if bid is None or not (0 < bid < 1):
+        return {"ok": False, "error": "no live bid for this market"}
+    limit = sell_limit_price(bid, min_price)
+    pool = await get_pool()
+    result = await asyncio.to_thread(
+        pmus.submit_fok, us_slug, limit, qty, True,
+        "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+    filled = float(result["filled_shares"]) if result["ok"] else 0.0
+    fill_price = float(result["fill_price"]) if result["ok"] else None
+    proceeds = round(filled * (fill_price or 0), 2)
+    pnl = (round((fill_price - avg_cost) * filled, 4)
+           if filled > 0 and fill_price is not None
+           and avg_cost is not None else None)
+    status = "cashed_out" if result["ok"] and filled > 0 else "unfilled"
+    # The sale is recorded on the manual sleeve as its own terminal row
+    # (the underdog sweep's 'cashed_out' contract): filled_usd carries
+    # the PROCEEDS, pnl the realized gain vs the venue's own avg cost
+    # where known. Terminal on insert — the in-flight index and the
+    # settlement sweep both ignore it by construction.
+    row_id = await pool.fetchval(
+        """
+        INSERT INTO live_orders (trade_id, whale_username, asset,
+                                 condition_id, side, his_price,
+                                 limit_price, requested_usd,
+                                 requested_shares, status, venue,
+                                 us_market_slug, order_id, filled_shares,
+                                 fill_price, filled_usd, raw, error, pnl,
+                                 settled_at)
+        VALUES (NULL, 'manual', $1, NULL, 'SELL', $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15,
+                CASE WHEN $6 = 'cashed_out' THEN now() END)
+        RETURNING id
+        """,
+        f"sell:{us_slug}"[:120], bid, limit, round(qty * limit, 2),
+        float(qty), status, venue, us_slug, result.get("order_id"),
+        filled, fill_price, proceeds,
+        json.dumps(result.get("raw"), default=str),
+        None if result["ok"] else str(result.get("raw"))[:300], pnl)
+    log.info("MANUAL SELL %s: %.0f/%d @ %.2f (bid %.2f) proceeds %.2f",
+             status, filled, qty, fill_price or limit, bid, proceeds)
+    return {"ok": bool(result["ok"] and filled > 0), "row_id": row_id,
+            "filled_shares": filled, "avg_price": fill_price,
+            "proceeds_usd": proceeds, "quoted_bid": bid,
+            "limit_price": limit, "pnl": pnl, "held": held,
+            "detail": ("sold" if filled > 0 else
+                       "no fill at the protective limit — the bid moved; "
+                       "nothing was sold")}
+
+
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
     """Called on every fresh detection (after the paper trade). All guards
     re-checked here; failure of any guard is a silent no-op or logged skip."""

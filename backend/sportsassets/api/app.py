@@ -155,6 +155,67 @@ def require_admin(x_admin_token: str = Header(default="")) -> None:
         raise HTTPException(status_code=401, detail="admin token required")
 
 
+# ── Desk auth (owner directive 2026-08-22) ──────────────────────────
+# The trading desk unlocks with its own password (DESK_PASSWORD) so the
+# admin token never has to live in a phone browser. A successful unlock
+# mints a stateless 12h token: "<exp>.<hmac_sha256(admin_token,
+# 'desk:'+exp)>" — verifiable on any instance without a session store,
+# and rotated for free whenever the admin token rotates. Tokens are
+# never logged.
+DESK_TOKEN_TTL_S = 12 * 3600
+
+
+def mint_desk_token(now: float | None = None) -> tuple[str, int]:
+    import hashlib
+    import hmac as _hmac
+    import time as _t
+
+    exp = int(now if now is not None else _t.time()) + DESK_TOKEN_TTL_S
+    key = (settings().admin_token or "").strip().encode()
+    sig = _hmac.new(key, f"desk:{exp}".encode(), hashlib.sha256).hexdigest()
+    return f"{exp}.{sig}", exp
+
+
+def desk_token_ok(token: str, now: float | None = None) -> bool:
+    import hashlib
+    import hmac as _hmac
+    import time as _t
+
+    if not isinstance(token, str):
+        return False
+    tok = token.strip()
+    exp_s, sep, sig = tok.partition(".")
+    if not sep:
+        return False
+    try:
+        exp = int(exp_s)
+    except ValueError:
+        return False
+    if exp <= (now if now is not None else _t.time()):
+        return False
+    key = (settings().admin_token or "").strip().encode()
+    if not key:
+        return False
+    want = _hmac.new(key, f"desk:{exp}".encode(),
+                     hashlib.sha256).hexdigest()
+    return _hmac.compare_digest(sig, want)
+
+
+def require_desk(x_desk_token: str = Header(default=""),
+                 x_admin_token: str = Header(default="")) -> None:
+    """Desk-scoped auth: a valid desk token OR the admin token. The
+    admin path keeps working so existing tooling never breaks."""
+    import hmac
+
+    if x_desk_token and desk_token_ok(x_desk_token):
+        return
+    supplied = (x_admin_token or "").strip()
+    expected = (settings().admin_token or "").strip()
+    if expected and hmac.compare_digest(supplied, expected):
+        return
+    raise HTTPException(status_code=401, detail="desk unlock required")
+
+
 def check_engine_token(supplied: str | None) -> None:
     """Engine-feed auth (audit 2026-08-21): every engine endpoint was
     comparing with != — non-constant-time, and unlike the admin path,
@@ -274,6 +335,54 @@ async def admin_ping(request: Request,
         "configured": bool(expected) and expected != "change-me",
         "match": bool(expected) and hmac.compare_digest(supplied, expected),
     }
+
+
+# Unlock throttle: same shape and rationale as _PING_HITS — the desk
+# password is short by design, so the guess oracle must be slow.
+_UNLOCK_HITS: dict[str, list[float]] = {}
+
+
+def _throttled(hits: dict[str, list[float]], request: Request,
+               limit: int = 10, window: float = 60.0) -> bool:
+    """True when this IP is over its budget (the _PING_HITS pattern,
+    shared). Records the attempt when allowed; bounds the map."""
+    import time as _t
+
+    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0] \
+        .strip() or (request.client.host if request.client else "?")
+    now = _t.time()
+    recent = [t for t in hits.get(ip, []) if now - t < window]
+    if len(recent) >= limit:
+        hits[ip] = recent
+        return True
+    recent.append(now)
+    hits[ip] = recent
+    if len(hits) > 1000:      # bound the map; drop stale IPs
+        for k in [k for k, v in hits.items()
+                  if not v or now - v[-1] > 300][:500]:
+            hits.pop(k, None)
+    return False
+
+
+class DeskUnlockBody(BaseModel):
+    password: str = ""
+
+
+@app.post("/api/desk/unlock")
+async def desk_unlock(request: Request, body: DeskUnlockBody) -> dict:
+    """Trade-desk unlock: password -> short-lived desk token. The
+    password is compared constant-time; the response never carries the
+    configured value, and nothing here is ever logged."""
+    import hmac
+
+    if _throttled(_UNLOCK_HITS, request):
+        raise HTTPException(status_code=429, detail="slow down")
+    supplied = (body.password or "").strip()
+    expected = (settings().desk_password or "").strip()
+    if not expected or not hmac.compare_digest(supplied, expected):
+        return {"ok": False, "error": "wrong password"}
+    token, exp = mint_desk_token()
+    return {"ok": True, "token": token, "expires_at": exp}
 
 
 @app.get("/api/config")
@@ -717,7 +826,7 @@ async def kalshi_claim_ingest(
 # ── Manual trade desk (owner directive 2026-08-07) ───────────────────
 
 
-@app.get("/api/admin/market-search", dependencies=[Depends(require_admin)])
+@app.get("/api/admin/market-search", dependencies=[Depends(require_desk)])
 async def api_market_search(q: str = Query(min_length=2)) -> dict:
     """Exchange-style market browser for the desk: title/slug/outcome
     substring over unresolved markets, grouped per MARKET with each
@@ -973,14 +1082,14 @@ async def _kalshi_fetch(series_list: list[str], q: str = "",
     return out[:cap] if cap else out
 
 
-@app.get("/api/admin/kalshi-markets", dependencies=[Depends(require_admin)])
+@app.get("/api/admin/kalshi-markets", dependencies=[Depends(require_desk)])
 async def api_kalshi_markets(q: str = Query(default="")) -> dict:
     """Search Kalshi's live sports markets for the desk — event rows
     with Yes/No prices, the venue's own presentation shape."""
     return {"markets": await _kalshi_fetch(_DESK_KALSHI_SERIES, q=q)}
 
 
-@app.get("/api/admin/book", dependencies=[Depends(require_admin)])
+@app.get("/api/admin/book", dependencies=[Depends(require_desk)])
 async def api_admin_book(venue: str = Query(...),
                          id: str = Query(...)) -> dict:
     """Live order-book depth for the desk ticket — the venue's actual
@@ -1102,7 +1211,7 @@ async def _pm_quote_many(assets: list[str]) -> dict[str, dict]:
     return out
 
 
-@app.get("/api/admin/desk-games", dependencies=[Depends(require_admin)])
+@app.get("/api/admin/desk-games", dependencies=[Depends(require_desk)])
 async def api_desk_games(venue: str = Query("polymarket"),
                          league: str = Query("all")) -> dict:
     """Game cards for the browse view: today/tomorrow's games with live
@@ -1189,7 +1298,7 @@ async def api_desk_games(venue: str = Query("polymarket"),
     return {"games": cards[:80], "counts": counts}
 
 
-@app.get("/api/admin/desk-game", dependencies=[Depends(require_admin)])
+@app.get("/api/admin/desk-game", dependencies=[Depends(require_desk)])
 async def api_desk_game(venue: str = Query(...),
                         id: str = Query(...)) -> dict:
     """The full game view: EVERY market for one game, grouped the way
@@ -1551,7 +1660,7 @@ class ManualTradeBody(BaseModel):
     ask: float | None = None   # PM slug rows: bounded fallback quote
 
 
-@app.post("/api/admin/manual-trade", dependencies=[Depends(require_admin)])
+@app.post("/api/admin/manual-trade", dependencies=[Depends(require_desk)])
 async def api_manual_trade(body: ManualTradeBody) -> dict:
     """Place an admin-directed trade as the 'manual' sleeve. Separate
     budget, separate P&L line, zero interaction with autonomous flows.
@@ -1714,7 +1823,8 @@ async def api_manual_kalshi_queue(
     check_engine_token(x_engine_token)
     pool = await get_pool()
     rows = await pool.fetch(
-        "SELECT id, ticker, side, limit_price::float8 AS limit_price, "
+        "SELECT id, ticker, side, action, "
+        "limit_price::float8 AS limit_price, "
         "count FROM manual_kalshi_queue WHERE status = 'pending' "
         "ORDER BY id LIMIT 20")
     return {"orders": [dict(r) for r in rows]}
@@ -1823,13 +1933,51 @@ async def api_kud_result(
     return {"ok": True}
 
 
-@app.get("/api/admin/manual-order", dependencies=[Depends(require_admin)])
-async def api_manual_order(id: int = Query(...)) -> dict:
+@app.get("/api/admin/manual-order", dependencies=[Depends(require_desk)])
+async def api_manual_order(id: int = Query(...),
+                           venue: str = Query("polymarket")) -> dict:
     """Live status of ONE desk order — the ticket polls this at 1s
     until terminal so the trader watches the AI counterparty execute
     in real time (owner order 2026-08-21: confirmation must be
-    instant, not a blotter refresh)."""
+    instant, not a blotter refresh).
+
+    venue=kalshi reads the relay queue row. Found 2026-08-22 at
+    integration: live_orders ids and manual_kalshi_queue ids are
+    independent serials, so the old single-table lookup left every
+    Kalshi ticket spinning on found:false (or, worse, could collide
+    with an unrelated PM order of the same id) — the venue param
+    makes the lookup unambiguous."""
     pool = await get_pool()
+    if venue == "kalshi":
+        kr = await pool.fetchrow(
+            """
+            SELECT id, status, error, created_at, ticker,
+                   limit_price::float8 AS limit_price,
+                   fill_price::float8 AS fill_price,
+                   usd::float8 AS usd, count, fill_count
+            FROM manual_kalshi_queue WHERE id = $1
+            """, id)
+        if kr is None:
+            return {"found": False}
+        fill_count = float(kr["fill_count"] or 0)
+        fill_price = float(kr["fill_price"] or 0)
+        return {
+            "found": True,
+            "id": kr["id"],
+            "status": kr["status"],
+            "terminal": kr["status"] in ("filled", "unfilled",
+                                         "error", "cancelled"),
+            "error": kr["error"],
+            "venue": "kalshi",
+            "placed_at": kr["created_at"].isoformat()
+                         if kr["created_at"] else None,
+            "us_market_slug": kr["ticker"],
+            "limit_price": kr["limit_price"],
+            "fill_price": kr["fill_price"],
+            "requested_usd": float(kr["usd"] or 0),
+            "filled_usd": round(fill_count * fill_price, 2),
+            "filled_shares": fill_count,
+        }
     r = await pool.fetchrow(
         """
         SELECT lo.id, lo.status, lo.error, lo.venue,
@@ -1852,7 +2000,7 @@ async def api_manual_order(id: int = Query(...)) -> dict:
     return d
 
 
-@app.get("/api/admin/manual-trades", dependencies=[Depends(require_admin)])
+@app.get("/api/admin/manual-trades", dependencies=[Depends(require_desk)])
 async def api_manual_trades() -> dict:
     """The desk blotter: every manual ticket with status and settled P&L."""
     pool = await get_pool()
@@ -1931,6 +2079,251 @@ async def api_manual_trades() -> dict:
     return {"trades": out, "day_spent": round(day_spent, 2),
             "day_budget": MANUAL_DAILY_USD,
             "max_per_order": MANUAL_MAX_PER_ORDER_USD}
+
+
+# ── Desk accounts + cash-out (owner directive 2026-08-22) ────────────
+
+
+_KALSHI_BALANCE_RE = re.compile(r"balance \$([0-9][0-9,]*(?:\.\d+)?)")
+
+
+async def _engine_heartbeat_detail() -> dict:
+    try:
+        pool = await get_pool()
+        row = await pool.fetchrow(
+            "SELECT detail FROM service_heartbeats "
+            "WHERE service='edge_engine'")
+    except Exception:  # noqa: BLE001 — accounts degrade, never 500
+        return {}
+    if row is None:
+        return {}
+    detail = row["detail"]
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except ValueError:
+            return {}
+    return detail if isinstance(detail, dict) else {}
+
+
+def kalshi_accounts_view(detail: dict, now: float) -> dict:
+    """Pure (unit-tested): engine heartbeat detail -> the desk's Kalshi
+    account card. Primary source is the engine's kalshi_account export
+    (~120s TTL); when a not-yet-upgraded engine hasn't published it,
+    degrade to the account-link balance string plus the open book at
+    cost — marked degraded, never guessed at marks."""
+    ka = (detail or {}).get("kalshi_account")
+    if isinstance(ka, dict):
+        at = float(ka.get("at") or 0) or None
+        positions = []
+        for p in ka.get("positions") or []:
+            cost, val = p.get("cost_usd"), p.get("value_usd")
+            positions.append({
+                "ticker": p.get("ticker"), "qty": p.get("qty"),
+                "cost_usd": cost, "mark_bid": p.get("mark_bid"),
+                "value_usd": val,
+                "unrealized": (round(val - cost, 2)
+                               if val is not None and cost is not None
+                               else None)})
+        return {"configured": True,
+                "balance_usd": ka.get("balance_usd"),
+                "at": at,
+                "stale_s": round(now - at, 1) if at else None,
+                "exposure_usd": ka.get("exposure_usd"),
+                "resting": int(ka.get("resting") or 0),
+                "positions": positions}
+    link = ((detail or {}).get("account_link") or {})
+    klink = link.get("kalshi")
+    balance = None
+    if isinstance(klink, dict):
+        m = _KALSHI_BALANCE_RE.search(str(klink.get("detail") or ""))
+        if m:
+            balance = float(m.group(1).replace(",", ""))
+    ko = (detail or {}).get("kalshi_open") or {}
+    positions = [{"ticker": r.get("ticker"), "qty": r.get("qty"),
+                  "cost_usd": r.get("cost"), "mark_bid": None,
+                  "value_usd": None, "unrealized": None}
+                 for r in (ko.get("rows") or [])]
+    return {"configured": bool(klink is not None or positions),
+            "degraded": True,
+            "balance_usd": balance,
+            "at": None, "stale_s": None,
+            "exposure_usd": ko.get("cost"),
+            "resting": 0,
+            "positions": positions}
+
+
+@app.get("/api/desk/accounts", dependencies=[Depends(require_desk)])
+async def api_desk_accounts() -> dict:
+    """Both live venue accounts on one card: PM from the venue's own
+    portfolio API (30s-cached snapshot), Kalshi from the engine's
+    heartbeat export (only the engine holds Kalshi credentials)."""
+    from .pmus_account import account_snapshot
+
+    now = time.time()
+    snap = await account_snapshot()
+    pm_positions = []
+    for r in (snap.get("open_positions") or []):
+        cost, value = r.get("cost"), r.get("value")
+        pm_positions.append({
+            "market_slug": r.get("market_slug"), "title": r.get("title"),
+            "outcome": r.get("outcome"), "qty": r.get("qty"),
+            "cost": cost, "value": value,
+            "unrealized": (round(value - cost, 2)
+                           if value is not None and cost is not None
+                           else None)})
+    pm = {"configured": bool(snap.get("configured")),
+          "account_value": snap.get("account_value"),
+          "cash": snap.get("cash"),
+          "buying_power": snap.get("buying_power"),
+          "open_value": snap.get("open_value"),
+          "unsettled_funds": snap.get("unsettled_funds"),
+          "realized_pnl": snap.get("realized_pnl"),
+          "positions": pm_positions,
+          "recent_trades": snap.get("recent_trades") or []}
+    if snap.get("error"):
+        pm["error"] = snap["error"]
+    kalshi = kalshi_accounts_view(await _engine_heartbeat_detail(), now)
+    k_pos_value = sum(
+        (p["value_usd"] if p["value_usd"] is not None
+         else (p["cost_usd"] or 0)) or 0
+        for p in kalshi["positions"])
+    totals = {
+        "value": round((pm.get("account_value") or 0)
+                       + (kalshi.get("balance_usd") or 0)
+                       + k_pos_value, 2),
+        "cash": round((pm.get("cash") or 0)
+                      + (kalshi.get("balance_usd") or 0), 2),
+        "unrealized": round(
+            sum(p["unrealized"] or 0 for p in pm_positions)
+            + sum(p["unrealized"] or 0 for p in kalshi["positions"]), 2),
+    }
+    return {"as_of": now, "polymarket": pm, "kalshi": kalshi,
+            "totals": totals}
+
+
+class CashOutBody(BaseModel):
+    venue: str
+    us_slug: str = ""            # PM: the held market's venue slug
+    outcome: str = ""            # PM: display only
+    ticker: str = ""             # Kalshi: the held market ticker
+    qty: int | None = None       # contracts/shares; omit = all held
+    min_price: float | None = None
+
+
+async def _kalshi_held_qty(ticker: str) -> int | None:
+    """Held contracts for one ticker, from the engine's heartbeat export
+    (kalshi_account first, open-book fallback). None = unknown."""
+    detail = await _engine_heartbeat_detail()
+    ka = detail.get("kalshi_account")
+    if isinstance(ka, dict):
+        for p in ka.get("positions") or []:
+            if p.get("ticker") == ticker:
+                try:
+                    return int(p.get("qty") or 0)
+                except (TypeError, ValueError):
+                    return None
+    for r in ((detail.get("kalshi_open") or {}).get("rows") or []):
+        if r.get("ticker") == ticker:
+            try:
+                return int(float(r.get("qty") or 0))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+@app.post("/api/desk/cash-out", dependencies=[Depends(require_desk)])
+async def api_desk_cash_out(body: CashOutBody) -> dict:
+    """Sell a held position from the desk. PM executes synchronously
+    (platform-side IOC at a protective limit under the live bid);
+    Kalshi queues a sell for the engine's relay — only the engine holds
+    Kalshi credentials, and it clamps the count to what is actually
+    held. Every path fails closed: no bid = refuse, more than held =
+    refuse, limits floored at $0.01."""
+    from ..live_executor import execute_manual_sell, sell_limit_price
+
+    if body.venue == "polymarket-us":
+        if not body.us_slug.strip():
+            return {"ok": False, "error": "pick a market"}
+        return await execute_manual_sell(
+            body.us_slug.strip(), qty=body.qty, min_price=body.min_price)
+    if body.venue != "kalshi":
+        return {"ok": False, "error": "unknown venue"}
+    ticker = body.ticker.strip()
+    if not ticker:
+        return {"ok": False, "error": "pick a market"}
+    qty = body.qty
+    if qty is None:
+        qty = await _kalshi_held_qty(ticker)
+        if qty is None:
+            return {"ok": False,
+                    "error": "position size unknown — pass qty explicitly"}
+    qty = int(qty)
+    if qty < 1:
+        return {"ok": False, "error": "nothing held on this market"}
+    # Server-side re-quote — never trust a client-supplied price.
+    import httpx
+
+    bid = None
+    try:
+        async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                     timeout=8) as client:
+            resp = await client.get("/markets", params={"tickers": ticker})
+            ms = (resp.json().get("markets") or []) if \
+                resp.status_code == 200 else []
+            if ms:
+                bid = _kcents(ms[0], "yes_bid")
+    except Exception:  # noqa: BLE001
+        bid = None
+    if bid is None or not (0 < bid < 1):
+        return {"ok": False, "error": "no live Kalshi bid for this market"}
+    limit = sell_limit_price(bid, body.min_price)
+    pool = await get_pool()
+    # 30s duplicate-ticket guard, same shape as the buy path: the venue
+    # HTTP above takes seconds and a double-click must not queue two
+    # real sells.
+    dup_id = await pool.fetchval(
+        """
+        SELECT id FROM manual_kalshi_queue
+        WHERE ticker = $1 AND action = 'sell'
+          AND status IN ('pending', 'placed')
+          AND created_at > now() - interval '30 seconds'
+        ORDER BY id DESC LIMIT 1
+        """, ticker)
+    if dup_id is not None:
+        return {"ok": False,
+                "error": (f"an identical sell ticket (#{dup_id}) was "
+                          "queued seconds ago — check the blotter before "
+                          "submitting again")}
+    row_id = await pool.fetchval(
+        """
+        INSERT INTO manual_kalshi_queue
+            (ticker, title, side, action, limit_price, count, usd, note)
+        VALUES ($1, $2, 'yes', 'sell', $3, $4, $5, $6)
+        RETURNING id
+        """,
+        ticker, ticker, limit, qty, round(qty * limit, 2),
+        "desk cash-out")
+    return {"ok": True, "queued": True, "row_id": row_id,
+            "quoted_bid": bid, "limit_price": limit, "count": qty,
+            "detail": ("queued — the engine places the sell within ~10 "
+                       "seconds, clamped to the held quantity")}
+
+
+@app.delete("/api/desk/manual-order/{id}",
+            dependencies=[Depends(require_desk)])
+async def api_desk_cancel_manual_order(id: int) -> dict:
+    """Cancel a queued (not yet relayed) Kalshi desk order. Only a
+    'pending' row can be cancelled — once the relay picked it up the
+    order is at the venue and this endpoint says so."""
+    pool = await get_pool()
+    rid = await pool.fetchval(
+        "UPDATE manual_kalshi_queue SET status='cancelled', "
+        "updated_at=now() WHERE id=$1 AND status='pending' RETURNING id",
+        id)
+    if rid is None:
+        return {"ok": False, "error": "already picked up"}
+    return {"ok": True, "cancelled": True}
 
 
 class EngineMethodologyBody(BaseModel):
@@ -2718,10 +3111,15 @@ async def api_daily_breakdown() -> dict:
 async def api_today_live() -> dict:
     """Second-latency settlement feed from OUR OWN ledger (owner report
     2026-08-07: 'won 4 trades, page didn't move'). The venue-account
-    snapshot lags minutes by design; the copy/manual sleeves settle in
+    snapshot lags minutes by design; the copy sleeves settle in
     live_orders the moment our resolution pipeline marks them — this
-    endpoint powers the hero LIVE strip and the win toasts."""
-    from .track_record import PNL_DISPLAY_CAP
+    endpoint powers the hero LIVE strip and the win toasts.
+
+    COPY-WHALES ONLY, UNCAPPED (owner order 2026-08-22): the strip is
+    the copy record's live edge — cash-outs count (they are settled by
+    OUR sale), and the $100 display cap is gone here so the strip
+    matches the uncapped copies record it fronts."""
+    from .copies_record import COPY_WHALES
 
     # Mid-boot resilience: this endpoint is polled every 12s by every
     # open page — during a redeploy the pool may not be ready, and a
@@ -2741,12 +3139,13 @@ async def api_today_live() -> dict:
                count(*)::int AS settled,
                count(*) FILTER (WHERE pnl > 0)::int AS wins
         FROM live_orders
-        WHERE status = 'settled' AND settled_at IS NOT NULL
+        WHERE status IN ('settled', 'cashed_out')
+          AND settled_at IS NOT NULL
           AND settled_at >= date_trunc('day',
                 now() AT TIME ZONE 'America/New_York')
               AT TIME ZONE 'America/New_York'
-          AND abs(COALESCE(pnl, 0)) <= $1
-        """, PNL_DISPLAY_CAP)
+          AND lower(COALESCE(whale_username, '')) = ANY($1::text[])
+        """, list(COPY_WHALES))
     recent = await pool.fetch(
         """
         SELECT lo.pnl::float8 AS pnl, lo.settled_at, lo.whale_username,
@@ -2754,11 +3153,12 @@ async def api_today_live() -> dict:
         FROM live_orders lo
         LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
         LEFT JOIN markets m ON m.condition_id = mt.condition_id
-        WHERE lo.status = 'settled' AND lo.settled_at IS NOT NULL
-          AND abs(COALESCE(lo.pnl, 0)) <= $1
+        WHERE lo.status IN ('settled', 'cashed_out')
+          AND lo.settled_at IS NOT NULL
+          AND lower(COALESCE(lo.whale_username, '')) = ANY($1::text[])
         ORDER BY lo.settled_at DESC
         LIMIT 8
-        """, PNL_DISPLAY_CAP)
+        """, list(COPY_WHALES))
     return {
         "pnl": round(float(day["pnl"]), 2),
         "settled": day["settled"],
@@ -2770,7 +3170,8 @@ async def api_today_live() -> dict:
             "pnl": round(float(r["pnl"] or 0), 2),
             "at": r["settled_at"].isoformat() if r["settled_at"] else None,
         } for r in recent],
-        "scope": "copy + manual sleeves (order-level, our ledger)",
+        "scope": ("copy whales only, uncapped, cash-outs included "
+                  "(order-level, our ledger)"),
     }
 
 
@@ -2788,12 +3189,20 @@ async def api_report_range(
 _WHALE_0X2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 _CAT_ORDER = ["rn1", "swisstony", "kch123", "homerunhazard",
               _WHALE_0X2C33,
+              # Dossier promotions (owner order 2026-08-21). Bug fix
+              # 2026-08-22: absent from this list, their settled rows
+              # were built by _category_breakdown but silently DROPPED
+              # from report.csv/pdf — the exports skip categories the
+              # label map doesn't know.
+              "ferrarichampions2026", "0x076daa87",
               "manual", "underdog", "arb", "software"]
 _CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
               "kch123": "kch123 copies", "homerunhazard": "HomeRunHazard copies",
               # Display label is the truncated address — the owner names
               # whales; until he does, the wallet is its own name.
               _WHALE_0X2C33: "0x2c33…0563 copies",
+              "ferrarichampions2026": "ferrariChampions2026 copies",
+              "0x076daa87": "0x076daa87 copies",
               "manual": "Manual desk", "underdog": "Underdog $1 test",
               "arb": "Arbitrage", "software": "Software"}
 

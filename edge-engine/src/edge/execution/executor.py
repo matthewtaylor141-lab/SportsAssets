@@ -669,10 +669,16 @@ def sync_kalshi_fills(adapter, ledger: Ledger, mode: str) -> int:
             if qty <= 0 or not (0 < price < 1):
                 continue
             if f.get("action") == "sell":
-                # The only sell path is the underdog sleeve's resting
-                # +20% exit; any other sell fill is unexpected and left
-                # alone (never guess at bookkeeping for an order this
-                # process didn't place).
+                # Desk cash-outs (runner desk relay, 2026-08-22) record
+                # their sell inline at placement and mark the order id —
+                # the same kalshi_inline skip the buy branch has always
+                # applied, so a desk sale is never booked twice.
+                if ledger.get_state(f"kalshi_inline:{f.get('order_id')}"):
+                    continue
+                # The only other sell path is the underdog sleeve's
+                # resting +20% exit; any remaining sell fill is
+                # unexpected and left alone (never guess at bookkeeping
+                # for an order this process didn't place).
                 ctx = ledger.get_state(
                     f"kalshi_order:{f.get('order_id')}") or {}
                 if ctx.get("category") != "kalshi_underdog_exit":
