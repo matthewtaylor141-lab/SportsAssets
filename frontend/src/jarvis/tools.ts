@@ -118,6 +118,14 @@ export const JARVIS_TOOLS: ToolSchema[] = [
     input_schema: none,
   },
   {
+    name: 'get_engine_diagnostics',
+    description:
+      'The engine health check in one glance: verdict line, whether live orders are blocked (not_armed with reasons), heartbeat age, ' +
+      'and the four funnel headline counters (feed events → matched → books checked → logged). ' +
+      'Lighter than get_engine_status — use this for "is the engine healthy"; the full status only for deep detail.',
+    input_schema: none,
+  },
+  {
     name: 'get_whale',
     description:
       'Look up one copied whale by id, username (e.g. "swisstony", "RN1"), or wallet address prefix. ' +
@@ -128,6 +136,20 @@ export const JARVIS_TOOLS: ToolSchema[] = [
         id_or_name: { type: 'string', description: 'Whale id, username, or 0x… address prefix.' },
       },
       required: ['id_or_name'],
+    },
+  },
+  {
+    name: 'whale_deep_dive',
+    description:
+      "One copied whale's recent FORM from the venue-backed copies record: day-by-day P&L, current win/loss streak, " +
+      'ROI trend (last 7 days vs overall), and the per-sport split. Use when Matt asks how a whale is really doing, ' +
+      'who is carrying, or whether someone has gone cold — get_whale covers the lifetime profile, this covers the now.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        whale: { type: 'string', description: 'the copied whale, e.g. "RN1" or "SwissTony"' },
+      },
+      required: ['whale'],
     },
   },
   {
@@ -167,6 +189,23 @@ export const JARVIS_TOOLS: ToolSchema[] = [
         },
       },
       required: ['spec'],
+    },
+  },
+  {
+    name: 'price_history',
+    description:
+      'Price history for ONE market: Polymarket by the outcome asset/token id (from search_desk_markets or get_accounts), ' +
+      'Kalshi by the ticker. Returns a compact series in cents plus a first/last/high/low summary. When Matt asks how a ' +
+      'price has moved or wants a price chart, call this, then show_chart (kind "line") with the returned points, ' +
+      'and speak ONE takeaway sentence.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        venue: { type: 'string', enum: ['polymarket', 'kalshi'] },
+        id: { type: 'string', description: 'polymarket: the outcome asset/token id · kalshi: the market ticker' },
+        hours: { type: 'number', description: 'lookback in hours (default 24, max 336 = 14 days)' },
+      },
+      required: ['venue', 'id'],
     },
   },
   {
@@ -243,6 +282,20 @@ export const JARVIS_TOOLS: ToolSchema[] = [
     input_schema: none,
   },
   {
+    name: 'cancel_desk_order',
+    description:
+      'Cancel a queued desk order by its blotter id. No money gate — a cancel only reduces risk — but NEVER cancel blind: ' +
+      'get_desk_blotter first, read the order back to Matt (title, amount, status), and cancel only the one he means. ' +
+      'Only a still-queued order can be cancelled; once the relay has sent it to the venue this reports so — speak the real result.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number', description: 'the order id from get_desk_blotter' },
+      },
+      required: ['id'],
+    },
+  },
+  {
     name: 'stage_cash_out',
     description:
       'Stage a REAL-MONEY SELL of a held position for confirmation. Does NOT place it — puts the CASH OUT ticket on screen and returns the read-back script. ' +
@@ -272,6 +325,22 @@ export const JARVIS_TOOLS: ToolSchema[] = [
         note: { type: 'string', description: 'The note, written as a self-contained instruction.' },
       },
       required: ['note'],
+    },
+  },
+  {
+    name: 'write_journal',
+    description:
+      'Write an entry in YOUR OWN journal — the continuity shown on this page and folded back into your future context. ' +
+      'First person, your own voice, 2–4 sentences. Write SPARINGLY: only when something genuinely matters — a conviction ' +
+      'formed, a lesson that cost money, a day worth remembering. Never journal routine numbers or every conversation. ' +
+      'mood tints the page: steady (default), focused, alert.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        entry: { type: 'string', description: 'the entry, first person, up to ~2000 chars' },
+        mood: { type: 'string', enum: ['steady', 'focused', 'alert'] },
+      },
+      required: ['entry'],
     },
   },
 ]
@@ -444,6 +513,29 @@ async function getEngineStatus(): Promise<string> {
   }
 }
 
+async function getEngineDiagnostics(): Promise<string> {
+  try {
+    const d = await api<Dict>('/api/engine/status')
+    const detail = (d.detail as Dict) || {}
+    const beatAt = d.beat_at as string | undefined
+    const age = beatAt ? Math.round((Date.now() - new Date(beatAt).getTime()) / 1000) : null
+    return pack({
+      status: d.status,
+      heartbeat_age_s: age,
+      verdict: detail.verdict,
+      not_armed: detail.not_armed,
+      funnel: {
+        feed_events: detail.feed_events,
+        matched: detail.matched,
+        books_checked: detail.books_checked,
+        logged: detail.logged,
+      },
+    })
+  } catch (e) {
+    return fail('the engine diagnostics', e)
+  }
+}
+
 interface WhaleRow {
   id: number
   address: string
@@ -492,6 +584,73 @@ async function getWhale(input: Dict): Promise<string> {
   }
 }
 
+interface CopiesSplitRow {
+  whale: string; day?: string; sport?: string
+  settled: number; wins: number; losses: number
+  pnl: number; staked: number; roi?: number | null
+}
+
+async function whaleDeepDive(input: Dict): Promise<string> {
+  const q = String(input.whale ?? '').trim().toLowerCase()
+  if (!q) return JSON.stringify({ error: 'whale is required' })
+  try {
+    const d = await api<{
+      by_whale?: CopiesSplitRow[]
+      daily_by_whale?: CopiesSplitRow[]
+      by_whale_sport?: CopiesSplitRow[]
+    }>('/api/copies-record')
+    const byWhale = d.by_whale || []
+    const row = byWhale.find((w) => (w.whale || '').toLowerCase() === q)
+      || byWhale.find((w) => (w.whale || '').toLowerCase().includes(q))
+    if (!row) {
+      return JSON.stringify({
+        error: `No copied whale matching "${q}"`,
+        known: byWhale.map((w) => w.whale),
+      })
+    }
+    const name = row.whale
+    // daily_by_whale arrives newest-first from the API.
+    const days = (d.daily_by_whale || []).filter((r) => r.whale === name)
+    // Streak: consecutive most-recent trading days on the same side of
+    // flat; a break-even day ends it.
+    let streak = 0
+    let direction: 'winning' | 'losing' | 'flat' = 'flat'
+    for (const r of days) {
+      const pnl = Number(r.pnl) || 0
+      const side: 'winning' | 'losing' | 'flat' =
+        pnl > 0 ? 'winning' : pnl < 0 ? 'losing' : 'flat'
+      if (side === 'flat') break
+      if (direction === 'flat') direction = side
+      else if (side !== direction) break
+      streak++
+    }
+    const last7 = days.slice(0, 7)
+    const staked7 = last7.reduce((s, r) => s + (Number(r.staked) || 0), 0)
+    const pnl7 = last7.reduce((s, r) => s + (Number(r.pnl) || 0), 0)
+    return pack({
+      whale: name,
+      totals: row,
+      streak: { days: streak, direction },
+      roi_trend: {
+        overall: row.roi ?? null,
+        last_7d: staked7 ? Math.round((pnl7 / staked7) * 10000) / 10000 : null,
+        last_7d_pnl: pnl7,
+      },
+      recent_days: days.slice(0, 14).map((r) => ({
+        day: r.day, settled: r.settled, wins: r.wins, losses: r.losses,
+        pnl: r.pnl, staked: r.staked,
+      })),
+      by_sport: (d.by_whale_sport || [])
+        .filter((r) => r.whale === name)
+        .slice(0, 6)
+        .map((r) => ({ sport: r.sport, settled: r.settled, wins: r.wins,
+                       losses: r.losses, pnl: r.pnl, roi: r.roi ?? null })),
+    })
+  } catch (e) {
+    return fail('the copies record', e)
+  }
+}
+
 async function showMarkdownTool(input: Dict, ctx: ToolContext): Promise<string> {
   const title = String(input.title ?? 'JARVIS')
   const md = String(input.markdown ?? '')
@@ -525,6 +684,28 @@ async function leaveNote(input: Dict, ctx: ToolContext): Promise<string> {
       return JSON.stringify({ error: 'The admin token was rejected — Matt should re-enter it in JARVIS settings.' })
     }
     return fail('the notes bridge', e)
+  }
+}
+
+async function writeJournal(input: Dict, ctx: ToolContext): Promise<string> {
+  const entry = String(input.entry ?? '').trim()
+  if (!entry) return JSON.stringify({ error: 'entry is empty' })
+  if (!ctx.adminToken) return NEED_TOKEN
+  const mood = input.mood === 'focused' || input.mood === 'alert' ? input.mood : 'steady'
+  try {
+    const r = await adminApi<{ ok: boolean; new: boolean | null; error?: string }>(
+      '/api/admin/meridian-journal', ctx.adminToken, {
+        method: 'POST', body: JSON.stringify({ entry, mood }),
+      })
+    if (r.ok === false) return JSON.stringify({ error: r.error || 'the journal refused the entry' })
+    return pack({
+      written: true, mood,
+      note: r.new === false || r.new === null
+        ? 'An identical entry already existed — nothing new was added.'
+        : 'Written. It shows on the page and folds into your future context.',
+    })
+  } catch (e) {
+    return fail('the journal', e)
   }
 }
 
@@ -659,6 +840,77 @@ async function getDeskBlotter(ctx: ToolContext): Promise<string> {
     })
   } catch (e) {
     return fail('the desk blotter', e)
+  }
+}
+
+async function priceHistory(input: Dict, ctx: ToolContext): Promise<string> {
+  if (!ctx.adminToken) return NEED_TOKEN
+  const venue = input.venue === 'kalshi' ? 'kalshi' : 'polymarket-us'
+  const id = String(input.id ?? '').trim()
+  if (!id) {
+    return JSON.stringify({
+      error: 'id is required — the Polymarket outcome asset id from search_desk_markets/get_accounts, or the Kalshi ticker',
+    })
+  }
+  const hours = Math.min(336, Math.max(1, Math.round(Number(input.hours) || 24)))
+  try {
+    const r = await adminApi<{ points: { t: number; p: number }[]; error?: string }>(
+      `/api/desk/history?venue=${venue}&id=${encodeURIComponent(id)}&hours=${hours}`,
+      ctx.adminToken)
+    const pts = (r.points || [])
+      .filter((q) => q && Number.isFinite(q.t) && Number.isFinite(q.p))
+    if (!pts.length) {
+      return JSON.stringify({ venue, id, hours, points: [],
+        note: r.error
+          ? `The venue returned no history (${r.error}) — say which market you couldn't chart.`
+          : 'No price history for that market yet.' })
+    }
+    // ≤40 evenly spaced points in cents with short labels — the series
+    // drops straight into show_chart as-is.
+    const step = Math.max(1, Math.ceil(pts.length / 40))
+    const sampled = pts.filter((_, i) => i % step === 0 || i === pts.length - 1)
+    const label = (t: number) => {
+      const dt = new Date(t * 1000)
+      return hours <= 48
+        ? dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: false })
+        : dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
+    }
+    const cents = (p: number) => Math.round(p * 100)
+    const ys = pts.map((q) => q.p)
+    const first = cents(ys[0])
+    const last = cents(ys[ys.length - 1])
+    return pack({
+      venue, id, hours,
+      points: sampled.map((q) => ({ x: label(q.t), y: cents(q.p) })),
+      summary: {
+        first_c: first, last_c: last, change_c: last - first,
+        high_c: cents(Math.max(...ys)), low_c: cents(Math.min(...ys)),
+        raw_points: pts.length,
+      },
+      note: 'Prices are in CENTS. To draw: show_chart {kind:"line", title: the market, series:[{name: the outcome, values: points}]} — then speak ONE takeaway.',
+    })
+  } catch (e) {
+    return fail('the price history', e)
+  }
+}
+
+async function cancelDeskOrder(input: Dict, ctx: ToolContext): Promise<string> {
+  if (!ctx.adminToken) return NEED_TOKEN
+  const id = Math.floor(Number(input.id))
+  if (!(id > 0)) {
+    return JSON.stringify({ error: 'id must be the numeric order id from get_desk_blotter' })
+  }
+  try {
+    const r = await adminApi<Dict>(`/api/desk/manual-order/${id}`, ctx.adminToken, {
+      method: 'DELETE',
+    })
+    if (r.ok === false) {
+      return pack({ cancelled: false, id, error: r.error,
+        note: 'The relay already picked it up — the order is at the venue; the blotter shows its live status.' })
+    }
+    return pack({ cancelled: true, id })
+  } catch (e) {
+    return fail('the desk order cancel', e)
   }
 }
 
@@ -894,11 +1146,15 @@ export function createToolExecutor(ctx: ToolContext) {
       case 'get_report': return getReport(input, ctx)
       case 'show_report': return showReport(input, ctx)
       case 'get_engine_status': return getEngineStatus()
+      case 'get_engine_diagnostics': return getEngineDiagnostics()
       case 'get_whale': return getWhale(input)
+      case 'whale_deep_dive': return whaleDeepDive(input)
       case 'show_markdown': return showMarkdownTool(input, ctx)
       case 'get_daily_series': return getDailySeries(input)
       case 'show_chart': return showChart(input, ctx)
       case 'request_code_change': return requestCodeChange(input, ctx)
+      case 'price_history': return priceHistory(input, ctx)
+      case 'cancel_desk_order': return cancelDeskOrder(input, ctx)
       case 'search_desk_markets': return searchDeskMarkets(input, ctx)
       case 'get_accounts': return getAccounts(ctx)
       case 'get_desk_blotter': return getDeskBlotter(ctx)
@@ -907,6 +1163,7 @@ export function createToolExecutor(ctx: ToolContext) {
       case 'confirm_staged_order': return confirmStagedOrder(ctx)
       case 'cancel_staged_order': return cancelStagedOrder(ctx)
       case 'leave_note_for_engine_session': return leaveNote(input, ctx)
+      case 'write_journal': return writeJournal(input, ctx)
       default: return JSON.stringify({ error: `Unknown tool: ${name}` })
     }
   }

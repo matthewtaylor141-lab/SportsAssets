@@ -417,6 +417,13 @@ export function TrackRecord() {
                   {today >= 0 ? '▲' : '▼'} {fmtSignedUsd(today)} today
                 </span>
               )}
+              {data.kalshi_included && data.venues?.kalshi && (
+                <div className="tr-venue-split mono">
+                  Polymarket {fmtSignedUsd(data.venues.polymarket?.pnl ?? 0)}
+                  {' '}· Kalshi {fmtSignedUsd(data.venues.kalshi.pnl ?? 0)}
+                  {' '}— both venues, one record
+                </div>
+              )}
             </div>
           </div>
           <div className="tr-stat" onMouseMove={tilt} onMouseLeave={untilt}>

@@ -1509,3 +1509,6 @@ body {
 /* Analytics: per-whale form sparkline. */
 .an-spark { width: 120px; height: 28px; display: block; }
 .an-table td { vertical-align: middle; }
+
+/* Venue split under the hero foot (Kalshi copy sleeve merged 2026-08-22) */
+.tr-venue-split { margin-top: 6px; font-size: 11px; color: var(--muted); letter-spacing: .02em; }

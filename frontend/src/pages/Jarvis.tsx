@@ -149,7 +149,7 @@ function trimHistory(msgs: MessageParam[]): void {
 /* ── small shared types ──────────────────────────────────────────────── */
 
 interface TurnLog { role: 'user' | 'assistant'; text: string; at: number }
-interface PanelState { title: string; kind: 'md' | 'pdf' | 'chart'; body: string }
+interface PanelState { id: number; title: string; kind: 'md' | 'pdf' | 'chart'; body: string }
 interface Pills {
   loaded: boolean
   pnl: number | null
@@ -168,11 +168,14 @@ const TOOL_NOTES: Record<string, string> = {
   get_report: 'Building the report…',
   show_report: 'Bringing the report up…',
   get_engine_status: 'Checking the engine…',
+  get_engine_diagnostics: 'Reading the engine vitals…',
   get_whale: 'Looking that whale up…',
+  whale_deep_dive: 'Going deep on that whale…',
   show_markdown: 'Putting it on screen…',
   leave_note_for_engine_session: 'Leaving the note…',
   get_daily_series: 'Pulling the daily numbers…',
   show_chart: 'Drawing the chart…',
+  price_history: 'Pulling the price history…',
   request_code_change: 'Filing the work order…',
   search_desk_markets: 'Searching the desk…',
   get_accounts: 'Opening the book…',
@@ -181,7 +184,15 @@ const TOOL_NOTES: Record<string, string> = {
   stage_cash_out: 'Staging the cash-out…',
   confirm_staged_order: 'Placing the order…',
   cancel_staged_order: 'Tearing the ticket up…',
+  cancel_desk_order: 'Cancelling that order…',
+  write_journal: 'Writing the journal…',
 }
+
+/** MICRO-ACKS: one short canned line spoken when a tool round leaves
+ * >1.2s of dead air — the silence otherwise reads as a hang. At most
+ * one per turn, never over real speech, never after a barge-in. */
+const ACK_LINES = ['Pulling that now.', 'One second.', 'Checking the book.']
+const ACK_DELAY_MS = 1200
 
 // The presence answers to its chosen name first; "jarvis" stays for
 // muscle memory, and "claude" because that is who is actually here.
@@ -208,12 +219,26 @@ export default function Jarvis() {
   const [liveText, setLiveText] = useState('')
   const [log, setLog] = useState<TurnLog[]>([])
   const [hint, setHint] = useState('')
-  const [panel, setPanel] = useState<PanelState | null>(null)
+  /** Panel STACK: chart + markdown + pdf coexist (one of each kind, max
+   * 3), newest on top, each dismissible. show_chart/show_report PUSH —
+   * a new chart no longer wipes the table beside it. */
+  const [panels, setPanels] = useState<PanelState[]>([])
+  const panelSeqRef = useRef(0)
+  const pushPanel = useCallback((p: Omit<PanelState, 'id'>) => {
+    setPanels((prev) =>
+      [...prev.filter((q) => q.kind !== p.kind),
+       { ...p, id: ++panelSeqRef.current }].slice(-3))
+  }, [])
+  const closePanel = useCallback((id: number) => {
+    setPanels((prev) => prev.filter((p) => p.id !== id))
+  }, [])
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [typed, setTyped] = useState('')
   const [pills, setPills] = useState<Pills>({
     loaded: false, pnl: null, settled: null, wins: null, armed: null, paused: false, engineAgeS: null,
   })
+  /** Open positions with unrealized P&L, cycled by the exposure ribbon. */
+  const [exposure, setExposure] = useState<string[]>([])
   const [journal, setJournal] = useState<{ entry: string; mood: string; at: string } | null>(null)
   /** Last few journal entries, folded into the system prompt — the
    * presence references its own written continuity. */
@@ -283,10 +308,10 @@ export default function Jarvis() {
         `**${new Date(e.at).toLocaleDateString('en-US', {
           month: 'long', day: 'numeric',
         })}** · _${e.mood}_\n\n${e.entry}`).join('\n\n---\n\n')
-      setPanel({ title: 'MERIDIAN — journal', kind: 'md',
-                 body: md || '_No entries yet._' })
+      pushPanel({ title: 'MERIDIAN — journal', kind: 'md',
+                  body: md || '_No entries yet._' })
     } catch { /* the card itself still shows the latest */ }
-  }, [])
+  }, [pushPanel])
 
   // Restore memory: seed the recap from the mirrored record on mount.
   useEffect(() => {
@@ -309,6 +334,10 @@ export default function Jarvis() {
   /** Set on barge-in: the interrupted turn keeps streaming captions but must
    * not enqueue any further speech. Cleared when the next turn starts. */
   const mutedRef = useRef(false)
+  /** Micro-ack bookkeeping: the pending dead-air timer and whether this
+   * turn already spoke its single ack. */
+  const ackTimerRef = useRef<number | null>(null)
+  const ackSpokenRef = useRef(false)
   /** Set when Matt cut MERIDIAN off mid-sentence; the next turn carries a
    * history marker so the reply acknowledges it and gets shorter. */
   const bargedRef = useRef(false)
@@ -389,6 +418,11 @@ export default function Jarvis() {
     setHint('')
     setBusy(true)
     mutedRef.current = false
+    ackSpokenRef.current = false
+    if (ackTimerRef.current != null) {
+      window.clearTimeout(ackTimerRef.current)
+      ackTimerRef.current = null
+    }
 
     const chunker = makeChunker((s) => { if (!mutedRef.current) mouth.speak(s) })
     try {
@@ -401,15 +435,15 @@ export default function Jarvis() {
         executeTool: createToolExecutor({
           adminToken: config.adminToken,
           ui: {
-            showMarkdown: (title, md) => setPanel({ title, kind: 'md', body: md }),
+            showMarkdown: (title, md) => pushPanel({ title, kind: 'md', body: md }),
             showChart: (spec) => {
               const parsed = parseChartSpec(spec)
               if (!parsed) return false
-              setPanel({ title: parsed.title || 'Chart', kind: 'chart',
-                         body: JSON.stringify(parsed) })
+              pushPanel({ title: parsed.title || 'Chart', kind: 'chart',
+                          body: JSON.stringify(parsed) })
               return true
             },
-            showPdf: (title, url) => setPanel({ title, kind: 'pdf', body: url }),
+            showPdf: (title, url) => pushPanel({ title, kind: 'pdf', body: url }),
             stageTicket: (t) => { stagedRef.current = t; setStagedView(t) },
           },
           getStaged: () => stagedRef.current,
@@ -423,7 +457,23 @@ export default function Jarvis() {
         }),
         signal: ctrl.signal,
         onTextDelta: (d) => { setLiveText((p) => p + d); chunker.push(d) },
-        onToolUse: (name) => setHint(TOOL_NOTES[name] || `Running ${name}…`),
+        onToolUse: (name) => {
+          setHint(TOOL_NOTES[name] || `Running ${name}…`)
+          // MICRO-ACK: if the tool round leaves >1.2s of dead air, say
+          // one short canned line through the normal mouth queue. Fires
+          // only while THIS turn is live, never over real speech, never
+          // after a barge-in, and at most once per turn.
+          if (!ackSpokenRef.current && ackTimerRef.current == null) {
+            ackTimerRef.current = window.setTimeout(() => {
+              ackTimerRef.current = null
+              if (ackSpokenRef.current || mutedRef.current) return
+              if (abortRef.current !== ctrl) return // turn ended or superseded
+              if (mouth.speaking) return           // real speech covers the gap
+              ackSpokenRef.current = true
+              mouth.speak(ACK_LINES[Math.floor(Math.random() * ACK_LINES.length)])
+            }, ACK_DELAY_MS)
+          }
+        },
       })
       chunker.flush()
       setHint('')
@@ -442,7 +492,13 @@ export default function Jarvis() {
       mouth.speak(spokenMsg)
       setLog((l) => [...l, { role: 'assistant', text: `${spokenMsg} (${detail})`, at: Date.now() }])
     } finally {
-      if (abortRef.current === ctrl) setBusy(false)
+      if (abortRef.current === ctrl) {
+        setBusy(false)
+        if (ackTimerRef.current != null) {
+          window.clearTimeout(ackTimerRef.current)
+          ackTimerRef.current = null
+        }
+      }
     }
   }, [])
 
@@ -574,8 +630,15 @@ export default function Jarvis() {
         // Account awareness: with a desk-capable token, "how much cash do
         // we have" answers straight from the snapshot — zero tool calls.
         token
-          ? adminApi<{ totals: { value: number; cash: number; unrealized: number } }>(
-              '/api/desk/accounts', token).catch(() => null)
+          ? adminApi<{
+              totals: { value: number; cash: number; unrealized: number }
+              polymarket?: { positions?: {
+                title: string | null; outcome: string | null; unrealized: number | null
+              }[] }
+              kalshi?: { positions?: {
+                ticker: string | null; cost_usd: number | null; unrealized: number | null
+              }[] }
+            }>('/api/desk/accounts', token).catch(() => null)
           : Promise.resolve(null),
       ])
       if (dead) return
@@ -599,6 +662,27 @@ export default function Jarvis() {
         live && `copy engine: ${live.paused ? 'PAUSED' : live.enabled ? 'armed' : 'off'}`,
         engine?.beat_at && `edge engine heartbeat: ${Math.max(0, Math.round((Date.now() - new Date(engine.beat_at).getTime()) / 1000))}s ago`,
       ].filter(Boolean).join(' | ')
+      // EXPOSURE RIBBON: every open position with its unrealized P&L
+      // cycles under the core — the book stays in the room even when
+      // nobody is asking about it.
+      const held: string[] = []
+      for (const p of accounts?.polymarket?.positions || []) {
+        const label = (p.outcome || p.title || '').slice(0, 26)
+        if (!label) continue
+        held.push(p.unrealized != null
+          ? `${label} ${p.unrealized >= 0 ? '+' : '−'}$${Math.abs(p.unrealized).toFixed(0)}`
+          : `${label} · open`)
+      }
+      for (const p of accounts?.kalshi?.positions || []) {
+        if (!p.ticker) continue
+        const label = p.ticker.slice(0, 26)
+        held.push(p.unrealized != null
+          ? `${label} ${p.unrealized >= 0 ? '+' : '−'}$${Math.abs(p.unrealized).toFixed(0)}`
+          : p.cost_usd != null
+            ? `${label} · $${Math.round(p.cost_usd)} in`
+            : `${label} · open`)
+      }
+      setExposure(held.slice(0, 12))
       setPills({
         loaded: !!(today || live || engine),
         pnl: today ? today.pnl : null,
@@ -697,7 +781,7 @@ export default function Jarvis() {
       </header>
 
       {/* ── stage ── */}
-      <div className={`jv-stage${panel ? ' jv-with-panel' : ''}`}>
+      <div className={`jv-stage${panels.length > 0 ? ' jv-with-panel' : ''}`}>
         <Starfield />
         <div className="jv-orb-wrap">
           <HudRing state={avatarState} />
@@ -707,6 +791,11 @@ export default function Jarvis() {
           <BootSequence />
         </div>
         <TelemetryRibbon items={ribbon} />
+        {exposure.length > 0 && (
+          <div className="jv-exposure" aria-hidden>
+            <TelemetryRibbon items={exposure} />
+          </div>
+        )}
         {journal && (
           <aside className="jv-journal" aria-label="Journal" role="button"
                  tabIndex={0}
@@ -824,25 +913,32 @@ export default function Jarvis() {
         </div>
       </div>
 
-      {/* ── report panel ── */}
-      {panel && (
-        <aside className="jv-panel">
-          <header className="jv-panel-head">
-            <span className="jv-panel-title">{panel.title}</span>
-            {panel.kind === 'pdf' && (
-              <a className="jv-panel-open" href={panel.body} target="_blank" rel="noopener noreferrer">
-                open ↗
-              </a>
-            )}
-            <button className="jv-iconbtn" aria-label="Close report" onClick={() => setPanel(null)}>✕</button>
-          </header>
-          {panel.kind === 'md' ? (
-            <div className="jv-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(panel.body) }} />
-          ) : panel.kind === 'chart' ? (
-            (() => { const sp = parseChartSpec(panel.body); return sp ? <MeridianChart spec={sp} /> : null })()
-          ) : (
-            <PdfFrame url={panel.body} title={panel.title} />
-          )}
+      {/* ── report panels (stack: newest on top, each dismissible) ── */}
+      {panels.length > 0 && (
+        <aside className="jv-panels" data-count={panels.length}>
+          {[...panels].reverse().map((p) => (
+            <article className="jv-panel" key={p.id}>
+              <header className="jv-panel-head">
+                <span className="jv-panel-title">{p.title}</span>
+                {p.kind === 'pdf' && (
+                  <a className="jv-panel-open" href={p.body} target="_blank" rel="noopener noreferrer">
+                    open ↗
+                  </a>
+                )}
+                <button className="jv-iconbtn" aria-label={`Close ${p.title}`}
+                        onClick={() => closePanel(p.id)}>✕</button>
+              </header>
+              {p.kind === 'md' ? (
+                <div className="jv-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(p.body) }} />
+              ) : p.kind === 'chart' ? (
+                <div className="jv-panel-chart">
+                  {(() => { const sp = parseChartSpec(p.body); return sp ? <MeridianChart spec={sp} /> : null })()}
+                </div>
+              ) : (
+                <PdfFrame url={p.body} title={p.title} />
+              )}
+            </article>
+          ))}
         </aside>
       )}
 

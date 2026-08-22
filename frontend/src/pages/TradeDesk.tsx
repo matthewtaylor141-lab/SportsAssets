@@ -5,6 +5,10 @@ import {
   DESK_RELOCK_EVENT, deskAdminToken, deskApi, deskToken, deskUnlock,
   type DeskAccounts,
 } from '../lib/desk'
+import {
+  PriceChart, Sparkline, fetchHistory, useDeskHistory,
+  type HistoryPoint, type HistoryVenue,
+} from '../components/PriceChart'
 import '../styles/desk2.css'
 
 // Desk v6 (owner order 2026-08-22, on top of the v5 venue skins): the
@@ -113,6 +117,8 @@ const kalshiFee = (count: number, price: number) =>
 
 const LEAGUES: { key: string; label: string; icon: string }[] = [
   { key: 'all', label: 'All', icon: '' },
+  // Wave-2: the full open universe on both venues, not just sports.
+  { key: 'everything', label: 'Everything', icon: '🌐' },
   { key: 'tennis', label: 'Tennis', icon: '🎾' },
   { key: 'mlb', label: 'MLB', icon: '⚾' },
   { key: 'soccer', label: 'Soccer', icon: '⚽' },
@@ -126,6 +132,61 @@ const SPORT_NAME: Record<string, string> = {
   mlb: 'BASEBALL', wnba: 'BASKETBALL', nba: 'BASKETBALL',
   nfl: 'FOOTBALL', nhl: 'HOCKEY', tennis: 'TENNIS',
   soccer: 'SOCCER', esports: 'ESPORTS',
+}
+
+// ── Lazy card sparklines (Wave-2) ────────────────────────────────────
+// A browse/search card only fetches history once it scrolls into view
+// (IntersectionObserver, 120px lookahead), through a 12-slot limiter so
+// a big grid never floods the API, into a ref-map cache owned by the
+// page — re-renders and revisits are free. Read-only decoration: an
+// error just leaves the reserved slot empty.
+const SPARK_MAX = 12
+let sparkActive = 0
+const sparkQ: (() => void)[] = []
+const sparkNext = () => {
+  if (sparkActive >= SPARK_MAX) return
+  const job = sparkQ.shift()
+  if (job) { sparkActive++; job() }
+}
+const sparkSlot = <T,>(job: () => Promise<T>): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    sparkQ.push(() => {
+      job().then(resolve, reject).finally(() => { sparkActive--; sparkNext() })
+    })
+    sparkNext()
+  })
+
+function Spark({ venue, id, cacheRef }: {
+  venue: HistoryVenue
+  id: string
+  cacheRef: { current: Map<string, HistoryPoint[]> }
+}) {
+  const key = `${venue}|${id}`
+  const boxRef = useRef<HTMLSpanElement | null>(null)
+  const [pts, setPts] = useState<HistoryPoint[] | null>(
+    () => cacheRef.current.get(key) || null)
+  useEffect(() => {
+    const cached = cacheRef.current.get(key)
+    if (cached) { setPts(cached); return }
+    const el = boxRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    let dead = false
+    const io = new IntersectionObserver((entries) => {
+      if (!entries.some((x) => x.isIntersecting)) return
+      io.disconnect()
+      sparkSlot(() => fetchHistory(venue, id, 24))
+        .then((p) => { cacheRef.current.set(key, p); if (!dead) setPts(p) })
+        .catch(() => { cacheRef.current.set(key, []); if (!dead) setPts([]) })
+    }, { rootMargin: '120px' })
+    io.observe(el)
+    return () => { dead = true; io.disconnect() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key])
+  return (
+    <span className="pc-spark" ref={boxRef}>
+      {pts && pts.length >= 2 ? <Sparkline points={pts} /> : null}
+    </span>
+  )
 }
 
 export function TradeDesk() {
@@ -167,6 +228,24 @@ export function TradeDesk() {
   const coLinkDone = useRef(false)
 
   const isK = venue === 'kalshi'
+
+  // ── Price history (Wave-2): venue + id straight from the pick ────
+  // One hook feeds both the game-view chart and the compact ticket
+  // chart (fetchHistory dedupes the wire call); 60s refresh inside.
+  const [histHours, setHistHours] = useState<24 | 168>(24)
+  const sparkCache = useRef(new Map<string, HistoryPoint[]>())
+  const histVenue: HistoryVenue | undefined =
+    pick ? (pick.venue === 'polymarket' ? 'polymarket-us' : 'kalshi') : undefined
+  const histId = pick ? (pick.venue === 'polymarket' ? pick.asset : pick.ticker) : undefined
+  const histPoints = useDeskHistory(histVenue, histId, histHours)
+  // Cash-out modal chart: Kalshi positions are addressable by ticker;
+  // Polymarket positions only carry the market slug (no token id for
+  // the history API), so the modal chart is Kalshi-only for now and
+  // hides gracefully otherwise.
+  const coHistId = co?.venue === 'kalshi' ? co.ticker : undefined
+  const coHistPoints = useDeskHistory(coHistId ? 'kalshi' : undefined, coHistId, 24)
+  const coEntry = co && co.cost != null && co.cost > 0 && co.held > 0
+    ? co.cost / co.held : null
 
   const loadBlotter = useCallback(() => {
     deskApi<Blotter>('/api/admin/manual-trades').then(setBlotter).catch(() => {})
@@ -820,6 +899,10 @@ export function TradeDesk() {
               </div>
             )}
 
+            {histId && (
+              <PriceChart points={histPoints} hours={histHours} compact />
+            )}
+
             <div className="dx-amount">
               <span className="dx-amount-label">Amount</span>
               <input
@@ -975,6 +1058,10 @@ export function TradeDesk() {
         <button className="kx-more" onClick={() => openGame(g)}>
           {g.markets_n ? `${g.markets_n} markets` : 'All markets'}
         </button>
+        {(() => {
+          const t = g.outcomes.find((o) => o.ticker)?.ticker
+          return t ? <Spark venue="kalshi" id={t} cacheRef={sparkCache} /> : null
+        })()}
       </div>
     </div>
   )
@@ -1017,6 +1104,10 @@ export function TradeDesk() {
           <button className="pmx-more" onClick={() => openGame(g)}>
             {g.markets_n ? `${g.markets_n} markets →` : 'All markets →'}
           </button>
+          {(() => {
+            const a = g.outcomes.find((x) => x.asset)?.asset
+            return a ? <Spark venue="polymarket-us" id={a} cacheRef={sparkCache} /> : null
+          })()}
         </div>
       </div>
     )
@@ -1027,6 +1118,25 @@ export function TradeDesk() {
     <div className={isK ? 'kx-game' : 'pmx-game'}>
       <button className="dx-back" onClick={() => { setGame(null) }}>← Back to all games</button>
       <h2 className="dx-game-title">{game.title}</h2>
+
+      {pick && histId && pick.label === game.title && (
+        <div className="pc-block">
+          <div className="pc-head">
+            <span className="pc-title">
+              {pick.side}
+              {isK && pick.kalshiSide === 'no' ? ' · market yes price' : ''}
+              {' — price history'}
+            </span>
+            <div className="pc-hours" role="group" aria-label="History range">
+              <button className={histHours === 24 ? 'on' : ''}
+                      onClick={() => setHistHours(24)}>24h</button>
+              <button className={histHours === 168 ? 'on' : ''}
+                      onClick={() => setHistHours(168)}>7d</button>
+            </div>
+          </div>
+          <PriceChart points={histPoints} hours={histHours} />
+        </div>
+      )}
 
       {game.positions.length > 0 && (
         <div className="dx-pos">
@@ -1123,6 +1233,9 @@ export function TradeDesk() {
                 >{pct(m.no_ask)}</button>
               </div>
             </div>
+            <div className="kx-card-foot">
+              <Spark venue="kalshi" id={m.ticker} cacheRef={sparkCache} />
+            </div>
           </div>
         ))}
         {kResults.length === 0 && !searching && (
@@ -1151,6 +1264,11 @@ export function TradeDesk() {
                 >Yes {cents(o.ask)}</button>
               </div>
             ))}
+            {m.outcomes[0]?.asset && (
+              <div className="pmx-card-foot">
+                <Spark venue="polymarket-us" id={m.outcomes[0].asset} cacheRef={sparkCache} />
+              </div>
+            )}
           </div>
         ))}
         {pmResults.length === 0 && !searching && (
@@ -1343,6 +1461,13 @@ export function TradeDesk() {
                 <span>Protective limit</span>
                 <b>{coLimit != null ? `${cents(coLimit)} (bid − 2¢)` : 'bid − 2¢ at execution'}</b>
               </div>
+
+              {coHistId && (
+                <PriceChart
+                  points={coHistPoints} hours={24} entry={coEntry} compact
+                  caption={coEntry != null ? 'Last 24h · entry marked' : 'Last 24h'}
+                />
+              )}
 
               <div className="dxm-qty">
                 <button

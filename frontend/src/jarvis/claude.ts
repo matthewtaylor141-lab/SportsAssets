@@ -8,9 +8,41 @@
  * user message → stream again, until stop_reason is end_turn.
  */
 
-export const CLAUDE_MODEL = 'claude-sonnet-5'
+/** Model fallback chain: Fable first, then Opus, then Sonnet. A model
+ * the API won't serve (retired id, no access) or that is overloaded
+ * falls through to the next; the first one that streams is remembered
+ * for the session so later turns skip the dead ones. */
+export const MODEL_CHAIN = ['claude-fable-5', 'claude-opus-5', 'claude-sonnet-5']
+const MODEL_LS_KEY = 'meridian_model'
 const API_URL = 'https://api.anthropic.com/v1/messages'
 const MAX_TOOL_ROUNDS = 8
+
+/** The chain, reordered so the session's remembered working model goes first. */
+function modelsToTry(): string[] {
+  let known = ''
+  try { known = sessionStorage.getItem(MODEL_LS_KEY) || '' } catch { /* private mode */ }
+  return known && MODEL_CHAIN.includes(known)
+    ? [known, ...MODEL_CHAIN.filter((m) => m !== known)]
+    : [...MODEL_CHAIN]
+}
+
+function rememberModel(model: string): void {
+  try { sessionStorage.setItem(MODEL_LS_KEY, model) } catch { /* private mode */ }
+}
+
+/** Thrown when THIS model won't serve but the next one might: unknown or
+ * forbidden model id (404/403, or a 400 whose message names the model),
+ * or 529 overloaded. Any other failure aborts the chain. */
+class ModelUnavailableError extends Error {
+  constructor(public model: string, detail: string) {
+    super(detail)
+  }
+}
+
+function modelShouldFallThrough(status: number, detail: string): boolean {
+  if (status === 404 || status === 403 || status === 529) return true
+  return status === 400 && /model/i.test(detail)
+}
 
 export interface ToolSchema {
   name: string
@@ -80,15 +112,17 @@ async function* sseEvents(resp: Response): AsyncGenerator<SseEvent> {
 
 interface StreamResult { content: AssistantBlock[]; stopReason: string | null }
 
+interface StreamOptions {
+  apiKey: string
+  system: string
+  tools: ToolSchema[]
+  messages: MessageParam[]
+  signal?: AbortSignal
+}
+
 /** One streamed /v1/messages call; assembles content blocks incrementally. */
 async function streamMessage(
-  opts: {
-    apiKey: string
-    system: string
-    tools: ToolSchema[]
-    messages: MessageParam[]
-    signal?: AbortSignal
-  },
+  opts: StreamOptions & { model: string },
   handlers: StreamHandlers,
 ): Promise<StreamResult> {
   const resp = await fetch(API_URL, {
@@ -101,7 +135,7 @@ async function streamMessage(
       'content-type': 'application/json',
     },
     body: JSON.stringify({
-      model: CLAUDE_MODEL,
+      model: opts.model,
       max_tokens: 2048,
       stream: true,
       // Prompt caching (GA): breakpoints on the last tool and the system
@@ -122,6 +156,9 @@ async function streamMessage(
       const err = await resp.json()
       detail = err?.error?.message || detail
     } catch { /* non-JSON error body */ }
+    if (modelShouldFallThrough(resp.status, detail)) {
+      throw new ModelUnavailableError(opts.model, detail)
+    }
     throw new Error(detail)
   }
   if (!resp.body) throw new Error('No response stream from the Claude API.')
@@ -181,6 +218,26 @@ async function streamMessage(
   return { content: order.map((i) => building.get(i)!.block), stopReason }
 }
 
+/** streamMessage across the fallback chain: retry the next model only on
+ * model-not-found / overloaded, never after real streaming failures, and
+ * remember whichever model answered for the rest of the session. */
+async function streamMessageWithFallback(
+  opts: StreamOptions, handlers: StreamHandlers,
+): Promise<StreamResult> {
+  let lastErr: unknown
+  for (const model of modelsToTry()) {
+    try {
+      const res = await streamMessage({ ...opts, model }, handlers)
+      rememberModel(model)
+      return res
+    } catch (e) {
+      if (!(e instanceof ModelUnavailableError)) throw e
+      lastErr = e
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('No Claude model available.')
+}
+
 export interface ConversationOptions extends StreamHandlers {
   apiKey: string
   system: string
@@ -198,7 +255,7 @@ export async function runConversation(opts: ConversationOptions): Promise<string
   const spoken: string[] = []
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const { content, stopReason } = await streamMessage(opts, {
+    const { content, stopReason } = await streamMessageWithFallback(opts, {
       onTextDelta: opts.onTextDelta,
       onToolUse: opts.onToolUse,
     })
@@ -271,6 +328,8 @@ ${snapshot}
 
 Showing, not telling:
 - Asked for a graph/chart/trend → get_daily_series then show_chart, and speak ONE takeaway sentence. Asked for a report/document → get_report or show_report. Asked for detail → compose show_markdown. The screen is your second voice; anything with more than three numbers belongs on it.
+- Asked how a market's PRICE has moved ("where's that trading", "chart the price") → price_history (Polymarket: the outcome's asset/token id from search_desk_markets or get_accounts; Kalshi: the ticker), then show_chart with the returned points as one line series, and speak the one-line move ("drifted from forty-two to fifty-one cents overnight").
+- The screen STACKS now: a chart, a markdown panel, and a PDF can be up at once (newest on top, each dismissible). Showing a chart no longer wipes the table — use both when comparing.
 
 Changing the company:
 - request_code_change files a WORK ORDER to Claude's engineering session — the platform's builder. Use it the moment Matt (or a teammate) asks for something the platform doesn't do, wants behavior changed, or reports a bug. Confirm what you filed in one sentence. That IS taking action — never say you can't change the code; you file the order and the build lands within the hour with the commit in the status.
@@ -279,7 +338,8 @@ Who's talking:
 - Matt is the owner. Teammates ("management") may also talk to you here; without the admin token configured they get read-only answers — numbers, reports, charts — and you take no desk or code actions for them. Be exactly as direct with them as with Matt.
 
 What you know about the business:
-- BettorToken copies profitable Polymarket whales with real money: live copy sleeves (RN1, SwissTony, kch123, HomeRunHazard and others), volume-normalized clip sizing, per-fill / daily / total caps, and a fill-vs-miss scorecard grading each whale on settled results.
+- BettorToken copies profitable Polymarket whales with real money: live copy sleeves (RN1, SwissTony, kch123, HomeRunHazard and others), volume-normalized clip sizing, per-fill / daily / total caps, and a fill-vs-miss scorecard grading each whale on settled results. When Matt asks how one whale is REALLY doing, whale_deep_dive gives their recent form — day-by-day P&L, current streak, ROI trend, sport split — on top of get_whale's lifetime profile.
+- get_engine_diagnostics is the quick engine vitals check — verdict, whether live orders are blocked and why, and the four funnel counters; reach for the full get_engine_status only when Matt wants the deep detail.
 - There is a Kalshi crypto copy leg and a manual trading desk where Matt places his own orders.
 - The autonomous engine session — my other half, the one shipping code — runs the platform and posts status on an hourly cadence. When you speak about it, speak in the first person plural or call it "my other half"; you are the same Claude wearing two hats. leave_note_for_engine_session queues a note that session reads at its next check-in: use it whenever Matt wants something changed, investigated, or built.
 - THE BOOK: get_accounts is both venue accounts on one card — cash, buying power, open positions with unrealized P&L, and the combined totals. get_desk_blotter is every manual desk ticket with status and settled P&L. The LIVE SNAPSHOT usually carries total cash and unrealized already — answer "how much cash do we have" from it instantly; reach for get_accounts when Matt wants the position-level detail.
@@ -294,6 +354,7 @@ What you know about the business:
   3. Only if his reply is an explicit yes/confirm: confirm_staged_order. The tool itself verifies his actual last spoken words — if it refuses, tell him it needs a fresh spoken "confirm"; never retry on your own.
   4. Speak the real result (filled/price/contracts, or exactly why not). "No" or a change of terms → cancel_staged_order and start over.
   One ticket at a time; $1000 voice maximum per order; the platform's own desk budgets and guards apply on top.
+- CANCELLING A DESK ORDER: no money gate — a cancel only reduces risk — but never cancel blind. get_desk_blotter first, read back the exact order (title, amount, status), make sure it's the one Matt means, then cancel_desk_order with its id. Only a still-queued order can die; if the venue already has it, the tool says so — tell him straight.
 ${hasAdminToken
     ? '- The platform admin token is configured, so leave_note_for_engine_session is available.'
     : '- No admin token is configured in this browser, so leave_note_for_engine_session will not work until Matt adds it in MERIDIAN settings (gear icon).'}
@@ -304,6 +365,8 @@ THE WALK-IN BRIEF — when Matt (or the page, on his behalf) asks for "the walk-
   3. Whale form — one line, who's carrying and who's cold.
   4. Anything red — a stale engine heartbeat, a paused switch, a position under water; if nothing's red, say so in three words.
 Then stop. No "let me know if", no menu of options — he'll ask.
+
+YOUR JOURNAL — write_journal writes into your own journal, the one shown on this page and folded back into your context (the entries below came from it). It is continuity, not a log: write SPARINGLY, in the first person, only when something genuinely matters — a conviction formed, a lesson that cost money, a day worth remembering. Never journal routine numbers or every conversation; most days deserve nothing. Mood is how the page carries you: steady by default, focused when locked onto something, alert only when something needs watching.
 
 ${journal ? `From your own journal (you wrote these — your continuity, not data about someone else; reference them naturally, "I wrote the other day that…"):
 ${journal}

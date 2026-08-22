@@ -196,6 +196,69 @@
   .dxm-cta, .dxm-all { min-height: 46px; }
 }
 
+/* ── Wave-2: price history charts (components/PriceChart.tsx) ──────
+   The SVG carries no literal colors — every mark reads a --pc-* slot.
+   Defaults map the dark app theme tokens (--s1/--ink/--muted); inside
+   the light .vdesk skins (the cash-out .dxm modal lives inside .vdesk
+   and re-scopes --vda-*/--vd-* itself) the same slots remap to the
+   venue inks, so one chart is legible on every desk surface. */
+.pc-chart, .pc-sparkline {
+  --pc-accent: var(--s1, #3987e5);
+  --pc-t-ink: var(--ink, #f4f5f2);
+  --pc-t-mut: var(--muted, #8b8983);
+  --pc-t-grid: rgba(244, 245, 242, 0.08);
+  --pc-tip-bg: rgba(10, 16, 24, 0.95);
+  --pc-tip-line: rgba(244, 245, 242, 0.18);
+  --pc-dot-ring: #101216;
+}
+.vdesk .pc-chart, .vdesk .pc-sparkline {
+  --pc-accent: var(--vda-ink, #1d3fb8);
+  --pc-t-ink: var(--vd-ink);
+  --pc-t-mut: var(--vd-mut);
+  --pc-t-grid: var(--vd-line);
+  --pc-tip-bg: rgba(255, 255, 255, 0.97);
+  --pc-tip-line: var(--vd-line);
+  --pc-dot-ring: var(--vd-bg);
+}
+.pc-chart { margin: 0; }
+.pc-chart svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
+.pc-chart figcaption {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--pc-t-mut); margin-bottom: 4px;
+}
+.pc-chart .pc-line { stroke: var(--pc-accent); }
+.pc-chart .pc-grid { stroke: var(--pc-t-grid); }
+.pc-chart .pc-entry { stroke: var(--pc-t-mut); }
+.pc-chart .pc-cross { stroke: var(--pc-t-mut); opacity: 0.55; }
+.pc-chart .pc-dot { fill: var(--pc-accent); stroke: var(--pc-dot-ring); }
+.pc-chart .pc-tip { fill: var(--pc-tip-bg); stroke: var(--pc-tip-line); }
+.pc-chart .pc-ink { fill: var(--pc-t-ink); }
+.pc-chart .pc-mut { fill: var(--pc-t-mut); }
+.pc-note { color: var(--pc-t-mut, var(--vd-mut, #6b7280)); font-size: 12.5px; padding: 8px 0; }
+
+/* Game-view chart block + 24h/7d toggle */
+.pc-block { border: 1px solid var(--vd-line); border-radius: 12px; padding: 12px 14px; margin: 0 0 14px; background: var(--vd-bg); }
+.pc-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.pc-head .pc-title {
+  font-size: 11px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--vd-mut); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pc-hours { display: flex; gap: 4px; flex: none; }
+.pc-hours button {
+  border: 1px solid var(--vd-line); background: transparent; color: var(--vd-mut);
+  border-radius: 999px; padding: 3px 10px; font-size: 11.5px; font-weight: 700; cursor: pointer;
+}
+.pc-hours button.on { border-color: var(--vda); background: var(--vda-soft); color: var(--vda-ink); }
+
+/* Compact ticket / modal variant */
+.pc-chart.compact { border: 1px solid var(--vd-line); border-radius: 10px; padding: 8px 8px 4px; }
+
+/* Sparkline slot on browse/search cards (reserved height, no jump) */
+.pc-spark { display: block; width: 120px; height: 36px; flex: none; margin-left: auto; }
+.pc-sparkline { display: block; opacity: 0.9; }
+.pc-sparkline .pc-line { stroke: var(--pc-accent); }
+.kx-card-foot, .pmx-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+
 /* ── Bottom-sheet ticket on phones (overrides theme.css static) ──── */
 @media (max-width: 720px) {
   .vdesk .vd-rail.has-pick .pmx-ticket,

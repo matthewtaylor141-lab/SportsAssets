@@ -246,6 +246,13 @@ export interface CopiesRecord {
   open?: { count: number; stake: number }
   trades?: CopiesTrade[]
   today?: { pnl: number; settled: number; wins: number; losses: number }
+  /** Per-venue split — kalshi is null until the engine export lands. */
+  venues?: {
+    polymarket?: { pnl: number; staked: number; settled: number } | null
+    kalshi?: { pnl: number; staked: number; settled: number } | null
+  }
+  /** True when the Kalshi copy sleeve is merged into the totals. */
+  kalshi_included?: boolean
 }
 
 export function useCopiesRecord(refreshMs = 30_000) {

@@ -244,6 +244,21 @@
   transition: opacity 380ms ease, transform 380ms ease;
 }
 .jv-ribbon-out { opacity: 0; transform: translateY(4px); }
+
+/* ── exposure ribbon: the open book cycling under the telemetry ──── */
+.jv-exposure .jv-ribbon {
+  margin-top: 0;
+  padding: 0 0 10px;
+  font-size: 10px;
+  letter-spacing: 0.24em;
+  color: rgba(232, 200, 119, 0.55);
+}
+.jv-exposure .jv-ribbon-rule {
+  width: min(64px, 9vw);
+  background: linear-gradient(90deg, transparent,
+              rgba(232, 200, 119, 0.3), transparent);
+}
+.jv-exposure .jv-ribbon-text { text-shadow: 0 0 12px rgba(232, 200, 119, 0.25); }
 .jv-state {
   position: absolute;
   left: 0;
@@ -433,13 +448,11 @@
   font-size: 10px;
 }
 
-/* ── report panel + transcript drawer ─────────────────────────────────── */
+/* ── report panels (stack) + transcript drawer ────────────────────────── */
 
-.jv-panel,
+.jv-panels,
 .jv-drawer {
   position: absolute;
-  display: flex;
-  flex-direction: column;
   background: var(--jv-surface);
   border: 1px solid var(--jv-border);
   backdrop-filter: blur(18px);
@@ -447,9 +460,25 @@
   z-index: 65;
   box-shadow: 0 12px 60px rgba(0, 0, 0, 0.55);
 }
+.jv-drawer { display: flex; flex-direction: column; }
+
+/* The stack: 1–3 panels split the sheet/column as equal grid rows,
+ * newest rendered first (on top), each with its own close button. */
+.jv-panels { display: grid; grid-template-rows: minmax(0, 1fr); }
+.jv-panels[data-count="2"] { grid-template-rows: repeat(2, minmax(0, 1fr)); }
+.jv-panels[data-count="3"] { grid-template-rows: repeat(3, minmax(0, 1fr)); }
+
+.jv-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.jv-panel + .jv-panel { border-top: 1px solid var(--jv-border); }
+.jv-panel-chart { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 6px; }
 
 /* mobile-first: slide-up sheets */
-.jv-panel,
+.jv-panels,
 .jv-drawer {
   left: 0;
   right: 0;
@@ -459,6 +488,8 @@
   animation: jv-rise 0.26s ease;
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
+.jv-panels[data-count="2"] { height: 84vh; }
+.jv-panels[data-count="3"] { height: 92vh; }
 
 @keyframes jv-rise {
   from { transform: translateY(24px); opacity: 0; }
@@ -673,7 +704,9 @@
 /* ── desktop ──────────────────────────────────────────────────────────── */
 
 @media (min-width: 761px) {
-  .jv-panel {
+  .jv-panels,
+  .jv-panels[data-count="2"],
+  .jv-panels[data-count="3"] {
     left: auto;
     top: 0;
     bottom: 0;
@@ -720,7 +753,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .jv-mic-live { animation: none; }
-  .jv-panel, .jv-drawer { animation: none; }
+  .jv-panels, .jv-drawer { animation: none; }
   .jv-stage { transition: none; }
   .jv-root * { transition-duration: 0.01ms !important; }
 }
