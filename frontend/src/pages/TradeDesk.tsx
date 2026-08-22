@@ -51,6 +51,9 @@ interface OrderRun {
   ms?: number
   rowId?: number
   fillPrice?: number | null
+  // Display-grade only: the ask (buys) / bid (sells) shown at submit,
+  // so the FILLED state can show fill-vs-quote slippage in cents.
+  quotedPx?: number | null
   filledShares?: number
   filledUsd?: number
   requestedUsd?: number
@@ -213,6 +216,10 @@ export function TradeDesk() {
   const [pmResults, setPmResults] = useState<PMSearchMarket[]>([])
   const [kResults, setKResults] = useState<KalshiSearchRow[]>([])
   const [acct, setAcct] = useState<DeskAccounts | null>(null)
+  const [acctAt, setAcctAt] = useState<number | null>(null)
+  const [acctDown, setAcctDown] = useState(false)
+  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
+  const [sheetDrag, setSheetDrag] = useState(0)
   const [co, setCo] = useState<CoTarget | null>(null)
   const [coQty, setCoQty] = useState('')
   const [coAll, setCoAll] = useState(true)
@@ -226,6 +233,10 @@ export function TradeDesk() {
   const coPollRef = useRef<number | null>(null)
   const coPlacingRef = useRef(false)
   const coLinkDone = useRef(false)
+  const toastTimer = useRef<number | null>(null)
+  const dragYRef = useRef<number | null>(null)
+  const prevRunPhase = useRef<Phase | null>(null)
+  const prevCoPhase = useRef<Phase | null>(null)
 
   const isK = venue === 'kalshi'
 
@@ -252,7 +263,9 @@ export function TradeDesk() {
   }, [])
 
   const loadAcct = useCallback(() => {
-    deskApi<DeskAccounts>('/api/desk/accounts').then(setAcct).catch(() => {})
+    deskApi<DeskAccounts>('/api/desk/accounts')
+      .then((d) => { setAcct(d); setAcctAt(Date.now()); setAcctDown(false) })
+      .catch(() => setAcctDown(true))
   }, [])
 
   // ── Desk session gate ────────────────────────────────────────────
@@ -443,7 +456,10 @@ export function TradeDesk() {
     if (!(amount > 0)) { setErr('Enter a dollar amount.'); return }
     placingRef.current = true
     const t0 = performance.now()
-    setRun({ phase: 'submitting', t0, title: pick.label, outcome: pick.side })
+    setRun({
+      phase: 'submitting', t0, title: pick.label, outcome: pick.side,
+      quotedPx: pick.ask > 0 ? pick.ask : null,
+    })
     try {
       const body = pick.venue === 'polymarket'
         ? { venue: 'polymarket-us', asset: pick.asset || '', us_slug: pick.usSlug || '', ask: pick.ask, title: `${pick.label} — ${pick.side}`, usd: amount }
@@ -565,7 +581,7 @@ export function TradeDesk() {
     coPlacingRef.current = true
     const t0 = performance.now()
     const requested = coCount
-    setCoRun({ phase: 'submitting', t0, title: co.title, outcome: co.outcome })
+    setCoRun({ phase: 'submitting', t0, title: co.title, outcome: co.outcome, quotedPx: coBid })
     try {
       const body: Record<string, unknown> = co.venue === 'polymarket'
         ? { venue: 'polymarket-us', us_slug: co.usSlug || '', outcome: co.outcome || '' }
@@ -580,7 +596,10 @@ export function TradeDesk() {
       loadBlotter()
       if (r.ok && r.queued && r.row_id) {
         if (r.quoted_bid != null) setCoBid(r.quoted_bid)
-        setCoRun((prev) => prev && ({ ...prev, phase: 'relaying', rowId: r.row_id }))
+        setCoRun((prev) => prev && ({
+          ...prev, phase: 'relaying', rowId: r.row_id,
+          quotedPx: r.quoted_bid ?? prev.quotedPx,
+        }))
         watchCoRow(r.row_id, t0, r.count ?? requested)
       } else if (r.ok && (r.filled_shares ?? 0) > 0) {
         const partial = r.filled_shares < requested
@@ -682,6 +701,83 @@ export function TradeDesk() {
   const busy = run?.phase === 'submitting' || run?.phase === 'relaying'
   const coBusy = coInFlight()
 
+  // ── Presentation pulses (v7 portal skin — no money-path changes) ──
+  // 1s clock re-render drives the "synced Ns ago" age in the portal
+  // strip; a 100ms ticker runs ONLY while an order is in flight and
+  // feeds the live execution clock in the timeline.
+  const [, setClockTick] = useState(0)
+  useEffect(() => {
+    if (!authed) return
+    const t = window.setInterval(() => setClockTick((c) => c + 1), 1000)
+    return () => window.clearInterval(t)
+  }, [authed])
+
+  const [execNow, setExecNow] = useState(0)
+  useEffect(() => {
+    if (!(busy || coBusy)) return
+    setExecNow(performance.now())
+    const t = window.setInterval(() => setExecNow(performance.now()), 100)
+    return () => window.clearInterval(t)
+  }, [busy, coBusy])
+
+  // Result toasts + a 30ms haptic tap, observed from run/coRun phase
+  // transitions — the placing/polling callbacks stay untouched.
+  const fireToast = (msg: string, ok: boolean) => {
+    if (toastTimer.current != null) window.clearTimeout(toastTimer.current)
+    setToast({ msg, ok })
+    toastTimer.current = window.setTimeout(() => setToast(null), 3800)
+  }
+  const buzz = () => {
+    try { navigator.vibrate?.(30) } catch { /* not supported */ }
+  }
+  useEffect(() => () => {
+    if (toastTimer.current != null) window.clearTimeout(toastTimer.current)
+  }, [])
+
+  useEffect(() => {
+    const p = run?.phase ?? null
+    if (p === prevRunPhase.current) return
+    prevRunPhase.current = p
+    if (p === 'filled' || p === 'partial') {
+      buzz()
+      fireToast(
+        `${p === 'partial' ? 'Partially filled' : 'Filled'} · ${Math.round(run?.filledShares || 0)} @ ${cents(run?.fillPrice)}${run?.ms != null ? ` · ${(run.ms / 1000).toFixed(1)}s` : ''}`,
+        true)
+    } else if (p === 'unfilled') {
+      buzz(); fireToast('Not filled — the book moved. Nothing was spent.', false)
+    } else if (p === 'error') {
+      buzz(); fireToast('Order not placed — see the ticket for details.', false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run?.phase])
+
+  useEffect(() => {
+    const p = coRun?.phase ?? null
+    if (p === prevCoPhase.current) return
+    prevCoPhase.current = p
+    if (p === 'filled' || p === 'partial') {
+      buzz()
+      fireToast(
+        `${p === 'partial' ? 'Partially cashed out' : 'Cashed out'} · ${Math.round(coRun?.filledShares || 0)} @ ${cents(coRun?.fillPrice)} · ${money(coRun?.filledUsd)}`,
+        true)
+    } else if (p === 'unfilled') {
+      buzz(); fireToast('Not sold — the book moved. You still hold the position.', false)
+    } else if (p === 'error') {
+      buzz(); fireToast('Cash-out refused — see the modal for details.', false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coRun?.phase])
+
+  const acctAgeS = acctAt == null ? null : Math.max(0, Math.round((Date.now() - acctAt) / 1000))
+  // Bottom-sheet dismissal (mobile scrim tap / drag-down). Locked while
+  // any order is in flight — same visibility rule the CTA already uses.
+  const sheetOpen = !!pick || side === 'sell'
+  const dismissSheet = () => {
+    if (busy || coBusy) return
+    setPick(null)
+    if (side === 'sell') setSide('buy')
+  }
+
   const sportTag = (lg: string) => SPORT_NAME[lg] || 'SPORTS'
   const countFor = (lg: string) => counts[venue]?.[lg]
 
@@ -721,6 +817,10 @@ export function TradeDesk() {
             <span className="dx-spin" />
             {kal ? 'AI counterparty relaying to Kalshi…' : 'AI counterparty executing on Polymarket…'}
           </div>
+          <div className="dx-run-clock">
+            <span>live execution clock</span>
+            <b>{(Math.max(0, (execNow || performance.now()) - r.t0) / 1000).toFixed(2)}s</b>
+          </div>
         </>
       )}
       {(r.phase === 'filled' || r.phase === 'partial') && (
@@ -739,6 +839,22 @@ export function TradeDesk() {
               : r.requestedUsd
                 ? ` of ${money(r.requestedUsd)} requested (book depth at your price)` : '')}
           </div>
+          {r.quotedPx != null && r.fillPrice != null && (() => {
+            const d = Math.round((r.fillPrice! - r.quotedPx!) * 100)
+            const better = sell ? d > 0 : d < 0
+            return (
+              <div className="dx-run-slip">
+                quoted {cents(r.quotedPx)} → filled {cents(r.fillPrice)} ·{' '}
+                {d === 0
+                  ? <b>on quote — zero slippage</b>
+                  : (
+                    <b className={better ? 'pos' : 'neg'}>
+                      {Math.abs(d)}¢ {better ? 'price improvement' : 'slippage'}
+                    </b>
+                  )}
+              </div>
+            )
+          })()}
           {r.ms != null && (
             <div className="dx-run-lat">executed by the AI in {(r.ms / 1000).toFixed(1)}s</div>
           )}
@@ -768,7 +884,9 @@ export function TradeDesk() {
   const sellList = (
     <div className="dx-sellpos">
       {!acct ? (
-        <p className="vd-empty">Loading account positions…</p>
+        <div className="dx-skel-rows bare" aria-label="Loading account positions">
+          <div className="tr-skel" /><div className="tr-skel" /><div className="tr-skel" />
+        </div>
       ) : venuePositions.length === 0 ? (
         <p className="vd-empty">
           No open {isK ? 'Kalshi' : 'Polymarket'} positions on the account.
@@ -813,7 +931,9 @@ export function TradeDesk() {
         </div>
       )}
       {!acct ? (
-        <div className="dx-acct-empty">Loading account snapshot…</div>
+        <div className="dx-skel-rows" aria-label="Loading account snapshot">
+          <div className="tr-skel" /><div className="tr-skel" /><div className="tr-skel" />
+        </div>
       ) : venuePositions.length === 0 ? (
         <div className="dx-acct-empty">No open positions on this account.</div>
       ) : venuePositions.map((t) => (
@@ -860,8 +980,30 @@ export function TradeDesk() {
   const bestAsk = depth?.asks?.[0]?.[0]
 
   const rail = (
-    <aside className={`vd-rail${pick || side === 'sell' ? ' has-pick' : ''}`}>
-      <div className={isK ? 'kx-ticket' : 'pmx-ticket'}>
+    <aside className={`vd-rail${sheetOpen ? ' has-pick' : ''}`}>
+      {sheetOpen && <div className="dx-sheet-scrim" onClick={dismissSheet} aria-hidden="true" />}
+      <div
+        className={isK ? 'kx-ticket' : 'pmx-ticket'}
+        style={sheetDrag > 0 ? { transform: `translateY(${sheetDrag}px)`, transition: 'none' } : undefined}
+      >
+        <div
+          className="dx-sheet-handle"
+          aria-hidden="true"
+          onTouchStart={(e) => { dragYRef.current = e.touches[0].clientY }}
+          onTouchMove={(e) => {
+            if (dragYRef.current == null) return
+            const d = e.touches[0].clientY - dragYRef.current
+            setSheetDrag(d > 0 ? d : 0)
+          }}
+          onTouchEnd={() => {
+            const d = sheetDrag
+            dragYRef.current = null
+            setSheetDrag(0)
+            if (d > 90) dismissSheet()
+          }}
+        >
+          <span />
+        </div>
         <div className="dx-tabs">
           <button className={`dx-tab${side === 'buy' ? ' on' : ''}`} onClick={() => setSide('buy')}>Buy</button>
           <button className={`dx-tab${side === 'sell' ? ' on' : ''}`} onClick={() => setSide('sell')}>Sell</button>
@@ -1316,21 +1458,48 @@ export function TradeDesk() {
 
   return (
     <>
-      <div className="vd-pagehead">
-        <h1>Trade Desk</h1>
-        <div className="vd-venues">
-          {(['polymarket', 'kalshi'] as Venue[]).map((v) => (
-            <button
-              key={v}
-              className={`vd-venue${venue === v ? ' on' : ''} ${v}`}
-              onClick={() => {
-                if (inFlight()) return
-                setVenue(v); setGame(null); setPick(null); setQ(''); setRun(null)
-              }}
-            >
-              {v === 'polymarket' ? 'Polymarket' : 'Kalshi'} mode
-            </button>
-          ))}
+      <div className="dx-topbar">
+        <div className="vd-pagehead">
+          <h1>Trade Desk</h1>
+          {acct && (
+            <span className="dx-cap" title="Live account capital">
+              <small>capital</small>
+              <b>{isK
+                ? money(acct.kalshi.balance_usd)
+                : money(acct.polymarket.cash ?? acct.polymarket.trading_capital)}</b>
+            </span>
+          )}
+          <div className="vd-venues">
+            {(['polymarket', 'kalshi'] as Venue[]).map((v) => (
+              <button
+                key={v}
+                className={`vd-venue${venue === v ? ' on' : ''} ${v}`}
+                onClick={() => {
+                  if (inFlight()) return
+                  setVenue(v); setGame(null); setPick(null); setQ(''); setRun(null)
+                }}
+              >
+                {v === 'polymarket' ? 'Polymarket' : 'Kalshi'} mode
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className={`dx-conn${acctDown ? ' down' : ''} ${isK ? 'k' : 'pm'}`} role="status">
+          <span className="dx-conn-dot" />
+          <span className="dx-conn-txt">
+            {acctDown ? (
+              <><b>RECONNECTING</b> · live {isK ? 'Kalshi' : 'Polymarket'} account feed
+                unreachable — retrying</>
+            ) : (
+              <><b>LIVE</b> · connected to the real {isK ? 'Kalshi' : 'Polymarket'} account
+                · executed by the AI trader</>
+            )}
+          </span>
+          <span className="dx-conn-age">
+            {acctDown ? 'retrying every 30s'
+              : acctAgeS == null ? 'syncing…'
+                : acctAgeS < 3 ? 'synced just now' : `synced ${acctAgeS}s ago`}
+          </span>
         </div>
       </div>
       <p style={{ opacity: 0.75, marginTop: 0 }}>
@@ -1393,7 +1562,10 @@ export function TradeDesk() {
               </div>
               {q.trim().length >= 2 ? searchBlock : game ? gameView : (
                 loading && games.length === 0 ? (
-                  <div className="tr-skel" style={{ height: 220, borderRadius: 12 }} />
+                  <div className="dx-skel-grid" aria-label="Loading markets">
+                    <div className="tr-skel" /><div className="tr-skel" />
+                    <div className="tr-skel" /><div className="tr-skel" />
+                  </div>
                 ) : (
                   <div className="kx-list">{games.map(kCard)}</div>
                 )
@@ -1428,7 +1600,10 @@ export function TradeDesk() {
               <main className="pmx-main">
                 {q.trim().length >= 2 ? searchBlock : game ? gameView : (
                   loading && games.length === 0 ? (
-                    <div className="tr-skel" style={{ height: 220, borderRadius: 12 }} />
+                    <div className="dx-skel-grid" aria-label="Loading markets">
+                    <div className="tr-skel" /><div className="tr-skel" />
+                    <div className="tr-skel" /><div className="tr-skel" />
+                  </div>
                   ) : (
                     <div className="pmx-grid">{games.map(pCard)}</div>
                   )
@@ -1552,7 +1727,46 @@ export function TradeDesk() {
         </div>
         {cancelErr && blotTab === 'open' && <p className="dk-gate-err">{cancelErr}</p>}
         {blotRows.length > 0 ? (
-          <div className="rpt-table-wrap">
+          <>
+          {/* Phone: same rows as touch cards (table hidden <720px). */}
+          <div className="dx-blot-cards">
+            {blotRows.map((t) => {
+              const m = blotTab === 'open' ? rowMark(t) : { mark: null, unrl: null }
+              return (
+                <div className="dx-blot-card" key={t.id}>
+                  <div className="dx-blot-card-top">
+                    <b>{t.title}</b>
+                    <span className={`dx-blot-st ${t.status}`}>{t.status}</span>
+                  </div>
+                  <div className="dx-blot-card-sub">
+                    {t.outcome || '—'} · {t.venue || 'polymarket'}
+                    {t.placed_at ? ` · ${new Date(t.placed_at).toLocaleTimeString()}` : ''}
+                  </div>
+                  <div className="dx-blot-nums">
+                    <span>Cost <b>{money(t.filled_usd || t.requested_usd)}</b></span>
+                    {blotTab === 'open' && <span>Mark <b>{cents(m.mark)}</b></span>}
+                    {blotTab === 'open' && (
+                      <span>Unrl <b className={(m.unrl ?? 0) > 0 ? 'pos' : (m.unrl ?? 0) < 0 ? 'neg' : ''}>
+                        {signed(m.unrl)}
+                      </b></span>
+                    )}
+                    <span>P&L <b className={(t.pnl ?? 0) > 0 ? 'pos' : (t.pnl ?? 0) < 0 ? 'neg' : ''}>
+                      {money(t.pnl)}
+                    </b></span>
+                  </div>
+                  {t.error && <div className="dx-blot-err">{t.error.slice(0, 80)}</div>}
+                  {blotTab === 'open' && cancellable(t) && (
+                    <button
+                      className="dx-cancel"
+                      disabled={cancelling != null}
+                      onClick={() => cancelRow(t.id)}
+                    >{cancelling === t.id ? 'Cancelling…' : 'Cancel'}</button>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+          <div className="rpt-table-wrap dx-blot-table">
             <table className="rpt-table">
               <thead>
                 <tr>
@@ -1600,8 +1814,17 @@ export function TradeDesk() {
               </tbody>
             </table>
           </div>
+          </>
+        ) : !blotter ? (
+          <div className="dx-skel-rows bare" aria-label="Loading trades">
+            <div className="tr-skel" /><div className="tr-skel" /><div className="tr-skel" />
+          </div>
         ) : <p style={{ opacity: 0.6 }}>{blotTab === 'open' ? 'No open positions.' : 'No settled trades yet.'}</p>}
       </div>
+
+      {toast && (
+        <div className={`dx-toast${toast.ok ? '' : ' bad'}`} role="status">{toast.msg}</div>
+      )}
     </>
   )
 }

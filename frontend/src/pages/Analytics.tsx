@@ -172,6 +172,9 @@ function WhaleForm({ whales, dailyByWhale }: {
         <span>PER-WHALE FORM</span>
         <span className="muted">curve = cumulative P&amp;L, recent window</span>
       </div>
+      {/* an-scroll: on phones the table scrolls inside the card instead of
+          stretching the page — the body never scrolls horizontally. */}
+      <div className="an-scroll">
       <table className="an-table">
         <thead>
           <tr><th></th><th>form</th><th>settled</th><th>W–L</th><th>staked</th><th>P&amp;L</th><th>ROI</th></tr>
@@ -192,6 +195,7 @@ function WhaleForm({ whales, dailyByWhale }: {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   )
 }
@@ -215,6 +219,7 @@ function SportRoi({ rows }: { rows: CopiesWhaleSport[] }) {
         <span>ROI BY SPORT</span>
         <span className="muted">groups under n={MIN_N} report the sample, not a verdict</span>
       </div>
+      <div className="an-scroll">
       <table className="an-table">
         <thead>
           <tr><th></th><th>settled</th><th>W–L</th><th>staked</th><th></th><th>P&amp;L</th><th>ROI</th></tr>
@@ -245,6 +250,7 @@ function SportRoi({ rows }: { rows: CopiesWhaleSport[] }) {
           })}
         </tbody>
       </table>
+      </div>
     </div>
   )
 }
@@ -258,6 +264,7 @@ function WhaleSportTable({ rows }: { rows: CopiesWhaleSport[] }) {
         <span>WHALE × SPORT</span>
         <span className="muted">every cell of the copy record</span>
       </div>
+      <div className="an-scroll">
       <table className="an-table">
         <thead>
           <tr><th>whale</th><th>sport</th><th>settled</th><th>W–L</th><th>staked</th><th>P&amp;L</th><th>ROI</th></tr>
@@ -281,6 +288,7 @@ function WhaleSportTable({ rows }: { rows: CopiesWhaleSport[] }) {
           })}
         </tbody>
       </table>
+      </div>
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   DESK_RELOCK_EVENT, deskApi, deskAuthed, deskUnlock,
@@ -46,6 +46,22 @@ export function Accounts() {
   const [loadErr, setLoadErr] = useState('')
   const [pmTab, setPmTab] = useState<'positions' | 'trades'>('positions')
   const navigate = useNavigate()
+
+  // Compact sticky summary: once the combined tiles scroll out under
+  // the 52px nav, a condensed totals bar takes over. Display-only.
+  const headRef = useRef<HTMLDivElement | null>(null)
+  const [stuck, setStuck] = useState(false)
+  const hasData = data != null
+  useEffect(() => {
+    const el = headRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver(
+      ([e]) => setStuck(!e.isIntersecting),
+      { rootMargin: '-56px 0px 0px 0px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [hasData])
 
   useEffect(() => {
     const relock = () => { setAuthed(false); setData(null) }
@@ -117,8 +133,19 @@ export function Accounts() {
         exactly as the venues report them. Cash out routes through the desk ticket.
       </p>
 
+      {data && stuck && (
+        <div className="ac-sticky" role="status">
+          <span>Total <b>{money(data.totals.value)}</b></span>
+          <span>{data.totals.cash != null ? 'Cash' : 'Capital'}{' '}
+            <b>{money(data.totals.cash ?? data.totals.trading_capital)}</b></span>
+          <span>Unrl <b className={pnlCls(data.totals.unrealized)}>
+            {signed(data.totals.unrealized)}
+          </b></span>
+        </div>
+      )}
+
       {data && (
-        <div className="ac-head">
+        <div className="ac-head" ref={headRef}>
           <div className="ac-tile">
             <div className="ac-tile-l">Total value</div>
             <div className="ac-tile-v mono">{money(data.totals.value)}</div>
@@ -148,8 +175,17 @@ export function Accounts() {
           as of {new Date(data.as_of).toLocaleTimeString()} · refreshes every 30s
         </p>
       )}
+      {loadErr && data && (
+        <div className="ac-degraded">{loadErr} Showing the last good snapshot.</div>
+      )}
       {loadErr && !data && <div className="card"><p className="ac-empty">{loadErr}</p></div>}
-      {!data && !loadErr && <div className="tr-skel" style={{ height: 260, borderRadius: 12 }} />}
+      {!data && !loadErr && (
+        <div className="ac-skel" aria-label="Loading accounts">
+          <div className="tr-skel" style={{ height: 72 }} />
+          <div className="tr-skel" style={{ height: 72 }} />
+          <div className="tr-skel" style={{ height: 240 }} />
+        </div>
+      )}
 
       {data && (
         <div className="ac-venues">

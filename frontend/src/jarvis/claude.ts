@@ -16,6 +16,12 @@ export const MODEL_CHAIN = ['claude-fable-5', 'claude-opus-5', 'claude-sonnet-5'
 const MODEL_LS_KEY = 'meridian_model'
 const API_URL = 'https://api.anthropic.com/v1/messages'
 const MAX_TOOL_ROUNDS = 8
+/** Completion cap. Raised from 2048 for the on-screen outputs — a
+ * show_markdown table or a 90-day show_chart spec is tool INPUT and
+ * spends from this same budget, and 2048 could truncate a long panel
+ * mid-JSON. Spoken turns stay tight because the prompt demands 2–4
+ * sentences — a cap is not what keeps the voice short. */
+const MAX_TOKENS = 8192
 
 /** The chain, reordered so the session's remembered working model goes first. */
 function modelsToTry(): string[] {
@@ -28,6 +34,13 @@ function modelsToTry(): string[] {
 
 function rememberModel(model: string): void {
   try { sessionStorage.setItem(MODEL_LS_KEY, model) } catch { /* private mode */ }
+}
+
+/** Which brain is live: the model that served this session's most recent
+ * successful stream, or '' before the first turn. The setup panel shows
+ * this so a fallback (Fable down → Opus answering) is never invisible. */
+export function liveModel(): string {
+  try { return sessionStorage.getItem(MODEL_LS_KEY) || '' } catch { return '' }
 }
 
 /** Thrown when THIS model won't serve but the next one might: unknown or
@@ -136,7 +149,7 @@ async function streamMessage(
     },
     body: JSON.stringify({
       model: opts.model,
-      max_tokens: 2048,
+      max_tokens: MAX_TOKENS,
       stream: true,
       // Prompt caching (GA): breakpoints on the last tool and the system
       // block cache the whole tools+system prefix. Within a multi-round

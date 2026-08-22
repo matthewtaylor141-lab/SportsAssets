@@ -76,8 +76,17 @@ export function useDeskHistory(
 }
 
 // ── Geometry ───────────────────────────────────────────────────────
+// PHONE: a ~1:1 viewBox for narrow screens (iPhone standalone is the
+// primary surface) — at 640 units squeezed into ~358 CSS px the axis
+// text scales below legibility, so full charts pick their frame from
+// a one-shot matchMedia at mount.
 const FULL = { w: 640, h: 220, pad: { l: 40, r: 14, t: 14, b: 26 } }
+const PHONE = { w: 380, h: 190, pad: { l: 34, r: 12, t: 12, b: 24 } }
 const MINI = { w: 320, h: 124, pad: { l: 30, r: 10, t: 10, b: 18 } }
+const isNarrowViewport = () =>
+  typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(max-width: 720px)').matches
 
 const fmtWhen = (t: number, hours: number): string => {
   const d = new Date(t * 1000)
@@ -102,7 +111,8 @@ export function PriceChart({ points, hours, entry, compact, caption }: {
 }) {
   const [hover, setHover] = useState<number | null>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
-  const dim = compact ? MINI : FULL
+  const [narrow] = useState(isNarrowViewport)
+  const dim = compact ? MINI : narrow ? PHONE : FULL
   const { w: W, h: H, pad: PAD } = dim
 
   const model = useMemo(() => {

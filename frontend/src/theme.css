@@ -1512,3 +1512,143 @@ body {
 
 /* Venue split under the hero foot (Kalshi copy sleeve merged 2026-08-22) */
 .tr-venue-split { margin-top: 6px; font-size: 11px; color: var(--muted); letter-spacing: .02em; }
+
+/* ════════════════════════════════════════════════════════════════════
+   v7 — installable iPhone app shell (owner order 2026-08-22).
+   Same override-layer discipline as v3–v6: appended, cascade-winning,
+   reversible as one block. The standalone PWA (Add to Home Screen on
+   iOS Safari) is the PRIMARY experience: under 720px navigation moves
+   to a fixed bottom tab bar; desktop is untouched.
+   ════════════════════════════════════════════════════════════════════ */
+
+:root { --tabbar-h: 58px; }
+
+/* Status bar is black-translucent in standalone: the sticky header pads
+   itself down by the notch inset (env() is 0 in ordinary browser tabs). */
+.nav {
+  padding-top: env(safe-area-inset-top, 0px);
+  height: calc(58px + env(safe-area-inset-top, 0px));
+}
+
+/* Momentum scrolling on every horizontal scroller. */
+.scroll-x, .rpt-table-wrap, .an-scroll, .desk-chips, .kd-strip, .pd-tabs,
+.pmx-tabs, .cal-grid { -webkit-overflow-scrolling: touch; }
+.an-scroll { overflow-x: auto; }
+
+/* Hidden above the breakpoint: desktop keeps the top nav exactly as-is. */
+.tabbar, .sheet, .sheet-overlay { display: none; }
+
+@media (max-width: 719.98px) {
+  /* Top nav collapses to a brand strip; tabs live in the bottom bar. */
+  .nav a.tab, .nav .spacer { display: none; }
+  .nav { height: calc(48px + env(safe-area-inset-top, 0px)); justify-content: center; }
+
+  /* ── Bottom tab bar ── */
+  .tabbar {
+    display: flex; align-items: stretch;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    background: rgba(11, 12, 14, 0.82);
+    backdrop-filter: blur(18px) saturate(1.4);
+    -webkit-backdrop-filter: blur(18px) saturate(1.4);
+    border-top: 1px solid var(--border);
+    padding: 5px max(6px, env(safe-area-inset-right))
+             max(5px, env(safe-area-inset-bottom))
+             max(6px, env(safe-area-inset-left));
+  }
+  .tabbar-item {
+    flex: 1; min-height: 48px; min-width: 44px;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 2px;
+    background: none; border: none; border-radius: 10px;
+    color: var(--muted); font-family: inherit; font-size: 10px;
+    font-weight: 650; letter-spacing: 0.02em; text-decoration: none;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    transition: color 0.15s var(--ease), background 0.15s var(--ease),
+                transform 80ms ease;
+  }
+  .tabbar-item svg { display: block; }
+  .tabbar-item:active { transform: scale(0.94); }
+  .tabbar-item:hover { color: var(--ink-2); }
+  .tabbar-item.active { color: var(--accent); background: rgba(57, 135, 229, 0.1); }
+
+  /* ── More sheet (secondary destinations) ── */
+  .sheet-overlay {
+    display: block; position: fixed; inset: 0; z-index: 38;
+    background: rgba(5, 6, 8, 0.6); backdrop-filter: blur(2px);
+    animation: page-in 0.2s ease both;
+  }
+  .sheet {
+    display: flex; flex-direction: column; gap: 2px;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 39;
+    background: var(--surface);
+    border: 1px solid var(--border-strong); border-bottom: none;
+    border-radius: 18px 18px 0 0;
+    padding: 8px 14px calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 10px);
+    box-shadow: 0 -18px 60px rgba(0, 0, 0, 0.5);
+    animation: sheet-up 0.28s var(--ease) both;
+  }
+  .sheet-grab { width: 36px; height: 4px; border-radius: 2px; background: var(--baseline); margin: 2px auto 8px; }
+  .sheet-link {
+    display: flex; align-items: center; min-height: 48px; padding: 0 12px;
+    border-radius: 10px; font-size: 15px; font-weight: 600; color: var(--ink-2);
+  }
+  .sheet-link:active { background: var(--surface-2); }
+  .sheet-link.active { color: var(--accent); background: rgba(57, 135, 229, 0.1); }
+
+  /* Content and bottom-anchored surfaces clear the fixed bar. */
+  .main { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 28px); }
+  .desk-ticket { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 8px); }
+  .vd-ticket { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 8px); }
+
+  /* Standalone (installed) mode: the body class comes from App.tsx. */
+  body.standalone { overscroll-behavior-y: none; }
+  body.standalone .main {
+    padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 36px);
+  }
+}
+@keyframes sheet-up {
+  from { transform: translateY(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+/* ── 390px pass over the public pages (TrackRecord / Analytics) ── */
+@media (max-width: 640px) {
+  h1 { font-size: 20px; }
+  .main { padding-left: 12px; padding-right: 12px; }
+
+  /* Hero tiles stack cleanly with a tighter frame. */
+  .tr-hero { padding: 16px 14px 12px; }
+  .tr-stat { padding: 12px 14px; }
+  .tr-stat-value { font-size: 26px; }
+  .tr-name { font-size: 16px; }
+  .tr-hero-grid { gap: 10px; margin-top: 14px; }
+
+  /* Equity chart runs full-bleed to the hero edges. */
+  .tr-curve { margin-left: -14px; margin-right: -14px; }
+  .tr-curve svg { height: 160px; }
+  .tr-curve-tip { padding: 2px 14px; height: auto; min-height: 18px; flex-wrap: wrap; row-gap: 2px; }
+
+  /* Calendar scrolls horizontally inside its card — cells never crush. */
+  .cal-grid {
+    overflow-x: auto; padding-bottom: 6px;
+    grid-template-columns: repeat(7, minmax(52px, 1fr));
+  }
+
+  /* Ledger rows read as tappable cards. */
+  .tr-slip { border-radius: 12px; }
+  .tr-slip:hover { transform: none; }
+  .tr-slip-main { padding: 12px 14px; }
+  .tr-slip-title { white-space: normal; line-height: 1.35; }
+  .tr-more { min-height: 48px; }
+
+  /* Analytics: wide tables scroll inside their own cards, and the
+     equity/drawdown stage goes full-bleed like the hero curve. */
+  .an-scroll .an-table { min-width: 620px; }
+  .an-svg { margin-left: -14px; width: calc(100% + 28px); }
+  .an-cols { height: 120px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet, .sheet-overlay { animation: none !important; }
+  .tabbar-item { transition: none !important; }
+}

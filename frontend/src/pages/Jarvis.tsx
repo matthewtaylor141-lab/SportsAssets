@@ -12,7 +12,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { JarvisAvatar, type AvatarState } from '../jarvis/avatar'
 import { BootSequence, HudRing, Starfield, TelemetryRibbon } from '../jarvis/stage'
-import { buildSystemPrompt, runConversation, type MessageParam, type TextBlock, type ToolResultBlock } from '../jarvis/claude'
+import { buildSystemPrompt, liveModel, MODEL_CHAIN, runConversation, type MessageParam, type TextBlock, type ToolResultBlock } from '../jarvis/claude'
 import { MeridianChart, parseChartSpec } from '../jarvis/chart'
 import { renderMarkdown } from '../jarvis/markdown'
 import {
@@ -73,6 +73,88 @@ function saveConfig(c: JarvisConfig): void {
     // Mirror the admin token where the Desk/Ops pages already look for it.
     if (c.adminToken) sessionStorage.setItem('sa_admin_token', c.adminToken)
   } catch { /* private mode — session-only config */ }
+}
+
+/* ── pocket mode ─────────────────────────────────────────────────────── */
+
+/** POCKET MODE: the installed-PWA ("Add to Home Screen") or small-phone
+ * experience — the primary one. Standalone display OR a <720px viewport
+ * flips the whole page into the immersive pocket layout. */
+function detectPocket(): boolean {
+  try {
+    const standalone = window.matchMedia('(display-mode: standalone)').matches
+      || (navigator as unknown as { standalone?: boolean }).standalone === true
+    return standalone || window.innerWidth < 720
+  } catch { return false }
+}
+
+/* ── "on my mind": the page notices things by itself ─────────────────── */
+
+interface MindItem { line: string; ask: string }
+
+/** After each pills poll, pick the SINGLE most notable thing from the
+ * data the page already holds — pure local heuristic, zero extra API
+ * calls. Priority: engine health, paused switch, a position under
+ * water, the day's first settle, the biggest mover, an outsized day. */
+function pickOnMyMind(a: {
+  pnl: number | null
+  settled: number | null
+  prevSettled: number
+  paused: boolean
+  engineAgeS: number | null
+  positions: { label: string; unrealized: number }[]
+}): MindItem | null {
+  if (a.engineAgeS != null && a.engineAgeS >= 900) {
+    return {
+      line: `the engine heartbeat is ${Math.round(a.engineAgeS / 60)} minutes old — that's red`,
+      ask: 'The engine heartbeat looks stale — run the diagnostics and tell me what is wrong.',
+    }
+  }
+  if (a.engineAgeS != null && a.engineAgeS >= 180) {
+    return {
+      line: `the engine heartbeat is running amber — ${Math.round(a.engineAgeS / 60)}m since the last beat`,
+      ask: 'The engine heartbeat is amber — check the engine diagnostics.',
+    }
+  }
+  if (a.paused) {
+    return {
+      line: 'the copy engine is sitting paused',
+      ask: 'Why is the copy engine paused — and should it be?',
+    }
+  }
+  if (a.positions.length > 0) {
+    const worst = a.positions.reduce((b, p) => (p.unrealized < b.unrealized ? p : b))
+    if (worst.unrealized <= -40) {
+      return {
+        line: `${worst.label} is $${Math.abs(Math.round(worst.unrealized))} under water`,
+        ask: `How is our ${worst.label} position doing — should we cash out or hold?`,
+      }
+    }
+  }
+  if (a.prevSettled === 0 && (a.settled ?? 0) > 0) {
+    return {
+      line: `first settle of the day just landed${a.pnl != null
+        ? ` — ${a.pnl >= 0 ? 'up' : 'down'} $${Math.abs(Math.round(a.pnl))} so far` : ''}`,
+      ask: "What just settled? Walk me through today's fills.",
+    }
+  }
+  if (a.positions.length > 0) {
+    const big = a.positions.reduce((b, p) =>
+      (Math.abs(p.unrealized) > Math.abs(b.unrealized) ? p : b))
+    if (Math.abs(big.unrealized) >= 30) {
+      return {
+        line: `${big.label} is the biggest mover on the book, ${big.unrealized >= 0 ? '+' : '−'}$${Math.abs(Math.round(big.unrealized))} unrealized`,
+        ask: `Tell me about the ${big.label} position — what's moving it?`,
+      }
+    }
+  }
+  if (a.pnl != null && Math.abs(a.pnl) >= 250) {
+    return {
+      line: `we're ${a.pnl >= 0 ? 'up' : 'down'} $${Math.abs(Math.round(a.pnl))} on the day`,
+      ask: a.pnl >= 0 ? "What's driving today's gain?" : "What's driving today's drawdown?",
+    }
+  }
+  return null
 }
 
 /* ── sentence chunker: stream text → TTS-sized utterances ─────────────── */
@@ -233,6 +315,7 @@ export default function Jarvis() {
     setPanels((prev) => prev.filter((p) => p.id !== id))
   }, [])
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const drawerBodyRef = useRef<HTMLDivElement | null>(null)
   const [typed, setTyped] = useState('')
   const [pills, setPills] = useState<Pills>({
     loaded: false, pnl: null, settled: null, wins: null, armed: null, paused: false, engineAgeS: null,
@@ -240,6 +323,12 @@ export default function Jarvis() {
   /** Open positions with unrealized P&L, cycled by the exposure ribbon. */
   const [exposure, setExposure] = useState<string[]>([])
   const [journal, setJournal] = useState<{ entry: string; mood: string; at: string } | null>(null)
+  /** POCKET MODE: standalone PWA or small viewport → immersive layout. */
+  const [pocket, setPocket] = useState(detectPocket)
+  /** ON MY MIND: the one thing the page noticed for itself this poll. */
+  const [onMind, setOnMind] = useState<MindItem | null>(null)
+  /** The last mind-line Matt tapped to ask — don't resurface it. */
+  const mindAskedRef = useRef('')
   /** Last few journal entries, folded into the system prompt — the
    * presence references its own written continuity. */
   const journalRecapRef = useRef('')
@@ -266,6 +355,27 @@ export default function Jarvis() {
   }, [])
 
   const [sttOk] = useState(() => sttSupported())
+
+  // Pocket detection tracks rotation/resize and display-mode changes.
+  useEffect(() => {
+    const onChange = () => setPocket(detectPocket())
+    window.addEventListener('resize', onChange)
+    let mq: MediaQueryList | null = null
+    try {
+      mq = window.matchMedia('(display-mode: standalone)')
+      mq.addEventListener('change', onChange)
+    } catch { mq = null }
+    return () => {
+      window.removeEventListener('resize', onChange)
+      try { mq?.removeEventListener('change', onChange) } catch { /* noop */ }
+    }
+  }, [])
+
+  // The transcript sheet follows the conversation to the newest bubble.
+  useEffect(() => {
+    const el = drawerBodyRef.current
+    if (el && drawerOpen) el.scrollTop = el.scrollHeight
+  }, [log, liveText, drawerOpen])
 
   const mouthRef = useRef<Mouth | null>(null)
   const earsRef = useRef<Ears | null>(null)
@@ -425,6 +535,60 @@ export default function Jarvis() {
     }
 
     const chunker = makeChunker((s) => { if (!mutedRef.current) mouth.speak(s) })
+    const baseExecute = createToolExecutor({
+      adminToken: config.adminToken,
+      ui: {
+        showMarkdown: (title, md) => pushPanel({ title, kind: 'md', body: md }),
+        showChart: (spec) => {
+          const parsed = parseChartSpec(spec)
+          if (!parsed) return false
+          pushPanel({ title: parsed.title || 'Chart', kind: 'chart',
+                      body: JSON.stringify(parsed) })
+          return true
+        },
+        showPdf: (title, url) => pushPanel({ title, kind: 'pdf', body: url }),
+        stageTicket: (t) => { stagedRef.current = t; setStagedView(t) },
+      },
+      getStaged: () => stagedRef.current,
+      // THE MONEY GATE: read from the actual transcript, not the
+      // model's claim — the last thing Matt said (spoken or typed)
+      // must be an explicit confirmation no older than 90s.
+      lastUtteranceConfirms: () => {
+        const u = lastFinalRef.current
+        return Date.now() - u.at < 90000 && CONFIRM_RE.test(u.text)
+      },
+    })
+    // BRIEFING CINEMA: during the walk-in brief the P&L chart rises
+    // while the words land over it — the daily series is already inside
+    // the copies/track-record payload the brief fetches, so the page
+    // pushes the chart itself from the passing tool result. Zero extra
+    // API calls; a read-only observer, never touching the tool's result.
+    const wantsBrief = /walk[- ]?in brief/i.test(text)
+    let briefChartUp = false
+    const executeTool = !wantsBrief ? baseExecute
+      : async (name: string, input: unknown): Promise<string> => {
+          const out = await baseExecute(name, input)
+          if (!briefChartUp && (name === 'get_copies_record'
+              || name === 'get_track_record_summary' || name === 'get_daily_series')) {
+            try {
+              const d = JSON.parse(out) as { last_7_days?: unknown; days?: unknown }
+              const rows = (Array.isArray(d.last_7_days) ? d.last_7_days : d.days) as
+                { date?: unknown; pnl?: unknown }[] | undefined
+              const values = (Array.isArray(rows) ? rows : [])
+                .filter((r) => r && r.pnl != null && Number.isFinite(Number(r.pnl)))
+                .map((r) => ({ x: String(r.date ?? '').slice(-5), y: Number(r.pnl) }))
+              if (values.length >= 2) {
+                briefChartUp = true
+                pushPanel({
+                  title: 'Daily P&L', kind: 'chart',
+                  body: JSON.stringify({ kind: 'bars', title: 'Daily P&L — the brief',
+                    unit: '$', series: [{ name: 'P&L', values }] }),
+                })
+              }
+            } catch { /* the chart is garnish — the brief never fails on it */ }
+          }
+          return out
+        }
     try {
       const finalText = await runConversation({
         apiKey: config.anthropicKey,
@@ -432,29 +596,7 @@ export default function Jarvis() {
                                   snapshotRef.current, journalRecapRef.current),
         tools: JARVIS_TOOLS,
         messages: msgs,
-        executeTool: createToolExecutor({
-          adminToken: config.adminToken,
-          ui: {
-            showMarkdown: (title, md) => pushPanel({ title, kind: 'md', body: md }),
-            showChart: (spec) => {
-              const parsed = parseChartSpec(spec)
-              if (!parsed) return false
-              pushPanel({ title: parsed.title || 'Chart', kind: 'chart',
-                          body: JSON.stringify(parsed) })
-              return true
-            },
-            showPdf: (title, url) => pushPanel({ title, kind: 'pdf', body: url }),
-            stageTicket: (t) => { stagedRef.current = t; setStagedView(t) },
-          },
-          getStaged: () => stagedRef.current,
-          // THE MONEY GATE: read from the actual transcript, not the
-          // model's claim — the last thing Matt said (spoken or typed)
-          // must be an explicit confirmation no older than 90s.
-          lastUtteranceConfirms: () => {
-            const u = lastFinalRef.current
-            return Date.now() - u.at < 90000 && CONFIRM_RE.test(u.text)
-          },
-        }),
+        executeTool,
         signal: ctrl.signal,
         onTextDelta: (d) => { setLiveText((p) => p + d); chunker.push(d) },
         onToolUse: (name) => {
@@ -617,6 +759,43 @@ export default function Jarvis() {
     }
   }
 
+  /* ── screen wake lock while hands-free (pocket mode's long sits) ── */
+
+  // Feature-detected: request while hands-free listening is on, release
+  // when the page blurs or hides, re-acquire when it returns. Never an
+  // error state — a refusal (battery saver) just means normal dimming.
+  useEffect(() => {
+    if (!handsFree) return
+    type Sentinel = { release?: () => Promise<void> }
+    const wl = (navigator as unknown as {
+      wakeLock?: { request: (type: 'screen') => Promise<Sentinel> }
+    }).wakeLock
+    if (!wl || typeof wl.request !== 'function') return
+    let lock: Sentinel | null = null
+    let dead = false
+    const acquire = () => {
+      if (dead || document.visibilityState !== 'visible') return
+      wl.request('screen').then((s) => {
+        if (dead) void s.release?.().catch(() => {})
+        else lock = s
+      }).catch(() => { /* denied — hands-free still works, screen may dim */ })
+    }
+    const drop = () => { void lock?.release?.().catch(() => {}); lock = null }
+    const onVis = () => {
+      if (document.visibilityState === 'visible') acquire()
+      else drop()
+    }
+    acquire()
+    document.addEventListener('visibilitychange', onVis)
+    window.addEventListener('blur', drop)
+    return () => {
+      dead = true
+      document.removeEventListener('visibilitychange', onVis)
+      window.removeEventListener('blur', drop)
+      drop()
+    }
+  }, [handsFree])
+
   /* ── status strip polling ── */
 
   useEffect(() => {
@@ -642,6 +821,9 @@ export default function Jarvis() {
           : Promise.resolve(null),
       ])
       if (dead) return
+      // Baseline BEFORE this poll updates it — the on-my-mind heuristic
+      // uses it to spot the day's first settle.
+      const settledBefore = prevSettledRef.current
       // Spoken arrivals: settlements announce themselves in hands-free
       // mode (the walk-into-the-office experience). First load only
       // baselines; never interrupt an active exchange.
@@ -666,9 +848,12 @@ export default function Jarvis() {
       // cycles under the core — the book stays in the room even when
       // nobody is asking about it.
       const held: string[] = []
+      /** Numeric positions for the on-my-mind heuristic (same poll). */
+      const posNum: { label: string; unrealized: number }[] = []
       for (const p of accounts?.polymarket?.positions || []) {
         const label = (p.outcome || p.title || '').slice(0, 26)
         if (!label) continue
+        if (p.unrealized != null) posNum.push({ label, unrealized: p.unrealized })
         held.push(p.unrealized != null
           ? `${label} ${p.unrealized >= 0 ? '+' : '−'}$${Math.abs(p.unrealized).toFixed(0)}`
           : `${label} · open`)
@@ -676,6 +861,7 @@ export default function Jarvis() {
       for (const p of accounts?.kalshi?.positions || []) {
         if (!p.ticker) continue
         const label = p.ticker.slice(0, 26)
+        if (p.unrealized != null) posNum.push({ label, unrealized: p.unrealized })
         held.push(p.unrealized != null
           ? `${label} ${p.unrealized >= 0 ? '+' : '−'}$${Math.abs(p.unrealized).toFixed(0)}`
           : p.cost_usd != null
@@ -683,6 +869,19 @@ export default function Jarvis() {
             : `${label} · open`)
       }
       setExposure(held.slice(0, 12))
+      // ON MY MIND: one most-notable thing, picked locally from this
+      // same poll — never resurfacing the line Matt already tapped.
+      const mind = pickOnMyMind({
+        pnl: today ? today.pnl : null,
+        settled: today ? today.settled : null,
+        prevSettled: settledBefore,
+        paused: !!live?.paused,
+        engineAgeS: engine?.beat_at
+          ? Math.max(0, Math.round((Date.now() - new Date(engine.beat_at).getTime()) / 1000))
+          : null,
+        positions: posNum,
+      })
+      setOnMind(mind && mind.line !== mindAskedRef.current ? mind : null)
       setPills({
         loaded: !!(today || live || engine),
         pnl: today ? today.pnl : null,
@@ -743,7 +942,7 @@ export default function Jarvis() {
       ? `${pills.engineAgeS}s` : `${Math.round(pills.engineAgeS / 60)}m`} ago`)
 
   return (
-    <div className="jv-root">
+    <div className={`jv-root${pocket ? ' jv-pocket' : ''}`}>
       {/* ── status strip ── */}
       <header className="jv-top">
         <span className="jv-brand">M E R I D I A N<em>BettorToken · Claude</em></span>
@@ -772,10 +971,15 @@ export default function Jarvis() {
           {!pills.loaded && <span className="jv-pill jv-dim"><i>PLATFORM</i>…</span>}
         </div>
         <div className="jv-topbtns">
-          <button className="jv-iconbtn" title="Transcript" aria-label="Transcript"
-                  onClick={() => setDrawerOpen((v) => !v)}>≡</button>
-          <button className="jv-iconbtn" title="Settings" aria-label="Settings"
-                  onClick={() => setSetupOpen(true)}>⚙</button>
+          {/* pocket mode moves transcript + settings into the thumb bar */}
+          {!pocket && (
+            <button className="jv-iconbtn" title="Transcript" aria-label="Transcript"
+                    onClick={() => setDrawerOpen((v) => !v)}>≡</button>
+          )}
+          {!pocket && (
+            <button className="jv-iconbtn" title="Settings" aria-label="Settings"
+                    onClick={() => setSetupOpen(true)}>⚙</button>
+          )}
           <Link className="jv-iconbtn" title="Exit to site" aria-label="Exit" to="/">✕</Link>
         </div>
       </header>
@@ -810,10 +1014,34 @@ export default function Jarvis() {
             </div>
           </aside>
         )}
+        {onMind && (
+          <aside className="jv-mind" role="button" tabIndex={0}
+                 aria-label={`On my mind: ${onMind.line}. Tap to ask.`}
+                 onClick={() => {
+                   mindAskedRef.current = onMind.line
+                   setOnMind(null)
+                   void send(onMind.ask)
+                 }}
+                 onKeyDown={(e) => {
+                   if (e.key !== 'Enter') return
+                   mindAskedRef.current = onMind.line
+                   setOnMind(null)
+                   void send(onMind.ask)
+                 }}>
+            <span className="jv-mind-dot" />
+            <div className="jv-mind-body">
+              <span className="jv-mind-head">on my mind</span>
+              <p>{onMind.line}</p>
+            </div>
+            <span className="jv-mind-ask">ask ›</span>
+          </aside>
+        )}
 
         <div className="jv-captions" aria-live="polite">
           {userInterim && <p className="jv-cap-user">{userInterim}</p>}
-          {liveText && <p className="jv-cap-ai">{liveText}</p>}
+          {liveText && (
+            <p className="jv-cap-ai">{liveText}<span className="jv-caret" aria-hidden /></p>
+          )}
           {!liveText && !userInterim && log.length > 0 && (
             <p className="jv-cap-last">{log[log.length - 1].text}</p>
           )}
@@ -882,6 +1110,11 @@ export default function Jarvis() {
               aria-label="Type to MERIDIAN"
             />
           </form>
+          {pocket && (
+            <button className="jv-iconbtn jv-dock-side jv-dock-left"
+                    title="Transcript" aria-label="Transcript"
+                    onClick={() => setDrawerOpen((v) => !v)}>≡</button>
+          )}
           <button
             className={`jv-mic${listening && !handsFree ? ' jv-mic-live' : ''}`}
             disabled={!sttOk || handsFree}
@@ -900,6 +1133,11 @@ export default function Jarvis() {
             </svg>
             <span>{listening && !handsFree ? 'Listening…' : 'Hold to talk'}</span>
           </button>
+          {pocket && (
+            <button className="jv-iconbtn jv-dock-side jv-dock-right"
+                    title="Settings" aria-label="Settings"
+                    onClick={() => setSetupOpen(true)}>⚙</button>
+          )}
           <button
             className={`jv-hf${handsFree ? ' jv-hf-on' : ''}`}
             disabled={!sttOk}
@@ -949,14 +1187,27 @@ export default function Jarvis() {
             <span className="jv-panel-title">Session transcript</span>
             <button className="jv-iconbtn" aria-label="Close transcript" onClick={() => setDrawerOpen(false)}>✕</button>
           </header>
-          <div className="jv-drawer-body">
-            {log.length === 0 && <p className="jv-dim-text">Nothing yet — say something.</p>}
+          <div className="jv-drawer-body" ref={drawerBodyRef}>
+            {log.length === 0 && !liveText &&
+              <p className="jv-dim-text">Nothing yet — say something.</p>}
             {log.map((t, i) => (
-              <div key={`${t.at}-${i}`} className={`jv-turn jv-turn-${t.role}`}>
-                <span className="jv-turn-who">{t.role === 'user' ? 'MATT' : 'MERIDIAN'}</span>
+              <div key={`${t.at}-${i}`} className={`jv-turn jv-turn-${t.role}`} tabIndex={0}>
+                <span className="jv-turn-who">
+                  {t.role === 'user' ? 'MATT' : 'MERIDIAN'}
+                  <time className="jv-turn-time">
+                    {new Date(t.at).toLocaleTimeString('en-US',
+                      { hour: 'numeric', minute: '2-digit' })}
+                  </time>
+                </span>
                 <p>{t.text}</p>
               </div>
             ))}
+            {liveText && (
+              <div className="jv-turn jv-turn-assistant jv-turn-live">
+                <span className="jv-turn-who">MERIDIAN</span>
+                <p>{liveText}<span className="jv-caret" aria-hidden /></p>
+              </div>
+            )}
           </div>
         </aside>
       )}
@@ -1073,6 +1324,12 @@ function SetupPanel(props: {
           <input type="password" autoComplete="off" placeholder="sk-ant-…"
                  value={anthropicKey} onChange={(e) => setAnthropicKey(e.target.value)} />
         </label>
+        <p className="jv-setup-brain">
+          {liveModel()
+            ? <>brain live this session: <strong>{liveModel()}</strong></>
+            : <>brain: <strong>{MODEL_CHAIN[0]}</strong> — first turn pending</>}
+          {' '}· fallback {MODEL_CHAIN.join(' → ')}
+        </p>
 
         <label className="jv-field">
           <span>ElevenLabs API key <em>optional — premium voice</em></span>

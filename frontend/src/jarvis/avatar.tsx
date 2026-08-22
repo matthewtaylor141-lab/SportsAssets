@@ -239,6 +239,7 @@ function drawFallbackCore(
 export function JarvisAvatar({ state, getLevel, tone = 0 }: Props) {
   const glRef = useRef<HTMLCanvasElement | null>(null)
   const ringRef = useRef<HTMLCanvasElement | null>(null)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
   const stateRef = useRef<AvatarState>(state)
   const levelRef = useRef<() => number>(getLevel)
   const toneRef = useRef(tone)
@@ -306,6 +307,11 @@ export function JarvisAvatar({ state, getLevel, tone = 0 }: Props) {
 
     /* eased state weights + smoothed amplitude */
     let listen = 0, think = 0, speak = 0, level = 0
+    /* choreography clocks: the moment speech began (anticipatory
+     * contraction) and the moment a think/tool phase settled (flare). */
+    let prevSt: AvatarState = stateRef.current
+    let speakAt = -10
+    let settleAt = -10
     const t0 = performance.now()
     let raf = 0
     let running = true
@@ -314,6 +320,11 @@ export function JarvisAvatar({ state, getLevel, tone = 0 }: Props) {
       if (!running) return
       const t = (performance.now() - t0) / 1000
       const st = stateRef.current
+      if (st !== prevSt) {
+        if (st === 'speaking') speakAt = t        // breath drawn before the first word
+        if (prevSt === 'thinking') settleAt = t   // a tool round just completed
+        prevSt = st
+      }
       const ease = (v: number, target: number) => v + (target - v) * 0.08
       listen = ease(listen, st === 'listening' ? 1 : 0)
       think = ease(think, st === 'thinking' ? 1 : 0)
@@ -323,11 +334,31 @@ export function JarvisAvatar({ state, getLevel, tone = 0 }: Props) {
                           : level + (raw - level) * 0.12   // slow decay
       const boot = Math.min(1, t / 1.6)
 
+      /* STATE CHOREOGRAPHY — a scale envelope on the wrapper (composited
+       * transform, no shader change) plus a flare riding u_level:
+       *   breath   idle only: 1±0.01 on a ~5s cycle, alive but calm
+       *   contract 300ms anticipatory dip as speech begins — the inhale
+       *   flare    settle-pulse when a tool round completes: fast
+       *            attack, eased exponential decay */
+      const idleW = Math.max(0, 1 - Math.max(listen, Math.max(think, speak)))
+      const breath = 0.01 * Math.sin((t * Math.PI * 2) / 5) * idleW
+      const cAge = t - speakAt
+      const contract = cAge >= 0 && cAge < 0.3
+        ? 0.014 * Math.sin((cAge / 0.3) * Math.PI) : 0
+      const fAge = t - settleAt
+      const flare = fAge >= 0 && fAge < 0.9
+        ? Math.min(1, fAge / 0.12) * Math.exp(-fAge * 4.2) : 0
+      if (wrapRef.current) {
+        wrapRef.current.style.transform =
+          `scale(${(1 + breath - contract + flare * 0.012).toFixed(4)})`
+      }
+      const lvl = Math.min(1, level + flare * 0.3)
+
       if (gl && program) {
         gl.useProgram(program)
         gl.uniform2f(uni.u_res, glCanvas.width, glCanvas.height)
         gl.uniform1f(uni.u_time, t)
-        gl.uniform1f(uni.u_level, level)
+        gl.uniform1f(uni.u_level, lvl)
         gl.uniform1f(uni.u_listen, listen)
         gl.uniform1f(uni.u_think, think)
         gl.uniform1f(uni.u_speak, speak)
@@ -338,14 +369,14 @@ export function JarvisAvatar({ state, getLevel, tone = 0 }: Props) {
         gl.drawArrays(gl.TRIANGLES, 0, 3)
         if (ring2d)
           drawRing(ring2d, ringCanvas.width, ringCanvas.height, t,
-                   particles, 1 + think * 2.2 + speak * 0.6, level)
+                   particles, 1 + think * 2.2 + speak * 0.6, lvl)
       } else if (ring2d) {
         // no WebGL: clear once, 2D core as base layer, ring on top
         ring2d.clearRect(0, 0, ringCanvas.width, ringCanvas.height)
         drawFallbackCore(ring2d, ringCanvas.width, ringCanvas.height,
-                         t, level, listen)
+                         t, lvl, listen)
         drawRing(ring2d, ringCanvas.width, ringCanvas.height, t,
-                 particles, 1, level, false)
+                 particles, 1, lvl, false)
       }
 
       if (reduced.matches && t > 1.7) return   // settle into a still frame
@@ -361,7 +392,7 @@ export function JarvisAvatar({ state, getLevel, tone = 0 }: Props) {
   }, [])
 
   return (
-    <div className="jv-core">
+    <div className="jv-core" ref={wrapRef}>
       <canvas ref={glRef} className="jv-core-gl" aria-hidden />
       <canvas ref={ringRef} className="jv-core-ring" aria-hidden />
     </div>

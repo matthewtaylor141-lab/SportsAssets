@@ -2,23 +2,35 @@
   "name": "BettorToken",
   "short_name": "BettorToken",
   "description": "BettorToken — whale copy trading. Includes the MERIDIAN voice cockpit.",
-  "start_url": "/jarvis",
+  "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#05070b",
-  "theme_color": "#05070b",
+  "background_color": "#0b0c0e",
+  "theme_color": "#0b0c0e",
   "icons": [
     {
-      "src": "/jarvis-icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/jarvis-icon.svg",
+      "src": "/icon-512.png",
       "sizes": "512x512",
-      "type": "image/svg+xml",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "maskable"
     }
   ]

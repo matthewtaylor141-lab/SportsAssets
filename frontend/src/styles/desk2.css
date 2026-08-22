@@ -277,3 +277,230 @@
 .ac-tile-note { font-size: 10px; color: var(--muted); margin-top: 2px; letter-spacing: .03em; }
 .ac-stat-wide span { white-space: normal; }
 .vd-cc-note { font-size: 10px; opacity: .75; letter-spacing: .02em; }
+
+/* ═══ Desk v7 (owner order 2026-08-22): the PORTAL skin. Everything
+   below is presentation-only — connection strip, iPhone-standalone
+   ergonomics (sticky compact header, true bottom sheet, card blotter,
+   result toasts), execution theater, skeletons. No new palettes: dark
+   chrome draws on theme tokens; venue hexes and rgba components reuse
+   the values already established above / in theme.css. ═══ */
+
+/* ── Portal connection strip (dark chrome, above the light vdesk) ── */
+.dx-topbar { margin-bottom: 2px; }
+.dx-conn {
+  display: flex; align-items: center; gap: 10px; margin: 10px 0 2px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); font-size: 12px; color: var(--muted);
+}
+.dx-conn b { color: var(--good); letter-spacing: 0.08em; }
+.dx-conn.down b { color: var(--critical); }
+.dx-conn-dot {
+  width: 9px; height: 9px; border-radius: 50%; flex: none;
+  background: var(--good); box-shadow: 0 0 6px var(--good);
+  animation: tr-pulse 1.6s ease-out infinite;
+}
+.dx-conn.pm .dx-conn-dot { outline: 2px solid rgba(45, 92, 246, 0.55); outline-offset: 2px; }
+.dx-conn.k .dx-conn-dot { outline: 2px solid rgba(10, 185, 127, 0.55); outline-offset: 2px; }
+.dx-conn.down .dx-conn-dot {
+  background: var(--critical); box-shadow: 0 0 6px var(--critical); animation: none;
+}
+.dx-conn-txt { min-width: 0; }
+.dx-conn-age {
+  margin-left: auto; white-space: nowrap; font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Live-capital chip in the page head (feeds the sticky mobile header) */
+.dx-cap {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  border: 1px solid var(--border); background: var(--surface); border-radius: 999px;
+  padding: 5px 12px; font-variant-numeric: tabular-nums; color: var(--muted);
+}
+.dx-cap small { font-size: 10px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; }
+.dx-cap b { color: var(--ink); font-size: 13px; }
+
+/* ── Execution theater ───────────────────────────────────────────── */
+.dx-run-clock {
+  display: flex; justify-content: space-between; align-items: baseline;
+  border-top: 1px dashed var(--vd-line); margin-top: 2px; padding-top: 6px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--vd-mut);
+}
+.dx-run-clock b {
+  font-size: 17px; color: var(--vd-ink); letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.dx-run-slip { font-size: 12.5px; color: var(--vd-mut); font-variant-numeric: tabular-nums; }
+.dx-run-slip b { color: var(--vd-ink); }
+.dx-run-slip b.pos { color: var(--vd-good, #14833b); }
+.dx-run-slip b.neg { color: var(--vd-bad, #c92a2a); }
+
+/* ── Result toast (fixed chrome, over both dark and light zones) ── */
+.dx-toast {
+  position: fixed; top: calc(60px + env(safe-area-inset-top)); left: 50%;
+  transform: translateX(-50%); z-index: 90; max-width: min(92vw, 440px);
+  background: rgba(16, 20, 26, 0.96); color: var(--ink, #f4f5f2);
+  border: 1px solid rgba(33, 176, 33, 0.45); border-radius: 12px;
+  padding: 10px 16px; font-size: 13px; font-weight: 600; line-height: 1.4;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.5);
+  animation: dx-toast-in 0.22s ease-out; pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+.dx-toast.bad { border-color: rgba(224, 82, 82, 0.5); }
+@keyframes dx-toast-in {
+  from { transform: translate(-50%, -8px); opacity: 0; }
+  to { transform: translate(-50%, 0); opacity: 1; }
+}
+
+/* ── Skeleton shimmer variants (shimmer visible on the light skins) ─ */
+.dx-skel-rows {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 13px; border-top: 1px solid var(--vd-line);
+}
+.dx-skel-rows.bare { padding: 0; border-top: 0; }
+.dx-skel-rows .tr-skel { height: 34px; border-radius: 8px; }
+.dx-skel-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px;
+}
+.dx-skel-grid .tr-skel { height: 150px; border-radius: 12px; }
+.vdesk .tr-skel { border-color: var(--vd-line); }
+.vdesk .tr-skel::after {
+  background: linear-gradient(100deg, transparent 30%, rgba(120, 144, 180, 0.12) 50%, transparent 70%);
+}
+
+/* ── Blotter cards (phone) — table stays for desktop ─────────────── */
+.dx-blot-cards { display: none; }
+.dx-blot-card {
+  border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.02));
+}
+.dx-blot-card-top {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 10px; font-size: 13.5px; line-height: 1.35;
+}
+.dx-blot-st {
+  font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--muted); border: 1px solid var(--border); border-radius: 999px;
+  padding: 2px 8px; white-space: nowrap; flex: none;
+}
+.dx-blot-st.filled, .dx-blot-st.settled { color: var(--good); border-color: rgba(33, 176, 33, 0.4); }
+.dx-blot-st.queued, .dx-blot-st.submitting { color: var(--warning); border-color: rgba(250, 178, 25, 0.4); }
+.dx-blot-st.error, .dx-blot-st.unfilled, .dx-blot-st.cancelled { color: var(--critical); border-color: rgba(224, 82, 82, 0.4); }
+.dx-blot-card-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.dx-blot-nums {
+  display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px;
+  font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.dx-blot-nums b { color: var(--ink); }
+.dx-blot-err { margin-top: 6px; font-size: 11.5px; color: var(--critical); }
+.dx-blot-card .dx-cancel { margin-top: 8px; width: 100%; min-height: 42px; }
+
+/* ── Bottom-sheet chrome (hidden on desktop) ─────────────────────── */
+.dx-sheet-handle { display: none; }
+.dx-sheet-scrim { display: none; }
+
+/* ── Accounts: compact sticky totals bar ─────────────────────────── */
+.ac-sticky {
+  position: fixed; top: 52px; left: 0; right: 0; z-index: 25;
+  display: flex; gap: 18px; align-items: baseline; justify-content: center;
+  flex-wrap: wrap; padding: 8px max(16px, env(safe-area-inset-left));
+  background: rgba(18, 20, 23, 0.92); backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border); font-size: 12.5px; color: var(--muted);
+  animation: ac-sticky-in 0.18s ease-out;
+}
+.ac-sticky b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.ac-sticky b.pos { color: var(--good); }
+.ac-sticky b.neg { color: var(--critical); }
+@keyframes ac-sticky-in { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
+.ac-skel { display: flex; flex-direction: column; gap: 10px; }
+.ac-skel .tr-skel { border-radius: 12px; }
+
+/* ── iPhone standalone (<720px): the portal in the hand ──────────── */
+@media (max-width: 720px) {
+  /* Sticky compact header: capital chip + venue toggle + LIVE strip
+     under the 52px nav; the h1 cedes its space. */
+  .dx-topbar {
+    position: sticky; top: 52px; z-index: 40;
+    margin: 0 -16px 10px; padding: 8px 16px;
+    background: var(--page, #101216); border-bottom: 1px solid var(--border);
+  }
+  .dx-topbar h1 { display: none; }
+  .dx-topbar .vd-pagehead { gap: 8px; }
+  .dx-cap { margin-right: auto; }
+  .vd-venue { padding: 9px 12px; font-size: 12.5px; min-height: 40px; }
+  .dx-conn { margin: 8px 0 0; padding: 6px 10px; font-size: 11px; border-radius: 8px; }
+  .dx-conn-age { font-size: 10.5px; }
+
+  /* True bottom sheet: scrim + drag handle + spring-up. The fixed
+     positioning itself comes from the v6 rule earlier in this file. */
+  .dx-sheet-scrim {
+    display: block; position: fixed; inset: 0; z-index: 49;
+    background: rgba(8, 10, 14, 0.45); animation: dx-fade 0.18s ease-out;
+  }
+  .vdesk .vd-rail.has-pick .pmx-ticket,
+  .vdesk .vd-rail.has-pick .kx-ticket {
+    max-height: 84vh; border-radius: 18px 18px 0 0; padding-top: 4px;
+    box-shadow: 0 -14px 48px rgba(0, 0, 0, 0.5);
+    animation: dx-sheet-up 0.22s ease-out; overscroll-behavior: contain;
+  }
+  .dx-sheet-handle {
+    display: flex; justify-content: center; padding: 8px 0 4px;
+    touch-action: none; margin: -4px -16px 0; /* wide grab zone */
+  }
+  .dx-sheet-handle span {
+    width: 42px; height: 5px; border-radius: 999px; background: var(--vd-line);
+  }
+  .dxm::before {
+    content: ''; display: block; width: 42px; height: 5px; border-radius: 999px;
+    background: var(--vd-line); margin: 0 auto 4px; flex: none;
+  }
+
+  /* Comfortable 44px+ touch targets. */
+  .pmx-btn, .kx-pct, .dx-mini { min-height: 44px; }
+  .dx-tab { min-height: 44px; padding: 10px 14px; }
+  .pmx-tabbtn { min-height: 42px; }
+  .kx-side-row { min-height: 44px; }
+  .dx-quick button { min-height: 44px; }
+  .dxm-x { width: 40px; height: 40px; }
+  .dx-blot-tabs button { min-height: 42px; padding: 9px 16px; }
+  .dx-cancel { min-height: 40px; padding: 8px 14px; }
+  .kx-pill { min-height: 48px; }
+  .pc-hours button { min-height: 36px; padding: 6px 14px; }
+  .dx-back { min-height: 44px; display: inline-flex; align-items: center; }
+
+  /* Book ladder readable at 390px. */
+  .dx-book { font-size: 13px; }
+  .dx-book-row { padding: 2px 0; }
+
+  /* Positions panel rows become touch cards. */
+  .dx-acct-row {
+    grid-template-columns: 1fr 1fr; gap: 4px 12px;
+    border: 1px solid var(--vd-line); border-radius: 10px;
+    margin: 8px 10px; padding: 10px 12px; border-top: 1px solid var(--vd-line);
+  }
+  .dx-acct-name { grid-column: 1 / -1; }
+  .dx-acct-num.hide-sm { display: block; }
+  .dx-acct-row .dx-cashout { grid-column: 1 / -1; min-height: 44px; }
+
+  /* Blotter: cards in, table out. */
+  .dx-blot-cards { display: flex; flex-direction: column; gap: 8px; }
+  .rpt-table-wrap.dx-blot-table { display: none; }
+
+  /* Accounts: full-bleed venue sections + sticky-bar breathing room. */
+  .ac-venues { margin: 0 -16px; gap: 10px; }
+  .ac-card { border-left: 0; border-right: 0; border-radius: 0; }
+  .ac-cashout { min-height: 44px; }
+  .ac-tabs button { min-height: 40px; padding: 8px 16px; }
+  .ac-sticky { justify-content: flex-start; gap: 14px; font-size: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dx-conn-dot, .dx-toast, .dx-sheet-scrim, .ac-sticky,
+  .vdesk .vd-rail.has-pick .pmx-ticket,
+  .vdesk .vd-rail.has-pick .kx-ticket { animation: none; }
+}
+@keyframes dx-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes dx-sheet-up {
+  from { transform: translateY(24px); opacity: 0.6; }
+  to { transform: none; opacity: 1; }
+}

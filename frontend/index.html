@@ -2,8 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#0b0c0e" />
+    <!-- iPhone standalone PWA: the site's primary surface is Add to Home
+         Screen on iOS Safari. black-translucent lets the app paint under
+         the status bar; viewport-fit=cover + safe-area insets (theme.css)
+         keep content clear of the notch and home indicator. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="BettorToken" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>BettorToken — Whale Copy Trading</title>
@@ -19,5 +28,15 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      // Register the app-shell service worker up front (push.ts registers the
+      // same '/sw.js', so enabling alerts later reuses this registration).
+      // Precaching makes standalone launches instant; sw.js never caches /api/*.
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('/sw.js').catch(function () {})
+        })
+      }
+    </script>
   </body>
 </html>

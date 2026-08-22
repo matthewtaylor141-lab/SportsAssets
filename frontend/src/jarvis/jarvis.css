@@ -149,7 +149,14 @@
 }
 
 /* ── the core: WebGL plasma sphere + particle-ring overlay ───────── */
-.jv-core { position: absolute; inset: 0; }
+/* The choreography (breath / anticipation / settle-flare) scales this
+ * wrapper from avatar.tsx — composited transform, no reflow. */
+.jv-core {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 50%;
+  will-change: transform;
+}
 .jv-core-gl,
 .jv-core-ring {
   position: absolute;
@@ -604,17 +611,61 @@
   flex-direction: column;
   gap: 12px;
 }
-.jv-turn { display: flex; flex-direction: column; gap: 2px; }
+/* Speaker-labeled bubbles: MERIDIAN left in cyan, Matt right in gold;
+ * the timestamp surfaces on hover/focus so the sheet stays quiet. */
+.jv-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 88%;
+  align-self: flex-start;
+  padding: 8px 12px 9px;
+  border: 1px solid var(--jv-border);
+  border-radius: 14px 14px 14px 4px;
+  background: rgba(105, 224, 255, 0.05);
+  outline: none;
+}
 .jv-turn p { margin: 0; font-size: 13.5px; line-height: 1.55; }
 .jv-turn-who {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: 9px;
   letter-spacing: 0.24em;
 }
+.jv-turn-user {
+  align-self: flex-end;
+  border-radius: 14px 14px 4px 14px;
+  border-color: rgba(232, 200, 119, 0.22);
+  background: rgba(232, 200, 119, 0.06);
+}
 .jv-turn-user .jv-turn-who { color: var(--jv-gold-soft); }
 .jv-turn-user p { color: rgba(238, 246, 250, 0.85); font-style: italic; }
 .jv-turn-assistant .jv-turn-who { color: var(--jv-cyan-soft); }
+.jv-turn-time {
+  margin-left: 10px;
+  font-size: 8.5px;
+  letter-spacing: 0.08em;
+  color: var(--jv-muted);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.jv-turn:hover .jv-turn-time,
+.jv-turn:focus .jv-turn-time,
+.jv-turn:focus-within .jv-turn-time { opacity: 1; }
+.jv-turn-live { border-color: var(--jv-cyan-faint); }
 .jv-dim-text { color: var(--jv-muted); font-size: 13px; }
+
+/* the live caret riding streamed text — captions and transcript both */
+.jv-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 3px;
+  vertical-align: -0.12em;
+  background: var(--jv-cyan);
+  box-shadow: 0 0 8px var(--jv-cyan-soft);
+  animation: jv-caret-blink 1s steps(2, start) infinite;
+}
+@keyframes jv-caret-blink { 50% { opacity: 0; } }
 
 /* ── setup ────────────────────────────────────────────────────────────── */
 
@@ -755,6 +806,7 @@
   .jv-mic-live { animation: none; }
   .jv-panels, .jv-drawer { animation: none; }
   .jv-stage { transition: none; }
+  .jv-caret { animation: none; }
   .jv-root * { transition-duration: 0.01ms !important; }
 }
 
@@ -897,6 +949,153 @@
   border-color: var(--jv-cyan-soft);
   color: var(--jv-cyan);
   background: rgba(105, 224, 255, 0.07);
+}
+
+/* ── "on my mind" — the page notices something by itself ─────────── */
+.jv-mind {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  max-width: min(520px, calc(100vw - 48px));
+  margin: 0 auto 10px;
+  padding: 9px 14px;
+  border: 1px solid rgba(232, 200, 119, 0.22);
+  border-radius: 12px;
+  background: rgba(14, 12, 6, 0.55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  animation: jv-boot-line 320ms ease;
+}
+.jv-mind:hover,
+.jv-mind:focus-visible {
+  border-color: var(--jv-gold-soft);
+  background: rgba(232, 200, 119, 0.07);
+  outline: none;
+}
+.jv-mind-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--jv-gold);
+  box-shadow: 0 0 10px var(--jv-gold-soft);
+  animation: jv-think-pulse 2.6s ease-in-out infinite;
+}
+.jv-mind-body { flex: 1; min-width: 0; }
+.jv-mind-head {
+  display: block;
+  font-family: var(--jv-mono);
+  font-size: 9px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--jv-gold-soft);
+  margin-bottom: 3px;
+}
+.jv-mind-body p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: rgba(238, 240, 222, 0.85);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.jv-mind-ask {
+  flex: none;
+  font-family: var(--jv-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--jv-gold);
+  white-space: nowrap;
+}
+@media (prefers-reduced-motion: reduce) {
+  .jv-mind, .jv-mind-dot { animation: none; }
+}
+
+/* ── setup: which brain is live ──────────────────────────────────── */
+.jv-setup-brain {
+  margin: -4px 0 12px;
+  font-family: var(--jv-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--jv-muted);
+  line-height: 1.5;
+}
+.jv-setup-brain strong { color: var(--jv-cyan); font-weight: 600; }
+
+/* ── POCKET MODE: the installed-PWA cockpit in one hand ──────────── */
+/* Core in the upper third, transcript as a translucent sheet, controls
+ * as a bottom action bar under the thumb, safe-area aware throughout. */
+
+.jv-pocket .jv-top {
+  border-bottom: none;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.jv-pocket .jv-orb-wrap { flex: 0 0 38vh; }
+.jv-pocket .jv-hud {
+  width: min(21.5vh, 57vw);
+  height: min(21.5vh, 57vw);
+}
+.jv-pocket .jv-captions {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+/* quick chips become one thumb-scrollable row */
+.jv-pocket .jv-chips {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.jv-pocket .jv-chips::-webkit-scrollbar { display: none; }
+.jv-pocket .jv-chip { flex: none; }
+
+/* the bottom action bar: [typed] / ≡ · hands-free · MIC ORB · ⚙ */
+.jv-pocket .jv-dock {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-evenly;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 8px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--jv-border);
+  background: rgba(5, 8, 12, 0.6);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+.jv-pocket .jv-typed { flex: 1 1 100%; order: -3; margin-bottom: 4px; }
+.jv-pocket .jv-dock-left { order: -2; }
+.jv-pocket .jv-hf { order: -1; justify-self: auto; }
+.jv-pocket .jv-mic { order: 0; width: 104px; height: 104px; }
+.jv-pocket .jv-mic svg { width: 30px; height: 30px; }
+.jv-pocket .jv-dock-side { width: 44px; height: 44px; border-radius: 12px; font-size: 18px; }
+.jv-pocket .jv-kbd-hint { display: none; }
+
+/* transcript rides over the stage as a translucent sheet */
+.jv-pocket .jv-drawer {
+  left: 0;
+  right: 0;
+  top: auto;
+  bottom: 0;
+  width: auto;
+  height: 66vh;
+  border-radius: 18px 18px 0 0;
+  border-width: 1px 0 0;
+  background: rgba(11, 17, 24, 0.82);
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 4px);
+  animation: jv-rise 0.26s ease;
 }
 
 /* ── charts in the panel ─────────────────────────────────────────── */
