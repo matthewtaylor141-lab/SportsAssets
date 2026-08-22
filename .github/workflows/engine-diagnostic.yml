@@ -563,6 +563,14 @@ jobs:
           # sports series listing alive at all?
           KAPI=$(curl -sS --max-time 20 "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXATPMATCH&status=open&limit=5" | jq -r '.markets | length' 2>/dev/null || echo ERR)
           echo "  KDESKG venue-direct KXATPMATCH open rows: $KAPI"
+          # Tennis-tab forensics: the venue's close times for those rows
+          # (are they inside our 168h window?), and whether the venue
+          # honors our min/max_close_ts param shape for this series.
+          curl -sS --max-time 20 "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXATPMATCH&status=open&limit=5" | \
+            jq -r '.markets[]? | "  KDESKG-T \(.ticker) close=\(.close_time // .close_ts // "?") status=\(.status // "?")"' 2>/dev/null | head -6
+          NOWS=$(date +%s); MAXS=$((NOWS + 604800))
+          KWIN=$(curl -sS --max-time 20 "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXATPMATCH&status=open&limit=1000&min_close_ts=$NOWS&max_close_ts=$MAXS" | jq -r '.markets | length' 2>/dev/null || echo ERR)
+          echo "  KDESKG-T windowed(min/max_close_ts, 168h): $KWIN rows"
 
           echo ""
           echo "#   PMBOARD (owner report 2026-08-22: moneyline sides at   #"
