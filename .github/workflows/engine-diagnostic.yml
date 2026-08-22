@@ -1224,6 +1224,87 @@ jobs:
                 " + 0xc5d563a36ae78145c45a50134d48a1215220f80a")
           PYEOF
 
+      - name: KCR-CHAIN receipts (why chain decodes zero crypto-whale fills)
+        if: always()
+        env:
+          DEFAULT_BASE: https://sportsassets-api.onrender.com
+          OVERRIDE: ${{ github.event.inputs.api_base }}
+        run: |
+          echo "###########################################################"
+          echo "#   KCR-CHAIN: crypto-whale fill receipts vs roster addr   #"
+          echo "###########################################################"
+          # Path B is back but Data-API publication lag is 3.5-8.5 min vs
+          # the leg's 90s bar. Chain would be sub-second, yet decodes ZERO
+          # fills for whales 28/29. Ground truth: fetch their recent fill
+          # receipts and print every log's emitter + owner-position topics
+          # beside the roster addresses. A different owner address (proxy
+          # vs EOA) or an unwatched emitter contract is the bug.
+          BASE="${OVERRIDE:-$DEFAULT_BASE}"
+          python3 - "$BASE" <<'PYEOF'
+          import json, sys, urllib.request
+
+          base = sys.argv[1]
+          ROSTER = {
+              "28/0xf705fa04": "0xf705fa045201391d9632b7f3cde06a5e24453ca7",
+              "29/jnstrtprdctnmrkts": "0x1465b79bff7992bc703e1aafb3683b1089647072",
+          }
+          WATCHED = {"0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+                     "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+                     "0xe2222d279d744050d28e00520010520000310f59"}
+          RPCS = ["https://polygon-rpc.com", "https://1rpc.io/matic",
+                  "https://polygon-bor-rpc.publicnode.com"]
+
+          def get(url):
+              with urllib.request.urlopen(url, timeout=30) as r:
+                  return json.load(r)
+
+          def rpc(method, params):
+              body = json.dumps({"jsonrpc": "2.0", "id": 1,
+                                 "method": method, "params": params}).encode()
+              for u in RPCS:
+                  try:
+                      req = urllib.request.Request(
+                          u, data=body,
+                          headers={"content-type": "application/json"})
+                      with urllib.request.urlopen(req, timeout=25) as r:
+                          out = json.load(r)
+                      if out.get("result") is not None:
+                          return out["result"]
+                  except Exception as exc:
+                      print(f"    (rpc {u} failed: {exc})")
+              return None
+
+          for whale_id in (28, 29):
+              try:
+                  rows = get(f"{base}/api/feed?whale_id={whale_id}&limit=3")
+              except Exception as exc:
+                  print(f"  KCR-CHAIN whale {whale_id}: feed fetch failed {exc}")
+                  continue
+              for row in rows[:2]:
+                  tx = row.get("tx_hash") or ""
+                  print(f"  KCR-CHAIN whale {whale_id} tx {tx} "
+                        f"({row.get('side')} ${row.get('notional')})")
+                  if not tx.startswith("0x"):
+                      print("    (no tx hash on row — poll rows should have one)")
+                      continue
+                  rec = rpc("eth_getTransactionReceipt", [tx])
+                  if not rec:
+                      print("    (no receipt from any RPC)")
+                      continue
+                  hay = json.dumps(rec).lower()
+                  for label, addr in ROSTER.items():
+                      print(f"    roster {label} appears in receipt: "
+                            f"{addr[2:] in hay}")
+                  for lg in rec.get("logs", []):
+                      em = (lg.get("address") or "").lower()
+                      tps = lg.get("topics") or []
+                      t0 = (tps[0] if tps else "")[:12]
+                      owners = [("0x" + t[-40:]) for t in tps[1:4]]
+                      mark = "WATCHED" if em in WATCHED else "unwatched"
+                      print(f"    log {em} [{mark}] t0={t0} "
+                            f"owners={' '.join(owners)}")
+          PYEOF
+
       - name: New exchange ABI (name the event behind topic d543adfd)
         if: always()
         run: |
