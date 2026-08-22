@@ -1082,11 +1082,98 @@ async def _kalshi_fetch(series_list: list[str], q: str = "",
     return out[:cap] if cap else out
 
 
+# ── Kalshi full universe (wave-2 2026-08-22: league=everything) ──────
+# One paginated sweep of EVERY open event (politics, econ, weather,
+# entertainment — not just the sports series), nested markets included.
+# 5-min TTL, its own cache: the sweep is ~3 pages of 200 events and the
+# desk's browse/search polling must not re-walk it per request. Capped
+# at ~600 events — beyond that the desk is a search box, not a board.
+_KALSHI_ALL_TTL_S = 300.0
+_KALSHI_ALL_EVENTS_CAP = 600
+_kalshi_all_cache: dict = {"ts": 0.0, "events": []}
+
+
+async def _kalshi_all_open_events() -> list[dict]:
+    """ALL open Kalshi events with nested markets, cached 5 minutes.
+    Best-effort: a venue error serves the stale sweep (or empty) —
+    the desk degrades, it never 500s."""
+    import time as _time
+
+    import httpx
+
+    now = _time.time()
+    if (now - _kalshi_all_cache["ts"] < _KALSHI_ALL_TTL_S
+            and _kalshi_all_cache["events"]):
+        return _kalshi_all_cache["events"]
+    events: list[dict] = []
+    try:
+        async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                     timeout=10) as client:
+            cursor = ""
+            while len(events) < _KALSHI_ALL_EVENTS_CAP:
+                params: dict = {"status": "open", "limit": 200,
+                                "with_nested_markets": "true"}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = await client.get("/events", params=params)
+                if resp.status_code != 200:
+                    break
+                d = resp.json() or {}
+                got = d.get("events") or []
+                if not got:
+                    break
+                events.extend(got)
+                cursor = d.get("cursor") or ""
+                if not cursor:
+                    break
+    except Exception:  # noqa: BLE001 — stale sweep beats an empty desk
+        pass
+    events = events[:_KALSHI_ALL_EVENTS_CAP]
+    if events:
+        _kalshi_all_cache.update(ts=now, events=events)
+    return events or _kalshi_all_cache["events"]
+
+
+def _kalshi_search_all(events: list[dict], q: str,
+                       cap: int = 60) -> list[dict]:
+    """Alias-aware market search over the full-events sweep — the same
+    row shape _kalshi_fetch returns, close-time sorted."""
+    from ..team_aliases import matches as _team_match
+
+    out = []
+    for ev in events:
+        ev_title = ev.get("title") or ""
+        for m in (ev.get("markets") or []):
+            if m.get("status") not in (None, "open", "active"):
+                continue
+            title = m.get("title") or ""
+            sub = m.get("yes_sub_title") or m.get("subtitle") or ""
+            if not _team_match(q, [title, sub, ev_title,
+                                   m.get("ticker")]):
+                continue
+            series = (m.get("ticker") or "").split("-", 1)[0]
+            out.append(_kalshi_shape(m, series))
+    out.sort(key=lambda m: (m.get("close_time") or ""))
+    return out[:cap]
+
+
 @app.get("/api/admin/kalshi-markets", dependencies=[Depends(require_desk)])
 async def api_kalshi_markets(q: str = Query(default="")) -> dict:
-    """Search Kalshi's live sports markets for the desk — event rows
-    with Yes/No prices, the venue's own presentation shape."""
-    return {"markets": await _kalshi_fetch(_DESK_KALSHI_SERIES, q=q)}
+    """Search Kalshi's live markets for the desk — event rows with
+    Yes/No prices, the venue's own presentation shape. A query searches
+    EVERYTHING open (wave-2: the sports-only restriction is gone) —
+    full-universe sweep plus the live sports series, deduped; browsing
+    with no query stays the sports slate."""
+    ql = q.strip()
+    sports = await _kalshi_fetch(_DESK_KALSHI_SERIES, q=q)
+    if not ql:
+        return {"markets": sports}
+    everything = _kalshi_search_all(await _kalshi_all_open_events(), ql)
+    seen = {m.get("ticker") for m in sports}
+    merged = sports + [m for m in everything
+                       if m.get("ticker") not in seen]
+    merged.sort(key=lambda m: (m.get("close_time") or ""))
+    return {"markets": merged[:60]}
 
 
 @app.get("/api/admin/book", dependencies=[Depends(require_desk)])
@@ -1221,6 +1308,33 @@ async def api_desk_games(venue: str = Query("polymarket"),
     from ..copy_sports import market_type_of
 
     days = {(_date.today() + _td(days=i)).isoformat() for i in (-1, 0, 1)}
+    if venue == "kalshi" and league == "everything":
+        # FULL UNIVERSE (wave-2 2026-08-22): every open event on the
+        # venue — politics, econ, weather, the lot — from the 5-min
+        # cached sweep, one card per event, same card shape as the
+        # sports board. The sports leagues keep their own per-series
+        # path below, untouched.
+        evs = await _kalshi_all_open_events()
+        games_all = []
+        for ev in evs:
+            et = ev.get("event_ticker") or ""
+            mkts = [m for m in (ev.get("markets") or [])
+                    if m.get("status") in (None, "open", "active")]
+            if not et or not mkts:
+                continue
+            series = et.split("-", 1)[0]
+            games_all.append({
+                "id": et, "venue": "kalshi", "league": "everything",
+                "title": ((ev.get("title") or et)
+                          .replace(" Winner?", "")),
+                "outcomes": [
+                    {"label": s["sub_title"] or s["title"],
+                     "ticker": s["ticker"], "price": s["yes_ask"]}
+                    for s in (_kalshi_shape(m, series)
+                              for m in mkts[:3])]})
+        return {"games": games_all,
+                "counts": {"everything": len(games_all),
+                           "all": len(games_all)}}
     if venue == "kalshi":
         # Kalshi games from the per-league series (each side its own
         # ticker); the league picks its OWN series so a busy MLB slate
@@ -1278,7 +1392,9 @@ async def api_desk_games(venue: str = Query("polymarket"),
     for ev in events:
         lg = league_of_ev(ev["league"])
         counts[lg] = counts.get(lg, 0) + 1
-        if league != "all" and lg != league:
+        # 'everything' = the venue's whole open board, no league filter
+        # (the venue-native listing already carries every open event).
+        if league not in ("all", "everything") and lg != league:
             continue
         ml = [m for m in ev["markets"] if m["kind"] in ("aec", "atc")]
         outs = [{"label": (m["label"].split("—")[-1].strip()
@@ -1294,8 +1410,10 @@ async def api_desk_games(venue: str = Query("polymarket"),
             "title": ev["title"], "markets_n": len(ev["markets"]),
             "outcomes": outs})
     counts["all"] = len(events)
+    counts["everything"] = len(events)
     cards.sort(key=lambda g: (g["id"][-10:], g["id"]))
-    return {"games": cards[:80], "counts": counts}
+    return {"games": cards[:400 if league == "everything" else 80],
+            "counts": counts}
 
 
 @app.get("/api/admin/desk-game", dependencies=[Depends(require_desk)])
@@ -2151,6 +2269,18 @@ def kalshi_accounts_view(detail: dict, now: float) -> dict:
             "exposure_usd": ko.get("cost"),
             "resting": 0,
             "positions": positions}
+
+
+@app.get("/api/desk/history", dependencies=[Depends(require_desk)])
+async def api_desk_history(venue: str = Query(...), id: str = Query(...),
+                           hours: int = Query(24, ge=1, le=336)) -> dict:
+    """Normalized price history for the desk's charts — both venues in
+    one shape (thin route; the proxies and 60s cache live in
+    desk_history). Venue errors return empty points with HTTP 200:
+    charts degrade, desks never break."""
+    from .desk_history import history
+
+    return await history(venue, id, hours)
 
 
 @app.get("/api/desk/accounts", dependencies=[Depends(require_desk)])
