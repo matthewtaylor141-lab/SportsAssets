@@ -3385,6 +3385,46 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
         sc["wins"] += 1 if pnl > 0 else 0
         sc["losses"] += 1 if pnl < 0 else 0
 
+    # EXTERNAL (owner) settlements — positive attribution BEFORE the
+    # remainder is derived (owner report 2026-08-22: personal trades
+    # placed directly on the venue app were landing in 'Software' and
+    # reviving the 'software is still firing' scare). A venue
+    # resolution on a market absent from EVERY platform ledger is the
+    # owner's own activity; it gets its own labeled line. Fail-open:
+    # if the venue export is unreachable, the remainder simply stays
+    # merged as before.
+    try:
+        from .pmus_account import venue_export
+
+        ours = {(r.get("market_slug") or "").lower()
+                for r in (rec.get("trades") or [])}
+        lo_rows = await pool.fetch(
+            "SELECT DISTINCT lower(us_market_slug) AS s FROM live_orders "
+            "WHERE us_market_slug IS NOT NULL")
+        ours |= {r["s"] for r in lo_rows if r["s"]}
+        vexp = await venue_export(from_day)
+        for vr in (vexp.get("rows") or []):
+            if vr.get("kind") != "resolution":
+                continue
+            slug = (vr.get("slug") or "").lower()
+            if not slug or slug in ours:
+                continue
+            when = vr.get("time") or ""
+            if not when:
+                continue
+            day = (_dt.fromisoformat(when.replace("Z", "+00:00"))
+                   .astimezone(RECORD_TZ).strftime("%Y-%m-%d"))
+            if not _in_range(day):
+                continue
+            pnl = float(vr.get("realized_pnl") or 0)
+            c = _cat(day, "external")
+            c["pnl"] = round(c["pnl"] + pnl, 2)
+            c["settled"] += 1
+            c["wins"] += 1 if pnl > 0 else 0
+            c["losses"] += 1 if pnl < 0 else 0
+    except Exception:  # noqa: BLE001 — attribution stays merged
+        pass
+
     for day, acct_pnl in acct_by_day.items():
         attributed = sum(c["pnl"] for c in (days.get(day) or {}).values())
         c = _cat(day, "software")
@@ -3415,7 +3455,9 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
             "note": ("reconciled by construction: each day's categories "
                      "sum exactly to the account calendar; copies/manual "
                      "from the order-level audit table, arb from the "
-                     "engine mirror's band tag, software is the derived "
+                     "engine mirror's band tag, external is venue "
+                     "settlements on markets no platform ledger touched "
+                     "(owner activity), software is the derived "
                      "remainder (identity method, owner ops PDF v1.1)")}
 
 
@@ -3570,7 +3612,7 @@ _CAT_ORDER = ["rn1", "swisstony", "kch123", "homerunhazard",
               # from report.csv/pdf — the exports skip categories the
               # label map doesn't know.
               "ferrarichampions2026", "0x076daa87",
-              "manual", "underdog", "arb", "software"]
+              "manual", "underdog", "arb", "external", "software"]
 _CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
               "kch123": "kch123 copies", "homerunhazard": "HomeRunHazard copies",
               # Display label is the truncated address — the owner names
@@ -3579,7 +3621,8 @@ _CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
               "ferrarichampions2026": "ferrariChampions2026 copies",
               "0x076daa87": "0x076daa87 copies",
               "manual": "Manual desk", "underdog": "Underdog $1 test",
-              "arb": "Arbitrage", "software": "Software"}
+              "arb": "Arbitrage", "external": "External (owner)",
+              "software": "Software (wind-down)"}
 
 
 @app.get("/api/report.csv")
