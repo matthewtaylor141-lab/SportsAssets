@@ -27,8 +27,10 @@ export interface KPosition {
 export interface DeskAccounts {
   as_of: string | number
   polymarket: {
-    configured: boolean; account_value: number | null; cash: number | null
-    buying_power: number | null; open_value: number | null
+    configured: boolean; account_value?: number | null; cash?: number | null
+    buying_power?: number | null; open_value: number | null
+    /** cash + committed capital — the composite desk sessions see. */
+    trading_capital?: number | null; committed_usd?: number | null
     unsettled_funds: number | null; realized_pnl: number | null
     positions: PMPosition[]; recent_trades: Record<string, unknown>[] | null
   }
@@ -37,7 +39,9 @@ export interface DeskAccounts {
     stale_s: number | null; exposure_usd: number | null; resting: number | null
     positions: KPosition[]; degraded?: boolean
   }
-  totals: { value: number | null; cash: number | null; unrealized: number | null }
+  totals: { value: number | null; cash?: number | null
+    trading_capital?: number | null; committed_usd?: number | null
+    unrealized: number | null }
 }
 
 /** Current desk token, or null (expired tokens are purged on read). */

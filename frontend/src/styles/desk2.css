@@ -272,3 +272,8 @@
   .pmx-cta, .kx-cta { min-height: 48px; }
   .dx-quick button { min-height: 40px; }
 }
+
+/* Committed-capital microlabels (option 2, 2026-08-22) */
+.ac-tile-note { font-size: 10px; color: var(--muted); margin-top: 2px; letter-spacing: .03em; }
+.ac-stat-wide span { white-space: normal; }
+.vd-cc-note { font-size: 10px; opacity: .75; letter-spacing: .02em; }

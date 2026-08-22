@@ -91,6 +91,13 @@ class Settings(BaseSettings):
     # phone browser. Compared constant-time; a successful unlock mints a
     # short-lived HMAC token derived from admin_token (see api/app.py).
     desk_password: str = "bt"
+    # Committed capital (owner directive 2026-08-22): dollars the owner
+    # has committed to restore to the Polymarket account (an owner draw
+    # outstanding). Displayed ONLY as part of the clearly-labeled
+    # "trading capital (incl. committed capital)" composite — never
+    # blended into a figure labeled cash/balance. Zero this env var when
+    # the money is restored and the display collapses to plain cash.
+    committed_capital_pm_usd: float = 0.0
     # Shared secret the edge-engine uses to record its shadow fills here.
     engine_ingest_token: str = ""
 

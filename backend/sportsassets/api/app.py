@@ -202,17 +202,19 @@ def desk_token_ok(token: str, now: float | None = None) -> bool:
 
 
 def require_desk(x_desk_token: str = Header(default=""),
-                 x_admin_token: str = Header(default="")) -> None:
+                 x_admin_token: str = Header(default="")) -> str:
     """Desk-scoped auth: a valid desk token OR the admin token. The
-    admin path keeps working so existing tooling never breaks."""
+    admin path keeps working so existing tooling never breaks. Returns
+    the caller's role ('admin'|'desk') — endpoints that shape their
+    payload per role read it via Depends; everyone else ignores it."""
     import hmac
 
-    if x_desk_token and desk_token_ok(x_desk_token):
-        return
     supplied = (x_admin_token or "").strip()
     expected = (settings().admin_token or "").strip()
     if expected and hmac.compare_digest(supplied, expected):
-        return
+        return "admin"
+    if x_desk_token and desk_token_ok(x_desk_token):
+        return "desk"
     raise HTTPException(status_code=401, detail="desk unlock required")
 
 
@@ -2283,11 +2285,21 @@ async def api_desk_history(venue: str = Query(...), id: str = Query(...),
     return await history(venue, id, hours)
 
 
-@app.get("/api/desk/accounts", dependencies=[Depends(require_desk)])
-async def api_desk_accounts() -> dict:
+@app.get("/api/desk/accounts")
+async def api_desk_accounts(role: str = Depends(require_desk)) -> dict:
     """Both live venue accounts on one card: PM from the venue's own
     portfolio API (30s-cached snapshot), Kalshi from the engine's
-    heartbeat export (only the engine holds Kalshi credentials)."""
+    heartbeat export (only the engine holds Kalshi credentials).
+
+    COMMITTED CAPITAL (owner directive 2026-08-22, option 2): the PM
+    block carries trading_capital = cash + committed_capital_pm_usd,
+    ALWAYS labeled as a composite (committed_usd rides beside it so no
+    client can render it without knowing what it is). Desk-password
+    sessions see the composite ONLY — raw cash / buying_power /
+    account_value are stripped for them (an owner draw is the owner's
+    business); the admin token sees the full breakdown. The composite
+    is never called cash anywhere, and the raw figure is never
+    falsified — restricted sessions simply don't receive it."""
     from .pmus_account import account_snapshot
 
     now = time.time()
@@ -2313,23 +2325,39 @@ async def api_desk_accounts() -> dict:
           "recent_trades": snap.get("recent_trades") or []}
     if snap.get("error"):
         pm["error"] = snap["error"]
+    committed = float(settings().committed_capital_pm_usd or 0)
+    if pm.get("cash") is not None:
+        pm["trading_capital"] = round(pm["cash"] + committed, 2)
+        pm["committed_usd"] = round(committed, 2)
     kalshi = kalshi_accounts_view(await _engine_heartbeat_detail(), now)
     k_pos_value = sum(
         (p["value_usd"] if p["value_usd"] is not None
          else (p["cost_usd"] or 0)) or 0
         for p in kalshi["positions"])
     totals = {
-        "value": round((pm.get("account_value") or 0)
+        "value": round((pm.get("account_value") or 0) + committed
                        + (kalshi.get("balance_usd") or 0)
                        + k_pos_value, 2),
+        "trading_capital": round((pm.get("cash") or 0) + committed
+                                 + (kalshi.get("balance_usd") or 0), 2),
+        "committed_usd": round(committed, 2),
         "cash": round((pm.get("cash") or 0)
                       + (kalshi.get("balance_usd") or 0), 2),
         "unrealized": round(
             sum(p["unrealized"] or 0 for p in pm_positions)
             + sum(p["unrealized"] or 0 for p in kalshi["positions"]), 2),
     }
+    if role != "admin":
+        # Owner-draw privacy: composite only for desk sessions.
+        for k in ("cash", "buying_power", "account_value"):
+            pm.pop(k, None)
+        totals.pop("cash", None)
+        totals["value"] = round((pm.get("trading_capital") or 0)
+                                + (pm.get("open_value") or 0)
+                                + (kalshi.get("balance_usd") or 0)
+                                + k_pos_value, 2)
     return {"as_of": now, "polymarket": pm, "kalshi": kalshi,
-            "totals": totals}
+            "totals": totals, "role": role}
 
 
 class CashOutBody(BaseModel):

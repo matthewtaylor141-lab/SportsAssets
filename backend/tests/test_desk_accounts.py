@@ -53,3 +53,34 @@ def test_empty_heartbeat_is_unconfigured_not_a_crash():
     assert out["degraded"] is True
     assert out["balance_usd"] is None
     assert out["positions"] == []
+
+
+# ── Committed capital (option 2, owner directive 2026-08-22) ─────────
+# The composite is ALWAYS labeled (committed_usd rides beside it); desk
+# sessions lose the raw cash fields; the admin sees everything; and no
+# field named cash/balance ever carries the padded figure.
+
+
+def test_trading_capital_is_composite_and_labeled():
+    import inspect
+
+    from sportsassets.api import app as app_mod
+
+    src = inspect.getsource(app_mod.api_desk_accounts)
+    assert 'pm["trading_capital"] = round(pm["cash"] + committed, 2)' in src
+    assert 'pm["committed_usd"]' in src, \
+        "the composite must carry its own label field"
+    # Desk sessions get the composite only — raw fields stripped.
+    assert '"cash", "buying_power", "account_value"' in src
+    assert 'role != "admin"' in src
+    # The padded figure is never assigned into a cash field.
+    assert 'pm["cash"] = round' not in src
+
+
+def test_require_desk_returns_roles():
+    import inspect
+
+    from sportsassets.api.app import require_desk
+
+    src = inspect.getsource(require_desk)
+    assert 'return "admin"' in src and 'return "desk"' in src

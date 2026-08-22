@@ -124,8 +124,16 @@ export function Accounts() {
             <div className="ac-tile-v mono">{money(data.totals.value)}</div>
           </div>
           <div className="ac-tile">
-            <div className="ac-tile-l">Total cash</div>
-            <div className="ac-tile-v mono">{money(data.totals.cash)}</div>
+            <div className="ac-tile-l">
+              {data.totals.cash != null ? 'Total cash' : 'Trading capital'}
+            </div>
+            <div className="ac-tile-v mono">
+              {money(data.totals.cash ?? data.totals.trading_capital)}
+            </div>
+            {data.totals.cash == null
+              && (data.totals.committed_usd ?? 0) > 0 && (
+              <div className="ac-tile-note">incl. committed capital</div>
+            )}
           </div>
           <div className="ac-tile">
             <div className="ac-tile-l">Unrealized P&L</div>
@@ -155,9 +163,22 @@ export function Accounts() {
               </span>
             </div>
             <div className="ac-stats">
-              <div className="ac-stat"><span>Account value</span><b>{money(pm?.account_value)}</b></div>
-              <div className="ac-stat"><span>Cash</span><b>{money(pm?.cash)}</b></div>
-              <div className="ac-stat"><span>Buying power</span><b>{money(pm?.buying_power)}</b></div>
+              {pm?.trading_capital != null && (
+                <div className="ac-stat ac-stat-wide">
+                  <span>Trading capital{(pm?.committed_usd ?? 0) > 0
+                    ? ' · incl. committed capital' : ''}</span>
+                  <b>{money(pm?.trading_capital)}</b>
+                </div>
+              )}
+              {pm?.account_value != null && (
+                <div className="ac-stat"><span>Account value</span><b>{money(pm?.account_value)}</b></div>
+              )}
+              {pm?.cash != null && (
+                <div className="ac-stat"><span>Cash</span><b>{money(pm?.cash)}</b></div>
+              )}
+              {pm?.buying_power != null && (
+                <div className="ac-stat"><span>Buying power</span><b>{money(pm?.buying_power)}</b></div>
+              )}
               <div className="ac-stat"><span>Open value</span><b>{money(pm?.open_value)}</b></div>
               <div className="ac-stat"><span>Unsettled</span><b>{money(pm?.unsettled_funds)}</b></div>
               <div className="ac-stat">
