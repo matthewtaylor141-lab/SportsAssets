@@ -554,10 +554,18 @@ jobs:
           # WHY: per crypto whale, are trades arriving source=chain
           # (sub-second, fresh) or source=poll (3-6 min Data-API lag,
           # always stale at the 90s bar)? latency_s = detected_at - ts.
+          # NOTE: /api/whales returns a BARE ARRAY; `.whales // .` errors
+          # on arrays (jq `//` catches null/false, not index errors) and
+          # printed a spurious NOT IN ROSTER on the first run of this step.
           curl -sS --max-time 60 -o /tmp/whales.json "$BASE/api/whales" || true
+          jq -r 'if type=="array" then
+                   "  KCR-PROV active roster: " + ([.[] | "\(.id):\(.username // .address[0:10])"] | join(" "))
+                 else "  KCR-PROV roster: unexpected shape" end' \
+            /tmp/whales.json 2>/dev/null || echo "  KCR-PROV roster: fetch failed"
           for W in 0xf705fa04 jnstrtprdctnmrkts; do
             WID=$(jq -r --arg w "$W" \
-              '(.whales // .) | .[] | select((.username // "" | ascii_downcase) == $w) | .id' \
+              '(if type=="array" then . else (.whales // []) end)
+               | .[] | select((.username // "" | ascii_downcase) == $w) | .id' \
               /tmp/whales.json 2>/dev/null | head -1)
             if [ -z "$WID" ]; then
               echo "  KCR-PROV $W: NOT IN ROSTER (/api/whales has no such username)"
