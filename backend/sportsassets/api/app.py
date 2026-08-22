@@ -1372,7 +1372,7 @@ async def api_desk_games(venue: str = Query("polymarket"),
         }
         series_list = (_DESK_KALSHI_SERIES if league == "all"
                        else series_by_league.get(league, []))
-        mkts = await _kalshi_fetch(series_list, max_close_h=48, cap=None)
+        mkts = await _kalshi_fetch(series_list, max_close_h=168, cap=None)
         games: dict[str, dict] = {}
         for m in mkts:
             t = m.get("ticker") or ""
@@ -1513,7 +1513,7 @@ async def api_desk_feed(venue: str = Query("polymarket"),
         }
         series_list = (_DESK_KALSHI_SERIES if league == "all"
                        else series_by_league.get(league, []))
-        mkts = await _kalshi_fetch(series_list, max_close_h=48, cap=None)
+        mkts = await _kalshi_fetch(series_list, max_close_h=168, cap=None)
         games: dict[str, dict] = {}
         for m in mkts:
             t = m.get("ticker") or ""
@@ -1758,6 +1758,26 @@ async def api_desk_game(venue: str = Query(...),
             "pnl": p["pnl"]})
     order = ["Moneyline", "Spreads", "Totals", "Set Markets",
              "Props & Specials", "More Markets"]
+    # LIVE RE-QUOTE for the moneyline rows (owner report 2026-08-22:
+    # Pegula 31c / Swiatek 32c — complements summing 63c). The venue's
+    # LISTING carries a stale per-side price when one side's book is
+    # thin; the ticket always re-quotes live so orders were never
+    # mispriced, but the page must not display a stale print either.
+    # Bounded: moneyline group only (<=6 slugs), live book read per
+    # side, listing price replaced whenever the live read answers.
+    ml = groups.get("Moneyline") or []
+    if ml:
+        from .. import pmus as _pm
+
+        async def _fresh(row: dict) -> None:
+            try:
+                px = await asyncio.to_thread(_pm.slug_ask,
+                                             row.get("us_slug") or "")
+                if px is not None:
+                    row["price"] = px
+            except Exception:  # noqa: BLE001 — keep the listing price
+                pass
+        await asyncio.gather(*(_fresh(r) for r in ml[:6]))
     return {"id": id, "venue": "polymarket", "title": ev["title"],
             "groups": [{"name": k, "markets": groups[k]}
                        for k in order if k in groups]
