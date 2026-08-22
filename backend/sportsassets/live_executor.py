@@ -381,7 +381,14 @@ PMUS_LOSS_BREAKER_USD = float(
 # only when the book actually moved. The tolerance cohort is measurable
 # in live_orders as limit_price > his_price; if its settled record
 # grades negative the knob goes back to 0 (env override, no deploy).
-RN1_TOL_CENTS = float(os.environ.get("PMUS_RN1_TOL_CENTS", "2"))
+# 2 -> 3 (owner capitalize order 2026-08-22): the 7d fill-vs-miss
+# grade showed RN1's MISSED copies running +10.1% ROI — trades we
+# refused over pennies were still profitable at worse entries, so one
+# more cent of fresh-reaction capture is the highest-confidence dollar
+# available. Graded as its own cohort from this deploy's timestamp;
+# revert to 2 (or env-override) if the +3c entries grade below the
+# +2c cohort. Fresh reactions ONLY — reclaims still pay no tolerance.
+RN1_TOL_CENTS = float(os.environ.get("PMUS_RN1_TOL_CENTS", "3"))
 
 
 def copy_limit_price(whale_username: str | None, his_price: float,

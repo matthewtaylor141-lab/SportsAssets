@@ -117,11 +117,14 @@ class TestCopyLimitPrice:
         assert copy_limit_price("0xwhoever", 0.50) == 0.50
         assert copy_limit_price(None, 0.335) == 0.33
 
-    def test_rn1_gets_two_cents_of_capture(self):
+    def test_rn1_gets_three_cents_of_capture(self):
+        # 2 -> 3 owner capitalize order 2026-08-22: missed RN1 copies
+        # graded +10.1% ROI — one more cent of fresh capture, its own
+        # grading cohort from the deploy timestamp.
         from sportsassets.live_executor import copy_limit_price
 
-        assert copy_limit_price("rn1", 0.474) == 0.49   # floor 47 + 2
-        assert copy_limit_price("RN1", 0.50) == 0.52
+        assert copy_limit_price("rn1", 0.474) == 0.50   # floor 47 + 3
+        assert copy_limit_price("RN1", 0.50) == 0.53
         assert copy_limit_price("rn1", 0.985) == 0.99   # capped below 1
 
     def test_env_zero_restores_strict_rule(self, monkeypatch):
