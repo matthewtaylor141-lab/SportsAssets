@@ -1254,8 +1254,13 @@ jobs:
           RPCS = ["https://polygon-rpc.com", "https://1rpc.io/matic",
                   "https://polygon-bor-rpc.publicnode.com"]
 
+          # Public RPCs 401/403 the default Python-urllib UA (observed
+          # 2026-08-22 first run of this step); curl's UA sails through.
+          UA = {"user-agent": "curl/8.5.0", "accept": "application/json"}
+
           def get(url):
-              with urllib.request.urlopen(url, timeout=30) as r:
+              req = urllib.request.Request(url, headers=UA)
+              with urllib.request.urlopen(req, timeout=30) as r:
                   return json.load(r)
 
           def rpc(method, params):
@@ -1265,7 +1270,7 @@ jobs:
                   try:
                       req = urllib.request.Request(
                           u, data=body,
-                          headers={"content-type": "application/json"})
+                          headers={"content-type": "application/json", **UA})
                       with urllib.request.urlopen(req, timeout=25) as r:
                           out = json.load(r)
                       if out.get("result") is not None:
