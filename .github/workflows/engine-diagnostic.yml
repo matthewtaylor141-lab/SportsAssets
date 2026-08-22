@@ -549,6 +549,21 @@ jobs:
             || echo "  (unavailable)"
 
           echo ""
+          echo "#   SOCCER FORENSIC (work order 2026-08-21: soccer -6.2k   #"
+          echo "#   on the venue account vs profitable soccer copy whales) #"
+          curl -sS --max-time 90 -o /tmp/tr.json "$BASE/api/track-record?since=2026-08-01" || true
+          echo "  -- venue-account P&L by sleeve x sport (capped record) --"
+          jq -r '[.trades[]? | {sleeve: (.sleeve // "?"), sport: (.sport // "?"), pnl: (.pnl // 0)}]
+                 | group_by([.sleeve, .sport]) | map({k: (.[0].sleeve + "/" + .[0].sport),
+                     pnl: (map(.pnl) | add | . * 100 | round / 100), n: length})
+                 | sort_by(.pnl) | .[:14][] | "  SOCFOR \(.k): \(.pnl) over \(.n)"' /tmp/tr.json \
+            2>/dev/null || echo "  SOCFOR unavailable"
+          curl -sS --max-time 60 "$BASE/api/copies-record" 2>/dev/null | \
+            jq -r '.by_whale_sport[]? | select(.sport == "soccer")
+                   | "  SOCFOR-COPY \(.whale)/soccer: pnl \(.pnl) staked \(.staked) (\(.wins)-\(.losses))"' \
+            2>/dev/null || echo "  SOCFOR-COPY unavailable"
+
+          echo ""
           echo "#   KCR-PROV: crypto-whale detection provenance            #"
           # The crypto leg refuses everything as stale (>90s). This says
           # WHY: per crypto whale, are trades arriving source=chain
