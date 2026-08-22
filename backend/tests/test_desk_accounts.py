@@ -84,3 +84,19 @@ def test_require_desk_returns_roles():
 
     src = inspect.getsource(require_desk)
     assert 'return "admin"' in src and 'return "desk"' in src
+
+
+def test_external_positions_partitioned_and_admin_only():
+    import inspect
+
+    from sportsassets.api import app as app_mod
+
+    src = inspect.getsource(app_mod.api_desk_accounts)
+    # Venue positions on markets the platform never ordered are split out
+    assert "pm_external" in src and "our_slugs" in src
+    # ...ride admin-only (never silently dropped, never shown to team)
+    assert 'pm["external_positions"] = pm_external' in src
+    assert src.index('if role == "admin"') < src.index(
+        'pm["external_positions"]')
+    # Open value sums PLATFORM positions, not the account-wide notional
+    assert "if not pm_external" in src

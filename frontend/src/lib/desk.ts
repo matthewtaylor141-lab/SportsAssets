@@ -31,6 +31,8 @@ export interface DeskAccounts {
     buying_power?: number | null; open_value: number | null
     /** cash + committed capital — the composite desk sessions see. */
     trading_capital?: number | null; committed_usd?: number | null
+    /** Admin-only: venue positions NOT placed by the platform. */
+    external_positions?: PMPosition[]; external_count?: number
     unsettled_funds: number | null; realized_pnl: number | null
     positions: PMPosition[]; recent_trades: Record<string, unknown>[] | null
   }

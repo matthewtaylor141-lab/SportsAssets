@@ -2468,25 +2468,44 @@ async def api_desk_accounts(role: str = Depends(require_desk)) -> dict:
 
     now = time.time()
     snap = await account_snapshot()
-    pm_positions = []
+    # PLATFORM-ONLY POSITIONS (owner 2026-08-22: personal trades placed
+    # directly on the venue app share the account but are NOT platform
+    # activity — the desk and team views show only what the copy engine
+    # and the desk placed). Membership = the platform's own order
+    # ledger; a venue position on a market we never ordered is
+    # external. Externals are never silently dropped: the admin view
+    # carries them in their own list so the owner always sees the whole
+    # account somewhere.
+    pool = await get_pool()
+    ours = await pool.fetch(
+        """
+        SELECT DISTINCT lower(COALESCE(us_market_slug, '')) AS slug
+        FROM live_orders
+        WHERE status IN ('submitting', 'filled')
+          AND us_market_slug IS NOT NULL
+        """)
+    our_slugs = {r["slug"] for r in ours if r["slug"]}
+    pm_positions, pm_external = [], []
     for r in (snap.get("open_positions") or []):
         cost, value = r.get("cost"), r.get("value")
-        pm_positions.append({
+        row = {
             "market_slug": r.get("market_slug"), "title": r.get("title"),
             "outcome": r.get("outcome"), "qty": r.get("qty"),
             "cost": cost, "value": value,
             "unrealized": (round(value - cost, 2)
                            if value is not None and cost is not None
-                           else None)})
-    # The venue's assetNotional intermittently reads 0 while positions
-    # plainly carry value (observed 2026-08-22) — fall back to summing
-    # the marked positions so "Open value $0.00" can't sit beside a
-    # list of valued holdings.
-    open_value = snap.get("open_value")
-    if not open_value:
-        marked = [p["value"] for p in pm_positions
-                  if p.get("value") is not None]
-        open_value = round(sum(marked), 2) if marked else open_value
+                           else None)}
+        slug = (r.get("market_slug") or "").lower()
+        (pm_positions if slug in our_slugs else pm_external).append(row)
+    # Open value = the PLATFORM's open book (externals excluded), summed
+    # from marked positions; the venue's account-wide assetNotional is
+    # only a fallback when we hold no marks at all (it both zeroes out
+    # intermittently and would count the owner's personal trades).
+    marked = [p["value"] for p in pm_positions
+              if p.get("value") is not None]
+    open_value = (round(sum(marked), 2) if marked
+                  else (snap.get("open_value") if not pm_external
+                        else 0.0))
     pm = {"configured": bool(snap.get("configured")),
           "account_value": snap.get("account_value"),
           "cash": snap.get("cash"),
@@ -2498,6 +2517,11 @@ async def api_desk_accounts(role: str = Depends(require_desk)) -> dict:
           "recent_trades": snap.get("recent_trades") or []}
     if snap.get("error"):
         pm["error"] = snap["error"]
+    if role == "admin":
+        # The whole account is always visible SOMEWHERE: externals
+        # (owner's personal venue-app trades) ride admin-only.
+        pm["external_positions"] = pm_external
+        pm["external_count"] = len(pm_external)
     committed = float(settings().committed_capital_pm_usd or 0)
     if pm.get("cash") is not None:
         pm["trading_capital"] = round(pm["cash"] + committed, 2)

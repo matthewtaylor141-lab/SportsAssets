@@ -223,6 +223,28 @@ export function Accounts() {
                 </div>
               </details>
             )}
+            {(pm?.external_count ?? 0) > 0 && (
+              <details className="ac-details">
+                <summary>
+                  external positions · {pm?.external_count} (placed on the
+                  venue app, not by the platform — excluded from all
+                  platform views and P&L)
+                </summary>
+                <div className="ac-postable">
+                  {(pm?.external_positions ?? []).map((p, i) => (
+                    <div className="ac-porow" key={i}>
+                      <div className="ac-poname">
+                        <b>{p.title ?? p.market_slug}</b>
+                        <span>{p.outcome}</span>
+                      </div>
+                      <div className="ac-ponums mono">
+                        Qty {p.qty} · Cost {money(p.cost)} · Value {money(p.value)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
             <div className="ac-tabs">
               <button className={pmTab === 'positions' ? 'on' : ''} onClick={() => setPmTab('positions')}>
                 Positions {pm?.positions?.length ? `(${pm.positions.length})` : ''}
