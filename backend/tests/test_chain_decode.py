@@ -146,3 +146,38 @@ def test_v2_nonsense_price_is_refused():
     entry = _v2_log(RN1, CPTY, side=0, gave=5_000_000, got=1_000_000)
     assert decode_order_filled_v2(entry, {RN1}) is None, \
         "an implied price >= 1 is not a priced fill"
+
+
+# ── second v2 instance (crypto/non-sports books, 2026-08-22) ─────────
+# KCR-CHAIN receipts: every fill of the crypto copy whales emitted the
+# SAME v2 event from 0xE111...996B, which the listener did not watch —
+# chain decoded zero of their trades and detection fell to the poll's
+# 3.5-8.5 min publication lag, starving the Kalshi crypto leg's 90s
+# freshness bar.
+
+CRYPTO_WHALE = "0x1465b79bff7992bc703e1aafb3683b1089647072"  # jnstrt...
+
+
+def test_listener_watches_the_crypto_exchange_instance():
+    from sportsassets.ingestion.chain import (
+        ORDER_FILLED_V2_TOPIC, ChainListener)
+
+    lst = ChainListener()
+    assert "0xe111180000d2663c0091e4f400237545b87b996b" in lst._addresses
+    # The three original emitters stay subscribed.
+    assert "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e" in lst._addresses
+    assert "0xc5d563a36ae78145c45a50134d48a1215220f80a" in lst._addresses
+    assert "0xe2222d279d744050d28e00520010520000310f59" in lst._addresses
+    # And the OR-list still carries both fill topics.
+    assert ORDER_FILLED_V2_TOPIC in lst._topics[0]
+
+
+def test_v2_decode_matches_crypto_whale_as_owner():
+    from sportsassets.ingestion.chain import decode_order_filled_v2
+
+    entry = _v2_log(CRYPTO_WHALE, CPTY, side=0,
+                    gave=0x747548, got=0xBBD5F0)
+    fill = decode_order_filled_v2(entry, {CRYPTO_WHALE})
+    assert fill is not None
+    assert fill.wallet == CRYPTO_WHALE
+    assert fill.side == "BUY"

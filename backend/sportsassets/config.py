@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     # emitting fills — diagnosed on-chain 2026-08-10). Old addresses stay
     # subscribed: harmless if silent, covering any straggler flow.
     pm_exchange_v2_address: str = "0xE2222D279d744050d28E00520010520000310f59"
+    # Second 2026 exchange instance: the crypto/non-sports books fill
+    # here — same OrderFilled-v2 event (topic 0xd543adfd...), different
+    # emitter. Diagnosed 2026-08-22 from the crypto copy whales' real
+    # fill receipts (KCR-CHAIN probe): every one of their fills emitted
+    # from this address while the listener watched only the three above,
+    # so chain decoded ZERO of their trades and detection fell to the
+    # Data-API poll (3.5-8.5 min publication lag vs the leg's 90s bar).
+    pm_exchange_crypto_address: str = "0xE111180000d2663c0091E4f400237545B87b996B"
 
     # Public APIs
     data_api_base: str = "https://data-api.polymarket.com"

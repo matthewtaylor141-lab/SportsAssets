@@ -208,6 +208,9 @@ class ChainListener:
             cfg.ctf_exchange_address.lower(),
             cfg.neg_risk_ctf_exchange_address.lower(),
             cfg.pm_exchange_v2_address.lower(),
+            # Crypto/non-sports books fill on a second v2 instance —
+            # without it the crypto copy whales decode zero (2026-08-22).
+            cfg.pm_exchange_crypto_address.lower(),
         ]
         # OR-list in topic position 0: legacy OrderFilled plus the v2
         # fill event — either matches.
