@@ -200,7 +200,7 @@ async def _write_outbox(trade_id: int, payload: dict) -> None:
 
 async def _enrich(trade_id: int, ev: TradeEvent, detected_at: datetime) -> None:
     try:
-        meta = await gamma.lookup_token(str(ev.asset))
+        meta = await gamma.lookup_token_live(str(ev.asset))
         if meta is None:
             log.warning("no metadata for token %s (tx %s); will enrich on refresh", ev.asset, ev.tx_hash)
             return
@@ -296,7 +296,7 @@ async def backfill_unenriched(limit: int = 200) -> int:
                         dead_tokens=len(dead))
     fixed = 0
     for row in rows:
-        meta = await gamma.lookup_token(row["asset"])
+        meta = await gamma.lookup_token_live(row["asset"])
         if meta is None:
             a = str(row["asset"])
             n, _ts = _enrich_fails.get(a, (0, 0.0))

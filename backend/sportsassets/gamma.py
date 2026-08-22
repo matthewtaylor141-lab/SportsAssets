@@ -306,3 +306,47 @@ async def lookup_token(token_id: str) -> dict[str, Any] | None:
         str(token_id),
     )
     return dict(row) if row else None
+
+
+# On-miss live fetch (2026-08-22): the metadata refresher sweeps SPORTS
+# markets only, so chain-detected trades in crypto markets never
+# enriched — and now that chain wins every detection race, the Data-API
+# duplicate that used to carry the slug is dedupe-dropped, so a new
+# market's slug would never arrive at all. On a cache+DB miss this
+# fetches the one market from the gamma API by clob token id, persists
+# it through the normal upsert (markets + market_tokens + Redis), and
+# returns the mapping. Dead/unknown tokens are negative-cached for
+# 10 minutes so 642 known-dead tokens can't turn this into a hammer.
+_live_client: GammaClient | None = None
+_token_miss_cache: dict[str, float] = {}
+_TOKEN_MISS_TTL_S = 600.0
+
+
+async def lookup_token_live(token_id: str) -> dict[str, Any] | None:
+    """lookup_token, plus a one-market gamma fetch on miss."""
+    import time as _t
+
+    global _live_client
+    tid = str(token_id)
+    found = await lookup_token(tid)
+    if found is not None:
+        return found
+    miss_at = _token_miss_cache.get(tid)
+    if miss_at is not None and _t.time() - miss_at < _TOKEN_MISS_TTL_S:
+        return None
+    if _live_client is None:
+        _live_client = GammaClient()
+    try:
+        raws = await _live_client.fetch_markets(
+            {"clob_token_ids": tid, "limit": 1})
+    except Exception as exc:  # noqa: BLE001 — enrichment stays best-effort
+        log.warning("live token fetch failed for %s: %s", tid, exc)
+        return None
+    meta = parse_market(raws[0]) if raws else None
+    if meta is None:
+        if len(_token_miss_cache) > 4096:
+            _token_miss_cache.clear()
+        _token_miss_cache[tid] = _t.time()
+        return None
+    await upsert_market(meta)
+    return await lookup_token(tid)

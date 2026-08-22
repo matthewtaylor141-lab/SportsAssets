@@ -1678,13 +1678,25 @@ async def api_crypto_copy_candidates(
     from .copies_record import CRYPTO_WHALES
 
     pool = await get_pool()
+    # Chain-detected rows (the fresh ones, post 2026-08-22 exchange fix)
+    # carry only the token id until async enrichment fills slug/title —
+    # the leg classifies by slug and was refusing every one as
+    # 'no-asset'. These systematics re-trade the same markets all day,
+    # so stored metadata (market_tokens -> markets, persisted the first
+    # time any trade on the market enriched) covers them: serve the
+    # trade's own slug/title when present, else the metadata's.
     rows = await pool.fetch(
         """
         SELECT t.id, lower(COALESCE(w.username, '')) AS username,
-               t.market_slug, t.market_title, t.side,
+               COALESCE(t.market_slug, m.slug)   AS market_slug,
+               COALESCE(t.market_title, m.title) AS market_title,
+               t.side,
                t.price::float8 AS price, t.notional::float8 AS notional,
                EXTRACT(EPOCH FROM t.ts)::float8 AS ts_epoch
-        FROM trades t JOIN whales w ON w.id = t.whale_id
+        FROM trades t
+        JOIN whales w ON w.id = t.whale_id
+        LEFT JOIN market_tokens mt ON mt.token_id = t.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
         WHERE lower(COALESCE(w.username, '')) = ANY($1::text[])
           AND t.side = 'BUY'
           AND t.ts > now() - interval '10 minutes'
