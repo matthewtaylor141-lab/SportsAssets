@@ -109,7 +109,11 @@ class Poller:
         # the INSERT ... ON CONFLICT stays as the authoritative gate for
         # anything that races in between.
         pool = await get_pool()
-        keys = [ev.dedupe_key() for ev in events]
+        # dedupe_key is a @property — calling it was 'str' object is not
+        # callable on EVERY wallet with events (Path B fully down,
+        # 2026-08-21 evening; masked because chain carried the sports
+        # whales and the hourly reconciler back-filled the rest).
+        keys = [ev.dedupe_key for ev in events]
         try:
             seen = {r["dedupe_key"] for r in await pool.fetch(
                 "SELECT dedupe_key FROM trades "
