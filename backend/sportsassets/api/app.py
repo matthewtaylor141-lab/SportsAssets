@@ -1014,6 +1014,23 @@ def _kalshi_shape(m: dict, series: str) -> dict:
     }
 
 
+
+async def _kalshi_fetch_boards(series_list: list[str]) -> list[dict]:
+    """Board fetch with per-sport close windows. Tennis carries the
+    TOURNAMENT'S close time (KDESKG-T forensics 2026-08-22: US Open
+    quali matches, played Aug 26, close Sep 6) — a game-time window
+    structurally hides every tennis market, so tennis series fetch
+    unwindowed while game sports keep the 7-day slate."""
+    tennis = [x for x in series_list
+              if x.startswith(("KXATPMATCH", "KXWTAMATCH"))]
+    rest = [x for x in series_list if x not in tennis]
+    out: list[dict] = []
+    if rest:
+        out += await _kalshi_fetch(rest, max_close_h=168, cap=None)
+    if tennis:
+        out += await _kalshi_fetch(tennis, max_close_h=None, cap=None)
+    return out
+
 async def _kalshi_fetch(series_list: list[str], q: str = "",
                         max_close_h: int | None = None,
                         cap: int | None = 60) -> list[dict]:
@@ -1372,7 +1389,7 @@ async def api_desk_games(venue: str = Query("polymarket"),
         }
         series_list = (_DESK_KALSHI_SERIES if league == "all"
                        else series_by_league.get(league, []))
-        mkts = await _kalshi_fetch(series_list, max_close_h=168, cap=None)
+        mkts = await _kalshi_fetch_boards(series_list)
         games: dict[str, dict] = {}
         for m in mkts:
             t = m.get("ticker") or ""
@@ -1513,7 +1530,7 @@ async def api_desk_feed(venue: str = Query("polymarket"),
         }
         series_list = (_DESK_KALSHI_SERIES if league == "all"
                        else series_by_league.get(league, []))
-        mkts = await _kalshi_fetch(series_list, max_close_h=168, cap=None)
+        mkts = await _kalshi_fetch_boards(series_list)
         games: dict[str, dict] = {}
         for m in mkts:
             t = m.get("ticker") or ""

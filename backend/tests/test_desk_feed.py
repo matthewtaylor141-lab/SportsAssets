@@ -152,8 +152,14 @@ def _kraw(ticker, title, sub, ask_cents, volume=None, close=None):
 
 
 def _wire_kalshi_fetch(monkeypatch, shaped_rows):
+    # The boards helper fetches game sports and tennis as separate
+    # partitions (tennis unwindowed — venue stamps tournament closes);
+    # answer each call with only the rows its series own, like the
+    # venue would.
     async def fake_fetch(series_list, q="", max_close_h=None, cap=60):
-        return shaped_rows
+        return [r for r in shaped_rows
+                if any((r.get("ticker") or "").startswith(sr)
+                       for sr in series_list)]
 
     monkeypatch.setattr(app_mod, "_kalshi_fetch", fake_fetch)
 
@@ -205,10 +211,10 @@ async def test_kalshi_league_param_picks_series(monkeypatch):
     monkeypatch.setattr(app_mod, "_kalshi_fetch", fake_fetch)
     out = await app_mod.api_desk_feed(venue="kalshi", league="tennis")
     assert seen["series"] == ["KXATPMATCH", "KXWTAMATCH"]
-    # 48h -> 168h (2026-08-22): a between-tournaments weekend left the
-    # venue with ~5 open sports markets, all beyond 48h — the desk
-    # showed All=0. The board now always shows the coming week.
-    assert seen["max_close_h"] == 168
+    # Tennis fetches UNWINDOWED (KDESKG-T 2026-08-22): the venue stamps
+    # tennis with the tournament's close (Sep 6 for Aug 26 matches), so
+    # any game-time window structurally hides the whole tennis board.
+    assert seen["max_close_h"] is None
     assert out["cards"] == [] and out["counts"]["all"] == 0
 
 
