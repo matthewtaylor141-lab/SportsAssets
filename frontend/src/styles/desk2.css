@@ -1,0 +1,211 @@
+/* ═══ Desk v6 (owner order 2026-08-22): accounts command center +
+   cash-out surfaces. Additive layer over theme.css — dark app-side
+   pieces (Accounts page, gate) use the theme tokens; everything that
+   renders INSIDE the light .vdesk skins reuses the vdesk vars. ═══ */
+
+/* ── Desk gate (shared by Accounts + Trade Desk) ─────────────────── */
+.dk-gate { max-width: 420px; }
+.dk-gate-row { display: flex; gap: 8px; margin-top: 10px; }
+.dk-gate-row .input { flex: 1; }
+.dk-gate-err { color: var(--critical); font-size: 13px; margin: 8px 0 0; }
+
+/* ── Accounts: combined header strip ─────────────────────────────── */
+.ac-head { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 12px 0 16px; }
+.ac-tile {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 16px;
+}
+.ac-tile-l { font-size: 11px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+.ac-tile-v { font-size: 24px; font-weight: 800; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.ac-tile-v.pos { color: var(--good); }
+.ac-tile-v.neg { color: var(--critical); }
+.ac-asof { color: var(--muted); font-size: 12px; margin: -6px 0 12px; }
+
+/* ── Accounts: venue cards ───────────────────────────────────────── */
+.ac-venues { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.ac-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; min-width: 0; }
+.ac-vhead { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.ac-vname { font-size: 16px; font-weight: 800; }
+.ac-vdot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.ac-vdot.pm { background: #2d5cf6; }
+.ac-vdot.k { background: #0ab97f; }
+.ac-vtag { margin-left: auto; font-size: 11px; font-weight: 700; color: var(--muted); }
+.ac-vtag.off { color: var(--warning); }
+.ac-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 4px 16px; margin-bottom: 12px; }
+.ac-stat { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.ac-stat span { color: var(--muted); }
+.ac-stat b { font-variant-numeric: tabular-nums; }
+.ac-stat b.pos { color: var(--good); }
+.ac-stat b.neg { color: var(--critical); }
+.ac-degraded {
+  border: 1px solid rgba(250, 178, 25, 0.4); background: rgba(250, 178, 25, 0.08);
+  color: var(--warning); border-radius: 8px; padding: 8px 11px; font-size: 12.5px; margin-bottom: 10px;
+}
+
+/* Tabs inside a venue card */
+.ac-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+.ac-tabs button {
+  border: 1px solid var(--border); background: transparent; color: var(--muted);
+  border-radius: 999px; padding: 4px 12px; font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.ac-tabs button.on { background: var(--surface-3); color: var(--ink); }
+
+/* Div-grid tables that collapse to row-cards on phones */
+.ac-table { min-width: 0; }
+.ac-thead, .ac-row { display: grid; gap: 8px; align-items: center; }
+.ac-thead {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--muted); padding: 4px 0; border-bottom: 1px solid var(--border-strong);
+}
+.ac-row { padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.ac-row:last-child { border-bottom: none; }
+.ac-cell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-cell.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ac-cell.pos { color: var(--good); }
+.ac-cell.neg { color: var(--critical); }
+.ac-cols-pm, .ac-thead.ac-cols-pm { grid-template-columns: minmax(0, 2.2fr) 0.9fr 0.7fr 0.9fr 0.9fr 0.9fr 84px; }
+.ac-cols-k, .ac-thead.ac-cols-k { grid-template-columns: minmax(0, 1.8fr) 0.7fr 0.9fr 0.8fr 0.9fr 0.9fr 84px; }
+.ac-cols-tr, .ac-thead.ac-cols-tr { grid-template-columns: 0.9fr minmax(0, 2fr) 1fr 0.7fr 0.7fr; }
+.ac-sub { display: block; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.ac-empty { color: var(--muted); font-size: 13px; padding: 10px 0; }
+.ac-cashout {
+  border: 1px solid var(--border-strong); background: transparent; color: var(--ink);
+  border-radius: 8px; padding: 7px 10px; font-size: 11.5px; font-weight: 800; cursor: pointer;
+  letter-spacing: 0.03em; white-space: nowrap; min-height: 34px;
+}
+.ac-cashout:hover { border-color: var(--critical); color: var(--critical); }
+
+@media (max-width: 980px) {
+  .ac-venues { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .ac-head { grid-template-columns: 1fr; gap: 8px; }
+  .ac-thead { display: none; }
+  .ac-row, .ac-row.ac-cols-pm, .ac-row.ac-cols-k, .ac-row.ac-cols-tr {
+    grid-template-columns: 1fr 1fr; gap: 4px 12px;
+    border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px;
+  }
+  .ac-cell { white-space: normal; }
+  .ac-cell.num { text-align: left; }
+  .ac-cell[data-l]::before {
+    content: attr(data-l); display: block; font-size: 10px; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted);
+  }
+  .ac-cell.ac-main { grid-column: 1 / -1; font-weight: 700; }
+  .ac-cell.ac-act { grid-column: 1 / -1; }
+  .ac-cashout { width: 100%; min-height: 42px; }
+}
+
+/* ── Trade Desk: live balance strip ──────────────────────────────── */
+.dx-balances { display: inline-flex; gap: 14px; flex-wrap: wrap; }
+.dx-balances b { font-variant-numeric: tabular-nums; }
+
+/* ── Trade Desk: account positions panel (inside the light vdesk) ── */
+.dx-acct { border: 1px solid var(--vd-line); border-radius: 12px; margin-top: 16px; overflow: hidden; }
+.dx-acct-h {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+  font-size: 12px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--vd-mut); background: var(--vd-soft); padding: 9px 13px;
+}
+.dx-acct-h span { font-weight: 600; text-transform: none; letter-spacing: 0; }
+.dx-acct-row {
+  display: grid; grid-template-columns: minmax(0, 2fr) auto auto auto auto 92px;
+  gap: 10px; align-items: center; padding: 9px 13px; border-top: 1px solid var(--vd-line);
+  font-size: 13px; font-variant-numeric: tabular-nums;
+}
+.dx-acct-name { min-width: 0; font-weight: 600; }
+.dx-acct-name small { display: block; font-weight: 500; color: var(--vd-mut); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dx-acct-num { color: var(--vd-mut); white-space: nowrap; }
+.dx-acct-num b { color: var(--vd-ink); }
+.dx-acct-empty { padding: 12px 13px; color: var(--vd-mut); font-size: 13px; border-top: 1px solid var(--vd-line); }
+.dx-cashout {
+  border: 1.5px solid #c92a2a; background: #fff; color: #c92a2a; border-radius: 8px;
+  padding: 8px 0; font-size: 11.5px; font-weight: 800; letter-spacing: 0.03em;
+  cursor: pointer; white-space: nowrap; transition: all 0.1s;
+}
+.dx-cashout:hover:not(:disabled) { background: #c92a2a; color: #fff; }
+.dx-cashout:disabled { opacity: 0.45; cursor: default; }
+/* Compact variant for the ticket's Sell tab */
+.dx-sellpos { display: flex; flex-direction: column; gap: 8px; }
+.dx-sellpos-row { border: 1px solid var(--vd-line); border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 6px; }
+.dx-sellpos-top { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; font-weight: 700; }
+.dx-sellpos-sub { display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; color: var(--vd-mut); font-variant-numeric: tabular-nums; }
+@media (max-width: 860px) {
+  .dx-acct-row { grid-template-columns: minmax(0, 1.4fr) auto auto 92px; }
+  .dx-acct-num.hide-sm { display: none; }
+}
+
+/* ── Book ladder: 5 levels + spread/mid ──────────────────────────── */
+.dx-book-mid {
+  grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 10px;
+  border-top: 1px dashed var(--vd-line); margin-top: 5px; padding-top: 5px;
+  font-size: 11px; font-weight: 700; color: var(--vd-mut); font-variant-numeric: tabular-nums;
+}
+
+/* ── Cancel button on pending queue rows ─────────────────────────── */
+.dx-cancel {
+  border: 1px solid var(--border-strong); background: transparent; color: var(--ink);
+  border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 700; cursor: pointer;
+}
+.dx-cancel:hover:not(:disabled) { border-color: var(--critical); color: var(--critical); }
+.dx-cancel:disabled { opacity: 0.5; cursor: default; }
+
+/* ── Cash-out modal (self-contained light card over a scrim) ─────── */
+.dxm-overlay {
+  position: fixed; inset: 0; z-index: 60; background: rgba(8, 10, 14, 0.62);
+  display: flex; align-items: center; justify-content: center; padding: 18px;
+}
+.dxm {
+  --vd-bg: #ffffff; --vd-ink: #1a1e23; --vd-mut: #6b7280; --vd-line: #e7e9ee;
+  --vd-soft: #f4f5f7;
+  background: var(--vd-bg); color: var(--vd-ink); border-radius: 16px;
+  width: min(420px, 100%); max-height: 88vh; overflow-y: auto;
+  padding: 16px 18px; display: flex; flex-direction: column; gap: 10px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+}
+.dxm--pmx { --vda: #2d5cf6; --vda-soft: #e8eeff; --vda-ink: #1d3fb8; }
+.dxm--kx { --vda: #0ab97f; --vda-soft: #e2f7ee; --vda-ink: #056646; }
+.dxm-h { display: flex; align-items: flex-start; gap: 10px; }
+.dxm-title { font-size: 15px; font-weight: 800; line-height: 1.3; min-width: 0; }
+.dxm-title small { display: block; font-size: 12px; font-weight: 600; color: var(--vd-mut); margin-top: 2px; }
+.dxm-x { margin-left: auto; border: 0; background: var(--vd-soft); color: var(--vd-mut); width: 30px; height: 30px; border-radius: 50%; font-size: 15px; cursor: pointer; flex: none; }
+.dxm-x:hover { color: var(--vd-ink); }
+.dxm-qty { display: flex; gap: 8px; align-items: stretch; }
+.dxm-qty input {
+  flex: 1; min-width: 0; border: 1.5px solid var(--vd-line); border-radius: 10px;
+  font-size: 22px; font-weight: 800; padding: 8px 12px; text-align: center;
+  color: var(--vd-ink); background: var(--vd-bg); font-variant-numeric: tabular-nums;
+}
+.dxm-qty input:focus { outline: 2px solid var(--vda); outline-offset: 1px; }
+.dxm-qty input:disabled { opacity: 0.6; }
+.dxm-all {
+  border: 1px solid var(--vd-line); background: var(--vd-soft); color: var(--vd-ink);
+  border-radius: 10px; padding: 0 16px; font-size: 13px; font-weight: 800; cursor: pointer;
+}
+.dxm-all.on { border-color: var(--vda); background: var(--vda-soft); color: var(--vda-ink); }
+.dxm-cta {
+  border: 0; border-radius: 10px; padding: 13px 0; font-weight: 800; font-size: 15px;
+  cursor: pointer; background: var(--vd-soft); color: var(--vd-mut); transition: all 0.12s;
+}
+.dxm-cta.ready { background: #c92a2a; color: #fff; }
+.dxm-cta.ready:hover { filter: brightness(1.08); }
+.dxm-err { color: #c92a2a; font-size: 12.5px; margin: 0; }
+@media (max-width: 720px) {
+  .dxm-overlay { align-items: flex-end; padding: 0; }
+  .dxm { width: 100%; border-radius: 16px 16px 0 0; max-height: 92vh; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  .dxm-cta, .dxm-all { min-height: 46px; }
+}
+
+/* ── Bottom-sheet ticket on phones (overrides theme.css static) ──── */
+@media (max-width: 720px) {
+  .vdesk .vd-rail.has-pick .pmx-ticket,
+  .vdesk .vd-rail.has-pick .kx-ticket {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+    border-radius: 16px 16px 0 0; max-height: 78vh; overflow-y: auto;
+    box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.4);
+    padding-bottom: max(14px, env(safe-area-inset-bottom));
+  }
+  .vdesk .vd-rail.has-pick::after { content: ''; display: block; height: 56px; }
+  .pmx-cta, .kx-cta { min-height: 48px; }
+  .dx-quick button { min-height: 40px; }
+}

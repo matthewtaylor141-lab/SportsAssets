@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { adminApi } from '../lib/api'
+import {
+  DESK_RELOCK_EVENT, deskAdminToken, deskApi, deskToken, deskUnlock,
+  type DeskAccounts,
+} from '../lib/desk'
+import '../styles/desk2.css'
 
-// Desk v5 (owner order 2026-08-21: "indistinguishable from the actual
-// Polymarket and Kalshi platform, minus the logos"). Two full venue
-// skins — layout, information architecture, order flow and confirmation
-// mirror each venue's own app. Browse is VENUE-NATIVE: the boards come
-// from each venue's own event listing (every market they list renders,
-// tennis alternate totals and game/set spreads included), and every
-// order streams its execution live in the ticket — submitted → AI
-// executing → filled @ price, with the measured latency shown, so the
-// trader watches the AI counterparty place their order in real time.
-// Execution is UNCHANGED: the walled-off 'manual' sleeve endpoints.
+// Desk v6 (owner order 2026-08-22, on top of the v5 venue skins): the
+// team uses both venues "identically as if they were logged in on the
+// native apps — better than the venues". New in v6: shared desk-password
+// session (admin token still accepted), live account balances in the
+// header, an account-wide positions panel with marks + unrealized and a
+// protected CASH OUT flow (limit = bid − 2¢, floored at 1¢, IOC), cancel
+// on pending Kalshi tickets, and the full 5-level book with spread/mid.
+// Execution is UNCHANGED: the walled-off 'manual' sleeve endpoints, all
+// v5 money locks intact (placingRef, dup guards, comma normalization).
 
 type Venue = 'polymarket' | 'kalshi'
 
@@ -50,6 +55,22 @@ interface OrderRun {
   outcome?: string
 }
 
+// A cash-out target: one held position, either venue. Built from the
+// /api/desk/accounts snapshot — the server re-quotes and re-clamps to
+// held at execution, so these numbers are display-grade only.
+interface CoTarget {
+  venue: Venue
+  title: string
+  outcome?: string
+  usSlug?: string
+  ticker?: string
+  held: number
+  cost: number | null
+  mark: number | null
+  value: number | null
+  unrealized: number | null
+}
+
 interface ManualTrade {
   id: number | string
   placed_at: string | null
@@ -84,6 +105,11 @@ const cents = (v: number | null | undefined) => (v == null ? '—' : `${Math.rou
 const pct = (v: number | null | undefined) => (v == null ? '—' : `${Math.round(v * 100)}%`)
 const money = (v: number | null | undefined) =>
   v == null ? '—' : `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(2)}`
+const signed = (v: number | null | undefined) =>
+  v == null ? '—' : `${v > 0 ? '+' : v < 0 ? '-' : ''}$${Math.abs(v).toFixed(2)}`
+// Kalshi's published taker-fee formula, computed at the protective limit.
+const kalshiFee = (count: number, price: number) =>
+  0.07 * count * price * (1 - price)
 
 const LEAGUES: { key: string; label: string; icon: string }[] = [
   { key: 'all', label: 'All', icon: '' },
@@ -103,8 +129,9 @@ const SPORT_NAME: Record<string, string> = {
 }
 
 export function TradeDesk() {
-  const [token, setToken] = useState(() => sessionStorage.getItem('sa_admin_token') || '')
-  const [authed, setAuthed] = useState(false)
+  const [authed, setAuthed] = useState(() => deskToken() != null)
+  const [pw, setPw] = useState('')
+  const [unlocking, setUnlocking] = useState(false)
   const [err, setErr] = useState('')
   const [venue, setVenue] = useState<Venue>('polymarket')
   const [league, setLeague] = useState('all')
@@ -124,47 +151,93 @@ export function TradeDesk() {
   const [searching, setSearching] = useState(false)
   const [pmResults, setPmResults] = useState<PMSearchMarket[]>([])
   const [kResults, setKResults] = useState<KalshiSearchRow[]>([])
+  const [acct, setAcct] = useState<DeskAccounts | null>(null)
+  const [co, setCo] = useState<CoTarget | null>(null)
+  const [coQty, setCoQty] = useState('')
+  const [coAll, setCoAll] = useState(true)
+  const [coRun, setCoRun] = useState<OrderRun | null>(null)
+  const [coBid, setCoBid] = useState<number | null>(null)
+  const [cancelling, setCancelling] = useState<number | string | null>(null)
+  const [cancelErr, setCancelErr] = useState('')
+  const [searchParams, setSearchParams] = useSearchParams()
   const pollRef = useRef<number | null>(null)
   const placingRef = useRef(false)
+  const coPollRef = useRef<number | null>(null)
+  const coPlacingRef = useRef(false)
+  const coLinkDone = useRef(false)
 
   const isK = venue === 'kalshi'
 
-  const loadBlotter = useCallback((tok: string) => {
-    adminApi<Blotter>('/api/admin/manual-trades', tok).then(setBlotter).catch(() => {})
+  const loadBlotter = useCallback(() => {
+    deskApi<Blotter>('/api/admin/manual-trades').then(setBlotter).catch(() => {})
   }, [])
 
-  const unlock = useCallback(async (tok: string) => {
+  const loadAcct = useCallback(() => {
+    deskApi<DeskAccounts>('/api/desk/accounts').then(setAcct).catch(() => {})
+  }, [])
+
+  // ── Desk session gate ────────────────────────────────────────────
+  // Team members unlock with the desk password (12h session token);
+  // the owner's admin token still works — the same input accepts both.
+  const unlock = useCallback(async (secret: string) => {
+    if (!secret || unlocking) return
+    setUnlocking(true)
+    const r = await deskUnlock(secret)
+    if (r.ok) {
+      setAuthed(true); setErr(''); setPw(''); setUnlocking(false)
+      return
+    }
     try {
       const ping = await adminApi<{ match: boolean }>(
-        '/api/admin/ping', tok, { method: 'POST', body: '{}' },
+        '/api/admin/ping', secret, { method: 'POST', body: '{}' },
       )
-      if (!ping.match) { setAuthed(false); setErr('Wrong admin token.'); return }
-      setAuthed(true)
-      setErr('')
-      sessionStorage.setItem('sa_admin_token', tok)
-      loadBlotter(tok)
-    } catch {
-      setAuthed(false)
-      setErr('API unreachable — check the service status.')
-    }
-  }, [loadBlotter])
+      if (ping.match) {
+        sessionStorage.setItem('sa_admin_token', secret)
+        setAuthed(true); setErr(''); setPw(''); setUnlocking(false)
+        return
+      }
+    } catch { /* fall through to the desk-unlock error */ }
+    setErr(r.error || 'Wrong password.')
+    setUnlocking(false)
+  }, [unlocking])
 
   useEffect(() => {
-    if (token) unlock(token)
+    // Resume: a live desk token self-verifies by expiry; a stored admin
+    // token is verified with the same ping the v5 gate used.
+    if (deskToken()) { setAuthed(true); return }
+    const atok = deskAdminToken()
+    if (atok) {
+      adminApi<{ match: boolean }>('/api/admin/ping', atok, { method: 'POST', body: '{}' })
+        .then((p) => { if (p.match) setAuthed(true) })
+        .catch(() => {})
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    const relock = () => { setAuthed(false); setAcct(null) }
+    window.addEventListener(DESK_RELOCK_EVENT, relock)
+    return () => window.removeEventListener(DESK_RELOCK_EVENT, relock)
   }, [])
 
   useEffect(() => {
     if (!authed) return
-    const t = setInterval(() => loadBlotter(token), 12000)
+    loadBlotter()
+    const t = setInterval(loadBlotter, 12000)
     return () => clearInterval(t)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authed])
+  }, [authed, loadBlotter])
+
+  useEffect(() => {
+    if (!authed) return
+    loadAcct()
+    const t = setInterval(loadAcct, 30000)
+    return () => clearInterval(t)
+  }, [authed, loadAcct])
 
   const loadGames = useCallback((v: Venue, lg: string) => {
     setLoading(true)
-    adminApi<{ games: GameCard[]; counts?: Record<string, number> }>(
-      `/api/admin/desk-games?venue=${v}&league=${lg}`, token)
+    deskApi<{ games: GameCard[]; counts?: Record<string, number> }>(
+      `/api/admin/desk-games?venue=${v}&league=${lg}`)
       .then((r) => {
         setGames(r.games)
         if (r.counts) setCounts((c) => ({ ...c, [v]: r.counts! }))
@@ -172,8 +245,7 @@ export function TradeDesk() {
       })
       .catch(() => setErr('Games failed to load — pull to retry.'))
       .finally(() => setLoading(false))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token])
+  }, [])
 
   useEffect(() => {
     if (authed) loadGames(venue, league)
@@ -186,14 +258,14 @@ export function TradeDesk() {
     setSearching(true)
     const t = setTimeout(() => {
       if (venue === 'polymarket') {
-        adminApi<{ markets: PMSearchMarket[] }>(
-          `/api/admin/market-search?q=${encodeURIComponent(query)}`, token)
+        deskApi<{ markets: PMSearchMarket[] }>(
+          `/api/admin/market-search?q=${encodeURIComponent(query)}`)
           .then((r) => setPmResults(r.markets || []))
           .catch(() => setPmResults([]))
           .finally(() => setSearching(false))
       } else {
-        adminApi<{ markets: KalshiSearchRow[] }>(
-          `/api/admin/kalshi-markets?q=${encodeURIComponent(query)}`, token)
+        deskApi<{ markets: KalshiSearchRow[] }>(
+          `/api/admin/kalshi-markets?q=${encodeURIComponent(query)}`)
           .then((r) => setKResults(r.markets || []))
           .catch(() => setKResults([]))
           .finally(() => setSearching(false))
@@ -205,7 +277,7 @@ export function TradeDesk() {
 
   const openGame = (g: { id: string; venue: Venue }, keepRun = false) => {
     if (!keepRun) { setGame(null); setRun(null); setLoading(true) }
-    adminApi<GameView>(`/api/admin/desk-game?venue=${g.venue}&id=${encodeURIComponent(g.id)}`, token)
+    deskApi<GameView>(`/api/admin/desk-game?venue=${g.venue}&id=${encodeURIComponent(g.id)}`)
       .then(setGame)
       .catch(() => { if (!keepRun) setErr('Game failed to load.') })
       .finally(() => { if (!keepRun) setLoading(false) })
@@ -219,8 +291,8 @@ export function TradeDesk() {
     if (!id) return
     let dead = false
     const load = () =>
-      adminApi<{ bids: number[][]; asks: number[][] }>(
-        `/api/admin/book?venue=${pick.venue}&id=${encodeURIComponent(id)}`, token,
+      deskApi<{ bids: number[][]; asks: number[][] }>(
+        `/api/admin/book?venue=${pick.venue}&id=${encodeURIComponent(id)}`,
       ).then((d) => { if (!dead) setDepth(d) }).catch(() => {})
     load()
     const t = setInterval(load, 5000)
@@ -237,7 +309,7 @@ export function TradeDesk() {
     run?.phase === 'submitting' || run?.phase === 'relaying'
   const choose = (p: Pick) => {
     if (inFlight()) return
-    setPick(p); setRun(null); setReviewing(false)
+    setPick(p); setRun(null); setReviewing(false); setSide('buy')
   }
 
   // ── Live order lifecycle ─────────────────────────────────────────
@@ -250,17 +322,20 @@ export function TradeDesk() {
   const stopPoll = () => {
     if (pollRef.current != null) { window.clearInterval(pollRef.current); pollRef.current = null }
   }
-  useEffect(() => () => stopPoll(), [])
+  const stopCoPoll = () => {
+    if (coPollRef.current != null) { window.clearInterval(coPollRef.current); coPollRef.current = null }
+  }
+  useEffect(() => () => { stopPoll(); stopCoPoll() }, [])
 
   const watchRow = (rowId: number, t0: number) => {
     stopPoll()
     pollRef.current = window.setInterval(async () => {
       try {
-        const r = await adminApi<any>(`/api/admin/manual-order?id=${rowId}`, token)
+        const r = await deskApi<any>(`/api/admin/manual-order?id=${rowId}&venue=kalshi`)
         if (!r.found || !r.terminal) return
         stopPoll()
         const ms = Math.round(performance.now() - t0)
-        loadBlotter(token)
+        loadBlotter()
         if (game) openGame({ id: game.id, venue: game.venue }, true)
         if (r.status === 'filled' || r.status === 'settled') {
           const partial = r.filled_usd > 0 && r.requested_usd > 0
@@ -294,14 +369,14 @@ export function TradeDesk() {
       const body = pick.venue === 'polymarket'
         ? { venue: 'polymarket-us', asset: pick.asset || '', us_slug: pick.usSlug || '', ask: pick.ask, title: `${pick.label} — ${pick.side}`, usd: amount }
         : { venue: 'kalshi', ticker: pick.ticker, side: pick.kalshiSide || 'yes', title: `${pick.label} — ${pick.side}`, usd: amount }
-      const r = await adminApi<any>('/api/admin/manual-trade', token, {
+      const r = await deskApi<any>('/api/admin/manual-trade', {
         method: 'POST', body: JSON.stringify(body),
         signal: AbortSignal.timeout(90000),
       })
       const ms = Math.round(performance.now() - t0)
       placingRef.current = false
       setReviewing(false)
-      loadBlotter(token)
+      loadBlotter()
       if (r.ok && r.queued && r.row_id) {
         setRun((prev) => prev && ({ ...prev, phase: 'relaying', rowId: r.row_id }))
         watchRow(r.row_id, t0)
@@ -323,7 +398,7 @@ export function TradeDesk() {
     } catch (e: any) {
       placingRef.current = false
       setReviewing(false)
-      loadBlotter(token)
+      loadBlotter()
       setRun((prev) => prev && ({
         ...prev, phase: 'error',
         error: e?.name === 'TimeoutError'
@@ -331,6 +406,191 @@ export function TradeDesk() {
           : `Request failed (${e?.message || 'network'}) — check Open Orders before retrying.`,
       }))
     }
+  }
+
+  // ── Cash-out flow ────────────────────────────────────────────────
+  // Same fail-closed grammar as buys, mirrored: the server re-quotes
+  // the bid, sells at (bid − 2¢, floored at 1¢) IOC, clamps to held,
+  // and refuses when nothing is held or the book is empty. Kalshi
+  // sells queue through the manual sleeve and stream their relay here
+  // exactly like Kalshi buys.
+  const coInFlight = () =>
+    coRun?.phase === 'submitting' || coRun?.phase === 'relaying'
+
+  const openCashOut = (t: CoTarget) => {
+    if (coInFlight()) return
+    setCo(t); setCoQty(''); setCoAll(true); setCoRun(null)
+    setCoBid(t.mark)
+  }
+  const closeCashOut = () => {
+    if (coRun?.phase === 'submitting') return
+    stopCoPoll()
+    setCo(null); setCoRun(null)
+  }
+
+  // Live re-quote while the modal is open (Kalshi books are addressable
+  // by ticker; Polymarket positions carry only the slug, so the account
+  // snapshot's mark stands in and the server re-quotes at execution).
+  useEffect(() => {
+    if (!co || co.venue !== 'kalshi' || !co.ticker) return
+    let dead = false
+    const load = () =>
+      deskApi<{ bids: number[][]; asks: number[][] }>(
+        `/api/admin/book?venue=kalshi&id=${encodeURIComponent(co.ticker!)}`,
+      ).then((d) => {
+        if (!dead && d.bids && d.bids.length) setCoBid(d.bids[0][0])
+      }).catch(() => {})
+    load()
+    const t = setInterval(load, 5000)
+    return () => { dead = true; clearInterval(t) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [co])
+
+  const watchCoRow = (rowId: number, t0: number, requested: number) => {
+    stopCoPoll()
+    coPollRef.current = window.setInterval(async () => {
+      try {
+        const r = await deskApi<any>(`/api/admin/manual-order?id=${rowId}&venue=kalshi`)
+        if (!r.found || !r.terminal) return
+        stopCoPoll()
+        const ms = Math.round(performance.now() - t0)
+        loadBlotter(); loadAcct()
+        if ((r.status === 'filled' || r.status === 'settled') && (r.filled_shares ?? 0) > 0) {
+          const partial = requested > 0 && r.filled_shares < requested
+          setCoRun((prev) => prev && ({
+            ...prev, phase: partial ? 'partial' : 'filled', ms,
+            fillPrice: r.fill_price, filledShares: r.filled_shares,
+            filledUsd: r.filled_usd,
+          }))
+        } else if (r.status === 'unfilled' || r.status === 'cancelled') {
+          setCoRun((prev) => prev && ({ ...prev, phase: 'unfilled', ms }))
+        } else {
+          setCoRun((prev) => prev && ({ ...prev, phase: 'error', ms, error: r.error || r.status }))
+        }
+      } catch { /* keep polling */ }
+    }, 900)
+  }
+
+  const coHeld = co ? Math.max(0, Math.floor(co.held)) : 0
+  const coCount = co ? (coAll ? coHeld : Math.floor(parseInt(coQty || '0', 10) || 0)) : 0
+  const coLimit = coBid != null && coBid > 0 ? Math.max(0.01, coBid - 0.02) : null
+  const coProceeds = coLimit != null && coCount > 0 ? coCount * coLimit : null
+  const coFee = co?.venue === 'kalshi' && coLimit != null && coCount > 0
+    ? kalshiFee(coCount, coLimit) : null
+  const coValid = coCount > 0 && coCount <= coHeld
+
+  const placeCashOut = async () => {
+    // Same synchronous re-entry lock as buys — a doubled sell is a
+    // doubled real-money order.
+    if (!co || coPlacingRef.current || coInFlight() || !coValid) return
+    coPlacingRef.current = true
+    const t0 = performance.now()
+    const requested = coCount
+    setCoRun({ phase: 'submitting', t0, title: co.title, outcome: co.outcome })
+    try {
+      const body: Record<string, unknown> = co.venue === 'polymarket'
+        ? { venue: 'polymarket-us', us_slug: co.usSlug || '', outcome: co.outcome || '' }
+        : { venue: 'kalshi', ticker: co.ticker }
+      if (!coAll) body.qty = requested
+      const r = await deskApi<any>('/api/desk/cash-out', {
+        method: 'POST', body: JSON.stringify(body),
+        signal: AbortSignal.timeout(90000),
+      })
+      const ms = Math.round(performance.now() - t0)
+      coPlacingRef.current = false
+      loadBlotter()
+      if (r.ok && r.queued && r.row_id) {
+        if (r.quoted_bid != null) setCoBid(r.quoted_bid)
+        setCoRun((prev) => prev && ({ ...prev, phase: 'relaying', rowId: r.row_id }))
+        watchCoRow(r.row_id, t0, r.count ?? requested)
+      } else if (r.ok && (r.filled_shares ?? 0) > 0) {
+        const partial = r.filled_shares < requested
+        setCoRun((prev) => prev && ({
+          ...prev, phase: partial ? 'partial' : 'filled', ms,
+          fillPrice: r.avg_price, filledShares: r.filled_shares,
+          filledUsd: r.proceeds_usd,
+        }))
+        loadAcct()
+        if (game) openGame({ id: game.id, venue: game.venue }, true)
+      } else {
+        const detail = r.error || r.detail || 'cash-out refused'
+        setCoRun((prev) => prev && ({
+          ...prev, phase: /did not fill|no bid|book moved/i.test(detail) ? 'unfilled' : 'error',
+          ms, error: detail,
+        }))
+      }
+    } catch (e: any) {
+      coPlacingRef.current = false
+      loadBlotter()
+      setCoRun((prev) => prev && ({
+        ...prev, phase: 'error',
+        error: e?.name === 'TimeoutError'
+          ? 'Still working after 90s — check Open Orders before retrying.'
+          : `Request failed (${e?.message || 'network'}) — check Open Orders before retrying.`,
+      }))
+    }
+  }
+
+  // ── Account positions for the active venue skin ──────────────────
+  const venuePositions: CoTarget[] = !acct ? [] : isK
+    ? (acct.kalshi.positions || []).map((p) => ({
+      venue: 'kalshi' as const, title: p.ticker, ticker: p.ticker,
+      held: p.qty, cost: p.cost_usd, mark: p.mark_bid,
+      value: p.value_usd, unrealized: p.unrealized,
+    }))
+    : (acct.polymarket.positions || []).map((p) => ({
+      venue: 'polymarket' as const, title: p.title || p.market_slug,
+      outcome: p.outcome, usSlug: p.market_slug, held: p.qty, cost: p.cost,
+      mark: p.value != null && p.qty > 0 ? p.value / p.qty : null,
+      value: p.value, unrealized: p.unrealized,
+    }))
+
+  // Deep link from the Accounts page: /desk?co_venue=…&co_slug=…&co_ticker=…
+  // opens the matching position's cash-out modal once the snapshot lands.
+  useEffect(() => {
+    if (!authed || !acct || coLinkDone.current) return
+    const v = searchParams.get('co_venue')
+    if (!v) return
+    coLinkDone.current = true
+    if (v === 'kalshi') {
+      setVenue('kalshi')
+      const tk = searchParams.get('co_ticker')
+      const p = (acct.kalshi.positions || []).find((x) => x.ticker === tk)
+      if (p) openCashOut({
+        venue: 'kalshi', title: p.ticker, ticker: p.ticker, held: p.qty,
+        cost: p.cost_usd, mark: p.mark_bid, value: p.value_usd, unrealized: p.unrealized,
+      })
+    } else {
+      setVenue('polymarket')
+      const slug = searchParams.get('co_slug')
+      const out = searchParams.get('co_outcome')
+      const p = (acct.polymarket.positions || []).find(
+        (x) => x.market_slug === slug && (!out || x.outcome === out))
+      if (p) openCashOut({
+        venue: 'polymarket', title: p.title || p.market_slug, outcome: p.outcome,
+        usSlug: p.market_slug, held: p.qty, cost: p.cost,
+        mark: p.value != null && p.qty > 0 ? p.value / p.qty : null,
+        value: p.value, unrealized: p.unrealized,
+      })
+    }
+    setSide('sell')
+    setSearchParams({}, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed, acct, searchParams])
+
+  // ── Cancel a pending Kalshi queue ticket ─────────────────────────
+  const cancelRow = async (id: number | string) => {
+    if (cancelling != null) return
+    setCancelling(id); setCancelErr('')
+    try {
+      const r = await deskApi<{ ok: boolean; cancelled?: boolean; error?: string }>(
+        `/api/desk/manual-order/${id}`, { method: 'DELETE' })
+      if (!r.ok) setCancelErr(r.error || 'Could not cancel — already picked up by the engine.')
+    } catch {
+      setCancelErr('Cancel failed — check Open Orders before retrying.')
+    }
+    setCancelling(null)
+    loadBlotter()
   }
 
   const amount = parseFloat(usd)
@@ -341,6 +601,7 @@ export function TradeDesk() {
   const estPayout = estContracts * 1
   const available = blotter ? Math.max(0, blotter.day_budget - blotter.day_spent) : null
   const busy = run?.phase === 'submitting' || run?.phase === 'relaying'
+  const coBusy = coInFlight()
 
   const sportTag = (lg: string) => SPORT_NAME[lg] || 'SPORTS'
   const countFor = (lg: string) => counts[venue]?.[lg]
@@ -349,68 +610,150 @@ export function TradeDesk() {
     return (
       <>
         <h1>Trade Desk</h1>
-        <div className="card" style={{ maxWidth: 420 }}>
-          <p>Enter the admin token (env <code>ADMIN_TOKEN</code>).</p>
-          <input
-            className="input" type="password" value={token}
-            autoCapitalize="none" autoCorrect="off" autoComplete="off" spellCheck={false}
-            onChange={(e) => setToken(e.target.value.trim())}
-            onKeyDown={(e) => e.key === 'Enter' && unlock(token.trim())}
-            aria-label="Admin token"
-          />
-          <button className="btn" onClick={() => unlock(token.trim())}>Unlock</button>
-          {err && <p style={{ color: 'var(--red, #f66)' }}>{err}</p>}
+        <div className="card dk-gate">
+          <p>Team access — enter the desk password (admin token also accepted).</p>
+          <div className="dk-gate-row">
+            <input
+              className="input" type="password" value={pw}
+              autoCapitalize="none" autoCorrect="off" autoComplete="current-password" spellCheck={false}
+              onChange={(e) => setPw(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && unlock(pw.trim())}
+              aria-label="Desk password"
+            />
+            <button className="btn" onClick={() => unlock(pw.trim())} disabled={unlocking}>
+              {unlocking ? 'Unlocking…' : 'Unlock'}
+            </button>
+          </div>
+          {err && <p className="dk-gate-err">{err}</p>}
         </div>
       </>
     )
   }
 
-  // ── Order execution timeline (shared, venue-skinned) ─────────────
-  const runPanel = run && (
-    <div className={`dx-run ${run.phase}`}>
-      {(run.phase === 'submitting' || run.phase === 'relaying') && (
+  // ── Order execution timeline (shared: buys + cash-outs) ──────────
+  const execTimeline = (r: OrderRun, sell: boolean, kal: boolean) => (
+    <div className={`dx-run ${r.phase}`}>
+      {(r.phase === 'submitting' || r.phase === 'relaying') && (
         <>
           <div className="dx-run-row on">
-            <span className="dx-spin" /> Order submitted
+            <span className="dx-spin" /> {sell ? 'Cash-out submitted' : 'Order submitted'}
           </div>
-          <div className={`dx-run-row${run.phase === 'relaying' ? ' on' : ''}`}>
+          <div className={`dx-run-row${r.phase === 'relaying' ? ' on' : ''}`}>
             <span className="dx-spin" />
-            {isK ? 'AI counterparty relaying to Kalshi…' : 'AI counterparty executing on Polymarket…'}
+            {kal ? 'AI counterparty relaying to Kalshi…' : 'AI counterparty executing on Polymarket…'}
           </div>
         </>
       )}
-      {(run.phase === 'filled' || run.phase === 'partial') && (
+      {(r.phase === 'filled' || r.phase === 'partial') && (
         <>
           <div className="dx-run-big">
             <span className="dx-check">✓</span>
-            {run.phase === 'partial' ? 'Partially filled' : 'Order filled'}
+            {r.phase === 'partial'
+              ? (sell ? 'Partially cashed out' : 'Partially filled')
+              : (sell ? 'Cashed out' : 'Order filled')}
           </div>
           <div className="dx-run-fill">
-            <b>{Math.round(run.filledShares || 0)}</b> contracts @ <b>{cents(run.fillPrice)}</b>
-            {' '}· {money(run.filledUsd)}
-            {run.phase === 'partial' && run.requestedUsd
-              ? ` of ${money(run.requestedUsd)} requested (book depth at your price)` : ''}
+            <b>{Math.round(r.filledShares || 0)}</b> contracts @ <b>{cents(r.fillPrice)}</b>
+            {' '}· {sell ? 'proceeds ' : ''}{money(r.filledUsd)}
+            {r.phase === 'partial' && (sell
+              ? ' — the rest stays open (book depth at your price)'
+              : r.requestedUsd
+                ? ` of ${money(r.requestedUsd)} requested (book depth at your price)` : '')}
           </div>
-          {run.ms != null && (
-            <div className="dx-run-lat">executed by the AI in {(run.ms / 1000).toFixed(1)}s</div>
+          {r.ms != null && (
+            <div className="dx-run-lat">executed by the AI in {(r.ms / 1000).toFixed(1)}s</div>
           )}
         </>
       )}
-      {run.phase === 'unfilled' && (
+      {r.phase === 'unfilled' && (
         <>
-          <div className="dx-run-big neg"><span className="dx-x">✕</span> Not filled</div>
+          <div className="dx-run-big neg"><span className="dx-x">✕</span> {sell ? 'Not sold' : 'Not filled'}</div>
           <div className="dx-run-fill">
-            No contracts available at your protected price — the book moved.
-            Nothing was spent. Re-quote and try again.
+            {sell
+              ? 'No contracts sold at your protected price — the book moved. You still hold the position. Re-quote and try again.'
+              : 'No contracts available at your protected price — the book moved. Nothing was spent. Re-quote and try again.'}
           </div>
         </>
       )}
-      {run.phase === 'error' && (
+      {r.phase === 'error' && (
         <>
-          <div className="dx-run-big neg"><span className="dx-x">✕</span> Not placed</div>
-          <div className="dx-run-fill">{run.error}</div>
+          <div className="dx-run-big neg"><span className="dx-x">✕</span> {sell ? 'Not cashed out' : 'Not placed'}</div>
+          <div className="dx-run-fill">{r.error}</div>
         </>
       )}
+    </div>
+  )
+  const runPanel = run && execTimeline(run, false, isK)
+
+  // ── Sell tab / positions panel content ───────────────────────────
+  const sellList = (
+    <div className="dx-sellpos">
+      {!acct ? (
+        <p className="vd-empty">Loading account positions…</p>
+      ) : venuePositions.length === 0 ? (
+        <p className="vd-empty">
+          No open {isK ? 'Kalshi' : 'Polymarket'} positions on the account.
+        </p>
+      ) : venuePositions.map((t) => (
+        <div className="dx-sellpos-row" key={`${t.usSlug || t.ticker}-${t.outcome || ''}`}>
+          <div className="dx-sellpos-top">
+            <span>{t.title}</span>
+            <span className={(t.unrealized ?? 0) > 0 ? 'pos' : (t.unrealized ?? 0) < 0 ? 'neg' : ''}>
+              {signed(t.unrealized)}
+            </span>
+          </div>
+          <div className="dx-sellpos-sub">
+            <span>{t.outcome || t.ticker} · {Math.round(t.held)} @ mark {cents(t.mark)}</span>
+            <span>value {money(t.value)}</span>
+          </div>
+          <button className="dx-cashout" disabled={coBusy} onClick={() => openCashOut(t)}>
+            CASH OUT
+          </button>
+        </div>
+      ))}
+    </div>
+  )
+
+  const acctPanel = (
+    <div className="dx-acct">
+      <div className="dx-acct-h">
+        {isK ? 'Kalshi' : 'Polymarket'} account positions
+        {acct && (
+          <span>
+            {isK
+              ? `${money(acct.kalshi.balance_usd)} cash`
+              : `${money(acct.polymarket.cash)} cash · ${money(acct.polymarket.open_value)} open`}
+          </span>
+        )}
+      </div>
+      {isK && acct?.kalshi.degraded && (
+        <div className="dx-acct-empty">
+          Live Kalshi feed degraded — showing engine-known positions at cost, no marks.
+        </div>
+      )}
+      {!acct ? (
+        <div className="dx-acct-empty">Loading account snapshot…</div>
+      ) : venuePositions.length === 0 ? (
+        <div className="dx-acct-empty">No open positions on this account.</div>
+      ) : venuePositions.map((t) => (
+        <div className="dx-acct-row" key={`${t.usSlug || t.ticker}-${t.outcome || ''}`}>
+          <div className="dx-acct-name">
+            {t.title}
+            <small>{t.outcome || t.ticker}</small>
+          </div>
+          <span className="dx-acct-num">Qty <b>{Math.round(t.held)}</b></span>
+          <span className="dx-acct-num hide-sm">Cost <b>{money(t.cost)}</b></span>
+          <span className="dx-acct-num hide-sm">Mark <b>{cents(t.mark)}</b></span>
+          <span className="dx-acct-num">
+            Unrl <b className={(t.unrealized ?? 0) > 0 ? 'pos' : (t.unrealized ?? 0) < 0 ? 'neg' : ''}>
+              {signed(t.unrealized)}
+            </b>
+          </span>
+          <button className="dx-cashout" disabled={coBusy} onClick={() => openCashOut(t)}>
+            CASH OUT
+          </button>
+        </div>
+      ))}
     </div>
   )
 
@@ -432,8 +775,11 @@ export function TradeDesk() {
     }
   }
 
+  const bestBid = depth?.bids?.[0]?.[0]
+  const bestAsk = depth?.asks?.[0]?.[0]
+
   const rail = (
-    <aside className={`vd-rail${pick ? ' has-pick' : ''}`}>
+    <aside className={`vd-rail${pick || side === 'sell' ? ' has-pick' : ''}`}>
       <div className={isK ? 'kx-ticket' : 'pmx-ticket'}>
         <div className="dx-tabs">
           <button className={`dx-tab${side === 'buy' ? ' on' : ''}`} onClick={() => setSide('buy')}>Buy</button>
@@ -441,13 +787,17 @@ export function TradeDesk() {
           <span className="dx-tab-right">Market ▾</span>
         </div>
 
-        {!pick ? (
+        {side === 'sell' ? (
+          <>
+            <div className="dx-mkt-title">Cash out a held position</div>
+            {sellList}
+            <p className="dx-fine">
+              Sells are protected: limit = live bid − 2¢ (never below 1¢), IOC —
+              whatever doesn't sell at your price stays yours.
+            </p>
+          </>
+        ) : !pick ? (
           <p className="vd-empty">Select an outcome to build your order.</p>
-        ) : side === 'sell' ? (
-          <p className="vd-empty">
-            This account holds to resolution — positions settle automatically
-            at full value when they win. Selling isn't offered on the desk.
-          </p>
         ) : (
           <>
             <div className="dx-mkt-title">{pick.label}</div>
@@ -505,7 +855,10 @@ export function TradeDesk() {
                   <div className="dx-line"><span>Contracts</span><b>{estContracts > 0 ? estContracts : '—'}</b></div>
                 )}
                 {askKnown && (
-                  <div className="dx-line"><span>Est. fees</span><b>$0.00</b></div>
+                  <div className="dx-line">
+                    <span>Est. fees</span>
+                    <b>{estContracts > 0 ? money(kalshiFee(estContracts, estLimit)) : '$0.00'}</b>
+                  </div>
                 )}
                 <div className="dx-line">
                   <span>Payout if Yes</span>
@@ -530,7 +883,7 @@ export function TradeDesk() {
               <div className="dx-book">
                 <div>
                   <div className="dx-book-h">Asks</div>
-                  {depth.asks.slice(0, 3).map(([p, s], i) => (
+                  {depth.asks.slice(0, 5).map(([p, s], i) => (
                     <div className="dx-book-row" key={i}>
                       <span className="neg">{cents(p)}</span>
                       <span>{Math.round(s).toLocaleString()}</span>
@@ -539,13 +892,19 @@ export function TradeDesk() {
                 </div>
                 <div>
                   <div className="dx-book-h">Bids</div>
-                  {depth.bids.slice(0, 3).map(([p, s], i) => (
+                  {depth.bids.slice(0, 5).map(([p, s], i) => (
                     <div className="dx-book-row" key={i}>
                       <span className="pos">{cents(p)}</span>
                       <span>{Math.round(s).toLocaleString()}</span>
                     </div>
                   ))}
                 </div>
+                {bestBid != null && bestAsk != null && (
+                  <div className="dx-book-mid">
+                    <span>Spread {((bestAsk - bestBid) * 100).toFixed(1)}¢</span>
+                    <span>Mid {(((bestAsk + bestBid) / 2) * 100).toFixed(1)}¢</span>
+                  </div>
+                )}
               </div>
             )}
 
@@ -581,7 +940,7 @@ export function TradeDesk() {
 
             <p className="dx-fine">
               Fill up to your amount at your price or better — never worse.
-              Unfilled remainder cancels instantly. Positions hold to resolution.
+              Unfilled remainder cancels instantly. Cash out any time from the Sell tab.
             </p>
           </>
         )}
@@ -808,6 +1167,33 @@ export function TradeDesk() {
     !['filled', 'submitting', 'queued'].includes(t.status))
   const blotRows = blotTab === 'open' ? openTrades : histTrades
 
+  // Best-effort join from blotter rows to the account snapshot so open
+  // rows pick up live marks + unrealized where the payload covers them
+  // (title-keyed — anything ambiguous stays "—", never a wrong number).
+  const rowMark = (t: ManualTrade): { mark: number | null; unrl: number | null } => {
+    const none = { mark: null, unrl: null }
+    if (!acct || t.status !== 'filled') return none
+    const title = (t.title || '').toLowerCase()
+    if ((t.venue || '').startsWith('kalshi')) {
+      const hits = (acct.kalshi.positions || []).filter((p) =>
+        title.includes(p.ticker.toLowerCase()) || (t.outcome || '').toLowerCase() === p.ticker.toLowerCase())
+      return hits.length === 1 ? { mark: hits[0].mark_bid, unrl: hits[0].unrealized } : none
+    }
+    let hits = (acct.polymarket.positions || []).filter((p) =>
+      p.title && title.includes(p.title.toLowerCase()))
+    if (hits.length > 1) {
+      hits = hits.filter((p) => p.outcome && title.includes(p.outcome.toLowerCase()))
+    }
+    if (hits.length !== 1) return none
+    const p = hits[0]
+    return {
+      mark: p.value != null && p.qty > 0 ? p.value / p.qty : null,
+      unrl: p.unrealized,
+    }
+  }
+  const cancellable = (t: ManualTrade) =>
+    t.status === 'queued' && (t.venue || '').startsWith('kalshi')
+
   return (
     <>
       <div className="vd-pagehead">
@@ -833,6 +1219,20 @@ export function TradeDesk() {
         {blotter && (
           <> Today: <b>{money(blotter.day_spent)}</b> of {money(blotter.day_budget)} ·
             max {money(blotter.max_per_order)}/ticket.</>
+        )}
+        {acct && (
+          <>
+            {' '}
+            <span className="dx-balances">
+              {isK ? (
+                <>Kalshi cash <b>{money(acct.kalshi.balance_usd)}</b> ·
+                  buying power <b>{money(acct.kalshi.balance_usd)}</b></>
+              ) : (
+                <>Polymarket cash <b>{money(acct.polymarket.cash)}</b> ·
+                  buying power <b>{money(acct.polymarket.buying_power)}</b></>
+              )}
+            </span>
+          </>
         )}
       </p>
 
@@ -871,6 +1271,7 @@ export function TradeDesk() {
                 )
               )}
               {err && q.trim().length < 2 && <p className="vd-empty">{err}</p>}
+              {acctPanel}
             </main>
             {rail}
           </div>
@@ -905,10 +1306,103 @@ export function TradeDesk() {
                   )
                 )}
                 {err && q.trim().length < 2 && <p className="vd-empty">{err}</p>}
+                {acctPanel}
               </main>
               {rail}
             </div>
           </>
+        )}
+
+        {/* ── Cash-out modal (self-skinned by the position's venue) ── */}
+        {co && (
+          <div
+            className="dxm-overlay"
+            onClick={(e) => { if (e.target === e.currentTarget) closeCashOut() }}
+          >
+            <div
+              className={`dxm ${co.venue === 'kalshi' ? 'dxm--kx' : 'dxm--pmx'}`}
+              role="dialog" aria-modal="true" aria-label="Cash out position"
+            >
+              <div className="dxm-h">
+                <div className="dxm-title">
+                  Cash out — {co.title}
+                  <small>{co.venue === 'kalshi' ? co.ticker : co.outcome}</small>
+                </div>
+                <button
+                  className="dxm-x" onClick={closeCashOut} aria-label="Close"
+                  disabled={coRun?.phase === 'submitting'}
+                >✕</button>
+              </div>
+
+              <div className="dx-line"><span>Held</span><b>{coHeld} contracts</b></div>
+              <div className="dx-line">
+                <span>{co.venue === 'kalshi' ? 'Current bid' : 'Mark (snapshot)'}</span>
+                <b>{cents(coBid)}</b>
+              </div>
+              <div className="dx-line">
+                <span>Protective limit</span>
+                <b>{coLimit != null ? `${cents(coLimit)} (bid − 2¢)` : 'bid − 2¢ at execution'}</b>
+              </div>
+
+              <div className="dxm-qty">
+                <button
+                  className={`dxm-all${coAll ? ' on' : ''}`}
+                  disabled={coBusy}
+                  onClick={() => { setCoAll(true); setCoQty('') }}
+                >All {coHeld}</button>
+                <input
+                  inputMode="numeric" placeholder="contracts"
+                  value={coAll ? '' : coQty}
+                  disabled={coBusy}
+                  onChange={(e) => {
+                    setCoAll(false)
+                    setCoQty(e.target.value.replace(/[^0-9]/g, ''))
+                  }}
+                  onFocus={() => setCoAll(false)}
+                  aria-label="Contracts to sell"
+                />
+              </div>
+              {!coAll && coQty !== '' && !coValid && (
+                <p className="dxm-err">Enter 1–{coHeld} contracts — you can't sell more than you hold.</p>
+              )}
+
+              <div className="dx-line"><span>Est. proceeds</span><b>{money(coProceeds)}</b></div>
+              {co.venue === 'kalshi' && (
+                <>
+                  <div className="dx-line">
+                    <span>Kalshi fee (est.)</span>
+                    <b>{coFee != null ? `-${money(coFee)}` : '—'}</b>
+                  </div>
+                  <div className="dx-line">
+                    <span>Est. net</span>
+                    <b>{coProceeds != null && coFee != null ? money(coProceeds - coFee) : '—'}</b>
+                  </div>
+                </>
+              )}
+
+              {coRun && execTimeline(coRun, true, co.venue === 'kalshi')}
+
+              {(!coRun || coRun.phase === 'unfilled' || coRun.phase === 'error') && (
+                <button
+                  className={`dxm-cta${coValid ? ' ready' : ''}`}
+                  disabled={!coValid || coBusy}
+                  onClick={placeCashOut}
+                >
+                  Sell {coValid ? coCount : '—'} @ {coLimit != null ? `${cents(coLimit)} or better` : 'bid − 2¢ or better'}
+                </button>
+              )}
+              {(coRun?.phase === 'filled' || coRun?.phase === 'partial') && (
+                <button className="dxm-cta ready" onClick={closeCashOut}>Done</button>
+              )}
+
+              <p className="dx-fine">
+                The AI re-quotes the live bid at execution and sells IOC at
+                bid − 2¢ (never below 1¢{co.venue === 'kalshi' ? ', engine clamps to held' : ''}).
+                Whatever doesn't sell at your price stays yours — nothing ever
+                sells below the protective limit.
+              </p>
+            </div>
+          </div>
         )}
       </div>
 
@@ -921,27 +1415,53 @@ export function TradeDesk() {
             History
           </button>
         </div>
+        {cancelErr && blotTab === 'open' && <p className="dk-gate-err">{cancelErr}</p>}
         {blotRows.length > 0 ? (
           <div className="rpt-table-wrap">
             <table className="rpt-table">
               <thead>
                 <tr>
                   <th>Placed</th><th>Market</th><th>Side</th>
-                  <th>Venue</th><th>Status</th><th>Cost</th><th>P&L</th>
+                  <th>Venue</th><th>Status</th><th>Cost</th>
+                  {blotTab === 'open' && <><th>Mark</th><th>Unrl</th></>}
+                  <th>P&L</th>
                 </tr>
               </thead>
               <tbody>
-                {blotRows.map((t) => (
-                  <tr key={t.id}>
-                    <td>{t.placed_at ? new Date(t.placed_at).toLocaleTimeString() : '—'}</td>
-                    <td>{t.title}</td>
-                    <td>{t.outcome || '—'}</td>
-                    <td>{t.venue || 'polymarket'}</td>
-                    <td>{t.status}{t.error ? ` (${t.error.slice(0, 40)})` : ''}</td>
-                    <td>{money(t.filled_usd || t.requested_usd)}</td>
-                    <td className={(t.pnl ?? 0) > 0 ? 'pos' : (t.pnl ?? 0) < 0 ? 'neg' : ''}>{money(t.pnl)}</td>
-                  </tr>
-                ))}
+                {blotRows.map((t) => {
+                  const m = blotTab === 'open' ? rowMark(t) : { mark: null, unrl: null }
+                  return (
+                    <tr key={t.id}>
+                      <td>{t.placed_at ? new Date(t.placed_at).toLocaleTimeString() : '—'}</td>
+                      <td>{t.title}</td>
+                      <td>{t.outcome || '—'}</td>
+                      <td>{t.venue || 'polymarket'}</td>
+                      <td>
+                        {t.status}{t.error ? ` (${t.error.slice(0, 40)})` : ''}
+                        {blotTab === 'open' && cancellable(t) && (
+                          <>
+                            {' '}
+                            <button
+                              className="dx-cancel"
+                              disabled={cancelling != null}
+                              onClick={() => cancelRow(t.id)}
+                            >{cancelling === t.id ? 'Cancelling…' : 'Cancel'}</button>
+                          </>
+                        )}
+                      </td>
+                      <td>{money(t.filled_usd || t.requested_usd)}</td>
+                      {blotTab === 'open' && (
+                        <>
+                          <td>{cents(m.mark)}</td>
+                          <td className={(m.unrl ?? 0) > 0 ? 'pos' : (m.unrl ?? 0) < 0 ? 'neg' : ''}>
+                            {signed(m.unrl)}
+                          </td>
+                        </>
+                      )}
+                      <td className={(t.pnl ?? 0) > 0 ? 'pos' : (t.pnl ?? 0) < 0 ? 'neg' : ''}>{money(t.pnl)}</td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
