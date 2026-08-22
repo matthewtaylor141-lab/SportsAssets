@@ -3474,8 +3474,11 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
                      "from the order-level audit table, arb from the "
                      "engine mirror's band tag, external is venue "
                      "settlements on markets no platform ledger touched "
-                     "(owner activity), software is the derived "
-                     "remainder (identity method, owner ops PDF v1.1)")}
+                     "(owner activity). The 'software' key is the derived "
+                     "remainder (identity method, owner ops PDF v1.1) — "
+                     "since the software wind-down completed it holds "
+                     "fees, open-stake mark moves, and trades past the "
+                     "±$100 display cap, NOT software trading")}
 
 
 @app.get("/api/admin/order-audit", dependencies=[Depends(require_admin)])
@@ -3639,7 +3642,11 @@ _CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
               "0x076daa87": "0x076daa87 copies",
               "manual": "Manual desk", "underdog": "Underdog $1 test",
               "arb": "Arbitrage", "external": "External (owner)",
-              "software": "Software (wind-down)"}
+              # Renamed 2026-08-22 (owner scare x2): the derived remainder
+              # is NOT software trading — software is OFF with a ~$5 tail.
+              # It holds fees, open-stake marks, and >$100-cap trades the
+              # display cap excludes from the sleeve rows.
+              "software": "Unattributed (fees · marks · capped trades)"}
 
 
 @app.get("/api/report.csv")

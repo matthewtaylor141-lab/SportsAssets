@@ -239,7 +239,12 @@ jobs:
           # strategy's loss and reading an attribution gap — without it the
           # 08-12 report showed software "losing" $353 on a day it settled
           # nothing at all, and the two are indistinguishable on the line.
-          jq -r '.days[]? | "  BRK \(.date)  acct=\(.account // "?")  rn1=\(.rn1.pnl // 0)/\(.rn1.wins // 0)-\(.rn1.losses // 0)  st=\(.swisstony.pnl // 0)/\(.swisstony.wins // 0)-\(.swisstony.losses // 0)  sw=\(.software.pnl // 0)/\(.software.wins // 0)-\(.software.losses // 0)  arb=\(.arb.pnl // 0)/\(.arb.wins // 0)-\(.arb.losses // 0)"' /tmp/db.json 2>/dev/null || true
+          # copies = ALL sleeve categories summed (2026-08-22: the line
+          # printed only rn1/st, so a day carried by ferrari/0x076daa87/
+          # HomeRunHazard read as "copies did nothing" while the remainder
+          # -- which is fees + marks + >cap trades, NOT software -- looked
+          # like a software loss. Twice now that misread reached the owner.)
+          jq -r '.days[]? | . as $d | ([$d.rn1, $d.swisstony, $d.kch123, $d.homerunhazard, $d["0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"], $d.ferrarichampions2026, $d["0x076daa87"]] | map(select(. != null)) | {p: (map(.pnl) | add // 0), w: (map(.wins) | add // 0), l: (map(.losses) | add // 0)}) as $c | "  BRK \($d.date)  acct=\($d.account // "?")  copies=\($c.p)/\($c.w)-\($c.l)  ud=\($d.underdog.pnl // 0)  man=\($d.manual.pnl // 0)  ext=\($d.external.pnl // 0)  arb=\($d.arb.pnl // 0)/\($d.arb.wins // 0)-\($d.arb.losses // 0)  unattr=\($d.software.pnl // 0)/\($d.software.settled // 0)set"' /tmp/db.json 2>/dev/null || true
           jq -r '.totals | to_entries[]? | "  BRKTOT \(.key)  pnl=\(.value.pnl)  \(.value.wins)-\(.value.losses) of \(.value.settled)"' /tmp/db.json 2>/dev/null || true
           probe /healthz 30
 

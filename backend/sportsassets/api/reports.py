@@ -374,15 +374,23 @@ def _settled_sections(bets: list[dict], daily: list[dict]) -> list:
 
 
 _WHALE_0X2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
+# Must mirror app.py's _CAT_ORDER: categories absent here are silently
+# dropped from the PDF's day table even though they carry P&L (same bug
+# class as the 2026-08-22 report.csv fix — ferrari/0x076daa87/underdog/
+# external were missing from this copy of the list).
 _CAT_ORDER = ["rn1", "swisstony", "kch123", "homerunhazard",
               _WHALE_0X2C33,
-              "manual", "arb", "software"]
+              "ferrarichampions2026", "0x076daa87",
+              "manual", "underdog", "arb", "external", "software"]
 _CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
               "kch123": "kch123 copies",
               "homerunhazard": "HomeRunHazard copies",
               _WHALE_0X2C33: "0x2c33…0563 copies",
-              "manual": "Manual desk", "arb": "Arbitrage",
-              "software": "Software"}
+              "ferrarichampions2026": "ferrariChampions2026 copies",
+              "0x076daa87": "0x076daa87 copies",
+              "manual": "Manual desk", "underdog": "Underdog $1 test",
+              "arb": "Arbitrage", "external": "External (owner)",
+              "software": "Unattributed"}
 
 
 def build_category_report(data: dict) -> tuple[bytes, str]:
@@ -433,29 +441,39 @@ def build_category_report(data: dict) -> tuple[bytes, str]:
                         color_col=1, raw_values=raws))
 
     story.append(Paragraph("Daily ledger", H2))
+    day_cats = [c for c in _CAT_ORDER if totals.get(c)]
     drows, draws = [], []
     for d in days:
         day_net = round(sum(c["pnl"] for k, c in d.items()
                             if isinstance(c, dict)), 2)
         cells = [d["date"], _signed(day_net)]
-        for cat in _CAT_ORDER:
+        for cat in day_cats:
             c = d.get(cat)
             cells.append(_signed(c["pnl"]) if c else "—")
         drows.append(cells)
         draws.append(day_net)
     story.append(_table(
         ["Date", "Net"] + [_CAT_LABEL[c].replace(" copies", "")
-                           for c in _CAT_ORDER],
-        drows, [0.85, 0.75] + [0.72] * len(_CAT_ORDER),
+                           for c in day_cats],
+        drows,
+        # Only categories with activity in range get a column, and the
+        # columns share the page's usable width — a fixed 0.72"/column
+        # overflowed LETTER once the sleeve roster grew past eight.
+        [0.85, 0.75] + [min(0.72, 5.5 / max(1, len(day_cats)))]
+        * len(day_cats),
         color_col=1, raw_values=draws))
 
     story.append(Spacer(1, 14))
     story.append(Paragraph(_esc(
         "Copies are order-level results from the platform's own audit "
-        "table; software and arbitrage are venue-account settlements "
-        "split by the engine mirror's band tag; unattributed results "
-        "count toward software (owner rule 2026-08-06). Generated "
-        "directly from the trading ledger — nothing entered by hand."),
+        "table; arbitrage is split by the engine mirror's band tag; "
+        "External (owner) is venue settlements no platform ledger "
+        "touched. Unattributed is the derived remainder against the "
+        "account calendar (owner rule 2026-08-06) — with the software "
+        "wind-down complete it holds fees, open-stake mark moves, and "
+        "trades past the ±$100 display cap, not software trading. "
+        "Generated directly from the trading ledger — nothing entered "
+        "by hand."),
         FOOT))
     doc.build(story)
     return buf.getvalue(), f"bettoredge_pnl_{frm}_{to}.pdf"
