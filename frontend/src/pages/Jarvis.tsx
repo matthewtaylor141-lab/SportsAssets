@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { JarvisAvatar, type AvatarState } from '../jarvis/avatar'
-import { BootSequence, GridFloor, HudRing, Starfield, TelemetryRibbon } from '../jarvis/stage'
+import { BootSequence, DataStreams, GridFloor, HudRing, OrbitalFrame, Starfield, TelemetryRibbon, VoiceArc } from '../jarvis/stage'
 import { buildSystemPrompt, liveModel, MODEL_CHAIN, runConversation, type MessageParam, type TextBlock, type ToolResultBlock } from '../jarvis/claude'
 import { MeridianChart, parseChartSpec } from '../jarvis/chart'
 import { renderMarkdown } from '../jarvis/markdown'
@@ -1059,12 +1059,16 @@ export default function Jarvis() {
 
       {/* ── stage ── */}
       <div className={`jv-stage${panels.length > 0 ? ' jv-with-panel' : ''}`}>
-        <Starfield />
+        <Starfield getWarp={() => (avatarState === 'thinking' ? 5 : 1)} />
+        {scene !== 'minimal' && <DataStreams items={[...ribbon, ...exposure]} />}
         {scene === 'hologram' && <GridFloor />}
         <div className="jv-orb-wrap">
+          {scene !== 'minimal' && <OrbitalFrame state={avatarState} />}
           <HudRing state={avatarState} />
           <JarvisAvatar state={avatarState} tone={tone} pulseSeq={pulseSeq}
                         getLevel={() => mouthRef.current?.level() ?? 0} />
+          <VoiceArc active={speaking}
+                    getLevel={() => mouthRef.current?.level() ?? 0} />
           <div className={`jv-state jv-state-${avatarState}`}>{stateLabel}</div>
           <BootSequence />
         </div>

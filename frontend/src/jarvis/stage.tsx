@@ -10,8 +10,10 @@ import { useEffect, useRef, useState } from 'react'
 interface Star { x: number; y: number; z: number; tw: number }
 interface Meteor { x: number; y: number; vx: number; vy: number; life: number }
 
-export function Starfield() {
+export function Starfield({ getWarp }: { getWarp?: () => number } = {}) {
   const ref = useRef<HTMLCanvasElement | null>(null)
+  const warpRef = useRef<(() => number) | undefined>(getWarp)
+  warpRef.current = getWarp
 
   useEffect(() => {
     const canvas = ref.current
@@ -49,19 +51,28 @@ export function Starfield() {
     let running = true
     const t0 = performance.now()
 
+    // WARP: while MERIDIAN thinks, the room computes — the drift eases
+    // toward ~5x and stars stretch into short streaks, then settles.
+    let warp = 1
     const frame = () => {
       if (!running) return
       const now = performance.now()
       const t = (now - t0) / 1000
       const w = canvas.width, h = canvas.height
+      const wantWarp = Math.max(1, Math.min(6, warpRef.current?.() ?? 1))
+      warp += (wantWarp - warp) * 0.04
       ctx.clearRect(0, 0, w, h)
       for (const s of stars) {
-        s.x -= s.z * 0.06                        // slow drift
+        s.x -= s.z * 0.06 * warp                 // slow drift (or warp)
         if (s.x < -2) { s.x = w + 2; s.y = Math.random() * h }
         const a = 0.25 + 0.5 * s.z + 0.22 * Math.sin(t * (0.6 + s.z) + s.tw)
         ctx.fillStyle = `rgba(160, 215, 255, ${Math.max(0.05, a * 0.5)})`
         const r = s.z * 1.25
-        ctx.fillRect(s.x, s.y, r, r)
+        if (warp > 1.25) {
+          ctx.fillRect(s.x, s.y, r + s.z * 2.2 * (warp - 1), Math.max(0.8, r * 0.8))
+        } else {
+          ctx.fillRect(s.x, s.y, r, r)
+        }
       }
       if (now > nextMeteor) {
         nextMeteor = now + 12000 + Math.random() * 20000
@@ -120,6 +131,203 @@ export function HudRing({ state }: { state: string }) {
       ))}
     </svg>
   )
+}
+
+/* ── orbital megastructure: the machine around the mind ──────────── */
+/* Three segmented arcs + a degree dial + orbit paths, all counter-
+ * rotating at geological speeds behind the HUD ring. Pure SVG. */
+
+export function OrbitalFrame({ state }: { state: string }) {
+  const segs = (r: number, n: number, fill: number, key: string) => {
+    const out = []
+    for (let i = 0; i < n; i++) {
+      const a0 = (i / n) * Math.PI * 2
+      const a1 = a0 + (fill / n) * Math.PI * 2
+      out.push(
+        <path key={`${key}-${i}`} fill="none" strokeWidth={r > 130 ? 2.4 : 1.2}
+          d={`M ${200 + r * Math.cos(a0)} ${200 + r * Math.sin(a0)} A ${r} ${r} 0 0 1 ${200 + r * Math.cos(a1)} ${200 + r * Math.sin(a1)}`} />,
+      )
+    }
+    return out
+  }
+  return (
+    <svg className={`jv-orbit jv-orbit-${state}`} viewBox="0 0 400 400" aria-hidden>
+      <g className="jv-orbit-a">{segs(186, 36, 0.5, 'a')}</g>
+      <g className="jv-orbit-b">{segs(172, 8, 0.72, 'b')}
+        <circle cx="200" cy="372" r="3.4" className="jv-orbit-sat" />
+      </g>
+      <g className="jv-orbit-c">
+        {segs(158, 96, 0.28, 'c')}
+        {[0, 45, 90, 135, 180, 225, 270, 315].map((d) => (
+          <text key={d} x="200" y="24" textAnchor="middle" fontSize="7.5"
+            transform={`rotate(${d} 200 200)`} className="jv-orbit-deg">
+            {String(d).padStart(3, '0')}
+          </text>
+        ))}
+      </g>
+      <ellipse cx="200" cy="200" rx="196" ry="66" className="jv-orbit-path" />
+    </svg>
+  )
+}
+
+/* ── data streams: the platform's own numbers raining through the
+ * room's edges. Real ribbon strings feed the glyphs — the movement IS
+ * the telemetry, never decoration. ──────────────────────────────── */
+
+interface StreamGlyph { y: number; v: number; text: string; a: number }
+
+export function DataStreams({ items }: { items: string[] }) {
+  const ref = useRef<HTMLCanvasElement | null>(null)
+  const itemsRef = useRef(items)
+  itemsRef.current = items
+
+  useEffect(() => {
+    const canvas = ref.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)')
+    if (reduced.matches) return                  // stillness is fine
+
+    const fit = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      const rect = canvas.getBoundingClientRect()
+      canvas.width = Math.round(rect.width * dpr)
+      canvas.height = Math.round(rect.height * dpr)
+    }
+    fit()
+    const ro = new ResizeObserver(fit)
+    ro.observe(canvas)
+
+    const FALLBACK = ['0x076daa87', 'RN1', 'KXBTC15M', 'settle', 'copy',
+      'edge', 'armed', 'bid', 'ask', 'fill']
+    const cols: { x: number; glyphs: StreamGlyph[]; next: number }[] = []
+    let raf = 0
+    let running = true
+    let last = performance.now()
+
+    const frame = () => {
+      if (!running) return
+      const now = performance.now()
+      const dt = Math.min(0.05, (now - last) / 1000)
+      last = now
+      const w = canvas.width, h = canvas.height
+      // Two thin gutters: 0-7% and 93-100% of the width.
+      if (cols.length === 0 && w > 0) {
+        for (const fx of [0.015, 0.045, 0.955, 0.985]) {
+          cols.push({ x: fx * w, glyphs: [], next: Math.random() * 1.4 })
+        }
+      }
+      ctx.clearRect(0, 0, w, h)
+      ctx.font = `${Math.max(9, Math.round(h / 92))}px 'JetBrains Mono', monospace`
+      const pool = itemsRef.current.length ? itemsRef.current : FALLBACK
+      for (const c of cols) {
+        c.next -= dt
+        if (c.next <= 0 && c.glyphs.length < 7) {
+          const src = pool[Math.floor(Math.random() * pool.length)] || ''
+          const frag = src.length > 14
+            ? src.slice(Math.floor(Math.random() * Math.max(1, src.length - 14)))
+              .slice(0, 14)
+            : src
+          c.glyphs.push({ y: h + 20, v: (26 + Math.random() * 34) * (h / 900),
+            text: frag.toUpperCase(), a: 0.05 + Math.random() * 0.13 })
+          c.next = 0.9 + Math.random() * 2.4
+        }
+        for (const g of c.glyphs) {
+          g.y -= g.v * dt
+          const fade = Math.min(1, Math.max(0, g.y / h))
+          ctx.fillStyle = `rgba(105, 224, 255, ${(g.a * fade).toFixed(3)})`
+          ctx.save()
+          ctx.translate(c.x, g.y)
+          ctx.rotate(-Math.PI / 2)
+          ctx.fillText(g.text, 0, 0)
+          ctx.restore()
+        }
+        c.glyphs = c.glyphs.filter((g) => g.y > -160)
+      }
+      raf = requestAnimationFrame(frame)
+    }
+    raf = requestAnimationFrame(frame)
+    return () => { running = false; cancelAnimationFrame(raf); ro.disconnect() }
+  }, [])
+
+  return <canvas ref={ref} className="jv-streams" aria-hidden />
+}
+
+/* ── voice arc: MERIDIAN's voice made visible — a ring segment of
+ * bars under the core breathing with the live TTS amplitude. ─────── */
+
+export function VoiceArc({ getLevel, active }: {
+  getLevel: () => number
+  active: boolean
+}) {
+  const ref = useRef<HTMLCanvasElement | null>(null)
+  const levelRef = useRef(getLevel)
+  const activeRef = useRef(active)
+  levelRef.current = getLevel
+  activeRef.current = active
+
+  useEffect(() => {
+    const canvas = ref.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)')
+    if (reduced.matches) return
+
+    const fit = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      const rect = canvas.getBoundingClientRect()
+      canvas.width = Math.round(rect.width * dpr)
+      canvas.height = Math.round(rect.height * dpr)
+    }
+    fit()
+    const ro = new ResizeObserver(fit)
+    ro.observe(canvas)
+
+    const N = 56
+    const bars = new Array(N).fill(0)
+    let vis = 0                                  // eased visibility
+    let raf = 0
+    let running = true
+    const t0 = performance.now()
+
+    const frame = () => {
+      if (!running) return
+      const t = (performance.now() - t0) / 1000
+      const w = canvas.width, h = canvas.height
+      ctx.clearRect(0, 0, w, h)
+      vis += ((activeRef.current ? 1 : 0) - vis) * 0.07
+      if (vis > 0.01) {
+        const lvl = Math.max(0, Math.min(1, levelRef.current()))
+        const cx = w / 2
+        const cy = h * 0.02                       // arc centre above box
+        const R = Math.min(w, h * 6) * 0.34
+        for (let i = 0; i < N; i++) {
+          const ph = (i / N) * Math.PI * 7 + t * 5.2
+          const want = lvl * (0.35 + 0.65 * Math.abs(Math.sin(ph)))
+          bars[i] += (want - bars[i]) * 0.35
+          const a = Math.PI * (0.18 + 0.64 * (i / (N - 1)))   // lower arc
+          const len = (4 + bars[i] * h * 0.72) * vis
+          const x0 = cx + R * Math.cos(a)
+          const y0 = cy + R * Math.sin(a) * 0.62
+          const x1 = cx + (R + len) * Math.cos(a)
+          const y1 = cy + (R + len) * Math.sin(a) * 0.62
+          ctx.strokeStyle = `rgba(232, 200, 119, ${(0.12 + bars[i] * 0.5) * vis})`
+          ctx.lineWidth = Math.max(1.5, w / 640)
+          ctx.beginPath()
+          ctx.moveTo(x0, y0)
+          ctx.lineTo(x1, y1)
+          ctx.stroke()
+        }
+      }
+      raf = requestAnimationFrame(frame)
+    }
+    raf = requestAnimationFrame(frame)
+    return () => { running = false; cancelAnimationFrame(raf); ro.disconnect() }
+  }, [])
+
+  return <canvas ref={ref} className="jv-voicearc" aria-hidden />
 }
 
 /* ── holographic grid floor (Hologram scene) ─────────────────────── */

@@ -167,6 +167,60 @@
 }
 .jv-core-ring { pointer-events: none; }
 
+/* ── orbital megastructure behind the HUD ring ───────────────────── */
+.jv-orbit {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(78vmin, 760px);
+  height: min(78vmin, 760px);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  stroke: rgba(105, 224, 255, 0.1);
+  opacity: 0.9;
+  transition: stroke 800ms ease;
+}
+.jv-orbit-speaking { stroke: rgba(232, 200, 119, 0.12); }
+.jv-orbit-thinking { stroke: rgba(105, 224, 255, 0.17); }
+.jv-orbit-a, .jv-orbit-b, .jv-orbit-c { transform-origin: 200px 200px; }
+.jv-orbit-a { animation: jv-spin 240s linear infinite; }
+.jv-orbit-b { animation: jv-spin 90s linear infinite reverse; }
+.jv-orbit-c { animation: jv-spin 360s linear infinite; }
+.jv-orbit-thinking .jv-orbit-b { animation-duration: 22s; }
+.jv-orbit-sat { fill: rgba(105, 224, 255, 0.55); stroke: none; }
+.jv-orbit-deg {
+  fill: rgba(105, 224, 255, 0.28);
+  stroke: none;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  letter-spacing: 0.2em;
+}
+.jv-orbit-path {
+  fill: none;
+  stroke: rgba(105, 224, 255, 0.06);
+  stroke-dasharray: 3 7;
+}
+
+/* ── data streams raining the platform's numbers down the edges ──── */
+.jv-streams {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.9;
+}
+
+/* ── voice arc under the core ────────────────────────────────────── */
+.jv-voicearc {
+  position: absolute;
+  left: 50%;
+  bottom: -4%;
+  width: min(70vmin, 680px);
+  height: 26%;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
 /* ── starfield behind everything on the stage ────────────────────── */
 .jv-stars {
   position: absolute;
@@ -311,7 +365,10 @@
 .jv-mic-live::before { opacity: 1; animation: jv-spin 2.4s linear infinite; }
 @media (prefers-reduced-motion: reduce) {
   .jv-mic-live::before,
-  .jv-hud-slow, .jv-hud-fast, .jv-state-thinking { animation: none; }
+  .jv-hud-slow, .jv-hud-fast, .jv-state-thinking,
+  .jv-orbit-a, .jv-orbit-b, .jv-orbit-c,
+  .jv-panels::before, .jv-drawer::before,
+  .jv-cap-ai { animation: none; }
 }
 
 /* ── captions ─────────────────────────────────────────────────────────── */
@@ -334,10 +391,16 @@
 .jv-cap-user::before { content: '“'; opacity: 0.5; }
 .jv-cap-user::after { content: '”'; opacity: 0.5; }
 .jv-cap-ai {
-  font-size: 16.5px;
+  font-size: 17.5px;
   line-height: 1.55;
   color: var(--jv-ink);
   text-wrap: balance;
+  text-shadow: 0 0 22px rgba(105, 224, 255, 0.35), 0 0 3px rgba(105, 224, 255, 0.2);
+  animation: jv-cap-in 0.35s ease;
+}
+@keyframes jv-cap-in {
+  from { opacity: 0; transform: translateY(5px); filter: blur(3px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
 }
 .jv-cap-last {
   font-size: 14.5px;
@@ -514,6 +577,49 @@
 @keyframes jv-rise {
   from { transform: translateY(24px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
+}
+
+/* HUD chrome: corner brackets + a slow scan shimmer make every surface read
+ * as part of the same instrument, not a generic modal */
+.jv-panels::after,
+.jv-drawer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+  background:
+    linear-gradient(to right, var(--jv-cyan-soft) 2px, transparent 2px) 0 0 / 18px 18px,
+    linear-gradient(to bottom, var(--jv-cyan-soft) 2px, transparent 2px) 0 0 / 18px 18px,
+    linear-gradient(to left, var(--jv-cyan-soft) 2px, transparent 2px) 100% 0 / 18px 18px,
+    linear-gradient(to bottom, var(--jv-cyan-soft) 2px, transparent 2px) 100% 0 / 18px 18px,
+    linear-gradient(to right, var(--jv-cyan-soft) 2px, transparent 2px) 0 100% / 18px 18px,
+    linear-gradient(to top, var(--jv-cyan-soft) 2px, transparent 2px) 0 100% / 18px 18px,
+    linear-gradient(to left, var(--jv-cyan-soft) 2px, transparent 2px) 100% 100% / 18px 18px,
+    linear-gradient(to top, var(--jv-cyan-soft) 2px, transparent 2px) 100% 100% / 18px 18px;
+  background-repeat: no-repeat;
+  opacity: 0.55;
+}
+.jv-panels::before,
+.jv-drawer::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  pointer-events: none;
+  z-index: 3;
+  background: linear-gradient(90deg, transparent, rgba(105, 224, 255, 0.7), transparent);
+  background-size: 45% 100%;
+  background-repeat: no-repeat;
+  animation: jv-panel-scan 7s ease-in-out infinite;
+  opacity: 0.8;
+}
+@keyframes jv-panel-scan {
+  0% { background-position: -80% 0; }
+  55% { background-position: 180% 0; }
+  100% { background-position: 180% 0; }
 }
 
 .jv-panel-head {
@@ -704,7 +810,11 @@
   border: 1px solid var(--jv-border);
   border-radius: 16px;
   padding: 22px;
-  box-shadow: 0 0 80px rgba(105, 224, 255, 0.08), 0 24px 80px rgba(0, 0, 0, 0.6);
+  box-shadow:
+    inset 0 2px 0 rgba(105, 224, 255, 0.35),
+    inset 0 22px 34px -28px rgba(105, 224, 255, 0.35),
+    0 0 80px rgba(105, 224, 255, 0.08),
+    0 24px 80px rgba(0, 0, 0, 0.6);
 }
 .jv-setup h2 {
   margin: 0 0 6px;
