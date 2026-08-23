@@ -252,11 +252,13 @@ def kalshi_crypto_markets(client) -> list[dict]:
     if now - _mkt_cache["ts"] < _MKT_TTL_S:
         return _mkt_cache["markets"]
     out: list[dict] = []
-    for series in SERIES:
+    for si, series in enumerate(SERIES):
         asset = next((a for p, a in _SERIES_ASSET
                       if series.startswith(p)), None)
         if asset is None:
             continue
+        if si:
+            time.sleep(0.4)      # pace the sweep — see 429 note below
         cursor = ""
         for _ in range(4):
             try:
@@ -266,6 +268,21 @@ def kalshi_crypto_markets(client) -> list[dict]:
                             "with_nested_markets": "true", "limit": 100,
                             **({"cursor": cursor} if cursor else {})},
                     timeout=12)
+                # Rate-limit pacing (2026-08-23): nine series swept
+                # back-to-back tripped the venue's limiter on the tail
+                # series (KXXRPD/KXDOGED answered 429 every cycle), so
+                # their markets never entered the twin cache and every
+                # XRP/DOGE whale trade refused "no-kalshi-twin". Pace
+                # each call and retry a 429 once after a short sit-out.
+                if resp.status_code == 429:
+                    time.sleep(2.5)
+                    resp = client._sess.get(
+                        f"{BASE}/events",
+                        params={"series_ticker": series, "status": "open",
+                                "with_nested_markets": "true",
+                                "limit": 100,
+                                **({"cursor": cursor} if cursor else {})},
+                        timeout=12)
             except requests.RequestException as exc:
                 funnel["last_error"] = f"{series}: {type(exc).__name__}"
                 break
@@ -273,6 +290,7 @@ def kalshi_crypto_markets(client) -> list[dict]:
                 funnel["refused"][f"series-http:{series}"] = \
                     resp.status_code
                 break
+            funnel["refused"].pop(f"series-http:{series}", None)
             data = resp.json() or {}
             for ev in data.get("events") or []:
                 for mm in ev.get("markets") or []:
