@@ -501,6 +501,54 @@ _WALL_KINDS = ("book", "report", "chart", "whales", "headline")
 _WALL_SCREEN_KEYS = ("kind", "from", "to", "text", "stat")
 
 
+def _clean_wall_chart(raw: object) -> dict | None:
+    """A projected chart (MERIDIAN throwing any series onto a TV) —
+    hard-capped so wall state stays a small dict, never a data sink:
+    <=3 series x <=160 finite numbers, short strings only."""
+    if not isinstance(raw, dict):
+        return None
+    series_in = raw.get("series")
+    if not isinstance(series_in, list):
+        return None
+    series = []
+    for s in series_in[:3]:
+        if not isinstance(s, dict):
+            continue
+        vals_in = s.get("values")
+        if not isinstance(vals_in, list):
+            continue
+        vals = []
+        for v in vals_in[:160]:
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if f == f and abs(f) < 1e12:      # finite, sane magnitude
+                vals.append(round(f, 4))
+        if len(vals) >= 2:
+            name = s.get("name")
+            series.append({
+                "name": (name if isinstance(name, str) else "")[:40],
+                "values": vals,
+            })
+    if not series:
+        return None
+    out: dict = {"series": series}
+    title = raw.get("title")
+    if isinstance(title, str) and title.strip():
+        out["title"] = title[:120]
+    labels_in = raw.get("labels")
+    if isinstance(labels_in, list):
+        labels = [str(x)[:12] for x in labels_in[:160]
+                  if isinstance(x, (str, int, float))]
+        if labels:
+            out["labels"] = labels
+    kind = raw.get("kind")
+    if kind in ("line", "bar"):
+        out["kind"] = kind
+    return out
+
+
 def _clean_wall_screens(raw: dict | None) -> dict | None:
     if not isinstance(raw, dict):
         return None
@@ -518,6 +566,9 @@ def _clean_wall_screens(raw: dict | None) -> dict | None:
             if isinstance(v, str) and v.strip():
                 cleaned[k] = v[:200]
         cleaned["kind"] = kind
+        chart = _clean_wall_chart(d.get("chart"))
+        if chart is not None:
+            cleaned["chart"] = chart
         out[venue] = cleaned
     return out or None
 

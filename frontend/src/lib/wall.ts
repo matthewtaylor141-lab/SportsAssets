@@ -18,6 +18,14 @@ export const WALL_RELOCK_EVENT = 'sa-wall-relock'
 
 export interface WallUnlockResult { ok: boolean; error?: string }
 
+/** A chart MERIDIAN projected onto a TV (bounded server-side). */
+export interface WallChart {
+  title?: string
+  kind?: 'line' | 'bar'
+  labels?: string[]
+  series: { name: string; values: number[] }[]
+}
+
 /** One screen's directive inside a MERIDIAN scene. */
 export interface WallScreen {
   kind: 'book' | 'report' | 'chart' | 'whales' | 'headline'
@@ -25,6 +33,7 @@ export interface WallScreen {
   to?: string
   text?: string
   stat?: string
+  chart?: WallChart
 }
 
 export interface WallState {

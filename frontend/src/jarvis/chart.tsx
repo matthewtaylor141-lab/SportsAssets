@@ -143,18 +143,38 @@ export function MeridianChart({ spec }: { spec: ChartSpec }) {
 
         {spec.kind === 'line' && series.map((s, si) => {
           const pts = s.values.map((p, i) => `${px(i)},${py(p.y)}`).join(' ')
+          const lastI = s.values.length - 1
+          // HUD glow (owner 2026-08-23 "charts are weak"): a wide
+          // translucent underlay beneath the crisp 2px line, plus an
+          // area wash under the first series and a lit endpoint. Pure
+          // layering — the dataviz palette and marks are unchanged.
+          const area = si === 0 && s.values.length > 1
+            ? `${px(0)},${H - PAD.b} ${pts} ${px(lastI)},${H - PAD.b}`
+            : null
           return (
             <g key={s.name}>
+              {area && <polygon points={area} fill={CAT[si]} opacity="0.07" />}
+              <polyline points={pts} fill="none" stroke={CAT[si]}
+                        strokeWidth="7" opacity="0.18"
+                        strokeLinejoin="round" strokeLinecap="round" />
               <polyline points={pts} fill="none" stroke={CAT[si]}
                         strokeWidth="2" strokeLinejoin="round"
                         strokeLinecap="round" />
+              {lastI >= 0 && (
+                <>
+                  <circle cx={px(lastI)} cy={py(s.values[lastI].y)} r="7"
+                          fill={CAT[si]} opacity="0.22" />
+                  <circle cx={px(lastI)} cy={py(s.values[lastI].y)} r="3.5"
+                          fill={CAT[si]} />
+                </>
+              )}
               {/* direct end label (identity never color-alone) */}
               {s.values.length > 0 && (
-                <text x={Math.min(px(s.values.length - 1) + 6, W - 4)}
-                      y={py(s.values[s.values.length - 1].y) + 3.5}
+                <text x={Math.min(px(lastI) + 9, W - 4)}
+                      y={py(s.values[lastI].y) + 3.5}
                       fontSize="10.5" fill={INK}>
                   {series.length > 1 ? s.name
-                    : fmt(s.values[s.values.length - 1].y, spec.unit)}
+                    : fmt(s.values[lastI].y, spec.unit)}
                 </text>
               )}
             </g>

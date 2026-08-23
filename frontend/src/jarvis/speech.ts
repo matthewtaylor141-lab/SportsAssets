@@ -50,8 +50,17 @@ export class Ears {
   /** User intent: keep listening (hands-free) until stop() is called. */
   private wantActive = false
   private continuous = false
+  /** ECHO SUPPRESSION (owner 2026-08-23: "he stops hearing himself"):
+   * while MERIDIAN's own voice is playing, recognition results are
+   * dropped at the source — the session stays warm (no slow Chrome
+   * restarts) but the TTS can never become input and self-trigger the
+   * barge-in. The page mutes on speech start and unmutes a beat after
+   * the last audio ends, covering the room's echo tail. */
+  private muted = false
 
   constructor(private handlers: EarsHandlers) {}
+
+  setMuted(muted: boolean): void { this.muted = muted }
 
   get listening(): boolean { return this.rec !== null }
 
@@ -74,6 +83,7 @@ export class Ears {
     rec.interimResults = true
     rec.maxAlternatives = 1
     rec.onresult = (e) => {
+      if (this.muted) return          // MERIDIAN is talking — that's him
       let interim = ''
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const res = e.results[i]

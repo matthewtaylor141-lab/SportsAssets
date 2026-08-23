@@ -367,6 +367,104 @@ function ChartBoard({ copies, live }: { copies: CopiesRecord | null; live: Today
   )
 }
 
+/** MERIDIAN's projected chart, full-bleed on a TV: any series he is
+ * holding (price history, P&L, whatever), drawn in the HUD language —
+ * layered glow strokes (no SVG filters: Tizen-safe), area fill, grid,
+ * endpoint badges. */
+const SERIES_COLORS = ['#69e0ff', '#e8c877', '#3ddc97']
+
+function ProjectedChartBoard({ screen }: { screen: WallScreen }) {
+  const ch = screen.chart
+  if (!ch || !ch.series.length) {
+    return <div className="wall-empty">Waiting for MERIDIAN's chart…</div>
+  }
+  const W = 1600
+  const H = 640
+  const padL = 30
+  const padR = 190
+  const padT = 40
+  const padB = 56
+  const iw = W - padL - padR
+  const ih = H - padT - padB
+  const n = Math.max(...ch.series.map((s) => s.values.length))
+  const all = ch.series.flatMap((s) => s.values)
+  let lo = Math.min(...all)
+  let hi = Math.max(...all)
+  if (hi === lo) { hi += 1; lo -= 1 }
+  const pad = (hi - lo) * 0.08
+  lo -= pad
+  hi += pad
+  const x = (i: number) => padL + (n <= 1 ? iw / 2 : (i / (n - 1)) * iw)
+  const y = (v: number) => padT + ((hi - v) / (hi - lo)) * ih
+  const gridYs = [0, 0.25, 0.5, 0.75, 1].map((f) => padT + f * ih)
+  const bar = ch.kind === 'bar'
+  const bw = Math.max(4, (iw / Math.max(1, n)) * 0.55)
+  return (
+    <>
+      {ch.title && <div className="wall-h chart-title">{ch.title}</div>}
+      <div className="wall-chart grow">
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" role="img"
+          aria-label={ch.title || 'MERIDIAN chart'}>
+          {gridYs.map((gy, gi) => (
+            <g key={gi}>
+              <line x1={padL} x2={W - padR} y1={gy} y2={gy}
+                stroke="rgba(105,224,255,0.1)" strokeWidth={1} />
+              <text x={W - padR + 12} y={gy + 6} fill="#71808f" fontSize={19}
+                fontFamily="'JetBrains Mono', ui-monospace, monospace">
+                {(hi - (gi / 4) * (hi - lo)).toFixed(Math.abs(hi - lo) < 5 ? 2 : 0)}
+              </text>
+            </g>
+          ))}
+          {ch.series.map((s, si) => {
+            const col = SERIES_COLORS[si % SERIES_COLORS.length]
+            if (bar) {
+              return (
+                <g key={si}>
+                  {s.values.map((v, i) => (
+                    <rect key={i} x={x(i) - bw / 2} y={Math.min(y(v), y(Math.max(lo, 0)))}
+                      width={bw}
+                      height={Math.max(2, Math.abs(y(v) - y(Math.max(lo, Math.min(hi, 0)))))}
+                      rx={3} fill={col} opacity={0.85} />
+                  ))}
+                </g>
+              )
+            }
+            const pts = s.values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ')
+            const area = `${padL},${padT + ih} ${pts} ${x(s.values.length - 1).toFixed(1)},${padT + ih}`
+            const last = s.values[s.values.length - 1]
+            return (
+              <g key={si}>
+                {si === 0 && (
+                  <polygon points={area} fill={col} opacity={0.09} />
+                )}
+                <polyline points={pts} fill="none" stroke={col} strokeWidth={11}
+                  opacity={0.16} strokeLinejoin="round" strokeLinecap="round" />
+                <polyline points={pts} fill="none" stroke={col} strokeWidth={4}
+                  strokeLinejoin="round" strokeLinecap="round" />
+                <circle cx={x(s.values.length - 1)} cy={y(last)} r={8} fill={col} />
+                <text x={x(s.values.length - 1) + 16} y={y(last) - 12 + si * 30}
+                  fill={col} fontSize={24} fontWeight={700}
+                  fontFamily="'JetBrains Mono', ui-monospace, monospace">
+                  {s.name ? `${s.name} ` : ''}{Math.abs(last) < 5 ? last.toFixed(2) : Math.round(last).toLocaleString('en-US')}
+                </text>
+              </g>
+            )
+          })}
+          {(ch.labels || []).length > 1 && [0, Math.floor((n - 1) / 2), n - 1].map((i) => (
+            ch.labels![i] != null && (
+              <text key={i} x={x(i)} y={H - 16} fill="#71808f" fontSize={19}
+                textAnchor="middle"
+                fontFamily="'JetBrains Mono', ui-monospace, monospace">
+                {ch.labels![i]}
+              </text>
+            )
+          ))}
+        </svg>
+      </div>
+    </>
+  )
+}
+
 /** Whale leaderboard board — the copy sleeves ranked by P&L. */
 function WhalesBoard({ copies }: { copies: CopiesRecord | null }) {
   const rows = [...(copies?.by_whale || [])].sort((a, b) => b.pnl - a.pnl)
@@ -474,12 +572,14 @@ function PnlChart({ copies, live }: { copies: CopiesRecord | null; live: TodayLi
             x={cx(i) - bw / 2} y={y} width={bw} height={h} rx={3} fill={fill} />
         )
       })}
-      <polyline points={linePts} fill="none" stroke="#3987e5" strokeWidth={4}
+      <polyline points={linePts} fill="none" stroke="#69e0ff" strokeWidth={12}
+        strokeLinejoin="round" strokeLinecap="round" opacity={0.14} />
+      <polyline points={linePts} fill="none" stroke="#69e0ff" strokeWidth={4}
         strokeLinejoin="round" strokeLinecap="round" opacity={0.95} />
       {n > 0 && (
         <g>
-          <circle cx={cx(n - 1)} cy={cy(total)} r={7} fill="#3987e5" />
-          <text x={Math.min(cx(n - 1) + 14, W - 4)} y={cy(total) + 6} fill="#3987e5"
+          <circle cx={cx(n - 1)} cy={cy(total)} r={7} fill="#69e0ff" />
+          <text x={Math.min(cx(n - 1) + 14, W - 4)} y={cy(total) + 6} fill="#69e0ff"
             fontSize={22} fontWeight={700}
             fontFamily="'JetBrains Mono', ui-monospace, monospace">
             {signed(total)}
@@ -488,7 +588,7 @@ function PnlChart({ copies, live }: { copies: CopiesRecord | null; live: TodayLi
       )}
       {bars.map((b, i) => (
         (i % tickEvery === 0 || b.isLive) && (
-          <text key={`t-${b.day}`} x={cx(i)} y={H - 14} fill={b.isLive ? '#3987e5' : '#8b8983'}
+          <text key={`t-${b.day}`} x={cx(i)} y={H - 14} fill={b.isLive ? '#69e0ff' : '#71808f'}
             fontSize={17} fontWeight={b.isLive ? 700 : 500} textAnchor="middle"
             fontFamily="'JetBrains Mono', ui-monospace, monospace">
             {b.isLive ? 'LIVE' : b.day.slice(5)}
@@ -800,7 +900,9 @@ function WallBoard({ venue }: { venue: WallVenue }) {
       {kind === 'report' ? (
         <ReportBoard state={reportState} breakdown={breakdown.data} />
       ) : kind === 'chart' ? (
-        <ChartBoard copies={copies.data} live={live.data} />
+        myScreen?.chart
+          ? <ProjectedChartBoard screen={myScreen} />
+          : <ChartBoard copies={copies.data} live={live.data} />
       ) : kind === 'whales' ? (
         <WhalesBoard copies={copies.data} />
       ) : kind === 'headline' && myScreen ? (

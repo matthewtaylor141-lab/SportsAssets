@@ -1,7 +1,7 @@
 /* ═══ TV wall (owner order 2026-08-23): full-screen boards for the two
    office TVs (45", viewed from ~3m) + the phone/Mac control page.
    Additive layer over theme.css. Brand look per desk2: #0b0c0e bg
-   family, #3987e5 accent, #17a06b pos, #e03d36 neg, Space Grotesk
+   family, #69e0ff accent, #17a06b pos, #e03d36 neg, Space Grotesk
    headings, JetBrains Mono numerals. Type scale is clamp()-based so
    1920x1080 gets the giant treatment and a 1366x768 Mac window still
    fits. No hover-dependent affordances anywhere — a TV has no mouse. ═══ */
@@ -388,7 +388,7 @@
   font-size: clamp(22px, 2.4vw, 44px);
   margin-bottom: 0.3em;
 }
-.wall-gate-brand b { color: #3987e5; }
+.wall-gate-brand b { color: #69e0ff; }
 .wall-gate-sub { color: #8b8983; font-size: clamp(15px, 1.3vw, 24px); margin-bottom: 1.4em; }
 .wall-gate-row { display: flex; gap: 14px; }
 .wall-gate-row input {
@@ -404,9 +404,9 @@
   text-align: center;
   letter-spacing: 0.2em;
 }
-.wall-gate-row input:focus { outline: none; border-color: #3987e5; }
+.wall-gate-row input:focus { outline: none; border-color: #69e0ff; }
 .wall-gate-row button {
-  background: #3987e5;
+  background: #69e0ff;
   border: none;
   border-radius: 14px;
   color: #fff;
@@ -441,7 +441,7 @@
 }
 .wallc-btn small { display: block; font-family: 'Inter', sans-serif; font-weight: 500; font-size: 13px; color: var(--muted, #8b8983); margin-top: 6px; letter-spacing: 0.02em; }
 .wallc-btn:active { transform: scale(0.98); }
-.wallc-btn.on { border-color: #3987e5; box-shadow: 0 0 0 2px rgba(57, 135, 229, 0.35) inset; }
+.wallc-btn.on { border-color: #69e0ff; box-shadow: 0 0 0 2px rgba(105, 224, 255, 0.35) inset; }
 .wallc-btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .wallc-state { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--ink-2, #c3c2b7); flex-wrap: wrap; }
 .wallc-state i {

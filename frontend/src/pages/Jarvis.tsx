@@ -274,7 +274,9 @@ const TOOL_NOTES: Record<string, string> = {
  * >1.2s of dead air — the silence otherwise reads as a hang. At most
  * one per turn, never over real speech, never after a barge-in. */
 const ACK_LINES = ['Pulling that now.', 'One second.', 'Checking the book.']
-const ACK_DELAY_MS = 1200
+const ACK_DELAY_MS = 700   // owner 2026-08-23: "slow to respond" — the
+                           // acknowledgement lands inside the natural
+                           // conversational gap, not after it
 
 // The presence answers to its chosen name first; "jarvis" stays for
 // muscle memory, and "claude" because that is who is actually here.
@@ -514,19 +516,35 @@ export default function Jarvis() {
 
   useEffect(() => {
     const mouth = mouthRef.current!
+    let unmuteTimer = 0
     mouth.onSpeakingChange = (v) => {
       setSpeaking(v)
+      // ECHO SUPPRESSION (owner 2026-08-23: "he stops hearing himself
+      // before he responds... cuts off"): the ears mute the instant his
+      // voice starts and unmute 400ms after it ends — the TTS bleeding
+      // from the speakers can never masquerade as Matt and self-trigger
+      // the barge-in. Interrupting mid-sentence is still one tap on the
+      // mic (or space) — that path stops the voice first, then listens.
+      const earsNow = earsRef.current
+      if (earsNow) {
+        window.clearTimeout(unmuteTimer)
+        if (v) earsNow.setMuted(true)
+        else unmuteTimer = window.setTimeout(() => earsNow.setMuted(false), 400)
+      }
       // Conversational flow (owner report: "communication is very
       // difficult"): when MERIDIAN finishes speaking in hands-free
-      // mode, the next utterance needs no wake word for 8s — a reply
-      // is a reply, not a fresh summons.
+      // mode, the next utterance needs no wake word for 30s — a reply
+      // is a reply, not a fresh summons (widened 2026-08-23 alongside
+      // echo suppression, which removed the self-trigger risk).
       if (!v && handsFreeRef.current) {
-        attentionUntilRef.current = Date.now() + 8000
+        attentionUntilRef.current = Math.max(
+          attentionUntilRef.current, Date.now() + 30_000)
       }
     }
     mouth.onError = (m) => setHint(m)
     const ears = earsRef.current!
     return () => {
+      window.clearTimeout(unmuteTimer)
       ears.destroy()
       mouth.destroy()
       abortRef.current?.abort()
@@ -724,7 +742,13 @@ export default function Jarvis() {
         setHint('Listening — go ahead.')
         return
       }
-      attentionUntilRef.current = 0
+      // ROLLING CONVERSATION (owner 2026-08-23: "he stops responding
+      // until I say Meridian again"): accepting a question used to
+      // CLOSE the window, so a follow-up without the wake word was
+      // silently dropped. A conversation stays open 90s past the last
+      // thing Matt said — with the ears now muted during MERIDIAN's own
+      // speech, a wide window can't self-trigger anymore.
+      attentionUntilRef.current = Date.now() + 90_000
     }
     void send(text)
   }

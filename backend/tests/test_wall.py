@@ -254,3 +254,37 @@ def test_broadcast_book_clears_scene_fields(fresh_wall_state):
     assert r["mode"] == "book"
     assert r["headline"] is None
     assert r["screens"] is None
+
+
+def test_broadcast_scene_projected_chart_capped(fresh_wall_state):
+    body = WallBroadcastBody.model_validate({
+        "mode": "scene",
+        "screens": {"polymarket": {"kind": "chart", "chart": {
+            "title": "T" * 300, "kind": "line",
+            "labels": list(range(500)),
+            "series": [
+                {"name": "N" * 100, "values": list(range(1000))},
+                {"name": "ok", "values": [1, "x", float("nan"), 2.5]},
+                {"name": "dropped", "values": [1]},      # <2 finite points
+                {"name": "over-the-3-cap", "values": [1, 2]},
+            ],
+        }}},
+    })
+    r = asyncio.run(wall_broadcast(body, role="admin"))
+    ch = r["screens"]["polymarket"]["chart"]
+    assert len(ch["title"]) == 120
+    assert ch["kind"] == "line"
+    assert len(ch["labels"]) == 160
+    assert len(ch["series"]) == 2                        # capped + pruned
+    assert len(ch["series"][0]["values"]) == 160
+    assert len(ch["series"][0]["name"]) == 40
+    assert ch["series"][1]["values"] == [1.0, 2.5]       # junk dropped
+
+
+def test_broadcast_scene_garbage_chart_dropped(fresh_wall_state):
+    body = WallBroadcastBody.model_validate({
+        "mode": "scene",
+        "screens": {"kalshi": {"kind": "chart", "chart": {"series": "x"}}},
+    })
+    r = asyncio.run(wall_broadcast(body, role="desk"))
+    assert "chart" not in r["screens"]["kalshi"]

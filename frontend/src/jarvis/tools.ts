@@ -365,18 +365,59 @@ export const JARVIS_TOOLS: ToolSchema[] = [
             stat: { type: 'string', description: 'headline kind: the number under it, e.g. "+$1,610"' },
             from: { type: 'string', description: 'report kind: start ET date YYYY-MM-DD' },
             to: { type: 'string', description: 'report kind: end ET date YYYY-MM-DD' },
+            chart: {
+              type: 'object',
+              description: 'chart kind, OPTIONAL: PROJECT YOUR OWN DATA full-screen on this TV — any series you are holding (price_history points, daily P&L, a comparison). Omit for the default copies-P&L chart. ≤3 series × ≤160 points.',
+              properties: {
+                title: { type: 'string' },
+                kind: { type: 'string', enum: ['line', 'bar'] },
+                labels: { type: 'array', items: { type: 'string' }, description: 'x labels (sparse ok)' },
+                series: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      name: { type: 'string' },
+                      values: { type: 'array', items: { type: 'number' } },
+                    },
+                    required: ['values'],
+                  },
+                },
+              },
+              required: ['series'],
+            },
           },
           required: ['kind'],
         },
         polymarket_screen: {
           type: 'object',
-          description: 'What the POLYMARKET TV shows. Same shape as kalshi_screen.',
+          description: 'What the POLYMARKET TV shows. Same shape as kalshi_screen (including the optional projected chart).',
           properties: {
             kind: { type: 'string', enum: ['book', 'report', 'chart', 'whales', 'headline'] },
             text: { type: 'string' },
             stat: { type: 'string' },
             from: { type: 'string' },
             to: { type: 'string' },
+            chart: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                kind: { type: 'string', enum: ['line', 'bar'] },
+                labels: { type: 'array', items: { type: 'string' } },
+                series: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      name: { type: 'string' },
+                      values: { type: 'array', items: { type: 'number' } },
+                    },
+                    required: ['values'],
+                  },
+                },
+              },
+              required: ['series'],
+            },
           },
           required: ['kind'],
         },
@@ -1190,6 +1231,9 @@ function cleanWallScreen(raw: unknown): Dict | undefined {
   for (const k of ['text', 'stat', 'from', 'to'] as const) {
     if (typeof d[k] === 'string' && (d[k] as string).trim()) out[k] = (d[k] as string).slice(0, 200)
   }
+  // Projected chart passes through as-is — the server re-validates and
+  // hard-caps it (≤3 series × ≤160 finite numbers).
+  if (d.chart && typeof d.chart === 'object') out.chart = d.chart
   return out
 }
 
