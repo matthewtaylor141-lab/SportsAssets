@@ -3281,6 +3281,11 @@ def _today_et() -> str:
     return _dt.now(RECORD_TZ).strftime("%Y-%m-%d")
 
 
+# Strong refs for shielded background fetches (asyncio only weakly
+# references running tasks; without this a warmup crawl could be GC'd).
+_bg_tasks: set = set()
+
+
 async def _category_breakdown(from_day: str, to_day: str) -> dict:
     """Per-ET-day results by category over a date range (owner reports
     2026-08-06/07): each live sleeve (RN1, swisstony, kch123,
@@ -3419,7 +3424,16 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
             "SELECT DISTINCT lower(us_market_slug) AS s FROM live_orders "
             "WHERE us_market_slug IS NOT NULL")
         ours |= {r["s"] for r in lo_rows if r["s"]}
-        vexp = await venue_export(from_day)
+        # Bounded (2026-08-23): on a cold cache this crawl runs minutes
+        # and was timing out every report endpoint that renders the
+        # breakdown. Slow == unavailable here: fail open to the merged
+        # remainder — but SHIELD the crawl so it finishes in the
+        # background and warms the activities cache for the next render
+        # (a bare wait_for cancels it, and the cache never warms).
+        vtask = asyncio.ensure_future(venue_export(from_day))
+        _bg_tasks.add(vtask)
+        vtask.add_done_callback(_bg_tasks.discard)
+        vexp = await asyncio.wait_for(asyncio.shield(vtask), timeout=25)
         for vr in (vexp.get("rows") or []):
             if vr.get("kind") != "resolution":
                 continue

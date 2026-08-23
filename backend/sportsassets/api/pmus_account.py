@@ -474,7 +474,11 @@ def _fetch_week_activities_sync(oldest_day: str) -> list[dict]:
 # The week-activities crawl pages ~80 venue calls and takes minutes on
 # a busy week; two report endpoints doing it back-to-back timed out the
 # probe (observed 2026-08-15 01:00Z). One shared fetch, cached briefly.
-_acts_cache: dict = {"ts": 0.0, "since": None, "acts": None}
+# Multi-slot per since_day (2026-08-23): callers alternate different
+# since dates (breakdown attribution vs weekly report vs export), and a
+# single-slot cache thrashed — every alternation re-crawled minutes of
+# venue pages and the report endpoints timed out again.
+_acts_cache: dict[str, tuple[float, list]] = {}
 _ACTS_TTL = 600.0
 _acts_lock = asyncio.Lock()
 
@@ -482,14 +486,17 @@ _acts_lock = asyncio.Lock()
 async def _week_activities(since_day: str, timeout: float = 240) -> list:
     async with _acts_lock:
         now = time.time()
-        if (_acts_cache["acts"] is not None
-                and _acts_cache["since"] == since_day
-                and now - _acts_cache["ts"] < _ACTS_TTL):
-            return _acts_cache["acts"]
+        hit = _acts_cache.get(since_day)
+        if hit is not None and now - hit[0] < _ACTS_TTL:
+            return hit[1]
         acts = await asyncio.wait_for(
             asyncio.to_thread(_fetch_week_activities_sync, since_day),
             timeout=timeout)
-        _acts_cache.update(ts=now, since=since_day, acts=acts)
+        _acts_cache[since_day] = (now, acts)
+        if len(_acts_cache) > 8:  # bounded: sweep expired slots
+            for k in [k for k, (t0, _) in _acts_cache.items()
+                      if now - t0 >= _ACTS_TTL]:
+                _acts_cache.pop(k, None)
         return acts
 
 
