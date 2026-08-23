@@ -1,0 +1,463 @@
+/* ═══ TV wall (owner order 2026-08-23): full-screen boards for the two
+   office TVs (45", viewed from ~3m) + the phone/Mac control page.
+   Additive layer over theme.css. Brand look per desk2: #0b0c0e bg
+   family, #3987e5 accent, #17a06b pos, #e03d36 neg, Space Grotesk
+   headings, JetBrains Mono numerals. Type scale is clamp()-based so
+   1920x1080 gets the giant treatment and a 1366x768 Mac window still
+   fits. No hover-dependent affordances anywhere — a TV has no mouse. ═══ */
+
+.wall {
+  --wp-bg: #0b0c0e;
+  --wp-panel: #131519;
+  --wp-panel-2: #1a1d22;
+  --wp-line: rgba(255, 255, 255, 0.09);
+  --wp-ink: #f4f5f2;
+  --wp-mut: #8b8983;
+  --wp-acc: #3987e5;
+  --wp-pos: #17a06b;
+  --wp-neg: #e03d36;
+  position: fixed;
+  inset: 0;
+  z-index: 60; /* above the app nav — the wall owns the whole screen */
+  display: flex;
+  flex-direction: column;
+  padding: clamp(14px, 2vh, 28px) clamp(18px, 2.2vw, 42px);
+  gap: clamp(8px, 1.4vh, 18px);
+  background:
+    radial-gradient(1400px 500px at 50% -260px, rgba(57, 135, 229, 0.09), transparent),
+    var(--wp-bg);
+  color: var(--wp-ink);
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: clamp(15px, 1.25vw, 24px);
+  line-height: 1.35;
+  overflow: hidden;
+  transition: transform 2s ease; /* burn-in pixel shift glides, never jumps */
+}
+.wall * { box-sizing: border-box; }
+
+/* Numerals everywhere on the wall read in mono, tabular. */
+.wall .num,
+.wall-bignum, .wall-tile-v, .wall-row, .wall-rrow, .wall-mkt-px {
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.wall .pos { color: var(--wp-pos); }
+.wall .neg { color: var(--wp-neg); }
+
+/* ── Brand strip (top-left) ──────────────────────────────────────── */
+.wall-top { display: flex; align-items: baseline; gap: 18px; flex: none; }
+.wall-brand {
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-weight: 700;
+  font-size: clamp(18px, 1.7vw, 32px);
+  letter-spacing: 0.14em;
+  white-space: nowrap;
+}
+.wall-brand b { color: var(--wp-acc); font-weight: 700; }
+.wall-mode {
+  margin-left: auto;
+  font-size: clamp(12px, 1vw, 19px);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--wp-mut);
+  border: 1px solid var(--wp-line);
+  border-radius: 999px;
+  padding: 0.25em 0.9em;
+  white-space: nowrap;
+}
+.wall-mode.report { color: var(--wp-acc); border-color: rgba(57, 135, 229, 0.5); }
+
+/* ── Hero: giant number + companion tiles ────────────────────────── */
+.wall-hero {
+  display: flex;
+  align-items: stretch;
+  gap: clamp(14px, 2vw, 36px);
+  flex: none;
+}
+.wall-big { min-width: 0; }
+.wall-biglabel {
+  font-size: clamp(13px, 1.1vw, 21px);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--wp-mut);
+}
+.wall-bignum {
+  font-size: clamp(64px, 7.3vw, 140px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.04;
+  white-space: nowrap;
+}
+.wall-tiles {
+  display: flex;
+  gap: clamp(10px, 1.2vw, 22px);
+  margin-left: auto;
+  align-items: stretch;
+}
+.wall-tile {
+  background: var(--wp-panel);
+  border: 1px solid var(--wp-line);
+  border-radius: 14px;
+  padding: clamp(10px, 1.4vh, 20px) clamp(14px, 1.4vw, 26px);
+  min-width: clamp(150px, 14vw, 270px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.wall-tile-l {
+  font-size: clamp(11px, 0.95vw, 18px);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--wp-mut);
+}
+.wall-tile-v {
+  font-size: clamp(26px, 2.6vw, 52px);
+  font-weight: 700;
+  margin-top: 0.1em;
+  white-space: nowrap;
+}
+
+/* ── Section heads ───────────────────────────────────────────────── */
+.wall-h {
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-size: clamp(12px, 1vw, 19px);
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--wp-mut);
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+.wall-h small { font-family: 'Inter', sans-serif; letter-spacing: 0.04em; font-weight: 500; text-transform: none; }
+
+/* ── Positions grid (both walls) ─────────────────────────────────── */
+.wall-posgrid {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--wp-line);
+  border-radius: 16px;
+  background: var(--wp-panel);
+  padding: clamp(8px, 1.2vh, 18px) clamp(12px, 1.4vw, 26px);
+  display: flex;
+  flex-direction: column;
+}
+.wall-thead, .wall-row {
+  display: grid;
+  gap: clamp(8px, 1vw, 20px);
+  align-items: center;
+}
+/* market | qty | cost | mark | value | unrealized */
+.wall-thead { grid-template-columns: minmax(0, 3fr) 1fr 1.2fr 1fr 1.2fr 1.4fr; }
+.wall-row { grid-template-columns: minmax(0, 3fr) 1fr 1.2fr 1fr 1.2fr 1.4fr; }
+.wall-thead {
+  font-size: clamp(11px, 0.9vw, 17px);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--wp-mut);
+  padding: 0.3em 0 0.45em;
+  border-bottom: 1px solid var(--wp-line);
+  flex: none;
+}
+.wall-rows { flex: 1; min-height: 0; overflow: hidden; }
+.wall-row {
+  font-size: clamp(19px, 1.65vw, 32px);
+  min-height: clamp(30px, 4.6vh, 52px);
+  padding: 0.14em 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-weight: 600;
+}
+.wall-row:last-child { border-bottom: none; }
+.wall-row .r { text-align: right; }
+.wall-thead .r { text-align: right; }
+.wall-mktname {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Inter', sans-serif;
+}
+.wall-mktname small {
+  color: var(--wp-mut);
+  font-weight: 500;
+  font-size: 0.66em;
+  margin-left: 0.7em;
+  letter-spacing: 0.02em;
+}
+.wall-more {
+  flex: none;
+  font-size: clamp(12px, 1vw, 19px);
+  color: var(--wp-mut);
+  padding-top: 0.4em;
+}
+.wall-empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  color: var(--wp-mut);
+  font-size: clamp(18px, 1.6vw, 30px);
+}
+
+/* PM wall variant: market | qty | cost | value | unrealized (5 cols) */
+.wall-posgrid.pm .wall-thead,
+.wall-posgrid.pm .wall-row { grid-template-columns: minmax(0, 3.4fr) 1fr 1.2fr 1.2fr 1.4fr; }
+
+/* ── Live markets strip (Kalshi wall, bottom) ────────────────────── */
+.wall-strip {
+  flex: none;
+  height: clamp(120px, 19vh, 210px);
+  display: flex;
+  gap: clamp(10px, 1vw, 18px);
+  overflow: hidden;
+}
+.wall-mkt {
+  flex: 0 0 clamp(240px, 20vw, 380px);
+  background: var(--wp-panel);
+  border: 1px solid var(--wp-line);
+  border-radius: 14px;
+  padding: clamp(8px, 1.2vh, 16px) clamp(12px, 1.1vw, 20px);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+.wall-mkt-title {
+  font-size: clamp(14px, 1.15vw, 22px);
+  font-weight: 700;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  flex: none;
+}
+.wall-mkt-outs { margin-top: auto; display: flex; flex-direction: column; gap: 0.15em; }
+.wall-mkt-out {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: clamp(13px, 1.05vw, 20px);
+  min-width: 0;
+}
+.wall-mkt-out span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #c3c2b7;
+}
+.wall-mkt-px { margin-left: auto; font-weight: 700; flex: none; }
+.wall-mkt-d { flex: none; font-weight: 700; font-size: 0.85em; }
+
+/* ── PM wall: P&L chart ──────────────────────────────────────────── */
+.wall-chart {
+  flex: 1.15;
+  min-height: 0;
+  border: 1px solid var(--wp-line);
+  border-radius: 16px;
+  background: var(--wp-panel);
+  padding: clamp(8px, 1.2vh, 16px) clamp(12px, 1.4vw, 24px);
+  display: flex;
+  flex-direction: column;
+}
+.wall-chart svg { flex: 1; min-height: 0; width: 100%; }
+.wall-chart .wall-h { margin-bottom: 0.3em; }
+@keyframes wall-bar-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.wall-live-bar { animation: wall-bar-pulse 1.8s ease-in-out infinite; }
+.wall-posgrid.pm { flex: 1; }
+
+/* ── Report board ────────────────────────────────────────────────── */
+.wall-rtiles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: clamp(12px, 1.4vw, 26px);
+  flex: none;
+}
+.wall-rtile {
+  background: var(--wp-panel);
+  border: 1px solid var(--wp-line);
+  border-radius: 16px;
+  padding: clamp(12px, 1.8vh, 24px) clamp(16px, 1.6vw, 30px);
+}
+.wall-rtile .wall-tile-v { font-size: clamp(40px, 4.6vw, 92px); }
+.wall-rtable {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--wp-line);
+  border-radius: 16px;
+  background: var(--wp-panel);
+  padding: clamp(8px, 1.2vh, 18px) clamp(12px, 1.4vw, 26px);
+  display: flex;
+  flex-direction: column;
+}
+.wall-rhead, .wall-rrow {
+  display: grid;
+  /* date | account | copies | manual | arb | external | unattributed */
+  grid-template-columns: 1.5fr 1fr 1fr 1fr 1fr 1fr 1.2fr;
+  gap: clamp(8px, 1vw, 20px);
+  align-items: center;
+}
+.wall-rhead {
+  font-size: clamp(11px, 0.95vw, 18px);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--wp-mut);
+  padding: 0.3em 0 0.5em;
+  border-bottom: 1px solid var(--wp-line);
+  flex: none;
+}
+.wall-rrow {
+  font-size: clamp(20px, 1.85vw, 36px);
+  font-weight: 600;
+  flex: 1;
+  min-height: clamp(30px, 5vh, 64px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.wall-rrow:last-child { border-bottom: none; }
+.wall-rhead .r, .wall-rrow .r { text-align: right; }
+.wall-rrow .d { font-family: 'Inter', sans-serif; font-weight: 700; }
+.wall-rrange { color: var(--wp-mut); font-weight: 500; letter-spacing: 0.04em; }
+
+/* ── Freshness dot (bottom-right) ────────────────────────────────── */
+.wall-live {
+  position: absolute;
+  right: clamp(14px, 1.6vw, 30px);
+  bottom: clamp(10px, 1.4vh, 22px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: clamp(11px, 0.9vw, 17px);
+  color: var(--wp-mut);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  z-index: 5;
+}
+.wall-live i {
+  width: clamp(10px, 0.8vw, 15px);
+  height: clamp(10px, 0.8vw, 15px);
+  border-radius: 50%;
+  background: #555;
+  flex: none;
+}
+.wall-live.ok i { background: var(--wp-pos); box-shadow: 0 0 10px rgba(23, 160, 107, 0.8); }
+.wall-live.lag i { background: #fab219; box-shadow: 0 0 10px rgba(250, 178, 25, 0.7); }
+.wall-live.stale i { background: var(--wp-neg); box-shadow: 0 0 10px rgba(224, 61, 54, 0.7); }
+
+/* ── Unlock gate (on the TV itself — remote-friendly) ────────────── */
+.wall-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: #0b0c0e;
+  color: #f4f5f2;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+.wall-gate-box { width: min(760px, 86vw); text-align: center; }
+.wall-gate-brand {
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  font-size: clamp(22px, 2.4vw, 44px);
+  margin-bottom: 0.3em;
+}
+.wall-gate-brand b { color: #3987e5; }
+.wall-gate-sub { color: #8b8983; font-size: clamp(15px, 1.3vw, 24px); margin-bottom: 1.4em; }
+.wall-gate-row { display: flex; gap: 14px; }
+.wall-gate-row input {
+  flex: 1;
+  min-width: 0;
+  background: #1a1d22;
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  color: #f4f5f2;
+  font-size: clamp(22px, 2vw, 38px);
+  padding: 0.45em 0.7em;
+  font-family: inherit;
+  text-align: center;
+  letter-spacing: 0.2em;
+}
+.wall-gate-row input:focus { outline: none; border-color: #3987e5; }
+.wall-gate-row button {
+  background: #3987e5;
+  border: none;
+  border-radius: 14px;
+  color: #fff;
+  font-weight: 800;
+  font-size: clamp(18px, 1.6vw, 30px);
+  padding: 0 1.2em;
+  cursor: pointer;
+  font-family: inherit;
+  letter-spacing: 0.08em;
+}
+.wall-gate-row button:disabled { opacity: 0.5; }
+.wall-gate-err { color: #e03d36; font-size: clamp(15px, 1.3vw, 24px); margin-top: 1em; min-height: 1.4em; }
+
+/* ── Control page (desk phone / Mac — normal in-app page) ────────── */
+.wallc { display: flex; flex-direction: column; gap: 16px; max-width: 680px; }
+.wallc-btns { display: grid; grid-template-columns: 1fr; gap: 14px; }
+@media (min-width: 560px) { .wallc-btns { grid-template-columns: 1fr 1fr; } }
+.wallc-btn {
+  border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.14));
+  border-radius: 16px;
+  background: var(--surface-2, #1e2126);
+  color: var(--ink, #f4f5f2);
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 30px 18px;
+  min-height: 110px;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 80ms;
+  line-height: 1.3;
+}
+.wallc-btn small { display: block; font-family: 'Inter', sans-serif; font-weight: 500; font-size: 13px; color: var(--muted, #8b8983); margin-top: 6px; letter-spacing: 0.02em; }
+.wallc-btn:active { transform: scale(0.98); }
+.wallc-btn.on { border-color: #3987e5; box-shadow: 0 0 0 2px rgba(57, 135, 229, 0.35) inset; }
+.wallc-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.wallc-state { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--ink-2, #c3c2b7); flex-wrap: wrap; }
+.wallc-state i {
+  width: 10px; height: 10px; border-radius: 50%; background: #17a06b;
+  box-shadow: 0 0 8px rgba(23, 160, 107, 0.8); flex: none;
+}
+.wallc-state b { letter-spacing: 0.08em; }
+.wallc-err { color: #e03d36; font-size: 13.5px; min-height: 1.2em; }
+.wallc-okmsg { color: #17a06b; font-size: 13.5px; }
+.wallc-hints { font-size: 13px; color: var(--muted, #8b8983); line-height: 1.7; }
+.wallc-hints code {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  background: var(--surface-2, #1e2126);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.07));
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 12.5px;
+  color: var(--ink, #f4f5f2);
+}
+
+/* ── Small-window safety (1366x768 Mac window and below) ─────────── */
+@media (max-width: 900px) {
+  .wall-hero { flex-wrap: wrap; }
+  .wall-tiles { margin-left: 0; flex-wrap: wrap; }
+  .wall-thead, .wall-row { grid-template-columns: minmax(0, 2.4fr) 1fr 1.2fr 1.4fr; }
+  .wall-posgrid.pm .wall-thead,
+  .wall-posgrid.pm .wall-row { grid-template-columns: minmax(0, 2.6fr) 1fr 1.2fr 1.4fr; }
+  .wall-thead .hide-narrow, .wall-row .hide-narrow { display: none; }
+  .wall-rhead, .wall-rrow { grid-template-columns: 1.4fr 1fr 1fr 1fr 1.2fr; }
+  .wall-rhead .hide-narrow, .wall-rrow .hide-narrow { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wall { transition: none; }
+  .wall-live-bar { animation: none; }
+}

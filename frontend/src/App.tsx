@@ -11,6 +11,7 @@ import { TradeDesk } from './pages/TradeDesk'
 // Voice cockpit (owner deliverable 2026-08-21): lazy so the Claude/TTS/canvas
 // stack never weighs down the main record pages.
 const Jarvis = lazy(() => import('./pages/Jarvis'))
+const Wall = lazy(() => import('./pages/Wall'))
 // Desk accounts view (venue balances + cash-out): lazy for the same reason.
 // Tolerates either export style so the page module stays free to match
 // the codebase's named-export convention.
@@ -140,8 +141,10 @@ export default function App() {
   // The MERIDIAN cockpit is a full-screen room with its own chrome (brand
   // strip, exit ✕). Site nav/tabbar must not float over it — and the
   // page-fade animation would trap its position:fixed root in a stacking
-  // context under them — so /jarvis gets a bare, chrome-less main.
-  const cockpit = pathname === '/jarvis'
+  // context under them — so /jarvis gets a bare, chrome-less main. The
+  // TV wall boards (/wall/*) are full-screen always-on displays and get
+  // the same treatment.
+  const cockpit = pathname === '/jarvis' || pathname.startsWith('/wall')
   return (
     <div className="app">
       {!cockpit && (
@@ -170,6 +173,7 @@ export default function App() {
           <Route path="/desk" element={<TradeDesk />} />
           <Route path="/admin" element={<Admin />} />
           <Route path="/jarvis" element={<Suspense fallback={null}><Jarvis /></Suspense>} />
+          <Route path="/wall/*" element={<Suspense fallback={null}><Wall /></Suspense>} />
         </Routes>
         {!cockpit && (
         <p className="notice">

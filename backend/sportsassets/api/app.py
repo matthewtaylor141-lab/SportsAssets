@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import roster as roster_svc
 from ..bus import CH_HEALTH, CH_TRADES_ENRICHED, CH_TRADES_NEW, get_redis
@@ -201,12 +201,59 @@ def desk_token_ok(token: str, now: float | None = None) -> bool:
     return _hmac.compare_digest(sig, want)
 
 
+# ── Wall auth (TV wall, 2026-08-23) ─────────────────────────────────
+# The office TV runs unattended for weeks, so its token lives 7 days
+# and rolls itself over (see /api/wall/renew). Same stateless HMAC
+# shape as desk tokens, keyed by the same admin token, with a distinct
+# scope string — 'wall:' vs 'desk:' — so neither kind ever verifies as
+# the other. Wall is strictly read-only. Tokens are never logged.
+WALL_TOKEN_TTL_S = 7 * 24 * 3600
+
+
+def mint_wall_token(now: float | None = None) -> tuple[str, int]:
+    import hashlib
+    import hmac as _hmac
+    import time as _t
+
+    exp = int(now if now is not None else _t.time()) + WALL_TOKEN_TTL_S
+    key = (settings().admin_token or "").strip().encode()
+    sig = _hmac.new(key, f"wall:{exp}".encode(), hashlib.sha256).hexdigest()
+    return f"{exp}.{sig}", exp
+
+
+def wall_token_ok(token: str, now: float | None = None) -> bool:
+    import hashlib
+    import hmac as _hmac
+    import time as _t
+
+    if not isinstance(token, str):
+        return False
+    tok = token.strip()
+    exp_s, sep, sig = tok.partition(".")
+    if not sep:
+        return False
+    try:
+        exp = int(exp_s)
+    except ValueError:
+        return False
+    if exp <= (now if now is not None else _t.time()):
+        return False
+    key = (settings().admin_token or "").strip().encode()
+    if not key:
+        return False
+    want = _hmac.new(key, f"wall:{exp}".encode(),
+                     hashlib.sha256).hexdigest()
+    return _hmac.compare_digest(sig, want)
+
+
 def require_desk(x_desk_token: str = Header(default=""),
                  x_admin_token: str = Header(default="")) -> str:
-    """Desk-scoped auth: a valid desk token OR the admin token. The
-    admin path keeps working so existing tooling never breaks. Returns
-    the caller's role ('admin'|'desk') — endpoints that shape their
-    payload per role read it via Depends; everyone else ignores it."""
+    """Desk-scoped auth: a valid desk token, a valid wall token, OR the
+    admin token. The admin path keeps working so existing tooling never
+    breaks. Returns the caller's role ('admin'|'desk'|'wall') — endpoints
+    that shape their payload per role read it via Depends; everyone else
+    ignores it. 'wall' is read-only: every mutating endpoint must check
+    the role and refuse it with a 403."""
     import hmac
 
     supplied = (x_admin_token or "").strip()
@@ -215,6 +262,8 @@ def require_desk(x_desk_token: str = Header(default=""),
         return "admin"
     if x_desk_token and desk_token_ok(x_desk_token):
         return "desk"
+    if x_desk_token and wall_token_ok(x_desk_token):
+        return "wall"
     raise HTTPException(status_code=401, detail="desk unlock required")
 
 
@@ -385,6 +434,72 @@ async def desk_unlock(request: Request, body: DeskUnlockBody) -> dict:
         return {"ok": False, "error": "wrong password"}
     token, exp = mint_desk_token()
     return {"ok": True, "token": token, "expires_at": exp}
+
+
+# ── TV wall (2026-08-23) ────────────────────────────────────────────
+# One password (the desk's), a long-lived read-only token, and a tiny
+# in-memory switch the desk flips to steer what every TV shows. The
+# state is per-instance and non-durable by design: a restart falls
+# back to the live book, which is always safe to display.
+_wall_state: dict = {"mode": "book", "from": None, "to": None,
+                     "set_at": None}
+
+
+@app.post("/api/wall/unlock")
+async def wall_unlock(request: Request, body: DeskUnlockBody) -> dict:
+    """Wall unlock: the desk password -> a 7-day read-only wall token.
+    Shares the desk throttle bucket so the two endpoints are one guess
+    oracle, not two. Constant-time compare; the response never carries
+    the configured value, and nothing here is ever logged."""
+    import hmac
+
+    if _throttled(_UNLOCK_HITS, request):
+        raise HTTPException(status_code=429, detail="slow down")
+    supplied = (body.password or "").strip()
+    expected = (settings().desk_password or "").strip()
+    if not expected or not hmac.compare_digest(supplied, expected):
+        return {"ok": False, "error": "wrong password"}
+    token, exp = mint_wall_token()
+    return {"ok": True, "token": token, "expires_at": exp}
+
+
+@app.post("/api/wall/renew")
+async def wall_renew(x_desk_token: str = Header(default="")) -> dict:
+    """Rolling renewal: a still-valid WALL token buys a fresh 7-day
+    one, so an always-on TV never sees the password again. Desk tokens
+    and everything else get a 401 — renewal must never be a way to
+    stretch a 12h desk grant into a week."""
+    if not wall_token_ok(x_desk_token):
+        raise HTTPException(status_code=401, detail="wall token required")
+    token, exp = mint_wall_token()
+    return {"ok": True, "token": token, "expires_at": exp}
+
+
+@app.get("/api/wall/state", dependencies=[Depends(require_desk)])
+async def wall_state() -> dict:
+    """What every TV should show right now. Any role may read."""
+    return dict(_wall_state)
+
+
+class WallBroadcastBody(BaseModel):
+    mode: str = "book"
+    from_: str | None = Field(default=None, alias="from")
+    to: str | None = None
+
+
+@app.post("/api/wall/broadcast")
+async def wall_broadcast(body: WallBroadcastBody,
+                         role: str = Depends(require_desk)) -> dict:
+    """Flip every TV between the live book and a date-ranged report.
+    The wall itself may not steer the wall — read-only means read-only."""
+    if role == "wall":
+        raise HTTPException(status_code=403, detail="wall is read-only")
+    if body.mode not in ("book", "report"):
+        raise HTTPException(status_code=400,
+                            detail="mode must be 'book' or 'report'")
+    _wall_state.update({"mode": body.mode, "from": body.from_,
+                        "to": body.to, "set_at": time.time()})
+    return {"ok": True, **_wall_state}
 
 
 @app.get("/api/config")
@@ -1981,12 +2096,15 @@ class ManualTradeBody(BaseModel):
     ask: float | None = None   # PM slug rows: bounded fallback quote
 
 
-@app.post("/api/admin/manual-trade", dependencies=[Depends(require_desk)])
-async def api_manual_trade(body: ManualTradeBody) -> dict:
+@app.post("/api/admin/manual-trade")
+async def api_manual_trade(body: ManualTradeBody,
+                           role: str = Depends(require_desk)) -> dict:
     """Place an admin-directed trade as the 'manual' sleeve. Separate
     budget, separate P&L line, zero interaction with autonomous flows.
     Polymarket executes synchronously; Kalshi queues for the engine's
     ~10s relay (only the engine holds Kalshi credentials)."""
+    if role == "wall":
+        raise HTTPException(status_code=403, detail="wall is read-only")
     from ..live_executor import (MANUAL_DAILY_USD, MANUAL_MAX_PER_ORDER_USD,
                                  execute_manual)
 
@@ -2624,14 +2742,17 @@ async def _kalshi_held_qty(ticker: str) -> int | None:
     return None
 
 
-@app.post("/api/desk/cash-out", dependencies=[Depends(require_desk)])
-async def api_desk_cash_out(body: CashOutBody) -> dict:
+@app.post("/api/desk/cash-out")
+async def api_desk_cash_out(body: CashOutBody,
+                            role: str = Depends(require_desk)) -> dict:
     """Sell a held position from the desk. PM executes synchronously
     (platform-side IOC at a protective limit under the live bid);
     Kalshi queues a sell for the engine's relay — only the engine holds
     Kalshi credentials, and it clamps the count to what is actually
     held. Every path fails closed: no bid = refuse, more than held =
     refuse, limits floored at $0.01."""
+    if role == "wall":
+        raise HTTPException(status_code=403, detail="wall is read-only")
     from ..live_executor import execute_manual_sell, sell_limit_price
 
     if body.venue == "polymarket-us":
@@ -2702,12 +2823,14 @@ async def api_desk_cash_out(body: CashOutBody) -> dict:
                        "seconds, clamped to the held quantity")}
 
 
-@app.delete("/api/desk/manual-order/{id}",
-            dependencies=[Depends(require_desk)])
-async def api_desk_cancel_manual_order(id: int) -> dict:
+@app.delete("/api/desk/manual-order/{id}")
+async def api_desk_cancel_manual_order(
+        id: int, role: str = Depends(require_desk)) -> dict:
     """Cancel a queued (not yet relayed) Kalshi desk order. Only a
     'pending' row can be cancelled — once the relay picked it up the
     order is at the venue and this endpoint says so."""
+    if role == "wall":
+        raise HTTPException(status_code=403, detail="wall is read-only")
     pool = await get_pool()
     rid = await pool.fetchval(
         "UPDATE manual_kalshi_queue SET status='cancelled', "
