@@ -246,6 +246,21 @@ jobs:
           # like a software loss. Twice now that misread reached the owner.)
           jq -r '.days[]? | . as $d | ([$d.rn1, $d.swisstony, $d.kch123, $d.homerunhazard, $d["0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"], $d.ferrarichampions2026, $d["0x076daa87"]] | map(select(. != null)) | {p: (map(.pnl) | add // 0), w: (map(.wins) | add // 0), l: (map(.losses) | add // 0)}) as $c | "  BRK \($d.date)  acct=\($d.account // "?")  copies=\($c.p)/\($c.w)-\($c.l)  ud=\($d.underdog.pnl // 0)  man=\($d.manual.pnl // 0)  ext=\($d.external.pnl // 0)  arb=\($d.arb.pnl // 0)/\($d.arb.wins // 0)-\($d.arb.losses // 0)  unattr=\($d.software.pnl // 0)/\($d.software.settled // 0)set"' /tmp/db.json 2>/dev/null || true
           jq -r '.totals | to_entries[]? | "  BRKTOT \(.key)  pnl=\(.value.pnl)  \(.value.wins)-\(.value.losses) of \(.value.settled)"' /tmp/db.json 2>/dev/null || true
+
+          # ── unattributed residual, row by row (owner order 2026-08-23:
+          # "every cent of it") — TODAY's day-detail: the anchor rows vs
+          # the copies audit, per-market deltas largest first, plus the
+          # non-copy rows that land wholly in the residual.
+          TODAY_ET=$(TZ=America/New_York date +%F)
+          curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/bdd.json \
+               "$BASE/api/admin/breakdown-day-detail?day=$TODAY_ET" || true
+          jq -r '"  BDD \(.day)  anchor=\(.anchor.pnl)/\(.anchor.rows)rows  copies=\(.copies.pnl)/\(.copies.rows)rows  arb=\(.arb_pnl)  ext=\(.external_pnl)  RESIDUAL=\(.residual)  (copyDeltas=\(.residual_from_copy_deltas)  noncopy=\(.residual_from_noncopy_rows))"' /tmp/bdd.json 2>/dev/null || true
+          jq -r '.copy_deltas[]? | "  BDD-D \(.delta)  anchor=\(.anchor) copies=\(.copies)  \(.title[0:80])"' /tmp/bdd.json 2>/dev/null | head -60 || true
+          jq -r '.noncopy_anchor_rows[]? | "  BDD-N \(.pnl)  sleeve=\(.sleeve)  \(.title[0:80])"' /tmp/bdd.json 2>/dev/null | head -30 || true
+          jq -r '.capped_copy_rows[]? | "  BDD-CAP \(.pnl)  \(.whale)  \(.title[0:80])"' /tmp/bdd.json 2>/dev/null | head -20 || true
+          jq -r '.foreign_whale_rows[]? | "  BDD-F \(.pnl)  \(.whale)  \(.title[0:80])"' /tmp/bdd.json 2>/dev/null | head -20 || true
+          jq -r '.external_rows[]? | "  BDD-E \(.pnl)  \(.title[0:80])"' /tmp/bdd.json 2>/dev/null | head -20 || true
           probe /healthz 30
 
           # ── the decisive number ────────────────────────────────────

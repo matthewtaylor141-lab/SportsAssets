@@ -3775,6 +3775,165 @@ async def api_daily_breakdown() -> dict:
     return await _category_breakdown("2026-08-01", _today_et())
 
 
+@app.get("/api/admin/breakdown-day-detail",
+         dependencies=[Depends(require_admin)])
+async def api_breakdown_day_detail(day: str) -> dict:
+    """Every row behind one ET day of the category breakdown (owner order
+    2026-08-23: 'pinpoint what is making up this $668 — every cent').
+    The breakdown's Unattributed line is a derived residual (account
+    anchor minus attributed categories); this lists BOTH sides row by
+    row and diffs them per market, so the residual decomposes into
+    named per-trade deltas instead of one opaque number."""
+    from datetime import datetime as _dt
+
+    from .track_record import PNL_DISPLAY_CAP, RECORD_TZ, track_record
+
+    pool = await get_pool()
+    rec = await track_record(None)
+    arb_rows = await pool.fetch(
+        "SELECT DISTINCT outcome_id FROM engine_fills "
+        "WHERE band IN ('arb', 'arb_crypto')")
+    arb_slugs = {r["outcome_id"] for r in arb_rows}
+
+    def _day_of(ts: float | None) -> str | None:
+        if not ts:
+            return None
+        return max(_dt.fromtimestamp(ts, RECORD_TZ).strftime("%Y-%m-%d"),
+                   "2026-08-01")
+
+    # Side A — the ANCHOR: record rows settled this ET day (their sum IS
+    # the day's 'account' figure the breakdown reconciles against).
+    anchor_rows = []
+    for r in rec.get("trades") or []:
+        if not r.get("settled"):
+            continue
+        if _day_of(r.get("settled_ts") or r.get("entry_ts")) != day:
+            continue
+        slug = (r.get("market_slug") or "").lower()
+        anchor_rows.append({
+            "slug": slug, "title": r.get("title") or slug,
+            "sleeve": r.get("sleeve"),
+            "arb": slug in arb_slugs,
+            "pnl": round(float(r.get("pnl") or 0), 4),
+            "cashed_out": bool(r.get("cashed_out"))})
+    anchor_pnl = round(sum(r["pnl"] for r in anchor_rows), 2)
+
+    # Side B — attributed copies: the exact live_orders query the
+    # breakdown runs (same whale tuple, same ±cap filter), per row.
+    lo_rows = await pool.fetch(
+        """
+        SELECT lower(COALESCE(lo.whale_username, '?')) AS whale,
+               lower(COALESCE(lo.us_market_slug, '')) AS slug,
+               COALESCE(m.title, lo.us_market_slug, lo.asset) AS title,
+               lo.pnl::float8 AS pnl,
+               abs(COALESCE(lo.pnl, 0)) > $2 AS over_cap
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.status = 'settled' AND lo.settled_at IS NOT NULL
+          AND to_char(lo.settled_at AT TIME ZONE 'America/New_York',
+                      'YYYY-MM-DD') = $1
+        """, day, PNL_DISPLAY_CAP)
+    sleeves = ("rn1", "swisstony", "kch123", "homerunhazard", "manual",
+               "underdog", "ferrarichampions2026", "0x076daa87",
+               "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563"
+               "-1759935795465")
+    copies_rows, capped_rows, foreign_rows = [], [], []
+    for r in lo_rows:
+        row = {"whale": r["whale"], "slug": r["slug"],
+               "title": r["title"], "pnl": round(r["pnl"] or 0, 4)}
+        if r["whale"] not in sleeves:
+            foreign_rows.append(row)
+        elif r["over_cap"]:
+            capped_rows.append(row)
+        else:
+            copies_rows.append(row)
+    copies_pnl = round(sum(r["pnl"] for r in copies_rows), 2)
+
+    # Arb + external, mirrored from the breakdown for this one day.
+    arb_pnl = round(sum(r["pnl"] for r in anchor_rows
+                        if r["arb"] and r["sleeve"] != "copy"), 2)
+    external_rows = []
+    try:
+        from .pmus_account import venue_export
+
+        ours = {(t.get("market_slug") or "").lower()
+                for t in (rec.get("trades") or [])}
+        lo_slugs = await pool.fetch(
+            "SELECT DISTINCT lower(us_market_slug) AS s FROM live_orders "
+            "WHERE us_market_slug IS NOT NULL")
+        ours |= {r["s"] for r in lo_slugs if r["s"]}
+        vtask = asyncio.ensure_future(venue_export(day))
+        _bg_tasks.add(vtask)
+        vtask.add_done_callback(_bg_tasks.discard)
+        vexp = await asyncio.wait_for(asyncio.shield(vtask), timeout=25)
+        for vr in (vexp.get("rows") or []):
+            if vr.get("kind") != "resolution":
+                continue
+            slug = (vr.get("slug") or "").lower()
+            when = vr.get("time") or ""
+            if not slug or slug in ours or not when:
+                continue
+            d = (_dt.fromisoformat(when.replace("Z", "+00:00"))
+                 .astimezone(RECORD_TZ).strftime("%Y-%m-%d"))
+            if d != day:
+                continue
+            external_rows.append({
+                "slug": slug, "title": vr.get("title") or slug,
+                "pnl": round(float(vr.get("realized_pnl") or 0), 2)})
+    except Exception:  # noqa: BLE001 — fail open, like the breakdown
+        pass
+    external_pnl = round(sum(r["pnl"] for r in external_rows), 2)
+    residual = round(anchor_pnl - copies_pnl - arb_pnl - external_pnl, 2)
+
+    # The decomposition: per market, what the anchor recorded vs what
+    # the copies audit recorded. Deltas are the residual, named.
+    by_slug: dict[str, dict] = {}
+    for r in anchor_rows:
+        if r["sleeve"] != "copy" or r["arb"]:
+            continue
+        s = by_slug.setdefault(r["slug"], {"slug": r["slug"],
+                                           "title": r["title"],
+                                           "anchor": 0.0, "copies": 0.0})
+        s["anchor"] = round(s["anchor"] + r["pnl"], 4)
+    for r in copies_rows:
+        s = by_slug.setdefault(r["slug"], {"slug": r["slug"],
+                                           "title": r["title"],
+                                           "anchor": 0.0, "copies": 0.0})
+        s["copies"] = round(s["copies"] + r["pnl"], 4)
+    diffs = []
+    for s in by_slug.values():
+        s["delta"] = round(s["anchor"] - s["copies"], 4)
+        if abs(s["delta"]) >= 0.005:
+            diffs.append(s)
+    diffs.sort(key=lambda s: -abs(s["delta"]))
+    noncopy = [r for r in anchor_rows
+               if r["sleeve"] != "copy" and not r["arb"]]
+    return {
+        "day": day,
+        "anchor": {"pnl": anchor_pnl, "rows": len(anchor_rows)},
+        "copies": {"pnl": copies_pnl, "rows": len(copies_rows)},
+        "arb_pnl": arb_pnl, "external_pnl": external_pnl,
+        "residual": residual,
+        "residual_from_copy_deltas": round(sum(s["delta"] for s in diffs), 2),
+        "residual_from_noncopy_rows": round(sum(r["pnl"] for r in noncopy), 2),
+        "copy_deltas": diffs,
+        "noncopy_anchor_rows": noncopy,
+        "capped_copy_rows": capped_rows,
+        "foreign_whale_rows": foreign_rows,
+        "external_rows": external_rows,
+        "anchor_rows": anchor_rows,
+        "copies_rows": copies_rows,
+        "note": ("residual == anchor - copies - arb - external, the same "
+                 "identity the breakdown derives per day. copy_deltas are "
+                 "per-market gaps between the venue-anchored record and "
+                 "the copies audit table (fees, partial fills, cash-out "
+                 "proceeds, settle-day boundaries); noncopy_anchor_rows "
+                 "land wholly in the residual. capped_copy_rows are "
+                 "excluded from BOTH sides by the ±$100 display rule and "
+                 "shown here for full disclosure.")}
+
+
 @app.get("/api/today-live")
 async def api_today_live() -> dict:
     """Second-latency settlement feed from OUR OWN ledger (owner report
