@@ -343,6 +343,48 @@ export const JARVIS_TOOLS: ToolSchema[] = [
       required: ['entry'],
     },
   },
+  {
+    name: 'command_walls',
+    description:
+      "TAKE COMMAND OF THE OFFICE TVS. The two wall screens — the Kalshi TV and the Polymarket TV — are YOUR displays. " +
+      'Seize them whenever showing beats telling: reports, the whale leaderboard, the P&L chart, or a headline YOU write across the room. ' +
+      'Each screen takes one board: kind "report" (per-day category table; optional from/to ET dates), "whales" (copy-sleeve leaderboard), ' +
+      '"chart" (daily copies P&L, full screen), "headline" (giant text + optional stat — your own words on the wall), or "book" (that screen\'s live venue board). ' +
+      'A headline banner rides across BOTH TVs while you present. The walls hand themselves back to the live books after `minutes` (default 10). ' +
+      'Use release:true to give the room back early. USE THIS LIBERALLY when Matt asks to see something — put different, complementary boards on each screen and tell him what each TV is showing.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        headline: { type: 'string', description: 'Your banner across both TVs while presenting (≤100 chars). E.g. "SUNDAY — BEST DAY THIS MONTH".' },
+        kalshi_screen: {
+          type: 'object',
+          description: 'What the KALSHI TV shows.',
+          properties: {
+            kind: { type: 'string', enum: ['book', 'report', 'chart', 'whales', 'headline'] },
+            text: { type: 'string', description: 'headline kind: the giant text' },
+            stat: { type: 'string', description: 'headline kind: the number under it, e.g. "+$1,610"' },
+            from: { type: 'string', description: 'report kind: start ET date YYYY-MM-DD' },
+            to: { type: 'string', description: 'report kind: end ET date YYYY-MM-DD' },
+          },
+          required: ['kind'],
+        },
+        polymarket_screen: {
+          type: 'object',
+          description: 'What the POLYMARKET TV shows. Same shape as kalshi_screen.',
+          properties: {
+            kind: { type: 'string', enum: ['book', 'report', 'chart', 'whales', 'headline'] },
+            text: { type: 'string' },
+            stat: { type: 'string' },
+            from: { type: 'string' },
+            to: { type: 'string' },
+          },
+          required: ['kind'],
+        },
+        minutes: { type: 'number', description: 'Minutes before the TVs return to the live books (1–60, default 10).' },
+        release: { type: 'boolean', description: 'true = hand both TVs back to the live books now (ignores everything else).' },
+      },
+    },
+  },
 ]
 
 /* ── executors ───────────────────────────────────────────────────────── */
@@ -1135,6 +1177,55 @@ async function cancelStagedOrder(ctx: ToolContext): Promise<string> {
   return JSON.stringify({ cancelled: true })
 }
 
+/** MERIDIAN commanding the office TVs (owner 2026-08-23). Read-only
+ * theater: the broadcast only ever changes what the walls DISPLAY —
+ * money paths are untouched and the walls fall back to the live books
+ * on their own TTL. */
+function cleanWallScreen(raw: unknown): Dict | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const d = raw as Dict
+  const kinds = ['book', 'report', 'chart', 'whales', 'headline']
+  if (typeof d.kind !== 'string' || !kinds.includes(d.kind)) return undefined
+  const out: Dict = { kind: d.kind }
+  for (const k of ['text', 'stat', 'from', 'to'] as const) {
+    if (typeof d[k] === 'string' && (d[k] as string).trim()) out[k] = (d[k] as string).slice(0, 200)
+  }
+  return out
+}
+
+async function commandWalls(input: Dict, ctx: ToolContext): Promise<string> {
+  if (!ctx.adminToken) return NEED_TOKEN
+  try {
+    const release = input.release === true
+    const minutes = Math.min(60, Math.max(1, Number(input.minutes) || 10))
+    const body = release
+      ? { mode: 'book' }
+      : {
+          mode: 'scene',
+          headline: typeof input.headline === 'string'
+            ? input.headline.slice(0, 120) : undefined,
+          ttl_s: Math.round(minutes * 60),
+          screens: {
+            kalshi: cleanWallScreen(input.kalshi_screen),
+            polymarket: cleanWallScreen(input.polymarket_screen),
+          },
+        }
+    const r = await adminApi<Dict>('/api/wall/broadcast', ctx.adminToken, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+    return pack({
+      ok: true,
+      note: release
+        ? 'Both TVs are back on the live books.'
+        : `The walls are yours for ${minutes} minutes (TVs refresh within ~10s), then they hand themselves back to the books. Tell Matt what each screen is showing.`,
+      state: r,
+    })
+  } catch (e) {
+    return fail('the wall broadcast', e)
+  }
+}
+
 export function createToolExecutor(ctx: ToolContext) {
   return async (name: string, rawInput: unknown): Promise<string> => {
     const input = (rawInput && typeof rawInput === 'object' ? rawInput : {}) as Dict
@@ -1164,6 +1255,7 @@ export function createToolExecutor(ctx: ToolContext) {
       case 'cancel_staged_order': return cancelStagedOrder(ctx)
       case 'leave_note_for_engine_session': return leaveNote(input, ctx)
       case 'write_journal': return writeJournal(input, ctx)
+      case 'command_walls': return commandWalls(input, ctx)
       default: return JSON.stringify({ error: `Unknown tool: ${name}` })
     }
   }

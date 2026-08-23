@@ -18,11 +18,23 @@ export const WALL_RELOCK_EVENT = 'sa-wall-relock'
 
 export interface WallUnlockResult { ok: boolean; error?: string }
 
+/** One screen's directive inside a MERIDIAN scene. */
+export interface WallScreen {
+  kind: 'book' | 'report' | 'chart' | 'whales' | 'headline'
+  from?: string
+  to?: string
+  text?: string
+  stat?: string
+}
+
 export interface WallState {
-  mode: 'book' | 'report'
+  mode: 'book' | 'report' | 'scene'
   from: string | null
   to: string | null
   set_at: number | null
+  headline?: string | null
+  ttl_s?: number | null
+  screens?: { kalshi?: WallScreen; polymarket?: WallScreen } | null
 }
 
 // ── Token storage ────────────────────────────────────────────────────
@@ -166,7 +178,14 @@ export async function wallApi<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ── Broadcast (control page) ─────────────────────────────────────────
 
-export interface WallBroadcastBody { mode: 'book' | 'report'; from?: string; to?: string }
+export interface WallBroadcastBody {
+  mode: 'book' | 'report' | 'scene'
+  from?: string
+  to?: string
+  headline?: string
+  ttl_s?: number
+  screens?: { kalshi?: WallScreen; polymarket?: WallScreen }
+}
 
 /**
  * POST /api/wall/broadcast. Wall tokens are read-only there (403), so

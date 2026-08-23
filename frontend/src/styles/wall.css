@@ -7,15 +7,19 @@
    fits. No hover-dependent affordances anywhere — a TV has no mouse. ═══ */
 
 .wall {
-  --wp-bg: #0b0c0e;
-  --wp-panel: #131519;
-  --wp-panel-2: #1a1d22;
-  --wp-line: rgba(255, 255, 255, 0.09);
-  --wp-ink: #f4f5f2;
-  --wp-mut: #8b8983;
-  --wp-acc: #3987e5;
-  --wp-pos: #17a06b;
-  --wp-neg: #e03d36;
+  /* MERIDIAN grid language (owner 2026-08-23: "like Iron Man talking
+     to Jarvis") — the walls are MERIDIAN's own displays: near-black
+     stage, cyan luminance, gold for presenting. Money stays green/red. */
+  --wp-bg: #05070b;
+  --wp-panel: rgba(13, 20, 28, 0.88);
+  --wp-panel-2: rgba(18, 27, 37, 0.9);
+  --wp-line: rgba(105, 224, 255, 0.14);
+  --wp-ink: #eef6fa;
+  --wp-mut: #71808f;
+  --wp-acc: #69e0ff;
+  --wp-gold: #e8c877;
+  --wp-pos: #3ddc97;
+  --wp-neg: #ff6b6b;
   position: fixed;
   inset: 0;
   z-index: 60; /* above the app nav — the wall owns the whole screen */
@@ -24,14 +28,26 @@
   padding: clamp(14px, 2vh, 28px) clamp(18px, 2.2vw, 42px);
   gap: clamp(8px, 1.4vh, 18px);
   background:
-    radial-gradient(1400px 500px at 50% -260px, rgba(57, 135, 229, 0.09), transparent),
+    linear-gradient(rgba(105, 224, 255, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(105, 224, 255, 0.028) 1px, transparent 1px),
+    radial-gradient(1400px 520px at 50% -260px, rgba(28, 90, 120, 0.22), transparent),
+    radial-gradient(1200px 420px at 50% 118%, rgba(20, 46, 66, 0.3), transparent),
     var(--wp-bg);
+  background-size: 56px 56px, 56px 56px, auto, auto, auto;
   color: var(--wp-ink);
   font-family: 'Inter', system-ui, sans-serif;
   font-size: clamp(15px, 1.25vw, 24px);
   line-height: 1.35;
   overflow: hidden;
   transition: transform 2s ease; /* burn-in pixel shift glides, never jumps */
+}
+.wall.presenting {
+  background:
+    linear-gradient(rgba(232, 200, 119, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(232, 200, 119, 0.03) 1px, transparent 1px),
+    radial-gradient(1400px 520px at 50% -260px, rgba(120, 96, 40, 0.18), transparent),
+    var(--wp-bg);
+  background-size: 56px 56px, 56px 56px, auto, auto;
 }
 .wall * { box-sizing: border-box; }
 
@@ -460,4 +476,199 @@
 @media (prefers-reduced-motion: reduce) {
   .wall { transition: none; }
   .wall-live-bar { animation: none; }
+}
+
+/* ═══ MERIDIAN HUD LAYER (owner 2026-08-23: Iron-Man treatment) ═══ */
+
+/* Slow scanline sweeping the board — presence without distraction. */
+.wall-scan {
+  position: absolute;
+  left: 0; right: 0; top: -8%;
+  height: 22vh;
+  background: linear-gradient(180deg, transparent,
+              rgba(105, 224, 255, 0.045) 45%,
+              rgba(105, 224, 255, 0.09) 50%,
+              rgba(105, 224, 255, 0.045) 55%, transparent);
+  pointer-events: none;
+  animation: wall-scan 14s linear infinite;
+}
+.wall.presenting .wall-scan {
+  background: linear-gradient(180deg, transparent,
+              rgba(232, 200, 119, 0.05) 45%,
+              rgba(232, 200, 119, 0.1) 50%,
+              rgba(232, 200, 119, 0.05) 55%, transparent);
+}
+@keyframes wall-scan { to { transform: translateY(130vh); } }
+
+/* MERIDIAN's core on the wall — breathing. */
+.wall-orb {
+  display: inline-block;
+  width: 0.62em; height: 0.62em;
+  margin-right: 0.55em;
+  border-radius: 50%;
+  vertical-align: baseline;
+  background: radial-gradient(circle at 35% 30%, #d9f6ff, #69e0ff 45%, #0a3346 90%);
+  box-shadow: 0 0 14px rgba(105, 224, 255, 0.75), 0 0 40px rgba(105, 224, 255, 0.25);
+  animation: wall-orb 4.5s ease-in-out infinite;
+}
+.wall-orb.presenting {
+  background: radial-gradient(circle at 35% 30%, #fff3d6, #e8c877 45%, #4a3608 90%);
+  box-shadow: 0 0 16px rgba(232, 200, 119, 0.85), 0 0 46px rgba(232, 200, 119, 0.3);
+  animation-duration: 1.8s;
+}
+.wall-orb.big {
+  width: clamp(56px, 8vh, 110px); height: clamp(56px, 8vh, 110px);
+  margin: 0;
+}
+@keyframes wall-orb {
+  50% { transform: scale(1.14); filter: brightness(1.25); }
+}
+
+/* Top strip additions: today chip + ET clock. */
+.wall-top { align-items: center; }
+.wall-today {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.6em;
+  padding: 0.22em 0.9em;
+  border: 1px solid var(--wp-line);
+  border-radius: 999px;
+  font-size: clamp(13px, 1.05vw, 20px);
+  white-space: nowrap;
+}
+.wall-today i {
+  font-style: normal;
+  font-size: 0.72em;
+  letter-spacing: 0.2em;
+  color: var(--wp-mut);
+}
+.wall-today span { color: var(--wp-mut); font-size: 0.85em; }
+.wall-clock {
+  font-size: clamp(13px, 1.05vw, 20px);
+  color: rgba(140, 210, 245, 0.85);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+.wall-clock i { font-style: normal; font-size: 0.7em; color: var(--wp-mut); letter-spacing: 0.2em; }
+.wall-mode.scene {
+  color: var(--wp-gold);
+  border-color: rgba(232, 200, 119, 0.55);
+  box-shadow: 0 0 18px rgba(232, 200, 119, 0.18);
+  animation: wall-mode-pulse 2.2s ease-in-out infinite;
+}
+@keyframes wall-mode-pulse { 50% { box-shadow: 0 0 30px rgba(232, 200, 119, 0.32); } }
+
+/* MERIDIAN's headline banner across the top of a scene. */
+.wall-banner {
+  flex: none;
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-weight: 600;
+  font-size: clamp(17px, 1.5vw, 30px);
+  letter-spacing: 0.06em;
+  color: var(--wp-gold);
+  border: 1px solid rgba(232, 200, 119, 0.3);
+  border-radius: 12px;
+  padding: 0.35em 0.9em;
+  background: rgba(30, 24, 8, 0.5);
+  text-shadow: 0 0 18px rgba(232, 200, 119, 0.35);
+}
+.wall-banner i { font-style: normal; animation: wall-orb 1.8s ease-in-out infinite; display: inline-block; }
+
+/* HUD corner brackets on every panel. */
+.wall-posgrid, .wall-rtable, .wall-rtile, .wall-tile, .wall-chart, .wall-mkt {
+  position: relative;
+  border-color: var(--wp-line);
+}
+.wall-posgrid::before, .wall-rtable::before, .wall-chart::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  pointer-events: none;
+  background:
+    linear-gradient(var(--wp-acc), var(--wp-acc)) top left / 22px 2px,
+    linear-gradient(var(--wp-acc), var(--wp-acc)) top left / 2px 22px,
+    linear-gradient(var(--wp-acc), var(--wp-acc)) bottom right / 22px 2px,
+    linear-gradient(var(--wp-acc), var(--wp-acc)) bottom right / 2px 22px;
+  background-repeat: no-repeat;
+  opacity: 0.55;
+}
+.wall.presenting .wall-posgrid::before,
+.wall.presenting .wall-rtable::before,
+.wall.presenting .wall-chart::before {
+  background:
+    linear-gradient(var(--wp-gold), var(--wp-gold)) top left / 22px 2px,
+    linear-gradient(var(--wp-gold), var(--wp-gold)) top left / 2px 22px,
+    linear-gradient(var(--wp-gold), var(--wp-gold)) bottom right / 22px 2px,
+    linear-gradient(var(--wp-gold), var(--wp-gold)) bottom right / 2px 22px;
+  background-repeat: no-repeat;
+}
+
+/* Headline board: MERIDIAN writing on the wall. */
+.wall-headline {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(18px, 4vh, 44px);
+  text-align: center;
+  padding: 0 6vw;
+}
+.wall-headline-text {
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-weight: 700;
+  font-size: clamp(34px, 4.6vw, 88px);
+  line-height: 1.16;
+  letter-spacing: 0.02em;
+  text-wrap: balance;
+  text-shadow: 0 0 32px rgba(105, 224, 255, 0.25);
+}
+.wall-headline-stat {
+  font-size: clamp(26px, 3vw, 60px);
+  font-weight: 700;
+}
+.wall-headline-stat small {
+  font-size: 0.45em;
+  color: var(--wp-mut);
+  font-weight: 500;
+}
+
+/* Chart board grows to fill the screen. */
+.wall-chart.grow { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.wall-chart.grow svg { flex: 1; min-height: 0; width: 100%; height: 100%; }
+.wall-wl { color: var(--wp-mut); font-size: 0.55em; }
+.wall-rtable.whales .wall-rhead,
+.wall-rtable.whales .wall-rrow {
+  grid-template-columns: 1.6fr 0.7fr 0.8fr 1fr 0.7fr 1fr;
+}
+
+/* Bottom ticker tape. */
+.wall-tape {
+  flex: none;
+  overflow: hidden;
+  border-top: 1px solid var(--wp-line);
+  padding-top: clamp(6px, 1vh, 12px);
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent);
+}
+.wall-tape-inner {
+  display: inline-flex;
+  gap: clamp(28px, 3vw, 56px);
+  white-space: nowrap;
+  animation: wall-tape 55s linear infinite;
+  will-change: transform;
+}
+.wall-tape-item {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: clamp(13px, 1.1vw, 21px);
+  color: rgba(200, 228, 245, 0.8);
+  letter-spacing: 0.03em;
+}
+@keyframes wall-tape { to { transform: translateX(-50%); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .wall-scan, .wall-orb, .wall-mode.scene, .wall-banner i, .wall-tape-inner {
+    animation: none;
+  }
 }

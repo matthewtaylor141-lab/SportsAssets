@@ -6,7 +6,7 @@ import {
   WALL_RELOCK_EVENT, dayCategories, etDaysAgo, etHM, etToday, isCopyCategory,
   maybeRenewWallToken, wallApi, wallAuthed, wallBroadcast, wallFeed, wallUnlock,
   type BreakdownDay, type DailyBreakdown, type TodayLive, type WallFeedCard,
-  type WallState,
+  type WallScreen, type WallState,
 } from '../lib/wall'
 import '../styles/wall.css'
 
@@ -308,6 +308,117 @@ function ReportBoard({ state, breakdown }: {
   )
 }
 
+// ── MERIDIAN scene boards (owner 2026-08-23: "he should use both
+// screens... bring him to life") — the walls become MERIDIAN's own
+// displays. A scene carries per-screen directives; each board below is
+// one thing MERIDIAN can throw onto a TV. ────────────────────────────
+
+/** MERIDIAN's presence on the wall: a small breathing core. Gold and
+ * fast while presenting, cyan and calm otherwise. Pure CSS. */
+function WallOrb({ presenting }: { presenting: boolean }) {
+  return <span className={`wall-orb${presenting ? ' presenting' : ''}`} aria-hidden />
+}
+
+/** Giant message board — MERIDIAN literally writing on the wall. */
+function HeadlineBoard({ screen, live }: { screen: WallScreen; live: TodayLive | null }) {
+  return (
+    <div className="wall-headline">
+      <div className="wall-headline-orb"><span className="wall-orb presenting big" /></div>
+      <div className="wall-headline-text">{screen.text || 'MERIDIAN'}</div>
+      {screen.stat ? (
+        <div className="wall-headline-stat num">{screen.stat}</div>
+      ) : live ? (
+        <div className={`wall-headline-stat num ${pnlCls(live.pnl)}`}>
+          {signed(live.pnl)} <small>today · {live.wins}W–{live.settled - live.wins}L</small>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/** Full-bleed copies P&L chart board (either TV). */
+function ChartBoard({ copies, live }: { copies: CopiesRecord | null; live: TodayLive | null }) {
+  return (
+    <>
+      <div className="wall-rtiles">
+        <div className="wall-rtile">
+          <div className="wall-tile-l">Today</div>
+          <div className={`wall-tile-v num ${pnlCls(live?.pnl)}`}>{signed(live?.pnl)}</div>
+        </div>
+        <div className="wall-rtile">
+          <div className="wall-tile-l">Settled today</div>
+          <div className="wall-tile-v num">
+            {live ? `${live.settled}` : '—'}
+            {live && <small className="wall-wl"> {live.wins}W–{live.settled - live.wins}L</small>}
+          </div>
+        </div>
+        <div className="wall-rtile">
+          <div className="wall-tile-l">All-time copies</div>
+          <div className={`wall-tile-v num ${pnlCls(copies?.total?.pnl)}`}>{signed(copies?.total?.pnl)}</div>
+        </div>
+      </div>
+      <div className="wall-chart grow">
+        <div className="wall-h">
+          Copies P&L — daily<small>green/red bars daily · blue line cumulative · last bar live today</small>
+        </div>
+        <PnlChart copies={copies} live={live} />
+      </div>
+    </>
+  )
+}
+
+/** Whale leaderboard board — the copy sleeves ranked by P&L. */
+function WhalesBoard({ copies }: { copies: CopiesRecord | null }) {
+  const rows = [...(copies?.by_whale || [])].sort((a, b) => b.pnl - a.pnl)
+  return (
+    <>
+      <div className="wall-h">
+        Whale copy sleeves<small>settled results · uncapped · since {copies?.since || '—'}</small>
+      </div>
+      <div className="wall-rtable whales">
+        <div className="wall-rhead">
+          <span>Whale</span>
+          <span className="r">Settled</span>
+          <span className="r">W–L</span>
+          <span className="r hide-narrow">Staked</span>
+          <span className="r">ROI</span>
+          <span className="r">P&L</span>
+        </div>
+        {rows.length === 0 ? (
+          <div className="wall-empty">{copies == null ? 'Loading the sleeves…' : 'No settled copies yet.'}</div>
+        ) : rows.map((w) => (
+          <div className="wall-rrow" key={w.whale}>
+            <span className="d">{w.whale}</span>
+            <span className="r">{w.settled.toLocaleString('en-US')}</span>
+            <span className="r">{w.wins}–{w.losses}</span>
+            <span className="r hide-narrow">{money(w.staked)}</span>
+            <span className={`r ${pnlCls(w.roi)}`}>{w.roi == null ? '—' : `${(w.roi * 100).toFixed(1)}%`}</span>
+            <span className={`r ${pnlCls(w.pnl)}`}>{signed(w.pnl)}</span>
+          </div>
+        ))}
+      </div>
+    </>
+  )
+}
+
+/** Bottom ticker tape — content loops forever (duplicated for the
+ * seamless CSS marquee). Kalshi wall runs prices; PM wall runs the
+ * day's settles. */
+function TapeBar({ items }: { items: { key: string; text: string; cls?: string }[] }) {
+  if (items.length === 0) return null
+  const strip = items.map((it) => (
+    <span className={`wall-tape-item ${it.cls || ''}`} key={it.key}>{it.text}</span>
+  ))
+  const strip2 = items.map((it) => (
+    <span className={`wall-tape-item ${it.cls || ''}`} key={`${it.key}-2`} aria-hidden>{it.text}</span>
+  ))
+  return (
+    <div className="wall-tape" aria-hidden>
+      <div className="wall-tape-inner">{strip}{strip2}</div>
+    </div>
+  )
+}
+
 // ── PM wall: daily copies P&L chart (self-contained SVG) ─────────────
 
 const CHART = { W: 1200, H: 420, padL: 24, padR: 96, padT: 28, padB: 46 }
@@ -574,11 +685,30 @@ function WallBoard({ venue }: { venue: WallVenue }) {
     () => wallApi('/api/wall/state'), 10_000, true, 'state')
   const feed = useWallPoll<WallFeedCard[]>(
     () => wallFeed('kalshi', 'all'), 25_000, isK, 'feed')
+
+  // MERIDIAN SCENES: resolve what THIS screen should draw. A scene's
+  // TTL is enforced client-side — when it lapses the wall hands itself
+  // back to the live book without waiting for anyone.
+  const st = state.data
+  const ttlLapsed = st?.set_at != null && st.ttl_s != null
+    && now / 1000 > st.set_at + st.ttl_s
+  const effMode: WallState['mode'] = ttlLapsed ? 'book' : (st?.mode ?? 'book')
+  const myScreen: WallScreen | null = effMode === 'scene'
+    ? (st?.screens?.[venue]
+       ?? { kind: 'headline', text: st?.headline || 'MERIDIAN' })
+    : null
+  const kind = effMode === 'scene' ? (myScreen?.kind ?? 'book') : effMode
+  const presenting = effMode === 'scene'
+  const report = kind === 'report'
+
+  // today-live runs on BOTH walls now (header strip + PM chart + the
+  // settle tape); copies powers the PM chart plus any scene chart or
+  // whale board on either TV.
   const live = useWallPoll<TodayLive>(
-    () => wallApi('/api/today-live'), 20_000, !isK, 'live')
+    () => wallApi('/api/today-live'), 20_000, true, 'live')
   const copies = useWallPoll<CopiesRecord>(
-    () => wallApi('/api/copies-record'), 120_000, !isK, 'copies')
-  const report = state.data?.mode === 'report'
+    () => wallApi('/api/copies-record'), 120_000,
+    !isK || kind === 'chart' || kind === 'whales', 'copies')
   const breakdown = useWallPoll<DailyBreakdown>(
     () => wallApi('/api/daily-breakdown'), 60_000, report, 'breakdown')
 
@@ -621,21 +751,66 @@ function WallBoard({ venue }: { venue: WallVenue }) {
     copies.lastOk, breakdown.lastOk]
     .reduce<number | null>((a, b) => (b != null && (a == null || b > a) ? b : a), null)
 
+  // Ticker tape: Kalshi wall runs live prices; PM wall runs the day's
+  // settles as they land.
+  const tape = isK
+    ? cards.slice(0, 14).map(({ c }) => ({
+        key: c.id,
+        text: `${c.title}  ${c.outcomes.slice(0, 2)
+          .map((o) => `${o.label} ${cents(o.price)}`).join(' · ')}`,
+      }))
+    : (live.data?.recent || []).slice(0, 14).map((t, i) => ({
+        key: `${t.title}-${i}`,
+        text: `${t.pnl >= 0 ? '✓' : '✕'} ${t.outcome || t.title}  ${signed(t.pnl)}`,
+        cls: t.pnl >= 0 ? 'pos' : 'neg',
+      }))
+
+  // The scene report range rides the screen directive when it has one.
+  const reportState: WallState | null = myScreen?.kind === 'report'
+    ? { ...(st as WallState), from: myScreen.from || st?.from || null,
+        to: myScreen.to || st?.to || null }
+    : state.data
+
   return (
-    <div className="wall" style={shift}>
+    <div className={`wall${presenting ? ' presenting' : ''}`} style={shift}>
+      <div className="wall-scan" aria-hidden />
       <div className="wall-top">
-        <div className="wall-brand">BETTORTOKEN <b>· {isK ? 'KALSHI' : 'POLYMARKET'}</b></div>
-        <div className={`wall-mode${report ? ' report' : ''}`}>
-          {report ? 'REPORT · LAST 7 DAYS' : 'LIVE BOOKS'}
+        <div className="wall-brand">
+          <WallOrb presenting={presenting} />
+          BETTORTOKEN <b>· {isK ? 'KALSHI' : 'POLYMARKET'}</b>
         </div>
+        {live.data && (
+          <div className="wall-today num">
+            <i>TODAY</i>
+            <b className={pnlCls(live.data.pnl)}>{signed(live.data.pnl)}</b>
+            <span>{live.data.wins}W–{live.data.settled - live.data.wins}L</span>
+          </div>
+        )}
+        <div className={`wall-mode${report ? ' report' : ''}${presenting ? ' scene' : ''}`}>
+          {presenting ? 'MERIDIAN · PRESENTING'
+            : report ? 'REPORT · LAST 7 DAYS' : 'LIVE BOOKS'}
+        </div>
+        <div className="wall-clock num">{new Date(now).toLocaleTimeString('en-US', {
+          timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', second: '2-digit',
+        })} <i>ET</i></div>
       </div>
-      {report ? (
-        <ReportBoard state={state.data} breakdown={breakdown.data} />
+      {presenting && st?.headline && (
+        <div className="wall-banner"><i>◉</i> {st.headline}</div>
+      )}
+      {kind === 'report' ? (
+        <ReportBoard state={reportState} breakdown={breakdown.data} />
+      ) : kind === 'chart' ? (
+        <ChartBoard copies={copies.data} live={live.data} />
+      ) : kind === 'whales' ? (
+        <WhalesBoard copies={copies.data} />
+      ) : kind === 'headline' && myScreen ? (
+        <HeadlineBoard screen={myScreen} live={live.data} />
       ) : isK ? (
         <KalshiBook acct={acct.data} cards={cards} />
       ) : (
         <PolymarketBook acct={acct.data} copies={copies.data} live={live.data} />
       )}
+      <TapeBar items={tape} />
       <LiveDot newest={newest} now={now} />
     </div>
   )

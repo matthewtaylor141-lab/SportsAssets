@@ -151,7 +151,8 @@ def fresh_wall_state():
 
 def test_state_defaults_to_book(fresh_wall_state):
     assert asyncio.run(wall_state()) == {
-        "mode": "book", "from": None, "to": None, "set_at": None}
+        "mode": "book", "from": None, "to": None, "set_at": None,
+        "headline": None, "ttl_s": None, "screens": None}
 
 
 def test_broadcast_as_desk_flips_the_state(fresh_wall_state):
@@ -211,3 +212,45 @@ def test_cash_out_is_403_for_wall():
 
 def test_cancel_manual_order_is_403_for_wall():
     _wall_403(api_desk_cancel_manual_order(1, role="wall"))
+
+
+def test_broadcast_scene_stores_cleaned_screens(fresh_wall_state):
+    body = WallBroadcastBody.model_validate({
+        "mode": "scene", "headline": "  SUNDAY — BEST DAY  ",
+        "ttl_s": 90000,
+        "screens": {
+            "kalshi": {"kind": "whales", "junk": "x", "text": "t" * 500},
+            "polymarket": {"kind": "nope"},
+            "other": {"kind": "book"},
+        },
+    })
+    r = asyncio.run(wall_broadcast(body, role="admin"))
+    assert r["ok"] is True
+    assert r["mode"] == "scene"
+    assert r["headline"] == "SUNDAY — BEST DAY"
+    assert r["ttl_s"] == 3600            # clamped to the 1h ceiling
+    scr = r["screens"]
+    assert set(scr) == {"kalshi"}        # bad kind + unknown venue dropped
+    assert scr["kalshi"]["kind"] == "whales"
+    assert len(scr["kalshi"]["text"]) <= 200
+    assert "junk" not in scr["kalshi"]
+
+
+def test_broadcast_scene_wall_role_still_403(fresh_wall_state):
+    body = WallBroadcastBody.model_validate({"mode": "scene"})
+    try:
+        asyncio.run(wall_broadcast(body, role="wall"))
+        raise AssertionError("wall role must not steer the wall")
+    except HTTPException as e:
+        assert e.status_code == 403
+
+
+def test_broadcast_book_clears_scene_fields(fresh_wall_state):
+    asyncio.run(wall_broadcast(WallBroadcastBody.model_validate({
+        "mode": "scene", "headline": "X",
+        "screens": {"kalshi": {"kind": "chart"}}}), role="desk"))
+    r = asyncio.run(wall_broadcast(
+        WallBroadcastBody.model_validate({"mode": "book"}), role="desk"))
+    assert r["mode"] == "book"
+    assert r["headline"] is None
+    assert r["screens"] is None

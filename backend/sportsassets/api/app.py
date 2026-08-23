@@ -442,7 +442,8 @@ async def desk_unlock(request: Request, body: DeskUnlockBody) -> dict:
 # state is per-instance and non-durable by design: a restart falls
 # back to the live book, which is always safe to display.
 _wall_state: dict = {"mode": "book", "from": None, "to": None,
-                     "set_at": None}
+                     "set_at": None, "headline": None, "ttl_s": None,
+                     "screens": None}
 
 
 @app.post("/api/wall/unlock")
@@ -485,20 +486,62 @@ class WallBroadcastBody(BaseModel):
     mode: str = "book"
     from_: str | None = Field(default=None, alias="from")
     to: str | None = None
+    # SCENE MODE (owner 2026-08-23: "Meridian should use both screens"):
+    # MERIDIAN commands the walls — a headline it writes across both
+    # TVs, an optional per-screen directive, and a TTL after which the
+    # walls fall back to the live books on their own.
+    headline: str | None = None
+    ttl_s: int | None = None
+    screens: dict | None = None
+
+
+# The only board kinds a wall knows how to draw, and the only param keys a
+# screen directive may carry — everything else is dropped, not stored.
+_WALL_KINDS = ("book", "report", "chart", "whales", "headline")
+_WALL_SCREEN_KEYS = ("kind", "from", "to", "text", "stat")
+
+
+def _clean_wall_screens(raw: dict | None) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    out: dict = {}
+    for venue in ("kalshi", "polymarket"):
+        d = raw.get(venue)
+        if not isinstance(d, dict):
+            continue
+        kind = d.get("kind")
+        if kind not in _WALL_KINDS:
+            continue
+        cleaned = {}
+        for k in _WALL_SCREEN_KEYS:
+            v = d.get(k)
+            if isinstance(v, str) and v.strip():
+                cleaned[k] = v[:200]
+        cleaned["kind"] = kind
+        out[venue] = cleaned
+    return out or None
 
 
 @app.post("/api/wall/broadcast")
 async def wall_broadcast(body: WallBroadcastBody,
                          role: str = Depends(require_desk)) -> dict:
-    """Flip every TV between the live book and a date-ranged report.
-    The wall itself may not steer the wall — read-only means read-only."""
+    """Steer every TV: the live book, a date-ranged report, or a
+    MERIDIAN scene (per-screen visuals + a headline + a TTL that hands
+    the walls back to the books). The wall itself may not steer the
+    wall — read-only means read-only."""
     if role == "wall":
         raise HTTPException(status_code=403, detail="wall is read-only")
-    if body.mode not in ("book", "report"):
+    if body.mode not in ("book", "report", "scene"):
         raise HTTPException(status_code=400,
-                            detail="mode must be 'book' or 'report'")
+                            detail="mode must be 'book', 'report' or 'scene'")
+    headline = (body.headline or "").strip()[:120] or None
+    ttl = None
+    if body.ttl_s is not None:
+        ttl = max(60, min(3600, int(body.ttl_s)))
     _wall_state.update({"mode": body.mode, "from": body.from_,
-                        "to": body.to, "set_at": time.time()})
+                        "to": body.to, "set_at": time.time(),
+                        "headline": headline, "ttl_s": ttl,
+                        "screens": _clean_wall_screens(body.screens)})
     return {"ok": True, **_wall_state}
 
 
