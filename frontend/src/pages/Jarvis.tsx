@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { JarvisAvatar, type AvatarState } from '../jarvis/avatar'
-import { BootSequence, HudRing, Starfield, TelemetryRibbon } from '../jarvis/stage'
+import { BootSequence, GridFloor, HudRing, Starfield, TelemetryRibbon } from '../jarvis/stage'
 import { buildSystemPrompt, liveModel, MODEL_CHAIN, runConversation, type MessageParam, type TextBlock, type ToolResultBlock } from '../jarvis/claude'
 import { MeridianChart, parseChartSpec } from '../jarvis/chart'
 import { renderMarkdown } from '../jarvis/markdown'
@@ -325,6 +325,28 @@ export default function Jarvis() {
   const [journal, setJournal] = useState<{ entry: string; mood: string; at: string } | null>(null)
   /** POCKET MODE: standalone PWA or small viewport → immersive layout. */
   const [pocket, setPocket] = useState(detectPocket)
+  /** SCENES (owner 2026-08-23 "office should look unreal"): Reactor is
+   * the classic core; Hologram adds the grid deck; Minimal strips the
+   * stage bare for screen-shares. Cycled from the top bar, persisted. */
+  const [scene, setScene] = useState<'reactor' | 'hologram' | 'minimal'>(() => {
+    try {
+      const s = localStorage.getItem('jarvis_scene')
+      return s === 'hologram' || s === 'minimal' ? s : 'reactor'
+    } catch { return 'reactor' }
+  })
+  const cycleScene = () => {
+    const next = scene === 'reactor' ? 'hologram'
+      : scene === 'hologram' ? 'minimal' : 'reactor'
+    setScene(next)
+    try { localStorage.setItem('jarvis_scene', next) } catch { /* noop */ }
+  }
+  /** AMBIENT: no input for 90s → chrome fades, the core takes the room.
+   * Any pointer/key/speech brings the cockpit back. The office-presence
+   * mode: MERIDIAN alive on the screen without asking for attention. */
+  const [ambient, setAmbient] = useState(false)
+  const ambientTimerRef = useRef<number>(0)
+  /** Settle shockwave: bumping this fires a ring off the core. */
+  const [pulseSeq, setPulseSeq] = useState(0)
   /** ON MY MIND: the one thing the page noticed for itself this poll. */
   const [onMind, setOnMind] = useState<MindItem | null>(null)
   /** The last mind-line Matt tapped to ask — don't resurface it. */
@@ -332,6 +354,23 @@ export default function Jarvis() {
   /** Last few journal entries, folded into the system prompt — the
    * presence references its own written continuity. */
   const journalRecapRef = useRef('')
+
+  useEffect(() => {
+    // Ambient arm/disarm: activity resets a 90s timer; speaking or an
+    // open panel/drawer/setup keeps the cockpit awake.
+    const wake = () => {
+      setAmbient(false)
+      window.clearTimeout(ambientTimerRef.current)
+      ambientTimerRef.current = window.setTimeout(() => setAmbient(true), 90_000)
+    }
+    wake()
+    const evs: (keyof WindowEventMap)[] = ['pointerdown', 'pointermove', 'keydown', 'touchstart']
+    for (const e of evs) window.addEventListener(e, wake, { passive: true })
+    return () => {
+      window.clearTimeout(ambientTimerRef.current)
+      for (const e of evs) window.removeEventListener(e, wake)
+    }
+  }, [])
 
   useEffect(() => {
     let dead = false
@@ -834,6 +873,7 @@ export default function Jarvis() {
         const amt = Math.abs(Math.round(today.pnl))
         const line = `${n === 1 ? 'One more trade' : `${n} more trades`} just settled — ${dir} $${amt} on the day.`
         setHint(line)
+        setPulseSeq((s) => s + 1)   // the core detonates a settle ring
         const mouth = mouthRef.current
         if (handsFreeRef.current && mouth && !mouth.speaking) mouth.speak(line)
       }
@@ -941,8 +981,12 @@ export default function Jarvis() {
     ribbon.push(`engine heartbeat ${pills.engineAgeS < 120
       ? `${pills.engineAgeS}s` : `${Math.round(pills.engineAgeS / 60)}m`} ago`)
 
+  // Ambient never swallows an active exchange or an open surface.
+  const ambientLive = ambient && !speaking && !busy && !listening
+    && !setupOpen && !drawerOpen && panels.length === 0 && !stagedView
+
   return (
-    <div className={`jv-root${pocket ? ' jv-pocket' : ''}`}>
+    <div className={`jv-root jv-scene-${scene}${pocket ? ' jv-pocket' : ''}${ambientLive ? ' jv-ambient' : ''}`}>
       {/* ── status strip ── */}
       <header className="jv-top">
         <span className="jv-brand">M E R I D I A N<em>BettorToken · Claude</em></span>
@@ -971,6 +1015,11 @@ export default function Jarvis() {
           {!pills.loaded && <span className="jv-pill jv-dim"><i>PLATFORM</i>…</span>}
         </div>
         <div className="jv-topbtns">
+          {!pocket && (
+            <button className="jv-iconbtn" aria-label="Cycle scene"
+                    title={`Scene: ${scene} — tap to cycle`}
+                    onClick={cycleScene}>✦</button>
+          )}
           {/* pocket mode moves transcript + settings into the thumb bar */}
           {!pocket && (
             <button className="jv-iconbtn" title="Transcript" aria-label="Transcript"
@@ -987,9 +1036,10 @@ export default function Jarvis() {
       {/* ── stage ── */}
       <div className={`jv-stage${panels.length > 0 ? ' jv-with-panel' : ''}`}>
         <Starfield />
+        {scene === 'hologram' && <GridFloor />}
         <div className="jv-orb-wrap">
           <HudRing state={avatarState} />
-          <JarvisAvatar state={avatarState} tone={tone}
+          <JarvisAvatar state={avatarState} tone={tone} pulseSeq={pulseSeq}
                         getLevel={() => mouthRef.current?.level() ?? 0} />
           <div className={`jv-state jv-state-${avatarState}`}>{stateLabel}</div>
           <BootSequence />

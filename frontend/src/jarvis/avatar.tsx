@@ -27,6 +27,9 @@ interface Props {
   getLevel: () => number
   /** 0..1 journal-mood tint: 0 steady (cool), 1 alert (warm, restless). */
   tone?: number
+  /** Increment to fire a settle shockwave — a ring detonates outward
+   * from the core when real money lands. Money speaks physically. */
+  pulseSeq?: number
 }
 
 /* ── shaders ─────────────────────────────────────────────────────── */
@@ -46,6 +49,7 @@ uniform float u_think;
 uniform float u_speak;
 uniform float u_boot;    // 0..1 iris-in
 uniform float u_tone;    // journal mood: 0 steady .. 1 alert
+uniform float u_pulse;   // settle shockwave energy 1->0 (decaying)
 
 float hash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -87,6 +91,18 @@ void main() {
   // faint interior nebula so the square never reads as a dead field
   float neb = fbm(uv * 2.2 + vec2(t * 0.008, -t * 0.005));
   col += vec3(0.012, 0.026, 0.045) * neb * 1.15 * boot;
+
+  // AURORA DEPTH: two slow counter-drifting bands of color behind the
+  // stage — teal and violet trading dominance over ~2 minutes — so the
+  // room reads as a place, not a black rectangle.
+  float aur1 = fbm(uv * vec2(1.3, 2.8) + vec2(t * 0.012, -t * 0.004));
+  float aur2 = fbm(uv * vec2(2.1, 1.2) - vec2(t * 0.007, t * 0.009) + 31.7);
+  float sway = 0.5 + 0.5 * sin(t * 0.05);
+  vec3 aurA = mix(vec3(0.010, 0.055, 0.075), vec3(0.045, 0.020, 0.085), sway);
+  vec3 aurB = mix(vec3(0.030, 0.015, 0.070), vec3(0.008, 0.060, 0.065), sway);
+  float far = smoothstep(0.42, 0.95, r);
+  col += (aurA * smoothstep(0.52, 0.95, aur1)
+        + aurB * smoothstep(0.55, 0.98, aur2)) * far * boot;
 
   // ── plasma interior ──
   if (r < R) {
@@ -140,6 +156,25 @@ void main() {
   // listening: a focus ring condenses just outside the surface
   float ring2 = exp(-pow((r - (R + 0.055 + 0.012 * sin(t * 2.2))) * 120.0, 2.0));
   col += vec3(0.5, 0.95, 1.0) * ring2 * u_listen * 0.8;
+
+  // GOD RAYS: angular light shafts streaming off the core, alive in
+  // the noise field — brighter while speaking/thinking, never static.
+  float shaft = pow(max(0.0, fbm(vec2(ang * 3.2 + t * 0.045,
+                                      t * 0.02)) - 0.34), 2.2);
+  float reach = exp(-(r - R) * (2.6 - u_speak * 0.7)) * step(R, r);
+  col += mix(vec3(0.16, 0.55, 0.85), vec3(0.75, 0.62, 0.35), u_speak * 0.5)
+         * shaft * reach * (0.5 + u_think * 0.5 + u_level * 0.9) * boot;
+
+  // SETTLE SHOCKWAVE: real money landing detonates a ring outward —
+  // bright leading edge, faint chromatic trail, gone in ~3 seconds.
+  if (u_pulse > 0.003) {
+    float prog = 1.0 - u_pulse;
+    float pr = R + prog * 0.85;
+    float ring3 = exp(-pow((r - pr) * 30.0, 2.0));
+    float trail = exp(-pow((r - pr + 0.05) * 22.0, 2.0)) * 0.4;
+    col += (vec3(0.40, 0.95, 1.0) * ring3
+          + vec3(0.85, 0.70, 0.35) * trail) * u_pulse * 1.35;
+  }
 
   // vignette + dither (kills gradient banding)
   col *= 1.0 - smoothstep(0.55, 1.0, r) * 0.72;
@@ -236,16 +271,18 @@ function drawFallbackCore(
 
 /* ── component ───────────────────────────────────────────────────── */
 
-export function JarvisAvatar({ state, getLevel, tone = 0 }: Props) {
+export function JarvisAvatar({ state, getLevel, tone = 0, pulseSeq = 0 }: Props) {
   const glRef = useRef<HTMLCanvasElement | null>(null)
   const ringRef = useRef<HTMLCanvasElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const stateRef = useRef<AvatarState>(state)
   const levelRef = useRef<() => number>(getLevel)
   const toneRef = useRef(tone)
+  const pulseSeqRef = useRef(pulseSeq)
   stateRef.current = state
   levelRef.current = getLevel
   toneRef.current = tone
+  pulseSeqRef.current = pulseSeq
 
   useEffect(() => {
     const glCanvas = glRef.current
@@ -287,7 +324,8 @@ export function JarvisAvatar({ state, getLevel, tone = 0 }: Props) {
         gl.enableVertexAttribArray(loc)
         gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0)
         for (const n of ['u_res', 'u_time', 'u_level', 'u_listen',
-                         'u_think', 'u_speak', 'u_boot', 'u_tone'])
+                         'u_think', 'u_speak', 'u_boot', 'u_tone',
+                         'u_pulse'])
           uni[n] = gl.getUniformLocation(program, n)
       }
     }
@@ -312,6 +350,8 @@ export function JarvisAvatar({ state, getLevel, tone = 0 }: Props) {
     let prevSt: AvatarState = stateRef.current
     let speakAt = -10
     let settleAt = -10
+    let prevPulseSeq = pulseSeqRef.current
+    let pulseAt = -10                      // settle-shockwave fire time
     const t0 = performance.now()
     let raf = 0
     let running = true
@@ -325,6 +365,12 @@ export function JarvisAvatar({ state, getLevel, tone = 0 }: Props) {
         if (prevSt === 'thinking') settleAt = t   // a tool round just completed
         prevSt = st
       }
+      if (pulseSeqRef.current !== prevPulseSeq) { // money landed: detonate
+        prevPulseSeq = pulseSeqRef.current
+        pulseAt = t
+      }
+      const pAge = t - pulseAt
+      const pulse = pAge >= 0 && pAge < 3.2 ? Math.exp(-pAge * 1.5) : 0
       const ease = (v: number, target: number) => v + (target - v) * 0.08
       listen = ease(listen, st === 'listening' ? 1 : 0)
       think = ease(think, st === 'thinking' ? 1 : 0)
@@ -364,6 +410,7 @@ export function JarvisAvatar({ state, getLevel, tone = 0 }: Props) {
         gl.uniform1f(uni.u_speak, speak)
         gl.uniform1f(uni.u_boot, boot)
         gl.uniform1f(uni.u_tone, Math.max(0, Math.min(1, toneRef.current)))
+        gl.uniform1f(uni.u_pulse, pulse)
         gl.clearColor(0, 0, 0, 0)
         gl.clear(gl.COLOR_BUFFER_BIT)
         gl.drawArrays(gl.TRIANGLES, 0, 3)

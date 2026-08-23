@@ -122,6 +122,84 @@ export function HudRing({ state }: { state: string }) {
   )
 }
 
+/* ── holographic grid floor (Hologram scene) ─────────────────────── */
+/* A perspective deck sliding slowly toward the viewer: horizontal
+ * scanlines with exponential spacing off a horizon, converging
+ * verticals, everything fading with distance. Pure 2D canvas. */
+
+export function GridFloor() {
+  const ref = useRef<HTMLCanvasElement | null>(null)
+
+  useEffect(() => {
+    const canvas = ref.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)')
+
+    const fit = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      const rect = canvas.getBoundingClientRect()
+      canvas.width = Math.round(rect.width * dpr)
+      canvas.height = Math.round(rect.height * dpr)
+    }
+    fit()
+    const ro = new ResizeObserver(fit)
+    ro.observe(canvas)
+
+    let raf = 0
+    let running = true
+    const t0 = performance.now()
+
+    const frame = () => {
+      if (!running) return
+      const t = (performance.now() - t0) / 1000
+      const w = canvas.width, h = canvas.height
+      ctx.clearRect(0, 0, w, h)
+      const horizon = h * 0.66            // deck occupies the lower third
+      const cx = w / 2
+      // horizontal scanlines: constant world spacing, projected — the
+      // scroll phase loops so the deck glides forever
+      const phase = (t * 0.12) % 1
+      for (let i = 0; i < 24; i++) {
+        const world = i + 1 - phase       // distance from viewer, 0=near
+        const y = horizon + (h - horizon) * (1.6 / (world * 0.55 + 0.9))
+        if (y < horizon || y > h + 4) continue
+        const a = Math.max(0, 0.30 - world * 0.013)
+        ctx.strokeStyle = `rgba(105, 224, 255, ${a})`
+        ctx.lineWidth = world < 3 ? 1.4 : 1
+        ctx.beginPath()
+        ctx.moveTo(0, y)
+        ctx.lineTo(w, y)
+        ctx.stroke()
+      }
+      // converging verticals
+      for (let i = -14; i <= 14; i++) {
+        const xNear = cx + i * (w / 14)
+        const xFar = cx + i * (w / 90)
+        ctx.strokeStyle = `rgba(105, 224, 255, ${0.16 - Math.abs(i) * 0.007})`
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(xFar, horizon)
+        ctx.lineTo(xNear, h)
+        ctx.stroke()
+      }
+      // horizon glow line
+      const grad = ctx.createLinearGradient(0, horizon - 14, 0, horizon + 6)
+      grad.addColorStop(0, 'rgba(105, 224, 255, 0)')
+      grad.addColorStop(1, 'rgba(105, 224, 255, 0.28)')
+      ctx.fillStyle = grad
+      ctx.fillRect(0, horizon - 14, w, 20)
+      if (reduced.matches && t > 0.2) return   // one still frame
+      raf = requestAnimationFrame(frame)
+    }
+    raf = requestAnimationFrame(frame)
+    return () => { running = false; cancelAnimationFrame(raf); ro.disconnect() }
+  }, [])
+
+  return <canvas ref={ref} className="jv-floor" aria-hidden />
+}
+
 /* ── boot sequence ───────────────────────────────────────────────── */
 
 const BOOT_LINES = [

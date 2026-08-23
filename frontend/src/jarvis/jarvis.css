@@ -1124,6 +1124,56 @@
   animation: jv-rise 0.26s ease;
 }
 
+/* ── SCENES + AMBIENT (owner 2026-08-23: "office should look unreal") ── */
+
+/* Hologram: the grid deck under the core; stage cools toward pure cyan */
+.jv-floor {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.85;
+}
+.jv-scene-hologram {
+  background:
+    radial-gradient(120vmax 70vmax at 50% 118%, rgba(10, 46, 60, 0.55), transparent 60%),
+    radial-gradient(90vmax 50vmax at 50% -30%, rgba(8, 30, 48, 0.6), transparent 60%),
+    var(--jv-bg);
+}
+
+/* Minimal: bare stage for screen-shares — core + captions only */
+.jv-scene-minimal .jv-stars,
+.jv-scene-minimal .jv-hud,
+.jv-scene-minimal .jv-ribbon,
+.jv-scene-minimal .jv-exposure,
+.jv-scene-minimal .jv-journal,
+.jv-scene-minimal .jv-mind { display: none; }
+.jv-scene-minimal { background: var(--jv-bg); }
+
+/* Ambient: chrome breathes out, the core takes the room. Any input
+ * (Jarvis.tsx wake listeners) restores the cockpit in one breath. */
+.jv-ambient .jv-top,
+.jv-ambient .jv-chips,
+.jv-ambient .jv-captions,
+.jv-ambient .jv-journal,
+.jv-ambient .jv-mind {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 1.6s ease;
+}
+.jv-ambient .jv-dock { opacity: 0.1; transition: opacity 1.6s ease; }
+.jv-ambient .jv-state { opacity: 0.4; transition: opacity 1.6s ease; }
+.jv-ambient .jv-orb-wrap {
+  transform: scale(1.09);
+  transition: transform 3.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.jv-orb-wrap { transition: transform 1.2s ease; }
+.jv-ambient .jv-ribbon { font-size: 12px; transition: font-size 1.6s ease; }
+@media (prefers-reduced-motion: reduce) {
+  .jv-ambient .jv-orb-wrap { transform: none; }
+}
+
 /* ── charts in the panel ─────────────────────────────────────────── */
 .jv-chart { margin: 8px 4px; }
 .jv-chart figcaption {
