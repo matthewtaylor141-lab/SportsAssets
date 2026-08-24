@@ -1295,11 +1295,14 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                         timeout=_EXACT_BOX_S)
                 except asyncio.TimeoutError:
                     mapping = None
+            mapping_src = "exact" if mapping is not None else None
             if mapping is None:
                 mapping = await asyncio.to_thread(
                     pmus.resolve_market, ctx.get("market_slug"), ctx.get("event_slug"),
                     ctx.get("market_title"), ctx.get("event_title"), ctx.get("outcome"),
                 )
+                if mapping is not None:
+                    mapping_src = "fuzzy"
             if mapping is None:
                 diag = getattr(pmus.resolve_market, "last_diag", "") or ""
                 await pool.execute(
@@ -1314,6 +1317,29 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 "UPDATE live_orders SET us_market_slug=$2 WHERE id=$1",
                 row_id, mapping["market_slug"],
             )
+            # MAPPING QUARANTINE (owner emergency 2026-08-23): the venue
+            # ledger proved a large share of two-outcome copies were held
+            # on the WRONG SIDE while the old settlement sweep graded them
+            # by the whale's result. Until each path is re-verified against
+            # venue truth, only the deterministic US slug-grammar paths may
+            # place money: fuzzy-resolved mappings and the aec- (tennis
+            # side-slug) class are refused, with the mapping kept on the
+            # row for the postmortem. LIVE_MAPPING_QUARANTINE=off lifts.
+            _q_slug = str(mapping.get("market_slug") or "").lower()
+            if (os.getenv("LIVE_MAPPING_QUARANTINE", "on") != "off"
+                    and (mapping_src == "fuzzy"
+                         or _q_slug.startswith("aec-"))):
+                await pool.execute(
+                    "UPDATE live_orders SET status='rejected', error=$2 "
+                    "WHERE id=$1",
+                    row_id,
+                    "quarantined: mapping class unverified after "
+                    "wrong-side incident 2026-08-23 "
+                    f"(src={mapping_src}, slug={_q_slug[:120]})")
+                log.warning("LIVE (US) quarantined %s mapping: %s / %s",
+                            mapping_src, ctx.get("market_title"),
+                            _q_slug)
+                return
             # NEVER-ADD, DB-SIDE (incident 2026-08-11 afternoon, the $318
             # Over-2.5 position): the venue-side no-stack below answers
             # from a positions snapshot that goes silently stale through

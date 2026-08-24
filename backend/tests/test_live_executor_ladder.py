@@ -96,6 +96,10 @@ def _wire(monkeypatch, pool, mapped_slug):
     monkeypatch.setattr(live_executor, "_market_context", fake_ctx)
     monkeypatch.setattr(live_executor, "active_venue",
                         lambda: "polymarket-us")
+    # These tests exercise the LADDER guard; the 2026-08-23 mapping
+    # quarantine (fuzzy paths refused) would fire first on this mock's
+    # fuzzy-resolved slug and mask the behavior under test.
+    monkeypatch.setenv("LIVE_MAPPING_QUARANTINE", "off")
     monkeypatch.setattr(pmus, "resolve_market_exact", lambda *a, **k: None)
     monkeypatch.setattr(
         pmus, "resolve_market",

@@ -251,6 +251,14 @@ jobs:
           # "every cent of it") — TODAY's day-detail: the anchor rows vs
           # the copies audit, per-market deltas largest first, plus the
           # non-copy rows that land wholly in the residual.
+          # ── venue-truth restatement status (owner emergency 2026-08-23:
+          # settlement was graded by the whale's token; rescore rewrites
+          # every settled copy row from the venue's own ledger)
+          curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/rescore.json "$BASE/api/admin/rescore-copies" || true
+          jq -r '"  RESCORE ran=\(.ran // false)  at=\(.at // "?")  rows=\(.settled // 0)  changed=\(.changed // 0)  delta=\(.delta // 0)  slugs=\(.slugs // 0)  no_truth=\(.no_truth // 0)"' /tmp/rescore.json 2>/dev/null || true
+          jq -r '.whales // {} | to_entries[]? | "  RESCORE-W \(.key)  old=\(.value.old)  new=\(.value.new)  rows=\(.value.rows)"' /tmp/rescore.json 2>/dev/null || true
+
           TODAY_ET=$(TZ=America/New_York date +%F)
           curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/bdd.json \

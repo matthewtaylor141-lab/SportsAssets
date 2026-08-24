@@ -554,6 +554,33 @@ async def venue_export(since_day: str) -> dict:
     return {"since": since_day, "rows": rows, "count": len(rows)}
 
 
+async def resolution_truth(from_day: str) -> dict[str, dict]:
+    """The venue's own verdict per market since a date: lowercased
+    marketSlug -> {'realized', 'ts'} from POSITION_RESOLUTION activities.
+
+    Owner emergency 2026-08-23: live_orders was being settled from the
+    WHALE'S global token resolution, never from what our venue account
+    was actually paid — wrong-side mappings and voids were graded as the
+    whale's result for two weeks. This map is the settlement sweep's and
+    the re-score's only source. `realized` is the venue's CUMULATIVE
+    per-position figure (sale realizations included), so callers must
+    subtract any already-booked cash-out P&L before allocating."""
+    out: dict[str, dict] = {}
+    vexp = await venue_export(from_day)
+    for r in (vexp.get("rows") or []):
+        if r.get("kind") != "resolution":
+            continue
+        slug = (r.get("slug") or "").lower()
+        if not slug:
+            continue
+        ts = r.get("time") or ""
+        prev = out.get(slug)
+        if prev is None or ts > (prev.get("ts") or ""):
+            out[slug] = {"realized": float(r.get("realized_pnl") or 0.0),
+                         "ts": ts}
+    return out
+
+
 async def venue_export_raw(since_day: str) -> dict:
     """VERBATIM venue activities since a date — no flattening at all.
 

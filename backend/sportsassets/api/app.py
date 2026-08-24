@@ -88,6 +88,36 @@ async def lifespan(_: FastAPI):
     # can take longer under evening ingest load, so it must never run on
     # the request path (starved the copy leg 3x on 2026-08-05).
     asyncio.get_running_loop().create_task(refresh_whale_idents_loop())
+
+    # ONE-SHOT RESTATEMENT (owner emergency 2026-08-23): re-score every
+    # settled US-venue copy row since Aug 1 from the venue's own ledger.
+    # The old settlement sweep graded rows by the whale's global token,
+    # so the stored record is corrupt; this rewrites it from ground
+    # truth exactly once (state-key guarded), after boot has settled.
+    async def _rescore_once():
+        await asyncio.sleep(75)
+        try:
+            pool = await get_pool()
+            key = "rescore_copies_v1"
+            done = await pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1", key)
+            if done:
+                return
+            from ..analytics.engine import _settle_pmus_from_venue
+
+            summary = await _settle_pmus_from_venue(
+                pool, rescore_since="2026-08-01")
+            summary["at"] = datetime.now(timezone.utc).isoformat()
+            await pool.execute(
+                "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+                "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+                key, json.dumps(summary))
+            logging.getLogger(__name__).warning("rescore v1: %s", summary)
+        except Exception:  # noqa: BLE001 — retried on next boot
+            logging.getLogger(__name__).exception(
+                "rescore v1 failed (will retry next boot)")
+
+    asyncio.get_running_loop().create_task(_rescore_once())
     yield
     if poller_task is not None:
         poller_task.cancel()
@@ -3773,6 +3803,34 @@ async def api_admin_order_audit(
 async def api_daily_breakdown() -> dict:
     """Month-to-date category breakdown (kept for existing consumers)."""
     return await _category_breakdown("2026-08-01", _today_et())
+
+
+@app.get("/api/admin/rescore-copies", dependencies=[Depends(require_admin)])
+async def api_rescore_summary() -> dict:
+    """Last venue-truth restatement summary (owner emergency 2026-08-23)."""
+    pool = await get_pool()
+    val = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1", "rescore_copies_v1")
+    if val is None:
+        return {"ran": False}
+    data = json.loads(val) if isinstance(val, str) else val
+    return {"ran": True, **(data or {})}
+
+
+@app.post("/api/admin/rescore-copies", dependencies=[Depends(require_admin)])
+async def api_rescore_run(since_day: str = "2026-08-01") -> dict:
+    """Re-run the venue-truth restatement of settled copy rows. Idempotent:
+    rows already matching the venue verdict are untouched."""
+    from ..analytics.engine import _settle_pmus_from_venue
+
+    pool = await get_pool()
+    summary = await _settle_pmus_from_venue(pool, rescore_since=since_day)
+    summary["at"] = datetime.now(timezone.utc).isoformat()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        "rescore_copies_v1", json.dumps(summary))
+    return summary
 
 
 @app.get("/api/admin/breakdown-day-detail",

@@ -396,9 +396,152 @@ async def settle_ai_trades() -> int:
     return settled
 
 
+def allocate_venue_pnl(target: float, rows: list[dict]) -> dict:
+    """Split one market's venue-true realized P&L across our rows on that
+    market, pro-rata by filled cost (equal split when no cost recorded).
+    The last row takes the rounding remainder so the per-market sum
+    matches the venue to the cent."""
+    base = sum(float(r["filled_usd"] or 0) for r in rows)
+    out: dict = {}
+    acc = 0.0
+    for i, r in enumerate(rows):
+        if i == len(rows) - 1:
+            out[r["id"]] = round(target - acc, 4)
+        else:
+            share = ((float(r["filled_usd"] or 0) / base) if base
+                     else 1.0 / len(rows))
+            p = round(target * share, 4)
+            out[r["id"]] = p
+            acc += p
+    return out
+
+
+async def _settle_pmus_from_venue(pool, *,
+                                  rescore_since: str | None = None) -> dict:
+    """Settle (or, with rescore_since, RESTATE) US-venue rows from the
+    venue's own ledger. A copy executes on Polymarket US against
+    us_market_slug, so its result is the venue's POSITION_RESOLUTION
+    realized for that slug — never the whale's global token payout,
+    which graded our rows by the WHALE'S outcome and hid wrong-side
+    mappings and voids (owner emergency 2026-08-23). Rows whose market
+    has no venue verdict yet stay untouched. The venue figure is
+    cumulative per position, so P&L already booked by cash-out rows on
+    the same market is subtracted before allocation."""
+    from datetime import datetime as _dt, timedelta as _td
+
+    from ..api.pmus_account import resolution_truth
+
+    if rescore_since:
+        rows = await pool.fetch(
+            """
+            SELECT id, lower(us_market_slug) AS slug,
+                   COALESCE(whale_username, '?') AS whale,
+                   COALESCE(filled_usd, 0)::float8 AS filled_usd,
+                   COALESCE(pnl, 0)::float8 AS pnl, status
+            FROM live_orders
+            WHERE us_market_slug IS NOT NULL
+              AND status IN ('filled', 'settled')
+              AND placed_at >= $1::date
+            ORDER BY id
+            """, rescore_since)
+        from_day = rescore_since
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT id, lower(us_market_slug) AS slug,
+                   COALESCE(whale_username, '?') AS whale,
+                   COALESCE(filled_usd, 0)::float8 AS filled_usd,
+                   COALESCE(pnl, 0)::float8 AS pnl, status
+            FROM live_orders
+            WHERE us_market_slug IS NOT NULL AND status = 'filled'
+            ORDER BY id
+            """)
+        oldest = await pool.fetchval(
+            "SELECT min(placed_at) FROM live_orders "
+            "WHERE us_market_slug IS NOT NULL AND status = 'filled'")
+        from_day = ((oldest - _td(days=1)).date().isoformat()
+                    if oldest else None)
+    summary = {"settled": 0, "changed": 0, "delta": 0.0,
+               "slugs": 0, "no_truth": 0, "whales": {}}
+    if not rows or not from_day:
+        return summary
+
+    sold = await pool.fetch(
+        """
+        SELECT lower(us_market_slug) AS slug,
+               COALESCE(sum(pnl), 0)::float8 AS pnl
+        FROM live_orders
+        WHERE us_market_slug IS NOT NULL AND status = 'cashed_out'
+        GROUP BY 1
+        """)
+    sold_by = {r["slug"]: float(r["pnl"]) for r in sold}
+    truth = await resolution_truth(from_day)
+
+    groups: dict[str, list] = {}
+    for r in rows:
+        groups.setdefault(r["slug"], []).append(dict(r))
+
+    def _whale_acc(w: str) -> dict:
+        return summary["whales"].setdefault(w, {"old": 0.0, "new": 0.0,
+                                                "rows": 0})
+
+    for slug, grp in groups.items():
+        t = truth.get(slug)
+        if t is None:
+            summary["no_truth"] += 1
+            continue
+        target = float(t["realized"]) - sold_by.get(slug, 0.0)
+        alloc = allocate_venue_pnl(target, grp)
+        ts = None
+        if t.get("ts"):
+            try:
+                ts = _dt.fromisoformat(str(t["ts"]).replace("Z", "+00:00"))
+            except ValueError:
+                ts = None
+        summary["slugs"] += 1
+        for r in grp:
+            newp = alloc[r["id"]]
+            oldp = float(r["pnl"]) if r["status"] == "settled" else 0.0
+            if r["status"] == "settled" and abs(newp - oldp) < 0.005:
+                continue
+            await pool.execute(
+                """
+                UPDATE live_orders
+                SET status = 'settled', pnl = $2,
+                    settled_at = COALESCE($3, settled_at, now())
+                WHERE id = $1
+                """, r["id"], newp, ts)
+            summary["settled"] += 1
+            if r["status"] == "settled":
+                summary["changed"] += 1
+            summary["delta"] = round(summary["delta"] + newp - oldp, 4)
+            w = _whale_acc(r["whale"])
+            w["old"] = round(w["old"] + oldp, 4)
+            w["new"] = round(w["new"] + newp, 4)
+            w["rows"] += 1
+    return summary
+
+
 async def pool_settle_live() -> int:
-    """Settle LIVE beta fills: pnl = (payout - fill_price) * filled_shares."""
+    """Settle LIVE beta fills from the venue's OWN ledger (owner
+    emergency 2026-08-23). The old implementation joined a.asset — the
+    whale's GLOBAL token — against global resolutions and paid
+    (payout - fill_price) * filled_shares, i.e. it graded every row by
+    the whale's outcome. Wrong-side/wrong-market mappings and venue
+    voids were booked as the whale's wins for two weeks while the venue
+    paid the opposite. US-venue rows now settle exclusively from
+    resolution_truth; a row with no venue verdict stays 'filled' —
+    never fall back to the whale-token join for a us_market_slug row.
+    Legacy global-CLOB rows (no us_market_slug) keep the old join."""
     pool = await get_pool()
+    n = 0
+    try:
+        summary = await _settle_pmus_from_venue(pool)
+        n = summary["settled"]
+        if n:
+            log.info("venue-truth settle: %s", summary)
+    except Exception:  # noqa: BLE001 — leave rows filled, next cycle retries
+        log.exception("venue-truth settle failed; rows left filled")
     status = await pool.execute(
         """
         UPDATE live_orders a
@@ -414,9 +557,10 @@ async def pool_settle_live() -> int:
               AND jsonb_array_length(m.resolved_prices) > mt.outcome_index
         ) p
         WHERE a.status = 'filled' AND a.asset = p.token_id
+          AND a.us_market_slug IS NULL
         """
     )
-    return int(status.split()[-1]) if status else 0
+    return n + (int(status.split()[-1]) if status else 0)
 
 
 async def run_cycle() -> dict:
