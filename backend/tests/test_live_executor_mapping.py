@@ -301,7 +301,7 @@ def test_tennis_candidates_ride_the_moneyline_branch():
 
     root = pathlib.Path(__file__).resolve().parents[1] / "sportsassets"
     le = (root / "live_executor.py").read_text()
-    branch = le[le.index('if mtype == "moneyline"'):]
+    branch = le[le.index('mtype == "moneyline"'):]
     assert "_tennis_candidates(ctx.get(\"market_title\")" in branch[:600]
     ud = (root / "workers" / "underdog.py").read_text()
     assert "_tennis_candidates(_title, slug)" in ud

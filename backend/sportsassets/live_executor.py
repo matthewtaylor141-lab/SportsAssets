@@ -1254,6 +1254,20 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             src_slug = ctx.get("market_slug") or ctx.get("event_slug") or ""
             mapping = None
             mtype = market_type_of(src_slug)
+            # PREMAP FIRST (owner order 2026-08-24): the pre-built venue
+            # universe answers from Postgres — exact keys, unique side or
+            # nothing, zero network, and the side identifier comes from
+            # the venue's own side expansion. Misses fall through to the
+            # legacy resolvers unchanged.
+            try:
+                from ..workers import premap as _premap
+
+                mapping = await _premap.resolve(
+                    pool, ctx.get("market_title"), ctx.get("event_title"),
+                    ctx.get("outcome"), ctx.get("market_slug"))
+            except Exception:  # noqa: BLE001 — premap never blocks a copy
+                mapping = None
+            mapping_src = "premap" if mapping is not None else None
             # The exact phase is TIME-BOXED (review 2026-08-13): the
             # tennis candidates triple its worst-case serial lookups,
             # and copy_sweep cancels the whole row at 60s — which
@@ -1262,7 +1276,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # pipeline its full budget; a timeout falls through, it
             # never rejects.
             _EXACT_BOX_S = 20.0
-            if mtype == "moneyline":
+            if mapping is None and mtype == "moneyline":
                 # Tennis first (owner order 2026-08-13): the feed's
                 # surname slugs can never hit the US first3+last3
                 # player grammar, so tennis candidates come from the
@@ -1278,7 +1292,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                         timeout=_EXACT_BOX_S)
                 except asyncio.TimeoutError:
                     mapping = None
-            elif mtype in ("spread", "total"):
+            elif mapping is None and mtype in ("spread", "total"):
                 # MAPPING RECOVERY (owner order 2026-08-12: spreads +
                 # moneylines were 94.5% of the 34k-row unmapped
                 # funnel): grammar-to-grammar exact resolution with
@@ -1295,7 +1309,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                         timeout=_EXACT_BOX_S)
                 except asyncio.TimeoutError:
                     mapping = None
-            mapping_src = "exact" if mapping is not None else None
+            if mapping_src is None:
+                mapping_src = "exact" if mapping is not None else None
             if mapping is None:
                 mapping = await asyncio.to_thread(
                     pmus.resolve_market, ctx.get("market_slug"), ctx.get("event_slug"),

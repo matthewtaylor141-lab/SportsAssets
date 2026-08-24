@@ -251,6 +251,12 @@ jobs:
           # "every cent of it") — TODAY's day-detail: the anchor rows vs
           # the copies audit, per-market deltas largest first, plus the
           # non-copy rows that land wholly in the residual.
+          # ── premap coverage (owner order 2026-08-24: copy-time mapping
+          # becomes a lookup; this line watches the table fill)
+          curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/premap.json "$BASE/api/admin/premap-status" || true
+          jq -r '"  PREMAP rows=\(.rows // 0)  events=\(.events // 0)  fresh=\(.fresh // "never")"' /tmp/premap.json 2>/dev/null || true
+
           # ── side-fidelity audit (owner order 2026-08-24: prove which
           # mapping path inverted sides — pick vs the slug we ordered,
           # with venue-true pnl; settled first, then quarantine stream)

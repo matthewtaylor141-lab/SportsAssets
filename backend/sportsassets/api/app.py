@@ -3840,6 +3840,22 @@ async def api_quarantine_get() -> dict:
     return {"quarantine": on, "env_override": env or None}
 
 
+@app.get("/api/admin/premap-status", dependencies=[Depends(require_admin)])
+async def api_premap_status() -> dict:
+    """Pre-map coverage: how much of the venue universe the lookup table
+    holds and how fresh it is (owner order 2026-08-24)."""
+    pool = await get_pool()
+    try:
+        row = await pool.fetchrow(
+            "SELECT count(*)::int AS rows, "
+            "count(DISTINCT event_slug)::int AS events, "
+            "max(updated_at) AS fresh FROM us_premap")
+    except Exception:  # noqa: BLE001 — table not created yet
+        return {"rows": 0, "events": 0, "fresh": None}
+    return {"rows": row["rows"], "events": row["events"],
+            "fresh": row["fresh"].isoformat() if row["fresh"] else None}
+
+
 @app.get("/api/admin/mapping-audit", dependencies=[Depends(require_admin)])
 async def api_mapping_audit(days: int = 3, limit: int = 400) -> dict:
     """Side-fidelity evidence, row by row (owner order 2026-08-24: prove
