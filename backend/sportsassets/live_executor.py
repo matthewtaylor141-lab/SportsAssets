@@ -1110,6 +1110,7 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
     the fill). Fetch failures and no-unique-match are counted and
     surfaced (side_echo_last state key), never treated as divergence —
     a venue outage must not be able to trip the breaker on its own."""
+    from . import pmus as pmus_mod
     from .workers import premap as _premap
 
     verdict, detail = "unverified", ""
@@ -1171,6 +1172,25 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                     detail = f"live matcher chose {hit['identifier']}"
     except Exception as exc:  # noqa: BLE001 — the echo never raises
         detail = f"echo error: {exc}"[:200]
+
+    # THIRD CHECK — WHAT WE ACTUALLY HOLD. The venue selects a side by
+    # intent, so the only end-to-end proof that BUY_SHORT bought the
+    # short side is the resulting position's sign. Runs on real fills
+    # only (a shadow row holds nothing).
+    if not shadow and intent:
+        try:
+            net = await asyncio.to_thread(pmus_mod.position_side, us_slug)
+            if net is not None and net != 0:
+                want_long = intent == "ORDER_INTENT_BUY_LONG"
+                got_long = net > 0
+                if want_long != got_long:
+                    verdict = "mismatch"
+                    detail = (f"POSITION SIDE WRONG: sent {intent} but "
+                              f"hold netPosition={net}")
+                elif verdict == "unverified":
+                    verdict, detail = "ok", f"position sign agrees ({net})"
+        except Exception as exc:  # noqa: BLE001 — never raises
+            detail = f"{detail} | position check failed: {exc}"[:200]
 
     # SECOND, INDEPENDENT OPINION: a wrong row that is internally
     # consistent passes the check above, so the whale's own signal is

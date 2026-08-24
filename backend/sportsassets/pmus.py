@@ -50,6 +50,37 @@ _POS_TTL = 20.0
 _POS_MAX_STALE_S = 600.0
 
 
+def position_side(us_market_slug: str) -> float | None:
+    """Signed net position on this market, or None when unreadable.
+
+    THE LAST LINK (venue ground truth 2026-08-24): every two-sided
+    market on this venue shares ONE identifier between its sides,
+    distinguished only by long/short, so `intent` is what selects a
+    side. That means the ONLY proof that BUY_SHORT actually bought the
+    short side is the position we end up holding: a long fill nets
+    positive, a short fill nets negative. Read fresh — this is
+    verification, not a cache lookup."""
+    try:
+        client = _get_client()
+        cursor = ""
+        for _ in range(5):
+            resp = client.portfolio.positions(
+                {"limit": 100,
+                 **({"cursor": cursor} if cursor else {})}) or {}
+            for slug, p in (resp.get("positions") or {}).items():
+                if str(slug).lower() == us_market_slug.lower():
+                    try:
+                        return float((p or {}).get("netPosition") or 0)
+                    except (TypeError, ValueError):
+                        return None
+            cursor = resp.get("nextCursor") or ""
+            if not cursor:
+                break
+    except Exception:  # noqa: BLE001 — unreadable is not a verdict
+        return None
+    return None
+
+
 def account_holds(us_market_slug: str) -> bool:
     """True when the account already holds ANY open position on this US
     market. A read error reuses the last snapshot (a BLIP must not starve
