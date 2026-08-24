@@ -352,9 +352,20 @@ PER_FILL_BY_WHALE = {"rn1": 0.00, "swisstony": 250.00,
 # otherwise place $150 and quietly exceed the authorization. A cap that
 # sits below the maps cannot be defeated by a cell edit.
 LIVE_MAX_CLIP_USD = float(os.environ.get("LIVE_MAX_CLIP_USD", "250"))
-# The whole probe is bounded too: a day cap sized so an unimagined
-# defect costs a bounded amount rather than an open-ended one.
-PROBE_DAY_USD = float(os.environ.get("LIVE_PROBE_DAY_USD", "2500"))
+# DAY CAP REMOVED (owner order 2026-08-24 evening). This ceiling was
+# mine, added with the probe; the owner's standing directive since
+# 2026-08-05 is no day cap on copies, so removing it restores his
+# policy rather than weakening a gate he set. 0 disables; the env knob
+# stays so a ceiling can be re-armed in one change.
+#
+# What still bounds the day, none of it touched:
+#   - $250 per order (LIVE_MAX_CLIP_USD, applied after every multiplier)
+#   - the first-fill gate: ONE copy in flight until a real fill is
+#     side-verified, so the unproven assumption cannot compound
+#   - the side-echo circuit: any confirmed wrong side halts ALL copying
+#   - the 24h realized-loss breaker (PMUS_LOSS_BREAKER_USD)
+#   - the per-market and per-game single-bet rules, 90s staleness gate
+PROBE_DAY_USD = float(os.environ.get("LIVE_PROBE_DAY_USD", "0"))
 
 # PER-MARKET-TYPE MULTIPLIERS (owner go 2026-08-20 morning, from the
 # five-whale lifetime type calibration, 2026-08-18): spreads beat every
