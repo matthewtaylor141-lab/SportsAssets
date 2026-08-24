@@ -486,16 +486,19 @@ async def _settle_pmus_from_venue(pool, *,
     # activity from day one — fill the gap from it; the live crawl
     # wins on markets both sources carry (it is fresher).
     try:
-        since_ts = _dt.fromisoformat(from_day).replace(
-            tzinfo=timezone.utc).timestamp()
+        # NO ts filter (2026-08-24, scanned=0): resolution activities
+        # carry their timestamps NESTED in the payload, so the top-level
+        # ts column is 0.0 for them and any epoch filter excludes every
+        # one. Slug-matching against our rows bounds the work instead.
+        arch_total = await pool.fetchval(
+            "SELECT count(*) FROM pmus_activity_archive")
         arch = await pool.fetch(
             """
             SELECT payload->'positionResolution' AS pr, ts
             FROM pmus_activity_archive
             WHERE payload->>'type' = 'ACTIVITY_TYPE_POSITION_RESOLUTION'
-              AND ts >= $1
             ORDER BY ts
-            """, since_ts)
+            """)
 
         def _amt(v) -> float:
             if isinstance(v, dict):
@@ -528,6 +531,7 @@ async def _settle_pmus_from_venue(pool, *,
         # Diagnostics ride the summary (2026-08-24: the first archive
         # run silently added nothing — never again invisible).
         summary["archive"] = {"scanned": len(arch),
+                              "table_total": int(arch_total or 0),
                               "slugs": len(arch_truth), "added": added,
                               "err": None}
     except Exception as exc:  # noqa: BLE001 — narrows coverage, visibly
