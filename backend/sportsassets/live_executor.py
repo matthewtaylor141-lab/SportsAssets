@@ -1058,7 +1058,7 @@ _ECHO_TASKS: set = set()
 
 async def _side_echo_verify(pool, row_id: int, us_slug: str,
                             outcome: str | None, his_title: str | None,
-                            attempts: int = 3) -> None:
+                            attempts: int = 3, shadow: bool = False) -> None:
     """POST-FILL SIDE ECHO (owner order 2026-08-24: "verify that we
     never ever take the wrong position ever again"): seconds after a
     copy fills, re-derive the mapping from the venue's LIVE event board
@@ -1111,8 +1111,18 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
     except Exception as exc:  # noqa: BLE001 — the echo never raises
         detail = f"echo error: {exc}"[:200]
 
+    # SHADOW MODE (owner order 2026-08-24: prove it before dollars): the
+    # same verification runs on QUARANTINED premap resolutions, where no
+    # money rode. A shadow mismatch never trips the circuit — there is
+    # nothing to halt — but it is counted separately and printed loudly,
+    # and the resume lever must never be flipped while shadow_mismatch
+    # is non-zero. This is what turns the refusal stream into an
+    # independent certification instrument: the mapper's choice is
+    # re-derived from LIVE venue data by the same precision matcher,
+    # so the evidence is not the mapper grading its own homework.
+    state_key = "side_echo_shadow" if shadow else "side_echo_last"
     try:
-        if verdict == "mismatch":
+        if verdict == "mismatch" and not shadow:
             # The un-overridable circuit FIRST (leak-hunt 2026-08-24):
             # the two switches below can both be env-shadowed; this one
             # cannot.
@@ -1136,11 +1146,16 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                 "SIDE-ECHO MISMATCH row %s slug %s: %s — total "
                 "quarantine re-armed, premap-live dropped",
                 row_id, us_slug, detail)
+        elif verdict == "mismatch":
+            log.critical(
+                "SHADOW SIDE-ECHO MISMATCH row %s slug %s: %s — the "
+                "premap lane is NOT certifiable; do not flip the lever",
+                row_id, us_slug, detail)
         prev = {}
         try:
             raw = await pool.fetchval(
                 "SELECT value FROM ingestion_state WHERE key=$1",
-                "side_echo_last")
+                state_key)
             if raw:
                 prev = json.loads(raw) if isinstance(raw, str) else raw
         except Exception:  # noqa: BLE001
@@ -1150,14 +1165,24 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
         counts[verdict] += 1
         await pool.execute(
             "INSERT INTO ingestion_state (key, value) "
-            "VALUES ('side_echo_last', $1::jsonb) "
+            "VALUES ($2, $1::jsonb) "
             "ON CONFLICT (key) DO UPDATE SET value=$1::jsonb",
             json.dumps({**counts, "last": verdict,
                         "last_slug": us_slug, "last_detail": detail,
                         "last_at": datetime.now(tz=timezone.utc)
-                        .isoformat(timespec="seconds")}))
+                        .isoformat(timespec="seconds")}), state_key)
     except Exception:  # noqa: BLE001 — bookkeeping must not raise either
         log.exception("side-echo bookkeeping failed for row %s", row_id)
+
+
+def _spawn_echo(pool, row_id: int, us_slug: str, outcome: str | None,
+                his_title: str | None, *, shadow: bool) -> None:
+    """Fire-and-forget echo with a strong task ref (a bare create_task
+    can be garbage-collected mid-flight)."""
+    t = asyncio.create_task(_side_echo_verify(
+        pool, row_id, us_slug, outcome, his_title, shadow=shadow))
+    _ECHO_TASKS.add(t)
+    t.add_done_callback(_ECHO_TASKS.discard)
 
 
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
@@ -1605,6 +1630,14 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     "UPDATE live_orders SET status='rejected', error=$2 "
                     "WHERE id=$1",
                     row_id, _q_reason)
+                # SHADOW CERTIFICATION: a refused PREMAP resolution is
+                # free evidence — re-derive it from live venue data and
+                # record the verdict. This is the streak the resume
+                # decision reads, produced at zero dollars of risk.
+                if mapping_src == "premap":
+                    _spawn_echo(pool, row_id, mapping["market_slug"],
+                                ctx.get("outcome"),
+                                ctx.get("market_title"), shadow=True)
                 log.warning("LIVE (US) quarantined %s mapping: %s / %s",
                             mapping_src, ctx.get("market_title"),
                             _q_slug)
@@ -1764,10 +1797,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                  venue, "FILLED" if result["ok"] and filled > 0 else "unfilled",
                  payload.get("whale_username"), filled, fill_price or limit, his_price)
         if _echo_args and result["ok"] and filled > 0:
-            _t = asyncio.create_task(_side_echo_verify(
-                pool, row_id, *_echo_args))
-            _ECHO_TASKS.add(_t)
-            _t.add_done_callback(_ECHO_TASKS.discard)
+            _spawn_echo(pool, row_id, *_echo_args, shadow=False)
     except Exception as exc:  # noqa: BLE001 — record, never crash ingestion
         log.exception("live order failed for trade %s", payload.get("id"))
         await pool.execute(

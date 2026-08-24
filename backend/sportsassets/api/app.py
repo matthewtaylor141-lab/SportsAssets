@@ -4062,22 +4062,27 @@ async def api_premap_status() -> dict:
 
         d0 = _date.today().isoformat()
         d1 = (_date.today() + _td(days=1)).isoformat()
+        # asyncpg cannot infer a parameter's type inside a concatenation
+        # ('%'||$1||'%' raises "could not determine data type") — the
+        # explicit ::text casts are load-bearing. Read today=0 on a
+        # 9k-row table on 2026-08-24: that was this, not missing data.
         coverage = dict(await pool.fetchrow(
-            "SELECT count(*) FILTER (WHERE identifier LIKE '%'||$1||'%')"
+            "SELECT count(*) FILTER (WHERE identifier LIKE '%'||$1::text||'%')"
             "::int AS today, "
-            "count(*) FILTER (WHERE identifier LIKE '%'||$2||'%')"
-            "::int AS tomorrow", d0, d1))
+            "count(*) FILTER (WHERE identifier LIKE '%'||$2::text||'%')"
+            "::int AS tomorrow FROM us_premap", d0, d1))
         coverage["sample"] = [
             r["identifier"] for r in await pool.fetch(
                 "SELECT identifier FROM us_premap "
-                "WHERE identifier LIKE '%'||$1||'%' "
+                "WHERE identifier LIKE '%'||$1::text||'%' "
                 "ORDER BY updated_at DESC LIMIT 3", d0)]
-    except Exception:  # noqa: BLE001 — coverage is diagnostics only
-        coverage = {}
+    except Exception as exc:  # noqa: BLE001 — never silent (2026-08-24)
+        coverage = {"err": f"{type(exc).__name__}: {str(exc)[:160]}"}
     extras: dict = {"coverage": coverage}
     for key, out in (("premap_last", "last_sweep"),
                      ("workers_boot", "workers_boot"),
                      ("side_echo_last", "side_echo"),
+                     ("side_echo_shadow", "side_echo_shadow"),
                      ("side_echo_tripped", "side_echo_tripped")):
         try:
             val = await pool.fetchval(

@@ -143,6 +143,16 @@ class _EchoPool:
         self.executes.append((" ".join(sql.split()), a))
 
 
+def _echo_state(pool, key):
+    """The state row the echo wrote, by KEY — the key is a bound
+    parameter now (shadow mode writes side_echo_shadow instead), so
+    matching on the SQL text would silently match nothing."""
+    for sql, a in pool.executes:
+        if "ingestion_state" in sql and len(a) == 2 and a[1] == key:
+            return json.loads(a[0])
+    return None
+
+
 def _live_rows(slug):
     """Rows in the sweep's own shape, as live_rows_for_market returns
     them (the echo consumes THIS shape — leak-hunt find 2026-08-24:
@@ -162,8 +172,8 @@ def test_side_echo_ok_records_and_never_trips(monkeypatch):
     asyncio.run(live_executor._side_echo_verify(
         pool, 101, slug, "Arsenal", "Arsenal vs Chelsea"))
     assert not any("mapping_quarantine" in sql for sql, _ in pool.executes)
-    state = [a for sql, a in pool.executes if "side_echo_last" in sql]
-    assert state and json.loads(state[0][0])["ok"] == 1
+    state = _echo_state(pool, "side_echo_last")
+    assert state and state["ok"] == 1
 
 
 def test_live_rows_for_market_produces_matchable_rows(monkeypatch):
@@ -255,8 +265,8 @@ def test_side_echo_outage_never_trips_the_breaker(monkeypatch):
         pool, 101, f"atc-epl-ars-che-{TODAY}-ars", "Arsenal",
         "Arsenal vs Chelsea", attempts=1))
     assert not any("mapping_quarantine" in sql for sql, _ in pool.executes)
-    state = [a for sql, a in pool.executes if "side_echo_last" in sql]
-    assert state and json.loads(state[0][0])["unverified"] == 1
+    state = _echo_state(pool, "side_echo_last")
+    assert state and state["unverified"] == 1
 
 
 def test_hold_refuses_swisstony_even_with_quarantine_off(monkeypatch):
@@ -325,3 +335,67 @@ def test_clob_fallback_is_fail_closed(monkeypatch):
     asyncio.run(live_executor.maybe_execute(
         _payload(whale_username="HomeRunHazard"), 5.0))
     assert clob_orders, "the explicit lever reopens the leg"
+
+
+class TestShadowCertification:
+    """The resume gate (owner order 2026-08-24: prove it before
+    dollars). Every QUARANTINED premap resolution is re-derived from
+    live venue data by the same precision matcher and recorded — the
+    streak that licenses the lever, produced at zero risk."""
+
+    def test_shadow_ok_records_to_its_own_key(self, monkeypatch):
+        slug = f"atc-epl-ars-che-{TODAY}-ars"
+        monkeypatch.setattr(premap_mod, "live_rows_for_market",
+                            lambda parent: _live_rows(slug))
+        pool = _EchoPool()
+        asyncio.run(live_executor._side_echo_verify(
+            pool, 101, slug, "Arsenal", "Arsenal vs Chelsea",
+            shadow=True))
+        assert _echo_state(pool, "side_echo_shadow")["ok"] == 1
+        # the live counter must NOT move on shadow verdicts
+        assert _echo_state(pool, "side_echo_last") is None
+
+    def test_shadow_mismatch_records_but_never_halts(self, monkeypatch):
+        """No money rode a quarantined row, so there is nothing to
+        halt — but the mismatch is counted and logged critical, and
+        the lever must never be flipped while it is non-zero."""
+        ours = f"atc-epl-ars-che-{TODAY}-ars"
+        other = f"atc-epl-ars-che-{TODAY}-v2-ars"
+        monkeypatch.setattr(premap_mod, "live_rows_for_market",
+                            lambda parent: _live_rows(other))
+        pool = _EchoPool()
+        asyncio.run(live_executor._side_echo_verify(
+            pool, 101, ours, "Arsenal", "Arsenal vs Chelsea",
+            shadow=True))
+        assert _echo_state(pool, "side_echo_shadow")["mismatch"] == 1
+        sqls = [sql for sql, _ in pool.executes]
+        assert not any("side_echo_tripped" in s for s in sqls), \
+            "a shadow verdict must not trip the live circuit"
+        assert not any("mapping_quarantine" in s for s in sqls)
+
+    def test_quarantined_premap_row_spawns_a_shadow_echo(self, monkeypatch):
+        """End-to-end: the refusal path itself produces the evidence."""
+        from sportsassets import copy_sports as _cs
+
+        spawned = []
+        monkeypatch.setattr(
+            live_executor, "_spawn_echo",
+            lambda pool, row_id, slug, outcome, title, *, shadow:
+            spawned.append((slug, outcome, shadow)))
+
+        pool = _LadderPool([])
+        _wire_with_real_cuts(monkeypatch, pool, "unused")
+        monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
+        monkeypatch.setenv("LIVE_MAPPING_QUARANTINE", "on")
+        monkeypatch.setenv("LIVE_PREMAP", "off")   # refused
+
+        async def fake_premap(_pool, *_a, **_k):
+            return {"market_slug": f"atc-epl-ars-che-{TODAY}-ars",
+                    "title": "Arsenal", "outcome": "arsenal",
+                    "matched_by": "premap", "score": 1.0}
+
+        monkeypatch.setattr(premap_mod, "resolve", fake_premap)
+        asyncio.run(live_executor.maybe_execute(
+            _payload(whale_username="HomeRunHazard"), 5.0))
+        assert spawned and spawned[0][2] is True, \
+            "a refused premap resolution must be shadow-verified"

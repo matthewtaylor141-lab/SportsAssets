@@ -294,7 +294,15 @@ jobs:
                -o /tmp/premap.json "$BASE/api/admin/premap-status" || true
           jq -r '"  PREMAP rows=\(.rows // 0)  events=\(.events // 0)  fresh=\(.fresh // "never")  last=\(.last_sweep // "none")"' /tmp/premap.json 2>/dev/null || true
           jq -r '"  WORKERS boot=\(.workers_boot // "none")  side_echo=\(.side_echo // "none")  TRIPPED=\(.side_echo_tripped // false)"' /tmp/premap.json 2>/dev/null || true
-          jq -r '"  PREMAP-COV today=\(.coverage.today // 0)  tomorrow=\(.coverage.tomorrow // 0)  sample=\(.coverage.sample // [] | join(" "))"' /tmp/premap.json 2>/dev/null || true
+          jq -r '"  PREMAP-COV today=\(.coverage.today // 0)  tomorrow=\(.coverage.tomorrow // 0)  err=\(.coverage.err // "none")  sample=\(.coverage.sample // [] | join(" "))"' /tmp/premap.json 2>/dev/null || true
+          # SHADOW CERTIFICATION (the resume gate): every quarantined
+          # premap resolution re-derived from LIVE venue data by the
+          # same precision matcher. ok climbing with mismatch=0 is what
+          # licenses the lever; ANY mismatch means do not flip.
+          jq -r '.side_echo_shadow as $s
+                 | if $s == null then "  SHADOW-CERT no verdicts yet"
+                   else "  SHADOW-CERT ok=\($s.ok // 0)  MISMATCH=\($s.mismatch // 0)  unverified=\($s.unverified // 0)  last=\($s.last // "?") \($s.last_detail // "")"
+                   end' /tmp/premap.json 2>/dev/null || true
           # SPORTS-PROV: per sports-roster whale, are detections arriving
           # src=chain (sub-second) or src=poll (minutes)? The swisstony
           # capture question answers here. (whales.json is fetched fresh
