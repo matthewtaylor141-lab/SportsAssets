@@ -480,6 +480,50 @@ async def _settle_pmus_from_venue(pool, *,
         """)
     sold_by = {r["slug"]: float(r["pnl"]) for r in sold}
     truth = await resolution_truth(from_day)
+    # The venue's live activity export only pages back a few days
+    # (first full restatement 2026-08-24: 1,150 of 1,229 markets out
+    # of reach). The platform's own append-only archive holds every
+    # activity from day one — fill the gap from it; the live crawl
+    # wins on markets both sources carry (it is fresher).
+    try:
+        since_ts = _dt.fromisoformat(from_day).replace(
+            tzinfo=timezone.utc).timestamp()
+        arch = await pool.fetch(
+            """
+            SELECT payload->'positionResolution' AS pr, ts
+            FROM pmus_activity_archive
+            WHERE payload->>'type' = 'ACTIVITY_TYPE_POSITION_RESOLUTION'
+              AND ts >= $1
+            ORDER BY ts
+            """, since_ts)
+
+        def _amt(v) -> float:
+            if isinstance(v, dict):
+                v = v.get("value")
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        arch_truth: dict[str, dict] = {}
+        for r in arch:
+            pr = r["pr"]
+            if isinstance(pr, str):
+                pr = json.loads(pr)
+            pr = pr or {}
+            slug = (pr.get("marketSlug") or "").lower()
+            if not slug:
+                continue
+            realized = (_amt((pr.get("afterPosition") or {}).get("realized"))
+                        or _amt((pr.get("beforePosition") or {})
+                                .get("realized")))
+            ts_iso = (_dt.fromtimestamp(float(r["ts"] or 0), timezone.utc)
+                      .isoformat() if r["ts"] else "")
+            arch_truth[slug] = {"realized": realized, "ts": ts_iso}
+        for slug, t in arch_truth.items():
+            truth.setdefault(slug, t)
+    except Exception:  # noqa: BLE001 — archive gap only narrows coverage
+        log.exception("archive resolution truth unavailable")
 
     groups: dict[str, list] = {}
     for r in rows:

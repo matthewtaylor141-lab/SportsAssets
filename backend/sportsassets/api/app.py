@@ -98,7 +98,7 @@ async def lifespan(_: FastAPI):
         await asyncio.sleep(75)
         try:
             pool = await get_pool()
-            key = "rescore_copies_v1"
+            key = "rescore_copies_v2"
             done = await pool.fetchval(
                 "SELECT value FROM ingestion_state WHERE key=$1", key)
             if done:
@@ -3887,7 +3887,7 @@ async def api_rescore_summary() -> dict:
     """Last venue-truth restatement summary (owner emergency 2026-08-23)."""
     pool = await get_pool()
     val = await pool.fetchval(
-        "SELECT value FROM ingestion_state WHERE key=$1", "rescore_copies_v1")
+        "SELECT value FROM ingestion_state WHERE key=$1", "rescore_copies_v2")
     if val is None:
         return {"ran": False}
     data = json.loads(val) if isinstance(val, str) else val
@@ -3906,7 +3906,7 @@ async def api_rescore_run(since_day: str = "2026-08-01") -> dict:
     await pool.execute(
         "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
         "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
-        "rescore_copies_v1", json.dumps(summary))
+        "rescore_copies_v2", json.dumps(summary))
     return summary
 
 
