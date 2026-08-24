@@ -484,3 +484,69 @@ class TestVerifiedOnlyIsIndependentOfQuarantine:
                                                            monkeypatch):
         pool, submitted = self._run(monkeypatch, "kch123", verified_env="")
         assert submitted, "an explicit empty list is a deliberate resume"
+
+
+class TestFirstFillGate:
+    """The owner upsized to $250 before any real fill returned. The
+    echo runs AFTER a fill, so the 4-slot semaphore could put four
+    orders on the venue before the first verdict — and which side an
+    intent buys is the one assumption still unproven. Until one real
+    fill verifies 'ok', only a single copy may be in flight."""
+
+    class _GatePool(_LadderPool):
+        """No prior verified fill: side_echo_last has ok=0."""
+
+        async def fetchval(self, sql, *a):
+            if "ingestion_state" in sql and a and a[0] == "side_echo_last":
+                return '{"ok": 0, "mismatch": 0, "unverified": 0}'
+            return await super().fetchval(sql, *a)
+
+    class _VerifiedPool(_LadderPool):
+        async def fetchval(self, sql, *a):
+            if "ingestion_state" in sql and a and a[0] == "side_echo_last":
+                return '{"ok": 7, "mismatch": 0, "unverified": 0}'
+            return await super().fetchval(sql, *a)
+
+    def _wire(self, monkeypatch, pool):
+        from sportsassets import copy_sports as _cs
+
+        submitted = _wire_with_real_cuts(
+            monkeypatch, pool, f"tsc-epl-ars-che-{TODAY}-o3pt5")
+        monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
+        return submitted
+
+    def test_a_second_copy_is_refused_while_the_first_is_unverified(
+            self, monkeypatch):
+        pool = self._GatePool([])
+        submitted = self._wire(monkeypatch, pool)
+        live_executor._FIRST_FILL_LOCK = asyncio.Lock()
+
+        async def two_at_once():
+            await live_executor._FIRST_FILL_LOCK.acquire()   # first in flight
+            try:
+                await live_executor.maybe_execute(
+                    _payload(whale_username="HomeRunHazard"), 5.0)
+            finally:
+                live_executor._FIRST_FILL_LOCK.release()
+
+        asyncio.run(two_at_once())
+        assert submitted == []
+        rej = [(sql, a) for sql, a in pool.updates
+               if "status='rejected'" in sql and "first-fill gate" in str(a)]
+        assert len(rej) == 1
+
+    def test_the_gate_opens_once_a_real_fill_is_verified(self, monkeypatch):
+        pool = self._VerifiedPool([])
+        submitted = self._wire(monkeypatch, pool)
+        live_executor._FIRST_FILL_LOCK = asyncio.Lock()
+
+        async def two_at_once():
+            await live_executor._FIRST_FILL_LOCK.acquire()
+            try:
+                await live_executor.maybe_execute(
+                    _payload(whale_username="HomeRunHazard"), 5.0)
+            finally:
+                live_executor._FIRST_FILL_LOCK.release()
+
+        asyncio.run(two_at_once())
+        assert submitted, "after a verified fill the gate no longer binds"

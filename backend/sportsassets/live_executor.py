@@ -52,6 +52,9 @@ PAUSE_KEY = "live_trading_paused"
 # concurrent mapping/preview/create calls at the venue, which was
 # Cloudflare-throttled once already (polymarket_us.py page pacing note).
 _COPY_SEM = asyncio.Semaphore(4)
+# Held while the FIRST real fill is unverified — see the first-fill gate
+# in maybe_execute.
+_FIRST_FILL_LOCK = asyncio.Lock()
 
 
 async def execute_copy(payload: dict) -> None:
@@ -333,19 +336,25 @@ COPY_CUT_WHALES = frozenset({"rn1", "ferrarichampions2026", _W2C33})
 # 429 independent checks but has never been confirmed by a REAL FILL,
 # and the position-sign check can only settle that with live orders.
 # Scale follows evidence, not the other way round.
-PER_FILL_BY_WHALE = {"rn1": 0.00, "swisstony": 100.00,
-                     _W2C33: 0.00, "homerunhazard": 100.00,
+# 100 -> 250 (owner order 2026-08-24 evening, same session): the owner
+# upsized the two verified whales before the first real fill returned.
+# That is his risk call; what it changes is the cost of the ONE
+# assumption still unproven (that BUY_SHORT buys the short side), so
+# the first-fill gate below narrows the unverified window to a single
+# order instead of the semaphore's four.
+PER_FILL_BY_WHALE = {"rn1": 0.00, "swisstony": 250.00,
+                     _W2C33: 0.00, "homerunhazard": 250.00,
                      "kch123": 150.00,
                      "ferrarichampions2026": 0.00,
-                     "0x076daa87": 100.00}
+                     "0x076daa87": 250.00}
 # HARD CEILING on the resolved clip, applied AFTER every override and
 # multiplier. The owner authorized $100 per clip; a spread's x1.5 would
 # otherwise place $150 and quietly exceed the authorization. A cap that
 # sits below the maps cannot be defeated by a cell edit.
-LIVE_MAX_CLIP_USD = float(os.environ.get("LIVE_MAX_CLIP_USD", "100"))
+LIVE_MAX_CLIP_USD = float(os.environ.get("LIVE_MAX_CLIP_USD", "250"))
 # The whole probe is bounded too: a day cap sized so an unimagined
 # defect costs a bounded amount rather than an open-ended one.
-PROBE_DAY_USD = float(os.environ.get("LIVE_PROBE_DAY_USD", "1000"))
+PROBE_DAY_USD = float(os.environ.get("LIVE_PROBE_DAY_USD", "2500"))
 
 # PER-MARKET-TYPE MULTIPLIERS (owner go 2026-08-20 morning, from the
 # five-whale lifetime type calibration, 2026-08-18): spreads beat every
@@ -1546,6 +1555,32 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             f"stale-signal: reaction {reaction}s > {_stale_cap:g}s cap")
         return
 
+    # FIRST-FILL GATE (owner upsized to $250 before any real fill,
+    # 2026-08-24 evening): until ONE real fill has been verified 'ok' by
+    # the side echo, only a single copy may be in flight. The echo runs
+    # after a fill, so without this the 4-slot semaphore could put four
+    # orders on the venue before the first verdict returns — and the one
+    # assumption still unproven is which side an intent actually buys.
+    # After the first verified fill the gate opens permanently.
+    _first_fill_gate = False
+    try:
+        _se = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            "side_echo_last")
+        _se = json.loads(_se) if isinstance(_se, str) else (_se or {})
+        _first_fill_gate = int((_se or {}).get("ok", 0)) < 1
+    except Exception:  # noqa: BLE001 — unverifiable: assume unproven
+        _first_fill_gate = True
+    if _first_fill_gate:
+        if _FIRST_FILL_LOCK.locked():
+            await pool.execute(
+                "UPDATE live_orders SET status='rejected', error=$2 "
+                "WHERE id=$1", row_id,
+                "first-fill gate: one copy at a time until a real fill "
+                "is side-verified")
+            return
+        await _FIRST_FILL_LOCK.acquire()
+
     _echo_args: tuple | None = None
     try:
         if venue == "polymarket-us":
@@ -1999,3 +2034,6 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             "UPDATE live_orders SET status='error', error=$2 WHERE id=$1",
             row_id, str(exc)[:300],
         )
+    finally:
+        if _first_fill_gate and _FIRST_FILL_LOCK.locked():
+            _FIRST_FILL_LOCK.release()

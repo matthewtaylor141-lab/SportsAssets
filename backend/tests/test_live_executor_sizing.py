@@ -22,10 +22,10 @@ def test_verified_profitable_whales_clip_at_the_probe_size():
     """SUPERSEDED by the owner's 2026-08-24 evening authorization: the
     resume is a bounded proof at $100 per clip, not a return to $300.
     Scale follows real fills."""
-    assert per_fill_usd("HomeRunHazard") == 100.00
-    assert per_fill_usd("homerunhazard") == 100.00
-    assert per_fill_usd("0x076daa87") == 100.00
-    assert per_fill_usd("SwissTony") == 100.00
+    assert per_fill_usd("HomeRunHazard") == 250.00
+    assert per_fill_usd("homerunhazard") == 250.00
+    assert per_fill_usd("0x076daa87") == 250.00
+    assert per_fill_usd("SwissTony") == 250.00
 
 
 def test_cut_whales_clip_at_zero_everywhere():
@@ -59,25 +59,26 @@ def test_cut_set_names_exactly_the_three_verified_negative_books():
 
 
 def test_every_whale_is_bounded_by_the_probe_ceiling():
-    """During the probe no sport cell or multiplier may exceed $100."""
-    assert per_fill_usd("SwissTony", "atc-epl-ars-che-2026-08-15-ars") == 100.00
-    assert per_fill_usd("swisstony", "epl-ars-che-2026-08-15") == 100.00
+    """No sport cell or multiplier may exceed the authorized $250 —
+    and the ceiling CAPS, it never promotes a smaller clip."""
+    assert per_fill_usd("SwissTony", "atc-epl-ars-che-2026-08-15-ars") == 250.00
+    assert per_fill_usd("swisstony", "epl-ars-che-2026-08-15") == 250.00
     assert per_fill_usd("someone-new", "epl-ars-che-2026-08-15") == 75.00
-    assert per_fill_usd("kch123", "atc-nhl-tor-mtl-2026-10-15-tor") == 100.00
+    assert per_fill_usd("kch123", "atc-nhl-tor-mtl-2026-10-15-tor") == 150.00
 
 
 def test_hrh_sport_cells_are_retired_for_the_probe():
     """A (whale, sport) cell WINS over the whale clip, so a surviving
     $600 baseball cell would have overridden the $100 authorization."""
-    assert per_fill_usd("homerunhazard", "aec-mlb-nyy-bos-2026-08-24") == 100.00
+    assert per_fill_usd("homerunhazard", "aec-mlb-nyy-bos-2026-08-24") == 250.00
     assert per_fill_usd("homerunhazard",
-                        "aec-nfl-kc-buf-2026-09-07") == 100.00
+                        "aec-nfl-kc-buf-2026-09-07") == 250.00
 
 
 def test_default_and_kch123_unchanged():
     # kch123 is out of season and not in the verified set; his map
     # entry is untouched but the ceiling bounds him if he ever fires.
-    assert per_fill_usd("kch123") == 100.00
+    assert per_fill_usd("kch123") == 150.00
     assert per_fill_usd(None) == 75.00
     assert per_fill_usd("someone-new") == 75.00
 
@@ -99,15 +100,15 @@ class TestTypeMultipliers:
         # the multiplier still applies UNDER the ceiling for whales
         # whose base is small enough to see it
         assert per_fill_usd(
-            "someone-new", "asc-epl-ars-che-2026-08-20-neg-1pt5") == 100.00
+            "someone-new", "asc-epl-ars-che-2026-08-20-neg-1pt5") == 112.50
         assert per_fill_usd(
-            "homerunhazard", "asc-nba-lal-bos-2026-11-01-neg-2pt5") == 100.00
+            "homerunhazard", "asc-nba-lal-bos-2026-11-01-neg-2pt5") == 250.00
 
     def test_moneylines_are_bounded_too(self):
         assert per_fill_usd("swisstony",
-                            "atc-epl-ars-che-2026-08-20-ars") == 100.00
+                            "atc-epl-ars-che-2026-08-20-ars") == 250.00
         assert per_fill_usd("0x076daa87",
-                            "aec-atp-rafjod-artfil-2026-08-21-raf") == 100.00
+                            "aec-atp-rafjod-artfil-2026-08-21-raf") == 250.00
 
     def test_a_blocked_cell_is_never_unblocked_by_a_multiplier(self):
         from sportsassets.live_executor import _W2C33
@@ -131,27 +132,27 @@ class TestCopyLimitPrice:
 
 
 class TestProbeAuthorization:
-    """Owner authorization 2026-08-24 evening: "$100 per clip on the
+    """Owner authorization 2026-08-24 evening: "$250 per clip on the
     actually verified profitable whales". The authorization is a
     CEILING, enforced after every override and multiplier — a cell edit
     or a market-type multiplier must not be able to exceed it."""
 
     def test_verified_whales_clip_at_one_hundred(self):
-        assert per_fill_usd("HomeRunHazard") == 100.00
-        assert per_fill_usd("0x076daa87") == 100.00
+        assert per_fill_usd("HomeRunHazard") == 250.00
+        assert per_fill_usd("0x076daa87") == 250.00
 
     def test_the_spread_multiplier_cannot_exceed_the_ceiling(self):
-        # x1.5 would be $150 — the ceiling clamps it to the authorized
-        # $100 rather than quietly overspending.
+        # x1.5 would be $375 — the ceiling clamps it to the authorized
+        # $250 rather than quietly overspending.
         assert per_fill_usd(
             "homerunhazard",
-            "asc-nfl-kc-buf-2026-09-13-neg-3pt5") == 100.00
+            "asc-nfl-kc-buf-2026-09-13-neg-3pt5") == 250.00
 
     def test_no_sport_cell_outranks_the_ceiling(self):
         assert per_fill_usd(
-            "homerunhazard", "aec-mlb-nyy-bos-2026-08-24") == 100.00
+            "homerunhazard", "aec-mlb-nyy-bos-2026-08-24") == 250.00
         assert per_fill_usd(
-            "homerunhazard", "aec-nfl-kc-buf-2026-09-07") == 100.00
+            "homerunhazard", "aec-nfl-kc-buf-2026-09-07") == 250.00
 
     def test_cut_whales_are_still_zero(self):
         from sportsassets.live_executor import _W2C33
@@ -163,6 +164,6 @@ class TestProbeAuthorization:
     def test_the_ceiling_is_env_adjustable_for_promotion(self, monkeypatch):
         from sportsassets import live_executor as le
 
-        monkeypatch.setattr(le, "LIVE_MAX_CLIP_USD", 300.0)
-        assert le.per_fill_usd("homerunhazard") == 100.00, \
+        monkeypatch.setattr(le, "LIVE_MAX_CLIP_USD", 500.0)
+        assert le.per_fill_usd("homerunhazard") == 250.00, \
             "raising the ceiling alone must not raise the clip"
