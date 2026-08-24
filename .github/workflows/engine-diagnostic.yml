@@ -1248,6 +1248,47 @@ jobs:
                       print(f"PREMAP-GT   marketSides={type(sides).__name__ if sides is not None else 'ABSENT'}")
           PY
 
+      - name: SIDE-TRUTH — is a tennis aec- slug a SIDE or a sideless parent?
+        if: always()
+        run: |
+          pip install --quiet polymarket-us 2>/dev/null || pip install polymarket-us
+          echo "###########################################################"
+          echo "#   SIDE-TRUTH: the question the resume lever hangs on     #"
+          echo "###########################################################"
+          # Two different whale picks (Marko Topo, Miguel Damas) resolved
+          # to the SAME slug aec-atp-martop-migdam-2026-08-24. Either the
+          # venue's side identifiers legitimately differ and we are fine,
+          # or that string is a SIDELESS PARENT and ordering it lets the
+          # venue choose our side — the 2026-08-23 incident, exactly.
+          # Ask the venue directly and print every side verbatim.
+          python - <<'PY'
+          from polymarket_us import PolymarketUS
+
+          pub = PolymarketUS()
+          SLUGS = ["aec-atp-martop-migdam-2026-08-24",
+                   "aec-atp-zhizha-reisak-2026-08-24",
+                   "aec-wta-eriand-marbol-2026-08-24"]
+          for slug in SLUGS:
+              try:
+                  m = (pub.markets.retrieve_by_slug(slug) or {}).get("market") or {}
+              except Exception as e:
+                  print(f"SIDE-TRUTH {slug} -> ERR {type(e).__name__}: {str(e)[:100]}")
+                  continue
+              if not m.get("slug"):
+                  print(f"SIDE-TRUTH {slug} -> NOT FOUND")
+                  continue
+              sides = m.get("marketSides") or []
+              print(f"SIDE-TRUTH {slug}")
+              print(f"  market.slug={m.get('slug')!r} question={str(m.get('question'))[:70]!r}")
+              print(f"  outcome={str(m.get('outcome'))[:40]!r} closed={m.get('closed')} sides={len(sides)}")
+              for i, s in enumerate(sides):
+                  if isinstance(s, dict):
+                      ident = s.get("identifier")
+                      print(f"  side[{i}] identifier={str(ident)!r} "
+                            f"description={str(s.get('description'))[:40]!r} "
+                            f"SAME_AS_MARKET_SLUG={ident == m.get('slug')}")
+          PY
+
       - name: Crypto census — PMUS crypto markets (public gateway via SDK)
         if: always()
         run: |
