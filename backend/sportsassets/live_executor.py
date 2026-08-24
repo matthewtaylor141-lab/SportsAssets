@@ -1326,9 +1326,28 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # side-slug) class are refused, with the mapping kept on the
             # row for the postmortem. LIVE_MAPPING_QUARANTINE=off lifts.
             _q_slug = str(mapping.get("market_slug") or "").lower()
-            if (os.getenv("LIVE_MAPPING_QUARANTINE", "on") != "off"
-                    and (mapping_src == "fuzzy"
-                         or _q_slug.startswith("aec-"))):
+            # Resume is a DB switch (POST /api/admin/quarantine/off) so
+            # the owner's go is one admin call; the env var stays as a
+            # hard override in either direction. Default is ON — an
+            # unreadable state key must fail safe, not fail open.
+            _q_env = os.getenv("LIVE_MAPPING_QUARANTINE", "")
+            if _q_env == "off":
+                _q_on = False
+            elif _q_env == "on":
+                _q_on = True
+            else:
+                _q_on = True
+                try:
+                    _q_val = await pool.fetchval(
+                        "SELECT value FROM ingestion_state WHERE key=$1",
+                        "mapping_quarantine")
+                    if _q_val is not None:
+                        _q_on = bool(json.loads(_q_val)
+                                     if isinstance(_q_val, str) else _q_val)
+                except Exception:  # noqa: BLE001 — fail safe: stay on
+                    _q_on = True
+            if (_q_on and (mapping_src == "fuzzy"
+                           or _q_slug.startswith("aec-"))):
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 "
                     "WHERE id=$1",

@@ -3805,6 +3805,41 @@ async def api_daily_breakdown() -> dict:
     return await _category_breakdown("2026-08-01", _today_et())
 
 
+@app.post("/api/admin/quarantine/{action}",
+          dependencies=[Depends(require_admin)])
+async def api_quarantine_set(action: str) -> dict:
+    """Mapping-quarantine switch (wrong-side incident 2026-08-23).
+    'off' resumes the quarantined copy classes after fidelity is
+    proven; 'on' re-arms. The env var LIVE_MAPPING_QUARANTINE remains
+    a hard override in either direction."""
+    if action not in ("on", "off"):
+        raise HTTPException(status_code=400, detail="action must be on|off")
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        "mapping_quarantine", json.dumps(action == "on"))
+    return {"ok": True, "quarantine": action == "on"}
+
+
+@app.get("/api/admin/quarantine", dependencies=[Depends(require_admin)])
+async def api_quarantine_get() -> dict:
+    pool = await get_pool()
+    val = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1",
+        "mapping_quarantine")
+    on = True
+    if val is not None:
+        try:
+            on = bool(json.loads(val) if isinstance(val, str) else val)
+        except (TypeError, ValueError):
+            on = True
+    env = os.getenv("LIVE_MAPPING_QUARANTINE", "")
+    if env in ("on", "off"):
+        on = env == "on"
+    return {"quarantine": on, "env_override": env or None}
+
+
 @app.get("/api/admin/mapping-audit", dependencies=[Depends(require_admin)])
 async def api_mapping_audit(days: int = 3, limit: int = 400) -> dict:
     """Side-fidelity evidence, row by row (owner order 2026-08-24: prove
