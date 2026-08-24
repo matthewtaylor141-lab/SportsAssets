@@ -266,6 +266,26 @@ jobs:
                -o /tmp/rescore.json "$BASE/api/admin/rescore-copies" || true
           jq -r '"  RESCORE ran=\(.ran // false)  at=\(.at // "?")  rows=\(.settled // 0)  changed=\(.changed // 0)  delta=\(.delta // 0)  slugs=\(.slugs // 0)  no_truth=\(.no_truth // 0)"' /tmp/rescore.json 2>/dev/null || true
           jq -r '.whales // {} | to_entries[]? | "  RESCORE-W \(.key)  old=\(.value.old)  new=\(.value.new)  rows=\(.value.rows)"' /tmp/rescore.json 2>/dev/null || true
+          # FORCE PATH (2026-08-24: the startup restatement kept losing
+          # to deploy restarts and then failed silently on an
+          # undisturbed boot). When the summary says it never ran, run
+          # it HERE, chunked newest-window-first so each venue crawl is
+          # bounded, and print each verdict verbatim — errors included.
+          # Idempotent server-side; this block self-disables once the
+          # summary records a completed run.
+          if ! jq -e '.ran == true' /tmp/rescore.json >/dev/null 2>&1; then
+            for SD in 2026-08-17 2026-08-10 2026-08-01; do
+              echo "  RESCORE-POST since=$SD:"
+              curl -sS --max-time 280 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+                   "$BASE/api/admin/rescore-copies?since_day=$SD" \
+                   | head -c 2000 || true
+              echo ""
+            done
+            curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
+                 -o /tmp/rescore.json "$BASE/api/admin/rescore-copies" || true
+            jq -r '"  RESCORE2 ran=\(.ran // false)  rows=\(.settled // 0)  changed=\(.changed // 0)  delta=\(.delta // 0)  no_truth=\(.no_truth // 0)"' /tmp/rescore.json 2>/dev/null || true
+            jq -r '.whales // {} | to_entries[]? | "  RESCORE-W \(.key)  old=\(.value.old)  new=\(.value.new)  rows=\(.value.rows)"' /tmp/rescore.json 2>/dev/null || true
+          fi
 
           TODAY_ET=$(TZ=America/New_York date +%F)
           curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
