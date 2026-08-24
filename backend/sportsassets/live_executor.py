@@ -1233,6 +1233,17 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     if row_id is None:
         return  # duplicate detection — never double-order one source trade
 
+    # STALENESS GATE (owner order 2026-08-24): a late signal is a decayed
+    # edge — the copier refuses rather than chases. The cap is deliberate
+    # slack for now; the edge-decay study tightens it per-whale later.
+    _stale_cap = float(os.getenv("LIVE_MAX_REACTION_S", "90"))
+    if reaction is not None and reaction > _stale_cap:
+        await pool.execute(
+            "UPDATE live_orders SET status='rejected', error=$2 WHERE id=$1",
+            row_id,
+            f"stale-signal: reaction {reaction}s > {_stale_cap:g}s cap")
+        return
+
     try:
         if venue == "polymarket-us":
             from . import pmus
@@ -1260,12 +1271,13 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # the venue's own side expansion. Misses fall through to the
             # legacy resolvers unchanged.
             try:
-                from ..workers import premap as _premap
+                from .workers import premap as _premap
 
                 mapping = await _premap.resolve(
                     pool, ctx.get("market_title"), ctx.get("event_title"),
                     ctx.get("outcome"), ctx.get("market_slug"))
             except Exception:  # noqa: BLE001 — premap never blocks a copy
+                log.exception("premap resolve failed; falling through")
                 mapping = None
             mapping_src = "premap" if mapping is not None else None
             # The exact phase is TIME-BOXED (review 2026-08-13): the
@@ -1367,7 +1379,27 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # day-by-day). While the switch is ON, ALL copy mappings
             # refuse — not just the fuzzy/aec classes — pending the
             # owner's morning review. Same switch lifts it.
-            if _q_on:
+            # RESUME LEVER (owner order 2026-08-24): while the total
+            # quarantine holds, ONLY premap-resolved mappings may trade,
+            # and only once the owner flips premap_live (DB switch via
+            # POST /api/admin/premap-live/on; env LIVE_PREMAP overrides
+            # both ways). Everything else stays refused-but-recorded.
+            _premap_ok = False
+            if _q_on and mapping_src == "premap":
+                _pl_env = os.getenv("LIVE_PREMAP", "")
+                if _pl_env == "on":
+                    _premap_ok = True
+                elif _pl_env != "off":
+                    try:
+                        _pl = await pool.fetchval(
+                            "SELECT value FROM ingestion_state WHERE key=$1",
+                            "premap_live")
+                        _premap_ok = (bool(json.loads(_pl)
+                                      if isinstance(_pl, str) else _pl)
+                                      if _pl is not None else False)
+                    except Exception:  # noqa: BLE001 — fail safe: refuse
+                        _premap_ok = False
+            if _q_on and not _premap_ok:
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 "
                     "WHERE id=$1",

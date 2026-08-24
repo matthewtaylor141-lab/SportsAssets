@@ -3822,6 +3822,23 @@ async def api_quarantine_set(action: str) -> dict:
     return {"ok": True, "quarantine": action == "on"}
 
 
+@app.post("/api/admin/premap-live/{action}",
+          dependencies=[Depends(require_admin)])
+async def api_premap_live_set(action: str) -> dict:
+    """The resume lever (owner order 2026-08-24): 'on' lets
+    premap-resolved mappings trade while the total quarantine still
+    refuses every legacy-resolved mapping. 'off' re-closes it. Flip on
+    only after the premap fidelity samples certify."""
+    if action not in ("on", "off"):
+        raise HTTPException(status_code=400, detail="action must be on|off")
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        "premap_live", json.dumps(action == "on"))
+    return {"ok": True, "premap_live": action == "on"}
+
+
 @app.get("/api/admin/quarantine", dependencies=[Depends(require_admin)])
 async def api_quarantine_get() -> dict:
     pool = await get_pool()
@@ -3837,7 +3854,21 @@ async def api_quarantine_get() -> dict:
     env = os.getenv("LIVE_MAPPING_QUARANTINE", "")
     if env in ("on", "off"):
         on = env == "on"
-    return {"quarantine": on, "env_override": env or None}
+    pl_val = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1", "premap_live")
+    premap_live = False
+    if pl_val is not None:
+        try:
+            premap_live = bool(json.loads(pl_val)
+                               if isinstance(pl_val, str) else pl_val)
+        except (TypeError, ValueError):
+            premap_live = False
+    pl_env = os.getenv("LIVE_PREMAP", "")
+    if pl_env in ("on", "off"):
+        premap_live = pl_env == "on"
+    return {"quarantine": on, "env_override": env or None,
+            "premap_live": premap_live,
+            "premap_env_override": pl_env or None}
 
 
 @app.get("/api/admin/edge-decay", dependencies=[Depends(require_admin)])

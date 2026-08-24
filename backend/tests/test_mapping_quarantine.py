@@ -69,3 +69,52 @@ def test_mapping_kept_on_row_for_postmortem(monkeypatch):
     slug_writes = [a for sql, a in pool.updates
                    if "us_market_slug" in sql]
     assert slug_writes and f"tsc-epl-ars-che-{TODAY}-o3pt5" in str(slug_writes)
+
+
+def test_staleness_gate_refuses_late_signals(monkeypatch):
+    monkeypatch.setenv("LIVE_MAX_REACTION_S", "90")
+    pool = _LadderPool([])
+    submitted = _wire(monkeypatch, pool, f"tsc-epl-ars-che-{TODAY}-o3pt5")
+    # reaction is stamped by the dispatcher and passed in — 300s is stale
+    asyncio.run(live_executor.maybe_execute(_payload(), 300.0))
+    assert submitted == []
+    stale = [(sql, a) for sql, a in pool.updates
+             if "status='rejected'" in sql and "stale-signal" in str(a)]
+    assert len(stale) == 1
+
+
+def test_premap_live_lever_admits_only_premap_mappings(monkeypatch):
+    from sportsassets.workers import premap as premap_mod
+
+    pool = _LadderPool([])
+    submitted = _wire(monkeypatch, pool, "unused-fuzzy-slug")
+    monkeypatch.setenv("LIVE_MAPPING_QUARANTINE", "on")
+    monkeypatch.setenv("LIVE_PREMAP", "on")
+
+    async def fake_premap(_pool, *_a, **_k):
+        return {"market_slug": f"atc-epl-ars-che-{TODAY}-ars",
+                "title": "Arsenal", "outcome": "arsenal",
+                "matched_by": "premap", "score": 1.0}
+
+    monkeypatch.setattr(premap_mod, "resolve", fake_premap)
+    asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
+    assert submitted  # premap mapping trades while quarantine holds
+
+
+def test_premap_live_off_keeps_premap_refused(monkeypatch):
+    from sportsassets.workers import premap as premap_mod
+
+    pool = _LadderPool([])
+    submitted = _wire(monkeypatch, pool, "unused-fuzzy-slug")
+    monkeypatch.setenv("LIVE_MAPPING_QUARANTINE", "on")
+    monkeypatch.setenv("LIVE_PREMAP", "off")
+
+    async def fake_premap(_pool, *_a, **_k):
+        return {"market_slug": f"atc-epl-ars-che-{TODAY}-ars",
+                "title": "Arsenal", "outcome": "arsenal",
+                "matched_by": "premap", "score": 1.0}
+
+    monkeypatch.setattr(premap_mod, "resolve", fake_premap)
+    asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
+    assert submitted == []
+    assert len(_rejections(pool)) == 1

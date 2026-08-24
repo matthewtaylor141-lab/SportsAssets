@@ -317,7 +317,7 @@ jobs:
           # quarantine switch state (resume is POST /api/admin/quarantine/off)
           curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/quar.json "$BASE/api/admin/quarantine" || true
-          jq -r '"  QUARANTINE \(.quarantine)  env_override=\(.env_override // "none")"' /tmp/quar.json 2>/dev/null || true
+          jq -r '"  QUARANTINE \(.quarantine)  env_override=\(.env_override // "none")  premap_live=\(.premap_live // false)"' /tmp/quar.json 2>/dev/null || true
           jq -r '.copy_deltas[]? | "  BDD-D \(.delta)  anchor=\(.anchor) copies=\(.copies)  \(.title[0:80])"' /tmp/bdd.json 2>/dev/null | head -60 || true
           jq -r '.noncopy_anchor_rows[]? | "  BDD-N \(.pnl)  sleeve=\(.sleeve)  \(.title[0:80])"' /tmp/bdd.json 2>/dev/null | head -30 || true
           jq -r '.capped_copy_rows[]? | "  BDD-CAP \(.pnl)  \(.whale)  \(.title[0:80])"' /tmp/bdd.json 2>/dev/null | head -20 || true
