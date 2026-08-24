@@ -811,9 +811,14 @@ async def _execute_manual(asset: str, usd: float, note: str = "",
         # Desk orders take the book's available size at the protected
         # limit and cancel the rest (owner order 2026-08-21) — same
         # partial-take contract as the copy path.
+        # The desk's resolver names the side (2026-08-24): without this
+        # the last-gate backstop refuses every two-sided market — which
+        # on this venue is every sports market — and the desk cannot
+        # trade at all. Fail-closed was correct; staying broken is not.
         result = await asyncio.to_thread(
             pmus.submit_fok, mapping["market_slug"], limit, shares,
-            False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+            False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+            mapping.get("intent"))
         filled = float(result["filled_shares"]) if result["ok"] else 0.0
         fill_price = float(result["fill_price"]) if result["ok"] else None
         await pool.execute(
