@@ -1101,7 +1101,8 @@ _ECHO_TASKS: set = set()
 async def _independent_check(us_slug: str, outcome: str | None,
                              his_title: str | None,
                              his_slug: str | None,
-                             intent: str | None) -> tuple[str, str]:
+                             intent: str | None,
+                             mapping_src: str | None = None) -> tuple[str, str]:
     """Re-derive the mapping from the WHALE'S OWN SIGNAL through a
     DIFFERENT resolver, and require it to agree with what we bought.
 
@@ -1113,6 +1114,18 @@ async def _independent_check(us_slug: str, outcome: str | None,
     independent resolvers agreeing is evidence; one resolver agreeing
     with itself is not.)"""
     from . import pmus
+
+    # NOT INDEPENDENT IF IT IS THE SAME RESOLVER (certification audit
+    # 2026-08-24): this cross-check calls pmus.resolve_market_exact. For
+    # a mapping the EXACT resolver produced, that is a bit-for-bit
+    # replay — it agrees with itself by construction and certifies
+    # nothing. Only a mapping from a DIFFERENT resolver can be checked
+    # this way; anything else is honestly unverified.
+    if mapping_src in ("exact", "desk_exact", "desk_exact_side",
+                       "derivative_exact", "spread_exact"):
+        return ("unverified",
+                "cross-check would replay the resolver that produced "
+                f"this mapping (src={mapping_src})")
 
     cands = (_tennis_candidates(his_title, his_slug or "")
              + _us_slug_candidates(his_slug or "", outcome or ""))
@@ -1139,7 +1152,8 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                             outcome: str | None, his_title: str | None,
                             attempts: int = 3, shadow: bool = False,
                             his_slug: str | None = None,
-                            intent: str | None = None) -> None:
+                            intent: str | None = None,
+                            mapping_src: str | None = None) -> None:
     """POST-FILL SIDE ECHO (owner order 2026-08-24: "verify that we
     never ever take the wrong position ever again"): seconds after a
     copy fills, re-derive the mapping from the venue's LIVE event board
@@ -1197,8 +1211,17 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                 want = _premap._norm(outcome)
                 if not subject or not want:
                     detail = "contract subject unreadable"
-                elif subject == want or want in subject or subject in want:
+                elif subject == want:
                     verdict = "ok"
+                elif want in subject or subject in want:
+                    # CONTAINMENT IS NOT IDENTITY (certification audit
+                    # 2026-08-24): 'Ito' is contained in 'Mai Ito' and
+                    # in 'Aoi Ito', so containment certified a WRONG
+                    # PLAYER as ok. A partial match is not evidence —
+                    # it is the absence of evidence, and must read as
+                    # unverified rather than as confirmation.
+                    detail = (f"contract subject {subject!r} only "
+                              f"partially matches {want!r} — not proof")
                 else:
                     verdict = "mismatch"
                     detail = (f"contract subject {subject!r} is not the "
@@ -1251,7 +1274,7 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
     # 'unverified' to verified.
     try:
         iv, idetail = await _independent_check(
-            us_slug, outcome, his_title, his_slug, intent)
+            us_slug, outcome, his_title, his_slug, intent, mapping_src)
         if iv == "mismatch":
             verdict, detail = "mismatch", f"{detail} | {idetail}".strip(" |")
         elif iv == "ok" and verdict == "unverified":
@@ -1328,12 +1351,13 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
 def _spawn_echo(pool, row_id: int, us_slug: str, outcome: str | None,
                 his_title: str | None, *, shadow: bool,
                 his_slug: str | None = None,
-                intent: str | None = None) -> None:
+                intent: str | None = None,
+                mapping_src: str | None = None) -> None:
     """Fire-and-forget echo with a strong task ref (a bare create_task
     can be garbage-collected mid-flight)."""
     t = asyncio.create_task(_side_echo_verify(
         pool, row_id, us_slug, outcome, his_title, shadow=shadow,
-        his_slug=his_slug, intent=intent))
+        his_slug=his_slug, intent=intent, mapping_src=mapping_src))
     _ECHO_TASKS.add(t)
     t.add_done_callback(_ECHO_TASKS.discard)
 
@@ -1974,7 +1998,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             _echo_args = (mapping["market_slug"], ctx.get("outcome"),
                           ctx.get("market_title"))
             _echo_kw = {"his_slug": src_slug,
-                        "intent": mapping.get("intent")}
+                        "intent": mapping.get("intent"),
+                        "mapping_src": mapping_src}
             # SIDE INTENT OR REFUSE (venue ground truth 2026-08-24):
             # on families whose sides share an identifier, `intent` is
             # the only field that names the side. A mapping that cannot

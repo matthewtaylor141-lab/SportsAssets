@@ -341,3 +341,90 @@ class TestWordFormTotalsAreNotSpreads:
 
         assert market_type_of("nba-bos-mia-2026-08-24-bos-neg-10") == "spread"
         assert market_type_of("epl-ars-che-2026-08-24-3pt5") == "spread"
+
+
+class TestCertificationAuditFindings:
+    """The 80-agent mapping certification audit (2026-08-24 evening).
+    Five of its seven confirmed findings were already closed by earlier
+    rounds; these pin the reproductions so they stay closed, and cover
+    the two that were still open — both of which weakened the
+    VERIFICATION instrument rather than the mapper."""
+
+    def _board(self, venue_q, venue_slug):
+        m = {"slug": venue_slug, "question": venue_q, "marketSides": [
+            {"identifier": venue_slug, "description": "Yes", "long": True},
+            {"identifier": venue_slug, "description": "No", "long": False}]}
+        ev = {"slug": "asc-mlb-wsn-nym-2026-08-13",
+              "title": "Nationals vs Mets"}
+        rows = premap._market_rows(ev, m)
+        keys = premap.event_keys_for(ev["title"], ev["slug"])
+        for r in rows:
+            r["event_keys"] = keys
+        return rows
+
+    def _resolve(self, rows, whale_title, whale_slug, outcome="Yes"):
+        class _P:
+            async def fetch(self, sql, *a):
+                k = set(a[0])
+                return [r for r in rows if set(r["event_keys"]) & k]
+
+        return asyncio.run(premap.resolve(
+            _P(), whale_title, "Nationals vs Mets", outcome, whale_slug))
+
+    def test_the_mirror_framed_market_is_refused(self):
+        """The audit's headline: the whale buys YES on 'Nationals cover
+        -1.5' and the US board frames the SAME game from the other
+        team. Matching the literal 'yes' bought the METS covering — the
+        exact inverse of his bet."""
+        rows = self._board(
+            "Will the New York Mets cover -1.5 against the Washington "
+            "Nationals?", "asc-mlb-wsn-nym-2026-08-13-nym-neg-1pt5")
+        assert self._resolve(
+            rows, "Spread: Washington Nationals (-1.5)",
+            "mlb-wsn-nym-2026-08-13-wsn-neg-1pt5") is None
+
+    def test_a_yes_on_the_wrong_line_is_refused(self):
+        rows = self._board("Will the Washington Nationals cover -1.5?",
+                           "asc-mlb-wsn-nym-2026-08-13-wsn-neg-1pt5")
+        assert self._resolve(
+            rows, "Will the Washington Nationals cover -2.5?",
+            "mlb-wsn-nym-2026-08-13-wsn-neg-2pt5") is None
+
+    def test_the_right_market_still_resolves(self):
+        rows = self._board("Will the Washington Nationals cover -1.5?",
+                           "asc-mlb-wsn-nym-2026-08-13-wsn-neg-1pt5")
+        hit = self._resolve(
+            rows, "Will the Washington Nationals cover -1.5?",
+            "mlb-wsn-nym-2026-08-13-wsn-neg-1pt5")
+        assert hit["market_slug"] == "asc-mlb-wsn-nym-2026-08-13-wsn-neg-1pt5"
+
+
+class TestTheCrossCheckIsActuallyIndependent:
+    """Two audit findings, both about the instrument rather than the
+    mapper — the more dangerous kind, because they inflate confidence."""
+
+    def test_it_refuses_to_replay_the_resolver_that_mapped_the_trade(self):
+        """The cross-check calls pmus.resolve_market_exact. For a
+        mapping the EXACT resolver produced that is a bit-for-bit
+        replay: it agrees with itself and certifies nothing."""
+        from sportsassets import live_executor as le
+
+        v, d = asyncio.run(le._independent_check(
+            "aec-atp-x-y-2026-08-24", "Player A", "A vs. B",
+            "atp-x-y-2026-08-24", "ORDER_INTENT_BUY_LONG",
+            mapping_src="exact"))
+        assert v == "unverified" and "replay" in d
+
+    def test_a_premap_mapping_is_still_cross_checked(self, monkeypatch):
+        from sportsassets import live_executor as le
+        from sportsassets import pmus
+
+        monkeypatch.setattr(
+            pmus, "resolve_market_exact",
+            lambda c, o: {"market_slug": "aec-atp-x-y-2026-08-24",
+                          "intent": "ORDER_INTENT_BUY_LONG"})
+        v, _ = asyncio.run(le._independent_check(
+            "aec-atp-x-y-2026-08-24", "Player A", "A vs. B",
+            "atp-x-y-2026-08-24", "ORDER_INTENT_BUY_LONG",
+            mapping_src="premap"))
+        assert v == "ok", "premap mappings ARE checkable by the exact path"

@@ -204,9 +204,27 @@ def match_side(rows: list[dict], outcome: str | None,
         want_q = _norm(his_title)
         if not want_q:
             return None
+        # LINE AND SIGN, EXPLICITLY (certification audit 2026-08-24):
+        # the question check above happens to catch a differing line
+        # because the line usually appears IN the question text — but
+        # that is emergent, not guaranteed. A yes/no pick on a lined
+        # market states a line and a sign; both must agree outright.
+        his_signed_yn = signed_line(outcome) or signed_line(his_title)
+
+        def _yn_line_ok(r: dict) -> bool:
+            rs = (r.get("signed") or "").strip()
+            if his_signed_yn or rs:
+                if not rs or rs != his_signed_yn:
+                    return False
+            rl = (r.get("line") or "").strip()
+            if bool(rl) != bool(his_lines):
+                return False
+            return not rl or rl in his_lines
+
         cands = [r for r in rows
                  if _norm(r.get("side_norm")) == on
-                 and _questions_agree(want_q, _norm(r.get("question")))]
+                 and _questions_agree(want_q, _norm(r.get("question")))
+                 and _yn_line_ok(r)]
     elif on.split()[:1] and on.split()[0] in ("over", "under"):
         want = on.split()[0]
         # side descriptions carry their line ("Over 2.5" → "over 2 5");
