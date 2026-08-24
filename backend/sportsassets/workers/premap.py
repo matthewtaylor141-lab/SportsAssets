@@ -55,10 +55,25 @@ def _lines_of(text: str | None) -> set[str]:
         {n for n in re.findall(r"\d+\.5", text or "")}
 
 
+def date_of(slug: str | None) -> str:
+    """The YYYY-MM-DD a slug names, or '' — the game identity that a
+    title alone cannot carry."""
+    m = re.search(r"\d{4}-\d{2}-\d{2}", (slug or "").lower())
+    return m.group(0) if m else ""
+
+
 def event_keys_for(title: str | None, slug: str | None = None) -> list[str]:
     """Deterministic lookup keys for one event, built the same way at
     write time (venue side) and read time (whale side) so a match is an
-    exact string hit, never a similarity score."""
+    exact string hit, never a similarity score.
+
+    DATE-STAMPED (leak-hunt round 2, 2026-08-24): title-derived keys
+    alone are date-free, so 'yankees vs red sox' matched ANY Yankees-Red
+    Sox game — a reviewer reproduced a 2026-08-23 whale trade resolving
+    to the 2026-08-27 game's live orderable side. Every title key is now
+    also emitted stamped with the event's date; resolve() uses the
+    stamped keys whenever the whale's signal carries a date, so the game
+    must agree. The bare keys remain for dateless signals."""
     keys: set[str] = set()
     t = pmus._clean_title(title)
     if t:
@@ -75,12 +90,38 @@ def event_keys_for(title: str | None, slug: str | None = None) -> list[str]:
             if na and nb:
                 keys.add(f"{na} vs {nb}")
                 keys.add(f"{nb} vs {na}")
-    if slug:
+    d = date_of(slug)
+    if d:
+        keys |= {f"{k}@{d}" for k in list(keys)}
         s = (slug or "").lower()
-        m = re.search(r"\d{4}-\d{2}-\d{2}", s)
-        if m:
-            keys.add(s[: m.end()].strip("-"))
+        keys.add(s[: s.find(d) + len(d)].strip("-"))
     return sorted(k for k in keys if k)
+
+
+def dated_keys(keys: list[str] | set[str]) -> list[str]:
+    """Only the date-stamped keys — what a dated whale signal may match
+    on, so a different day's game can never be a candidate."""
+    return sorted(k for k in keys if "@" in k)
+
+
+# The venue's slug grammar names the market TYPE in its prefix (the desk
+# groups on it — see pmus.list_desk_events). Copy-time resolution must
+# not let a moneyline pick land on a spread, a segment, or a prop:
+# every market on an event shares one key set, so without this the
+# candidate pool is the whole board (leak-hunt round 2, 2026-08-24).
+PREFIX_FOR_TYPE = {"moneyline": {"aec", "atc"},
+                   "spread": {"asc"},
+                   "total": {"tsc"},
+                   "btts": {"astatc"}}
+
+
+def _prefix_of(identifier: str | None) -> str:
+    return ((identifier or "").split("-", 1)[0] or "").lower()
+
+
+class _SkipFallback(Exception):
+    """Internal: a partially-successful events sweep must not fall
+    through to the degraded markets path."""
 
 
 def match_side(rows: list[dict], outcome: str | None,
@@ -121,17 +162,40 @@ def match_side(rows: list[dict], outcome: str | None,
                  if (r.get("side_norm") or "").split()[:1] == [want]
                  and line_ok(r)]
     else:
+        # LINE AGREEMENT, not line ABSENCE (leak-hunt round 2,
+        # 2026-08-24): requiring an empty line excluded every spread row
+        # — _market_rows stamps the line on them — so spreads wrote rows
+        # that could never match and the lane was silently dead for the
+        # whole type. A lined pick matches a row whose line it names; an
+        # unlined pick still matches only unlined rows.
+        def _lined_ok(r: dict) -> bool:
+            rl = (r.get("line") or "").strip()
+            if not rl:
+                return not his_lines
+            return rl in his_lines
+
         exact = [r for r in rows if r.get("side_norm") == on
-                 and not (r.get("line") or "").strip()]
+                 and _lined_ok(r)]
         if len(exact) == 1:
             return exact[0]
         if len(exact) > 1:
             return None
+        # a lined pick normalizes with its number attached
+        # ("kansas city chiefs  3 5"), so also try the name alone
+        base = re.sub(r"\s*\d+\s+5$", "", on).strip()
+        if his_lines and base and base != on:
+            lined = [r for r in rows
+                     if _norm(r.get("side_norm") or "")
+                     .startswith(base) and _lined_ok(r)]
+            if len(lined) == 1:
+                return lined[0]
+            if len(lined) > 1:
+                return None
         out_last = (on.split() or [""])[-1]
         if len(out_last) > 3:
             tok = [r for r in rows
                    if out_last in (r.get("side_norm") or "").split()
-                   and not (r.get("line") or "").strip()]
+                   and _lined_ok(r)]
             if len(tok) == 1:
                 return tok[0]
         return None
@@ -335,11 +399,27 @@ async def refresh() -> dict:
             await asyncio.sleep(LIST_PACING_S)
             if len(got) < PAGE_LIMIT:
                 break
-    except Exception as exc:  # noqa: BLE001 — try the fallback path
+    except Exception as exc:  # noqa: BLE001 — maybe try the fallback
         err = f"{type(exc).__name__}: {str(exc)[:160]}"
-        log.warning("premap events path failed (%s); markets fallback", err)
-        mode = "markets"
+        # FALLBACK ONLY ON A DEAD PATH (leak-hunt round 2, 2026-08-24):
+        # the except wraps the whole page loop, so a page-7 timeout or
+        # 429 used to route a HEALTHY sweep into the markets fallback —
+        # whose rows are keyed off each market's own question (junk
+        # surnames, no dated slug key) and overwrite good rows
+        # table-wide via the identifier upsert. Partial success keeps
+        # what it wrote and waits for the next cycle instead.
+        if seen_rows > 0:
+            log.warning("premap events path failed mid-sweep after %d "
+                        "rows (%s); keeping them, no fallback",
+                        seen_rows, err)
+            mode, events_err = "events/partial", err
+        else:
+            log.warning("premap events path failed (%s); markets fallback",
+                        err)
+            mode = "markets"
         try:
+            if mode == "events/partial":
+                raise _SkipFallback()
             offset = 0
             for _page in range(MAX_EVENT_PAGES):
                 mresp = await asyncio.wait_for(asyncio.to_thread(
@@ -375,6 +455,8 @@ async def refresh() -> dict:
             # keys come from market titles, a DEGRADED key set vs the
             # event boards — a silent mode downgrade must be visible.
             events_err, err = err, None
+        except _SkipFallback:
+            pass          # partial sweep: keep the rows, err stays set
         except Exception as exc2:  # noqa: BLE001 — recorded, next cycle
             events_err = err
             err = f"{type(exc2).__name__}: {str(exc2)[:160]}"
@@ -426,12 +508,19 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     """Copy-time resolution from the table: exact keys, unique side, no
     network. None means 'not pre-mapped' — the caller falls through to
     the legacy resolvers (which the quarantine still gates)."""
+    # GAME AGREEMENT (leak-hunt round 2): when the whale's signal names
+    # a date, ONLY date-stamped keys may match, so another day's game
+    # can never be a candidate. Dateless signals keep the bare keys.
+    d = date_of(global_slug)
     keys: set[str] = set()
     for t in (market_title, event_title):
-        keys.update(event_keys_for(t))
+        keys.update(event_keys_for(t, global_slug if d else None))
     if global_slug:
         keys.update(event_keys_for(None, global_slug))
     keys = {k for k in keys if k}
+    if d:
+        keys = set(dated_keys(keys)) | {k for k in keys if k.startswith(
+            tuple(f"{p}-" for p in ("aec", "atc", "asc", "tsc", "astatc")))}
     if not keys:
         return None
     try:
@@ -441,6 +530,19 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
             sorted(keys))]
     except Exception:  # noqa: BLE001 — table absent/degraded: fall through
         return None
+    if not rows:
+        return None
+    # MARKET-TYPE AGREEMENT (leak-hunt round 2): every market on an
+    # event shares one key set, so without this the candidate pool is
+    # the WHOLE board — a moneyline pick could land on a segment or a
+    # prop whose side carries the same name. The venue names the type
+    # in its slug prefix; an unrecognized type refuses (fail closed).
+    from ..copy_sports import market_type_of
+
+    want = PREFIX_FOR_TYPE.get(market_type_of(global_slug or ""))
+    if not want:
+        return None
+    rows = [r for r in rows if _prefix_of(r.get("identifier")) in want]
     if not rows:
         return None
     hit = match_side(rows, outcome, market_title)

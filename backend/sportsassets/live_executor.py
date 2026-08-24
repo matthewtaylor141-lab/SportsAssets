@@ -1099,11 +1099,33 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                 detail = "venue unreachable"
             elif not rows:
                 detail = "event has no live rows"
+            elif (len(rows) == 1
+                  and str(rows[0].get("identifier", "")).lower()
+                  == us_slug.lower()):
+                # SINGLE-SIDE CONTRACT (leak-hunt round 2, 2026-08-24):
+                # for a per-side contract row the parent IS the side, so
+                # the refetch returns exactly one row — itself — and
+                # match_side could only ever say ok or no-unique-match:
+                # 'mismatch' was structurally unreachable and the
+                # tripwire was inert for the whole row class. The real
+                # question here is not WHICH of several sides, it is
+                # whether this contract's own subject still IS the
+                # whale's pick.
+                subject = _premap._norm(rows[0].get("side_norm"))
+                want = _premap._norm(outcome)
+                if not subject or not want:
+                    detail = "contract subject unreadable"
+                elif subject == want or want in subject or subject in want:
+                    verdict = "ok"
+                else:
+                    verdict = "mismatch"
+                    detail = (f"contract subject {subject!r} is not the "
+                              f"whale's pick {want!r}")
             else:
                 hit = _premap.match_side(rows, outcome, his_title)
                 if hit is None:
                     detail = "no unique live match"
-                elif hit["identifier"] == us_slug.lower():
+                elif str(hit["identifier"]).lower() == us_slug.lower():
                     verdict = "ok"
                 else:
                     verdict = "mismatch"

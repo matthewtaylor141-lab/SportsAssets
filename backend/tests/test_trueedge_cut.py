@@ -399,3 +399,43 @@ class TestShadowCertification:
             _payload(whale_username="HomeRunHazard"), 5.0))
         assert spawned and spawned[0][2] is True, \
             "a refused premap resolution must be shadow-verified"
+
+
+class TestContractRowEcho:
+    """Leak-hunt round 2, defect #5: for a per-side CONTRACT row the
+    parent IS the side, so the refetch returns exactly one row — itself
+    — and match_side could only ever answer ok or no-unique-match.
+    'mismatch' was structurally unreachable and the tripwire was inert
+    for the whole row class. The real question for a contract is
+    whether its own subject is still the whale's pick."""
+
+    def _pool(self):
+        return _EchoPool()
+
+    def test_contract_whose_subject_matches_reads_ok(self, monkeypatch):
+        slug = f"atc-epl-ars-che-{TODAY}-ars"
+        monkeypatch.setattr(
+            premap_mod, "live_rows_for_market",
+            lambda parent: [{"identifier": slug, "side_norm": "arsenal",
+                             "line": "", "kind": "contract",
+                             "question": "Will Arsenal win?"}])
+        pool = self._pool()
+        asyncio.run(live_executor._side_echo_verify(
+            pool, 101, slug, "Arsenal", "Arsenal vs Chelsea"))
+        assert _echo_state(pool, "side_echo_last")["ok"] == 1
+
+    def test_contract_whose_subject_flipped_now_trips(self, monkeypatch):
+        """The previously-unreachable verdict: the venue's contract at
+        this identifier is no longer the whale's pick."""
+        slug = f"atc-epl-ars-che-{TODAY}-ars"
+        monkeypatch.setattr(
+            premap_mod, "live_rows_for_market",
+            lambda parent: [{"identifier": slug, "side_norm": "chelsea",
+                             "line": "", "kind": "contract",
+                             "question": "Will Chelsea win?"}])
+        pool = self._pool()
+        asyncio.run(live_executor._side_echo_verify(
+            pool, 101, slug, "Arsenal", "Arsenal vs Chelsea"))
+        assert _echo_state(pool, "side_echo_last")["mismatch"] == 1
+        sqls = [sql for sql, _ in pool.executes]
+        assert any("side_echo_tripped" in s and "'true'" in s for s in sqls)
