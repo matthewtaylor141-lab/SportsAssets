@@ -251,6 +251,14 @@ jobs:
           # "every cent of it") — TODAY's day-detail: the anchor rows vs
           # the copies audit, per-market deltas largest first, plus the
           # non-copy rows that land wholly in the residual.
+          # ── side-fidelity audit (owner order 2026-08-24: prove which
+          # mapping path inverted sides — pick vs the slug we ordered,
+          # with venue-true pnl; settled first, then quarantine stream)
+          curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/mapa.json "$BASE/api/admin/mapping-audit?days=3" || true
+          jq -r '.rows[]? | select(.status == "settled") | "  MAPA \(.pnl)  \(.whale)  pick=\(.pick)  slug=\(.us_slug)"' /tmp/mapa.json 2>/dev/null | head -60 || true
+          jq -r '.rows[]? | select(.status == "rejected") | "  MAPA-Q \(.whale)  pick=\(.pick)  \(.error)"' /tmp/mapa.json 2>/dev/null | head -25 || true
+
           # ── venue-truth restatement status (owner emergency 2026-08-23:
           # settlement was graded by the whale's token; rescore rewrites
           # every settled copy row from the venue's own ledger)

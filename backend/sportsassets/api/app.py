@@ -3805,6 +3805,48 @@ async def api_daily_breakdown() -> dict:
     return await _category_breakdown("2026-08-01", _today_et())
 
 
+@app.get("/api/admin/mapping-audit", dependencies=[Depends(require_admin)])
+async def api_mapping_audit(days: int = 3, limit: int = 400) -> dict:
+    """Side-fidelity evidence, row by row (owner order 2026-08-24: prove
+    which mapping path put copies on the wrong side). For every recent
+    copy row with a US mapping: the whale's pick (token outcome), the
+    US slug we actually ordered (or would have — quarantined rejections
+    carry the mapping in their error), and the venue-true P&L. The slug
+    tail vs the pick's surname makes side-inversion readable at a
+    glance; the postmortem groups by mapping shape."""
+    pool = await get_pool()
+    days = max(1, min(int(days), 14))
+    limit = max(1, min(int(limit), 1000))
+    rows = await pool.fetch(
+        """
+        SELECT lo.placed_at, lower(COALESCE(lo.whale_username,'?')) AS whale,
+               COALESCE(mt.outcome, '') AS pick,
+               COALESCE(m.title, '') AS gtitle,
+               lower(COALESCE(lo.us_market_slug, '')) AS us_slug,
+               lo.status, lo.error,
+               lo.pnl::float8 AS pnl,
+               lo.filled_usd::float8 AS filled_usd
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.placed_at > now() - ($1::int * interval '1 day')
+          AND (lo.us_market_slug IS NOT NULL
+               OR lo.error LIKE 'quarantined%')
+        ORDER BY lo.placed_at DESC
+        LIMIT $2
+        """, days, limit)
+    out = []
+    for r in rows:
+        out.append({
+            "at": r["placed_at"].isoformat() if r["placed_at"] else None,
+            "whale": r["whale"], "pick": r["pick"][:60],
+            "gtitle": r["gtitle"][:80], "us_slug": r["us_slug"][:120],
+            "status": r["status"], "pnl": r["pnl"],
+            "filled_usd": r["filled_usd"],
+            "error": (r["error"] or "")[:160] or None})
+    return {"days": days, "count": len(out), "rows": out}
+
+
 @app.get("/api/admin/rescore-copies", dependencies=[Depends(require_admin)])
 async def api_rescore_summary() -> dict:
     """Last venue-truth restatement summary (owner emergency 2026-08-23)."""
