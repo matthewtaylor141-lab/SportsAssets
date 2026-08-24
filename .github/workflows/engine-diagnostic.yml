@@ -251,6 +251,13 @@ jobs:
           # "every cent of it") — TODAY's day-detail: the anchor rows vs
           # the copies audit, per-market deltas largest first, plus the
           # non-copy rows that land wholly in the residual.
+          # ── the thesis verification (owner order 2026-08-24: verified,
+          # not guessed): per whale, his TRUE edge on the full detected
+          # book at his prices vs what our reaction time achieves
+          curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/tedge.json "$BASE/api/admin/whale-true-edge" || true
+          jq -r '.whales[]? | "  TRUEEDGE \(.whale)  detected=\(.detected)  cf_total=\(.cf_total)  cf_on_filled=\(.cf_on_filled)  paper_actual=\(.paper_actual)  miss_sel=\(.miss_selection)  lat_cost=\(.latency_price_cost)  cf_wins=\(.cf_wins)/\(.cf_graded)"' /tmp/tedge.json 2>/dev/null || true
+
           # ── the syllogism test (owner order 2026-08-24): per whale,
           # venue-true outcomes priced at HIS fill vs OURS — who is
           # copyable at price parity, and what latency actually cost

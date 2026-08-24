@@ -3871,6 +3871,61 @@ async def api_quarantine_get() -> dict:
             "premap_env_override": pl_env or None}
 
 
+@app.get("/api/admin/whale-true-edge", dependencies=[Depends(require_admin)])
+async def api_whale_true_edge(since_day: str = "2026-08-01") -> dict:
+    """The owner's verification (2026-08-24: 'will we profit — verified,
+    not guessed'). ai_trades holds EVERY detected whale trade with two
+    settled results: counterfactual_pnl at HIS price (his true edge on
+    the full detected book — no fill-selection bias) and pnl from a
+    depth-walked paper fill at OUR real reaction time. Per whale:
+      cf_total      his edge, full book, his prices  ← the thesis test
+      cf_on_filled  his edge on just the trades our paper fill caught
+      paper_actual  what our reaction time actually achieves
+    cf_total>0 and paper_actual<0 = pure latency problem (engineering
+    fixes it). cf_total<=0 = the whale isn't copyable at ANY speed."""
+    from datetime import datetime as _dt
+
+    pool = await get_pool()
+    since_d = _dt.fromisoformat(since_day).date()
+    rows = await pool.fetch(
+        """
+        SELECT lower(COALESCE(whale_username, '?')) AS whale,
+               count(*)::int AS detected,
+               count(*) FILTER (WHERE filled_notional > 0)::int AS filled,
+               count(*) FILTER (WHERE status = 'missed')::int AS missed,
+               COALESCE(sum(counterfactual_pnl), 0)::float8 AS cf_total,
+               COALESCE(sum(counterfactual_pnl)
+                        FILTER (WHERE filled_notional > 0), 0)::float8
+                   AS cf_on_filled,
+               COALESCE(sum(pnl) FILTER (WHERE status = 'settled'
+                        AND filled_notional > 0), 0)::float8 AS paper_actual,
+               COALESCE(sum(clip_target), 0)::float8 AS clip_total,
+               count(*) FILTER (WHERE counterfactual_pnl > 0)::int AS cf_wins,
+               count(*) FILTER (WHERE counterfactual_pnl IS NOT NULL
+                        AND abs(counterfactual_pnl) >= 0.005)::int AS cf_graded
+        FROM ai_trades
+        WHERE placed_at >= $1
+        GROUP BY 1
+        ORDER BY cf_total DESC
+        """, since_d)
+    whales = []
+    for r in rows:
+        d = dict(r)
+        d["cf_total"] = round(d["cf_total"], 2)
+        d["cf_on_filled"] = round(d["cf_on_filled"], 2)
+        d["paper_actual"] = round(d["paper_actual"], 2)
+        d["clip_total"] = round(d["clip_total"], 2)
+        d["miss_selection"] = round(d["cf_total"] - d["cf_on_filled"], 2)
+        d["latency_price_cost"] = round(d["cf_on_filled"]
+                                        - d["paper_actual"], 2)
+        whales.append(d)
+    return {"since": since_day, "whales": whales,
+            "note": ("counterfactuals settle on the whale's own venue "
+                     "(global), where resolution data was always "
+                     "correct — this table is untouched by the "
+                     "settlement incident.")}
+
+
 @app.get("/api/admin/edge-decay", dependencies=[Depends(require_admin)])
 async def api_edge_decay(since_day: str = "2026-08-01") -> dict:
     """The syllogism test, per whale (owner order 2026-08-24: 'if we copy
