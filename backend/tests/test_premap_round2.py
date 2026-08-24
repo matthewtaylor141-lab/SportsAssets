@@ -286,3 +286,58 @@ class TestWholeNumberLinesAndSignOrdering:
         assert _lines_of("O/U 47") == {"47"}
         assert _lines_of("Over 2.5") == {"2.5"}
         assert _lines_of("Spread: Chiefs -3") == {"3"}
+
+
+class TestOverUnderRequiresItsLine:
+    """Leak-hunt round 3, the last of the ten confirmed findings.
+    line_ok ended in a bare `return True`, so a row whose line failed
+    to stamp satisfied ANY lined pick: a whale's Over 2.5 matched an
+    Over 9.5 row — a different bet at score 1.0."""
+
+    def test_unlined_row_never_satisfies_a_lined_pick(self):
+        rows = [{"identifier": "tsc-x-o-9pt5", "side_norm": "over 9 5",
+                 "line": "", "kind": "side", "question": "Total"}]
+        assert premap.match_side(rows, "Over 2.5", "O/U 2.5") is None
+
+    def test_each_line_still_matches_its_own_row(self):
+        rows = [{"identifier": "tsc-o-2pt5", "side_norm": "over 2 5",
+                 "line": "2.5", "kind": "side", "question": "Total"},
+                {"identifier": "tsc-o-9pt5", "side_norm": "over 9 5",
+                 "line": "9.5", "kind": "side", "question": "Total"}]
+        assert premap.match_side(
+            rows, "Over 2.5", "O/U 2.5")["identifier"] == "tsc-o-2pt5"
+        assert premap.match_side(
+            rows, "Over 9.5", "O/U 9.5")["identifier"] == "tsc-o-9pt5"
+
+    def test_a_pick_with_no_line_cannot_take_a_total(self):
+        rows = [{"identifier": "tsc-o-2pt5", "side_norm": "over 2 5",
+                 "line": "2.5", "kind": "side", "question": "Total"}]
+        assert premap.match_side(rows, "Over", None) is None
+
+
+class TestWordFormTotalsAreNotSpreads:
+    """market_type_of classified 'over-2pt5' as SPREAD ('over' is four
+    characters, so it slipped past the >4 unknown-word guard) while
+    'under-2pt5' returned unknown. With the market-type gate live that
+    routed a TOTALS bet onto the game's SPREAD market — and made the
+    outcome depend on which word the feed happened to use."""
+
+    def test_word_form_over_and_under_are_totals(self):
+        from sportsassets.copy_sports import market_type_of
+
+        for slug in ("epl-ars-che-2026-08-24-over-2pt5",
+                     "epl-ars-che-2026-08-24-under-2pt5",
+                     "epl-ars-che-2026-08-24-ou-2pt5",
+                     "epl-x-2026-08-24-ht-over-1pt5"):
+            assert market_type_of(slug) == "total", slug
+
+    def test_a_team_qualified_over_is_a_prop_not_the_game_total(self):
+        from sportsassets.copy_sports import market_type_of
+
+        assert market_type_of("epl-x-2026-08-24-home-over-3pt5") == "prop"
+
+    def test_real_spreads_still_classify_as_spreads(self):
+        from sportsassets.copy_sports import market_type_of
+
+        assert market_type_of("nba-bos-mia-2026-08-24-bos-neg-10") == "spread"
+        assert market_type_of("epl-ars-che-2026-08-24-3pt5") == "spread"

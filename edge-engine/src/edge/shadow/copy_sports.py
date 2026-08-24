@@ -292,6 +292,19 @@ def market_type_of(slug: str) -> str:
         return "prop"
     if "total" in suffix:
         return "total"
+    # WORD-FORM OVER/UNDER (leak-hunt round 3, 2026-08-24): 'over' is
+    # four characters, so it slipped past the >4 unknown-word guard
+    # below and fell through to the bare-line fallback — classifying
+    # 'over-2pt5' as SPREAD. With the market-type gate live that routes
+    # a TOTALS bet onto the game's SPREAD market. ('under', at five
+    # characters, was caught by the guard and returned unknown, so the
+    # same bet was blocked or mis-typed depending only on which word
+    # the feed used.) A side-qualified over/under is a TEAM total,
+    # which is prop class, not the game total.
+    if any(t in ("over", "under", "ou") for t in suffix):
+        if any(t in ("home", "away", "h", "a") for t in suffix):
+            return "prop"
+        return "total"
     if any(_TOTAL_RE.match(t) for t in suffix):
         return "total"
     # A line token is a spread ONLY in the company of nothing but short

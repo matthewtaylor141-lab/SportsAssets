@@ -181,10 +181,18 @@ def match_side(rows: list[dict], outcome: str | None,
     his_lines = _lines_of(his_title) | _lines_of(outcome)
 
     def line_ok(r: dict) -> bool:
+        """Line agreement for the OVER/UNDER branch.
+
+        The old form ended in a bare `return True`, so a row whose line
+        failed to stamp satisfied ANY lined pick: a whale's Over 2.5
+        matched an Over 9.5 row — a different bet entirely (leak-hunt
+        round 3, 2026-08-24). An over/under pick is MEANINGLESS without
+        its line, so both sides must state one and they must agree.
+        """
         rl = (r.get("line") or "").strip()
-        if on in ("over", "under") or rl:
-            return bool(rl) and rl in his_lines if his_lines else False
-        return True
+        if not his_lines or not rl:
+            return False
+        return rl in his_lines
 
     cands: list[dict] = []
     if on in ("yes", "no"):
