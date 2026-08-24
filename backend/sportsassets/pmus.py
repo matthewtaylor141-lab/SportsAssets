@@ -758,6 +758,27 @@ def resolve_derivative_exact(global_slug: str,
             "matched_by": "derivative_exact", "score": best_score}
 
 
+
+def order_intent_for(market: dict, side: dict | None) -> str | None:
+    """The ORDER INTENT that buys this side of this market, or None when
+    the venue does not say unambiguously (REFUSE).
+
+    Venue ground truth 2026-08-24: on the aec- family both sides carry
+    the SAME identifier (equal to the market slug) and the order payload
+    has no side field, so `intent` (BUY_LONG vs BUY_SHORT) is the only
+    thing that selects a side. Every resolver must state it or refuse —
+    ordering an unnamed side hands the choice to the venue, which is the
+    wrong-side incident's root cause."""
+    sides = [x for x in (market.get("marketSides") or [])
+             if isinstance(x, dict)]
+    if side is None:
+        # a single-outcome contract: the slug itself is the position
+        return None if sides else "ORDER_INTENT_BUY_LONG"
+    from .workers.premap import side_intent
+
+    return side_intent(side, sides)
+
+
 def resolve_market_exact(candidate_slugs: list[str],
                          outcome: str | None) -> dict | None:
     """Deterministic US-market resolution for the manual desk: try each
@@ -789,6 +810,7 @@ def resolve_market_exact(candidate_slugs: list[str],
         if score >= MATCH_FLOOR and not _has_sides:
             return {"market_slug": m["slug"], "title": m.get("title"),
                     "outcome": m.get("outcome"),
+                    "intent": order_intent_for(m, None),
                     "matched_by": "desk_exact", "score": score}
         # Two-sided markets (tennis aec- especially) score near zero on
         # the PARENT outcome — the tradable sides live in marketSides,
@@ -814,9 +836,15 @@ def resolve_market_exact(candidate_slugs: list[str],
                 second_sc = sscore
         if (best_side is not None and best_sc >= MATCH_FLOOR
                 and second_sc < MATCH_FLOOR):
+            _int = order_intent_for(m, best_side)
+            if _int is None:
+                # sides share an identifier and the venue named no
+                # long/short: unorderable, never a coin flip
+                continue
             return {"market_slug": best_side["identifier"],
                     "title": m.get("question") or m.get("title"),
                     "outcome": best_side["description"],
+                    "intent": _int,
                     "matched_by": "desk_exact_side", "score": best_sc}
     return None
 
@@ -1021,7 +1049,8 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
 
 def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
                sell: bool = False,
-               tif: str = "TIME_IN_FORCE_FILL_OR_KILL") -> dict:
+               tif: str = "TIME_IN_FORCE_FILL_OR_KILL",
+               intent: str | None = None) -> dict:
     """Preview then place a limit order. Returns the same normalized
     shape the global executor uses:
     {ok, order_id, status, fill_price, filled_shares, raw}.
@@ -1039,10 +1068,26 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
     guard stays valid: an IOC can only cost LESS than the full-quantity
     preview it was checked against."""
     client = _get_client()
+    # THE SIDE SELECTOR (venue ground truth 2026-08-24): on market
+    # families whose two sides share one identifier — every aec- match
+    # — the slug does NOT name a side and CreateOrderParams carries no
+    # side field, so `intent` is the ONLY thing that distinguishes
+    # BUYING Marko Topo from BUYING Miguel Damas (BUY_LONG vs
+    # BUY_SHORT). Hardcoding BUY_LONG, as this did until now, let the
+    # venue pick our side on that whole family — the wrong-side
+    # incident's root cause. Callers pass the intent the venue's own
+    # side object named; the default stays BUY_LONG for the families
+    # whose side identifiers are distinct.
+    _buy_intent = intent or "ORDER_INTENT_BUY_LONG"
+    if _buy_intent not in ("ORDER_INTENT_BUY_LONG",
+                           "ORDER_INTENT_BUY_SHORT"):
+        return {"ok": False, "order_id": None,
+                "status": "bad_intent", "fill_price": None,
+                "filled_shares": 0.0,
+                "raw": {"intent": _buy_intent}}
     params = {
         "marketSlug": us_market_slug,
-        "intent": "ORDER_INTENT_SELL_LONG" if sell
-                  else "ORDER_INTENT_BUY_LONG",
+        "intent": "ORDER_INTENT_SELL_LONG" if sell else _buy_intent,
         "type": "ORDER_TYPE_LIMIT",
         "price": _amount(limit_price),
         "quantity": int(quantity),

@@ -84,7 +84,7 @@ def test_exact_grammar_maps_first_and_fuzzy_never_runs(monkeypatch):
             "side-coded atc candidate must lead"
         return {"market_slug": slugs[0], "title": "Arsenal",
                 "outcome": outcome, "matched_by": "desk_exact",
-                "score": 1.0}
+                "intent": "ORDER_INTENT_BUY_LONG", "score": 1.0}
 
     def fake_fuzzy(*a, **k):
         calls["fuzzy"] += 1
@@ -93,7 +93,11 @@ def test_exact_grammar_maps_first_and_fuzzy_never_runs(monkeypatch):
     submitted = []
 
     def fake_submit(slug, limit, shares, sell=False,
-                    tif="TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"):
+                    tif="TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+                    intent=None):
+        assert intent in ("ORDER_INTENT_BUY_LONG",
+                          "ORDER_INTENT_BUY_SHORT"), \
+            "every copy order must name its side intent"
         submitted.append((slug, limit, shares))
         return {"ok": True, "filled_shares": float(shares),
                 "fill_price": limit, "order_id": "o1", "raw": {}}

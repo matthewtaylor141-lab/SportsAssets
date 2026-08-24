@@ -217,16 +217,66 @@ async def _ensure_table(pool) -> None:
             line text,
             side_norm text,
             event_keys text[],
+            intent text,
             updated_at timestamptz NOT NULL DEFAULT now()
         )
         """)
+    # Sides that share an identifier (the aec- family) are distinct
+    # ONLY by side_norm — keying on identifier alone silently
+    # overwrote one side of every such market (2026-08-24).
+    await pool.execute(
+        "ALTER TABLE us_premap ADD COLUMN IF NOT EXISTS intent text")
+    await pool.execute(
+        "ALTER TABLE us_premap DROP CONSTRAINT IF EXISTS us_premap_pkey")
+    await pool.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS us_premap_ident_side "
+        "ON us_premap (identifier, side_norm)")
     await pool.execute(
         "CREATE INDEX IF NOT EXISTS us_premap_keys ON us_premap "
         "USING gin (event_keys)")
 
 
+def side_intent(side: dict, sides: list[dict]) -> str | None:
+    """Which ORDER INTENT buys THIS side, or None when the venue does
+    not say unambiguously.
+
+    THE INCIDENT'S ROOT CAUSE (venue ground truth, 2026-08-24): on the
+    aec- family BOTH sides carry the SAME identifier — equal to the
+    market slug — and CreateOrderParams has no side field. The slug
+    therefore does not name a side; only `intent` does (BUY_LONG vs
+    BUY_SHORT). Every copy this engine ever placed sent BUY_LONG, so on
+    that whole family the side was decided by the venue's ordering
+    rather than by the whale's pick.
+
+    None means REFUSE: an ambiguous side must never be ordered, because
+    the order carries no other field that could correct it."""
+    lg = side.get("long")
+    if isinstance(lg, bool):
+        return "ORDER_INTENT_BUY_LONG" if lg else "ORDER_INTENT_BUY_SHORT"
+    t = str(side.get("marketSideType") or "").upper()
+    if t.endswith("LONG"):
+        return "ORDER_INTENT_BUY_LONG"
+    if t.endswith("SHORT"):
+        return "ORDER_INTENT_BUY_SHORT"
+    # No explicit long/short marker. Safe ONLY when this side's
+    # identifier is unique among the market's sides — then the slug
+    # itself names the side and the default BUY_LONG is correct.
+    idents = [str(s.get("identifier") or "").lower() for s in sides]
+    mine = str(side.get("identifier") or "").lower()
+    if mine and idents.count(mine) == 1:
+        return "ORDER_INTENT_BUY_LONG"
+    return None
+
+
 def _market_rows(ev: dict, m: dict) -> list[dict]:
-    """Rows for one venue market: each side its own orderable row."""
+    """Rows for one venue market: each side its own orderable row.
+
+    A side row carries the INTENT that buys it. Sides that share an
+    identifier (the aec- family) are distinguished ONLY by intent, so
+    the row key must be (identifier, side_norm) — keying on identifier
+    alone silently overwrote one side of every such market with the
+    other, which is why the table looked healthy while a whole family
+    was unorderable."""
     q = m.get("question") or m.get("title") or ""
     line = ""
     ql = re.findall(r"\d+\.5", q)
@@ -247,6 +297,7 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
                 "question": q[:300], "kind": "side",
                 "line": line,
                 "side_norm": _norm(s["description"]),
+                "intent": side_intent(s, sides),
             })
         return out
     # per-side contract: the market IS one side; its subject names it
@@ -268,6 +319,7 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
             "question": q[:300], "kind": "contract",
             "line": line,
             "side_norm": _norm(subject),
+            "intent": "ORDER_INTENT_BUY_LONG",
         })
     return out
 
@@ -277,16 +329,16 @@ async def _upsert(pool, r: dict, keys: list[str]) -> None:
         """
         INSERT INTO us_premap (identifier, event_slug,
             event_title, market_slug, question, kind, line,
-            side_norm, event_keys, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
-        ON CONFLICT (identifier) DO UPDATE SET
+            side_norm, event_keys, intent, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+        ON CONFLICT (identifier, side_norm) DO UPDATE SET
             event_slug=$2, event_title=$3, market_slug=$4,
-            question=$5, kind=$6, line=$7, side_norm=$8,
-            event_keys=$9, updated_at=now()
+            question=$5, kind=$6, line=$7,
+            event_keys=$9, intent=$10, updated_at=now()
         """,
         r["identifier"], r["event_slug"], r["event_title"],
         r["market_slug"], r["question"], r["kind"],
-        r["line"], r["side_norm"], keys)
+        r["line"], r["side_norm"], keys, r.get("intent"))
 
 
 async def _record_last(pool, summary: dict) -> None:
@@ -526,7 +578,8 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     try:
         rows = [dict(r) for r in await pool.fetch(
             "SELECT identifier, side_norm, kind, line, question, "
-            "event_title FROM us_premap WHERE event_keys && $1::text[]",
+            "event_title, intent FROM us_premap "
+            "WHERE event_keys && $1::text[]",
             sorted(keys))]
     except Exception:  # noqa: BLE001 — table absent/degraded: fall through
         return None
@@ -548,9 +601,21 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     hit = match_side(rows, outcome, market_title)
     if hit is None:
         return None
+    # AMBIGUOUS SIDE = REFUSE (venue ground truth 2026-08-24): on the
+    # aec- family both sides share the market slug, so the order's only
+    # side selector is `intent`. A row whose intent the sweep could not
+    # determine is UNORDERABLE — returning it would hand side selection
+    # back to the venue, which is the incident itself.
+    intent = hit.get("intent")
+    if not intent:
+        log.warning("premap refuses %s: no side intent (sides share an "
+                    "identifier and the venue named no long/short)",
+                    hit.get("identifier"))
+        return None
     return {"market_slug": hit["identifier"],
             "title": hit.get("question") or hit.get("event_title"),
             "outcome": hit.get("side_norm"),
+            "intent": intent,
             "matched_by": "premap", "score": 1.0}
 
 

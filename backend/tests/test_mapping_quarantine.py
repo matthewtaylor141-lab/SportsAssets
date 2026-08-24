@@ -99,6 +99,7 @@ def test_premap_live_lever_admits_only_premap_mappings(monkeypatch):
     async def fake_premap(_pool, *_a, **_k):
         return {"market_slug": f"atc-epl-ars-che-{TODAY}-ars",
                 "title": "Arsenal", "outcome": "arsenal",
+                "intent": "ORDER_INTENT_BUY_LONG",
                 "matched_by": "premap", "score": 1.0}
 
     monkeypatch.setattr(premap_mod, "resolve", fake_premap)
@@ -118,6 +119,7 @@ def test_premap_live_off_keeps_premap_refused(monkeypatch):
     async def fake_premap(_pool, *_a, **_k):
         return {"market_slug": f"atc-epl-ars-che-{TODAY}-ars",
                 "title": "Arsenal", "outcome": "arsenal",
+                "intent": "ORDER_INTENT_BUY_LONG",
                 "matched_by": "premap", "score": 1.0}
 
     monkeypatch.setattr(premap_mod, "resolve", fake_premap)

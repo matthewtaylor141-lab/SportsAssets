@@ -30,7 +30,8 @@ class _Pool:
 def _row(identifier, side_norm, keys, line=""):
     return {"identifier": identifier, "side_norm": side_norm,
             "kind": "side", "line": line, "question": "q",
-            "event_title": "t", "event_keys": keys}
+            "event_title": "t", "event_keys": keys,
+            "intent": "ORDER_INTENT_BUY_LONG"}
 
 
 class TestGameAgreement:

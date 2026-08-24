@@ -1774,9 +1774,26 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # book yields a smaller position instead of a killed order.
             _echo_args = (mapping["market_slug"], ctx.get("outcome"),
                           ctx.get("market_title"))
+            # SIDE INTENT OR REFUSE (venue ground truth 2026-08-24):
+            # on families whose sides share an identifier, `intent` is
+            # the only field that names the side. A mapping that cannot
+            # state its intent is UNORDERABLE — ordering it would hand
+            # side selection to the venue, which is the incident.
+            _intent = mapping.get("intent")
+            if not _intent:
+                await pool.execute(
+                    "UPDATE live_orders SET status='rejected', error=$2 "
+                    "WHERE id=$1", row_id,
+                    "no side intent: this market's sides share an "
+                    "identifier and the resolver could not name the "
+                    "side — refusing rather than letting the venue pick")
+                log.warning("LIVE (US) refused %s: unorderable side",
+                            mapping["market_slug"])
+                return
             result = await asyncio.to_thread(
                 pmus.submit_fok, mapping["market_slug"], limit,
-                int(shares), False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+                int(shares), False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+                _intent)
         else:
             # GLOBAL-CLOB LEG FAIL-CLOSED (leak-hunt find 2026-08-24):
             # active_venue() silently falls back to the global CLOB when

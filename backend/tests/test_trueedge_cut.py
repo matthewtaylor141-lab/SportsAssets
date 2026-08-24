@@ -63,6 +63,7 @@ class TestPremapLiveAllowlist:
         async def fake_premap(_pool, *_a, **_k):
             return {"market_slug": f"atc-epl-ars-che-{TODAY}-ars",
                     "title": "Arsenal", "outcome": "arsenal",
+                    "intent": "ORDER_INTENT_BUY_LONG",
                     "matched_by": "premap", "score": 1.0}
 
         monkeypatch.setattr(premap_mod, "resolve", fake_premap)
@@ -392,6 +393,7 @@ class TestShadowCertification:
         async def fake_premap(_pool, *_a, **_k):
             return {"market_slug": f"atc-epl-ars-che-{TODAY}-ars",
                     "title": "Arsenal", "outcome": "arsenal",
+                    "intent": "ORDER_INTENT_BUY_LONG",
                     "matched_by": "premap", "score": 1.0}
 
         monkeypatch.setattr(premap_mod, "resolve", fake_premap)

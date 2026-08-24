@@ -111,12 +111,19 @@ def _wire(monkeypatch, pool, mapped_slug):
         pmus, "resolve_market",
         lambda *a, **k: {"market_slug": mapped_slug, "title": "O/U",
                          "outcome": "Over 3.5", "matched_by": "fuzzy",
+                         "intent": "ORDER_INTENT_BUY_LONG",
                          "score": 1.0})
     monkeypatch.setattr(pmus, "account_holds", lambda slug: False)
     submitted = []
 
     def fake_submit(slug, limit, shares, sell=False,
-                    tif="TIME_IN_FORCE_FILL_OR_KILL"):
+                    tif="TIME_IN_FORCE_FILL_OR_KILL", intent=None):
+        # A copy must always name the side it is buying (venue ground
+        # truth 2026-08-24: on families whose sides share an identifier
+        # `intent` is the ONLY side selector).
+        assert intent in ("ORDER_INTENT_BUY_LONG",
+                          "ORDER_INTENT_BUY_SHORT"), \
+            "every copy order must name its side intent"
         # Copies must ask for partial-take (owner order 2026-08-21).
         assert tif == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
         submitted.append(slug)
