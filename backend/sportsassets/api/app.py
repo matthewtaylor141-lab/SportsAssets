@@ -4052,7 +4052,29 @@ async def api_premap_status() -> dict:
             "max(updated_at) AS fresh FROM us_premap")
     except Exception:  # noqa: BLE001 — table not created yet
         return {"rows": 0, "events": 0, "fresh": None}
-    extras: dict = {}
+    # COVERAGE PROOF (2026-08-24): "9,353 rows" is only good news if the
+    # rows are TODAY's markets — the venue's bare listing leads with a
+    # stale 2025 catalog, so a full table can still be useless. Count
+    # the rows carrying today's/tomorrow's date and sample a few.
+    coverage: dict = {}
+    try:
+        from datetime import date as _date, timedelta as _td
+
+        d0 = _date.today().isoformat()
+        d1 = (_date.today() + _td(days=1)).isoformat()
+        coverage = dict(await pool.fetchrow(
+            "SELECT count(*) FILTER (WHERE identifier LIKE '%'||$1||'%')"
+            "::int AS today, "
+            "count(*) FILTER (WHERE identifier LIKE '%'||$2||'%')"
+            "::int AS tomorrow", d0, d1))
+        coverage["sample"] = [
+            r["identifier"] for r in await pool.fetch(
+                "SELECT identifier FROM us_premap "
+                "WHERE identifier LIKE '%'||$1||'%' "
+                "ORDER BY updated_at DESC LIMIT 3", d0)]
+    except Exception:  # noqa: BLE001 — coverage is diagnostics only
+        coverage = {}
+    extras: dict = {"coverage": coverage}
     for key, out in (("premap_last", "last_sweep"),
                      ("workers_boot", "workers_boot"),
                      ("side_echo_last", "side_echo"),

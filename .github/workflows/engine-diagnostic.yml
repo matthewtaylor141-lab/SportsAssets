@@ -294,6 +294,7 @@ jobs:
                -o /tmp/premap.json "$BASE/api/admin/premap-status" || true
           jq -r '"  PREMAP rows=\(.rows // 0)  events=\(.events // 0)  fresh=\(.fresh // "never")  last=\(.last_sweep // "none")"' /tmp/premap.json 2>/dev/null || true
           jq -r '"  WORKERS boot=\(.workers_boot // "none")  side_echo=\(.side_echo // "none")  TRIPPED=\(.side_echo_tripped // false)"' /tmp/premap.json 2>/dev/null || true
+          jq -r '"  PREMAP-COV today=\(.coverage.today // 0)  tomorrow=\(.coverage.tomorrow // 0)  sample=\(.coverage.sample // [] | join(" "))"' /tmp/premap.json 2>/dev/null || true
           # SPORTS-PROV: per sports-roster whale, are detections arriving
           # src=chain (sub-second) or src=poll (minutes)? The swisstony
           # capture question answers here. (whales.json is fetched fresh
@@ -348,6 +349,16 @@ jobs:
                -o /tmp/mapa.json "$BASE/api/admin/mapping-audit?days=3" || true
           jq -r '.rows[]? | select(.status == "settled") | "  MAPA \(.pnl)  \(.whale)  pick=\(.pick)  slug=\(.us_slug)"' /tmp/mapa.json 2>/dev/null | head -60 || true
           jq -r '.rows[]? | select(.status == "rejected") | "  MAPA-Q \(.whale)  pick=\(.pick)  \(.error)"' /tmp/mapa.json 2>/dev/null | head -25 || true
+          # FIDELITY STREAK (owner resume gate 2026-08-24): of recently
+          # audited copy signals, how many resolved through the PREMAP
+          # lane vs the legacy resolvers? The premap count is the
+          # number the resume decision waits on — it must be climbing
+          # before the lever flips.
+          jq -r '([.rows[]? | select((.error // "") | test("src=premap"))] | length) as $p
+                 | ([.rows[]? | select((.error // "") | test("src=exact"))] | length) as $e
+                 | ([.rows[]? | select((.error // "") | test("src=fuzzy"))] | length) as $f
+                 | "  FIDELITY premap=\($p)  exact=\($e)  fuzzy=\($f)  (of \((.rows // []) | length) audited)"' \
+            /tmp/mapa.json 2>/dev/null || echo "  FIDELITY unavailable"
 
           # ── venue-truth restatement status (owner emergency 2026-08-23:
           # settlement was graded by the whale's token; rescore rewrites
