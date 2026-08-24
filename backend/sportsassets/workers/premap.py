@@ -285,9 +285,10 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
     ev_slug = ev.get("slug") or ev.get("eventSlug") or ""
     ev_title = ev.get("title") or ""
     out: list[dict] = []
-    sides = [s for s in (m.get("marketSides") or [])
-             if isinstance(s, dict) and s.get("identifier")
-             and s.get("description")]
+    all_sides = [s for s in (m.get("marketSides") or [])
+                 if isinstance(s, dict)]
+    sides = [s for s in all_sides
+             if s.get("identifier") and s.get("description")]
     if sides:
         for s in sides:
             out.append({
@@ -297,7 +298,11 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
                 "question": q[:300], "kind": "side",
                 "line": line,
                 "side_norm": _norm(s["description"]),
-                "intent": side_intent(s, sides),
+                # the UNFILTERED list: judging uniqueness against a
+                # filtered one made a dropped sibling look unique, so a
+                # shared-identifier SHORT side would default to BUY_LONG
+                # — the exact inversion this whole build exists to stop
+                "intent": side_intent(s, all_sides),
             })
         return out
     # per-side contract: the market IS one side; its subject names it
@@ -311,6 +316,11 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
         tl = f" {title.lower()} "
         if title and " vs" not in tl and " - " not in tl and " @ " not in tl:
             subject = title
+    if all_sides:
+        # a market that HAS sides never falls through to the contract
+        # branch: that branch writes the PARENT slug with a hardcoded
+        # BUY_LONG, which is a sideless order by another name
+        return out
     if m.get("slug") and subject:
         out.append({
             "identifier": (m.get("slug") or "").lower(),

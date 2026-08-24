@@ -146,8 +146,17 @@ class TestSubmitCarriesTheIntent:
                 seen.append(params)
                 return {"id": "o1", "executions": []}
 
+        class _Markets:
+            def retrieve_by_slug(self, slug):
+                # SAFE shape: distinct side identifiers, so the
+                # last-gate backstop permits the historical BUY_LONG
+                return {"market": {"slug": slug, "marketSides": [
+                    {"identifier": slug, "description": "A"},
+                    {"identifier": slug + "-b", "description": "B"}]}}
+
         class _C:
             orders = _Orders()
+            markets = _Markets()
 
         return _C()
 
@@ -235,3 +244,145 @@ class TestEchoIndependence:
             "x", "Miguel Damas", "Marko Topo vs. Miguel Damas",
             "atp-martop-migdam-2026-08-24", "ORDER_INTENT_BUY_SHORT"))
         assert v == "unverified"
+
+
+class _EchoPool:
+    """Records every ingestion_state write the echo makes."""
+
+    def __init__(self):
+        self.executes = []
+
+    async def fetchrow(self, sql, *a):
+        if "FROM us_premap" in sql:
+            return {"event_slug": "e", "market_slug": "parent"}
+        return None
+
+    async def fetchval(self, sql, *a):
+        return None
+
+    async def execute(self, sql, *a):
+        self.executes.append((" ".join(sql.split()), a))
+
+
+def _echo_state(pool, key):
+    import json as _json
+
+    for sql, a in pool.executes:
+        if "ingestion_state" in sql and len(a) == 2 and a[1] == key:
+            return _json.loads(a[0])
+    return None
+
+
+class TestPositionSideVerification:
+    """The last link: the venue selects a side by intent, so the only
+    END-TO-END proof that BUY_SHORT bought the short side is the sign
+    of the position we end up holding."""
+
+    def _run(self, monkeypatch, intent, net):
+        from sportsassets import live_executor as le
+
+        slug = "aec-atp-martop-migdam-2026-08-24"
+        monkeypatch.setattr(premap.pmus, "position_side", lambda s: net)
+        monkeypatch.setattr(
+            premap, "live_rows_for_market",
+            lambda parent: [
+                {"identifier": slug, "side_norm": "miguel damas",
+                 "line": "", "kind": "side", "question": "q",
+                 "intent": intent},
+                {"identifier": slug, "side_norm": "marko topo",
+                 "line": "", "kind": "side", "question": "q",
+                 "intent": "ORDER_INTENT_BUY_LONG"}])
+        monkeypatch.setattr(pmus, "resolve_market_exact", lambda c, o: None)
+        pool = _EchoPool()
+        asyncio.run(le._side_echo_verify(
+            pool, 101, slug, "Miguel Damas",
+            "Marko Topo vs. Miguel Damas", intent=intent))
+        return pool
+
+    def test_short_intent_holding_long_is_a_mismatch(self, monkeypatch):
+        pool = self._run(monkeypatch, "ORDER_INTENT_BUY_SHORT", 50.0)
+        st = _echo_state(pool, "side_echo_last")
+        assert st["mismatch"] == 1
+        assert "POSITION SIDE WRONG" in st["last_detail"]
+
+    def test_short_intent_holding_short_reads_ok(self, monkeypatch):
+        pool = self._run(monkeypatch, "ORDER_INTENT_BUY_SHORT", -50.0)
+        assert _echo_state(pool, "side_echo_last")["mismatch"] == 0
+
+    def test_unreadable_position_is_never_a_verdict(self, monkeypatch):
+        pool = self._run(monkeypatch, "ORDER_INTENT_BUY_SHORT", None)
+        assert _echo_state(pool, "side_echo_last")["mismatch"] == 0
+
+
+class TestAuditFindingsInMyOwnFix:
+    """The six-lens certification audit turned its attack on the
+    wrong-side FIX itself and found three ways it still inverted a
+    side. Each is pinned here."""
+
+    def test_a_dropped_sibling_never_makes_the_survivor_look_unique(self):
+        """side_intent judged uniqueness against the FILTERED side list,
+        so one unreadable sibling made a shared-identifier SHORT side
+        look unique — and unique means 'the slug names it', i.e.
+        BUY_LONG. That is the exact inversion, reintroduced."""
+        slug = "aec-atp-x-y-2026-08-24"
+        full = [{"identifier": slug, "description": None},      # dropped
+                {"identifier": slug, "description": "Player B"}]
+        survivor = full[1]
+        # judged against the FULL list: still ambiguous -> refuse
+        assert premap.side_intent(survivor, full) is None
+        # (the old bug: judged against [survivor] alone -> BUY_LONG)
+        assert premap.side_intent(survivor, [survivor]) == \
+            "ORDER_INTENT_BUY_LONG"
+
+    def test_market_rows_uses_the_unfiltered_list(self):
+        slug = "aec-atp-x-y-2026-08-24"
+        m = {"slug": slug, "question": "A vs. B", "marketSides": [
+            {"identifier": slug, "description": None},
+            {"identifier": slug, "description": "Player B"}]}
+        rows = premap._market_rows({"slug": "e", "title": "A vs. B"}, m)
+        assert len(rows) == 1
+        assert rows[0]["intent"] is None, \
+            "an ambiguous side must be unorderable, not BUY_LONG"
+
+    def test_a_sided_market_never_falls_to_the_contract_branch(self):
+        """The contract fallback writes the PARENT slug with a
+        hardcoded BUY_LONG — a sideless order by another name."""
+        slug = "aec-atp-x-y-2026-08-24"
+        m = {"slug": slug, "question": "A vs. B", "outcome": "Player A",
+             "marketSides": [{"identifier": slug, "description": None},
+                             {"identifier": slug, "description": None}]}
+        rows = premap._market_rows({"slug": "e", "title": "A vs. B"}, m)
+        assert all(r["kind"] != "contract" for r in rows), \
+            "a market carrying sides must never emit a contract row"
+
+
+class TestEchoComparesSideNotIdentifier:
+    """Identifier equality is NOT side equality on this venue: both
+    sides of every two-sided market share one identifier, so an echo
+    that compares identifiers lets a wrong-side order certify itself."""
+
+    def test_same_identifier_opposite_intent_is_a_mismatch(self,
+                                                           monkeypatch):
+        from sportsassets import live_executor as le
+
+        slug = "aec-atp-martop-migdam-2026-08-24"
+        # the live board says the whale's pick is the SHORT side...
+        monkeypatch.setattr(
+            premap, "live_rows_for_market",
+            lambda parent: [
+                {"identifier": slug, "side_norm": "marko topo", "line": "",
+                 "kind": "side", "question": "q",
+                 "intent": "ORDER_INTENT_BUY_LONG"},
+                {"identifier": slug, "side_norm": "miguel damas",
+                 "line": "", "kind": "side", "question": "q",
+                 "intent": "ORDER_INTENT_BUY_SHORT"}])
+        monkeypatch.setattr(pmus, "resolve_market_exact", lambda c, o: None)
+        monkeypatch.setattr(premap.pmus, "position_side", lambda s: None)
+        pool = _EchoPool()
+        # ...but we sent LONG. Same slug, opposite side.
+        asyncio.run(le._side_echo_verify(
+            pool, 101, slug, "Miguel Damas",
+            "Marko Topo vs. Miguel Damas",
+            intent="ORDER_INTENT_BUY_LONG"))
+        st = _echo_state(pool, "side_echo_last")
+        assert st["mismatch"] == 1

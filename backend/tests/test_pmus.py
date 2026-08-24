@@ -169,6 +169,18 @@ class _StubOrders:
         return self.create_resp
 
 
+class _SideLookupStub:
+    """The last-gate backstop (2026-08-24) asks the venue whether the
+    slug unambiguously names a side when the caller passes no intent.
+    These fixtures use the SAFE shape (distinct side identifiers); the
+    ambiguous shape has its own tests in test_side_intent.py."""
+
+    def retrieve_by_slug(self, slug):
+        return {"market": {"slug": slug, "marketSides": [
+            {"identifier": slug, "description": "A"},
+            {"identifier": slug + "-b", "description": "B"}]}}
+
+
 def test_submit_fok_filled(monkeypatch):
     orders = _StubOrders(
         preview_order={"cashOrderQty": {"value": "9.54", "currency": "USD"},
@@ -180,7 +192,8 @@ def test_submit_fok_filled(monkeypatch):
             "order": {"state": "ORDER_STATE_FILLED"},
         }]},
     )
-    monkeypatch.setattr(pmus, "_get_client", lambda: type("C", (), {"orders": orders})())
+    monkeypatch.setattr(pmus, "_get_client", lambda: type("C", (), {"orders": orders,
+                                                    "markets": _SideLookupStub()})())
     r = pmus.submit_fok("g1-red-sox", 0.53, 18)
     assert r["ok"] is True
     assert r["order_id"] == "ord-1"
@@ -199,7 +212,8 @@ def test_submit_fok_preview_cost_mismatch_aborts(monkeypatch):
         preview_order={"cashOrderQty": {"value": "17.00", "currency": "USD"}},
         create_resp={"id": "should-not-happen"},
     )
-    monkeypatch.setattr(pmus, "_get_client", lambda: type("C", (), {"orders": orders})())
+    monkeypatch.setattr(pmus, "_get_client", lambda: type("C", (), {"orders": orders,
+                                                    "markets": _SideLookupStub()})())
     r = pmus.submit_fok("m", 0.50, 20)  # our cost: $10
     assert r["ok"] is False
     assert r["status"] == "preview_mismatch"
@@ -214,7 +228,8 @@ def test_submit_fok_killed_not_ok(monkeypatch):
             "order": {"state": "ORDER_STATE_CANCELED"},
         }]},
     )
-    monkeypatch.setattr(pmus, "_get_client", lambda: type("C", (), {"orders": orders})())
+    monkeypatch.setattr(pmus, "_get_client", lambda: type("C", (), {"orders": orders,
+                                                    "markets": _SideLookupStub()})())
     r = pmus.submit_fok("m", 0.50, 20)
     assert r["ok"] is False
     assert r["filled_shares"] == 0.0
@@ -300,7 +315,8 @@ def test_submit_ioc_partial_fill(monkeypatch):
         }]},
     )
     monkeypatch.setattr(pmus, "_get_client",
-                        lambda: type("C", (), {"orders": orders})())
+                        lambda: type("C", (), {"orders": orders,
+                                                    "markets": _SideLookupStub()})())
     r = pmus.submit_fok("g1-red-sox", 0.53, 100, False,
                         "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
     assert r["ok"] is True

@@ -1165,11 +1165,21 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                 hit = _premap.match_side(rows, outcome, his_title)
                 if hit is None:
                     detail = "no unique live match"
-                elif str(hit["identifier"]).lower() == us_slug.lower():
-                    verdict = "ok"
-                else:
+                elif str(hit["identifier"]).lower() != us_slug.lower():
                     verdict = "mismatch"
                     detail = f"live matcher chose {hit['identifier']}"
+                elif intent and hit.get("intent") \
+                        and hit["intent"] != intent:
+                    # IDENTIFIER EQUALITY IS NOT SIDE EQUALITY: every
+                    # two-sided market here shares one identifier
+                    # between its sides, so comparing identifiers alone
+                    # let a wrong-side order certify itself. The INTENT
+                    # is the side.
+                    verdict = "mismatch"
+                    detail = (f"live matcher would order "
+                              f"{hit['intent']}, we sent {intent}")
+                else:
+                    verdict = "ok"
     except Exception as exc:  # noqa: BLE001 — the echo never raises
         detail = f"echo error: {exc}"[:200]
 

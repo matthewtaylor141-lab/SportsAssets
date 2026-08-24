@@ -1109,13 +1109,41 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
     # incident's root cause. Callers pass the intent the venue's own
     # side object named; the default stays BUY_LONG for the families
     # whose side identifiers are distinct.
-    _buy_intent = intent or "ORDER_INTENT_BUY_LONG"
-    if _buy_intent not in ("ORDER_INTENT_BUY_LONG",
-                           "ORDER_INTENT_BUY_SHORT"):
+    if intent is not None and intent not in ("ORDER_INTENT_BUY_LONG",
+                                             "ORDER_INTENT_BUY_SHORT"):
         return {"ok": False, "order_id": None,
                 "status": "bad_intent", "fill_price": None,
-                "filled_shares": 0.0,
-                "raw": {"intent": _buy_intent}}
+                "filled_shares": 0.0, "raw": {"intent": intent}}
+    _buy_intent = intent
+    if _buy_intent is None and not sell:
+        # LAST-GATE BACKSTOP (2026-08-24): three live paths — the
+        # underdog sleeve and both desk paths — call this without an
+        # intent, and the old default silently bought side 0. Since
+        # EVERY two-sided market on this venue shares one identifier
+        # between its sides, that default was a coin flip. When the
+        # caller does not name a side, ask the venue: a market whose
+        # sides are ambiguous is REFUSED here, so no caller can forget
+        # its way into a wrong-side order.
+        try:
+            _m = (_get_client().markets.retrieve_by_slug(us_market_slug)
+                  or {}).get("market") or {}
+        except Exception as exc:  # noqa: BLE001 — unreadable: refuse
+            return {"ok": False, "order_id": None,
+                    "status": "side_unverifiable", "fill_price": None,
+                    "filled_shares": 0.0, "raw": {"error": str(exc)[:200]}}
+        _sides = [x for x in (_m.get("marketSides") or [])
+                  if isinstance(x, dict)]
+        _idents = [str(x.get("identifier") or "").lower() for x in _sides]
+        if len(_sides) > 1 and len(set(_idents)) < len(_sides):
+            return {"ok": False, "order_id": None,
+                    "status": "ambiguous_side", "fill_price": None,
+                    "filled_shares": 0.0,
+                    "raw": {"slug": us_market_slug,
+                            "sides": [x.get("description") for x in _sides],
+                            "why": "sides share an identifier; the caller "
+                                   "must pass the intent that names the "
+                                   "side"}}
+        _buy_intent = "ORDER_INTENT_BUY_LONG"
     params = {
         "marketSlug": us_market_slug,
         "intent": "ORDER_INTENT_SELL_LONG" if sell else _buy_intent,
