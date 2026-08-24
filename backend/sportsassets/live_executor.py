@@ -1561,6 +1561,32 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # new sub-second detection certifies positive and the env
             # deliberately changes. The row keeps its mapping — his
             # fidelity samples continue.
+            # VERIFIED-ONLY, INDEPENDENT OF QUARANTINE (leak-hunt round
+            # 2): the allowlist below lived INSIDE the `if _q_on` branch,
+            # so lifting the quarantine — a mapping-fidelity action —
+            # silently dropped the profitability allowlist with it and
+            # opened the lane to every non-cut whale. Only whales the
+            # TRUEEDGE table verified profitable may spend, whatever the
+            # quarantine says. LIVE_VERIFIED_WHALES widens it
+            # deliberately; empty disables the gate for a full resume.
+            # The verified set is exactly TRUEEDGE cf_total > 0:
+            # homerunhazard (+26,076), 0x076 (+6,189), swisstony
+            # (+11,895). swisstony is verified but HELD below, pending
+            # his paper cohort at the new sub-second detection — the two
+            # gates answer different questions and must stay separate.
+            _verified_env = os.getenv(
+                "LIVE_VERIFIED_WHALES",
+                "homerunhazard,0x076daa87,swisstony")
+            _verified = {w.strip() for w in _verified_env.lower().split(",")
+                         if w.strip()}
+            if _verified and username not in _verified:
+                await pool.execute(
+                    "UPDATE live_orders SET status='rejected', error=$2 "
+                    "WHERE id=$1", row_id,
+                    "not verified-profitable: only whales certified by "
+                    "the TRUEEDGE counterfactual may spend "
+                    f"(slug={_q_slug0[:100]})")
+                return
             _held = {w.strip() for w in
                      os.getenv("LIVE_HOLD_WHALES", "swisstony")
                      .lower().split(",") if w.strip()}

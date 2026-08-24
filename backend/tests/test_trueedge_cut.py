@@ -441,3 +441,46 @@ class TestContractRowEcho:
         assert _echo_state(pool, "side_echo_last")["mismatch"] == 1
         sqls = [sql for sql, _ in pool.executes]
         assert any("side_echo_tripped" in s and "'true'" in s for s in sqls)
+
+
+class TestVerifiedOnlyIsIndependentOfQuarantine:
+    """Leak-hunt round 2: the profitability allowlist lived INSIDE the
+    quarantine branch, so `POST /api/admin/quarantine/off` — a
+    mapping-fidelity action — silently dropped it and opened the lane
+    to every non-cut whale. Verified-only is now its own gate."""
+
+    def _run(self, monkeypatch, whale, verified_env=None):
+        from sportsassets import copy_sports as _cs
+
+        pool = _LadderPool([])
+        submitted = _wire_with_real_cuts(
+            monkeypatch, pool, f"tsc-epl-ars-che-{TODAY}-o3pt5")
+        monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
+        monkeypatch.setenv("LIVE_MAPPING_QUARANTINE", "off")  # fully lifted
+        # _wire clears the gate for its historical RN1 fixtures; this
+        # suite is ABOUT the gate, so put the real default back.
+        monkeypatch.setenv(
+            "LIVE_VERIFIED_WHALES",
+            "homerunhazard,0x076daa87,swisstony"
+            if verified_env is None else verified_env)
+        asyncio.run(live_executor.maybe_execute(
+            _payload(whale_username=whale), 5.0))
+        return pool, submitted
+
+    def test_unverified_whale_refused_even_with_quarantine_off(
+            self, monkeypatch):
+        pool, submitted = self._run(monkeypatch, "kch123")
+        assert submitted == []
+        rej = [(sql, a) for sql, a in pool.updates
+               if "status='rejected'" in sql
+               and "not verified-profitable" in str(a)]
+        assert len(rej) == 1
+
+    def test_verified_whale_flows_with_quarantine_off(self, monkeypatch):
+        pool, submitted = self._run(monkeypatch, "HomeRunHazard")
+        assert submitted
+
+    def test_empty_env_disables_the_gate_for_a_full_resume(self,
+                                                           monkeypatch):
+        pool, submitted = self._run(monkeypatch, "kch123", verified_env="")
+        assert submitted, "an explicit empty list is a deliberate resume"

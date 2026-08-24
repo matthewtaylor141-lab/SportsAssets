@@ -106,6 +106,9 @@ def _wire(monkeypatch, pool, mapped_slug):
     # its own tests (test_trueedge_cut.py).
     monkeypatch.setattr(live_executor, "COPY_CUT_WHALES", frozenset())
     monkeypatch.setitem(live_executor.PER_FILL_BY_WHALE, "rn1", 225.00)
+    # ...and out of the 2026-08-24 verified-profitable gate, for the
+    # same reason: these fixtures predate it (it has its own tests).
+    monkeypatch.setenv("LIVE_VERIFIED_WHALES", "")
     monkeypatch.setattr(pmus, "resolve_market_exact", lambda *a, **k: None)
     monkeypatch.setattr(
         pmus, "resolve_market",

@@ -47,6 +47,9 @@ def _wire(monkeypatch, pool):
     monkeypatch.setenv("LIVE_MAPPING_QUARANTINE", "off")
     monkeypatch.setattr(live_executor, "COPY_CUT_WHALES", frozenset())
     monkeypatch.setitem(live_executor.PER_FILL_BY_WHALE, "rn1", 225.00)
+    # ...and out of the 2026-08-24 verified-profitable gate, for the
+    # same reason: these fixtures predate it (it has its own tests).
+    monkeypatch.setenv("LIVE_VERIFIED_WHALES", "")
     # Soccer slug: outside KALSHI_FIRST_SPORTS, so the venue split never
     # defers and the test exercises mapping, not routing.
     ctx = {"market_slug": f"epl-ars-che-{date.today().isoformat()}",
