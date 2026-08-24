@@ -1287,6 +1287,35 @@ jobs:
                       print(f"  side[{i}] identifier={str(ident)!r} "
                             f"description={str(s.get('description'))[:40]!r} "
                             f"SAME_AS_MARKET_SLUG={ident == m.get('slug')}")
+                      # THE SIDE SELECTOR: both sides of an aec- market
+                      # share one identifier, and CreateOrderParams has
+                      # no side field — only intent (BUY_LONG vs
+                      # BUY_SHORT). These fields are how a side is named.
+                      print(f"    long={s.get('long')!r} "
+                            f"marketSideType={s.get('marketSideType')!r} "
+                            f"id={str(s.get('id'))[:24]!r} "
+                            f"team={str(s.get('team'))[:24]!r}")
+          # A market family whose sides DO carry distinct identifiers,
+          # for contrast (soccer atc-): proves the split is per-family.
+          print("SIDE-TRUTH --- contrast: a soccer moneyline board ---")
+          try:
+              evs = pub.events.list({"limit": 40, "active": True,
+                                     "closed": False}) or {}
+              evs = evs.get("events") if isinstance(evs, dict) else evs
+              for ev in list(evs or []):
+                  for m in (ev.get("markets") or []):
+                      sides = [s for s in (m.get("marketSides") or [])
+                               if isinstance(s, dict)]
+                      if len(sides) < 2:
+                          continue
+                      idents = {s.get("identifier") for s in sides}
+                      print(f"  {str(m.get('slug'))[:52]!r} sides={len(sides)} "
+                            f"distinct_identifiers={len(idents)} "
+                            f"longs={[s.get('long') for s in sides]} "
+                            f"types={[str(s.get('marketSideType'))[-12:] for s in sides]}")
+                      break
+          except Exception as e:
+              print(f"  contrast ERR {type(e).__name__}: {str(e)[:100]}")
           PY
 
       - name: Crypto census — PMUS crypto markets (public gateway via SDK)
