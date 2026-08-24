@@ -418,3 +418,50 @@ def test_copy_exit_gain_floor_and_threshold(monkeypatch):
 
     stats = asyncio.run(ud._copy_exit_sweep(None))
     assert stats == {"copyexit_open": 0, "copyexit_cashed": 0}
+
+
+class TestSleeveIsOffEntirely:
+    """Owner order 2026-08-24: "that sleeve should be off completely...
+    only copies flow." Entries were already off (2026-08-20); the
+    cash-out leg was still placing real SELL orders. Both are off now,
+    while the COPY take-profit exit — which lives in the same loop but
+    is a copy function — keeps running."""
+
+    def test_enabled_defaults_to_off(self, monkeypatch):
+        import importlib
+
+        monkeypatch.delenv("UNDERDOG_ENABLED", raising=False)
+        from sportsassets.workers import underdog as ud
+
+        importlib.reload(ud)
+        assert ud.ENABLED is False, \
+            "the sleeve must be off unless deliberately re-enabled"
+
+    def test_entry_sweep_refuses_without_touching_the_db(self, monkeypatch):
+        import asyncio
+
+        from sportsassets.workers import underdog as ud
+
+        monkeypatch.setattr(ud, "ENABLED", False)
+        monkeypatch.setenv("UNDERDOG_ENTRIES_FORCE_ON", "1")  # even forced
+
+        class _Pool:
+            def fetch(self, *a, **k):
+                raise AssertionError("entry sweep touched the db while off")
+
+        st = asyncio.run(ud._entry_sweep(_Pool()))
+        assert "2026-08-24" in st["off"] and st["entered"] == 0
+
+    def test_cashout_sweep_places_no_orders_while_off(self, monkeypatch):
+        import asyncio
+
+        from sportsassets.workers import underdog as ud
+
+        monkeypatch.setattr(ud, "ENABLED", False)
+
+        class _Pool:
+            def fetch(self, *a, **k):
+                raise AssertionError("cashout sweep touched the db while off")
+
+        st = asyncio.run(ud._cashout_sweep(_Pool()))
+        assert st == {"skipped": "sleeve off"}

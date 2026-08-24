@@ -46,7 +46,13 @@ log = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
 
-ENABLED = os.environ.get("UNDERDOG_ENABLED", "1") != "0"
+# OFF BY DEFAULT (owner order 2026-08-24: "that sleeve should be off
+# completely... only copies flow"). The sleeve placed real, unquarantined
+# orders through submit_fok WITHOUT naming a side, and every two-sided
+# market on this venue shares one identifier between its sides — so its
+# side was chosen by the venue on every entry. It stays off until the
+# owner says otherwise; UNDERDOG_ENABLED=1 is the deliberate re-enable.
+ENABLED = os.environ.get("UNDERDOG_ENABLED", "0") != "0"
 # v2 stake (owner 2026-08-12): $2 flat on every dog.
 PER_FILL_USD = float(os.environ.get("UNDERDOG_PER_FILL_USD", "2.00"))
 # No day cap (owner directive 2026-08-08: "every MLB and tennis match").
@@ -382,6 +388,13 @@ async def _entry_sweep(pool) -> dict:
     # positions already held are still managed. Re-arming requires the
     # NEW explicit knob — deliberately not the old UNDERDOG_SLEEVE env,
     # so a stale service-config value can never re-arm it.
+    # SLEEVE OFF ENTIRELY (owner order 2026-08-24: "that sleeve should
+    # be off completely... only copies flow") — layered above the
+    # 2026-08-20 entries-off order, which already stopped new buys.
+    if not ENABLED:
+        stats["off"] = ("entries off (owner order 2026-08-20); sleeve "
+                        "off entirely (owner order 2026-08-24)")
+        return stats
     if os.environ.get("UNDERDOG_ENTRIES_FORCE_ON", "0") != "1":
         stats["off"] = "entries off (owner order 2026-08-20)"
         return stats
@@ -753,6 +766,8 @@ async def _entry_sweep(pool) -> dict:
 
 
 async def _cashout_sweep(pool) -> dict:
+    if not ENABLED:            # owner order 2026-08-24: sleeve OFF
+        return {"skipped": "sleeve off"}
     from ..config import settings
     from ..live_executor import active_venue
     from .. import pmus
@@ -1021,9 +1036,22 @@ async def main() -> None:
     from ..db import get_pool, heartbeat
 
     if not ENABLED:
-        log.warning("underdog sleeve disabled (UNDERDOG_ENABLED=0)")
+        # The sleeve is off, but the COPY take-profit exit lives in this
+        # same loop and is a COPY function — "only copies flow" keeps it
+        # running. Nothing here places an underdog order.
+        log.warning("underdog sleeve OFF (owner order 2026-08-24); "
+                    "copy-exit sweep continues")
         while True:
-            await asyncio.sleep(3600)
+            try:
+                pool = await get_pool()
+                ce = await _copy_exit_sweep(pool)
+                if ce.get("copyexit_cashed"):
+                    log.info("copy exit sweep: %s", ce)
+                await heartbeat("underdog", "ok",
+                                {"sleeve": "off", **ce})
+            except Exception:  # noqa: BLE001 — supervisor restarts us
+                log.exception("copy exit sweep failed")
+            await asyncio.sleep(CASHOUT_SWEEP_S)
     last_entry = 0.0
     while True:
         try:
