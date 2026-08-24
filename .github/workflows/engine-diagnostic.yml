@@ -251,6 +251,13 @@ jobs:
           # "every cent of it") — TODAY's day-detail: the anchor rows vs
           # the copies audit, per-market deltas largest first, plus the
           # non-copy rows that land wholly in the residual.
+          # ── the syllogism test (owner order 2026-08-24): per whale,
+          # venue-true outcomes priced at HIS fill vs OURS — who is
+          # copyable at price parity, and what latency actually cost
+          curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/edge.json "$BASE/api/admin/edge-decay" || true
+          jq -r '.whales[]? | "  EDGE \(.whale)  n=\(.n)  at_his=\(.at_his)  at_ours=\(.at_ours_feefree)  actual=\(.actual)  drag=\(.price_drag)  fees=\(.fees_other)  slip=\(.avg_slip // "?")  lat_med=\(.latency_median_s // "?")s  lat_p90=\(.latency_p90_s // "?")s  wins=\(.wins)/\(.n - .voids)"' /tmp/edge.json 2>/dev/null || true
+
           # ── premap coverage (owner order 2026-08-24: copy-time mapping
           # becomes a lookup; this line watches the table fill)
           curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \

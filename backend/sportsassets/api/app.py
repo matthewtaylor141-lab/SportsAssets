@@ -3840,6 +3840,90 @@ async def api_quarantine_get() -> dict:
     return {"quarantine": on, "env_override": env or None}
 
 
+@app.get("/api/admin/edge-decay", dependencies=[Depends(require_admin)])
+async def api_edge_decay(since_day: str = "2026-08-01") -> dict:
+    """The syllogism test, per whale (owner order 2026-08-24: 'if we copy
+    their trades at the same or better price we must match their
+    profit'). For every settled copy row we hold the whale's price
+    (his_price), our fill (fill_price), our reaction time (reaction_s)
+    and the venue-true result — so each whale's certified P&L decomposes
+    into: his edge on OUR filled subset (P&L had we filled at his
+    price), the price drag our latency cost, and fees/other. A whale
+    with positive edge_at_his_price is copyable the moment our fills
+    reach price parity; one negative even at his prices is either
+    unlucky in our subset (selection effect) or not worth copying."""
+    from datetime import datetime as _dt
+
+    pool = await get_pool()
+    since_d = _dt.fromisoformat(since_day).date()
+    rows = await pool.fetch(
+        """
+        SELECT lower(COALESCE(whale_username, '?')) AS whale,
+               his_price::float8 AS his, fill_price::float8 AS fp,
+               filled_usd::float8 AS stake, pnl::float8 AS pnl,
+               reaction_s::float8 AS rs
+        FROM live_orders
+        WHERE status IN ('settled', 'cashed_out')
+          AND filled_usd > 0 AND his_price > 0
+          AND placed_at >= $1
+        """, since_d)
+    out: dict[str, dict] = {}
+    for r in rows:
+        w = out.setdefault(r["whale"], {
+            "n": 0, "voids": 0, "wins": 0, "staked": 0.0,
+            "actual": 0.0, "at_his": 0.0, "at_ours_feefree": 0.0,
+            "slip_sum": 0.0, "slip_n": 0, "rs": []})
+        pnl = float(r["pnl"] or 0)
+        stake = float(r["stake"])
+        his, fp = float(r["his"]), float(r["fp"] or 0)
+        w["n"] += 1
+        w["staked"] = round(w["staked"] + stake, 2)
+        w["actual"] = round(w["actual"] + pnl, 2)
+        if r["rs"] is not None:
+            w["rs"].append(float(r["rs"]))
+        if fp and his:
+            w["slip_sum"] += (fp - his)
+            w["slip_n"] += 1
+        if abs(pnl) < 0.005:
+            w["voids"] += 1
+            continue
+        win = pnl > 0
+        if win:
+            w["wins"] += 1
+        if 0 < his < 1:
+            w["at_his"] = round(
+                w["at_his"] + (stake * (1 - his) / his if win else -stake), 2)
+        if 0 < fp < 1:
+            w["at_ours_feefree"] = round(
+                w["at_ours_feefree"]
+                + (stake * (1 - fp) / fp if win else -stake), 2)
+    whales = []
+    for w, d in sorted(out.items(), key=lambda kv: kv[1]["at_his"],
+                       reverse=True):
+        rs = sorted(d.pop("rs"))
+        med = rs[len(rs) // 2] if rs else None
+        p90 = rs[int(len(rs) * 0.9)] if rs else None
+        whales.append({
+            "whale": w, **d,
+            "avg_slip": round(d["slip_sum"] / d["slip_n"], 4)
+            if d["slip_n"] else None,
+            "latency_median_s": round(med, 1) if med is not None else None,
+            "latency_p90_s": round(p90, 1) if p90 is not None else None,
+            "price_drag": round(d["at_ours_feefree"] - d["at_his"], 2),
+            "fees_other": round(d["actual"] - d["at_ours_feefree"], 2),
+        })
+    for wrow in whales:
+        wrow.pop("slip_sum", None)
+        wrow.pop("slip_n", None)
+    return {"since": since_day, "whales": whales,
+            "note": ("at_his = venue-true outcomes priced at the whale's "
+                     "fill (his edge on OUR subset, fee-free); "
+                     "at_ours_feefree = same outcomes at our fill price; "
+                     "price_drag = what latency cost; fees_other = "
+                     "venue-actual minus fee-free at our price. A whale "
+                     "is copyable-at-parity iff at_his > 0.")}
+
+
 @app.get("/api/admin/premap-status", dependencies=[Depends(require_admin)])
 async def api_premap_status() -> dict:
     """Pre-map coverage: how much of the venue universe the lookup table
