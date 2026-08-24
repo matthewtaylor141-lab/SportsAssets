@@ -260,13 +260,57 @@ async def refresh() -> dict:
     # exactly where it hangs.
     await _record_last(pool, {"mode": "starting", "events": 0, "rows": 0})
     try:
+        # PREMAP-GT ground truth (probe #1030, 2026-08-24): the venue
+        # IGNORES the eventSlug filter on markets.list (every queried
+        # event got back the same generic page), and a bare
+        # {"active": True} events.list leads with a stale historical
+        # catalog (2025 games on page 1). The desk solved both on
+        # 2026-08-21: probe the PARAM-VARIANT LADDER most-specific
+        # first (a start-time window), and read each event's markets
+        # INLINE off the event row — no per-event calls at all.
+        from datetime import datetime as _dt, timedelta as _td
+        from datetime import timezone as _tz
+
+        def _iso(d):
+            return d.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        _now = _dt.now(_tz.utc)
+        variants = (
+            {"active": True, "closed": False,
+             "startTimeMin": _iso(_now - _td(hours=12)),
+             "startTimeMax": _iso(_now + _td(hours=96))},
+            {"active": True, "closed": False},
+            {"active": True},
+        )
+        variant, first = None, None
+        for v in variants:
+            try:
+                probe = await asyncio.wait_for(asyncio.to_thread(
+                    client.events.list, {"limit": PAGE_LIMIT, **v}),
+                    timeout=LIST_CALL_TIMEOUT_S)
+            except Exception:  # noqa: BLE001 — next variant
+                continue
+            evs = _items(probe, "events")
+            # the winning variant is the one whose events carry live
+            # inline markets — a page of bare historical rows is the
+            # junk catalog, not a win
+            if any(m for e in evs for m in (e.get("markets") or [])
+                   if isinstance(m, dict) and not m.get("closed")):
+                variant, first = v, evs
+                break
+        if variant is None:
+            raise RuntimeError(
+                "no events.list variant returned live inline markets")
         offset = 0
         for _page in range(MAX_EVENT_PAGES):
-            resp = await asyncio.wait_for(asyncio.to_thread(
-                client.events.list,
-                {"limit": PAGE_LIMIT, "offset": offset, "active": True}),
-                timeout=LIST_CALL_TIMEOUT_S)
-            got = _items(resp, "events")
+            if _page == 0:
+                got = first
+            else:
+                resp = await asyncio.wait_for(asyncio.to_thread(
+                    client.events.list,
+                    {"limit": PAGE_LIMIT, "offset": offset, **variant}),
+                    timeout=LIST_CALL_TIMEOUT_S)
+                got = _items(resp, "events")
             if not got:
                 break
             offset += len(got)
@@ -274,16 +318,9 @@ async def refresh() -> dict:
                 ev_slug = ev.get("slug") or ev.get("eventSlug")
                 if not ev_slug:
                     continue
-                await asyncio.sleep(LIST_PACING_S)
-                try:
-                    mresp = await asyncio.wait_for(asyncio.to_thread(
-                        client.markets.list,
-                        {"eventSlug": [ev_slug], "active": True}),
-                        timeout=LIST_CALL_TIMEOUT_S)
-                    markets = [m for m in _items(mresp, "markets")
-                               if (m.get("eventSlug") or m.get("event_slug"))
-                               in (None, ev_slug) and not m.get("closed")]
-                except Exception:  # noqa: BLE001 — next event
+                markets = [m for m in (ev.get("markets") or [])
+                           if isinstance(m, dict) and not m.get("closed")]
+                if not markets:
                     continue
                 events += 1
                 keys = event_keys_for(ev.get("title"), ev_slug)
@@ -295,6 +332,7 @@ async def refresh() -> dict:
                         seen_rows += 1
             await _record_last(pool, {"mode": "events/page%d" % _page,
                                       "events": events, "rows": seen_rows})
+            await asyncio.sleep(LIST_PACING_S)
             if len(got) < PAGE_LIMIT:
                 break
     except Exception as exc:  # noqa: BLE001 — try the fallback path
@@ -360,23 +398,26 @@ async def refresh() -> dict:
     return summary
 
 
-def live_rows_for_event(ev_slug: str) -> list[dict]:
-    """RAW venue rows for one event, in the exact shape the sweep writes
-    and match_side consumes — the side-echo re-derivation input.
+def live_rows_for_market(parent_slug: str) -> list[dict]:
+    """RAW venue rows for one market via DIRECT slug lookup — the
+    side-echo re-derivation input, in the exact shape the sweep writes
+    and match_side consumes.
     (Leak-hunt find 2026-08-24: the echo originally consumed
     pmus.event_board, whose DESK-shaped rows carry none of the keys
-    _market_rows reads — the tripwire was structurally inert.)
+    _market_rows reads — the tripwire was structurally inert. And
+    PREMAP-GT proved markets.list IGNORES the eventSlug filter, so a
+    list-based refetch would compare against a GENERIC page — direct
+    retrieve_by_slug is the venue call the exact resolver already uses
+    in production.)
     Closed markets are INCLUDED: the just-filled market may close within
     seconds, and its absence must read as unverified, never as a
     different side. Exceptions propagate — the caller owns retries."""
     client = pmus._get_client()
-    mresp = client.markets.list({"eventSlug": [ev_slug]})
-    rows: list[dict] = []
-    for m in _items(mresp, "markets"):
-        if (m.get("eventSlug") or m.get("event_slug")) not in (None, ev_slug):
-            continue
-        rows.extend(_market_rows({"slug": ev_slug, "title": ""}, m))
-    return rows
+    m = (client.markets.retrieve_by_slug(parent_slug) or {}).get(
+        "market") or {}
+    if not m.get("slug"):
+        raise RuntimeError(f"market not found: {parent_slug}")
+    return _market_rows({"slug": "", "title": ""}, m)
 
 
 async def resolve(pool, market_title: str | None, event_title: str | None,

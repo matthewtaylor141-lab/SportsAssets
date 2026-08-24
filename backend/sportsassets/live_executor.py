@@ -1075,21 +1075,23 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
 
     verdict, detail = "unverified", ""
     try:
-        ev_slug = await pool.fetchval(
-            "SELECT event_slug FROM us_premap WHERE identifier=$1",
-            us_slug.lower())
-        if not ev_slug:
+        prow = await pool.fetchrow(
+            "SELECT event_slug, market_slug FROM us_premap "
+            "WHERE identifier=$1", us_slug.lower())
+        if not prow:
             detail = "identifier not in us_premap"
         else:
-            # RAW venue rows in the sweep's own shape (leak-hunt find
-            # 2026-08-24: event_board rows are desk-shaped and made the
-            # tripwire structurally inert). live_rows_for_event raises
-            # on failure, so the retries here are real.
+            # RAW venue rows via DIRECT market lookup (leak-hunt find
+            # 2026-08-24: desk-shaped event_board rows made the
+            # tripwire inert; PREMAP-GT proved list-based refetch
+            # compares against a GENERIC page). live_rows_for_market
+            # raises on failure, so the retries here are real.
+            parent = prow["market_slug"] or us_slug.lower()
             rows = None
             for _ in range(attempts):
                 try:
                     rows = await asyncio.to_thread(
-                        _premap.live_rows_for_event, ev_slug)
+                        _premap.live_rows_for_market, parent)
                     break
                 except Exception:  # noqa: BLE001 — retry, then count
                     await asyncio.sleep(2)

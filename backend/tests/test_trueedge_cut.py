@@ -123,16 +123,20 @@ class TestPremapLiveAllowlist:
 
 
 class _EchoPool:
-    """Pool for the side-echo unit tests: serves the us_premap event
+    """Pool for the side-echo unit tests: serves the us_premap parent
     lookup and records every state write."""
 
     def __init__(self, event_slug="epl-ars-che"):
         self.event_slug = event_slug
         self.executes = []
 
-    async def fetchval(self, sql, *a):
+    async def fetchrow(self, sql, *a):
         if "FROM us_premap" in sql:
-            return self.event_slug
+            return {"event_slug": self.event_slug,
+                    "market_slug": "parent-slug"}
+        return None
+
+    async def fetchval(self, sql, *a):
         return None   # no prior side_echo_last
 
     async def execute(self, sql, *a):
@@ -140,7 +144,7 @@ class _EchoPool:
 
 
 def _live_rows(slug):
-    """Rows in the sweep's own shape, as live_rows_for_event returns
+    """Rows in the sweep's own shape, as live_rows_for_market returns
     them (the echo consumes THIS shape — leak-hunt find 2026-08-24:
     desk-shaped event_board rows made the tripwire inert)."""
     return [{"identifier": slug, "side_norm": "arsenal", "line": "",
@@ -152,8 +156,8 @@ def _live_rows(slug):
 
 def test_side_echo_ok_records_and_never_trips(monkeypatch):
     slug = f"atc-epl-ars-che-{TODAY}-ars"
-    monkeypatch.setattr(premap_mod, "live_rows_for_event",
-                        lambda ev: _live_rows(slug))
+    monkeypatch.setattr(premap_mod, "live_rows_for_market",
+                        lambda parent: _live_rows(slug))
     pool = _EchoPool()
     asyncio.run(live_executor._side_echo_verify(
         pool, 101, slug, "Arsenal", "Arsenal vs Chelsea"))
@@ -162,29 +166,32 @@ def test_side_echo_ok_records_and_never_trips(monkeypatch):
     assert state and json.loads(state[0][0])["ok"] == 1
 
 
-def test_live_rows_for_event_produces_matchable_rows(monkeypatch):
-    """The end-to-end shape contract the leak-hunt proved broken: raw
-    venue markets (dict OR bare-list response) must come back as rows
+def test_live_rows_for_market_produces_matchable_rows(monkeypatch):
+    """The end-to-end shape contract the leak-hunt proved broken: the
+    raw market from a DIRECT retrieve_by_slug lookup (the venue call
+    the exact resolver already uses in production — PREMAP-GT proved
+    the list-based path returns a generic page) must come back as rows
     match_side can actually match."""
     from sportsassets import pmus as pmus_mod
 
     slug = f"atc-epl-ars-che-{TODAY}-ars"
     raw_market = {"question": "Arsenal vs Chelsea Winner",
-                  "slug": slug[:-4], "eventSlug": "epl-ars-che",
+                  "slug": slug[:-4],
                   "marketSides": [
                       {"identifier": slug, "description": "Arsenal"},
                       {"identifier": slug[:-4] + "-che",
                        "description": "Chelsea"}]}
 
     class _Markets:
-        def list(self, _q):
-            return [raw_market]          # the bare-list SDK shape
+        def retrieve_by_slug(self, s):
+            assert s == slug[:-4], "must look up the PARENT slug"
+            return {"market": raw_market}
 
     class _Client:
         markets = _Markets()
 
     monkeypatch.setattr(pmus_mod, "_get_client", lambda: _Client())
-    rows = premap_mod.live_rows_for_event("epl-ars-che")
+    rows = premap_mod.live_rows_for_market(slug[:-4])
     hit = premap_mod.match_side(rows, "Arsenal", "Arsenal vs Chelsea")
     assert hit and hit["identifier"] == slug
 
@@ -194,8 +201,8 @@ def test_side_echo_mismatch_requarantines_alone(monkeypatch):
     # The live board now says the matcher's pick is a DIFFERENT
     # identifier than the one we bought — the one-order tripwire.
     other = f"atc-epl-ars-che-{TODAY}-v2-ars"
-    monkeypatch.setattr(premap_mod, "live_rows_for_event",
-                        lambda ev: _live_rows(other))
+    monkeypatch.setattr(premap_mod, "live_rows_for_market",
+                        lambda parent: _live_rows(other))
     pool = _EchoPool()
     asyncio.run(live_executor._side_echo_verify(
         pool, 101, ours, "Arsenal", "Arsenal vs Chelsea"))
@@ -242,7 +249,7 @@ def test_side_echo_outage_never_trips_the_breaker(monkeypatch):
     def boom(_ev):
         raise RuntimeError("venue 503")
 
-    monkeypatch.setattr(premap_mod, "live_rows_for_event", boom)
+    monkeypatch.setattr(premap_mod, "live_rows_for_market", boom)
     pool = _EchoPool()
     asyncio.run(live_executor._side_echo_verify(
         pool, 101, f"atc-epl-ars-che-{TODAY}-ars", "Arsenal",
