@@ -432,6 +432,10 @@ async def _settle_pmus_from_venue(pool, *,
     from ..api.pmus_account import resolution_truth
 
     if rescore_since:
+        # asyncpg demands a date OBJECT for a date parameter — the str
+        # form 500'd instantly here, which is why the startup
+        # restatement failed silently on every boot (2026-08-24).
+        since_d = _dt.fromisoformat(rescore_since).date()
         rows = await pool.fetch(
             """
             SELECT id, lower(us_market_slug) AS slug,
@@ -441,9 +445,9 @@ async def _settle_pmus_from_venue(pool, *,
             FROM live_orders
             WHERE us_market_slug IS NOT NULL
               AND status IN ('filled', 'settled')
-              AND placed_at >= $1::date
+              AND placed_at >= $1
             ORDER BY id
-            """, rescore_since)
+            """, since_d)
         from_day = rescore_since
     else:
         rows = await pool.fetch(
