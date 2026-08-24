@@ -386,3 +386,24 @@ class TestEchoComparesSideNotIdentifier:
             intent="ORDER_INTENT_BUY_LONG"))
         st = _echo_state(pool, "side_echo_last")
         assert st["mismatch"] == 1
+
+
+class TestExitsCloseTheSideTheyOpened:
+    """Leak-hunt round 3: exits hardcoded SELL_LONG, so a position
+    opened with BUY_SHORT could not be closed — the order tries to sell
+    a side we do not hold."""
+
+    def test_short_position_exits_short(self):
+        assert pmus._exit_intent("x", "ORDER_INTENT_BUY_SHORT") == \
+            "ORDER_INTENT_SELL_SHORT"
+
+    def test_long_position_exits_long(self):
+        assert pmus._exit_intent("x", "ORDER_INTENT_BUY_LONG") == \
+            "ORDER_INTENT_SELL_LONG"
+
+    def test_unknown_opener_falls_back_to_the_position_sign(self,
+                                                            monkeypatch):
+        monkeypatch.setattr(pmus, "position_side", lambda s: -25.0)
+        assert pmus._exit_intent("x", None) == "ORDER_INTENT_SELL_SHORT"
+        monkeypatch.setattr(pmus, "position_side", lambda s: 25.0)
+        assert pmus._exit_intent("x", None) == "ORDER_INTENT_SELL_LONG"

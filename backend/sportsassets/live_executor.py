@@ -1302,6 +1302,14 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     if COPY_MODE == "off":
         return
     cfg = settings()
+    # MASTER KILL SWITCH, AT THE COMMON GATE (leak-hunt round 3,
+    # 2026-08-24): copy_probe_enabled was checked only in execute_copy,
+    # the FRESH-detection entry point, so copy_sweep's reclaim path
+    # called maybe_execute directly and kept placing real orders after
+    # an operator disabled copying. Every copy crosses this function;
+    # the switch belongs here.
+    if not cfg.copy_probe_enabled:
+        return
     venue = active_venue()
     if venue is None:
         return

@@ -113,13 +113,24 @@ class TestSpreadLines:
     def test_lined_pick_matches_its_lined_row(self):
         rows = [{"identifier": "asc-nfl-kc-buf-2026-09-13-kc",
                  "side_norm": "kansas city chiefs  3 5", "line": "3.5",
+                 "signed": "-3.5",
                  "kind": "side", "question": "Spread: Kansas City (-3.5)"},
                 {"identifier": "asc-nfl-kc-buf-2026-09-13-buf",
                  "side_norm": "buffalo bills  3 5", "line": "3.5",
+                 "signed": "+3.5",
                  "kind": "side", "question": "Spread: Buffalo (+3.5)"}]
         hit = premap.match_side(rows, "Kansas City Chiefs -3.5",
                                 "Spread: Kansas City Chiefs (-3.5)")
         assert hit and hit["identifier"].endswith("-kc")
+
+    def test_a_row_missing_its_sign_refuses_a_signed_pick(self):
+        """Fail closed: if the venue row does not state a sign we
+        cannot prove the handicap direction, so we do not bet it."""
+        rows = [{"identifier": "asc-x-kc",
+                 "side_norm": "kansas city chiefs  3 5", "line": "3.5",
+                 "kind": "side", "question": "Spread"}]
+        assert premap.match_side(
+            rows, "Kansas City Chiefs -3.5", "Spread (-3.5)") is None
 
     def test_unlined_pick_still_refuses_lined_rows(self):
         rows = [{"identifier": "asc-x-kc", "side_norm": "kansas city chiefs",
@@ -190,3 +201,46 @@ class TestPartialSweepNeverFallsBack:
             "a partially successful sweep must NOT run the degraded fallback"
         assert summary["mode"] == "events/partial"
         assert summary["err"], "the failure stays on the record"
+
+
+class TestHandicapSignIsNeverErased:
+    """Leak-hunt round 3: _norm strips punctuation, so 'Chiefs -3.5' and
+    'Chiefs +3.5' both normalize to 'chiefs  3 5'. A whale taking +3.5
+    (getting points) therefore matched the venue's -3.5 side (giving
+    points) — the opposite bet — on every spread copy."""
+
+    def _rows(self):
+        from sportsassets.workers.premap import _norm, signed_line
+
+        return [{"identifier": "asc-kc",
+                 "side_norm": _norm("Kansas City Chiefs -3.5"),
+                 "line": "3.5",
+                 "signed": signed_line("Kansas City Chiefs -3.5"),
+                 "kind": "side", "question": "Spread"},
+                {"identifier": "asc-buf",
+                 "side_norm": _norm("Buffalo Bills +3.5"),
+                 "line": "3.5",
+                 "signed": signed_line("Buffalo Bills +3.5"),
+                 "kind": "side", "question": "Spread"}]
+
+    def test_the_inversion_is_closed(self):
+        # the venue lists KC only at -3.5; a +3.5 KC pick has no side
+        assert premap.match_side(
+            self._rows(), "Kansas City Chiefs +3.5",
+            "Spread: KC (+3.5)") is None
+
+    def test_each_side_still_matches_its_own_sign(self):
+        assert premap.match_side(
+            self._rows(), "Kansas City Chiefs -3.5",
+            "Spread: KC (-3.5)")["identifier"] == "asc-kc"
+        assert premap.match_side(
+            self._rows(), "Buffalo Bills +3.5",
+            "Spread: BUF (+3.5)")["identifier"] == "asc-buf"
+
+    def test_signed_line_reads_both_directions(self):
+        from sportsassets.workers.premap import signed_line
+
+        assert signed_line("Chiefs -3.5") == "-3.5"
+        assert signed_line("Bills +3.5") == "+3.5"
+        assert signed_line("Over 47.5") == ""      # totals carry no sign
+        assert signed_line(None) == ""

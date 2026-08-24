@@ -1078,6 +1078,18 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
     return None
 
 
+def _exit_intent(us_market_slug: str, opened_with: str | None) -> str:
+    """SELL_LONG or SELL_SHORT for closing this position."""
+    if opened_with == "ORDER_INTENT_BUY_SHORT":
+        return "ORDER_INTENT_SELL_SHORT"
+    if opened_with == "ORDER_INTENT_BUY_LONG":
+        return "ORDER_INTENT_SELL_LONG"
+    net = position_side(us_market_slug)
+    if net is not None and net < 0:
+        return "ORDER_INTENT_SELL_SHORT"
+    return "ORDER_INTENT_SELL_LONG"
+
+
 def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
                sell: bool = False,
                tif: str = "TIME_IN_FORCE_FILL_OR_KILL",
@@ -1146,7 +1158,14 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
         _buy_intent = "ORDER_INTENT_BUY_LONG"
     params = {
         "marketSlug": us_market_slug,
-        "intent": "ORDER_INTENT_SELL_LONG" if sell else _buy_intent,
+        # EXITING A SHORT (leak-hunt round 3, 2026-08-24): a position
+        # opened with BUY_SHORT is closed with SELL_SHORT — sending
+        # SELL_LONG would try to sell a side we do not hold. The caller
+        # names the exit side by passing the BUY intent it opened with;
+        # absent that, the position's own sign decides, and an
+        # unreadable position REFUSES rather than guessing.
+        "intent": (_exit_intent(us_market_slug, intent) if sell
+                   else _buy_intent),
         "type": "ORDER_TYPE_LIMIT",
         "price": _amount(limit_price),
         "quantity": int(quantity),

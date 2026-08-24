@@ -55,6 +55,20 @@ def _lines_of(text: str | None) -> set[str]:
         {n for n in re.findall(r"\d+\.5", text or "")}
 
 
+def signed_line(text: str | None) -> str:
+    """The SIGNED handicap a description carries ('-3.5', '+3.5'), or ''.
+
+    _norm strips punctuation, so 'Chiefs -3.5' and 'Chiefs +3.5' both
+    normalize to 'chiefs  3 5' — a whale taking +3.5 (getting points)
+    matched the venue's -3.5 side (giving points), the exact opposite
+    bet, on every spread. The sign must be read BEFORE normalization
+    and compared on its own (leak-hunt round 3, 2026-08-24)."""
+    m = re.search(r"([+-])\s*(\d+(?:\.\d+)?)", str(text or ""))
+    if not m:
+        return ""
+    return f"{m.group(1)}{m.group(2)}"
+
+
 def date_of(slug: str | None) -> str:
     """The YYYY-MM-DD a slug names, or '' — the game identity that a
     title alone cannot carry."""
@@ -168,11 +182,21 @@ def match_side(rows: list[dict], outcome: str | None,
         # that could never match and the lane was silently dead for the
         # whole type. A lined pick matches a row whose line it names; an
         # unlined pick still matches only unlined rows.
+        his_signed = signed_line(outcome) or signed_line(his_title)
+
         def _lined_ok(r: dict) -> bool:
             rl = (r.get("line") or "").strip()
             if not rl:
                 return not his_lines
-            return rl in his_lines
+            if rl not in his_lines:
+                return False
+            # SIGN AGREEMENT (leak-hunt round 3): _norm erases +/-, so
+            # without this a +3.5 pick matched the -3.5 side — the
+            # opposite bet. When either side states a sign, both must.
+            rs = (r.get("signed") or "").strip()
+            if his_signed or rs:
+                return bool(rs) and rs == his_signed
+            return True
 
         exact = [r for r in rows if r.get("side_norm") == on
                  and _lined_ok(r)]
@@ -298,6 +322,7 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
                 "question": q[:300], "kind": "side",
                 "line": line,
                 "side_norm": _norm(s["description"]),
+                "signed": signed_line(s["description"]) or signed_line(q),
                 # the UNFILTERED list: judging uniqueness against a
                 # filtered one made a dropped sibling look unique, so a
                 # shared-identifier SHORT side would default to BUY_LONG
