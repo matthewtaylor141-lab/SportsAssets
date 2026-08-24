@@ -131,7 +131,13 @@ def _outcome_score(us_market: dict, outcome: str | None) -> float:
     # that reads like a matchup ("A vs B") names BOTH sides and must
     # never vote, and slug-looking strings are noise.
     title = us_market.get("title") or ""
-    if title and " vs" not in title.lower() and title.count("-") < 4:
+    # Matchup shapes name BOTH sides and must never vote — and the venue
+    # writes matchups with more separators than ' vs': 'A - B' and
+    # 'A @ B' both let containment score EITHER team 1.0 (wrong-side
+    # incident 2026-08-23: sideless parent orders on two-sided markets).
+    _tl = f" {title.lower()} "
+    if title and " vs" not in _tl and " - " not in _tl \
+            and " @ " not in _tl and title.count("-") < 4:
         candidates.append(title)
     # The REAL schema (named by the 2026-08-04 trails): markets carry a
     # natural-language `question` — "Will the Los Angeles Dodgers cover
@@ -866,28 +872,42 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
                                 + (m.get("question") or ""))
             line_adj = (-0.2 if src_lines != cand_lines
                         else (0.05 if src_lines else 0.0))
-            if m.get("slug"):
+            sides = [s for s in (m.get("marketSides") or [])
+                     if isinstance(s, dict)
+                     and s.get("description") and s.get("identifier")]
+            # A market that CARRIES sides is a two-outcome contract: its
+            # parent slug is not a position, and ordering it sideless
+            # hands side selection to the venue's default (wrong-side
+            # incident 2026-08-23 — a coin flip with real money). The
+            # parent may never win; only a uniquely-matched side may.
+            if m.get("slug") and not sides:
                 sc = _outcome_score(m, outcome) + line_adj
                 if sc > top_score:
                     top, top_score = m, min(sc, 1.0)
-            # marketSides (schema named by the 2026-08-04 trails): each
-            # side of a two-sided market is its OWN market — description
-            # names the side ("Dalma Galfi"), identifier is that side's
-            # slug (aec-wta-...), orderable with the same BUY_LONG flow
-            # as any other market. Matching the side kills the wrong-side
-            # risk structurally: we order the slug that IS his outcome.
-            for side in (m.get("marketSides") or []):
-                if not isinstance(side, dict):
-                    continue
-                desc = side.get("description")
-                ident = side.get("identifier")
-                if not desc or not ident:
-                    continue
-                ssc = _outcome_score({"outcome": desc}, outcome) + line_adj
-                if ssc > top_score:
-                    top = {"slug": ident, "title": m.get("question"),
-                           "outcome": desc, "closed": False}
-                    top_score = min(ssc, 1.0)
+            if sides:
+                # marketSides (schema named by the 2026-08-04 trails):
+                # each side is its OWN orderable market — description
+                # names the side ("Dalma Galfi"), identifier is that
+                # side's slug. Same uniqueness rule as the exact path:
+                # exactly ONE side may pass the floor; two passing
+                # sides is ambiguity and the market contributes
+                # nothing — a tie must never fall to venue ordering.
+                s_top, s_bsc, s_2nd = None, 0.0, 0.0
+                for side in sides:
+                    ssc = min(_outcome_score({"outcome":
+                                              side["description"]},
+                                             outcome) + line_adj, 1.0)
+                    if ssc > s_bsc:
+                        s_top, s_bsc, s_2nd = side, ssc, s_bsc
+                    elif ssc > s_2nd:
+                        s_2nd = ssc
+                if (s_top is not None and s_bsc >= MATCH_FLOOR
+                        and s_2nd < MATCH_FLOOR and s_bsc > top_score):
+                    top = {"slug": s_top["identifier"],
+                           "title": m.get("question"),
+                           "outcome": s_top["description"],
+                           "closed": False}
+                    top_score = s_bsc
         return top, top_score
 
     best, best_score = _best(candidates)
