@@ -196,69 +196,128 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
     return out
 
 
+async def _upsert(pool, r: dict, keys: list[str]) -> None:
+    await pool.execute(
+        """
+        INSERT INTO us_premap (identifier, event_slug,
+            event_title, market_slug, question, kind, line,
+            side_norm, event_keys, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
+        ON CONFLICT (identifier) DO UPDATE SET
+            event_slug=$2, event_title=$3, market_slug=$4,
+            question=$5, kind=$6, line=$7, side_norm=$8,
+            event_keys=$9, updated_at=now()
+        """,
+        r["identifier"], r["event_slug"], r["event_title"],
+        r["market_slug"], r["question"], r["kind"],
+        r["line"], r["side_norm"], keys)
+
+
+async def _record_last(pool, summary: dict) -> None:
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz
+
+    summary = {**summary,
+               "at": _dt.now(_tz.utc).isoformat(timespec="seconds")}
+    try:
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            "premap_last", _json.dumps(summary))
+    except Exception:  # noqa: BLE001 — diagnostics never kill the sweep
+        log.exception("premap_last write failed")
+
+
 async def refresh() -> dict:
+    """Sweep the venue universe into us_premap. Primary path walks
+    events.list; if the installed SDK lacks it (2026-08-24: rows=0 with
+    no visible error — the worker's SDK predates .events), fall back to
+    paginating markets.list directly and keying each market from its own
+    title/question. Every completion or failure writes premap_last so
+    a silent sweep is impossible."""
     pool = await get_pool()
     await _ensure_table(pool)
     client = pmus._get_client()
     seen_rows = 0
     events = 0
-    offset = 0
-    for _page in range(MAX_EVENT_PAGES):
-        try:
+    err = None
+    mode = "events"
+    try:
+        offset = 0
+        for _page in range(MAX_EVENT_PAGES):
             resp = await asyncio.to_thread(
                 client.events.list,
                 {"limit": PAGE_LIMIT, "offset": offset, "active": True})
-        except Exception as exc:  # noqa: BLE001 — partial sweep stands
-            log.warning("premap events page failed: %s", exc)
-            break
-        got = list((resp or {}).get("events") or [])
-        if not got:
-            break
-        offset += len(got)
-        for ev in got:
-            ev_slug = ev.get("slug") or ev.get("eventSlug")
-            if not ev_slug:
-                continue
-            await asyncio.sleep(LIST_PACING_S)
-            try:
+            got = list((resp or {}).get("events") or [])
+            if not got:
+                break
+            offset += len(got)
+            for ev in got:
+                ev_slug = ev.get("slug") or ev.get("eventSlug")
+                if not ev_slug:
+                    continue
+                await asyncio.sleep(LIST_PACING_S)
+                try:
+                    mresp = await asyncio.to_thread(
+                        client.markets.list,
+                        {"eventSlug": [ev_slug], "active": True})
+                    markets = [m for m in (mresp or {}).get("markets") or []
+                               if (m.get("eventSlug") or m.get("event_slug"))
+                               in (None, ev_slug) and not m.get("closed")]
+                except Exception:  # noqa: BLE001 — next event
+                    continue
+                events += 1
+                keys = event_keys_for(ev.get("title"), ev_slug)
+                if not keys:
+                    continue
+                for m in markets:
+                    for r in _market_rows(ev, m):
+                        await _upsert(pool, r, keys)
+                        seen_rows += 1
+            if len(got) < PAGE_LIMIT:
+                break
+    except Exception as exc:  # noqa: BLE001 — try the fallback path
+        err = f"{type(exc).__name__}: {str(exc)[:160]}"
+        log.warning("premap events path failed (%s); markets fallback", err)
+        mode = "markets"
+        try:
+            offset = 0
+            for _page in range(MAX_EVENT_PAGES):
                 mresp = await asyncio.to_thread(
                     client.markets.list,
-                    {"eventSlug": [ev_slug], "active": True})
-                markets = [m for m in (mresp or {}).get("markets") or []
-                           if (m.get("eventSlug") or m.get("event_slug"))
-                           in (None, ev_slug) and not m.get("closed")]
-            except Exception:  # noqa: BLE001 — next event
-                continue
-            events += 1
-            keys = event_keys_for(ev.get("title"), ev_slug)
-            if not keys:
-                continue
-            rows: list[dict] = []
-            for m in markets:
-                rows.extend(_market_rows(ev, m))
-            for r in rows:
-                await pool.execute(
-                    """
-                    INSERT INTO us_premap (identifier, event_slug,
-                        event_title, market_slug, question, kind, line,
-                        side_norm, event_keys, updated_at)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
-                    ON CONFLICT (identifier) DO UPDATE SET
-                        event_slug=$2, event_title=$3, market_slug=$4,
-                        question=$5, kind=$6, line=$7, side_norm=$8,
-                        event_keys=$9, updated_at=now()
-                    """,
-                    r["identifier"], r["event_slug"], r["event_title"],
-                    r["market_slug"], r["question"], r["kind"],
-                    r["line"], r["side_norm"], keys)
-                seen_rows += 1
-        if len(got) < PAGE_LIMIT:
-            break
+                    {"limit": PAGE_LIMIT, "offset": offset, "active": True})
+                got = [m for m in (mresp or {}).get("markets") or []
+                       if not m.get("closed")]
+                raw = list((mresp or {}).get("markets") or [])
+                if not raw:
+                    break
+                offset += len(raw)
+                await asyncio.sleep(LIST_PACING_S)
+                for m in got:
+                    ev_slug = (m.get("eventSlug") or m.get("event_slug")
+                               or "")
+                    ev = {"slug": ev_slug,
+                          "title": m.get("title") or m.get("question")}
+                    keys = event_keys_for(
+                        m.get("question") or m.get("title"), ev_slug)
+                    if not keys:
+                        continue
+                    events += 1
+                    for r in _market_rows(ev, m):
+                        await _upsert(pool, r, keys)
+                        seen_rows += 1
+                if len(raw) < PAGE_LIMIT:
+                    break
+            err = None
+        except Exception as exc2:  # noqa: BLE001 — recorded, next cycle
+            err = f"{type(exc2).__name__}: {str(exc2)[:160]}"
     pruned = await pool.execute(
         "DELETE FROM us_premap WHERE updated_at < now() - interval '%s hours'"
         % int(PRUNE_HOURS))
-    summary = {"events": events, "rows": seen_rows,
+    summary = {"mode": mode, "events": events, "rows": seen_rows,
+               "err": err,
                "pruned": int(pruned.split()[-1]) if pruned else 0}
+    await _record_last(pool, summary)
     log.info("premap refresh: %s", summary)
     return summary
 

@@ -269,7 +269,7 @@ jobs:
           # becomes a lookup; this line watches the table fill)
           curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/premap.json "$BASE/api/admin/premap-status" || true
-          jq -r '"  PREMAP rows=\(.rows // 0)  events=\(.events // 0)  fresh=\(.fresh // "never")"' /tmp/premap.json 2>/dev/null || true
+          jq -r '"  PREMAP rows=\(.rows // 0)  events=\(.events // 0)  fresh=\(.fresh // "never")  last=\(.last_sweep // "none")"' /tmp/premap.json 2>/dev/null || true
 
           # ── side-fidelity audit (owner order 2026-08-24: prove which
           # mapping path inverted sides — pick vs the slug we ordered,
