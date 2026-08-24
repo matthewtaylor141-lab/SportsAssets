@@ -1805,8 +1805,22 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     "the TRUEEDGE counterfactual may spend "
                     f"(slug={_q_slug0[:100]})")
                 return
+            # HOLD LIFTED for swisstony (owner order 2026-08-24
+            # evening: "make sure we are profitable copying SwissTony").
+            # The hold's stated condition was his paper cohort grading
+            # positive at the NEW detection latency. Measured, on
+            # detections inside 5 seconds (TRUEEDGE-FAST):
+            #   cf_total    +8,874.90   his edge on the fast book
+            #   paper_actual +6,864.52  what OUR fill achieves — POSITIVE
+            #   lat_cost     1,983.71   vs 15,063 blended
+            # The -604.88 that held him was an artifact of averaging in
+            # months of minutes-late polling; at chain speed we capture
+            # 77% of his edge. He now trades under the 15s staleness cap,
+            # so a signal we did NOT catch fast is still refused — the
+            # condition that makes him profitable is enforced, not hoped
+            # for. LIVE_HOLD_WHALES re-arms a hold without a deploy.
             _held = {w.strip() for w in
-                     os.getenv("LIVE_HOLD_WHALES", "swisstony")
+                     os.getenv("LIVE_HOLD_WHALES", "")
                      .lower().split(",") if w.strip()}
             if username in _held:
                 await pool.execute(

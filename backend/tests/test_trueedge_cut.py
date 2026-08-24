@@ -90,17 +90,29 @@ class TestPremapLiveAllowlist:
             pool, submitted = self._run(monkeypatch, whale)
             assert submitted, f"{whale} is verified-profitable — trades"
 
-    def test_swisstony_refused_by_the_hold_first(self, monkeypatch):
-        """Even fully allowlisted, swisstony's PROFITABILITY hold
-        (independent of quarantine state) refuses until his paper
-        cohort at the new latency certifies."""
+    def test_swisstony_trades_now_that_his_fast_cohort_certified(
+            self, monkeypatch):
+        """His hold's stated condition — paper cohort positive at the
+        NEW detection latency — was met on 2026-08-24 evening:
+        TRUEEDGE-FAST paper_actual +6,864.52 on detections inside 5s.
+        The hold is lifted; the 15s staleness cap enforces the
+        condition that makes him profitable."""
+        pool, submitted = self._run(
+            monkeypatch, "SwissTony",
+            allowlist_env="homerunhazard,0x076daa87,swisstony")
+        assert submitted, "a certified whale trades"
+
+    def test_the_hold_mechanism_still_works_for_any_whale(self,
+                                                          monkeypatch):
+        """The gate itself is intact and re-armable without a deploy."""
+        monkeypatch.setenv("LIVE_HOLD_WHALES", "swisstony")
         pool, submitted = self._run(
             monkeypatch, "SwissTony",
             allowlist_env="homerunhazard,0x076daa87,swisstony")
         assert submitted == []
         rej = [(sql, a) for sql, a in pool.updates
                if "status='rejected'" in sql and "hold:" in str(a)]
-        assert len(rej) == 1, "refusal must carry the hold reason"
+        assert len(rej) == 1
 
     def test_non_allowlisted_whale_refused_with_allowlist_reason(
             self, monkeypatch):
@@ -270,10 +282,13 @@ def test_side_echo_outage_never_trips_the_breaker(monkeypatch):
     assert state and state["unverified"] == 1
 
 
-def test_hold_refuses_swisstony_even_with_quarantine_off(monkeypatch):
+def test_a_held_whale_is_refused_even_with_quarantine_off(monkeypatch):
     """The leak-hunt scenario: lifting the quarantine (a mapping-
-    fidelity action) must NOT re-arm swisstony — his hold is a
-    profitability decision with its own gate."""
+    fidelity action) must NOT admit a HELD whale — the hold is a
+    profitability decision with its own gate. swisstony's hold was
+    lifted on measured evidence 2026-08-24 evening, so the mechanism
+    is exercised here by re-arming it explicitly."""
+    monkeypatch.setenv("LIVE_HOLD_WHALES", "swisstony")
     from sportsassets import copy_sports as _cs
 
     pool = _LadderPool([])
