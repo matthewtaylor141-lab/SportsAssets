@@ -457,6 +457,19 @@ def copy_limit_price(whale_username: str | None, his_price: float,
     return limit
 
 
+# Per-whale staleness ceilings, in seconds. Absent whales take the
+# default; env overrides the default only, so a measured cap cannot be
+# loosened by a stray environment variable.
+STALE_CAP_BY_WHALE = {"swisstony": 15.0}
+
+
+def _stale_cap_for(whale_username: str | None) -> float:
+    """The oldest a signal may be for THIS whale and still be worth
+    copying — derived from what latency measurably costs his edge."""
+    default = float(os.getenv("LIVE_MAX_REACTION_S", "90"))
+    return STALE_CAP_BY_WHALE.get((whale_username or "").lower(), default)
+
+
 def per_fill_usd(whale_username: str | None,
                  slug: str | None = None) -> float:
     """Clip for this whale on this market: the (whale, sport) override
@@ -1580,9 +1593,19 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         return  # duplicate detection — never double-order one source trade
 
     # STALENESS GATE (owner order 2026-08-24): a late signal is a decayed
-    # edge — the copier refuses rather than chases. The cap is deliberate
-    # slack for now; the edge-decay study tightens it per-whale later.
-    _stale_cap = float(os.getenv("LIVE_MAX_REACTION_S", "90"))
+    # edge — the copier refuses rather than chases.
+    #
+    # PER-WHALE CAPS (the swisstony work, same evening): one global cap
+    # is wrong because edges decay at wildly different rates. Measured
+    # latency cost against each whale's own edge, from TRUEEDGE:
+    #   0x076        lat_cost  -59 on +15,576 — decay is ~free, 90s fine
+    #   homerunhazard lat_cost 10,612 on +24,657 — survives, 90s fine
+    #   swisstony    lat_cost 15,063 on +14,805 — latency eats ALL of it
+    # A whale whose entire edge is consumed by delay must not be copied
+    # on a delayed signal at all: at 90s his expected value is negative
+    # by his own numbers. 15s reflects what the chain path now delivers
+    # (measured -1.1s) while refusing anything that fell back to polling.
+    _stale_cap = _stale_cap_for(username)
     if reaction is not None and reaction > _stale_cap:
         await pool.execute(
             "UPDATE live_orders SET status='rejected', error=$2 WHERE id=$1",

@@ -126,3 +126,57 @@ def test_premap_live_off_keeps_premap_refused(monkeypatch):
     asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
     assert submitted == []
     assert len(_rejections(pool)) == 1
+
+
+class TestPerWhaleStalenessCaps:
+    """The swisstony work (owner order 2026-08-24 evening): one global
+    staleness cap is wrong because edges decay at wildly different
+    rates. Measured latency cost against each whale's own edge:
+      0x076         lat_cost    -59 on +15,576 — decay is ~free
+      homerunhazard lat_cost 10,612 on +24,657 — survives it
+      swisstony     lat_cost 15,063 on +14,805 — latency eats ALL of it
+    A whale whose entire edge is consumed by delay must not be copied
+    on a delayed signal: at 90s his expected value is negative by his
+    own numbers."""
+
+    def test_swisstony_gets_the_tight_cap(self):
+        from sportsassets.live_executor import _stale_cap_for
+
+        assert _stale_cap_for("swisstony") == 15.0
+        assert _stale_cap_for("SwissTony") == 15.0
+
+    def test_whales_whose_edge_survives_keep_the_default(self):
+        from sportsassets.live_executor import _stale_cap_for
+
+        assert _stale_cap_for("homerunhazard") == 90.0
+        assert _stale_cap_for("0x076daa87") == 90.0
+        assert _stale_cap_for(None) == 90.0
+
+    def test_env_moves_the_default_but_not_a_measured_cap(self,
+                                                          monkeypatch):
+        """A measured cap is evidence, not a preference — a stray
+        environment variable must not be able to loosen it."""
+        from sportsassets.live_executor import _stale_cap_for
+
+        monkeypatch.setenv("LIVE_MAX_REACTION_S", "600")
+        assert _stale_cap_for("homerunhazard") == 600.0
+        assert _stale_cap_for("swisstony") == 15.0
+
+    def test_a_late_swisstony_signal_is_refused(self, monkeypatch):
+        """30s is fine for everyone else and far too late for him.
+        (The harness slug is a soccer TOTAL, which is not one of his
+        cells, so the cell gate would refuse him first — stubbed here
+        to isolate the staleness rule under test.)"""
+        from sportsassets import copy_sports as _cs
+
+        pool = _LadderPool([])
+        submitted = _wire(monkeypatch, pool,
+                          f"tsc-epl-ars-che-{TODAY}-o3pt5")
+        monkeypatch.setattr(live_executor, "COPY_CUT_WHALES", frozenset())
+        monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
+        asyncio.run(live_executor.maybe_execute(
+            _payload(whale_username="SwissTony"), 30.0))
+        assert submitted == []
+        stale = [(sql, a) for sql, a in pool.updates
+                 if "status='rejected'" in sql and "stale-signal" in str(a)]
+        assert len(stale) == 1
