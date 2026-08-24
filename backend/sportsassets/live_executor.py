@@ -327,11 +327,25 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 #   of LIVE_PREMAP_WHALES until his paper re-run at the new sub-second
 #   detection grades positive.
 COPY_CUT_WHALES = frozenset({"rn1", "ferrarichampions2026", _W2C33})
-PER_FILL_BY_WHALE = {"rn1": 0.00, "swisstony": 300.00,
-                     _W2C33: 0.00, "homerunhazard": 300.00,
+# PROBE CLIPS (owner authorization 2026-08-24 evening: "$100 per clip
+# on the actually verified profitable whales"). The resume is a bounded
+# proof, not a return to size: the venue's side model is verified by
+# 429 independent checks but has never been confirmed by a REAL FILL,
+# and the position-sign check can only settle that with live orders.
+# Scale follows evidence, not the other way round.
+PER_FILL_BY_WHALE = {"rn1": 0.00, "swisstony": 100.00,
+                     _W2C33: 0.00, "homerunhazard": 100.00,
                      "kch123": 150.00,
                      "ferrarichampions2026": 0.00,
-                     "0x076daa87": 300.00}
+                     "0x076daa87": 100.00}
+# HARD CEILING on the resolved clip, applied AFTER every override and
+# multiplier. The owner authorized $100 per clip; a spread's x1.5 would
+# otherwise place $150 and quietly exceed the authorization. A cap that
+# sits below the maps cannot be defeated by a cell edit.
+LIVE_MAX_CLIP_USD = float(os.environ.get("LIVE_MAX_CLIP_USD", "100"))
+# The whole probe is bounded too: a day cap sized so an unimagined
+# defect costs a bounded amount rather than an open-ended one.
+PROBE_DAY_USD = float(os.environ.get("LIVE_PROBE_DAY_USD", "1000"))
 
 # PER-MARKET-TYPE MULTIPLIERS (owner go 2026-08-20 morning, from the
 # five-whale lifetime type calibration, 2026-08-18): spreads beat every
@@ -359,10 +373,10 @@ TYPE_MULT: dict[tuple[str, str], float] = {
 # homerunhazard's cells scale with his base (112.50→300, x2.667:
 # baseball 225→600, football 37.50→100) so the measured per-sport
 # judgment survives the upsize.
-PER_FILL_BY_WHALE_SPORT = {("swisstony", "soccer"): 225.00,
-                           (_W2C33, "tennis"): 0.00,
-                           ("homerunhazard", "baseball"): 600.00,
-                           ("homerunhazard", "football"): 100.00}
+# The (whale, sport) cell WINS over the whale clip, so during the probe
+# no cell may exceed the authorized $100 — HRH's measured baseball and
+# football cells are retired until the probe promotes back to size.
+PER_FILL_BY_WHALE_SPORT = {(_W2C33, "tennis"): 0.00}
 # 24H ROLLING-LOSS BREAKER (owner 2026-08-12, threshold his call:
 # "$1500"): when the copy sleeve's realized losses over any rolling
 # 24 hours reach this, copying pauses by itself until the window
@@ -445,7 +459,10 @@ def per_fill_usd(whale_username: str | None,
         mt = market_type_of(slug)
         mult = TYPE_MULT.get((w, mt), TYPE_MULT.get(("*", mt)))
         if mult is not None:
-            return round(base * mult, 2)
+            base = round(base * mult, 2)
+    # the authorization is a CEILING, not a suggestion
+    if LIVE_MAX_CLIP_USD > 0:
+        base = min(base, LIVE_MAX_CLIP_USD)
     return base
 
 
@@ -1449,6 +1466,12 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         total_spent = cfg.live_max_total_usd - total_room
         day_room = PENNY_TRIAL_DAILY_USD - day_spent
         total_room = PENNY_TRIAL_TOTAL_USD - total_spent
+        # PROBE DAY CAP (owner authorization 2026-08-24 evening): the
+        # resume is a bounded proof, so the day's copy spend is bounded
+        # too — an unimagined defect costs this much, not an open-ended
+        # amount. Raise it deliberately once real fills verify.
+        if PROBE_DAY_USD > 0:
+            day_room = min(day_room, PROBE_DAY_USD - day_spent)
     if day_room <= 0 or total_room <= 1:
         log.warning("live caps exhausted (day room %.2f, total room %.2f) — skipping",
                     day_room, total_room)
