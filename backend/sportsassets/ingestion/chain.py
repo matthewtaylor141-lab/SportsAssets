@@ -83,6 +83,102 @@ ORDER_FILLED_V2_TOPIC = (
     "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee")
 
 
+# ── Path A2: the venue's NEW exchanges (vanity 0xe111…/0xe2222…) emit a
+# proprietary fill event (topic 0xd543adfd…) our decoders never knew —
+# whales whose flow moved there silently fell back to minutes-latency
+# polling (RN1 median 212s, measured 2026-08-24). The proprietary DATA
+# layout is unknown, but the same receipt carries the economics in
+# STANDARD events: ERC-1155 TransferSingle (token id + shares) and
+# ERC-20 Transfer (USDC legs). So A2 matches the roster wallet in the
+# fill event's owner topics, pulls the receipt (~1 RPC), and decodes
+# the standard legs — sub-second detection, no reverse-engineering.
+FILL_V3_TOPIC = "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee"
+TRANSFER_SINGLE_TOPIC = "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62"
+ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+V3_EXCHANGES_DEFAULT = ("0xe2222d279d744050d28e00520010520000310f59,"
+                        "0xe111180000d2663c0091e4f400237545b87b996b")
+
+
+def v3_owner_candidates(log_entry: dict[str, Any]) -> set[str]:
+    """Addresses named in a v3 fill event's indexed topics."""
+    topics = log_entry.get("topics") or []
+    return {_topic_addr(t) for t in topics[1:4] if t}
+
+
+def decode_fill_v3_receipt(logs: list[dict[str, Any]],
+                           wallet: str) -> DecodedFill | None:
+    """Reconstruct one wallet's fill from a receipt's STANDARD events.
+
+    BUY: the wallet received CTF tokens (TransferSingle to=wallet) and
+    paid USDC (ERC-20 Transfer from=wallet). SELL is the mirror. More
+    than one distinct token id for the wallet is a bundle we don't
+    price — refuse and let the poller carry it. Pure function.
+    """
+    wallet = wallet.lower()
+    tok_in = tok_out = 0
+    usdc_in = usdc_out = 0
+    token_ids: set[int] = set()
+    tx_hash = ""
+    block_number = 0
+    for lg in logs:
+        tps = lg.get("topics") or []
+        if not tps:
+            continue
+        t0 = str(tps[0]).lower()
+        data = str(lg.get("data", "0x"))[2:]
+        if t0 == TRANSFER_SINGLE_TOPIC and len(tps) >= 4                 and len(data) >= 2 * 64:
+            frm, to = _topic_addr(tps[2]), _topic_addr(tps[3])
+            tid = int(data[0:64], 16)
+            val = int(data[64:128], 16)
+            if to == wallet:
+                tok_in += val
+                token_ids.add(tid)
+            elif frm == wallet:
+                tok_out += val
+                token_ids.add(tid)
+            else:
+                continue
+        elif t0 == ERC20_TRANSFER_TOPIC and len(tps) >= 3                 and len(data) >= 64:
+            frm, to = _topic_addr(tps[1]), _topic_addr(tps[2])
+            val = int(data[0:64], 16)
+            if frm == wallet:
+                usdc_out += val
+            elif to == wallet:
+                usdc_in += val
+            else:
+                continue
+        else:
+            continue
+        tx_hash = str(lg.get("transactionHash", tx_hash)).lower() or tx_hash
+        try:
+            block_number = int(str(lg.get("blockNumber", "0x0")), 16)                 or block_number
+        except ValueError:
+            pass
+    if len(token_ids) != 1:
+        return None
+    token = token_ids.pop()
+    if tok_in and usdc_out and not tok_out:
+        side, size_units, usdc_units = "BUY", tok_in, usdc_out
+    elif tok_out and usdc_in and not tok_in:
+        side, size_units, usdc_units = "SELL", tok_out, usdc_in
+    else:
+        return None
+    if size_units == 0:
+        return None
+    price = round(usdc_units / size_units, 6)
+    if not (0 < price < 1):
+        return None
+    return DecodedFill(
+        wallet=wallet,
+        token_id=str(token),
+        side=side,
+        size=round(size_units / USDC_DECIMALS, 6),
+        price=price,
+        tx_hash=tx_hash,
+        block_number=block_number,
+    )
+
+
 def decode_order_filled_v2(log_entry: dict[str, Any],
                            roster: set[str]) -> DecodedFill | None:
     """Decode one v2 fill log; each matched order emits its OWN log with
@@ -212,10 +308,16 @@ class ChainListener:
             # without it the crypto copy whales decode zero (2026-08-22).
             cfg.pm_exchange_crypto_address.lower(),
         ]
+        # Path A2 exchanges (env-extensible as the venue mints more)
+        import os as _os
+        self._addresses += [
+            a.strip().lower() for a in
+            _os.getenv("PM_EXCHANGE_V3_ADDRESSES",
+                       V3_EXCHANGES_DEFAULT).split(",") if a.strip()]
         # OR-list in topic position 0: legacy OrderFilled plus the v2
         # fill event — either matches.
         self._topic = order_filled_topic()
-        self._topics = [[self._topic, ORDER_FILLED_V2_TOPIC]]
+        self._topics = [[self._topic, ORDER_FILLED_V2_TOPIC, FILL_V3_TOPIC]]
         self._http = httpx.AsyncClient(timeout=10)
         self._blocks = BlockTimestampCache(self._http, self._http_url)
         self._roster: dict[str, dict] = {}  # address -> {id, username}
@@ -251,6 +353,9 @@ class ChainListener:
     async def _handle_log(self, log_entry: dict[str, Any]) -> None:
         self.events_seen += 1
         topics = log_entry.get("topics") or []
+        if topics and str(topics[0]).lower() == FILL_V3_TOPIC:
+            await self._handle_v3(log_entry)
+            return
         if topics and str(topics[0]).lower() == ORDER_FILLED_V2_TOPIC:
             fill = decode_order_filled_v2(log_entry, set(self._roster))
         else:
@@ -285,6 +390,69 @@ class ChainListener:
                 trade_id,
             )
         await self._save_cursor(fill.block_number)
+
+    async def _handle_v3(self, log_entry: dict[str, Any]) -> None:
+        """Path A2: roster wallet named in a new-exchange fill event →
+        pull the receipt once and decode the standard transfer legs."""
+        matched = v3_owner_candidates(log_entry) & set(self._roster)
+        if not matched:
+            return
+        tx = str(log_entry.get("transactionHash", "")).lower()
+        if not tx:
+            return
+        if not hasattr(self, "_v3_seen"):
+            self._v3_seen = {}
+        if tx in self._v3_seen:
+            return
+        self._v3_seen[tx] = time.time()
+        if len(self._v3_seen) > 512:
+            cutoff = sorted(self._v3_seen.values())[128]
+            self._v3_seen = {k: v for k, v in self._v3_seen.items()
+                             if v > cutoff}
+        try:
+            resp = await self._http.post(
+                self._http_url,
+                json={"jsonrpc": "2.0", "id": 1,
+                      "method": "eth_getTransactionReceipt",
+                      "params": [tx]})
+            receipt = (resp.json() or {}).get("result") or {}
+        except Exception:  # noqa: BLE001 — the poller still carries it
+            log.warning("v3 receipt fetch failed for %s", tx)
+            return
+        logs = receipt.get("logs") or []
+        for wallet in matched:
+            fill = decode_fill_v3_receipt(logs, wallet)
+            if fill is None:
+                log.info("v3 fill undecodable for %s in %s (bundle?)",
+                         wallet[:10], tx[:14])
+                continue
+            self.decoded += 1
+            whale = self._roster[wallet]
+            ts_epoch = await self._blocks.get(
+                fill.block_number
+                or int(str(log_entry.get("blockNumber", "0x0")), 16))
+            ev = TradeEvent(
+                whale_id=whale["id"],
+                whale_username=whale["username"],
+                tx_hash=fill.tx_hash or tx,
+                asset=fill.token_id,
+                side=fill.side,
+                size=fill.size,
+                price=fill.price,
+                ts_epoch=ts_epoch,
+                source="chain",
+            )
+            trade_id = await ingest_trade(ev)
+            if trade_id:
+                self.ingested += 1
+                self.last_lag_s = round(time.time() - ts_epoch, 1)
+                log.info("v3 chain fill: %s %s %s %.2f @ %.3f (trade %s)",
+                         whale["username"] or wallet, fill.side,
+                         fill.token_id[:12], fill.size, fill.price,
+                         trade_id)
+        blk = int(str(log_entry.get("blockNumber", "0x0")), 16)
+        if blk:
+            await self._save_cursor(blk)
 
     async def _save_cursor(self, block_number: int) -> None:
         pool = await get_pool()
