@@ -297,9 +297,7 @@ jobs:
           # SLEEVE-OFF (owner order 2026-08-24: "only copies flow") —
           # the underdog worker's heartbeat states whether the sleeve is
           # off; anything but off is a lead-with-this alarm.
-          jq -r '.workers[]? | select(.name == "underdog")
-                 | "  SLEEVE underdog=\(.detail.sleeve // "ON — INVESTIGATE")  copyexit_open=\(.detail.copyexit_open // 0)  at=\(.beat_at // "?")"' \
-            /tmp/status.json 2>/dev/null || echo "  SLEEVE underdog: heartbeat unavailable"
+          jq -r '.sleeve as $s | "  SLEEVE underdog=\($s.state // "?")  status=\($s.status // "?")  copyexit_open=\($s.copyexit_open // 0)  at=\($s.beat_at // "?")"' /tmp/premap.json 2>/dev/null || echo "  SLEEVE unavailable"
           jq -r '"  PREMAP-COV today=\(.coverage.today // 0)  tomorrow=\(.coverage.tomorrow // 0)  err=\(.coverage.err // "none")  sample=\(.coverage.sample // [] | join(" "))"' /tmp/premap.json 2>/dev/null || true
           # SHADOW CERTIFICATION (the resume gate): every quarantined
           # premap resolution re-derived from LIVE venue data by the

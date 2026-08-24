@@ -4078,7 +4078,30 @@ async def api_premap_status() -> dict:
                 "ORDER BY updated_at DESC LIMIT 3", d0)]
     except Exception as exc:  # noqa: BLE001 — never silent (2026-08-24)
         coverage = {"err": f"{type(exc).__name__}: {str(exc)[:160]}"}
-    extras: dict = {"coverage": coverage}
+    # SLEEVE STATE (owner order 2026-08-24: "only copies flow"). The
+    # public heartbeats endpoint sanitizes detail away, so the sleeve's
+    # own report is read here — "is it off" must be verifiable, never
+    # assumed.
+    sleeve: dict = {}
+    try:
+        hb = await pool.fetchrow(
+            "SELECT status, beat_at, detail FROM service_heartbeats "
+            "WHERE service='underdog'")
+        if hb:
+            det = hb["detail"]
+            if isinstance(det, str):
+                det = json.loads(det)
+            sleeve = {"state": (det or {}).get("sleeve", "ON"),
+                      "status": hb["status"],
+                      "beat_at": hb["beat_at"].isoformat()
+                      if hb["beat_at"] else None,
+                      "copyexit_open": (det or {}).get("copyexit_open")}
+        else:
+            sleeve = {"state": "no-heartbeat"}
+    except Exception as exc:  # noqa: BLE001 — never silent
+        sleeve = {"state": "unreadable",
+                  "err": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    extras: dict = {"coverage": coverage, "sleeve": sleeve}
     for key, out in (("premap_last", "last_sweep"),
                      ("workers_boot", "workers_boot"),
                      ("side_echo_last", "side_echo"),
