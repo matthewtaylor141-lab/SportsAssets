@@ -51,6 +51,12 @@ jobs:
           # JARVIS-notes probe lines (admin-gated endpoints). Absent
           # secret -> those curls 401 and the lines print nothing.
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          # Resume lever input (owner order 2026-08-24). Passed via env
+          # deliberately: any ${{ }} inside the giant run block makes
+          # GitHub treat the WHOLE block as one expression template and
+          # trips the 21,000-char expression cap — run #1026 failed to
+          # parse exactly that way.
+          PREMAP_LIVE_INPUT: ${{ inputs.premap_live }}
         run: |
           BASE="${OVERRIDE:-$DEFAULT_BASE}"
           echo "API base: $BASE"
@@ -260,10 +266,10 @@ jobs:
           # dispatch input is set, flip premap-live through the admin
           # switch and print the verdict verbatim — a fully audited
           # go/no-go action, never an ambient default.
-          if [ -n "${{ inputs.premap_live || '' }}" ]; then
-            echo "  LEVER premap-live -> ${{ inputs.premap_live }}"
+          if [ "$PREMAP_LIVE_INPUT" = "on" ] || [ "$PREMAP_LIVE_INPUT" = "off" ]; then
+            echo "  LEVER premap-live -> $PREMAP_LIVE_INPUT"
             curl -sS --max-time 30 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
-              "$BASE/api/admin/premap-live/${{ inputs.premap_live }}" \
+              "$BASE/api/admin/premap-live/$PREMAP_LIVE_INPUT" \
               | head -c 400 || echo "  LEVER call failed"
             echo ""
           fi
