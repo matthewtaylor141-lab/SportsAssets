@@ -50,9 +50,23 @@ def _norm(s: str | None) -> str:
     return pmus._norm(s)
 
 
+_LINE_CTX = re.compile(
+    r"(?:[+-]|\bover\b|\bunder\b|\bo\b|\bu\b|o/u|:)\s*(\d+(?:\.\d+)?)",
+    re.I)
+
+
 def _lines_of(text: str | None) -> set[str]:
-    return {n for n in re.findall(r"\d+(?:\.5)?", "") } if text is None else \
-        {n for n in re.findall(r"\d+\.5", text or "")}
+    """Every line a text states — half-point lines anywhere, plus WHOLE
+    numbers when they sit in a handicap or total context.
+
+    Only \d+\.5 was matched before, so a whole-number line ('-3', 'O/U
+    47') produced NO line at all on both the venue row and the whale's
+    pick — and an empty line skipped the comparison entirely (leak-hunt
+    round 3, 2026-08-24)."""
+    t = text or ""
+    out = {n for n in re.findall(r"\d+\.\d+", t)}
+    out |= {m.group(1) for m in _LINE_CTX.finditer(t)}
+    return {n for n in out if n}
 
 
 def signed_line(text: str | None) -> str:
@@ -138,6 +152,13 @@ class _SkipFallback(Exception):
     through to the degraded markets path."""
 
 
+def _questions_agree(a: str, b: str) -> bool:
+    """Two normalized questions describe the same proposition."""
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
+
+
 def match_side(rows: list[dict], outcome: str | None,
                his_title: str | None) -> dict | None:
     """Pick the unique premap row that IS the whale's outcome.
@@ -167,7 +188,17 @@ def match_side(rows: list[dict], outcome: str | None,
 
     cands: list[dict] = []
     if on in ("yes", "no"):
-        cands = [r for r in rows if _norm(r.get("side_norm")) == on]
+        # A BARE Yes/No NAMES NOTHING (leak-hunt round 3): every
+        # derivative on an event shares one key set, so a whale's 'Yes'
+        # on "Will both teams score?" matched the clean-sheet market's
+        # Yes — a different proposition entirely. The QUESTION must
+        # correspond, and with no question to compare we refuse.
+        want_q = _norm(his_title)
+        if not want_q:
+            return None
+        cands = [r for r in rows
+                 if _norm(r.get("side_norm")) == on
+                 and _questions_agree(want_q, _norm(r.get("question")))]
     elif on.split()[:1] and on.split()[0] in ("over", "under"):
         want = on.split()[0]
         # side descriptions carry their line ("Over 2.5" → "over 2 5");
@@ -185,18 +216,19 @@ def match_side(rows: list[dict], outcome: str | None,
         his_signed = signed_line(outcome) or signed_line(his_title)
 
         def _lined_ok(r: dict) -> bool:
+            # SIGN AGREEMENT FIRST (leak-hunt round 3): _norm erases
+            # +/-, so 'Chiefs -3' and 'Chiefs +3' are the same string.
+            # This check used to live inside the line branch and was
+            # skipped whenever no line parsed — which is exactly the
+            # whole-number handicap case, so those inverted silently.
+            rs = (r.get("signed") or "").strip()
+            if his_signed or rs:
+                if not rs or rs != his_signed:
+                    return False
             rl = (r.get("line") or "").strip()
             if not rl:
                 return not his_lines
-            if rl not in his_lines:
-                return False
-            # SIGN AGREEMENT (leak-hunt round 3): _norm erases +/-, so
-            # without this a +3.5 pick matched the -3.5 side — the
-            # opposite bet. When either side states a sign, both must.
-            rs = (r.get("signed") or "").strip()
-            if his_signed or rs:
-                return bool(rs) and rs == his_signed
-            return True
+            return rl in his_lines
 
         exact = [r for r in rows if r.get("side_norm") == on
                  and _lined_ok(r)]
@@ -302,10 +334,11 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
     other, which is why the table looked healthy while a whole family
     was unorderable."""
     q = m.get("question") or m.get("title") or ""
-    line = ""
-    ql = re.findall(r"\d+\.5", q)
-    if len(set(ql)) == 1:
-        line = ql[0]
+    # WHOLE NUMBERS COUNT (leak-hunt round 3): only \d+\.5 was stamped,
+    # so a whole-number line ('-3', 'O/U 47') left the row unlined and
+    # the line comparison was skipped on both sides.
+    _ql = _lines_of(q)
+    line = next(iter(_ql)) if len(_ql) == 1 else ""
     ev_slug = ev.get("slug") or ev.get("eventSlug") or ""
     ev_title = ev.get("title") or ""
     out: list[dict] = []
@@ -320,7 +353,9 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
                 "event_slug": ev_slug, "event_title": ev_title,
                 "market_slug": (m.get("slug") or "").lower(),
                 "question": q[:300], "kind": "side",
-                "line": line,
+                "line": (next(iter(_lines_of(s["description"])))
+                         if len(_lines_of(s["description"])) == 1
+                         else line),
                 "side_norm": _norm(s["description"]),
                 "signed": signed_line(s["description"]) or signed_line(q),
                 # the UNFILTERED list: judging uniqueness against a

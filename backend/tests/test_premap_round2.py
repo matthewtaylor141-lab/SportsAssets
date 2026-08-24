@@ -244,3 +244,45 @@ class TestHandicapSignIsNeverErased:
         assert signed_line("Bills +3.5") == "+3.5"
         assert signed_line("Over 47.5") == ""      # totals carry no sign
         assert signed_line(None) == ""
+
+
+class TestWholeNumberLinesAndSignOrdering:
+    """Leak-hunt round 3, the subtlest inversion found today. Only
+    \\d+\\.5 was ever parsed as a line, so a WHOLE-number handicap ('-3')
+    left both the venue row and the whale's pick unlined — and the sign
+    check lived INSIDE the line branch, so it was skipped exactly when
+    no line parsed. _norm erases +/-, so 'Chiefs -3' and 'Chiefs +3'
+    are the same string: the opposite bet, silently."""
+
+    def _rows(self):
+        m = {"slug": "asc-nfl-kc-buf-2026-09-13", "question": "Spread",
+             "marketSides": [
+                 {"identifier": "asc-kc", "description": "Chiefs -3",
+                  "long": True},
+                 {"identifier": "asc-buf", "description": "Bills +3",
+                  "long": False}]}
+        return premap._market_rows({"slug": "e",
+                                    "title": "Chiefs vs. Bills"}, m)
+
+    def test_whole_number_lines_are_stamped_on_rows(self):
+        rows = self._rows()
+        assert {r["line"] for r in rows} == {"3"}
+        assert {r["signed"] for r in rows} == {"-3", "+3"}
+
+    def test_the_whole_number_inversion_is_closed(self):
+        assert premap.match_side(self._rows(), "Chiefs +3",
+                                 "Spread: Chiefs (+3)") is None
+
+    def test_each_whole_number_side_still_matches_itself(self):
+        rows = self._rows()
+        assert premap.match_side(
+            rows, "Chiefs -3", "Spread: Chiefs (-3)")["identifier"] == "asc-kc"
+        assert premap.match_side(
+            rows, "Bills +3", "Spread: Bills (+3)")["identifier"] == "asc-buf"
+
+    def test_totals_read_whole_numbers_too(self):
+        from sportsassets.workers.premap import _lines_of
+
+        assert _lines_of("O/U 47") == {"47"}
+        assert _lines_of("Over 2.5") == {"2.5"}
+        assert _lines_of("Spread: Chiefs -3") == {"3"}

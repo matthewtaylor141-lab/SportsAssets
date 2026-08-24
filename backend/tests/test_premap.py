@@ -48,14 +48,40 @@ def test_shared_surname_is_ambiguous_and_refuses():
 
 
 def test_yes_no_only_matches_literal_yes_no():
+    """A Yes/No pick never matches a NAMED side (inversion incident
+    2026-08-24), and since 2026-08-24 round 3 it also requires the
+    QUESTION to correspond: every derivative on an event shares one key
+    set, so a bare 'Yes' names nothing on its own."""
+    q = "Will Pumas win?"
     rows = [
-        {"identifier": "x-pum", "side_norm": "pumas unam", "kind": "side", "line": ""},
-        {"identifier": "x-nec", "side_norm": "necaxa", "kind": "side", "line": ""},
+        {"identifier": "x-pum", "side_norm": "pumas unam", "kind": "side",
+         "line": "", "question": q},
+        {"identifier": "x-nec", "side_norm": "necaxa", "kind": "side",
+         "line": "", "question": q},
     ]
-    assert premap.match_side(rows, "No", None) is None
-    rows.append({"identifier": "x-no", "side_norm": "no", "kind": "side", "line": ""})
-    hit = premap.match_side(rows, "No", None)
+    assert premap.match_side(rows, "No", q) is None
+    rows.append({"identifier": "x-no", "side_norm": "no", "kind": "side",
+                 "line": "", "question": q})
+    hit = premap.match_side(rows, "No", q)
     assert hit and hit["identifier"] == "x-no"
+
+
+def test_a_yes_no_pick_without_a_question_is_unbettable():
+    """No question means no proposition — refuse rather than guess
+    which of the event's derivatives the whale meant."""
+    rows = [{"identifier": "x-no", "side_norm": "no", "kind": "side",
+             "line": "", "question": "Will Pumas win?"}]
+    assert premap.match_side(rows, "No", None) is None
+
+
+def test_a_yes_no_pick_never_crosses_to_another_proposition():
+    """The reproduction: a whale's Yes on 'Will both teams score?'
+    matched the CLEAN SHEET market's Yes — a different bet entirely."""
+    rows = [{"identifier": "astatc-cleansheet", "side_norm": "yes",
+             "kind": "side", "line": "",
+             "question": "Will Arsenal keep a clean sheet?"}]
+    assert premap.match_side(rows, "Yes",
+                             "Will both teams score?") is None
 
 
 def test_over_under_requires_line_equality():
