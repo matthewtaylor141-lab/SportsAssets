@@ -158,8 +158,40 @@ def test_side_echo_mismatch_requarantines_alone(monkeypatch):
     sqls = [sql for sql, _ in pool.executes]
     assert any("mapping_quarantine" in s and "'true'" in s for s in sqls)
     assert any("premap_live" in s and "'false'" in s for s in sqls)
+    # The un-overridable circuit (leak-hunt find 2026-08-24): the two
+    # switches above can be env-shadowed; this one cannot.
+    assert any("side_echo_tripped" in s and "'true'" in s for s in sqls)
     err = [a for sql, a in pool.executes if "UPDATE live_orders" in sql]
     assert err and "SIDE-ECHO MISMATCH" in str(err[0])
+
+
+class _TrippedPool(_LadderPool):
+    """The circuit is armed; everything else answers as _LadderPool."""
+
+    async def fetchval(self, sql, *a):
+        if "ingestion_state" in sql and a and a[0] == "side_echo_tripped":
+            return "true"
+        return await super().fetchval(sql, *a)
+
+
+def test_tripped_circuit_refuses_even_with_env_overrides(monkeypatch):
+    """The leak-hunt scenario verbatim: LIVE_MAPPING_QUARANTINE=off and
+    LIVE_PREMAP=on (env-armed operation) must NOT sail past a tripped
+    side-echo circuit — the circuit has no env override."""
+    from sportsassets import copy_sports as _cs
+
+    pool = _TrippedPool([])
+    submitted = _wire_with_real_cuts(
+        monkeypatch, pool, f"tsc-epl-ars-che-{TODAY}-o3pt5")
+    monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
+    monkeypatch.setenv("LIVE_MAPPING_QUARANTINE", "off")
+    monkeypatch.setenv("LIVE_PREMAP", "on")
+    asyncio.run(live_executor.maybe_execute(
+        _payload(whale_username="HomeRunHazard"), 5.0))
+    assert submitted == []
+    rej = [(sql, a) for sql, a in pool.updates
+           if "status='rejected'" in sql and "side-echo tripped" in str(a)]
+    assert len(rej) == 1
 
 
 def test_side_echo_outage_never_trips_the_breaker(monkeypatch):

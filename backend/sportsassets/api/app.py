@@ -3839,6 +3839,21 @@ async def api_premap_live_set(action: str) -> dict:
     return {"ok": True, "premap_live": action == "on"}
 
 
+@app.post("/api/admin/side-echo-reset",
+          dependencies=[Depends(require_admin)])
+async def api_side_echo_reset() -> dict:
+    """Clear the side-echo circuit after review. The circuit (tripped
+    by a confirmed wrong-side mismatch on a filled copy) deliberately
+    has NO env override — this explicit reset is the only way back to
+    trading, so a mismatch always gets human eyes before resumption."""
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) "
+        "VALUES ('side_echo_tripped', 'false'::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value='false'::jsonb")
+    return {"ok": True, "side_echo_tripped": False}
+
+
 @app.get("/api/admin/quarantine", dependencies=[Depends(require_admin)])
 async def api_quarantine_get() -> dict:
     pool = await get_pool()
@@ -4040,7 +4055,8 @@ async def api_premap_status() -> dict:
     extras: dict = {}
     for key, out in (("premap_last", "last_sweep"),
                      ("workers_boot", "workers_boot"),
-                     ("side_echo_last", "side_echo")):
+                     ("side_echo_last", "side_echo"),
+                     ("side_echo_tripped", "side_echo_tripped")):
         try:
             val = await pool.fetchval(
                 "SELECT value FROM ingestion_state WHERE key=$1", key)

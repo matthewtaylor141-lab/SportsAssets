@@ -1110,6 +1110,13 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
 
     try:
         if verdict == "mismatch":
+            # The un-overridable circuit FIRST (leak-hunt 2026-08-24):
+            # the two switches below can both be env-shadowed; this one
+            # cannot.
+            await pool.execute(
+                "INSERT INTO ingestion_state (key, value) "
+                "VALUES ('side_echo_tripped', 'true'::jsonb) "
+                "ON CONFLICT (key) DO UPDATE SET value='true'::jsonb")
             await pool.execute(
                 "INSERT INTO ingestion_state (key, value) "
                 "VALUES ('mapping_quarantine', 'true'::jsonb) "
@@ -1465,6 +1472,34 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 "UPDATE live_orders SET us_market_slug=$2 WHERE id=$1",
                 row_id, mapping["market_slug"],
             )
+            # SIDE-ECHO CIRCUIT (leak-hunt find 2026-08-24): the echo's
+            # auto-requarantine writes the DB switches, but the env
+            # overrides (LIVE_PREMAP=on / LIVE_MAPPING_QUARANTINE=off)
+            # short-circuit BEFORE those DB reads — env-armed operation
+            # would sail past a confirmed wrong-side mismatch. This
+            # circuit deliberately has NO env override: tripped means
+            # every copy mapping refuses until an admin explicitly
+            # resets it (POST /api/admin/side-echo-reset). Unreadable
+            # state fails safe.
+            _q_slug0 = str(mapping.get("market_slug") or "").lower()
+            try:
+                _tv = await pool.fetchval(
+                    "SELECT value FROM ingestion_state WHERE key=$1",
+                    "side_echo_tripped")
+                _tripped = (bool(json.loads(_tv) if isinstance(_tv, str)
+                                 else _tv) if _tv is not None else False)
+            except Exception:  # noqa: BLE001 — fail safe: refuse
+                _tripped = True
+            if _tripped:
+                await pool.execute(
+                    "UPDATE live_orders SET status='rejected', error=$2 "
+                    "WHERE id=$1", row_id,
+                    "side-echo tripped: confirmed wrong-side evidence — "
+                    "copying halted pending admin review "
+                    f"(slug={_q_slug0[:120]})")
+                log.warning("LIVE (US) refused: side-echo circuit "
+                            "tripped (%s)", _q_slug0)
+                return
             # MAPPING QUARANTINE (owner emergency 2026-08-23): the venue
             # ledger proved a large share of two-outcome copies were held
             # on the WRONG SIDE while the old settlement sweep graded them

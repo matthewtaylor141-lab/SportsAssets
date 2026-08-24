@@ -293,7 +293,7 @@ jobs:
           curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/premap.json "$BASE/api/admin/premap-status" || true
           jq -r '"  PREMAP rows=\(.rows // 0)  events=\(.events // 0)  fresh=\(.fresh // "never")  last=\(.last_sweep // "none")"' /tmp/premap.json 2>/dev/null || true
-          jq -r '"  WORKERS boot=\(.workers_boot // "none")  side_echo=\(.side_echo // "none")"' /tmp/premap.json 2>/dev/null || true
+          jq -r '"  WORKERS boot=\(.workers_boot // "none")  side_echo=\(.side_echo // "none")  TRIPPED=\(.side_echo_tripped // false)"' /tmp/premap.json 2>/dev/null || true
           # SPORTS-PROV: per sports-roster whale, are detections arriving
           # src=chain (sub-second) or src=poll (minutes)? The swisstony
           # capture question answers here. (whales.json is fetched fresh
