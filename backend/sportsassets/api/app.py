@@ -4037,16 +4037,19 @@ async def api_premap_status() -> dict:
             "max(updated_at) AS fresh FROM us_premap")
     except Exception:  # noqa: BLE001 — table not created yet
         return {"rows": 0, "events": 0, "fresh": None}
-    last = None
-    try:
-        val = await pool.fetchval(
-            "SELECT value FROM ingestion_state WHERE key=$1", "premap_last")
-        last = json.loads(val) if isinstance(val, str) else val
-    except Exception:  # noqa: BLE001
-        pass
+    extras: dict = {}
+    for key, out in (("premap_last", "last_sweep"),
+                     ("workers_boot", "workers_boot"),
+                     ("side_echo_last", "side_echo")):
+        try:
+            val = await pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1", key)
+            extras[out] = json.loads(val) if isinstance(val, str) else val
+        except Exception:  # noqa: BLE001
+            extras[out] = None
     return {"rows": row["rows"], "events": row["events"],
             "fresh": row["fresh"].isoformat() if row["fresh"] else None,
-            "last_sweep": last}
+            **extras}
 
 
 @app.get("/api/admin/mapping-audit", dependencies=[Depends(require_admin)])

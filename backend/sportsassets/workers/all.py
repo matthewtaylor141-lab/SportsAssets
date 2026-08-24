@@ -48,7 +48,34 @@ async def supervise(name: str, factory: Callable[[], Awaitable[None]]) -> None:
         await asyncio.sleep(RESTART_DELAY_SECONDS)
 
 
+async def _record_boot() -> None:
+    """Workers-side /healthz (2026-08-24): three probes in a row read a
+    silent premap sweep and the diagnosis stalled on 'is the worker even
+    running the new code?'. The API answers that with /healthz commit;
+    the workers now answer it with this state row, written at every
+    boot and surfaced by the probe."""
+    import json
+    import os
+    from datetime import datetime, timezone
+
+    from ..db import get_pool
+
+    try:
+        pool = await get_pool()
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) "
+            "VALUES ('workers_boot', $1::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value=$1::jsonb",
+            json.dumps({
+                "commit": (os.environ.get("RENDER_GIT_COMMIT") or "?")[:7],
+                "at": datetime.now(tz=timezone.utc)
+                .isoformat(timespec="seconds")}))
+    except Exception:  # noqa: BLE001 — the marker must not block boot
+        log.exception("workers_boot marker write failed")
+
+
 async def main() -> None:
+    await _record_boot()
     await asyncio.gather(*(supervise(name, fn) for name, fn in LOOPS))
 
 

@@ -32,6 +32,18 @@ PAGE_LIMIT = 100
 MAX_EVENT_PAGES = 40            # bounds a sweep at ~4k events
 LIST_PACING_S = 0.35            # stay under venue rate limits (429 fix, 2026-08-23)
 PRUNE_HOURS = 26                # rows unseen for a day age out
+LIST_CALL_TIMEOUT_S = 30        # a hung SDK call must not wedge the sweep
+
+
+def _items(resp, key: str) -> list:
+    """The SDK returns either {"events": [...]} / {"markets": [...]} or a
+    BARE LIST depending on version — `.get` on a list raises and the old
+    sweep died silently on exactly that. Accept both shapes."""
+    if isinstance(resp, dict):
+        return list(resp.get(key) or [])
+    if isinstance(resp, list):
+        return list(resp)
+    return []
 
 
 def _norm(s: str | None) -> str:
@@ -242,13 +254,19 @@ async def refresh() -> dict:
     events = 0
     err = None
     mode = "events"
+    # A sweep that never records is indistinguishable from one that
+    # never STARTED (2026-08-24: rows=0 last=none read three probes in a
+    # row) — record the start, then progress every page, so a hang shows
+    # exactly where it hangs.
+    await _record_last(pool, {"mode": "starting", "events": 0, "rows": 0})
     try:
         offset = 0
         for _page in range(MAX_EVENT_PAGES):
-            resp = await asyncio.to_thread(
+            resp = await asyncio.wait_for(asyncio.to_thread(
                 client.events.list,
-                {"limit": PAGE_LIMIT, "offset": offset, "active": True})
-            got = list((resp or {}).get("events") or [])
+                {"limit": PAGE_LIMIT, "offset": offset, "active": True}),
+                timeout=LIST_CALL_TIMEOUT_S)
+            got = _items(resp, "events")
             if not got:
                 break
             offset += len(got)
@@ -258,10 +276,11 @@ async def refresh() -> dict:
                     continue
                 await asyncio.sleep(LIST_PACING_S)
                 try:
-                    mresp = await asyncio.to_thread(
+                    mresp = await asyncio.wait_for(asyncio.to_thread(
                         client.markets.list,
-                        {"eventSlug": [ev_slug], "active": True})
-                    markets = [m for m in (mresp or {}).get("markets") or []
+                        {"eventSlug": [ev_slug], "active": True}),
+                        timeout=LIST_CALL_TIMEOUT_S)
+                    markets = [m for m in _items(mresp, "markets")
                                if (m.get("eventSlug") or m.get("event_slug"))
                                in (None, ev_slug) and not m.get("closed")]
                 except Exception:  # noqa: BLE001 — next event
@@ -274,6 +293,8 @@ async def refresh() -> dict:
                     for r in _market_rows(ev, m):
                         await _upsert(pool, r, keys)
                         seen_rows += 1
+            await _record_last(pool, {"mode": "events/page%d" % _page,
+                                      "events": events, "rows": seen_rows})
             if len(got) < PAGE_LIMIT:
                 break
     except Exception as exc:  # noqa: BLE001 — try the fallback path
@@ -283,12 +304,12 @@ async def refresh() -> dict:
         try:
             offset = 0
             for _page in range(MAX_EVENT_PAGES):
-                mresp = await asyncio.to_thread(
+                mresp = await asyncio.wait_for(asyncio.to_thread(
                     client.markets.list,
-                    {"limit": PAGE_LIMIT, "offset": offset, "active": True})
-                got = [m for m in (mresp or {}).get("markets") or []
-                       if not m.get("closed")]
-                raw = list((mresp or {}).get("markets") or [])
+                    {"limit": PAGE_LIMIT, "offset": offset, "active": True}),
+                    timeout=LIST_CALL_TIMEOUT_S)
+                raw = _items(mresp, "markets")
+                got = [m for m in raw if not m.get("closed")]
                 if not raw:
                     break
                 offset += len(raw)
@@ -306,6 +327,9 @@ async def refresh() -> dict:
                     for r in _market_rows(ev, m):
                         await _upsert(pool, r, keys)
                         seen_rows += 1
+                await _record_last(pool, {"mode": "markets/page%d" % _page,
+                                          "events": events,
+                                          "rows": seen_rows})
                 if len(raw) < PAGE_LIMIT:
                     break
             err = None

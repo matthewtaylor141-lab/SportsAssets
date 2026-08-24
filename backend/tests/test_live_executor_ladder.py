@@ -100,6 +100,12 @@ def _wire(monkeypatch, pool, mapped_slug):
     # quarantine (fuzzy paths refused) would fire first on this mock's
     # fuzzy-resolved slug and mask the behavior under test.
     monkeypatch.setenv("LIVE_MAPPING_QUARANTINE", "off")
+    # The 2026-08-24 TRUEEDGE cut refuses RN1 at entry and zeroes his
+    # clip; the historical RN1 fixtures here exercise ladder/mapping
+    # logic, so the cut is lifted for the harness. The cut itself has
+    # its own tests (test_trueedge_cut.py).
+    monkeypatch.setattr(live_executor, "COPY_CUT_WHALES", frozenset())
+    monkeypatch.setitem(live_executor.PER_FILL_BY_WHALE, "rn1", 225.00)
     monkeypatch.setattr(pmus, "resolve_market_exact", lambda *a, **k: None)
     monkeypatch.setattr(
         pmus, "resolve_market",

@@ -23,6 +23,10 @@ on:
         description: "Override the API base URL"
         required: false
         default: ""
+      premap_live:
+        description: "Flip the premap-live resume lever (on/off; empty = leave alone). Owner-authorized resume path 2026-08-24."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -251,6 +255,19 @@ jobs:
           # "every cent of it") — TODAY's day-detail: the anchor rows vs
           # the copies audit, per-market deltas largest first, plus the
           # non-copy rows that land wholly in the residual.
+          # ── RESUME LEVER (owner order 2026-08-24, "copies on and
+          # firing for the verifiably profitable whales"): when the
+          # dispatch input is set, flip premap-live through the admin
+          # switch and print the verdict verbatim — a fully audited
+          # go/no-go action, never an ambient default.
+          if [ -n "${{ inputs.premap_live || '' }}" ]; then
+            echo "  LEVER premap-live -> ${{ inputs.premap_live }}"
+            curl -sS --max-time 30 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+              "$BASE/api/admin/premap-live/${{ inputs.premap_live }}" \
+              | head -c 400 || echo "  LEVER call failed"
+            echo ""
+          fi
+
           # ── the thesis verification (owner order 2026-08-24: verified,
           # not guessed): per whale, his TRUE edge on the full detected
           # book at his prices vs what our reaction time achieves
@@ -270,6 +287,28 @@ jobs:
           curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/premap.json "$BASE/api/admin/premap-status" || true
           jq -r '"  PREMAP rows=\(.rows // 0)  events=\(.events // 0)  fresh=\(.fresh // "never")  last=\(.last_sweep // "none")"' /tmp/premap.json 2>/dev/null || true
+          jq -r '"  WORKERS boot=\(.workers_boot // "none")  side_echo=\(.side_echo // "none")"' /tmp/premap.json 2>/dev/null || true
+          # SPORTS-PROV: per sports-roster whale, are detections arriving
+          # src=chain (sub-second) or src=poll (minutes)? The swisstony
+          # capture question answers here. (whales.json is fetched fresh
+          # here — the KCR-PROV fetch runs much later in the script.)
+          curl -sS --max-time 60 -o /tmp/whales.json "$BASE/api/whales" || true
+          for W in rn1 swisstony homerunhazard 0x076daa87 ferrarichampions2026; do
+            WID=$(jq -r --arg w "$W" \
+              '(if type=="array" then . else (.whales // []) end)
+               | .[] | select((.username // "" | ascii_downcase) == $w) | .id' \
+              /tmp/whales.json 2>/dev/null | head -1)
+            [ -z "$WID" ] && { echo "  SPORTS-PROV $W: not in roster"; continue; }
+            curl -sS --max-time 60 "$BASE/api/feed?whale_id=$WID&limit=10" 2>/dev/null | \
+              jq -r --arg w "$W" '. as $rows
+                | if (type=="array" and length > 0) then
+                    ($rows | map(select(.source=="chain")) | length) as $ch
+                    | ($rows | map(select(.source=="poll")) | length) as $po
+                    | "  SPORTS-PROV \($w): last \(length) rows — chain \($ch) / poll \($po)",
+                      (.[0:3][] | "    \(.ts)  src=\(.source // "?")  lat=\(.latency_s // "?")s  \(.side) $\(.notional)")
+                  else "  SPORTS-PROV \($w): no feed rows" end' \
+              || echo "  SPORTS-PROV $W: feed fetch failed"
+          done
 
           # ── side-fidelity audit (owner order 2026-08-24: prove which
           # mapping path inverted sides — pick vs the slug we ordered,

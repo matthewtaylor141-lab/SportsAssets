@@ -58,6 +58,10 @@ def _wire(monkeypatch, pool, ctx):
     monkeypatch.setattr(live_executor, "get_pool", fake_get_pool)
     monkeypatch.setattr(live_executor, "_is_paused", fake_paused)
     monkeypatch.setattr(live_executor, "_market_context", fake_ctx)
+    # The fixture whale (0x2c33) was TRUEEDGE-cut 2026-08-24; these
+    # tests exercise slug-resolution plumbing, not the cut (which has
+    # its own tests in test_trueedge_cut.py).
+    monkeypatch.setattr(live_executor, "COPY_CUT_WHALES", frozenset())
     monkeypatch.setattr(live_executor, "active_venue",
                         lambda: "polymarket-us")
 

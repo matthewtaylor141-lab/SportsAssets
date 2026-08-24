@@ -311,15 +311,27 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 # copies are positive; HRH's cell-gated book is 12W-8L with the 50-95c
 # band guard doing its job. Both raises are bounded (+33%/+50%), not
 # leaps — the settled samples are still small.
-PER_FILL_BY_WHALE = {"rn1": 225.00, "swisstony": 300.00,
-                     _W2C33: 300.00, "homerunhazard": 112.50,
+# TRUEEDGE CUTS + UPSIZE (owner order 2026-08-24, from the verified
+# counterfactual table on the FULL detected book, settled on each
+# whale's own venue — no fill-selection bias, untouched by the
+# settlement incident):
+#   rn1 cf_total −4,468, ferrari −10,513, 0x2c33 −29,638 → their books
+#   are negative AT THEIR OWN PRICES. Not copyable at any speed; their
+#   clips are 0.00 (a 0 cell is a BLOCK) and COPY_CUT_WHALES refuses
+#   them at entry. Detection continues — data is free, dollars are not.
+#   homerunhazard cf_total +26,076 (paper at our real latency +15,051)
+#   and 0x076 +6,189 (paper +5,772) → upsized to the $300 clip the
+#   formerly-largest sleeves carried ("match what our sizing was for
+#   profitable whales"). swisstony (+11,895 at his prices, latency-cost
+#   −14,835 at the OLD ~74s median) keeps his $300 clip but stays out
+#   of LIVE_PREMAP_WHALES until his paper re-run at the new sub-second
+#   detection grades positive.
+COPY_CUT_WHALES = frozenset({"rn1", "ferrarichampions2026", _W2C33})
+PER_FILL_BY_WHALE = {"rn1": 0.00, "swisstony": 300.00,
+                     _W2C33: 0.00, "homerunhazard": 300.00,
                      "kch123": 150.00,
-                     # Dossier promotions (owner order 2026-08-21):
-                     # "$100 per order" probation clips. The FOK takes
-                     # $100 at his price or better, or nothing — the
-                     # same contract every whale trades under.
-                     "ferrarichampions2026": 100.00,
-                     "0x076daa87": 100.00}
+                     "ferrarichampions2026": 0.00,
+                     "0x076daa87": 300.00}
 
 # PER-MARKET-TYPE MULTIPLIERS (owner go 2026-08-20 morning, from the
 # five-whale lifetime type calibration, 2026-08-18): spreads beat every
@@ -341,13 +353,16 @@ TYPE_MULT: dict[tuple[str, str], float] = {
 # missed cohort grades -26.8% — the selectivity is doing the work, so
 # the fills that DO pass the gates earn a bigger clip. Same +50% step
 # discipline as every prior raise.
+# The (whale, sport) cell WINS over the whale clip, so a cut whale must
+# carry no live cells here — rn1's tennis/baseball/soccer rows are gone
+# (2026-08-24 TRUEEDGE cut), not merely shadowed by his 0.00 base.
+# homerunhazard's cells scale with his base (112.50→300, x2.667:
+# baseball 225→600, football 37.50→100) so the measured per-sport
+# judgment survives the upsize.
 PER_FILL_BY_WHALE_SPORT = {("swisstony", "soccer"): 225.00,
-                           ("rn1", "tennis"): 112.50,
-                           ("rn1", "baseball"): 375.00,
-                           ("rn1", "soccer"): 300.00,
                            (_W2C33, "tennis"): 0.00,
-                           ("homerunhazard", "baseball"): 225.00,
-                           ("homerunhazard", "football"): 37.50}
+                           ("homerunhazard", "baseball"): 600.00,
+                           ("homerunhazard", "football"): 100.00}
 # 24H ROLLING-LOSS BREAKER (owner 2026-08-12, threshold his call:
 # "$1500"): when the copy sleeve's realized losses over any rolling
 # 24 hours reach this, copying pauses by itself until the window
@@ -1036,6 +1051,105 @@ async def _execute_manual_sell(us_slug: str, qty: int | None,
                        "nothing was sold")}
 
 
+# Strong refs for fire-and-forget echo tasks (a bare create_task can be
+# garbage-collected mid-flight).
+_ECHO_TASKS: set = set()
+
+
+async def _side_echo_verify(pool, row_id: int, us_slug: str,
+                            outcome: str | None, his_title: str | None,
+                            attempts: int = 3) -> None:
+    """POST-FILL SIDE ECHO (owner order 2026-08-24: "verify that we
+    never ever take the wrong position ever again"): seconds after a
+    copy fills, re-derive the mapping from the venue's LIVE event board
+    through the same precision matcher (premap.match_side) and require
+    it to land on the exact identifier we bought. A CONFIRMED
+    divergence — the matcher choosing a DIFFERENT identifier on live
+    venue data — re-arms the total quarantine and drops premap-live by
+    itself, so a corrupt or stale premap row gets ONE order of
+    exposure, never a day. Zero latency on the order path (runs after
+    the fill). Fetch failures and no-unique-match are counted and
+    surfaced (side_echo_last state key), never treated as divergence —
+    a venue outage must not be able to trip the breaker on its own."""
+    from . import pmus
+    from .workers import premap as _premap
+
+    verdict, detail = "unverified", ""
+    try:
+        ev_slug = await pool.fetchval(
+            "SELECT event_slug FROM us_premap WHERE identifier=$1",
+            us_slug.lower())
+        if not ev_slug:
+            detail = "identifier not in us_premap"
+        else:
+            board = None
+            for _ in range(attempts):
+                try:
+                    board = await asyncio.to_thread(
+                        pmus.event_board, ev_slug)
+                    break
+                except Exception:  # noqa: BLE001 — retry, then count
+                    await asyncio.sleep(2)
+            if not board:
+                detail = "event board unreachable"
+            else:
+                rows: list[dict] = []
+                for m in board:
+                    rows.extend(_premap._market_rows(
+                        {"slug": ev_slug, "title": ""}, m))
+                hit = _premap.match_side(rows, outcome, his_title)
+                if hit is None:
+                    detail = "no unique live match"
+                elif hit["identifier"] == us_slug.lower():
+                    verdict = "ok"
+                else:
+                    verdict = "mismatch"
+                    detail = f"live matcher chose {hit['identifier']}"
+    except Exception as exc:  # noqa: BLE001 — the echo never raises
+        detail = f"echo error: {exc}"[:200]
+
+    try:
+        if verdict == "mismatch":
+            await pool.execute(
+                "INSERT INTO ingestion_state (key, value) "
+                "VALUES ('mapping_quarantine', 'true'::jsonb) "
+                "ON CONFLICT (key) DO UPDATE SET value='true'::jsonb")
+            await pool.execute(
+                "INSERT INTO ingestion_state (key, value) "
+                "VALUES ('premap_live', 'false'::jsonb) "
+                "ON CONFLICT (key) DO UPDATE SET value='false'::jsonb")
+            await pool.execute(
+                "UPDATE live_orders SET error=$2 WHERE id=$1", row_id,
+                ("SIDE-ECHO MISMATCH — auto-requarantined "
+                 f"({detail})")[:300])
+            log.critical(
+                "SIDE-ECHO MISMATCH row %s slug %s: %s — total "
+                "quarantine re-armed, premap-live dropped",
+                row_id, us_slug, detail)
+        prev = {}
+        try:
+            raw = await pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1",
+                "side_echo_last")
+            if raw:
+                prev = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:  # noqa: BLE001
+            prev = {}
+        counts = {k: int(prev.get(k, 0)) for k in
+                  ("ok", "mismatch", "unverified")}
+        counts[verdict] += 1
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) "
+            "VALUES ('side_echo_last', $1::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value=$1::jsonb",
+            json.dumps({**counts, "last": verdict,
+                        "last_slug": us_slug, "last_detail": detail,
+                        "last_at": datetime.now(tz=timezone.utc)
+                        .isoformat(timespec="seconds")}))
+    except Exception:  # noqa: BLE001 — bookkeeping must not raise either
+        log.exception("side-echo bookkeeping failed for row %s", row_id)
+
+
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
     """Called on every fresh detection (after the paper trade). All guards
     re-checked here; failure of any guard is a silent no-op or logged skip."""
@@ -1047,6 +1161,12 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         return
     username = (payload.get("whale_username") or "").lower()
     if payload.get("side") != "BUY" or username not in cfg.source_whales():
+        return
+    # TRUEEDGE CUT (owner order 2026-08-24): a whale whose full detected
+    # book is negative at his OWN prices is not copyable at any speed.
+    # First of three independent blocks (this gate, the 0.00 clip, the
+    # premap-live allowlist) — any one of them alone stops the dollars.
+    if username in COPY_CUT_WHALES:
         return
     his_notional = float(payload.get("notional") or 0)
     his_price = float(payload.get("price") or 0)
@@ -1244,6 +1364,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             f"stale-signal: reaction {reaction}s > {_stale_cap:g}s cap")
         return
 
+    _echo_args: tuple | None = None
     try:
         if venue == "polymarket-us":
             from . import pmus
@@ -1384,8 +1505,18 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # and only once the owner flips premap_live (DB switch via
             # POST /api/admin/premap-live/on; env LIVE_PREMAP overrides
             # both ways). Everything else stays refused-but-recorded.
+            # PREMAP-LIVE ALLOWLIST (owner order 2026-08-24): the resume
+            # lane admits ONLY the whales the TRUEEDGE table verified
+            # profitable at their own prices AND at our measured latency.
+            # swisstony joins via env (no code change) the moment his
+            # paper cohort at the new sub-second detection grades
+            # positive; everyone else stays refused-but-recorded.
+            _allowed = {w.strip() for w in
+                        os.getenv("LIVE_PREMAP_WHALES",
+                                  "homerunhazard,0x076daa87")
+                        .lower().split(",") if w.strip()}
             _premap_ok = False
-            if _q_on and mapping_src == "premap":
+            if _q_on and mapping_src == "premap" and username in _allowed:
                 _pl_env = os.getenv("LIVE_PREMAP", "")
                 if _pl_env == "on":
                     _premap_ok = True
@@ -1400,13 +1531,20 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     except Exception:  # noqa: BLE001 — fail safe: refuse
                         _premap_ok = False
             if _q_on and not _premap_ok:
+                if mapping_src == "premap" and username not in _allowed:
+                    _q_reason = ("premap-live: whale not in the "
+                                 "verified-profitable set (TRUEEDGE "
+                                 "2026-08-24) "
+                                 f"(src=premap, slug={_q_slug[:120]})")
+                else:
+                    _q_reason = ("quarantined: mapping class unverified "
+                                 "after wrong-side incident 2026-08-23 "
+                                 f"(src={mapping_src}, "
+                                 f"slug={_q_slug[:120]})")
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 "
                     "WHERE id=$1",
-                    row_id,
-                    "quarantined: mapping class unverified after "
-                    "wrong-side incident 2026-08-23 "
-                    f"(src={mapping_src}, slug={_q_slug[:120]})")
+                    row_id, _q_reason)
                 log.warning("LIVE (US) quarantined %s mapping: %s / %s",
                             mapping_src, ctx.get("market_title"),
                             _q_slug)
@@ -1519,6 +1657,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # cancels the rest. The same-or-better limit is unchanged —
             # only the all-or-nothing constraint is dropped, so a thin
             # book yields a smaller position instead of a killed order.
+            _echo_args = (mapping["market_slug"], ctx.get("outcome"),
+                          ctx.get("market_title"))
             result = await asyncio.to_thread(
                 pmus.submit_fok, mapping["market_slug"], limit,
                 int(shares), False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
@@ -1545,6 +1685,11 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         log.info("LIVE order [%s] %s: %s %.2f shares @ %.3f (his %.3f)",
                  venue, "FILLED" if result["ok"] and filled > 0 else "unfilled",
                  payload.get("whale_username"), filled, fill_price or limit, his_price)
+        if _echo_args and result["ok"] and filled > 0:
+            _t = asyncio.create_task(_side_echo_verify(
+                pool, row_id, *_echo_args))
+            _ECHO_TASKS.add(_t)
+            _t.add_done_callback(_ECHO_TASKS.discard)
     except Exception as exc:  # noqa: BLE001 — record, never crash ingestion
         log.exception("live order failed for trade %s", payload.get("id"))
         await pool.execute(

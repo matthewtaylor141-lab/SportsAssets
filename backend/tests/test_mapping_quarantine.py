@@ -90,6 +90,11 @@ def test_premap_live_lever_admits_only_premap_mappings(monkeypatch):
     submitted = _wire(monkeypatch, pool, "unused-fuzzy-slug")
     monkeypatch.setenv("LIVE_MAPPING_QUARANTINE", "on")
     monkeypatch.setenv("LIVE_PREMAP", "on")
+    # The harness whale is RN1; the 2026-08-24 premap-live allowlist
+    # only admits the verified-profitable set, so the lever mechanics
+    # are tested with RN1 explicitly allowlisted. The allowlist itself
+    # has its own tests (test_trueedge_cut.py).
+    monkeypatch.setenv("LIVE_PREMAP_WHALES", "rn1")
 
     async def fake_premap(_pool, *_a, **_k):
         return {"market_slug": f"atc-epl-ars-che-{TODAY}-ars",
@@ -108,6 +113,7 @@ def test_premap_live_off_keeps_premap_refused(monkeypatch):
     submitted = _wire(monkeypatch, pool, "unused-fuzzy-slug")
     monkeypatch.setenv("LIVE_MAPPING_QUARANTINE", "on")
     monkeypatch.setenv("LIVE_PREMAP", "off")
+    monkeypatch.setenv("LIVE_PREMAP_WHALES", "rn1")  # see admit test
 
     async def fake_premap(_pool, *_a, **_k):
         return {"market_slug": f"atc-epl-ars-che-{TODAY}-ars",
