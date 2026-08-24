@@ -5023,6 +5023,14 @@ async def _whale_by_body(body: RosterActionBody) -> dict | None:
         row = await pool.fetchrow("SELECT * FROM whales WHERE id=$1", body.whale_id)
     elif body.address:
         row = await pool.fetchrow("SELECT * FROM whales WHERE address=$1", body.address.lower())
+    elif body.username:
+        # 2026-08-24: rn1 and swisstony silently dropped off the active
+        # roster (auto-deactivation) and the only lookups here were
+        # id/address, neither of which the probe knows — reactivation
+        # by username closes that gap.
+        row = await pool.fetchrow(
+            "SELECT * FROM whales WHERE lower(username)=lower($1) "
+            "ORDER BY active DESC, id LIMIT 1", body.username)
     else:
         return None
     return dict(row) if row else None

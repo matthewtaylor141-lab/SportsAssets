@@ -320,6 +320,26 @@ jobs:
                 else "  SPORTS-PROV \($w): no feed rows" end' /tmp/feed.json \
               || echo "  SPORTS-PROV $W: feed parse failed"
           done
+          # ROSTER-GUARD (2026-08-24: rn1 + swisstony silently dropped
+          # off the active roster — no detection, no paper cohort, no
+          # TRUEEDGE updates). Every configured source whale must be
+          # DETECTED even when cut or held: detection is data, the
+          # cut/hold/quarantine gates are what stop dollars. Idempotent;
+          # prints every action it takes.
+          for W in rn1 swisstony homerunhazard 0x076daa87 ferrarichampions2026 kch123; do
+            HIT=$(jq -r --arg w "$W" \
+              '(if type=="array" then . else (.whales // []) end)
+               | [.[] | select((.username // "" | ascii_downcase) == $w)] | length' \
+              /tmp/whales.json 2>/dev/null || echo 0)
+            if [ "$HIT" = "0" ]; then
+              echo "  ROSTER-GUARD $W: not active — reactivating"
+              curl -sS --max-time 30 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"username\": \"$W\"}" \
+                "$BASE/api/admin/roster/activate" | head -c 300 || true
+              echo ""
+            fi
+          done
 
           # ── side-fidelity audit (owner order 2026-08-24: prove which
           # mapping path inverted sides — pick vs the slug we ordered,
@@ -1162,6 +1182,47 @@ jobs:
               2>/dev/null | head -60 || true
             sleep 1
           done
+
+      - name: Premap ground truth (the sweep's exact reads, via public SDK)
+        if: always()
+        run: |
+          pip install --quiet polymarket-us 2>/dev/null || pip install polymarket-us
+          echo "###########################################################"
+          echo "#   PREMAP-GT: why did 300 events produce zero rows?       #"
+          echo "###########################################################"
+          python - <<'PY'
+          from polymarket_us import PolymarketUS
+
+          pub = PolymarketUS()
+          resp = pub.events.list({"limit": 8, "offset": 0, "active": True})
+          evs = resp.get("events") if isinstance(resp, dict) else resp
+          evs = list(evs or [])
+          print(f"PREMAP-GT events.list -> {len(evs)} events; "
+                f"resp type {type(resp).__name__}")
+          for ev in evs[:5]:
+              ev_slug = ev.get("slug") or ev.get("eventSlug")
+              print(f"PREMAP-GT event keys={sorted(ev.keys())[:12]}")
+              print(f"PREMAP-GT event slug={ev_slug!r} title={str(ev.get('title'))[:60]!r}")
+              try:
+                  mresp = pub.markets.list({"eventSlug": [ev_slug],
+                                            "active": True})
+              except Exception as e:
+                  print(f"PREMAP-GT   markets.list ERR {type(e).__name__}: {str(e)[:120]}")
+                  continue
+              ms = mresp.get("markets") if isinstance(mresp, dict) else mresp
+              ms = list(ms or [])
+              print(f"PREMAP-GT   markets.list -> {len(ms)} markets; resp type {type(mresp).__name__}")
+              for m in ms[:3]:
+                  print(f"PREMAP-GT   market keys={sorted(m.keys())[:16]}")
+                  print(f"PREMAP-GT   slug={str(m.get('slug'))[:60]!r} eventSlug={str(m.get('eventSlug') or m.get('event_slug'))[:60]!r}")
+                  print(f"PREMAP-GT   question={str(m.get('question'))[:70]!r} title={str(m.get('title'))[:70]!r} outcome={str(m.get('outcome'))[:40]!r}")
+                  sides = m.get('marketSides')
+                  if isinstance(sides, list) and sides:
+                      s = sides[0]
+                      print(f"PREMAP-GT   marketSides[0] keys={sorted(s.keys())[:10]} identifier={str(s.get('identifier'))[:60]!r} description={str(s.get('description'))[:40]!r}")
+                  else:
+                      print(f"PREMAP-GT   marketSides={type(sides).__name__ if sides is not None else 'ABSENT'}")
+          PY
 
       - name: Crypto census — PMUS crypto markets (public gateway via SDK)
         if: always()
