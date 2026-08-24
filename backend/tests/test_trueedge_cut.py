@@ -381,8 +381,8 @@ class TestShadowCertification:
         spawned = []
         monkeypatch.setattr(
             live_executor, "_spawn_echo",
-            lambda pool, row_id, slug, outcome, title, *, shadow:
-            spawned.append((slug, outcome, shadow)))
+            lambda pool, row_id, slug, outcome, title, *, shadow,
+            **kw: spawned.append((slug, outcome, shadow, kw)))
 
         pool = _LadderPool([])
         _wire_with_real_cuts(monkeypatch, pool, "unused")

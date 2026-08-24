@@ -173,3 +173,65 @@ class TestSubmitCarriesTheIntent:
         out = pmus.submit_fok("x", 0.5, 10, intent="ORDER_INTENT_SELL_SHORT")
         assert out["ok"] is False and out["status"] == "bad_intent"
         assert seen == []
+
+
+class TestEchoIndependence:
+    """Leak-hunt round 2: the echo re-derived inside the market the
+    suspect premap row itself named, so an internally consistent but
+    WRONG row certified itself. A second opinion now re-resolves the
+    whale's own signal through a different resolver; disagreement is a
+    mismatch even when the first check said ok."""
+
+    def test_disagreement_is_a_mismatch(self, monkeypatch):
+        from sportsassets import live_executor as le
+
+        monkeypatch.setattr(
+            pmus, "resolve_market_exact",
+            lambda cands, outcome: {
+                "market_slug": "aec-atp-OTHER-2026-08-24",
+                "intent": "ORDER_INTENT_BUY_LONG"})
+        v, d = asyncio.run(le._independent_check(
+            "aec-atp-martop-migdam-2026-08-24", "Miguel Damas",
+            "Marko Topo vs. Miguel Damas",
+            "atp-martop-migdam-2026-08-24", "ORDER_INTENT_BUY_SHORT"))
+        assert v == "mismatch" and "OTHER" in d
+
+    def test_same_slug_but_opposite_intent_is_a_mismatch(self,
+                                                         monkeypatch):
+        """The subtle one: right market, WRONG SIDE — only the intent
+        differs, which is exactly the failure this whole build is
+        about."""
+        from sportsassets import live_executor as le
+
+        slug = "aec-atp-martop-migdam-2026-08-24"
+        monkeypatch.setattr(
+            pmus, "resolve_market_exact",
+            lambda cands, outcome: {"market_slug": slug,
+                                    "intent": "ORDER_INTENT_BUY_LONG"})
+        v, d = asyncio.run(le._independent_check(
+            slug, "Miguel Damas", "Marko Topo vs. Miguel Damas",
+            "atp-martop-migdam-2026-08-24", "ORDER_INTENT_BUY_SHORT"))
+        assert v == "mismatch" and "BUY_LONG" in d
+
+    def test_agreement_reads_ok(self, monkeypatch):
+        from sportsassets import live_executor as le
+
+        slug = "aec-atp-martop-migdam-2026-08-24"
+        monkeypatch.setattr(
+            pmus, "resolve_market_exact",
+            lambda cands, outcome: {"market_slug": slug,
+                                    "intent": "ORDER_INTENT_BUY_SHORT"})
+        v, _ = asyncio.run(le._independent_check(
+            slug, "Miguel Damas", "Marko Topo vs. Miguel Damas",
+            "atp-martop-migdam-2026-08-24", "ORDER_INTENT_BUY_SHORT"))
+        assert v == "ok"
+
+    def test_resolver_silence_is_unverified_not_ok(self, monkeypatch):
+        from sportsassets import live_executor as le
+
+        monkeypatch.setattr(pmus, "resolve_market_exact",
+                            lambda cands, outcome: None)
+        v, _ = asyncio.run(le._independent_check(
+            "x", "Miguel Damas", "Marko Topo vs. Miguel Damas",
+            "atp-martop-migdam-2026-08-24", "ORDER_INTENT_BUY_SHORT"))
+        assert v == "unverified"

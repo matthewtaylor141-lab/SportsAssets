@@ -1056,9 +1056,48 @@ async def _execute_manual_sell(us_slug: str, qty: int | None,
 _ECHO_TASKS: set = set()
 
 
+async def _independent_check(us_slug: str, outcome: str | None,
+                             his_title: str | None,
+                             his_slug: str | None,
+                             intent: str | None) -> tuple[str, str]:
+    """Re-derive the mapping from the WHALE'S OWN SIGNAL through a
+    DIFFERENT resolver, and require it to agree with what we bought.
+
+    (Leak-hunt round 2: the echo re-derived inside the market the
+    suspect premap row itself named, so an internally consistent but
+    wrong row self-certified. This path never reads us_premap — it
+    starts from the whale's title, builds candidate slugs the way the
+    deterministic desk resolver does, and asks the venue. Two
+    independent resolvers agreeing is evidence; one resolver agreeing
+    with itself is not.)"""
+    from . import pmus
+
+    cands = (_tennis_candidates(his_title, his_slug or "")
+             + _us_slug_candidates(his_slug or "", outcome or ""))
+    cands = [c for c in cands if c]
+    if not cands:
+        return "unverified", "no independent candidates"
+    try:
+        alt = await asyncio.to_thread(
+            pmus.resolve_market_exact, cands, outcome)
+    except Exception as exc:  # noqa: BLE001
+        return "unverified", f"independent resolver error: {exc}"[:160]
+    if alt is None:
+        return "unverified", "independent resolver found nothing"
+    if str(alt.get("market_slug", "")).lower() != us_slug.lower():
+        return "mismatch", (f"independent resolver chose "
+                            f"{alt.get('market_slug')}")
+    if intent and alt.get("intent") and alt["intent"] != intent:
+        return "mismatch", (f"independent resolver would order "
+                            f"{alt['intent']}, we sent {intent}")
+    return "ok", "independent resolver agrees"
+
+
 async def _side_echo_verify(pool, row_id: int, us_slug: str,
                             outcome: str | None, his_title: str | None,
-                            attempts: int = 3, shadow: bool = False) -> None:
+                            attempts: int = 3, shadow: bool = False,
+                            his_slug: str | None = None,
+                            intent: str | None = None) -> None:
     """POST-FILL SIDE ECHO (owner order 2026-08-24: "verify that we
     never ever take the wrong position ever again"): seconds after a
     copy fills, re-derive the mapping from the venue's LIVE event board
@@ -1133,6 +1172,23 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
     except Exception as exc:  # noqa: BLE001 — the echo never raises
         detail = f"echo error: {exc}"[:200]
 
+    # SECOND, INDEPENDENT OPINION: a wrong row that is internally
+    # consistent passes the check above, so the whale's own signal is
+    # re-resolved through a different resolver. Disagreement is a
+    # mismatch even when the first check said ok; agreement upgrades an
+    # 'unverified' to verified.
+    try:
+        iv, idetail = await _independent_check(
+            us_slug, outcome, his_title, his_slug, intent)
+        if iv == "mismatch":
+            verdict, detail = "mismatch", f"{detail} | {idetail}".strip(" |")
+        elif iv == "ok" and verdict == "unverified":
+            verdict, detail = "ok", idetail
+        elif iv == "ok" and verdict == "ok":
+            detail = f"{detail} + {idetail}".strip(" +")
+    except Exception as exc:  # noqa: BLE001 — never raises
+        detail = f"{detail} | independent check failed: {exc}"[:200]
+
     # SHADOW MODE (owner order 2026-08-24: prove it before dollars): the
     # same verification runs on QUARANTINED premap resolutions, where no
     # money rode. A shadow mismatch never trips the circuit — there is
@@ -1198,11 +1254,14 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
 
 
 def _spawn_echo(pool, row_id: int, us_slug: str, outcome: str | None,
-                his_title: str | None, *, shadow: bool) -> None:
+                his_title: str | None, *, shadow: bool,
+                his_slug: str | None = None,
+                intent: str | None = None) -> None:
     """Fire-and-forget echo with a strong task ref (a bare create_task
     can be garbage-collected mid-flight)."""
     t = asyncio.create_task(_side_echo_verify(
-        pool, row_id, us_slug, outcome, his_title, shadow=shadow))
+        pool, row_id, us_slug, outcome, his_title, shadow=shadow,
+        his_slug=his_slug, intent=intent))
     _ECHO_TASKS.add(t)
     t.add_done_callback(_ECHO_TASKS.discard)
 
@@ -1685,7 +1744,9 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 if mapping_src == "premap":
                     _spawn_echo(pool, row_id, mapping["market_slug"],
                                 ctx.get("outcome"),
-                                ctx.get("market_title"), shadow=True)
+                                ctx.get("market_title"), shadow=True,
+                                his_slug=src_slug,
+                                intent=mapping.get("intent"))
                 log.warning("LIVE (US) quarantined %s mapping: %s / %s",
                             mapping_src, ctx.get("market_title"),
                             _q_slug)
@@ -1800,6 +1861,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # book yields a smaller position instead of a killed order.
             _echo_args = (mapping["market_slug"], ctx.get("outcome"),
                           ctx.get("market_title"))
+            _echo_kw = {"his_slug": src_slug,
+                        "intent": mapping.get("intent")}
             # SIDE INTENT OR REFUSE (venue ground truth 2026-08-24):
             # on families whose sides share an identifier, `intent` is
             # the only field that names the side. A mapping that cannot
@@ -1862,7 +1925,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                  venue, "FILLED" if result["ok"] and filled > 0 else "unfilled",
                  payload.get("whale_username"), filled, fill_price or limit, his_price)
         if _echo_args and result["ok"] and filled > 0:
-            _spawn_echo(pool, row_id, *_echo_args, shadow=False)
+            _spawn_echo(pool, row_id, *_echo_args, shadow=False,
+                        **_echo_kw)
     except Exception as exc:  # noqa: BLE001 — record, never crash ingestion
         log.exception("live order failed for trade %s", payload.get("id"))
         await pool.execute(
