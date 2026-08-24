@@ -162,6 +162,15 @@ def _outcome_score(us_market: dict, outcome: str | None) -> float:
         for c in candidates:
             if c and out_last in _norm(c).split():
                 best = max(best, 0.9)
+    # A bare Yes/No pick is a POSITION on the market's statement, not a
+    # name — it must never similarity-match a named side (quarantine
+    # stream 2026-08-24: pick=No mapped onto the team's OWN side, the
+    # exact inverse of the whale's bet). Only a literal Yes/No side
+    # may match a Yes/No pick.
+    on_full = _norm(outcome)
+    if on_full in ("yes", "no"):
+        return 1.0 if any(c and _norm(c) == on_full
+                          for c in candidates) else 0.0
     return best
 
 
@@ -768,7 +777,16 @@ def resolve_market_exact(candidate_slugs: list[str],
         if not m.get("slug") or m.get("closed"):
             continue
         score = _outcome_score(m, outcome)
-        if score >= MATCH_FLOOR:
+        # A market that CARRIES sides is a two-outcome contract: its
+        # parent slug is not a position, and ordering it sideless hands
+        # side selection to the venue (wrong-side incident 2026-08-23;
+        # the quarantine stream caught this branch still returning
+        # parent aec- slugs on 2026-08-24 — a parent passing the floor
+        # must fall through to side selection, never be ordered).
+        _has_sides = any(isinstance(s, dict) and s.get("identifier")
+                         and s.get("description")
+                         for s in (m.get("marketSides") or []))
+        if score >= MATCH_FLOOR and not _has_sides:
             return {"market_slug": m["slug"], "title": m.get("title"),
                     "outcome": m.get("outcome"),
                     "matched_by": "desk_exact", "score": score}

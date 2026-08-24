@@ -84,3 +84,36 @@ def test_at_matchup_title_never_votes():
 def test_plain_side_title_still_votes():
     m = {"title": "New York Yankees"}
     assert pmus._outcome_score(m, "New York Yankees") >= pmus.MATCH_FLOOR
+
+
+def test_exact_path_never_returns_parent_with_sides(monkeypatch):
+    # quarantine stream 2026-08-24: resolve_market_exact's first branch
+    # returned parent aec- slugs when the parent itself passed the floor
+    parent = _two_sided(slug="aec-wta-liltag-yulsta-2026-08-23",
+                        title="Lilli Tagger")   # no ' vs' — title votes
+    parent["marketSides"] = [
+        {"identifier": "aec-wta-liltag-yulsta-2026-08-23-liltag",
+         "description": "Lilli Tagger"},
+        {"identifier": "aec-wta-liltag-yulsta-2026-08-23-yulsta",
+         "description": "Yulia Starodubtseva"},
+    ]
+
+    class _Markets:
+        def retrieve_by_slug(self, slug):
+            return {"market": parent}
+
+    class _Client:
+        markets = _Markets()
+
+    monkeypatch.setattr(pmus, "_get_client", lambda: _Client())
+    m = pmus.resolve_market_exact(["aec-wta-liltag-yulsta-2026-08-23"],
+                                  "Lilli Tagger")
+    assert m is not None
+    assert m["market_slug"].endswith("-liltag")   # the side, never the parent
+
+
+def test_yes_no_pick_never_matches_a_team_side():
+    assert pmus._outcome_score({"outcome": "Pumas UNAM"}, "No") == 0.0
+    assert pmus._outcome_score({"outcome": "Pumas UNAM"}, "Yes") == 0.0
+    assert pmus._outcome_score({"outcome": "No"}, "No") == 1.0
+    assert pmus._outcome_score({"outcome": "Yes"}, "Yes") == 1.0
