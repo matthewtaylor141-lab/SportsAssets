@@ -1346,8 +1346,13 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                                      if isinstance(_q_val, str) else _q_val)
                 except Exception:  # noqa: BLE001 — fail safe: stay on
                     _q_on = True
-            if (_q_on and (mapping_src == "fuzzy"
-                           or _q_slug.startswith("aec-"))):
+            # 2026-08-24 05:00 ET: the venue-certified restatement shows
+            # EVERY sleeve August-negative at our fills (RN1 -8.6k at
+            # 39% wins; the restated ledger now matches the account
+            # day-by-day). While the switch is ON, ALL copy mappings
+            # refuse — not just the fuzzy/aec classes — pending the
+            # owner's morning review. Same switch lifts it.
+            if _q_on:
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 "
                     "WHERE id=$1",

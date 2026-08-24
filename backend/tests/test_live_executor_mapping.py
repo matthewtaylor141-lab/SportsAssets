@@ -42,6 +42,9 @@ def _payload(**over):
 
 
 def _wire(monkeypatch, pool):
+    # these tests exercise mapping precedence, not the 2026-08-24 total
+    # copy quarantine (which has its own tests)
+    monkeypatch.setenv("LIVE_MAPPING_QUARANTINE", "off")
     # Soccer slug: outside KALSHI_FIRST_SPORTS, so the venue split never
     # defers and the test exercises mapping, not routing.
     ctx = {"market_slug": f"epl-ars-che-{date.today().isoformat()}",
