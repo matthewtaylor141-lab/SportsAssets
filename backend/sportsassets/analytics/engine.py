@@ -520,9 +520,19 @@ async def _settle_pmus_from_venue(pool, *,
             ts_iso = (_dt.fromtimestamp(float(r["ts"] or 0), timezone.utc)
                       .isoformat() if r["ts"] else "")
             arch_truth[slug] = {"realized": realized, "ts": ts_iso}
+        added = 0
         for slug, t in arch_truth.items():
-            truth.setdefault(slug, t)
-    except Exception:  # noqa: BLE001 — archive gap only narrows coverage
+            if slug not in truth:
+                truth[slug] = t
+                added += 1
+        # Diagnostics ride the summary (2026-08-24: the first archive
+        # run silently added nothing — never again invisible).
+        summary["archive"] = {"scanned": len(arch),
+                              "slugs": len(arch_truth), "added": added,
+                              "err": None}
+    except Exception as exc:  # noqa: BLE001 — narrows coverage, visibly
+        summary["archive"] = {"err": f"{type(exc).__name__}: "
+                                     f"{str(exc)[:180]}"}
         log.exception("archive resolution truth unavailable")
 
     groups: dict[str, list] = {}

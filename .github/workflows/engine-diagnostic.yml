@@ -273,7 +273,11 @@ jobs:
           # bounded, and print each verdict verbatim — errors included.
           # Idempotent server-side; this block self-disables once the
           # summary records a completed run.
-          if ! jq -e '.ran == true' /tmp/rescore.json >/dev/null 2>&1; then
+          # Fire the force path when the restatement never ran OR when
+          # its coverage is poor (no_truth > 100 markets unreachable —
+          # the archive merge should leave a small remainder; 2026-08-24
+          # the self-disable on ran=true alone masked a coverage failure).
+          if ! jq -e '(.ran == true) and ((.no_truth // 999999) <= 100)' /tmp/rescore.json >/dev/null 2>&1; then
             for SD in 2026-08-17 2026-08-10 2026-08-01; do
               echo "  RESCORE-POST since=$SD:"
               curl -sS --max-time 280 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
@@ -283,7 +287,7 @@ jobs:
             done
             curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
                  -o /tmp/rescore.json "$BASE/api/admin/rescore-copies" || true
-            jq -r '"  RESCORE2 ran=\(.ran // false)  rows=\(.settled // 0)  changed=\(.changed // 0)  delta=\(.delta // 0)  no_truth=\(.no_truth // 0)"' /tmp/rescore.json 2>/dev/null || true
+            jq -r '"  RESCORE2 ran=\(.ran // false)  rows=\(.settled // 0)  changed=\(.changed // 0)  delta=\(.delta // 0)  no_truth=\(.no_truth // 0)  archive=\(.archive // "absent")"' /tmp/rescore.json 2>/dev/null || true
             jq -r '.whales // {} | to_entries[]? | "  RESCORE-W \(.key)  old=\(.value.old)  new=\(.value.new)  rows=\(.value.rows)"' /tmp/rescore.json 2>/dev/null || true
           fi
 
