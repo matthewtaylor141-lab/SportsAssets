@@ -3887,22 +3887,30 @@ async def api_edge_decay(since_day: str = "2026-08-01") -> dict:
 
     pool = await get_pool()
     since_d = _dt.fromisoformat(since_day).date()
+    # v2 (2026-08-24): resolution-settled rows ONLY — a cash-out row's
+    # pnl is sale-based and breaks the payout model; rows the model
+    # can't reconcile against the venue-true actual are COUNTED as
+    # unmodeled instead of silently blended (v1's decomposition mixed
+    # both and produced visibly inconsistent columns).
     rows = await pool.fetch(
         """
         SELECT lower(COALESCE(whale_username, '?')) AS whale,
                his_price::float8 AS his, fill_price::float8 AS fp,
                filled_usd::float8 AS stake, pnl::float8 AS pnl,
-               reaction_s::float8 AS rs
+               reaction_s::float8 AS rs,
+               abs(COALESCE(pnl, 0)) > 100 AS over_cap
         FROM live_orders
-        WHERE status IN ('settled', 'cashed_out')
+        WHERE status = 'settled'
           AND filled_usd > 0 AND his_price > 0
           AND placed_at >= $1
         """, since_d)
     out: dict[str, dict] = {}
     for r in rows:
         w = out.setdefault(r["whale"], {
-            "n": 0, "voids": 0, "wins": 0, "staked": 0.0,
-            "actual": 0.0, "at_his": 0.0, "at_ours_feefree": 0.0,
+            "n": 0, "voids": 0, "wins": 0, "over_cap_n": 0,
+            "unmodeled": 0, "staked": 0.0,
+            "actual": 0.0, "actual_capped_out": 0.0,
+            "at_his": 0.0, "at_ours_feefree": 0.0,
             "slip_sum": 0.0, "slip_n": 0, "rs": []})
         pnl = float(r["pnl"] or 0)
         stake = float(r["stake"])
@@ -3910,6 +3918,9 @@ async def api_edge_decay(since_day: str = "2026-08-01") -> dict:
         w["n"] += 1
         w["staked"] = round(w["staked"] + stake, 2)
         w["actual"] = round(w["actual"] + pnl, 2)
+        if r["over_cap"]:
+            w["over_cap_n"] += 1
+            w["actual_capped_out"] = round(w["actual_capped_out"] + pnl, 2)
         if r["rs"] is not None:
             w["rs"].append(float(r["rs"]))
         if fp and his:
@@ -3919,15 +3930,20 @@ async def api_edge_decay(since_day: str = "2026-08-01") -> dict:
             w["voids"] += 1
             continue
         win = pnl > 0
+        if not (0 < his < 1 and 0 < fp < 1):
+            w["unmodeled"] += 1
+            continue
+        # the payout model must explain the venue-true actual for this
+        # row; a row it can't explain is disclosed, never blended
+        model_row = stake * (1 - fp) / fp if win else -stake
+        if abs(model_row - pnl) > max(1.0, 0.15 * stake):
+            w["unmodeled"] += 1
+            continue
         if win:
             w["wins"] += 1
-        if 0 < his < 1:
-            w["at_his"] = round(
-                w["at_his"] + (stake * (1 - his) / his if win else -stake), 2)
-        if 0 < fp < 1:
-            w["at_ours_feefree"] = round(
-                w["at_ours_feefree"]
-                + (stake * (1 - fp) / fp if win else -stake), 2)
+        w["at_his"] = round(
+            w["at_his"] + (stake * (1 - his) / his if win else -stake), 2)
+        w["at_ours_feefree"] = round(w["at_ours_feefree"] + model_row, 2)
     whales = []
     for w, d in sorted(out.items(), key=lambda kv: kv[1]["at_his"],
                        reverse=True):
@@ -3941,7 +3957,6 @@ async def api_edge_decay(since_day: str = "2026-08-01") -> dict:
             "latency_median_s": round(med, 1) if med is not None else None,
             "latency_p90_s": round(p90, 1) if p90 is not None else None,
             "price_drag": round(d["at_ours_feefree"] - d["at_his"], 2),
-            "fees_other": round(d["actual"] - d["at_ours_feefree"], 2),
         })
     for wrow in whales:
         wrow.pop("slip_sum", None)
