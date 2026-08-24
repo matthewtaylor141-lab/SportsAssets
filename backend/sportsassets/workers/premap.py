@@ -332,18 +332,51 @@ async def refresh() -> dict:
                                           "rows": seen_rows})
                 if len(raw) < PAGE_LIMIT:
                     break
-            err = None
+            # The events-path failure stays on the record even when the
+            # fallback succeeds (leak-hunt 2026-08-24): markets-mode
+            # keys come from market titles, a DEGRADED key set vs the
+            # event boards — a silent mode downgrade must be visible.
+            events_err, err = err, None
         except Exception as exc2:  # noqa: BLE001 — recorded, next cycle
+            events_err = err
             err = f"{type(exc2).__name__}: {str(exc2)[:160]}"
-    pruned = await pool.execute(
-        "DELETE FROM us_premap WHERE updated_at < now() - interval '%s hours'"
-        % int(PRUNE_HOURS))
+    else:
+        events_err = None
+    # NEVER prune on an empty sweep (leak-hunt 2026-08-24): a sweep
+    # that wrote zero rows proves nothing about staleness — repeated
+    # empty sweeps would otherwise age the whole table out and take
+    # the premap lane down with it.
+    if seen_rows > 0:
+        pruned = await pool.execute(
+            "DELETE FROM us_premap WHERE updated_at < now() - "
+            "interval '%s hours'" % int(PRUNE_HOURS))
+    else:
+        pruned = None
     summary = {"mode": mode, "events": events, "rows": seen_rows,
-               "err": err,
+               "err": err, "events_err": events_err,
                "pruned": int(pruned.split()[-1]) if pruned else 0}
     await _record_last(pool, summary)
     log.info("premap refresh: %s", summary)
     return summary
+
+
+def live_rows_for_event(ev_slug: str) -> list[dict]:
+    """RAW venue rows for one event, in the exact shape the sweep writes
+    and match_side consumes — the side-echo re-derivation input.
+    (Leak-hunt find 2026-08-24: the echo originally consumed
+    pmus.event_board, whose DESK-shaped rows carry none of the keys
+    _market_rows reads — the tripwire was structurally inert.)
+    Closed markets are INCLUDED: the just-filled market may close within
+    seconds, and its absence must read as unverified, never as a
+    different side. Exceptions propagate — the caller owns retries."""
+    client = pmus._get_client()
+    mresp = client.markets.list({"eventSlug": [ev_slug]})
+    rows: list[dict] = []
+    for m in _items(mresp, "markets"):
+        if (m.get("eventSlug") or m.get("event_slug")) not in (None, ev_slug):
+            continue
+        rows.extend(_market_rows({"slug": ev_slug, "title": ""}, m))
+    return rows
 
 
 async def resolve(pool, market_title: str | None, event_title: str | None,

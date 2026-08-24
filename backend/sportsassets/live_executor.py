@@ -1071,7 +1071,6 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
     the fill). Fetch failures and no-unique-match are counted and
     surfaced (side_echo_last state key), never treated as divergence —
     a venue outage must not be able to trip the breaker on its own."""
-    from . import pmus
     from .workers import premap as _premap
 
     verdict, detail = "unverified", ""
@@ -1082,21 +1081,23 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
         if not ev_slug:
             detail = "identifier not in us_premap"
         else:
-            board = None
+            # RAW venue rows in the sweep's own shape (leak-hunt find
+            # 2026-08-24: event_board rows are desk-shaped and made the
+            # tripwire structurally inert). live_rows_for_event raises
+            # on failure, so the retries here are real.
+            rows = None
             for _ in range(attempts):
                 try:
-                    board = await asyncio.to_thread(
-                        pmus.event_board, ev_slug)
+                    rows = await asyncio.to_thread(
+                        _premap.live_rows_for_event, ev_slug)
                     break
                 except Exception:  # noqa: BLE001 — retry, then count
                     await asyncio.sleep(2)
-            if not board:
-                detail = "event board unreachable"
+            if rows is None:
+                detail = "venue unreachable"
+            elif not rows:
+                detail = "event has no live rows"
             else:
-                rows: list[dict] = []
-                for m in board:
-                    rows.extend(_premap._market_rows(
-                        {"slug": ev_slug, "title": ""}, m))
                 hit = _premap.match_side(rows, outcome, his_title)
                 if hit is None:
                     detail = "no unique live match"
@@ -1500,6 +1501,28 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 log.warning("LIVE (US) refused: side-echo circuit "
                             "tripped (%s)", _q_slug0)
                 return
+            # PROFITABILITY HOLD (leak-hunt find 2026-08-24): swisstony's
+            # exclusion previously lived only in the premap-live
+            # allowlist, which is consulted ONLY while the quarantine is
+            # armed — lifting the quarantine (a mapping-fidelity action)
+            # would silently re-arm his $300 clip with no profitability
+            # decision made. The hold is its own gate, independent of
+            # quarantine state: LIVE_HOLD_WHALES (default swisstony)
+            # refuses with an audit reason until his paper cohort at the
+            # new sub-second detection certifies positive and the env
+            # deliberately changes. The row keeps its mapping — his
+            # fidelity samples continue.
+            _held = {w.strip() for w in
+                     os.getenv("LIVE_HOLD_WHALES", "swisstony")
+                     .lower().split(",") if w.strip()}
+            if username in _held:
+                await pool.execute(
+                    "UPDATE live_orders SET status='rejected', error=$2 "
+                    "WHERE id=$1", row_id,
+                    "hold: pending paper certification at the new "
+                    "detection latency (TRUEEDGE 2026-08-24) "
+                    f"(slug={_q_slug0[:120]})")
+                return
             # MAPPING QUARANTINE (owner emergency 2026-08-23): the venue
             # ledger proved a large share of two-outcome copies were held
             # on the WRONG SIDE while the old settlement sweep graded them
@@ -1698,6 +1721,24 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 pmus.submit_fok, mapping["market_slug"], limit,
                 int(shares), False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
         else:
+            # GLOBAL-CLOB LEG FAIL-CLOSED (leak-hunt find 2026-08-24):
+            # active_venue() silently falls back to the global CLOB when
+            # the PMUS keys go missing but PM_PRIVATE_KEY remains — and
+            # this branch carried NONE of the freeze controls (total
+            # quarantine, allowlist, hold, never-add, one-per-game,
+            # no-stack, side echo). A config fault must fail CLOSED,
+            # never into an ungated venue. LIVE_CLOB_COPIES=on re-opens
+            # the leg deliberately; until then every attempt records an
+            # audit-visible refusal.
+            if os.environ.get("LIVE_CLOB_COPIES", "") != "on":
+                await pool.execute(
+                    "UPDATE live_orders SET status='rejected', error=$2 "
+                    "WHERE id=$1", row_id,
+                    "clob-leg-closed: global-CLOB fallback is "
+                    "fail-closed (freeze controls are PMUS-only)")
+                log.warning("LIVE refused: global-CLOB fallback while "
+                            "fail-closed (venue=%s)", venue)
+                return
             result = await asyncio.to_thread(
                 _submit_fok, str(payload["asset"]), limit, shares)
 

@@ -75,8 +75,12 @@ async def _record_boot() -> None:
 
 
 async def main() -> None:
-    await _record_boot()
-    await asyncio.gather(*(supervise(name, fn) for name, fn in LOOPS))
+    # The marker runs CONCURRENTLY with the loops (leak-hunt find
+    # 2026-08-24): awaiting it first serialized a DB connect retry in
+    # front of every worker — a slow DB would have delayed the chain
+    # listener itself for a status row.
+    await asyncio.gather(_record_boot(),
+                         *(supervise(name, fn) for name, fn in LOOPS))
 
 
 if __name__ == "__main__":

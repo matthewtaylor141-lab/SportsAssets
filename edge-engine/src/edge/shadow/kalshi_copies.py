@@ -96,18 +96,24 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 # 2026-08-20 midday (owner mandate, maximum-profitability pass —
 # parity with the PMUS leg shipped the same day): 0x2c33 to $300 (best
 # residual ROI at our latency), HomeRunHazard to $112.50 (12W-8L).
-PER_COPY_USD = {"rn1": 225.00, "swisstony": 300.00,
-                _W2C33: 300.00, "homerunhazard": 112.50,
+# TRUEEDGE CUTS (owner order 2026-08-24, venue parity with the PMUS
+# leg): rn1 / ferrarichampions2026 / 0x2c33 graded NEGATIVE at their
+# OWN prices on the full detected book — not copyable at any speed, on
+# ANY venue. Their clips are 0.00 blocks here too, so re-enabling this
+# (currently pm_only-paused) leg can never resurrect them. swisstony
+# holds pending paper certification at the new detection latency;
+# homerunhazard upsized to $300 parity (his sport cells scaled x2.667).
+PER_COPY_USD = {"rn1": 0.00, "swisstony": 300.00,
+                _W2C33: 0.00, "homerunhazard": 300.00,
+                "ferrarichampions2026": 0.00,
+                "0x076daa87": 300.00,
                 # kch123 pre-sized for his (out-of-season) NBA/NFL/NHL
                 # cells, matching the PMUS leg (owner go 2026-08-20).
                 "kch123": 150.00}
 PER_COPY_USD_SPORT = {("swisstony", "soccer"): 150.00,
-                      ("rn1", "tennis"): 112.50,
-                      ("rn1", "baseball"): 375.00,
-                      ("rn1", "soccer"): 300.00,
                       (_W2C33, "tennis"): 0.00,
-                      ("homerunhazard", "baseball"): 225.00,
-                      ("homerunhazard", "football"): 37.50}
+                      ("homerunhazard", "baseball"): 600.00,
+                      ("homerunhazard", "football"): 100.00}
 PER_COPY_DEFAULT = 75.00
 # Inverse volume<->size scaling (owner order 2026-08-12): past this
 # many fills in a venue-day, the clip shrinks proportionally — 10x

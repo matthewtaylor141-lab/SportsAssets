@@ -89,8 +89,23 @@ class TestPremapLiveAllowlist:
             pool, submitted = self._run(monkeypatch, whale)
             assert submitted, f"{whale} is verified-profitable — trades"
 
-    def test_swisstony_refused_until_allowlisted(self, monkeypatch):
-        pool, submitted = self._run(monkeypatch, "SwissTony")
+    def test_swisstony_refused_by_the_hold_first(self, monkeypatch):
+        """Even fully allowlisted, swisstony's PROFITABILITY hold
+        (independent of quarantine state) refuses until his paper
+        cohort at the new latency certifies."""
+        pool, submitted = self._run(
+            monkeypatch, "SwissTony",
+            allowlist_env="homerunhazard,0x076daa87,swisstony")
+        assert submitted == []
+        rej = [(sql, a) for sql, a in pool.updates
+               if "status='rejected'" in sql and "hold:" in str(a)]
+        assert len(rej) == 1, "refusal must carry the hold reason"
+
+    def test_non_allowlisted_whale_refused_with_allowlist_reason(
+            self, monkeypatch):
+        # kch123: not cut, not held — the refusal isolates the
+        # allowlist mechanics.
+        pool, submitted = self._run(monkeypatch, "kch123")
         assert submitted == []
         rej = [(sql, a) for sql, a in pool.updates
                if "status='rejected'" in sql
@@ -98,6 +113,9 @@ class TestPremapLiveAllowlist:
         assert len(rej) == 1, "refusal must carry the allowlist reason"
 
     def test_swisstony_joins_via_env_no_deploy(self, monkeypatch):
+        """The certification path: clear the hold AND join the
+        allowlist — both deliberate env actions, no deploy."""
+        monkeypatch.setenv("LIVE_HOLD_WHALES", "")
         pool, submitted = self._run(
             monkeypatch, "SwissTony",
             allowlist_env="homerunhazard,0x076daa87,swisstony")
@@ -121,20 +139,21 @@ class _EchoPool:
         self.executes.append((" ".join(sql.split()), a))
 
 
-def _board_market(slug, description):
-    return {"question": "Arsenal vs Chelsea Winner", "slug": slug[:-4],
-            "marketSides": [
-                {"identifier": slug, "description": description},
-                {"identifier": slug[:-4] + "-che", "description": "Chelsea"},
-            ]}
+def _live_rows(slug):
+    """Rows in the sweep's own shape, as live_rows_for_event returns
+    them (the echo consumes THIS shape — leak-hunt find 2026-08-24:
+    desk-shaped event_board rows made the tripwire inert)."""
+    return [{"identifier": slug, "side_norm": "arsenal", "line": "",
+             "kind": "side", "question": "Arsenal vs Chelsea Winner"},
+            {"identifier": slug[:-4] + "-che", "side_norm": "chelsea",
+             "line": "", "kind": "side",
+             "question": "Arsenal vs Chelsea Winner"}]
 
 
 def test_side_echo_ok_records_and_never_trips(monkeypatch):
-    from sportsassets import pmus
-
     slug = f"atc-epl-ars-che-{TODAY}-ars"
-    monkeypatch.setattr(pmus, "event_board",
-                        lambda ev: [_board_market(slug, "Arsenal")])
+    monkeypatch.setattr(premap_mod, "live_rows_for_event",
+                        lambda ev: _live_rows(slug))
     pool = _EchoPool()
     asyncio.run(live_executor._side_echo_verify(
         pool, 101, slug, "Arsenal", "Arsenal vs Chelsea"))
@@ -143,15 +162,40 @@ def test_side_echo_ok_records_and_never_trips(monkeypatch):
     assert state and json.loads(state[0][0])["ok"] == 1
 
 
-def test_side_echo_mismatch_requarantines_alone(monkeypatch):
-    from sportsassets import pmus
+def test_live_rows_for_event_produces_matchable_rows(monkeypatch):
+    """The end-to-end shape contract the leak-hunt proved broken: raw
+    venue markets (dict OR bare-list response) must come back as rows
+    match_side can actually match."""
+    from sportsassets import pmus as pmus_mod
 
+    slug = f"atc-epl-ars-che-{TODAY}-ars"
+    raw_market = {"question": "Arsenal vs Chelsea Winner",
+                  "slug": slug[:-4], "eventSlug": "epl-ars-che",
+                  "marketSides": [
+                      {"identifier": slug, "description": "Arsenal"},
+                      {"identifier": slug[:-4] + "-che",
+                       "description": "Chelsea"}]}
+
+    class _Markets:
+        def list(self, _q):
+            return [raw_market]          # the bare-list SDK shape
+
+    class _Client:
+        markets = _Markets()
+
+    monkeypatch.setattr(pmus_mod, "_get_client", lambda: _Client())
+    rows = premap_mod.live_rows_for_event("epl-ars-che")
+    hit = premap_mod.match_side(rows, "Arsenal", "Arsenal vs Chelsea")
+    assert hit and hit["identifier"] == slug
+
+
+def test_side_echo_mismatch_requarantines_alone(monkeypatch):
     ours = f"atc-epl-ars-che-{TODAY}-ars"
     # The live board now says the matcher's pick is a DIFFERENT
     # identifier than the one we bought — the one-order tripwire.
     other = f"atc-epl-ars-che-{TODAY}-v2-ars"
-    monkeypatch.setattr(pmus, "event_board",
-                        lambda ev: [_board_market(other, "Arsenal")])
+    monkeypatch.setattr(premap_mod, "live_rows_for_event",
+                        lambda ev: _live_rows(other))
     pool = _EchoPool()
     asyncio.run(live_executor._side_echo_verify(
         pool, 101, ours, "Arsenal", "Arsenal vs Chelsea"))
@@ -195,12 +239,10 @@ def test_tripped_circuit_refuses_even_with_env_overrides(monkeypatch):
 
 
 def test_side_echo_outage_never_trips_the_breaker(monkeypatch):
-    from sportsassets import pmus
-
     def boom(_ev):
         raise RuntimeError("venue 503")
 
-    monkeypatch.setattr(pmus, "event_board", boom)
+    monkeypatch.setattr(premap_mod, "live_rows_for_event", boom)
     pool = _EchoPool()
     asyncio.run(live_executor._side_echo_verify(
         pool, 101, f"atc-epl-ars-che-{TODAY}-ars", "Arsenal",
@@ -208,3 +250,71 @@ def test_side_echo_outage_never_trips_the_breaker(monkeypatch):
     assert not any("mapping_quarantine" in sql for sql, _ in pool.executes)
     state = [a for sql, a in pool.executes if "side_echo_last" in sql]
     assert state and json.loads(state[0][0])["unverified"] == 1
+
+
+def test_hold_refuses_swisstony_even_with_quarantine_off(monkeypatch):
+    """The leak-hunt scenario: lifting the quarantine (a mapping-
+    fidelity action) must NOT re-arm swisstony — his hold is a
+    profitability decision with its own gate."""
+    from sportsassets import copy_sports as _cs
+
+    pool = _LadderPool([])
+    submitted = _wire_with_real_cuts(
+        monkeypatch, pool, f"tsc-epl-ars-che-{TODAY}-o3pt5")
+    monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
+    # quarantine fully OFF (env, as _wire sets) — the hold still bites
+    asyncio.run(live_executor.maybe_execute(
+        _payload(whale_username="SwissTony"), 5.0))
+    assert submitted == []
+    rej = [(sql, a) for sql, a in pool.updates
+           if "status='rejected'" in sql and "hold:" in str(a)]
+    assert len(rej) == 1
+    # clearing the hold (deliberate env action) restores his flow
+    pool2 = _LadderPool([])
+    submitted2 = _wire_with_real_cuts(
+        monkeypatch, pool2, f"tsc-epl-ars-che-{TODAY}-o3pt5")
+    monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
+    monkeypatch.setenv("LIVE_HOLD_WHALES", "")
+    asyncio.run(live_executor.maybe_execute(
+        _payload(whale_username="SwissTony"), 5.0))
+    assert submitted2
+
+
+def test_clob_fallback_is_fail_closed(monkeypatch):
+    """Leak-hunt find: active_venue() silently falls back to the global
+    CLOB on a PMUS-credential fault, and that branch carried none of
+    the freeze controls. It must refuse unless deliberately reopened."""
+    from sportsassets import copy_sports as _cs
+
+    pool = _LadderPool([])
+    submitted = _wire_with_real_cuts(
+        monkeypatch, pool, f"tsc-epl-ars-che-{TODAY}-o3pt5")
+    monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
+    monkeypatch.setattr(live_executor, "active_venue",
+                        lambda: "polymarket-clob")
+    clob_orders = []
+    monkeypatch.setattr(live_executor, "_submit_fok",
+                        lambda *a, **k: clob_orders.append(a) or
+                        {"ok": True, "filled_shares": 1.0,
+                         "fill_price": 0.5, "order_id": "x", "raw": {}})
+    asyncio.run(live_executor.maybe_execute(
+        _payload(whale_username="HomeRunHazard"), 5.0))
+    assert submitted == [] and clob_orders == []
+    rej = [(sql, a) for sql, a in pool.updates
+           if "status='rejected'" in sql and "clob-leg-closed" in str(a)]
+    assert len(rej) == 1
+    # the deliberate reopen lever
+    pool2 = _LadderPool([])
+    _wire_with_real_cuts(monkeypatch, pool2,
+                         f"tsc-epl-ars-che-{TODAY}-o3pt5")
+    monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
+    monkeypatch.setattr(live_executor, "active_venue",
+                        lambda: "polymarket-clob")
+    monkeypatch.setattr(live_executor, "_submit_fok",
+                        lambda *a, **k: clob_orders.append(a) or
+                        {"ok": True, "filled_shares": 1.0,
+                         "fill_price": 0.5, "order_id": "x", "raw": {}})
+    monkeypatch.setenv("LIVE_CLOB_COPIES", "on")
+    asyncio.run(live_executor.maybe_execute(
+        _payload(whale_username="HomeRunHazard"), 5.0))
+    assert clob_orders, "the explicit lever reopens the leg"

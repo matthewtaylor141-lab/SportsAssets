@@ -305,15 +305,20 @@ jobs:
                | .[] | select((.username // "" | ascii_downcase) == $w) | .id' \
               /tmp/whales.json 2>/dev/null | head -1)
             [ -z "$WID" ] && { echo "  SPORTS-PROV $W: not in roster"; continue; }
-            curl -sS --max-time 60 "$BASE/api/feed?whale_id=$WID&limit=10" 2>/dev/null | \
-              jq -r --arg w "$W" '. as $rows
-                | if (type=="array" and length > 0) then
-                    ($rows | map(select(.source=="chain")) | length) as $ch
-                    | ($rows | map(select(.source=="poll")) | length) as $po
-                    | "  SPORTS-PROV \($w): last \(length) rows — chain \($ch) / poll \($po)",
-                      (.[0:3][] | "    \(.ts)  src=\(.source // "?")  lat=\(.latency_s // "?")s  \(.side) $\(.notional)")
-                  else "  SPORTS-PROV \($w): no feed rows" end' \
-              || echo "  SPORTS-PROV $W: feed fetch failed"
+            # fetch-to-file so a curl failure prints instead of feeding
+            # jq empty stdin (which exits 0 and printed NOTHING)
+            if ! curl -sS --max-time 60 -o /tmp/feed.json \
+                 "$BASE/api/feed?whale_id=$WID&limit=10" 2>/dev/null; then
+              echo "  SPORTS-PROV $W: feed fetch failed"; continue
+            fi
+            jq -r --arg w "$W" '. as $rows
+              | if (type=="array" and length > 0) then
+                  ($rows | map(select(.source=="chain")) | length) as $ch
+                  | ($rows | map(select(.source=="poll")) | length) as $po
+                  | "  SPORTS-PROV \($w): last \(length) rows — chain \($ch) / poll \($po)",
+                    (.[0:3][] | "    \(.ts)  src=\(.source // "?")  lat=\(.latency_s // "?")s  \(.side) $\(.notional)")
+                else "  SPORTS-PROV \($w): no feed rows" end' /tmp/feed.json \
+              || echo "  SPORTS-PROV $W: feed parse failed"
           done
 
           # ── side-fidelity audit (owner order 2026-08-24: prove which
