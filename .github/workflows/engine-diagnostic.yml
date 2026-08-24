@@ -333,11 +333,16 @@ jobs:
                | [.[] | select((.username // "" | ascii_downcase) == $w)] | length' \
               /tmp/whales.json 2>/dev/null || echo 0)
             if [ "$HIT" = "0" ]; then
-              echo "  ROSTER-GUARD $W: not active — reactivating"
+              # PIN, not activate: roster.refresh deactivates any whale
+              # that is active AND NOT pinned AND absent from the venue
+              # leaderboard, so a bare activate is undone on the next
+              # roster cycle (observed twice, probes #1031/#1032).
+              # Pinned whales survive the refresh.
+              echo "  ROSTER-GUARD $W: not active — pinning"
               curl -sS --max-time 30 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
                 -H "Content-Type: application/json" \
                 -d "{\"username\": \"$W\"}" \
-                "$BASE/api/admin/roster/activate" | head -c 300 || true
+                "$BASE/api/admin/roster/pin" | head -c 300 || true
               echo ""
             fi
           done
