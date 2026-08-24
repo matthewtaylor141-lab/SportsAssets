@@ -280,6 +280,18 @@ jobs:
           curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/tedge.json "$BASE/api/admin/whale-true-edge" || true
           jq -r '.whales[]? | "  TRUEEDGE \(.whale)  detected=\(.detected)  cf_total=\(.cf_total)  cf_on_filled=\(.cf_on_filled)  paper_actual=\(.paper_actual)  miss_sel=\(.miss_selection)  lat_cost=\(.latency_price_cost)  cf_wins=\(.cf_wins)/\(.cf_graded)"' /tmp/tedge.json 2>/dev/null || true
+          # FAST COHORT (owner order 2026-08-24 evening, the swisstony
+          # question): the blended paper figure averages over months of
+          # minutes-late polling, so it reports the OLD world forever.
+          # Restricted to detections inside 5s it measures what today's
+          # sub-second chain path actually achieves on each whale's flow
+          # — the only number that can justify resuming a held whale.
+          curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/tedge_fast.json \
+               "$BASE/api/admin/whale-true-edge?max_reaction_s=5" || true
+          jq -r '.whales[]? | select(.detected > 20)
+                 | "  TRUEEDGE-FAST \(.whale)  detected=\(.detected)  cf_total=\(.cf_total)  paper_actual=\(.paper_actual)  lat_cost=\(.latency_price_cost)  cf_wins=\(.cf_wins)/\(.cf_graded)"' \
+            /tmp/tedge_fast.json 2>/dev/null || echo "  TRUEEDGE-FAST unavailable"
 
           # ── the syllogism test (owner order 2026-08-24): per whale,
           # venue-true outcomes priced at HIS fill vs OURS — who is

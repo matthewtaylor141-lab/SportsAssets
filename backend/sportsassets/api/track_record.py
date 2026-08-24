@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import sys
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -40,7 +41,19 @@ _lock = asyncio.Lock()
 _refresh_health: dict[str, Any] = {"error": None, "error_at": 0.0,
                                    "streak": 0}
 
-DEFAULT_SINCE = "2026-08-01"
+# RE-BASELINED (owner order 2026-08-24 evening: "clear the front end
+# track record completely — start fresh today with all new fills").
+#
+# This moves the DISPLAY WINDOW, it does not erase anything. Every
+# historical row stays in the database: the venue-certified August
+# restatement, the day-by-day reconciliation and the investor ledger
+# all depend on that history existing, and a scoreboard that could
+# delete its own losses is exactly the instrument that misled us for
+# fifteen days. The record is served FROM this date and labelled with
+# it, so a reader can never mistake a fresh start for a lifetime
+# result. Pass ?since=2026-08-01 to see the prior period in full.
+RECORD_EPOCH = "2026-08-24"
+DEFAULT_SINCE = os.environ.get("TRACK_RECORD_SINCE", RECORD_EPOCH)
 
 # Owner directive 2026-08-06: no single trade may move any displayed P&L
 # by more than this, either direction — at $3-5 clips a $100+ swing is an
@@ -629,6 +642,13 @@ def build(positions: dict[str, dict], activities: list[dict],
     return {
         "since": datetime.fromtimestamp(since_ts, tz)
                  .strftime("%Y-%m-%d"),
+        # The display is RE-BASELINED, not erased (owner order
+        # 2026-08-24). The front end labels the record with this epoch
+        # so a fresh start can never read as a lifetime result, and the
+        # prior period stays retrievable at ?since=2026-08-01.
+        "record_epoch": RECORD_EPOCH,
+        "rebaselined": datetime.fromtimestamp(since_ts, tz)
+                       .strftime("%Y-%m-%d") == RECORD_EPOCH,
         "generated_at": time.time(),
         "account": account,
         "sold_markets": sold_markets,

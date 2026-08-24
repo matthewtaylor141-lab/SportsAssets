@@ -3887,7 +3887,8 @@ async def api_quarantine_get() -> dict:
 
 
 @app.get("/api/admin/whale-true-edge", dependencies=[Depends(require_admin)])
-async def api_whale_true_edge(since_day: str = "2026-08-01") -> dict:
+async def api_whale_true_edge(since_day: str = "2026-08-01",
+                              max_reaction_s: float | None = None) -> dict:
     """The owner's verification (2026-08-24: 'will we profit — verified,
     not guessed'). ai_trades holds EVERY detected whale trade with two
     settled results: counterfactual_pnl at HIS price (his true edge on
@@ -3897,7 +3898,16 @@ async def api_whale_true_edge(since_day: str = "2026-08-01") -> dict:
       cf_on_filled  his edge on just the trades our paper fill caught
       paper_actual  what our reaction time actually achieves
     cf_total>0 and paper_actual<0 = pure latency problem (engineering
-    fixes it). cf_total<=0 = the whale isn't copyable at ANY speed."""
+    fixes it). cf_total<=0 = the whale isn't copyable at ANY speed.
+
+    max_reaction_s (owner order 2026-08-24 evening: "make sure we are
+    profitable copying SwissTony") answers the question the blended
+    figure cannot. paper_actual averages over MONTHS of detections,
+    most of them minutes-late polling — so for a whale whose edge
+    decays fast it reports the old world forever, however quick we
+    became today. Restricting to trades we detected within N seconds
+    measures what our CURRENT speed achieves on his flow, which is the
+    only number that can justify resuming him."""
     from datetime import datetime as _dt
 
     pool = await get_pool()
@@ -3920,9 +3930,10 @@ async def api_whale_true_edge(since_day: str = "2026-08-01") -> dict:
                         AND abs(counterfactual_pnl) >= 0.005)::int AS cf_graded
         FROM ai_trades
         WHERE placed_at >= $1
+          AND ($2::float8 IS NULL OR reaction_s <= $2::float8)
         GROUP BY 1
         ORDER BY cf_total DESC
-        """, since_d)
+        """, since_d, max_reaction_s)
     whales = []
     for r in rows:
         d = dict(r)
@@ -3934,7 +3945,8 @@ async def api_whale_true_edge(since_day: str = "2026-08-01") -> dict:
         d["latency_price_cost"] = round(d["cf_on_filled"]
                                         - d["paper_actual"], 2)
         whales.append(d)
-    return {"since": since_day, "whales": whales,
+    return {"since": since_day, "max_reaction_s": max_reaction_s,
+            "whales": whales,
             "note": ("counterfactuals settle on the whale's own venue "
                      "(global), where resolution data was always "
                      "correct — this table is untouched by the "
