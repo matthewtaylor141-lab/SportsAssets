@@ -651,6 +651,21 @@ jobs:
           jq -r '.sizing_24h // [] | .[] |
                  "  SIZING \(.whale): n24 \(.n_24h) unf \(.unfilled_24h // 0) rej \(.rejected_24h // 0) avg_req $\(.avg_req // "?") avg_filled $\(.avg_filled // "?") max_req $\(.max_req // "?") deployed24 $\(.deployed_24h // 0)"' \
             /tmp/live.json 2>/dev/null || true
+          # MERGEPNL — the whale numbers with their exits included.
+          #
+          # Every prior whale grade was settlement-only, which cannot
+          # see a merge. Three instruments agreed there were no exits
+          # because all three read the same trade-feed definition of a
+          # sale, and three whales were cut on it.
+          curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/mergepnl.json \
+               "$BASE/api/admin/whale-merge-pnl?since=2026-08-01" || true
+          jq -r '.whales // {} | to_entries[]
+                 | "  MERGEPNL \(.key): merges=\(.value.n_merges) shares=\(.value.merge_shares) realised=$\(.value.realized_merge_pnl) sells=$\(.value.realized_sell_pnl) entries=$\(.value.entry_notional) roi=\(.value.roi_on_entries // "n/a") open=\(.value.open_shares)sh/$\(.value.open_cost) cashflow=$\(.value.net_cashflow)"' \
+            /tmp/mergepnl.json 2>/dev/null || echo "  MERGEPNL unavailable"
+          jq -r '.whales // {} | to_entries[] | "  MERGEVERDICT \(.key): \(.value.verdict)"' \
+            /tmp/mergepnl.json 2>/dev/null || true
+
           # SHORTTRUTH — does the venue book a BUY_SHORT as a SELL?
           #
           # The entire "6-for-6 overspend" finding assumed cash cost is

@@ -4264,6 +4264,58 @@ async def api_price_truth(price: float = 0.30, qty: int = 10,
     return out
 
 
+@app.get("/api/admin/whale-merge-pnl",
+         dependencies=[Depends(require_admin)])
+async def api_whale_merge_pnl(since: str = "2026-08-01",
+                              whales: str = "") -> dict:
+    """Re-grade every whale with their MERGES counted as exits.
+
+    Owner, 2026-08-25: "I need you to rerun all of the whale copy rois
+    and pnls with the sale order information included. I can see all of
+    these whales both buy and sell."
+
+    Every whale number this desk has produced grades at RESOLUTION,
+    which cannot see how these accounts actually take profit. The
+    blindness was total and self-consistent: SIDES said 0 sells, EXITS
+    said exit_rate 0.0, CUTCHECK had to print "NO EXIT DATA" — three
+    instruments agreeing because all three read the same trade-feed
+    definition of a sale. Three whales were cut on that basis.
+
+    A merge IS the sale: buying N of the complementary leg retires N
+    held shares and returns $N, because YES + NO is worth exactly $1.
+    It is a round trip, it has been in our trades table the whole time,
+    and nothing has ever read it as one.
+
+    Reported beside the settlement number, never instead of it — the
+    two answer different questions and the gap between them is the
+    point.
+    """
+    from ..analytics.merge_pnl import whale_merge_pnl
+    from .copies_record import COPY_WHALES
+
+    pool = await get_pool()
+    want = [w.strip() for w in whales.split(",") if w.strip()] or list(
+        COPY_WHALES)
+    graded = await whale_merge_pnl(pool, want, since)
+    for name, g in graded.items():
+        st = await pool.fetchval(
+            """
+            SELECT COALESCE(sum(
+                     CASE WHEN t.side = 'BUY'
+                          THEN -t.notional ELSE t.notional END), 0)::float8
+              FROM trades t JOIN whales wh ON wh.id = t.whale_id
+             WHERE lower(wh.username) = $1 AND t.ts >= $2::date
+            """, name.lower(), since)
+        g["net_cashflow"] = round(float(st or 0), 2)
+        g["verdict"] = (
+            "NO MERGES FOUND — this whale does not close by merging, so "
+            "the settlement basis is the only one available"
+            if not g.get("n_merges") else
+            f"{g['n_merges']} merges realising ${g['realized_merge_pnl']} "
+            f"on ${g['entry_notional']} of entries")
+    return {"since": since, "whales": graded}
+
+
 @app.get("/api/admin/short-truth", dependencies=[Depends(require_admin)])
 async def api_short_truth(days: int = 7) -> dict:
     """Does the venue book a BUY_SHORT as a SELL? The receipts already know.
