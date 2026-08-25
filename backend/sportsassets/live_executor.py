@@ -527,10 +527,17 @@ async def mirror_exit(payload: dict) -> None:
     asset = str(payload.get("asset") or "")
     if not asset:
         return _exit_stop("mx_no_asset")
-    _exit_stop("mx_reached_position_lookup", whale=username, asset=asset)
     pool = await get_pool()
     if await overspend_halt(pool):
         return _exit_stop("mx_overspend_halt")
+    # STAMPED AFTER THE HALT GATE, NOT BEFORE (2026-08-25, adversarial
+    # review). It was counted before overspend_halt and before the
+    # query, so a sleeve stopped by a tripped breaker still reported
+    # every exit as "reaching the position lookup" — and the endpoint's
+    # verdict reads that counter to decide whether exits are arriving
+    # at all. A halted system would have looked like a working one with
+    # nothing to sell.
+    _exit_stop("mx_reached_position_lookup", whale=username, asset=asset)
     row = await pool.fetchrow(
         "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
         "       fill_price::float8 AS entry, "

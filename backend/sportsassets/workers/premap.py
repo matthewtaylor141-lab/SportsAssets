@@ -1153,7 +1153,20 @@ async def _fast_loop() -> None:
                 log.info("premap fast lane: full sweep in flight, "
                          "skipping this cycle (it covers the window)")
             else:
-                await fast_refresh()
+                # AND IT MUST HOLD THE LOCK WHILE IT RUNS (2026-08-25,
+                # adversarial review). Checking `locked()` and never
+                # acquiring gave one-way exclusion: the fast lane
+                # yielded to a full sweep already running, but a full
+                # sweep STARTING mid-fast-sweep walked the venue's
+                # event board concurrently — precisely the two-lanes-at-
+                # once condition that brought the 429s back on
+                # 2026-08-23, and the thing the lock was added for.
+                #
+                # There is no await between the check and the acquire,
+                # and asyncio is single-threaded, so this cannot block:
+                # nothing else can take the lock in between.
+                async with _SWEEP_LOCK:
+                    await fast_refresh()
         except Exception:  # noqa: BLE001 — supervised loop, next cycle
             log.exception("premap fast refresh failed")
         elapsed = time.monotonic() - started

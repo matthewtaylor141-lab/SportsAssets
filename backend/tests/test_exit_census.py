@@ -27,6 +27,7 @@ Reading the first as the second is how a working path gets rewritten.
 """
 
 import inspect
+import re
 
 import pytest
 
@@ -231,3 +232,83 @@ class TestTheProbeCanReadIt:
 
     def test_it_prints_the_recent_ring_too(self):
         assert "EXITRECENT" in self._probe()
+
+
+class TestAbsentIsNotEmpty:
+    """A heartbeat with NO exit_census field was substituted with {}
+    and then reported available:true beside the verdict "no exit signal
+    has reached mirror_exit at all".
+
+    That is a confident claim about the exit path drawn from a
+    heartbeat that never measured it — the exact false negative this
+    endpoint exists to prevent, reproduced inside the endpoint. The
+    most likely cause is also the most misleading one: the worker
+    running an older commit than the API."""
+
+    def _src(self):
+        from sportsassets.api import app as A
+
+        return inspect.getsource(A.admin_exit_census)
+
+    def test_a_missing_field_reports_unavailable(self):
+        src = self._src()
+        assert '"exit_census" not in detail' in src
+        i = src.index('"exit_census" not in detail')
+        assert '"available": False' in src[i:i + 500]
+
+    def test_it_names_the_likely_cause(self):
+        assert "older commit than the API" in self._src()
+
+    def test_it_refuses_to_draw_a_conclusion(self):
+        assert "says NOTHING about whether exits are firing" in self._src()
+
+    def test_an_EMPTY_census_is_still_distinguishable(self):
+        """Present-but-empty means the worker published and nothing has
+        happened yet — a different fact from absent, and the probe
+        already says so."""
+        from pathlib import Path
+
+        from sportsassets.api import app as A
+
+        root = Path(A.__file__).resolve().parents[3]
+        y = (root / ".github/workflows/engine-diagnostic.yml").read_text()
+        assert "has not run once since this worker booted" in y
+
+
+class TestTheVerdictCanPointAtEveryPostLookupRefusal:
+    """The defect list omitted three reasons, so the verdict could send
+    a reader to post_position_refusals and show them an empty object
+    while the sleeve sat halted. A diagnostic that names a bucket must
+    be able to put things in it."""
+
+    def _src(self):
+        from sportsassets.api import app as A
+
+        return inspect.getsource(A.admin_exit_census)
+
+    def test_the_halt_is_in_the_defect_list(self):
+        assert "mx_overspend_halt" in self._src()
+
+    def test_every_post_lookup_reason_is_covered(self):
+        from sportsassets import live_executor as le
+
+        src = inspect.getsource(le.mirror_exit)
+        after = src[src.index("mx_reached_position_lookup"):]
+        reasons = set(re.findall(r'_exit_stop\(\s*"(mx_[a-z_]+)"', after))
+        reasons.discard("mx_SOLD")
+        listed = set(re.findall(r'"(mx_[a-z_]+)"', self._src()))
+        missing = reasons - listed
+        assert not missing, f"verdict cannot name: {sorted(missing)}"
+
+    def test_the_reached_counter_is_stamped_AFTER_the_halt_gate(self):
+        """It was counted before overspend_halt, so a sleeve stopped by
+        a tripped breaker still reported every exit as reaching the
+        lookup — a halted system looking like a working one with
+        nothing to sell."""
+        from sportsassets import live_executor as le
+
+        src = inspect.getsource(le.mirror_exit)
+        code = "\n".join(l for l in src.splitlines()
+                         if not l.strip().startswith("#"))
+        assert code.index("mx_overspend_halt") < \
+            code.index("mx_reached_position_lookup")

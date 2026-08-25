@@ -4708,6 +4708,23 @@ async def admin_exit_census() -> dict:
         except ValueError:
             detail = {}
     detail = detail or {}
+    # ABSENT IS NOT EMPTY (2026-08-25, adversarial review). A heartbeat
+    # with no exit_census key at all — what a pre-census worker build
+    # writes, and what a failed sweep pass writes — was silently
+    # substituted with {} and then reported available:true alongside
+    # the verdict "no exit signal has reached mirror_exit at all". That
+    # is a confident claim about the exit path drawn from a heartbeat
+    # that never measured it: the exact false negative this endpoint
+    # was built to prevent, reproduced inside the endpoint.
+    if "exit_census" not in detail:
+        return {"source": "copy_sweep heartbeat (worker process)",
+                "beat_at": row["beat_at"],
+                "available": False,
+                "why": "the copy_sweep heartbeat carries no exit_census "
+                       "field. The sweep is beating but this build does "
+                       "not publish the census — most likely the worker "
+                       "is running an older commit than the API. This "
+                       "says NOTHING about whether exits are firing."}
     counts = detail.get("exit_census") or {}
     if not isinstance(counts, dict):
         return {"source": "copy_sweep heartbeat", "available": False,
@@ -4721,9 +4738,15 @@ async def admin_exit_census() -> dict:
     # Refusals that happen AFTER we confirmed a position of ours is the
     # only bucket that can be an exit-path defect. Everything before it
     # is coverage or a genuine non-exit.
-    defect_keys = ("mx_venue_holds_nothing", "mx_no_bid_for_partial",
-                   "mx_venue_unfilled", "mx_bad_supplied_fraction",
-                   "mx_already_claimed")
+    # EVERY REFUSAL THAT CAN FOLLOW A REACHED LOOKUP. The first list
+    # omitted mx_overspend_halt, mx_below_floor and mx_no_ledger_position,
+    # so the verdict could point a reader at "post_position_refusals"
+    # and show them an empty object while the sleeve sat halted. A
+    # diagnostic that names a bucket must be able to put things in it.
+    defect_keys = ("mx_overspend_halt", "mx_venue_holds_nothing",
+                   "mx_no_bid_for_partial", "mx_venue_unfilled",
+                   "mx_bad_supplied_fraction", "mx_already_claimed",
+                   "mx_below_floor", "mx_no_ledger_position")
     return {
         "source": "copy_sweep heartbeat (worker process)",
         "beat_at": row["beat_at"],

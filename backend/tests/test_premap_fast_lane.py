@@ -306,3 +306,45 @@ class TestBothLanesActuallyRun:
 
         src = Path(premap.__file__).with_name("all.py").read_text()
         assert '("premap", premap.main)' in src
+
+
+class TestTheLockIsTwoWay:
+    """`locked()` was checked and never acquired, which is one-way
+    exclusion: the fast lane yielded to a full sweep already running,
+    but a full sweep STARTING mid-fast-sweep walked the venue's event
+    board concurrently. That is exactly the two-lanes-at-once condition
+    the 429 fix of 2026-08-23 was about, and the thing the lock exists
+    to prevent."""
+
+    def test_the_fast_lane_actually_takes_the_lock(self):
+        src = inspect.getsource(premap._fast_loop)
+        assert "async with _SWEEP_LOCK" in src
+
+    def test_it_still_skips_rather_than_waits(self):
+        src = inspect.getsource(premap._fast_loop)
+        assert src.index("_SWEEP_LOCK.locked()") < \
+            src.index("async with _SWEEP_LOCK")
+
+    def test_a_full_sweep_cannot_start_during_a_fast_sweep(self, monkeypatch):
+        order = []
+
+        async def _slow_fast():
+            order.append("fast-start")
+            await asyncio.sleep(0.05)
+            order.append("fast-end")
+
+        monkeypatch.setattr(premap, "fast_refresh", _slow_fast)
+
+        async def _race():
+            t = asyncio.create_task(premap._fast_loop())
+            await asyncio.sleep(0.01)          # fast lane now holds it
+            assert premap._SWEEP_LOCK.locked(), \
+                "the fast lane must hold the lock while it sweeps"
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(_race())
+        assert order[:1] == ["fast-start"]
