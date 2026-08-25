@@ -215,11 +215,23 @@ async def sweep_once() -> dict:
     # apart from one that arrived late. It counts against the staleness
     # cap either way, which makes it the first number to look at before
     # touching any timeout.
-    from ..live_executor import _COPY_CONCURRENCY, _QUEUE_STATS
+    from ..live_executor import (_COPY_CONCURRENCY, _QUEUE_STATS,
+                                 exit_census, exit_census_lines)
+
+    # EXIT CENSUS rides this heartbeat for the same reason queue wait
+    # does: every worker loop — poller, copy_sweep, whale_exits — runs
+    # in ONE process (workers/all.py), so the counters are complete
+    # here and would be near-empty anywhere else. An admin endpoint
+    # reading the module global from the API process would report zeros
+    # forever and read as "the exit path never ran", which is precisely
+    # the wrong conclusion this census exists to prevent.
+    _cen = exit_census()
 
     _n = _QUEUE_STATS["n"] or 0
     return {"candidates": len(rows), "attempted": attempted,
             "deferred_to_next_pass": deferred,
+            "exit_census": _cen["counts"],
+            "exit_recent": exit_census_lines(),
             "copy_queue": {
                 "n": _n, "concurrency": _COPY_CONCURRENCY,
                 "avg_wait_s": (round(_QUEUE_STATS["total_s"] / _n, 3)

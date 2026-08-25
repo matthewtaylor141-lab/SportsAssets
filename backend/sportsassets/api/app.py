@@ -4466,6 +4466,96 @@ async def api_whale_merge_pnl(since: str = "2026-08-01",
     return {"since": since, "whales": graded}
 
 
+@app.get("/api/admin/exit-census", dependencies=[Depends(require_admin)])
+async def admin_exit_census() -> dict:
+    """WHY the exit path did or did not act, attributed.
+
+    "mirror_exit has never placed an order" has stood as an open item
+    for hours and it is not an answer — it is the absence of one.
+    classify_exit and mirror_exit refuse in twenty distinct ways and
+    nineteen were silent, so "the whale never exited", "we never copied
+    his entry", "the venue says we hold nothing" and "another task
+    claimed it" all reached production as the same event: no log line.
+
+    READ FROM THE HEARTBEAT, NOT FROM THIS PROCESS. The counters are
+    module globals in whichever process runs the copy path, and that is
+    the WORKER process — poller, copy_sweep and whale_exits all run
+    under workers/all.py. The API runs separately. An endpoint that
+    returned its own in-process census would answer zero forever and
+    read as "the exit path never ran", which is the exact false
+    negative this census was built to stop. So it reads the copy_sweep
+    heartbeat, and it says so in its own output.
+
+    The most important line is `mx_no_position_of_ours`. If that
+    dominates, the exit path is working and the fill rate is the
+    constraint — there is nothing to sell. Only a refusal AFTER
+    mx_reached_position_lookup with a position present is an exit-path
+    defect.
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT detail, beat_at FROM service_heartbeats "
+        "WHERE service = 'copy_sweep'")
+    if row is None:
+        return {"source": "copy_sweep heartbeat",
+                "available": False,
+                "why": "no copy_sweep heartbeat row — the sweep has "
+                       "never completed a cycle, so nothing has been "
+                       "published. This is a worker liveness problem, "
+                       "not an exit-path finding."}
+    detail = row["detail"]
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except ValueError:
+            detail = {}
+    detail = detail or {}
+    counts = detail.get("exit_census") or {}
+    if not isinstance(counts, dict):
+        return {"source": "copy_sweep heartbeat", "available": False,
+                "why": f"exit_census arrived as {type(counts).__name__}, "
+                       "not an object — the heartbeat is being mangled "
+                       "between the worker and here."}
+    total = sum(v for v in counts.values() if isinstance(v, int))
+    reached = int(counts.get("mx_reached_position_lookup") or 0)
+    sold = int(counts.get("mx_SOLD") or 0)
+    no_pos = int(counts.get("mx_no_position_of_ours") or 0)
+    # Refusals that happen AFTER we confirmed a position of ours is the
+    # only bucket that can be an exit-path defect. Everything before it
+    # is coverage or a genuine non-exit.
+    defect_keys = ("mx_venue_holds_nothing", "mx_no_bid_for_partial",
+                   "mx_venue_unfilled", "mx_bad_supplied_fraction",
+                   "mx_already_claimed")
+    return {
+        "source": "copy_sweep heartbeat (worker process)",
+        "beat_at": row["beat_at"],
+        "available": True,
+        "counts": counts,
+        "recent": detail.get("exit_recent") or [],
+        "read_this_first": {
+            "exits_reaching_the_position_lookup": reached,
+            "orders_actually_sold": sold,
+            "stopped_because_we_never_copied_his_entry": no_pos,
+            "post_position_refusals": {
+                k: int(counts.get(k) or 0) for k in defect_keys
+                if counts.get(k)},
+            "verdict": (
+                "no exit signal has reached mirror_exit at all — look "
+                "upstream at whale_exits and classify_exit"
+                if reached == 0 else
+                "exits reach the path and stop only because we hold "
+                "nothing to sell — this is a FILL RATE constraint, not "
+                "an exit defect"
+                if sold == 0 and no_pos >= reached else
+                "exits are being placed"
+                if sold > 0 else
+                "exits reach the path, we hold a position, and they "
+                "still do not sell — read post_position_refusals"),
+        },
+        "census_total_events": total,
+    }
+
+
 @app.get("/api/admin/short-truth", dependencies=[Depends(require_admin)])
 async def api_short_truth(days: int = 7) -> dict:
     """Does the venue book a BUY_SHORT as a SELL? The receipts already know.

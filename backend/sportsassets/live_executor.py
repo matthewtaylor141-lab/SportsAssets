@@ -243,6 +243,76 @@ async def _release_exit_claim(pool, row_id: int) -> None:
         log.exception("could not release exit claim on row %s", row_id)
 
 
+# ────────────────────────────────────────────────────────────────────
+# EXIT CENSUS. Why the exit path did or did not act, attributed.
+#
+# classify_exit and mirror_exit refuse in TWENTY distinct ways and
+# nineteen of them were silent. In production that makes "the whale
+# never exited", "we hold nothing", "the venue says we hold nothing",
+# "another task claimed it" and "the market type has no sibling token"
+# a single indistinguishable event: nothing in the log.
+#
+# That is why "mirror_exit has never placed an order" has stood
+# unexplained. It is not evidence the path is broken and not evidence
+# it is fine — the question has been unanswerable, which is the same
+# position the mapper was in before resolve_explain, and the same
+# failure mode as a probe reading a column production does not write.
+#
+# Deliberately a COUNTER AND A RING, not a branch. Nothing here reads
+# back into a decision: every helper returns None (or its argument) and
+# is called on the way out of a path that had already decided. A
+# diagnostic on the money path must be provably incapable of changing
+# an order, and a reader must see that at a glance.
+_EXIT_CENSUS: dict[str, int] = {}
+_EXIT_RING: list[dict] = []
+_EXIT_RING_MAX = 60
+
+
+def _exit_stop(reason: str, **ctx) -> None:
+    """Record why the exit path stopped, and return None."""
+    _EXIT_CENSUS[reason] = _EXIT_CENSUS.get(reason, 0) + 1
+    if ctx:
+        import datetime as _d
+
+        _EXIT_RING.append({
+            "reason": reason,
+            "at": _d.datetime.now(_d.timezone.utc).isoformat(
+                timespec="seconds"),
+            **{k: (v if isinstance(v, (int, float, bool))
+                   else str(v)[:64]) for k, v in ctx.items()}})
+        del _EXIT_RING[:-_EXIT_RING_MAX]
+    return None
+
+
+def exit_census() -> dict:
+    """The census as a plain dict, newest refusals last."""
+    return {"counts": dict(_EXIT_CENSUS), "recent": list(_EXIT_RING)}
+
+
+def exit_census_lines(limit: int = 12) -> list[str]:
+    """The recent ring as flat strings.
+
+    NOT a convenience. The census has to travel from the worker process
+    to a reader, and the only channel is the heartbeat, which
+    /api/health/services sanitizes to a bounded depth of 3. A list of
+    dicts inside detail.exit_census sits at exactly depth 3 and comes
+    back as "<dict depth>" — the sanitizer refusing a payload, working
+    as designed.
+    #
+    The fix is to flatten here rather than to raise the bound. That
+    guard is on a PUBLIC endpoint and exists to stop a payload or a
+    token reaching it; loosening a money-adjacent safety bound so a
+    diagnostic can be prettier is the trade that produces the next
+    incident. A string is a string at any depth.
+    """
+    out = []
+    for e in _EXIT_RING[-limit:]:
+        bits = " ".join(f"{k}={v}" for k, v in e.items()
+                        if k not in ("reason", "at"))
+        out.append(f"{e.get('at', '')} {e.get('reason', '?')} {bits}"[:80])
+    return out
+
+
 async def classify_exit(pool, asset: str, whale: str,
                         size: float) -> dict | None:
     """Is this "buy" actually the whale CLOSING a position?
@@ -283,16 +353,25 @@ async def classify_exit(pool, asset: str, whale: str,
     path — one indexed local join, no venue call, sub-millisecond.
     """
     if not asset or not whale:
-        return None
+        return _exit_stop("cls_no_asset_or_whale")
     try:
         sibs = await pool.fetch(
             "SELECT s.token_id FROM market_tokens mt "
             "JOIN market_tokens s USING (condition_id) "
             "WHERE mt.token_id = $1 AND s.token_id <> $1", asset)
     except Exception:  # noqa: BLE001 — a lookup failure is not an exit
-        return None
-    if not sibs or len(sibs) != 1:
-        return None
+        return _exit_stop("cls_sibling_lookup_failed", asset=asset)
+    if not sibs:
+        # The token is not in market_tokens at all — unenriched. This
+        # is the bucket that says "we cannot even ask the question",
+        # and it is a mapping problem, not an exit problem.
+        return _exit_stop("cls_token_unenriched", asset=asset, whale=whale)
+    if len(sibs) != 1:
+        # Multi-outcome markets and negative-risk baskets have no
+        # single complement. Refusing is correct; counting it tells us
+        # how much of the roster's flow is structurally unclassifiable.
+        return _exit_stop("cls_not_binary", asset=asset,
+                          siblings=len(sibs))
     sibling = str(sibs[0]["token_id"])
     try:
         his = await pool.fetchrow(
@@ -304,16 +383,22 @@ async def classify_exit(pool, asset: str, whale: str,
             "WHERE t.asset = $1 AND lower(w.username) = $2",
             sibling, whale)
     except Exception:  # noqa: BLE001
-        return None
+        return _exit_stop("cls_holding_lookup_failed", asset=sibling)
     open_sh = float((his["open_sh"] if his else 0) or 0.0)
     if open_sh <= 0:
-        return None
+        # He does not hold the other leg, so this really is a fresh bet
+        # on this side. THE EXPECTED OUTCOME on a genuine entry — this
+        # counter should dominate, and if it does not, something is
+        # wrong upstream rather than here.
+        return _exit_stop("cls_no_sibling_holding")
     try:
         qty = float(size or 0)
     except (TypeError, ValueError):
-        return None
+        return _exit_stop("cls_size_unparseable", size=size)
     if qty <= 0:
-        return None
+        return _exit_stop("cls_size_not_positive", size=size)
+    _exit_stop("cls_classified_as_exit", asset=sibling, whale=whale,
+               closed_frac=round(min(1.0, qty / open_sh), 4))
     return {"asset": sibling, "exit_via_asset": asset,
             "closed_frac": min(1.0, qty / open_sh),
             "his_open_shares": open_sh, "his_exit_shares": qty}
@@ -344,18 +429,19 @@ async def mirror_exit(payload: dict) -> None:
     correct rather than being written in a hurry against live money.
     """
     if payload.get("side") != "SELL":
-        return
+        return _exit_stop("mx_not_a_sell")
     if not settings().copy_probe_enabled or copy_halted():
-        return
+        return _exit_stop("mx_halted")
     username = (payload.get("whale_username") or "").lower()
     if username not in _whale_set("LIVE_VERIFIED_WHALES"):
-        return
+        return _exit_stop("mx_whale_not_verified", whale=username)
     asset = str(payload.get("asset") or "")
     if not asset:
-        return
+        return _exit_stop("mx_no_asset")
+    _exit_stop("mx_reached_position_lookup", whale=username, asset=asset)
     pool = await get_pool()
     if await overspend_halt(pool):
-        return
+        return _exit_stop("mx_overspend_halt")
     row = await pool.fetchrow(
         "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
         "       fill_price::float8 AS entry "
@@ -364,7 +450,13 @@ async def mirror_exit(payload: dict) -> None:
         "  AND status = 'filled' AND us_market_slug IS NOT NULL "
         "ORDER BY placed_at DESC LIMIT 1", asset, username)
     if row is None or (row["qty"] or 0) <= 0:
-        return  # nothing of ours to exit
+        # WE NEVER COPIED HIS ENTRY. At a 0.55% fill rate this is the
+        # expected majority outcome and it is NOT an exit-path defect:
+        # there is nothing to sell. Counting it separately is what
+        # stops "mirror_exit never fired" from being read as a broken
+        # exit path when it is actually a coverage number.
+        return _exit_stop("mx_no_position_of_ours", whale=username,
+                          asset=asset)
     # HIS fraction: how much of his own position did this sale close?
     # Sum his own ledger for this asset rather than trusting one row.
     pos = await pool.fetchrow(
@@ -391,10 +483,10 @@ async def mirror_exit(payload: dict) -> None:
         try:
             closed_frac = max(0.0, min(float(supplied), 1.0))
         except (TypeError, ValueError):
-            return
+            return _exit_stop("mx_bad_supplied_fraction", frac=supplied)
     else:
         if bought <= 0:
-            return
+            return _exit_stop("mx_no_ledger_position", asset=asset)
         closed_frac = min(sold / bought, 1.0)
     # PROPORTIONAL, BOTH LEGS (owner order 2026-08-25: "copy buys and
     # 'sells' in the correct proportional relationship").
@@ -412,7 +504,8 @@ async def mirror_exit(payload: dict) -> None:
         log.info("MIRROR-EXIT below floor: %s closed %.1f%% of %s "
                  "(floor %.0f%%) — not worth a spread crossing",
                  username, closed_frac * 100, asset, MIN_EXIT_FRAC * 100)
-        return
+        return _exit_stop("mx_below_floor", whale=username,
+                          closed_frac=round(closed_frac, 4))
     from . import pmus
 
     us_slug = row["us_market_slug"]
@@ -425,7 +518,7 @@ async def mirror_exit(payload: dict) -> None:
         "WHERE id=$1 AND status='filled' RETURNING id", row["id"])
     if claimed is None:
         log.info("MIRROR-EXIT %s already claimed by another task", us_slug)
-        return
+        return _exit_stop("mx_already_claimed", slug=us_slug)
     try:
         held, _avg = await _pm_held(us_slug)
         ours = min(int(row["qty"]), held)
@@ -435,7 +528,11 @@ async def mirror_exit(payload: dict) -> None:
             qty = ours          # he is out; so are we, to the share
         if qty <= 0:
             await _release_exit_claim(pool, row["id"])
-            return  # the venue says we hold nothing worth selling
+            # Our ledger says filled, the VENUE says we hold nothing.
+            # A disagreement between the two is its own class of
+            # problem and must never be filed under "no position".
+            return _exit_stop("mx_venue_holds_nothing", slug=us_slug,
+                              our_qty=int(row["qty"] or 0), held=held)
         # FULL EXIT: use the venue's own flatten, which needs no price.
         #
         # Pricing the sell off slug_bid meant every unreadable bid was
@@ -455,7 +552,7 @@ async def mirror_exit(payload: dict) -> None:
                 log.warning("MIRROR-EXIT no bid for %s — partial exit "
                             "deferred rather than sold blind", us_slug)
                 await _release_exit_claim(pool, row["id"])
-                return
+                return _exit_stop("mx_no_bid_for_partial", slug=us_slug)
             limit = sell_limit_price(bid)
     except Exception:
         await _release_exit_claim(pool, row["id"])
@@ -478,7 +575,7 @@ async def mirror_exit(payload: dict) -> None:
         log.warning("MIRROR-EXIT unfilled %s: %s", us_slug,
                     str(result.get("raw"))[:160])
         await _release_exit_claim(pool, row["id"])
-        return
+        return _exit_stop("mx_venue_unfilled", slug=us_slug)
     entry = row["entry"] or 0
     pnl = round((float(px) - entry) * filled, 4) if px else None
     # PARTIAL EXITS MUST NOT RETIRE THE WHOLE POSITION. Writing
@@ -496,6 +593,9 @@ async def mirror_exit(payload: dict) -> None:
         await pool.execute(
             "UPDATE live_orders SET status='cashed_out', pnl=$2, "
             "settled_at=now() WHERE id=$1", row["id"], pnl)
+    _exit_stop("mx_SOLD", whale=username, slug=us_slug,
+               shares=int(filled), pnl=pnl or 0,
+               full=bool(closed_frac >= FULL_EXIT_FRAC))
     log.warning("MIRROR-EXIT %s %s: sold %d of %d @ %.3f (entry %.3f) "
                 "pnl %.2f — mirroring his %.1f%% exit, %d left",
                 username, us_slug, int(filled), int(row["qty"]),

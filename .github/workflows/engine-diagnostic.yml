@@ -678,6 +678,32 @@ jobs:
                    end' \
             /tmp/hb_we.json 2>/dev/null || echo "  COPYQUEUE unreadable"
 
+          # EXITCENSUS — why the exit path did or did not act.
+          #
+          # "mirror_exit has never placed an order" is not a finding,
+          # it is the absence of one: nineteen of its twenty refusal
+          # paths were silent, so every possible reason reached
+          # production as the same event. mx_no_position_of_ours
+          # dominating means the exit path WORKS and the fill rate is
+          # the constraint — there is nothing to sell. A refusal after
+          # mx_reached_position_lookup is the only kind that is a
+          # defect.
+          jq -r '[.[]? | select(.service == "copy_sweep")] as $c
+                 | if ($c | length) == 0
+                   then "  EXITCENSUS no copy_sweep heartbeat"
+                   elif (($c[0].detail.exit_census? // null) | type) != "object"
+                   then "  EXITCENSUS detail.exit_census is \(($c[0].detail.exit_census? // null) | type), not an object"
+                   elif (($c[0].detail.exit_census | length) == 0)
+                   then "  EXITCENSUS empty — the exit path has not run once since this worker booted"
+                   else ($c[0].detail.exit_census | to_entries
+                         | sort_by(-.value)[]
+                         | "  EXITCENSUS \(.key): \(.value)")
+                   end' \
+            /tmp/hb_we.json 2>/dev/null || echo "  EXITCENSUS unreadable"
+          jq -r '.[]? | select(.service == "copy_sweep")
+                 | (.detail.exit_recent // [])[] | "  EXITRECENT \(.)"' \
+            /tmp/hb_we.json 2>/dev/null || true
+
           # UNMAPPED — WHY the biggest bucket fails, attributed.
           #
           # listed_mapper_fail is 26,569 rows = 1,155 blocked whale
