@@ -235,3 +235,85 @@ class TestTheEndpointKeepsTheHistoryOnThePage:
 
     def test_the_probe_prints_how_many_more_are_needed(self):
         assert "still to go" in self._probe()
+
+
+class TestTheBenchmarkCannotTakeTheEndpointDown:
+    """The first version computed the whale benchmark inline. That is
+    the heaviest query in the system — seven whales, up to 600,000
+    fills each, swisstony alone at 283,748 — and it took the endpoint
+    with it. The 2026-08-25 probe read, on the same line:
+
+        MERGEHTTP code=502     PROOF unavailable
+
+    The instrument that answers "are we profitable" became unavailable
+    exactly when it mattered, because I hung it off the most expensive
+    thing the API does."""
+
+    def _src(self):
+        import inspect
+
+        from sportsassets.api import app as A
+
+        return inspect.getsource(A.admin_proof)
+
+    def test_the_endpoint_does_not_run_the_merge_replay(self):
+        # CODE ONLY — the comment above the fix names the function it
+        # removed, on purpose, so a grep over raw source would flag the
+        # explanation as the defect.
+        code = "\n".join(l for l in self._src().splitlines()
+                         if not l.strip().startswith("#"))
+        assert "whale_merge_pnl" not in code
+
+    def test_it_reads_a_published_value_instead(self):
+        assert "whale_edge_benchmark" in self._src()
+
+    def test_a_missing_benchmark_degrades_rather_than_fails(self):
+        s = self._src()
+        assert "no published benchmark yet" in s
+        assert "the verdict is unaffected" in s
+
+    def test_a_worker_publishes_it(self):
+        import inspect
+
+        from sportsassets.workers import analytics as an
+
+        src = inspect.getsource(an.publish_whale_benchmark)
+        assert "whale_edge_benchmark" in src
+        assert "whale_merge_pnl" in src
+
+    def test_the_publisher_is_rate_limited_well_below_the_cycle(self):
+        from sportsassets.workers import analytics as an
+
+        assert an.BENCHMARK_EVERY_S >= 1800
+
+    def test_the_publisher_never_kills_the_analytics_loop(self):
+        import inspect
+
+        from sportsassets.workers import analytics as an
+
+        src = inspect.getsource(an.publish_whale_benchmark)
+        assert "except Exception" in src
+        assert "never kills the loop" in src
+
+    def test_it_is_actually_called_from_the_cycle(self):
+        import inspect
+
+        from sportsassets.workers import analytics as an
+
+        assert "await publish_whale_benchmark()" in inspect.getsource(an.main)
+
+
+class TestTheProbeNamesItsFailures:
+    def _probe(self):
+        from pathlib import Path
+
+        from sportsassets.api import app as A
+
+        root = Path(A.__file__).resolve().parents[3]
+        return (root / ".github/workflows/engine-diagnostic.yml").read_text()
+
+    def test_the_status_code_is_printed(self):
+        assert "PROOFHTTP code=" in self._probe()
+
+    def test_the_body_is_printed_when_it_will_not_parse(self):
+        assert "PROOFBODY" in self._probe()

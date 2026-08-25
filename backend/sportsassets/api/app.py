@@ -4563,26 +4563,43 @@ async def admin_proof(since: str = "", target: float = 0.0) -> dict:
     # THE BENCHMARK: what the whales themselves return, merge-inclusive.
     # Reported beside our number because the gap between them is the
     # execution loss, which is the thing engineering can actually move.
+    # THE BENCHMARK IS READ, NOT COMPUTED.
+    #
+    # The first version called whale_merge_pnl inline. That is the
+    # heaviest query in the system — seven whales, up to 600,000 fills
+    # each, swisstony alone at 283,748 — and it took this endpoint
+    # down with it: the 2026-08-25 probe read
+    #
+    #     MERGEHTTP code=502     PROOF unavailable
+    #
+    # at an API RSS of ~545MB. I made the instrument that answers "are
+    # we profitable" depend on the single most expensive thing the API
+    # does, so the answer became unavailable exactly when it mattered.
+    #
+    # The benchmark is now read from the value the analytics worker
+    # publishes. A stale benchmark is a fine benchmark — whale edge
+    # measured over a month does not move in an hour — and a MISSING
+    # one degrades to "no target", which costs the sample-size
+    # projection and nothing else. The verdict never depended on it.
     bench: dict = {}
     if not target:
         try:
-            from ..analytics.merge_pnl import whale_merge_pnl
-            from .copies_record import COPY_WHALES
-
-            graded = await whale_merge_pnl(pool, list(COPY_WHALES),
-                                           "2026-08-01")
-            ent = sum(float(g.get("entry_notional") or 0)
-                      for g in graded.values())
-            rea = sum(float(g.get("realized_total") or 0)
-                      for g in graded.values())
-            if ent > 0:
-                target = rea / ent
-                bench = {"whale_roi_on_entries": round(target, 6),
-                         "whale_entry_notional": round(ent, 2),
-                         "whale_realized": round(rea, 2),
-                         "basis": "merge-inclusive, all copied whales"}
+            raw = await pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1",
+                "whale_edge_benchmark")
+            d = raw if isinstance(raw, dict) else (json.loads(raw)
+                                                   if raw else None)
+            if d and float(d.get("whale_roi_on_entries") or 0):
+                target = float(d["whale_roi_on_entries"])
+                bench = {**d, "basis": "merge-inclusive, all copied "
+                                       "whales (published by the "
+                                       "analytics worker)"}
+            else:
+                bench = {"error": "no published benchmark yet — the "
+                                  "sample-size projection is omitted, "
+                                  "the verdict is unaffected"}
         except Exception as exc:  # noqa: BLE001 — benchmark is optional
-            bench = {"error": f"benchmark unavailable: "
+            bench = {"error": f"benchmark unreadable: "
                               f"{type(exc).__name__}"}
 
     if target and out.get("overall", {}).get("sigma_per_dollar"):

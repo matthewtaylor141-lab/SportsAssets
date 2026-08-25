@@ -720,8 +720,21 @@ jobs:
           # needed is the number that turns "are we there yet" into a
           # date, and it is sized against the whales' own merge-
           # inclusive ROI, not our noisy point estimate.
-          curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
-               -o /tmp/proof.json "$BASE/api/admin/proof" || true
+          PROOFCODE=$(curl -sS --max-time 90 -w '%{http_code}' \
+               -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/proof.json "$BASE/api/admin/proof" \
+               2>/dev/null || echo "000")
+          # NAME THE CAUSE. "PROOF unavailable" told me nothing for a
+          # whole probe cycle: the endpoint was returning 502 because
+          # it computed the whale benchmark inline and inherited the
+          # heaviest query in the system. A status code and the first
+          # 300 bytes of the body would have said so immediately, which
+          # is the same fix /api/admin/short-truth needed for the same
+          # reason.
+          echo "  PROOFHTTP code=$PROOFCODE bytes=$(wc -c < /tmp/proof.json 2>/dev/null || echo 0)"
+          if ! jq -e . /tmp/proof.json >/dev/null 2>&1; then
+            echo "  PROOFBODY $(head -c 300 /tmp/proof.json 2>/dev/null | tr '\n' ' ')"
+          fi
           jq -r '.overall // {} |
                  "  PROOF cohort n=\(.n // 0) staked=$\(.staked // 0) pnl=$\(.pnl // 0) roi=\(.roi // "n/a") ci95=\(.ci95 | tostring)"' \
             /tmp/proof.json 2>/dev/null || echo "  PROOF unavailable"

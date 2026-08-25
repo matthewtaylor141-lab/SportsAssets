@@ -22,6 +22,72 @@ from sportsassets.analytics import merge_pnl as mp
 from sportsassets.analytics.merge_pnl import DUST, replay
 
 
+class _FakePool:
+    """A pool that speaks the CURSOR protocol the replay now uses.
+
+    whale_merge_pnl streams via `acquire -> transaction -> cursor`
+    since 2026-08-25, because materialising 600,000 dicts per whale
+    across seven whales 502'd the API at ~545MB RSS. A stub that only
+    answers `fetch` would silently stop exercising the real path — the
+    shape of test that keeps passing while production breaks.
+    """
+
+    def __init__(self, rows, payouts=None):
+        self._rows = list(rows)
+        self._payouts = list(payouts or [])
+        self.bound = None
+        self.batches = 0
+
+    # --- cursor protocol -------------------------------------------
+    class _Cursor:
+        def __init__(self, pool):
+            self._pool = pool
+            self._i = 0
+
+        async def fetch(self, n):
+            self._pool.batches += 1
+            out = self._pool._rows[self._i:self._i + n]
+            self._i += len(out)
+            return out
+
+    class _Tx:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Conn:
+        def __init__(self, pool):
+            self._pool = pool
+
+        def transaction(self):
+            return _FakePool._Tx()
+
+        async def cursor(self, _sql, *a):
+            self._pool.bound = a[1] if len(a) > 1 else None
+            return _FakePool._Cursor(self._pool)
+
+    class _Acq:
+        def __init__(self, pool):
+            self._pool = pool
+
+        async def __aenter__(self):
+            return _FakePool._Conn(self._pool)
+
+        async def __aexit__(self, *a):
+            return False
+
+    def acquire(self):
+        return _FakePool._Acq(self)
+
+    # --- the payout lookup -----------------------------------------
+    async def fetch(self, _sql, *_a):
+        return self._payouts
+
+
+
+
 def _f(cid, idx, side, size, price):
     return {"condition_id": cid, "outcome_index": idx, "side": side,
             "size": size, "price": price}
@@ -167,8 +233,19 @@ class TestTheQueryTakesADateNotAString:
         src = inspect.getsource(m.whale_merge_pnl)
         assert "since_d" in src
         assert "fromisoformat" in src
-        # the cast must be gone from the SQL itself, comments aside
-        sql = src[src.index('"""\n            SELECT'):src.index('", w.lower()')]
+        # The cast must be gone from the SQL itself, comments aside.
+        #
+        # Sliced by REGEX rather than by literal surrounding text: the
+        # first version keyed on the exact indentation and the exact
+        # argument line, and broke the moment the query moved into a
+        # streaming cursor. A test that breaks on reformatting is a
+        # test that will be edited to pass rather than read.
+        import re as _re
+
+        m2 = _re.search(r"SELECT t\.condition_id.*?ORDER BY[^\"]*",
+                        src, _re.S)
+        assert m2, "the replay query is no longer recognisable"
+        sql = m2.group(0)
         assert "::date" not in sql
 
     def test_the_cashflow_query_binds_a_date_object(self):
@@ -189,12 +266,9 @@ class TestTheQueryTakesADateNotAString:
 
         seen = {}
 
-        class _P:
-            async def fetch(self, _sql, *a):
-                seen["bound"] = a[1]
-                return []
-
-        asyncio.run(whale_merge_pnl(_P(), ["w"], dt.date(2026, 8, 1)))
+        pool = _FakePool([])
+        asyncio.run(whale_merge_pnl(pool, ["w"], dt.date(2026, 8, 1)))
+        seen["bound"] = pool.bound
         assert seen["bound"] == dt.date(2026, 8, 1)
 
     def test_a_string_is_converted_not_rejected(self):
@@ -205,12 +279,9 @@ class TestTheQueryTakesADateNotAString:
 
         seen = {}
 
-        class _P:
-            async def fetch(self, _sql, *a):
-                seen["bound"] = a[1]
-                return []
-
-        asyncio.run(whale_merge_pnl(_P(), ["w"], "2026-08-01"))
+        pool = _FakePool([])
+        asyncio.run(whale_merge_pnl(pool, ["w"], "2026-08-01"))
+        seen["bound"] = pool.bound
         assert seen["bound"] == dt.date(2026, 8, 1)
 
 
@@ -220,12 +291,9 @@ class TestTruncationIsReportedNotSilent:
 
         from sportsassets.analytics.merge_pnl import whale_merge_pnl
 
-        class _P:
-            async def fetch(self, _sql, *_a):
-                return [{"condition_id": "c", "outcome_index": 0,
-                         "side": "BUY", "size": 1, "price": 0.5}] * 3
-
-        out = asyncio.run(whale_merge_pnl(_P(), ["w"], "2026-08-01",
+        pool = _FakePool([{"condition_id": "c", "outcome_index": 0,
+                           "side": "BUY", "size": 1, "price": 0.5}] * 3)
+        out = asyncio.run(whale_merge_pnl(pool, ["w"], "2026-08-01",
                                           max_fills=3))
         assert out["w"]["truncated"] is True
         assert "floors, not totals" in out["w"]["verdict_note"]
@@ -235,12 +303,9 @@ class TestTruncationIsReportedNotSilent:
 
         from sportsassets.analytics.merge_pnl import whale_merge_pnl
 
-        class _P:
-            async def fetch(self, _sql, *_a):
-                return [{"condition_id": "c", "outcome_index": 0,
-                         "side": "BUY", "size": 1, "price": 0.5}]
-
-        out = asyncio.run(whale_merge_pnl(_P(), ["w"], "2026-08-01",
+        pool = _FakePool([{"condition_id": "c", "outcome_index": 0,
+                           "side": "BUY", "size": 1, "price": 0.5}])
+        out = asyncio.run(whale_merge_pnl(pool, ["w"], "2026-08-01",
                                           max_fills=100))
         assert out["w"]["truncated"] is False
         assert "verdict_note" not in out["w"]

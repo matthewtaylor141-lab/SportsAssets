@@ -317,19 +317,44 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
                else _dt.datetime.fromisoformat(str(since)).date())
     res: dict[str, Any] = {}
     for w in whales:
-        rows = await pool.fetch(
-            """
-            SELECT t.condition_id, t.outcome_index, t.side,
-                   t.size::float8 AS size, t.price::float8 AS price
-              FROM trades t JOIN whales wh ON wh.id = t.whale_id
-             WHERE lower(wh.username) = $1
-               AND t.ts >= $2
-               AND t.condition_id IS NOT NULL
-               AND t.outcome_index IS NOT NULL
-             ORDER BY t.condition_id, t.ts, t.id
-             LIMIT $3
-            """, w.lower(), since_d, max_fills)
-        fills = [dict(r) for r in rows]
+        # STREAMED, NOT MATERIALISED. This endpoint returned 502 on
+        # 2026-08-25 at an API RSS of ~545MB: seven whales at up to
+        # 600,000 fills each, every row turned into a dict and held in
+        # a list before the replay even started. swisstony alone has
+        # 283,748 fills. The replay is a single forward pass and never
+        # needs the second row while looking at the first.
+        #
+        # A server-side cursor inside a transaction hands them over in
+        # batches, so peak memory is the batch and not the book. replay
+        # already consumes an iterable, so nothing about the arithmetic
+        # changes — this is the same walk, not a second one.
+        fills = []
+        n_read = 0
+        conds: set[str] = set()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                cur = await conn.cursor(
+                    """
+                    SELECT t.condition_id, t.outcome_index, t.side,
+                           t.size::float8 AS size, t.price::float8 AS price
+                      FROM trades t JOIN whales wh ON wh.id = t.whale_id
+                     WHERE lower(wh.username) = $1
+                       AND t.ts >= $2
+                       AND t.condition_id IS NOT NULL
+                       AND t.outcome_index IS NOT NULL
+                     ORDER BY t.condition_id, t.ts, t.id
+                    """, w.lower(), since_d)
+                while n_read < max_fills:
+                    batch = await cur.fetch(min(5000, max_fills - n_read))
+                    if not batch:
+                        break
+                    for r in batch:
+                        d = dict(r)
+                        fills.append(d)
+                        if d.get("condition_id"):
+                            conds.add(str(d["condition_id"]))
+                    n_read += len(batch)
+        rows = fills
         # THE PAYOUTS, FOR THE CONDITIONS THIS WHALE ACTUALLY TOUCHED.
         #
         # Fetched by explicit condition list rather than a join on the
@@ -337,8 +362,7 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
         # his fill from the replay. A resolution we do not have has to
         # read as "unknown payout" — which the replay excludes and
         # reports — and never as "this fill did not happen".
-        conds = sorted({str(f["condition_id"]) for f in fills
-                        if f.get("condition_id")})
+        conds = sorted(conds)
         payouts: dict[str, list[float]] = {}
         cf_error: str | None = None
         if conds:
