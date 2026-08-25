@@ -4952,6 +4952,89 @@ async def api_quarantine_get() -> dict:
             "premap_env_override": pl_env or None}
 
 
+@app.get("/api/admin/memory-census", dependencies=[Depends(require_admin)])
+async def api_memory_census() -> dict:
+    """WHAT IS ACTUALLY HOLDING THE MEMORY — measured, not guessed.
+
+    Three fixes have now been shipped at the API's OOM on the reasoning
+    that they were "obviously" the cost, and the honest scoreboard is:
+
+      type filter on the hydrate  317,681 -> 300,182 rows  (5.5%)
+      streaming snapshot packer   RSS still 595 -> 1,684.6 MB on one
+                                  process across a completed grind
+
+    Both were real improvements to real waste. Neither was the thing.
+    A fourth guess is not worth shipping; a number is.
+
+    So this walks the retained structures and reports bytes, sampling
+    rows and scaling rather than deep-sizing 300k dicts (which would
+    itself allocate). It is deliberately read-only and allocates on the
+    order of the sample, not the archive.
+    """
+    import sys
+
+    from . import track_record as tr
+
+    def _deep(obj: Any, depth: int = 0) -> int:
+        """getsizeof is shallow — a dict of strings reports ~360 bytes
+        and hides the strings. One level of recursion over keys and
+        values is where the archive's real weight lives."""
+        n = sys.getsizeof(obj)
+        if depth > 2:
+            return n
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                n += _deep(k, depth + 1) + _deep(v, depth + 1)
+        elif isinstance(obj, (list, tuple, set)):
+            for v in obj:
+                n += _deep(v, depth + 1)
+        return n
+
+    def _measure(rows: Any, sample: int = 200) -> dict:
+        if not isinstance(rows, list) or not rows:
+            return {"rows": 0, "est_mb": 0.0, "bytes_per_row": 0}
+        step = max(1, len(rows) // sample)
+        taken = rows[::step][:sample]
+        per = sum(_deep(r) for r in taken) / max(1, len(taken))
+        return {"rows": len(rows),
+                "bytes_per_row": round(per),
+                "est_mb": round(per * len(rows) / 1048576, 1)}
+
+    rss_mb = None
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss_mb = round(int(line.split()[1]) / 1024, 1)
+                    break
+    except OSError:
+        pass
+
+    cache = _measure(tr._archive_cache.get("data"))
+    grind = _measure(tr._hydrate_progress.get("rows"))
+    raw = tr._raw_cache.get("data")
+    raw_acts = (raw or {}).get("activities") if isinstance(raw, dict) else None
+    rawm = _measure(raw_acts)
+
+    accounted = cache["est_mb"] + grind["est_mb"] + rawm["est_mb"]
+    return {
+        "rss_mb": rss_mb,
+        "archive_cache": cache,
+        "hydrate_in_progress": grind,
+        "raw_window_cache": rawm,
+        "accounted_mb": round(accounted, 1),
+        # The gap is the honest part. If the retained structures do not
+        # explain RSS, the next place to look is allocator arenas and
+        # per-request churn, NOT another cache.
+        "unaccounted_mb": (round(rss_mb - accounted, 1)
+                           if rss_mb is not None else None),
+        "gc_counts": list(__import__("gc").get_count()),
+        "note": ("est_mb is a sampled estimate scaled to the row count, "
+                 "not an exact walk — it is meant to rank the holders, "
+                 "not to balance to the byte"),
+    }
+
+
 @app.get("/api/admin/whale-true-edge", dependencies=[Depends(require_admin)])
 async def api_whale_true_edge(since_day: str = "2026-08-01",
                               max_reaction_s: float | None = None) -> dict:

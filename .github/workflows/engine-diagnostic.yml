@@ -397,6 +397,21 @@ jobs:
                  | "  REFUSED-BY-CLASS premap=\($p)  exact=\($e)  fuzzy=\($f)  passed=\($ok)  (of \((.rows // []) | length) audited; premap=0 means none REFUSED, not none resolved)"' \
             /tmp/mapa.json 2>/dev/null || echo "  REFUSED-BY-CLASS unavailable"
 
+          # MEMCENSUS — rank what is actually holding the RSS.
+          #
+          # Three memory fixes shipped tonight on reasoning; the type
+          # filter moved 5.5% of rows and the streaming packer did not
+          # stop RSS going 595 -> 1,684.6 MB across one grind. This
+          # prints bytes-per-row and the estimate per retained
+          # structure, plus the UNACCOUNTED gap. A large gap means the
+          # caches are not the story and the next look is allocator
+          # arenas, not a fourth cache.
+          curl -sS --max-time 45 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/memc.json "$BASE/api/admin/memory-census" || true
+          jq -r 'if .rss_mb == null then "  MEMCENSUS unavailable"
+                 else "  MEMCENSUS rss=\(.rss_mb)MB accounted=\(.accounted_mb)MB unaccounted=\(.unaccounted_mb)MB | archive \(.archive_cache.rows)r @\(.archive_cache.bytes_per_row)B = \(.archive_cache.est_mb)MB | grind \(.hydrate_in_progress.rows)r = \(.hydrate_in_progress.est_mb)MB | window \(.raw_window_cache.rows)r = \(.raw_window_cache.est_mb)MB"
+                 end' /tmp/memc.json 2>/dev/null || echo "  MEMCENSUS unreadable"
+
           # SHORTSHADOW — the evidence the short ban owes us.
           #
           # The ban is 6-for-6 justified on FILLS, but it now refuses
