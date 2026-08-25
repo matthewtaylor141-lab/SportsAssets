@@ -669,11 +669,16 @@ jobs:
           # see a merge. Three instruments agreed there were no exits
           # because all three read the same trade-feed definition of a
           # sale, and three whales were cut on it.
-          curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
-               -o /tmp/mergepnl.json \
-               "$BASE/api/admin/whale-merge-pnl?since=2026-08-01" || true
+          MERGECODE=$(curl -sS --max-time 120 -w '%{http_code}' \
+               -H "X-Admin-Token: $ADMIN_TOKEN" -o /tmp/mergepnl.json \
+               "$BASE/api/admin/whale-merge-pnl?since=2026-08-01" \
+               2>/dev/null || echo "000")
+          echo "  MERGEHTTP code=$MERGECODE bytes=$(wc -c < /tmp/mergepnl.json 2>/dev/null || echo 0)"
+          if ! jq -e . /tmp/mergepnl.json >/dev/null 2>&1; then
+            echo "  MERGEBODY $(head -c 300 /tmp/mergepnl.json 2>/dev/null | tr '\n' ' ')"
+          fi
           jq -r '.whales // {} | to_entries[]
-                 | "  MERGEPNL \(.key): merges=\(.value.n_merges) shares=\(.value.merge_shares) realised=$\(.value.realized_merge_pnl) sells=$\(.value.realized_sell_pnl) entries=$\(.value.entry_notional) roi=\(.value.roi_on_entries // "n/a") open=\(.value.open_shares)sh/$\(.value.open_cost) cashflow=$\(.value.net_cashflow)"' \
+                 | "  MERGEPNL \(.key): merges=\(.value.n_merges) shares=\(.value.merge_shares) realised=$\(.value.realized_merge_pnl) sells=$\(.value.realized_sell_pnl) entries=$\(.value.entry_notional) roi=\(.value.roi_on_entries // "n/a") open=\(.value.open_shares)sh/$\(.value.open_cost) cashflow=$\(.value.net_cashflow) fills=\(.value.fills_read // 0)\(if .value.truncated then " TRUNCATED" else "" end)"' \
             /tmp/mergepnl.json 2>/dev/null || echo "  MERGEPNL unavailable"
           jq -r '.whales // {} | to_entries[] | "  MERGEVERDICT \(.key): \(.value.verdict)"' \
             /tmp/mergepnl.json 2>/dev/null || true

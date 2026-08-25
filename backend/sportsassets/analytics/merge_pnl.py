@@ -125,8 +125,19 @@ def replay(fills: list[dict]) -> dict:
 
 
 async def whale_merge_pnl(pool: Any, whales: list[str],
-                          since: str = "2026-08-01") -> dict:
-    """Run the replay for each whale off the trades ledger."""
+                          since: str = "2026-08-01",
+                          max_fills: int = 200000) -> dict:
+    """Run the replay for each whale off the trades ledger.
+
+    BOUNDED. The first probe of this endpoint came back "unavailable":
+    seven whales, some with 860,000 fills, each needing an ordered walk
+    the existing indexes do not serve. Migration 029 adds
+    (whale_id, condition_id, ts, id); this cap is the belt to that
+    braces, so a whale with an unexpected ledger cannot hang the probe.
+
+    The cap is REPORTED, never silent — a truncated replay that reads
+    as a complete one is a wrong P&L presented as a right one.
+    """
     res: dict[str, Any] = {}
     for w in whales:
         rows = await pool.fetch(
@@ -139,6 +150,14 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
                AND t.condition_id IS NOT NULL
                AND t.outcome_index IS NOT NULL
              ORDER BY t.condition_id, t.ts, t.id
-            """, w.lower(), since)
-        res[w] = replay([dict(r) for r in rows])
+             LIMIT $3
+            """, w.lower(), since, max_fills)
+        out = replay([dict(r) for r in rows])
+        out["fills_read"] = len(rows)
+        out["truncated"] = len(rows) >= max_fills
+        if out["truncated"]:
+            out["verdict_note"] = (
+                f"TRUNCATED at {max_fills} fills — this is a partial "
+                f"replay and the totals are floors, not totals")
+        res[w] = out
     return res

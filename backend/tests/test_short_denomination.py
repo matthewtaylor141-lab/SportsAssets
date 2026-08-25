@@ -194,36 +194,57 @@ class TestItIsWiredIntoTheMoneyPath:
         assert src.index("spent = fill_cash(") < src.index("is_overspend(")
 
 
-class TestTheGateHoldsWhenUnconfirmed:
-    """The shipped default. An unproven cost model must not arm itself,
-    and above all must not arm as a side effect of flipping the OTHER
-    switch — re-opening the short trade class and changing how a short
-    is costed are two separate decisions with two separate proofs."""
+class TestTheModelIsArmedOnTheVenuesOwnReceipt:
+    """CONFIRMED 2026-08-25 14:38Z, and not by my argument.
 
-    def test_the_short_math_is_off_without_the_flag(self, monkeypatch):
+    /api/admin/short-truth read the create-order responses we have been
+    storing on every row since the beginning:
+
+        SHORTTRUTH n=6 with_venue_side=6 sides={"ORDER_SIDE_SELL":6}
+                   within_auth short_model=6/6 long_model=0/6
+
+    `side` is not a field we send — the venue derives it from the
+    intent — so six of six is the venue stating that our BUY_SHORT was
+    booked as a sell. The SDK argument I originally offered stays
+    retracted; this is a different and better kind of evidence.
+
+    So: there was never an overspend, the breaker fired six times on
+    correct trades, and filled_usd / pnl / deployed have been wrong by
+    (1-p)/p on every short row.
+    """
+
+    def test_it_is_armed_by_default_now(self, monkeypatch):
         monkeypatch.delenv("LIVE_SHORT_COST_MODEL", raising=False)
-        assert not le.short_model_confirmed()
-        assert le.wire_limit(0.22, SHORT) == 0.22
-        assert le.fill_cash(1136, 0.78, SHORT) == 886.08
+        assert le.short_model_confirmed()
+        assert le.wire_limit(0.22, SHORT) == 0.78
+        assert le.fill_cash(1136, 0.78, SHORT) == 249.92
 
-    def test_only_the_exact_word_arms_it(self, monkeypatch):
-        for val in ("", "1", "true", "yes", "on", "probably", "CONFIRMED?"):
+    def test_an_explicit_word_disarms_it_in_one_move(self, monkeypatch):
+        """If a later reading disagrees, this comes off without a
+        deploy."""
+        for val in ("off", "0", "no", "disarm", "disarmed", "OFF"):
             monkeypatch.setenv("LIVE_SHORT_COST_MODEL", val)
             assert not le.short_model_confirmed(), val
+            assert le.wire_limit(0.22, SHORT) == 0.22
+            assert le.fill_cash(1136, 0.78, SHORT) == 886.08
 
-    def test_the_word_is_confirmed(self, monkeypatch):
-        monkeypatch.setenv("LIVE_SHORT_COST_MODEL", "confirmed")
-        assert le.short_model_confirmed()
+    def test_a_vague_value_does_not_disarm_it(self, monkeypatch):
+        """Only the named words turn it off. A stray env value must not
+        silently revert a confirmed model."""
+        for val in ("", "maybe", "1", "true", "confirmed"):
+            monkeypatch.setenv("LIVE_SHORT_COST_MODEL", val)
+            assert le.short_model_confirmed(), val
 
-    def test_allowing_shorts_does_not_arm_the_cost_model(self, monkeypatch):
-        """The specific coupling this gate exists to prevent."""
-        monkeypatch.delenv("LIVE_SHORT_COST_MODEL", raising=False)
-        monkeypatch.setenv("LIVE_ALLOW_SHORT", "on")
-        assert not le.short_model_confirmed()
-        assert le.wire_limit(0.22, SHORT) == 0.22
+    def test_the_receipt_is_recorded_in_the_code(self):
+        """The six rows and the venue's answer live beside the switch,
+        so re-opening the question has to argue with the numbers."""
+        src = inspect.getsource(le.short_model_confirmed)
+        assert "ORDER_SIDE_SELL" in src
+        assert "n=6 with_venue_side=6" in src
+        assert "there was never an overspend" in src
 
     def test_longs_are_unaffected_either_way(self, monkeypatch):
-        for val in (None, "confirmed"):
+        for val in (None, "off"):
             if val is None:
                 monkeypatch.delenv("LIVE_SHORT_COST_MODEL", raising=False)
             else:

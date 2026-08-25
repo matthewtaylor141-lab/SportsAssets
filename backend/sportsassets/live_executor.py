@@ -1027,8 +1027,39 @@ def is_short_intent(intent: str | None) -> bool:
 # unproven cost model at the same moment it re-opens the trade class —
 # two unverified changes riding one switch.
 def short_model_confirmed() -> bool:
-    return os.environ.get(
-        "LIVE_SHORT_COST_MODEL", "").strip().lower() == "confirmed"
+    """CONFIRMED 2026-08-25 14:38Z BY THE VENUE'S OWN RECEIPTS.
+
+    Not by my SDK argument, which was unsound and is retracted above.
+    By /api/admin/short-truth reading the create-order responses we
+    have been storing on every row since the beginning:
+
+        SHORTTRUTH n=6 with_venue_side=6 sides={"ORDER_SIDE_SELL":6}
+                   within_auth short_model=6/6 long_model=0/6
+
+    Six of six booked by the venue as ORDER_SIDE_SELL. `side` is not a
+    field we send — the venue derives it — so this is the venue stating
+    that our BUY_SHORT was a sell. Per row:
+
+        danalt-fracom lim0.22 qty1136 @0.78  long $886.08  short $249.92
+        domsal-akaurh lim0.37 qty 675 @0.65  long $438.75  short $236.25
+        colwon-elmmoe lim0.32 qty 781 @0.6853 long $535.22 short $245.78
+        harwen-stetra lim0.23 qty1086 @0.89  long $966.54  short $119.46
+        jancho-meerot lim0.45 qty 555 @0.56  long $310.80  short $244.20
+        ekaovc-kaique lim0.48 qty 520 @0.55  long $286.00  short $234.00
+
+    So: there was never an overspend. The breaker fired six times on
+    correct trades, I took a whole class of copy off the board for a
+    day, and filled_usd / pnl / deployed / the volume governor's
+    throttle input have been wrong by (1-p)/p on every short row.
+
+    The default flips to armed because the evidence is now the venue's
+    rather than mine. The env var stays as an override so it can be
+    disarmed in one move if a later reading disagrees.
+    """
+    v = os.environ.get("LIVE_SHORT_COST_MODEL", "").strip().lower()
+    if v in ("off", "0", "no", "disarm", "disarmed"):
+        return False
+    return True
 
 
 def _use_short_math(intent: str | None) -> bool:
