@@ -126,7 +126,7 @@ def replay(fills: list[dict]) -> dict:
 
 async def whale_merge_pnl(pool: Any, whales: list[str],
                           since: str = "2026-08-01",
-                          max_fills: int = 200000) -> dict:
+                          max_fills: int = 600000) -> dict:
     """Run the replay for each whale off the trades ledger.
 
     BOUNDED. The first probe of this endpoint came back "unavailable":

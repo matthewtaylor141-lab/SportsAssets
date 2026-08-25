@@ -1215,6 +1215,106 @@ BASELINE_FILLS_DEFAULT = 20.0
 MIN_CLIP_USD = 5.0
 
 
+# CONVICTION SIZING (owner order 2026-08-25).
+#
+# "If the average trade price for all our whales is $2k, and there is an
+#  order for $5k, I want to make sure our proportional trades reflect
+#  that. There is a reason that whale is putting more on that. In the
+#  counter side of the same logic, if the average position is $2k and
+#  the whale cashes out $1k in profit from a position, and then reenters
+#  at $500, I want our behavior to match the logic there."
+#
+# What we had destroyed exactly that signal. The clip is capped at $250,
+# so his $5,000 high-conviction bet and his $250 routine one both came
+# out as our $250 — every trade he made looked identical to us, and the
+# single most informative thing about a whale's book (how much HE varies
+# his own size) was thrown away at the last step.
+#
+# Conviction is measured against HIS OWN baseline, not against ours and
+# not against the roster's. A whale who habitually stakes $2k and puts
+# $5k on one game is telling us something; a whale whose average is $50
+# putting on $200 is telling us the same thing at a different scale, and
+# both should reach us as 2.5x.
+#
+# The multiple is BOUNDED both ways. A single outlier in his ledger
+# would otherwise let one trade claim many times the clip, and a whale
+# with a thin or new history has no meaningful average at all — that
+# case takes the neutral multiple rather than a guess.
+CONVICTION_MIN = float(os.environ.get("LIVE_CONVICTION_MIN", "0.25"))
+CONVICTION_MAX = float(os.environ.get("LIVE_CONVICTION_MAX", "3.0"))
+# Below this many priced entries his "average" is one or two trades.
+CONVICTION_MIN_SAMPLE = int(
+    os.environ.get("LIVE_CONVICTION_MIN_SAMPLE", "20"))
+_CONVICTION_CACHE: dict = {}
+_CONVICTION_TTL_S = float(os.environ.get("LIVE_CONVICTION_TTL_S", "900"))
+
+
+def conviction_multiple(his_notional: float, his_average: float) -> float:
+    """How far above or below his own habit this trade sits, bounded.
+
+    Pure, so the arithmetic is testable without a venue or a database:
+        his avg $2,000, this trade $5,000 -> 2.5x
+        his avg $2,000, this trade   $500 -> 0.25x
+    """
+    try:
+        n = float(his_notional or 0)
+        a = float(his_average or 0)
+    except (TypeError, ValueError):
+        return 1.0
+    if n <= 0 or a <= 0:
+        return 1.0          # no signal — neutral, never a guess
+    return max(CONVICTION_MIN, min(CONVICTION_MAX, n / a))
+
+
+async def whale_average_notional(pool, whale_username: str | None) -> float:
+    """His own typical ENTRY size, in dollars. 0.0 when unknowable.
+
+    Deliberately excludes his exits. These whales close by buying the
+    complementary leg, so a merge is a BUY row like any other — folding
+    those into the average would mix "what he risks" with "what it cost
+    him to stop risking it" and drag the baseline toward whatever his
+    exit prices happen to be.
+
+    MEDIAN, not mean. One $2M block in a book of $200 trades moves a
+    mean enough to make every ordinary trade look like low conviction;
+    the median is what "his usual size" actually means.
+
+    Cached per whale: this is a habit measured over 30 days, it does not
+    move between fills, and the copy path must not pay for a percentile
+    scan on every trade.
+    """
+    w = (whale_username or "").lower()
+    if not w:
+        return 0.0
+    hit = _CONVICTION_CACHE.get(w)
+    if hit and (time.time() - hit[0]) < _CONVICTION_TTL_S:
+        return hit[1]
+    try:
+        row = await pool.fetchrow(
+            """
+            SELECT count(*)::int AS n,
+                   COALESCE(percentile_cont(0.5) WITHIN GROUP (
+                       ORDER BY t.notional), 0)::float8 AS med
+              FROM trades t JOIN whales wh ON wh.id = t.whale_id
+             WHERE lower(wh.username) = $1
+               AND t.side = 'BUY'
+               AND t.notional > 0
+               AND t.ts > now() - interval '30 days'
+            """, w)
+        # Reading the row belongs INSIDE the guard. The first version
+        # left it outside and a row without the expected keys raised
+        # KeyError straight up the copy path — 35 tests, and in
+        # production it would have been an exception on the money path
+        # from a function whose entire contract is "degrade to neutral".
+        n = int((row["n"] if row else 0) or 0)
+        med = float((row["med"] if row else 0) or 0.0)
+    except Exception:  # noqa: BLE001 — degrade to neutral, never block
+        return 0.0
+    avg = med if n >= CONVICTION_MIN_SAMPLE else 0.0
+    _CONVICTION_CACHE[w] = (time.time(), avg)
+    return avg
+
+
 async def volume_normalized_clip(pool, whale_username: str | None,
                                  slug: str | None = None) -> float:
     base = per_fill_usd(whale_username, slug)
@@ -2323,6 +2423,27 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         # existing cap, the volume governor and the cell blocks intact.
         if his_notional > 0:
             per = min(per, COPY_RATIO_MAX * his_notional)
+        # CONVICTION (owner order 2026-08-25). Scale by how far this
+        # trade sits above or below HIS OWN habit, then re-apply the
+        # mirror clamp so a high-conviction copy can still never exceed
+        # what he himself staked.
+        #
+        # The order matters. Multiplying first and clamping second means
+        # conviction can only ever move us WITHIN the envelope his own
+        # size defines — it cannot be used to out-bet him, which is the
+        # thing he told us to stop doing this morning. The $250 per-fill
+        # cap and the daily cap both sit outside this and are untouched.
+        _avg = await whale_average_notional(
+            pool, payload.get("whale_username"))
+        _conv = conviction_multiple(his_notional, _avg)
+        if _avg > 0 and _conv != 1.0:
+            per = per * _conv
+            if his_notional > 0:
+                per = min(per, COPY_RATIO_MAX * his_notional)
+            log.info("CONVICTION %s: his $%.2f vs his median $%.2f = "
+                     "%.2fx -> clip $%.2f",
+                     payload.get("whale_username"), his_notional, _avg,
+                     _conv, per)
         shares = float(int(per / limit))
         if shares < 1:
             return
