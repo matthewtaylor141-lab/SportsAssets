@@ -38,12 +38,29 @@ class TestOnlyShrinksCount:
 
 
 class TestWhatItDeliberatelyRefuses:
-    def test_a_vanished_asset_is_skipped(self):
-        """Could be an exit, could be a resolved market. Resolution
-        settles our copy on its own, and mirroring it would try to sell
-        a position that no longer exists — so a disappearance is never
-        treated as an exit."""
-        assert we.diff_exits({"a": 100.0}, {}) == []
+    def test_a_vanished_RESOLVED_asset_is_skipped(self):
+        """Resolution settles our copy on its own, and mirroring it
+        would try to sell a position the venue is about to close.
+
+        SUPERSEDED 2026-08-25 in the other direction. This used to skip
+        EVERY disappearance, on the reasoning that it could be either a
+        resolution or an exit. The caution was right; treating "could
+        be either" as "always resolution" was not — it discarded
+        precisely the case the detector exists for.
+
+        These whales barely scale out. swisstony holds below purchase
+        on 62 of 75 positions and ferrari on 18 of 23, so ~83% of their
+        positions get exited, and a full exit goes to zero. The
+        detector could therefore only ever have fired on the partial
+        trims they almost never make, which is why it reported exits: 0
+        for nine straight hours.
+
+        The resolved set makes the distinction properly instead of
+        assuming it away."""
+        assert we.diff_exits({"a": 100.0}, {}, {"a"}) == []
+
+    def test_a_vanished_UNRESOLVED_asset_is_a_full_exit(self):
+        assert we.diff_exits({"a": 100.0}, {}, set()) == [("a", 1.0)]
 
     def test_a_new_asset_is_not_an_exit(self):
         assert we.diff_exits({}, {"a": 50.0}) == []

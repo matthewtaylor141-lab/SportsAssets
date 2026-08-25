@@ -2,14 +2,24 @@
 
 Both detection paths call `ingest_trade`. The contract:
 
-1. INSERT with ON CONFLICT (dedupe_key) DO NOTHING — the only dedupe gate.
-2. If (and only if) the row was new: publish `trades.new` immediately and
-   write notification outbox rows. Fan-out fires on the PROVISIONAL record —
-   enrichment must never delay notification.
+1. INSERT with ON CONFLICT (dedupe_key) DO UPDATE, filling NULL metadata
+   columns only. `(xmax = 0) AS was_insert` is the dedupe gate.
+2. If (and only if) the row was NEWLY INSERTED: publish `trades.new`
+   immediately and write notification outbox rows. Fan-out fires on the
+   PROVISIONAL record — enrichment must never delay notification.
 3. Enrich asynchronously from the hot metadata cache; publish `trades.enriched`.
 
-Replaying any event is therefore safe end-to-end: a duplicate insert is a
-no-op, so no duplicate publish and no duplicate outbox rows.
+Replaying any event is therefore safe end-to-end: a conflicting insert
+updates nothing but holes and returns was_insert=false, so no duplicate
+publish, no duplicate outbox rows, and no duplicate copy order.
+
+This was DO NOTHING until 2026-08-25, which meant the second pass — the
+one whose entire job is to supply the condition_id the chain leg could
+not know — had its result discarded on every run. That is the NOSLUG
+bucket: 22,330 rejected copy rows, 22,327 of them with no token in
+market_tokens at all, ~971 permanently dead copy attempts a day. A
+trade with a NULL condition_id can never be mapped, never have its
+sibling leg resolved, and never be classified as an entry or an exit.
 """
 
 from __future__ import annotations
@@ -92,8 +102,55 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
                             size, price, notional, market_title, market_slug, event_slug, sport,
                             ts, source, detected_at, enriched_at, dedupe_key)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
-        ON CONFLICT (dedupe_key) DO NOTHING
-        RETURNING id
+        -- ENRICHMENT MUST LAND, NOT BE DISCARDED (2026-08-25).
+        --
+        -- DO NOTHING threw away the only thing the second pass was for.
+        -- The chain leg sees a fill before anyone knows what market it
+        -- belongs to, so it writes the row with condition_id / outcome
+        -- / outcome_index NULL. The hourly enrichment pass then fetches
+        -- exactly those fields and re-INSERTs the same dedupe_key — and
+        -- the conflict clause dropped it on the floor. Every hour.
+        --
+        -- The cost is the whole NOSLUG bucket: 22,330 rejected rows,
+        -- 22,327 of them with no token in market_tokens, over 23 live
+        -- days = 971 permanently dead copy attempts a day. A row with a
+        -- NULL condition_id can never map, never resolve a sibling, and
+        -- never be classified as an entry or an exit.
+        --
+        -- COALESCE keeps the FIRST non-null value in every case, so a
+        -- late pass can only ever fill a hole. It cannot overwrite what
+        -- the chain observed, which is the property that makes this
+        -- safe on a table the executor reads: the price, size and side
+        -- that money was staked against are not in this list and never
+        -- move.
+        ON CONFLICT (dedupe_key) DO UPDATE SET
+            condition_id  = COALESCE(trades.condition_id,
+                                     EXCLUDED.condition_id),
+            outcome       = COALESCE(trades.outcome, EXCLUDED.outcome),
+            outcome_index = COALESCE(trades.outcome_index,
+                                     EXCLUDED.outcome_index),
+            market_title  = COALESCE(trades.market_title,
+                                     EXCLUDED.market_title),
+            market_slug   = COALESCE(trades.market_slug,
+                                     EXCLUDED.market_slug),
+            event_slug    = COALESCE(trades.event_slug,
+                                     EXCLUDED.event_slug),
+            enriched_at   = COALESCE(trades.enriched_at,
+                                     EXCLUDED.enriched_at)
+        -- xmax = 0 IS THE ONLY THING SEPARATING A FILL FROM A REFILL.
+        --
+        -- Under DO NOTHING a duplicate returned no row, and `row is
+        -- None` was the entire duplicate test. DO UPDATE returns a row
+        -- every time — so without this flag the hourly enrichment pass
+        -- would look like a brand-new trade, publish to the feed, and
+        -- fire execute_copy AGAIN on a fill we already copied. Fixing
+        -- coverage must not buy it with duplicate orders.
+        --
+        -- Postgres sets xmax to 0 on a genuine INSERT and to the
+        -- updating transaction id on a conflict-update, so this is the
+        -- engine telling us which branch it took rather than us
+        -- inferring it.
+        RETURNING id, (xmax = 0) AS was_insert
         """,
         ev.whale_id,
         ev.tx_hash,
@@ -120,6 +177,12 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
     if row is None:
         return None  # duplicate — the other path saw it first
     trade_id = row["id"]
+    # An enrichment pass filling in a NULL condition_id is not a new
+    # fill. It returns the id — the row is real and callers want it —
+    # but it must never reach the fan-out below, or every hourly pass
+    # re-publishes and re-copies a trade we already acted on.
+    if not row["was_insert"]:
+        return trade_id
 
     if not notify:
         return trade_id

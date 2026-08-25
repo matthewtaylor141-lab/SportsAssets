@@ -113,7 +113,8 @@ async def _fetch_positions(http: httpx.AsyncClient,
 
 
 def diff_exits(prev: dict[str, float],
-               now: dict[str, float]) -> list[tuple[str, float]]:
+               now: dict[str, float],
+               resolved: set[str] | None = None) -> list[tuple[str, float]]:
     """(asset, closed_fraction) for holdings that SHRANK.
 
     Pure, so the rule is testable without a venue:
@@ -124,8 +125,34 @@ def diff_exits(prev: dict[str, float],
       * shrank by less than MIN_SHRINK of the position -> noise.
     """
     out: list[tuple[str, float]] = []
+    res = resolved or set()
     for asset, before in prev.items():
-        if before <= 0 or asset not in now:
+        if before <= 0:
+            continue
+        if asset not in now:
+            # A VANISHED POSITION IS THE MOST COMMON EXIT, AND WE WERE
+            # DROPPING EVERY ONE (2026-08-25).
+            #
+            # The old rule skipped disappearances because a resolved
+            # market also vanishes, and mirroring a resolution would
+            # sell a position the venue is about to settle for us. The
+            # caution was right; treating "could be either" as "always
+            # resolution" was not.
+            #
+            # It discarded exactly the case the whole feature exists
+            # for: a FULL exit. swisstony holds below purchase on 62 of
+            # 75 positions and ferrari on 18 of 23 — roughly 83% of
+            # their positions get exited — and every one that reached
+            # zero was invisible here. The detector could only ever
+            # have fired on partial scale-outs, which these whales
+            # barely do.
+            #
+            # We already know which markets resolved: the caller passes
+            # the resolved set. Unresolved and gone is a close, at
+            # 100%. Resolved and gone is still skipped, so the original
+            # protection is intact rather than traded away.
+            if asset not in res:
+                out.append((asset, 1.0))
             continue
         after = now[asset]
         if after >= before:
@@ -161,7 +188,35 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
             # holding as a fresh exit and fire a full close on each.
             stats["first_snapshots"] += 1
             continue
-        found = diff_exits(prev, now)
+        # WHICH OF THE VANISHED MARKETS ACTUALLY RESOLVED.
+        #
+        # diff_exits now treats a disappearance as a full exit unless
+        # the market resolved. That is only safe if the resolved set is
+        # REAL — an empty set here would turn every settlement into a
+        # sell order against a position the venue already closed.
+        #
+        # So the query failing is not "assume nothing resolved". It
+        # falls back to the old behaviour (skip every disappearance),
+        # which forfeits coverage rather than risking orders.
+        gone = [a for a in prev if a not in now]
+        resolved: set[str] | None = set()
+        if gone:
+            try:
+                rows = await pool.fetch(
+                    "SELECT DISTINCT mt.token_id FROM market_tokens mt "
+                    "JOIN markets m ON m.condition_id = mt.condition_id "
+                    "WHERE mt.token_id = ANY($1::text[]) "
+                    "  AND COALESCE(m.resolved, false) = true", gone)
+                resolved = {str(r["token_id"]) for r in rows}
+            except Exception:  # noqa: BLE001 — unknown, so assume all
+                log.warning("whale-exit: resolution lookup failed; "
+                            "treating every vanished position as "
+                            "possibly resolved and skipping it")
+                resolved = None
+        if resolved is None:
+            found = diff_exits(prev, now, set(gone))
+        else:
+            found = diff_exits(prev, now, resolved)
         if len(found) > MAX_EXITS_PER_CYCLE:
             log.warning("whale-exit: %s has %d exits this cycle, acting on "
                         "%d — the rest still read as shrunk next cycle",
