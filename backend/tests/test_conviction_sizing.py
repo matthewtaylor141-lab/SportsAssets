@@ -150,16 +150,61 @@ class TestTheQueryMeasuresTheRightThing:
         assert "interval '30 days'" in src
 
 
-class TestItCannotBeUsedToOutbetHim:
-    """The clamp is re-applied AFTER the multiply. Conviction may move
-    us only WITHIN the envelope his own size defines — it can never make
-    us stake more than he did, which is the thing the owner told us to
-    stop doing this morning."""
+class TestTheOwnersCapHoldsStructurally:
+    """THE BUG THIS REPLACES, and why the shape matters.
 
-    def test_the_mirror_clamp_is_reapplied_after_the_multiply(self):
+    v1 did `per = per * conv` and re-clamped against HIS notional. That
+    bound us to his size — which I checked — while silently breaching
+    OURS. The governed clip already IS the $250 authorization, so a 3x
+    multiple made $750 and a re-clamp against a $2,000 whale trade let
+    every dollar through. A $500 breach of the owner's per-order cap,
+    on the money path, shipped.
+
+    The lesson is the shape, not the number: a SEQUENCE of clamps fails
+    because each step knows only one bound. One min() with every
+    ceiling in it cannot.
+
+    And the arithmetic makes it unavoidable rather than unlucky —
+    inside a $250 cap an upward multiple has nowhere to go. Conviction
+    is only expressible by anchoring BELOW the cap and letting his
+    strongest trades climb toward it.
+    """
+
+    GOV = 250.0
+
+    def _clip(self, his, med):
+        conv = le.conviction_multiple(his, med)
+        arms = [self.GOV * le.CONVICTION_ANCHOR_FRAC * conv, self.GOV]
+        if his > 0:
+            arms.append(le.COPY_RATIO_MAX * his)
+        return round(min(arms), 2)
+
+    def test_no_conviction_can_breach_the_cap(self):
+        """The property, swept rather than spot-checked."""
+        for med in (10, 100, 2000, 50_000):
+            for his in (1, 50, 500, 2000, 6000, 1_000_000):
+                assert self._clip(his, med) <= le.LIVE_MAX_CLIP_USD, (
+                    f"his {his} median {med} breached the cap")
+
+    def test_a_neutral_trade_sits_at_the_anchor(self):
+        assert self._clip(2000, 2000) == 100.00
+
+    def test_a_high_conviction_trade_reaches_the_cap(self):
+        assert self._clip(6000, 2000) == 250.00
+
+    def test_a_small_re_entry_sizes_small(self):
+        """The owner's case: he banks $1k and re-enters at $500 against
+        a $2k median. That is a quarter-conviction trade."""
+        assert self._clip(500, 2000) == 25.00
+
+    def test_it_still_cannot_outbet_him(self):
+        assert self._clip(40, 20) <= 40
+
+    def test_the_source_uses_one_min_not_a_sequence(self):
         src = inspect.getsource(le.maybe_execute)
-        i = src.index("per = per * _conv")
-        assert "min(per, COPY_RATIO_MAX * his_notional)" in src[i:i + 400]
+        assert "_arms = [per * CONVICTION_ANCHOR_FRAC * _conv, per]" in src
+        assert "per = per * _conv" not in src, (
+            "the multiply-then-clamp form is the breach")
 
     def test_conviction_runs_before_the_share_count(self):
         src = inspect.getsource(le.maybe_execute)
@@ -168,10 +213,13 @@ class TestItCannotBeUsedToOutbetHim:
 
     def test_the_dust_floor_and_day_room_still_follow(self):
         src = inspect.getsource(le.maybe_execute)
-        i = src.index("per = per * _conv")
+        i = src.index("_conv = conviction_multiple")
         assert "COPY_MIN_CLIP_USD" in src[i:]
         assert "day_room" in src[i:]
 
-    def test_a_neutral_multiple_changes_nothing(self):
-        src = inspect.getsource(le.maybe_execute)
-        assert "if _avg > 0 and _conv != 1.0:" in src
+    def test_the_anchor_can_flatten_but_never_raise(self):
+        """Turning the anchor up to 1.0 removes the conviction spread.
+        It must not be able to lift the ceiling."""
+        for frac in (0.4, 1.0, 2.0):
+            arms = [self.GOV * frac * le.CONVICTION_MAX, self.GOV]
+            assert min(arms) <= le.LIVE_MAX_CLIP_USD

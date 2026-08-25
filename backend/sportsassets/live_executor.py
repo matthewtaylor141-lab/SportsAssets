@@ -1296,7 +1296,16 @@ MIN_CLIP_USD = 5.0
 # with a thin or new history has no meaningful average at all — that
 # case takes the neutral multiple rather than a guess.
 CONVICTION_MIN = float(os.environ.get("LIVE_CONVICTION_MIN", "0.25"))
-CONVICTION_MAX = float(os.environ.get("LIVE_CONVICTION_MAX", "3.0"))
+# Harmless above the anchor now: the governed clip binds the result, so
+# a large ceiling here only means his very biggest trades reach the cap
+# rather than stopping short of it.
+CONVICTION_MAX = float(os.environ.get("LIVE_CONVICTION_MAX", "10.0"))
+# Where a NEUTRAL trade sits as a fraction of the authorized clip. 0.40
+# of $250 = a $100 anchor, leaving 2.5x of headroom for his
+# high-conviction trades INSIDE the existing cap. Raising this toward
+# 1.0 flattens conviction back out; it can never raise the ceiling.
+CONVICTION_ANCHOR_FRAC = float(
+    os.environ.get("LIVE_CONVICTION_ANCHOR_FRAC", "0.40"))
 # Below this many priced entries his "average" is one or two trades.
 CONVICTION_MIN_SAMPLE = int(
     os.environ.get("LIVE_CONVICTION_MIN_SAMPLE", "20"))
@@ -2488,17 +2497,45 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         # size defines — it cannot be used to out-bet him, which is the
         # thing he told us to stop doing this morning. The $250 per-fill
         # cap and the daily cap both sit outside this and are untouched.
+        # ANCHOR BELOW THE CAP, THEN SCALE UP TO IT. Never multiply the
+        # governed clip.
+        #
+        # The first version of this did `per = per * conv` and then
+        # re-clamped against HIS notional. That bound us to his size —
+        # which is what I checked — while silently breaching OURS: the
+        # governed clip is already the $250 authorization, so a 3x
+        # conviction multiple produced $750 and the re-clamp against a
+        # $2,000 whale trade let all of it through. A $500 breach of the
+        # owner's per-order cap, shipped, on the money path.
+        #
+        # The arithmetic makes the mistake unavoidable rather than
+        # unlucky: inside a $250 cap an UPWARD multiple has nowhere to
+        # go. Conviction can only be expressed by anchoring BELOW the
+        # cap and letting high-conviction trades climb toward it.
+        # ANCHOR_FRAC 0.40 puts the neutral clip at $100 of a $250
+        # ceiling, so a routine trade sizes at $100 and his top-decile
+        # trades reach the cap — which reallocates our dollars toward
+        # the trades he backs hardest without ever adding a dollar of
+        # authorization.
+        #
+        # ONE min() with every ceiling in it. Not a sequence of clamps:
+        # a sequence is what let the breach through, because each step
+        # only knew about one bound. No reachable value of the multiple
+        # can exceed `gov` here, so the cap holds structurally rather
+        # than by trusting CONVICTION_MAX to stay small.
         _avg = await whale_average_notional(
             pool, payload.get("whale_username"))
         _conv = conviction_multiple(his_notional, _avg)
-        if _avg > 0 and _conv != 1.0:
-            per = per * _conv
+        if _avg > 0:
+            _arms = [per * CONVICTION_ANCHOR_FRAC * _conv, per]
             if his_notional > 0:
-                per = min(per, COPY_RATIO_MAX * his_notional)
+                _arms.append(COPY_RATIO_MAX * his_notional)
+            _sized = round(min(_arms), 2)
             log.info("CONVICTION %s: his $%.2f vs his median $%.2f = "
-                     "%.2fx -> clip $%.2f",
+                     "%.2fx | anchor $%.2f -> clip $%.2f (cap $%.2f)",
                      payload.get("whale_username"), his_notional, _avg,
-                     _conv, per)
+                     _conv, per * CONVICTION_ANCHOR_FRAC, _sized, per)
+            per = _sized
         shares = float(int(per / limit))
         if shares < 1:
             return
