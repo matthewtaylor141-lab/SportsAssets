@@ -2904,6 +2904,26 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         # Bounding by his notional here is what makes the copy a mirror.
         # min() can only ever shrink the clip, so it inherits the
         # existing cap, the volume governor and the cell blocks intact.
+        # THE GOVERNED CLIP, BEFORE THE MIRROR CLAMP.
+        #
+        # The conviction anchor below multiplies whatever `per` is at
+        # that point, and after this line `per` is no longer the
+        # governed clip — it is the MIRRORED one. Anchoring on it
+        # applies two shrinks for one decision:
+        #
+        #   his $100, his median $2,000 -> $10.00, design says $25.00
+        #   his  $50, his median $2,000 -> $ 5.00 -> DUST-DROPPED
+        #   his $100, his median   $100 -> $40.00, design says $100.00
+        #   his  $25, his median   $100 -> $ 2.50 -> DUST-DROPPED
+        #
+        # The bottom two are not merely small, they fall under
+        # COPY_MIN_CLIP_USD and the copy is DISCARDED — a whale trade we
+        # mapped, priced and then threw away on an arithmetic slip.
+        #
+        # The mirror clamp stays, as a CEILING in the same min(). Every
+        # bound is still there and the result is still <= gov <= $250
+        # and <= his own stake; only the anchor's base changes.
+        _gov = per
         if his_notional > 0:
             per = min(per, COPY_RATIO_MAX * his_notional)
         # CONVICTION (owner order 2026-08-25). Scale by how far this
@@ -2946,7 +2966,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             pool, payload.get("whale_username"))
         _conv = conviction_multiple(his_notional, _avg)
         if _avg > 0:
-            _arms = [per * CONVICTION_ANCHOR_FRAC * _conv, per]
+            _arms = [_gov * CONVICTION_ANCHOR_FRAC * _conv, per]
             if his_notional > 0:
                 _arms.append(COPY_RATIO_MAX * his_notional)
             _sized = round(min(_arms), 2)

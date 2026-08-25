@@ -173,8 +173,20 @@ class TestTheOwnersCapHoldsStructurally:
     GOV = 250.0
 
     def _clip(self, his, med):
+        """Production's arm list, mirror clamp included.
+
+        THIS HELPER MODELLED THE CORRECT BEHAVIOUR WHILE PRODUCTION DID
+        NOT, so it could never catch the divergence. It anchored on GOV
+        — which is right — while maybe_execute anchored on `per` AFTER
+        the mirror clamp had already shrunk it, applying two shrinks for
+        one decision. A test harness that computes the intended answer
+        instead of the shipped one is the same failure as a probe
+        reading a different column than production, and it is why the
+        string pin below now names the exact source line."""
         conv = le.conviction_multiple(his, med)
-        arms = [self.GOV * le.CONVICTION_ANCHOR_FRAC * conv, self.GOV]
+        gov = self.GOV
+        per = min(gov, le.COPY_RATIO_MAX * his) if his > 0 else gov
+        arms = [gov * le.CONVICTION_ANCHOR_FRAC * conv, per]
         if his > 0:
             arms.append(le.COPY_RATIO_MAX * his)
         return round(min(arms), 2)
@@ -202,9 +214,43 @@ class TestTheOwnersCapHoldsStructurally:
 
     def test_the_source_uses_one_min_not_a_sequence(self):
         src = inspect.getsource(le.maybe_execute)
-        assert "_arms = [per * CONVICTION_ANCHOR_FRAC * _conv, per]" in src
+        assert "_arms = [_gov * CONVICTION_ANCHOR_FRAC * _conv, per]" in src
         assert "per = per * _conv" not in src, (
             "the multiply-then-clamp form is the breach")
+
+    def test_the_anchor_base_is_the_GOVERNED_clip(self):
+        """`per` stops being the governed clip the moment the mirror
+        clamp runs. Anchoring on it double-shrinks, and the small end
+        of that fell under the dust floor and was DISCARDED — a whale
+        trade we mapped, priced and then threw away."""
+        src = inspect.getsource(le.maybe_execute)
+        assert "_gov = per" in src
+        assert src.index("_gov = per") < src.index(
+            "per = min(per, COPY_RATIO_MAX * his_notional)")
+
+    def test_the_mirror_clamp_survives_as_a_ceiling(self):
+        src = inspect.getsource(le.maybe_execute)
+        assert "per = min(per, COPY_RATIO_MAX * his_notional)" in src
+        assert "_conv, per]" in src, "the mirrored clip stays in the min()"
+
+    def test_the_dust_drops_are_gone(self):
+        """The four cases the double shrink produced. The bottom two
+        fell under COPY_MIN_CLIP_USD and became no copy at all."""
+        assert self._clip(100, 2000) == 25.00
+        assert self._clip(50, 2000) == 25.00
+        assert self._clip(100, 100) == 100.00
+        assert self._clip(25, 100) == 25.00
+        for his, med in ((100, 2000), (50, 2000), (25, 100)):
+            assert self._clip(his, med) >= le.COPY_MIN_CLIP_USD, (his, med)
+
+    def test_the_cap_holds_across_a_dense_sweep(self):
+        """Swept, not spot-checked: the anchor's base changed, so the
+        ceiling has to be re-proved rather than assumed."""
+        for med in (5, 20, 100, 2000, 50_000):
+            for his in range(1, 20_000, 137):
+                v = self._clip(his, med)
+                assert v <= le.LIVE_MAX_CLIP_USD, (his, med, v)
+                assert v <= his, "it can never outbet him"
 
     def test_conviction_runs_before_the_share_count(self):
         src = inspect.getsource(le.maybe_execute)
