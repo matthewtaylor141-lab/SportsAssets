@@ -279,6 +279,9 @@ def _questions_agree(a: str, b: str) -> bool:
 _SLUG_HALF_RE = re.compile(r"(?<![a-z0-9])(\d+)pt(\d)(?![a-z0-9])")
 _SLUG_OU_RE = re.compile(r"(?<![a-z0-9])[ou](\d+)(?:pt(\d))?(?![a-z0-9])")
 _LINED_TYPES = ("total", "spread", "prop")
+# The same shapes copy_sports._LINE_RE / _TOTAL_RE accept as THE line
+# when they decide the market type.
+_SLUG_WHOLE_RE = re.compile(r"^(pos|neg|o|u)?(\d+)(?:pt(\d))?$")
 
 
 def slug_lines(global_slug: str | None) -> set[str]:
@@ -301,6 +304,33 @@ def slug_lines(global_slug: str | None) -> set[str]:
     for m in _SLUG_OU_RE.finditer(s):
         out.add(f"{int(m.group(1))}.{m.group(2)}" if m.group(2)
                 else str(int(m.group(1))))
+    # WHOLE NUMBERS TOO (2026-08-25). The two patterns above require a
+    # `pt` decimal marker or a leading o/u, so a whole-number line
+    # stated in the feed's own grammar decodes to nothing:
+    #
+    #   nba-bos-mia-2026-08-24-bos-neg-10   -> spread, no line
+    #   spl-ett-nsr-2026-08-25-total-3      -> total,  no line
+    #
+    # and an empty his_lines makes line_ok refuse every row. _lines_of
+    # learned this exact lesson on 2026-08-24 ("only \d+\.5 was matched
+    # before, so a whole-number line produced NO line at all") and the
+    # decision was not carried across when slug_lines was written today
+    # — failure mode (d), by me, twelve hours later.
+    #
+    # These are precisely the tokens copy_sports already accepts as THE
+    # line when it decides the market type, so accepting them here
+    # cannot type a market differently than the gate that let it in.
+    #
+    # POST-DATE TOKENS ONLY, never the raw slug: the date's own digits
+    # would otherwise become lines.
+    from ..copy_sports import _post_date_tokens
+
+    suffix = _post_date_tokens([t for t in s.split("-") if t]) or []
+    for tok in suffix:
+        m = _SLUG_WHOLE_RE.match(tok)
+        if m:
+            out.add(f"{int(m.group(2))}.{m.group(3)}" if m.group(3)
+                    else str(int(m.group(2))))
     return out
 
 

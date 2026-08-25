@@ -1097,7 +1097,21 @@ async def _market_context(pool, payload: dict) -> dict:
     otherwise from the metadata tables."""
     keys = ("market_slug", "event_slug", "market_title", "event_title", "outcome")
     ctx = {k: payload.get(k) for k in keys}
-    if all(ctx.get(k) for k in ("market_slug", "outcome")):
+    # THE SHORT-CIRCUIT WAS DROPPING A KEY LANE (2026-08-25).
+    #
+    # premap.resolve builds its key set from THREE sources — market
+    # title, event title, and the global slug. Returning as soon as
+    # slug+outcome are present meant a payload carrying those two but
+    # no titles never reached the lookup below, and resolve then built
+    # its keys from one source instead of three. On the live lane
+    # event_title is set only inside _enrich, which is spawned one line
+    # AFTER execute_copy, so the copy path wins that race and reads
+    # nothing.
+    #
+    # Requiring a title before short-circuiting costs one indexed
+    # lookup on the rows that were previously guaranteed to map badly.
+    if (all(ctx.get(k) for k in ("market_slug", "outcome"))
+            and (ctx.get("event_title") or ctx.get("market_title"))):
         return ctx
     row = await pool.fetchrow(
         """

@@ -77,8 +77,20 @@ async def sweep_once() -> dict:
                t.id, t.whale_id, w.username AS whale_username, t.tx_hash, t.asset,
                t.condition_id, t.side, t.outcome, t.outcome_index,
                t.size::float8 AS size, t.price::float8 AS price,
-               t.notional::float8 AS notional, t.market_title, t.market_slug,
-               t.event_slug, t.sport,
+               t.notional::float8 AS notional,
+               -- EVENT_TITLE WAS NEVER SELECTED, SO A WHOLE KEY LANE
+               -- WAS DEAD. premap.resolve builds its keys from three
+               -- sources — market_title, event_title and the slug —
+               -- and `trades` has no event_title column, so the sweep
+               -- payload never carried one and one third of the key
+               -- construction produced nothing on every copy.
+               -- The markets join is already here for the resolved
+               -- filter, so this costs no extra query.
+               COALESCE(t.market_title, m.title) AS market_title,
+               m.event_title,
+               COALESCE(t.market_slug, m.slug) AS market_slug,
+               COALESCE(t.event_slug, m.event_slug) AS event_slug,
+               t.sport,
                extract(epoch FROM t.ts)::float8 AS ts_epoch
         FROM trades t
         JOIN whales w ON w.id = t.whale_id
@@ -182,6 +194,7 @@ async def sweep_once() -> dict:
             "price": r["price"],
             "notional": r["notional"],
             "market_title": r["market_title"],
+            "event_title": r["event_title"],
             "market_slug": r["market_slug"],
             "event_slug": r["event_slug"],
             "sport": r["sport"],

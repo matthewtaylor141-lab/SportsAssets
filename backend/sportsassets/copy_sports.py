@@ -288,8 +288,20 @@ def market_type_of(slug: str) -> str:
     # without 'team' is the game total.
     if "player" in suffix or "corners" in suffix or "cards" in suffix:
         return "prop"
-    if "team" in suffix and "total" in suffix:
+    if "team" in suffix and ("total" in suffix or "totals" in suffix):
         return "prop"
+    # SPELLED MONEYLINE. A bare team code types as moneyline, but the
+    # feed also spells it out — and 'moneyline' is nine characters, so
+    # it hit the >4 unknown-word guard below and returned "unknown",
+    # which PREFIX_FOR_TYPE has no entry for, so resolve refused before
+    # any matcher ran. Same omission as the word-form 'spread' fixed
+    # earlier today, in the other direction.
+    if ("moneyline" in suffix or "h2h" in suffix or "1x2" in suffix
+            or ("money" in suffix and "line" in suffix)):
+        return "moneyline"
+    # Spelled both-teams-to-score, beside the existing ftts/btts test.
+    if "both" in suffix and "teams" in suffix and "score" in suffix:
+        return "btts"
     # WORD-FORM SPREAD (census 2026-08-25). 'total' was spelled out and
     # handled; 'spread' was not, so 'spl-sha-riy-2026-08-25-spread-away
     # -1pt5' fell all the way to the >4-character unknown-word guard and
@@ -301,9 +313,14 @@ def market_type_of(slug: str) -> str:
     # total: a game total split by team is a different bet (a team
     # total), but a spread is ALWAYS stated from one side — 'away -1.5'
     # is the game spread, not a derivative.
-    if "spread" in suffix or "handicap" in suffix:
+    if ("spread" in suffix or "spreads" in suffix
+            or "handicap" in suffix or "handicaps" in suffix):
         return "spread"
-    if "total" in suffix:
+    # PLURALS, and the venue's own total-games token. `tg` currently
+    # falls to the bare-line fallback and types a tennis TOTAL as a
+    # SPREAD, which is not a refusal — it is a wrong-MARKET route.
+    if ("total" in suffix or "totals" in suffix or "tg" in suffix
+            or "games" in suffix):
         return "total"
     # WORD-FORM OVER/UNDER (leak-hunt round 3, 2026-08-24): 'over' is
     # four characters, so it slipped past the >4 unknown-word guard
