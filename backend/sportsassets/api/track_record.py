@@ -55,6 +55,17 @@ _refresh_health: dict[str, Any] = {"error": None, "error_at": 0.0,
 RECORD_EPOCH = "2026-08-24"
 DEFAULT_SINCE = os.environ.get("TRACK_RECORD_SINCE", RECORD_EPOCH)
 
+# The floor the RECONCILIATION reads, as opposed to the display epoch
+# above. Moving the display window must never move what the audit
+# reconciles: the day-detail audit diffs the account anchor against the
+# copies ledger, and the copies side counts rows by the day they
+# SETTLED, which includes positions opened long before the epoch. Point
+# the anchor at the epoch and the two sides cover different populations
+# — observed 2026-08-25 as a phantom $867 "residual" that was really
+# 470 settled rows the windowed anchor could not see. Every consumer
+# that reconciles rather than displays passes this.
+AUDIT_SINCE = "2026-08-01"
+
 # Owner directive 2026-08-06: no single trade may move any displayed P&L
 # by more than this, either direction — at $3-5 clips a $100+ swing is an
 # anomaly, not the strategy. Applied by default to every served record

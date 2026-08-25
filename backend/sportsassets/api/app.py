@@ -3315,6 +3315,38 @@ async def _live_status_uncached() -> dict:
         GROUP BY 1 ORDER BY deployed_24h DESC
         """
     )
+    # OVERSPEND FORENSICS (2026-08-25): the 24h aggregate showed
+    # avg_filled ($363) ABOVE avg_req ($250) on a verified whale. Every
+    # writer of filled_usd sets it to filled_shares * fill_price, and an
+    # IOC buy cannot fill above its limit — so the aggregate and the
+    # money path disagree and one of them is wrong. Serve the RAW rows
+    # rather than reasoning about which: requested vs filled on both
+    # legs (shares and price) names the culprit on sight. `ratio` > 1 is
+    # the alarm; a per-row filled_usd above the authorized clip is a
+    # real overspend and must halt sizing.
+    fills = await pool.fetch(
+        """
+        SELECT COALESCE(whale_username, '?') AS whale, status,
+               round(requested_usd, 2)::float8 AS req_usd,
+               round(requested_shares, 2)::float8 AS req_sh,
+               round(limit_price, 4)::float8 AS lim,
+               round(filled_shares, 2)::float8 AS fill_sh,
+               round(fill_price, 4)::float8 AS fill_px,
+               round(filled_usd, 2)::float8 AS fill_usd,
+               CASE WHEN COALESCE(requested_usd, 0) > 0
+                    THEN round(filled_usd / requested_usd, 3)::float8
+               END AS ratio,
+               us_market_slug AS slug,
+               to_char(placed_at AT TIME ZONE 'America/New_York',
+                       'MM-DD HH24:MI') AS at
+        FROM live_orders
+        WHERE placed_at > now() - interval '24 hours'
+          AND status IN ('filled', 'settled', 'cashed_out')
+          AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+        ORDER BY filled_usd DESC NULLS LAST
+        LIMIT 40
+        """
+    )
     # Manual-desk diagnostics (owner report 2026-08-21: "trades aren't
     # being processed"): the sleeve's status counts and its last rows
     # WITH their errors ride the public status so the probe reads the
@@ -3356,6 +3388,7 @@ async def _live_status_uncached() -> dict:
         "paused": paused,
         "by_whale": [dict(r) for r in by_whale],
         "sizing_24h": [dict(r) for r in sizing],
+        "fills_24h": [dict(r) for r in fills],
         "manual_desk": manual_desk,
         "fill_vs_miss_7d": fvm,
         "caps": {"per_fill": cfg.live_max_per_fill_usd, "daily": cfg.live_max_daily_usd,
@@ -3542,7 +3575,8 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
     The site's ±$100 single-trade display cap applies throughout."""
     from datetime import datetime as _dt
 
-    from .track_record import PNL_DISPLAY_CAP, RECORD_TZ, track_record
+    from .track_record import (AUDIT_SINCE, PNL_DISPLAY_CAP, RECORD_TZ,
+                               track_record)
 
     pool = await get_pool()
     copies = await pool.fetch(
@@ -3565,7 +3599,15 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
         "SELECT DISTINCT outcome_id FROM engine_fills "
         "WHERE band IN ('arb', 'arb_crypto')")
     arb_slugs = {r["outcome_id"] for r in arb_rows}
-    rec = await track_record(None)
+    # AUDIT SINCE (2026-08-25): this breakdown spans from first_day and
+    # its sleeve rows come from live_orders with NO date floor, so the
+    # account anchor must span the same period. track_record(None) reads
+    # the DISPLAY epoch, which the 2026-08-24 re-baseline moved forward
+    # — anchoring here would report every pre-epoch settled row as
+    # unattributed. Display windows move; audits do not.
+    from .track_record import AUDIT_SINCE as _audit_since
+
+    rec = await track_record(_audit_since)
     first_day = "2026-08-01"
 
     days: dict[str, dict] = {}
@@ -4214,7 +4256,18 @@ async def api_breakdown_day_detail(day: str) -> dict:
     from .track_record import PNL_DISPLAY_CAP, RECORD_TZ, track_record
 
     pool = await get_pool()
-    rec = await track_record(None)
+    # AUDIT SINCE, NOT DISPLAY SINCE (2026-08-25). track_record(None)
+    # honours DEFAULT_SINCE, which the 2026-08-24 front-end re-baseline
+    # moved to that day's epoch. This reconciliation is an ACCOUNTING
+    # audit, not a display: the copies side counts every live_order that
+    # SETTLED today, including positions entered days earlier, so an
+    # anchor windowed to the epoch compares two different populations.
+    # It read anchor=1 row against copies=471 rows and reported the 470
+    # invisible rows as an $867 residual — an alarm firing on its own
+    # window rather than on a real record-vs-venue divergence. The
+    # display re-baseline was a front-end decision and the history was
+    # kept on purpose; the audit reads all of it.
+    rec = await track_record(AUDIT_SINCE)
     arb_rows = await pool.fetch(
         "SELECT DISTINCT outcome_id FROM engine_fills "
         "WHERE band IN ('arb', 'arb_crypto')")

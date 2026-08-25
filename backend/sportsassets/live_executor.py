@@ -103,6 +103,34 @@ async def execute_copy(payload: dict) -> None:
         log.exception("copy execution failed for trade %s", payload.get("id"))
 
 
+def overspend_ratio(requested_usd: float, filled_shares: float,
+                    fill_price: float | None) -> float | None:
+    """How much of the AUTHORIZED clip a fill actually consumed.
+
+    The per-fill ceiling is enforced before submit, on
+    `requested_usd = shares * limit`. That bounds what we ASK to spend.
+    It bounds what the venue TAKES only while an IOC buy cannot fill
+    above its own limit — an assumption, not a control. This turns the
+    assumption into a number: > 1.0 means the venue took more than we
+    authorized, and no clip cap in the sizing map can see it.
+
+    None when there is nothing to judge (no fill, or no request)."""
+    if not requested_usd or requested_usd <= 0:
+        return None
+    if not filled_shares or filled_shares <= 0 or not fill_price:
+        return None
+    return round(filled_shares * fill_price / requested_usd, 4)
+
+
+OVERSPEND_TOLERANCE = 1.01  # a cent of rounding on a whole-unit fill
+
+
+def is_overspend(requested_usd: float, filled_shares: float,
+                 fill_price: float | None) -> bool:
+    r = overspend_ratio(requested_usd, filled_shares, fill_price)
+    return r is not None and r > OVERSPEND_TOLERANCE
+
+
 def plan_order(
     his_price: float, his_notional: float, ratio: float,
     max_per_fill: float, max_slippage_cents: float,
@@ -1774,11 +1802,14 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # armed — lifting the quarantine (a mapping-fidelity action)
             # would silently re-arm his $300 clip with no profitability
             # decision made. The hold is its own gate, independent of
-            # quarantine state: LIVE_HOLD_WHALES (default swisstony)
-            # refuses with an audit reason until his paper cohort at the
-            # new sub-second detection certifies positive and the env
-            # deliberately changes. The row keeps its mapping — his
-            # fidelity samples continue.
+            # quarantine state: LIVE_HOLD_WHALES refuses with an audit
+            # reason until a whale's paper cohort at the new sub-second
+            # detection certifies positive. It defaulted to swisstony
+            # until 2026-08-24 evening, when TRUEEDGE-FAST graded him
+            # positive on detections inside 5s and the owner order
+            # lifted it; the default is now EMPTY, and the env re-arms a
+            # hold on any whale without a deploy. A held row keeps its
+            # mapping — fidelity samples continue.
             # VERIFIED-ONLY, INDEPENDENT OF QUARANTINE (leak-hunt round
             # 2): the allowlist below lived INSIDE the `if _q_on` branch,
             # so lifting the quarantine — a mapping-fidelity action —
@@ -2081,6 +2112,28 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
 
         filled = float(result["filled_shares"]) if result["ok"] else 0.0
         fill_price = float(result["fill_price"]) if result["ok"] else None
+        spent = round(filled * (fill_price or 0), 2)
+        # POST-FILL OVERSPEND DETECTOR (2026-08-25). The per-fill clip is
+        # enforced BEFORE submit, on `usd = shares * limit`. That bounds
+        # what we ASK to spend, not what the venue takes: it holds only
+        # while an IOC buy cannot fill above its own limit. The 24h
+        # aggregate showed filled averaging 1.45x requested on a live
+        # whale, so that assumption is not something to keep assuming.
+        # Record the breach on the row itself — a number nobody can read
+        # is not a control — and shout it into the log.
+        overspent = is_overspend(usd, filled, fill_price)
+        if overspent:
+            # `mapping` is bound only on the PMUS branch; the CLOB leg
+            # names its market by asset. Never let the alarm itself
+            # raise — an overspend that crashes into the generic
+            # handler is recorded as a mystery 'error' row instead.
+            log.error("LIVE OVERSPEND %s %s: asked $%.2f (%.0f @ %.4f) "
+                      "but filled $%.2f (%.0f @ %.4f) — ratio %.3f",
+                      payload.get("whale_username"),
+                      (locals().get("mapping") or {}).get("market_slug")
+                      or payload.get("asset") or "?",
+                      usd, shares, limit, spent, filled, fill_price or 0,
+                      spent / usd)
         await pool.execute(
             """
             UPDATE live_orders
@@ -2090,10 +2143,11 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             """,
             row_id,
             "filled" if result["ok"] and filled > 0 else "unfilled",
-            result.get("order_id"), filled, fill_price,
-            round(filled * (fill_price or 0), 2),
+            result.get("order_id"), filled, fill_price, spent,
             json.dumps(result.get("raw"), default=str),
-            None if result["ok"] else str(result.get("raw"))[:300],
+            (f"OVERSPEND: asked ${usd:.2f}, filled ${spent:.2f}"
+             if overspent else
+             None if result["ok"] else str(result.get("raw"))[:300]),
         )
         log.info("LIVE order [%s] %s: %s %.2f shares @ %.3f (his %.3f)",
                  venue, "FILLED" if result["ok"] and filled > 0 else "unfilled",

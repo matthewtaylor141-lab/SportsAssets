@@ -561,6 +561,15 @@ jobs:
           jq -r '.sizing_24h // [] | .[] |
                  "  SIZING \(.whale): n24 \(.n_24h) unf \(.unfilled_24h // 0) rej \(.rejected_24h // 0) avg_req $\(.avg_req // "?") avg_filled $\(.avg_filled // "?") max_req $\(.max_req // "?") deployed24 $\(.deployed_24h // 0)"' \
             /tmp/live.json 2>/dev/null || true
+          # OVERSPEND: raw requested-vs-filled per fill. ratio > 1 means
+          # filled_usd exceeded what we asked to spend, which an IOC buy
+          # cannot do — so it names a real overspend or a broken number.
+          jq -r '.fills_24h // [] | map(select((.ratio // 0) > 1.001)) |
+                 "  OVERSPEND rows=\(length)"' \
+            /tmp/live.json 2>/dev/null || true
+          jq -r '.fills_24h // [] | .[0:14][] |
+                 "  FILL \(.at) \(.whale) \(.status) req $\(.req_usd // "?")/\(.req_sh // "?")sh @\(.lim // "?") -> filled $\(.fill_usd // 0)/\(.fill_sh // "?")sh @\(.fill_px // "?") ratio \(.ratio // "?")"' \
+            /tmp/live.json 2>/dev/null || true
           jq -r '"  enabled(api env): \(.enabled // .config.enabled // "?")  paused: \(.paused // "?")",
                  (.by_whale // [] | .[] | "  whale \(.whale): fills \(.fills) deployed $\(.deployed) settled \(.settled) pnl $\(.pnl)"),
                  (.orders // .summary // {} | to_entries[] | "  \(.key): \(.value)"),
