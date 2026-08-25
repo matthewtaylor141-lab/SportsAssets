@@ -2342,13 +2342,35 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 log.warning("LIVE (US) refused %s: side priced %s vs his "
                             "%s", mapping["market_slug"], _ask, his_price)
                 return
-            if _ask is None or _ask > limit + 1e-9:
+            # PROPORTIONAL, NOT ABSOLUTE (2026-08-25, second pass).
+            #
+            # Shipped as `ask > limit` and it made the sleeve STERILE
+            # within the hour. Observed refusals: asks of 0.59 / 0.89 /
+            # 0.85 against limits of 0.57 / 0.88 / 0.84 — one and two
+            # cents. Our limit is his price plus a deliberately tight
+            # slippage cap, so an absolute test refuses nearly every
+            # honest copy. A guard that blocks everything is not a
+            # guard, it is an outage that reports itself as safety.
+            #
+            # Calibrated against BOTH populations rather than guessed:
+            #   worst honest refusal   ratio 1.035
+            #   cheapest real overspend ratio 1.146
+            # A threshold of 1.08 sits in that gap with margin either
+            # side. Proportional matters: +0.03 absolute would be 13%
+            # at a 0.22 limit and 75% at 0.04.
+            #
+            # Worst case this now permits is an 8% overspend on a clip
+            # — about $20 — against losing every copy. The complement
+            # case starts at 1.146 and is still refused.
+            _tol = 1.0 + float(os.getenv("LIVE_ASK_TOLERANCE_PCT", "0.08"))
+            if _ask is None or _ask > limit * _tol:
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 "
                     "WHERE id=$1", row_id,
                     (f"ask-above-limit: venue asks {_ask} for this side, "
-                     f"we authorized {limit} — refusing (the venue does "
-                     f"not enforce our limit at execution)")
+                     f"we authorized {limit} (ratio "
+                     f"{(_ask / limit if limit else 0):.3f} > {_tol:.2f}) "
+                     f"— refusing")
                     if _ask is not None else
                     ("no readable ask for this side — refusing rather "
                      "than sending an unbounded order"))

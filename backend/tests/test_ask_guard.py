@@ -101,28 +101,64 @@ class TestSideAskPicksTheRightLeg:
                                  "ORDER_INTENT_BUY_LONG") is None
 
 
-class TestTheRealOverspendsWouldHaveBeenRefused:
-    """Every row from the 2026-08-24 receipts, against the check that
-    now stands in front of them. `ask > limit` is the refusal."""
+TOL = 1.08  # LIVE_ASK_TOLERANCE_PCT default
 
-    ROWS = [(0.23, 0.89), (0.32, 0.6853), (0.37, 0.65),
-            (0.45, 0.56), (0.48, 0.55)]
 
-    def test_each_row_is_refused(self):
-        for limit, ask in self.ROWS:
-            assert ask > limit + 1e-9, (
-                f"ask {ask} vs limit {limit} must refuse")
+def _refused(limit, ask, tol=TOL):
+    return ask is None or ask > limit * tol
 
-    def test_an_honest_quote_is_allowed(self):
-        for limit, ask in [(0.37, 0.37), (0.45, 0.44), (0.90, 0.12)]:
-            assert not (ask > limit + 1e-9), (
-                f"ask {ask} at limit {limit} must NOT refuse")
 
-    def test_an_unreadable_ask_refuses(self):
+class TestTheGuardIsProportionalNotAbsolute:
+    """Shipped absolute (`ask > limit`) and it made the sleeve STERILE
+    inside an hour. Real refusals observed in production:
+
+        asks 0.59 / 0.89 / 0.85  vs limits 0.57 / 0.88 / 0.84
+
+    One and two cents. Our limit is his price plus a deliberately tight
+    slippage cap, so an absolute test refuses nearly every honest copy.
+    A guard that blocks everything is an outage reporting itself as
+    safety — which is harder to notice than a loud failure.
+
+    The threshold is calibrated against BOTH populations, not chosen:
+
+        worst honest refusal    ratio 1.035
+        cheapest real overspend ratio 1.146
+
+    1.08 sits in that gap with margin either side.
+    """
+
+    HONEST = [(0.57, 0.59), (0.88, 0.89), (0.84, 0.85)]
+    OVERSPENDS = [(0.23, 0.89), (0.22, 0.78), (0.32, 0.6853),
+                  (0.37, 0.65), (0.45, 0.56), (0.48, 0.55)]
+
+    def test_the_sterility_cases_now_pass(self):
+        for limit, ask in self.HONEST:
+            assert not _refused(limit, ask), (
+                f"ask {ask} at limit {limit} is ordinary slippage and "
+                f"must NOT be refused — this is what emptied the sleeve")
+
+    def test_every_real_overspend_is_still_refused(self):
+        for limit, ask in self.OVERSPENDS:
+            assert _refused(limit, ask), (
+                f"ask {ask} vs limit {limit} must still refuse")
+
+    def test_the_threshold_sits_between_the_two_populations(self):
+        worst_honest = max(a / l for l, a in self.HONEST)
+        cheapest_bad = min(a / l for l, a in self.OVERSPENDS)
+        assert worst_honest < TOL < cheapest_bad, (
+            f"honest up to {worst_honest:.3f}, bad from "
+            f"{cheapest_bad:.3f} — {TOL} must separate them")
+
+    def test_proportional_beats_absolute_at_low_prices(self):
+        """+0.03 absolute would be 13% at a 0.22 limit and 75% at 0.04.
+        Proportional keeps the same meaning across the price range."""
+        assert not _refused(0.04, 0.0428)   # 7% over, allowed
+        assert _refused(0.04, 0.96)         # the complement, refused
+
+    def test_an_unreadable_ask_still_refuses(self):
         """Fail closed: a price we cannot see is not a price we can
         bound."""
-        ask = None
-        assert ask is None or ask > 0  # documents the caller's branch
+        assert _refused(0.45, None)
 
 
 class TestTheGuardIsWiredIn:
