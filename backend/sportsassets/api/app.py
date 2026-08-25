@@ -3459,6 +3459,104 @@ async def api_overspend_halt() -> dict:
     return {"tripped": bool(v), "record": v}
 
 
+@app.get("/api/admin/true-edge-cashout",
+         dependencies=[Depends(require_admin)])
+async def api_true_edge_cashout(since_day: str = "2026-08-01",
+                                max_reaction_s: float | None = None) -> dict:
+    """TRUEEDGE re-graded at the whale's OWN EXIT, not at resolution.
+
+    Owner, 2026-08-25: "it would also mean you understate all whales
+    that genuinely sell before settlement (which I have confirmed is a
+    number of our whale traders, i.e. SwissTony)."
+
+    He is right, and this is the correction. Every whale number served
+    today comes from:
+
+        counterfactual_pnl = (payout - his_price) * (clip / his_price)
+
+    where `payout` is the RESOLUTION price, 1 or 0. A whale who buys at
+    0.22 and sells at 0.45 before the match ends made +0.23/share. If
+    that outcome later resolves 0, we book -0.22/share. A profitable
+    cash-out trader is recorded as a loser, systematically, and the
+    faster he takes profits the worse we make him look.
+
+    That is not a rounding issue. The TRUEEDGE cuts (rn1 -6,897,
+    ferrarichampions2026 -18,248, 0x2c33 -59,667) were made on this
+    number, so any whale who trades that way may have been cut on an
+    artifact of our accounting.
+
+    This grades each detected trade at his ACTUAL exit where he made
+    one — the notional-weighted price of his later SELLs of that asset
+    — and falls back to resolution only where he genuinely held. It
+    writes nothing: the stored table stays as it is so the two bases
+    can be compared rather than one quietly replacing the other.
+
+    `delta` is the correction per whale. A large positive delta means
+    we have been understating him.
+    """
+    from datetime import datetime as _dt
+
+    pool = await get_pool()
+    since_d = _dt.fromisoformat(since_day).date()
+    rows = await pool.fetch(
+        """
+        WITH ex AS (
+            -- his notional-weighted exit price per asset, from his own
+            -- SELLs. Weighted, not last: a partial scale-out is one
+            -- exit at a blended price, not several.
+            SELECT w.username AS whale, tr.asset,
+                   sum(tr.price * tr.size) / NULLIF(sum(tr.size), 0)
+                       AS exit_px,
+                   min(tr.ts) AS first_exit
+            FROM trades tr JOIN whales w ON w.id = tr.whale_id
+            WHERE tr.side = 'SELL'
+            GROUP BY 1, 2
+        )
+        SELECT lower(COALESCE(a.whale_username, '?')) AS whale,
+               count(*)::int AS detected,
+               count(*) FILTER (WHERE ex.exit_px IS NOT NULL
+                                  AND ex.first_exit > a.placed_at)::int
+                   AS exited,
+               COALESCE(sum(a.counterfactual_pnl), 0)::float8
+                   AS cf_settlement,
+               COALESCE(sum(
+                   CASE WHEN ex.exit_px IS NOT NULL
+                             AND ex.first_exit > a.placed_at
+                             AND a.his_price > 0
+                        THEN (ex.exit_px - a.his_price)
+                             * (a.clip_target / a.his_price)
+                        ELSE a.counterfactual_pnl END), 0)::float8
+                   AS cf_cashout
+        FROM ai_trades a
+        LEFT JOIN ex ON ex.whale = lower(a.whale_username)
+                    AND ex.asset = a.asset
+        WHERE a.placed_at >= $1
+          AND ($2::float8 IS NULL OR a.reaction_s <= $2::float8)
+        GROUP BY 1
+        ORDER BY cf_cashout DESC
+        """, since_d, max_reaction_s)
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["cf_settlement"] = round(d["cf_settlement"], 2)
+        d["cf_cashout"] = round(d["cf_cashout"], 2)
+        d["delta"] = round(d["cf_cashout"] - d["cf_settlement"], 2)
+        det = d.get("detected") or 0
+        d["exit_rate"] = round((d.get("exited") or 0) / det, 3) if det else None
+        # The line that matters for the cut list.
+        d["verdict"] = (
+            "CUT MAY BE WRONG — negative at settlement, positive on his "
+            "own exits" if d["cf_settlement"] <= 0 < d["cf_cashout"]
+            else "negative on both bases" if d["cf_cashout"] <= 0
+            else "positive on both bases")
+        out.append(d)
+    return {"since": since_day, "max_reaction_s": max_reaction_s,
+            "whales": out,
+            "note": ("cf_settlement is what every whale number served "
+                     "today used. cf_cashout grades at his own exit "
+                     "where he made one. Nothing is overwritten.")}
+
+
 @app.get("/api/admin/whale-exits",
          dependencies=[Depends(require_admin)])
 async def api_whale_exits(days: int = 7) -> dict:

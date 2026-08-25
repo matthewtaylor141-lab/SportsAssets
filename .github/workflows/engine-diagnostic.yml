@@ -606,6 +606,17 @@ jobs:
           jq -r '.whales[]? |
                  "  EXITS \(.whale): bought \(.assets_bought) assets $\(.bought_usd) | round_trips \(.round_trips) sold $\(.sold_usd) | exit_rate \(.exit_rate // "?")"' \
             /tmp/exits.json 2>/dev/null || true
+          # TRUEEDGE RE-GRADED AT HIS OWN EXIT. Every whale number
+          # served today settles at resolution, which books a
+          # cash-out trader's WIN as a loss. The TRUEEDGE cuts were
+          # made on that number. CUTCHECK is the line that says
+          # whether we cut a profitable whale by accident.
+          curl -sS --max-time 50 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/cashout.json \
+               "$BASE/api/admin/true-edge-cashout?since_day=2026-08-01" || true
+          jq -r '.whales[]? |
+                 "  CUTCHECK \(.whale): settlement $\(.cf_settlement) -> cashout $\(.cf_cashout) (delta \(.delta)) exited \(.exited)/\(.detected) rate \(.exit_rate // "?") — \(.verdict)"' \
+            /tmp/cashout.json 2>/dev/null || true
           # PRICE-TRUTH, server-side: the CI version printed "SKIP: no
           # credentials" (2026-08-25 00:57Z) because the runner holds no
           # PMUS keys. Only the deployed API can preview an order.
