@@ -2236,6 +2236,45 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # state its intent is UNORDERABLE — ordering it would hand
             # side selection to the venue, which is the incident.
             _intent = mapping.get("intent")
+            # BUY_SHORT IS REFUSED (2026-08-25). Not a heuristic — a
+            # controlled comparison, 31 fills in 24h:
+            #
+            #   BYINTENT BUY_LONG   n=25  over=0  clean=25
+            #   BYINTENT BUY_SHORT  n=6   over=6  clean=0
+            #
+            # Perfect separation, and the whale confound is ruled out
+            # WITHIN one book: 0x076daa87 filled six shorts (ratios
+            # 3.87, 3.545, 2.142, 1.757, 1.244, 1.146) and several
+            # longs (6250sh @0.04 = $250.00, 4166sh @0.06 = $249.96,
+            # 423sh @0.59) on the same day, same venue, same aec-
+            # family. Same whale, same everything — the only variable
+            # that separates broken from clean is the intent.
+            #
+            # Every short we have ever filled has been wrong. Refusing
+            # the branch costs us a class of copy we have never once
+            # executed correctly and keeps the 25 that work.
+            #
+            # This does NOT diagnose WHY. The intent may be inverted in
+            # side_intent, or BUY_SHORT may not mean what we assume at
+            # this venue. The SIDE verdict is still pending and I am
+            # not shipping an inversion on a theory — but I do not need
+            # the cause to stop doing the thing that is 6-for-6 wrong.
+            #
+            # LIVE_ALLOW_SHORT=on re-opens it once the cause is known.
+            if (_intent == "ORDER_INTENT_BUY_SHORT"
+                    and os.getenv("LIVE_ALLOW_SHORT", "").strip().lower()
+                    != "on"):
+                await pool.execute(
+                    "UPDATE live_orders SET status='rejected', error=$2 "
+                    "WHERE id=$1", row_id,
+                    "short-branch-refused: every BUY_SHORT fill on "
+                    "2026-08-24 landed on the opposite side at the "
+                    "complement price (6/6, against 25/25 clean longs) "
+                    "— the short branch is off until the cause is known")
+                log.warning("LIVE (US) refused %s: BUY_SHORT branch is "
+                            "off (6/6 wrong on 2026-08-24)",
+                            mapping["market_slug"])
+                return
             if not _intent:
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 "
