@@ -933,6 +933,62 @@ async def resolve_explain(pool, market_title: str | None,
         out["detail"] = ("his keys match no us_premap row — either the "
                          "sweep never captured this market, or the two "
                          "key sets are built differently")
+        # WHICH OF THE TWO, MEASURED (2026-08-25). "Either A or B" is
+        # where this cause has sat since the census was built, and the
+        # two need opposite fixes: A is a sweep-coverage problem, B is a
+        # key-grammar problem. The probe printed a pair that names a
+        # THIRD possibility neither of them covers:
+        #
+        #   whale  bol1-gvs-ori-2026-08-25-gvs
+        #   venue  atc-lpb-gvs-ori-2026-08-25-gvs
+        #
+        # Same game, same date, same teams, same market. The whale feed
+        # calls the league bol1 and the venue calls it lpb, so the keys
+        # cannot intersect no matter how well the sweep ran. That is
+        # league-code ALIASING, and after the kind-prefix bridge it is
+        # the obvious next suspect for a cause still sitting at 37%.
+        #
+        # This only REPORTS. Dropping the league token from the key
+        # would widen what a signal can match, and widening a key is
+        # how a whale's pick reaches another game's row — the incident
+        # this whole lane exists to prevent. So the size of the class
+        # gets measured first, on real rejected rows, and the matcher
+        # is not touched until the number says it is worth the risk and
+        # the ambiguity it would introduce is understood.
+        try:
+            # AT LEAST TWO TOKENS MUST SURVIVE IN FRONT OF THE DATE.
+            #
+            # Counting hyphens is not enough and my first attempt got
+            # this wrong: `gvs-2026-08-25` carries three hyphens, two of
+            # them inside the date, so a naive rule strips it to
+            # `2026-08-25` — A BARE DATE, which matches every game
+            # played that day. That is not a widened key, it is no key
+            # at all, and it would have made this diagnostic report a
+            # huge recoverable class that does not exist.
+            #
+            # The real grammar is <league>-<home>-<away>-<date>, so
+            # after dropping the league at least the two team tokens
+            # must remain.
+            stripped = set()
+            for k in keys:
+                if not d or not k.endswith(d):
+                    continue
+                toks = [t for t in k[:-len(d)].rstrip("-").split("-") if t]
+                if len(toks) >= 3:
+                    stripped.add("-".join(toks[1:]) + "-" + d)
+            if stripped:
+                alt = await pool.fetch(
+                    "SELECT identifier FROM us_premap "
+                    "WHERE event_keys && $1::text[] LIMIT 25",
+                    sorted(stripped))
+                out["league_alias_probe"] = {
+                    "stripped_keys": sorted(stripped)[:4],
+                    "rows_it_would_find": len(alt),
+                    "would_have_hit": bool(alt),
+                    "sample": [str(r["identifier"]) for r in alt[:3]],
+                }
+        except Exception as exc:  # noqa: BLE001 — diagnostics never
+            out["league_alias_probe"] = {"error": type(exc).__name__}
         return out
     want = PREFIX_FOR_TYPE.get(market_type_of(global_slug or ""))
     if not want:

@@ -4376,6 +4376,8 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
     steps: dict[str, int] = {}
     by_whale: dict[str, dict[str, int]] = {}
     examples: dict[str, dict] = {}
+    alias_hits = 0
+    alias_examples: list[dict] = []
     for r in rows:
         try:
             ex = await resolve_explain(
@@ -4386,6 +4388,31 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
                   "detail": type(exc).__name__, "keys": 0, "rows": 0}
         step = str(ex.get("step") or "unknown")
         steps[step] = steps.get(step, 0) + 1
+        # LEAGUE-CODE ALIASING, counted rather than argued.
+        #
+        # no_key_intersection has read "either the sweep never captured
+        # this market, or the two key sets are built differently" since
+        # the census was written, and those need opposite fixes. The
+        # probe printed a pair that is neither:
+        #
+        #   whale  bol1-gvs-ori-2026-08-25-gvs
+        #   venue  atc-lpb-gvs-ori-2026-08-25-gvs
+        #
+        # Same game, same date, same teams — the feed calls the league
+        # bol1 and the venue calls it lpb. resolve_explain now asks, on
+        # each miss, whether dropping the league token WOULD have found
+        # rows. This tallies the answer so the size of the class is a
+        # number before anything in the matcher moves.
+        _lap = ex.get("league_alias_probe") or {}
+        if _lap.get("would_have_hit"):
+            alias_hits += 1
+            if len(alias_examples) < 5:
+                alias_examples.append({
+                    "his_slug": r["market_slug"],
+                    "stripped_key": (_lap.get("stripped_keys") or [None])[0],
+                    "venue_rows_found": _lap.get("rows_it_would_find"),
+                    "venue_sample": _lap.get("sample"),
+                })
         w = (r["whale_username"] or "?").lower()
         by_whale.setdefault(w, {})
         by_whale[w][step] = by_whale[w].get(step, 0) + 1
@@ -4403,6 +4430,21 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
         "steps": dict(ranked),
         "by_whale": by_whale,
         "examples": examples,
+        # MEASUREMENT ONLY — the matcher is unchanged. Dropping the
+        # league token widens what a signal can match, and widening a
+        # key is how a whale's pick reaches another game's row. The
+        # number comes first.
+        "league_alias": {
+            "misses_a_league_strip_would_have_found": alias_hits,
+            "share_of_sample": (round(alias_hits / n, 4) if n else None),
+            "share_of_no_key_intersection": (
+                round(alias_hits / steps["no_key_intersection"], 4)
+                if steps.get("no_key_intersection") else None),
+            "examples": alias_examples,
+            "note": ("counted, NOT applied — a league-stripped key can "
+                     "collide two leagues' identical team codes on one "
+                     "date, so this is sized before it is trusted"),
+        },
         "verdict": (
             "NO UNMAPPED ROWS in window — nothing to attribute"
             if not n else

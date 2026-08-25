@@ -723,6 +723,11 @@ jobs:
                "$BASE/api/admin/unmapped-census?hours=48&sample=400" \
                || true
           echo "  UNMAPHTTP bytes=$(wc -c < /tmp/unmapped.json 2>/dev/null || echo 0)"
+          jq -r '.league_alias // {} |
+                 "  UNMAPALIAS \(.misses_a_league_strip_would_have_found // 0) of the sample would be found by dropping the league token (share \(.share_of_sample // "n/a"), of no_key_intersection \(.share_of_no_key_intersection // "n/a")) — COUNTED, NOT APPLIED"' \
+            /tmp/unmapped.json 2>/dev/null || true
+          jq -r '(.league_alias.examples // [])[] | "  UNMAPALIAS-EG his=\(.his_slug) stripped=\(.stripped_key) -> \(.venue_rows_found) venue rows \(.venue_sample | tostring)"' \
+            /tmp/unmapped.json 2>/dev/null || true
           jq -r '"  UNMAPPED sampled=\(.sampled // 0) | \(.verdict // "n/a")"' \
             /tmp/unmapped.json 2>/dev/null || echo "  UNMAPPED unreadable"
           jq -r '.steps // {} | to_entries[] | "  UNMAPSTEP \(.key): \(.value)"' \
