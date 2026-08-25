@@ -3680,6 +3680,101 @@ async def api_ratio_calibration(target_turnover_x: float = 1.0,
     return out
 
 
+@app.get("/api/admin/mapgap", dependencies=[Depends(require_admin)])
+async def api_mapgap(whale: str = "swisstony", limit: int = 12) -> dict:
+    """Why does this whale's book never reach the premap lane?
+
+    swisstony has 3,092 rejections and $0 deployed. Every one resolves
+    src=fuzzy, which the quarantine refuses — so the whale the system
+    is built around places nothing, and the same mapper gap is what
+    holds the fill rate at 0.9% and caps the turnover target.
+
+    His picks are "Yes"/"No" on slugs like
+
+        atc-lpa-tig-cac-2026-08-24-tig
+
+    where the TRAILING token names which team the market is about. So
+    "Yes" means Tigre wins. The venue's sides for that slug are named
+    by team, so a pick of "Yes" can never equal a side description of
+    "tigre" — and match_side deliberately refuses to bridge that:
+
+        "Yes/No picks match only literal yes/no sides — never a named
+         team (inversion incident 2026-08-24)"
+
+    That guard is there because this precise mapping once inverted a
+    position. I am NOT rewriting it on a hunch at 4am; that is the
+    failure mode that cost yesterday.
+
+    So: measure whether the bridge is UNAMBIGUOUS before building it.
+    For each recent refusal this reports his slug, outcome and title
+    against the venue's actual side descriptions, and asks one
+    question — does the slug's trailing token match exactly ONE side?
+
+      unique on every row  -> the mapping is determinate and safe to
+                              implement, because the slug names the
+                              side rather than us inferring it.
+      any row ambiguous    -> the guard is right and must stay.
+    """
+    from .. import pmus
+
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT DISTINCT ON (lo.us_market_slug)
+               lo.us_market_slug AS slug, lo.error,
+               t.outcome, t.market_title AS title, t.market_slug AS his_slug
+        FROM live_orders lo JOIN trades t ON t.id = lo.trade_id
+        WHERE lower(COALESCE(lo.whale_username,'')) = lower($1)
+          AND lo.status = 'rejected'
+          AND lo.us_market_slug IS NOT NULL
+          AND lo.placed_at > now() - interval '2 days'
+        ORDER BY lo.us_market_slug, lo.placed_at DESC
+        LIMIT $2
+        """, whale, min(int(limit), 40))
+    out, unique_n, total_n = [], 0, 0
+    for r in rows:
+        slug = r["slug"] or ""
+        rec = {"slug": slug, "outcome": r["outcome"], "title": r["title"],
+               "error": (r["error"] or "")[:90]}
+        # the trailing token after the date is the side the market is on
+        parts = slug.split("-")
+        suffix = parts[-1] if parts and not parts[-1].isdigit() else ""
+        rec["slug_suffix"] = suffix
+        try:
+            m = await asyncio.to_thread(
+                pmus._get_client().markets.retrieve_by_slug, slug)
+            sides = ((m or {}).get("market") or {}).get("marketSides") or []
+            descs = [str(sd.get("description") or "") for sd in sides
+                     if isinstance(sd, dict)]
+            rec["venue_sides"] = descs[:4]
+            if suffix and descs:
+                total_n += 1
+                hits = [d for d in descs
+                        if any(w.lower().startswith(suffix.lower())
+                               for w in pmus._norm(d).split())]
+                rec["suffix_matches"] = hits
+                if len(hits) == 1:
+                    unique_n += 1
+                    rec["verdict"] = (
+                        f"UNIQUE — '{suffix}' names '{hits[0]}' and "
+                        f"nothing else; Yes maps there, No to the other")
+                else:
+                    rec["verdict"] = (
+                        f"AMBIGUOUS — '{suffix}' matches {len(hits)} "
+                        f"sides; the guard is right to refuse")
+        except Exception as exc:  # noqa: BLE001 — report, never infer
+            rec["error_venue"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        out.append(rec)
+    return {"whale": whale, "rows": out,
+            "unique": unique_n, "checked": total_n,
+            "verdict": (
+                f"{unique_n}/{total_n} slugs name their side uniquely — "
+                "the Yes/No bridge is determinate"
+                if total_n and unique_n == total_n else
+                f"{unique_n}/{total_n} unique — do NOT build the bridge"
+                if total_n else "no rows to judge")}
+
+
 @app.get("/api/admin/whale-position-truth",
          dependencies=[Depends(require_admin)])
 async def api_whale_position_truth(top: int = 40) -> dict:

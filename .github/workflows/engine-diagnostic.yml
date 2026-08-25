@@ -638,6 +638,17 @@ jobs:
             /tmp/postruth.json 2>/dev/null || true
           jq -r '.whales[0]? | "  POSTRUTH sample_keys=\(.sample_keys // [] | join(","))"' \
             /tmp/postruth.json 2>/dev/null || true
+          # MAPGAP: why swisstony's whole book falls to fuzzy. His picks
+          # are Yes/No on slugs whose trailing token names the team.
+          # match_side refuses to bridge that by design (inversion
+          # incident 2026-08-24) — so measure whether the slug names its
+          # side UNIQUELY before touching that guard.
+          curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/mapgap.json \
+               "$BASE/api/admin/mapgap?whale=swisstony&limit=12" || true
+          jq -r '"  MAPGAP \(.whale): \(.verdict // "?")"' /tmp/mapgap.json 2>/dev/null || true
+          jq -r '.rows[]? | "  MAPGAP \(.slug) pick=\(.outcome // "?") suffix=\(.slug_suffix // "?") sides=\(.venue_sides // [] | tostring) — \(.verdict // .error_venue // "?")"' \
+            /tmp/mapgap.json 2>/dev/null || true
           # RATIO: what copy ratio hits "play through the capital once a
           # day"? Computed against the flow we actually FILL, not the
           # flow that exists — the difference is ~100x and decides
