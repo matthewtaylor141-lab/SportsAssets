@@ -3680,6 +3680,112 @@ async def api_ratio_calibration(target_turnover_x: float = 1.0,
     return out
 
 
+@app.get("/api/admin/whale-position-truth",
+         dependencies=[Depends(require_admin)])
+async def api_whale_position_truth(top: int = 40) -> dict:
+    """Infer whale exits from POSITIONS, because they do not sell.
+
+    Established 2026-08-25, and it changes the approach entirely:
+
+        SELLTRUTH 0x076daa87 n=500 sides={"BUY":500}
+        SIDES swisstony buys 860,326 sells 0 across backfill+chain+poll
+        SIDES 0xf705fa04 buys 32,815 sells 14,901 (chain AND poll)
+
+    Our pipeline records sells fine — another whale has 14,901 of them
+    on the same code paths. The four whales we copy have zero, and the
+    data API's own trade feed has zero for them too. So this is not a
+    bug in our ingestion and no patch there will ever find them.
+
+    The owner has confirmed these accounts take profit before
+    settlement. Both facts hold at once if they close WITHOUT SELLING:
+    on this venue a position can also be closed by buying the
+    complementary outcome and merging, or by redeeming at resolution.
+    Neither is a SELL trade. Neither appears in any trade feed. That is
+    why every trade-based search tonight came back empty.
+
+    Positions are the observable that survives that. For each copy
+    whale: what our ledger says he bought of an asset, against what he
+    still HOLDS. A holding materially below the buys is an exit we
+    never saw, whatever mechanism produced it.
+
+    `unexplained_exits` is the count of assets where he holds less than
+    he bought and the market has not resolved — those are live exits
+    invisible to every trade feed we have.
+    """
+    import httpx
+
+    from ..api.copies_record import COPY_WHALES
+
+    cfg = settings()
+    pool = await get_pool()
+    whales = await pool.fetch(
+        "SELECT username, address FROM whales WHERE address IS NOT NULL")
+    wanted = {w.lower() for w in COPY_WHALES}
+    out = []
+    async with httpx.AsyncClient(base_url=cfg.data_api_base,
+                                 timeout=25.0) as http:
+        for w in whales:
+            uname = (w["username"] or "")
+            if wanted and uname.lower() not in wanted:
+                continue
+            rec = {"whale": uname}
+            try:
+                resp = await http.get("/positions",
+                                      params={"user": w["address"],
+                                              "limit": min(int(top), 100)})
+                resp.raise_for_status()
+                body = resp.json()
+                pos = body if isinstance(body, list) else (
+                    body.get("data") or body.get("positions") or [])
+                held: dict[str, float] = {}
+                for p_ in pos:
+                    if not isinstance(p_, dict):
+                        continue
+                    a = str(p_.get("asset") or p_.get("tokenId") or "")
+                    try:
+                        held[a] = float(p_.get("size")
+                                        or p_.get("netPosition") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                rec["positions_returned"] = len(pos)
+                if pos and isinstance(pos[0], dict):
+                    rec["sample_keys"] = sorted(pos[0].keys())[:16]
+                # What our ledger says he bought of the assets he still
+                # appears in — restricted to those assets so one query
+                # answers it.
+                if held:
+                    rows = await pool.fetch(
+                        """
+                        SELECT t.asset,
+                               COALESCE(sum(t.size) FILTER
+                                   (WHERE t.side='BUY'), 0)::float8 AS bought
+                        FROM trades t JOIN whales w2 ON w2.id = t.whale_id
+                        WHERE lower(w2.username) = $1
+                          AND t.asset = ANY($2::text[])
+                        GROUP BY 1
+                        """, uname.lower(), list(held.keys()))
+                    shrunk = 0
+                    for r in rows:
+                        b = r["bought"] or 0
+                        h = held.get(r["asset"], 0)
+                        if b > 0 and h < b * 0.95:
+                            shrunk += 1
+                    rec["assets_compared"] = len(rows)
+                    rec["unexplained_exits"] = shrunk
+                    rec["verdict"] = (
+                        f"{shrunk}/{len(rows)} held positions are BELOW "
+                        f"what he bought — exits no trade feed shows"
+                        if shrunk else
+                        "holdings match his buys — no hidden exits here")
+                else:
+                    rec["verdict"] = ("no positions returned — check the "
+                                      "endpoint shape before concluding")
+            except Exception as exc:  # noqa: BLE001 — report, never infer
+                rec["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+            out.append(rec)
+    return {"base": cfg.data_api_base, "whales": out}
+
+
 @app.get("/api/admin/whale-sell-truth",
          dependencies=[Depends(require_admin)])
 async def api_whale_sell_truth(limit: int = 500) -> dict:

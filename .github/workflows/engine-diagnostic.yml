@@ -626,6 +626,18 @@ jobs:
             /tmp/selltruth.json 2>/dev/null || true
           jq -r '.whales[0]? | "  SELLTRUTH sample_keys=\(.sample_keys // [] | join(","))"' \
             /tmp/selltruth.json 2>/dev/null || true
+          # POSITION-TRUTH: the whales we copy do not SELL — the API's
+          # own trade feed agrees. They close by merging or redeeming,
+          # neither of which is a trade. Positions are the only
+          # observable that survives that.
+          curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/postruth.json \
+               "$BASE/api/admin/whale-position-truth?top=100" || true
+          jq -r '.whales[]? |
+                 "  POSTRUTH \(.whale): positions \(.positions_returned // 0) compared \(.assets_compared // 0) hidden_exits \(.unexplained_exits // 0) — \(.verdict // .error // "?")"' \
+            /tmp/postruth.json 2>/dev/null || true
+          jq -r '.whales[0]? | "  POSTRUTH sample_keys=\(.sample_keys // [] | join(","))"' \
+            /tmp/postruth.json 2>/dev/null || true
           # RATIO: what copy ratio hits "play through the capital once a
           # day"? Computed against the flow we actually FILL, not the
           # flow that exists — the difference is ~100x and decides
