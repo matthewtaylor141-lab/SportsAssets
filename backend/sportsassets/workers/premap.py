@@ -262,6 +262,32 @@ def match_side(rows: list[dict], outcome: str | None,
             return exact[0]
         if len(exact) > 1:
             return None
+        # APOSTROPHES SPLIT ONE NAME INTO TWO SPELLINGS (2026-08-25).
+        #
+        # _norm turns punctuation into spaces, so the venue's
+        # "Christopher O'Connell" becomes "christopher o connell" while
+        # the whale feed's "Christopher OConnell" becomes "christopher
+        # oconnell". Exact equality fails on a difference that is not a
+        # difference. Measured on the live census: no_side_match is 47
+        # of 400 sampled unmapped rows (11.8%), and the very first
+        # example it printed was that exact pair.
+        #
+        # Collapsing whitespace makes both "christopheroconnell". This
+        # runs ONLY after exact equality has found nothing, and it still
+        # demands a UNIQUE hit — ambiguity refuses, as everywhere else
+        # in this function. Two different players on one market would
+        # have to collapse to the same string to cause a wrong match,
+        # and if they did, the len() != 1 guard refuses rather than
+        # picking.
+        tight = on.replace(" ", "")
+        if tight:
+            collapsed = [r for r in rows
+                         if (r.get("side_norm") or "").replace(" ", "")
+                         == tight and _lined_ok(r)]
+            if len(collapsed) == 1:
+                return collapsed[0]
+            if len(collapsed) > 1:
+                return None
         # a lined pick normalizes with its number attached
         # ("kansas city chiefs  3 5"), so also try the name alone
         base = re.sub(r"\s*\d+\s+5$", "", on).strip()
