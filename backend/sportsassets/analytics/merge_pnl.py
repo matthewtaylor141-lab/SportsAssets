@@ -95,8 +95,7 @@ def _lot_interval(o: dict) -> dict:
             "edge_verdict": v}
 
 
-def replay(fills: list[dict],
-           payouts: dict[str, list[float]] | None = None) -> dict:
+def _replay_stepper(payouts: dict[str, list[float]] | None = None):
     """Classify one whale's fills. Pure — no database, so it is testable.
 
     `fills` must be ordered (condition_id, ts, id) and carry:
@@ -198,7 +197,8 @@ def replay(fills: list[dict],
         out["cf_graded_shares"] += q
         out["cf_actual_on_graded"] += q * (exit_px - avg)
         out["cf_hold_on_graded"] += q * (po - avg)
-    for f in fills:
+    def step(f) -> None:
+        """One fill. The loop body, unchanged."""
         cid = str(f.get("condition_id") or "")
         try:
             idx = int(f.get("outcome_index") if f.get(
@@ -206,9 +206,9 @@ def replay(fills: list[dict],
             size = float(f.get("size") or 0)
             price = float(f.get("price") or 0)
         except (TypeError, ValueError):
-            continue
+            return
         if not cid or idx not in (0, 1) or size <= 0:
-            continue
+            return
         out["n_fills"] += 1
         # [shares_leg0, shares_leg1, cost_leg0, cost_leg1]
         st = per_cond.setdefault(cid, [[0.0, 0.0], [0.0, 0.0]])
@@ -224,7 +224,7 @@ def replay(fills: list[dict],
                 bal[idx] -= q
                 cost[idx] -= q * avg
                 out["n_sells"] += 1
-            continue
+            return
         # A BUY. The part that meets an opposing balance is an EXIT.
         m = min(size, bal[other])
         if m > DUST:
@@ -253,42 +253,83 @@ def replay(fills: list[dict],
             cost[idx] += entry * price
             out["entry_notional"] += entry * price
             out["n_entries"] += 1
-    for st in per_cond.values():
-        out["open_shares"] += st[0][0] + st[0][1]
-        out["open_cost"] += st[1][0] + st[1][1]
-    for k in ("entry_notional", "merge_shares", "realized_merge_pnl",
-              "realized_sell_pnl", "open_shares", "open_cost",
-              "cf_closed_shares", "cf_graded_shares", "cf_ungraded_shares",
-              "cf_actual_on_graded", "cf_hold_on_graded"):
-        out[k] = round(out[k], 2)
-    # EXIT VALUE: what the exits themselves were worth, on the shares
-    # where both worlds can be priced. Positive means exiting beat
-    # holding to resolution.
-    out["exit_value"] = round(
-        out["cf_actual_on_graded"] - out["cf_hold_on_graded"], 2)
-    # THE INTERVAL ON HIS OWN EDGE.
-    #
-    # Same ratio estimator the copy sleeve is judged by, so "is this
-    # whale profitable" and "are we profitable" are answered on one
-    # scale and can be compared directly.
-    out.update(_lot_interval(out))
-    out["cf_coverage"] = (
-        round(out["cf_graded_shares"] / out["cf_closed_shares"], 4)
-        if out["cf_closed_shares"] > 0 else None)
-    if payouts is not None and out["cf_ungraded_shares"] > 0:
-        out["cf_note"] = (
-            f"{out['cf_ungraded_shares']:.0f} of "
-            f"{out['cf_closed_shares']:.0f} closed shares have no known "
-            f"payout and are EXCLUDED from the comparison, not counted "
-            f"as losses")
-    out["realized_total"] = round(
-        out["realized_merge_pnl"] + out["realized_sell_pnl"], 2)
-    out["roi_on_entries"] = (
-        round(out["realized_total"] / out["entry_notional"], 4)
-        if out["entry_notional"] > 0 else None)
-    out["rows"] = sorted(out["rows"], key=lambda r: r["pnl"])[:5] + \
-        sorted(out["rows"], key=lambda r: -r["pnl"])[:5]
-    return out
+    def finish() -> dict:
+        """Summarise. Called once, after the last fill."""
+        for st in per_cond.values():
+            out["open_shares"] += st[0][0] + st[0][1]
+            out["open_cost"] += st[1][0] + st[1][1]
+        for k in ("entry_notional", "merge_shares", "realized_merge_pnl",
+                  "realized_sell_pnl", "open_shares", "open_cost",
+                  "cf_closed_shares", "cf_graded_shares", "cf_ungraded_shares",
+                  "cf_actual_on_graded", "cf_hold_on_graded"):
+            out[k] = round(out[k], 2)
+        # EXIT VALUE: what the exits themselves were worth, on the shares
+        # where both worlds can be priced. Positive means exiting beat
+        # holding to resolution.
+        out["exit_value"] = round(
+            out["cf_actual_on_graded"] - out["cf_hold_on_graded"], 2)
+        # THE INTERVAL ON HIS OWN EDGE.
+        #
+        # Same ratio estimator the copy sleeve is judged by, so "is this
+        # whale profitable" and "are we profitable" are answered on one
+        # scale and can be compared directly.
+        out.update(_lot_interval(out))
+        out["cf_coverage"] = (
+            round(out["cf_graded_shares"] / out["cf_closed_shares"], 4)
+            if out["cf_closed_shares"] > 0 else None)
+        if payouts is not None and out["cf_ungraded_shares"] > 0:
+            out["cf_note"] = (
+                f"{out['cf_ungraded_shares']:.0f} of "
+                f"{out['cf_closed_shares']:.0f} closed shares have no known "
+                f"payout and are EXCLUDED from the comparison, not counted "
+                f"as losses")
+        out["realized_total"] = round(
+            out["realized_merge_pnl"] + out["realized_sell_pnl"], 2)
+        out["roi_on_entries"] = (
+            round(out["realized_total"] / out["entry_notional"], 4)
+            if out["entry_notional"] > 0 else None)
+        out["rows"] = sorted(out["rows"], key=lambda r: r["pnl"])[:5] + \
+            sorted(out["rows"], key=lambda r: -r["pnl"])[:5]
+        return out
+
+    return step, finish
+
+
+
+def replay(fills, payouts: dict[str, list[float]] | None = None) -> dict:
+    """Classify one whale's fills. Pure — no database, so it is testable.
+
+    See _replay_stepper for the arithmetic and the counterfactual.
+    """
+    step, finish = _replay_stepper(payouts)
+    for f in fills:
+        step(f)
+    return finish()
+
+
+async def replay_stream(fills, payouts=None) -> dict:
+    """replay() over an ASYNC iterable, holding ONE ROW at a time.
+
+    replay() takes a list because a test hands it one. Production must
+    not build that list: swisstony alone has 283,748 fills, and seven
+    whales of dicts is several hundred megabytes on a ~512MB container.
+
+    My first "streaming" version replaced pool.fetch with a server-side
+    cursor and then appended every row to a list anyway — the same peak
+    memory with more machinery — and the API went on dying. The probe
+    read rss_mb 1133.8 and EVERY admin endpoint returned 502: PROOF,
+    MERGE, SHORT-TRUTH, MEMCENSUS, UNMAPPED. The instruments meant to
+    prove profitability could not answer because of the query behind
+    them.
+
+    Both forms drive the SAME stepper. Two implementations of one
+    replay is how they drift, and this arithmetic is what the entire
+    roster is graded on.
+    """
+    step, finish = _replay_stepper(payouts)
+    async for f in fills:
+        step(f)
+    return finish()
 
 
 async def whale_merge_pnl(pool: Any, whales: list[str],
@@ -342,94 +383,97 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
                    else _dt.datetime.fromisoformat(str(since)).date())
     res: dict[str, Any] = {}
     for w in whales:
-        # STREAMED, NOT MATERIALISED. This endpoint returned 502 on
-        # 2026-08-25 at an API RSS of ~545MB: seven whales at up to
-        # 600,000 fills each, every row turned into a dict and held in
-        # a list before the replay even started. swisstony alone has
-        # 283,748 fills. The replay is a single forward pass and never
-        # needs the second row while looking at the first.
-        #
-        # A server-side cursor inside a transaction hands them over in
-        # batches, so peak memory is the batch and not the book. replay
-        # already consumes an iterable, so nothing about the arithmetic
-        # changes — this is the same walk, not a second one.
-        fills = []
-        n_read = 0
-        conds: set[str] = set()
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                if since_d is None:
-                    cur = await conn.cursor(
-                        """
-                        SELECT t.condition_id, t.outcome_index, t.side,
-                               t.size::float8 AS size,
-                               t.price::float8 AS price
-                          FROM trades t JOIN whales wh
-                            ON wh.id = t.whale_id
-                         WHERE lower(wh.username) = $1
-                           AND t.condition_id IS NOT NULL
-                           AND t.outcome_index IS NOT NULL
-                         ORDER BY t.condition_id, t.ts, t.id
-                        """, w.lower())
-                else:
-                    cur = await conn.cursor(
-                        """
-                        SELECT t.condition_id, t.outcome_index, t.side,
-                               t.size::float8 AS size,
-                               t.price::float8 AS price
-                          FROM trades t JOIN whales wh
-                            ON wh.id = t.whale_id
-                         WHERE lower(wh.username) = $1
-                           AND t.ts >= $2
-                           AND t.condition_id IS NOT NULL
-                           AND t.outcome_index IS NOT NULL
-                         ORDER BY t.condition_id, t.ts, t.id
-                        """, w.lower(), since_d)
-                while n_read < max_fills:
-                    batch = await cur.fetch(min(5000, max_fills - n_read))
-                    if not batch:
-                        break
-                    for r in batch:
-                        d = dict(r)
-                        fills.append(d)
-                        if d.get("condition_id"):
-                            conds.add(str(d["condition_id"]))
-                    n_read += len(batch)
-        rows = fills
-        # THE PAYOUTS, FOR THE CONDITIONS THIS WHALE ACTUALLY TOUCHED.
-        #
-        # Fetched by explicit condition list rather than a join on the
-        # fills query, so a market missing from `markets` cannot drop
-        # his fill from the replay. A resolution we do not have has to
-        # read as "unknown payout" — which the replay excludes and
-        # reports — and never as "this fill did not happen".
-        conds = sorted(conds)
+        # PAYOUTS FIRST, BY SUBQUERY. Collecting the condition ids
+        # from the fills was the other reason a full pass had to be
+        # materialised; the database can answer it without us holding
+        # a single row.
         payouts: dict[str, list[float]] = {}
         cf_error: str | None = None
-        if conds:
-            try:
+        _sub = ("SELECT DISTINCT t.condition_id FROM trades t "
+                "JOIN whales wh ON wh.id = t.whale_id "
+                "WHERE lower(wh.username) = $1 "
+                "  AND t.condition_id IS NOT NULL")
+        try:
+            if since_d is None:
                 prows = await pool.fetch(
-                    "SELECT condition_id, resolved_prices FROM markets "
-                    "WHERE condition_id = ANY($1::text[]) "
-                    "  AND COALESCE(resolved, false) = true "
-                    "  AND resolved_prices IS NOT NULL", conds)
-                for pr in prows:
-                    v = pr["resolved_prices"]
-                    if isinstance(v, str):
-                        try:
-                            v = _json.loads(v)
-                        except ValueError:
-                            continue
-                    if isinstance(v, (list, tuple)):
-                        payouts[str(pr["condition_id"])] = list(v)
-            except Exception as exc:  # noqa: BLE001
-                # No counterfactual rather than a WRONG one. An empty
-                # payout map would silently grade every exit as if it
-                # were unresolved, which reads as 0% coverage — visibly
-                # nothing, not quietly something.
-                payouts = {}
-                cf_error = f"payout lookup failed: {type(exc).__name__}"
-        out = replay(fills, payouts)
+                    "SELECT m.condition_id, m.resolved_prices FROM markets m "
+                    " WHERE COALESCE(m.resolved, false) = true "
+                    "   AND m.resolved_prices IS NOT NULL "
+                    f"   AND m.condition_id IN ({_sub})", w.lower())
+            else:
+                prows = await pool.fetch(
+                    "SELECT m.condition_id, m.resolved_prices FROM markets m "
+                    " WHERE COALESCE(m.resolved, false) = true "
+                    "   AND m.resolved_prices IS NOT NULL "
+                    f"   AND m.condition_id IN ({_sub} AND t.ts >= $2)",
+                    w.lower(), since_d)
+            for pr in prows:
+                v = pr["resolved_prices"]
+                if isinstance(v, str):
+                    try:
+                        v = _json.loads(v)
+                    except ValueError:
+                        continue
+                if isinstance(v, (list, tuple)):
+                    payouts[str(pr["condition_id"])] = list(v)
+        except Exception as exc:  # noqa: BLE001
+            # No counterfactual rather than a WRONG one.
+            payouts = {}
+            cf_error = f"payout lookup failed: {type(exc).__name__}"
+
+        # ACTUALLY STREAMED THIS TIME.
+        #
+        # The previous version used a server-side cursor and then
+        # appended every row to a list — the same peak memory with more
+        # machinery. The probe read rss_mb 1133.8 and every admin
+        # endpoint returned 502.
+        #
+        # replay_stream walks this generator and holds one batch.
+        _seen: set[str] = set()
+        _n = [0]
+
+        async def _rows():
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    if since_d is None:
+                        cur = await conn.cursor(
+                            "SELECT t.condition_id, t.outcome_index, t.side, "
+                            "       t.size::float8 AS size, "
+                            "       t.price::float8 AS price "
+                            "  FROM trades t JOIN whales wh "
+                            "    ON wh.id = t.whale_id "
+                            " WHERE lower(wh.username) = $1 "
+                            "   AND t.condition_id IS NOT NULL "
+                            "   AND t.outcome_index IS NOT NULL "
+                            " ORDER BY t.condition_id, t.ts, t.id",
+                            w.lower())
+                    else:
+                        cur = await conn.cursor(
+                            "SELECT t.condition_id, t.outcome_index, t.side, "
+                            "       t.size::float8 AS size, "
+                            "       t.price::float8 AS price "
+                            "  FROM trades t JOIN whales wh "
+                            "    ON wh.id = t.whale_id "
+                            " WHERE lower(wh.username) = $1 "
+                            "   AND t.ts >= $2 "
+                            "   AND t.condition_id IS NOT NULL "
+                            "   AND t.outcome_index IS NOT NULL "
+                            " ORDER BY t.condition_id, t.ts, t.id",
+                            w.lower(), since_d)
+                    while _n[0] < max_fills:
+                        batch = await cur.fetch(min(5000,
+                                                    max_fills - _n[0]))
+                        if not batch:
+                            break
+                        for r in batch:
+                            _n[0] += 1
+                            if r["condition_id"]:
+                                _seen.add(str(r["condition_id"]))
+                            yield r
+
+        out = await replay_stream(_rows(), payouts)
+        n_read = _n[0]
+        conds = _seen
         # The error belongs to THIS WHALE'S result, not to a sibling key
         # in the whale map. A "_errors" entry beside the whales reads as
         # an eighth whale to every caller that iterates the map — the
@@ -439,7 +483,7 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
             out["cf_error"] = cf_error
         out["conditions_touched"] = len(conds)
         out["conditions_resolved"] = len(payouts)
-        out["fills_read"] = len(rows)
+        out["fills_read"] = n_read
         out["window"] = ("whole book" if since_d is None
                          else f"fills on or after {since_d}")
         if since_d is not None:
@@ -449,7 +493,7 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
                 "as a fresh entry — realised P&L is understated and the "
                 "ROI denominator inflated. Pass since=None for the "
                 "whole book.")
-        out["truncated"] = len(rows) >= max_fills
+        out["truncated"] = n_read >= max_fills
         if out["truncated"]:
             out["verdict_note"] = (
                 f"TRUNCATED at {max_fills} fills — this is a partial "

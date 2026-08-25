@@ -504,9 +504,18 @@ class TestTheQueryCannotFabricateCoverage:
         import inspect
 
         src = inspect.getsource(mp.whale_merge_pnl)
-        assert "ANY($1::text[])" in src, \
-            "payouts are fetched by explicit condition list, not joined"
+        # The payout lookup is a SUBQUERY now, not an explicit id list:
+        # collecting the condition ids from the fills was the other
+        # reason a full pass had to be materialised, and materialising
+        # is what took the API to 1,133MB and 502'd every endpoint.
+        # What matters is unchanged — the fills are not INNER JOINed to
+        # markets, so a market row we lack cannot drop his fill from
+        # the replay; it reads as an unknown payout, which the
+        # counterfactual excludes and reports.
+        assert "SELECT DISTINCT t.condition_id FROM trades t" in src
         assert "resolved, false) = true" in src
+        assert "JOIN markets" not in src.split("async def _rows")[1], \
+            "the fills query must not join markets"
 
     def test_a_failed_payout_lookup_yields_NO_counterfactual(self):
         import inspect
@@ -654,7 +663,7 @@ class TestTheWhalesOwnEdgeGetsAnInterval:
         compute a variance is not available."""
         import inspect
 
-        src = inspect.getsource(mp.replay)
+        src = inspect.getsource(mp._replay_stepper)
         assert "lot_ss" in src and "lot_ps" in src
         r = mp.replay(self._book(50, lambda i: 0.55))
         assert "lots_list" not in r and "lot_rows" not in r
@@ -761,3 +770,107 @@ class TestThePreWindowPositionWasBookedAsAnEntry:
         src = inspect.getsource(an.publish_whale_benchmark)
         assert "whale_merge_pnl(pool, list(COPY_WHALES), None)" in src
         assert "2026-08-01" not in src
+
+
+class TestItActuallyStreamsThisTime:
+    """The first "streaming" version replaced pool.fetch with a
+    server-side cursor and then appended every row to a list — the same
+    peak memory with more machinery. It shipped described as streamed,
+    and the API went on dying:
+
+        22:42:54  rss_mb 1133.8
+        PROOFHTTP code=502   MERGEHTTP code=502   SHORTHTTP code=502
+        MEMCENSUS unreadable   UNMAPPED unreadable
+
+    Every instrument built today to prove profitability was answering
+    502 because of the query behind it. swisstony alone has 283,748
+    fills; seven whales of dicts is several hundred megabytes on a
+    ~512MB container."""
+
+    def test_no_list_of_fills_is_built(self):
+        import inspect
+
+        src = inspect.getsource(mp.whale_merge_pnl)
+        assert "fills.append" not in src
+        assert "fills = []" not in src
+
+    def test_the_rows_come_from_an_async_generator(self):
+        import inspect
+
+        src = inspect.getsource(mp.whale_merge_pnl)
+        assert "async def _rows()" in src
+        assert "yield r" in src
+        assert "await replay_stream(_rows()" in src
+
+    def test_the_payouts_no_longer_need_the_fills(self):
+        """Collecting condition ids from a materialised pass was the
+        other reason the whole book had to be held."""
+        import inspect
+
+        src = inspect.getsource(mp.whale_merge_pnl)
+        i = src.index("async def _rows()")
+        assert "SELECT DISTINCT t.condition_id" in src[:i], \
+            "payouts must be resolved BEFORE the stream begins"
+
+    def test_both_forms_drive_the_SAME_stepper(self):
+        """Two implementations of one replay is how they drift, and
+        this arithmetic is what the entire roster is graded on."""
+        import inspect
+
+        for fn in (mp.replay, mp.replay_stream):
+            assert "_replay_stepper(payouts)" in inspect.getsource(fn)
+
+    def test_the_streaming_form_agrees_with_the_pure_one(self):
+        import asyncio
+
+        fills = [
+            {"condition_id": "a", "outcome_index": 0, "side": "BUY",
+             "size": 100.0, "price": 0.40},
+            {"condition_id": "a", "outcome_index": 1, "side": "BUY",
+             "size": 100.0, "price": 0.30},
+            {"condition_id": "b", "outcome_index": 1, "side": "BUY",
+             "size": 250.0, "price": 0.62},
+            {"condition_id": "b", "outcome_index": 0, "side": "BUY",
+             "size": 90.0, "price": 0.31},
+            {"condition_id": "c", "outcome_index": 0, "side": "BUY",
+             "size": 40.0, "price": 0.15},
+            {"condition_id": "c", "outcome_index": 0, "side": "SELL",
+             "size": 40.0, "price": 0.55},
+        ]
+        pay = {"a": [0.0, 1.0], "b": [1.0, 0.0], "c": [1.0, 0.0]}
+
+        async def _gen():
+            for f in fills:
+                yield f
+
+        a = mp.replay(fills, pay)
+        b = asyncio.run(mp.replay_stream(_gen(), pay))
+        assert a == b
+
+    def test_the_fill_COUNT_comes_from_the_stream_not_a_list(self):
+        import inspect
+
+        src = inspect.getsource(mp.whale_merge_pnl)
+        assert 'out["fills_read"] = n_read' in src
+        assert "len(rows)" not in src
+
+    def test_a_SELL_still_ends_that_fill(self):
+        """The loop body became a per-fill function, so every `continue`
+        had to become `return`. A missed one would fall through into
+        the BUY branch and double-book the fill."""
+        fills = [
+            {"condition_id": "c", "outcome_index": 0, "side": "BUY",
+             "size": 100.0, "price": 0.40},
+            {"condition_id": "c", "outcome_index": 0, "side": "SELL",
+             "size": 40.0, "price": 0.70},
+        ]
+        r = mp.replay(fills)
+        assert r["n_sells"] == 1
+        assert r["n_entries"] == 1, "the SELL must not also book an entry"
+        assert r["n_merges"] == 0
+        assert r["realized_sell_pnl"] == pytest.approx(12.0)
+
+    def test_an_unparseable_fill_is_skipped_not_partially_booked(self):
+        r = mp.replay([{"condition_id": "c", "outcome_index": 0,
+                        "side": "BUY", "size": "x", "price": 0.4}])
+        assert r["n_fills"] == 0 and r["n_entries"] == 0
