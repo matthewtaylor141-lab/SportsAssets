@@ -135,3 +135,29 @@ class TestTheFirstActiveCycleIsBounded:
         found = [(f"a{i}", 0.5) for i in range(62)]
         assert len(found[:we.MAX_EXITS_PER_CYCLE]) == we.MAX_EXITS_PER_CYCLE
         assert len(found) - we.MAX_EXITS_PER_CYCLE == 52
+
+class TestItIsActuallyRegistered:
+    """A worker that is not in LOOPS never runs, and nothing complains.
+
+    Twice tonight a correct fix landed where execution never arrives —
+    the sizing clamp in a dead branch, the archive filter behind a stale
+    snapshot. Both looked complete in the diff. This asserts the
+    detector is wired into the supervised loop set, read from source
+    because the module graph needs optional deps this environment
+    lacks.
+    """
+
+    def test_whale_exits_is_in_the_supervised_loops(self):
+        from pathlib import Path
+
+        src = Path(we.__file__).with_name("all.py").read_text()
+        assert '("whale_exits", whale_exits.main)' in src
+        assert "whale_exits" in src.split("LOOPS")[0], \
+            "it must also be imported, not only referenced"
+
+    def test_the_loop_is_supervised_and_restarts(self):
+        from pathlib import Path
+
+        src = Path(we.__file__).with_name("all.py").read_text()
+        assert "async def supervise(" in src
+        assert "RESTART_DELAY_SECONDS" in src

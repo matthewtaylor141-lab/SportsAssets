@@ -558,6 +558,12 @@ jobs:
              /tmp/status.json 2>/dev/null || true
 
           echo "KALSHI CRYPTO LEG (owner order 2026-08-21):"
+          # WHALE-EXIT DETECTOR: is the new worker actually cycling?
+          # first_snapshots on the first pass by design; exits after.
+          jq -r '(.services // .heartbeats // {}) | to_entries[]
+                 | select(.key | test("whale_exit"))
+                 | "  WHALEEXIT \(.value.detail // .value | tostring | .[0:200]) at \(.value.at // "?")"' \
+             /tmp/status.json 2>/dev/null || true
           jq -r '.detail.kalshi_crypto // {} |
                  "  KCRYPTO seen \(.seen // 0) placed \(.placed // 0) filled \(.filled // 0) contracts \(.contracts // 0) deployed $\(.deployed_usd // 0) fees $\(.fees_usd // 0) halted \(.halted // false) err \(.last_error // "none")"' \
              /tmp/status.json 2>/dev/null || true
