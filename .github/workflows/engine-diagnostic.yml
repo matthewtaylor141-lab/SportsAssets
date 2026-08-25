@@ -738,6 +738,25 @@ jobs:
             /tmp/proof.json 2>/dev/null || true
           jq -r '"  PROOF cohort_start=\(.cohort_start // "n/a")"' \
             /tmp/proof.json 2>/dev/null || true
+          # PRICEFID — "same or better price", measured at last.
+          #
+          # The status page's slippage median is (fill_price -
+          # his_price), which is LONG-ONLY math: on a short, fill_price
+          # names the long leg, so that difference read ~66 cents of
+          # slippage on six fills that actually BEAT his price by 12.
+          # This scores every fill on what it really cost —
+          # fill_price for a long, 1-fill_price for a short — and
+          # reports the DISTRIBUTION, because the median hides the tail
+          # and the tail is where the money is.
+          jq -r '.price_fidelity.overall // {} |
+                 "  PRICEFID \(.at_or_better // 0)/\(.n // 0) at his price or better (\(.at_or_better_share // "n/a")) | median \(.median_edge_cents // "n/a")c p10 \(.p10_edge_cents // "n/a")c worst \(.worst_edge_cents // "n/a")c | $\(.dollar_edge_vs_his_price // 0) vs his price on $\(.deployed // 0) deployed (\(.edge_per_100_deployed // "n/a") per $100)"' \
+            /tmp/proof.json 2>/dev/null || echo "  PRICEFID unavailable"
+          jq -r '.price_fidelity.by_whale // {} | to_entries[]
+                 | "  PRICEFID-W \(.key): \(.value.at_or_better // 0)/\(.value.n // 0) better, median \(.value.median_edge_cents // "n/a")c, $\(.value.dollar_edge_vs_his_price // 0)"' \
+            /tmp/proof.json 2>/dev/null || true
+          jq -r '.price_fidelity.overall // {} | select(.unmeasurable > 0)
+                 | "  PRICEFID-GAP \(.unmeasurable) fills could not be scored (missing his price or ours) — NOT counted as neutral"' \
+            /tmp/proof.json 2>/dev/null || true
 
           # UNMAPPED — WHY the biggest bucket fails, attributed.
           #

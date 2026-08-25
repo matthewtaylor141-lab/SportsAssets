@@ -4594,6 +4594,17 @@ async def admin_proof(since: str = "", target: float = 0.0) -> dict:
         o["n_needed_at_target"] = need
         o["n_still_needed"] = max(0, (need or 0) - o["n"])
     out["benchmark"] = bench
+    # PRICE FIDELITY — the owner's other stated requirement, "same or
+    # better price", which had no instrument until now. It belongs on
+    # this page because it is the half of the strategy engineering can
+    # actually move: the whales' edge is theirs, and what we control is
+    # how much of it survives our execution.
+    try:
+        from ..analytics.price_fidelity import cohort_fidelity
+
+        out["price_fidelity"] = await cohort_fidelity(pool, start)
+    except Exception as exc:  # noqa: BLE001
+        out["price_fidelity"] = {"error": type(exc).__name__}
     # THE ALL-TIME NUMBER STAYS ON THE PAGE. Showing only the clean
     # cohort would be the same move as choosing the cutoff quietly:
     # the contaminated history is the reason a cohort exists, so it is
