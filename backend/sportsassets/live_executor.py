@@ -172,6 +172,106 @@ _HALT_ON_VALUES = {"on", "1", "true", "yes", "halt", "halted", "stop"}
 ASK_GUARD_SINCE = "2026-08-25T02:20:00"
 
 
+# A scale-out smaller than this is not worth crossing a spread for —
+# the fee and the half-spread eat a 2% trim. Above it we follow him.
+MIN_EXIT_FRAC = float(os.environ.get("LIVE_MIN_EXIT_FRAC", "0.10"))
+# At or above this he is treated as fully out, and so are we. Below it
+# the position stays open with the remainder still tracked.
+FULL_EXIT_FRAC = float(os.environ.get("LIVE_FULL_EXIT_FRAC", "0.95"))
+
+
+async def _release_exit_claim(pool, row_id: int) -> None:
+    """Hand a claimed row back when the exit did not happen.
+
+    Every refusal after the atomic claim must come through here. A row
+    left in 'exiting' is invisible to the settlement sweep (which
+    targets 'filled') and blocked from re-entry — a position stranded
+    by a guard doing its job is still a stranded position.
+    """
+    try:
+        await pool.execute(
+            "UPDATE live_orders SET status='filled' "
+            "WHERE id=$1 AND status='exiting'", row_id)
+    except Exception:  # noqa: BLE001 — never mask the original refusal
+        log.exception("could not release exit claim on row %s", row_id)
+
+
+async def classify_exit(pool, asset: str, whale: str,
+                        size: float) -> dict | None:
+    """Is this "buy" actually the whale CLOSING a position?
+
+    Owner, 2026-08-25, after reading Polymarket's global microdata:
+    "shorts, in the context of this data, means selling."
+
+    The venue holds ONE SIGNED net position per market. There is no way
+    to be long and short the same market at once — so buying the
+    complementary leg of something you already hold does not open a
+    second bet, it retires the first, share for share. That is why
+    these whales show 860,669 buys and zero sells: the exits were never
+    missing from the feed, they were sitting in it wearing a BUY label.
+
+    Until now this path did worse than miss them. execute_copy tested
+    `side == "BUY"` and handed a complement buy to maybe_execute, which
+    sized a fresh clip and bought the leg he was ABANDONING. Our
+    exposure to the original outcome did not fall to zero, it went to
+    2x — his leg we never close, plus the opposite leg at a price that
+    necessarily sums to about 1.00 with his entry. Every exit he made
+    cost us twice.
+
+    Three refusals, all fail-closed, because misreading an entry as an
+    exit SELLS a position we meant to hold:
+
+      * exactly ONE sibling token, or refuse. Multi-outcome markets and
+        negative-risk baskets have no single complement, and an
+        unenriched token has none at all. Guessing is not available.
+      * he must actually HOLD the sibling. No holding means this is a
+        genuine new bet on the other side, not a close.
+      * the fraction is capped at 1.0. A buy larger than his holding is
+        an exit of everything plus a new entry; we mirror the exit part
+        and let the entry go.
+
+    The fraction needs no price conversion: a complement share retires a
+    held share one for one, so his closed fraction is a pure ratio of
+    share counts. That is what makes it safe to compute on the fast
+    path — one indexed local join, no venue call, sub-millisecond.
+    """
+    if not asset or not whale:
+        return None
+    try:
+        sibs = await pool.fetch(
+            "SELECT s.token_id FROM market_tokens mt "
+            "JOIN market_tokens s USING (condition_id) "
+            "WHERE mt.token_id = $1 AND s.token_id <> $1", asset)
+    except Exception:  # noqa: BLE001 — a lookup failure is not an exit
+        return None
+    if not sibs or len(sibs) != 1:
+        return None
+    sibling = str(sibs[0]["token_id"])
+    try:
+        his = await pool.fetchrow(
+            "SELECT COALESCE(sum(t.size) FILTER (WHERE t.side='BUY'), 0)"
+            "::float8 "
+            "     - COALESCE(sum(t.size) FILTER (WHERE t.side='SELL'), 0)"
+            "::float8 AS open_sh "
+            "FROM trades t JOIN whales w ON w.id = t.whale_id "
+            "WHERE t.asset = $1 AND lower(w.username) = $2",
+            sibling, whale)
+    except Exception:  # noqa: BLE001
+        return None
+    open_sh = float((his["open_sh"] if his else 0) or 0.0)
+    if open_sh <= 0:
+        return None
+    try:
+        qty = float(size or 0)
+    except (TypeError, ValueError):
+        return None
+    if qty <= 0:
+        return None
+    return {"asset": sibling, "exit_via_asset": asset,
+            "closed_frac": min(1.0, qty / open_sh),
+            "his_open_shares": open_sh, "his_exit_shares": qty}
+
+
 async def mirror_exit(payload: dict) -> None:
     """The whale sold. Sell our copy of the same market.
 
@@ -249,42 +349,96 @@ async def mirror_exit(payload: dict) -> None:
         if bought <= 0:
             return
         closed_frac = min(sold / bought, 1.0)
-    if closed_frac < 0.95:
-        log.info("MIRROR-EXIT partial skipped: %s closed %.0f%% of %s "
-                 "(v1 mirrors full exits only)",
-                 username, closed_frac * 100, asset)
+    # PROPORTIONAL, BOTH LEGS (owner order 2026-08-25: "copy buys and
+    # 'sells' in the correct proportional relationship").
+    #
+    # v1 mirrored only 95%+ exits and skipped the rest, because partial
+    # accounting is where errors compound. The compounding risk is real
+    # but the fix is not to discard the information: a partial that is
+    # skipped leaves us holding a position he has already reduced,
+    # which is the exact divergence this whole path exists to close.
+    #
+    # So we sell his fraction of OUR holding, and the row bookkeeping
+    # below keeps the remainder alive rather than retiring the whole
+    # position on a partial sale.
+    if closed_frac < MIN_EXIT_FRAC:
+        log.info("MIRROR-EXIT below floor: %s closed %.1f%% of %s "
+                 "(floor %.0f%%) — not worth a spread crossing",
+                 username, closed_frac * 100, asset, MIN_EXIT_FRAC * 100)
         return
     from . import pmus
 
     us_slug = row["us_market_slug"]
-    held, _avg = await _pm_held(us_slug)
-    qty = min(int(row["qty"]), held)
-    if qty <= 0:
-        return  # the venue says we hold nothing to sell
-    bid = await asyncio.to_thread(pmus.slug_bid, us_slug)
+    # ATOMIC CLAIM. Five complement fills inside one second spawn five
+    # execute_copy tasks, and mirror_exit runs outside _COPY_SEM — so
+    # without this every one of them reads the same 'filled' row and
+    # every one issues a sell. Exactly one caller gets a row back here.
+    claimed = await pool.fetchval(
+        "UPDATE live_orders SET status='exiting' "
+        "WHERE id=$1 AND status='filled' RETURNING id", row["id"])
+    if claimed is None:
+        log.info("MIRROR-EXIT %s already claimed by another task", us_slug)
+        return
+    try:
+        held, _avg = await _pm_held(us_slug)
+        ours = min(int(row["qty"]), held)
+        # His fraction OF OUR position — the proportional relationship.
+        qty = int(ours * closed_frac)
+        if closed_frac >= FULL_EXIT_FRAC:
+            qty = ours          # he is out; so are we, to the share
+        if qty <= 0:
+            await _release_exit_claim(pool, row["id"])
+            return  # the venue says we hold nothing worth selling
+        bid = await asyncio.to_thread(pmus.slug_bid, us_slug)
+    except Exception:
+        await _release_exit_claim(pool, row["id"])
+        raise
     if bid is None or not (0 < bid < 1):
+        # slug_bid returns None on the whole aec- family. Refusing here
+        # is right — selling blind is worse than holding — but it means
+        # the exit is DEFERRED, not abandoned, so the claim must go back
+        # or the position is stranded in 'exiting' forever.
         log.warning("MIRROR-EXIT no bid for %s — leaving the position "
                     "rather than selling blind", us_slug)
+        await _release_exit_claim(pool, row["id"])
         return
     limit = sell_limit_price(bid)
-    result = await asyncio.to_thread(
-        pmus.submit_fok, us_slug, limit, qty, True,
-        "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+    try:
+        result = await asyncio.to_thread(
+            pmus.submit_fok, us_slug, limit, qty, True,
+            "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+    except Exception:
+        await _release_exit_claim(pool, row["id"])
+        raise
     filled = float(result.get("filled_shares") or 0)
     px = result.get("fill_price")
     if not (result.get("ok") and filled > 0):
         log.warning("MIRROR-EXIT unfilled %s: %s", us_slug,
                     str(result.get("raw"))[:160])
+        await _release_exit_claim(pool, row["id"])
         return
     entry = row["entry"] or 0
     pnl = round((float(px) - entry) * filled, 4) if px else None
-    await pool.execute(
-        "UPDATE live_orders SET status='cashed_out', pnl=$2, "
-        "settled_at=now() WHERE id=$1", row["id"], pnl)
-    log.warning("MIRROR-EXIT %s %s: sold %d @ %.3f (entry %.3f) pnl %.2f "
-                "— following his %.0f%% exit", username, us_slug,
-                int(filled), float(px or limit), entry, pnl or 0,
-                closed_frac * 100)
+    # PARTIAL EXITS MUST NOT RETIRE THE WHOLE POSITION. Writing
+    # 'cashed_out' after selling a fraction would orphan the remainder:
+    # the settlement sweep targets status='filled', so the shares we
+    # still hold would never be graded, and copy_sweep's blocking list
+    # would stop us re-entering a market we are still in.
+    remaining = max(0, int(row["qty"]) - int(filled))
+    if remaining > 0 and closed_frac < FULL_EXIT_FRAC:
+        await pool.execute(
+            "UPDATE live_orders SET status='filled', "
+            "filled_shares=$2, pnl=COALESCE(pnl,0)+$3 WHERE id=$1",
+            row["id"], remaining, pnl or 0)
+    else:
+        await pool.execute(
+            "UPDATE live_orders SET status='cashed_out', pnl=$2, "
+            "settled_at=now() WHERE id=$1", row["id"], pnl)
+    log.warning("MIRROR-EXIT %s %s: sold %d of %d @ %.3f (entry %.3f) "
+                "pnl %.2f — mirroring his %.1f%% exit, %d left",
+                username, us_slug, int(filled), int(row["qty"]),
+                float(px or limit), entry, pnl or 0,
+                closed_frac * 100, remaining)
 
 
 async def overspend_halt(pool) -> Any:
@@ -798,6 +952,47 @@ def is_short_intent(intent: str | None) -> bool:
     return "SHORT" in (intent or "").upper()
 
 
+# THE SHORT COST MODEL IS NOT CONFIRMED, SO IT DOES NOT ARM ITSELF.
+#
+# I argued to the owner that the SDK settled this: CreateOrderParams
+# carries no token id, therefore one market, one ladder, therefore short
+# is a book-level SELL costing (1 - price) x qty. An adversarial read of
+# the SDK took that apart, and I checked it myself:
+#
+#   * polymarket_us/types/markets.py MarketDetail has ZERO occurrences
+#     of marketSides — and this repo reads marketSides SEVENTEEN times
+#     in pmus.py alone, against a venue that demonstrably returns it.
+#     The stubs are provably incomplete, so a field's absence from them
+#     is not evidence the venue lacks it.
+#   * pmus.event_board (pmus.py:291-296) already treats each side's
+#     `identifier` as its own orderable slug WITH ITS OWN `price`, and
+#     side_ask reads that side's own bestAsk. A per-side price plainly
+#     exists here. "There is no second ladder" is contradicted by code
+#     in this repository.
+#
+# The arithmetic still fits — six of six at or under authorisation, one
+# to the cent — but a fit is not a mechanism, and the same six rows fit
+# "we were filled on the opposite leg at its own ask" too, because that
+# ask is approximately the complement.
+#
+# So the model is written, tested, and DISARMED. It applies only when
+# LIVE_SHORT_COST_MODEL=confirmed, which is set after the venue's own
+# order.side on those rows says ORDER_SIDE_SELL. Until then a short
+# costs what a long costs, which is the arithmetic that has always
+# governed the rows we actually book.
+#
+# This matters because flipping LIVE_ALLOW_SHORT would otherwise arm an
+# unproven cost model at the same moment it re-opens the trade class —
+# two unverified changes riding one switch.
+def short_model_confirmed() -> bool:
+    return os.environ.get(
+        "LIVE_SHORT_COST_MODEL", "").strip().lower() == "confirmed"
+
+
+def _use_short_math(intent: str | None) -> bool:
+    return is_short_intent(intent) and short_model_confirmed()
+
+
 def wire_limit(limit: float, intent: str | None) -> float:
     """The price to put ON THE WIRE for `limit` of our own money.
 
@@ -833,7 +1028,7 @@ def wire_limit(limit: float, intent: str | None) -> float:
     """
     import math
 
-    if not is_short_intent(intent):
+    if not _use_short_math(intent):
         return limit
     return math.ceil(round((1.0 - limit) * 100, 6)) / 100.0
 
@@ -867,7 +1062,7 @@ def fill_cash(filled_shares: float, fill_price: float | None,
     px = float(fill_price or 0)
     if px <= 0 or filled_shares <= 0:
         return 0.0
-    per = (1.0 - px) if is_short_intent(intent) else px
+    per = (1.0 - px) if _use_short_math(intent) else px
     return round(filled_shares * per, 2)
 
 
@@ -1418,16 +1613,27 @@ def sell_limit_price(bid: float, min_price: float | None = None) -> float:
 async def _pm_held(us_slug: str) -> tuple[int, float | None]:
     """(held whole contracts, avg cost) for one US market, from the
     venue's OWN positions payload — the account is the referee for what
-    can be sold, exactly as it is for no-stack on the buy side."""
+    can be sold, exactly as it is for no-stack on the buy side.
+
+    SIGNED, AND THE SIGN IS THE POSITION (2026-08-25). netPosition is
+    signed on this venue: a short is NEGATIVE. `qty <= 0` therefore read
+    every short we hold as "nothing here", which made a short position
+    unsellable by mirror_exit and invisible to the no-stack referee —
+    a pricing bug converted into permanently stranded inventory.
+
+    The MAGNITUDE is what can be closed, in either direction. `expired`
+    still returns nothing, because an expired market cannot be traded
+    whatever the sign says.
+    """
     from .api.pmus_account import _amt, _fetch_all_positions_sync
 
     positions = await asyncio.wait_for(
         asyncio.to_thread(_fetch_all_positions_sync), timeout=30)
     p = (positions or {}).get(us_slug) or {}
-    qty = _amt(p.get("netPosition"))
+    qty = abs(_amt(p.get("netPosition")))
     if qty <= 0 or p.get("expired"):
         return 0, None
-    cost = _amt(p.get("cost"))
+    cost = abs(_amt(p.get("cost")))
     return int(qty), (round(cost / qty, 4) if cost > 0 else None)
 
 
@@ -1827,6 +2033,43 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         return
 
     pool = await get_pool()
+    # THE COMPLEMENT-BUY EXIT (2026-08-25, owner-confirmed against
+    # Polymarket's global microdata).
+    #
+    # On a signed-net venue, buying the other leg of a market you
+    # already hold retires the holding share for share. These whales
+    # exit that way exclusively — 860,669 buys, zero sells — so every
+    # exit arrives labelled BUY. Before this, the label was taken at
+    # face value and the exit was copied as a fresh ENTRY on the side he
+    # was LEAVING. That is not a missed copy, it is a doubled one: his
+    # leg we never close, plus the opposite leg at a price summing to
+    # ~1.00 with his entry. Every exit he made cost us twice.
+    #
+    # It sits HERE, not in execute_copy, for two reasons that are not
+    # style. First, `pool` already exists at this line, so classifying
+    # adds no connection acquisition to the copy path — the first
+    # version called get_pool() in execute_copy and added 105 SECONDS of
+    # connect-retry to a path that had never needed a pool, which the
+    # reaction-stamp test caught by reading 135s where it expected 30s.
+    # Second, this is after the staleness gate and inside the
+    # semaphore, so a classified exit is measured with the same latency
+    # accounting as an entry instead of quietly preceding it.
+    #
+    # classify_exit refuses unless the market has exactly ONE sibling
+    # token AND he demonstrably holds it. Everything else falls through
+    # to the entry path untouched.
+    _exit = await classify_exit(
+        pool, str(payload.get("asset") or ""),
+        (payload.get("whale_username") or "").lower(),
+        payload.get("size") or 0)
+    if _exit:
+        log.warning("EXIT-CLASSIFIED %s bought %s to close %.1f%% of %s "
+                    "— mirroring the exit, not the entry",
+                    payload.get("whale_username"),
+                    _exit["exit_via_asset"],
+                    _exit["closed_frac"] * 100, _exit["asset"])
+        await mirror_exit({**payload, **_exit, "side": "SELL"})
+        return
     # OVERSPEND BREAKER (2026-08-25). Tripped by the post-fill detector
     # the first time the venue charges more than we authorized. Placed
     # at the first point `pool` exists, still ahead of sizing, pricing

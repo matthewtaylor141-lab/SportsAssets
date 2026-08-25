@@ -3,16 +3,32 @@
 Owner, 2026-08-25, after checking Polymarket's global microdata:
 "It is the mechanism. This has been our biggest leak."
 
-THE VENUE SHAPE (polymarket_us/types/orders.py):
-  * CreateOrderParams takes marketSlug and intent and carries NO token
-    or asset id. There is ONE market and ONE price ladder — you cannot
-    name a "short token" because none exists.
-  * Order carries `side` (ORDER_SIDE_BUY/SELL) but CreateOrderParams
-    does not. `side` is returned, never sent: the venue DERIVES it from
-    the intent.
-
-That is a futures contract. Going short is SELLING it, `price`
+THE MODEL UNDER TEST: going short is SELLING the contract, `price`
 denominates the contract, and a short ties up (1 - price) x qty.
+
+IT IS NOT CONFIRMED, AND THESE TESTS ARM IT DELIBERATELY.
+
+I originally argued the SDK settled it: CreateOrderParams carries no
+token id, therefore one market, one ladder, therefore short is a sell.
+I put that to the owner as established. It is not sound:
+
+  * polymarket_us/types/markets.py MarketDetail has ZERO occurrences of
+    `marketSides` — a field the venue demonstrably returns and pmus.py
+    reads seventeen times. The stubs are partial, so absence from them
+    is evidence of nothing.
+  * pmus.event_board already treats each side's `identifier` as its own
+    orderable slug WITH ITS OWN price, and side_ask reads that side's
+    own bestAsk. A per-side price exists here. "No second ladder" is
+    contradicted by code we ship.
+
+The arithmetic below still fits six of six. But the same six also fit
+"we were filled on the opposite leg at its own ask", because that ask
+is approximately the complement — a fit is not a mechanism.
+
+So the model ships DISARMED behind LIVE_SHORT_COST_MODEL=confirmed,
+which is set only once the venue's own order.side on those rows reads
+ORDER_SIDE_SELL. These tests exercise the model, so the fixture arms
+it; TestTheGateHoldsWhenUnconfirmed covers the shipped default.
 
 TWO CONSEQUENCES, and they are different bugs:
 
@@ -33,7 +49,18 @@ authorised, one exact to the cent, worst overage $0.00 across all six.
 
 import inspect
 
+import pytest
+
 from sportsassets import live_executor as le
+
+
+@pytest.fixture(autouse=True)
+def _arm_short_model(monkeypatch):
+    """The short cost model is DISARMED by default in production —
+    see live_executor.short_model_confirmed. These tests exercise the
+    model itself, so they arm it explicitly. test_short_model_gate
+    covers the disarmed behaviour."""
+    monkeypatch.setenv("LIVE_SHORT_COST_MODEL", "confirmed")
 
 LONG = "ORDER_INTENT_BUY_LONG"
 SHORT = "ORDER_INTENT_BUY_SHORT"
@@ -165,3 +192,41 @@ class TestItIsWiredIntoTheMoneyPath:
         short fills."""
         src = inspect.getsource(le.maybe_execute)
         assert src.index("spent = fill_cash(") < src.index("is_overspend(")
+
+
+class TestTheGateHoldsWhenUnconfirmed:
+    """The shipped default. An unproven cost model must not arm itself,
+    and above all must not arm as a side effect of flipping the OTHER
+    switch — re-opening the short trade class and changing how a short
+    is costed are two separate decisions with two separate proofs."""
+
+    def test_the_short_math_is_off_without_the_flag(self, monkeypatch):
+        monkeypatch.delenv("LIVE_SHORT_COST_MODEL", raising=False)
+        assert not le.short_model_confirmed()
+        assert le.wire_limit(0.22, SHORT) == 0.22
+        assert le.fill_cash(1136, 0.78, SHORT) == 886.08
+
+    def test_only_the_exact_word_arms_it(self, monkeypatch):
+        for val in ("", "1", "true", "yes", "on", "probably", "CONFIRMED?"):
+            monkeypatch.setenv("LIVE_SHORT_COST_MODEL", val)
+            assert not le.short_model_confirmed(), val
+
+    def test_the_word_is_confirmed(self, monkeypatch):
+        monkeypatch.setenv("LIVE_SHORT_COST_MODEL", "confirmed")
+        assert le.short_model_confirmed()
+
+    def test_allowing_shorts_does_not_arm_the_cost_model(self, monkeypatch):
+        """The specific coupling this gate exists to prevent."""
+        monkeypatch.delenv("LIVE_SHORT_COST_MODEL", raising=False)
+        monkeypatch.setenv("LIVE_ALLOW_SHORT", "on")
+        assert not le.short_model_confirmed()
+        assert le.wire_limit(0.22, SHORT) == 0.22
+
+    def test_longs_are_unaffected_either_way(self, monkeypatch):
+        for val in (None, "confirmed"):
+            if val is None:
+                monkeypatch.delenv("LIVE_SHORT_COST_MODEL", raising=False)
+            else:
+                monkeypatch.setenv("LIVE_SHORT_COST_MODEL", val)
+            assert le.wire_limit(0.45, LONG) == 0.45
+            assert le.fill_cash(100, 0.45, LONG) == 45.0

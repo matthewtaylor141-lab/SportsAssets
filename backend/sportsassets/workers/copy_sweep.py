@@ -104,9 +104,28 @@ async def sweep_once() -> dict:
           -- are retryable: a mapper fix must be able to revisit the same
           -- open positions, so only this trade-id's own audit row blocks
           -- (maybe_execute's ON CONFLICT would no-op it silently).
+          -- 'cashed_out' and 'exiting' BELONG HERE (2026-08-25). The
+          -- list decides what counts as "already taken". Without those
+          -- two, every position mirror_exit closes reads as untaken on
+          -- the next pass and the sweep BUYS IT BACK — at whatever the
+          -- market has moved to, undoing the exit we just followed him
+          -- out of, and doing it hourly.
+          --
+          -- It bites specifically because the sweep picks the NEWEST
+          -- trade per asset (DISTINCT ON ... ORDER BY t.ts DESC) while
+          -- maybe_execute's never-add check returns BEFORE inserting a
+          -- row for a duplicate buy — so the trade it re-candidates is
+          -- precisely the one with no audit row of its own to block it.
+          --
+          -- This is the stale-sweep re-entry only. A genuinely FRESH
+          -- buy after his exit is his re-entry, which the owner wants
+          -- copied ("then he re-enters at $60"), and that path is
+          -- untouched.
           AND NOT EXISTS (SELECT 1 FROM live_orders lo
                           WHERE lo.asset = t.asset
-                            AND lo.status IN ('submitting','filled','settled')
+                            AND lo.status IN ('submitting','filled',
+                                              'settled','cashed_out',
+                                              'exiting')
                             -- Manual-desk rows are invisible to the
                             -- autonomous paths (owner 2026-08-07).
                             AND COALESCE(lo.whale_username, '') <> 'manual')

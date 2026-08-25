@@ -4321,19 +4321,38 @@ async def api_short_truth(days: int = 7) -> dict:
     pool = await get_pool()
     rows = await pool.fetch(
         """
-        SELECT id, us_market_slug, intent,
+        -- live_orders HAS NO `intent` COLUMN. The first version of this
+        -- query selected and filtered on one, so it raised
+        -- UndefinedColumnError and 500'd on every call — which the
+        -- probe reported as the uninformative "SHORTTRUTH unavailable".
+        -- The intent lives in the venue blob, and the already-working
+        -- read of it is the JSON path below (app.py:3430-3432 uses the
+        -- same one).
+        SELECT id, us_market_slug,
+               COALESCE(raw #>> '{response,executions,0,order,intent}',
+                        raw #>> '{preview,intent}')        AS intent,
                round(limit_price, 4)::float8   AS lim,
                round(requested_usd, 2)::float8 AS req_usd,
                round(filled_shares, 2)::float8 AS qty,
                round(fill_price, 4)::float8    AS fill_px,
                round(filled_usd, 2)::float8    AS booked_usd,
+               -- Which keys the venue actually returned on the order.
+               -- Without this, "side is absent" and "we read the wrong
+               -- path" look identical, and the endpoint's own
+               -- no-verdict branch depends on telling them apart.
+               (SELECT string_agg(k, ',' ORDER BY k)
+                  FROM jsonb_object_keys(
+                       COALESCE(raw #> '{response,executions,0,order}',
+                                '{}'::jsonb)) AS k)        AS order_keys,
                CASE WHEN jsonb_typeof(raw #> '{response,executions}')
                          = 'array'
                     THEN raw #> '{response,executions}'
                     ELSE '[]'::jsonb END       AS executions
           FROM live_orders
          WHERE placed_at > now() - interval '1 day' * $1
-           AND COALESCE(intent, '') LIKE '%SHORT%'
+           AND COALESCE(
+                 raw #>> '{response,executions,0,order,intent}',
+                 raw #>> '{preview,intent}', '') LIKE '%SHORT%'
            AND COALESCE(filled_shares, 0) > 0
          ORDER BY placed_at DESC
          LIMIT 50
@@ -4371,6 +4390,7 @@ async def api_short_truth(days: int = 7) -> dict:
             "venue_side": venue_side,
             "venue_cash_order_qty": venue_cash,
             "venue_avg_px": venue_avg,
+            "order_keys": r["order_keys"],
         })
 
     named = [r for r in out if r["venue_side"]]

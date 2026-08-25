@@ -77,17 +77,43 @@ class TestTheTwoCostModels:
 
 
 class TestTheSDKShapeIsWhatMakesThisPlausible:
-    def test_a_create_order_names_no_token(self):
-        """If you could name a short TOKEN, the long model would be the
-        natural reading. You cannot — there is only marketSlug."""
-        from polymarket_us.types import orders as o
+    def test_the_stubs_are_incomplete_so_absence_proves_nothing(self):
+        """RETRACTED ASSERTION.
 
-        params = getattr(o, "CreateOrderParams").__annotations__
-        assert "marketSlug" in params and "intent" in params
-        for token_field in ("assetId", "tokenId", "instrumentId", "side"):
-            assert token_field not in params, (
-                f"{token_field} is settable — the one-book reading is "
-                f"wrong and this whole model needs revisiting")
+        This test used to read: CreateOrderParams has no assetId, so
+        you cannot name a short token, so there is one ladder, so short
+        must be a sell. I put that argument to the owner as settled.
+        It is not sound, and the disproof is in this repo.
+
+        The SDK's MarketDetail has ZERO occurrences of `marketSides` —
+        a field the venue demonstrably returns and pmus.py reads
+        seventeen times. The stubs are partial. A field's absence from
+        them is not evidence the venue lacks it, which is exactly what
+        the retracted assertion treated it as.
+
+        Worse for the old reading: pmus.event_board already takes each
+        side's `identifier` as its own orderable slug WITH ITS OWN
+        price, and side_ask reads that side's own bestAsk. A per-side
+        price exists here. "No second ladder" was contradicted by code
+        we ship.
+
+        The test now pins the reason the argument fails, so nobody
+        rebuilds it.
+        """
+        from polymarket_us.types import markets as m
+
+        assert "marketSides" not in getattr(
+            m, "MarketDetail").__annotations__, (
+            "if the stub gains marketSides this retraction needs "
+            "revisiting — but so does everything built on it")
+
+        import inspect as _i
+
+        from sportsassets import pmus
+
+        assert _i.getsource(pmus).count("marketSides") > 10, (
+            "the venue sends a field the SDK never declares — that is "
+            "the whole point")
 
     def test_side_is_returned_not_sent(self):
         from polymarket_us.types import orders as o

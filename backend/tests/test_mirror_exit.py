@@ -85,13 +85,49 @@ class TestItCannotSellWhatWeDoNotHold:
         assert "sell_limit_price(bid)" in inspect.getsource(le.mirror_exit)
 
 
-class TestPartialExitsAreSkippedNotGuessed:
-    def test_the_threshold_is_explicit(self):
-        assert "closed_frac < 0.95" in inspect.getsource(le.mirror_exit)
+class TestPartialExitsAreNowMirroredProportionally:
+    """v1 skipped anything under 95% because partial accounting is where
+    errors compound. Owner order 2026-08-25: "copy buys and 'sells' in
+    the correct proportional relationship."
 
-    def test_a_partial_is_logged_rather_than_silently_dropped(self):
+    Skipping a partial is not neutral — it leaves us holding a position
+    he has already reduced, which is the exact divergence this path
+    exists to close. So we now sell HIS fraction OF OUR holding, and the
+    row bookkeeping keeps the remainder alive instead of retiring the
+    whole position on a partial sale."""
+
+    def test_there_is_a_floor_but_it_is_not_a_full_exit_gate(self):
         src = inspect.getsource(le.mirror_exit)
-        assert "MIRROR-EXIT partial skipped" in src
+        assert "closed_frac < MIN_EXIT_FRAC" in src
+        assert le.MIN_EXIT_FRAC < 0.5, (
+            "a floor that only admits near-total exits is the v1 "
+            "behaviour wearing a new name")
+
+    def test_the_floor_exists_so_dust_trims_do_not_cross_a_spread(self):
+        assert 0 < le.MIN_EXIT_FRAC <= 0.25
+
+    def test_our_quantity_is_his_fraction_of_our_position(self):
+        src = inspect.getsource(le.mirror_exit)
+        assert "qty = int(ours * closed_frac)" in src
+
+    def test_a_full_exit_closes_everything_to_the_share(self):
+        """Rounding a 99% exit down would leave a permanent dust
+        position that nothing ever revisits."""
+        src = inspect.getsource(le.mirror_exit)
+        assert "closed_frac >= FULL_EXIT_FRAC" in src
+        assert "qty = ours" in src
+
+    def test_a_partial_sale_does_not_retire_the_whole_row(self):
+        """'cashed_out' after selling a fraction orphans the remainder:
+        the settlement sweep targets status='filled', so the shares we
+        still hold would never be graded."""
+        src = inspect.getsource(le.mirror_exit)
+        assert "remaining = max(0, int(row[\"qty\"]) - int(filled))" in src
+        assert "SET status='filled', " in src
+
+    def test_a_partial_is_logged_with_what_is_left(self):
+        src = inspect.getsource(le.mirror_exit)
+        assert "%d left" in src
 
     def test_the_fraction_comes_from_his_whole_ledger(self):
         """Not from the one sell row — a scale-out across several fills
