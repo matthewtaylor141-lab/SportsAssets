@@ -140,7 +140,17 @@ class TestSubmitCarriesTheIntent:
     def _client(self, seen):
         class _Orders:
             def preview(self, params):
-                return {"order": {}}
+                # The venue states the cost it intends to charge. An
+                # EMPTY preview is no longer treated as agreement
+                # (2026-08-25 fail-closed fix) — echo the request's own
+                # price*qty so these tests exercise the INTENT path
+                # rather than tripping the cost guard.
+                px = float((params.get("request") or params)
+                           .get("price", {}).get("value", 0) or 0)
+                qty = float((params.get("request") or params)
+                            .get("quantity") or 0)
+                return {"order": {"price": {"value": px},
+                                  "quantity": qty}}
 
             def create(self, params):
                 seen.append(params)

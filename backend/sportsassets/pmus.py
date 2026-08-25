@@ -1185,13 +1185,27 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
             {"request": {k: v for k, v in params.items()
                          if k != "synchronousExecution"}})
         prev_order = (preview or {}).get("order") or {}
-        prev_cost = _order_cost(prev_order, default=expected_cost)
+        prev_cost = _order_cost(prev_order)
+        # FAIL CLOSED (2026-08-25). An unreadable preview is not
+        # agreement — it is the absence of a second opinion on a real
+        # order, and it is exactly the state in which the overspend got
+        # through. Refuse and let the row record why.
+        if prev_cost is None:
+            return {"ok": False, "order_id": None,
+                    "status": "preview_unreadable",
+                    "fill_price": None, "filled_shares": 0.0,
+                    "raw": {"preview": preview,
+                            "expected_cost": expected_cost,
+                            "why": "venue preview stated no cost; "
+                                   "refusing rather than assuming it "
+                                   "agrees with ours"}}
         if prev_cost > expected_cost * PREVIEW_COST_TOLERANCE:
             return {"ok": False, "order_id": None,
                     "status": "preview_mismatch",
                     "fill_price": None, "filled_shares": 0.0,
                     "raw": {"preview": preview,
-                            "expected_cost": expected_cost}}
+                            "expected_cost": expected_cost,
+                            "venue_cost": prev_cost}}
 
     resp = client.orders.create(params)
     order_id = (resp or {}).get("id")
@@ -1226,13 +1240,29 @@ def _amount_value(a: Any) -> float:
         return 0.0
 
 
-def _order_cost(order: dict, default: float) -> float:
+def _order_cost(order: dict, default: float | None = None) -> float | None:
+    """The venue's OWN cost for a previewed order, or None if it did not
+    state one.
+
+    THIS USED TO FAIL OPEN (2026-08-25). The signature was
+    `_order_cost(order, default=expected_cost)`, so a preview carrying
+    no readable cost returned OUR number — and the caller's guard,
+    `prev_cost > expected_cost * TOLERANCE`, compared expected against
+    expected and passed. The single control positioned to catch a
+    venue charging more than we authorized was silently inert whenever
+    the venue said least. Five fills took 1.15x-3.87x the clip through
+    it.
+
+    None now means "the venue did not tell us", which is not the same
+    as "it agrees with us", and the caller must refuse on it."""
     cash = _amount_value(order.get("cashOrderQty"))
     if cash > 0:
         return cash
     px = _amount_value(order.get("price"))
     qty = float(order.get("quantity") or 0)
-    return px * qty if px and qty else default
+    if px and qty:
+        return px * qty
+    return default
 
 
 def probe() -> dict:
