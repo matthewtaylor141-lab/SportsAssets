@@ -614,6 +614,8 @@ jobs:
           jq -r '.rows[]? |
                  "  RCPT \(.placed_at) \(.whale) \(.slug) lim=\(.limit_price) req=$\(.requested_usd)/\(.requested_shares)sh filled=$\(.filled_usd)/\(.filled_shares)sh@\(.fill_price) ordersOnMkt=\(.orders_on_market) execs=\(.n_executions) maxPx=\(.exec_max_px // "none") pnl=\(.pnl // "?")",
                  "       VERDICT: \(.verdict)",
+                 "       SIDE: \(.side_verdict // "?")",
+                 "       venue_sides: \(.venue_sides // [] | tostring | .[0:220])",
                  (.executions[]? | "       exec \(.type // "?") \(.shares)sh @ \(.px // "?") ident=\(.ident // {} | tostring) keys=\(.keys // [] | join(","))")' \
             /tmp/receipts.json 2>/dev/null || true
           jq -r '"  enabled(api env): \(.enabled // .config.enabled // "?")  paused: \(.paused // "?")",

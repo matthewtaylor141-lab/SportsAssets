@@ -3697,6 +3697,60 @@ async def api_overspend_receipts(hours: int = 48) -> dict:
         else:
             d["verdict"] = (f"execution at {mx} ABOVE limit {lim} — the "
                             "venue charged more than authorized")
+        # WHICH SIDE DID WE ASK FOR, AND WHICH DID WE GET? (2026-08-25)
+        #
+        # order.price echoes back the price WE sent (0.22) while the
+        # fill lands at 0.78 — exactly 1-0.22. The venue did not
+        # reinterpret our number; it recorded our order at 0.22 and
+        # filled us on the instrument trading at 0.78. That is the
+        # OPPOSITE SIDE, not a pricing convention.
+        #
+        # If that is right, the bug is in the INTENT we derive, not in
+        # the price we send, and it is the original wrong-side incident
+        # still live. The side echo cannot see it because it re-derives
+        # the intent with the SAME logic and agrees with itself.
+        #
+        # So ask the venue directly: which side carries the outcome we
+        # copied, and what is its `long` flag? Compare that to the
+        # intent we actually sent. A disagreement is the whole answer.
+        try:
+            from .. import pmus as _pmus
+
+            m = await asyncio.to_thread(
+                _pmus._get_client().markets.retrieve_by_slug, d["slug"])
+            sides = ((m or {}).get("market") or {}).get("marketSides") or []
+            d["venue_sides"] = [
+                {"desc": str(sd.get("description"))[:40],
+                 "long": sd.get("long"),
+                 "price": sd.get("price")}
+                for sd in sides if isinstance(sd, dict)][:4]
+            sent = (d.get("executions") or [{}])[0].get(
+                "ident", {}).get("order.intent") or ""
+            want_long = sent.endswith("BUY_LONG")
+            # The side whose price matches what we authorized is the
+            # side we MEANT to buy.
+            lim = d.get("limit_price")
+            meant = None
+            for sd in d["venue_sides"]:
+                try:
+                    if lim and abs(float(sd["price"]) - float(lim)) <= 0.06:
+                        meant = sd
+                except (TypeError, ValueError):
+                    continue
+            if meant is not None and meant.get("long") is not None:
+                d["side_verdict"] = (
+                    f"we authorized {lim}; the side priced near that is "
+                    f"'{meant['desc']}' with long={meant['long']}; we "
+                    f"sent {sent or '?'} — "
+                    + ("AGREES"
+                       if bool(meant["long"]) == want_long else
+                       "INVERTED: we bought the opposite side"))
+            else:
+                d["side_verdict"] = (
+                    "no venue side is priced near our limit — cannot "
+                    "attribute; do not infer")
+        except Exception as exc:  # noqa: BLE001 — report, never infer
+            d["side_verdict"] = f"unreadable: {type(exc).__name__}"
         out.append(d)
     return {"hours": hours, "n": len(out), "rows": out}
 
