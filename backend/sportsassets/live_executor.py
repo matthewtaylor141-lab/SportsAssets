@@ -103,6 +103,43 @@ async def execute_copy(payload: dict) -> None:
         log.exception("copy execution failed for trade %s", payload.get("id"))
 
 
+# EMERGENCY HALT — CONFIRMED OVERSPEND ON PROBABLE WRONG SIDE
+# (2026-08-25 00:50Z). The fill forensics deployed minutes earlier
+# returned five rows where the venue took 1.15x-3.87x the authorized
+# clip. The share count matched our request EXACTLY every time; the
+# FILL PRICE did not:
+#
+#   req 1086sh @0.23 -> filled 1086sh @0.89   $249.78 -> $966.54
+#   req  781sh @0.32 -> filled  781sh @0.6853 $249.92 -> $535.22
+#   req  675sh @0.37 -> filled  675sh @0.65   $249.75 -> $438.75
+#   req  555sh @0.45 -> filled  555sh @0.56   $249.75 -> $310.80
+#   req  520sh @0.48 -> filled  520sh @0.55   $249.60 -> $286.00
+#
+# An IOC buy cannot fill above its limit. Each fill price sits near the
+# COMPLEMENT of ours (1-0.32=0.68 vs 0.6853; 1-0.45=0.55 vs 0.56) —
+# the signature of landing on the opposite side of the market. That is
+# the 2026-08-23 wrong-side incident, still live, on a whale the side
+# echo had reported ok.
+#
+# Two controls should have stopped this and did not:
+#   - the per-fill clip bounds requested_usd, never what the venue takes
+#   - submit_fok's preview cost guard compares against _order_cost(...,
+#     default=expected_cost), so an unreadable preview compares equal
+#     and passes. A money guard that fails OPEN.
+#
+# Copying is OFF until the side/price mechanism is understood and the
+# preview guard fails closed. This is a tightening, reversible with
+# LIVE_COPY_HALT=off once the cause is proven — not before.
+COPY_HALT_REASON = (
+    "halted 2026-08-25: confirmed overspend to 3.87x the authorized "
+    "clip at complement prices (probable wrong side) — copying is off "
+    "pending root cause")
+
+
+def copy_halted() -> bool:
+    return os.getenv("LIVE_COPY_HALT", "on").strip().lower() != "off"
+
+
 # THE VERIFIED-PROFITABLE SET — ONE DEFINITION (2026-08-25).
 #
 # Two gates ask this same question: the verified-only gate and the
@@ -1438,6 +1475,12 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     # an operator disabled copying. Every copy crosses this function;
     # the switch belongs here.
     if not cfg.copy_probe_enabled:
+        return
+    # EMERGENCY HALT rides the same common gate as the master kill, for
+    # the same reason: the reclaim path reaches maybe_execute directly.
+    # Fail-closed by default — see COPY_HALT_REASON.
+    if copy_halted():
+        log.warning("LIVE refused: %s", COPY_HALT_REASON)
         return
     venue = active_venue()
     if venue is None:
