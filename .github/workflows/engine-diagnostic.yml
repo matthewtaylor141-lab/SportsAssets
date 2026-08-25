@@ -378,16 +378,24 @@ jobs:
                -o /tmp/mapa.json "$BASE/api/admin/mapping-audit?days=3" || true
           jq -r '.rows[]? | select(.status == "settled") | "  MAPA \(.pnl)  \(.whale)  pick=\(.pick)  slug=\(.us_slug)"' /tmp/mapa.json 2>/dev/null | head -60 || true
           jq -r '.rows[]? | select(.status == "rejected") | "  MAPA-Q \(.whale)  pick=\(.pick)  \(.error)"' /tmp/mapa.json 2>/dev/null | head -25 || true
-          # FIDELITY STREAK (owner resume gate 2026-08-24): of recently
-          # audited copy signals, how many resolved through the PREMAP
-          # lane vs the legacy resolvers? The premap count is the
-          # number the resume decision waits on — it must be climbing
-          # before the lever flips.
+          # REFUSED-BY-CLASS (corrected 2026-08-25). This counts the
+          # mapping class of REJECTED rows only — src= appears in the
+          # refusal reason, and an ADMITTED premap resolution writes no
+          # error at all, so it is invisible here BY CONSTRUCTION.
+          # It was previously labelled "FIDELITY ... premap=" and
+          # documented as the climbing number the resume waits on. It
+          # can never climb: premap=0 means "no premap row was
+          # REFUSED", which is what success looks like. That reading
+          # cost real time on 2026-08-24 — it was taken as "the premap
+          # lane resolves nothing" while two whales were filling
+          # through it. `passed` is the denominator that makes the
+          # counts legible.
           jq -r '([.rows[]? | select((.error // "") | test("src=premap"))] | length) as $p
                  | ([.rows[]? | select((.error // "") | test("src=exact"))] | length) as $e
                  | ([.rows[]? | select((.error // "") | test("src=fuzzy"))] | length) as $f
-                 | "  FIDELITY premap=\($p)  exact=\($e)  fuzzy=\($f)  (of \((.rows // []) | length) audited)"' \
-            /tmp/mapa.json 2>/dev/null || echo "  FIDELITY unavailable"
+                 | ([.rows[]? | select((.status // "") != "rejected")] | length) as $ok
+                 | "  REFUSED-BY-CLASS premap=\($p)  exact=\($e)  fuzzy=\($f)  passed=\($ok)  (of \((.rows // []) | length) audited; premap=0 means none REFUSED, not none resolved)"' \
+            /tmp/mapa.json 2>/dev/null || echo "  REFUSED-BY-CLASS unavailable"
 
           # ── venue-truth restatement status (owner emergency 2026-08-23:
           # settlement was graded by the whale's token; rescore rewrites

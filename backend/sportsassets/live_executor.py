@@ -103,6 +103,28 @@ async def execute_copy(payload: dict) -> None:
         log.exception("copy execution failed for trade %s", payload.get("id"))
 
 
+# THE VERIFIED-PROFITABLE SET — ONE DEFINITION (2026-08-25).
+#
+# Two gates ask this same question: the verified-only gate and the
+# premap-live allowlist. They carried SEPARATE hard-coded defaults, and
+# on 2026-08-24 they drifted: swisstony was certified on TRUEEDGE-FAST,
+# his hold was lifted and he was added to the verified set — but the
+# premap allowlist still named only the original two whales. The result
+# was a whale reported as "resumed" who could not place an order,
+# refused by an allowlist nobody had updated. A certification decision
+# must land in ONE place.
+#
+# Both gates still exist and still run independently; they just cannot
+# disagree about who has been certified. Each stays overridable by its
+# own env var for a deliberate, asymmetric change.
+VERIFIED_PROFITABLE_DEFAULT = "homerunhazard,0x076daa87,swisstony"
+
+
+def _whale_set(env_name: str) -> set[str]:
+    raw = os.getenv(env_name, VERIFIED_PROFITABLE_DEFAULT)
+    return {w.strip() for w in raw.lower().split(",") if w.strip()}
+
+
 def overspend_ratio(requested_usd: float, filled_shares: float,
                     fill_price: float | None) -> float | None:
     """How much of the AUTHORIZED clip a fill actually consumed.
@@ -1823,11 +1845,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # (+11,895). swisstony is verified but HELD below, pending
             # his paper cohort at the new sub-second detection — the two
             # gates answer different questions and must stay separate.
-            _verified_env = os.getenv(
-                "LIVE_VERIFIED_WHALES",
-                "homerunhazard,0x076daa87,swisstony")
-            _verified = {w.strip() for w in _verified_env.lower().split(",")
-                         if w.strip()}
+            _verified = _whale_set("LIVE_VERIFIED_WHALES")
             if _verified and username not in _verified:
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 "
@@ -1907,10 +1925,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # swisstony joins via env (no code change) the moment his
             # paper cohort at the new sub-second detection grades
             # positive; everyone else stays refused-but-recorded.
-            _allowed = {w.strip() for w in
-                        os.getenv("LIVE_PREMAP_WHALES",
-                                  "homerunhazard,0x076daa87")
-                        .lower().split(",") if w.strip()}
+            _allowed = _whale_set("LIVE_PREMAP_WHALES")
             _premap_ok = False
             if _q_on and mapping_src == "premap" and username in _allowed:
                 _pl_env = os.getenv("LIVE_PREMAP", "")
