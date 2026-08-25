@@ -651,6 +651,18 @@ jobs:
           jq -r '.sizing_24h // [] | .[] |
                  "  SIZING \(.whale): n24 \(.n_24h) unf \(.unfilled_24h // 0) rej \(.rejected_24h // 0) avg_req $\(.avg_req // "?") avg_filled $\(.avg_filled // "?") max_req $\(.max_req // "?") deployed24 $\(.deployed_24h // 0)"' \
             /tmp/live.json 2>/dev/null || true
+          # COPYQUEUE — our OWN latency, which was never measured.
+          # A copy rejected as "stale-signal" may have been fresh on
+          # arrival and aged entirely waiting for one of four semaphore
+          # slots, each held through three sequential venue round trips.
+          # max_wait_s is the number that says whether the cap is the
+          # bottleneck; it is deliberately measured before it is raised,
+          # because widening throughput also lets more orders clear the
+          # day-room check before any of them lands.
+          jq -r '.[]? | select(.service == "copy_sweep") | .detail.copy_queue
+                 | "  COPYQUEUE n=\(.n // 0) concurrency=\(.concurrency // "?") avg=\(.avg_wait_s // 0)s max=\(.max_wait_s // 0)s"' \
+            /tmp/hb_we.json 2>/dev/null || echo "  COPYQUEUE unavailable"
+
           # MERGEPNL — the whale numbers with their exits included.
           #
           # Every prior whale grade was settlement-only, which cannot

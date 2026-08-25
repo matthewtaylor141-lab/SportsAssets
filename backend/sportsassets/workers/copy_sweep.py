@@ -208,8 +208,23 @@ async def sweep_once() -> dict:
         "  AND status IN ('unfilled', 'error', 'rejected') "
         "  AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog') "
         "GROUP BY status")
+    # QUEUE WAIT rides the sweep's heartbeat rather than getting a
+    # worker of its own. It is the copy path's own latency — time a
+    # detected trade spent waiting for a semaphore slot — and it was
+    # invisible, so a copy rejected as "stale-signal" could not be told
+    # apart from one that arrived late. It counts against the staleness
+    # cap either way, which makes it the first number to look at before
+    # touching any timeout.
+    from ..live_executor import _COPY_CONCURRENCY, _QUEUE_STATS
+
+    _n = _QUEUE_STATS["n"] or 0
     return {"candidates": len(rows), "attempted": attempted,
             "deferred_to_next_pass": deferred,
+            "copy_queue": {
+                "n": _n, "concurrency": _COPY_CONCURRENCY,
+                "avg_wait_s": (round(_QUEUE_STATS["total_s"] / _n, 3)
+                               if _n else 0.0),
+                "max_wait_s": round(_QUEUE_STATS["max_s"], 3)},
             "retryable_48h": {r["status"]: r["n"] for r in failed}}
 
 

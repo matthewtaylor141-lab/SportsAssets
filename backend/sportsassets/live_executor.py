@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 
 import asyncpg
 from datetime import datetime, timezone
@@ -51,7 +52,22 @@ PAUSE_KEY = "live_trading_paused"
 # this semaphore is what still keeps a burst from firing unbounded
 # concurrent mapping/preview/create calls at the venue, which was
 # Cloudflare-throttled once already (polymarket_us.py page pacing note).
-_COPY_SEM = asyncio.Semaphore(4)
+# COPY CONCURRENCY. Four slots, each held through mapping plus three
+# sequential venue round trips, was a throughput cap masquerading as a
+# safety control — it is neither a per-order cap, a daily cap nor a dup
+# guard, and the only thing it bounded was how fast we could react.
+#
+# It is env-tunable so the ceiling can be raised against MEASURED queue
+# wait (see _QUEUE_STATS / the QUEUE probe line) rather than a guess.
+# The default is deliberately unchanged until that measurement exists:
+# raising it means more orders can clear the day-room check before any
+# of them lands, and that check reads a running total. Widening
+# throughput and widening a money gate must not happen in one step.
+_COPY_CONCURRENCY = max(1, int(os.environ.get("LIVE_COPY_CONCURRENCY", "4")))
+_COPY_SEM = asyncio.Semaphore(_COPY_CONCURRENCY)
+# Rolling queue-wait, surfaced on the heartbeat. n/total/max, never
+# reset, so a burst hours ago still shows in the max.
+_QUEUE_STATS: dict = {"n": 0, "total_s": 0.0, "max_s": 0.0}
 # Held while the FIRST real fill is unverified — see the first-fill gate
 # in maybe_execute.
 _FIRST_FILL_LOCK = asyncio.Lock()
@@ -84,7 +100,33 @@ async def execute_copy(payload: dict) -> None:
             return
         if payload.get("side") != "BUY":
             return
+        # QUEUE WAIT IS OUR OWN LATENCY, AND IT WAS INVISIBLE.
+        #
+        # reaction is stamped INSIDE the semaphore, which is right — the
+        # staleness gate must judge the moment the order fires. But it
+        # means a copy rejected as "stale-signal" may have been fresh on
+        # arrival and aged entirely in OUR queue: four slots, each held
+        # through mapping plus three sequential venue round trips
+        # (side_ask, preview, create). Under a burst from the highest-
+        # flow whale on the roster, rows age past a 15s cap waiting for
+        # a slot we never widened.
+        #
+        # Nothing distinguished "he was slow to reach us" from "we sat
+        # on it". You cannot cut what you cannot see, so the wait is
+        # measured before anything else changes.
+        _queued_at = time.monotonic()
         async with _COPY_SEM:
+            queue_wait = round(time.monotonic() - _queued_at, 3)
+            if queue_wait > float(
+                    os.environ.get("COPY_QUEUE_WARN_S", "1.0")):
+                log.warning("COPY-QUEUE waited %.2fs for a slot (%d in "
+                            "flight) — this counts against the staleness "
+                            "cap and it is our delay, not his",
+                            queue_wait, _COPY_CONCURRENCY)
+            _QUEUE_STATS["n"] += 1
+            _QUEUE_STATS["total_s"] += queue_wait
+            if queue_wait > _QUEUE_STATS["max_s"]:
+                _QUEUE_STATS["max_s"] = queue_wait
             # Reaction is stamped and the ceiling judged INSIDE the
             # semaphore (review 2026-08-10): a burst can queue a task
             # here for minutes, and both the recorded latency and the
