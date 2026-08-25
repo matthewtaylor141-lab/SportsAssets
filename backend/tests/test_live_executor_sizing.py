@@ -28,11 +28,18 @@ from sportsassets.live_executor import COPY_CUT_WHALES, per_fill_usd
 def test_verified_profitable_whales_clip_at_the_probe_size():
     """SUPERSEDED by the owner's 2026-08-24 evening authorization: the
     resume is a bounded proof at $100 per clip, not a return to $300.
-    Scale follows real fills."""
-    assert per_fill_usd("HomeRunHazard") == 250.00
-    assert per_fill_usd("homerunhazard") == 250.00
+    Scale follows real fills.
+
+    HomeRunHazard REMOVED 2026-08-25 (owner order) on the
+    merge-inclusive re-grade: -0.14% on $27.56M of entries across
+    46,905 closed lots, against +2.05% / +1.66% / +0.94% for the three
+    that stay. His old case was a settlement-basis read taken before
+    merges were priced as the exits they are."""
     assert per_fill_usd("0x076daa87") == 250.00
     assert per_fill_usd("RN1") == 250.00
+    assert per_fill_usd("ferrarichampions2026") == 250.00
+    assert per_fill_usd("HomeRunHazard") == 0.00
+    assert per_fill_usd("homerunhazard") == 0.00
 
 
 def test_cut_whales_clip_at_zero_everywhere():
@@ -59,10 +66,26 @@ def test_cut_whales_clip_at_zero_everywhere():
                         "aec-atp-rafjod-artfil-2026-08-11") == 0.00
 
 
-def test_cut_set_names_exactly_the_three_verified_negative_books():
-    from sportsassets.live_executor import _W2C33
+def test_cut_set_names_exactly_the_verified_negative_books():
+    """Three literals encode this one decision — the clip map, the
+    verified set, and this cut set — and a roster move that lands in
+    two of the three is the exact shape of the 2026-08-24 bug where
+    SwissTony was "resumed" everywhere except the list that mattered
+    and placed 2,897 rejections with $0 deployed. HomeRunHazard joined
+    2026-08-25."""
+    from sportsassets.live_executor import (
+        VERIFIED_PROFITABLE_DEFAULT, _W2C33)
 
-    assert COPY_CUT_WHALES == {"swisstony", _W2C33}
+    assert COPY_CUT_WHALES == {"swisstony", _W2C33, "homerunhazard"}
+    # and the three literals must agree with each other
+    verified = {w.strip() for w in
+                VERIFIED_PROFITABLE_DEFAULT.lower().split(",")}
+    assert not (verified & COPY_CUT_WHALES), \
+        "a whale cannot be both verified-profitable and cut"
+    for w in COPY_CUT_WHALES:
+        assert per_fill_usd(w) == 0.00, f"{w} is cut but still clips"
+    for w in verified:
+        assert per_fill_usd(w) > 0, f"{w} is verified but clips at zero"
 
 
 def test_every_whale_is_bounded_by_the_probe_ceiling():
@@ -74,12 +97,17 @@ def test_every_whale_is_bounded_by_the_probe_ceiling():
     assert per_fill_usd("kch123", "atc-nhl-tor-mtl-2026-10-15-tor") == 150.00
 
 
-def test_hrh_sport_cells_are_retired_for_the_probe():
+def test_hrh_sport_cells_cannot_outrank_the_cut():
     """A (whale, sport) cell WINS over the whale clip, so a surviving
-    $600 baseball cell would have overridden the $100 authorization."""
-    assert per_fill_usd("homerunhazard", "aec-mlb-nyy-bos-2026-08-24") == 250.00
+    baseball cell would resurrect a CUT whale at full size. This is the
+    same leak the swisstony cut had to close, and HomeRunHazard's cells
+    are still in CELLS by design — the cut has to hold above them."""
     assert per_fill_usd("homerunhazard",
-                        "aec-nfl-kc-buf-2026-09-07") == 250.00
+                        "aec-mlb-nyy-bos-2026-08-24") == 0.00
+    assert per_fill_usd("homerunhazard",
+                        "aec-nfl-kc-buf-2026-09-07") == 0.00
+    assert per_fill_usd("homerunhazard",
+                        "asc-nba-lal-bos-2026-11-01-neg-2pt5") == 0.00
 
 
 def test_default_and_kch123_unchanged():
@@ -109,7 +137,7 @@ class TestTypeMultipliers:
         assert per_fill_usd(
             "someone-new", "asc-epl-ars-che-2026-08-20-neg-1pt5") == 112.50
         assert per_fill_usd(
-            "homerunhazard", "asc-nba-lal-bos-2026-11-01-neg-2pt5") == 250.00
+            "0x076daa87", "asc-nba-lal-bos-2026-11-01-neg-2pt5") == 250.00
 
     def test_moneylines_are_bounded_too(self):
         assert per_fill_usd("rn1",
@@ -133,7 +161,7 @@ class TestCopyLimitPrice:
         from sportsassets.live_executor import copy_limit_price
 
         assert copy_limit_price("swisstony", 0.474) == 0.47
-        assert copy_limit_price("homerunhazard", 0.50) == 0.50
+        assert copy_limit_price("0x076daa87", 0.50) == 0.50
         assert copy_limit_price("0x076daa87", 0.335) == 0.33
         assert copy_limit_price(None, 0.335) == 0.33
 
@@ -145,21 +173,21 @@ class TestProbeAuthorization:
     or a market-type multiplier must not be able to exceed it."""
 
     def test_verified_whales_clip_at_one_hundred(self):
-        assert per_fill_usd("HomeRunHazard") == 250.00
         assert per_fill_usd("0x076daa87") == 250.00
+        assert per_fill_usd("ferrarichampions2026") == 250.00
 
     def test_the_spread_multiplier_cannot_exceed_the_ceiling(self):
         # x1.5 would be $375 — the ceiling clamps it to the authorized
         # $250 rather than quietly overspending.
         assert per_fill_usd(
-            "homerunhazard",
+            "0x076daa87",
             "asc-nfl-kc-buf-2026-09-13-neg-3pt5") == 250.00
 
     def test_no_sport_cell_outranks_the_ceiling(self):
         assert per_fill_usd(
-            "homerunhazard", "aec-mlb-nyy-bos-2026-08-24") == 250.00
+            "0x076daa87", "aec-mlb-nyy-bos-2026-08-24") == 250.00
         assert per_fill_usd(
-            "homerunhazard", "aec-nfl-kc-buf-2026-09-07") == 250.00
+            "0x076daa87", "aec-nfl-kc-buf-2026-09-07") == 250.00
 
     def test_cut_whales_are_still_zero(self):
         from sportsassets.live_executor import _W2C33
@@ -172,5 +200,5 @@ class TestProbeAuthorization:
         from sportsassets import live_executor as le
 
         monkeypatch.setattr(le, "LIVE_MAX_CLIP_USD", 500.0)
-        assert le.per_fill_usd("homerunhazard") == 250.00, \
+        assert le.per_fill_usd("0x076daa87") == 250.00, \
             "raising the ceiling alone must not raise the clip"

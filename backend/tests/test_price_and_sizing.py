@@ -42,9 +42,14 @@ def test_clip_is_base_at_or_under_envelope():
     arithmetic is what is under test, so they follow whoever is live."""
     # Probe sizing (owner authorization 2026-08-24 evening): $100 clip,
     # so the envelope is baseline x $100.
-    assert _clip("rn1", 0) == 250.00
-    assert _clip("rn1", 150 * 250.00) == 250.00
-    assert _clip("homerunhazard", 20 * 250.00) == 250.00
+    from sportsassets.live_executor import (
+        BASELINE_FILLS_DEFAULT, BASELINE_FILLS_PER_DAY, per_fill_usd)
+
+    for w in ("rn1", "0x076daa87", "ferrarichampions2026"):
+        base = per_fill_usd(w)
+        n = BASELINE_FILLS_PER_DAY.get(w, BASELINE_FILLS_DEFAULT)
+        assert _clip(w, 0) == base, w
+        assert _clip(w, n * base) == base, f"{w} at exactly the envelope"
 
 
 def test_partial_takes_do_not_burn_full_slots():
@@ -55,8 +60,20 @@ def test_partial_takes_do_not_burn_full_slots():
 
 
 def test_ten_x_dollars_means_one_tenth_size():
-    assert _clip("rn1", 10 * 150 * 250.00) == pytest.approx(25.00)
-    assert _clip("homerunhazard", 10 * 20 * 250.00) == pytest.approx(25.00)
+    """Derived from the maps, not from hard-coded pairs.
+
+    This fixture has now broken twice on roster moves because it named
+    a whale to pick up a (clip, baseline) pair and then hard-coded the
+    baseline beside it — so a whale whose baseline differed read as an
+    arithmetic failure in the governor, which is not what is under
+    test. The governor arithmetic is; the roster is not."""
+    from sportsassets.live_executor import (
+        BASELINE_FILLS_DEFAULT, BASELINE_FILLS_PER_DAY, per_fill_usd)
+
+    for w in ("rn1", "0x076daa87", "ferrarichampions2026"):
+        base = per_fill_usd(w)
+        n = BASELINE_FILLS_PER_DAY.get(w, BASELINE_FILLS_DEFAULT)
+        assert _clip(w, 10 * n * base) == pytest.approx(base / 10.0), w
 
 
 def test_clip_floors_at_five_dollars_and_never_scales_up():

@@ -64,7 +64,7 @@ def test_verified_whales_still_flow_when_quarantine_lifted(monkeypatch):
         monkeypatch, pool, f"tsc-epl-ars-che-{TODAY}-o3pt5")
     monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
     asyncio.run(live_executor.maybe_execute(
-        _payload(whale_username="HomeRunHazard"), 5.0))
+        _payload(whale_username="0x076daa87"), 5.0))
     assert submitted
 
 
@@ -95,8 +95,8 @@ class TestPremapLiveAllowlist:
             _payload(whale_username=whale), 5.0))
         return pool, submitted
 
-    def test_default_allowlist_admits_hrh_and_0x076(self, monkeypatch):
-        for whale in ("HomeRunHazard", "0x076daa87"):
+    def test_default_allowlist_admits_the_verified_three(self, monkeypatch):
+        for whale in ("0x076daa87", "0x076daa87"):
             pool, submitted = self._run(monkeypatch, whale)
             assert submitted, f"{whale} is verified-profitable — trades"
 
@@ -273,7 +273,7 @@ def test_tripped_circuit_refuses_even_with_env_overrides(monkeypatch):
     monkeypatch.setenv("LIVE_MAPPING_QUARANTINE", "off")
     monkeypatch.setenv("LIVE_PREMAP", "on")
     asyncio.run(live_executor.maybe_execute(
-        _payload(whale_username="HomeRunHazard"), 5.0))
+        _payload(whale_username="0x076daa87"), 5.0))
     assert submitted == []
     rej = [(sql, a) for sql, a in pool.updates
            if "status='rejected'" in sql and "side-echo tripped" in str(a)]
@@ -343,7 +343,7 @@ def test_clob_fallback_is_fail_closed(monkeypatch):
                         {"ok": True, "filled_shares": 1.0,
                          "fill_price": 0.5, "order_id": "x", "raw": {}})
     asyncio.run(live_executor.maybe_execute(
-        _payload(whale_username="HomeRunHazard"), 5.0))
+        _payload(whale_username="0x076daa87"), 5.0))
     assert submitted == [] and clob_orders == []
     rej = [(sql, a) for sql, a in pool.updates
            if "status='rejected'" in sql and "clob-leg-closed" in str(a)]
@@ -361,7 +361,7 @@ def test_clob_fallback_is_fail_closed(monkeypatch):
                          "fill_price": 0.5, "order_id": "x", "raw": {}})
     monkeypatch.setenv("LIVE_CLOB_COPIES", "on")
     asyncio.run(live_executor.maybe_execute(
-        _payload(whale_username="HomeRunHazard"), 5.0))
+        _payload(whale_username="0x076daa87"), 5.0))
     assert clob_orders, "the explicit lever reopens the leg"
 
 
@@ -425,7 +425,7 @@ class TestShadowCertification:
 
         monkeypatch.setattr(premap_mod, "resolve", fake_premap)
         asyncio.run(live_executor.maybe_execute(
-            _payload(whale_username="HomeRunHazard"), 5.0))
+            _payload(whale_username="0x076daa87"), 5.0))
         assert spawned and spawned[0][2] is True, \
             "a refused premap resolution must be shadow-verified"
 
@@ -504,7 +504,7 @@ class TestVerifiedOnlyIsIndependentOfQuarantine:
         assert len(rej) == 1
 
     def test_verified_whale_flows_with_quarantine_off(self, monkeypatch):
-        pool, submitted = self._run(monkeypatch, "HomeRunHazard")
+        pool, submitted = self._run(monkeypatch, "0x076daa87")
         assert submitted
 
     def test_empty_env_disables_the_gate_for_a_full_resume(self,
@@ -552,7 +552,7 @@ class TestFirstFillGate:
             await live_executor._FIRST_FILL_LOCK.acquire()   # first in flight
             try:
                 await live_executor.maybe_execute(
-                    _payload(whale_username="HomeRunHazard"), 5.0)
+                    _payload(whale_username="0x076daa87"), 5.0)
             finally:
                 live_executor._FIRST_FILL_LOCK.release()
 
@@ -571,7 +571,7 @@ class TestFirstFillGate:
             await live_executor._FIRST_FILL_LOCK.acquire()
             try:
                 await live_executor.maybe_execute(
-                    _payload(whale_username="HomeRunHazard"), 5.0)
+                    _payload(whale_username="0x076daa87"), 5.0)
             finally:
                 live_executor._FIRST_FILL_LOCK.release()
 

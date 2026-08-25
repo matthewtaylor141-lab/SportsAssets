@@ -31,8 +31,18 @@ from sportsassets import live_executor as le
 
 
 def test_the_verified_set_names_the_certified_whales():
+    """HomeRunHazard removed 2026-08-25 (owner order): merge-inclusive
+    he is -0.14% on $27.56M of entries across 46,905 closed lots, while
+    the three that remain are +2.05%, +1.66% and +0.94%. He was our
+    second-largest allocation at $5,514 in 24 hours."""
     assert le.VERIFIED_PROFITABLE_DEFAULT == (
-        "homerunhazard,0x076daa87,rn1,ferrarichampions2026")
+        "0x076daa87,rn1,ferrarichampions2026")
+
+
+def test_the_cut_whale_is_out_of_both_gates():
+    for w in ("swisstony", "homerunhazard"):
+        assert w not in le._whale_set("LIVE_VERIFIED_WHALES"), w
+        assert w not in le._whale_set("LIVE_PREMAP_WHALES"), w
 
 
 def test_the_restored_whales_are_in_both_gates():

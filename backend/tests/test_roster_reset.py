@@ -22,8 +22,14 @@ Owner granted the change 2026-08-25.
 from sportsassets import live_executor as le
 
 RESTORED = ("rn1", "ferrarichampions2026")
-CUT = ("swisstony", le._W2C33)
-KEPT = ("homerunhazard", "0x076daa87")
+# HomeRunHazard moved from KEPT to CUT on 2026-08-25 (owner order),
+# on the merge-inclusive re-grade: -0.14% on $27.56M of entries over
+# 46,905 closed lots. The three that remain are +2.05% (0x076daa87),
+# +1.66% (ferrari) and +0.94% (rn1). His earlier case — baseball
+# totals +1.89%, WNBA +6.50% — was a SETTLEMENT-basis read taken
+# before merges were priced as the exits they are.
+CUT = ("swisstony", le._W2C33, "homerunhazard")
+KEPT = ("0x076daa87",)
 
 
 class TestTheClipMapMatchesTheDecision:

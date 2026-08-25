@@ -749,8 +749,23 @@ def copy_halted() -> bool:
 # map. Divergence between these two is the shape of the 2026-08-24 bug
 # where SwissTony was "resumed" everywhere except the one list that
 # mattered and placed 2,897 rejections and zero orders.
+# HomeRunHazard CUT 2026-08-25 (owner order) on the merge-inclusive
+# re-grade. Not a judgement call and not a drawdown reaction — a
+# measurement over his whole book:
+#
+#     HomeRunHazard  -$39,738 realised on $27,560,002 of entries
+#                    = -0.14% on dollar deployed, 46,905 closed lots
+#
+# against the three that stay: 0x076daa87 +2.05%, ferrari +1.66%,
+# rn1 +0.94%. He is not a marginal member of that set, he is on the
+# other side of zero, and he was our SECOND LARGEST allocation at
+# $5,514 deployed in 24 hours.
+#
+# The old case for him was a settlement-basis read (baseball totals
+# +1.89%, WNBA +6.50%) taken before merges were counted as the exits
+# they are. Once his exits are priced, the book is negative.
 VERIFIED_PROFITABLE_DEFAULT = (
-    "homerunhazard,0x076daa87,rn1,ferrarichampions2026")
+    "0x076daa87,rn1,ferrarichampions2026")
 
 
 def _whale_set(env_name: str) -> set[str]:
@@ -1064,7 +1079,7 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 # Three literals for one decision is a standing hazard. They are pinned
 # against each other in test_verified_set and test_roster_reset so a
 # future roster move cannot land in two of the three again.
-COPY_CUT_WHALES = frozenset({"swisstony", _W2C33})
+COPY_CUT_WHALES = frozenset({"swisstony", _W2C33, "homerunhazard"})
 # PROBE CLIPS (owner authorization 2026-08-24 evening: "$100 per clip
 # on the actually verified profitable whales"). The resume is a bounded
 # proof, not a return to size: the venue's side model is verified by
@@ -1112,7 +1127,9 @@ COPY_CUT_WHALES = frozenset({"swisstony", _W2C33})
 # flatters high-turnover books. If the next re-grade moves these lines,
 # this map moves with it.
 PER_FILL_BY_WHALE = {"rn1": 250.00, "swisstony": 0.00,
-                     _W2C33: 0.00, "homerunhazard": 250.00,
+                     _W2C33: 0.00,
+                     # CUT 2026-08-25: -0.14% on $27.56M merge-inclusive.
+                     "homerunhazard": 0.00,
                      "kch123": 150.00,
                      "ferrarichampions2026": 250.00,
                      "0x076daa87": 250.00}
