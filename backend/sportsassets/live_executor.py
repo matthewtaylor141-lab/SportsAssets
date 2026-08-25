@@ -793,6 +793,84 @@ def copy_limit_price(whale_username: str | None, his_price: float,
     return limit
 
 
+def is_short_intent(intent: str | None) -> bool:
+    """True for the two SHORT intents this venue accepts."""
+    return "SHORT" in (intent or "").upper()
+
+
+def wire_limit(limit: float, intent: str | None) -> float:
+    """The price to put ON THE WIRE for `limit` of our own money.
+
+    THE SHORT MIS-DENOMINATION (2026-08-25, owner-confirmed against
+    Polymarket's global microdata).
+
+    polymarket_us/types/orders.py settles the venue's shape:
+    CreateOrderParams takes marketSlug and intent and carries NO token
+    id — there is ONE market and ONE price ladder — and Order.side is
+    RETURNED, never sent, so the venue DERIVES buy/sell from the intent.
+    That is a futures contract: going short is SELLING it, `price`
+    denominates the contract, and a short ties up (1 - price) x qty.
+
+    We were sending the whale's own outcome price straight to the wire
+    for both intents. For a long that is right by construction: his
+    outcome IS the contract. For a short it is a different number in a
+    different space, and the error is not symmetric — it is LOOSE.
+
+    Sending 0.22 as a sell limit authorises selling at anything >= 0.22,
+    i.e. paying up to 0.78 a contract, when we meant to pay 0.22. That
+    is a 3.5x wider authorisation than intended on the worst row, and
+    the six fills came in under it by luck, not by control.
+
+    The correct wire price for "pay at most `limit` per contract" is a
+    sell limit of 1 - limit: sell at >= 0.78 means pay <= 0.22.
+
+    Rounded so the rounding can never work against us — down for a buy,
+    up for a sell, both meaning "pay no more than intended".
+
+    This is a TIGHTENING. On the six 2026-08-24 rows it replaces wire
+    limits of 0.22-0.48 with 0.78-0.52, and the money each authorises
+    falls in every case.
+    """
+    import math
+
+    if not is_short_intent(intent):
+        return limit
+    return math.ceil(round((1.0 - limit) * 100, 6)) / 100.0
+
+
+def fill_cash(filled_shares: float, fill_price: float | None,
+              intent: str | None) -> float:
+    """What a fill actually COST us, in dollars.
+
+    `spent = filled * fill_price` is the LONG formula, and it was
+    applied to every row regardless of intent. On a short, fill_price is
+    the CONTRACT price and the cash is (1 - fill_price) x qty.
+
+    That single line is what produced "BUY_SHORT n=6 over=6 clean=0".
+    Re-run the six against both formulas:
+
+        req $249.92 qty 1136 @0.78   long $886.08  short $249.92
+        req $249.92 qty  781 @0.6853 long $535.22  short $245.78
+        req $249.75 qty  675 @0.65   long $438.75  short $236.25
+        req $249.75 qty  555 @0.56   long $310.80  short $244.20
+        req $249.60 qty  520 @0.55   long $286.00  short $234.00
+        req $249.78 qty 1086 @0.89   long $966.54  short $119.46
+
+    Every one at or under what we authorised, one exact to the cent,
+    worst overage across all six $0.00. There was no overspend. There
+    was a units bug in our own bookkeeping, and it took a correct class
+    of trade off the board for a day.
+
+    Everything downstream inherits this number: filled_usd, pnl, the
+    24h deployed totals, and the volume governor's throttle input.
+    """
+    px = float(fill_price or 0)
+    if px <= 0 or filled_shares <= 0:
+        return 0.0
+    per = (1.0 - px) if is_short_intent(intent) else px
+    return round(filled_shares * per, 2)
+
+
 # Per-whale staleness ceilings, in seconds. Absent whales take the
 # default; env overrides the default only, so a measured cap cannot be
 # loosened by a stray environment variable.
@@ -2606,8 +2684,13 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 log.warning("LIVE (US) refused %s: ask %s > limit %s",
                             mapping["market_slug"], _ask, limit)
                 return
+            # The wire price is denominated in the CONTRACT, not in the
+            # whale's outcome. For a long they are the same number; for
+            # a short they are complements, and sending the raw one
+            # authorised up to 3.5x the money we meant to commit.
+            _wire = wire_limit(limit, _intent)
             result = await asyncio.to_thread(
-                pmus.submit_fok, mapping["market_slug"], limit,
+                pmus.submit_fok, mapping["market_slug"], _wire,
                 int(shares), False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
                 _intent)
         else:
@@ -2634,7 +2717,9 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
 
         filled = float(result["filled_shares"]) if result["ok"] else 0.0
         fill_price = float(result["fill_price"]) if result["ok"] else None
-        spent = round(filled * (fill_price or 0), 2)
+        _fill_intent = locals().get("_intent") or (
+            (locals().get("mapping") or {}).get("intent"))
+        spent = fill_cash(filled, fill_price, _fill_intent)
         # POST-FILL OVERSPEND DETECTOR (2026-08-25). The per-fill clip is
         # enforced BEFORE submit, on `usd = shares * limit`. That bounds
         # what we ASK to spend, not what the venue takes: it holds only
