@@ -646,8 +646,8 @@ jobs:
           curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/mapgap.json \
                "$BASE/api/admin/mapgap?whale=swisstony&limit=12" || true
-          jq -r '"  MAPGAP \(.whale): \(.verdict // "?")"' /tmp/mapgap.json 2>/dev/null || true
-          jq -r '.rows[]? | "  MAPGAP \(.slug) pick=\(.outcome // "?") suffix=\(.slug_suffix // "?") sides=\(.venue_sides // [] | tostring) — \(.verdict // .error_venue // "?")"' \
+          jq -r '"  MAPGAP \(.whale): \(.verdict // "?") | NOT IN PREMAP \(.not_in_premap // 0)/\(.of // 0)"' /tmp/mapgap.json 2>/dev/null || true
+          jq -r '.rows[]? | "  MAPGAP \(.slug) pick=\(.outcome // "?") suffix=\(.slug_suffix // "?") premap_rows=\(.premap_rows // 0) sides=\(.venue_sides // [] | tostring) — \(.verdict // .error_venue // "?")"' \
             /tmp/mapgap.json 2>/dev/null || true
           # RATIO: what copy ratio hits "play through the capital once a
           # day"? Computed against the flow we actually FILL, not the

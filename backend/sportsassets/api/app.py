@@ -3740,6 +3740,18 @@ async def api_mapgap(whale: str = "swisstony", limit: int = 12) -> dict:
         parts = slug.split("-")
         suffix = parts[-1] if parts and not parts[-1].isdigit() else ""
         rec["slug_suffix"] = suffix
+        # IS IT IN PREMAP AT ALL? (2026-08-25)
+        #
+        # The bridge hypothesis is dead: the venue's sides for these
+        # slugs are literally "Yes"/"No", so side_norm == "no" already
+        # matches and match_side was never the blocker. What is left is
+        # coverage — a market the sweep never captured cannot be
+        # resolved by the premap lane no matter how good the matcher is,
+        # and every such pick falls to fuzzy, which the quarantine
+        # refuses. This is the fact that decides where the work goes.
+        rec["premap_rows"] = await pool.fetchval(
+            "SELECT count(*)::int FROM us_premap WHERE identifier = $1",
+            slug)
         try:
             m = await asyncio.to_thread(
                 pmus._get_client().markets.retrieve_by_slug, slug)
@@ -3765,8 +3777,10 @@ async def api_mapgap(whale: str = "swisstony", limit: int = 12) -> dict:
         except Exception as exc:  # noqa: BLE001 — report, never infer
             rec["error_venue"] = f"{type(exc).__name__}: {str(exc)[:120]}"
         out.append(rec)
+    missing = sum(1 for r in out if not r.get("premap_rows"))
     return {"whale": whale, "rows": out,
             "unique": unique_n, "checked": total_n,
+            "not_in_premap": missing, "of": len(out),
             "verdict": (
                 f"{unique_n}/{total_n} slugs name their side uniquely — "
                 "the Yes/No bridge is determinate"
