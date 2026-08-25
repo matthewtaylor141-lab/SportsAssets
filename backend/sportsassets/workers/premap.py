@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 
@@ -28,6 +29,29 @@ from .. import pmus
 log = logging.getLogger(__name__)
 
 REFRESH_SECONDS = 1800          # full sweep cadence
+# FAST LANE (2026-08-25). The full sweep walks up to 40 pages across a
+# now-12h..now+96h window and runs every 30 minutes, so a market listed
+# just before tip-off can be invisible for up to half an hour — and
+# that is exactly when the whales trade it.
+#
+# The unmapped census put two causes at 36.6% of sampled misses which
+# are both this same gap wearing different names:
+#   resolves 101/400 (25.3%)  — the row maps NOW but did not at the
+#                               moment of his fill
+#   type_prefix_filter_emptied 45/400 (11.3%) — the event was captured
+#                               but that market type was not yet
+#
+# The fast lane re-sweeps only the IMMINENT window on a short cadence.
+# It writes through the same _market_rows / _upsert path as the full
+# sweep, so rows carry the venue's own side expansion and the
+# wrong-side-by-construction property is identical — this is the same
+# sweep, aimed narrowly and run often, not a second way of building a
+# row.
+FAST_REFRESH_SECONDS = float(
+    os.environ.get("PREMAP_FAST_REFRESH_S", "180"))
+FAST_WINDOW_BACK_H = float(os.environ.get("PREMAP_FAST_BACK_H", "3"))
+FAST_WINDOW_FWD_H = float(os.environ.get("PREMAP_FAST_FWD_H", "14"))
+FAST_MAX_PAGES = int(os.environ.get("PREMAP_FAST_PAGES", "8"))
 PAGE_LIMIT = 100
 MAX_EVENT_PAGES = 40            # bounds a sweep at ~4k events
 LIST_PACING_S = 0.35            # stay under venue rate limits (429 fix, 2026-08-23)
@@ -529,7 +553,19 @@ async def _upsert(pool, r: dict, keys: list[str]) -> None:
         r["line"], r["side_norm"], keys, r.get("intent"))
 
 
-async def _record_last(pool, summary: dict) -> None:
+async def _record_last(pool, summary: dict,
+                       key: str = "premap_last") -> None:
+    """Record a sweep's progress under its OWN state key.
+
+    The fast lane writes `premap_last_fast`, never `premap_last`. A
+    narrow 14-hour sweep and a 108-hour one produce wildly different
+    row counts, and every probe, dashboard and alert that reads
+    `premap_last` was written against the full sweep's numbers. Sharing
+    the key would have the fast lane's small count read as a collapsed
+    full sweep every three minutes — an instrument reporting on a
+    population it never measured, which is the exact failure mode that
+    has cost this codebase the most today.
+    """
     import json as _json
     from datetime import datetime as _dt, timezone as _tz
 
@@ -539,12 +575,16 @@ async def _record_last(pool, summary: dict) -> None:
         await pool.execute(
             "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
             "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
-            "premap_last", _json.dumps(summary))
+            key, _json.dumps(summary))
     except Exception:  # noqa: BLE001 — diagnostics never kill the sweep
         log.exception("premap_last write failed")
 
 
-async def refresh() -> dict:
+async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
+                  max_pages: int = MAX_EVENT_PAGES,
+                  prune: bool = True,
+                  windowed_only: bool = False,
+                  state_key: str = "premap_last") -> dict:
     """Sweep the venue universe into us_premap. Primary path walks
     events.list; if the installed SDK lacks it (2026-08-24: rows=0 with
     no visible error — the worker's SDK predates .events), fall back to
@@ -562,7 +602,8 @@ async def refresh() -> dict:
     # never STARTED (2026-08-24: rows=0 last=none read three probes in a
     # row) — record the start, then progress every page, so a hang shows
     # exactly where it hangs.
-    await _record_last(pool, {"mode": "starting", "events": 0, "rows": 0})
+    await _record_last(pool, {"mode": "starting", "events": 0, "rows": 0},
+                       state_key)
     try:
         # PREMAP-GT ground truth (probe #1030, 2026-08-24): the venue
         # IGNORES the eventSlug filter on markets.list (every queried
@@ -579,10 +620,21 @@ async def refresh() -> dict:
             return d.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         _now = _dt.now(_tz.utc)
-        variants = (
-            {"active": True, "closed": False,
-             "startTimeMin": _iso(_now - _td(hours=12)),
-             "startTimeMax": _iso(_now + _td(hours=96))},
+        _window = {"active": True, "closed": False,
+                   "startTimeMin": _iso(_now - _td(hours=back_h)),
+                   "startTimeMax": _iso(_now + _td(hours=fwd_h))}
+        # THE FAST LANE TAKES THE WINDOWED RUNG OR NOTHING.
+        #
+        # Rungs 2 and 3 carry no start-time bound at all, and PREMAP-GT
+        # established that a bare {"active": True} board leads with a
+        # stale historical catalog (2025 games on page 1). The full
+        # sweep can absorb that: it has 40 pages of budget and prunes
+        # what it replaces. The fast lane has 8 pages and runs every
+        # three minutes — falling through would spend its whole budget
+        # on last year's games, every three minutes, writing
+        # title-keyed rows over the good ones.
+        variants = (_window,) if windowed_only else (
+            _window,
             {"active": True, "closed": False},
             {"active": True},
         )
@@ -606,7 +658,7 @@ async def refresh() -> dict:
             raise RuntimeError(
                 "no events.list variant returned live inline markets")
         offset = 0
-        for _page in range(MAX_EVENT_PAGES):
+        for _page in range(max_pages):
             if _page == 0:
                 got = first
             else:
@@ -635,7 +687,8 @@ async def refresh() -> dict:
                         await _upsert(pool, r, keys)
                         seen_rows += 1
             await _record_last(pool, {"mode": "events/page%d" % _page,
-                                      "events": events, "rows": seen_rows})
+                                      "events": events, "rows": seen_rows},
+                              state_key)
             await asyncio.sleep(LIST_PACING_S)
             if len(got) < PAGE_LIMIT:
                 break
@@ -653,15 +706,25 @@ async def refresh() -> dict:
                         "rows (%s); keeping them, no fallback",
                         seen_rows, err)
             mode, events_err = "events/partial", err
+        elif windowed_only:
+            # The fast lane never runs the markets fallback either. Its
+            # rows are keyed off each market's own question — a
+            # degraded key set that the upsert would spread table-wide
+            # — and the full sweep is already the recovery path for a
+            # dead events board. A narrow lane failing is a reason to
+            # wait 180 seconds, not to write worse rows.
+            log.warning("premap fast lane: events path failed (%s); "
+                        "no fallback, full sweep owns recovery", err)
+            mode, events_err = "fast/failed", err
         else:
             log.warning("premap events path failed (%s); markets fallback",
                         err)
             mode = "markets"
         try:
-            if mode == "events/partial":
+            if mode != "markets":
                 raise _SkipFallback()
             offset = 0
-            for _page in range(MAX_EVENT_PAGES):
+            for _page in range(max_pages):
                 mresp = await asyncio.wait_for(asyncio.to_thread(
                     client.markets.list,
                     {"limit": PAGE_LIMIT, "offset": offset, "active": True}),
@@ -687,7 +750,7 @@ async def refresh() -> dict:
                         seen_rows += 1
                 await _record_last(pool, {"mode": "markets/page%d" % _page,
                                           "events": events,
-                                          "rows": seen_rows})
+                                          "rows": seen_rows}, state_key)
                 if len(raw) < PAGE_LIMIT:
                     break
             # The events-path failure stays on the record even when the
@@ -706,7 +769,15 @@ async def refresh() -> dict:
     # that wrote zero rows proves nothing about staleness — repeated
     # empty sweeps would otherwise age the whole table out and take
     # the premap lane down with it.
-    if seen_rows > 0:
+    #
+    # AND ONLY THE FULL SWEEP MAY PRUNE. Staleness is a table-wide
+    # judgement, and the fast lane only ever looks at a 14-hour slice
+    # of the calendar; it has no standing to decide what the other 94
+    # hours mean. (In practice the full sweep keeps those rows'
+    # updated_at fresh, so the DELETE would be a no-op — but a no-op
+    # that runs on the wrong authority is one config change away from
+    # deleting the table.)
+    if seen_rows > 0 and prune:
         pruned = await pool.execute(
             "DELETE FROM us_premap WHERE updated_at < now() - "
             "interval '%s hours'" % int(PRUNE_HOURS))
@@ -714,8 +785,10 @@ async def refresh() -> dict:
         pruned = None
     summary = {"mode": mode, "events": events, "rows": seen_rows,
                "err": err, "events_err": events_err,
+               "lane": "fast" if windowed_only else "full",
+               "window_h": [back_h, fwd_h], "max_pages": max_pages,
                "pruned": int(pruned.split()[-1]) if pruned else 0}
-    await _record_last(pool, summary)
+    await _record_last(pool, summary, state_key)
     log.info("premap refresh: %s", summary)
     return summary
 
@@ -893,12 +966,67 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
             "matched_by": "premap", "score": 1.0}
 
 
-async def main() -> None:
+async def fast_refresh() -> dict:
+    """The imminent window, swept often.
+
+    Same function, same `_market_rows` / `_upsert` path, same venue
+    side expansion — only the aim is different. This is deliberately
+    NOT a second way of building a premap row: the wrong-side incident
+    was caused by a resolution path that could invent a side, and the
+    property that makes premap safe is that every row comes from the
+    venue's own expansion of the market it belongs to. A parallel
+    row-builder would put that back at risk for a coverage gain, which
+    is a trade this desk does not make.
+    """
+    return await refresh(back_h=FAST_WINDOW_BACK_H,
+                         fwd_h=FAST_WINDOW_FWD_H,
+                         max_pages=FAST_MAX_PAGES,
+                         prune=False,
+                         windowed_only=True,
+                         state_key="premap_last_fast")
+
+
+# Held by the full sweep for its whole run. The fast lane checks it and
+# SKIPS rather than waiting: while a full sweep is in flight the
+# imminent window is already being covered by it, so a skipped fast
+# cycle forfeits nothing — and two lanes walking the venue's event
+# board at once is how the 429s came back on 2026-08-23.
+_SWEEP_LOCK = asyncio.Lock()
+
+
+async def _full_loop() -> None:
     while True:
         started = time.monotonic()
         try:
-            await refresh()
+            async with _SWEEP_LOCK:
+                await refresh()
         except Exception:  # noqa: BLE001 — supervised loop, next cycle
             log.exception("premap refresh failed")
         elapsed = time.monotonic() - started
         await asyncio.sleep(max(60.0, REFRESH_SECONDS - elapsed))
+
+
+async def _fast_loop() -> None:
+    while True:
+        started = time.monotonic()
+        try:
+            if _SWEEP_LOCK.locked():
+                log.info("premap fast lane: full sweep in flight, "
+                         "skipping this cycle (it covers the window)")
+            else:
+                await fast_refresh()
+        except Exception:  # noqa: BLE001 — supervised loop, next cycle
+            log.exception("premap fast refresh failed")
+        elapsed = time.monotonic() - started
+        await asyncio.sleep(max(30.0, FAST_REFRESH_SECONDS - elapsed))
+
+
+async def main() -> None:
+    if FAST_REFRESH_SECONDS > 0:
+        # gather, not create_task: a lane that dies must take main down
+        # so the worker supervisor restarts BOTH. A detached task that
+        # dies silently is a lane that stops sweeping while the
+        # heartbeat keeps saying premap is up.
+        await asyncio.gather(_full_loop(), _fast_loop())
+    else:
+        await _full_loop()
