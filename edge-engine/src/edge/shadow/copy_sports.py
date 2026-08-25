@@ -290,6 +290,19 @@ def market_type_of(slug: str) -> str:
         return "prop"
     if "team" in suffix and "total" in suffix:
         return "prop"
+    # WORD-FORM SPREAD (census 2026-08-25). 'total' was spelled out and
+    # handled; 'spread' was not, so 'spl-sha-riy-2026-08-25-spread-away
+    # -1pt5' fell all the way to the >4-character unknown-word guard and
+    # returned "unknown" — and unknown is never tradeable, so every
+    # word-form spread in the feed was refused before it reached a
+    # matcher. Same omission, same shape, one word apart.
+    #
+    # A side qualifier does NOT make it a prop the way it does for a
+    # total: a game total split by team is a different bet (a team
+    # total), but a spread is ALWAYS stated from one side — 'away -1.5'
+    # is the game spread, not a derivative.
+    if "spread" in suffix or "handicap" in suffix:
+        return "spread"
     if "total" in suffix:
         return "total"
     # WORD-FORM OVER/UNDER (leak-hunt round 3, 2026-08-24): 'over' is

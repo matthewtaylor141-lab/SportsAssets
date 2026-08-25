@@ -249,8 +249,64 @@ def _questions_agree(a: str, b: str) -> bool:
     return a == b or a in b or b in a
 
 
+# THE WHALE'S LINE IS IN HIS SLUG, AND NOTHING READ IT (census
+# 2026-08-25).
+#
+#   UNMAPEG no_side_match: his=ucl-sf-hbs-2026-08-25-total-4pt5
+#     outcome=Over keys=5 premap_rows=20
+#     | outcome 'Over' matched none of ['over','under','over','under',...]
+#
+# The premap had the market, both sides, and the right words. The whale
+# picked "Over". The rows say "over". They did not match because an
+# over/under pick is meaningless without its line, so match_side
+# requires BOTH sides to state one — and his line is not in his outcome
+# text ("Over") nor in the market title. It is in his slug: total-4pt5.
+#
+# _lines_of never saw the slug, so his_lines came back empty and
+# line_ok refused every row. Not one totals copy in the feed could
+# match, for a reason that has nothing to do with totals being hard.
+# no_side_match is 93 of 400 sampled misses (23.3%).
+#
+# THIS TIGHTENS THE GUARD RATHER THAN RELAXING IT. The requirement that
+# the lines agree is untouched; we are supplying the line the whale
+# actually stated instead of treating its absence as unknowable. A pick
+# whose line disagrees with a row still refuses, and now for the right
+# reason.
+#
+# Gated on the market TYPE so a moneyline can never acquire a line by
+# accident: a stray digit pattern in a team code or an event slug would
+# otherwise turn a currently-matching unlined pick into a refusal.
+_SLUG_HALF_RE = re.compile(r"(?<![a-z0-9])(\d+)pt(\d)(?![a-z0-9])")
+_SLUG_OU_RE = re.compile(r"(?<![a-z0-9])[ou](\d+)(?:pt(\d))?(?![a-z0-9])")
+_LINED_TYPES = ("total", "spread", "prop")
+
+
+def slug_lines(global_slug: str | None) -> set[str]:
+    """Lines stated by the WHALE'S OWN SLUG, in `_lines_of` format.
+
+    Two encodings appear in the feed: the spelled form (`total-4pt5`,
+    `spread-away-1pt5`) and the compact one (`o8pt5`, `u10`). Both
+    decode to the same "4.5" / "10" strings the venue rows carry.
+    """
+    s = (global_slug or "").lower()
+    if not s:
+        return set()
+    from ..copy_sports import market_type_of
+
+    if market_type_of(s) not in _LINED_TYPES:
+        return set()
+    out: set[str] = set()
+    for m in _SLUG_HALF_RE.finditer(s):
+        out.add(f"{int(m.group(1))}.{m.group(2)}")
+    for m in _SLUG_OU_RE.finditer(s):
+        out.add(f"{int(m.group(1))}.{m.group(2)}" if m.group(2)
+                else str(int(m.group(1))))
+    return out
+
+
 def match_side(rows: list[dict], outcome: str | None,
-               his_title: str | None) -> dict | None:
+               his_title: str | None,
+               his_slug: str | None = None) -> dict | None:
     """Pick the unique premap row that IS the whale's outcome.
 
     Precision rules (each one is a shipped incident):
@@ -267,8 +323,11 @@ def match_side(rows: list[dict], outcome: str | None,
     on = _norm(outcome)
     if not on:
         return None
-    # the whale's line may live in his title OR his outcome ("Over 3.5")
-    his_lines = _lines_of(his_title) | _lines_of(outcome)
+    # the whale's line may live in his title, his outcome ("Over 3.5")
+    # OR — for most of the feed — only in his slug (`total-4pt5`), which
+    # nothing read until 2026-08-25. See slug_lines above.
+    his_lines = (_lines_of(his_title) | _lines_of(outcome)
+                 | slug_lines(his_slug))
 
     def line_ok(r: dict) -> bool:
         """Line agreement for the OVER/UNDER branch.
@@ -886,7 +945,7 @@ async def resolve_explain(pool, market_title: str | None,
         out["detail"] = (f"{len(rows)} rows on this event, none with a "
                          f"{sorted(want)} prefix")
         return out
-    hit = match_side(kept, outcome, market_title)
+    hit = match_side(kept, outcome, market_title, global_slug)
     if hit is None:
         out["step"] = "no_side_match"
         out["detail"] = (f"outcome {outcome!r} matched none of "
@@ -945,7 +1004,7 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     rows = [r for r in rows if _prefix_of(r.get("identifier")) in want]
     if not rows:
         return None
-    hit = match_side(rows, outcome, market_title)
+    hit = match_side(rows, outcome, market_title, global_slug)
     if hit is None:
         return None
     # AMBIGUOUS SIDE = REFUSE (venue ground truth 2026-08-24): on the

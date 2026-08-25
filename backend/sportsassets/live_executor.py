@@ -2281,7 +2281,14 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                     detail = (f"contract subject {subject!r} is not the "
                               f"whale's pick {want!r}")
             else:
-                hit = _premap.match_side(rows, outcome, his_title)
+                # THE SAME INPUTS PRODUCTION USED. The echo exists to
+                # re-derive the side independently; if it feeds the
+                # matcher a different argument list than resolve did,
+                # it is not verifying production, it is verifying
+                # something else — the failure mode that has cost the
+                # most here.
+                hit = _premap.match_side(rows, outcome, his_title,
+                                         his_slug)
                 if hit is None:
                     detail = "no unique live match"
                 elif str(hit["identifier"]).lower() != us_slug.lower():
