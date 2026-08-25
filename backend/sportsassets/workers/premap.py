@@ -475,6 +475,7 @@ async def _ensure_table(pool) -> None:
             side_norm text,
             event_keys text[],
             intent text,
+            signed text,
             updated_at timestamptz NOT NULL DEFAULT now()
         )
         """)
@@ -483,6 +484,28 @@ async def _ensure_table(pool) -> None:
     # overwrote one side of every such market (2026-08-24).
     await pool.execute(
         "ALTER TABLE us_premap ADD COLUMN IF NOT EXISTS intent text")
+    # SIGNED WAS PRODUCED AND NEVER STORED (2026-08-25).
+    #
+    # _market_rows stamps `signed` on every row, and match_side's
+    # _lined_ok requires the venue side's sign to equal the whale's:
+    #
+    #     rs = (r.get("signed") or "").strip()
+    #     if his_signed or rs:
+    #         if not rs or rs != his_signed:
+    #             return False
+    #
+    # There was no `signed` column, so every row loaded from this table
+    # had rs = "" — and any whale pick stating a sign hit `not rs` and
+    # refused. Every signed spread was structurally unresolvable, and
+    # premap is the ONLY lane allowed to trade under the quarantine, so
+    # the class was dead end to end.
+    #
+    # This does not loosen the guard, it makes it FUNCTIONAL: it goes
+    # from refusing every signed pick to refusing MISMATCHED ones,
+    # which is the inversion protection it was written for. A guard
+    # that blocks everything is an outage wearing a guard's uniform.
+    await pool.execute(
+        "ALTER TABLE us_premap ADD COLUMN IF NOT EXISTS signed text")
     await pool.execute(
         "ALTER TABLE us_premap DROP CONSTRAINT IF EXISTS us_premap_pkey")
     await pool.execute(
@@ -600,16 +623,17 @@ async def _upsert(pool, r: dict, keys: list[str]) -> None:
         """
         INSERT INTO us_premap (identifier, event_slug,
             event_title, market_slug, question, kind, line,
-            side_norm, event_keys, intent, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+            side_norm, event_keys, intent, signed, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
         ON CONFLICT (identifier, side_norm) DO UPDATE SET
             event_slug=$2, event_title=$3, market_slug=$4,
             question=$5, kind=$6, line=$7,
-            event_keys=$9, intent=$10, updated_at=now()
+            event_keys=$9, intent=$10, signed=$11, updated_at=now()
         """,
         r["identifier"], r["event_slug"], r["event_title"],
         r["market_slug"], r["question"], r["kind"],
-        r["line"], r["side_norm"], keys, r.get("intent"))
+        r["line"], r["side_norm"], keys, r.get("intent"),
+        r.get("signed"))
 
 
 async def _record_last(pool, summary: dict,
@@ -921,7 +945,7 @@ async def resolve_explain(pool, market_title: str | None,
     try:
         rows = [dict(r) for r in await pool.fetch(
             "SELECT identifier, side_norm, kind, line, question, "
-            "event_title, intent FROM us_premap "
+            "event_title, intent, signed FROM us_premap "
             "WHERE event_keys && $1::text[]", sorted(keys))]
     except Exception as exc:  # noqa: BLE001
         out["step"] = "premap_query_failed"
@@ -1040,7 +1064,7 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     try:
         rows = [dict(r) for r in await pool.fetch(
             "SELECT identifier, side_norm, kind, line, question, "
-            "event_title, intent FROM us_premap "
+            "event_title, intent, signed FROM us_premap "
             "WHERE event_keys && $1::text[]",
             sorted(keys))]
     except Exception:  # noqa: BLE001 — table absent/degraded: fall through

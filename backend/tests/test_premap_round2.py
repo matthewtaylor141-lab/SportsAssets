@@ -428,3 +428,115 @@ class TestTheCrossCheckIsActuallyIndependent:
             "atp-x-y-2026-08-24", "ORDER_INTENT_BUY_LONG",
             mapping_src="premap"))
         assert v == "ok", "premap mappings ARE checkable by the exact path"
+
+
+class TestTheSignedColumnIsActuallyPersisted:
+    """`signed` was produced on every row and stored nowhere.
+
+    match_side._lined_ok requires the venue side's sign to equal the
+    whale's, and reads it off the row. us_premap had no such column, so
+    every row loaded from the table carried signed="" — and any whale
+    pick stating a sign hit `not rs` and refused. Every SIGNED SPREAD
+    was structurally unresolvable through premap, which is the only
+    lane allowed to trade under the quarantine.
+
+    Found by an adversarial review, in the same pass that found the
+    overspend breaker. Both are the same shape: a value converted in the
+    place it is computed and not in the place it is consumed.
+    """
+
+    def test_the_row_builder_produces_it(self):
+        rows = premap._market_rows(
+            {"slug": "asc-nfl-kc-buf-2026-08-25", "title": "KC vs BUF"},
+            {"slug": "asc-nfl-kc-buf-2026-08-25", "question": "Spread",
+             "marketSides": [
+                 {"identifier": "asc-nfl-kc-buf-2026-08-25-kc",
+                  "description": "Kansas City Chiefs -3.5", "long": True},
+                 {"identifier": "asc-nfl-kc-buf-2026-08-25-buf",
+                  "description": "Buffalo Bills +3.5", "long": False}]})
+        signs = {r.get("signed") for r in rows}
+        assert signs - {None, ""}, "the builder must stamp a sign"
+
+    def test_the_upsert_writes_it(self):
+        import inspect
+
+        src = inspect.getsource(premap._upsert)
+        assert "signed" in src.split("VALUES")[0], "not in the column list"
+        assert "signed=$" in src, "not in the DO UPDATE set"
+        assert 'r.get("signed")' in src, "not in the argument list"
+
+    def test_both_readers_select_it(self):
+        import inspect
+
+        for fn in (premap.resolve, premap.resolve_explain):
+            assert "intent, signed FROM us_premap" in inspect.getsource(fn), \
+                fn.__name__
+
+    def test_the_column_exists_in_the_table_definition(self):
+        import inspect
+
+        src = inspect.getsource(premap._ensure_table)
+        assert "signed text" in src
+        assert "ADD COLUMN IF NOT EXISTS signed text" in src, \
+            "an existing deployment needs the ALTER, not just the CREATE"
+
+    def test_there_is_a_migration_for_it(self):
+        from pathlib import Path
+
+        root = Path(premap.__file__).resolve().parents[2]
+        m = root / "migrations" / "031_us_premap_signed.sql"
+        assert m.exists()
+        assert "ADD COLUMN IF NOT EXISTS signed" in m.read_text()
+
+
+class TestTheSignGuardIsNowFunctionalNotBlanket:
+    """From 'refuse every signed pick' to 'refuse MISMATCHED signs'.
+    Strictly more matching, and the inversion protection is what
+    actually starts working."""
+
+    def _rows(self, stored_sign_kc, stored_sign_buf):
+        return [{"identifier": "asc-kc",
+                 "side_norm": premap._norm("Kansas City Chiefs -3.5"),
+                 "line": "3.5", "signed": stored_sign_kc,
+                 "kind": "side", "question": "Spread"},
+                {"identifier": "asc-buf",
+                 "side_norm": premap._norm("Buffalo Bills +3.5"),
+                 "line": "3.5", "signed": stored_sign_buf,
+                 "kind": "side", "question": "Spread"}]
+
+    def _live(self):
+        return self._rows(premap.signed_line("Kansas City Chiefs -3.5"),
+                          premap.signed_line("Buffalo Bills +3.5"))
+
+    def test_a_signed_pick_refused_when_the_column_was_empty(self):
+        """The old production behaviour, reproduced: every DB row read
+        back with signed=None."""
+        assert premap.match_side(self._rows(None, None),
+                                 "Kansas City Chiefs -3.5",
+                                 "Spread: KC (-3.5)") is None
+
+    def test_the_same_pick_matches_once_the_sign_is_stored(self):
+        hit = premap.match_side(self._live(), "Kansas City Chiefs -3.5",
+                                "Spread: KC (-3.5)")
+        assert hit is not None and hit["identifier"] == "asc-kc"
+
+    def test_the_OTHER_side_still_matches_its_own_sign(self):
+        hit = premap.match_side(self._live(), "Buffalo Bills +3.5",
+                                "Spread: BUF (+3.5)")
+        assert hit is not None and hit["identifier"] == "asc-buf"
+
+    def test_THE_INVERSION_IS_STILL_REFUSED(self):
+        """_norm erases +/-, so 'Chiefs -3.5' and 'Chiefs +3.5'
+        normalize identically. The venue lists KC only at -3.5, so a
+        +3.5 KC pick — the opposite bet — must still find nothing.
+        This is the incident this lane exists to prevent and the whole
+        reason the column has to be real rather than absent."""
+        assert premap.match_side(self._live(), "Kansas City Chiefs +3.5",
+                                 "Spread: KC (+3.5)") is None
+
+    def test_an_unsigned_pick_on_unsigned_rows_is_unaffected(self):
+        rows = [{"identifier": "atc-kc", "side_norm": "kansas city chiefs",
+                 "line": "", "signed": "", "kind": "side",
+                 "question": "Moneyline"}]
+        hit = premap.match_side(rows, "Kansas City Chiefs", "Moneyline")
+        assert hit is not None
