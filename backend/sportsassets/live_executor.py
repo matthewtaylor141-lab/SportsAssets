@@ -72,7 +72,17 @@ async def execute_copy(payload: dict) -> None:
         # (same-day review finding — an operator flipping it expects
         # copies to stop, and silently un-braking a kill dial is worse
         # than the naming being imperfect).
-        if not settings().copy_probe_enabled or payload.get("side") != "BUY":
+        if not settings().copy_probe_enabled:
+            return
+        # HIS SELL IS A SIGNAL TOO (owner order 2026-08-25). This path
+        # returned early on anything that was not a BUY, so his exits
+        # were discarded at the door — we copied entries and then held
+        # to resolution while he took the move. mirror_exit carries its
+        # own gates; it is not a bypass of this one.
+        if payload.get("side") == "SELL":
+            await mirror_exit(payload)
+            return
+        if payload.get("side") != "BUY":
             return
         async with _COPY_SEM:
             # Reaction is stamped and the ceiling judged INSIDE the
@@ -160,6 +170,106 @@ _HALT_ON_VALUES = {"on", "1", "true", "yes", "halt", "halted", "stop"}
 # sleeve down. Breaches AFTER it mean the guard itself failed, and those
 # halt hard and stay halted.
 ASK_GUARD_SINCE = "2026-08-25T02:20:00"
+
+
+async def mirror_exit(payload: dict) -> None:
+    """The whale sold. Sell our copy of the same market.
+
+    Owner order 2026-08-25: "copy both buys and sells at a proportional
+    rate", and the worked example — he buys $5,000, sells for $7,500,
+    then re-enters at $60. Copying only the entry leaves us holding to
+    resolution while he banks the move, which is a different and worse
+    strategy than his. Mirroring both legs makes our net position on a
+    market track his automatically: no house-money special case is
+    needed, because after his exit our exposure is proportionally the
+    same as his.
+
+    V1 MIRRORS FULL EXITS ONLY. If he closes 95%+ of his position we
+    close ours; a partial scale-out is logged and skipped. Partial
+    position accounting is where errors compound — the fraction has to
+    be right against a position we track across many fills — and his
+    "cash out" behaviour is a full exit, which is the case that carries
+    the value. The narrower version is the one I can be sure of.
+
+    Inert until whale sells are ingested: every copied whale currently
+    shows zero sells all time, so this fires zero times today. It is
+    built now so that the moment the data lands the sell leg is already
+    correct rather than being written in a hurry against live money.
+    """
+    if payload.get("side") != "SELL":
+        return
+    if not settings().copy_probe_enabled or copy_halted():
+        return
+    username = (payload.get("whale_username") or "").lower()
+    if username not in _whale_set("LIVE_VERIFIED_WHALES"):
+        return
+    asset = str(payload.get("asset") or "")
+    if not asset:
+        return
+    pool = await get_pool()
+    if await overspend_halt(pool):
+        return
+    row = await pool.fetchrow(
+        "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
+        "       fill_price::float8 AS entry "
+        "FROM live_orders "
+        "WHERE asset = $1 AND lower(COALESCE(whale_username,'')) = $2 "
+        "  AND status = 'filled' AND us_market_slug IS NOT NULL "
+        "ORDER BY placed_at DESC LIMIT 1", asset, username)
+    if row is None or (row["qty"] or 0) <= 0:
+        return  # nothing of ours to exit
+    # HIS fraction: how much of his own position did this sale close?
+    # Sum his own ledger for this asset rather than trusting one row.
+    pos = await pool.fetchrow(
+        """
+        SELECT COALESCE(sum(t.size) FILTER (WHERE t.side='BUY'), 0)::float8
+                   AS bought,
+               COALESCE(sum(t.size) FILTER (WHERE t.side='SELL'), 0)::float8
+                   AS sold
+        FROM trades t JOIN whales w ON w.id = t.whale_id
+        WHERE t.asset = $1 AND lower(w.username) = $2
+        """, asset, username)
+    bought = (pos["bought"] if pos else 0) or 0.0
+    sold = (pos["sold"] if pos else 0) or 0.0
+    if bought <= 0:
+        return
+    closed_frac = min(sold / bought, 1.0)
+    if closed_frac < 0.95:
+        log.info("MIRROR-EXIT partial skipped: %s closed %.0f%% of %s "
+                 "(v1 mirrors full exits only)",
+                 username, closed_frac * 100, asset)
+        return
+    from . import pmus
+
+    us_slug = row["us_market_slug"]
+    held, _avg = await _pm_held(us_slug)
+    qty = min(int(row["qty"]), held)
+    if qty <= 0:
+        return  # the venue says we hold nothing to sell
+    bid = await asyncio.to_thread(pmus.slug_bid, us_slug)
+    if bid is None or not (0 < bid < 1):
+        log.warning("MIRROR-EXIT no bid for %s — leaving the position "
+                    "rather than selling blind", us_slug)
+        return
+    limit = sell_limit_price(bid)
+    result = await asyncio.to_thread(
+        pmus.submit_fok, us_slug, limit, qty, True,
+        "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+    filled = float(result.get("filled_shares") or 0)
+    px = result.get("fill_price")
+    if not (result.get("ok") and filled > 0):
+        log.warning("MIRROR-EXIT unfilled %s: %s", us_slug,
+                    str(result.get("raw"))[:160])
+        return
+    entry = row["entry"] or 0
+    pnl = round((float(px) - entry) * filled, 4) if px else None
+    await pool.execute(
+        "UPDATE live_orders SET status='cashed_out', pnl=$2, "
+        "settled_at=now() WHERE id=$1", row["id"], pnl)
+    log.warning("MIRROR-EXIT %s %s: sold %d @ %.3f (entry %.3f) pnl %.2f "
+                "— following his %.0f%% exit", username, us_slug,
+                int(filled), float(px or limit), entry, pnl or 0,
+                closed_frac * 100)
 
 
 async def overspend_halt(pool) -> Any:
@@ -275,6 +385,27 @@ def is_overspend(requested_usd: float, filled_shares: float,
     return r is not None and r > OVERSPEND_TOLERANCE
 
 
+# MIRROR HIS SIZE, NEVER EXCEED IT (owner order 2026-08-25).
+#
+# The effective production ratio was above 70 — a $3.46 whale probe
+# became a $249.92 position of ours, while his $2,907 conviction trade
+# got 0.1x. Our sizing was inverted against his own risk allocation on
+# every copy we have ever placed.
+#
+# 1.0 means "take the size he takes". At the measured 0.92% fill rate
+# that lands on the owner's halved turnover target (ratio needed 1.004).
+# It is a CLAMP rather than a default because the env var overrides the
+# config and I cannot read Render from here; a clamp can only shrink a
+# copy, so it is safe without knowing what it is shrinking from.
+COPY_RATIO_MAX = float(os.environ.get("LIVE_COPY_RATIO_MAX", "1.0"))
+
+# Dust floor. At ratio 1.0 his smallest probes become $3-5 orders where
+# spread and fees dominate the edge. Skipping them concentrates us on
+# the trades he actually commits to — and it is a tightening, so it
+# needs no further authority.
+COPY_MIN_CLIP_USD = float(os.environ.get("LIVE_MIN_CLIP_USD", "10"))
+
+
 def plan_order(
     his_price: float, his_notional: float, ratio: float,
     max_per_fill: float, max_slippage_cents: float,
@@ -283,7 +414,25 @@ def plan_order(
     """Pure sizing/pricing: (limit_price, requested_usd, requested_shares).
 
     whole_units=True (Polymarket US): whole-cent limit price and integer
-    contract count, rounding down so the cost never exceeds the budget."""
+    contract count, rounding down so the cost never exceeds the budget.
+
+    PROPORTIONAL, AND CLAMPED (owner order 2026-08-25: "make the switch
+    to ensure proportional trades", turnover target halved to 0.5x
+    daily).
+
+    Measured: at a 0.92% fill rate, 0.5x daily turnover works out to a
+    ratio of 1.004 — mirror his size. So the policy is simply "we take
+    the size he takes", bounded by the per-clip cap.
+
+    The clamp exists because the ratio is an ENV value and the env was
+    lying. The config default is 0.001, yet production placed $249.92
+    against a $3.46 trade — 72x his size — which requires an effective
+    ratio above 70. Whatever LIVE_COPY_RATIO is set to out there, it is
+    not what anyone intended, and I cannot read or change Render from
+    here. So the code refuses to exceed COPY_RATIO_MAX regardless of
+    what the env says. It can only ever make a copy SMALLER, which is
+    why it is safe to apply without knowing the current value."""
+    ratio = min(float(ratio), COPY_RATIO_MAX)
     if whole_units:
         limit = round(min(his_price + max_slippage_cents / 100.0, 0.99), 2)
         usd_budget = min(ratio * his_notional, max_per_fill)
@@ -1762,7 +1911,12 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             cfg.live_max_slippage_cents,
             whole_units=(venue == "polymarket-us"),
         )
-        if usd < 1 or shares <= 0:
+        # DUST FLOOR (2026-08-25). At ratio 1.0 his smallest probes size
+        # to $3-5, where spread and fees eat the edge before the market
+        # moves. Skipping them concentrates the book on trades he
+        # actually commits to. Tightening only — it can never enlarge
+        # an order.
+        if usd < COPY_MIN_CLIP_USD or shares <= 0:
             return
 
     try:
