@@ -1,11 +1,17 @@
-"""The emergency halt fails CLOSED (2026-08-25).
+"""The emergency halt: armed 00:50Z, lifted 01:10Z by owner decision.
 
 Fill forensics returned five rows where the venue took 1.15x-3.87x the
 authorized clip, at prices near the COMPLEMENT of our limit — the
 signature of landing on the opposite side. Copying is off until that
 mechanism is understood.
 
-These tests deliberately clear the suite-wide LIVE_COPY_HALT=off from
+The owner reads those rows as round-trips on one game and asked to run
+live while the reporting question is settled. The default is now LIVE;
+what protects the money path is the fail-closed preview cost guard,
+which refuses any order the venue prices above what we authorized —
+or prices at all.
+
+These tests deliberately override the suite-wide LIVE_COPY_HALT from
 conftest, so they see the real production default.
 """
 
@@ -14,27 +20,38 @@ import inspect
 from sportsassets import live_executor as le
 
 
-def test_the_default_is_halted(monkeypatch):
-    """No env var set — the halt must be ON. A missing variable can
-    never resurrect live copying."""
+def test_the_default_is_live(monkeypatch):
+    """Owner decision 2026-08-25 01:10Z: run live while the reporting
+    question is settled. What protects the money path now is the
+    fail-closed preview cost guard, not this switch."""
     monkeypatch.delenv("LIVE_COPY_HALT", raising=False)
-    assert le.copy_halted() is True
-
-
-def test_only_an_explicit_off_lifts_it(monkeypatch):
-    monkeypatch.setenv("LIVE_COPY_HALT", "off")
-    assert le.copy_halted() is False
-    monkeypatch.setenv("LIVE_COPY_HALT", "OFF")
-    assert le.copy_halted() is False
-    monkeypatch.setenv("LIVE_COPY_HALT", " off ")
     assert le.copy_halted() is False
 
 
-def test_garbage_values_stay_halted(monkeypatch):
-    """A typo'd or half-written override must not open the money path."""
-    for v in ("", "on", "0", "false", "no", "of", "disabled", "1", "true"):
+def test_any_plausible_yes_re_arms_the_halt(monkeypatch):
+    """The default inverted, so a typo can no longer strand us HALTED —
+    only LIVE. The forgiving direction must therefore be the one that
+    STOPS trading: every reasonable spelling of "halt" typed into
+    Render at 2am has to work."""
+    for v in ("on", "ON", " on ", "1", "true", "TRUE", "yes",
+              "halt", "halted", "stop"):
         monkeypatch.setenv("LIVE_COPY_HALT", v)
-        assert le.copy_halted() is True, f"{v!r} must not lift the halt"
+        assert le.copy_halted() is True, f"{v!r} must re-arm the halt"
+
+
+def test_explicit_off_and_blank_stay_live(monkeypatch):
+    for v in ("", "off", "OFF", " off ", "no", "0", "false"):
+        monkeypatch.setenv("LIVE_COPY_HALT", v)
+        assert le.copy_halted() is False, f"{v!r} must not halt"
+
+
+def test_the_guard_is_what_protects_us_now(monkeypatch):
+    """Lifting the halt is only defensible because submit_fok refuses a
+    preview it cannot read. If that ever regresses, this pairing is the
+    reminder that the halt is no longer covering it."""
+    from sportsassets import pmus
+
+    assert pmus._order_cost({}) is None
 
 
 def test_the_halt_sits_at_the_common_gate():

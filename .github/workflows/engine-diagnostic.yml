@@ -587,6 +587,16 @@ jobs:
                -o /tmp/receipts.json \
                "$BASE/api/admin/overspend-receipts?hours=48" || true
           jq -r '"  RECEIPTS n=\(.n // 0)"' /tmp/receipts.json 2>/dev/null || true
+          # PRICE-TRUTH, server-side: the CI version printed "SKIP: no
+          # credentials" (2026-08-25 00:57Z) because the runner holds no
+          # PMUS keys. Only the deployed API can preview an order.
+          curl -sS --max-time 40 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/ptruth.json \
+               "$BASE/api/admin/price-truth?price=0.30&qty=10" || true
+          jq -r '"  PRICE-TRUTH market=\(.market // "?") ours=$\(.ours // "?") complement=$\(.complement // "?") err=\(.error // "none")",
+                 (.legs // {} | to_entries[] |
+                   "  PTRUTH \(.key): venue_cost=$\(.value.venue_cost // "?") ratio=\(.value.ratio_to_ours // "?") \(.value.verdict // .value.error // "?")")' \
+            /tmp/ptruth.json 2>/dev/null || true
           jq -r '.rows[]? |
                  "  RCPT \(.placed_at) \(.whale) \(.slug) lim=\(.limit_price) req=$\(.requested_usd)/\(.requested_shares)sh filled=$\(.filled_usd)/\(.filled_shares)sh@\(.fill_price) ordersOnMkt=\(.orders_on_market) execs=\(.n_executions) maxPx=\(.exec_max_px // "none") pnl=\(.pnl // "?")",
                  "       VERDICT: \(.verdict)",
@@ -2207,92 +2217,4 @@ jobs:
                       break
           except Exception as e:
               print(f"  contrast ERR {type(e).__name__}: {str(e)[:100]}")
-          PY
-
-      - name: PRICE-TRUTH — what does the venue CHARGE for a BUY_SHORT?
-        if: always()
-        env:
-          PMUS_KEY_ID: ${{ secrets.PMUS_KEY_ID }}
-          PMUS_SECRET_KEY: ${{ secrets.PMUS_SECRET_KEY }}
-          PMUS_PASSPHRASE: ${{ secrets.PMUS_PASSPHRASE }}
-        run: |
-          echo "###########################################################"
-          echo '#   PRICE-TRUTH: which leg does price name on a SHORT?   #'
-          echo "###########################################################"
-          # Five real fills on 2026-08-24 took 1.15x-3.87x the authorized
-          # clip. The share count matched our request EXACTLY; the fill
-          # price did not, and every fill price sat near the COMPLEMENT
-          # of our limit (1-0.32=0.68 vs 0.6853; 1-0.45=0.55 vs 0.56).
-          #
-          # Hypothesis, NOT yet proven: the venue's price field always
-          # names the LONG leg, so BUY_SHORT at price p costs (1-p) per
-          # share — and we have been passing the price of the side we
-          # WANT. If true, every short copy silently paid the complement.
-          #
-          # Do not infer this from fills. PREVIEW both intents on one
-          # market at one price and read the venue's own stated cost.
-          # A preview places nothing.
-          python - <<'PY'
-          import os
-          from polymarket_us import PolymarketUS
-
-          def amt(a):
-              try:
-                  return float((a or {}).get("value") or 0)
-              except (TypeError, ValueError):
-                  return 0.0
-
-          key = os.environ.get("PMUS_KEY_ID") or ""
-          if not key:
-              print("  PRICE-TRUTH SKIP: no credentials on this runner")
-              raise SystemExit(0)
-          c = PolymarketUS(key_id=key,
-                           secret_key=os.environ.get("PMUS_SECRET_KEY"),
-                           passphrase=os.environ.get("PMUS_PASSPHRASE"))
-          pub = PolymarketUS()
-          # any live two-sided market; the point is the ARITHMETIC
-          evs = (pub.events.list({"limit": 20, "active": True,
-                                  "closed": False}) or {})
-          evs = evs.get("events") or evs.get("data") or []
-          target = None
-          for ev in evs:
-              for m in (ev.get("markets") or []):
-                  if m.get("closed"):
-                      continue
-                  sides = m.get("marketSides") or []
-                  if len(sides) == 2 and m.get("slug"):
-                      target = m
-                      break
-              if target:
-                  break
-          if not target:
-              print("  PRICE-TRUTH: no live two-sided market found")
-              raise SystemExit(0)
-          slug = target["slug"]
-          print(f"  PRICE-TRUTH market={slug}")
-          for s in (target.get("marketSides") or []):
-              print(f"  PRICE-TRUTH   side long={s.get('long')} "
-                    f"id={str(s.get('identifier'))[:60]} "
-                    f"desc={str(s.get('description'))[:40]}")
-          PX, QTY = 0.30, 10
-          for intent in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
-              req = {"marketSlug": slug, "intent": intent,
-                     "type": "ORDER_TYPE_LIMIT",
-                     "price": {"value": str(PX)}, "quantity": QTY,
-                     "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"}
-              try:
-                  pv = c.orders.preview({"request": req}) or {}
-                  o = pv.get("order") or {}
-                  cash, px = amt(o.get("cashOrderQty")), amt(o.get("price"))
-                  ours = PX * QTY
-                  print(f"  PRICE-TRUTH {intent[-10:]}: we asked "
-                        f"{QTY}sh @{PX} = ${ours:.2f} | venue cash="
-                        f"${cash:.2f} price={px} qty={o.get('quantity')} "
-                        f"=> ratio {(cash/ours if ours and cash else 0):.3f}")
-                  if cash and abs(cash - (1 - PX) * QTY) < 0.02:
-                      print("  PRICE-TRUTH   ^^ COMPLEMENT CONFIRMED: the "
-                            "venue charges (1-price) for this intent")
-              except Exception as e:
-                  print(f"  PRICE-TRUTH {intent[-10:]} ERR "
-                        f"{type(e).__name__}: {str(e)[:140]}")
           PY

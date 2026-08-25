@@ -3411,6 +3411,89 @@ async def _live_status_uncached() -> dict:
     }
 
 
+@app.get("/api/admin/price-truth",
+         dependencies=[Depends(require_admin)])
+async def api_price_truth(price: float = 0.30, qty: int = 10) -> dict:
+    """Which leg does the venue's `price` field name on a BUY_SHORT?
+
+    Runs HERE rather than on the CI runner because the runner has no
+    PMUS credentials — the workflow version printed "SKIP: no
+    credentials" and measured nothing (2026-08-25 00:57Z).
+
+    Previews the SAME market at the SAME price under both intents and
+    reports the venue's own stated cost for each. A preview places no
+    order. The arithmetic decides a question I will not decide by
+    pattern-matching fills:
+
+      BUY_SHORT cost ~= price*qty      -> price names the side we ask
+                                          for; the overspend is
+                                          something else
+      BUY_SHORT cost ~= (1-price)*qty  -> price names the LONG leg, so
+                                          every short copy has been
+                                          paying the complement
+    """
+    from . import pmus_account  # noqa: F401 — ensures creds are loaded
+
+    from .. import pmus as _pmus
+
+    def _amt(a) -> float:
+        try:
+            return float((a or {}).get("value") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    price = max(0.01, min(float(price), 0.99))
+    qty = max(1, min(int(qty), 10))
+    ours = round(price * qty, 4)
+    comp = round((1 - price) * qty, 4)
+    try:
+        client = await asyncio.to_thread(_pmus._get_client)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:200]}
+    # Any live two-sided market — the point is the arithmetic, not the
+    # game. Reuse the premap table so we do not crawl the venue again.
+    pool = await get_pool()
+    slug = await pool.fetchval(
+        "SELECT identifier FROM us_premap "
+        "WHERE intent IS NOT NULL AND identifier IS NOT NULL "
+        "ORDER BY updated_at DESC LIMIT 1")
+    if not slug:
+        return {"ok": False, "error": "no premap row to preview against"}
+    out = {"ok": True, "market": slug, "price": price, "qty": qty,
+           "ours": ours, "complement": comp, "legs": {}}
+    for intent in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
+        req = {"marketSlug": slug, "intent": intent,
+               "type": "ORDER_TYPE_LIMIT",
+               "price": {"value": str(price)}, "quantity": qty,
+               "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"}
+        try:
+            pv = await asyncio.to_thread(
+                client.orders.preview, {"request": req})
+            o = (pv or {}).get("order") or {}
+            cash = _amt(o.get("cashOrderQty"))
+            px = _amt(o.get("price"))
+            if not cash and px:
+                cash = round(px * float(o.get("quantity") or qty), 4)
+            verdict = "venue stated no cost"
+            if cash:
+                if abs(cash - ours) <= 0.02:
+                    verdict = "matches OUR price — this leg is priced as asked"
+                elif abs(cash - comp) <= 0.02:
+                    verdict = ("COMPLEMENT — venue charges (1-price); we "
+                               "have been passing the wrong leg's price")
+                else:
+                    verdict = f"neither ours ({ours}) nor complement ({comp})"
+            out["legs"][intent[-10:]] = {
+                "venue_cost": cash, "venue_price": px,
+                "venue_qty": o.get("quantity"),
+                "ratio_to_ours": round(cash / ours, 4) if ours else None,
+                "verdict": verdict}
+        except Exception as exc:  # noqa: BLE001 — report, never infer
+            out["legs"][intent[-10:]] = {
+                "error": f"{type(exc).__name__}: {str(exc)[:180]}"}
+    return out
+
+
 @app.get("/api/admin/overspend-receipts",
          dependencies=[Depends(require_admin)])
 async def api_overspend_receipts(hours: int = 48) -> dict:

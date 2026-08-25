@@ -127,17 +127,43 @@ async def execute_copy(payload: dict) -> None:
 #     default=expected_cost), so an unreadable preview compares equal
 #     and passes. A money guard that fails OPEN.
 #
-# Copying is OFF until the side/price mechanism is understood and the
-# preview guard fails closed. This is a tightening, reversible with
-# LIVE_COPY_HALT=off once the cause is proven — not before.
+# HALT LIFTED (owner decision 2026-08-25 01:10Z: "I want the system
+# live while you fix the reporting"). The owner reads these rows as
+# round-trips on ONE game — bought at 250, sold for profit, rebought
+# with the same 250 — in which case the true stake never exceeded the
+# clip and filled_usd is only a reporting artifact. That is his call to
+# make, it is not yet disproven, and the receipts endpoint decides it.
+#
+# What makes live SAFE rather than a coin flip, on EITHER hypothesis:
+# the preview cost guard now FAILS CLOSED (pmus._order_cost, same day).
+# Before every buy the venue states its own cost, and submit_fok
+# REFUSES when that exceeds ours beyond tolerance — or when the venue
+# states no cost at all. So:
+#   - owner right (reporting artifact): nothing changes, guard silent
+#   - me right (venue charges the complement): the order is REFUSED
+#     pre-trade instead of filling at 3.87x
+# The GUARD, not the halt, is the real protection. That is what makes
+# lifting this defensible while the cause is still open.
+#
+# LIVE_COPY_HALT=on re-arms the halt from Render with no deploy.
 COPY_HALT_REASON = (
-    "halted 2026-08-25: confirmed overspend to 3.87x the authorized "
-    "clip at complement prices (probable wrong side) — copying is off "
-    "pending root cause")
+    "halted: overspend to 3.87x the authorized clip at complement "
+    "prices (probable wrong side) — set LIVE_COPY_HALT=on to re-arm")
+
+
+_HALT_ON_VALUES = {"on", "1", "true", "yes", "halt", "halted", "stop"}
 
 
 def copy_halted() -> bool:
-    return os.getenv("LIVE_COPY_HALT", "on").strip().lower() != "off"
+    """True when the owner has re-armed the halt.
+
+    The default is now LIVE (owner decision above), which inverts the
+    risk of a typo: it can no longer strand us halted, so it must not
+    be able to strand us LIVE when the owner meant to stop. Any
+    plausible spelling of "yes, halt" halts — the forgiving direction
+    is the one that stops trading."""
+    return (os.getenv("LIVE_COPY_HALT", "").strip().lower()
+            in _HALT_ON_VALUES)
 
 
 # THE VERIFIED-PROFITABLE SET — ONE DEFINITION (2026-08-25).
