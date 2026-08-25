@@ -21,6 +21,24 @@ def _lift_emergency_halt(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _permissive_ask(monkeypatch):
+    """The pre-trade ask check needs a readable book.
+
+    It fails CLOSED on an unreadable ask, which is right for money and
+    wrong for the suite: the stub venues here expose no order book, so
+    every test of an upstream gate would refuse at the ask check and
+    pass while proving nothing. Answer with an ask far below any limit
+    under test, so the check is satisfied and the gate under test is
+    what actually decides.
+
+    test_ask_guard.py exercises the real check against real numbers.
+    """
+    from sportsassets import pmus
+
+    monkeypatch.setattr(pmus, "side_ask", lambda slug, intent: 0.01)
+
+
+@pytest.fixture(autouse=True)
 def _clear_overspend_breaker(monkeypatch):
     """Same problem, different switch.
 

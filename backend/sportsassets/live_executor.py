@@ -2207,6 +2207,47 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 log.warning("LIVE (US) refused %s: unorderable side",
                             mapping["market_slug"])
                 return
+            # PRE-TRADE ASK CHECK (2026-08-25) — the guard the evidence
+            # actually supports.
+            #
+            # Measured, not assumed: PRICE-TRUTH previewed BOTH intents
+            # on the aec- family (the family that overspent) and the
+            # venue quoted OUR price both times, ratio 1.000. So the
+            # venue is not charging the complement. Yet five real fills
+            # came back far ABOVE our limit — 1086sh asked at 0.23,
+            # filled at 0.89 — with the exact quantity requested. The
+            # limit we send is evidently not enforced at execution; the
+            # order behaves like a market IOC and takes the book.
+            #
+            # If the venue will not hold our limit, we have to check the
+            # book ourselves BEFORE sending. side_ask reads the ask for
+            # the leg our INTENT names (slug_ask cannot: both sides
+            # share the identifier on this family). Ask above our limit
+            # means the fill would cost more than authorized — refuse.
+            #
+            # Fail-closed on an unreadable ask: a price we cannot see is
+            # not a price we can bound. All five overspent rows would
+            # have been refused here.
+            #
+            # COST: one extra venue read per order, which is latency on
+            # the copy path. That is a real tradeoff against SwissTony's
+            # speed and it is the right side of it — a fast wrong-priced
+            # fill is worth less than a slow refusal.
+            _ask = await asyncio.to_thread(
+                pmus.side_ask, mapping["market_slug"], _intent)
+            if _ask is None or _ask > limit + 1e-9:
+                await pool.execute(
+                    "UPDATE live_orders SET status='rejected', error=$2 "
+                    "WHERE id=$1", row_id,
+                    (f"ask-above-limit: venue asks {_ask} for this side, "
+                     f"we authorized {limit} — refusing (the venue does "
+                     f"not enforce our limit at execution)")
+                    if _ask is not None else
+                    ("no readable ask for this side — refusing rather "
+                     "than sending an unbounded order"))
+                log.warning("LIVE (US) refused %s: ask %s > limit %s",
+                            mapping["market_slug"], _ask, limit)
+                return
             result = await asyncio.to_thread(
                 pmus.submit_fok, mapping["market_slug"], limit,
                 int(shares), False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",

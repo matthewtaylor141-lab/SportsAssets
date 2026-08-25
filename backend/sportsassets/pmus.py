@@ -480,6 +480,47 @@ def slug_ask(us_slug: str) -> float | None:
     return None
 
 
+def side_ask(us_slug: str, intent: str | None) -> float | None:
+    """Live ask for the SIDE our intent names — not merely the slug.
+
+    slug_ask() matches `identifier == us_slug`, which on the aec-
+    family returns whichever side happens to come first: BOTH sides
+    carry the market slug as their identifier. That is the same
+    shared-identifier trap as the original wrong-side incident, sitting
+    in the price reader this time.
+
+    `intent` names the leg (BUY_LONG -> long=True). Returns None when
+    the venue has no readable quote for THAT leg, and the caller
+    refuses rather than guessing — a price we cannot attribute to a
+    side is not a price we can trade on.
+    """
+    if intent not in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
+        return None
+    want_long = intent == "ORDER_INTENT_BUY_LONG"
+    client = _get_client()
+    try:
+        m = (client.markets.retrieve_by_slug(us_slug) or {}).get(
+            "market") or {}
+    except Exception:  # noqa: BLE001 — 404s are an answer
+        return None
+    for s in (m.get("marketSides") or []):
+        if not isinstance(s, dict):
+            continue
+        lng = s.get("long")
+        if lng is None or bool(lng) != want_long:
+            continue
+        for k in ("bestAsk", "best_ask", "ask", "price"):
+            try:
+                v = s.get(k)
+                if v is not None:
+                    px = float(v)
+                    if 0 < px < 1:
+                        return px
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 def slug_bid(us_slug: str) -> float | None:
     """Live best BID for one orderable US slug (desk cash-out, owner
     directive 2026-08-22). Explicit bid fields first; on a two-sided
