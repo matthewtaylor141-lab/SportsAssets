@@ -17,7 +17,9 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
-from . import analytics, chain_listener, copy_sweep, dispatcher, metadata_refresher, poller, premap, reconciler, roster, underdog
+from . import (analytics, chain_listener, copy_sweep, dispatcher,
+               metadata_refresher, poller, premap, reconciler, roster,
+               underdog, whale_exits)
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +36,12 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     ("copy_sweep", copy_sweep.main),
     ("underdog", underdog.main),
     ("premap", premap.main),
+    # Exit detection from POSITIONS (2026-08-25). These whales close
+    # by merging, not selling: 860k buys and 0 sells for swisstony,
+    # while 62 of his 75 held positions sit below what he bought. No
+    # trade listener can see that, so this diffs holdings and feeds
+    # mirror_exit the fraction it measured.
+    ("whale_exits", whale_exits.main),
 ]
 
 

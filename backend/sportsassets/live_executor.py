@@ -231,9 +231,24 @@ async def mirror_exit(payload: dict) -> None:
         """, asset, username)
     bought = (pos["bought"] if pos else 0) or 0.0
     sold = (pos["sold"] if pos else 0) or 0.0
-    if bought <= 0:
-        return
-    closed_frac = min(sold / bought, 1.0)
+    # POSITION-DERIVED FRACTION (2026-08-25). The ledger computation
+    # below can never fire for these whales: they close by MERGING, not
+    # selling, so `sold` is 0 across 860k trades and closed_frac would
+    # always be 0. Measured: swisstony holds less than he bought on
+    # 62 of 75 positions, ferrari on 18 of 23 — exits no trade feed
+    # shows. The position poller therefore supplies the fraction it
+    # measured directly, and the ledger stays as the path for a whale
+    # who genuinely sells.
+    supplied = payload.get("closed_frac")
+    if supplied is not None:
+        try:
+            closed_frac = max(0.0, min(float(supplied), 1.0))
+        except (TypeError, ValueError):
+            return
+    else:
+        if bought <= 0:
+            return
+        closed_frac = min(sold / bought, 1.0)
     if closed_frac < 0.95:
         log.info("MIRROR-EXIT partial skipped: %s closed %.0f%% of %s "
                  "(v1 mirrors full exits only)",
