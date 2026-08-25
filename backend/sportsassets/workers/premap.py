@@ -90,6 +90,12 @@ def date_of(slug: str | None) -> str:
     return m.group(0) if m else ""
 
 
+# The venue's slug grammar leads with a market-kind token; the whale's
+# feed does not. Kept next to event_keys_for because that is the only
+# place the asymmetry has to be reconciled.
+_KIND_PREFIXES = frozenset({"aec", "atc", "asc", "tsc", "astatc"})
+
+
 def event_keys_for(title: str | None, slug: str | None = None) -> list[str]:
     """Deterministic lookup keys for one event, built the same way at
     write time (venue side) and read time (whale side) so a match is an
@@ -122,8 +128,68 @@ def event_keys_for(title: str | None, slug: str | None = None) -> list[str]:
     if d:
         keys |= {f"{k}@{d}" for k in list(keys)}
         s = (slug or "").lower()
-        keys.add(s[: s.find(d) + len(d)].strip("-"))
+        slug_key = s[: s.find(d) + len(d)].strip("-")
+        keys.add(slug_key)
+        # THE KIND PREFIX MADE THE TWO SIDES UNABLE TO MEET (2026-08-25).
+        #
+        # This function runs on BOTH sides — venue slugs at sweep time,
+        # whale slugs at copy time — and the two grammars differ by one
+        # token. The venue names the market TYPE in a leading prefix
+        # (aec/atc/asc/tsc/astatc); the whale's feed does not.
+        #
+        #   whale  efl-don-mid-2026-08-25-spread-away-1pt5
+        #            -> key  efl-don-mid-2026-08-25
+        #   venue  asc-efl-don-mid-2026-08-25-away-1pt5
+        #            -> key  asc-efl-don-mid-2026-08-25
+        #
+        # Same game, same date, same teams — and the keys can never
+        # intersect. The deterministic lane was structurally dead for
+        # every market whose venue slug carries a kind prefix, which is
+        # all of them.
+        #
+        # This is the largest single cause in the funnel. The unmapped
+        # census, over 400 sampled rows: no_key_intersection 207
+        # (51.8%), and its first example was exactly this pair.
+        #
+        # Emitting the kind-stripped form as well lets the two grammars
+        # meet on the game. It does NOT loosen market-type agreement:
+        # resolve() still applies the PREFIX_FOR_TYPE filter to the rows
+        # this key returns, so an asc- spread row and a tsc- total row
+        # on one game both match the game key and are then separated by
+        # type exactly as before. Game agreement comes from the date in
+        # the key, which is untouched.
+        head = slug_key.split("-", 1)
+        if len(head) == 2 and head[0] in _KIND_PREFIXES:
+            keys.add(head[1])
     return sorted(k for k in keys if k)
+
+
+def _dated_admissible(keys: set[str], d: str) -> set[str]:
+    """Which keys a DATED whale signal may match on.
+
+    The rule is game agreement: a dated signal must never match another
+    day's game. Two forms satisfy that — a title key stamped with the
+    date ("yankees vs red sox@2026-08-25"), and a slug key that ENDS in
+    the date ("efl-don-mid-2026-08-25").
+
+    The old filter admitted the first plus anything starting with a
+    venue kind prefix. That silently excluded the second: the whale's
+    own slug key carries no kind prefix and no "@", so the one
+    deterministic key his signal produces was thrown away on every
+    dated trade — which is every trade. The deterministic lane could
+    then only ever match on TITLE STRINGS.
+
+    Ending in the date is exactly as strong a guarantee as carrying an
+    "@" stamp, because it IS the date, in the position the venue and
+    the whale both put it. Admitting it costs nothing and recovers the
+    largest cause in the funnel (no_key_intersection, 51.8% of sampled
+    unmapped rows).
+    """
+    ok = set(dated_keys(keys))
+    ok |= {k for k in keys if k.startswith(
+        tuple(f"{p}-" for p in _KIND_PREFIXES))}
+    ok |= {k for k in keys if d and k.endswith(d)}
+    return {k for k in ok if k}
 
 
 def dated_keys(keys: list[str] | set[str]) -> list[str]:
@@ -714,8 +780,7 @@ async def resolve_explain(pool, market_title: str | None,
         keys.update(event_keys_for(None, global_slug))
     keys = {k for k in keys if k}
     if d:
-        keys = set(dated_keys(keys)) | {k for k in keys if k.startswith(
-            tuple(f"{p}-" for p in ("aec", "atc", "asc", "tsc", "astatc")))}
+        keys = _dated_admissible(keys, d)
     out["keys"] = len(keys)
     if not keys:
         out["step"] = "no_keys_built"
@@ -781,8 +846,7 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
         keys.update(event_keys_for(None, global_slug))
     keys = {k for k in keys if k}
     if d:
-        keys = set(dated_keys(keys)) | {k for k in keys if k.startswith(
-            tuple(f"{p}-" for p in ("aec", "atc", "asc", "tsc", "astatc")))}
+        keys = _dated_admissible(keys, d)
     if not keys:
         return None
     try:
