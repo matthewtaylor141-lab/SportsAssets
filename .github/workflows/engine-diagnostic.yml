@@ -666,10 +666,22 @@ jobs:
           # perfectly is the most persuasive kind of wrong, and the
           # venue states the answer directly in order.side, which we
           # have been storing on every row and never reading.
-          curl -sS --max-time 45 -H "X-Admin-Token: $ADMIN_TOKEN" \
-               -o /tmp/shorttruth.json "$BASE/api/admin/short-truth?days=7" || true
+          # "unavailable" is not a diagnosis. The first run of this line
+          # printed exactly that, on a build where the endpoint WAS
+          # deployed (healthz said 5e17364), and it said nothing about
+          # whether the call 404'd, 500'd, timed out or returned HTML.
+          # Capture the status and the first bytes so the next failure
+          # names itself instead of needing another round trip.
+          SHORTCODE=$(curl -sS --max-time 45 -w '%{http_code}' \
+               -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/shorttruth.json \
+               "$BASE/api/admin/short-truth?days=7" 2>/dev/null || echo "000")
+          echo "  SHORTHTTP code=$SHORTCODE bytes=$(wc -c < /tmp/shorttruth.json 2>/dev/null || echo 0)"
+          if ! jq -e . /tmp/shorttruth.json >/dev/null 2>&1; then
+            echo "  SHORTBODY $(head -c 300 /tmp/shorttruth.json 2>/dev/null | tr '\n' ' ')"
+          fi
           jq -r '"  SHORTTRUTH n=\(.n // 0) with_venue_side=\(.n_with_venue_side // 0) sides=\(.side_counts // {} | tostring) within_auth short_model=\(.within_authorization_under_short_model // 0)/\(.n // 0) long_model=\(.within_authorization_under_long_model // 0)/\(.n // 0)"' \
-            /tmp/shorttruth.json 2>/dev/null || echo "  SHORTTRUTH unavailable"
+            /tmp/shorttruth.json 2>/dev/null || echo "  SHORTTRUTH unreadable — see SHORTHTTP/SHORTBODY above"
           jq -r '"  SHORTVERDICT \(.verdict // "unavailable")"' \
             /tmp/shorttruth.json 2>/dev/null || true
           jq -r '.rows[]? | "  SHORTROW \(.slug) lim=\(.limit) req$\(.requested_usd) qty=\(.qty) fill=\(.fill_px) | long_model $\(.cost_if_long_model) short_model $\(.cost_if_short_model) | venue_side=\(.venue_side // "absent") cashQty=\(.venue_cash_order_qty // "absent") avgPx=\(.venue_avg_px // "absent")"' \
