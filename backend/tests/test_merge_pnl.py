@@ -18,6 +18,7 @@ and every input has been sitting in the trades table the whole time.
 
 import pytest
 
+from sportsassets.analytics import merge_pnl as mp
 from sportsassets.analytics.merge_pnl import DUST, replay
 
 
@@ -243,3 +244,218 @@ class TestTruncationIsReportedNotSilent:
                                           max_fills=100))
         assert out["w"]["truncated"] is False
         assert "verdict_note" not in out["w"]
+
+
+# ────────────────────────────────────────────────────────────────────
+# THE COUNTERFACTUAL (owner question 2026-08-25).
+#
+# Every whale number this desk has published grades at RESOLUTION —
+# a world in which the exit never happens. The owner's position is that
+# for a number of the copied whales the exits ARE the edge, and the
+# probe's TRUEEDGE table supports it: on our detected flow, rn1 and
+# ferrari grade NEGATIVE held to settlement while their merge-inclusive
+# books are +$222k and +$217k, and HomeRunHazard and SwissTony grade
+# POSITIVE held to settlement while their real books are -$35k and
+# -$188k. Four of six flip sign, in both directions.
+#
+# That comparison was across two different populations (our detected
+# subsample vs their full book), which makes it evidence and not proof.
+# This measures both worlds over the SAME fills, so the difference is
+# the exits and nothing else.
+#
+#     actual          q * (exit_price - avg_cost)
+#     held to settle  q * (payout     - avg_cost)
+#     EXIT VALUE      q * (exit_price - payout)
+#
+# avg_cost cancels: the exit value does not depend on what he paid,
+# only on where he got out versus where it finished.
+
+class TestTheExitValueArithmetic:
+    def _fills(self, entry_px, complement_px, size=100.0):
+        """Buy leg 0, then close it by buying leg 1 (a merge)."""
+        return [
+            {"condition_id": "c", "outcome_index": 0, "side": "BUY",
+             "size": size, "price": entry_px},
+            {"condition_id": "c", "outcome_index": 1, "side": "BUY",
+             "size": size, "price": complement_px},
+        ]
+
+    def test_exiting_a_position_that_would_have_LOST_is_worth_money(self):
+        """Bought leg0 at 0.40, closed it by buying leg1 at 0.30 — so he
+        sold leg0 at 0.70. Leg0 then lost (payout 0).
+
+        actual   100 * (0.70 - 0.40) = +30
+        held     100 * (0.00 - 0.40) = -40
+        exit     100 * (0.70 - 0.00) = +70
+        """
+        r = mp.replay(self._fills(0.40, 0.30), {"c": [0.0, 1.0]})
+        assert r["cf_actual_on_graded"] == 30.0
+        assert r["cf_hold_on_graded"] == -40.0
+        assert r["exit_value"] == 70.0
+
+    def test_exiting_a_position_that_would_have_WON_costs_money(self):
+        """Same trade, but leg0 wins (payout 1).
+
+        actual   100 * (0.70 - 0.40) = +30
+        held     100 * (1.00 - 0.40) = +60
+        exit     100 * (0.70 - 1.00) = -30
+        """
+        r = mp.replay(self._fills(0.40, 0.30), {"c": [1.0, 0.0]})
+        assert r["cf_actual_on_graded"] == 30.0
+        assert r["cf_hold_on_graded"] == 60.0
+        assert r["exit_value"] == -30.0
+
+    def test_the_entry_price_cancels_out_of_the_exit_value(self):
+        """The property that makes this measurement clean."""
+        a = mp.replay(self._fills(0.40, 0.30), {"c": [0.0, 1.0]})
+        b = mp.replay(self._fills(0.10, 0.30), {"c": [0.0, 1.0]})
+        assert a["exit_value"] == b["exit_value"] == 70.0
+        assert a["cf_actual_on_graded"] != b["cf_actual_on_graded"]
+
+    def test_a_plain_SELL_is_graded_the_same_way(self):
+        fills = [
+            {"condition_id": "c", "outcome_index": 0, "side": "BUY",
+             "size": 100.0, "price": 0.40},
+            {"condition_id": "c", "outcome_index": 0, "side": "SELL",
+             "size": 100.0, "price": 0.70},
+        ]
+        r = mp.replay(fills, {"c": [0.0, 1.0]})
+        assert r["exit_value"] == 70.0
+
+    def test_the_merge_exit_price_is_ONE_MINUS_the_complement(self):
+        """A merge is a sale of the held leg at (1 - complement price),
+        because the pair returns exactly $1. Getting this backwards
+        would invert every exit value."""
+        r = mp.replay(self._fills(0.40, 0.30), {"c": [0.0, 1.0]})
+        # exit at 0.70, not 0.30
+        assert r["cf_actual_on_graded"] == 30.0
+
+
+class TestUnknownPayoutsAreExcludedNotAssumed:
+    """A missing resolution silently read as 'it lost' would manufacture
+    exit value out of nothing — the exact shape of the number this is
+    built to check."""
+
+    def _fills(self):
+        return [
+            {"condition_id": "c", "outcome_index": 0, "side": "BUY",
+             "size": 100.0, "price": 0.40},
+            {"condition_id": "c", "outcome_index": 1, "side": "BUY",
+             "size": 100.0, "price": 0.30},
+        ]
+
+    def test_no_payout_means_no_grade(self):
+        r = mp.replay(self._fills(), {})
+        assert r["cf_graded_shares"] == 0.0
+        assert r["cf_ungraded_shares"] == 100.0
+        assert r["exit_value"] == 0.0
+
+    def test_the_exclusion_is_reported(self):
+        r = mp.replay(self._fills(), {})
+        assert "EXCLUDED" in r["cf_note"]
+        assert r["cf_coverage"] == 0.0
+
+    def test_full_coverage_reports_one(self):
+        r = mp.replay(self._fills(), {"c": [0.0, 1.0]})
+        assert r["cf_coverage"] == 1.0
+        assert "cf_note" not in r
+
+    def test_a_malformed_payout_is_unknown_not_zero(self):
+        for bad in ({"c": "x"}, {"c": []}, {"c": [None, None]},
+                    {"c": ["a", "b"]}):
+            r = mp.replay(self._fills(), bad)
+            assert r["cf_graded_shares"] == 0.0, bad
+            assert r["exit_value"] == 0.0, bad
+
+
+class TestOnlyCLOSEDSharesAreCompared:
+    def test_an_open_position_is_not_graded_in_either_world(self):
+        """It never exited in either world, so it cancels. Grading it
+        would measure his open book, not his exits."""
+        fills = [{"condition_id": "c", "outcome_index": 0, "side": "BUY",
+                  "size": 100.0, "price": 0.40}]
+        r = mp.replay(fills, {"c": [1.0, 0.0]})
+        assert r["cf_closed_shares"] == 0.0
+        assert r["exit_value"] == 0.0
+        assert r["open_shares"] == 100.0
+
+    def test_a_partial_exit_grades_only_the_part_that_closed(self):
+        fills = [
+            {"condition_id": "c", "outcome_index": 0, "side": "BUY",
+             "size": 100.0, "price": 0.40},
+            {"condition_id": "c", "outcome_index": 1, "side": "BUY",
+             "size": 30.0, "price": 0.30},
+        ]
+        r = mp.replay(fills, {"c": [0.0, 1.0]})
+        assert r["cf_closed_shares"] == 30.0
+        assert r["exit_value"] == round(30 * 0.70, 2)
+
+
+class TestItIsOffByDefault:
+    def test_no_payouts_argument_leaves_the_old_result_shape(self):
+        fills = [{"condition_id": "c", "outcome_index": 0, "side": "BUY",
+                  "size": 100.0, "price": 0.40}]
+        r = mp.replay(fills)
+        assert r["exit_value"] == 0.0
+        assert "cf_note" not in r
+        assert r["realized_total"] == 0.0
+
+    def test_the_actual_pnl_is_unchanged_by_supplying_payouts(self):
+        fills = [
+            {"condition_id": "c", "outcome_index": 0, "side": "BUY",
+             "size": 100.0, "price": 0.40},
+            {"condition_id": "c", "outcome_index": 1, "side": "BUY",
+             "size": 100.0, "price": 0.30},
+        ]
+        a = mp.replay(fills)
+        b = mp.replay(fills, {"c": [0.0, 1.0]})
+        assert a["realized_total"] == b["realized_total"]
+        assert a["realized_merge_pnl"] == b["realized_merge_pnl"]
+
+
+class TestTheQueryCannotFabricateCoverage:
+    def test_a_missing_market_row_does_not_drop_the_fill(self):
+        import inspect
+
+        src = inspect.getsource(mp.whale_merge_pnl)
+        assert "ANY($1::text[])" in src, \
+            "payouts are fetched by explicit condition list, not joined"
+        assert "resolved, false) = true" in src
+
+    def test_a_failed_payout_lookup_yields_NO_counterfactual(self):
+        import inspect
+
+        src = inspect.getsource(mp.whale_merge_pnl)
+        assert "payouts = {}" in src
+        assert "_errors" in src
+
+
+class TestTheErrorCannotBecomeAnEighthWhale:
+    """A "_errors" key beside the whales reads as another whale to
+    every caller that iterates the map — the diagnostic's own jq does
+    exactly that. A fabricated row in a P&L table is worse than the
+    error it was reporting."""
+
+    def test_the_error_lives_on_the_whales_own_result(self):
+        import inspect
+
+        src = inspect.getsource(mp.whale_merge_pnl)
+        assert 'out["cf_error"] = cf_error' in src
+        assert 'res.setdefault("_errors"' not in src
+
+    def test_the_endpoint_verdict_never_claims_a_priced_comparison(self):
+        import inspect
+
+        from sportsassets.api import app as A
+
+        src = inspect.getsource(A.api_whale_merge_pnl)
+        assert "NO GRADED EXITS" in src
+        assert "NOT evidence that the exits were worthless" in src
+
+    def test_thin_coverage_is_flagged_not_hidden(self):
+        import inspect
+
+        from sportsassets.api import app as A
+
+        src = inspect.getsource(A.api_whale_merge_pnl)
+        assert "thin coverage" in src

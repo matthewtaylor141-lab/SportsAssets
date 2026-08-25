@@ -47,19 +47,81 @@ from typing import Any
 DUST = 1e-6
 
 
-def replay(fills: list[dict]) -> dict:
+def replay(fills: list[dict],
+           payouts: dict[str, list[float]] | None = None) -> dict:
     """Classify one whale's fills. Pure — no database, so it is testable.
 
     `fills` must be ordered (condition_id, ts, id) and carry:
         condition_id, outcome_index, side, size, price
+
+    THE COUNTERFACTUAL (owner question 2026-08-25). `payouts` maps
+    condition_id -> the venue's resolved payout per outcome index
+    (markets.resolved_prices, e.g. [1, 0]). Given it, this also
+    measures what the SAME closed shares would have returned if the
+    whale had never exited and simply held to resolution.
+
+    That comparison is the owner's thesis stated as arithmetic. Every
+    whale number this desk has published grades at resolution, which
+    is a world in which the exit never happens; the whales' real
+    returns come from the exits. Per closed lot:
+
+        actual          q * (exit_price   - avg_cost)
+        held to settle  q * (payout       - avg_cost)
+        EXIT VALUE      q * (exit_price   - payout)
+
+    and for a merge the exit price of the held leg is (1 - complement
+    price), because the pair returns exactly $1:
+
+        EXIT VALUE      m * (1 - complement_price - payout_held)
+
+    The avg_cost cancels, which is what makes this clean: the exit
+    value does not depend on what he paid, only on where he got out
+    versus where it finished.
+
+    ONLY CLOSED SHARES ARE COMPARED. Positions still open at the end of
+    the walk never exited in either world, so they cancel and are
+    excluded rather than graded — including them would measure his open
+    book, not his exits.
+
+    Conditions with no known payout are EXCLUDED AND COUNTED, never
+    treated as a zero payout. A missing resolution silently read as
+    "it lost" would manufacture exit value out of nothing, which is the
+    exact shape of the number this is meant to check.
     """
     per_cond: dict[str, list[list[float]]] = {}
+    pay = payouts or {}
     out = {
         "n_fills": 0, "n_entries": 0, "n_merges": 0, "n_sells": 0,
         "entry_notional": 0.0, "merge_shares": 0.0,
         "realized_merge_pnl": 0.0, "realized_sell_pnl": 0.0,
         "open_shares": 0.0, "open_cost": 0.0, "rows": [],
+        # counterfactual, populated only when `payouts` is supplied
+        "cf_closed_shares": 0.0, "cf_graded_shares": 0.0,
+        "cf_ungraded_shares": 0.0,
+        "cf_actual_on_graded": 0.0, "cf_hold_on_graded": 0.0,
     }
+
+    def _payout(cid: str, leg: int) -> float | None:
+        """The venue's payout for one leg, or None if unresolved."""
+        v = pay.get(cid)
+        if not isinstance(v, (list, tuple)) or leg >= len(v):
+            return None
+        try:
+            return float(v[leg])
+        except (TypeError, ValueError):
+            return None
+
+    def _grade(cid: str, leg: int, q: float, exit_px: float,
+               avg: float) -> None:
+        """Book one closed lot into the actual-vs-held comparison."""
+        out["cf_closed_shares"] += q
+        po = _payout(cid, leg)
+        if po is None:
+            out["cf_ungraded_shares"] += q
+            return
+        out["cf_graded_shares"] += q
+        out["cf_actual_on_graded"] += q * (exit_px - avg)
+        out["cf_hold_on_graded"] += q * (po - avg)
     for f in fills:
         cid = str(f.get("condition_id") or "")
         try:
@@ -81,6 +143,7 @@ def replay(fills: list[dict]) -> dict:
             if q > DUST:
                 avg = cost[idx] / bal[idx] if bal[idx] > DUST else 0.0
                 out["realized_sell_pnl"] += q * (price - avg)
+                _grade(cid, idx, q, price, avg)
                 bal[idx] -= q
                 cost[idx] -= q * avg
                 out["n_sells"] += 1
@@ -92,6 +155,10 @@ def replay(fills: list[dict]) -> dict:
                          if bal[other] > DUST else 0.0)
             pnl = m * (1.0 - avg_other - price)
             out["realized_merge_pnl"] += pnl
+            # The held leg's effective exit price is (1 - price paid for
+            # the complement): the pair returns $1, so buying the other
+            # side at `price` is selling this one at 1 - price.
+            _grade(cid, other, m, 1.0 - price, avg_other)
             out["merge_shares"] += m
             out["n_merges"] += 1
             bal[other] -= m
@@ -112,8 +179,24 @@ def replay(fills: list[dict]) -> dict:
         out["open_shares"] += st[0][0] + st[0][1]
         out["open_cost"] += st[1][0] + st[1][1]
     for k in ("entry_notional", "merge_shares", "realized_merge_pnl",
-              "realized_sell_pnl", "open_shares", "open_cost"):
+              "realized_sell_pnl", "open_shares", "open_cost",
+              "cf_closed_shares", "cf_graded_shares", "cf_ungraded_shares",
+              "cf_actual_on_graded", "cf_hold_on_graded"):
         out[k] = round(out[k], 2)
+    # EXIT VALUE: what the exits themselves were worth, on the shares
+    # where both worlds can be priced. Positive means exiting beat
+    # holding to resolution.
+    out["exit_value"] = round(
+        out["cf_actual_on_graded"] - out["cf_hold_on_graded"], 2)
+    out["cf_coverage"] = (
+        round(out["cf_graded_shares"] / out["cf_closed_shares"], 4)
+        if out["cf_closed_shares"] > 0 else None)
+    if payouts is not None and out["cf_ungraded_shares"] > 0:
+        out["cf_note"] = (
+            f"{out['cf_ungraded_shares']:.0f} of "
+            f"{out['cf_closed_shares']:.0f} closed shares have no known "
+            f"payout and are EXCLUDED from the comparison, not counted "
+            f"as losses")
     out["realized_total"] = round(
         out["realized_merge_pnl"] + out["realized_sell_pnl"], 2)
     out["roi_on_entries"] = (
@@ -144,6 +227,7 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
     # api_true_edge_cashout already does this conversion (app.py:3578);
     # I wrote a new query instead of following the idiom next to it.
     import datetime as _dt
+    import json as _json
 
     since_d = (since if isinstance(since, _dt.date)
                else _dt.datetime.fromisoformat(str(since)).date())
@@ -161,7 +245,51 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
              ORDER BY t.condition_id, t.ts, t.id
              LIMIT $3
             """, w.lower(), since_d, max_fills)
-        out = replay([dict(r) for r in rows])
+        fills = [dict(r) for r in rows]
+        # THE PAYOUTS, FOR THE CONDITIONS THIS WHALE ACTUALLY TOUCHED.
+        #
+        # Fetched by explicit condition list rather than a join on the
+        # fills query, so a market missing from `markets` cannot drop
+        # his fill from the replay. A resolution we do not have has to
+        # read as "unknown payout" — which the replay excludes and
+        # reports — and never as "this fill did not happen".
+        conds = sorted({str(f["condition_id"]) for f in fills
+                        if f.get("condition_id")})
+        payouts: dict[str, list[float]] = {}
+        cf_error: str | None = None
+        if conds:
+            try:
+                prows = await pool.fetch(
+                    "SELECT condition_id, resolved_prices FROM markets "
+                    "WHERE condition_id = ANY($1::text[]) "
+                    "  AND COALESCE(resolved, false) = true "
+                    "  AND resolved_prices IS NOT NULL", conds)
+                for pr in prows:
+                    v = pr["resolved_prices"]
+                    if isinstance(v, str):
+                        try:
+                            v = _json.loads(v)
+                        except ValueError:
+                            continue
+                    if isinstance(v, (list, tuple)):
+                        payouts[str(pr["condition_id"])] = list(v)
+            except Exception as exc:  # noqa: BLE001
+                # No counterfactual rather than a WRONG one. An empty
+                # payout map would silently grade every exit as if it
+                # were unresolved, which reads as 0% coverage — visibly
+                # nothing, not quietly something.
+                payouts = {}
+                cf_error = f"payout lookup failed: {type(exc).__name__}"
+        out = replay(fills, payouts)
+        # The error belongs to THIS WHALE'S result, not to a sibling key
+        # in the whale map. A "_errors" entry beside the whales reads as
+        # an eighth whale to every caller that iterates the map — the
+        # probe's own jq does exactly that — and a fabricated row in a
+        # P&L table is worse than the error it was reporting.
+        if cf_error:
+            out["cf_error"] = cf_error
+        out["conditions_touched"] = len(conds)
+        out["conditions_resolved"] = len(payouts)
         out["fills_read"] = len(rows)
         out["truncated"] = len(rows) >= max_fills
         if out["truncated"]:

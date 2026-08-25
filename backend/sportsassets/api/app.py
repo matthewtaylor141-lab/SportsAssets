@@ -4463,6 +4463,24 @@ async def api_whale_merge_pnl(since: str = "2026-08-01",
             if not g.get("n_merges") else
             f"{g['n_merges']} merges realising ${g['realized_merge_pnl']} "
             f"on ${g['entry_notional']} of entries")
+        # THE EXIT VERDICT, stated rather than left to the reader.
+        #
+        # The owner's thesis is that for a number of these whales the
+        # EXITS are the edge. Both worlds are now measured over the
+        # SAME fills, so this is the comparison, not an analogy to one.
+        _cov = g.get("cf_coverage")
+        _ev = g.get("exit_value") or 0
+        g["exit_verdict"] = (
+            "NO GRADED EXITS — no closed share on this book has a known "
+            "payout, so neither world can be priced. This is missing "
+            "resolution data, NOT evidence that the exits were worthless"
+            if not _cov else
+            f"exiting {'BEAT' if _ev > 0 else 'LOST TO'} holding to "
+            f"resolution by ${abs(_ev):,.2f} on "
+            f"{g.get('cf_graded_shares', 0):,.0f} graded shares "
+            f"({_cov:.0%} of closed shares)"
+            + ("  — thin coverage, treat as indicative"
+               if _cov < 0.5 else ""))
     return {"since": since, "whales": graded}
 
 

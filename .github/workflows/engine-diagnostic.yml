@@ -749,6 +749,31 @@ jobs:
             /tmp/mergepnl.json 2>/dev/null || echo "  MERGEPNL unavailable"
           jq -r '.whales // {} | to_entries[] | "  MERGEVERDICT \(.key): \(.value.verdict)"' \
             /tmp/mergepnl.json 2>/dev/null || true
+          # EXITVALUE — the owner's thesis as one number per whale.
+          #
+          # Every whale figure this desk has published grades at
+          # RESOLUTION, which is a world where the exit never happens.
+          # The owner's position is that for a number of the copied
+          # whales the EXITS are the edge. TRUEEDGE supports it but
+          # compares two different populations (our detected subsample
+          # vs their full book), so it is evidence, not proof. This
+          # runs both worlds over the SAME fills:
+          #
+          #   actual  q*(exit_price - avg)   held  q*(payout - avg)
+          #   EXIT VALUE = q*(exit_price - payout)   -- avg cancels
+          #
+          # Positive means exiting BEAT holding to resolution. coverage
+          # is the share of closed shares with a known payout; a low
+          # coverage number means the verdict is thin, not that the
+          # exits were worthless.
+          jq -r '.whales // {} | to_entries[]
+                 | "  EXITVALUE \(.key): exit_value=$\(.value.exit_value // 0) | actual=$\(.value.cf_actual_on_graded // 0) vs held=$\(.value.cf_hold_on_graded // 0) | graded \(.value.cf_graded_shares // 0)sh of \(.value.cf_closed_shares // 0)sh (coverage \(.value.cf_coverage // "n/a")) | resolved \(.value.conditions_resolved // 0)/\(.value.conditions_touched // 0)"' \
+            /tmp/mergepnl.json 2>/dev/null || echo "  EXITVALUE unavailable"
+          jq -r '.whales // {} | to_entries[] | select(.value.cf_note)
+                 | "  EXITVALUE-NOTE \(.key): \(.value.cf_note)"' \
+            /tmp/mergepnl.json 2>/dev/null || true
+          jq -r '._errors // {} | to_entries[] | "  EXITVALUE-ERR \(.key): \(.value)"' \
+            /tmp/mergepnl.json 2>/dev/null || true
 
           # SHORTTRUTH — does the venue book a BUY_SHORT as a SELL?
           #
