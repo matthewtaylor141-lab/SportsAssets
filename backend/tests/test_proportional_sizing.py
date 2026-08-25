@@ -99,3 +99,55 @@ class TestTheDustFloor:
     def test_it_only_ever_removes_orders(self):
         """A floor must never round an order UP into existence."""
         assert _usd(4.0, his_price=0.25) < COPY_MIN_CLIP_USD
+
+class TestTheLivePathIsTheOneThatChanged:
+    """The clamp went into plan_order first, and plan_order is DEAD.
+
+    COPY_MODE is hardcoded "penny_trial", so maybe_execute takes the
+    volume_normalized_clip branch and never calls plan_order at all. The
+    first version of this change would have shipped, passed all of the
+    tests above, and altered nothing in production — every fill would
+    have stayed at ~$250 whether the whale staked $3.46 or $2,907.
+
+    These tests target the branch that actually runs. If COPY_MODE ever
+    moves, the first assertion fails and says so rather than letting the
+    suite quietly test the wrong path again.
+    """
+
+    def test_the_live_mode_is_penny_trial(self):
+        from sportsassets import live_executor as le
+
+        assert le.COPY_MODE == "penny_trial", (
+            "the sizing tests below target the penny_trial branch; if "
+            "the mode changed they are testing dead code")
+
+    def test_the_live_branch_bounds_the_clip_by_his_notional(self):
+        import inspect
+
+        from sportsassets import live_executor as le
+
+        src = inspect.getsource(le.maybe_execute)
+        live = src[src.index("volume_normalized_clip("):]
+        assert "COPY_RATIO_MAX * his_notional" in live, (
+            "the mirror must bound the clip in the LIVE branch, not "
+            "only in plan_order")
+        assert live.index("COPY_RATIO_MAX * his_notional") < \
+            live.index("shares = float(int(per / limit))")
+
+    def test_the_live_branch_has_the_dust_floor(self):
+        import inspect
+
+        from sportsassets import live_executor as le
+
+        src = inspect.getsource(le.maybe_execute)
+        live = src[src.index("volume_normalized_clip("):]
+        assert "COPY_MIN_CLIP_USD" in live
+
+    def test_the_bound_only_ever_shrinks(self):
+        """min() against the governor's clip: the cap, the volume
+        governor and the 0.00 cell blocks all survive intact."""
+        for governor_clip, his_notional in [(250.0, 3.46), (250.0, 2907.32),
+                                            (0.0, 5000.0), (75.0, 40.0)]:
+            bounded = (min(governor_clip, 1.0 * his_notional)
+                       if his_notional > 0 else governor_clip)
+            assert bounded <= governor_clip

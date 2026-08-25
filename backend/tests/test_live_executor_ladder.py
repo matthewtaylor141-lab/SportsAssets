@@ -65,9 +65,15 @@ class _LadderPool:
 
 
 def _payload(**over):
+    # notional 5.5 -> 500: the copy is now a MIRROR of the whale's own
+    # size (2026-08-25), so a $5.50 fixture trade sizes to $5.50 and is
+    # correctly skipped by the dust floor — every downstream gate test
+    # would then pass while submitting nothing. $500 is about the
+    # measured average whale notional on the copies we actually fill
+    # ($515), so these fixtures now exercise a realistic copy.
     p = {"id": 1, "whale_id": 2, "whale_username": "RN1", "asset": "123",
          "condition_id": "0xc", "side": "BUY", "outcome": "Over 3.5",
-         "size": 10.0, "price": 0.55, "notional": 5.5,
+         "size": 909.0, "price": 0.55, "notional": 499.95,
          "market_title": None, "market_slug": None, "event_slug": None}
     p.update(over)
     return p

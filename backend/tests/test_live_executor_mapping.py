@@ -35,7 +35,10 @@ class _MapPool:
 def _payload(**over):
     p = {"id": 1, "whale_id": 2, "whale_username": "RN1", "asset": "123",
          "condition_id": "0xc", "side": "BUY", "outcome": "Arsenal",
-         "size": 10.0, "price": 0.55, "notional": 5.5,
+         # A MIRROR of his size now (2026-08-25): a $5.50 whale trade
+         # sizes to $5.50 and the dust floor skips it, so these mapping
+         # tests would pass while never reaching the mapper at all.
+         "size": 909.0, "price": 0.55, "notional": 499.95,
          "market_title": None, "market_slug": None, "event_slug": None}
     p.update(over)
     return p

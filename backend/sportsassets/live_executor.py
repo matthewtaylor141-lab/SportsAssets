@@ -1898,10 +1898,30 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         per = await volume_normalized_clip(
             pool, payload.get("whale_username"),
             payload.get("market_slug") or payload.get("event_slug") or "")
+        # PROPORTIONAL, IN THE PATH THAT ACTUALLY RUNS (2026-08-25).
+        #
+        # I put the mirror clamp in plan_order and called the switch
+        # done. COPY_MODE is hardcoded "penny_trial", so plan_order is
+        # NEVER REACHED in production — this branch is the live one, and
+        # volume_normalized_clip scales the flat clip by our own recent
+        # ACTIVITY without ever looking at the whale's size. That is why
+        # every fill came back at ~$250 regardless of whether he staked
+        # $3.46 or $2,907, and my "proportional switch" would have
+        # changed nothing at all.
+        #
+        # Bounding by his notional here is what makes the copy a mirror.
+        # min() can only ever shrink the clip, so it inherits the
+        # existing cap, the volume governor and the cell blocks intact.
+        if his_notional > 0:
+            per = min(per, COPY_RATIO_MAX * his_notional)
         shares = float(int(per / limit))
         if shares < 1:
             return
         usd = round(shares * limit, 2)
+        # Dust floor: at a mirror ratio his small probes size to a few
+        # dollars, where spread and fees eat the edge.
+        if usd < COPY_MIN_CLIP_USD:
+            return
         if usd > day_room:
             return
     else:
