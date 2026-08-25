@@ -829,6 +829,10 @@ _archive_cache: dict[str, Any] = {"ts": 0.0, "data": None}
 
 
 _archived_ids: set[str] = set()
+# How far back to seed the dedupe set. The venue pages ~1,200 rows of
+# activity; a week is far more than can ever scroll back into view.
+_ARCHIVED_ID_WINDOW_S = float(
+    os.environ.get("ARCHIVE_ID_WINDOW_S", str(7 * 24 * 3600)))
 
 
 def _malloc_trim() -> None:
@@ -840,6 +844,24 @@ def _malloc_trim() -> None:
         ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception:  # noqa: BLE001 - non-glibc platforms simply skip
         pass
+
+
+# THE ONLY ACTIVITY TYPES build() READS (memory fix 2026-08-25).
+#
+# The API was OOM-killed on a Pro instance at 317,681 archived rows.
+# build() consumes exactly two types — it filters to ACTIVITY_TYPE_TRADE
+# at one call site and ACTIVITY_TYPE_POSITION_RESOLUTION at the other.
+# Every other activity the account ever produced — deposits,
+# conversions, order lifecycle events — was fetched from Postgres,
+# JSON-parsed, slimmed and held in RAM for the life of the process
+# WITHOUT EVER BEING READ.
+#
+# Filtering in SQL means those rows are never fetched, never parsed and
+# never retained. The TABLE keeps full fidelity, exactly as before; only
+# the working set shrinks. If build() ever grows a third type
+# dependency, add it here — test_archive_types.py fails if the code and
+# this list disagree.
+ARCHIVE_TYPES = ("ACTIVITY_TYPE_TRADE", "ACTIVITY_TYPE_POSITION_RESOLUTION")
 
 
 def _i(s: Any) -> Any:
@@ -1013,7 +1035,9 @@ async def _hydrate_all(pool: Any) -> list[dict]:
             async with con.transaction():
                 cur = await con.cursor(
                     "SELECT id, payload FROM pmus_activity_archive "
-                    "WHERE id > $1 ORDER BY id", last)
+                    "WHERE id > $1 "
+                    "  AND payload->>'type' = ANY($2::text[]) "
+                    "ORDER BY id", last, list(ARCHIVE_TYPES))
                 while True:
                     rows = await asyncio.wait_for(cur.fetch(2500),
                                                   timeout=60)
@@ -1108,7 +1132,18 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
                    id text PRIMARY KEY,
                    ts double precision,
                    payload jsonb NOT NULL)""")
-        known = await pool.fetch("SELECT id FROM pmus_activity_archive")
+        # BOUNDED SEED (memory fix 2026-08-25). This loaded EVERY id —
+        # 317,681 strings, tens of MB — to skip re-serializing rows we
+        # already have. But the venue's activity feed is a sliding
+        # ~1,200-row window: an id older than the last few days can
+        # never appear in it again, so keeping it costs memory and
+        # saves nothing. The INSERT ... ON CONFLICT DO NOTHING below is
+        # still the authoritative guard, so a miss here is a wasted
+        # serialization, never a duplicate row.
+        known = await pool.fetch(
+            "SELECT id FROM pmus_activity_archive "
+            "WHERE ts IS NULL OR ts > $1",
+            time.time() - _ARCHIVED_ID_WINDOW_S)
         _archived_ids.update(r["id"] for r in known)
         _archive_ready = True
 
