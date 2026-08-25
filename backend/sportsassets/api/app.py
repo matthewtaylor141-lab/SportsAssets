@@ -28,6 +28,48 @@ from .grading import grade_rows
 log = logging.getLogger(__name__)
 
 
+def _cap_malloc_arenas(limit: int = 2) -> str:
+    """Cap glibc's per-thread malloc arenas. Called at IMPORT, on purpose.
+
+    Measured 2026-08-25, one process, no restart:
+
+        MEMCENSUS rss=1424.2MB accounted=353.4MB unaccounted=1070.8MB
+        archive 300171r @1181B marginal = 338.2MB
+
+    Three quarters of RSS is in none of the caches, and RSS moved
+    1,217.7 -> 1,808.2 MB between two reads thirty seconds apart. That
+    is not a leak and not a cache — it is transient allocation that is
+    freed and never handed back.
+
+    glibc gives each thread that contends for the heap its own arena,
+    up to 8 x ncores, and each one keeps its freed pages. The archive
+    parse runs in asyncio.to_thread workers, so every heavy request can
+    land in a different arena and grow the process permanently. The
+    code has described this ratchet since August and answered it with a
+    one-shot malloc_trim, which reclaims but does not stop the spread.
+
+    M_ARENA_MAX (-8) bounds the count instead. It must be set before
+    the arenas exist, which is why this runs at import rather than in
+    lifespan — by the time the first request arrives the thread pool
+    has already claimed them.
+
+    Returns a short status string so the census can report whether it
+    took, rather than leaving it to be assumed. Every wrong turn on
+    this problem has been an instrument that could not see its subject.
+    """
+    try:
+        import ctypes
+
+        M_ARENA_MAX = -8
+        rc = ctypes.CDLL("libc.so.6").mallopt(M_ARENA_MAX, int(limit))
+        return f"arena_max={limit} rc={rc}"
+    except Exception as exc:  # noqa: BLE001 — non-glibc simply skips
+        return f"unavailable: {type(exc).__name__}"
+
+
+_ARENA_STATUS = _cap_malloc_arenas()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Boot must not require a healthy database. get_pool() retries lazily
@@ -117,8 +159,28 @@ async def lifespan(_: FastAPI):
             logging.getLogger(__name__).exception(
                 "rescore v1 failed (will retry next boot)")
 
+    # PERIODIC TRIM. Capping the arenas stops the spread; it does not
+    # give back what a heavy request already took. malloc_trim walks
+    # every arena and returns free pages to the OS, and it is cheap
+    # when there is nothing to return — so it runs on a timer instead
+    # of only after a snapshot save, which is roughly never.
+    async def _trim_loop():
+        from .track_record import _malloc_trim
+
+        while True:
+            await asyncio.sleep(
+                float(_os.environ.get("API_TRIM_INTERVAL_S", "60")))
+            try:
+                await asyncio.to_thread(_malloc_trim)
+            except Exception:  # noqa: BLE001 — never kill the loop
+                logging.getLogger(__name__).warning(
+                    "periodic malloc_trim failed", exc_info=True)
+
+    trim_task = asyncio.get_running_loop().create_task(_trim_loop())
+
     asyncio.get_running_loop().create_task(_rescore_once())
     yield
+    trim_task.cancel()
     if poller_task is not None:
         poller_task.cancel()
     await close_pool()
@@ -5061,6 +5123,7 @@ async def api_memory_census() -> dict:
         "unaccounted_mb": (round(rss_mb - accounted, 1)
                            if rss_mb is not None else None),
         "gc_counts": list(__import__("gc").get_count()),
+        "arena_cap": _ARENA_STATUS,
         "note": ("est_mb is a sampled estimate scaled to the row count, "
                  "not an exact walk — it is meant to rank the holders, "
                  "not to balance to the byte"),
