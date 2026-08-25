@@ -651,6 +651,30 @@ jobs:
           jq -r '.sizing_24h // [] | .[] |
                  "  SIZING \(.whale): n24 \(.n_24h) unf \(.unfilled_24h // 0) rej \(.rejected_24h // 0) avg_req $\(.avg_req // "?") avg_filled $\(.avg_filled // "?") max_req $\(.max_req // "?") deployed24 $\(.deployed_24h // 0)"' \
             /tmp/live.json 2>/dev/null || true
+          # SHORTTRUTH — does the venue book a BUY_SHORT as a SELL?
+          #
+          # The entire "6-for-6 overspend" finding assumed cash cost is
+          # fill_price x qty. The SDK says a market is ONE instrument
+          # (CreateOrderParams takes marketSlug + intent, with no token
+          # id) and that Order.side is DERIVED by the venue from the
+          # intent. That is a futures contract, where a short ties up
+          # (1 - price) x qty.
+          #
+          # Under that model all six "overspends" land at or under the
+          # authorised amount, one to the cent, worst overage $0.00.
+          # Which is exactly why this line exists: a model that fits
+          # perfectly is the most persuasive kind of wrong, and the
+          # venue states the answer directly in order.side, which we
+          # have been storing on every row and never reading.
+          curl -sS --max-time 45 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/shorttruth.json "$BASE/api/admin/short-truth?days=7" || true
+          jq -r '"  SHORTTRUTH n=\(.n // 0) with_venue_side=\(.n_with_venue_side // 0) sides=\(.side_counts // {} | tostring) within_auth short_model=\(.within_authorization_under_short_model // 0)/\(.n // 0) long_model=\(.within_authorization_under_long_model // 0)/\(.n // 0)"' \
+            /tmp/shorttruth.json 2>/dev/null || echo "  SHORTTRUTH unavailable"
+          jq -r '"  SHORTVERDICT \(.verdict // "unavailable")"' \
+            /tmp/shorttruth.json 2>/dev/null || true
+          jq -r '.rows[]? | "  SHORTROW \(.slug) lim=\(.limit) req$\(.requested_usd) qty=\(.qty) fill=\(.fill_px) | long_model $\(.cost_if_long_model) short_model $\(.cost_if_short_model) | venue_side=\(.venue_side // "absent") cashQty=\(.venue_cash_order_qty // "absent") avgPx=\(.venue_avg_px // "absent")"' \
+            /tmp/shorttruth.json 2>/dev/null | head -10 || true
+
           # OVERSPEND: raw requested-vs-filled per fill. ratio > 1 means
           # filled_usd exceeded what we asked to spend, which an IOC buy
           # cannot do — so it names a real overspend or a broken number.

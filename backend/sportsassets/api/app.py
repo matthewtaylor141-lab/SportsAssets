@@ -4264,6 +4264,141 @@ async def api_price_truth(price: float = 0.30, qty: int = 10,
     return out
 
 
+@app.get("/api/admin/short-truth", dependencies=[Depends(require_admin)])
+async def api_short_truth(days: int = 7) -> dict:
+    """Does the venue book a BUY_SHORT as a SELL? The receipts already know.
+
+    The whole "6-for-6 overspend" finding rests on ONE assumption nobody
+    checked: that the cash cost of a filled order is fill_price x qty.
+    That is true for a long. It is not obviously true here.
+
+    The SDK settles the shape of the question
+    (polymarket_us/types/orders.py):
+
+      * CreateOrderParams takes marketSlug and intent. There is NO token
+        or asset id — you cannot name a "short token", because there is
+        only ONE market and one price ladder.
+      * Order carries BOTH `side` (ORDER_SIDE_BUY/SELL) and `intent`
+        (BUY_LONG/SELL_LONG/BUY_SHORT/SELL_SHORT). `side` is NOT an
+        input. The venue DERIVES it from the intent.
+
+    That is a futures-style contract, where going short is selling the
+    contract, `price` denominates the contract (long) side, and the cash
+    a short ties up is (1 - price) x qty.
+
+    Test it against the six rows, requested vs both models:
+
+      req $249.92  qty 1136  fill 0.78   f*q = $886.08   (1-f)*q = $249.92
+      req $249.92  qty  781  fill 0.6853 f*q = $535.22   (1-f)*q = $245.78
+      req $249.75  qty  675  fill 0.65   f*q = $438.75   (1-f)*q = $236.25
+      req $249.75  qty  555  fill 0.56   f*q = $310.80   (1-f)*q = $244.20
+      req $249.60  qty  520  fill 0.55   f*q = $286.00   (1-f)*q = $234.00
+      req $249.78  qty 1086  fill 0.89   f*q = $966.54   (1-f)*q = $119.46
+
+    Under the short model every one of the six lands AT OR UNDER the
+    authorised amount, one of them to the cent, and the worst overage
+    across all six is exactly $0.00. Six independent "overspends" do not
+    all land just under the exact figure we authorised by chance.
+
+    But arithmetic that fits is not proof — a fitted model is the most
+    persuasive kind of wrong, and this codebase has produced several
+    tonight. `order.side` is the venue SAYING it, and submit_fok has
+    been storing the full create-order response on every row all along:
+    raw -> response -> executions[] -> order -> {side, avgPx,
+    cashOrderQty}. The overspend diagnostic reads that same blob and
+    pulls marketSlug, intent, price — skipping the three fields that
+    answer the question.
+
+    ORDER_SIDE_SELL  -> short IS a sell; there was never an overspend,
+                        and our filled_usd/pnl/deployed figures are
+                        wrong by (1-p)/p on every short row.
+    ORDER_SIDE_BUY   -> we really were filled on the opposite leg and
+                        the ban stands.
+
+    No verdict is emitted when the field is absent. A missing `side` is
+    not evidence for either answer.
+    """
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, us_market_slug, intent,
+               round(limit_price, 4)::float8   AS lim,
+               round(requested_usd, 2)::float8 AS req_usd,
+               round(filled_shares, 2)::float8 AS qty,
+               round(fill_price, 4)::float8    AS fill_px,
+               round(filled_usd, 2)::float8    AS booked_usd,
+               CASE WHEN jsonb_typeof(raw #> '{response,executions}')
+                         = 'array'
+                    THEN raw #> '{response,executions}'
+                    ELSE '[]'::jsonb END       AS executions
+          FROM live_orders
+         WHERE placed_at > now() - interval '1 day' * $1
+           AND COALESCE(intent, '') LIKE '%SHORT%'
+           AND COALESCE(filled_shares, 0) > 0
+         ORDER BY placed_at DESC
+         LIMIT 50
+        """, days)
+
+    out, sides = [], {}
+    for r in rows:
+        execs = r["executions"]
+        if isinstance(execs, str):
+            try:
+                execs = json.loads(execs)
+            except (TypeError, ValueError):
+                execs = []
+        venue_side = venue_cash = venue_avg = None
+        for e in (execs or []):
+            o = (e or {}).get("order") or {}
+            venue_side = venue_side or o.get("side")
+            venue_cash = venue_cash or o.get("cashOrderQty")
+            venue_avg = venue_avg or o.get("avgPx")
+        qty = float(r["qty"] or 0)
+        f = float(r["fill_px"] or 0)
+        long_cost = round(f * qty, 2)
+        short_cost = round((1.0 - f) * qty, 2)
+        req = float(r["req_usd"] or 0)
+        sides[str(venue_side)] = sides.get(str(venue_side), 0) + 1
+        out.append({
+            "id": r["id"], "slug": r["us_market_slug"],
+            "intent": r["intent"], "limit": r["lim"], "requested_usd": req,
+            "qty": qty, "fill_px": f,
+            "booked_usd": r["booked_usd"],
+            "cost_if_long_model": long_cost,
+            "cost_if_short_model": short_cost,
+            "short_model_within_authorization": short_cost <= req + 0.01,
+            "long_model_within_authorization": long_cost <= req + 0.01,
+            "venue_side": venue_side,
+            "venue_cash_order_qty": venue_cash,
+            "venue_avg_px": venue_avg,
+        })
+
+    named = [r for r in out if r["venue_side"]]
+    if not out:
+        verdict = "NO SHORT ROWS in window — nothing to decide from"
+    elif not named:
+        verdict = ("VENUE SIDE ABSENT on every row — the receipts do not "
+                   "carry it, so neither model is confirmed. The "
+                   "arithmetic below is suggestive, NOT proof")
+    elif all(r["venue_side"] == "ORDER_SIDE_SELL" for r in named):
+        verdict = ("SHORT IS A SELL — the venue booked every one of these "
+                   "as ORDER_SIDE_SELL, so cost is (1-price)*qty, there "
+                   "was no overspend, and filled_usd/pnl/deployed are "
+                   "wrong by (1-p)/p on every short row")
+    elif all(r["venue_side"] == "ORDER_SIDE_BUY" for r in named):
+        verdict = ("SHORT IS A BUY — we were filled on the opposite leg; "
+                   "the ban stands and the overspend was real")
+    else:
+        verdict = f"MIXED venue sides {sides} — do not act until resolved"
+
+    return {"rows": out, "n": len(out), "n_with_venue_side": len(named),
+            "side_counts": sides, "verdict": verdict,
+            "within_authorization_under_short_model":
+                sum(1 for r in out if r["short_model_within_authorization"]),
+            "within_authorization_under_long_model":
+                sum(1 for r in out if r["long_model_within_authorization"])}
+
+
 @app.get("/api/admin/overspend-receipts",
          dependencies=[Depends(require_admin)])
 async def api_overspend_receipts(hours: int = 48) -> dict:
