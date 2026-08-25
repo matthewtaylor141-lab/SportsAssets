@@ -3347,8 +3347,15 @@ async def _live_status_uncached() -> dict:
                  WHERE o2.us_market_slug = live_orders.us_market_slug
                    AND COALESCE(o2.whale_username, '')
                        NOT IN ('manual', 'underdog'))::int AS orders_on_mkt,
-               jsonb_array_length(COALESCE(
-                   raw #> '{response,executions}', '[]'::jsonb)) AS n_exec,
+               -- jsonb_array_length THROWS on a JSON null, and COALESCE
+               -- does not catch it: `#>` returns SQL NULL for a missing
+               -- path but 'null'::jsonb for a present-and-null one. One
+               -- such row would 500 this endpoint and silently delete
+               -- every FILL line — the exact measurement in flight.
+               CASE WHEN jsonb_typeof(raw #> '{response,executions}')
+                         = 'array'
+                    THEN jsonb_array_length(raw #> '{response,executions}')
+                    ELSE 0 END AS n_exec,
                to_char(placed_at AT TIME ZONE 'America/New_York',
                        'MM-DD HH24:MI') AS at
         FROM live_orders
@@ -3541,8 +3548,10 @@ async def api_overspend_receipts(hours: int = 48) -> dict:
                    AND COALESCE(o2.whale_username, '')
                        NOT IN ('manual', 'underdog'))::int
                    AS orders_on_market,
-               COALESCE(raw #> '{response,executions}', '[]'::jsonb)
-                   AS executions
+               CASE WHEN jsonb_typeof(raw #> '{response,executions}')
+                         = 'array'
+                    THEN raw #> '{response,executions}'
+                    ELSE '[]'::jsonb END AS executions
         FROM live_orders
         WHERE placed_at > now() - interval '1 hour' * $1
           AND status IN ('filled', 'settled', 'cashed_out')
