@@ -3594,6 +3594,85 @@ async def api_true_edge_cashout(since_day: str = "2026-08-01",
                      "where he made one. Nothing is overwritten.")}
 
 
+@app.get("/api/admin/whale-sell-truth",
+         dependencies=[Depends(require_admin)])
+async def api_whale_sell_truth(limit: int = 500) -> dict:
+    """Does the SOURCE report sells for our whales? Ask it directly.
+
+    Owner, 2026-08-25: "the whale order sell data is most crucial — I
+    know the accounts are profitable and you are missing that whole
+    data ingestion, which is making decision making difficult."
+
+    Our ingestion is clean end to end: the poller requests
+    /trades?user=X with takerOnly=false and no side filter, maps
+    raw["side"] straight through, and ingest_trade inserts whatever
+    arrives — I read all three rather than assuming. Yet every copied
+    whale shows zero sells all time.
+
+    So the question is upstream of us, and inferring it from our own
+    empty table is exactly the mistake this session kept making. This
+    hits the data API for each copy whale and reports the RAW side
+    histogram from ITS response, bypassing our pipeline entirely:
+
+      * sells > 0 here, 0 in our table -> WE are dropping them, and the
+        gap is between this response and the trades row.
+      * sells = 0 here too -> the API does not report his exits at all,
+        and the fix is a different SOURCE (chain decode of the
+        unwatched contract, or the positions endpoint), not a pipeline
+        patch.
+
+    Either answer is actionable. Guessing between them is not.
+    """
+    import httpx
+
+    from ..api.copies_record import COPY_WHALES
+
+    cfg = settings()
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT username, address FROM whales "
+        "WHERE address IS NOT NULL ORDER BY username")
+    wanted = {w.lower() for w in COPY_WHALES}
+    out = []
+    async with httpx.AsyncClient(base_url=cfg.data_api_base,
+                                 timeout=20.0) as http:
+        for r in rows:
+            uname = r["username"] or ""
+            if wanted and uname.lower() not in wanted:
+                continue
+            rec = {"whale": uname, "address": r["address"]}
+            try:
+                resp = await http.get("/trades",
+                                      params={"user": r["address"],
+                                              "limit": min(int(limit), 500),
+                                              "takerOnly": "false"})
+                resp.raise_for_status()
+                body = resp.json()
+                rows_ = body if isinstance(body, list) else (
+                    body.get("data") or body.get("trades") or [])
+                hist: dict[str, int] = {}
+                for t in rows_:
+                    if isinstance(t, dict):
+                        k = str(t.get("side", "?")).upper() or "?"
+                        hist[k] = hist.get(k, 0) + 1
+                rec["n"] = len(rows_)
+                rec["sides"] = hist
+                rec["sells"] = hist.get("SELL", 0)
+                rec["verdict"] = (
+                    "API REPORTS SELLS — our pipeline is dropping them"
+                    if hist.get("SELL", 0) > 0 else
+                    "API reports no sells either — need a different "
+                    "source for his exits")
+                # One raw row, so the field names are visible rather
+                # than assumed if the shape ever changes.
+                if rows_ and isinstance(rows_[0], dict):
+                    rec["sample_keys"] = sorted(rows_[0].keys())[:16]
+            except Exception as exc:  # noqa: BLE001 — report, never infer
+                rec["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+            out.append(rec)
+    return {"base": cfg.data_api_base, "whales": out}
+
+
 @app.get("/api/admin/whale-side-census",
          dependencies=[Depends(require_admin)])
 async def api_whale_side_census() -> dict:

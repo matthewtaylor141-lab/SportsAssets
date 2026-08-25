@@ -614,6 +614,18 @@ jobs:
           jq -r '.whales[]? |
                  "  SIDES \(.whale): buys \(.buys) sells \(.sells) share \(.sell_share // "?") — \(.verdict) | \(.by_source | tostring | .[0:160])"' \
             /tmp/sides.json 2>/dev/null || true
+          # SELL-TRUTH: ask the data API directly what sides IT reports
+          # for each copy whale, bypassing our pipeline. Separates "we
+          # drop sells" from "the source never had them" — the two need
+          # completely different fixes.
+          curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/selltruth.json \
+               "$BASE/api/admin/whale-sell-truth?limit=500" || true
+          jq -r '.whales[]? |
+                 "  SELLTRUTH \(.whale): n=\(.n // 0) sides=\(.sides // {} | tostring) — \(.verdict // .error // "?")"' \
+            /tmp/selltruth.json 2>/dev/null || true
+          jq -r '.whales[0]? | "  SELLTRUTH sample_keys=\(.sample_keys // [] | join(","))"' \
+            /tmp/selltruth.json 2>/dev/null || true
           # TRUEEDGE RE-GRADED AT HIS OWN EXIT. Every whale number
           # served today settles at resolution, which books a
           # cash-out trader's WIN as a loss. The TRUEEDGE cuts were
