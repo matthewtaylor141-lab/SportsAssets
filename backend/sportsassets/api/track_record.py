@@ -937,7 +937,21 @@ _hydrate_err: dict = {"err": None, "at": 0.0, "chunks": 0}
 # seconds with a single small read. The grind also checkpoints partial
 # progress here every 20 chunks, so progress survives deploys and the
 # FIRST completion is guaranteed even on a sick database.
-_SNAP_KEY = "track_record_slim_archive_v1"
+# v1 -> v2 (2026-08-25): the type filter changed what a snapshot MEANS.
+#
+# The filter shipped, deployed, and moved nothing: archive_rows stayed
+# at 317,681 and RSS at 1.6-1.9 GB. _hydrate_all returns a complete
+# fresh snapshot WITHOUT reading the table, so boot kept loading rows
+# written by a pre-filter process and never reached the filtered
+# cursor. The fix was live and bypassed.
+#
+# The key must therefore version with the filter: a snapshot is only
+# valid for the ARCHIVE_TYPES that produced it. Bumping the key retires
+# every stale snapshot at once, forces one filtered re-hydrate, and the
+# next save writes a snapshot that means what its key says. If
+# ARCHIVE_TYPES ever changes again, bump this too — test_archive_types
+# pins the pairing.
+_SNAP_KEY = "track_record_slim_archive_v2"
 _snap_state: dict = {"at": 0.0}
 _SNAP_REFRESH_S = 6 * 3600.0
 _SNAP_MAX_AGE_S = 24 * 3600.0   # window union covers ~2 days; stay well under

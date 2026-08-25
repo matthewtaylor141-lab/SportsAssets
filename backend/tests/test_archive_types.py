@@ -90,3 +90,39 @@ class TestTheIdSeedIsBounded:
         """The set is an optimization; ON CONFLICT is the guard."""
         src = inspect.getsource(tr)
         assert "ON CONFLICT" in src
+
+class TestTheSnapshotIsVersionedWithTheFilter:
+    """The filter shipped and changed NOTHING for a full deploy cycle.
+
+    _hydrate_all short-circuits on a complete, fresh snapshot and
+    returns its rows without touching the table — so boot kept loading
+    317,681 rows written before the filter existed, and the filtered
+    cursor was never reached. archive_rows stayed at 317,681 and RSS at
+    1.6-1.9 GB with the fix deployed.
+
+    A snapshot is only valid for the ARCHIVE_TYPES that produced it, so
+    the key has to version with them. This is the same shape as the
+    proportional-sizing miss earlier tonight: correct code placed where
+    execution never arrives.
+    """
+
+    def test_the_key_is_v2(self):
+        assert tr._SNAP_KEY.endswith("_v2"), (
+            "bumping the key is what retires snapshots written before "
+            "the type filter existed")
+
+    def test_the_key_carries_a_version_at_all(self):
+        import re
+
+        assert re.search(r"_v\d+$", tr._SNAP_KEY), (
+            "an unversioned snapshot key cannot express that the "
+            "meaning of its contents changed")
+
+    def test_the_short_circuit_still_exists(self):
+        """Not arguing the fast path away — it is what keeps boot cheap.
+        The point is only that it must not serve rows from a different
+        filter generation."""
+        import inspect
+
+        src = inspect.getsource(tr._hydrate_all)
+        assert "snap[\"complete\"]" in src
