@@ -36,6 +36,11 @@ def _permissive_ask(monkeypatch):
     from sportsassets import pmus
 
     monkeypatch.setattr(pmus, "side_ask", lambda slug, intent: 0.01)
+    # The side-price-band check compares that ask to the WHALE's price,
+    # and the fixture whales pay ~0.55 — so a fixed 0.01 stub would trip
+    # the band on every test. Widen the band past 1.0 for the suite;
+    # test_side_band.py pins the real width and the real refusals.
+    monkeypatch.setenv("LIVE_SIDE_PRICE_BAND", "2.0")
 
 
 @pytest.fixture(autouse=True)

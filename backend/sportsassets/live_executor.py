@@ -154,6 +154,14 @@ COPY_HALT_REASON = (
 _HALT_ON_VALUES = {"on", "1", "true", "yes", "halt", "halted", "stop"}
 
 
+# When the pre-trade ask guard went live. Breaches recorded BEFORE this
+# were caught by the post-fill breaker because nothing stood in front of
+# them; that hole is now closed, so they no longer justify keeping the
+# sleeve down. Breaches AFTER it mean the guard itself failed, and those
+# halt hard and stay halted.
+ASK_GUARD_SINCE = "2026-08-25T02:20:00"
+
+
 async def overspend_halt(pool) -> Any:
     """The tripped-breaker record, or None.
 
@@ -166,12 +174,43 @@ async def overspend_halt(pool) -> Any:
     "the database did not answer" is not evidence that nothing is
     wrong."""
     try:
-        return await pool.fetchval(
+        rec = await pool.fetchval(
             "SELECT value FROM ingestion_state WHERE key=$1",
             "copy_overspend_halt")
     except Exception:  # noqa: BLE001
         log.exception("overspend breaker unreadable — treating as tripped")
         return {"why": "breaker unreadable — refusing until it can be read"}
+    if not rec:
+        return None
+    # STALE BREACH, NOW GUARDED PRE-TRADE (owner order 2026-08-25:
+    # "I want trading live but I want this limit issue resolved").
+    #
+    # The breaker exists because nothing stood between us and a venue
+    # filling above our limit — the only move available was to notice
+    # afterwards and stop. The pre-trade ask guard now refuses those
+    # orders BEFORE they are sent, so a breach recorded before the guard
+    # existed is evidence about a hole that is closed. Keeping the
+    # sleeve down for it protects nothing.
+    #
+    # A breach recorded AFTER the guard is the opposite: it means the
+    # guard did not hold, and that must stop everything and stay
+    # stopped. So this clears BACKWARDS only, never forwards.
+    try:
+        _rec = rec if isinstance(rec, dict) else json.loads(rec)
+        _at = str(_rec.get("at") or "")
+        if _at and _at < ASK_GUARD_SINCE:
+            await pool.execute(
+                "DELETE FROM ingestion_state WHERE key=$1",
+                "copy_overspend_halt")
+            log.warning(
+                "overspend breaker CLEARED: breach at %s predates the "
+                "pre-trade ask guard (%s), which now refuses that "
+                "failure mode before the order is sent",
+                _at, ASK_GUARD_SINCE)
+            return None
+    except (TypeError, ValueError, AttributeError):
+        pass  # an unparseable record is not a cleared one
+    return rec
 
 
 def copy_halted() -> bool:
@@ -2233,8 +2272,37 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # the copy path. That is a real tradeoff against SwissTony's
             # speed and it is the right side of it — a fast wrong-priced
             # fill is worth less than a slow refusal.
+            # BOTH DIRECTIONS (owner order 2026-08-25: "resolve the
+            # limit issue"). `ask > limit` alone stops the OVERSPEND but
+            # not the WRONG SIDE. If our intent names the opposite leg
+            # and that leg happens to be CHEAPER than our limit, the
+            # order sails through looking like a bargain and we hold the
+            # wrong bet at a good price.
+            #
+            # The whale's own price is the reference: we are copying the
+            # same outcome, so the side we buy should be quoted near
+            # what he paid. Far off in EITHER direction means the leg we
+            # named is probably not his outcome. On the 0.22 -> 0.78
+            # rows the gap was 0.56, which this refuses outright.
+            #
+            # Wide enough not to fight normal movement between his fill
+            # and ours; far tighter than a complement flip, which is
+            # always >= |1 - 2p| away.
+            _band = float(os.getenv("LIVE_SIDE_PRICE_BAND", "0.15"))
             _ask = await asyncio.to_thread(
                 pmus.side_ask, mapping["market_slug"], _intent)
+            if (_ask is not None and his_price
+                    and abs(_ask - his_price) > _band):
+                await pool.execute(
+                    "UPDATE live_orders SET status='rejected', error=$2 "
+                    "WHERE id=$1", row_id,
+                    f"side-price-mismatch: the side our intent names is "
+                    f"quoted {_ask} but the whale paid {his_price} "
+                    f"(gap {abs(_ask - his_price):.2f} > {_band}) — this "
+                    f"is probably not his outcome, refusing")
+                log.warning("LIVE (US) refused %s: side priced %s vs his "
+                            "%s", mapping["market_slug"], _ask, his_price)
+                return
             if _ask is None or _ask > limit + 1e-9:
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 "
