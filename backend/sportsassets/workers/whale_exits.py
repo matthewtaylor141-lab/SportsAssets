@@ -67,6 +67,20 @@ ENABLED = os.environ.get("WHALE_EXIT_ENABLED", "1") != "0"
 MAX_EXITS_PER_CYCLE = int(os.environ.get("WHALE_EXIT_MAX_PER_CYCLE", "10"))
 
 _KEY = "whale_positions:%s"
+# The sibling map is merged across cycles, so it needs a ceiling.
+MAX_SIBLINGS = int(os.environ.get("WHALE_EXIT_MAX_SIBLINGS", "20000"))
+
+
+async def _load_siblings(pool) -> dict[str, str]:
+    raw = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1", _SIB_STATE_KEY)
+    if not raw:
+        return {}
+    try:
+        d = raw if isinstance(raw, dict) else json.loads(raw)
+        return {str(k): str(v) for k, v in (d or {}).items() if k and v}
+    except (TypeError, ValueError):
+        return {}
 
 
 async def _load(pool, whale: str) -> dict[str, float]:
@@ -88,8 +102,58 @@ async def _save(pool, whale: str, snap: dict[str, float]) -> None:
         _KEY % whale, json.dumps(snap))
 
 
+# THE SIBLING TOKEN, IF THE VENUE ACTUALLY SENDS IT.
+#
+# classify_exit answers "is this buy really an exit?" by asking whether
+# the whale holds the COMPLEMENTARY leg, and it finds that leg through
+# market_tokens. The production census says it often cannot:
+#
+#     EXITCENSUS cls_token_unenriched: 56
+#
+# 56 buys in one window where the token is not in market_tokens at all,
+# so the question cannot even be asked. The default when it cannot be
+# asked is to treat the buy as an ENTRY — and of the buys we CAN
+# classify, 79 of 122 (65%) are exits. Defaulting to entry on an
+# unknown token is therefore wrong most of the time for that
+# population, and when it is wrong it does not miss a copy, it DOUBLES
+# one: we buy the leg he is abandoning while still holding the leg he
+# just closed.
+#
+# This module's own docstring has claimed since it was written that the
+# venue's positions payload carries `mergeable` and `oppositeAsset`. I
+# wrote that line. Nothing in the codebase has ever read those fields,
+# so it is an assertion, not a fact, and building a money path on it
+# would be the same mistake as the SDK argument I had to retract today.
+#
+# So: CAPTURE AND REPORT, USE ONLY IF PRESENT. Every cycle records how
+# many position rows actually carried a usable sibling. If the field
+# does not exist the coverage reads zero, nothing changes anywhere, and
+# the heartbeat says so. If it does exist we get a sibling map for free
+# out of a call we were already making every 120 seconds and throwing
+# most of away.
+_SIBLING_KEYS = ("oppositeAsset", "opposite_asset", "complementAsset",
+                 "oppositeTokenId", "opposite_token_id")
+_SIB_STATE_KEY = "token_siblings"
+
+
+def _sibling_of(p: dict) -> str:
+    """The complementary token id on one position row, or ''."""
+    for k in _SIBLING_KEYS:
+        v = p.get(k)
+        if v not in (None, "", 0):
+            return str(v)
+    return ""
+
+
 async def _fetch_positions(http: httpx.AsyncClient,
-                           address: str) -> dict[str, float]:
+                           address: str) -> tuple[dict[str, float],
+                                                  dict[str, str], int]:
+    """(sizes, sibling map, rows seen).
+
+    The sibling map is a by-product of a call already being made. It is
+    returned separately rather than folded into the sizes dict so the
+    exit-diff logic is untouched by its presence or absence.
+    """
     resp = await http.get("/positions",
                           params={"user": address, "limit": 500})
     resp.raise_for_status()
@@ -97,19 +161,28 @@ async def _fetch_positions(http: httpx.AsyncClient,
     rows = body if isinstance(body, list) else (
         body.get("data") or body.get("positions") or [])
     out: dict[str, float] = {}
+    sibs: dict[str, str] = {}
+    seen = 0
     for p in rows:
         if not isinstance(p, dict):
             continue
         a = str(p.get("asset") or p.get("tokenId") or "")
         if not a:
             continue
+        seen += 1
+        sib = _sibling_of(p)
+        if sib and sib != a:
+            sibs[a] = sib
+            # The relation is symmetric, and recording both directions
+            # means a later buy of EITHER leg can find the other.
+            sibs.setdefault(sib, a)
         try:
             sz = float(p.get("size") or p.get("netPosition") or 0)
         except (TypeError, ValueError):
             continue
         if sz > 0:
             out[a] = sz
-    return out
+    return out, sibs, seen
 
 
 def diff_exits(prev: dict[str, float],
@@ -167,7 +240,13 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
     from ..api.copies_record import COPY_WHALES
     from ..live_executor import execute_copy
 
-    stats = {"whales": 0, "exits": 0, "first_snapshots": 0}
+    stats = {"whales": 0, "exits": 0, "first_snapshots": 0,
+             # Coverage of the venue's sibling field, measured rather
+             # than assumed. sib_rows == 0 means the field is not there
+             # and the fallback below contributes nothing — which is a
+             # finding, not a failure.
+             "sib_rows": 0, "sib_pairs": 0, "pos_rows": 0}
+    all_sibs: dict[str, str] = {}
     wanted = {w.lower() for w in COPY_WHALES}
     rows = await pool.fetch(
         "SELECT username, address FROM whales WHERE address IS NOT NULL")
@@ -176,10 +255,13 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
         if uname.lower() not in wanted:
             continue
         try:
-            now = await _fetch_positions(http, r["address"])
+            now, sibs, seen = await _fetch_positions(http, r["address"])
         except Exception as exc:  # noqa: BLE001 — one whale, not the loop
             log.warning("whale-exit positions failed for %s: %s", uname, exc)
             continue
+        stats["pos_rows"] += seen
+        stats["sib_rows"] += len(sibs)
+        all_sibs.update(sibs)
         stats["whales"] += 1
         prev = await _load(pool, uname.lower())
         await _save(pool, uname.lower(), now)
@@ -229,6 +311,31 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
                         "a trade)", uname, asset, frac * 100)
             await execute_copy({"whale_username": uname, "asset": asset,
                                 "side": "SELL", "closed_frac": frac})
+    # PUBLISH THE SIBLING MAP, MERGED not replaced.
+    #
+    # A whale's positions payload only describes the markets he is in
+    # RIGHT NOW, so replacing the map each cycle would drop the sibling
+    # of every position he closed — which is exactly the population
+    # classify_exit asks about. Merging keeps them.
+    #
+    # Bounded so a long-running worker cannot grow this row without
+    # limit; oldest insertions go first, which is the right order
+    # because a market he has been out of for a long time is one we are
+    # also out of.
+    if all_sibs:
+        try:
+            prev = await _load_siblings(pool)
+            prev.update(all_sibs)
+            if len(prev) > MAX_SIBLINGS:
+                prev = dict(list(prev.items())[-MAX_SIBLINGS:])
+            await pool.execute(
+                "INSERT INTO ingestion_state (key, value) "
+                "VALUES ($1, $2::jsonb) ON CONFLICT (key) DO UPDATE "
+                "SET value = $2::jsonb",
+                _SIB_STATE_KEY, json.dumps(prev))
+            stats["sib_pairs"] = len(prev)
+        except Exception:  # noqa: BLE001 — a by-product, never the loop
+            log.warning("whale-exit: sibling map write failed")
     return stats
 
 

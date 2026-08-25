@@ -313,6 +313,40 @@ def exit_census_lines(limit: int = 12) -> list[str]:
     return out
 
 
+# The venue's sibling map, published by the whale_exits worker out of
+# the positions call it already makes. Cached because classify_exit is
+# on the copy hot path and this is a fallback, not a lookup we want to
+# pay for on every miss.
+_SIBLING_CACHE: dict[str, str] = {}
+_SIBLING_CACHE_AT = 0.0
+_SIBLING_TTL_S = 300.0
+
+
+async def _sibling_from_positions(pool, asset: str) -> str:
+    """The complementary token id per the VENUE, or ''.
+
+    Never a guess. An absent map, an absent key, or an unreadable row
+    all return '' and the caller refuses exactly as it did before.
+    """
+    global _SIBLING_CACHE, _SIBLING_CACHE_AT
+    import time as _t
+
+    now = _t.monotonic()
+    if now - _SIBLING_CACHE_AT > _SIBLING_TTL_S:
+        try:
+            raw = await pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1",
+                "token_siblings")
+            d = raw if isinstance(raw, dict) else (
+                json.loads(raw) if raw else {})
+            _SIBLING_CACHE = {str(k): str(v)
+                              for k, v in (d or {}).items() if k and v}
+        except Exception:  # noqa: BLE001 — no map is not a wrong map
+            _SIBLING_CACHE = {}
+        _SIBLING_CACHE_AT = now
+    return _SIBLING_CACHE.get(str(asset), "")
+
+
 async def classify_exit(pool, asset: str, whale: str,
                         size: float) -> dict | None:
     """Is this "buy" actually the whale CLOSING a position?
@@ -361,18 +395,41 @@ async def classify_exit(pool, asset: str, whale: str,
             "WHERE mt.token_id = $1 AND s.token_id <> $1", asset)
     except Exception:  # noqa: BLE001 — a lookup failure is not an exit
         return _exit_stop("cls_sibling_lookup_failed", asset=asset)
-    if not sibs:
-        # The token is not in market_tokens at all — unenriched. This
-        # is the bucket that says "we cannot even ask the question",
-        # and it is a mapping problem, not an exit problem.
-        return _exit_stop("cls_token_unenriched", asset=asset, whale=whale)
-    if len(sibs) != 1:
+    sibling = ""
+    if sibs and len(sibs) == 1:
+        sibling = str(sibs[0]["token_id"])
+    elif not sibs:
+        # THE VENUE'S OWN SIBLING MAP, WHEN IT HAS ONE.
+        #
+        # market_tokens does not have this token, so the enrichment
+        # lane has not reached it. That was 56 buys in one census
+        # window, and the default when we cannot ask is to treat the
+        # buy as an ENTRY — while 79 of the 122 buys we CAN classify
+        # (65%) turn out to be exits. Guessing "entry" on an unknown
+        # token is therefore wrong most of the time here, and being
+        # wrong does not miss a copy, it DOUBLES one.
+        #
+        # whale_exits already fetches each whale's positions every 120
+        # seconds and the venue's rows carry the complementary token.
+        # We were discarding it. This reads the map that worker
+        # publishes — no extra venue call, no hot-path latency beyond
+        # one indexed key lookup, and it is CACHED in-process.
+        #
+        # If the venue does not actually send that field the map is
+        # empty, this changes nothing, and the heartbeat's sib_rows
+        # says so. The fallback is never a guess: no entry, no
+        # classification.
+        sibling = await _sibling_from_positions(pool, asset)
+        if not sibling:
+            return _exit_stop("cls_token_unenriched", asset=asset,
+                              whale=whale)
+        _exit_stop("cls_sibling_from_venue_map", asset=asset)
+    if not sibling:
         # Multi-outcome markets and negative-risk baskets have no
         # single complement. Refusing is correct; counting it tells us
         # how much of the roster's flow is structurally unclassifiable.
         return _exit_stop("cls_not_binary", asset=asset,
                           siblings=len(sibs))
-    sibling = str(sibs[0]["token_id"])
     try:
         his = await pool.fetchrow(
             "SELECT COALESCE(sum(t.size) FILTER (WHERE t.side='BUY'), 0)"
