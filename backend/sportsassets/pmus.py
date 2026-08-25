@@ -1274,6 +1274,68 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
             "raw": {"preview": prev_order, "response": resp}}
 
 
+def close_position(us_slug: str, *, slippage_bips: int) -> dict:
+    """Flatten a whole position in one call. The venue's own exit.
+
+    POST /v1/order/close-position takes ONLY marketSlug — no side, no
+    intent, no quantity, no limit — and returns the same
+    {id, executions[]} shape as orders.create.
+
+    THIS IS WHY IT MATTERS HERE. mirror_exit priced its sells off
+    slug_bid, and slug_bid returns None whenever the venue exposes no
+    bid field and the market is not a readable two-sided pair. Every
+    such refusal was an exit we DETECTED and then declined to take,
+    leaving us holding a position the whale had already left. A close
+    that needs no price cannot be blocked by a missing one.
+
+    It also works on either sign, which matters because netPosition is
+    signed here and a short reads negative — the leg that three
+    separate guards were treating as "nothing held".
+
+    SLIPPAGE IS MANDATORY, not defaulted. This call carries no limit
+    price and cannot be previewed (orders.preview takes CreateOrderParams
+    only), so sending it bare is an unbounded market order. A caller
+    that has not decided how much slippage it will accept has not
+    decided to trade.
+    """
+    if not us_slug:
+        return {"ok": False, "order_id": None, "status": "no_slug",
+                "fill_price": None, "filled_shares": 0.0, "raw": {}}
+    if not slippage_bips or int(slippage_bips) <= 0:
+        return {"ok": False, "order_id": None,
+                "status": "no_slippage_bound",
+                "fill_price": None, "filled_shares": 0.0,
+                "raw": {"why": "close-position carries no limit price; "
+                               "refusing to send an unbounded market "
+                               "order"}}
+    client = _get_client()
+    try:
+        resp = client.orders.close_position({
+            "marketSlug": us_slug,
+            "slippageTolerance": {"bips": int(slippage_bips)},
+            "synchronousExecution": True,
+        })
+    except Exception as exc:  # noqa: BLE001 — a refusal, not a crash
+        return {"ok": False, "order_id": None, "status": "close_failed",
+                "fill_price": None, "filled_shares": 0.0,
+                "raw": {"error": str(exc)[:200], "slug": us_slug}}
+    executions = (resp or {}).get("executions") or []
+    filled, notional, state = 0.0, 0.0, ""
+    for ex in executions:
+        state = (ex.get("order") or {}).get("state") or state
+        px = _amount_value((ex.get("lastPx") or {}))
+        sh = float(ex.get("lastShares") or 0)
+        if ex.get("type") in ("EXECUTION_TYPE_FILL",
+                              "EXECUTION_TYPE_PARTIAL_FILL") and px:
+            filled += sh
+            notional += sh * px
+    return {"ok": filled > 0, "order_id": (resp or {}).get("id"),
+            "status": state.replace("ORDER_STATE_", "").lower() or "unknown",
+            "fill_price": (round(notional / filled, 4)
+                           if filled > 0 else None),
+            "filled_shares": filled, "raw": {"response": resp}}
+
+
 def _amount_value(a: Any) -> float:
     try:
         return float((a or {}).get("value") or 0)

@@ -820,7 +820,30 @@ async def _cashout_sweep(pool) -> dict:
 # Aug 10-16 week (+$9.2k Saturday); this systematizes it for the copy
 # sleeves only, above a floor big enough that clips never churn.
 # SA_COPY_EXIT=0 is the desk override (kill switch).
-COPY_EXIT_ENABLED = os.environ.get("SA_COPY_EXIT", "1") != "0"
+# OFF BY DEFAULT 2026-08-25, owner directive:
+#
+#   "I hate our exit strategy. It needs to be mirroring the order of
+#    the whales we copy, not our own. That is how our account and
+#    investment methodology mirrors a similar return on dollar deployed
+#    to the actual whales we are copying."
+#
+# He is right, and the asymmetry is the argument. A +20% take-profit
+# sells the winners early and holds every loser to resolution: upside
+# capped at 20%, downside uncapped. Copy a whale's ENTRIES and then
+# exit on our own rule and we are not mirroring him — we are running a
+# different strategy that happens to use his picks, and the returns
+# diverge by construction no matter how good his picks are.
+#
+# This rule HAS been earning: the owner's 2026-08-25 portfolio history
+# shows +$230.73, +$307.50, +$299.54 and +$136.06 inside 45 minutes,
+# all from here. Turning it off is a deliberate trade of a working
+# local rule for a faithful one, not a bug fix.
+#
+# It stays REACHABLE (SA_COPY_EXIT=1) rather than deleted, because
+# mirror_exit has never fired in production. If the whale-exit path
+# proves inert, this is the fallback that gets us out of positions at
+# all — and re-arming it must be one env change, not a deploy.
+COPY_EXIT_ENABLED = os.environ.get("SA_COPY_EXIT", "0") != "0"
 COPY_EXIT_TAKE = float(os.environ.get("SA_COPY_EXIT_TAKE", "0.20"))
 # 500 -> 15 (owner go 2026-08-21): the $500 floor made this sweep
 # provably dead code — copy clips cap ~$75-225 and never-add prevents

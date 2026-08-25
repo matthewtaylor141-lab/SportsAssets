@@ -220,6 +220,11 @@ MIN_EXIT_FRAC = float(os.environ.get("LIVE_MIN_EXIT_FRAC", "0.10"))
 # At or above this he is treated as fully out, and so are we. Below it
 # the position stays open with the remainder still tracked.
 FULL_EXIT_FRAC = float(os.environ.get("LIVE_FULL_EXIT_FRAC", "0.95"))
+# Slippage bound for the venue's close-position call, which carries no
+# limit price. 300 bips = 3%: wide enough that a real exit is not
+# refused into a moving book, tight enough that an unbounded market
+# order is never what we send.
+EXIT_SLIPPAGE_BIPS = int(os.environ.get("LIVE_EXIT_SLIPPAGE_BIPS", "300"))
 
 
 async def _release_exit_claim(pool, row_id: int) -> None:
@@ -431,24 +436,39 @@ async def mirror_exit(payload: dict) -> None:
         if qty <= 0:
             await _release_exit_claim(pool, row["id"])
             return  # the venue says we hold nothing worth selling
-        bid = await asyncio.to_thread(pmus.slug_bid, us_slug)
+        # FULL EXIT: use the venue's own flatten, which needs no price.
+        #
+        # Pricing the sell off slug_bid meant every unreadable bid was
+        # an exit we DETECTED and then declined to take, leaving us
+        # holding a position the whale had already left. close-position
+        # carries no limit, so a missing bid cannot block it, and it
+        # works on either sign — which matters because a short reads
+        # negative and three separate guards treated that as "nothing
+        # held".
+        #
+        # A partial still needs a quantity, so it keeps the limit IOC.
+        _full = closed_frac >= FULL_EXIT_FRAC
+        limit = None
+        if not _full:
+            bid = await asyncio.to_thread(pmus.slug_bid, us_slug)
+            if bid is None or not (0 < bid < 1):
+                log.warning("MIRROR-EXIT no bid for %s — partial exit "
+                            "deferred rather than sold blind", us_slug)
+                await _release_exit_claim(pool, row["id"])
+                return
+            limit = sell_limit_price(bid)
     except Exception:
         await _release_exit_claim(pool, row["id"])
         raise
-    if bid is None or not (0 < bid < 1):
-        # slug_bid returns None on the whole aec- family. Refusing here
-        # is right — selling blind is worse than holding — but it means
-        # the exit is DEFERRED, not abandoned, so the claim must go back
-        # or the position is stranded in 'exiting' forever.
-        log.warning("MIRROR-EXIT no bid for %s — leaving the position "
-                    "rather than selling blind", us_slug)
-        await _release_exit_claim(pool, row["id"])
-        return
-    limit = sell_limit_price(bid)
     try:
-        result = await asyncio.to_thread(
-            pmus.submit_fok, us_slug, limit, qty, True,
-            "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+        if _full:
+            result = await asyncio.to_thread(
+                pmus.close_position, us_slug,
+                slippage_bips=EXIT_SLIPPAGE_BIPS)
+        else:
+            result = await asyncio.to_thread(
+                pmus.submit_fok, us_slug, limit, qty, True,
+                "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
     except Exception:
         await _release_exit_claim(pool, row["id"])
         raise
@@ -479,7 +499,7 @@ async def mirror_exit(payload: dict) -> None:
     log.warning("MIRROR-EXIT %s %s: sold %d of %d @ %.3f (entry %.3f) "
                 "pnl %.2f — mirroring his %.1f%% exit, %d left",
                 username, us_slug, int(filled), int(row["qty"]),
-                float(px or limit), entry, pnl or 0,
+                float(px or limit or 0), entry, pnl or 0,
                 closed_frac * 100, remaining)
 
 

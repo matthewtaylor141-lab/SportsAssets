@@ -74,12 +74,34 @@ class TestItCannotSellWhatWeDoNotHold:
         assert "_pm_held(us_slug)" in src
         assert "min(int(row[\"qty\"]), held)" in src
 
-    def test_no_bid_means_no_sale(self):
-        """Selling into an empty book at a guessed price is worse than
-        holding."""
+    def test_a_partial_still_refuses_without_a_bid(self):
+        """A partial needs a quantity and a price, so an unreadable bid
+        still defers it — selling into an empty book at a guessed price
+        is worse than holding."""
         src = inspect.getsource(le.mirror_exit)
         assert "slug_bid" in src
-        assert "leaving the position" in src
+        assert "partial exit \n" in src or "partial exit " in src
+
+    def test_a_full_exit_no_longer_needs_a_bid_at_all(self):
+        """This was the blocker that made detection worthless: every
+        unreadable bid was an exit we FOUND and then declined to take,
+        leaving us holding what the whale had already left.
+        close-position carries no limit price, so a missing bid cannot
+        block it — and it works on either sign, which matters because a
+        short reads negative."""
+        src = inspect.getsource(le.mirror_exit)
+        assert "pmus.close_position" in src
+        assert "slippage_bips=EXIT_SLIPPAGE_BIPS" in src
+
+    def test_the_flatten_is_never_sent_unbounded(self):
+        """close-position has no limit and cannot be previewed, so a
+        caller that has not chosen a slippage bound has not chosen to
+        trade."""
+        from sportsassets import pmus
+
+        assert pmus.close_position("aec-x", slippage_bips=0)["status"] \
+            == "no_slippage_bound"
+        assert le.EXIT_SLIPPAGE_BIPS > 0
 
     def test_the_limit_is_protective(self):
         assert "sell_limit_price(bid)" in inspect.getsource(le.mirror_exit)
