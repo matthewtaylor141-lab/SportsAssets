@@ -50,6 +50,21 @@ INTERVAL_S = float(os.environ.get("WHALE_EXIT_INTERVAL_S", "120"))
 # field, or a partial that is not worth a fee to follow.
 MIN_SHRINK = float(os.environ.get("WHALE_EXIT_MIN_SHRINK", "0.05"))
 ENABLED = os.environ.get("WHALE_EXIT_ENABLED", "1") != "0"
+# MOST EXITS PER CYCLE, PER WHALE.
+#
+# swisstony holds less than he bought on 62 of 75 positions. The first
+# cycle that has a previous snapshot to diff against could therefore
+# fire 62 real sell orders back to back — from a worker written tonight,
+# on a night where several of my confident fixes turned out to do
+# nothing or the opposite. A brand-new component that places real
+# orders should not be able to place sixty of them before anyone sees
+# the first one.
+#
+# The remainder is not lost: the next snapshot still shows the position
+# below its recorded size, so it is picked up on the following cycle
+# two minutes later. This bounds the blast radius of a bug, not the
+# work.
+MAX_EXITS_PER_CYCLE = int(os.environ.get("WHALE_EXIT_MAX_PER_CYCLE", "10"))
 
 _KEY = "whale_positions:%s"
 
@@ -146,7 +161,14 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
             # holding as a fresh exit and fire a full close on each.
             stats["first_snapshots"] += 1
             continue
-        for asset, frac in diff_exits(prev, now):
+        found = diff_exits(prev, now)
+        if len(found) > MAX_EXITS_PER_CYCLE:
+            log.warning("whale-exit: %s has %d exits this cycle, acting on "
+                        "%d — the rest still read as shrunk next cycle",
+                        uname, len(found), MAX_EXITS_PER_CYCLE)
+            stats["deferred"] = stats.get("deferred", 0) + (
+                len(found) - MAX_EXITS_PER_CYCLE)
+        for asset, frac in found[:MAX_EXITS_PER_CYCLE]:
             stats["exits"] += 1
             log.warning("WHALE EXIT %s %s: closed %.0f%% (positions, not "
                         "a trade)", uname, asset, frac * 100)

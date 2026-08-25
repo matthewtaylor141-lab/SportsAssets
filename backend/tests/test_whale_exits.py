@@ -97,3 +97,41 @@ class TestTheEmittedEvent:
 
         src = inspect.getsource(le.mirror_exit)
         assert "except (TypeError, ValueError):" in src
+
+class TestTheFirstActiveCycleIsBounded:
+    """swisstony holds less than he bought on 62 of 75 positions.
+
+    The first cycle with a previous snapshot to diff against would
+    otherwise fire 62 real sell orders back to back — from a worker
+    written the same night, on a night where two of my confident fixes
+    turned out to do nothing at all. A brand-new component that places
+    real orders must not be able to place sixty before anyone sees the
+    first.
+
+    The remainder is not lost: the position still reads below its
+    recorded size next cycle, so it is picked up two minutes later.
+    This bounds the blast radius of a bug, not the work.
+    """
+
+    def test_the_cap_is_small(self):
+        assert 0 < we.MAX_EXITS_PER_CYCLE <= 25
+
+    def test_the_cycle_slices_to_the_cap(self):
+        import inspect
+
+        src = inspect.getsource(we._cycle)
+        assert "found[:MAX_EXITS_PER_CYCLE]" in src
+
+    def test_the_overflow_is_reported_not_silently_dropped(self):
+        """A silent cap reads as 'only 10 exits happened', which is the
+        kind of quiet truncation that made other numbers tonight lie."""
+        import inspect
+
+        src = inspect.getsource(we._cycle)
+        assert "deferred" in src
+        assert "the rest still read as shrunk next cycle" in src
+
+    def test_swisstonys_62_would_be_spread_not_fired_at_once(self):
+        found = [(f"a{i}", 0.5) for i in range(62)]
+        assert len(found[:we.MAX_EXITS_PER_CYCLE]) == we.MAX_EXITS_PER_CYCLE
+        assert len(found) - we.MAX_EXITS_PER_CYCLE == 52
