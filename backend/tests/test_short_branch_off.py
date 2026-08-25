@@ -64,6 +64,51 @@ class TestItDoesNotStrandOpenShorts:
             le.execute_manual)
 
 
+class TestTheIntentIsNotInverted:
+    """DO NOT FLIP THE INTENT. This is the refutation, on the record.
+
+    The leading theory for hours was that side_intent named the wrong
+    leg — that BUY_SHORT was buying the opposite player. The venue's
+    own settled data refutes it:
+
+        whale pick   Stefano Travaglia
+        venue sides  Harry Wendelken long=true
+                     Stefano Travaglia long=false   <- the pick
+        we sent      ORDER_INTENT_BUY_SHORT         <- correct for him
+
+    We named the side CORRECTLY and were charged 0.89 for a side the
+    whale paid ~0.22 for. Right side, wrong price.
+
+    So the eventual fix is a PRICE fix on the short leg, not an intent
+    flip. Had the flip shipped on the theory, every short would have
+    bought the wrong player at a plausible-looking price — the original
+    incident, reintroduced by the attempt to fix it.
+
+    These assertions have no runtime effect. They exist so the next
+    person to reach for the one-line inversion finds the evidence
+    against it first.
+    """
+
+    # (whale_pick_is_long, intent_we_sent) from the 2026-08-24 receipts
+    HARWEN_STETRA = (False, "ORDER_INTENT_BUY_SHORT")
+
+    def test_the_intent_matched_the_picked_side(self):
+        pick_is_long, sent = self.HARWEN_STETRA
+        expected = ("ORDER_INTENT_BUY_LONG" if pick_is_long
+                    else "ORDER_INTENT_BUY_SHORT")
+        assert sent == expected, (
+            "the venue's own side flags say we named the right leg — "
+            "the overspend is a PRICE fault, not an inverted intent")
+
+    def test_the_refusal_does_not_flip_anything(self):
+        """The shipped guard REFUSES the branch. It must not quietly
+        rewrite the intent, which would be the flip by another name."""
+        src = inspect.getsource(le.maybe_execute)
+        head = src[:src.index("short-branch-refused")]
+        assert 'intent = "ORDER_INTENT_BUY_LONG"' not in head
+        assert "_intent = _intent.replace" not in src
+
+
 class TestTheEvidenceIsRecorded:
     """The counts are the justification. Pin them so a future reader
     cannot mistake this for a hunch, and so re-opening the branch has
