@@ -659,9 +659,24 @@ jobs:
           # bottleneck; it is deliberately measured before it is raised,
           # because widening throughput also lets more orders clear the
           # day-room check before any of them lands.
-          jq -r '.[]? | select(.service == "copy_sweep") | .detail.copy_queue
-                 | "  COPYQUEUE n=\(.n // 0) concurrency=\(.concurrency // "?") avg=\(.avg_wait_s // 0)s max=\(.max_wait_s // 0)s"' \
-            /tmp/hb_we.json 2>/dev/null || echo "  COPYQUEUE unavailable"
+          #
+          # IT PRINTED "unavailable" ON FIVE CONSECUTIVE PROBES and the
+          # worker was publishing the block correctly the whole time.
+          # /api/health/services used to str()-flatten every nested
+          # value, so .detail.copy_queue arrived as a Python repr and
+          # indexing it threw. The endpoint keeps nested scalars now;
+          # this line distinguishes the three outcomes so a future
+          # regression cannot read as a dead worker again — the same
+          # mistake this probe made about the exit detector.
+          jq -r '[.[]? | select(.service == "copy_sweep")] as $c
+                 | if ($c | length) == 0
+                   then "  COPYQUEUE no copy_sweep heartbeat — sweep never completed a cycle"
+                   elif (($c[0].detail.copy_queue? // null) | type) != "object"
+                   then "  COPYQUEUE detail.copy_queue is \(($c[0].detail.copy_queue? // null) | type), not an object — the ENDPOINT is mangling it"
+                   else ($c[0].detail.copy_queue
+                         | "  COPYQUEUE n=\(.n // 0) concurrency=\(.concurrency // "?") avg=\(.avg_wait_s // 0)s max=\(.max_wait_s // 0)s")
+                   end' \
+            /tmp/hb_we.json 2>/dev/null || echo "  COPYQUEUE unreadable"
 
           # UNMAPPED — WHY the biggest bucket fails, attributed.
           #

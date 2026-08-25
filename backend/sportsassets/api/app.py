@@ -407,6 +407,68 @@ async def healthz() -> dict:
             "rss_mb": rss_mb}
 
 
+# HEARTBEAT DETAIL SANITIZER.
+#
+# The old one-liner kept scalars and ran str()[:80] over everything
+# else — which destroyed every NESTED counter block on the way out:
+#
+#     detail.copy_queue  {"n": 0, "concurrency": 4, ...}
+#       became           "{\'n\': 0, \'concurrency\': 4, ...}"
+#
+# a Python repr, in single quotes, truncated at 80 characters. Anything
+# reading it as JSON gets a type error, which is why the COPYQUEUE line
+# of the diagnostic printed "unavailable" on five consecutive probes.
+# Copy-path queue latency — the number that says whether our own
+# semaphore is what ages a signal into a stale-signal rejection — has
+# never once been read, and it was being published correctly the whole
+# time.
+#
+# The truncation is the worse half. At 80 characters a slightly larger
+# counter block does not fail loudly, it loses its tail: a dict of four
+# 48-hour retry counts is 73 characters, so one more status or one
+# wider number silently cuts a value in half and the reader sees a
+# plausible smaller number. This endpoint has published wrong-looking
+# numbers as readily as missing ones.
+#
+# Nested scalars are the same safety class as top-level scalars, so
+# they are kept as scalars. Depth, key count and string length are all
+# bounded, because the reason for a sanitizer here is real: heartbeat
+# details are public and must never carry a payload or a token.
+_DETAIL_MAX_DEPTH = 3
+_DETAIL_MAX_KEYS = 40
+_DETAIL_MAX_ITEMS = 20
+_DETAIL_MAX_STR = 80
+
+
+def _sanitize_detail(obj, depth: int = 0):
+    """Numbers stay numbers, at any depth; everything else is capped."""
+    if isinstance(obj, bool) or isinstance(obj, (int, float)):
+        return obj
+    if obj is None:
+        return None
+    if isinstance(obj, str):
+        return obj[:_DETAIL_MAX_STR]
+    if depth >= _DETAIL_MAX_DEPTH:
+        # Deeper than a counter block ever needs to be. Report the
+        # shape rather than the contents, so a nested payload is
+        # visibly refused instead of silently half-printed.
+        return f"<{type(obj).__name__} depth>"
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in list(obj.items())[:_DETAIL_MAX_KEYS]:
+            out[str(k)[:_DETAIL_MAX_STR]] = _sanitize_detail(v, depth + 1)
+        if len(obj) > _DETAIL_MAX_KEYS:
+            out["_truncated_keys"] = len(obj) - _DETAIL_MAX_KEYS
+        return out
+    if isinstance(obj, (list, tuple)):
+        out = [_sanitize_detail(v, depth + 1)
+               for v in list(obj)[:_DETAIL_MAX_ITEMS]]
+        if len(obj) > _DETAIL_MAX_ITEMS:
+            out.append(f"<+{len(obj) - _DETAIL_MAX_ITEMS} more>")
+        return out
+    return str(obj)[:_DETAIL_MAX_STR]
+
+
 @app.get("/api/health/services")
 async def health_services() -> list[dict]:
     """Sanitized service heartbeats — status and age only, plus a short
@@ -434,10 +496,9 @@ async def health_services() -> list[dict]:
                     # but placing nothing" gets localized in one probe
                     # (owner report 2026-08-08). Numbers and short
                     # strings only, capped.
-                    "detail": {k: (v if isinstance(v, (int, float, bool))
-                                   else str(v)[:80])
-                               for k, v in (detail or {}).items()
-                               if k != "error"} or None,
+                    "detail": _sanitize_detail(
+                        {k: v for k, v in (detail or {}).items()
+                         if k != "error"}) or None,
                     **({"error": err} if err else {})})
     return out
 
