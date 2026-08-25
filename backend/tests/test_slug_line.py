@@ -139,17 +139,48 @@ class TestTheWordFormSpread:
         assert market_type_of("asc-nfl-kc-buf-2026-08-25-kc") == "spread"
         assert market_type_of("tsc-nfl-kc-buf-2026-08-25") == "total"
 
-    def test_a_spread_without_a_sign_still_refuses_on_the_named_branch(self):
-        """slug_lines supplies a MAGNITUDE and no sign, and _norm erases
-        +/-. The sign check must still refuse rather than let the
-        magnitude alone select a side — that inversion is the incident
-        this codebase is named after."""
-        rows = [{"identifier": "asc-x-kc",
-                 "side_norm": premap._norm("Kansas City Chiefs -3.5"),
-                 "line": "3.5",
-                 "signed": premap.signed_line("Kansas City Chiefs -3.5"),
-                 "kind": "side", "question": "Spread"}]
-        assert match_side(rows, "Kansas City Chiefs", "Spread",
+    def test_an_unsigned_pick_resolves_only_when_the_TEAM_is_unique(self):
+        """POLICY CHANGED 2026-08-25, deliberately, and this is the
+        test that recorded the old one.
+
+        It used to assert that a bare team pick on a lined market
+        refuses outright, on the reasoning that "the magnitude alone
+        must not select a side". That reasoning does not survive
+        contact with the data: the magnitude never selects the side —
+        THE TEAM NAME does, and the magnitude only has to agree. What
+        the old rule actually did was refuse roughly half of every
+        spread pick, because a spread title names ONE team's handicap
+        and the other team's pick borrowed it and mismatched.
+
+        The inversion protection is unchanged and is tested directly in
+        test_spread_sign_attribution.py: a whale who STATES a sign must
+        still match it exactly, and a KC +3.5 pick against a venue
+        listing KC only at -3.5 still returns None.
+
+        What protects the UNSTATED case is uniqueness, which was
+        already on every branch of the named path — so a team listed at
+        two handicaps refuses rather than guessing."""
+        one = [{"identifier": "asc-x-kc",
+                "side_norm": premap._norm("Kansas City Chiefs -3.5"),
+                "line": "3.5",
+                "signed": premap.signed_line("Kansas City Chiefs -3.5"),
+                "kind": "side", "question": "Spread"}]
+        # exactly one KC side on this market -> he can only have meant it
+        hit = match_side(one, "Kansas City Chiefs", "Spread",
+                         "nfl-kc-buf-2026-08-25-spread-away-3pt5")
+        assert hit is not None and hit["identifier"] == "asc-x-kc"
+
+        # two KC sides -> genuinely ambiguous -> still refuses
+        two = one + [{"identifier": "asc-x-kc-alt",
+                      "side_norm": premap._norm("Kansas City Chiefs +3.5"),
+                      "line": "3.5",
+                      "signed": premap.signed_line("Kansas City Chiefs +3.5"),
+                      "kind": "side", "question": "Spread"}]
+        assert match_side(two, "Kansas City Chiefs", "Spread",
+                          "nfl-kc-buf-2026-08-25-spread-away-3pt5") is None
+
+        # and a STATED sign that disagrees still refuses
+        assert match_side(one, "Kansas City Chiefs +3.5", "Spread",
                           "nfl-kc-buf-2026-08-25-spread-away-3pt5") is None
 
 

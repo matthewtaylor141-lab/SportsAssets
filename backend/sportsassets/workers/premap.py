@@ -387,6 +387,36 @@ def slug_lines(global_slug: str | None) -> set[str]:
     return out
 
 
+def _title_sign_is_his(his_title: str | None, outcome: str | None) -> bool:
+    """Does the title's handicap describe HIS outcome, or the other team?
+
+    A spread title names ONE team's handicap: "Spread: Doncaster
+    (-1.5)". match_side took that sign as the whale's whenever his
+    outcome text carried none — so a bare "Middlesbrough" pick was
+    compared against Doncaster's -1.5, and Middlesbrough's own row
+    (+1.5) mismatched and refused. Half of every spread pick, refused
+    for stating the wrong team's sign.
+
+    Only True when the title names ONE subject and that subject is his
+    outcome. A title containing "vs" names two, and there is no way to
+    tell which the sign belongs to, so it returns False and the caller
+    treats the sign as UNSTATED rather than guessing.
+    """
+    # Both sides through _key_variants, for the same reason the event
+    # keys are: "Inter Miami C.F." normalizes to "inter miami c f" and
+    # "Inter Miami CF" to "inter miami cf", so a plain containment test
+    # says the title is about a different club than his pick — and the
+    # sign is then treated as unstated on a market where he DID state
+    # one. Caught by its own test.
+    titles = _key_variants(his_title)
+    outs = _key_variants(outcome)
+    if not titles or not outs:
+        return False
+    if any(" vs " in t for t in titles):
+        return False
+    return any(o in t for t in titles for o in outs if o)
+
+
 def match_side(rows: list[dict], outcome: str | None,
                his_title: str | None,
                his_slug: str | None = None) -> dict | None:
@@ -471,18 +501,41 @@ def match_side(rows: list[dict], outcome: str | None,
         # that could never match and the lane was silently dead for the
         # whole type. A lined pick matches a row whose line it names; an
         # unlined pick still matches only unlined rows.
-        his_signed = signed_line(outcome) or signed_line(his_title)
+        # WHOSE SIGN IS IT? (2026-08-25.)
+        #
+        # This was `signed_line(outcome) or signed_line(his_title)`, and
+        # a spread title names ONE team's handicap. So a bare
+        # "Middlesbrough" pick on "Spread: Doncaster (-1.5)" borrowed
+        # Doncaster's sign, mismatched Middlesbrough's own +1.5 row, and
+        # refused. Reproduced against the live matcher: "Doncaster"
+        # resolves, "Middlesbrough" returns None — half of every spread
+        # pick, refused for stating the other team's sign.
+        #
+        # His outcome always speaks for him. The title speaks for him
+        # only when it names ONE subject and that subject is his pick.
+        his_signed = signed_line(outcome)
+        if not his_signed and _title_sign_is_his(his_title, outcome):
+            his_signed = signed_line(his_title)
 
         def _lined_ok(r: dict) -> bool:
-            # SIGN AGREEMENT FIRST (leak-hunt round 3): _norm erases
-            # +/-, so 'Chiefs -3' and 'Chiefs +3' are the same string.
-            # This check used to live inside the line branch and was
-            # skipped whenever no line parsed — which is exactly the
-            # whole-number handicap case, so those inverted silently.
+            # SIGN AGREEMENT WHEN HE STATED ONE (leak-hunt round 3):
+            # _norm erases +/-, so 'Chiefs -3' and 'Chiefs +3' are the
+            # same string and only the sign separates giving points from
+            # getting them. THIS PATH IS UNCHANGED — a stated sign must
+            # still match exactly, which is the 2026-08-24 inversion
+            # guard.
             rs = (r.get("signed") or "").strip()
-            if his_signed or rs:
+            if his_signed:
                 if not rs or rs != his_signed:
                     return False
+            # HE STATED NONE. There is nothing to compare a sign
+            # against, and demanding equality with an empty string
+            # refused every row — a guard blocking everything, which is
+            # an outage wearing a guard's uniform. The MAGNITUDE must
+            # still agree, and the caller's uniqueness rule
+            # (len(...) == 1 on every branch) still refuses ambiguity,
+            # so a team listed at two handicaps returns nothing rather
+            # than a coin flip.
             rl = (r.get("line") or "").strip()
             if not rl:
                 return not his_lines
