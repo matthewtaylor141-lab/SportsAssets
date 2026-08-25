@@ -93,22 +93,44 @@ async def publish_whale_benchmark() -> None:
         from ..analytics.merge_pnl import whale_merge_pnl
         from ..api.copies_record import COPY_WHALES
         from ..db import get_pool
+        from ..live_executor import COPY_CUT_WHALES, _whale_set
 
         pool = await get_pool()
         # Whole book — a windowed replay misbooks every pre-window
         # position's exit as an entry, understating realised P&L and
         # inflating the ROI denominator.
         graded = await whale_merge_pnl(pool, list(COPY_WHALES), None)
+
+        # THE BENCHMARK IS THE EDGE WE ARE TRYING TO INHERIT, SO IT MUST
+        # BE THE WHALES WE ACTUALLY COPY.
+        #
+        # Averaging every graded whale produced a headline of -0.08% on
+        # $878,764,744 of entries — dominated by 0x2c33 at -18.97% and
+        # swisstony at -3.29%, both of whom are CUT and neither of whom
+        # we place a dollar behind. /api/admin/proof then sized the
+        # sample against a negative target and reported that we needed
+        # 19,787,471 settled copies, which is absurd on its face and is
+        # the only reason I caught it.
+        #
+        # A benchmark that includes the books we deliberately do not
+        # trade is not this strategy's benchmark. Rostered whales only,
+        # and the response names which.
+        _kept = {w for w in graded
+                 if w.lower() in _whale_set("LIVE_VERIFIED_WHALES")
+                 and w.lower() not in COPY_CUT_WHALES}
+        _rost = {w: g for w, g in graded.items() if w in _kept}
         ent = sum(float(g.get("entry_notional") or 0)
-                  for g in graded.values())
+                  for g in _rost.values())
         rea = sum(float(g.get("realized_total") or 0)
-                  for g in graded.values())
+                  for g in _rost.values())
         if ent <= 0:
             return
         payload = {
             "whale_roi_on_entries": round(rea / ent, 6),
             "whale_entry_notional": round(ent, 2),
             "whale_realized": round(rea, 2),
+            "rostered": sorted(_kept),
+            "excluded_as_cut": sorted(set(graded) - _kept),
             # Per whale too, so a roster question can be answered from
             # the published value instead of re-running the walk.
             "per_whale": {

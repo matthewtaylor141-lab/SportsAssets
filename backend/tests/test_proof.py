@@ -317,3 +317,50 @@ class TestTheProbeNamesItsFailures:
 
     def test_the_body_is_printed_when_it_will_not_parse(self):
         assert "PROOFBODY" in self._probe()
+
+
+class TestTheBenchmarkIsTheEdgeWeAreTryingToInherit:
+    """It averaged EVERY graded whale, including the ones we cut.
+
+    Live output: "whales return -0.000827 on $878,764,744.37 of
+    entries" — dominated by 0x2c33 at -18.97% and swisstony at -3.29%,
+    both cut, neither carrying a dollar of ours. /api/admin/proof then
+    sized the sample against a NEGATIVE target and reported that we
+    needed 19,787,471 settled copies. That number is absurd on its face
+    and is the only reason it was caught; a benchmark that was merely
+    wrong rather than ridiculous would have shipped.
+
+    The whales we deliberately do not trade are not this strategy's
+    benchmark.
+    """
+
+    def _src(self):
+        import inspect
+
+        from sportsassets.workers import analytics as an
+
+        return inspect.getsource(an.publish_whale_benchmark)
+
+    def test_it_filters_to_the_verified_set(self):
+        assert '_whale_set("LIVE_VERIFIED_WHALES")' in self._src()
+
+    def test_it_also_honours_the_cut_set(self):
+        """Two literals encode the roster and they have disagreed
+        before — the whale must clear BOTH."""
+        assert "COPY_CUT_WHALES" in self._src()
+
+    def test_the_totals_come_from_the_filtered_set(self):
+        src = self._src()
+        assert "for g in _rost.values()" in src
+        assert "for g in graded.values()" not in src
+
+    def test_it_publishes_who_was_counted_and_who_was_not(self):
+        src = self._src()
+        assert '"rostered"' in src
+        assert '"excluded_as_cut"' in src
+
+    def test_per_whale_still_carries_everyone(self):
+        """A cut whale's numbers are how a cut gets REVIEWED — filtering
+        them out of the detail would make the decision unauditable."""
+        src = self._src()
+        assert "for w, g in graded.items()" in src
