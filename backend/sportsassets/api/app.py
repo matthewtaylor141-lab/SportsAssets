@@ -3356,6 +3356,18 @@ async def _live_status_uncached() -> dict:
                          = 'array'
                     THEN jsonb_array_length(raw #> '{response,executions}')
                     ELSE 0 END AS n_exec,
+               -- THE FALSIFIABLE VERSION (2026-08-25). Every overspent
+               -- row so far is ORDER_INTENT_BUY_SHORT, which reads like
+               -- "shorts pay the complement". That is only a real
+               -- finding if the converse holds: CLEAN shorts would
+               -- refute it, and clean longs would support it. The
+               -- receipts endpoint only returns overspent rows, so it
+               -- cannot see a clean short by construction. Carrying the
+               -- intent on EVERY fill makes the claim testable instead
+               -- of merely consistent.
+               COALESCE(
+                   raw #>> '{response,executions,0,order,intent}',
+                   raw #>> '{preview,intent}') AS intent,
                to_char(placed_at AT TIME ZONE 'America/New_York',
                        'MM-DD HH24:MI') AS at
         FROM live_orders

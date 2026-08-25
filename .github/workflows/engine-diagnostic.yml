@@ -576,7 +576,15 @@ jobs:
                  "  OVERSPEND rows=\(length)"' \
             /tmp/live.json 2>/dev/null || true
           jq -r '.fills_24h // [] | .[0:14][] |
-                 "  FILL \(.at) \(.whale) \(.status) req $\(.req_usd // "?")/\(.req_sh // "?")sh @\(.lim // "?") -> filled $\(.fill_usd // 0)/\(.fill_sh // "?")sh @\(.fill_px // "?") ratio \(.ratio // "?") execs=\(.n_exec // "?") ordersOnMkt=\(.orders_on_mkt // "?") \(.slug // "?")"' \
+                 "  FILL \(.at) \(.whale) \(.status) req $\(.req_usd // "?")/\(.req_sh // "?")sh @\(.lim // "?") -> filled $\(.fill_usd // 0)/\(.fill_sh // "?")sh @\(.fill_px // "?") ratio \(.ratio // "?") intent=\(.intent // "?" | sub("ORDER_INTENT_";"")) execs=\(.n_exec // "?") ordersOnMkt=\(.orders_on_mkt // "?") \(.slug // "?")"' \
+            /tmp/live.json 2>/dev/null || true
+          # THE FALSIFIER: group every 24h fill by intent and overspend.
+          # "shorts pay the complement" requires shorts>0 clean=0. A
+          # clean short refutes it; a long that overspends refutes it
+          # differently. Either way this is the line that can prove me
+          # wrong, which is why it exists.
+          jq -r '.fills_24h // [] | group_by(.intent // "unknown")[] |
+                 "  BYINTENT \(.[0].intent // "unknown" | sub("ORDER_INTENT_";"")) n=\(length) over=\([.[] | select((.ratio // 0) > 1.001)] | length) clean=\([.[] | select((.ratio // 0) <= 1.001)] | length)"' \
             /tmp/live.json 2>/dev/null || true
           # OVERSPEND RECEIPTS: the venue's own execution list for every
           # overspent row. Settles the owner's round-trip hypothesis
