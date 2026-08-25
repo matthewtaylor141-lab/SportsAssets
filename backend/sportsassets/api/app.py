@@ -4455,7 +4455,7 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
 
 @app.get("/api/admin/whale-merge-pnl",
          dependencies=[Depends(require_admin)])
-async def api_whale_merge_pnl(since: str = "2026-08-01",
+async def api_whale_merge_pnl(since: str = "",
                               whales: str = "") -> dict:
     """Re-grade every whale with their MERGES counted as exits.
 
@@ -4487,17 +4487,38 @@ async def api_whale_merge_pnl(since: str = "2026-08-01",
     pool = await get_pool()
     want = [w.strip() for w in whales.split(",") if w.strip()] or list(
         COPY_WHALES)
-    graded = await whale_merge_pnl(pool, want, since)
+    # since="" means the WHOLE BOOK, which is the only window in
+    # which the replay's balances are right: a windowed replay seeds
+    # every balance at zero, so a position opened before the cutoff has
+    # its exit booked as a fresh entry.
+    graded = await whale_merge_pnl(pool, want, since or None)
+    # THE CASHFLOW MUST SHARE THE REPLAY'S WINDOW. Two numbers on one
+    # row measured over different spans is how a reader draws a
+    # conclusion neither of them supports — and with since="" the old
+    # form did not merely disagree, fromisoformat("") raises.
+    _since_d = (_dt_mod.datetime.fromisoformat(since).date()
+                if since else None)
     for name, g in graded.items():
-        st = await pool.fetchval(
-            """
-            SELECT COALESCE(sum(
-                     CASE WHEN t.side = 'BUY'
-                          THEN -t.notional ELSE t.notional END), 0)::float8
-              FROM trades t JOIN whales wh ON wh.id = t.whale_id
-             WHERE lower(wh.username) = $1 AND t.ts >= $2
-            """, name.lower(),
-                 _dt_mod.datetime.fromisoformat(since).date())
+        if _since_d is None:
+            st = await pool.fetchval(
+                """
+                SELECT COALESCE(sum(
+                         CASE WHEN t.side = 'BUY'
+                              THEN -t.notional ELSE t.notional END),
+                       0)::float8
+                  FROM trades t JOIN whales wh ON wh.id = t.whale_id
+                 WHERE lower(wh.username) = $1
+                """, name.lower())
+        else:
+            st = await pool.fetchval(
+                """
+                SELECT COALESCE(sum(
+                         CASE WHEN t.side = 'BUY'
+                              THEN -t.notional ELSE t.notional END),
+                       0)::float8
+                  FROM trades t JOIN whales wh ON wh.id = t.whale_id
+                 WHERE lower(wh.username) = $1 AND t.ts >= $2
+                """, name.lower(), _since_d)
         g["net_cashflow"] = round(float(st or 0), 2)
         g["verdict"] = (
             "NO MERGES FOUND — this whale does not close by merging, so "

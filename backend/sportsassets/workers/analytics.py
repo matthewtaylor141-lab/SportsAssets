@@ -95,8 +95,10 @@ async def publish_whale_benchmark() -> None:
         from ..db import get_pool
 
         pool = await get_pool()
-        graded = await whale_merge_pnl(pool, list(COPY_WHALES),
-                                       "2026-08-01")
+        # Whole book — a windowed replay misbooks every pre-window
+        # position's exit as an entry, understating realised P&L and
+        # inflating the ROI denominator.
+        graded = await whale_merge_pnl(pool, list(COPY_WHALES), None)
         ent = sum(float(g.get("entry_notional") or 0)
                   for g in graded.values())
         rea = sum(float(g.get("realized_total") or 0)

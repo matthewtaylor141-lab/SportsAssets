@@ -292,7 +292,7 @@ def replay(fills: list[dict],
 
 
 async def whale_merge_pnl(pool: Any, whales: list[str],
-                          since: str = "2026-08-01",
+                          since: str | None = None,
                           max_fills: int = 600000) -> dict:
     """Run the replay for each whale off the trades ledger.
 
@@ -313,8 +313,33 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
     import datetime as _dt
     import json as _json
 
-    since_d = (since if isinstance(since, _dt.date)
-               else _dt.datetime.fromisoformat(str(since)).date())
+    # THE WINDOW WAS MISBOOKING EVERY PRE-WINDOW POSITION AS AN ENTRY
+    # (2026-08-25, adversarial review).
+    #
+    # The replay reconstructs holdings ONLY from fills inside the
+    # window, seeding every balance at zero. So a complement buy that
+    # retires a position opened before `since` finds bal[other] == 0,
+    # is classified as a fresh ENTRY rather than a MERGE, and:
+    #
+    #   * its realised P&L vanishes from realized_merge_pnl
+    #   * its cost inflates entry_notional — the ROI DENOMINATOR
+    #   * the phantom position inflates open_shares
+    #
+    # Reproduced: a leg bought at 0.40 before the window and closed at
+    # 0.30 inside it books as 0 merges, $0 realised and $30 of new
+    # entries, against the truth of 1 merge and +$30 realised. Both
+    # errors push measured ROI toward zero, on the numbers the ROSTER
+    # is graded with.
+    #
+    # `since` now defaults to NONE — the whole book — which is the only
+    # window in which the balances are actually right. The replay
+    # streams through a cursor, so a full book is a single forward pass
+    # rather than a memory problem. A caller that still passes a date
+    # gets it, and gets told what it costs.
+    since_d = None
+    if since is not None:
+        since_d = (since if isinstance(since, _dt.date)
+                   else _dt.datetime.fromisoformat(str(since)).date())
     res: dict[str, Any] = {}
     for w in whales:
         # STREAMED, NOT MATERIALISED. This endpoint returned 502 on
@@ -333,17 +358,33 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
         conds: set[str] = set()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                cur = await conn.cursor(
-                    """
-                    SELECT t.condition_id, t.outcome_index, t.side,
-                           t.size::float8 AS size, t.price::float8 AS price
-                      FROM trades t JOIN whales wh ON wh.id = t.whale_id
-                     WHERE lower(wh.username) = $1
-                       AND t.ts >= $2
-                       AND t.condition_id IS NOT NULL
-                       AND t.outcome_index IS NOT NULL
-                     ORDER BY t.condition_id, t.ts, t.id
-                    """, w.lower(), since_d)
+                if since_d is None:
+                    cur = await conn.cursor(
+                        """
+                        SELECT t.condition_id, t.outcome_index, t.side,
+                               t.size::float8 AS size,
+                               t.price::float8 AS price
+                          FROM trades t JOIN whales wh
+                            ON wh.id = t.whale_id
+                         WHERE lower(wh.username) = $1
+                           AND t.condition_id IS NOT NULL
+                           AND t.outcome_index IS NOT NULL
+                         ORDER BY t.condition_id, t.ts, t.id
+                        """, w.lower())
+                else:
+                    cur = await conn.cursor(
+                        """
+                        SELECT t.condition_id, t.outcome_index, t.side,
+                               t.size::float8 AS size,
+                               t.price::float8 AS price
+                          FROM trades t JOIN whales wh
+                            ON wh.id = t.whale_id
+                         WHERE lower(wh.username) = $1
+                           AND t.ts >= $2
+                           AND t.condition_id IS NOT NULL
+                           AND t.outcome_index IS NOT NULL
+                         ORDER BY t.condition_id, t.ts, t.id
+                        """, w.lower(), since_d)
                 while n_read < max_fills:
                     batch = await cur.fetch(min(5000, max_fills - n_read))
                     if not batch:
@@ -399,6 +440,15 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
         out["conditions_touched"] = len(conds)
         out["conditions_resolved"] = len(payouts)
         out["fills_read"] = len(rows)
+        out["window"] = ("whole book" if since_d is None
+                         else f"fills on or after {since_d}")
+        if since_d is not None:
+            out["window_warning"] = (
+                "a WINDOWED replay seeds every balance at zero, so any "
+                "position opened before this date has its exit booked "
+                "as a fresh entry — realised P&L is understated and the "
+                "ROI denominator inflated. Pass since=None for the "
+                "whole book.")
         out["truncated"] = len(rows) >= max_fills
         if out["truncated"]:
             out["verdict_note"] = (

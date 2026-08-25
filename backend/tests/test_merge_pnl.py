@@ -253,10 +253,31 @@ class TestTheQueryTakesADateNotAString:
 
         from sportsassets.api import app as app_mod
 
+        import re as _re
+
         src = inspect.getsource(app_mod.api_whale_merge_pnl)
-        assert ".date())" in src
-        sql = src[src.index("SELECT COALESCE(sum("):src.index('", name.lower()')]
-        assert "::date" not in sql
+        assert ".date()" in src, "the string must still be converted"
+        # Both branches — whole-book and windowed. Sliced by regex, not
+        # by surrounding literals: the windowed form now sits beside an
+        # unwindowed one, and a slice keyed on the old neighbour text
+        # would silently check nothing.
+        sqls = _re.findall(r"SELECT COALESCE\(sum\(.*?\)\)", src, _re.S)
+        assert len(sqls) == 2, f"expected both branches, got {len(sqls)}"
+        for sql in sqls:
+            assert "::date" not in sql
+
+    def test_the_cashflow_shares_the_replays_window(self):
+        """Two numbers on one row measured over different spans is how
+        a reader draws a conclusion neither supports. And with the new
+        whole-book default, fromisoformat("") would simply raise."""
+        import inspect
+
+        from sportsassets.api import app as app_mod
+
+        src = inspect.getsource(app_mod.api_whale_merge_pnl)
+        assert "_since_d = (" in src
+        assert "if since else None" in src
+        assert "if _since_d is None:" in src
 
     def test_a_date_object_passes_straight_through(self):
         import asyncio
@@ -657,3 +678,86 @@ class TestTheWhalesOwnEdgeGetsAnInterval:
         for k in ("edge_lots", "edge_deployed", "edge_roi", "edge_se",
                   "edge_ci95", "edge_verdict"):
             assert k in good and k in thin and k in none_, k
+
+
+class TestThePreWindowPositionWasBookedAsAnEntry:
+    """The replay seeds every balance at zero, so a windowed run turns
+    every pre-window position's EXIT into a fresh ENTRY.
+
+    Three errors from one omission, all pushing measured ROI toward
+    zero on the numbers the ROSTER is graded with:
+      * the realised P&L of that exit vanishes
+      * its cost inflates entry_notional — the ROI DENOMINATOR
+      * the phantom position inflates open_shares
+
+    Found by an adversarial review, and it is the reason `since`
+    defaults to the whole book now.
+    """
+
+    def _closed_inside_only(self):
+        """The complement buy alone — its entry predates the window."""
+        return [{"condition_id": "c", "outcome_index": 1, "side": "BUY",
+                 "size": 100.0, "price": 0.30}]
+
+    def _the_whole_truth(self):
+        return [{"condition_id": "c", "outcome_index": 0, "side": "BUY",
+                 "size": 100.0, "price": 0.40}] + self._closed_inside_only()
+
+    def test_the_exit_reads_as_an_entry_when_the_open_is_out_of_window(self):
+        r = mp.replay(self._closed_inside_only())
+        assert r["n_merges"] == 0
+        assert r["n_entries"] == 1
+        assert r["realized_total"] == 0.0
+
+    def test_the_same_trade_is_a_merge_with_its_open_in_scope(self):
+        r = mp.replay(self._the_whole_truth())
+        assert r["n_merges"] == 1
+        assert r["realized_total"] == 30.0
+
+    def test_the_denominator_is_inflated_by_the_phantom_entry(self):
+        clipped = mp.replay(self._closed_inside_only())
+        whole = mp.replay(self._the_whole_truth())
+        assert clipped["entry_notional"] == 30.0    # the exit, miscounted
+        assert whole["entry_notional"] == 40.0      # the real entry
+        assert clipped["open_shares"] == 100.0      # phantom position
+        assert whole["open_shares"] == 0.0
+
+    def test_the_default_is_now_the_whole_book(self):
+        import inspect
+
+        sig = inspect.signature(mp.whale_merge_pnl)
+        assert sig.parameters["since"].default is None
+
+    def test_no_date_filter_is_applied_when_since_is_none(self):
+        import asyncio
+
+        pool = _FakePool([{"condition_id": "c", "outcome_index": 0,
+                           "side": "BUY", "size": 1, "price": 0.5}])
+        out = asyncio.run(mp.whale_merge_pnl(pool, ["w"], None))
+        assert pool.bound is None, "a bound date means a filter was applied"
+        assert out["w"]["window"] == "whole book"
+
+    def test_a_windowed_call_still_works_and_SAYS_WHAT_IT_COSTS(self):
+        import asyncio
+
+        pool = _FakePool([{"condition_id": "c", "outcome_index": 0,
+                           "side": "BUY", "size": 1, "price": 0.5}])
+        out = asyncio.run(mp.whale_merge_pnl(pool, ["w"], "2026-08-01"))
+        assert "2026-08-01" in out["w"]["window"]
+        assert "booked as a fresh entry" in out["w"]["window_warning"]
+
+    def test_the_whole_book_run_carries_no_warning(self):
+        import asyncio
+
+        pool = _FakePool([])
+        out = asyncio.run(mp.whale_merge_pnl(pool, ["w"], None))
+        assert "window_warning" not in out["w"]
+
+    def test_the_benchmark_publisher_uses_the_whole_book(self):
+        import inspect
+
+        from sportsassets.workers import analytics as an
+
+        src = inspect.getsource(an.publish_whale_benchmark)
+        assert "whale_merge_pnl(pool, list(COPY_WHALES), None)" in src
+        assert "2026-08-01" not in src
