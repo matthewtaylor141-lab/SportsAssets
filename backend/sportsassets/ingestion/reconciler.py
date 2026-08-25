@@ -16,7 +16,7 @@ import httpx
 from ..config import settings
 from ..db import get_pool, heartbeat
 from ..ratelimit import polite_get
-from .pipeline import ingest_trade
+from .pipeline import ingest_trade_result
 from .poller import _sport_for_condition, parse_data_api_trade
 
 log = logging.getLogger(__name__)
@@ -56,7 +56,14 @@ async def reconcile_once(depth: int = 500) -> dict:
                     sport = await _sport_for_condition(ev.condition_id)
                     if sport:
                         ev.sport = sport
-                    if await ingest_trade(ev) is not None:
+                    # WAS IT NEW? `is not None` stopped meaning that
+                    # when ingest_trade switched to ON CONFLICT DO
+                    # UPDATE — it returns the id for duplicates too, so
+                    # this counted the ENTIRE 500-row-per-wallet
+                    # re-sweep as missed fills and reported permanent
+                    # drift on every run.
+                    _tid, was_new = await ingest_trade_result(ev)
+                    if was_new:
                         wallet_missed += 1
                 offset += 100
                 if len(batch) < 100:

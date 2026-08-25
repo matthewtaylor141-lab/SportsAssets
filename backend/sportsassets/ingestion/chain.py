@@ -33,7 +33,7 @@ import websockets
 
 from ..config import settings
 from ..db import get_pool, heartbeat
-from .pipeline import TradeEvent, ingest_trade
+from .pipeline import TradeEvent, ingest_trade_result
 
 log = logging.getLogger(__name__)
 
@@ -376,8 +376,12 @@ class ChainListener:
             ts_epoch=ts_epoch,
             source="chain",
         )
-        trade_id = await ingest_trade(ev)
-        if trade_id:
+        # `if trade_id:` was a dedupe test in effect, and stopped being
+        # one when ingest_trade switched to ON CONFLICT DO UPDATE — it
+        # returns the id for duplicates too, so `ingested` counted every
+        # re-seen chain fill and the heartbeat over-reported.
+        trade_id, was_new = await ingest_trade_result(ev)
+        if was_new:
             self.ingested += 1
             self.last_lag_s = round(time.time() - ts_epoch, 1)
             log.info(
@@ -442,8 +446,8 @@ class ChainListener:
                 ts_epoch=ts_epoch,
                 source="chain",
             )
-            trade_id = await ingest_trade(ev)
-            if trade_id:
+            trade_id, was_new = await ingest_trade_result(ev)
+            if was_new:
                 self.ingested += 1
                 self.last_lag_s = round(time.time() - ts_epoch, 1)
                 log.info("v3 chain fill: %s %s %s %.2f @ %.3f (trade %s)",

@@ -72,12 +72,14 @@ def fake_env(monkeypatch):
 
     async def fake_ingest(ev):
         ingested.append(ev)
-        return 42  # row id — "new"
+        # (id, was_new). The id alone stopped meaning "new" when
+        # ingest_trade switched to ON CONFLICT DO UPDATE.
+        return 42, True
 
     monkeypatch.setattr(poller_mod, "get_pool", fake_get_pool)
     monkeypatch.setattr(
         "sportsassets.ratelimit.polite_get", fake_polite_get)
-    monkeypatch.setattr(poller_mod, "ingest_trade", fake_ingest)
+    monkeypatch.setattr(poller_mod, "ingest_trade_result", fake_ingest)
     return pool, ingested
 
 

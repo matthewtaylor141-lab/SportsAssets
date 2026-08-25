@@ -16,7 +16,7 @@ import httpx
 
 from ..config import settings
 from ..db import get_pool, heartbeat
-from .pipeline import TradeEvent, ingest_trade
+from .pipeline import TradeEvent, ingest_trade_result
 
 log = logging.getLogger(__name__)
 
@@ -127,7 +127,13 @@ class Poller:
             sport = await _sport_for_condition(ev.condition_id)
             if sport:
                 ev.sport = sport
-            if await ingest_trade(ev) is not None:
+            # Same contract change as the reconciler: ingest_trade
+            # returns the id for duplicates too since the ON CONFLICT
+            # DO UPDATE, so `is not None` over-counted every re-polled
+            # fill as new and inflated this heartbeat's `new` on every
+            # pass.
+            _tid, was_new = await ingest_trade_result(ev)
+            if was_new:
                 new += 1
                 if ev.ts_epoch:
                     import time as _t

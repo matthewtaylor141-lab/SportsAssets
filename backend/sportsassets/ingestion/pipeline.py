@@ -85,11 +85,44 @@ def _feed_payload(trade_id: int, ev: TradeEvent, detected_at: datetime, enriched
     }
 
 
+# THE DEDUPE ANSWER, SEPARATED FROM THE ID (2026-08-25, adversarial
+# review of the ON CONFLICT change).
+#
+# This function used to return None on a duplicate, so `is not None`
+# WAS the "was this new?" test and two callers used it that way. The
+# switch to ON CONFLICT DO UPDATE (so an enrichment pass can fill in a
+# NULL condition_id without re-firing the fan-out) made it return the
+# id on EVERY row — and the fan-out gate inside this file was converted
+# to `row["was_insert"]` while the two external callers were not.
+#
+# Result: reconciler.py counted its entire 500-row-per-wallet re-sweep
+# as MISSED FILLS and reported permanent drift, and poller.py
+# over-reported new trades on every pass. Both are displayed numbers,
+# and both were confidently wrong rather than absent.
+#
+# The fix is not to restore the old overloading — an id that doubles as
+# a boolean is what let one contract change break two readers silently.
+# `ingest_trade_result` states both facts explicitly, and `ingest_trade`
+# stays as the id-returning wrapper for callers that only want the id.
 async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
-    """Insert + fan out one detected fill. Returns trade id if new, None if dup.
+    """Insert + fan out one detected fill, returning the trade id.
+
+    RETURNS THE ID ON DUPLICATES TOO. `is not None` is NOT a dedupe
+    test — use ingest_trade_result() for that. See the note above.
 
     notify=False inserts silently (no publish, no outbox) — used by the deep
     history backfill so importing thousands of past trades can't page anyone.
+    """
+    tid, _was_new = await ingest_trade_result(ev, notify)
+    return tid
+
+
+async def ingest_trade_result(ev: TradeEvent,
+                              notify: bool = True) -> tuple[int | None, bool]:
+    """(trade id, was_this_row_newly_inserted).
+
+    Callers asking "did I just see something new?" read the second
+    element. The first is non-None for duplicates too.
     """
     pool = await get_pool()
     detected_at = datetime.now(tz=timezone.utc)
@@ -175,17 +208,19 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
         ev.dedupe_key,
     )
     if row is None:
-        return None  # duplicate — the other path saw it first
+        # The WHERE on the DO UPDATE matched nothing: a duplicate with
+        # no holes to fill. Not new, and no id to hand back.
+        return None, False
     trade_id = row["id"]
     # An enrichment pass filling in a NULL condition_id is not a new
     # fill. It returns the id — the row is real and callers want it —
     # but it must never reach the fan-out below, or every hourly pass
     # re-publishes and re-copies a trade we already acted on.
     if not row["was_insert"]:
-        return trade_id
+        return trade_id, False
 
     if not notify:
-        return trade_id
+        return trade_id, True
 
     payload = _feed_payload(trade_id, ev, detected_at, pre_enriched)
 
@@ -228,7 +263,7 @@ async def ingest_trade(ev: TradeEvent, notify: bool = True) -> int | None:
     if not pre_enriched:
         # Enrich off the hot path; never blocks the next detection.
         asyncio.get_running_loop().create_task(_enrich(trade_id, ev, detected_at))
-    return trade_id
+    return trade_id, True
 
 
 async def _write_outbox(trade_id: int, payload: dict) -> None:
