@@ -1102,6 +1102,19 @@ def _ensure_hydrate_retry() -> None:
     _hydrate_task = asyncio.get_running_loop().create_task(_loop())
 
 
+def _slim_relevant(acts: list) -> list[dict]:
+    """Slim only the activities build() can read.
+
+    The SQL type filter fixes the COLD BOOT. This fixes the ratchet:
+    every refresh unions the fresh venue window into the cache, and that
+    window carries all activity types. Without filtering here the
+    unread types accumulate straight back into RAM at ~15k/day and the
+    boot-time saving evaporates within a day — which is exactly the
+    shape of the memory ratchet documented below."""
+    return [_slim(a) for a in acts
+            if (a or {}).get("type") in ARCHIVE_TYPES]
+
+
 async def _archive_and_union(acts: list[dict]) -> list[dict]:
     """Persist every venue activity ever seen; return the full archive.
 
@@ -1189,7 +1202,7 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
                 logging.getLogger(__name__).exception("archive hydrate retry")
         if parsed is None:
             _ensure_hydrate_retry()
-            return [_slim(a) for _, _, _, a in new]
+            return _slim_relevant([a for _, _, _, a in new])
     else:
         # Warm: the cache IS the archive (first-seen versions, exactly what
         # the table holds under ON CONFLICT DO NOTHING), so append only this
@@ -1201,7 +1214,8 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
         # — observed 2026-08-03, three OOM restarts on the Standard
         # instance). A new list, not in-place append: readers hold
         # references to the old one mid-request.
-        parsed = _archive_cache["data"] + [_slim(a) for _, _, _, a in new]
+        parsed = _archive_cache["data"] + _slim_relevant(
+            [a for _, _, _, a in new])
 
     _archive_cache["data"], _archive_cache["ts"] = parsed, time.time()
     # Rolling snapshot refresh: keeps the one-read boot path fresh so the

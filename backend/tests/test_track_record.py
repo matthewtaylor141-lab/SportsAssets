@@ -436,12 +436,29 @@ def test_warm_archive_refresh_appends_without_rereading_the_table(monkeypatch):
     monkeypatch.setattr(tr, "_archived_ids", {"a1"})
     monkeypatch.setitem(tr._archive_cache, "data", [{"id": "a1"}])
 
-    out = asyncio.run(tr._archive_and_union([{"id": "a1"}, {"id": "a2"}]))
+    # Activities carry a real type: the union keeps only what build()
+    # reads (memory fix 2026-08-25), so an untyped fixture would be
+    # filtered out and prove nothing about the append.
+    _T = "ACTIVITY_TYPE_TRADE"
+    out = asyncio.run(tr._archive_and_union(
+        [{"id": "a1", "type": _T}, {"id": "a2", "type": _T}]))
 
     assert [a["id"] for a in out] == ["a1", "a2"]
     assert pool.fetches == []                      # no full-table re-read
     inserted = [r for q, r in pool.execs if isinstance(r, list)]
     assert len(inserted) == 1 and len(inserted[0]) == 1  # only a2 upserted
+
+    # The refresh union must ALSO drop unread types, or the boot-time
+    # saving evaporates within a day as the venue window re-adds them
+    # at ~15k/day — the memory ratchet, returning by another door.
+    monkeypatch.setattr(tr, "_archived_ids", {"a1"})
+    monkeypatch.setitem(tr._archive_cache, "data", [{"id": "a1"}])
+    out2 = asyncio.run(tr._archive_and_union([
+        {"id": "a2", "type": _T},
+        {"id": "a3", "type": "ACTIVITY_TYPE_DEPOSIT"},
+    ]))
+    assert [a["id"] for a in out2] == ["a1", "a2"], \
+        "a deposit is never read by build() and must not be retained"
 
     # Cold boot (empty in-process cache) DOES hydrate from the table —
     # via one streaming cursor scan, never repeated all-rows fetches.
@@ -480,7 +497,9 @@ def test_failed_hydrate_serves_the_window_and_arms_a_retry(monkeypatch):
     monkeypatch.setitem(tr._archive_cache, "data", None)
 
     async def run():
-        out = await tr._archive_and_union([{"id": "w1"}, {"id": "w2"}])
+        out = await tr._archive_and_union(
+            [{"id": "w1", "type": "ACTIVITY_TYPE_TRADE"},
+             {"id": "w2", "type": "ACTIVITY_TYPE_TRADE"}])
         # Serves the window acts it was given, does NOT cache them as
         # the archive, and a retry task is armed.
         assert [a["id"] for a in out] == ["w1", "w2"]
