@@ -415,10 +415,21 @@ jobs:
           jq -r '.rows[]? | select((.error // "") | test("SHADOW"))
                  | "  SHORTSHADOW \(.whale) pick=\(.pick) \((.error | capture("SHADOW (?<s>.*)$").s))"' \
             /tmp/mapa.json 2>/dev/null | head -25 || true
-          jq -r '[.rows[]? | select((.error // "") | test("SHADOW ratio=|SHADOW ask="))
-                  | (.error | capture("ratio=(?<r>[0-9.]+)") | .r | tonumber)] as $rs
-                 | if ($rs | length) == 0 then "  SHORTSHADOW n=0 — no shadowed shorts yet"
-                   else "  SHORTSHADOW n=\($rs | length) near1=\([$rs[] | select(. > 0.85 and . < 1.18)] | length) complement=\([$rs[] | select(. > 1.5 or . < 0.6)] | length)"
+          # The split, counting UNREADABLE as its own class. First
+          # shadowed row (05:21:55, HomeRunHazard, an O/U "Under") came
+          # back `ask=unreadable` — and the ask guard refuses a None ask
+          # outright, so that flow would NOT return just by lifting the
+          # ban. A summary that folded unreadable into "no rows yet"
+          # would have hidden the single most useful thing the shadow
+          # has said so far.
+          jq -r '[.rows[]? | select((.error // "") | test("SHADOW"))] as $all
+                 | [$all[] | select((.error) | test("SHADOW ratio="))
+                    | (.error | capture("ratio=(?<r>[0-9.]+)") | .r | tonumber)] as $rs
+                 | [$all[] | select((.error) | test("ask=unreadable"))] as $u
+                 | [$all[] | select((.error) | test("SHADOW err="))] as $e
+                 | if ($all | length) == 0
+                   then "  SHORTSHADOW n=0 — no shorts refused since the shadow shipped"
+                   else "  SHORTSHADOW n=\($all | length) quoted=\($rs | length) unreadable=\($u | length) errored=\($e | length) near1=\([$rs[] | select(. > 0.85 and . < 1.18)] | length) complement=\([$rs[] | select(. > 1.5 or . < 0.6)] | length)"
                    end' /tmp/mapa.json 2>/dev/null || true
 
           # ── venue-truth restatement status (owner emergency 2026-08-23:
