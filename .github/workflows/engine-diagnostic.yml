@@ -663,6 +663,32 @@ jobs:
                  | "  COPYQUEUE n=\(.n // 0) concurrency=\(.concurrency // "?") avg=\(.avg_wait_s // 0)s max=\(.max_wait_s // 0)s"' \
             /tmp/hb_we.json 2>/dev/null || echo "  COPYQUEUE unavailable"
 
+          # UNMAPPED — WHY the biggest bucket fails, attributed.
+          #
+          # listed_mapper_fail is 26,569 rows = 1,155 blocked whale
+          # entries a day, and at the repo's own 13.6% entry-to-fill
+          # conversion a quarter-fix is +39 fills/day against a 19.2/day
+          # baseline. It is the only bucket big enough to move 0.55%.
+          #
+          # Nothing could attribute it before: api_mapgap filters
+          # us_market_slug IS NOT NULL, and that column is written only
+          # AFTER a mapping succeeds — it measured the rows that WORKED
+          # while reporting on the ones that failed. This runs the true
+          # unmapped population back through the resolver and names
+          # which of its six decision points returned None, because the
+          # six need completely different fixes.
+          curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/unmapped.json \
+               "$BASE/api/admin/unmapped-census?hours=48&sample=400" \
+               || true
+          echo "  UNMAPHTTP bytes=$(wc -c < /tmp/unmapped.json 2>/dev/null || echo 0)"
+          jq -r '"  UNMAPPED sampled=\(.sampled // 0) | \(.verdict // "n/a")"' \
+            /tmp/unmapped.json 2>/dev/null || echo "  UNMAPPED unreadable"
+          jq -r '.steps // {} | to_entries[] | "  UNMAPSTEP \(.key): \(.value)"' \
+            /tmp/unmapped.json 2>/dev/null || true
+          jq -r '.examples // {} | to_entries[] | "  UNMAPEG \(.key): his=\(.value.his_slug) outcome=\(.value.his_outcome) keys=\(.value.keys) premap_rows=\(.value.premap_rows) | \(.value.detail)"' \
+            /tmp/unmapped.json 2>/dev/null | head -8 || true
+
           # MERGEPNL — the whale numbers with their exits included.
           #
           # Every prior whale grade was settlement-only, which cannot

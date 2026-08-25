@@ -650,6 +650,94 @@ def live_rows_for_market(parent_slug: str) -> list[dict]:
     return _market_rows({"slug": "", "title": ""}, m)
 
 
+async def resolve_explain(pool, market_title: str | None,
+                          event_title: str | None, outcome: str | None,
+                          global_slug: str | None) -> dict:
+    """WHY resolve() said no. Same steps, same order, no side effects.
+
+    26,569 rejected rows sit in listed_mapper_fail — markets that ARE
+    listed on our venue and that we still could not name. It is the only
+    bucket big enough to move a 0.55% fill rate, and until now nothing
+    could attribute a single one of them to a cause.
+
+    The endpoint built to diagnose it (api_mapgap) filters
+    `us_market_slug IS NOT NULL`, and that column is written only AFTER
+    a mapping succeeds — so it measures the population that WORKED while
+    reporting on the one that failed. Every published number about this
+    bucket describes the wrong rows.
+
+    resolve() has six distinct ways to return None and they need
+    completely different fixes: no keys built, no key intersection, an
+    unknown market type, a type-prefix filter that emptied the pool, no
+    side match, and a side with no intent. "Coverage is fine" was an
+    assumption resting on all six being invisible.
+
+    Deliberately a SEPARATE function rather than instrumenting resolve.
+    resolve is on the copy hot path; it must not grow a diagnostic
+    branch, and a reader must be able to see at a glance that this one
+    cannot affect an order.
+    """
+    from ..copy_sports import market_type_of
+
+    out: dict = {"step": None, "detail": None, "keys": 0, "rows": 0}
+    d = date_of(global_slug)
+    keys: set[str] = set()
+    for t in (market_title, event_title):
+        keys.update(event_keys_for(t, global_slug if d else None))
+    if global_slug:
+        keys.update(event_keys_for(None, global_slug))
+    keys = {k for k in keys if k}
+    if d:
+        keys = set(dated_keys(keys)) | {k for k in keys if k.startswith(
+            tuple(f"{p}-" for p in ("aec", "atc", "asc", "tsc", "astatc")))}
+    out["keys"] = len(keys)
+    if not keys:
+        out["step"] = "no_keys_built"
+        out["detail"] = "no event key could be derived from his titles/slug"
+        return out
+    try:
+        rows = [dict(r) for r in await pool.fetch(
+            "SELECT identifier, side_norm, kind, line, question, "
+            "event_title, intent FROM us_premap "
+            "WHERE event_keys && $1::text[]", sorted(keys))]
+    except Exception as exc:  # noqa: BLE001
+        out["step"] = "premap_query_failed"
+        out["detail"] = f"{type(exc).__name__}"
+        return out
+    out["rows"] = len(rows)
+    if not rows:
+        out["step"] = "no_key_intersection"
+        out["detail"] = ("his keys match no us_premap row — either the "
+                         "sweep never captured this market, or the two "
+                         "key sets are built differently")
+        return out
+    want = PREFIX_FOR_TYPE.get(market_type_of(global_slug or ""))
+    if not want:
+        out["step"] = "unknown_market_type"
+        out["detail"] = f"market_type_of({global_slug!r}) is unrecognised"
+        return out
+    kept = [r for r in rows if _prefix_of(r.get("identifier")) in want]
+    if not kept:
+        out["step"] = "type_prefix_filter_emptied"
+        out["detail"] = (f"{len(rows)} rows on this event, none with a "
+                         f"{sorted(want)} prefix")
+        return out
+    hit = match_side(kept, outcome, market_title)
+    if hit is None:
+        out["step"] = "no_side_match"
+        out["detail"] = (f"outcome {outcome!r} matched none of "
+                         f"{[r.get('side_norm') for r in kept][:6]}")
+        return out
+    if not hit.get("intent"):
+        out["step"] = "side_has_no_intent"
+        out["detail"] = (f"{hit.get('identifier')} matched but the sweep "
+                         f"could not name its long/short side")
+        return out
+    out["step"] = "resolves"
+    out["detail"] = hit.get("identifier")
+    return out
+
+
 async def resolve(pool, market_title: str | None, event_title: str | None,
                   outcome: str | None,
                   global_slug: str | None) -> dict | None:

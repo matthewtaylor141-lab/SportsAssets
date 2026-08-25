@@ -4264,6 +4264,92 @@ async def api_price_truth(price: float = 0.30, qty: int = 10,
     return out
 
 
+@app.get("/api/admin/unmapped-census",
+         dependencies=[Depends(require_admin)])
+async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
+    """WHY did 26,569 copies fail to map? Attributed, not guessed.
+
+    This is the bucket that decides the fill rate. 1,155 blocked whale
+    entries a day; at the repo's own 13.6% entry-to-fill conversion,
+    fixing a quarter of it adds ~39 fills/day against a 19.2/day
+    baseline. Nothing else on the board is that size.
+
+    Until now it could not be attributed at all. api_mapgap — the
+    endpoint written to diagnose exactly this — filters
+    `us_market_slug IS NOT NULL` (app.py:3791), and that column is
+    written only AFTER a mapping succeeds (live_executor.py:2125-2128).
+    It measures the rows that WORKED while reporting on the ones that
+    failed, so every number published about this bucket so far
+    describes the wrong population.
+
+    Here the population is the right one — rejected rows with NO
+    us_market_slug — and each is re-run through resolve_explain, which
+    walks the same six decision points resolve() walks and names which
+    one returned None. Those six need completely different fixes:
+
+        no_keys_built            his titles/slug yield no event key
+        no_key_intersection      keys built, nothing in us_premap matched
+        unknown_market_type      market_type_of did not recognise it
+        type_prefix_filter_emptied  event found, wrong market family
+        no_side_match            market found, his outcome matched no side
+        side_has_no_intent       side found, venue named no long/short
+
+    Read-only: resolve_explain performs no writes and places no orders.
+    Bounded by `sample` because it is one resolver pass per row.
+    """
+    from ..workers.premap import resolve_explain
+
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT lo.id, lo.whale_username, lo.error,
+               t.market_title, t.event_slug, t.outcome, t.market_slug
+          FROM live_orders lo JOIN trades t ON t.id = lo.trade_id
+         WHERE lo.status = 'rejected'
+           AND lo.us_market_slug IS NULL
+           AND lo.placed_at > now() - interval '1 hour' * $1
+         ORDER BY lo.placed_at DESC
+         LIMIT $2
+        """, hours, min(int(sample), 1500))
+
+    steps: dict[str, int] = {}
+    by_whale: dict[str, dict[str, int]] = {}
+    examples: dict[str, dict] = {}
+    for r in rows:
+        try:
+            ex = await resolve_explain(
+                pool, r["market_title"], r["event_slug"], r["outcome"],
+                r["market_slug"])
+        except Exception as exc:  # noqa: BLE001 — one row, not the census
+            ex = {"step": "explain_raised",
+                  "detail": type(exc).__name__, "keys": 0, "rows": 0}
+        step = str(ex.get("step") or "unknown")
+        steps[step] = steps.get(step, 0) + 1
+        w = (r["whale_username"] or "?").lower()
+        by_whale.setdefault(w, {})
+        by_whale[w][step] = by_whale[w].get(step, 0) + 1
+        if step not in examples:
+            examples[step] = {
+                "whale": w, "his_slug": r["market_slug"],
+                "his_outcome": r["outcome"], "his_title": r["market_title"],
+                "keys": ex.get("keys"), "premap_rows": ex.get("rows"),
+                "detail": str(ex.get("detail"))[:220]}
+
+    n = len(rows)
+    ranked = sorted(steps.items(), key=lambda kv: -kv[1])
+    return {
+        "sampled": n, "hours": hours,
+        "steps": dict(ranked),
+        "by_whale": by_whale,
+        "examples": examples,
+        "verdict": (
+            "NO UNMAPPED ROWS in window — nothing to attribute"
+            if not n else
+            f"largest cause: {ranked[0][0]} at {ranked[0][1]}/{n} "
+            f"({100.0 * ranked[0][1] / n:.1f}%)"),
+    }
+
+
 @app.get("/api/admin/whale-merge-pnl",
          dependencies=[Depends(require_admin)])
 async def api_whale_merge_pnl(since: str = "2026-08-01",
