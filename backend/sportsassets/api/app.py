@@ -3368,6 +3368,22 @@ async def _live_status_uncached() -> dict:
                COALESCE(
                    raw #>> '{response,executions,0,order,intent}',
                    raw #>> '{preview,intent}') AS intent,
+               -- OUR SIZE AS A MULTIPLE OF HIS (owner 2026-08-25:
+               -- "copy both buys and sells at a proportional rate").
+               --
+               -- plan_order computes min(ratio * his_notional, cap).
+               -- If the ratio is set high enough that the cap always
+               -- binds, every copy is a flat clip and our size stops
+               -- tracking his conviction entirely. Measured on the six
+               -- receipts: 72x his size on a $3.46 probe, 0.1x on a
+               -- $2,907 conviction trade. Nothing in the system
+               -- reported that, so it ran unseen.
+               (SELECT round(live_orders.requested_usd
+                             / NULLIF(t.notional, 0), 2)::float8
+                  FROM trades t WHERE t.id = live_orders.trade_id)
+                   AS size_vs_his,
+               (SELECT round(t.notional, 2)::float8 FROM trades t
+                 WHERE t.id = live_orders.trade_id) AS his_notional,
                to_char(placed_at AT TIME ZONE 'America/New_York',
                        'MM-DD HH24:MI') AS at
         FROM live_orders

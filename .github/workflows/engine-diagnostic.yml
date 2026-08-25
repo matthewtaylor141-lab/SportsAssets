@@ -576,7 +576,7 @@ jobs:
                  "  OVERSPEND rows=\(length)"' \
             /tmp/live.json 2>/dev/null || true
           jq -r '.fills_24h // [] | .[0:14][] |
-                 "  FILL \(.at) \(.whale) \(.status) req $\(.req_usd // "?")/\(.req_sh // "?")sh @\(.lim // "?") -> filled $\(.fill_usd // 0)/\(.fill_sh // "?")sh @\(.fill_px // "?") ratio \(.ratio // "?") intent=\(.intent // "?" | sub("ORDER_INTENT_";"")) execs=\(.n_exec // "?") ordersOnMkt=\(.orders_on_mkt // "?") \(.slug // "?")"' \
+                 "  FILL \(.at) \(.whale) \(.status) req $\(.req_usd // "?")/\(.req_sh // "?")sh @\(.lim // "?") -> filled $\(.fill_usd // 0)/\(.fill_sh // "?")sh @\(.fill_px // "?") ratio \(.ratio // "?") intent=\(.intent // "?" | sub("ORDER_INTENT_";"")) his$\(.his_notional // "?") ourX\(.size_vs_his // "?") execs=\(.n_exec // "?") ordersOnMkt=\(.orders_on_mkt // "?") \(.slug // "?")"' \
             /tmp/live.json 2>/dev/null || true
           # THE FALSIFIER: group every 24h fill by intent and overspend.
           # "shorts pay the complement" requires shorts>0 clean=0. A
