@@ -27,7 +27,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..config import settings
-from .pmus_account import _act_ts, _amt
+from .pmus_account import _act_ts, _amt, _any_ts
 
 _raw_cache: dict[str, Any] = {"ts": 0.0, "data": None}
 # The record is settlement-paced: a 3-minute snapshot is indistinguishable
@@ -1233,7 +1233,27 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
                                      .encode()).hexdigest()
             if aid in _archived_ids:
                 continue
-            out.append((aid, float(_act_ts(a) or 0.0),
+            # _any_ts, NOT _act_ts (2026-08-25).
+            #
+            # A POSITION_RESOLUTION carries its timestamp NESTED under
+            # positionResolution, not at the top level. _act_ts reads
+            # only the top level, so every resolution archived here got
+            # ts = 0.0 — and the settlement writer treats a zero as
+            # "unknown" and falls through to
+            # `settled_at = COALESCE($3, settled_at, now())`.
+            #
+            # The consequence is a reporting lie, not a trading bug:
+            # the analytics crawl reached 79 of 1,229 markets live, so
+            # up to 93.6% of the book settles from the archive — and
+            # every one of those lands on the CALENDAR DAY WE READ IT
+            # rather than the day it resolved. Against a -$13,398.96
+            # book that is roughly -$12,542 stamped onto a day that did
+            # not lose it, which is exactly the kind of number the
+            # owner has an absolute rule about.
+            #
+            # _any_ts already exists and already reads the nested
+            # positionResolution time; it was simply never wired here.
+            out.append((aid, float(_any_ts(a) or 0.0),
                         json.dumps(a, default=str), a))
         return out
 
