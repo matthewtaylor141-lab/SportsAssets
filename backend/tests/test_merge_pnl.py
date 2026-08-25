@@ -459,3 +459,49 @@ class TestTheErrorCannotBecomeAnEighthWhale:
 
         src = inspect.getsource(A.api_whale_merge_pnl)
         assert "thin coverage" in src
+
+
+class TestTheTwoAccountingsAgree:
+    """The counterfactual re-derives the ACTUAL side independently of
+    the realized-P&L path. At full coverage the two must agree exactly
+    — if they drift, one of them is wrong and the exit value inherits
+    the error silently."""
+
+    def test_at_full_coverage_actual_equals_realized(self):
+        fills = [
+            {"condition_id": "a", "outcome_index": 0, "side": "BUY",
+             "size": 100.0, "price": 0.40},
+            {"condition_id": "a", "outcome_index": 1, "side": "BUY",
+             "size": 100.0, "price": 0.30},
+            {"condition_id": "b", "outcome_index": 1, "side": "BUY",
+             "size": 250.0, "price": 0.62},
+            {"condition_id": "b", "outcome_index": 0, "side": "BUY",
+             "size": 90.0, "price": 0.31},
+            {"condition_id": "c", "outcome_index": 0, "side": "BUY",
+             "size": 40.0, "price": 0.15},
+            {"condition_id": "c", "outcome_index": 0, "side": "SELL",
+             "size": 40.0, "price": 0.55},
+        ]
+        pay = {"a": [0.0, 1.0], "b": [1.0, 0.0], "c": [1.0, 0.0]}
+        r = mp.replay(fills, pay)
+        assert r["cf_coverage"] == 1.0
+        assert r["cf_actual_on_graded"] == pytest.approx(
+            r["realized_total"], abs=0.02)
+
+    def test_exit_value_is_actual_minus_held(self):
+        fills = [
+            {"condition_id": "a", "outcome_index": 0, "side": "BUY",
+             "size": 100.0, "price": 0.40},
+            {"condition_id": "a", "outcome_index": 1, "side": "BUY",
+             "size": 100.0, "price": 0.30},
+        ]
+        r = mp.replay(fills, {"a": [0.0, 1.0]})
+        assert r["exit_value"] == pytest.approx(
+            r["cf_actual_on_graded"] - r["cf_hold_on_graded"])
+
+    def test_a_whale_who_never_exits_has_zero_exit_value(self):
+        fills = [{"condition_id": "a", "outcome_index": 0, "side": "BUY",
+                  "size": 100.0, "price": 0.40}] * 3
+        r = mp.replay(fills, {"a": [1.0, 0.0]})
+        assert r["n_merges"] == 0
+        assert r["exit_value"] == 0.0
