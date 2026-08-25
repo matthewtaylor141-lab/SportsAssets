@@ -3594,6 +3594,92 @@ async def api_true_edge_cashout(since_day: str = "2026-08-01",
                      "where he made one. Nothing is overwritten.")}
 
 
+@app.get("/api/admin/ratio-calibration",
+         dependencies=[Depends(require_admin)])
+async def api_ratio_calibration(target_turnover_x: float = 1.0,
+                                days: int = 1) -> dict:
+    """What copy ratio hits the owner's turnover target — and can it?
+
+    Owner, 2026-08-25: "I want to play through the capital once a day
+    on average."
+
+    The naive answer divides the target by the whales' total flow and
+    lands near 1%. That is wrong, because we only FILL about one copy
+    in a hundred — the rest are refused for want of a mapped US market.
+    The ratio has to be computed against the flow we actually capture,
+    not the flow that exists.
+
+    Done properly the two goals collide: at a ~0.9% fill rate, playing
+    through the capital once a day requires trading roughly TWICE the
+    whale's own size on every copy. That is what the flat clip already
+    does — and it is why a $3.46 probe of his became a $249.92 position
+    of ours.
+
+    So the turnover target is a MAPPING problem, not a sizing one.
+    `ratio_at_fill_multiple` shows what becomes reachable as coverage
+    improves; the honest reading is that 1x daily turnover with
+    faithful proportional sizing needs roughly 50x the current fill
+    rate, which the US venue's listings may simply not support.
+
+    Nothing here changes sizing. It reports the number so the choice —
+    turnover, fidelity, or more markets — is made on arithmetic.
+    """
+    pool = await get_pool()
+    days = max(1, min(int(days), 30))
+    row = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS fills,
+               COALESCE(sum(t.notional), 0)::float8 AS his_flow_filled,
+               COALESCE(avg(t.notional), 0)::float8 AS avg_his,
+               COALESCE(sum(lo.filled_usd), 0)::float8 AS we_deployed
+        FROM live_orders lo JOIN trades t ON t.id = lo.trade_id
+        WHERE lo.placed_at > now() - interval '1 day' * $1
+          AND lo.status IN ('filled', 'settled', 'cashed_out')
+          AND COALESCE(lo.whale_username, '') NOT IN ('manual', 'underdog')
+        """, float(days))
+    refused = await pool.fetchval(
+        """
+        SELECT count(*)::int FROM live_orders
+        WHERE placed_at > now() - interval '1 day' * $1
+          AND status IN ('rejected', 'unfilled')
+          AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+        """, float(days)) or 0
+    try:
+        from .pmus_account import account_snapshot
+
+        snap = await account_snapshot()
+        capital = float((snap or {}).get("account_value") or 0)
+    except Exception:  # noqa: BLE001
+        capital = 0.0
+    fills = row["fills"] or 0
+    flow = row["his_flow_filled"] or 0.0
+    per_day = flow / days if days else 0.0
+    target = capital * float(target_turnover_x)
+    out = {
+        "capital": round(capital, 2),
+        "target_daily_deployment": round(target, 2),
+        "days": days,
+        "fills": fills,
+        "refused": refused,
+        "fill_rate": (round(fills / (fills + refused), 4)
+                      if (fills + refused) else None),
+        "his_flow_on_filled_per_day": round(per_day, 2),
+        "avg_his_notional_on_fills": round(row["avg_his"] or 0, 2),
+        "we_deployed_per_day": round((row["we_deployed"] or 0) / days, 2),
+    }
+    out["ratio_needed"] = (round(target / per_day, 4) if per_day else None)
+    out["ratio_at_fill_multiple"] = {
+        str(m): (round(target / (per_day * m), 4) if per_day else None)
+        for m in (1, 5, 10, 25, 50)}
+    out["verdict"] = (
+        "unreachable proportionally — ratio_needed above 1.0 means "
+        "trading MORE than the whale on every copy, which is the flat "
+        "clip we already have; fix fill rate, not size"
+        if out["ratio_needed"] and out["ratio_needed"] > 1.0
+        else "reachable — set LIVE_COPY_RATIO to ratio_needed")
+    return out
+
+
 @app.get("/api/admin/whale-sell-truth",
          dependencies=[Depends(require_admin)])
 async def api_whale_sell_truth(limit: int = 500) -> dict:

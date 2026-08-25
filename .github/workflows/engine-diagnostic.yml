@@ -626,6 +626,17 @@ jobs:
             /tmp/selltruth.json 2>/dev/null || true
           jq -r '.whales[0]? | "  SELLTRUTH sample_keys=\(.sample_keys // [] | join(","))"' \
             /tmp/selltruth.json 2>/dev/null || true
+          # RATIO: what copy ratio hits "play through the capital once a
+          # day"? Computed against the flow we actually FILL, not the
+          # flow that exists — the difference is ~100x and decides
+          # whether the target is a sizing problem or a mapping one.
+          curl -sS --max-time 40 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/ratio.json \
+               "$BASE/api/admin/ratio-calibration?target_turnover_x=1" || true
+          jq -r '"  RATIO capital $\(.capital // 0) target $\(.target_daily_deployment // 0)/day | fills \(.fills // 0) refused \(.refused // 0) rate \(.fill_rate // "?") | his flow filled $\(.his_flow_on_filled_per_day // 0)/day | we deploy $\(.we_deployed_per_day // 0)/day",
+                 "  RATIO needed \(.ratio_needed // "?")  at fill multiples \(.ratio_at_fill_multiple // {} | tostring)",
+                 "  RATIO verdict: \(.verdict // "?")"' \
+            /tmp/ratio.json 2>/dev/null || true
           # TRUEEDGE RE-GRADED AT HIS OWN EXIT. Every whale number
           # served today settles at resolution, which books a
           # cash-out trader's WIN as a loss. The TRUEEDGE cuts were
