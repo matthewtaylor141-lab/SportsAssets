@@ -774,7 +774,8 @@ def _whale_set(env_name: str) -> set[str]:
 
 
 def overspend_ratio(requested_usd: float, filled_shares: float,
-                    fill_price: float | None) -> float | None:
+                    fill_price: float | None,
+                    intent: str | None = None) -> float | None:
     """How much of the AUTHORIZED clip a fill actually consumed.
 
     The per-fill ceiling is enforced before submit, on
@@ -784,20 +785,48 @@ def overspend_ratio(requested_usd: float, filled_shares: float,
     assumption into a number: > 1.0 means the venue took more than we
     authorized, and no clip cap in the sizing map can see it.
 
+    THE FIFTH PLACE THE SHORT DENOMINATION LIVED (2026-08-25, found by
+    an adversarial review of my own diff). `spent = filled * fill_price`
+    was converted in fill_cash, realized_pnl, wire_limit and the price
+    fidelity scorer. This function computed it a fifth time, inline,
+    long-only — and it is the one wired to a BREAKER.
+
+    On a short, cost is (1 - price) x qty. Take the venue's own receipt:
+    1,136 shares authorized at $249.92, filled at 0.78. The real cost is
+    1136 x 0.22 = $249.92, EXACTLY the authorization, zero overage. The
+    long formula reads 1136 x 0.78 / 249.92 = 3.545 and trips at 1.01.
+
+    So the first correctly-priced short fill would halt the entire copy
+    sleeve — every whale, both legs, via overspend_halt at the top of
+    maybe_execute and mirror_exit — and it cannot self-clear, because
+    the clear only removes records stamped before ASK_GUARD_SINCE. A
+    manual admin clear, triggered by a trade that did nothing wrong.
+
+    Worse, the halt RECORD already wrote the corrected ratio
+    (spent / usd = 1.0) beside a predicate that fired on 3.545: the
+    same block would have reported two different numbers for one fill,
+    one of them exonerating.
+
+    It takes the intent and defers to fill_cash rather than restating
+    the rule a sixth time. Default None preserves the long formula
+    exactly, so every existing caller and every long fill is unchanged.
+
     None when there is nothing to judge (no fill, or no request)."""
     if not requested_usd or requested_usd <= 0:
         return None
     if not filled_shares or filled_shares <= 0 or not fill_price:
         return None
-    return round(filled_shares * fill_price / requested_usd, 4)
+    return round(fill_cash(filled_shares, fill_price, intent)
+                 / requested_usd, 4)
 
 
 OVERSPEND_TOLERANCE = 1.01  # a cent of rounding on a whole-unit fill
 
 
 def is_overspend(requested_usd: float, filled_shares: float,
-                 fill_price: float | None) -> bool:
-    r = overspend_ratio(requested_usd, filled_shares, fill_price)
+                 fill_price: float | None,
+                 intent: str | None = None) -> bool:
+    r = overspend_ratio(requested_usd, filled_shares, fill_price, intent)
     return r is not None and r > OVERSPEND_TOLERANCE
 
 
@@ -3522,7 +3551,10 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         # whale, so that assumption is not something to keep assuming.
         # Record the breach on the row itself — a number nobody can read
         # is not a control — and shout it into the log.
-        overspent = is_overspend(usd, filled, fill_price)
+        # THE SAME INTENT `spent` WAS COMPUTED WITH, one line above.
+        # Passing the price and letting the breaker re-derive the cost
+        # is what made the predicate and the halt record disagree.
+        overspent = is_overspend(usd, filled, fill_price, _fill_intent)
         if overspent:
             # `mapping` is bound only on the PMUS branch; the CLOB leg
             # names its market by asset. Never let the alarm itself

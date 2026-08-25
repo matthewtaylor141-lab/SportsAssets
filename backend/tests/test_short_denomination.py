@@ -193,6 +193,70 @@ class TestItIsWiredIntoTheMoneyPath:
         src = inspect.getsource(le.maybe_execute)
         assert src.index("spent = fill_cash(") < src.index("is_overspend(")
 
+    def test_the_breaker_is_ACTUALLY_short_aware(self):
+        """THE ASSERTION ABOVE IS VACUOUS AND HID A LIVE HALT.
+
+        It checks source-text ORDERING — that `spent = fill_cash(...)`
+        appears before `is_overspend(...)` — and never that `spent`, or
+        the intent, reaches the breaker. It did not. is_overspend took
+        (usd, filled, fill_price) and overspend_ratio re-derived the
+        cost as `filled * fill_price`: the long-only formula, a FIFTH
+        copy of the denomination rule, and the one wired to a breaker.
+
+        The venue's own receipt: 1,136 shares authorized at $249.92,
+        filled at 0.78. Real cost 1136 x 0.22 = $249.92 — exactly the
+        authorization, zero overage. The long formula reads
+        1136 x 0.78 / 249.92 = 3.545 and trips at 1.01.
+
+        The consequence was not a bad number on a report. overspend_halt
+        gates the top of BOTH maybe_execute and mirror_exit, so the
+        first correctly-priced short fill would have stopped every whale
+        on both legs — and it cannot self-clear, because the clear only
+        removes records stamped before ASK_GUARD_SINCE. A manual admin
+        clear, triggered by a trade that did nothing wrong.
+
+        Found by an adversarial review of my own diff, hours after I
+        wrote a commit message claiming the denomination was fixed in
+        every place it lived.
+        """
+        assert le.is_overspend(249.92, 1136, 0.78, SHORT) is False
+        assert le.overspend_ratio(249.92, 1136, 0.78, SHORT) == 1.0
+
+    def test_a_REAL_short_overspend_is_still_caught(self):
+        """The breaker must still protect. Same fill against a $100
+        authorization is a genuine 2.5x breach."""
+        assert le.is_overspend(100.0, 1136, 0.78, SHORT) is True
+
+    def test_long_fills_are_bit_for_bit_unchanged(self):
+        """The intent defaults to None, so every existing caller and
+        every long fill computes exactly what it did before."""
+        for req, sh, px in ((249.73, 1135, 0.32), (250.0, 1000, 0.30),
+                            (249.92, 781, 0.32), (250.0, 400, 0.32)):
+            assert (le.overspend_ratio(req, sh, px)
+                    == le.overspend_ratio(req, sh, px, LONG)
+                    == round(sh * px / req, 4))
+
+    def test_the_breaker_and_the_halt_RECORD_cannot_disagree(self):
+        """The halt row already stamped the CORRECTED ratio
+        (spent / usd) beside a predicate that fired on the uncorrected
+        one — the same block reporting two numbers for one fill, one of
+        them exonerating. Both derive from fill_cash now."""
+        for px, req, sh in ((0.78, 249.92, 1136), (0.6853, 245.78, 781)):
+            spent = le.fill_cash(sh, px, SHORT)
+            assert le.overspend_ratio(req, sh, px, SHORT) == \
+                pytest.approx(round(spent / req, 4), abs=1e-4)
+
+    def test_the_intent_reaches_the_call_site(self):
+        """The defect was an ARGUMENT LIST, so read the argument list —
+        not the ordering of two lines."""
+        import re as _re
+
+        src = inspect.getsource(le.maybe_execute)
+        m = _re.search(r"is_overspend\(([^)]*)\)", src)
+        assert m, "the breaker call site vanished"
+        assert "_fill_intent" in m.group(1), \
+            f"breaker called without the intent: is_overspend({m.group(1)})"
+
 
 class TestTheModelIsArmedOnTheVenuesOwnReceipt:
     """CONFIRMED 2026-08-25 14:38Z, and not by my argument.
