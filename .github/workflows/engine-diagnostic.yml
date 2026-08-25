@@ -397,6 +397,30 @@ jobs:
                  | "  REFUSED-BY-CLASS premap=\($p)  exact=\($e)  fuzzy=\($f)  passed=\($ok)  (of \((.rows // []) | length) audited; premap=0 means none REFUSED, not none resolved)"' \
             /tmp/mapa.json 2>/dev/null || echo "  REFUSED-BY-CLASS unavailable"
 
+          # SHORTSHADOW — the evidence the short ban owes us.
+          #
+          # The ban is 6-for-6 justified on FILLS, but it now refuses
+          # most of the live flow (one fill in the five hours after it
+          # shipped). Every refusal now records the intent-aware ask
+          # for the leg we would have bought, beside the whale's price.
+          #
+          # Read it as: ratio near 1.0 and a small gap means the leg we
+          # name IS his outcome and the ask guard (1.08) plus the side
+          # band (0.15) already cover this class — the ban is redundant
+          # and can be lifted with LIVE_ALLOW_SHORT=on. Ratios near the
+          # complement mean the ban is load-bearing and stays.
+          #
+          # No count here decides anything on its own. This prints the
+          # rows so the decision is made on numbers, by the owner.
+          jq -r '.rows[]? | select((.error // "") | test("SHADOW"))
+                 | "  SHORTSHADOW \(.whale) pick=\(.pick) \((.error | capture("SHADOW (?<s>.*)$").s))"' \
+            /tmp/mapa.json 2>/dev/null | head -25 || true
+          jq -r '[.rows[]? | select((.error // "") | test("SHADOW ratio=|SHADOW ask="))
+                  | (.error | capture("ratio=(?<r>[0-9.]+)") | .r | tonumber)] as $rs
+                 | if ($rs | length) == 0 then "  SHORTSHADOW n=0 — no shadowed shorts yet"
+                   else "  SHORTSHADOW n=\($rs | length) near1=\([$rs[] | select(. > 0.85 and . < 1.18)] | length) complement=\([$rs[] | select(. > 1.5 or . < 0.6)] | length)"
+                   end' /tmp/mapa.json 2>/dev/null || true
+
           # ── venue-truth restatement status (owner emergency 2026-08-23:
           # settlement was graded by the whale's token; rescore rewrites
           # every settled copy row from the venue's own ledger)
@@ -560,10 +584,27 @@ jobs:
           echo "KALSHI CRYPTO LEG (owner order 2026-08-21):"
           # WHALE-EXIT DETECTOR: is the new worker actually cycling?
           # first_snapshots on the first pass by design; exits after.
-          jq -r '(.services // .heartbeats // {}) | to_entries[]
-                 | select(.key | test("whale_exit"))
-                 | "  WHALEEXIT \(.value.detail // .value | tostring | .[0:200]) at \(.value.at // "?")"' \
-             /tmp/status.json 2>/dev/null || true
+          #
+          # v1 of this line read /tmp/status.json for an object keyed by
+          # service name. Heartbeats are not there and are not shaped
+          # like that: /api/health/services returns a LIST of rows with
+          # a .service field. So it matched nothing and printed nothing
+          # — and a silent line reads exactly like a dead worker.
+          #
+          # That is the same failure this whole night kept producing: an
+          # instrument that cannot see its subject, reporting anyway.
+          # The absence of WHALEEXIT was my own broken probe, not proof
+          # the detector was inert, and I nearly filed it as the latter.
+          # It fetches its own copy so it does not depend on a later
+          # step having run.
+          curl -sS --max-time 30 -o /tmp/hb_we.json \
+               "$BASE/api/health/services" || true
+          jq -r '[.[]? | select(.service | test("whale_exit"))] as $w
+                 | if ($w | length) == 0
+                   then "  WHALEEXIT no heartbeat row — worker never completed a cycle"
+                   else ($w[] | "  WHALEEXIT \(.status) beat=\(.beat_at) \(.detail | tostring | .[0:220])")
+                   end' /tmp/hb_we.json 2>/dev/null \
+            || echo "  WHALEEXIT unreadable"
           jq -r '.detail.kalshi_crypto // {} |
                  "  KCRYPTO seen \(.seen // 0) placed \(.placed // 0) filled \(.filled // 0) contracts \(.contracts // 0) deployed $\(.deployed_usd // 0) fees $\(.fees_usd // 0) halted \(.halted // false) err \(.last_error // "none")"' \
              /tmp/status.json 2>/dev/null || true

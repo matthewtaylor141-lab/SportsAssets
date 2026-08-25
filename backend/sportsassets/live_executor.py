@@ -2453,16 +2453,56 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             if (_intent == "ORDER_INTENT_BUY_SHORT"
                     and os.getenv("LIVE_ALLOW_SHORT", "").strip().lower()
                     != "on"):
+                # SHADOW THE REFUSAL, DO NOT JUST DROP IT.
+                #
+                # Five hours after the ban shipped the sleeve had taken
+                # ONE fill, because 0x076daa87's live flow is almost
+                # entirely shorts (rejections at 04:58, 05:03, 05:04,
+                # every one of them stopped here). A ban on the class
+                # that carries most of the flow is an outage wearing a
+                # guard's uniform, and I have made that exact mistake
+                # twice tonight already.
+                #
+                # But the ban is not lifted on that argument alone.
+                # Reopening a money gate while the owner is asleep, on
+                # a class that is 6-for-6 wrong, is not a call I get to
+                # make on inference. So instead: read the intent-aware
+                # ask for the leg we WOULD have bought and record it
+                # beside the whale's price on the rejection row.
+                #
+                # That converts every refusal into evidence. By morning
+                # the question "would the ask guard alone have caught
+                # these?" is answered by counting rows, not arguing —
+                # if the shadow asks sit near his price, the ask guard
+                # (1.08) and the side band (0.15) are the real fix and
+                # the ban is redundant; if they sit at the complement,
+                # the ban stays and we know why.
+                _shadow = ""
+                try:
+                    _sa = await asyncio.to_thread(
+                        pmus.side_ask, mapping["market_slug"], _intent)
+                    if _sa is not None and his_price:
+                        _r = (_sa / his_price) if his_price else 0.0
+                        _shadow = (f" | SHADOW ask={_sa} his={his_price} "
+                                   f"ratio={_r:.3f} gap="
+                                   f"{abs(_sa - his_price):.3f}")
+                    elif _sa is not None:
+                        _shadow = f" | SHADOW ask={_sa} his=?"
+                    else:
+                        _shadow = " | SHADOW ask=unreadable"
+                except Exception as _exc:  # noqa: BLE001 — evidence only
+                    _shadow = f" | SHADOW err={type(_exc).__name__}"
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 "
                     "WHERE id=$1", row_id,
                     "short-branch-refused: every BUY_SHORT fill on "
                     "2026-08-24 landed on the opposite side at the "
                     "complement price (6/6, against 25/25 clean longs) "
-                    "— the short branch is off until the cause is known")
+                    "— the short branch is off until the cause is known"
+                    + _shadow)
                 log.warning("LIVE (US) refused %s: BUY_SHORT branch is "
-                            "off (6/6 wrong on 2026-08-24)",
-                            mapping["market_slug"])
+                            "off (6/6 wrong on 2026-08-24)%s",
+                            mapping["market_slug"], _shadow)
                 return
             if not _intent:
                 await pool.execute(
