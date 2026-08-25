@@ -3459,6 +3459,78 @@ async def api_overspend_halt() -> dict:
     return {"tripped": bool(v), "record": v}
 
 
+@app.get("/api/admin/whale-exits",
+         dependencies=[Depends(require_admin)])
+async def api_whale_exits(days: int = 7) -> dict:
+    """Does the whale CASH OUT before settlement? (owner 2026-08-25)
+
+    If he does, two things follow and both matter more than any bug
+    found tonight:
+
+    1. Our copy is only half his strategy. We mirror his entries and
+       then hold to resolution. If his edge is partly in EXITING —
+       taking a winner at 0.80 rather than riding it to 1.00 or 0.00 —
+       then copying entries alone is a different, worse strategy that
+       we have been grading as if it were his.
+
+    2. Every number we have shown all day understates him. TRUEEDGE,
+       fill-vs-miss and the copies audit all settle positions at
+       resolution. A whale who sells early books a gain our accounting
+       never sees, so he looks worse than he is — and our copies look
+       like they track him when they do not.
+
+    `round_trips` is the count of assets he both bought AND later sold.
+    `exit_rate` is that as a share of the assets he bought: how much of
+    his book he actively closes rather than letting resolve.
+    """
+    pool = await get_pool()
+    days = max(1, min(int(days), 60))
+    rows = await pool.fetch(
+        """
+        WITH t AS (
+            SELECT w.username AS whale, tr.asset, tr.side,
+                   tr.notional, tr.ts
+            FROM trades tr JOIN whales w ON w.id = tr.whale_id
+            WHERE tr.ts > now() - interval '1 day' * $1
+        ),
+        legs AS (
+            SELECT whale, asset,
+                   min(ts) FILTER (WHERE side = 'BUY')  AS first_buy,
+                   max(ts) FILTER (WHERE side = 'SELL') AS last_sell,
+                   sum(notional) FILTER (WHERE side = 'BUY')::float8
+                       AS bought,
+                   sum(notional) FILTER (WHERE side = 'SELL')::float8
+                       AS sold
+            FROM t GROUP BY 1, 2
+        )
+        SELECT whale,
+               count(*) FILTER (WHERE first_buy IS NOT NULL)::int
+                   AS assets_bought,
+               count(*) FILTER (WHERE first_buy IS NOT NULL
+                                  AND last_sell IS NOT NULL
+                                  AND last_sell > first_buy)::int
+                   AS round_trips,
+               round(COALESCE(sum(bought), 0)::numeric, 2)::float8
+                   AS bought_usd,
+               round(COALESCE(sum(sold), 0)::numeric, 2)::float8
+                   AS sold_usd
+        FROM legs GROUP BY 1
+        HAVING count(*) FILTER (WHERE first_buy IS NOT NULL) > 0
+        ORDER BY round_trips DESC
+        """, float(days))
+    out = []
+    for r in rows:
+        d = dict(r)
+        ab = d.get("assets_bought") or 0
+        d["exit_rate"] = round((d.get("round_trips") or 0) / ab, 3) if ab else None
+        out.append(d)
+    return {"days": days, "whales": out,
+            "note": ("round_trips = assets he bought AND later sold. A "
+                     "high exit_rate means our hold-to-settlement copy "
+                     "is NOT his strategy, and our settlement-based "
+                     "P&L understates him.")}
+
+
 @app.get("/api/admin/price-truth",
          dependencies=[Depends(require_admin)])
 async def api_price_truth(price: float = 0.30, qty: int = 10,
@@ -3607,7 +3679,30 @@ async def api_overspend_receipts(hours: int = 48) -> dict:
                CASE WHEN jsonb_typeof(raw #> '{response,executions}')
                          = 'array'
                     THEN raw #> '{response,executions}'
-                    ELSE '[]'::jsonb END AS executions
+                    ELSE '[]'::jsonb END AS executions,
+               -- THE WHALE'S OWN TRADE (owner hypothesis 2026-08-25:
+               -- "he is cashing out — selling before settlement").
+               --
+               -- The arithmetic already says we sized from one price
+               -- and bought at another: 249.92/0.22 = 1136 shares,
+               -- 1136 x 0.78 = $886.08, the observed fill to the cent.
+               -- So the venue charged correctly for the side we
+               -- ordered; OUR price and OUR side disagreed.
+               --
+               -- If his source trade was a SELL, that is the whole
+               -- story: his 0.22 is the price of a side he was LEAVING,
+               -- and copying it as an entry buys the complement. This
+               -- column is the test. maybe_execute refuses side != BUY,
+               -- so a SELL here would mean the refusal is being reached
+               -- with the wrong side already recorded.
+               (SELECT t.side FROM trades t
+                 WHERE t.id = live_orders.trade_id) AS his_side,
+               (SELECT t.outcome FROM trades t
+                 WHERE t.id = live_orders.trade_id) AS his_outcome,
+               (SELECT round(t.price, 4)::float8 FROM trades t
+                 WHERE t.id = live_orders.trade_id) AS his_trade_price,
+               (SELECT round(t.size, 2)::float8 FROM trades t
+                 WHERE t.id = live_orders.trade_id) AS his_size
         FROM live_orders
         WHERE placed_at > now() - interval '1 hour' * $1
           AND status IN ('filled', 'settled', 'cashed_out')
