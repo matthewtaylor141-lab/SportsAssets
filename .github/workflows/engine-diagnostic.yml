@@ -576,8 +576,22 @@ jobs:
                  "  OVERSPEND rows=\(length)"' \
             /tmp/live.json 2>/dev/null || true
           jq -r '.fills_24h // [] | .[0:14][] |
-                 "  FILL \(.at) \(.whale) \(.status) req $\(.req_usd // "?")/\(.req_sh // "?")sh @\(.lim // "?") -> filled $\(.fill_usd // 0)/\(.fill_sh // "?")sh @\(.fill_px // "?") ratio \(.ratio // "?")"' \
+                 "  FILL \(.at) \(.whale) \(.status) req $\(.req_usd // "?")/\(.req_sh // "?")sh @\(.lim // "?") -> filled $\(.fill_usd // 0)/\(.fill_sh // "?")sh @\(.fill_px // "?") ratio \(.ratio // "?") execs=\(.n_exec // "?") ordersOnMkt=\(.orders_on_mkt // "?") \(.slug // "?")"' \
             /tmp/live.json 2>/dev/null || true
+          # OVERSPEND RECEIPTS: the venue's own execution list for every
+          # overspent row. Settles the owner's round-trip hypothesis
+          # (2026-08-25) from stored data — ordersOnMkt=1 means the
+          # market was only ever bought once, and exec_max_px vs the
+          # limit says whether we were actually overcharged.
+          curl -sS --max-time 45 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/receipts.json \
+               "$BASE/api/admin/overspend-receipts?hours=48" || true
+          jq -r '"  RECEIPTS n=\(.n // 0)"' /tmp/receipts.json 2>/dev/null || true
+          jq -r '.rows[]? |
+                 "  RCPT \(.placed_at) \(.whale) \(.slug) lim=\(.limit_price) req=$\(.requested_usd)/\(.requested_shares)sh filled=$\(.filled_usd)/\(.filled_shares)sh@\(.fill_price) ordersOnMkt=\(.orders_on_market) execs=\(.n_executions) maxPx=\(.exec_max_px // "none") pnl=\(.pnl // "?")",
+                 "       VERDICT: \(.verdict)",
+                 (.executions[]? | "       exec \(.type // "?") \(.shares)sh @ \(.px // "?")")' \
+            /tmp/receipts.json 2>/dev/null || true
           jq -r '"  enabled(api env): \(.enabled // .config.enabled // "?")  paused: \(.paused // "?")",
                  (.by_whale // [] | .[] | "  whale \(.whale): fills \(.fills) deployed $\(.deployed) settled \(.settled) pnl $\(.pnl)"),
                  (.orders // .summary // {} | to_entries[] | "  \(.key): \(.value)"),

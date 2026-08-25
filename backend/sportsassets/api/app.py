@@ -3337,6 +3337,18 @@ async def _live_status_uncached() -> dict:
                     THEN round(filled_usd / requested_usd, 3)::float8
                END AS ratio,
                us_market_slug AS slug,
+               -- ROUND-TRIP TEST (owner hypothesis 2026-08-25): "these
+               -- were the same game bought and sold repeatedly, so the
+               -- max stake was only ever $250". Two facts decide it:
+               -- how many orders this account placed on THIS market,
+               -- and what the venue's own execution list says. One
+               -- market appearing once cannot have been round-tripped.
+               (SELECT count(*) FROM live_orders o2
+                 WHERE o2.us_market_slug = live_orders.us_market_slug
+                   AND COALESCE(o2.whale_username, '')
+                       NOT IN ('manual', 'underdog'))::int AS orders_on_mkt,
+               jsonb_array_length(COALESCE(
+                   raw #> '{response,executions}', '[]'::jsonb)) AS n_exec,
                to_char(placed_at AT TIME ZONE 'America/New_York',
                        'MM-DD HH24:MI') AS at
         FROM live_orders
@@ -3397,6 +3409,110 @@ async def _live_status_uncached() -> dict:
         "summary": d,
         "recent": [dict(r) for r in recent],
     }
+
+
+@app.get("/api/admin/overspend-receipts",
+         dependencies=[Depends(require_admin)])
+async def api_overspend_receipts(hours: int = 48) -> dict:
+    """The venue's OWN execution records for every fill that cost more
+    than it was authorized to (owner question 2026-08-25).
+
+    The owner's hypothesis for the 1.15x-3.87x rows: "the order was
+    bought, then sold for profit, rebought with the same 250, sold
+    again" — i.e. round-trips on ONE market, so the true stake never
+    exceeded the clip and filled_usd is just aggregating them.
+
+    That is decidable from stored data, not from argument:
+
+      * `executions` is the venue's list for THIS order. A single buy
+        that walked the book shows several fills, all at or below the
+        limit — an IOC buy cannot pay more. Round-trips would not
+        appear here at all; they would be separate rows.
+      * `orders_on_market` counts how many orders this account ever
+        placed on the same slug. Round-tripping requires more than one.
+        The never-add gate and the one-fill-per-asset index are both
+        designed to make that impossible, so a count of 1 refutes the
+        hypothesis and a count above 1 supports it.
+      * `exec_max_px` vs `limit_price` is the decisive number. Every
+        execution at or below the limit means we were never overcharged
+        and the recorded fill_price is wrong. Any execution above it
+        means the venue really did charge more than we authorized.
+    """
+    pool = await get_pool()
+    hours = max(1, min(int(hours), 24 * 14))
+    rows = await pool.fetch(
+        """
+        SELECT id, whale_username AS whale, us_market_slug AS slug,
+               status,
+               round(limit_price, 4)::float8 AS limit_price,
+               round(requested_usd, 2)::float8 AS requested_usd,
+               round(requested_shares, 2)::float8 AS requested_shares,
+               round(filled_shares, 2)::float8 AS filled_shares,
+               round(fill_price, 4)::float8 AS fill_price,
+               round(filled_usd, 2)::float8 AS filled_usd,
+               round(pnl, 2)::float8 AS pnl,
+               to_char(placed_at AT TIME ZONE 'America/New_York',
+                       'MM-DD HH24:MI:SS') AS placed_at,
+               (SELECT count(*) FROM live_orders o2
+                 WHERE o2.us_market_slug = live_orders.us_market_slug
+                   AND COALESCE(o2.whale_username, '')
+                       NOT IN ('manual', 'underdog'))::int
+                   AS orders_on_market,
+               COALESCE(raw #> '{response,executions}', '[]'::jsonb)
+                   AS executions
+        FROM live_orders
+        WHERE placed_at > now() - interval '1 hour' * $1
+          AND status IN ('filled', 'settled', 'cashed_out')
+          AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+          AND COALESCE(requested_usd, 0) > 0
+          AND filled_usd > requested_usd * 1.01
+        ORDER BY filled_usd / requested_usd DESC
+        LIMIT 25
+        """, float(hours))
+    out = []
+    for r in rows:
+        d = dict(r)
+        execs = d.pop("executions", None)
+        if isinstance(execs, str):
+            try:
+                execs = json.loads(execs)
+            except (TypeError, ValueError):
+                execs = []
+        execs = execs or []
+        # Flatten each execution to the three numbers that matter, so
+        # the answer is readable in a probe line rather than a blob.
+        flat, mx = [], None
+        for e in execs:
+            if not isinstance(e, dict):
+                continue
+            px = e.get("lastPx")
+            px = (px or {}).get("value") if isinstance(px, dict) else px
+            try:
+                px = float(px) if px is not None else None
+            except (TypeError, ValueError):
+                px = None
+            try:
+                sh = float(e.get("lastShares") or 0)
+            except (TypeError, ValueError):
+                sh = 0.0
+            flat.append({"type": e.get("type"), "px": px, "shares": sh})
+            if px is not None and sh > 0:
+                mx = px if mx is None else max(mx, px)
+        d["n_executions"] = len(flat)
+        d["executions"] = flat[:12]
+        d["exec_max_px"] = mx
+        lim = d.get("limit_price") or 0
+        # The verdict, computed here so no reader has to eyeball it.
+        if mx is None:
+            d["verdict"] = "no execution prices recorded — undecidable"
+        elif mx <= lim + 1e-9:
+            d["verdict"] = ("executions all AT OR BELOW limit — we were "
+                            "NOT overcharged; recorded fill_price is wrong")
+        else:
+            d["verdict"] = (f"execution at {mx} ABOVE limit {lim} — the "
+                            "venue charged more than authorized")
+        out.append(d)
+    return {"hours": hours, "n": len(out), "rows": out}
 
 
 @app.get("/api/copy-unmapped")
