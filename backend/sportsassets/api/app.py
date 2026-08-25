@@ -3544,11 +3544,32 @@ async def api_true_edge_cashout(since_day: str = "2026-08-01",
         det = d.get("detected") or 0
         d["exit_rate"] = round((d.get("exited") or 0) / det, 3) if det else None
         # The line that matters for the cut list.
-        d["verdict"] = (
-            "CUT MAY BE WRONG — negative at settlement, positive on his "
-            "own exits" if d["cf_settlement"] <= 0 < d["cf_cashout"]
-            else "negative on both bases" if d["cf_cashout"] <= 0
-            else "positive on both bases")
+        # NO EXITS MEANS NO SECOND BASIS (2026-08-25, corrected).
+        #
+        # First version emitted "negative on both bases" / "positive on
+        # both bases" whenever the two numbers matched. They match
+        # trivially when the whale has NO recorded sells: cf_cashout
+        # falls back to cf_settlement row by row, so the "second basis"
+        # is a verbatim copy of the first. The line then reads as two
+        # independent confirmations of a cut when it is one number
+        # printed twice.
+        #
+        # Observed: every copied whale returned delta 0.0 with exited
+        # 0/N — swisstony 0 out of 142,890. An instrument that
+        # manufactures corroboration out of missing data is worse than
+        # one that stays silent, because the silence would have been
+        # investigated.
+        if not (d.get("exited") or 0):
+            d["verdict"] = (
+                "NO EXIT DATA — cashout basis unavailable; this is the "
+                "settlement number repeated, NOT a second opinion")
+        elif d["cf_settlement"] <= 0 < d["cf_cashout"]:
+            d["verdict"] = ("CUT MAY BE WRONG — negative at settlement, "
+                            "positive on his own exits")
+        elif d["cf_cashout"] <= 0:
+            d["verdict"] = "negative on both bases"
+        else:
+            d["verdict"] = "positive on both bases"
         out.append(d)
     return {"since": since_day, "max_reaction_s": max_reaction_s,
             "whales": out,
