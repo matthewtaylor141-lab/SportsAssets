@@ -83,9 +83,103 @@ class TestTheFirstSnapshotIsSilent:
         src = inspect.getsource(we._cycle)
         assert "if not prev:" in src
         assert "first_snapshots" in src
-        # and it must save BEFORE deciding, so a crash mid-cycle cannot
-        # replay the same diff next time
-        assert src.index("_save(pool") < src.index("if not prev:")
+
+
+class TestDeferredExitsAreDeferredNotDISCARDED:
+    """The cap was throwing away every exit past the tenth, forever.
+
+    The snapshot was saved BEFORE the diff was acted on, which is right
+    for crash safety — a crash mid-cycle must not replay the diff and
+    fire the sells twice. But it saved `now` WHOLESALE, so the next
+    cycle's `prev` already reflected the exits we had just declined to
+    act on. The cap did not defer them, it discarded them, and the log
+    line said the opposite.
+
+    It bites at exactly the moment the cap exists for. swisstony holds
+    below purchase on 62 of 75 positions; such a cycle acted on 10 and
+    silently dropped 52 REAL exits — positions the whale had left and
+    we would go on holding to resolution, which is the divergence this
+    entire worker exists to close.
+
+    Found by an adversarial review of the diff, not by the test above,
+    which asserted the save ORDERING that caused it.
+    """
+
+    def test_the_deferred_assets_are_pinned_at_their_previous_size(self):
+        import inspect
+
+        src = inspect.getsource(we._cycle)
+        assert "to_save = dict(now)" in src
+        assert "to_save[asset] = prev[asset]" in src
+
+    def test_the_pinning_happens_before_the_save(self):
+        import inspect
+
+        src = inspect.getsource(we._cycle)
+        assert src.index("to_save[asset] = prev[asset]") < \
+            src.index("await _save(pool, uname.lower(), to_save)")
+
+    def test_a_crash_still_cannot_replay_an_ACTED_exit(self):
+        """The save must still precede the orders, so the acted-on set
+        is recorded as done before any of it is placed."""
+        import inspect
+
+        src = inspect.getsource(we._cycle)
+        assert src.index("await _save(pool, uname.lower(), to_save)") < \
+            src.index("for asset, frac in acting:")
+
+    def test_the_first_snapshot_still_saves_and_skips(self):
+        import inspect
+
+        src = inspect.getsource(we._cycle)
+        # rindex: "first_snapshots" also appears in the stats dict at
+        # the top of the function, so indexing on the FIRST occurrence
+        # slices before the save and proves nothing.
+        head = src[:src.rindex("first_snapshots")]
+        assert "_save(pool, uname.lower(), now)" in head
+
+    def test_the_pinned_snapshot_reproduces_the_exit_next_cycle(self):
+        """The arithmetic, end to end: 62 shrunk positions, a cap of 10,
+        and the 52 deferred must still read as shrunk against the saved
+        snapshot."""
+        prev = {f"a{i}": 100.0 for i in range(62)}
+        now = {f"a{i}": 40.0 for i in range(62)}
+        found = we.diff_exits(prev, now)
+        assert len(found) == 62
+        acting, deferred = (found[:we.MAX_EXITS_PER_CYCLE],
+                            found[we.MAX_EXITS_PER_CYCLE:])
+        to_save = dict(now)
+        for asset, _f in deferred:
+            to_save[asset] = prev[asset]
+        # next cycle: prev is what we saved, now is unchanged
+        again = we.diff_exits(to_save, now)
+        assert len(again) == len(deferred) == 52
+        acted = {a for a, _ in acting}
+        assert not ({a for a, _ in again} & acted), \
+            "an acted-on exit must never re-fire"
+
+    def test_a_deferred_FULL_exit_survives_too(self):
+        """A vanished asset is a full exit. Pinning re-adds it to the
+        snapshot, so it is still absent from `now` next cycle."""
+        prev = {"a": 100.0, "b": 100.0}
+        now: dict[str, float] = {}
+        found = we.diff_exits(prev, now, set())
+        to_save = dict(now)
+        for asset, _f in found[1:]:
+            to_save[asset] = prev[asset]
+        again = we.diff_exits(to_save, now, set())
+        assert [a for a, _ in again] == [a for a, _ in found[1:]]
+
+    def test_the_log_no_longer_claims_something_false(self):
+        import inspect
+
+        # The LOG CALL, not the comment — the comment above the fix
+        # quotes the false line on purpose, to record what it said.
+        src = inspect.getsource(we._cycle)
+        code = "\n".join(l for l in src.splitlines()
+                          if not l.strip().startswith("#"))
+        assert "still read as shrunk next cycle" not in code
+        assert "HELD BACK IN THE SNAPSHOT" in code
 
 
 class TestTheEmittedEvent:
@@ -146,7 +240,7 @@ class TestTheFirstActiveCycleIsBounded:
 
         src = inspect.getsource(we._cycle)
         assert "deferred" in src
-        assert "the rest still read as shrunk next cycle" in src
+        assert "HELD BACK IN THE SNAPSHOT" in src
 
     def test_swisstonys_62_would_be_spread_not_fired_at_once(self):
         found = [(f"a{i}", 0.5) for i in range(62)]

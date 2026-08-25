@@ -264,10 +264,10 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
         all_sibs.update(sibs)
         stats["whales"] += 1
         prev = await _load(pool, uname.lower())
-        await _save(pool, uname.lower(), now)
         if not prev:
             # No previous state: diffing against nothing would read every
             # holding as a fresh exit and fire a full close on each.
+            await _save(pool, uname.lower(), now)
             stats["first_snapshots"] += 1
             continue
         # WHICH OF THE VANISHED MARKETS ACTUALLY RESOLVED.
@@ -299,13 +299,42 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
             found = diff_exits(prev, now, set(gone))
         else:
             found = diff_exits(prev, now, resolved)
-        if len(found) > MAX_EXITS_PER_CYCLE:
+        acting = found[:MAX_EXITS_PER_CYCLE]
+        deferred = found[MAX_EXITS_PER_CYCLE:]
+        if deferred:
             log.warning("whale-exit: %s has %d exits this cycle, acting on "
-                        "%d — the rest still read as shrunk next cycle",
+                        "%d — the rest are HELD BACK IN THE SNAPSHOT so "
+                        "they are found again next cycle",
                         uname, len(found), MAX_EXITS_PER_CYCLE)
-            stats["deferred"] = stats.get("deferred", 0) + (
-                len(found) - MAX_EXITS_PER_CYCLE)
-        for asset, frac in found[:MAX_EXITS_PER_CYCLE]:
+            stats["deferred"] = stats.get("deferred", 0) + len(deferred)
+        # THE DEFERRED EXITS WERE BEING DROPPED FOREVER (2026-08-25,
+        # adversarial review).
+        #
+        # The snapshot was saved BEFORE the diff was acted on, which is
+        # right for crash safety — a crash mid-cycle must not replay the
+        # same diff and fire the sells twice. But it saved `now`
+        # WHOLESALE, so the next cycle's `prev` already reflected the
+        # exits we had just declined to act on. The cap did not defer
+        # them, it discarded them, and the log line said the opposite:
+        # "the rest still read as shrunk next cycle" was false.
+        #
+        # It matters at exactly the moment the cap exists for. swisstony
+        # held below purchase on 62 of 75 positions; a cycle like that
+        # acts on 10 and silently threw away 52 real exits — positions
+        # the whale had left and we would go on holding to resolution,
+        # which is the divergence this whole worker exists to close.
+        #
+        # Both properties are available at once. Save `now`, but PIN the
+        # deferred assets at their previous size, so next cycle diffs
+        # pre-exit against post-exit and finds them again. Acted-on
+        # exits are recorded as done and cannot re-fire; a crash after
+        # the save still cannot replay them.
+        to_save = dict(now)
+        for asset, _frac in deferred:
+            if asset in prev:
+                to_save[asset] = prev[asset]
+        await _save(pool, uname.lower(), to_save)
+        for asset, frac in acting:
             stats["exits"] += 1
             log.warning("WHALE EXIT %s %s: closed %.0f%% (positions, not "
                         "a trade)", uname, asset, frac * 100)
