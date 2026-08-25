@@ -411,6 +411,15 @@ jobs:
           jq -r 'if .rss_mb == null then "  MEMCENSUS unavailable"
                  else "  MEMCENSUS rss=\(.rss_mb)MB accounted=\(.accounted_mb)MB unaccounted=\(.unaccounted_mb)MB | archive \(.archive_cache.rows)r @\(.archive_cache.bytes_per_row)B marginal (naive \(.archive_cache.bytes_per_row_naive)B) = \(.archive_cache.est_mb)MB | grind \(.hydrate_in_progress.rows)r = \(.hydrate_in_progress.est_mb)MB | window \(.raw_window_cache.rows)r = \(.raw_window_cache.est_mb)MB | \(.arena_cap // "arena_cap ?")"
                  end' /tmp/memc.json 2>/dev/null || echo "  MEMCENSUS unreadable"
+          # MALLOC — the split that says whether anything HOLDS the gap.
+          # in_use ~ RSS means real retention the census cannot see;
+          # free_retained ~ the gap means fragmentation, and no cache
+          # fix or trim will ever return it.
+          jq -r '.malloc_info as $m
+                 | if ($m.unavailable // null) != null
+                   then "  MALLOC unavailable (\($m.unavailable))"
+                   else "  MALLOC in_use=\($m.in_use_mb)MB free_retained=\($m.free_retained_mb)MB arena=\($m.arena_mb)MB mmapped=\($m.hblkhd_mb)MB releasable=\($m.releasable_mb)MB chunks=\($m.free_chunks)"
+                   end' /tmp/memc.json 2>/dev/null || true
 
           # SHORTSHADOW — the evidence the short ban owes us.
           #

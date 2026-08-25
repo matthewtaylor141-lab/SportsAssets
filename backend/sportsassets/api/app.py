@@ -5104,6 +5104,49 @@ async def api_memory_census() -> dict:
     except OSError:
         pass
 
+    # WHO HOLDS THE GAP — the allocator, or something we never counted?
+    #
+    # The arena cap took (mallopt rc=1) and RSS did not come down:
+    # 1,536.5 MB at 9 minutes uptime, against 595 MB at 11 minutes on
+    # the previous build. Capping arenas was the fourth memory change
+    # tonight and the third that moved nothing.
+    #
+    # I am not proposing a fifth on reasoning. mallinfo2 splits the
+    # question exactly:
+    #
+    #   uordblks  in USE by the program — if this is ~RSS then
+    #             something really holds it and my census misses it
+    #   fordblks  FREE but retained by the allocator — if this is
+    #             ~1 GB then nothing holds it, trim cannot return it,
+    #             and the cause is fragmentation, not retention
+    #
+    # Two hypotheses, one number, no interpretation needed.
+    malloc_info: dict = {}
+    try:
+        import ctypes
+
+        class _MallInfo2(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_size_t) for n in (
+                "arena", "ordblks", "smblks", "hblks", "hblkhd",
+                "usmblks", "fsmblks", "uordblks", "fordblks",
+                "keepcost")]
+
+        libc = ctypes.CDLL("libc.so.6")
+        libc.mallinfo2.restype = _MallInfo2
+        mi = libc.mallinfo2()
+        malloc_info = {
+            # non-mmapped space from sbrk
+            "arena_mb": round(mi.arena / 1048576, 1),
+            # space in mmapped regions
+            "hblkhd_mb": round(mi.hblkhd / 1048576, 1),
+            "in_use_mb": round(mi.uordblks / 1048576, 1),
+            "free_retained_mb": round(mi.fordblks / 1048576, 1),
+            "releasable_mb": round(mi.keepcost / 1048576, 1),
+            "free_chunks": mi.ordblks,
+        }
+    except Exception as exc:  # noqa: BLE001 — glibc 2.33+ only
+        malloc_info = {"unavailable": type(exc).__name__}
+
     cache = _measure(tr._archive_cache.get("data"))
     grind = _measure(tr._hydrate_progress.get("rows"))
     raw = tr._raw_cache.get("data")
@@ -5124,6 +5167,7 @@ async def api_memory_census() -> dict:
                            if rss_mb is not None else None),
         "gc_counts": list(__import__("gc").get_count()),
         "arena_cap": _ARENA_STATUS,
+        "malloc_info": malloc_info,
         "note": ("est_mb is a sampled estimate scaled to the row count, "
                  "not an exact walk — it is meant to rank the holders, "
                  "not to balance to the byte"),
