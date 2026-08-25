@@ -3631,7 +3631,28 @@ async def api_overspend_receipts(hours: int = 48) -> dict:
                 sh = float(e.get("lastShares") or 0)
             except (TypeError, ValueError):
                 sh = 0.0
-            flat.append({"type": e.get("type"), "px": px, "shares": sh})
+            # WHICH INSTRUMENT DID WE ACTUALLY GET? (2026-08-25)
+            # The complement hypothesis says the venue priced the other
+            # leg. A simpler and worse possibility is that it FILLED the
+            # other leg — a different instrument than the slug names.
+            # Those look identical in price and are opposite in
+            # position. Carry whatever identity the execution states,
+            # plus the key list, because guessing which field names the
+            # instrument is how the original incident happened.
+            ident = {}
+            for k in ("marketSlug", "instrumentId", "instrument",
+                      "marketSideId", "sideId", "identifier", "intent",
+                      "side", "long"):
+                if e.get(k) is not None:
+                    ident[k] = str(e.get(k))[:60]
+            o = e.get("order")
+            if isinstance(o, dict):
+                for k in ("marketSlug", "intent", "instrumentId"):
+                    if o.get(k) is not None:
+                        ident[f"order.{k}"] = str(o.get(k))[:60]
+            flat.append({"type": e.get("type"), "px": px, "shares": sh,
+                         "ident": ident or None,
+                         "keys": sorted(e.keys())[:14]})
             if px is not None and sh > 0:
                 mx = px if mx is None else max(mx, px)
         d["n_executions"] = len(flat)
