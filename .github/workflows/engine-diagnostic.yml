@@ -657,6 +657,28 @@ jobs:
           jq -r '.fills_24h // [] | map(select((.ratio // 0) > 1.001)) |
                  "  OVERSPEND rows=\(length)"' \
             /tmp/live.json 2>/dev/null || true
+          # NEWEST FIRST. The line below takes .[0:14] in whatever order
+          # the endpoint returns, and every reading of it this morning
+          # showed 08-24 rows while SIZING said 26 fills in 24h — so the
+          # sample never contained the fills that matter: the ones placed
+          # AFTER the proportional clamp went live at 04:16Z.
+          #
+          # The clamp has therefore never been verified on a real fill. It
+          # was shipped once into dead code already; "it is deployed" is
+          # not evidence it executed.
+          #
+          # ourX (size_vs_his) is the number that proves it: our clip
+          # divided by the whale's notional. <= 1.0 means we did not
+          # outbet him. Values like 17.77 and 72.23 are the old behaviour.
+          jq -r '[.fills_24h // [] | .[] | select(.at != null)]
+                 | sort_by(.at) | reverse | .[0:10][]
+                 | "  NEWFILL \(.at) \(.whale) \(.status) $\(.fill_usd // 0) @\(.fill_px // "?") ratio \(.ratio // "?") ourX\(.size_vs_his // "?") his$\(.his_notional // "?") \(.intent // "?" | sub("ORDER_INTENT_";"")) \(.slug // "?")"' \
+            /tmp/live.json 2>/dev/null || true
+          # And the distribution, so one lucky row cannot read as proof.
+          jq -r '[.fills_24h // [] | .[] | .size_vs_his // empty] as $x
+                 | if ($x | length) == 0 then "  OURX no fills with a size_vs_his"
+                   else "  OURX n=\($x | length) le1=\([$x[] | select(. <= 1.001)] | length) gt1=\([$x[] | select(. > 1.001)] | length) max=\($x | max) median=\(($x | sort)[($x | length) / 2 | floor])"
+                   end' /tmp/live.json 2>/dev/null || true
           jq -r '.fills_24h // [] | .[0:14][] |
                  "  FILL \(.at) \(.whale) \(.status) req $\(.req_usd // "?")/\(.req_sh // "?")sh @\(.lim // "?") -> filled $\(.fill_usd // 0)/\(.fill_sh // "?")sh @\(.fill_px // "?") ratio \(.ratio // "?") intent=\(.intent // "?" | sub("ORDER_INTENT_";"")) his$\(.his_notional // "?") ourX\(.size_vs_his // "?") execs=\(.n_exec // "?") ordersOnMkt=\(.orders_on_mkt // "?") \(.slug // "?")"' \
             /tmp/live.json 2>/dev/null || true
