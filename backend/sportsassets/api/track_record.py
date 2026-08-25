@@ -958,16 +958,66 @@ _SNAP_MAX_AGE_S = 24 * 3600.0   # window union covers ~2 days; stay well under
 
 
 def _pack_rows(rows: list[dict]) -> str:
+    """Gzip the archive a ROW AT A TIME, never as one giant string.
+
+    The one-liner this replaces was
+        base64(compress(dumps(<the whole list>).encode()))
+    which, at 300,000 slim rows, materialises the archive THREE
+    times over before a single byte is compressed: the dumps() str, the
+    encode() bytes, and then the compressor's input. Hundreds of MB of
+    transient allocation, fired on every 20-chunk checkpoint during a
+    grind and again on every rolling refresh — against a kill line the
+    API has been hitting all week.
+
+    Streaming into a GzipFile holds one row's JSON at a time. The
+    OUTPUT is the only thing that grows, and it is a few MB compressed.
+    The format is byte-identical to what _unpack_rows already reads: a
+    JSON array, assembled incrementally instead of all at once.
+
+    This is the memory candidate I should have gone to first. The type
+    filter I shipped before it cut the row count from 317,681 to at
+    most 300,000 — about 6% — and I had described it as the fix.
+    """
     import base64
     import gzip
-    return base64.b64encode(
-        gzip.compress(json.dumps(rows, default=str).encode(), 5)).decode()
+    import io
+
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=5) as out:
+        out.write(b"[")
+        first = True
+        for r in rows:
+            if first:
+                first = False
+            else:
+                out.write(b",")
+            out.write(json.dumps(r, default=str).encode())
+        out.write(b"]")
+    raw = buf.getvalue()
+    buf.close()
+    return base64.b64encode(raw).decode()
 
 
 def _unpack_rows(gz: str) -> list[dict]:
+    """Drop each intermediate as soon as the next one exists.
+
+    Same shape of problem in the other direction: the base64 str, the
+    compressed bytes and the decompressed bytes were all live at once
+    on the boot path. json.loads still needs the whole document, so
+    this cannot be made free — but three simultaneous copies can be
+    made into one.
+    """
     import base64
     import gzip
-    return json.loads(gzip.decompress(base64.b64decode(gz)))
+
+    comp = base64.b64decode(gz)
+    del gz
+    plain = gzip.decompress(comp)
+    del comp
+    try:
+        return json.loads(plain)
+    finally:
+        del plain
 
 
 async def _save_snapshot(pool: Any, rows: list[dict], *, complete: bool,
