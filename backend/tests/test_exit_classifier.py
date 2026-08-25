@@ -31,9 +31,15 @@ class _Pool:
     """Minimal stub: canned sibling rows and a canned holding."""
 
     def __init__(self, siblings=(("TOKEN_B",),), open_sh=1000.0,
-                 raise_on=None):
+                 raise_on=None, mine=0.0):
         self._siblings = [{"token_id": s[0]} for s in siblings]
-        self._open = open_sh
+        # `open_sh` is now DERIVED: net(sibling) = gross(sibling) -
+        # gross(this leg), because on a merge venue a holding is
+        # retired by buying the complement and the sibling's own sum
+        # never decrements. The stub carries both legs so it exercises
+        # the query the executor actually runs.
+        self._sib = open_sh
+        self._mine = mine
         self._raise_on = raise_on
 
     async def fetch(self, _sql, *_a):
@@ -44,7 +50,7 @@ class _Pool:
     async def fetchrow(self, _sql, *_a):
         if self._raise_on == "fetchrow":
             raise RuntimeError("db down")
-        return {"open_sh": self._open}
+        return {"sib": self._sib, "mine": self._mine}
 
 
 def _c(pool, asset="TOKEN_A", whale="swisstony", size=500.0):
@@ -180,3 +186,126 @@ class TestTheMoneyGates:
     def test_an_expired_market_still_returns_nothing(self):
         src = inspect.getsource(le._pm_held)
         assert 'p.get("expired")' in src
+
+
+class TestTheHoldingIsNETOFTHEMERGES:
+    """`open_sh` was buys − sells on the sibling ALONE.
+
+    On this venue nobody sells: a holding is retired by BUYING the
+    complement, which lands as a BUY on the OTHER asset and never
+    decrements the sibling's sum. So open_sh was lifetime GROSS BUYS of
+    that leg and could only go up.
+
+    After one completed round trip that does not merely lose precision,
+    IT INVERTS THE ANSWER. He buys A, exits by buying B — both legs are
+    zero on the venue — but the sum still reads 100 of B. His next
+    fresh entry on A then classifies as an EXIT and we SELL a position
+    we were meant to hold. That is the one direction this classifier
+    must never fail in, and it is the failure the classifier was
+    written to prevent, reappearing through its own denominator.
+
+    The venue nets the pair, so the holding does too:
+        net(sibling) = gross(sibling) − gross(this leg)
+    """
+
+    def test_a_completed_round_trip_leaves_NO_holding(self):
+        """Bought A 100, exited by buying B 100. Both legs flat. A
+        fresh buy of A must NOT read as an exit."""
+        assert _c(_Pool(open_sh=100.0, mine=100.0), size=50.0) is None
+
+    def test_the_old_formula_would_have_called_it_an_exit(self):
+        """Same state, sibling gross alone: 100 > 0 -> 'he holds it'."""
+        assert _c(_Pool(open_sh=100.0, mine=0.0), size=50.0) is not None
+
+    def test_a_genuine_first_exit_still_classifies(self):
+        out = _c(_Pool(open_sh=100.0, mine=0.0), size=60.0)
+        assert out is not None
+        assert out["his_open_shares"] == 100.0
+        assert out["closed_frac"] == 0.6
+
+    def test_adding_to_a_position_is_not_an_exit(self):
+        """He holds A and buys more A. gross(sibling)=0, gross(mine)>0,
+        so the net is negative and clamps to zero."""
+        assert _c(_Pool(open_sh=0.0, mine=100.0), size=50.0) is None
+
+    def test_a_partially_exited_position_reports_what_is_LEFT(self):
+        """Bought A 100, closed 40 of it. He holds 60 of A. A further
+        complement buy must size against 60, not 100."""
+        out = _c(_Pool(open_sh=100.0, mine=40.0), size=30.0)
+        assert out["his_open_shares"] == 60.0
+        assert out["closed_frac"] == 0.5
+
+    def test_the_net_can_never_go_negative(self):
+        out = _c(_Pool(open_sh=10.0, mine=999.0), size=5.0)
+        assert out is None
+
+    def test_the_query_reads_BOTH_legs(self):
+        import inspect
+
+        src = inspect.getsource(le.classify_exit)
+        assert "t.asset IN ($1, $2)" in src
+        assert 'AS sib' in src and 'AS mine' in src
+
+    def test_the_current_fill_is_excluded_by_id(self):
+        """It is already in `trades` when we are called, and it is a buy
+        of THIS leg — leaving it in subtracts his own exit from the
+        position it is closing."""
+        import inspect
+
+        src = inspect.getsource(le.classify_exit)
+        assert "t.id <> COALESCE($4::bigint, -1)" in src
+
+    def test_the_caller_passes_the_trade_id(self):
+        import inspect
+
+        src = inspect.getsource(le.maybe_execute)
+        i = src.index("classify_exit(")
+        assert 'payload.get("id")' in src[i:i + 260]
+
+    def test_a_missing_trade_id_still_works(self):
+        """COALESCE(-1) means 'exclude nothing', which is the old
+        behaviour and safe — it can only make open_sh smaller."""
+        out = asyncio.run(le.classify_exit(
+            _Pool(open_sh=100.0, mine=0.0), "TOKEN_A", "w", 50.0))
+        assert out is not None
+
+
+class TestAFullCloseDoesNotErasePartialPnl:
+    """The partial branch accumulated (COALESCE(pnl,0)+$3) and the
+    terminal branch four lines later ASSIGNED (pnl=$2). So the moment a
+    whale who had already trimmed finally closed out, every dollar
+    realised by his earlier partial exits was erased from the row.
+
+    Reachable on exactly the flow this desk exists to copy: scale out,
+    then close. The owner's own worked example was buy $5,000, sell
+    $7,500, re-enter at $60."""
+
+    @staticmethod
+    def _code():
+        """mirror_exit with COMMENTS STRIPPED.
+
+        Three of my assertions today have matched text that my own
+        explanatory comments contained — the comment above this fix
+        quotes both SQL fragments on purpose. A source-reading test has
+        to read code."""
+        import inspect
+
+        return "\n".join(
+            l for l in inspect.getsource(le.mirror_exit).splitlines()
+            if not l.strip().startswith("#"))
+
+    def test_both_branches_accumulate(self):
+        assert self._code().count("COALESCE(pnl,0)+$") == 2, \
+            "one branch still assigns instead of accumulating"
+
+    def test_the_terminal_branch_is_the_one_that_changed(self):
+        code = self._code()
+        seg = code[code.index("status='cashed_out'"):][:200]
+        assert "COALESCE(pnl,0)+$2" in seg
+        assert "pnl=$2," not in seg
+
+    def test_a_null_pnl_contributes_zero_not_null(self):
+        """An unpriced final leg must not wipe the row to NULL."""
+        code = self._code()
+        seg = code[code.index("status='cashed_out'"):][:320]
+        assert "pnl or 0" in seg

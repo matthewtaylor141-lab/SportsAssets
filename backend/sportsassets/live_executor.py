@@ -348,7 +348,8 @@ async def _sibling_from_positions(pool, asset: str) -> str:
 
 
 async def classify_exit(pool, asset: str, whale: str,
-                        size: float) -> dict | None:
+                        size: float,
+                        trade_id: int | None = None) -> dict | None:
     """Is this "buy" actually the whale CLOSING a position?
 
     Owner, 2026-08-25, after reading Polymarket's global microdata:
@@ -430,18 +431,49 @@ async def classify_exit(pool, asset: str, whale: str,
         # how much of the roster's flow is structurally unclassifiable.
         return _exit_stop("cls_not_binary", asset=asset,
                           siblings=len(sibs))
+    # HIS HOLDING OF THE SIBLING, NET OF THE MERGES (2026-08-25,
+    # adversarial review).
+    #
+    # This was buys - sells on the sibling alone. On THIS venue nobody
+    # sells: a holding is retired by BUYING the complement, which lands
+    # as a BUY on the OTHER asset and never decrements the sibling's
+    # sum. So `open_sh` was lifetime GROSS BUYS of that leg and could
+    # only ever go up.
+    #
+    # After a single completed round trip that is not merely imprecise,
+    # it INVERTS THE ANSWER. He buys A, exits by buying B — both legs
+    # are now zero on the venue, but our sum still reads 100 of B. His
+    # next fresh entry on A therefore classifies as an EXIT, and we
+    # SELL a position we were meant to hold. That is the one direction
+    # this classifier must never fail in.
+    #
+    # The venue nets the pair, so the real holding does too:
+    #
+    #     net(sibling) = gross(sibling) - gross(this leg)
+    #
+    # where gross is buys - sells per leg. Both legs in one indexed
+    # query over (asset, whale_id), so it is no more work than before.
+    #
+    # THE CURRENT FILL IS EXCLUDED BY ID. It is already in `trades` by
+    # the time we are called, and it is a buy of THIS leg — leaving it
+    # in would subtract his own exit from the position it is closing
+    # and understate what he still held when he made it.
     try:
         his = await pool.fetchrow(
-            "SELECT COALESCE(sum(t.size) FILTER (WHERE t.side='BUY'), 0)"
-            "::float8 "
-            "     - COALESCE(sum(t.size) FILTER (WHERE t.side='SELL'), 0)"
-            "::float8 AS open_sh "
+            "SELECT COALESCE(sum(CASE WHEN t.asset = $1 THEN "
+            "         (CASE WHEN t.side='BUY' THEN t.size "
+            "               ELSE -t.size END) END), 0)::float8 AS sib, "
+            "       COALESCE(sum(CASE WHEN t.asset = $2 THEN "
+            "         (CASE WHEN t.side='BUY' THEN t.size "
+            "               ELSE -t.size END) END), 0)::float8 AS mine "
             "FROM trades t JOIN whales w ON w.id = t.whale_id "
-            "WHERE t.asset = $1 AND lower(w.username) = $2",
-            sibling, whale)
+            "WHERE t.asset IN ($1, $2) AND lower(w.username) = $3 "
+            "  AND t.id <> COALESCE($4::bigint, -1)",
+            sibling, asset, whale, trade_id)
     except Exception:  # noqa: BLE001
         return _exit_stop("cls_holding_lookup_failed", asset=sibling)
-    open_sh = float((his["open_sh"] if his else 0) or 0.0)
+    open_sh = max(0.0, float((his["sib"] if his else 0) or 0.0)
+                  - float((his["mine"] if his else 0) or 0.0))
     if open_sh <= 0:
         # He does not hold the other leg, so this really is a fresh bet
         # on this side. THE EXPECTED OUTCOME on a genuine entry — this
@@ -652,9 +684,23 @@ async def mirror_exit(payload: dict) -> None:
             "filled_shares=$2, pnl=COALESCE(pnl,0)+$3 WHERE id=$1",
             row["id"], remaining, pnl or 0)
     else:
+        # ACCUMULATE, DO NOT ASSIGN (2026-08-25, adversarial review).
+        #
+        # The partial branch above adds with COALESCE(pnl,0)+$3, and
+        # this one assigned pnl=$2 four lines later — so the moment a
+        # whale who had already trimmed finally closed out, every
+        # dollar realised by his earlier partial exits was erased from
+        # the row. The position's own P&L, silently restated downward
+        # (or upward) by its last leg.
+        #
+        # It is reachable on exactly the flow this desk exists to copy:
+        # a whale who scales out and then closes. Both branches use the
+        # same accumulate now, so a row's pnl is the sum of what its
+        # legs actually realised however many there were.
         await pool.execute(
-            "UPDATE live_orders SET status='cashed_out', pnl=$2, "
-            "settled_at=now() WHERE id=$1", row["id"], pnl)
+            "UPDATE live_orders SET status='cashed_out', "
+            "pnl=COALESCE(pnl,0)+$2, settled_at=now() WHERE id=$1",
+            row["id"], pnl or 0)
     _exit_stop("mx_SOLD", whale=username, slug=us_slug,
                shares=int(filled), pnl=pnl or 0,
                full=bool(closed_frac >= FULL_EXIT_FRAC))
@@ -2592,7 +2638,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     _exit = await classify_exit(
         pool, str(payload.get("asset") or ""),
         (payload.get("whale_username") or "").lower(),
-        payload.get("size") or 0)
+        payload.get("size") or 0,
+        payload.get("id"))
     if _exit:
         log.warning("EXIT-CLASSIFIED %s bought %s to close %.1f%% of %s "
                     "— mirroring the exit, not the entry",
