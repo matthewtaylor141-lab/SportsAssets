@@ -606,6 +606,14 @@ jobs:
           jq -r '.whales[]? |
                  "  EXITS \(.whale): bought \(.assets_bought) assets $\(.bought_usd) | round_trips \(.round_trips) sold $\(.sold_usd) | exit_rate \(.exit_rate // "?")"' \
             /tmp/exits.json 2>/dev/null || true
+          # ALL-TIME side census. exit_rate 0.0 over 7d could be a quiet
+          # week; zero sells EVER is a detection gap. The per-source
+          # split says which ingestion path is blind.
+          curl -sS --max-time 40 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/sides.json "$BASE/api/admin/whale-side-census" || true
+          jq -r '.whales[]? |
+                 "  SIDES \(.whale): buys \(.buys) sells \(.sells) share \(.sell_share // "?") — \(.verdict) | \(.by_source | tostring | .[0:160])"' \
+            /tmp/sides.json 2>/dev/null || true
           # TRUEEDGE RE-GRADED AT HIS OWN EXIT. Every whale number
           # served today settles at resolution, which books a
           # cash-out trader's WIN as a loss. The TRUEEDGE cuts were

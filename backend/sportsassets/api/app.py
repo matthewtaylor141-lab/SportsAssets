@@ -3557,6 +3557,64 @@ async def api_true_edge_cashout(since_day: str = "2026-08-01",
                      "where he made one. Nothing is overwritten.")}
 
 
+@app.get("/api/admin/whale-side-census",
+         dependencies=[Depends(require_admin)])
+async def api_whale_side_census() -> dict:
+    """BUY vs SELL rows per whale, ALL TIME, by ingestion source.
+
+    The 7-day exit report returned exit_rate 0.0 for every whale we
+    copy — swisstony 9,243 assets bought, zero sold — while two whales
+    we do NOT copy showed round-trips at 46% and 29%. The owner has
+    confirmed from outside the system that several of ours do sell
+    before settlement. Our data says they never have.
+
+    One of those is wrong, and it is ours. This narrows where:
+
+      * sells = 0 ALL TIME (not just 7d) means we have never once
+        recorded a sale from that wallet — a detection gap, not a
+        quiet week.
+      * the `source` split says WHICH path is blind. If chain records
+        buys and sells but poll records only buys (or vice versa), the
+        gap has an address.
+      * a whale with sells proves the pipeline CAN store them, so any
+        whale without them is missing data rather than not selling.
+
+    No date filter anywhere: the question is existence, not recency.
+    """
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT w.username AS whale, tr.source,
+               count(*) FILTER (WHERE tr.side = 'BUY')::int  AS buys,
+               count(*) FILTER (WHERE tr.side = 'SELL')::int AS sells,
+               min(tr.ts) AS first_ts, max(tr.ts) AS last_ts
+        FROM trades tr JOIN whales w ON w.id = tr.whale_id
+        GROUP BY 1, 2 ORDER BY 1, 2
+        """)
+    by_whale: dict[str, dict] = {}
+    for r in rows:
+        d = by_whale.setdefault(r["whale"], {"whale": r["whale"],
+                                             "by_source": {},
+                                             "buys": 0, "sells": 0})
+        d["by_source"][r["source"]] = {"buys": r["buys"],
+                                       "sells": r["sells"]}
+        d["buys"] += r["buys"]
+        d["sells"] += r["sells"]
+    out = []
+    for d in by_whale.values():
+        d["sell_share"] = (round(d["sells"] / (d["buys"] + d["sells"]), 4)
+                           if (d["buys"] + d["sells"]) else None)
+        d["verdict"] = ("NO SELLS EVER RECORDED — detection gap"
+                        if d["sells"] == 0 and d["buys"] > 50
+                        else "has sells")
+        out.append(d)
+    out.sort(key=lambda x: -x["buys"])
+    return {"whales": out,
+            "note": ("A whale WITH sells proves the pipeline can store "
+                     "them; a whale with thousands of buys and zero "
+                     "sells is missing data, not abstaining.")}
+
+
 @app.get("/api/admin/whale-exits",
          dependencies=[Depends(require_admin)])
 async def api_whale_exits(days: int = 7) -> dict:
