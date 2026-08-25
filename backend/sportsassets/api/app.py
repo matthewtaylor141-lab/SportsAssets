@@ -3650,6 +3650,23 @@ async def api_overspend_receipts(hours: int = 48) -> dict:
                 for k in ("marketSlug", "intent", "instrumentId"):
                     if o.get(k) is not None:
                         ident[f"order.{k}"] = str(o.get(k))[:60]
+                # The venue echoes back the price WE sent. Comparing it
+                # to lastPx is the whole question: same number means it
+                # honoured our limit, different means it did not.
+                if isinstance(o.get("price"), dict):
+                    ident["order.price"] = str(
+                        o["price"].get("value"))[:20]
+            # legPrices (2026-08-25): the venue states a price PER LEG
+            # on every execution. Every overspent fill is BUY_SHORT and
+            # filled near (1 - our price). If legPrices shows our number
+            # on one leg and the fill price on the other, the venue's
+            # `price` field names the LONG leg even on a short order —
+            # and PRICE-TRUTH could not see it, because the PREVIEW
+            # echoes price*qty naively while EXECUTION does the real
+            # conversion. This field settles it.
+            lp = e.get("legPrices")
+            if lp is not None:
+                ident["legPrices"] = str(lp)[:200]
             flat.append({"type": e.get("type"), "px": px, "shares": sh,
                          "ident": ident or None,
                          "keys": sorted(e.keys())[:14]})
