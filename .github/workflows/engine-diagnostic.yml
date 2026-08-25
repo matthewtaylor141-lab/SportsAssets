@@ -704,6 +704,41 @@ jobs:
                  | (.detail.exit_recent // [])[] | "  EXITRECENT \(.)"' \
             /tmp/hb_we.json 2>/dev/null || true
 
+          # PROOF — is the strategy proven profitable yet?
+          #
+          # Built to be able to say NO. The all-time ledger is negative
+          # and that is reported here beside the cohort, never instead
+          # of it: showing only the clean cohort would be the same move
+          # as choosing the cutoff quietly.
+          #
+          # The cohort starts at the deploy of the exit classifier —
+          # the last change that altered WHAT WE BUY rather than what we
+          # report. Copies before it were placed by a system that copied
+          # a whale's exit as a DOUBLED ENTRY.
+          #
+          # INSUFFICIENT is the expected answer for a while. n_still_
+          # needed is the number that turns "are we there yet" into a
+          # date, and it is sized against the whales' own merge-
+          # inclusive ROI, not our noisy point estimate.
+          curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/proof.json "$BASE/api/admin/proof" || true
+          jq -r '.overall // {} |
+                 "  PROOF cohort n=\(.n // 0) staked=$\(.staked // 0) pnl=$\(.pnl // 0) roi=\(.roi // "n/a") ci95=\(.ci95 | tostring)"' \
+            /tmp/proof.json 2>/dev/null || echo "  PROOF unavailable"
+          jq -r '"  PROOF verdict: \(.overall.verdict // "n/a")"' \
+            /tmp/proof.json 2>/dev/null || true
+          jq -r '.overall // {} | select(.n_needed_at_target)
+                 | "  PROOF need \(.n_needed_at_target) settled copies at target edge \(.target_edge) — \(.n_still_needed) still to go"' \
+            /tmp/proof.json 2>/dev/null || true
+          jq -r '.benchmark // {} | select(.whale_roi_on_entries)
+                 | "  PROOF benchmark: whales return \(.whale_roi_on_entries) on $\(.whale_entry_notional) of entries (\(.basis))"' \
+            /tmp/proof.json 2>/dev/null || true
+          jq -r '.all_time_including_contaminated // {} |
+                 "  PROOF all-time (CONTAMINATED, kept on the page): n=\(.n // 0) roi=\(.roi // "n/a") ci95=\(.ci95 | tostring)"' \
+            /tmp/proof.json 2>/dev/null || true
+          jq -r '"  PROOF cohort_start=\(.cohort_start // "n/a")"' \
+            /tmp/proof.json 2>/dev/null || true
+
           # UNMAPPED — WHY the biggest bucket fails, attributed.
           #
           # listed_mapper_fail is 26,569 rows = 1,155 blocked whale

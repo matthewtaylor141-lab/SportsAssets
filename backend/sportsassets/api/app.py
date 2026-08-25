@@ -4526,6 +4526,95 @@ async def api_whale_merge_pnl(since: str = "2026-08-01",
     return {"since": since, "whales": graded}
 
 
+@app.get("/api/admin/proof", dependencies=[Depends(require_admin)])
+async def admin_proof(since: str = "", target: float = 0.0) -> dict:
+    """Is the strategy proven profitable, and if not, how far off?
+
+    The owner asked for confidence that the company runs as designed
+    AND that the strategy is mathematically proven profitable. Those
+    need different evidence and only the first is a matter of reading
+    code. This is the second.
+
+    IT IS BUILT TO BE ABLE TO SAY NO. The all-time ledger is 3,351
+    settled copies at -3.62% on dollar deployed, and there is no
+    reading of that under which the strategy is currently proven. What
+    that number cannot do is settle the question, because every copy in
+    it was placed by a system that copied a whale's EXIT as a doubled
+    ENTRY — the census shows 79 such buys correctly reclassified in one
+    window. A ledger produced by a different system does not measure
+    this one.
+
+    So it reports a COHORT with the cutoff stated out loud, a real
+    ratio-estimator interval, and INSUFFICIENT until the sample can
+    carry a conclusion — plus how many more settled copies that takes,
+    which is the number that turns "are we there yet" into a date.
+
+    The target edge defaults to the whales' own merge-inclusive ROI:
+    that is the return the strategy is trying to inherit, and sizing
+    against our own noisy point estimate would demand an absurd sample
+    precisely when the estimate is least trustworthy.
+    """
+    from ..analytics.proof import COHORT_START, cohort_assess
+
+    pool = await get_pool()
+    start = since or COHORT_START
+    out = await cohort_assess(pool, start)
+
+    # THE BENCHMARK: what the whales themselves return, merge-inclusive.
+    # Reported beside our number because the gap between them is the
+    # execution loss, which is the thing engineering can actually move.
+    bench: dict = {}
+    if not target:
+        try:
+            from ..analytics.merge_pnl import whale_merge_pnl
+            from .copies_record import COPY_WHALES
+
+            graded = await whale_merge_pnl(pool, list(COPY_WHALES),
+                                           "2026-08-01")
+            ent = sum(float(g.get("entry_notional") or 0)
+                      for g in graded.values())
+            rea = sum(float(g.get("realized_total") or 0)
+                      for g in graded.values())
+            if ent > 0:
+                target = rea / ent
+                bench = {"whale_roi_on_entries": round(target, 6),
+                         "whale_entry_notional": round(ent, 2),
+                         "whale_realized": round(rea, 2),
+                         "basis": "merge-inclusive, all copied whales"}
+        except Exception as exc:  # noqa: BLE001 — benchmark is optional
+            bench = {"error": f"benchmark unavailable: "
+                              f"{type(exc).__name__}"}
+
+    if target and out.get("overall", {}).get("sigma_per_dollar"):
+        from ..analytics.proof import required_n
+
+        o = out["overall"]
+        need = required_n(o["sigma_per_dollar"], target)
+        o["target_edge"] = round(target, 6)
+        o["n_needed_at_target"] = need
+        o["n_still_needed"] = max(0, (need or 0) - o["n"])
+    out["benchmark"] = bench
+    # THE ALL-TIME NUMBER STAYS ON THE PAGE. Showing only the clean
+    # cohort would be the same move as choosing the cutoff quietly:
+    # the contaminated history is the reason a cohort exists, so it is
+    # reported beside it, never instead of it.
+    try:
+        alltime = await pool.fetch(
+            "SELECT COALESCE(filled_usd, requested_usd)::float8 AS stake, "
+            "       pnl::float8 AS pnl FROM live_orders "
+            " WHERE pnl IS NOT NULL "
+            "   AND COALESCE(whale_username,'') NOT IN ('manual','underdog') "
+            "   AND COALESCE(filled_usd, requested_usd) > 0")
+        from ..analytics.proof import roi_with_ci
+
+        out["all_time_including_contaminated"] = roi_with_ci(
+            [dict(r) for r in alltime])
+    except Exception as exc:  # noqa: BLE001
+        out["all_time_including_contaminated"] = {
+            "error": type(exc).__name__}
+    return out
+
+
 @app.get("/api/admin/exit-census", dependencies=[Depends(require_admin)])
 async def admin_exit_census() -> dict:
     """WHY the exit path did or did not act, attributed.

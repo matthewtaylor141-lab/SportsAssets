@@ -1,0 +1,219 @@
+"""Is the strategy profitable, and how would we know?
+
+The owner asked for confidence that the company runs as designed AND
+that the strategy is mathematically proven profitable. Those are two
+different claims needing two different kinds of evidence, and only one
+of them is a matter of reading code.
+
+WHAT THE LEDGER SAYS TODAY, unvarnished: 3,351 settled copies,
+-$5,398.57 on $149,190.40 staked, -3.62% on dollar deployed. There is
+no reading of that number under which the strategy is currently proven
+profitable, and no amount of engineering confidence substitutes for it.
+
+WHY THAT NUMBER DOES NOT SETTLE THE QUESTION EITHER. Every copy in it
+was placed by a system with at least one defect that is now closed, and
+the largest was not a rounding error:
+
+  * EXIT DOUBLING. These whales exit by buying the complementary leg.
+    Until 2026-08-25 that arrived labelled BUY and was copied as a
+    fresh ENTRY on the leg he was ABANDONING — so our exposure went to
+    2x rather than to zero, at a price summing to about $1.00 with his
+    entry. Every exit he made cost us twice. The production census now
+    shows 79 such buys correctly classified as exits in a single
+    window, which is the size of what was being done backwards.
+  * SHORT MISDENOMINATION. Cost was computed as filled*price on a leg
+    that costs (1-price)*qty, which is what produced "BUY_SHORT n=6
+    over=6 clean=0" and got the whole short branch banned.
+  * MAPPING COVERAGE. The fill rate was 0.55%: the sample is not only
+    contaminated, it is thin.
+
+A ledger produced by a different system does not measure this one. So
+the honest instrument is a COHORT: count only copies placed after the
+last known money-path defect was closed, state that cutoff out loud,
+and refuse to draw a conclusion until the sample can carry one.
+
+THE STATISTICS. ROI on dollar deployed is a RATIO of two sums, not a
+mean, so its standard error is the ratio estimator's, not sd/sqrt(n):
+
+    R    = sum(pnl) / sum(stake)
+    d_i  = pnl_i - R * stake_i          (residuals, sum to zero)
+    SE   = sqrt( n/(n-1) * sum(d^2) ) / sum(stake)
+
+Using sd/sqrt(n) on per-copy ROI would weight a $3 copy equally with a
+$250 one and report a tighter interval than the data supports.
+
+WHAT WOULD COUNT AS PROOF. The 95% interval excluding zero on the
+positive side. Until then this reports INSUFFICIENT and says how many
+more settled copies are needed at the currently observed dispersion —
+which is the number the owner actually needs, because it converts
+"are we there yet" into a date.
+
+This module is PURE and takes rows. It cannot fabricate a sample.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any
+
+# Two-sided 95%.
+Z95 = 1.959963985
+# 80% power, one-sided, for the sample-size projection.
+Z80 = 0.8416212336
+
+# THE CLEAN-COHORT CUTOFF.
+#
+# 2026-08-25T14:00Z is when the exit classifier reached production —
+# the fix that stopped a whale's exit being copied as a doubled entry.
+# It is the last change that altered WHAT WE BUY rather than what we
+# report, so it is the first moment the ledger describes the system we
+# actually run.
+#
+# Stated as a constant and reported in every response on purpose. A
+# cohort boundary chosen quietly is how a bad result gets tuned away by
+# moving the start date, and this number exists to be argued with in
+# the open.
+COHORT_START = "2026-08-25T14:00:00+00:00"
+
+
+def roi_with_ci(rows: list[dict]) -> dict:
+    """ROI on dollar deployed, with a real confidence interval.
+
+    `rows` carry `stake` and `pnl` in dollars. Rows with a
+    non-positive stake are dropped and counted — a copy that staked
+    nothing cannot inform a return on dollars deployed, and leaving it
+    in inflates n while contributing no information.
+    """
+    pairs: list[tuple[float, float]] = []
+    dropped = 0
+    for r in rows:
+        try:
+            s = float(r.get("stake") or 0)
+            p = float(r.get("pnl") or 0)
+        except (TypeError, ValueError):
+            dropped += 1
+            continue
+        if s <= 0:
+            dropped += 1
+            continue
+        pairs.append((s, p))
+    n = len(pairs)
+    tot_s = sum(s for s, _ in pairs)
+    tot_p = sum(p for _, p in pairs)
+    out: dict[str, Any] = {
+        "n": n, "dropped_rows": dropped,
+        "staked": round(tot_s, 2), "pnl": round(tot_p, 2),
+    }
+    if n == 0 or tot_s <= 0:
+        out.update({"roi": None, "se": None, "ci95": None,
+                    "verdict": "NO SAMPLE — nothing settled in this cohort"})
+        return out
+    r = tot_p / tot_s
+    out["roi"] = round(r, 6)
+    if n < 2:
+        out.update({"se": None, "ci95": None,
+                    "verdict": "INSUFFICIENT — one settled copy cannot "
+                               "carry an interval"})
+        return out
+    ss = sum((p - r * s) ** 2 for s, p in pairs)
+    se = math.sqrt(n / (n - 1) * ss) / tot_s
+    lo, hi = r - Z95 * se, r + Z95 * se
+    out["se"] = round(se, 6)
+    out["ci95"] = [round(lo, 6), round(hi, 6)]
+    # Per-DOLLAR dispersion, which is what a projection needs. Derived
+    # from the same residuals so it cannot disagree with the interval.
+    sigma = se * tot_s / math.sqrt(n)
+    out["sigma_per_dollar"] = round(sigma * n / tot_s, 6) if tot_s else None
+    return out
+
+
+def required_n(sigma_per_dollar: float, target_edge: float,
+               power: bool = True) -> int | None:
+    """Settled copies needed for a 95% interval to exclude zero.
+
+    `sigma_per_dollar` is the per-copy dispersion of return per dollar
+    staked; `target_edge` the ROI we are trying to demonstrate. With
+    `power`, sizes for 80% power (the honest number — an interval that
+    excludes zero only half the time it should is not a plan).
+    """
+    try:
+        s, e = float(sigma_per_dollar), abs(float(target_edge))
+    except (TypeError, ValueError):
+        return None
+    if s <= 0 or e <= 0:
+        return None
+    z = Z95 + (Z80 if power else 0.0)
+    return int(math.ceil((z * s / e) ** 2))
+
+
+def assess(rows: list[dict], target_edge: float | None = None) -> dict:
+    """The full read: interval, verdict, and what is still needed."""
+    out = roi_with_ci(rows)
+    if out.get("ci95") is None:
+        out.setdefault("verdict", "INSUFFICIENT")
+        out["target_edge"] = target_edge
+        return out
+    lo, hi = out["ci95"]
+    sigma = out.get("sigma_per_dollar") or 0.0
+    if lo > 0:
+        out["verdict"] = (
+            f"PROVEN POSITIVE — 95% interval [{lo:+.2%}, {hi:+.2%}] on "
+            f"{out['n']} settled copies excludes zero")
+    elif hi < 0:
+        out["verdict"] = (
+            f"PROVEN NEGATIVE — 95% interval [{lo:+.2%}, {hi:+.2%}] on "
+            f"{out['n']} settled copies excludes zero. This is a real "
+            f"result, not noise: STOP AND DIAGNOSE.")
+    else:
+        out["verdict"] = (
+            f"INSUFFICIENT — 95% interval [{lo:+.2%}, {hi:+.2%}] on "
+            f"{out['n']} settled copies still contains zero. The point "
+            f"estimate is {out['roi']:+.2%} and it is not yet evidence "
+            f"of anything.")
+    # HOW MANY MORE. Sized against the whale's own measured edge when we
+    # have one, because that is the return the strategy is trying to
+    # inherit — sizing against our own noisy point estimate would
+    # demand an absurd sample whenever the estimate is near zero.
+    out["target_edge"] = target_edge
+    if sigma > 0:
+        if target_edge:
+            need = required_n(sigma, target_edge)
+            out["n_needed_at_target"] = need
+            out["n_still_needed"] = max(0, (need or 0) - out["n"])
+        if out["roi"]:
+            out["n_needed_at_observed"] = required_n(sigma, out["roi"])
+    return out
+
+
+async def cohort_assess(pool: Any, since: str = COHORT_START,
+                        whales: list[str] | None = None) -> dict:
+    """Run the assessment over settled copies placed since the cutoff."""
+    import datetime as _dt
+
+    since_ts = _dt.datetime.fromisoformat(str(since))
+    q = """
+        SELECT lo.whale_username,
+               COALESCE(lo.filled_usd, lo.requested_usd)::float8 AS stake,
+               lo.pnl::float8 AS pnl
+          FROM live_orders lo
+         WHERE lo.placed_at >= $1
+           AND lo.pnl IS NOT NULL
+           AND COALESCE(lo.whale_username, '') NOT IN ('manual', 'underdog')
+           AND COALESCE(lo.filled_usd, lo.requested_usd) > 0
+    """
+    rows = [dict(r) for r in await pool.fetch(q, since_ts)]
+    overall = assess(rows)
+    per: dict[str, dict] = {}
+    for w in {str(r["whale_username"] or "?").lower() for r in rows}:
+        per[w] = assess([r for r in rows
+                         if str(r["whale_username"] or "?").lower() == w])
+    return {
+        "cohort_start": since,
+        "cohort_start_is": (
+            "the deploy of the exit classifier — the last change that "
+            "altered WHAT WE BUY rather than what we report. Copies "
+            "before it were placed by a system that copied a whale's "
+            "exit as a doubled entry."),
+        "overall": overall,
+        "by_whale": per,
+    }
