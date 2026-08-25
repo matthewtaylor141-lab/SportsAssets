@@ -3418,9 +3418,39 @@ async def _live_status_uncached() -> dict:
     }
 
 
+@app.post("/api/admin/overspend-halt-clear",
+          dependencies=[Depends(require_admin)])
+async def api_overspend_halt_clear() -> dict:
+    """Clear the post-fill overspend breaker.
+
+    Deliberately a POST and deliberately not an env var: the breaker
+    means the venue charged us more than we authorized on a real fill.
+    Clearing it is a decision someone makes after reading
+    /api/admin/overspend-receipts, not something a config change does
+    as a side effect."""
+    pool = await get_pool()
+    prev = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1",
+        "copy_overspend_halt")
+    await pool.execute(
+        "DELETE FROM ingestion_state WHERE key=$1", "copy_overspend_halt")
+    return {"ok": True, "cleared": prev}
+
+
+@app.get("/api/admin/overspend-halt",
+         dependencies=[Depends(require_admin)])
+async def api_overspend_halt() -> dict:
+    pool = await get_pool()
+    v = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1",
+        "copy_overspend_halt")
+    return {"tripped": bool(v), "record": v}
+
+
 @app.get("/api/admin/price-truth",
          dependencies=[Depends(require_admin)])
-async def api_price_truth(price: float = 0.30, qty: int = 10) -> dict:
+async def api_price_truth(price: float = 0.30, qty: int = 10,
+                          family: str = "aec-") -> dict:
     """Which leg does the venue's `price` field name on a BUY_SHORT?
 
     Runs HERE rather than on the CI runner because the runner has no
@@ -3460,13 +3490,27 @@ async def api_price_truth(price: float = 0.30, qty: int = 10) -> dict:
     # Any live two-sided market — the point is the arithmetic, not the
     # game. Reuse the premap table so we do not crawl the venue again.
     pool = await get_pool()
+    # FAMILY MATTERS (2026-08-25). The first run of this picked the
+    # most recently updated premap row — an `astatc` MLB prop — and
+    # reported "matches OUR price" for both intents. All five overspend
+    # rows are `aec-` tennis, and we already know side semantics differ
+    # BY FAMILY (that was the whole shared-identifier finding). Testing
+    # the wrong family and reporting it as an answer is the mistake
+    # this parameter exists to prevent. Defaults to aec-.
     slug = await pool.fetchval(
         "SELECT identifier FROM us_premap "
         "WHERE intent IS NOT NULL AND identifier IS NOT NULL "
-        "ORDER BY updated_at DESC LIMIT 1")
+        "AND identifier LIKE $1 || '%' "
+        "ORDER BY updated_at DESC LIMIT 1", family)
+    if not slug:
+        slug = await pool.fetchval(
+            "SELECT identifier FROM us_premap "
+            "WHERE intent IS NOT NULL AND identifier IS NOT NULL "
+            "ORDER BY updated_at DESC LIMIT 1")
     if not slug:
         return {"ok": False, "error": "no premap row to preview against"}
-    out = {"ok": True, "market": slug, "price": price, "qty": qty,
+    out = {"ok": True, "market": slug, "family": family,
+           "price": price, "qty": qty,
            "ours": ours, "complement": comp, "legs": {}}
     for intent in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
         req = {"marketSlug": slug, "intent": intent,

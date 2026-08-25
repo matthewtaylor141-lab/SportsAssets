@@ -154,6 +154,26 @@ COPY_HALT_REASON = (
 _HALT_ON_VALUES = {"on", "1", "true", "yes", "halt", "halted", "stop"}
 
 
+async def overspend_halt(pool) -> Any:
+    """The tripped-breaker record, or None.
+
+    Read through a named helper rather than inline so the test suite can
+    neutralize it in one place — the stub pools answer every fetchval
+    with a truthy value, which would otherwise make all 42 downstream
+    gate tests pass while testing nothing.
+
+    An UNREADABLE breaker counts as TRIPPED. This guards real money, and
+    "the database did not answer" is not evidence that nothing is
+    wrong."""
+    try:
+        return await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            "copy_overspend_halt")
+    except Exception:  # noqa: BLE001
+        log.exception("overspend breaker unreadable — treating as tripped")
+        return {"why": "breaker unreadable — refusing until it can be read"}
+
+
 def copy_halted() -> bool:
     """True when the owner has re-armed the halt.
 
@@ -1526,6 +1546,25 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         return
 
     pool = await get_pool()
+    # OVERSPEND BREAKER (2026-08-25). Tripped by the post-fill detector
+    # the first time the venue charges more than we authorized. Placed
+    # at the first point `pool` exists, still ahead of sizing, pricing
+    # and the live_orders INSERT — nothing about the order has been
+    # decided when it refuses.
+    #
+    # COPY SLEEVE ONLY, deliberately. It is NOT wired into the manual
+    # desk: the desk rides its own budget and is the owner's directed
+    # trading, and I already broke it once today with a fail-closed
+    # check that was right in principle and in the wrong function.
+    #
+    # NOT env-clearable either: LIVE_COPY_HALT is the owner's lever,
+    # this one is evidence of a live money defect and takes a
+    # deliberate admin clear after someone has read the receipts.
+    _osh = await overspend_halt(pool)
+    if _osh:
+        log.warning("LIVE refused: overspend breaker tripped (%s)",
+                    str(_osh)[:200])
+        return
     if await _is_paused(pool):
         return
     # Cell-level copy policy (owner directive 2026-08-06): each source
@@ -2218,6 +2257,43 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                       or payload.get("asset") or "?",
                       usd, shares, limit, spent, filled, fill_price or 0,
                       spent / usd)
+            # AUTO-HALT ON THE FIRST OVERSPEND (2026-08-25).
+            #
+            # I told the owner the preview cost guard made running live
+            # safe. That was WRONG and this is the correction. PRICE-
+            # TRUTH showed the venue's preview simply echoes our own
+            # price * quantity ($3.00 asked, $3.00 previewed, ratio
+            # 1.000) — so prev_cost always equals expected_cost and the
+            # guard can NEVER see an overcharge. The overcharge happens
+            # at EXECUTION, which no pre-trade check observes.
+            #
+            # What is actually observable is the fill itself. So the
+            # circuit is post-fill: the first overspend costs one clip
+            # and stops the sleeve, instead of repeating across every
+            # copy for the rest of the night. Bounded damage is the
+            # honest protection here; pre-trade prevention is not
+            # available until the mechanism is understood.
+            #
+            # Persisted, so it survives a worker restart and holds until
+            # a human clears it — a breaker that forgets is not one.
+            try:
+                await pool.execute(
+                    "INSERT INTO ingestion_state (key, value) "
+                    "VALUES ('copy_overspend_halt', $1::jsonb) "
+                    "ON CONFLICT (key) DO UPDATE SET value = $1::jsonb",
+                    json.dumps({
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "whale": payload.get("whale_username"),
+                        "slug": (locals().get("mapping") or {}).get(
+                            "market_slug") or payload.get("asset"),
+                        "asked": usd, "spent": spent,
+                        "ratio": round(spent / usd, 3),
+                        "limit": limit, "fill_price": fill_price,
+                        "why": "venue filled above our limit — copying "
+                               "halted after the first occurrence"}))
+                log.error("COPY SLEEVE HALTED by overspend breaker")
+            except Exception:  # noqa: BLE001 — never lose the fill record
+                log.exception("could not persist the overspend halt")
         await pool.execute(
             """
             UPDATE live_orders

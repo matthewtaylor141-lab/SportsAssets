@@ -18,3 +18,21 @@ import pytest
 @pytest.fixture(autouse=True)
 def _lift_emergency_halt(monkeypatch):
     monkeypatch.setenv("LIVE_COPY_HALT", "off")
+
+
+@pytest.fixture(autouse=True)
+def _clear_overspend_breaker(monkeypatch):
+    """Same problem, different switch.
+
+    The overspend breaker reads ingestion_state through the pool, and
+    the stub pools in this suite answer EVERY fetchval with a truthy
+    value — so the breaker reads "tripped" and short-circuits
+    maybe_execute before any gate under test runs. Neutralized here;
+    test_overspend_breaker.py exercises the real function directly.
+    """
+    from sportsassets import live_executor as le
+
+    async def _clear(_pool):
+        return None
+
+    monkeypatch.setattr(le, "overspend_halt", _clear)

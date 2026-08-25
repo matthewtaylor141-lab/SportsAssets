@@ -592,8 +592,14 @@ jobs:
           # PMUS keys. Only the deployed API can preview an order.
           curl -sS --max-time 40 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/ptruth.json \
-               "$BASE/api/admin/price-truth?price=0.30&qty=10" || true
-          jq -r '"  PRICE-TRUTH market=\(.market // "?") ours=$\(.ours // "?") complement=$\(.complement // "?") err=\(.error // "none")",
+               "$BASE/api/admin/price-truth?price=0.30&qty=10&family=aec-" || true
+          # OVERSPEND BREAKER state — if this is tripped the copy sleeve
+          # is stopped and only an admin clear restarts it.
+          curl -sS --max-time 25 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/osh.json "$BASE/api/admin/overspend-halt" || true
+          jq -r '"  OSHALT tripped=\(.tripped // false) \(.record // "" | tostring | .[0:220])"' \
+            /tmp/osh.json 2>/dev/null || true
+          jq -r '"  PRICE-TRUTH market=\(.market // "?") family=\(.family // "?") ours=$\(.ours // "?") complement=$\(.complement // "?") err=\(.error // "none")",
                  (.legs // {} | to_entries[] |
                    "  PTRUTH \(.key): venue_cost=$\(.value.venue_cost // "?") ratio=\(.value.ratio_to_ours // "?") \(.value.verdict // .value.error // "?")")' \
             /tmp/ptruth.json 2>/dev/null || true
