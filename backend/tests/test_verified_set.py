@@ -16,23 +16,39 @@ sent the investigation somewhere else entirely.
 The two gates still run independently and each still takes its own env
 override. What they can no longer do is disagree about who has been
 certified.
-"""
+
+MEMBERSHIP MOVED 2026-08-25 (owner-granted) when the first
+merge-inclusive whale P&L showed the roster was inverted: rn1
+(+$222,038) and ferrari (+$217,159) had been cut, swisstony
+(-$187,613) was being copied. The unity property below is what this
+file protects, not any particular membership — so these fixtures name
+whoever is currently certified and will move again when the numbers
+do."""
 
 import inspect
 
 from sportsassets import live_executor as le
 
 
-def test_the_verified_set_names_the_three_certified_whales():
+def test_the_verified_set_names_the_certified_whales():
     assert le.VERIFIED_PROFITABLE_DEFAULT == (
-        "homerunhazard,0x076daa87,swisstony")
+        "homerunhazard,0x076daa87,rn1,ferrarichampions2026")
 
 
-def test_swisstony_is_in_the_default_set():
-    """He is the whale the system is built around; a resume that leaves
-    him out of any allowlist is not a resume."""
-    assert "swisstony" in le._whale_set("LIVE_VERIFIED_WHALES")
-    assert "swisstony" in le._whale_set("LIVE_PREMAP_WHALES")
+def test_the_restored_whales_are_in_both_gates():
+    """rn1 and ferrari are the two best books on the roster and were
+    cut on a settlement basis that could not see how they take profit.
+    A restore that leaves either out of an allowlist is not a restore —
+    that is precisely the 2,897-rejection failure this file exists
+    for."""
+    for w in ("rn1", "ferrarichampions2026"):
+        assert w in le._whale_set("LIVE_VERIFIED_WHALES"), w
+        assert w in le._whale_set("LIVE_PREMAP_WHALES"), w
+
+
+def test_the_cut_whale_is_in_neither_gate():
+    assert "swisstony" not in le._whale_set("LIVE_VERIFIED_WHALES")
+    assert "swisstony" not in le._whale_set("LIVE_PREMAP_WHALES")
 
 
 def test_both_gates_default_to_the_same_membership(monkeypatch):
@@ -49,7 +65,7 @@ def test_each_gate_still_takes_its_own_override(monkeypatch):
     monkeypatch.setenv("LIVE_PREMAP_WHALES", "homerunhazard")
     monkeypatch.delenv("LIVE_VERIFIED_WHALES", raising=False)
     assert le._whale_set("LIVE_PREMAP_WHALES") == {"homerunhazard"}
-    assert "swisstony" in le._whale_set("LIVE_VERIFIED_WHALES")
+    assert "rn1" in le._whale_set("LIVE_VERIFIED_WHALES")
 
 
 def test_an_empty_override_disables_that_gate_not_the_other(monkeypatch):

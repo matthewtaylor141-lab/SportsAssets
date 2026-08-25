@@ -560,7 +560,15 @@ def copy_halted() -> bool:
 # Both gates still exist and still run independently; they just cannot
 # disagree about who has been certified. Each stays overridable by its
 # own env var for a deliberate, asymmetric change.
-VERIFIED_PROFITABLE_DEFAULT = "homerunhazard,0x076daa87,swisstony"
+# Follows the roster reset above (see PER_FILL_BY_WHALE for the numbers
+# and the reasoning). This set gates BOTH the premap-live lane and
+# mirror_exit, so a whale missing from it can neither enter nor be
+# followed out — which is why it has to move in lockstep with the clip
+# map. Divergence between these two is the shape of the 2026-08-24 bug
+# where SwissTony was "resumed" everywhere except the one list that
+# mattered and placed 2,897 rejections and zero orders.
+VERIFIED_PROFITABLE_DEFAULT = (
+    "homerunhazard,0x076daa87,rn1,ferrarichampions2026")
 
 
 def _whale_set(env_name: str) -> set[str]:
@@ -861,7 +869,20 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 #   −14,835 at the OLD ~74s median) keeps his $300 clip but stays out
 #   of LIVE_PREMAP_WHALES until his paper re-run at the new sub-second
 #   detection grades positive.
-COPY_CUT_WHALES = frozenset({"rn1", "ferrarichampions2026", _W2C33})
+# RESET 2026-08-25 with the clip map and the verified set — see
+# PER_FILL_BY_WHALE for the re-graded numbers.
+#
+# This is the THIRD gate on the same decision, and the test suite is
+# the only reason it did not get missed: the clip map and the verified
+# set were both updated first, and this literal still refused rn1 and
+# ferrari at entry. That is the identical shape of the 2026-08-24 bug,
+# where SwissTony was resumed in two places and refused by a third,
+# reported as live, and placed 2,897 rejections with $0 deployed.
+#
+# Three literals for one decision is a standing hazard. They are pinned
+# against each other in test_verified_set and test_roster_reset so a
+# future roster move cannot land in two of the three again.
+COPY_CUT_WHALES = frozenset({"swisstony", _W2C33})
 # PROBE CLIPS (owner authorization 2026-08-24 evening: "$100 per clip
 # on the actually verified profitable whales"). The resume is a bounded
 # proof, not a return to size: the venue's side model is verified by
@@ -874,10 +895,44 @@ COPY_CUT_WHALES = frozenset({"rn1", "ferrarichampions2026", _W2C33})
 # assumption still unproven (that BUY_SHORT buys the short side), so
 # the first-fill gate below narrows the unverified window to a single
 # order instead of the semaphore's four.
-PER_FILL_BY_WHALE = {"rn1": 0.00, "swisstony": 250.00,
+# ROSTER RESET 2026-08-25, owner-granted, on the first whale P&L this
+# desk has ever produced that can SEE how these accounts take profit.
+#
+# Every prior roster decision graded at RESOLUTION. That basis cannot
+# see a merge, and these whales close by merging — so the numbers the
+# cuts were made on were blind to the exits that decide their P&L.
+# Re-graded over full ledgers (no truncation), merges counted:
+#
+#   rn1                   +$222,038 on $23.9M entries  (+0.93%)  WAS CUT
+#   ferrarichampions2026  +$217,159 on $12.8M entries  (+1.69%)  WAS CUT
+#   0x076daa87             +$43,897 on $2.9M entries   (+1.53%)  kept
+#   homerunhazard          -$35,363 on $27.4M entries  (-0.13%)  kept
+#   swisstony             -$187,613 on $23.0M entries  (-0.82%)  NOW CUT
+#   0x2c33...           -$1,910,412 on $47.4M entries  (-4.03%)  stays cut
+#
+# We had cut the two best books and were copying the second-worst. The
+# settlement basis said the opposite of every one of those lines.
+#
+# swisstony to 0.00 is the least disruptive of these changes in
+# practice: he has placed ZERO orders for days (his book resolves
+# src=fuzzy and the quarantine admits only src=premap), so this makes
+# an existing outage into a deliberate decision rather than stopping
+# live flow.
+#
+# homerunhazard STAYS at -0.13%. He is roughly break-even on a huge
+# book, not a leak, and cutting three of five whales at once would
+# leave one live source and no way to attribute what changed.
+#
+# 0x2c33 stays blocked: -4.03% on $47M is the clearest loser here.
+#
+# WHAT THIS IS NOT: proof. It is realised P&L with large open positions
+# still outstanding (ferrari $7.5M, rn1 $12.3M), and ROI on entries
+# flatters high-turnover books. If the next re-grade moves these lines,
+# this map moves with it.
+PER_FILL_BY_WHALE = {"rn1": 250.00, "swisstony": 0.00,
                      _W2C33: 0.00, "homerunhazard": 250.00,
                      "kch123": 150.00,
-                     "ferrarichampions2026": 0.00,
+                     "ferrarichampions2026": 250.00,
                      "0x076daa87": 250.00}
 # HARD CEILING on the resolved clip, applied AFTER every override and
 # multiplier. The owner authorized $100 per clip; a spread's x1.5 would

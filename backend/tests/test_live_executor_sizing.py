@@ -2,7 +2,14 @@
 2026-08-24, from the verified counterfactual table on the FULL detected
 book, settled on each whale's own venue):
 
-- rn1, ferrarichampions2026, 0x2c33 are CUT — negative at their OWN
+ROSTER RESET 2026-08-25 (owner-granted). The merge-inclusive re-grade
+— the first whale P&L that can see how these accounts actually take
+profit — inverted the previous decision: rn1 +$222,038 and ferrari
++$217,159 were the two BEST books and had been cut, while swisstony
+-$187,613 was being copied. These fixtures follow the live roster.
+
+Superseded, kept for the record:
+- rn1, ferrarichampions2026, 0x2c33 were CUT — negative at their OWN
   prices, not copyable at any speed. Their clips are 0.00 blocks and
   COPY_CUT_WHALES refuses them at entry.
 - homerunhazard (+26,076 cf / +15,051 paper) and 0x076 (+6,189 cf /
@@ -25,7 +32,7 @@ def test_verified_profitable_whales_clip_at_the_probe_size():
     assert per_fill_usd("HomeRunHazard") == 250.00
     assert per_fill_usd("homerunhazard") == 250.00
     assert per_fill_usd("0x076daa87") == 250.00
-    assert per_fill_usd("SwissTony") == 250.00
+    assert per_fill_usd("RN1") == 250.00
 
 
 def test_cut_whales_clip_at_zero_everywhere():
@@ -35,34 +42,34 @@ def test_cut_whales_clip_at_zero_everywhere():
     over the 0.00 base, which is exactly the leak this test pins."""
     from sportsassets.live_executor import _W2C33
 
-    assert per_fill_usd("rn1") == 0.00
-    assert per_fill_usd("RN1") == 0.00
-    assert per_fill_usd("ferrarichampions2026") == 0.00
+    assert per_fill_usd("swisstony") == 0.00
+    assert per_fill_usd("SwissTony") == 0.00
+    assert per_fill_usd(_W2C33) == 0.00
     assert per_fill_usd(_W2C33) == 0.00
     # The old rn1 sport cells (tennis 112.50 / baseball 375 / soccer
     # 300) must not survive anywhere:
-    assert per_fill_usd("rn1", "aec-atp-rafjod-artfil-2026-08-21-raf") == 0.00
-    assert per_fill_usd("rn1", "aec-mlb-nyy-bos-2026-08-24") == 0.00
-    assert per_fill_usd("rn1", "atc-epl-ars-che-2026-08-15-ars") == 0.00
+    assert per_fill_usd("swisstony", "aec-atp-rafjod-artfil-2026-08-21-raf") == 0.00
+    assert per_fill_usd("swisstony", "aec-mlb-nyy-bos-2026-08-24") == 0.00
+    assert per_fill_usd("swisstony", "atc-epl-ars-che-2026-08-15-ars") == 0.00
     # Multipliers never resurrect a cut whale (0 x anything = 0):
-    assert per_fill_usd("rn1", "epl-ars-che-2026-08-20-1pt5") == 0.00
+    assert per_fill_usd("swisstony", "epl-ars-che-2026-08-20-1pt5") == 0.00
     assert per_fill_usd(_W2C33,
                         "aec-atp-rafjod-artfil-2026-08-11") == 0.00
-    assert per_fill_usd("ferrarichampions2026",
+    assert per_fill_usd(_W2C33,
                         "aec-atp-rafjod-artfil-2026-08-11") == 0.00
 
 
 def test_cut_set_names_exactly_the_three_verified_negative_books():
     from sportsassets.live_executor import _W2C33
 
-    assert COPY_CUT_WHALES == {"rn1", "ferrarichampions2026", _W2C33}
+    assert COPY_CUT_WHALES == {"swisstony", _W2C33}
 
 
 def test_every_whale_is_bounded_by_the_probe_ceiling():
     """No sport cell or multiplier may exceed the authorized $250 —
     and the ceiling CAPS, it never promotes a smaller clip."""
-    assert per_fill_usd("SwissTony", "atc-epl-ars-che-2026-08-15-ars") == 250.00
-    assert per_fill_usd("swisstony", "epl-ars-che-2026-08-15") == 250.00
+    assert per_fill_usd("RN1", "atc-epl-ars-che-2026-08-15-ars") == 250.00
+    assert per_fill_usd("rn1", "epl-ars-che-2026-08-15") == 250.00
     assert per_fill_usd("someone-new", "epl-ars-che-2026-08-15") == 75.00
     assert per_fill_usd("kch123", "atc-nhl-tor-mtl-2026-10-15-tor") == 150.00
 
@@ -105,7 +112,7 @@ class TestTypeMultipliers:
             "homerunhazard", "asc-nba-lal-bos-2026-11-01-neg-2pt5") == 250.00
 
     def test_moneylines_are_bounded_too(self):
-        assert per_fill_usd("swisstony",
+        assert per_fill_usd("rn1",
                             "atc-epl-ars-che-2026-08-20-ars") == 250.00
         assert per_fill_usd("0x076daa87",
                             "aec-atp-rafjod-artfil-2026-08-21-raf") == 250.00
@@ -157,8 +164,8 @@ class TestProbeAuthorization:
     def test_cut_whales_are_still_zero(self):
         from sportsassets.live_executor import _W2C33
 
-        assert per_fill_usd("rn1") == 0.00
-        assert per_fill_usd("ferrarichampions2026") == 0.00
+        assert per_fill_usd("swisstony") == 0.00
+        assert per_fill_usd(_W2C33) == 0.00
         assert per_fill_usd(_W2C33) == 0.00
 
     def test_the_ceiling_is_env_adjustable_for_promotion(self, monkeypatch):

@@ -21,8 +21,19 @@ from tests.test_live_executor_ladder import _LadderPool, _payload, _wire
 
 TODAY = date.today().isoformat()
 
-REAL_CUTS = frozenset({"rn1", "ferrarichampions2026",
-                       live_executor._W2C33})
+# THE PRODUCTION SET, not a copy of it.
+#
+# This was a frozenset literal listing rn1 and ferrari, written when
+# they were cut. The 2026-08-25 roster reset moved production and left
+# this behind — a FOURTH literal of the same decision, inside the
+# harness that is supposed to be testing it. Every rn1 fixture then
+# failed with no rejection row at all, because the harness itself was
+# re-cutting him after wiring.
+#
+# Reading the real constant means the harness cannot disagree with
+# production about who is cut, which is the property the whole
+# roster-drift family of bugs comes from.
+REAL_CUTS = live_executor.COPY_CUT_WHALES
 
 
 def _wire_with_real_cuts(monkeypatch, pool, mapped_slug):
@@ -34,8 +45,7 @@ def _wire_with_real_cuts(monkeypatch, pool, mapped_slug):
 
 
 def test_cut_whales_are_refused_at_entry(monkeypatch):
-    for whale in ("RN1", "rn1", "ferrarichampions2026",
-                  live_executor._W2C33):
+    for whale in ("SwissTony", "swisstony", live_executor._W2C33):
         pool = _LadderPool([])
         submitted = _wire_with_real_cuts(
             monkeypatch, pool, f"tsc-epl-ars-che-{TODAY}-o3pt5")
@@ -90,25 +100,27 @@ class TestPremapLiveAllowlist:
             pool, submitted = self._run(monkeypatch, whale)
             assert submitted, f"{whale} is verified-profitable — trades"
 
-    def test_swisstony_trades_now_that_his_fast_cohort_certified(
+    def test_a_certified_whale_trades(
             self, monkeypatch):
         """His hold's stated condition — paper cohort positive at the
         NEW detection latency — was met on 2026-08-24 evening:
         TRUEEDGE-FAST paper_actual +6,864.52 on detections inside 5s.
-        The hold is lifted; the 15s staleness cap enforces the
-        condition that makes him profitable."""
+        Exemplar moved to RN1 on 2026-08-25: the merge-inclusive
+        re-grade made him the roster's best book (+$222,038) and cut
+        SwissTony (-$187,613). The gate under test is the allowlist,
+        not the identity."""
         pool, submitted = self._run(
-            monkeypatch, "SwissTony",
-            allowlist_env="homerunhazard,0x076daa87,swisstony")
+            monkeypatch, "RN1",
+            allowlist_env="homerunhazard,0x076daa87,rn1")
         assert submitted, "a certified whale trades"
 
     def test_the_hold_mechanism_still_works_for_any_whale(self,
                                                           monkeypatch):
         """The gate itself is intact and re-armable without a deploy."""
-        monkeypatch.setenv("LIVE_HOLD_WHALES", "swisstony")
+        monkeypatch.setenv("LIVE_HOLD_WHALES", "rn1")
         pool, submitted = self._run(
-            monkeypatch, "SwissTony",
-            allowlist_env="homerunhazard,0x076daa87,swisstony")
+            monkeypatch, "RN1",
+            allowlist_env="homerunhazard,0x076daa87,rn1")
         assert submitted == []
         rej = [(sql, a) for sql, a in pool.updates
                if "status='rejected'" in sql and "hold:" in str(a)]
@@ -125,13 +137,13 @@ class TestPremapLiveAllowlist:
                and "verified-profitable" in str(a)]
         assert len(rej) == 1, "refusal must carry the allowlist reason"
 
-    def test_swisstony_joins_via_env_no_deploy(self, monkeypatch):
+    def test_a_whale_joins_via_env_no_deploy(self, monkeypatch):
         """The certification path: clear the hold AND join the
         allowlist — both deliberate env actions, no deploy."""
         monkeypatch.setenv("LIVE_HOLD_WHALES", "")
         pool, submitted = self._run(
-            monkeypatch, "SwissTony",
-            allowlist_env="homerunhazard,0x076daa87,swisstony")
+            monkeypatch, "RN1",
+            allowlist_env="homerunhazard,0x076daa87,rn1")
         assert submitted
 
 
@@ -285,10 +297,10 @@ def test_side_echo_outage_never_trips_the_breaker(monkeypatch):
 def test_a_held_whale_is_refused_even_with_quarantine_off(monkeypatch):
     """The leak-hunt scenario: lifting the quarantine (a mapping-
     fidelity action) must NOT admit a HELD whale — the hold is a
-    profitability decision with its own gate. swisstony's hold was
-    lifted on measured evidence 2026-08-24 evening, so the mechanism
-    is exercised here by re-arming it explicitly."""
-    monkeypatch.setenv("LIVE_HOLD_WHALES", "swisstony")
+    profitability decision with its own gate. No whale is held by
+    default, so the mechanism is exercised by re-arming it explicitly
+    on a whale that is otherwise fully live."""
+    monkeypatch.setenv("LIVE_HOLD_WHALES", "rn1")
     from sportsassets import copy_sports as _cs
 
     pool = _LadderPool([])
@@ -297,7 +309,7 @@ def test_a_held_whale_is_refused_even_with_quarantine_off(monkeypatch):
     monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
     # quarantine fully OFF (env, as _wire sets) — the hold still bites
     asyncio.run(live_executor.maybe_execute(
-        _payload(whale_username="SwissTony"), 5.0))
+        _payload(whale_username="RN1"), 5.0))
     assert submitted == []
     rej = [(sql, a) for sql, a in pool.updates
            if "status='rejected'" in sql and "hold:" in str(a)]
@@ -309,7 +321,7 @@ def test_a_held_whale_is_refused_even_with_quarantine_off(monkeypatch):
     monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
     monkeypatch.setenv("LIVE_HOLD_WHALES", "")
     asyncio.run(live_executor.maybe_execute(
-        _payload(whale_username="SwissTony"), 5.0))
+        _payload(whale_username="RN1"), 5.0))
     assert submitted2
 
 
@@ -476,7 +488,7 @@ class TestVerifiedOnlyIsIndependentOfQuarantine:
         # suite is ABOUT the gate, so put the real default back.
         monkeypatch.setenv(
             "LIVE_VERIFIED_WHALES",
-            "homerunhazard,0x076daa87,swisstony"
+            "homerunhazard,0x076daa87,rn1,ferrarichampions2026"
             if verified_env is None else verified_env)
         asyncio.run(live_executor.maybe_execute(
             _payload(whale_username=whale), 5.0))

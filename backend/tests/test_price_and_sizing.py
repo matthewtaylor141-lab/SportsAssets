@@ -35,35 +35,39 @@ def test_clip_is_base_at_or_under_envelope():
     money actually deployed against the whale's dollar envelope
     (baseline fills x clip), so partial IOC takes no longer burn a full
     baseline slot. Fixtures moved to the live whales after the
-    2026-08-24 TRUEEDGE cut zeroed rn1's clip."""
+    2026-08-24 TRUEEDGE cut zeroed rn1's clip, and moved AGAIN on
+    2026-08-25 when the merge-inclusive re-grade restored rn1
+    (+$222,038) and cut swisstony (-$187,613). These fixtures name a
+    whale only to pick up a (clip, baseline) pair; the governor
+    arithmetic is what is under test, so they follow whoever is live."""
     # Probe sizing (owner authorization 2026-08-24 evening): $100 clip,
     # so the envelope is baseline x $100.
-    assert _clip("swisstony", 0) == 250.00
-    assert _clip("swisstony", 30 * 250.00) == 250.00
+    assert _clip("rn1", 0) == 250.00
+    assert _clip("rn1", 150 * 250.00) == 250.00
     assert _clip("homerunhazard", 20 * 250.00) == 250.00
 
 
 def test_partial_takes_do_not_burn_full_slots():
     # 300 partial takes of ~$9 = $2,700 deployed — nowhere near the
-    # $9,000 swisstony envelope. The old count-based governor shrank
+    # $37,500 rn1 envelope. The old count-based governor shrank
     # the clip here; the dollar governor keeps full size.
-    assert _clip("swisstony", 100 * 9.0) == 250.00
+    assert _clip("rn1", 100 * 9.0) == 250.00
 
 
 def test_ten_x_dollars_means_one_tenth_size():
-    assert _clip("swisstony", 10 * 30 * 250.00) == pytest.approx(25.00)
+    assert _clip("rn1", 10 * 150 * 250.00) == pytest.approx(25.00)
     assert _clip("homerunhazard", 10 * 20 * 250.00) == pytest.approx(25.00)
 
 
 def test_clip_floors_at_five_dollars_and_never_scales_up():
-    assert _clip("swisstony", 10_000_000) == 5.00
-    assert _clip("swisstony", 30 * 250.00 + 500) < 250.00
+    assert _clip("rn1", 10_000_000) == 5.00
+    assert _clip("rn1", 150 * 250.00 + 500) < 250.00
 
 
 def test_sport_override_is_the_scaling_base():
     # During the probe every base is the $100 ceiling, so 10x the
     # envelope scales to $10.
-    assert _clip("swisstony", 10 * 30 * 250.00,
+    assert _clip("rn1", 10 * 150 * 250.00,
                  "epl-ars-che-2026-08-15") == pytest.approx(25.00)
 
 
@@ -72,7 +76,7 @@ def test_unreadable_count_degrades_to_base_clip():
         async def fetchval(self, sql, *a):
             raise RuntimeError("db down")
 
-    assert asyncio.run(volume_normalized_clip(_Boom(), "swisstony")) == 250.00
+    assert asyncio.run(volume_normalized_clip(_Boom(), "rn1")) == 250.00
 
 
 # ── same-or-better limit (float-floor regression) ───────────────────

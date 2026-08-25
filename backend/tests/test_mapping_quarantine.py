@@ -166,13 +166,19 @@ class TestPerWhaleStalenessCaps:
         """30s is fine for everyone else and far too late for him.
         (The harness slug is a soccer TOTAL, which is not one of his
         cells, so the cell gate would refuse him first — stubbed here
-        to isolate the staleness rule under test.)"""
+        to isolate the staleness rule under test. His clip went to 0.00
+        in the 2026-08-25 roster reset, which skips before the
+        staleness check, so that is stubbed for the same reason: the
+        per-whale CAP is what is under test, and it outlives whoever
+        happens to be on the roster.)"""
         from sportsassets import copy_sports as _cs
 
         pool = _LadderPool([])
         submitted = _wire(monkeypatch, pool,
                           f"tsc-epl-ars-che-{TODAY}-o3pt5")
         monkeypatch.setattr(live_executor, "COPY_CUT_WHALES", frozenset())
+        monkeypatch.setitem(live_executor.PER_FILL_BY_WHALE,
+                            "swisstony", 250.00)
         monkeypatch.setattr(_cs, "copy_allowed", lambda *a, **k: True)
         asyncio.run(live_executor.maybe_execute(
             _payload(whale_username="SwissTony"), 30.0))
