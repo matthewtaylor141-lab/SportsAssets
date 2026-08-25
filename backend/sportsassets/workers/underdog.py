@@ -770,6 +770,7 @@ async def _cashout_sweep(pool) -> dict:
         return {"skipped": "sleeve off"}
     from ..config import settings
     from ..live_executor import active_venue
+    from .. import live_executor as le
     from .. import pmus
 
     stats = {"open": 0, "cashed": 0}
@@ -803,7 +804,11 @@ async def _cashout_sweep(pool) -> dict:
         sold = float(res.get("filled_shares") or 0)
         if res.get("ok") and sold >= r["qty"]:
             px = float(res.get("fill_price") or want)
-            pnl = round((px - r["entry"]) * r["qty"], 4)
+            # The underdog sleeve has no short entry path, so intent is
+            # None and this is arithmetically identical to before. It
+            # goes through the shared helper so a future short-capable
+            # sleeve cannot inherit the long-only formula by default.
+            pnl = le.realized_pnl(r["entry"], px, r["qty"], None) or 0.0
             await pool.execute(
                 """UPDATE live_orders SET status='cashed_out', pnl=$2,
                    settled_at=now() WHERE id=$1""", r["id"], pnl)
@@ -857,6 +862,7 @@ COPY_EXIT_MIN_GAIN_USD = float(
 async def _copy_exit_sweep(pool) -> dict:
     from ..config import settings
     from ..live_executor import active_venue
+    from .. import live_executor as le
     from .. import pmus
 
     stats = {"copyexit_open": 0, "copyexit_cashed": 0}
@@ -864,7 +870,11 @@ async def _copy_exit_sweep(pool) -> dict:
         return stats
     rows = await pool.fetch(
         "SELECT id, asset, us_market_slug, whale_username, "
-        "fill_price::float8 AS entry, filled_shares::float8 AS qty "
+        "fill_price::float8 AS entry, filled_shares::float8 AS qty, "
+        # ONE definition of where the intent lives. Copying the
+        # expression here is how four places came to encode one
+        # decision in the first place.
+        f"{le.ORDER_INTENT_SQL} AS intent "
         "FROM live_orders "
         "WHERE status = 'filled' AND us_market_slug IS NOT NULL "
         "AND whale_username NOT IN ('underdog', 'manual')")
@@ -912,7 +922,11 @@ async def _copy_exit_sweep(pool) -> dict:
         sold = float(res.get("filled_shares") or 0)
         if res.get("ok") and sold >= r["qty"]:
             px = float(res.get("fill_price") or want)
-            pnl = round((px - r["entry"]) * r["qty"], 4)
+            # THESE ARE COPY-SLEEVE ROWS — the same population
+            # mirror_exit sells, which is why the two race for the
+            # claim above. That means they can be SHORTS, and the long
+            # formula inverts a short's sign.
+            pnl = le.realized_pnl(r["entry"], px, r["qty"], r["intent"])
             await pool.execute(
                 """UPDATE live_orders SET status='cashed_out', pnl=$2,
                    settled_at=now() WHERE id=$1""", r["id"], pnl)

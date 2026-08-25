@@ -444,7 +444,8 @@ async def mirror_exit(payload: dict) -> None:
         return _exit_stop("mx_overspend_halt")
     row = await pool.fetchrow(
         "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
-        "       fill_price::float8 AS entry "
+        "       fill_price::float8 AS entry, "
+        f"      {ORDER_INTENT_SQL} AS intent "
         "FROM live_orders "
         "WHERE asset = $1 AND lower(COALESCE(whale_username,'')) = $2 "
         "  AND status = 'filled' AND us_market_slug IS NOT NULL "
@@ -577,7 +578,11 @@ async def mirror_exit(payload: dict) -> None:
         await _release_exit_claim(pool, row["id"])
         return _exit_stop("mx_venue_unfilled", slug=us_slug)
     entry = row["entry"] or 0
-    pnl = round((float(px) - entry) * filled, 4) if px else None
+    # SHORT EXITS WERE SIGN-INVERTED. See realized_pnl: on a short the
+    # venue's price field names the LONG leg, so the realized amount is
+    # (entry - exit), not (exit - entry). Six shorts filled before the
+    # branch was banned and we may still hold them.
+    pnl = realized_pnl(entry, px, filled, row["intent"])
     # PARTIAL EXITS MUST NOT RETIRE THE WHOLE POSITION. Writing
     # 'cashed_out' after selling a fraction would orphan the remainder:
     # the settlement sweep targets status='filled', so the shares we
@@ -1239,6 +1244,62 @@ def short_model_confirmed() -> bool:
 
 def _use_short_math(intent: str | None) -> bool:
     return is_short_intent(intent) and short_model_confirmed()
+
+
+# THE INTENT, READ OFF THE ROW WE ALREADY STORE.
+#
+# live_orders has no `intent` column — asking for one is what made
+# /api/admin/short-truth return 500s that surfaced only as "SHORTTRUTH
+# unavailable". The intent has always been in `raw`, in the venue's own
+# execution record, and the short-truth endpoint already reads it from
+# exactly these two paths. Same expression, one definition.
+ORDER_INTENT_SQL = (
+    "COALESCE(raw #>> '{response,executions,0,order,intent}', "
+    "         raw #>> '{preview,intent}')")
+
+
+def realized_pnl(entry: float | None, exit_px: float | None,
+                 shares: float, intent: str | None) -> float | None:
+    """Realized P&L on closing a position — CORRECT ON BOTH SIGNS.
+
+    `(exit - entry) * shares` is the LONG formula and it was applied to
+    every exit regardless of intent. That is the same mistake, in the
+    same shape, as `spent = filled * fill_price` — the line that
+    produced "BUY_SHORT n=6 over=6 clean=0" and cost a whole class of
+    copy before fill_cash was written. One decision was encoded in
+    several places and only some of them were converted.
+
+    On a short it does not merely misreport the magnitude, IT INVERTS
+    THE SIGN. Six shorts filled on 2026-08-24 before the branch was
+    banned, so this is reachable on rows we hold right now, and it
+    becomes reachable on every new short the moment LIVE_ALLOW_SHORT is
+    turned back on.
+
+    The arithmetic, using what the venue's six receipts established —
+    that on a short the `price` field names the LONG leg:
+
+        short entry at price e   cost per share      = 1 - e
+        closed  at    price x    short leg worth     = 1 - x
+        realized per share       = (1 - x) - (1 - e) = e - x
+
+    So a short is the long formula with the sign flipped, and nothing
+    else changes. A short that WON (the long leg fell) reports a gain,
+    where before it reported a loss of equal size.
+
+    Returns None when any input is missing, exactly as the call sites
+    already expected — an unknown P&L must stay unknown rather than
+    become zero.
+    """
+    if entry is None or exit_px is None:
+        return None
+    try:
+        e, x, n = float(entry), float(exit_px), float(shares)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    per = (e - x) if _use_short_math(intent) else (x - e)
+    return round(per * n, 4)
 
 
 def wire_limit(limit: float, intent: str | None) -> float:
@@ -2044,9 +2105,12 @@ async def _execute_manual_sell(us_slug: str, qty: int | None,
     filled = float(result["filled_shares"]) if result["ok"] else 0.0
     fill_price = float(result["fill_price"]) if result["ok"] else None
     proceeds = round(filled * (fill_price or 0), 2)
-    pnl = (round((fill_price - avg_cost) * filled, 4)
-           if filled > 0 and fill_price is not None
-           and avg_cost is not None else None)
+    # Same helper as every other exit. The desk's positions are long
+    # today — it has no short entry path — so `intent=None` reproduces
+    # today's arithmetic exactly. It routes through realized_pnl anyway
+    # so that ONE function owns this decision: the way this bug reached
+    # production was four places encoding it and one of them converted.
+    pnl = realized_pnl(avg_cost, fill_price, filled, None)
     status = "cashed_out" if result["ok"] and filled > 0 else "unfilled"
     # The sale is recorded on the manual sleeve as its own terminal row
     # (the underdog sweep's 'cashed_out' contract): filled_usd carries
