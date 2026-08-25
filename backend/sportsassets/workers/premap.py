@@ -51,9 +51,16 @@ FAST_REFRESH_SECONDS = float(
     os.environ.get("PREMAP_FAST_REFRESH_S", "180"))
 FAST_WINDOW_BACK_H = float(os.environ.get("PREMAP_FAST_BACK_H", "3"))
 FAST_WINDOW_FWD_H = float(os.environ.get("PREMAP_FAST_FWD_H", "14"))
-FAST_MAX_PAGES = int(os.environ.get("PREMAP_FAST_PAGES", "8"))
+# 8 -> 25 for the same reason; ~6s inside a 180s cadence.
+FAST_MAX_PAGES = int(os.environ.get("PREMAP_FAST_PAGES", "25"))
 PAGE_LIMIT = 100
-MAX_EVENT_PAGES = 40            # bounds a sweep at ~4k events
+# RAISED 40 -> 120 once truncation became visible (2026-08-25). The
+# window is now-12h..now+96h — 4.5 days of a board carrying worldwide
+# soccer plus ATP/WTA/ITF/challenger tennis plus the US majors — and
+# 4,000 events did not cover it. At LIST_PACING_S=0.35 the extra 80
+# pages cost ~28s inside a 1800s cadence, so the pacing that fixed the
+# 2026-08-23 429s is untouched.
+MAX_EVENT_PAGES = 120           # bounds a sweep at ~12k events
 LIST_PACING_S = 0.35            # stay under venue rate limits (429 fix, 2026-08-23)
 PRUNE_HOURS = 26                # rows unseen for a day age out
 LIST_CALL_TIMEOUT_S = 30        # a hung SDK call must not wedge the sweep
@@ -120,6 +127,46 @@ def date_of(slug: str | None) -> str:
 _KIND_PREFIXES = frozenset({"aec", "atc", "asc", "tsc", "astatc"})
 
 
+def _key_norm(text: str | None) -> str:
+    """A title normalized for use as an EVENT KEY.
+
+    pmus._norm replaces each punctuation RUN with a space and never
+    collapses the result, so the two sides of one game disagree on
+    spacing alone:
+
+        "Arsenal vs. Chelsea"  -> "arsenal vs  chelsea"   (two spaces)
+        "Arsenal vs Chelsea"   -> "arsenal vs chelsea"
+
+    Two distinct keys, one game, and the deterministic lane cannot
+    intersect them. Abbreviations are worse: "Inter Miami C.F." becomes
+    "inter miami c f" while "Inter Miami CF" becomes "inter miami cf" —
+    completely disjoint key sets for the same club.
+
+    DELIBERATELY LOCAL. pmus._norm also produces `side_norm`, which is
+    half of the us_premap unique index and half of match_side's
+    equality test; changing it would silently rewrite what counts as
+    the same SIDE, which is the wrong-side incident's own machinery.
+    Keys are a lookup, sides are a decision, and only the lookup is
+    widened here.
+    """
+    return re.sub(r"\s+", " ", _norm(text)).strip()
+
+
+def _key_variants(text: str | None) -> set[str]:
+    """Key spellings for one title: spacing-collapsed, and with dots
+    and apostrophes DELETED rather than spaced, so "C.F." and "CF"
+    reach the same string."""
+    out: set[str] = set()
+    base = _key_norm(text)
+    if base:
+        out.add(base)
+    t = (text or "").replace(".", "").replace("'", "").replace("\u2019", "")
+    tight = _key_norm(t)
+    if tight:
+        out.add(tight)
+    return out
+
+
 def event_keys_for(title: str | None, slug: str | None = None) -> list[str]:
     """Deterministic lookup keys for one event, built the same way at
     write time (venue side) and read time (whale side) so a match is an
@@ -135,19 +182,25 @@ def event_keys_for(title: str | None, slug: str | None = None) -> list[str]:
     keys: set[str] = set()
     t = pmus._clean_title(title)
     if t:
-        keys.add(_norm(t))
+        # Every emission goes through _key_variants: raw _norm left
+        # "arsenal vs  chelsea" facing "arsenal vs chelsea" and the two
+        # could never meet.
+        keys |= _key_variants(t)
     sm = pmus._surname_matchup(title)
     if sm:
         a, b = [p.strip() for p in re.split(r"\s+vs\s+", sm, flags=re.I)]
-        keys.add(f"{a} vs {b}".lower())
-        keys.add(f"{b} vs {a}".lower())
+        # These were emitted with .lower() alone — not normalized at
+        # all — so a surname carrying punctuation ("O'Connell") built a
+        # key no normalized row could match.
+        keys |= _key_variants(f"{a} vs {b}")
+        keys |= _key_variants(f"{b} vs {a}")
     if t and " vs" in t.lower():
         sides = re.split(r"\s+vs\.?\s+", t, flags=re.I)
         if len(sides) == 2:
-            na, nb = _norm(sides[0]), _norm(sides[1])
+            na, nb = _key_norm(sides[0]), _key_norm(sides[1])
             if na and nb:
-                keys.add(f"{na} vs {nb}")
-                keys.add(f"{nb} vs {na}")
+                keys |= _key_variants(f"{na} vs {nb}")
+                keys |= _key_variants(f"{nb} vs {na}")
     d = date_of(slug)
     if d:
         keys |= {f"{k}@{d}" for k in list(keys)}
@@ -771,7 +824,10 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
             raise RuntimeError(
                 "no events.list variant returned live inline markets")
         offset = 0
+        pages_walked = 0
+        last_page_full = False
         for _page in range(max_pages):
+            pages_walked = _page + 1
             if _page == 0:
                 got = first
             else:
@@ -803,7 +859,8 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                                       "events": events, "rows": seen_rows},
                               state_key)
             await asyncio.sleep(LIST_PACING_S)
-            if len(got) < PAGE_LIMIT:
+            last_page_full = len(got) >= PAGE_LIMIT
+            if not last_page_full:
                 break
     except Exception as exc:  # noqa: BLE001 — maybe try the fallback
         err = f"{type(exc).__name__}: {str(exc)[:160]}"
@@ -896,10 +953,28 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
             "interval '%s hours'" % int(PRUNE_HOURS))
     else:
         pruned = None
+    # THE SWEEP COULD NOT SEE ITS OWN TRUNCATION.
+    #
+    # The page loop exits on a short page (board exhausted) or by
+    # running out of budget (board TRUNCATED), and the summary could
+    # not tell those apart — it published `events` and `rows`, which
+    # read as a large healthy sweep either way. A truncated board is
+    # markets that can NEVER be premapped, and premap is the only lane
+    # allowed to trade under the quarantine, so it is a silent hard
+    # ceiling on coverage that no instrument reported.
+    _truncated = bool(locals().get("last_page_full")) and \
+        locals().get("pages_walked") == max_pages
     summary = {"mode": mode, "events": events, "rows": seen_rows,
                "err": err, "events_err": events_err,
                "lane": "fast" if windowed_only else "full",
                "window_h": [back_h, fwd_h], "max_pages": max_pages,
+               "pages_walked": locals().get("pages_walked", 0),
+               "truncated": _truncated,
+               "truncated_note": (
+                   "the page budget ran out while the venue was still "
+                   "returning full pages — part of the board was never "
+                   "read, and those markets cannot be resolved at all"
+                   if _truncated else None),
                "pruned": int(pruned.split()[-1]) if pruned else 0}
     await _record_last(pool, summary, state_key)
     log.info("premap refresh: %s", summary)

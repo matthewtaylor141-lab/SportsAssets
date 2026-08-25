@@ -180,3 +180,106 @@ class TestTheEventTitleKeyLane:
             _P(), {"asset": "1", "market_slug": "s", "outcome": "Yes",
                    "market_title": "T"}))
         assert ctx["market_title"] == "T"
+
+
+class TestTitleKeysCanActuallyMeet:
+    """pmus._norm replaces each punctuation RUN with a space and never
+    collapses, so the two sides of one game disagreed on SPACING:
+
+        "Arsenal vs. Chelsea" -> "arsenal vs  chelsea"   (two spaces)
+        "Arsenal vs Chelsea"  -> "arsenal vs chelsea"
+
+    Two distinct keys, one game, and the deterministic lane could not
+    intersect them. Abbreviations were worse: "Inter Miami C.F."
+    became "inter miami c f" against "inter miami cf" — completely
+    disjoint key sets for the same club."""
+
+    def _keys(self, title, slug):
+        from sportsassets.workers.premap import event_keys_for
+
+        return set(event_keys_for(title, slug))
+
+    def test_the_punctuated_and_bare_spellings_now_intersect(self):
+        a = self._keys("Arsenal vs. Chelsea", "epl-ars-che-2026-08-25")
+        b = self._keys("Arsenal vs Chelsea", "atc-epl-ars-che-2026-08-25")
+        assert "arsenal vs chelsea" in (a & b)
+        assert "arsenal vs chelsea@2026-08-25" in (a & b)
+
+    def test_abbreviations_reach_the_same_string(self):
+        a = self._keys("Inter Miami C.F. vs. Orlando City S.C.",
+                       "mls-mia-orl-2026-08-25")
+        b = self._keys("Inter Miami CF vs Orlando City SC",
+                       "atc-mls-mia-orl-2026-08-25")
+        assert "inter miami cf vs orlando city sc" in (a & b)
+
+    def test_the_reversed_matchup_is_still_emitted(self):
+        a = self._keys("Arsenal vs. Chelsea", "epl-ars-che-2026-08-25")
+        assert "chelsea vs arsenal" in a
+
+    def test_an_apostrophe_surname_normalizes(self):
+        a = self._keys("Christopher O'Connell vs. Mai Ito",
+                       "atp-oco-ito-2026-08-25")
+        b = self._keys("Christopher OConnell vs Mai Ito",
+                       "aec-atp-oco-ito-2026-08-25")
+        assert a & b, "an apostrophe must not split one player in two"
+
+    def test_pmus_norm_ITSELF_is_untouched(self):
+        """It also produces side_norm, which is half of the us_premap
+        unique index and half of match_side's equality test. Changing
+        it would silently rewrite what counts as the same SIDE — the
+        wrong-side incident's own machinery. Keys are a lookup, sides
+        are a decision, and only the lookup is widened."""
+        from sportsassets import pmus
+
+        assert pmus._norm("Arsenal vs. Chelsea") == "arsenal vs  chelsea"
+
+    def test_the_normalizer_is_local_to_key_building(self):
+        import inspect
+
+        from sportsassets.workers import premap
+
+        assert "_key_norm" in inspect.getsource(premap.event_keys_for)
+        assert "_key_norm" not in inspect.getsource(premap.match_side)
+
+
+class TestTheSweepCanSeeItsOwnTruncation:
+    """The page loop exits on a short page (board exhausted) or by
+    running out of budget (board TRUNCATED), and the summary could not
+    tell those apart — it published `events` and `rows`, which read as
+    a large healthy sweep either way. A truncated board is markets that
+    can NEVER be premapped, and premap is the only lane allowed to
+    trade under the quarantine."""
+
+    def test_the_summary_carries_both_facts(self):
+        import inspect
+
+        from sportsassets.workers import premap
+
+        src = inspect.getsource(premap.refresh)
+        assert '"pages_walked"' in src
+        assert '"truncated"' in src
+
+    def test_truncated_requires_BOTH_budget_and_a_full_last_page(self):
+        """Exhausting the budget on a short final page is a complete
+        sweep, not a truncated one."""
+        import inspect
+
+        from sportsassets.workers import premap
+
+        src = inspect.getsource(premap.refresh)
+        assert 'last_page_full' in src and 'pages_walked") == max_pages' in src
+
+    def test_the_note_says_what_truncation_costs(self):
+        import inspect
+
+        from sportsassets.workers import premap
+
+        assert "cannot be resolved at all" in inspect.getsource(premap.refresh)
+
+    def test_the_caps_rose_and_the_pacing_did_not(self):
+        from sportsassets.workers import premap
+
+        assert premap.MAX_EVENT_PAGES >= 120
+        assert premap.FAST_MAX_PAGES >= 25
+        assert premap.LIST_PACING_S == 0.35, \
+            "the pacing that fixed the 2026-08-23 429s must not move"
