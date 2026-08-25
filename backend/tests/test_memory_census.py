@@ -115,3 +115,56 @@ class TestItIsAdminOnly:
                  if getattr(r, "path", "") == "/api/admin/memory-census"]
         assert route, "route not registered"
         assert route[0].dependencies, "census must not be public"
+
+
+class TestSharedStringsAreChargedOnce:
+    """The correction to this census's own first result.
+
+    _slim interns type tags, market slugs and sides, so one string
+    object is shared across tens of thousands of rows. The first
+    version charged every row the full size of those shared objects
+    and reported 1,838 B/row and 526 MB for the archive — a number my
+    own instrument invented, and one I had already quoted as fact.
+
+    "How much would freeing this row give back" is the marginal cost,
+    not the isolated one. Both are now reported, because the naive
+    figure still answers a different real question (what one row costs
+    if nothing else exists).
+    """
+
+    def test_interned_rows_cost_far_less_marginally_than_naively(self):
+        import sys
+
+        _, _measure = _fns()
+        tag = sys.intern("ACTIVITY_TYPE_TRADE")
+        slug = sys.intern("aec-mlb-pit-sd-2026-08-24")
+        rows = [{"type": tag, "slug": slug, "id": f"0x{i:060x}"}
+                for i in range(4000)]
+        out = _measure(rows)
+        assert out["bytes_per_row_naive"] > out["bytes_per_row"], (
+            "shared strings must not be charged to every row")
+
+    def test_unshared_rows_measure_about_the_same_either_way(self):
+        """The correction must not deflate genuinely distinct data —
+        that would swap one wrong number for another."""
+        _, _measure = _fns()
+        rows = [{"a": f"unique-value-{i}-{'z' * 30}"} for i in range(2000)]
+        out = _measure(rows)
+        naive, marg = out["bytes_per_row_naive"], out["bytes_per_row"]
+        assert abs(naive - marg) < naive * 0.25
+
+    def test_the_same_object_twice_is_counted_once(self):
+        _deep, _ = _fns()
+        inner = {"x": "y" * 100}
+        seen: set = set()
+        first = _deep({"a": inner}, seen)
+        second = _deep({"b": inner}, seen)
+        assert second < first, (
+            "the second row shares `inner` and must not pay for it again")
+
+    def test_est_mb_scales_the_marginal_cost(self):
+        _, _measure = _fns()
+        rows = [{"a": f"v{i}"} for i in range(10000)]
+        out = _measure(rows)
+        expected = out["bytes_per_row"] * out["rows"] / 1048576
+        assert abs(out["est_mb"] - expected) < 0.5

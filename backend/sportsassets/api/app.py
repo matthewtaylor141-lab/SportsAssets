@@ -4975,30 +4975,62 @@ async def api_memory_census() -> dict:
 
     from . import track_record as tr
 
-    def _deep(obj: Any, depth: int = 0) -> int:
+    def _deep(obj: Any, seen: set | None = None, depth: int = 0) -> int:
         """getsizeof is shallow — a dict of strings reports ~360 bytes
-        and hides the strings. One level of recursion over keys and
-        values is where the archive's real weight lives."""
+        and hides the strings, which is how a 300k-row cache reads as
+        negligible. One level of recursion is where the weight lives.
+
+        `seen` is the correction to the FIRST version of this census.
+        _slim interns type tags, market slugs and sides, so one string
+        object is shared by tens of thousands of rows. Charging each
+        row the full size of a shared object inflates the per-row cost
+        and would have had me optimising against a number my own
+        instrument invented: the first run reported 1,838 B/row and
+        526 MB for the archive on exactly that basis.
+
+        With identity tracking, a shared object is charged once to the
+        first row that reaches it and nothing thereafter — which is
+        what "how much would freeing this row give back" actually
+        means.
+        """
+        if seen is None:
+            seen = set()
+        if id(obj) in seen:
+            return 0
+        seen.add(id(obj))
         n = sys.getsizeof(obj)
         if depth > 2:
             return n
         if isinstance(obj, dict):
             for k, v in obj.items():
-                n += _deep(k, depth + 1) + _deep(v, depth + 1)
+                n += _deep(k, seen, depth + 1) + _deep(v, seen, depth + 1)
         elif isinstance(obj, (list, tuple, set)):
             for v in obj:
-                n += _deep(v, depth + 1)
+                n += _deep(v, seen, depth + 1)
         return n
 
     def _measure(rows: Any, sample: int = 200) -> dict:
+        """Report BOTH costs, because they answer different questions.
+
+        naive  — every row charged in isolation. Overstates whenever
+                 rows share interned strings, which these do.
+        marginal — one shared `seen` across the sample, so shared
+                 objects are paid for once. This is the number that
+                 scales to the row count.
+        """
         if not isinstance(rows, list) or not rows:
-            return {"rows": 0, "est_mb": 0.0, "bytes_per_row": 0}
+            return {"rows": 0, "est_mb": 0.0, "bytes_per_row": 0,
+                    "bytes_per_row_naive": 0}
         step = max(1, len(rows) // sample)
         taken = rows[::step][:sample]
-        per = sum(_deep(r) for r in taken) / max(1, len(taken))
+        n = max(1, len(taken))
+        naive = sum(_deep(r) for r in taken) / n
+        shared: set = set()
+        marginal = sum(_deep(r, shared) for r in taken) / n
         return {"rows": len(rows),
-                "bytes_per_row": round(per),
-                "est_mb": round(per * len(rows) / 1048576, 1)}
+                "bytes_per_row": round(marginal),
+                "bytes_per_row_naive": round(naive),
+                "est_mb": round(marginal * len(rows) / 1048576, 1)}
 
     rss_mb = None
     try:

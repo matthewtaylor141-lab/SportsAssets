@@ -409,7 +409,7 @@ jobs:
           curl -sS --max-time 45 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/memc.json "$BASE/api/admin/memory-census" || true
           jq -r 'if .rss_mb == null then "  MEMCENSUS unavailable"
-                 else "  MEMCENSUS rss=\(.rss_mb)MB accounted=\(.accounted_mb)MB unaccounted=\(.unaccounted_mb)MB | archive \(.archive_cache.rows)r @\(.archive_cache.bytes_per_row)B = \(.archive_cache.est_mb)MB | grind \(.hydrate_in_progress.rows)r = \(.hydrate_in_progress.est_mb)MB | window \(.raw_window_cache.rows)r = \(.raw_window_cache.est_mb)MB"
+                 else "  MEMCENSUS rss=\(.rss_mb)MB accounted=\(.accounted_mb)MB unaccounted=\(.unaccounted_mb)MB | archive \(.archive_cache.rows)r @\(.archive_cache.bytes_per_row)B marginal (naive \(.archive_cache.bytes_per_row_naive)B) = \(.archive_cache.est_mb)MB | grind \(.hydrate_in_progress.rows)r = \(.hydrate_in_progress.est_mb)MB | window \(.raw_window_cache.rows)r = \(.raw_window_cache.est_mb)MB"
                  end' /tmp/memc.json 2>/dev/null || echo "  MEMCENSUS unreadable"
 
           # SHORTSHADOW — the evidence the short ban owes us.
