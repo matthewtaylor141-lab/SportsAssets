@@ -4361,11 +4361,38 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
     from ..workers.premap import resolve_explain
 
     pool = await get_pool()
+    # THE SAME INPUTS PRODUCTION USES, FROM THE SAME PLACE.
+    #
+    # This passed t.event_slug into resolve_explain's EVENT_TITLE
+    # parameter. Those are different data — "mlb-nyy-bos-2026-08-25"
+    # against "New York Yankees vs. Boston Red Sox" — and
+    # event_keys_for builds title-derived keys out of whatever it is
+    # handed. So the census built a DIFFERENT KEY SET than production
+    # and then attributed production's failures to it.
+    #
+    # That is failure mode (c) — a probe reading a different argument
+    # list than the thing it measures — sitting inside the instrument
+    # every coverage decision today was prioritised from. The cause
+    # ranking (no_key_intersection 35.5%, resolves 25.8%, no_side_match
+    # 23.3%) was measured on inputs the copy path never sees.
+    #
+    # _market_context resolves the real values off market_tokens joined
+    # to markets, preferring the enriched payload; this LEFT JOINs the
+    # same pair and coalesces the same way, so the census now asks the
+    # question production asked.
     rows = await pool.fetch(
         """
         SELECT lo.id, lo.whale_username, lo.error,
-               t.market_title, t.event_slug, t.outcome, t.market_slug
-          FROM live_orders lo JOIN trades t ON t.id = lo.trade_id
+               COALESCE(t.market_title, m.title)     AS market_title,
+               m.event_title                         AS event_title,
+               COALESCE(t.outcome, mt.outcome)       AS outcome,
+               COALESCE(t.market_slug, m.slug)       AS market_slug
+          FROM live_orders lo
+          JOIN trades t ON t.id = lo.trade_id
+          LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+          LEFT JOIN markets m
+                 ON m.condition_id = COALESCE(mt.condition_id,
+                                              lo.condition_id)
          WHERE lo.status = 'rejected'
            AND lo.us_market_slug IS NULL
            AND lo.placed_at > now() - interval '1 hour' * $1
@@ -4381,7 +4408,7 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
     for r in rows:
         try:
             ex = await resolve_explain(
-                pool, r["market_title"], r["event_slug"], r["outcome"],
+                pool, r["market_title"], r["event_title"], r["outcome"],
                 r["market_slug"])
         except Exception as exc:  # noqa: BLE001 — one row, not the census
             ex = {"step": "explain_raised",

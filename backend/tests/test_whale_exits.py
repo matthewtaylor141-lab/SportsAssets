@@ -272,3 +272,66 @@ class TestItIsActuallyRegistered:
         src = Path(we.__file__).with_name("all.py").read_text()
         assert "async def supervise(" in src
         assert "RESTART_DELAY_SECONDS" in src
+
+
+class TestATruncatedPositionListIsNotAnExit:
+    """The read asked for limit=500 with no offset. positions_sync.py
+    pages the SAME endpoint in 100s up to 2000, so 500 was never the
+    ceiling — just where this call stopped looking.
+
+    The consequence is not a coverage gap, it is WRONG SELL ORDERS.
+    Every asset past the truncation is absent from `now`; diff_exits
+    reads absent-and-unresolved as a FULL EXIT; and we fire a 100%
+    close on positions the whale still holds, up to the per-cycle cap,
+    every cycle. swisstony carries 860k fills and a book far past 500
+    rows.
+
+    A partial position list is not a smaller truth, it is a different
+    one."""
+
+    def test_it_pages(self):
+        import inspect
+
+        src = inspect.getsource(we._fetch_positions)
+        assert '"offset": offset' in src
+        assert "while offset < POSITIONS_MAX" in src
+
+    def test_the_page_size_matches_the_other_reader(self):
+        """positions_sync.py uses 100/2000 against the same endpoint.
+        Two readers disagreeing about what 'his whole book' means is
+        how one of them ends up wrong."""
+        from pathlib import Path
+
+        import sportsassets.workers.whale_exits as _we
+
+        assert we.POSITIONS_PAGE == 100
+        assert we.POSITIONS_MAX == 2000
+        other = (Path(_we.__file__).resolve().parents[1]
+                 / "positions_sync.py").read_text()
+        assert '"limit": 100' in other
+
+    def test_hitting_the_ceiling_RAISES_rather_than_returning(self):
+        """Returning a partial book would let it reach diff_exits.
+        Raising cannot."""
+        import inspect
+
+        src = inspect.getsource(we._fetch_positions)
+        assert "raise TruncatedPositions(" in src
+
+    def test_the_cycle_skips_that_whale_and_counts_it(self):
+        import inspect
+
+        src = inspect.getsource(we._cycle)
+        assert "except TruncatedPositions" in src
+        assert 'stats["truncated_books"]' in src
+        i = src.index("except TruncatedPositions")
+        assert "continue" in src[i:i + 600]
+
+    def test_a_short_final_page_ends_the_walk_normally(self):
+        import inspect
+
+        src = inspect.getsource(we._fetch_positions)
+        assert "if len(rows) < POSITIONS_PAGE:" in src
+
+    def test_the_exception_explains_the_money_consequence(self):
+        assert "real sell orders" in (we.TruncatedPositions.__doc__ or "")

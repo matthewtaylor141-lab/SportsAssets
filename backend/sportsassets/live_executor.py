@@ -347,6 +347,63 @@ async def _sibling_from_positions(pool, asset: str) -> str:
     return _SIBLING_CACHE.get(str(asset), "")
 
 
+async def whale_still_holds(pool, asset: str, whale: str) -> bool | None:
+    """Does he STILL hold this leg? True/False, or None if unknowable.
+
+    THE SWEEP PATH HAS NO STALENESS GATE. execute_copy caps age at
+    COPY_EXEC_MAX_AGE_S and maybe_execute at _stale_cap_for(whale), but
+    BOTH are guarded on `reaction is not None`, and copy_sweep calls
+    maybe_execute(payload, None) over a candidate window of
+    `t.ts > now() - interval '7 days'`. So a signal a week old reaches
+    the order path with no age check at all.
+
+    That is defensible on price — the FOK limit is his price or better,
+    so a market that ran away from him simply does not fill. It is NOT
+    defensible on POSITION: a week-old buy is a buy he may since have
+    exited, and entering a position the whale has already left is the
+    precise divergence the exit work exists to close, arriving through
+    the other door.
+
+    Same net-of-merges arithmetic classify_exit uses, because on this
+    venue a holding is retired by BUYING the complement and the leg's
+    own sum never decrements:
+
+        net(leg) = gross(leg) - gross(sibling)
+
+    None when we cannot tell — no sibling, an unenriched token, a
+    failed lookup. The caller treats None as "proceed", because
+    refusing everything we cannot measure would close the sweep lane
+    entirely, and the lane is not the problem.
+    """
+    if not asset or not whale:
+        return None
+    try:
+        sibs = await pool.fetch(
+            "SELECT s.token_id FROM market_tokens mt "
+            "JOIN market_tokens s USING (condition_id) "
+            "WHERE mt.token_id = $1 AND s.token_id <> $1", asset)
+    except Exception:  # noqa: BLE001
+        return None
+    if not sibs or len(sibs) != 1:
+        return None
+    try:
+        row = await pool.fetchrow(
+            "SELECT COALESCE(sum(CASE WHEN t.asset = $1 THEN "
+            "         (CASE WHEN t.side='BUY' THEN t.size "
+            "               ELSE -t.size END) END), 0)::float8 AS mine, "
+            "       COALESCE(sum(CASE WHEN t.asset = $2 THEN "
+            "         (CASE WHEN t.side='BUY' THEN t.size "
+            "               ELSE -t.size END) END), 0)::float8 AS sib "
+            "FROM trades t JOIN whales w ON w.id = t.whale_id "
+            "WHERE t.asset IN ($1, $2) AND lower(w.username) = $3",
+            asset, str(sibs[0]["token_id"]), whale)
+    except Exception:  # noqa: BLE001
+        return None
+    if row is None:
+        return None
+    return (float(row["mine"] or 0) - float(row["sib"] or 0)) > 0
+
+
 async def classify_exit(pool, asset: str, whale: str,
                         size: float,
                         trade_id: int | None = None) -> dict | None:
@@ -2946,6 +3003,34 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     # on a delayed signal at all: at 90s his expected value is negative
     # by his own numbers. 15s reflects what the chain path now delivers
     # (measured -1.1s) while refusing anything that fell back to polling.
+    # THE SWEEP PATH: NO AGE GATE, SO CHECK THE POSITION INSTEAD.
+    #
+    # copy_sweep calls maybe_execute(payload, None) over a seven-day
+    # candidate window, and every age ceiling here and in execute_copy
+    # is guarded on `reaction is not None` — so a week-old signal
+    # reaches this line unchecked. Price is already protected (the FOK
+    # limit is his price or better, so a market that ran away does not
+    # fill), but POSITION is not: a week-old buy is one he may since
+    # have exited, and entering a position the whale has already left
+    # is the divergence the exit work exists to close, arriving through
+    # the other door.
+    #
+    # Only on the stale lane. Fresh copies are seconds old and asking
+    # would add a query to the hot path to answer a question that
+    # cannot yet have changed. Unknowable reads as PROCEED — refusing
+    # everything we cannot measure would close the sweep lane, and the
+    # lane is not the problem.
+    if reaction is None:
+        _held = await whale_still_holds(
+            pool, str(payload.get("asset") or ""), username)
+        if _held is False:
+            await pool.execute(
+                "UPDATE live_orders SET status='rejected', error=$2 "
+                "WHERE id=$1", row_id,
+                "stale-signal: he no longer holds this leg — the sweep "
+                "found a buy he has since exited, and copying it would "
+                "open a position he is out of")
+            return
     _stale_cap = _stale_cap_for(username)
     if reaction is not None and reaction > _stale_cap:
         await pool.execute(

@@ -67,6 +67,21 @@ ENABLED = os.environ.get("WHALE_EXIT_ENABLED", "1") != "0"
 MAX_EXITS_PER_CYCLE = int(os.environ.get("WHALE_EXIT_MAX_PER_CYCLE", "10"))
 
 _KEY = "whale_positions:%s"
+# Page size and hard ceiling for the positions read. positions_sync.py
+# uses 100/2000 against the same endpoint; matched here so the two
+# cannot disagree about what "his whole book" means.
+POSITIONS_PAGE = int(os.environ.get("WHALE_EXIT_POS_PAGE", "100"))
+POSITIONS_MAX = int(os.environ.get("WHALE_EXIT_POS_MAX", "2000"))
+
+
+class TruncatedPositions(RuntimeError):
+    """The venue still had more positions when we stopped reading.
+
+    Raised rather than returned because a partial book must never reach
+    diff_exits: every asset past the cut is absent from `now`, which
+    reads as a FULL EXIT and fires a 100% close on a position the whale
+    still holds. Losing a cycle costs a delay; diffing a truncated book
+    costs real sell orders."""
 # The sibling map is merged across cycles, so it needs a ceiling.
 MAX_SIBLINGS = int(os.environ.get("WHALE_EXIT_MAX_SIBLINGS", "20000"))
 
@@ -154,34 +169,69 @@ async def _fetch_positions(http: httpx.AsyncClient,
     returned separately rather than folded into the sizes dict so the
     exit-diff logic is untouched by its presence or absence.
     """
-    resp = await http.get("/positions",
-                          params={"user": address, "limit": 500})
-    resp.raise_for_status()
-    body = resp.json()
-    rows = body if isinstance(body, list) else (
-        body.get("data") or body.get("positions") or [])
+    # PAGED, AND A TRUNCATED READ MUST NOT LOOK LIKE AN EXIT
+    # (2026-08-25, as-designed audit).
+    #
+    # This asked for limit=500 and no offset. positions_sync.py pages
+    # the same endpoint in 100s up to 2000, so 500 is not the ceiling —
+    # it is just where this call stopped looking.
+    #
+    # The consequence is not a coverage gap, it is WRONG SELL ORDERS.
+    # Every asset past the truncation is absent from `now`, diff_exits
+    # reads absent-and-unresolved as a FULL EXIT, and we fire a 100%
+    # close on positions the whale still holds — up to the per-cycle
+    # cap, every cycle. swisstony carries 860k fills and a book far
+    # past 500 rows.
+    #
+    # So: page to the same 2000 ceiling, and if the venue is still
+    # handing us full pages at the end, REFUSE THE WHOLE SNAPSHOT
+    # rather than diff against a book we know is incomplete. A partial
+    # position list is not a smaller truth, it is a different one.
     out: dict[str, float] = {}
     sibs: dict[str, str] = {}
     seen = 0
-    for p in rows:
-        if not isinstance(p, dict):
-            continue
-        a = str(p.get("asset") or p.get("tokenId") or "")
-        if not a:
-            continue
-        seen += 1
-        sib = _sibling_of(p)
-        if sib and sib != a:
-            sibs[a] = sib
-            # The relation is symmetric, and recording both directions
-            # means a later buy of EITHER leg can find the other.
-            sibs.setdefault(sib, a)
-        try:
-            sz = float(p.get("size") or p.get("netPosition") or 0)
-        except (TypeError, ValueError):
-            continue
-        if sz > 0:
-            out[a] = sz
+    offset = 0
+    truncated = False
+    while offset < POSITIONS_MAX:
+        resp = await http.get("/positions",
+                              params={"user": address,
+                                      "limit": POSITIONS_PAGE,
+                                      "offset": offset})
+        resp.raise_for_status()
+        body = resp.json()
+        rows = body if isinstance(body, list) else (
+            body.get("data") or body.get("positions") or [])
+        if not rows:
+            break
+        for p in rows:
+            if not isinstance(p, dict):
+                continue
+            a = str(p.get("asset") or p.get("tokenId") or "")
+            if not a:
+                continue
+            seen += 1
+            sib = _sibling_of(p)
+            if sib and sib != a:
+                sibs[a] = sib
+                # The relation is symmetric, and recording both
+                # directions means a later buy of EITHER leg can find
+                # the other.
+                sibs.setdefault(sib, a)
+            try:
+                sz = float(p.get("size") or p.get("netPosition") or 0)
+            except (TypeError, ValueError):
+                continue
+            if sz > 0:
+                out[a] = sz
+        offset += len(rows)
+        if len(rows) < POSITIONS_PAGE:
+            break
+    else:
+        truncated = True
+    if truncated:
+        raise TruncatedPositions(
+            f"{address}: still returning full pages at {POSITIONS_MAX} "
+            f"positions — refusing to diff against an incomplete book")
     return out, sibs, seen
 
 
@@ -256,8 +306,17 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
             continue
         try:
             now, sibs, seen = await _fetch_positions(http, r["address"])
+        except TruncatedPositions as exc:
+            # Forfeit this whale's cycle rather than diff a book we know
+            # is incomplete. Counted, because a lane that silently skips
+            # a whale every cycle looks exactly like a whale who never
+            # exits.
+            log.warning("whale-exit: %s", exc)
+            stats["truncated_books"] = stats.get("truncated_books", 0) + 1
+            continue
         except Exception as exc:  # noqa: BLE001 — one whale, not the loop
             log.warning("whale-exit positions failed for %s: %s", uname, exc)
+            stats["fetch_failed"] = stats.get("fetch_failed", 0) + 1
             continue
         stats["pos_rows"] += seen
         stats["sib_rows"] += len(sibs)

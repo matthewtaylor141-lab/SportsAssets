@@ -133,3 +133,90 @@ class TestTheCensusMeasuresTheRightPopulation:
         route = [r for r in app_mod.app.routes
                  if getattr(r, "path", "") == "/api/admin/unmapped-census"]
         assert route and route[0].dependencies
+
+
+class TestTheCensusAsksProductionsQuestion:
+    """It passed `t.event_slug` into resolve_explain's EVENT_TITLE
+    parameter.
+
+    Those are different data — "mlb-nyy-bos-2026-08-25" against
+    "New York Yankees vs. Boston Red Sox" — and event_keys_for builds
+    title-derived keys out of whatever it is handed. So the census
+    built a DIFFERENT KEY SET than production and then attributed
+    production's failures to it.
+
+    Failure mode (c), a probe reading a different argument list than
+    the thing it measures, sitting inside the instrument that every
+    coverage decision today was prioritised from. The published cause
+    ranking — no_key_intersection 35.5%, resolves 25.8%, no_side_match
+    23.3% — was measured on inputs the copy path never sees.
+    """
+
+    def _src(self):
+        import inspect
+
+        from sportsassets.api import app as A
+
+        return inspect.getsource(A.api_unmapped_census)
+
+    def test_it_passes_an_event_TITLE(self):
+        src = self._src()
+        assert 'r["event_title"]' in src
+        assert 'r["event_slug"]' not in src
+
+    def test_it_sources_the_title_the_way_production_does(self):
+        """_market_context reads market_tokens joined to markets,
+        preferring the enriched payload. The census must reach the same
+        columns or it is measuring a different population."""
+        src = self._src()
+        assert "m.event_title" in src
+        assert "market_tokens mt" in src
+        assert "markets m" in src
+
+    def test_it_left_joins_so_a_missing_market_row_is_not_dropped(self):
+        """An INNER join would silently exclude exactly the unenriched
+        rows this census exists to explain."""
+        src = self._src()
+        assert "LEFT JOIN market_tokens" in src
+        assert "LEFT JOIN markets" in src
+
+    def test_it_coalesces_the_same_way_production_prefers(self):
+        src = self._src()
+        for col in ("t.market_title, m.title", "t.outcome, mt.outcome",
+                    "t.market_slug, m.slug"):
+            assert f"COALESCE({col})" in src, col
+
+    def test_the_two_argument_lists_agree(self):
+        """The real invariant: whatever production hands resolve(), the
+        census hands resolve_explain() in the same order."""
+        import inspect
+        import re
+
+        from sportsassets.api import app as A
+        from sportsassets import live_executor as le
+
+        def _args(src, call):
+            """The argument text of `call`, paren-balanced.
+
+            A naive [^)]* stops inside ctx.get("market_title") and
+            compares one argument against four — which would have let
+            this test pass on the broken code."""
+            i = src.index(call) + len(call)
+            depth, out = 1, []
+            while depth:
+                c = src[i]
+                depth += (c == "(") - (c == ")")
+                if depth:
+                    out.append(c)
+                i += 1
+            return "".join(out)
+
+        def _fields(t):
+            return re.findall(r'"([a-z_]+)"', t)
+
+        prod = _fields(_args(inspect.getsource(le.maybe_execute),
+                             "_premap.resolve("))
+        cens = _fields(_args(inspect.getsource(A.api_unmapped_census),
+                             "resolve_explain("))
+        assert prod and cens
+        assert prod == cens, (prod, cens)
