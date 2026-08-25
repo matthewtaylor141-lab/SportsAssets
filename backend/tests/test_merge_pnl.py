@@ -505,3 +505,90 @@ class TestTheTwoAccountingsAgree:
         r = mp.replay(fills, {"a": [1.0, 0.0]})
         assert r["n_merges"] == 0
         assert r["exit_value"] == 0.0
+
+
+class TestTheWhalesOwnEdgeGetsAnInterval:
+    """'rn1 is profitable' has been asserted from a total all day.
+    +$231,495 on $24.5M of entries is +0.94% on dollar deployed, and
+    whether 94 basis points is real or noise depends entirely on the
+    dispersion behind it — which nothing was carrying.
+
+    Same ratio estimator the copy sleeve is judged by, so the whale's
+    edge and ours land on one scale and can be compared directly."""
+
+    def _book(self, n, complement_px, entry_px=0.40, size=100):
+        f = []
+        for i in range(n):
+            c = f"c{i}"
+            f += [{"condition_id": c, "outcome_index": 0, "side": "BUY",
+                   "size": size, "price": entry_px},
+                  {"condition_id": c, "outcome_index": 1, "side": "BUY",
+                   "size": size, "price": complement_px(i)}]
+        return f
+
+    def test_a_consistent_winner_is_called_profitable(self):
+        r = mp.replay(self._book(2000, lambda i: 0.55 if i % 2 else 0.57))
+        assert r["edge_ci95"][0] > 0
+        assert "PROFITABLE at 95%" in r["edge_verdict"]
+
+    def test_a_consistent_loser_is_called_losing(self):
+        r = mp.replay(self._book(2000, lambda i: 0.65 if i % 2 else 0.67))
+        assert r["edge_ci95"][1] < 0
+        assert "LOSING at 95%" in r["edge_verdict"]
+
+    def test_a_thin_edge_in_heavy_noise_is_NOT_DEMONSTRATED(self):
+        """The case that matters: a small positive point estimate that
+        the sample cannot support. This is where 'rn1 is profitable'
+        has to be able to fail."""
+        r = mp.replay(self._book(40, lambda i: 0.20 if i % 2 else 0.95))
+        assert r["edge_ci95"][0] < 0 < r["edge_ci95"][1]
+        assert "NOT DEMONSTRATED" in r["edge_verdict"]
+        assert "contains zero" in r["edge_verdict"]
+
+    def test_a_book_with_no_exits_cannot_be_graded(self):
+        r = mp.replay([{"condition_id": "c", "outcome_index": 0,
+                        "side": "BUY", "size": 100, "price": 0.4}])
+        assert r["edge_roi"] is None
+        assert "INSUFFICIENT" in r["edge_verdict"]
+
+    def test_the_stake_is_what_he_had_AT_RISK_on_the_closed_lot(self):
+        """Not his entry notional across the whole book — the lot's own
+        cost basis, so the ratio is a return on the dollars that
+        actually closed."""
+        r = mp.replay(self._book(1, lambda i: 0.55))
+        assert r["edge_deployed"] == pytest.approx(40.0)
+
+    def test_the_roi_matches_the_realized_total_over_the_deployed(self):
+        r = mp.replay(self._book(500, lambda i: 0.55 if i % 2 else 0.57))
+        assert r["edge_roi"] == pytest.approx(
+            r["realized_total"] / r["edge_deployed"], rel=1e-4)
+
+    def test_it_is_computed_in_constant_memory(self):
+        """These books run to 90,000 merges each; keeping the lots to
+        compute a variance is not available."""
+        import inspect
+
+        src = inspect.getsource(mp.replay)
+        assert "lot_ss" in src and "lot_ps" in src
+        r = mp.replay(self._book(50, lambda i: 0.55))
+        assert "lots_list" not in r and "lot_rows" not in r
+
+    def test_float_cancellation_cannot_raise(self):
+        """sum(p^2) - 2R*sum(ps) + R^2*sum(s^2) can go slightly
+        negative on a large book. An exception in a P&L report is
+        worse than a degenerate interval."""
+        o = {"lots": 5, "lot_s": 100.0, "lot_p": 1.0,
+             "lot_ss": 2000.0, "lot_pp": 0.2, "lot_ps": 20.0}
+        got = mp._lot_interval(o)
+        assert got["edge_ci95"] is not None
+        assert got["edge_se"] >= 0
+
+    def test_the_response_shape_does_not_change_with_the_verdict(self):
+        """A shape that changes with the news makes every reader
+        special-case the bad case, which is where readers stop looking."""
+        good = mp.replay(self._book(500, lambda i: 0.55))
+        thin = mp.replay(self._book(1, lambda i: 0.55))
+        none_ = mp.replay([])
+        for k in ("edge_lots", "edge_deployed", "edge_roi", "edge_se",
+                  "edge_ci95", "edge_verdict"):
+            assert k in good and k in thin and k in none_, k

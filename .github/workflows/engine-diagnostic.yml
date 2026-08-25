@@ -808,6 +808,21 @@ jobs:
             /tmp/mergepnl.json 2>/dev/null || echo "  MERGEPNL unavailable"
           jq -r '.whales // {} | to_entries[] | "  MERGEVERDICT \(.key): \(.value.verdict)"' \
             /tmp/mergepnl.json 2>/dev/null || true
+          # WHALEEDGE — is this whale PROVABLY profitable, per dollar?
+          #
+          # The absolute totals flatter enormous turnover. rn1 makes
+          # +$231,495 by deploying $24.5M: his edge is 94 BASIS POINTS.
+          # Whether 94bp is real or noise depends on the dispersion
+          # behind it, and nothing was carrying that until now. Same
+          # ratio estimator the copy sleeve is judged by, so his edge
+          # and ours are on one scale.
+          #
+          # This is also the roster instrument: a whale in the verified
+          # set whose interval contains zero is one we are funding on
+          # an assertion.
+          jq -r '.whales // {} | to_entries[]
+                 | "  WHALEEDGE \(.key): \(.value.edge_verdict // "n/a")"' \
+            /tmp/mergepnl.json 2>/dev/null || echo "  WHALEEDGE unavailable"
           # EXITVALUE — the owner's thesis as one number per whale.
           #
           # Every whale figure this desk has published grades at

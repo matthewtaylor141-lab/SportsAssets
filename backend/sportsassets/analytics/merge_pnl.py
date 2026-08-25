@@ -39,12 +39,60 @@ needs no venue model at all.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 # Below this many shares a leg is treated as flat — venue dust, not a
 # position, and it otherwise leaves permanent 1e-9 balances that make
 # every later buy look like a partial merge.
 DUST = 1e-6
+
+
+# Two-sided 95%.
+_Z95 = 1.959963985
+
+
+def _lot_interval(o: dict) -> dict:
+    """ROI on dollar deployed, with a 95% interval, from the running
+    sums. Same estimator the copy sleeve is judged by, so the whale's
+    edge and ours are on one scale.
+
+        R  = sum(p) / sum(s)
+        SE = sqrt( n/(n-1) * (sum(p^2) - 2R*sum(ps) + R^2*sum(s^2)) )
+             / sum(s)
+
+    A NEGATIVE variance is possible here from floating-point
+    cancellation on large books and is clamped to zero rather than
+    handed to sqrt — an exception in a P&L report is worse than a
+    degenerate interval, and a zero-width one is visibly degenerate.
+    """
+    n, ts, tp = o.get("lots", 0), o.get("lot_s", 0.0), o.get("lot_p", 0.0)
+    # lots and deployed are facts whether or not an interval can be
+    # drawn from them; a response whose SHAPE changes with the verdict
+    # makes every reader special-case the bad news.
+    base = {"edge_lots": n, "edge_deployed": round(ts, 2)}
+    if n < 2 or ts <= 0:
+        return {**base, "edge_roi": (round(tp / ts, 6) if ts > 0 else None),
+                "edge_se": None, "edge_ci95": None,
+                "edge_verdict": "INSUFFICIENT — fewer than two closed "
+                                "lots on this book"}
+    r = tp / ts
+    ss = (o["lot_pp"] - 2.0 * r * o["lot_ps"] + r * r * o["lot_ss"])
+    se = math.sqrt(max(0.0, n / (n - 1) * ss)) / ts
+    lo, hi = r - _Z95 * se, r + _Z95 * se
+    if lo > 0:
+        v = (f"PROFITABLE at 95% — {r:+.2%} on dollar deployed, "
+             f"interval [{lo:+.2%}, {hi:+.2%}] over {n:,} closed lots")
+    elif hi < 0:
+        v = (f"LOSING at 95% — {r:+.2%} on dollar deployed, interval "
+             f"[{lo:+.2%}, {hi:+.2%}] over {n:,} closed lots")
+    else:
+        v = (f"NOT DEMONSTRATED — {r:+.2%} on dollar deployed but the "
+             f"interval [{lo:+.2%}, {hi:+.2%}] contains zero over "
+             f"{n:,} closed lots")
+    return {**base, "edge_roi": round(r, 6), "edge_se": round(se, 6),
+            "edge_ci95": [round(lo, 6), round(hi, 6)],
+            "edge_verdict": v}
 
 
 def replay(fills: list[dict],
@@ -95,6 +143,23 @@ def replay(fills: list[dict],
         "entry_notional": 0.0, "merge_shares": 0.0,
         "realized_merge_pnl": 0.0, "realized_sell_pnl": 0.0,
         "open_shares": 0.0, "open_cost": 0.0, "rows": [],
+        # RATIO-ESTIMATOR ACCUMULATORS, so each whale's edge gets a
+        # confidence interval instead of a point estimate.
+        #
+        # "rn1 is profitable" has been asserted from a total all day.
+        # +$231,495 on $24.5M of entries is +0.94% on dollar deployed,
+        # and whether 94 basis points is real or noise depends entirely
+        # on the dispersion behind it — which nothing was carrying.
+        #
+        # Accumulated in O(1) rather than by keeping the lots, because
+        # these books run to 90,000 merges each. The identity that
+        # makes it possible:
+        #
+        #   sum((p - R*s)^2) = sum(p^2) - 2R*sum(p*s) + R^2*sum(s^2)
+        #
+        # so five running sums carry the whole interval.
+        "lots": 0, "lot_s": 0.0, "lot_p": 0.0,
+        "lot_ss": 0.0, "lot_pp": 0.0, "lot_ps": 0.0,
         # counterfactual, populated only when `payouts` is supplied
         "cf_closed_shares": 0.0, "cf_graded_shares": 0.0,
         "cf_ungraded_shares": 0.0,
@@ -110,6 +175,17 @@ def replay(fills: list[dict],
             return float(v[leg])
         except (TypeError, ValueError):
             return None
+
+    def _lot(stake: float, pnl: float) -> None:
+        """One CLOSED lot: what he had at risk, and what it returned."""
+        if stake <= 0:
+            return
+        out["lots"] += 1
+        out["lot_s"] += stake
+        out["lot_p"] += pnl
+        out["lot_ss"] += stake * stake
+        out["lot_pp"] += pnl * pnl
+        out["lot_ps"] += pnl * stake
 
     def _grade(cid: str, leg: int, q: float, exit_px: float,
                avg: float) -> None:
@@ -143,6 +219,7 @@ def replay(fills: list[dict],
             if q > DUST:
                 avg = cost[idx] / bal[idx] if bal[idx] > DUST else 0.0
                 out["realized_sell_pnl"] += q * (price - avg)
+                _lot(q * avg, q * (price - avg))
                 _grade(cid, idx, q, price, avg)
                 bal[idx] -= q
                 cost[idx] -= q * avg
@@ -155,6 +232,7 @@ def replay(fills: list[dict],
                          if bal[other] > DUST else 0.0)
             pnl = m * (1.0 - avg_other - price)
             out["realized_merge_pnl"] += pnl
+            _lot(m * avg_other, pnl)
             # The held leg's effective exit price is (1 - price paid for
             # the complement): the pair returns $1, so buying the other
             # side at `price` is selling this one at 1 - price.
@@ -188,6 +266,12 @@ def replay(fills: list[dict],
     # holding to resolution.
     out["exit_value"] = round(
         out["cf_actual_on_graded"] - out["cf_hold_on_graded"], 2)
+    # THE INTERVAL ON HIS OWN EDGE.
+    #
+    # Same ratio estimator the copy sleeve is judged by, so "is this
+    # whale profitable" and "are we profitable" are answered on one
+    # scale and can be compared directly.
+    out.update(_lot_interval(out))
     out["cf_coverage"] = (
         round(out["cf_graded_shares"] / out["cf_closed_shares"], 4)
         if out["cf_closed_shares"] > 0 else None)
