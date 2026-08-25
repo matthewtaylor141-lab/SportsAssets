@@ -857,6 +857,26 @@ async def _copy_exit_sweep(pool) -> dict:
         # at >= want, so the realized gain clears the floor too.
         if (want - r["entry"]) * r["qty"] < COPY_EXIT_MIN_GAIN_USD - 1e-6:
             continue
+        # ATOMIC CLAIM — added 2026-08-25 because mirror_exit now sells
+        # the same rows when the WHALE exits, and this sweep sells them
+        # on our own +20% take-profit. Both select status='filled'.
+        #
+        # The race is not hypothetical: this loop reads its whole row
+        # set up front, so mirror_exit can claim and sell a position
+        # between that read and this submit, and we would then sell a
+        # position we no longer hold — on a venue where netPosition is
+        # signed, that opens a SHORT rather than failing.
+        #
+        # Claiming here means exactly one seller acts on a row. The
+        # claim is released on every path that does not end in a sale,
+        # so a refusal cannot strand the position in 'exiting' where
+        # the settlement sweep (which targets 'filled') would never see
+        # it again.
+        claimed = await pool.fetchval(
+            "UPDATE live_orders SET status='exiting' "
+            "WHERE id=$1 AND status='filled' RETURNING id", r["id"])
+        if claimed is None:
+            continue        # mirror_exit or another pass has this row
         try:
             res = await asyncio.to_thread(
                 pmus.submit_fok, r["us_market_slug"],
@@ -864,6 +884,7 @@ async def _copy_exit_sweep(pool) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("copy exit failed (%s): %s",
                         r["us_market_slug"], exc)
+            await _release_claim(pool, r["id"])
             continue
         sold = float(res.get("filled_shares") or 0)
         if res.get("ok") and sold >= r["qty"]:
@@ -877,7 +898,23 @@ async def _copy_exit_sweep(pool) -> dict:
                         "pnl +%.2f", r["us_market_slug"],
                         r["whale_username"], int(r["qty"]), px,
                         r["entry"], pnl)
+        else:
+            # Unfilled or partial: the position is still ours, so the
+            # claim goes back. Without this an unfilled take-profit
+            # would retire a live position from every sweep that looks
+            # for 'filled' — including the one that grades it.
+            await _release_claim(pool, r["id"])
     return stats
+
+
+async def _release_claim(pool, row_id: int) -> None:
+    """Hand a claimed row back when no sale happened."""
+    try:
+        await pool.execute(
+            "UPDATE live_orders SET status='filled' "
+            "WHERE id=$1 AND status='exiting'", row_id)
+    except Exception:  # noqa: BLE001 — never mask the original refusal
+        log.exception("could not release exit claim on row %s", row_id)
 
 
 async def _record(pool) -> dict:
