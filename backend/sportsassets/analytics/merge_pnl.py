@@ -138,6 +138,15 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
     The cap is REPORTED, never silent — a truncated replay that reads
     as a complete one is a wrong P&L presented as a right one.
     """
+    # asyncpg infers the parameter type from the CAST, so `$2::date`
+    # expects a datetime.date and rejects a str with an opaque 500 —
+    # which is exactly what the first two probes of this endpoint got.
+    # api_true_edge_cashout already does this conversion (app.py:3578);
+    # I wrote a new query instead of following the idiom next to it.
+    import datetime as _dt
+
+    since_d = (since if isinstance(since, _dt.date)
+               else _dt.datetime.fromisoformat(str(since)).date())
     res: dict[str, Any] = {}
     for w in whales:
         rows = await pool.fetch(
@@ -146,12 +155,12 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
                    t.size::float8 AS size, t.price::float8 AS price
               FROM trades t JOIN whales wh ON wh.id = t.whale_id
              WHERE lower(wh.username) = $1
-               AND t.ts >= $2::date
+               AND t.ts >= $2
                AND t.condition_id IS NOT NULL
                AND t.outcome_index IS NOT NULL
              ORDER BY t.condition_id, t.ts, t.id
              LIMIT $3
-            """, w.lower(), since, max_fills)
+            """, w.lower(), since_d, max_fills)
         out = replay([dict(r) for r in rows])
         out["fills_read"] = len(rows)
         out["truncated"] = len(rows) >= max_fills

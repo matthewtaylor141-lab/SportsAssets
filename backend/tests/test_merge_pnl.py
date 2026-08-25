@@ -142,3 +142,104 @@ class TestTheRoiDenominatorIsEntriesOnly:
         assert r["entry_notional"] == 230.0
         assert r["roi_on_entries"] == round(
             r["realized_total"] / 230.0, 4)
+
+
+class TestTheQueryTakesADateNotAString:
+    """Two probes of this endpoint returned 500 before anyone knew why.
+
+    asyncpg infers a parameter's type from the CAST it sits under, so
+    `$2::date` expects a datetime.date and rejects a str. The codebase
+    already had the idiom — api_true_edge_cashout converts with
+    `_dt.fromisoformat(since_day).date()` before binding — and I wrote a
+    new query beside it without following it.
+
+    The first probe said only "unavailable", which is why it took two
+    rounds: the line could not tell a 500 from a timeout from an empty
+    body. HTTP status and body are printed now.
+    """
+
+    def test_the_replay_query_binds_a_date_object(self):
+        import inspect
+
+        from sportsassets.analytics import merge_pnl as m
+
+        src = inspect.getsource(m.whale_merge_pnl)
+        assert "since_d" in src
+        assert "fromisoformat" in src
+        # the cast must be gone from the SQL itself, comments aside
+        sql = src[src.index('"""\n            SELECT'):src.index('", w.lower()')]
+        assert "::date" not in sql
+
+    def test_the_cashflow_query_binds_a_date_object(self):
+        import inspect
+
+        from sportsassets.api import app as app_mod
+
+        src = inspect.getsource(app_mod.api_whale_merge_pnl)
+        assert ".date())" in src
+        sql = src[src.index("SELECT COALESCE(sum("):src.index('", name.lower()')]
+        assert "::date" not in sql
+
+    def test_a_date_object_passes_straight_through(self):
+        import asyncio
+        import datetime as dt
+
+        from sportsassets.analytics.merge_pnl import whale_merge_pnl
+
+        seen = {}
+
+        class _P:
+            async def fetch(self, _sql, *a):
+                seen["bound"] = a[1]
+                return []
+
+        asyncio.run(whale_merge_pnl(_P(), ["w"], dt.date(2026, 8, 1)))
+        assert seen["bound"] == dt.date(2026, 8, 1)
+
+    def test_a_string_is_converted_not_rejected(self):
+        import asyncio
+        import datetime as dt
+
+        from sportsassets.analytics.merge_pnl import whale_merge_pnl
+
+        seen = {}
+
+        class _P:
+            async def fetch(self, _sql, *a):
+                seen["bound"] = a[1]
+                return []
+
+        asyncio.run(whale_merge_pnl(_P(), ["w"], "2026-08-01"))
+        assert seen["bound"] == dt.date(2026, 8, 1)
+
+
+class TestTruncationIsReportedNotSilent:
+    def test_a_capped_replay_says_so(self):
+        import asyncio
+
+        from sportsassets.analytics.merge_pnl import whale_merge_pnl
+
+        class _P:
+            async def fetch(self, _sql, *_a):
+                return [{"condition_id": "c", "outcome_index": 0,
+                         "side": "BUY", "size": 1, "price": 0.5}] * 3
+
+        out = asyncio.run(whale_merge_pnl(_P(), ["w"], "2026-08-01",
+                                          max_fills=3))
+        assert out["w"]["truncated"] is True
+        assert "floors, not totals" in out["w"]["verdict_note"]
+
+    def test_an_uncapped_replay_does_not_claim_truncation(self):
+        import asyncio
+
+        from sportsassets.analytics.merge_pnl import whale_merge_pnl
+
+        class _P:
+            async def fetch(self, _sql, *_a):
+                return [{"condition_id": "c", "outcome_index": 0,
+                         "side": "BUY", "size": 1, "price": 0.5}]
+
+        out = asyncio.run(whale_merge_pnl(_P(), ["w"], "2026-08-01",
+                                          max_fills=100))
+        assert out["w"]["truncated"] is False
+        assert "verdict_note" not in out["w"]

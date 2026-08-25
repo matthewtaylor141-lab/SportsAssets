@@ -4290,6 +4290,8 @@ async def api_whale_merge_pnl(since: str = "2026-08-01",
     two answer different questions and the gap between them is the
     point.
     """
+    import datetime as _dt_mod
+
     from ..analytics.merge_pnl import whale_merge_pnl
     from .copies_record import COPY_WHALES
 
@@ -4304,8 +4306,9 @@ async def api_whale_merge_pnl(since: str = "2026-08-01",
                      CASE WHEN t.side = 'BUY'
                           THEN -t.notional ELSE t.notional END), 0)::float8
               FROM trades t JOIN whales wh ON wh.id = t.whale_id
-             WHERE lower(wh.username) = $1 AND t.ts >= $2::date
-            """, name.lower(), since)
+             WHERE lower(wh.username) = $1 AND t.ts >= $2
+            """, name.lower(),
+                 _dt_mod.datetime.fromisoformat(since).date())
         g["net_cashflow"] = round(float(st or 0), 2)
         g["verdict"] = (
             "NO MERGES FOUND — this whale does not close by merging, so "
