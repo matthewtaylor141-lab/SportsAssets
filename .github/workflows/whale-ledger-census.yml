@@ -1,0 +1,241 @@
+# WHALE LEDGER CENSUS (owner order 2026-08-26: "Stop taking our data at
+# face value. Pull it directly from the POLYMARKET ledger and learn
+# exactly what they are doing and why our system isn't capturing that
+# edge they verifiably have.")
+#
+# Runs on a GitHub runner because the analysis container's network
+# policy blocks the venue. Everything here comes from the venue's OWN
+# public data API (data-api.polymarket.com) keyed by the whales' wallet
+# addresses -- none of it passes through our ingestion pipeline, so it
+# can disagree with our tables and the disagreement is the finding.
+#
+# Its own workflow (not a job in engine-diagnostic) so it can be
+# triggered and re-read without waiting out the ~19-minute probe, and so
+# a push cancelling the probe does not cancel this.
+#
+# QUESTIONS IT ANSWERS, per roster whale, from the raw ledger:
+#   1. Is the account profitable by the venue's own accounting?
+#      (positions realizedPnl / cashPnl, portfolio value)
+#   2. What do they actually DO? Activity split: TRADE buys vs sells,
+#      MERGE, REDEEM, SPLIT -- counts and USDC volumes.
+#   3. The owner's round-trip thesis, tested on raw fills: shares
+#      bought and then EXITED (sold or merged) inside the window --
+#      what fraction exits before resolution, at what margin per
+#      share, after what hold time, and how fast the freed capital
+#      re-enters (the restake cadence).
+#   4. Exit mechanism: of exited shares, what fraction left by SELL
+#      vs MERGE vs REDEEM.
+name: whale-ledger-census
+on:
+  workflow_dispatch: {}
+
+jobs:
+  ledger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      BASE: https://sportsassets-api.onrender.com
+      ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+    steps:
+      - name: Pull roster wallets, crawl the venue ledger, compute
+        run: |
+          set +e
+          D="https://data-api.polymarket.com"
+          echo "###########################################################"
+          echo "#  WHALE LEDGER CENSUS - venue's own data, not our tables  #"
+          echo "###########################################################"
+          # Roster with addresses from our API (the only thing our stack
+          # is trusted for here: WHO to look at, never WHAT they did).
+          curl -sS --max-time 45 "$BASE/api/whales" -o /tmp/roster.json \
+            || echo "ROSTER FETCH FAILED"
+          jq -r '.[] | select(.active) | "\(.username) \(.address)"' \
+            /tmp/roster.json > /tmp/roster.txt 2>/dev/null
+          echo "ROSTER $(wc -l < /tmp/roster.txt) active whales"
+          cat /tmp/roster.txt | sed 's/^/  R /'
+
+          # Crawl 30 days of activity per whale. The activity feed caps
+          # offset at 5000, so paging advances by rows returned and,
+          # when the cap nears, re-anchors with end=<oldest-1> at
+          # offset 0 -- depth via time windows, not offsets.
+          CUT=$(date -u -d '30 days ago' +%s)
+          crawl () {  # $1 name  $2 address
+            local out="/tmp/act_$1.json" n=0 off=0 end="" rows cnt oldest
+            : > "$out"
+            while [ $n -lt 80 ]; do
+              url="$D/activity?user=$2&limit=500&offset=$off"
+              [ -n "$end" ] && url="$url&end=$end"
+              rows=$(curl -sS --max-time 25 "$url")
+              cnt=$(echo "$rows" | jq 'length' 2>/dev/null || echo 0)
+              if [ -z "$cnt" ] || [ "$cnt" = "0" ] || [ "$cnt" = "null" ]; then break; fi
+              echo "$rows" | jq -c '.[]' >> "$out"
+              oldest=$(echo "$rows" | jq '[.[].timestamp] | min' 2>/dev/null || echo 0)
+              n=$((n+1)); off=$((off+cnt))
+              if [ "$oldest" != "null" ] && [ "$oldest" -lt "$CUT" ]; then break; fi
+              if [ $off -ge 4500 ]; then end=$((oldest-1)); off=0; fi
+              sleep 0.35
+            done
+            echo "CRAWL $1 pages=$n rows=$(wc -l < "$out")"
+          }
+          # Positions: the venue's own P&L per position.
+          posget () {  # $1 name  $2 address
+            local out="/tmp/pos_$1.json" off=0 n=0 rows cnt
+            : > "$out"
+            while [ $n -lt 20 ]; do
+              rows=$(curl -sS --max-time 25 \
+                "$D/positions?user=$2&limit=500&offset=$off&sizeThreshold=0")
+              cnt=$(echo "$rows" | jq 'length' 2>/dev/null || echo 0)
+              if [ -z "$cnt" ] || [ "$cnt" = "0" ] || [ "$cnt" = "null" ]; then break; fi
+              echo "$rows" | jq -c '.[]' >> "$out"
+              n=$((n+1)); off=$((off+cnt)); sleep 0.3
+            done
+            echo "POS $1 rows=$(wc -l < "$out")"
+          }
+          while read -r NAME ADDR; do
+            [ -z "$ADDR" ] && continue
+            crawl "$NAME" "$ADDR"
+            posget "$NAME" "$ADDR"
+            V=$(curl -sS --max-time 20 "$D/value?user=$ADDR" 2>/dev/null)
+            echo "VALUE $NAME $V"
+          done < /tmp/roster.txt
+
+          python3 - <<'PYEOF'
+          import glob
+          import json
+          import statistics as st
+
+          def f(x):
+              try:
+                  return float(x)
+              except (TypeError, ValueError):
+                  return 0.0
+
+          for path in sorted(glob.glob("/tmp/act_*.json")):
+              name = path.split("act_", 1)[1][:-5]
+              acts, seen = [], set()
+              with open(path) as fh:
+                  for line in fh:
+                      try:
+                          a = json.loads(line)
+                      except json.JSONDecodeError:
+                          continue
+                      # DEDUP. The crawl re-anchors with end=<oldest-1>
+                      # when the offset cap nears; if the server ever
+                      # ignores `end`, pages would repeat and every
+                      # count below would silently double. A ledger
+                      # census that can double-count is not a census.
+                      key = (a.get("transactionHash"), a.get("asset"),
+                             a.get("timestamp"), a.get("size"),
+                             a.get("side"), a.get("type"))
+                      if key in seen:
+                          continue
+                      seen.add(key)
+                      acts.append(a)
+              # ---- 2. what they DO: type x side, counts + USDC
+              agg = {}
+              for a in acts:
+                  t = (a.get("type") or "?").upper()
+                  side = (a.get("side") or "").upper()
+                  key = f"{t}:{side}" if t == "TRADE" else t
+                  usdc = f(a.get("usdcSize"))
+                  n, v = agg.get(key, (0, 0.0))
+                  agg[key] = (n + 1, v + usdc)
+              parts = "  ".join(
+                  f"{k} n={n} ${v:,.0f}" for k, (n, v) in
+                  sorted(agg.items(), key=lambda kv: -kv[1][1]))
+              print(f"WLV {name} ACT30d: {parts}")
+
+              # ---- 3. round trips per asset: entries matched to exits
+              by_asset = {}
+              for a in sorted(acts, key=lambda x: x.get("timestamp") or 0):
+                  t = (a.get("type") or "").upper()
+                  side = (a.get("side") or "").upper()
+                  asset = a.get("asset") or a.get("conditionId") or ""
+                  if not asset:
+                      continue
+                  sh, usdc = f(a.get("size")), f(a.get("usdcSize"))
+                  ts = a.get("timestamp") or 0
+                  b = by_asset.setdefault(asset, {
+                      "bsh": 0.0, "busd": 0.0, "xsh": 0.0, "xusd": 0.0,
+                      "mech": {}, "bt": [], "xt": []})
+                  if t == "TRADE" and side == "BUY":
+                      b["bsh"] += sh; b["busd"] += usdc; b["bt"].append(ts)
+                  elif ((t == "TRADE" and side == "SELL")
+                        or t in ("MERGE", "REDEEM")):
+                      mech = "SELL" if t == "TRADE" else t
+                      b["xsh"] += sh; b["xusd"] += usdc; b["xt"].append(ts)
+                      b["mech"][mech] = b["mech"].get(mech, 0.0) + sh
+              bought = sum(b["bsh"] for b in by_asset.values())
+              buy_usd = sum(b["busd"] for b in by_asset.values())
+              exited, exit_usd, margin_usd = 0.0, 0.0, 0.0
+              holds, restakes, mech_all = [], [], {}
+              pre_resolution = 0.0
+              for b in by_asset.values():
+                  if b["bsh"] <= 0:
+                      continue
+                  m = min(b["bsh"], b["xsh"])   # shares that round-tripped
+                  if m <= 0:
+                      continue
+                  exited += m
+                  cost_ps = b["busd"] / b["bsh"]
+                  proc_ps = b["xusd"] / b["xsh"] if b["xsh"] else 0.0
+                  exit_usd += m * proc_ps
+                  margin_usd += m * (proc_ps - cost_ps)
+                  # REDEEM is post-resolution; SELL/MERGE are the
+                  # pre-resolution exits the owner is pointing at
+                  nonredeem = sum(v for k, v in b["mech"].items()
+                                  if k != "REDEEM")
+                  pre_resolution += min(m, nonredeem)
+                  for k, v in b["mech"].items():
+                      mech_all[k] = mech_all.get(k, 0.0) + v
+                  if b["bt"] and b["xt"]:
+                      holds.append((st.median(b["xt"])
+                                    - st.median(b["bt"])) / 60.0)
+              # restake cadence: exit anywhere -> next entry anywhere
+              exits_ts = sorted(ts for b in by_asset.values()
+                                for ts in b["xt"])
+              buys_ts = sorted(ts for b in by_asset.values()
+                               for ts in b["bt"])
+              j = 0
+              for xt in exits_ts:
+                  while j < len(buys_ts) and buys_ts[j] <= xt:
+                      j += 1
+                  if j < len(buys_ts):
+                      restakes.append((buys_ts[j] - xt) / 60.0)
+              if bought > 0:
+                  mstr = " ".join(f"{k}={v:,.0f}sh"
+                                  for k, v in sorted(mech_all.items()))
+                  print(
+                      f"WLV {name} RT30d: bought={bought:,.0f}sh "
+                      f"(${buy_usd:,.0f})  exited={exited:,.0f}sh "
+                      f"({exited / bought:.1%})  pre_resolution="
+                      f"{pre_resolution / bought:.1%}  "
+                      f"margin=${margin_usd:,.0f} "
+                      f"({(margin_usd / (exit_usd - margin_usd)) if exit_usd - margin_usd else 0:+.2%} on exited cost)  "
+                      f"hold_med={st.median(holds):,.0f}min "
+                      f"restake_med={st.median(restakes):,.0f}min"
+                      if holds and restakes else
+                      f"WLV {name} RT30d: bought={bought:,.0f}sh "
+                      f"exited={exited:,.0f}sh (insufficient timing data)")
+                  print(f"WLV {name} EXITMECH: {mstr}")
+
+          # ---- 1. venue's own P&L verdict from positions
+          for path in sorted(glob.glob("/tmp/pos_*.json")):
+              name = path.split("pos_", 1)[1][:-5]
+              pos = []
+              with open(path) as fh:
+                  for line in fh:
+                      try:
+                          pos.append(json.loads(line))
+                      except json.JSONDecodeError:
+                          pass
+              if not pos:
+                  print(f"WLV {name} POS: none returned")
+                  continue
+              rp = sum(f(p.get("realizedPnl")) for p in pos)
+              cp = sum(f(p.get("cashPnl")) for p in pos)
+              cur = sum(f(p.get("currentValue")) for p in pos)
+              ini = sum(f(p.get("initialValue")) for p in pos)
+              print(f"WLV {name} POS: n={len(pos)} realizedPnl=${rp:,.0f} "
+                    f"cashPnl=${cp:,.0f} currentValue=${cur:,.0f} "
+                    f"initialValue=${ini:,.0f}")
+          PYEOF
