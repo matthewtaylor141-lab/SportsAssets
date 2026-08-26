@@ -4784,6 +4784,13 @@ async def admin_exit_census() -> dict:
                    # is what made a rounding outcome read as a
                    # ledger/venue disagreement.
                    "mx_exit_rounds_to_zero",
+                   # The re-raise paths. Before 2026-08-26 an exit that
+                   # died on a cancellation or a venue error left no
+                   # census trace at all, so the totals read as complete
+                   # while a whole class was missing from them.
+                   "mx_aborted_before_venue",
+                   "mx_cancelled_mid_venue_call",
+                   "mx_venue_error",
                    "mx_no_bid_for_partial", "mx_venue_unfilled",
                    # A full exit that only partly filled. We still hold
                    # shares the whale does not — the row stays live and

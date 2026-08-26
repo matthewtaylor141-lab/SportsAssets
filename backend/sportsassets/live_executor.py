@@ -739,17 +739,21 @@ async def mirror_exit(payload: dict) -> str:
     needed, because after his exit our exposure is proportionally the
     same as his.
 
-    V1 MIRRORS FULL EXITS ONLY. If he closes 95%+ of his position we
-    close ours; a partial scale-out is logged and skipped. Partial
-    position accounting is where errors compound — the fraction has to
-    be right against a position we track across many fills — and his
-    "cash out" behaviour is a full exit, which is the case that carries
-    the value. The narrower version is the one I can be sure of.
+    PARTIALS ARE MIRRORED PROPORTIONALLY (owner order 2026-08-25: "copy
+    buys and 'sells' in the correct proportional relationship"). We sell
+    his closed fraction OF OUR holding and keep the remainder alive;
+    only at FULL_EXIT_FRAC do we go flat. v1 mirrored 95%+ exits and
+    skipped the rest, on the reasoning that partial accounting is where
+    errors compound. That risk is real, but skipping leaves us holding a
+    position he has already reduced, which is the exact divergence this
+    path exists to close.
 
-    Inert until whale sells are ingested: every copied whale currently
-    shows zero sells all time, so this fires zero times today. It is
-    built now so that the moment the data lands the sell leg is already
-    correct rather than being written in a hurry against live money.
+    NOT inert, and the docstring said it was for a day after it stopped
+    being true. The copied whales still show zero SELLs across 860k
+    trades — they close by MERGING back to USDC, which no trade feed
+    shows — so this fires through two detectors that do not need a sell:
+    classify_exit (he BOUGHT the complementary leg) and the whale_exits
+    positions-snapshot diff, which supplies closed_frac directly.
     """
     if payload.get("side") != "SELL":
         return _exit_done("mx_not_a_sell")
@@ -1072,6 +1076,16 @@ async def mirror_exit(payload: dict) -> str:
         # because awaiting inside a cancelled task is itself cancelled.
         with contextlib.suppress(BaseException):
             await asyncio.shield(_release_exit_claim(pool, row["id"]))
+        # COUNT IT ON THE WAY OUT (2026-08-26). Every other way out of
+        # this function records a reason; the three re-raise paths did
+        # not, so an exit that died on a cancellation or a venue error
+        # left NO trace in the census — and a census that silently omits
+        # a class is worse than no census, because the reader believes
+        # the totals.
+        #
+        # _exit_stop, not _exit_done: it returns None and nothing
+        # branches on it, so this cannot alter the re-raise below.
+        _exit_stop("mx_aborted_before_venue", slug=us_slug, qty=qty)
         raise
     try:
         if _flatten:
@@ -1102,9 +1116,12 @@ async def mirror_exit(payload: dict) -> str:
                 row["id"],
                 "exit cancelled mid-venue-call — reconcile: the sale "
                 "may have executed"))
+        _exit_stop("mx_cancelled_mid_venue_call", slug=us_slug, qty=qty)
         raise
-    except Exception:
+    except Exception as _exc:
         await _release_exit_claim(pool, row["id"])
+        _exit_stop("mx_venue_error", slug=us_slug, qty=qty,
+                   err=str(_exc)[:64])
         raise
     filled = float(result.get("filled_shares") or 0)
     px = result.get("fill_price")

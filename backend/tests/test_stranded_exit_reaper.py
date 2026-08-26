@@ -158,27 +158,53 @@ class TestCancellationNoLongerSlipsPast:
         src = inspect.getsource(le.mirror_exit)
         assert "asyncio.shield(_release_exit_claim" in src
 
+    def _venue_call_handlers(self):
+        """The handlers wrapping the venue call, read from the TREE.
+
+        Windowing on the literal "except Exception:" broke the moment
+        the handler grew an `as` clause -- a landmark guessed against
+        today's formatting, which is the same mistake in a new costume.
+        The tree does not care how the line is spelled.
+        """
+        import ast
+
+        fn = ast.parse(inspect.getsource(le.mirror_exit).lstrip()).body[0]
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Try):
+                continue
+            body = ast.unparse(node.body)
+            if "submit_fok" in body and "close_position" in body:
+                return {ast.unparse(h.type) if h.type else "":
+                        ast.unparse(h.body) for h in node.handlers}
+        raise AssertionError("the venue-call try block moved")
+
     def test_a_cancellation_AFTER_the_venue_call_does_not_release(self):
         """to_thread cannot be cancelled, so the sale may already have
         executed. Releasing to 'filled' would sell it twice."""
-        src = inspect.getsource(le.mirror_exit)
-        # Windowed to the NEXT handler, not a fixed character count. A
-        # slice width guessed against today's formatting is a test that
-        # reads the wrong text tomorrow; this file's author has made
-        # that mistake more than once tonight.
-        i = src.index("except asyncio.CancelledError:")
-        block = src[i:]
-        block = block[:block.index("except Exception:")]
+        h = self._venue_call_handlers()
+        block = h["asyncio.CancelledError"]
         assert "_release_exit_claim" not in block
         assert "reconcile" in block
 
     def test_an_ordinary_exception_after_the_venue_call_still_releases(
             self):
-        src = inspect.getsource(le.mirror_exit)
-        i = src.index("except asyncio.CancelledError:")
-        after = src[i:]
-        j = after.index("except Exception:")
-        assert "_release_exit_claim" in after[j:j + 200]
+        h = self._venue_call_handlers()
+        assert "_release_exit_claim" in h["Exception"]
+
+    def test_both_handlers_re_raise(self):
+        for block in self._venue_call_handlers().values():
+            assert block.rstrip().endswith("raise")
+
+    def test_both_handlers_leave_a_census_trace(self):
+        """Every other way out of mirror_exit records a reason. A
+        re-raise that records nothing makes the census silently omit a
+        whole class, and the reader believes the totals."""
+        for block in self._venue_call_handlers().values():
+            assert "_exit_stop(" in block, (
+                "an exit that died here would leave no trace")
+            assert "_exit_done(" not in block, (
+                "_exit_done returns the reason; only _exit_stop is "
+                "provably incapable of altering this path")
 
 
 class TestItIsWiredIn:
