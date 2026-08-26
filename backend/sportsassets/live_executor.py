@@ -595,6 +595,49 @@ async def mirror_exit(payload: dict) -> None:
     # at all. A halted system would have looked like a working one with
     # nothing to sell.
     _exit_stop("mx_reached_position_lookup", whale=username, asset=asset)
+    # ONE WHALE EXIT, MIRRORED ONCE (2026-08-26, adversarial round 2).
+    #
+    # mirror_exit runs BEFORE maybe_execute's live_orders INSERT and
+    # never writes a row keyed to the EXIT trade, so BOTH of
+    # copy_sweep's idempotency guards miss it: the asset guard tests
+    # lo.asset = t.asset and the exit trade's asset is the COMPLEMENT
+    # leg, and the trade guard tests lo2.trade_id = t.id and no such
+    # row exists.
+    #
+    # A FULL exit is saved by accident — the position row becomes
+    # 'cashed_out' and the next sweep finds nothing to sell. A PARTIAL
+    # one is not: the remainder branch writes the row back to
+    # status='filled', so ~120s later the same complement buy is
+    # re-detected, re-classified and mirrored again against what is
+    # LEFT. A single 50% trim becomes 50%, then 50% of the rest — we
+    # exit a position he only trimmed, in a staircase, paying the
+    # spread at every step.
+    #
+    # CHECKED HERE, RECORDED ONLY AFTER A SALE. My first version wrote
+    # the ledger row up front, which burns the exit on any legitimate
+    # refusal — and the most important refusal is mx_no_position_of_ours,
+    # which happens whenever his exit is detected BEFORE our entry
+    # fills. Claiming there would mean the exit is never mirrored once
+    # the entry lands, and we would hold a position he has left: the
+    # exact divergence this path exists to close.
+    #
+    # Concurrency is already handled by the atomic status='exiting'
+    # claim on the position row. This ledger is about REPLAY ACROSS
+    # TIME, which is a different problem and needs a different record.
+    #
+    # Trade-driven path only: the position-diff detector carries no
+    # trade id and is already bounded by its snapshot advancing.
+    _xtid = payload.get("id")
+    if _xtid is not None:
+        try:
+            _seen = await pool.fetchval(
+                "SELECT trade_id FROM copy_exit_applied WHERE trade_id=$1",
+                int(_xtid))
+        except Exception:  # noqa: BLE001 — an unreadable ledger is not
+            # permission to replay a sale. Refuse and retry next cycle.
+            return _exit_stop("mx_exit_ledger_unreadable", trade=_xtid)
+        if _seen is not None:
+            return _exit_stop("mx_exit_already_mirrored", trade=_xtid)
     row = await pool.fetchrow(
         "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
         "       fill_price::float8 AS entry, "
@@ -765,6 +808,21 @@ async def mirror_exit(payload: dict) -> None:
             "UPDATE live_orders SET status='cashed_out', "
             "pnl=COALESCE(pnl,0)+$2, settled_at=now() WHERE id=$1",
             row["id"], pnl or 0)
+    # RECORD IT, now that a sale actually happened.
+    if _xtid is not None:
+        try:
+            await pool.execute(
+                "INSERT INTO copy_exit_applied (trade_id, row_id, "
+                "closed_frac) VALUES ($1, $2, $3) "
+                "ON CONFLICT (trade_id) DO NOTHING",
+                int(_xtid), int(row["id"]), float(closed_frac))
+        except Exception:  # noqa: BLE001 — the sale already happened;
+            # failing to record it must not undo it. Next cycle may
+            # re-mirror, which is the pre-existing behaviour, and the
+            # log says so.
+            log.warning("MIRROR-EXIT: sold but could not record exit "
+                        "trade %s — a replay is possible next cycle",
+                        _xtid)
     _exit_stop("mx_SOLD", whale=username, slug=us_slug,
                shares=int(filled), pnl=pnl or 0,
                full=bool(closed_frac >= FULL_EXIT_FRAC))

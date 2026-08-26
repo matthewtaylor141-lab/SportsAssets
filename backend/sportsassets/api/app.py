@@ -4773,7 +4773,12 @@ async def admin_exit_census() -> dict:
     defect_keys = ("mx_overspend_halt", "mx_venue_holds_nothing",
                    "mx_no_bid_for_partial", "mx_venue_unfilled",
                    "mx_bad_supplied_fraction", "mx_already_claimed",
-                   "mx_below_floor", "mx_no_ledger_position")
+                   "mx_below_floor", "mx_no_ledger_position",
+                   # mx_exit_already_mirrored is the replay guard doing
+                   # its job and is EXPECTED at volume; it is listed so
+                   # the verdict can name it, not because it is a
+                   # defect. mx_exit_ledger_unreadable is.
+                   "mx_exit_already_mirrored", "mx_exit_ledger_unreadable")
     return {
         "source": "copy_sweep heartbeat (worker process)",
         "beat_at": row["beat_at"],

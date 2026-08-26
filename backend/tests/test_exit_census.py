@@ -312,3 +312,62 @@ class TestTheVerdictCanPointAtEveryPostLookupRefusal:
                          if not l.strip().startswith("#"))
         assert code.index("mx_overspend_halt") < \
             code.index("mx_reached_position_lookup")
+
+
+class TestOneWhaleExitIsMirroredOnce:
+    """mirror_exit runs BEFORE maybe_execute's live_orders INSERT and
+    never writes a row keyed to the EXIT trade, so both of copy_sweep's
+    idempotency guards miss it — the asset guard tests lo.asset =
+    t.asset and the exit trade's asset is the COMPLEMENT leg, and the
+    trade guard tests lo2.trade_id = t.id and no such row exists.
+
+    A FULL exit is saved by accident: the position row becomes
+    'cashed_out' and the next sweep finds nothing to sell. A PARTIAL
+    one is not — the remainder branch writes the row back to
+    status='filled', so ~120s later the same complement buy is
+    re-detected and mirrored again against what is LEFT. A single 50%
+    trim becomes 50%, then 50% of the rest, and we exit a position he
+    only trimmed, paying the spread at every step.
+    """
+
+    def test_the_ledger_is_checked_before_selling(self):
+        src = inspect.getsource(le.mirror_exit)
+        assert "FROM copy_exit_applied WHERE trade_id" in src
+        assert src.index("copy_exit_applied") < src.index("submit_fok")
+
+    def test_it_is_RECORDED_only_after_a_sale(self):
+        """Writing it up front burns the exit on any legitimate
+        refusal — and the most important one is mx_no_position_of_ours,
+        which fires whenever his exit is seen before our entry fills.
+        Claiming there would mean the exit never mirrors once the entry
+        lands, and we hold a position he has left."""
+        src = inspect.getsource(le.mirror_exit)
+        insert = src.index("INSERT INTO copy_exit_applied")
+        assert src.index("mx_SOLD") > insert
+        assert src.index("_exit_stop(\"mx_no_position_of_ours\"") < insert
+
+    def test_an_unreadable_ledger_refuses_rather_than_replays(self):
+        src = inspect.getsource(le.mirror_exit)
+        assert "mx_exit_ledger_unreadable" in src
+
+    def test_a_failed_RECORD_does_not_undo_the_sale(self):
+        """The sale already happened. Failing to record it must not
+        raise past it — the fallback is the pre-existing behaviour, and
+        the log says so."""
+        src = inspect.getsource(le.mirror_exit)
+        i = src.index("INSERT INTO copy_exit_applied")
+        assert "a replay is possible next cycle" in src[i:i + 900]
+
+    def test_the_position_diff_path_is_not_gated_by_it(self):
+        """whale_exits carries no trade id and is already bounded by
+        its snapshot advancing."""
+        src = inspect.getsource(le.mirror_exit)
+        assert 'if _xtid is not None:' in src
+
+    def test_there_is_a_migration(self):
+        from pathlib import Path
+
+        root = Path(le.__file__).resolve().parents[1]
+        m = root / "migrations" / "032_copy_exit_applied.sql"
+        assert m.exists()
+        assert "trade_id    BIGINT PRIMARY KEY" in m.read_text()
