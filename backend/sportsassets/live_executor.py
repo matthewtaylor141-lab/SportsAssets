@@ -2428,11 +2428,37 @@ def _tennis_candidates(title: str | None, global_slug: str) -> list[str]:
     right player NAME to be ordered."""
     import re as _re
 
+    from .copy_sports import league_of as _league_of
+
     s = (global_slug or "").lower()
     m = _re.search(r"\d{4}-\d{2}-\d{2}", s)
-    head = [t for t in s[:m.start()].strip("-").split("-") if t] if m \
-        else []
-    if not m or not head or head[0] not in _TENNIS_LEAGUES:
+    if not m:
+        return []
+    # THE LEAGUE IS NOT THE FIRST SEGMENT (2026-08-26).
+    #
+    # This read head[0] and compared it against _TENNIS_LEAGUES. The
+    # first segment of one of these slugs is the KIND prefix -- aec,
+    # atc, tsc, asc, cpc, astatc -- and the league is the segment AFTER
+    # it. league_of has always known that; this function carried a
+    # second, wrong copy of the same decision.
+    #
+    # So for every real tennis slug head[0] was 'aec', the gate refused
+    # it, and the function returned NO CANDIDATES:
+    #
+    #   aec-atp-harwen-stetra-2026-08-24  ->  head[0]='aec'  ->  0
+    #   atp-harwen-stetra-2026-08-24      ->  head[0]='atp'  ->  2
+    #
+    # Only the second shape ever worked and the feed does not produce
+    # it. resolve_market_exact was therefore NEVER CALLED for tennis:
+    # every tennis copy fell straight through to the fuzzy resolver, and
+    # fuzzy output is exactly what the quarantine refuses. Tennis is 48%
+    # of the recent unmapped funnel -- 4,919 ATP, 2,425 WTA and 2,168
+    # ITF rows in seven days -- and all of it died on this line.
+    #
+    # league_of is now the single definition. A slug with no kind prefix
+    # still resolves, so the shape that used to work still does.
+    lg = _league_of(s)
+    if lg not in _TENNIS_LEAGUES:
         return []
     date = m.group(0)
     # LAST colon: 'Tennis: ATP Cincinnati: A vs B' keeps only the
@@ -2449,8 +2475,8 @@ def _tennis_candidates(title: str | None, global_slug: str) -> list[str]:
     a, b = (_abbrev_player(p) for p in players)
     if not a or not b or a == b:
         return []
-    codes = list(_TENNIS_US_CODES.get(head[0], [head[0]]))
-    if head[0] == "itf":
+    codes = list(_TENNIS_US_CODES.get(lg, [lg]))
+    if lg == "itf":
         # Tour hint from the title ('ITF W15 ...' / 'Women' vs 'M25' /
         # 'Men') puts the likelier code first; both are still tried.
         tl = (title or "").lower()
