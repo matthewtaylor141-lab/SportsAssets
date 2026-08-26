@@ -3297,19 +3297,40 @@ def pair_completion_allowed(our_cost: float | None,
 
 
 async def _pair_completion_context(pool, us_slug: str,
-                                   held_slugs: list[str]) -> dict | None:
+                                   held_slugs: list[str],
+                                   order_limit: float | None = None,
+                                   ) -> dict | None:
     """Is `us_slug` the complement of something we hold, and at what edge?
 
     None means "refuse, exactly as before", and it is returned whenever
     anything at all is unknown. The venue's own positions payload is the
     referee for both what we hold and what it cost, the same referee
     no-stack already uses on the buy side.
+
+    TWO DEFECTS FIXED HOURS AFTER V1 SHIPPED (adversarial review
+    2026-08-26), both of which made the first version wrong in the same
+    direction -- it looked like a working gate and was not:
+
+      * WRONG KEY SPACE. v1 asked _sibling_from_positions, whose map
+        (token_siblings) is keyed CTF-token-id -> CTF-token-id from the
+        whale's GLOBAL positions. A PMUS market slug is never a key
+        there, so the lookup returned '' on every call and the
+        carve-out never fired once -- inert while its tests passed.
+        The complement now comes from pmus.slug_complement, the venue's
+        own marketSides array, in the same key space as held_slugs.
+      * PROVED AT THE WRONG PRICE. v1 proved the edge at the live ask,
+        but the order transacts at up to `limit` -- the whale-derived
+        price plus the Option A tolerance. A FOK can fill anywhere up
+        to its limit, so a pair proved at ask can cost more than a
+        dollar by fill time. The edge is now proved at the WORST price
+        the order can pay: max(ask, order_limit). A tightening -- it
+        can only refuse pairs v1 would have admitted.
     """
     from . import pmus
 
     try:
-        sib = await _sibling_from_positions(pool, us_slug)
-    except Exception:  # noqa: BLE001 -- an unreadable map is not a sibling
+        sib = await asyncio.to_thread(pmus.slug_complement, us_slug)
+    except Exception:  # noqa: BLE001 -- an unreadable venue is not a sibling
         return None
     if not sib or sib not in set(held_slugs):
         return None
@@ -3323,11 +3344,15 @@ async def _pair_completion_context(pool, us_slug: str,
         ask = await asyncio.to_thread(pmus.slug_ask, us_slug)
     except Exception:  # noqa: BLE001
         return None
-    edge = pair_completion_edge(avg, ask)
+    if ask is None:
+        return None
+    worst = max(float(ask), float(order_limit)) \
+        if order_limit is not None else float(ask)
+    edge = pair_completion_edge(avg, worst)
     if edge is None:
         return None
     return {"sibling": sib, "held": int(held), "our_cost": float(avg),
-            "ask": float(ask), "edge_cents": edge,
+            "ask": float(ask), "worst_price": worst, "edge_cents": edge,
             "allowed": edge >= PAIR_MIN_EDGE_CENTS}
 
 
@@ -4762,7 +4787,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     # this branch always has.
                     _pair = await _pair_completion_context(
                         pool, mapping["market_slug"],
-                        [r["us_market_slug"] for r in held])
+                        [r["us_market_slug"] for r in held],
+                        order_limit=limit)
                     if _pair and _pair["allowed"]:
                         # Cap at the shares already held: buying more
                         # than the other leg would leave net directional

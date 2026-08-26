@@ -521,6 +521,43 @@ def side_ask(us_slug: str, intent: str | None) -> float | None:
     return None
 
 
+def slug_complement(us_slug: str) -> str | None:
+    """The OTHER side's identifier for a two-sided US market, from the
+    venue's own marketSides array — or None.
+
+    Extracted 2026-08-26 from the mirror logic slug_bid already trusts
+    (`identifier != us_slug` over the same array), because the pair
+    completion carve-out needed a venue-confirmed complement and instead
+    consumed `token_siblings` — a map keyed CTF-token-id -> CTF-token-id
+    built from the WHALE'S global positions. A PMUS slug is never a key
+    in that map, so the lookup returned '' on every call and the
+    carve-out shipped inert: it compiled, its tests passed, and it could
+    never fire. The venue's own market record is the only source that
+    answers this question in the right key space.
+
+    None on anything unreadable — the caller refuses, never guesses.
+    """
+    client = _get_client()
+    try:
+        m = (client.markets.retrieve_by_slug(us_slug) or {}).get(
+            "market") or {}
+    except Exception:  # noqa: BLE001 — 404s are an answer
+        return None
+    sides = [s for s in (m.get("marketSides") or []) if isinstance(s, dict)]
+    if len(sides) != 2:
+        return None
+    other = next((s for s in sides
+                  if s.get("identifier") and s.get("identifier") != us_slug),
+                 None)
+    if other is None:
+        return None
+    # Sanity: us_slug itself must be one of the two sides, or this
+    # market record is not the market we were asked about.
+    if not any(s.get("identifier") == us_slug for s in sides):
+        return None
+    return str(other["identifier"])
+
+
 def slug_bid(us_slug: str) -> float | None:
     """Live best BID for one orderable US slug (desk cash-out, owner
     directive 2026-08-22). Explicit bid fields first; on a two-sided

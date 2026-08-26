@@ -77,82 +77,103 @@ class TestTheEdgeArithmetic:
 
 
 class TestTheContextFailsClosed:
-    class _Pool:
-        def __init__(self, sibling_map):
-            self.m = sibling_map
+    """The context asks pmus.slug_complement -- the venue's own
+    marketSides array -- NOT the token_siblings map.
 
-        async def fetchval(self, sql, *a):
-            return self.m
+    That distinction is the v1 postmortem: the first version consumed
+    token_siblings, which is keyed CTF-token-id -> CTF-token-id from
+    the whale's global positions. A PMUS slug is never a key there, so
+    the lookup returned '' on every call and the carve-out shipped
+    inert -- compiled, tested, and structurally unable to fire. These
+    tests stub the venue call, so the context's own logic is what is
+    being graded.
+    """
+
+    class _Pool:
+        async def fetchval(self, sql, *a):  # pragma: no cover - unused
+            raise AssertionError(
+                "the pair context must not read ingestion_state: the "
+                "token_siblings map is the wrong key space, which is "
+                "exactly how v1 shipped inert")
+
+    def _stub(self, monkeypatch, *, complement, held=(40, 0.47),
+              ask=0.51):
+        from sportsassets import pmus
+
+        monkeypatch.setattr(pmus, "slug_complement",
+                            lambda s: complement)
+        monkeypatch.setattr(pmus, "slug_ask", lambda s: ask)
+
+        async def fake_held(slug):
+            if isinstance(held, Exception):
+                raise held
+            return held
+
+        monkeypatch.setattr(le, "_pm_held", fake_held)
 
     @pytest.mark.asyncio
-    async def test_no_sibling_refuses(self, monkeypatch):
-        monkeypatch.setattr(le, "_SIBLING_CACHE", {})
-        monkeypatch.setattr(le, "_SIBLING_CACHE_AT", None)
+    async def test_no_complement_refuses(self, monkeypatch):
+        self._stub(monkeypatch, complement=None)
         out = await le._pair_completion_context(
-            self._Pool({}), "slug-b", ["slug-a"])
+            self._Pool(), "slug-b", ["slug-a"])
         assert out is None
 
     @pytest.mark.asyncio
-    async def test_a_sibling_we_do_not_hold_refuses(self, monkeypatch):
-        """Mutation-caught gap (2026-08-26): without the stubs below,
-        this passed even with the membership check DELETED -- the
-        un-patched venue call failed in the sandbox and refused for the
-        wrong reason. In production that mutant would have priced the
-        pair against a position from a DIFFERENT game than the one whose
-        guard it was lifting. The stubs make the venue path succeed, so
-        only the membership check itself can produce the refusal."""
-        monkeypatch.setattr(le, "_SIBLING_CACHE", {})
-        monkeypatch.setattr(le, "_SIBLING_CACHE_AT", None)
-
-        async def fake_held(slug):
-            return 40, 0.47        # venue would happily price it
-
-        from sportsassets import pmus
-
-        monkeypatch.setattr(le, "_pm_held", fake_held)
-        monkeypatch.setattr(pmus, "slug_ask", lambda s: 0.51)
+    async def test_a_complement_we_do_not_hold_refuses(self, monkeypatch):
+        """The venue path succeeds here on purpose (mutation-caught gap
+        in an earlier draft): only the membership check itself may
+        produce this refusal, or a mutant that deletes it prices the
+        pair against a DIFFERENT game's position."""
+        self._stub(monkeypatch, complement="slug-z")
         out = await le._pair_completion_context(
-            self._Pool({"slug-b": "slug-z"}), "slug-b", ["slug-a"])
-        assert out is None, (
-            "the complement is held NOWHERE in this guard's rows; "
-            "pricing it against another game's position lifts the "
-            "wrong refusal")
+            self._Pool(), "slug-b", ["slug-a"])
+        assert out is None
 
     @pytest.mark.asyncio
     async def test_held_leg_plus_cheap_ask_allows(self, monkeypatch):
-        monkeypatch.setattr(le, "_SIBLING_CACHE", {})
-        monkeypatch.setattr(le, "_SIBLING_CACHE_AT", None)
-
-        async def fake_held(slug):
-            assert slug == "slug-a"
-            return 40, 0.47
-
-        from sportsassets import pmus
-
-        monkeypatch.setattr(le, "_pm_held", fake_held)
-        monkeypatch.setattr(pmus, "slug_ask", lambda s: 0.51)
+        self._stub(monkeypatch, complement="slug-a")
         out = await le._pair_completion_context(
-            self._Pool({"slug-b": "slug-a"}), "slug-b", ["slug-a"])
+            self._Pool(), "slug-b", ["slug-a"])
         assert out is not None
         assert out["allowed"] is True
         assert out["held"] == 40
         assert out["edge_cents"] == pytest.approx(2.0)
 
     @pytest.mark.asyncio
+    async def test_the_edge_is_proved_at_the_worst_price(self, monkeypatch):
+        """v1 proved the edge at the ASK, but the order transacts at up
+        to its LIMIT -- the whale price plus the Option A tolerance. A
+        FOK can fill anywhere up to that limit, so a pair proved at ask
+        can cost over a dollar by fill time. max(ask, limit) is the
+        worst case, and the proof runs there."""
+        self._stub(monkeypatch, complement="slug-a", ask=0.51)
+        out = await le._pair_completion_context(
+            self._Pool(), "slug-b", ["slug-a"], order_limit=0.53)
+        assert out is not None
+        assert out["worst_price"] == pytest.approx(0.53)
+        assert out["edge_cents"] == pytest.approx(0.0)
+        assert out["allowed"] is False, (
+            "profitable at the ask, unprovable at the limit the order "
+            "will actually carry -- must refuse")
+
+    @pytest.mark.asyncio
+    async def test_a_limit_below_the_ask_does_not_loosen_the_proof(
+            self, monkeypatch):
+        """max(), not the limit alone: a limit below the ask simply
+        means the FOK will not fill, and the proof must still price the
+        book it would cross."""
+        self._stub(monkeypatch, complement="slug-a", ask=0.51)
+        out = await le._pair_completion_context(
+            self._Pool(), "slug-b", ["slug-a"], order_limit=0.40)
+        assert out is not None
+        assert out["worst_price"] == pytest.approx(0.51)
+
+    @pytest.mark.asyncio
     async def test_an_expensive_ask_declines_with_the_edge_visible(
             self, monkeypatch):
-        monkeypatch.setattr(le, "_SIBLING_CACHE", {})
-        monkeypatch.setattr(le, "_SIBLING_CACHE_AT", None)
-
-        async def fake_held(slug):
-            return 40, 0.47
-
-        from sportsassets import pmus
-
-        monkeypatch.setattr(le, "_pm_held", fake_held)
-        monkeypatch.setattr(pmus, "slug_ask", lambda s: 0.56)
+        self._stub(monkeypatch, complement="slug-a", ask=0.56)
         out = await le._pair_completion_context(
-            self._Pool({"slug-b": "slug-a"}), "slug-b", ["slug-a"])
+            self._Pool(), "slug-b", ["slug-a"])
         assert out is not None
         assert out["allowed"] is False
         assert out["edge_cents"] == pytest.approx(-3.0)
@@ -160,16 +181,26 @@ class TestTheContextFailsClosed:
     @pytest.mark.asyncio
     async def test_a_venue_error_refuses_rather_than_guessing(
             self, monkeypatch):
-        monkeypatch.setattr(le, "_SIBLING_CACHE", {})
-        monkeypatch.setattr(le, "_SIBLING_CACHE_AT", None)
-
-        async def fake_held(slug):
-            raise RuntimeError("venue down")
-
-        monkeypatch.setattr(le, "_pm_held", fake_held)
+        self._stub(monkeypatch, complement="slug-a",
+                   held=RuntimeError("venue down"))
         out = await le._pair_completion_context(
-            self._Pool({"slug-b": "slug-a"}), "slug-b", ["slug-a"])
+            self._Pool(), "slug-b", ["slug-a"])
         assert out is None
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_ask_refuses(self, monkeypatch):
+        self._stub(monkeypatch, complement="slug-a", ask=None)
+        out = await le._pair_completion_context(
+            self._Pool(), "slug-b", ["slug-a"])
+        assert out is None
+
+    def test_the_guard_passes_the_order_limit_in(self):
+        """Wiring: the carve-out call site hands the copy's own limit to
+        the context, or the worst-price proof grades a price the order
+        does not carry."""
+        src = inspect.getsource(le.maybe_execute)
+        i = src.index("_pair_completion_context(")
+        assert "order_limit=limit" in src[i:i + 300]
 
 
 class TestTheWiring:
