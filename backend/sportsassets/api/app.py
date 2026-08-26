@@ -6174,6 +6174,81 @@ async def api_whale_true_edge(since_day: str = "2026-08-01",
                      "settlement incident.")}
 
 
+@app.get("/api/admin/copy-tolerance", dependencies=[Depends(require_admin)])
+async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
+    """Did Option A pay for itself? Graded on the MARGINAL cohort only.
+
+    Option A (owner order 2026-08-26) gave every whale a capture
+    tolerance so the FOK can fill above his price. Before it, the limit
+    was his price floored to the tick, so the book only reached us when
+    the market had moved AGAINST him -- filling was conditioned on the
+    whale being wrong, and at_his was negative on all six whales.
+
+    THE COHORT SPLIT IS THE WHOLE INSTRUMENT. A fill AT OR BELOW his
+    price would have happened under the old rule too; it says nothing
+    about the change. Only fills ABOVE his price exist BECAUSE of the
+    tolerance. Those are 'marginal', and their P&L is the only number
+    that answers whether Option A was worth doing.
+
+    Blending the two is how a change like this gets graded as harmless:
+    parity fills dominate the count and drown the marginal signal. So
+    the two are never summed here.
+
+    Reported per whale and per cohort: n, staked, realised P&L, ROI on
+    dollar staked, and the mean cents paid over his price. `since_day`
+    defaults to the day Option A shipped -- grading it against rows
+    placed under the OLD rule would mix two different policies into one
+    average, which is the same error as the blend above.
+    """
+    from datetime import datetime as _dt
+
+    pool = await get_pool()
+    since_d = _dt.fromisoformat(since_day).date()
+    rows = await pool.fetch(
+        """
+        SELECT lower(COALESCE(whale_username, '?')) AS whale,
+               CASE WHEN fill_price > his_price THEN 'marginal'
+                    ELSE 'parity' END AS cohort,
+               count(*)::int AS n,
+               count(*) FILTER (WHERE status = 'settled')::int AS settled,
+               COALESCE(sum(filled_usd), 0)::float8 AS staked,
+               COALESCE(sum(pnl) FILTER
+                   (WHERE status = 'settled'), 0)::float8 AS pnl,
+               COALESCE(sum(filled_usd) FILTER
+                   (WHERE status = 'settled'), 0)::float8 AS settled_staked,
+               avg((fill_price - his_price) * 100)::float8 AS cents_over
+        FROM live_orders
+        WHERE placed_at >= $1
+          AND status IN ('filled', 'settled', 'cashed_out')
+          AND filled_usd > 0 AND his_price > 0 AND fill_price > 0
+          AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+        GROUP BY 1, 2 ORDER BY 1, 2
+        """, since_d)
+    out = []
+    for r in rows:
+        d = dict(r)
+        ss = float(d["settled_staked"] or 0)
+        # ROI ON SETTLED DOLLARS ONLY. Dividing realised P&L by dollars
+        # that include still-open positions understates every cohort,
+        # and it understates the SMALLER one more -- which here is the
+        # marginal cohort, the one being judged.
+        d["roi"] = round(float(d["pnl"]) / ss, 4) if ss > 0 else None
+        d["cents_over"] = (round(float(d["cents_over"]), 3)
+                           if d["cents_over"] is not None else None)
+        for k in ("staked", "pnl", "settled_staked"):
+            d[k] = round(float(d[k]), 2)
+        out.append(d)
+    return {
+        "since": since_day, "rows": out,
+        "note": ("marginal = filled ABOVE his price, i.e. only because "
+                 "of the tolerance -- the only cohort that grades "
+                 "Option A. parity = at or below, which same-or-better "
+                 "would also have filled. Never summed together. roi is "
+                 "on SETTLED dollars; a cohort with settled=0 has no "
+                 "verdict yet, however large its n."),
+    }
+
+
 @app.get("/api/admin/copy-latency", dependencies=[Depends(require_admin)])
 async def api_copy_latency(hours: int = Query(24, ge=1, le=24 * 60)) -> dict:
     """Reaction time on the copy sleeve over a WINDOW YOU CHOOSE.

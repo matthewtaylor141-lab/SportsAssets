@@ -317,6 +317,17 @@ jobs:
               /tmp/lat.json 2>/dev/null || echo "  LAT$H unavailable"
           done
 
+          # ── OPTION A GRADE (owner order 2026-08-26). The marginal
+          # cohort -- fills ABOVE his price, which exist only because of
+          # the tolerance -- is the ONLY one that judges the change. The
+          # parity rows would have filled under same-or-better too and
+          # outnumber them, so a blended average would report a losing
+          # Option A as harmless. Printed separately, never summed.
+          curl -sS --max-time 45 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/tol.json "$BASE/api/admin/copy-tolerance" || true
+          jq -r '.rows[]? | "  TOLA \(.whale) \(.cohort)  n=\(.n) settled=\(.settled)  staked=$\(.staked) roi=\(.roi)  cents_over=\(.cents_over)  pnl=$\(.pnl)"' \
+            /tmp/tol.json 2>/dev/null || echo "  TOLA unavailable"
+
           # ── premap coverage (owner order 2026-08-24: copy-time mapping
           # becomes a lookup; this line watches the table fill)
           curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \

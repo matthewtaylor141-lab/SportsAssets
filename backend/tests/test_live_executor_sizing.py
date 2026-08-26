@@ -153,17 +153,140 @@ class TestTypeMultipliers:
 
 
 class TestCopyLimitPrice:
-    """The strict same-or-better limit is now universal in practice:
-    RN1's +3c capture tolerance is dead code while he is cut (kept for
-    the map's history; his entry gate refuses long before pricing)."""
+    """OPTION A (owner order 2026-08-26): a capture tolerance for every
+    whale, not RN1 alone.
 
-    def test_everyone_stays_same_or_better(self):
+    This class used to assert `copy_limit_price("swisstony", 0.474) ==
+    0.47` under the heading "everyone stays same-or-better". That was a
+    faithful test of the old rule, and the old rule was the defect: the
+    limit was his price floored to the tick, so the book only reached it
+    when the market had moved AGAINST him, and filling was conditioned
+    on the whale being wrong. Measured, not theorised -- at_his, his own
+    P&L on the subset we filled at HIS prices, was negative on all six
+    whales (-$30,248) while price_drag was positive on all six
+    (+$13,051): we filled cheaper than he did and still lost.
+
+    So the assertions below invert deliberately. What must NOT change is
+    everything the tolerance is not allowed to touch, and that is most
+    of this class.
+    """
+
+    def test_a_fresh_copy_now_carries_the_tolerance(self):
+        from sportsassets.live_executor import (copy_limit_price,
+                                                tol_cents_for)
+
+        cents = tol_cents_for("swisstony")
+        assert cents > 0, "Option A did not reach the general whale"
+        assert copy_limit_price("swisstony", 0.474) == round(
+            0.47 + cents / 100.0, 2)
+
+    def test_a_reclaim_still_pays_nothing(self):
+        """Unchanged by Option A and load-bearing. The tolerance exists
+        to capture a signal the market is moving with; paying over a
+        days-old entry is adverse selection wearing the same clothes."""
         from sportsassets.live_executor import copy_limit_price
 
-        assert copy_limit_price("swisstony", 0.474) == 0.47
-        assert copy_limit_price("0x076daa87", 0.50) == 0.50
-        assert copy_limit_price("0x076daa87", 0.335) == 0.33
-        assert copy_limit_price(None, 0.335) == 0.33
+        assert copy_limit_price("swisstony", 0.474, fresh=False) == 0.47
+        assert copy_limit_price("rn1", 0.474, fresh=False) == 0.47
+        assert copy_limit_price(None, 0.335, fresh=False) == 0.33
+
+    def test_the_floor_to_the_tick_survives(self):
+        """The tolerance is added to the FLOORED price, not to his raw
+        one. Adding first and flooring second would silently give back a
+        fraction of a cent and make the knob mean something different at
+        different prices."""
+        from sportsassets.live_executor import (copy_limit_price,
+                                                tol_cents_for)
+
+        c = tol_cents_for("x") / 100.0
+        assert copy_limit_price("x", 0.4799) == round(0.47 + c, 2)
+        assert copy_limit_price("x", 0.4700) == round(0.47 + c, 2)
+
+    def test_it_never_crosses_the_dollar(self):
+        from sportsassets.live_executor import copy_limit_price
+
+        for p in (0.98, 0.99, 0.995):
+            assert copy_limit_price("x", p) <= 0.99
+
+    def test_the_ceiling_clamps_a_fat_fingered_env(self, monkeypatch):
+        """The only way this becomes a 10-cent overpay is an env typo,
+        and 10c on a 50c contract is 20% of stake against a 1.5% edge."""
+        from sportsassets import live_executor as le
+
+        monkeypatch.setenv("PMUS_COPY_TOL_BY_WHALE", "greedy:99")
+        assert le.tol_cents_for("greedy") == le.COPY_TOL_MAX_CENTS
+
+    def test_a_named_zero_refuses_tolerance(self, monkeypatch):
+        """An explicit 0 must beat a non-zero global default. Testing
+        the override for truthiness rather than membership would silently
+        pay on a whale someone deliberately excluded."""
+        from sportsassets import live_executor as le
+
+        monkeypatch.setenv("PMUS_COPY_TOL_BY_WHALE", "cautious:0")
+        assert le.tol_cents_for("cautious") == 0.0
+        assert le.copy_limit_price("cautious", 0.474) == 0.47
+
+    def test_a_negative_env_cannot_bid_below_his_price(self, monkeypatch):
+        """A negative tolerance would be same-or-better made stricter,
+        which is the bug we are removing, not a safety feature."""
+        from sportsassets import live_executor as le
+
+        monkeypatch.setenv("PMUS_COPY_TOL_BY_WHALE", "odd:-5")
+        assert le.tol_cents_for("odd") == 0.0
+
+    def test_rn1_keeps_its_own_env_var(self, monkeypatch):
+        """PMUS_RN1_TOL_CENTS is already set in the live environment.
+        Option A must not silently change what it means."""
+        from sportsassets import live_executor as le
+
+        monkeypatch.delenv("PMUS_COPY_TOL_BY_WHALE", raising=False)
+        assert le.tol_cents_for("rn1") == min(le.RN1_TOL_CENTS,
+                                              le.COPY_TOL_MAX_CENTS)
+
+    def test_the_default_is_one_cent(self):
+        """On a 50c contract one cent is 2% of stake and rn1's whole
+        measured edge is +1.50%. The default is the smallest step that
+        breaks the conditioning at all; anything wider must be earned
+        from graded evidence."""
+        from sportsassets import live_executor as le
+
+        assert le.COPY_TOL_CENTS == 1.0
+
+
+class TestToleranceCohort:
+    """Option A ships with its own grader. A change that cannot be
+    graded is exactly how the previous rule survived for two weeks."""
+
+    def test_a_fill_above_his_price_is_marginal(self):
+        from sportsassets.live_executor import tolerance_cohort
+
+        assert tolerance_cohort(0.47, 0.48) == "marginal"
+
+    def test_a_fill_at_or_below_is_parity(self):
+        """Same-or-better would have taken these too, so they say
+        nothing about the change."""
+        from sportsassets.live_executor import tolerance_cohort
+
+        assert tolerance_cohort(0.47, 0.47) == "parity"
+        assert tolerance_cohort(0.47, 0.46) == "parity"
+
+    def test_missing_prices_are_not_guessed(self):
+        from sportsassets.live_executor import tolerance_cohort
+
+        assert tolerance_cohort(None, 0.48) == "unknown"
+        assert tolerance_cohort(0.47, None) == "unknown"
+        assert tolerance_cohort(0.47, "n/a") == "unknown"
+
+    def test_the_split_is_what_answers_the_question(self):
+        """Blending the cohorts is how this gets graded as harmless:
+        parity fills dominate the count and drown the marginal signal.
+        Only the marginal ones exist BECAUSE of Option A."""
+        import inspect
+
+        from sportsassets.live_executor import tolerance_cohort
+
+        doc = inspect.getdoc(tolerance_cohort) or ""
+        assert "marginal" in doc and "parity" in doc
 
 
 class TestProbeAuthorization:

@@ -2092,22 +2092,124 @@ PMUS_LOSS_BREAKER_USD = float(
 # +2c cohort. Fresh reactions ONLY — reclaims still pay no tolerance.
 RN1_TOL_CENTS = float(os.environ.get("PMUS_RN1_TOL_CENTS", "3"))
 
+# OPTION A (owner order 2026-08-26): a capture tolerance for EVERY
+# whale, not just RN1.
+#
+# WHAT SAME-OR-BETTER ACTUALLY BOUGHT US. The limit was his price
+# floored to the tick, and the code called the consequence a feature:
+# "the order fills only at his price or cheaper, never worse. A book
+# that ran past him is a skipped copy." Follow that through. The book
+# only comes back to his price when the market moved AGAINST him, so
+# FILLING WAS CONDITIONED ON THE WHALE BEING WRONG. We were not
+# sampling his trades; we were sampling his losers.
+#
+# It is measured, not theorised. at_his -- his OWN P&L on the subset we
+# actually filled, at HIS prices -- is negative on all six whales,
+# summing -$30,248, while price_drag is POSITIVE on all six (+$13,051):
+# we filled CHEAPER than he did and still lost. Under that rule no
+# amount of further data reaches a positive verdict, because more data
+# only tightens the negative interval. The rule had to change before
+# the question could be asked.
+#
+# THIS IS A CEILING, NOT A PAYMENT. The FOK fills at the BOOK, so a
+# +Nc limit costs whatever the ask is, up to N over. The fills it BUYS,
+# though, are exactly the ones whose ask sat above him -- so the
+# MARGINAL trade's cost is conditioned on being above him and is not
+# the average over all fills. That distinction is why this ships with
+# tolerance_cohort() and the copy-tolerance endpoint rather than alone:
+# a change that cannot be graded is how the previous rule survived.
+#
+# THE ARITHMETIC THAT SETS THE DEFAULT. On a 50c contract one cent is
+# 2% of stake, and rn1's whole measured edge is +1.50% ([-0.45%,
+# +3.46%] over 103,065 lots). A wide tolerance can therefore cost more
+# than the edge it captures. Default is ONE cent -- the smallest step
+# that breaks the conditioning at all, since the venue ticks in cents.
+# Raise it per whale, on graded evidence, never on a hunch.
+COPY_TOL_CENTS = float(os.environ.get("PMUS_COPY_TOL_CENTS", "1"))
+
+# Hard ceiling on anything the environment can ask for. A fat-fingered
+# env var is the only way this becomes a 10-cent overpay, and 10 cents
+# on a 50c contract is 20% of stake against a 1.5% edge. Tightening
+# only -- it can never raise a tolerance, only refuse one.
+COPY_TOL_MAX_CENTS = float(os.environ.get("PMUS_COPY_TOL_MAX_CENTS", "3"))
+
+
+def _tol_overrides() -> dict[str, float]:
+    """Per-whale tolerance from PMUS_COPY_TOL_BY_WHALE ("rn1:3,x:0").
+
+    A whale named with 0 is an explicit REFUSAL to pay tolerance on him,
+    which must survive a non-zero global default -- so this returns the
+    parsed mapping and callers test membership, never truthiness.
+    """
+    out: dict[str, float] = {}
+    for part in (os.environ.get("PMUS_COPY_TOL_BY_WHALE", "") or "").split(","):
+        name, _, cents = part.partition(":")
+        name = name.strip().lower()
+        if not name:
+            continue
+        try:
+            out[name] = float(cents)
+        except ValueError:
+            continue
+    return out
+
+
+def tol_cents_for(whale_username: str | None) -> float:
+    """Capture tolerance in cents for this whale, clamped to the ceiling.
+
+    Precedence: explicit per-whale override, then RN1's own long-standing
+    env var (kept so an operator's existing PMUS_RN1_TOL_CENTS keeps
+    meaning what it meant), then the global default.
+    """
+    name = (whale_username or "").lower()
+    over = _tol_overrides()
+    if name in over:
+        cents = over[name]
+    elif name == "rn1":
+        cents = RN1_TOL_CENTS
+    else:
+        cents = COPY_TOL_CENTS
+    return max(0.0, min(cents, COPY_TOL_MAX_CENTS))
+
 
 def copy_limit_price(whale_username: str | None, his_price: float,
                      fresh: bool = True) -> float:
-    """FOK limit for a copy: his price floored to the venue tick —
-    same-or-better — plus the per-whale capture tolerance (RN1 +2c).
+    """FOK limit for a copy: his price floored to the venue tick, plus
+    the per-whale capture tolerance (see tol_cents_for).
 
-    fresh=False (the sweep's reclaims, audit 2026-08-21): NO tolerance.
-    The +2c evidence base is fresh-capture misses grading +5.3%; paying
-    2c over a days-old entry price is adverse selection, not capture."""
+    fresh=False (the sweep's reclaims, audit 2026-08-21): NO tolerance,
+    and that stays true under Option A. The tolerance exists to capture
+    a signal the market is moving with; paying over a days-old entry
+    price is adverse selection wearing the same clothes.
+    """
     import math
 
     limit = math.floor(round(his_price * 100, 6)) / 100.0
-    if fresh and (whale_username or "").lower() == "rn1" \
-            and RN1_TOL_CENTS > 0:
-        limit = min(0.99, round(limit + RN1_TOL_CENTS / 100.0, 2))
+    cents = tol_cents_for(whale_username) if fresh else 0.0
+    if cents > 0:
+        limit = min(0.99, round(limit + cents / 100.0, 2))
     return limit
+
+
+def tolerance_cohort(his_price: float | None,
+                     fill_price: float | None) -> str:
+    """Which cohort a FILL belongs to, for grading Option A.
+
+    'marginal' -- we paid ABOVE his price, so this fill exists ONLY
+    because of the tolerance. These are the trades Option A bought, and
+    they are the ONLY ones whose P&L answers whether it was worth it.
+    'parity'   -- at or below his price; same-or-better would have
+    filled it too, so it says nothing about the change.
+
+    Averaging the two together is how a change like this gets graded as
+    harmless: the parity fills dominate the count and drown the signal.
+    """
+    if his_price is None or fill_price is None:
+        return "unknown"
+    try:
+        return "marginal" if float(fill_price) > float(his_price) else "parity"
+    except (TypeError, ValueError):
+        return "unknown"
 
 
 def is_short_intent(intent: str | None) -> bool:
