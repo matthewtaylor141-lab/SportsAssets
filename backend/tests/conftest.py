@@ -59,3 +59,27 @@ def _clear_overspend_breaker(monkeypatch):
         return None
 
     monkeypatch.setattr(le, "overspend_halt", _clear)
+
+
+@pytest.fixture(autouse=True)
+def _clear_module_caches():
+    """Module-level caches must not leak between tests.
+
+    _SIBLING_CACHE lives on live_executor and is keyed by token with a
+    300s TTL, so one test populating it makes the NEXT test's stub pool
+    unreachable -- _sibling_from_positions answers from the cache and
+    never calls it. test_sibling_fallback passed in isolation and failed
+    in the suite, and only surfaced because an unrelated new test file
+    changed collection order.
+
+    A test that passes only in one ordering is proving nothing, and the
+    ordering it needs is invisible. Cleared before and after, so a test
+    inherits nothing and leaves nothing.
+    """
+    from sportsassets import live_executor as _le
+
+    _le._SIBLING_CACHE.clear()
+    _le._SIBLING_CACHE_AT = 0.0
+    yield
+    _le._SIBLING_CACHE.clear()
+    _le._SIBLING_CACHE_AT = 0.0

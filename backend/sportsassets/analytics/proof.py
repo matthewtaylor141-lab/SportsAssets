@@ -198,6 +198,25 @@ async def cohort_assess(pool: Any, since: str = COHORT_START,
           FROM live_orders lo
          WHERE lo.placed_at >= $1
            AND lo.pnl IS NOT NULL
+           -- TERMINAL ROWS ONLY (2026-08-26).
+           --
+           -- `pnl IS NOT NULL` was the whole test, and it stopped being
+           -- a proxy for "closed" the moment partial exits started
+           -- accumulating P&L onto a row that stays 'filled'. Such a
+           -- row still HOLDS SHARES, and it was entering the proof
+           -- cohort at FULL stake with only its realised partial gain
+           -- in the numerator.
+           --
+           -- That biases the headline in the optimistic direction: the
+           -- gain from the part we sold is counted, the exposure we
+           -- still carry is not. This is the number reported as
+           -- evidence of whether the desk earns, so it has to be
+           -- exactly the closed book and nothing else.
+           --
+           -- 'settled'   the market resolved
+           -- 'cashed_out' mirror_exit closed it out entirely
+           -- 'filled'    still open, partial exits included -- OUT
+           AND lo.status IN ('settled', 'cashed_out')
            AND COALESCE(lo.whale_username, '') NOT IN ('manual', 'underdog')
            AND COALESCE(lo.filled_usd, lo.requested_usd) > 0
     """
