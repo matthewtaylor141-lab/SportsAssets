@@ -38,7 +38,7 @@ import pytest
 from sportsassets import live_executor as le
 from sportsassets.workers import whale_exits as we
 
-from test_refused_exit_is_held import FakePool, harness  # noqa: F401
+from tests.test_refused_exit_is_held import FakePool, harness  # noqa: F401
 
 
 async def _cycle(pool):
