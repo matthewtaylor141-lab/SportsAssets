@@ -358,6 +358,38 @@ EXIT_PENDING_REASONS: frozenset[str] = frozenset({
     # Liquidity, not position. Both come back.
     "mx_no_bid_for_partial",
     "mx_venue_unfilled",
+    # THE SUB-FLOOR TRIM, WHICH IS WHY DRIFT NEVER ACCUMULATED
+    # (2026-08-26).
+    #
+    # closed_frac is a FLOW: one observation's delta over the position
+    # as it stood immediately before that observation. The position
+    # lane then advances its snapshot every 120s. So a whale trimming
+    # 7% repeatedly has EVERY observation correctly refused as
+    # sub-floor while the deficit is discarded each time -- he reaches
+    # 23% and we still hold 100%, without one observation ever crossing
+    # the floor. Simulated against the production constants:
+    #
+    #   7%/cycle x20  ->  whale 23.4%, we 100.0%, 20 refusals
+    #   4%/cycle x20  ->  whale 44.2%, we 100.0%, 0 observations even
+    #                     reported (MIN_SHRINK=0.05 drops them silently)
+    #
+    # mx_below_floor: 293 counts refusals, not the un-exited drift
+    # behind them, and it cannot see the sub-5% band at all.
+    #
+    # Marking it PENDING makes whale_exits PIN the asset at its
+    # pre-trim size instead of advancing past it, so the next cycle
+    # measures pre-trim against a further-shrunken book and the
+    # fraction GROWS until it genuinely crosses the floor. The floor
+    # itself is unchanged -- this does not admit a smaller trim, it
+    # stops the baseline running away from one. Same ratchet:
+    #
+    #   7%/cycle x20  ->  whale 23.4%, we 23.4%, 10 exits fired
+    #   4%/cycle x20  ->  whale 44.2%, we 47.9%,  6 exits fired
+    #
+    # The starvation cost of pinning is already handled: the retry
+    # cursor rotates, so a pinned asset cannot crowd out one that has
+    # never had a turn.
+    "mx_below_floor",
     # The whale is out and we are only partly out. The row still holds
     # shares and stays 'filled', so this is a real position to finish
     # exiting, not a settled one.

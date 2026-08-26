@@ -337,10 +337,31 @@ class TestTheAllowlistIsOwnedByTheProducer:
     def test_the_settled_reasons_are_excluded_deliberately(self):
         """These mean there is nothing left to do. Retrying any of them
         would re-pin the asset and re-diff it every cycle forever."""
-        for r in ("mx_SOLD", "mx_no_position_of_ours", "mx_below_floor",
+        for r in ("mx_SOLD", "mx_no_position_of_ours",
                   "mx_venue_holds_nothing", "mx_exit_already_mirrored",
                   "mx_whale_not_verified", "mx_no_ledger_position"):
             assert r not in le.EXIT_PENDING_REASONS
+
+    def test_mx_below_floor_MOVED_to_pending_on_evidence(self):
+        """This assertion used to include mx_below_floor, and it was
+        wrong -- recorded here rather than quietly deleted.
+
+        The reasoning was that a trim under the floor means "nothing
+        worth doing". That holds for ONE observation and fails across
+        many, because closed_frac is a flow measured against the
+        previous snapshot and the snapshot advances every 120 seconds.
+        A whale trimming 7% repeatedly has every observation correctly
+        refused while the deficit is discarded each time. Simulated on
+        the production constants: 7%/cycle for 20 cycles leaves him at
+        23.4% and us at 100.0%, with 20 refusals and no observation
+        ever crossing the floor.
+
+        Pinning does not admit a smaller trim -- the floor is
+        unchanged. It stops the baseline running away from one.
+        """
+        assert "mx_below_floor" in le.EXIT_PENDING_REASONS
+        # And the floor itself did NOT move.
+        assert le.MIN_EXIT_FRAC == 0.10
 
     def test_the_halt_reasons_ARE_included(self):
         """The 326 destroyed exits were all one of these."""
