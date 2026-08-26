@@ -417,6 +417,293 @@ def _title_sign_is_his(his_title: str | None, outcome: str | None) -> bool:
     return any(o in t for t in titles for o in outs if o)
 
 
+# ── THE YES/NO BRIDGE (Phase 0, 2026-08-26) ─────────────────────────
+#
+# no_side_match is 239 of 400 sampled unmapped rejections (59.8%), and
+# the production example that named the class:
+#
+#   his_slug  col-aus-scb-2026-08-27-scb   outcome "Yes"
+#   his_title "Will SC Braga win on 2026-08-27?"
+#   detail    outcome 'Yes' matched none of ['yes','no','yes','yes',...]
+#
+# The yes/no branch of match_side demands _questions_agree between his
+# title and the venue's question WORDING, and the two feeds word the
+# same proposition differently — a structural refusal on the whole
+# "will TEAM win" family. The identity is recoverable without wording
+# luck: his slug's final token names the market subject in team-code
+# vocabulary, his title names the team, the venue question names both
+# the subject AND the opponent, and the row's own event_title names the
+# two teams. The bridge triangulates all four and refuses on ANY
+# disagreement.
+#
+# DESIGNED UNDER ATTACK, NOT UNDER HOPE. Three candidate designs were
+# adversarially attacked with the shipped-incident corpus (2026-08-23
+# ambiguity-to-ordering, 2026-08-24 yes/no-to-named-team inversion, the
+# Ito containment kill, the bare-Yes/No cross-proposition match, the
+# date-as-line misparse) plus constructed wrong-market inputs:
+# same-city teams, colliding codes, doubleheaders, win-or-draw /
+# first-half / to-nil / extra-time qualifiers, derbies, partial
+# capture. Two designs DIED in attack with executed wrong-market
+# admissions. This one survived 56 executed checks with 0 failures, and
+# every clause below exists because an attack demanded it.
+#
+# STRUCTURAL PROPERTIES (each is a shipped incident's rule):
+#   * double uniqueness — exactly one candidate row (step 2) AND
+#     exactly one event-wide subject match (step 3); no ordered
+#     selection exists anywhere;
+#   * literal side_norm yes/no polarity only — never a named side;
+#   * distinctive-token SET EQUALITY — never containment;
+#   * fully anchored, closed-tail grammars on BOTH feeds;
+#   * unlined, unsigned rows only — the O/U branch is untouched;
+#   * his title's date is consumed by the grammar and never fed to
+#     _lines_of/signed_line, so "on 2026-08-27" cannot misparse as a
+#     line ({'08','27'}) and a sign ('-08') the way it does today.
+#
+# PHASE 0: this function is consumed ONLY by resolve_explain's
+# read-only probe and the census. Nothing on the order path calls it;
+# resolve() takes no bridge argument yet. The census must first measure
+# how much of the 239 the bridge would recover and which venue question
+# tails exist, and any grammar extension is a reviewed change that
+# re-runs the attack harness.
+
+GENERIC_CLUB_TOKENS = frozenset({"fc", "cf", "sc", "ac", "afc", "ca",
+                                 "cd", "club", "the", "de"})
+# EXACTLY these ten. The list may only strip legal-form furniture,
+# never identity markers: adding 'b', 'ii', 'w', 'u21', 'women' or
+# 'reserves' would merge 'SC Braga B' into 'SC Braga' — the
+# reserve-team collapse the attack corpus measured. An addition is a
+# LOOSENING and needs the same review as a grammar change. Pinned.
+
+_BRIDGE_TITLE_RE = re.compile(
+    r"^will (?:the )?(?P<subj>.+?) win"
+    r"(?: on (?P<iso>\d{4} \d{2} \d{2})"
+    r"| on (?P<mon>[a-z]+) (?P<day>\d{1,2})(?: (?P<yr>\d{4}))?)?$")
+
+_BRIDGE_Q_RE = re.compile(
+    r"^will (?:the )?(?P<subj>.+?) win"
+    r"(?: (?:against|vs) (?P<opp>[a-z0-9 ]+?))?"
+    r"(?: (?:in|on) (?:their )?(?:match|game))?"
+    r"(?: on (?P<qmon>[a-z]+) (?P<qday>\d{1,2})(?: (?P<qyr>\d{4}))?)?$")
+
+_BRIDGE_MONTHS = {m: i + 1 for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july",
+     "august", "september", "october", "november", "december"])}
+_BRIDGE_MONTHS.update({m[:3]: v for m, v in list(_BRIDGE_MONTHS.items())})
+
+
+def _distinctive(subject_norm: str) -> frozenset:
+    """Whole identity tokens of a normalized subject.
+
+    NO length-based stripping: '<3 chars' would erase the reserve and
+    women's markers, and 'SC Braga B' must yield {'braga','b'} so it
+    can never set-equal 'SC Braga'."""
+    return frozenset(t for t in subject_norm.split()
+                     if t not in GENERIC_CLUB_TOKENS)
+
+
+def _collapsed(s: str) -> str:
+    return _norm(s).replace(" ", "")
+
+
+def _bridge_title_subject(his_title: str | None,
+                          his_slug: str | None) -> tuple[str | None, str]:
+    """The team his 'Will X win …?' title asks about, or (None, why).
+
+    The date clause is consumed HERE and compared against his slug's
+    own date — never handed to _lines_of/signed_line, which today read
+    'on 2026-08-27' as a line and a sign and refuse every dated yes/no
+    title at _yn_line_ok."""
+    n = " ".join(_norm(his_title).split())
+    m = _BRIDGE_TITLE_RE.fullmatch(n)
+    if not m:
+        return None, "title_not_win_shape"
+    d = date_of(his_slug)
+    if m.group("iso"):
+        if not d or m.group("iso").replace(" ", "-") != d:
+            return None, "title_date_mismatch"
+    elif m.group("mon"):
+        mo = _BRIDGE_MONTHS.get(m.group("mon"))
+        if mo is None:
+            return None, "title_month_unknown"
+        if not d:
+            return None, "title_date_mismatch"
+        yr = m.group("yr")
+        want = (int(d[0:4]), int(d[5:7]), int(d[8:10]))
+        got = (int(yr) if yr else want[0], mo, int(m.group("day")))
+        if want != got:
+            return None, "title_date_mismatch"
+    subj = " ".join(m.group("subj").split())
+    if any(ch.isdigit() for ch in subj):
+        # 'FC Schalke 04' refuses — the safe direction. A digit in a
+        # subject is more often a line, a game number or a year that
+        # escaped the grammar than a team identity.
+        return None, "subject_has_digit"
+    return subj, "ok"
+
+
+def _q_parse_raw(question: str | None):
+    """Step-3 BLOCKING form: anchored parse only, no validation.
+
+    Deliberately permissive relative to strict: a question that parses
+    here but fails strict validation is unselectable but still BLOCKS
+    uniqueness — refusing whether or not the true sibling was captured.
+    """
+    n = " ".join(_norm(question).split())
+    return _BRIDGE_Q_RE.fullmatch(n)
+
+
+def _q_parse_strict(question: str | None, his_dist: frozenset,
+                    other_code: str,
+                    event_title: str | None) -> tuple[frozenset | None,
+                                                      str]:
+    """Step-2 SELECTION form. All clauses conjunctive; any miss refuses.
+
+    The against/vs clause is MANDATORY: the attested venue wording
+    family names the opponent, and requiring it closes the
+    same-day-rematch residue. The opp group is then VALIDATED against
+    the row's own event_title by distinctive-set EQUALITY — a lazy
+    regex group that absorbed 'in extra time' pollutes the set and
+    fails equality, which is exactly the point."""
+    m = _q_parse_raw(question)
+    if m is None:
+        return None, "q_not_win_shape"
+    subj = " ".join(m.group("subj").split())
+    if any(ch.isdigit() for ch in subj):
+        return None, "q_subject_has_digit"
+    opp = m.group("opp")
+    if opp is None:
+        return None, "no_against_clause"
+    opp = " ".join(_norm(opp).split())
+    if any(ch.isdigit() for ch in opp):
+        return None, "opp_has_digit"
+    sides = re.split(r"\s+vs\.?\s+", _norm(event_title or ""))
+    sides = [" ".join(s.split()) for s in sides if s.strip()]
+    if len(sides) != 2:
+        return None, "event_title_unsplittable"
+    od = _distinctive(opp)
+    other_sides = [s for s in sides if _distinctive(s) != his_dist]
+    if not any(_distinctive(s) == od for s in other_sides):
+        return None, "opp_not_event_team"
+    if not (_collapsed(opp).startswith(other_code)
+            or any(_collapsed(s).startswith(other_code)
+                   for s in other_sides)):
+        return None, "opp_not_corroborated"
+    return _distinctive(subj), "ok"
+
+
+def _bridge_ident_suffix_ok(identifier: str | None) -> bool:
+    """A candidate row's identifier must carry at most ONE post-date
+    token, purely alphabetic — a '-2' or '-game-2' disambiguator
+    refuses the row, closing the one-game-captured doubleheader
+    window."""
+    from ..copy_sports import _post_date_tokens
+
+    toks = _post_date_tokens([p for p in (identifier or "").lower()
+                              .split("-") if p])
+    if toks is None or len(toks) > 1:
+        return False
+    return all(t.isalpha() for t in toks)
+
+
+def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
+                   outcome: str | None, his_title: str | None,
+                   his_slug: str | None) -> tuple[dict | None, str]:
+    """The full bridge: (hit, 'ok') or (None, named_refusal).
+
+    Consulted only AFTER match_side returns None — a primary hit always
+    wins. rows_kept is the prefix-filtered pool selection runs over;
+    rows_all is the PRE-filter pool the event-wide blocking scan runs
+    over, any prefix family, lined or not."""
+    from ..copy_sports import _post_date_tokens, market_type_of
+
+    on = _norm(outcome)
+    if on not in ("yes", "no"):
+        return None, "not_yes_no"
+    if market_type_of(his_slug or "") != "moneyline":
+        # totals/spreads/props never enter, and the doubleheader whale
+        # slug ('…-2026-07-22-2-nyy') types spread today — measured —
+        # so it refuses here.
+        return None, "wrong_type"
+    parts = [p for p in (his_slug or "").lower().split("-") if p]
+    suffix = _post_date_tokens(parts)
+    if not suffix or len(suffix) != 1 or not suffix[0].isalpha():
+        return None, "no_subject_token"
+    code = suffix[0]
+    if len(code) < 3:
+        return None, "code_too_short"
+    d = date_of(his_slug)
+    pre = parts[:parts.index(d[:4])] if d and d[:4] in parts else None
+    if not pre or len(pre) != 3:
+        return None, "slug_shape"
+    _lg, c1, c2 = pre
+    if c1 == c2:
+        return None, "degenerate_codes"
+    if code not in (c1, c2):
+        # kills 'draw', 'dnb', surname tails — the final token must BE
+        # one of the two team codes
+        return None, "code_not_team"
+    other = c2 if code == c1 else c1
+    subj, why = _bridge_title_subject(his_title, his_slug)
+    if subj is None:
+        return None, why
+    his_dist = _distinctive(subj)
+    if not his_dist:
+        return None, "empty_distinctive"
+    cs = _collapsed(subj)
+    if not cs.startswith(code) or cs.startswith(other):
+        # whale-internal corroboration, veto-only: the title's team
+        # must prefix-match HIS slug code and must not also match the
+        # opponent's. Both or neither is a collision, and a collision
+        # refuses. (When the slug's codes collide the other way —
+        # 'man' prefixing 'manchestercity' — the opp-corroboration
+        # clause in _q_parse_strict lands the refusal instead.)
+        return None, "slug_corroboration_failed"
+    if len({r.get("event_slug") or "" for r in rows_all}) > 1:
+        return None, "multi_event_pool"
+    cands = []
+    for r in rows_kept:
+        if _norm(r.get("side_norm")) != on:
+            continue
+        if (r.get("line") or "").strip() or (r.get("signed")
+                                             or "").strip():
+            continue
+        if not r.get("intent"):
+            continue
+        if not _bridge_ident_suffix_ok(r.get("identifier")):
+            continue
+        qd, _qwhy = _q_parse_strict(r.get("question"), his_dist, other,
+                                    r.get("event_title"))
+        if qd is None or qd != his_dist:
+            continue
+        cands.append(r)
+    if len(cands) != 1:
+        return None, ("no_candidate_row" if not cands
+                      else "multiple_candidates")
+    blockers = set()
+    for r in rows_all:
+        m = _q_parse_raw(r.get("question"))
+        if m is None:
+            continue
+        sd = _distinctive(" ".join(m.group("subj").split()))
+        if sd == his_dist:
+            blockers.add(((r.get("identifier") or "").lower(),
+                          _norm(r.get("question"))))
+    want = ((cands[0].get("identifier") or "").lower(),
+            _norm(cands[0].get("question")))
+    if blockers != {want}:
+        return None, "event_scan_ambiguous"
+    return cands[0], "ok"
+
+
+def match_side_bridge(rows_kept: list[dict], rows_all: list[dict],
+                      outcome: str | None, his_title: str | None,
+                      his_slug: str | None) -> dict | None:
+    """bridge_explain's hit, reasonless — the match_side-shaped form."""
+    hit, _why = bridge_explain(rows_kept, rows_all, outcome, his_title,
+                               his_slug)
+    return hit
+
+
 def match_side(rows: list[dict], outcome: str | None,
                his_title: str | None,
                his_slug: str | None = None) -> dict | None:
@@ -1217,6 +1504,41 @@ async def resolve_explain(pool, market_title: str | None,
         out["step"] = "no_side_match"
         out["detail"] = (f"outcome {outcome!r} matched none of "
                          f"{[r.get('side_norm') for r in kept][:6]}")
+        # PHASE-0 BRIDGE PROBE (2026-08-26): read-only. Mirrors exactly
+        # the composition resolve would run (match_side first, bridge
+        # only on refusal) so the census can MEASURE what the bridge
+        # would recover from the 59.8% class, and which venue question
+        # tails exist, before any executor code consumes it. The step
+        # string above is unchanged so census bucketing stays stable.
+        try:
+            bhit, breason = bridge_explain(kept, rows, outcome,
+                                           market_title, global_slug)
+            out["bridge"] = {
+                "would_resolve": bool(bhit),
+                "identifier": (bhit or {}).get("identifier"),
+                "matched_question": (bhit or {}).get("question"),
+                "reason": breason,
+            }
+        except Exception as exc:  # noqa: BLE001 — a probe never breaks
+            out["bridge"] = {"error": type(exc).__name__}
+        # Split the two failure modes this counter conflates: wording
+        # disagreement vs the date-as-line misparse at _yn_line_ok.
+        if _norm(outcome) in ("yes", "no"):
+            try:
+                wq = _norm(market_title)
+                out["yn_detail"] = {
+                    "question_agreed": sum(
+                        1 for r in kept
+                        if _questions_agree(wq, _norm(r.get("question")))),
+                    "his_lines_parsed": sorted(
+                        _lines_of(market_title) | _lines_of(outcome)
+                        | slug_lines(global_slug)),
+                    "his_signed_parsed": (signed_line(outcome)
+                                          or signed_line(market_title)
+                                          or ""),
+                }
+            except Exception as exc:  # noqa: BLE001
+                out["yn_detail"] = {"error": type(exc).__name__}
         return out
     if not hit.get("intent"):
         out["step"] = "side_has_no_intent"

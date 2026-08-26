@@ -4613,6 +4613,8 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
     examples: dict[str, dict] = {}
     alias_hits = 0
     alias_examples: list[dict] = []
+    bridge_stats: dict = {"would_resolve": 0, "reasons": {},
+                          "questions": []}
     for r in rows:
         try:
             ex = await resolve_explain(
@@ -4648,6 +4650,26 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
                     "venue_rows_found": _lap.get("rows_it_would_find"),
                     "venue_sample": _lap.get("sample"),
                 })
+        # THE BRIDGE INSTRUMENT (Phase 0, 2026-08-26). resolve_explain
+        # now runs the yes/no bridge read-only on every no_side_match
+        # and reports what it WOULD have done. Tallied here so the true
+        # recoverable fraction of the 59.8% class — and every venue
+        # question tail the bridge would consume — is a measured number
+        # before any executor code consumes a bridge hit. The
+        # certification bar reads the tail set: one non-whitelisted
+        # tail observed is a grammar review, not a shrug.
+        _br = ex.get("bridge") or {}
+        if _br:
+            _brs = bridge_stats  # accumulated below the loop's scope
+            _brs["reasons"][str(_br.get("reason") or _br.get("error")
+                                or "?")] = _brs["reasons"].get(
+                str(_br.get("reason") or _br.get("error") or "?"), 0) + 1
+            if _br.get("would_resolve"):
+                _brs["would_resolve"] += 1
+                q = str(_br.get("matched_question") or "")[:120]
+                if q and q not in _brs["questions"] \
+                        and len(_brs["questions"]) < 25:
+                    _brs["questions"].append(q)
         w = (r["whale_username"] or "?").lower()
         by_whale.setdefault(w, {})
         by_whale[w][step] = by_whale[w].get(step, 0) + 1
@@ -4679,6 +4701,21 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
             "note": ("counted, NOT applied — a league-stripped key can "
                      "collide two leagues' identical team codes on one "
                      "date, so this is sized before it is trusted"),
+        },
+        # THE BRIDGE'S PHASE-0 NUMBER. would_resolve over the
+        # no_side_match arm, the refusal-reason distribution (what the
+        # closed grammars cost in coverage), and every distinct venue
+        # question the bridge would have consumed — the certification
+        # bar demands zero non-whitelisted tails in that list.
+        "bridge": {
+            **bridge_stats,
+            "share_of_no_side_match": (
+                round(bridge_stats["would_resolve"]
+                      / steps["no_side_match"], 4)
+                if steps.get("no_side_match") else None),
+            "note": ("measured, NOT applied — resolve() takes no bridge "
+                     "argument yet; nothing on the order path consumes "
+                     "a bridge hit"),
         },
         "verdict": (
             "NO UNMAPPED ROWS in window — nothing to attribute"
