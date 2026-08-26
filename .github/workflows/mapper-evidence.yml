@@ -1,0 +1,36 @@
+# MAPPER FAILURE EVIDENCE DUMP (2026-08-26).
+#
+# The copy sleeve rejects ~90% of detections and RSN unmapped is 76% of
+# the refusals, with no_side_match the largest attributed cause
+# (162/400 sampled). Fixing a matcher against imagined examples is how
+# fixes ship inert, so this dumps the production census's OWN sampled
+# failures -- real whale slugs, real venue rows, real diag strings --
+# as a gzip blob for offline analysis. Read-only; one admin GET.
+name: mapper-evidence
+on:
+  workflow_dispatch: {}
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      BASE: https://sportsassets-api.onrender.com
+      ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+    steps:
+      - name: Dump unmapped census samples
+        run: |
+          set +e
+          for H in 48 168; do
+            curl -sS --max-time 240 -H "X-Admin-Token: $ADMIN_TOKEN" \
+              -o /tmp/unm_$H.json \
+              "$BASE/api/admin/unmapped-census?hours=$H&sample=400" || true
+            echo "UNMCENSUS h=$H bytes=$(wc -c < /tmp/unm_$H.json 2>/dev/null)"
+            jq -r '"  summary: \(.summary // .totals // "?" | tostring | .[0:400])"' \
+              /tmp/unm_$H.json 2>/dev/null || true
+            if jq -e . /tmp/unm_$H.json >/dev/null 2>&1; then
+              echo "UNMBLOB_$H $(gzip -c /tmp/unm_$H.json | base64 -w0)"
+            else
+              echo "UNMBLOB_$H FAILED"
+            fi
+          done
