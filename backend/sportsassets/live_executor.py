@@ -2192,7 +2192,8 @@ def copy_limit_price(whale_username: str | None, his_price: float,
 
 
 def tolerance_cohort(his_price: float | None,
-                     fill_price: float | None) -> str:
+                     fill_price: float | None,
+                     intent: str | None = None) -> str:
     """Which cohort a FILL belongs to, for grading Option A.
 
     'marginal' -- we paid ABOVE his price, so this fill exists ONLY
@@ -2203,11 +2204,25 @@ def tolerance_cohort(his_price: float | None,
 
     Averaging the two together is how a change like this gets graded as
     harmless: the parity fills dominate the count and drown the signal.
+
+    ONE DENOMINATION, VIA cost_per_share (adversarial review
+    2026-08-26, hours after this shipped). The first version compared
+    raw fill_price to his_price. fill_price on a SHORT names the LONG
+    leg while his_price is what the whale paid on HIS side, so every
+    short fill was cohorted by comparing two different legs -- the
+    exact defect that inverted realized_pnl and fill_cash before both
+    took an intent, and that price_fidelity records as ~66c of phantom
+    slippage on six real fills. cost_per_share is the single
+    definition; this reads it like everything else does.
     """
     if his_price is None or fill_price is None:
         return "unknown"
     try:
-        return "marginal" if float(fill_price) > float(his_price) else "parity"
+        ours = cost_per_share(float(fill_price), intent)
+        # Strict 'above', with a hair of tolerance for float
+        # round-trips through numeric columns: a fill AT his price is
+        # parity by definition -- same-or-better would have taken it.
+        return "marginal" if ours > float(his_price) + 1e-9 else "parity"
     except (TypeError, ValueError):
         return "unknown"
 

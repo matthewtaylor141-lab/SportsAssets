@@ -6202,41 +6202,63 @@ async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
     """
     from datetime import datetime as _dt
 
+    from ..live_executor import (ORDER_INTENT_SQL, cost_per_share,
+                                 tolerance_cohort)
+
     pool = await get_pool()
     since_d = _dt.fromisoformat(since_day).date()
+    # ROW FETCH, COHORTED IN PYTHON BY THE PRODUCTION FUNCTION
+    # (adversarial review 2026-08-26, hours after the first version
+    # shipped). The v1 SQL split cohorts on raw `fill_price >
+    # his_price`. fill_price on a SHORT names the LONG leg while
+    # his_price is the whale's own side, so every short was cohorted by
+    # comparing two different legs -- the defect that inverted
+    # realized_pnl and fill_cash before both took an intent. Cohorting
+    # through tolerance_cohort/cost_per_share means the grader and the
+    # executor share ONE definition, and a future fix to that
+    # definition cannot leave this endpoint grading a population the
+    # code no longer produces. Row volume is bounded: the window opens
+    # the day Option A shipped.
     rows = await pool.fetch(
-        """
+        f"""
         SELECT lower(COALESCE(whale_username, '?')) AS whale,
-               CASE WHEN fill_price > his_price THEN 'marginal'
-                    ELSE 'parity' END AS cohort,
-               count(*)::int AS n,
-               count(*) FILTER (WHERE status = 'settled')::int AS settled,
-               COALESCE(sum(filled_usd), 0)::float8 AS staked,
-               COALESCE(sum(pnl) FILTER
-                   (WHERE status = 'settled'), 0)::float8 AS pnl,
-               COALESCE(sum(filled_usd) FILTER
-                   (WHERE status = 'settled'), 0)::float8 AS settled_staked,
-               avg((fill_price - his_price) * 100)::float8 AS cents_over
+               his_price::float8 AS his, fill_price::float8 AS fp,
+               filled_usd::float8 AS staked, pnl::float8 AS pnl,
+               status, {ORDER_INTENT_SQL} AS intent
         FROM live_orders
         WHERE placed_at >= $1
           AND status IN ('filled', 'settled', 'cashed_out')
           AND filled_usd > 0 AND his_price > 0 AND fill_price > 0
           AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
-        GROUP BY 1, 2 ORDER BY 1, 2
         """, since_d)
-    out = []
+    agg: dict[tuple, dict] = {}
     for r in rows:
-        d = dict(r)
-        ss = float(d["settled_staked"] or 0)
+        cohort = tolerance_cohort(r["his"], r["fp"], r["intent"])
+        d = agg.setdefault((r["whale"], cohort), {
+            "whale": r["whale"], "cohort": cohort, "n": 0, "settled": 0,
+            "staked": 0.0, "pnl": 0.0, "settled_staked": 0.0,
+            "cents_sum": 0.0})
+        d["n"] += 1
+        d["staked"] += float(r["staked"])
+        d["cents_sum"] += (cost_per_share(float(r["fp"]), r["intent"])
+                           - float(r["his"])) * 100.0
+        if r["status"] == "settled":
+            d["settled"] += 1
+            d["pnl"] += float(r["pnl"] or 0)
+            d["settled_staked"] += float(r["staked"])
+    out = []
+    for d in sorted(agg.values(), key=lambda x: (x["whale"], x["cohort"])):
+        ss = d.pop("settled_staked")
+        cs = d.pop("cents_sum")
         # ROI ON SETTLED DOLLARS ONLY. Dividing realised P&L by dollars
         # that include still-open positions understates every cohort,
         # and it understates the SMALLER one more -- which here is the
         # marginal cohort, the one being judged.
-        d["roi"] = round(float(d["pnl"]) / ss, 4) if ss > 0 else None
-        d["cents_over"] = (round(float(d["cents_over"]), 3)
-                           if d["cents_over"] is not None else None)
-        for k in ("staked", "pnl", "settled_staked"):
-            d[k] = round(float(d[k]), 2)
+        d["roi"] = round(d["pnl"] / ss, 4) if ss > 0 else None
+        d["settled_staked"] = round(ss, 2)
+        d["cents_over"] = round(cs / d["n"], 3) if d["n"] else None
+        for k in ("staked", "pnl"):
+            d[k] = round(d[k], 2)
         out.append(d)
     return {
         "since": since_day, "rows": out,
