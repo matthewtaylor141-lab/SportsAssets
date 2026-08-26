@@ -2190,7 +2190,13 @@ async def api_fill_vs_miss(days: int = Query(7, ge=1, le=30)) -> dict:
         WHERE lo.placed_at > now() - make_interval(days => $1)
           AND COALESCE(lo.whale_username, '')
               NOT IN ('manual', 'underdog')
-          AND lo.status IN ('filled', 'settled', 'unfilled')
+          -- 'cashed_out' is what mirror_exit writes on a copy
+          -- exited at a profit. Omitting it deleted every
+          -- winning exited copy from the filled cohort, which
+          -- biases fill-vs-miss toward 'misses grade better'
+          -- and that number decides the price-tolerance rule.
+          AND lo.status IN ('filled', 'settled', 'unfilled',
+                            'cashed_out')
         """, days)
     return {"days": days, "whales": grade_rows(rows)}
 
