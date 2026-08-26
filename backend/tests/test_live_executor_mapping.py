@@ -135,7 +135,12 @@ def test_exact_miss_still_falls_through_to_fuzzy(monkeypatch):
     monkeypatch.setattr(pmus, "resolve_market", fake_fuzzy)
 
     asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
-    assert calls == {"exact": 1, "fuzzy": 1}
+    # TWO exact attempts on a moneyline miss (2026-08-26): the
+    # candidate grammar first, then his own slug verbatim. The second
+    # exists because a direct identity match was previously reachable
+    # only through resolve_market, which labels everything `fuzzy` and
+    # therefore had it refused by the quarantine.
+    assert calls == {"exact": 2, "fuzzy": 1}
     assert any("status='rejected'" in sql for sql, _ in pool.updates), \
         "a double miss must still record the unmapped rejection"
 

@@ -3890,6 +3890,54 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 except asyncio.TimeoutError:
                     _ex_diag.append("timeout")
                     mapping = None
+            # HIS OWN SLUG IS THE STRONGEST CANDIDATE THERE IS, AND
+            # ONLY THE FUZZY RESOLVER EVER TRIED IT (2026-08-26).
+            #
+            # resolve_market's FIRST attempt is direct slug parity --
+            # his market slug looked up verbatim on the US venue --
+            # returning matched_by="slug". But everything that function
+            # returns is labelled `fuzzy` at the call site below, so an
+            # exact identity match was recorded as a guess, and `fuzzy`
+            # is precisely what the quarantine refuses.
+            #
+            # Live, from the refusal stream:
+            #   MAPA-Q rn1 pick=Boris Butulija quarantined
+            #     (src=fuzzy, slug=aec-itfme-marifer-borbut-2026-08-26)
+            # borbut is Boris Butulija under the venue's own grammar,
+            # right league, right date. Nothing about that is fuzzy.
+            #
+            # Routed through resolve_market_exact rather than by
+            # promoting matched_by=="slug", because parity inside
+            # resolve_market carries NO _has_sides guard: it can return
+            # a two-sided PARENT slug, and ordering a parent hands side
+            # selection to the venue -- the 2026-08-23 wrong-side
+            # incident exactly. The exact resolver refuses a parent,
+            # applies the outcome floor, demands exactly one side above
+            # it, and carries the intent. Strictly safer than the path
+            # already accepting these.
+            #
+            # MONEYLINE ONLY, deliberately. A prior review closed the
+            # derivative case: the candidate grammar drops the line
+            # suffix, so a spread resolved exactly lands on the game's
+            # MONEYLINE, and a spread outcome is a team name that passes
+            # the outcome floor. That hazard is about GENERATED
+            # candidates and this passes his slug verbatim -- but the
+            # two venues' derivative grammars are not something this
+            # code can verify, and buying a moneyline instead of a
+            # spread is a real wrong-market loss. Taking the win where
+            # it is provably safe; that guard stays as the review left
+            # it, and its test still passes untouched.
+            if mapping is None and src_slug and mtype == "moneyline":
+                _ex_cands = _ex_cands + [src_slug]
+                try:
+                    mapping = await asyncio.wait_for(
+                        asyncio.to_thread(pmus.resolve_market_exact,
+                                          [src_slug], ctx.get("outcome"),
+                                          _ex_diag),
+                        timeout=_EXACT_BOX_S)
+                except asyncio.TimeoutError:
+                    _ex_diag.append("timeout")
+                    mapping = None
             if mapping_src is None:
                 mapping_src = "exact" if mapping is not None else None
             if mapping is None:

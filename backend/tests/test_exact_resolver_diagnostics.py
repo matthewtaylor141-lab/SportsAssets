@@ -192,8 +192,9 @@ class TestItReachesTheRejectedRow:
         worst-case serial lookups, so 'the box is too small' is a live
         hypothesis that has never been observable."""
         src = inspect.getsource(le.maybe_execute)
-        assert src.count('_ex_diag.append("timeout")') == 2, \
-            "both exact phases need it -- moneyline and derivative"
+        assert src.count('_ex_diag.append("timeout")') == 3, \
+            "all three exact phases need it -- moneyline, derivative, " \
+            "and the whale's own slug"
 
     def test_the_fuzzy_diagnostic_is_still_kept(self):
         """The exact reason is additional evidence, not a replacement."""
