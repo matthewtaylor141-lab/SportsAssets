@@ -1238,6 +1238,34 @@ def overspend_ratio(requested_usd: float, filled_shares: float,
 # asked for. max() rather than a plain env read so the halt can never
 # sit below what we authorize: to tighten the halt, tighten
 # LIVE_ASK_TOLERANCE_PCT and the halt follows it down.
+# MAPPING CLASSES THE RESUME LANE ADMITS WHILE THE QUARANTINE HOLDS.
+#
+# Owner decision 2026-08-26, taken on the probe that showed the sleeve
+# refusing every copy it successfully mapped:
+#
+#   SHADOW-CERT ok=691  MISMATCH=0  unverified=0
+#   QUARANTINE true  premap_live=true
+#   MAPA-Q rn1 pick=Washington Mystics quarantined (src=exact)
+#
+# The quarantine's own release condition -- an independent resolver
+# re-deriving each refused mapping and voting -- has been satisfied 691
+# times with no dissent, and the vector the quarantine was raised for is
+# separately closed: every one of the six wrong-side receipts was an
+# ORDER_INTENT_BUY_SHORT, and that branch is refused outright further
+# down this function.
+#
+# The owner chose the NARROW widening: admit `exact`, keep `fuzzy`
+# quarantined. That is a real distinction rather than a convenient one.
+# `exact` is grammar-to-grammar resolution through resolve_market_exact
+# / resolve_derivative_exact, and the mapping code says of it:
+# "anything short of full corroboration falls through to the fuzzy
+# pipeline exactly as before". `fuzzy` is the guessing class, and it is
+# the class the 2026-08-23 incident came through.
+#
+# `exact` rides the SAME resume lane as `premap` -- same whale
+# allowlist, same premap_live operator switch -- so this widens exactly
+# one thing and inherits every other gate unchanged.
+QUARANTINE_RESUME_SRC = frozenset({"premap", "exact"})
 ASK_TOLERANCE = 1.0 + float(os.getenv("LIVE_ASK_TOLERANCE_PCT", "0.08"))
 OVERSPEND_TOLERANCE = 1.01  # a cent of rounding on a whole-unit fill
 OVERSPEND_HALT_RATIO = max(
@@ -3685,7 +3713,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # positive; everyone else stays refused-but-recorded.
             _allowed = _whale_set("LIVE_PREMAP_WHALES")
             _premap_ok = False
-            if _q_on and mapping_src == "premap" and username in _allowed:
+            if _q_on and mapping_src in QUARANTINE_RESUME_SRC \
+                    and username in _allowed:
                 _pl_env = os.getenv("LIVE_PREMAP", "")
                 if _pl_env == "on":
                     _premap_ok = True
@@ -3700,11 +3729,13 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     except Exception:  # noqa: BLE001 — fail safe: refuse
                         _premap_ok = False
             if _q_on and not _premap_ok:
-                if mapping_src == "premap" and username not in _allowed:
+                if mapping_src in QUARANTINE_RESUME_SRC \
+                        and username not in _allowed:
                     _q_reason = ("premap-live: whale not in the "
                                  "verified-profitable set (TRUEEDGE "
                                  "2026-08-24) "
-                                 f"(src=premap, slug={_q_slug[:120]})")
+                                 f"(src={mapping_src}, "
+                                 f"slug={_q_slug[:120]})")
                 else:
                     _q_reason = ("quarantined: mapping class unverified "
                                  "after wrong-side incident 2026-08-23 "
@@ -3718,7 +3749,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 # free evidence — re-derive it from live venue data and
                 # record the verdict. This is the streak the resume
                 # decision reads, produced at zero dollars of risk.
-                if mapping_src == "premap":
+                if mapping_src in QUARANTINE_RESUME_SRC:
                     _spawn_echo(pool, row_id, mapping["market_slug"],
                                 ctx.get("outcome"),
                                 ctx.get("market_title"), shadow=True,
