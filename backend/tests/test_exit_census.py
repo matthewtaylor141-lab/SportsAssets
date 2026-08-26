@@ -371,8 +371,21 @@ class TestOneWhaleExitIsMirroredOnce:
         raise past it — the fallback is the pre-existing behaviour, and
         the log says so."""
         src = inspect.getsource(le.mirror_exit)
-        i = src.index("INSERT INTO copy_exit_applied")
-        assert "a replay is possible next cycle" in src[i:i + 900]
+        # BOTH ledger writes, not just the first. There are two now --
+        # the trade-driven lane keyed on trade_id, and the position lane
+        # keyed on a synthetic negative id -- and indexing on the first
+        # occurrence would stop testing whichever one moved.
+        n = src.count("INSERT INTO copy_exit_applied")
+        assert n == 2, f"expected two ledger writes, found {n}"
+        i = 0
+        for _ in range(n):
+            i = src.index("INSERT INTO copy_exit_applied", i)
+            block = src[i:]
+            nxt = block.find("INSERT INTO copy_exit_applied", 10)
+            block = block[:nxt] if nxt > 0 else block[:1200]
+            assert "must not undo it" in block or "possible next cycle" \
+                in block, "a failed record must not raise past the sale"
+            i += 10
 
     def test_the_position_diff_path_is_not_gated_by_it(self):
         """whale_exits carries no trade id and is already bounded by

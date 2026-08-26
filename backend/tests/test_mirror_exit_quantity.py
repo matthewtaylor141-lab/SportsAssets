@@ -145,8 +145,18 @@ async def _exit(pool, closed_frac=1.0):
 
 
 def _status(pool):
-    assert pool.updates, "the row was never written"
-    sql, args = pool.updates[-1]
+    """The live_orders status write, found by WHAT IT IS.
+
+    This used to take pool.updates[-1] and trust that the row write was
+    last. The exit-dedup ledger insert now follows it, so ordering was
+    never the right thing to key on -- a helper that finds the wrong
+    statement reports the wrong status and the test lies about the money
+    path.
+    """
+    hits = [(sql, a) for sql, a in pool.updates
+            if "UPDATE live_orders SET status=" in sql]
+    assert hits, "the row status was never written"
+    sql, args = hits[-1]
     return ("cashed_out" if "cashed_out" in sql else "filled"), args
 
 
@@ -241,7 +251,9 @@ class TestPnLIsBookedOnOurSharesOnly:
         bench["held"] = 200
         pool = Pool(_row(qty=200))
         await _exit(pool)
-        sql, _a = pool.updates[-1]
+        # Found by content, not by position — see _status.
+        sql, _a = [(q, a) for q, a in pool.updates
+                   if "UPDATE live_orders SET status=" in q][-1]
         assert "pnl=COALESCE(pnl,0)+" in sql, \
             "assigning would erase what earlier legs realised"
 

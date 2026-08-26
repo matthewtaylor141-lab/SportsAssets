@@ -4790,7 +4790,13 @@ async def admin_exit_census() -> dict:
                    # its job and is EXPECTED at volume; it is listed so
                    # the verdict can name it, not because it is a
                    # defect. mx_exit_ledger_unreadable is.
-                   "mx_exit_already_mirrored", "mx_exit_ledger_unreadable")
+                   "mx_exit_already_mirrored", "mx_exit_ledger_unreadable",
+                   # Not a defect on its own -- it is the position lane
+                   # correctly declining an exit the trade lane already
+                   # mirrored. A STANDING count means the two detectors
+                   # are racing on every exit, which is worth seeing.
+                   "mx_exit_recently_applied",
+                   "mx_exit_dedup_unreadable")
     return {
         "source": "copy_sweep heartbeat (worker process)",
         "beat_at": row["beat_at"],

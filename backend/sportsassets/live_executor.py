@@ -750,6 +750,25 @@ async def mirror_exit(payload: dict) -> str:
         # exit path when it is actually a coverage number.
         return _exit_done("mx_no_position_of_ours", whale=username,
                           asset=asset)
+    # THE OTHER LANE MAY ALREADY HAVE MIRRORED THIS EXIT.
+    # See EXIT_DEDUP_MINUTES. Only for the position-diff lane: a caller
+    # WITH a trade id was already deduped by the ledger check above, and
+    # applying this to it would refuse his genuine second trade on a
+    # market inside the window.
+    if _xtid is None:
+        try:
+            _recent = await pool.fetchval(
+                "SELECT applied_at FROM copy_exit_applied "
+                "WHERE row_id = $1 "
+                "  AND applied_at > now() - make_interval(mins => $2) "
+                "ORDER BY applied_at DESC LIMIT 1",
+                int(row["id"]), EXIT_DEDUP_MINUTES)
+        except Exception:  # noqa: BLE001 — an unreadable ledger is not
+            # permission to sell again. Refuse; it retries next cycle.
+            return _exit_done("mx_exit_dedup_unreadable", asset=asset)
+        if _recent is not None:
+            return _exit_done("mx_exit_recently_applied", whale=username,
+                              asset=asset, row=int(row["id"]))
     # HIS fraction: how much of his own position did this sale close?
     # Sum his own ledger for this asset rather than trusting one row.
     pos = await pool.fetchrow(
@@ -998,6 +1017,24 @@ async def mirror_exit(payload: dict) -> str:
             "pnl=COALESCE(pnl,0)+$2, settled_at=now() WHERE id=$1",
             row["id"], pnl or 0)
     # RECORD IT, now that a sale actually happened.
+    if _xtid is None:
+        # The position lane has no trade id, so it records against a
+        # NEGATIVE synthetic key derived from the row. trade_id is the
+        # primary key and real trade ids are positive, so this cannot
+        # collide with the trade-driven lane's records; what it does is
+        # give the row_id window above something to find.
+        try:
+            await pool.execute(
+                "INSERT INTO copy_exit_applied (trade_id, row_id, "
+                "closed_frac) VALUES ($1, $2, $3) "
+                "ON CONFLICT (trade_id) DO UPDATE SET "
+                "applied_at = now(), closed_frac = EXCLUDED.closed_frac",
+                -int(row["id"]), int(row["id"]), float(closed_frac))
+        except Exception:  # noqa: BLE001 — the sale already happened;
+            # failing to record it must not undo it.
+            log.warning("MIRROR-EXIT: sold on the position lane but "
+                        "could not record it for row %s — a duplicate "
+                        "mirror is possible next cycle", row["id"])
     if _xtid is not None:
         try:
             await pool.execute(
@@ -1304,6 +1341,37 @@ QUARANTINE_RESUME_SRC = frozenset({"premap", "exact"})
 # Where the fuzzy class's certification streak accumulates. Its own key
 # on purpose: see the state_key note in _side_echo_verify.
 FUZZY_CERT_KEY = "side_echo_fuzzy"
+# TWO DETECTORS, ONE ECONOMIC EXIT (2026-08-26, adversarial round 4).
+#
+# classify_exit sees the whale's exit as a complement BUY in the trade
+# feed, seconds after it happens. whale_exits sees the SAME exit as a
+# drop in his /positions snapshot, up to 120s later. Both call
+# mirror_exit and nothing correlates the two observations.
+#
+# copy_exit_applied dedupes the trade-driven lane by trade_id, but the
+# position lane carries no trade id, so that guard cannot see it. The
+# atomic status='exiting' claim serializes the two callers and does not
+# deduplicate them: the first sale writes the row back to 'filled' with
+# the remainder, and the second claims that row and sells a fraction of
+# what is LEFT.
+#
+# He trims 30% of a position we hold 200 of. The trade lane sells 60 and
+# leaves 140. Two minutes later the position lane reads the same 30%
+# drop, takes 30% of 140, and sells 42 more. We are 51% out of a
+# position he is 30% out of, and we paid two spread crossings to get
+# there.
+#
+# Keyed on the ROW rather than the trade, because the row is the only
+# identifier both lanes share. A window rather than a permanent record
+# because he does genuinely trim twice; ten minutes is five whale_exits
+# cycles, comfortably longer than the lag between his fill reaching the
+# trade feed and reaching his positions payload.
+#
+# The cost of the window is a second genuine trim inside it being
+# missed. That is the right side to err on: under-selling leaves us in a
+# position he is partly out of, over-selling exits a position he is
+# still in and pays a spread to do it.
+EXIT_DEDUP_MINUTES = int(os.environ.get("LIVE_EXIT_DEDUP_MIN", "10"))
 ASK_TOLERANCE = 1.0 + float(os.getenv("LIVE_ASK_TOLERANCE_PCT", "0.08"))
 OVERSPEND_TOLERANCE = 1.01  # a cent of rounding on a whole-unit fill
 OVERSPEND_HALT_RATIO = max(
