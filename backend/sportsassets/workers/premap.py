@@ -1519,6 +1519,28 @@ async def resolve_explain(pool, market_title: str | None,
                 "matched_question": (bhit or {}).get("question"),
                 "reason": breason,
             }
+            # THE VENUE'S OWN WORDINGS, CAPTURED ON REFUSAL (Phase 0
+            # round 2). The first census measured would_resolve=0 with
+            # not_yes_no at 213/267 -- the dominant shape is a NAMED
+            # team pick against a yes/no board, the mirror image of the
+            # built variant -- and questions=[] left the grammar
+            # designer with nothing real to design against. Designing
+            # a matcher against imagined strings is how the O/U branch
+            # once refused every totals copy, so the probe now records
+            # what the venue actually says: up to three distinct
+            # (side_norm, question) pairs from the pool, plus the
+            # outcome shape, on every no_side_match.
+            seenq: list[list[str]] = []
+            for r in kept:
+                pair = [str(r.get("side_norm"))[:30],
+                        str(r.get("question"))[:110]]
+                if pair not in seenq:
+                    seenq.append(pair)
+                if len(seenq) >= 3:
+                    break
+            out["bridge"]["venue_q_sample"] = seenq
+            out["bridge"]["outcome_shape"] = (
+                "yes_no" if _norm(outcome) in ("yes", "no") else "named")
         except Exception as exc:  # noqa: BLE001 — a probe never breaks
             out["bridge"] = {"error": type(exc).__name__}
         # Split the two failure modes this counter conflates: wording

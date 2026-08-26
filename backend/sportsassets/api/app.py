@@ -4614,7 +4614,7 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
     alias_hits = 0
     alias_examples: list[dict] = []
     bridge_stats: dict = {"would_resolve": 0, "reasons": {},
-                          "questions": []}
+                          "questions": [], "venue_wordings": {}}
     for r in rows:
         try:
             ex = await resolve_explain(
@@ -4670,6 +4670,15 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
                 if q and q not in _brs["questions"] \
                         and len(_brs["questions"]) < 25:
                     _brs["questions"].append(q)
+            # The wording census: what the venue's boards actually say,
+            # split by the whale's outcome shape. This is the ground
+            # truth the named-pick bridge variant gets designed against
+            # -- real strings, never imagined ones.
+            shape = str(_br.get("outcome_shape") or "?")
+            bucket = _brs["venue_wordings"].setdefault(shape, [])
+            for pair in (_br.get("venue_q_sample") or []):
+                if pair not in bucket and len(bucket) < 30:
+                    bucket.append(pair)
         w = (r["whale_username"] or "?").lower()
         by_whale.setdefault(w, {})
         by_whale[w][step] = by_whale[w].get(step, 0) + 1
