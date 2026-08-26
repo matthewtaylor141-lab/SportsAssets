@@ -59,7 +59,7 @@ def fill_edge(his_price: float | None, fill_price: float | None,
     be scored as a neutral one, because a pile of zeros drags every
     average toward "we matched him exactly".
     """
-    from ..live_executor import fill_cash
+    from ..live_executor import cost_per_share
 
     try:
         hp = float(his_price)
@@ -68,9 +68,13 @@ def fill_edge(his_price: float | None, fill_price: float | None,
         return None
     if not (0.0 < hp < 1.0) or not (0.0 < fp < 1.0):
         return None
-    # fill_cash(1 share) IS our cost per share, in the right
-    # denomination for the intent.
-    return hp - fill_cash(1.0, fp, intent)
+    # OUR COST PER SHARE, UNROUNDED. This used to read
+    # fill_cash(1.0, fp, intent), and fill_cash ends in
+    # round(shares * per, 2) -- so asking it for a one-share cost
+    # quantized the RATE to a whole cent before the subtraction below.
+    # Sub-cent slippage, which is the entire size of the edge, came out
+    # as exactly zero; see cost_per_share for the arithmetic.
+    return hp - cost_per_share(fp, intent)
 
 
 def assess(rows: list[dict]) -> dict:

@@ -184,3 +184,107 @@ class TestTheQueryReadsTheIntent:
         src = inspect.getsource(pf.cohort_fidelity)
         assert "fill_price IS NOT NULL" in src
         assert "filled_shares, 0) > 0" in src
+
+
+class TestSubCentSlippageIsVisible:
+    """The instrument quantized our cost to the whole cent.
+
+    fill_edge asked for our per-share cost by calling
+    fill_cash(1.0, price, intent), and fill_cash ends in
+    round(shares * per, 2) -- so a one-share call rounded the RATE to a
+    cent before subtracting the whale's price. Everything assess()
+    produces is built on that: at_or_better, at_or_better_share, the
+    median/p10/p90/worst edge in cents, dollar_edge_vs_his_price,
+    edge_per_100_deployed, and the owner-facing verdict string.
+
+    Production fill prices are not cent-aligned -- submit_fok returns
+    round(notional / filled, 4), a VWAP across executions, and the
+    venue's own receipts in this repo include 0.6853. So this was live
+    on ordinary fills.
+
+    Every price in the twenty-one tests above this one is a whole cent,
+    which is exactly why the suite could not see it. These use the
+    prices production actually produces.
+    """
+
+    def test_a_half_cent_overpay_is_no_longer_invisible(self):
+        e = pf.fill_edge(0.68, 0.6849, None)
+        assert e is not None
+        assert e == pytest.approx(-0.0049, abs=1e-9), \
+            "a real overpay reported as exactly zero"
+
+    def test_it_does_not_FABRICATE_slippage_either(self):
+        """The error ran both ways: 0.6853 against 0.68 is a true
+        -0.53c, and the quantizer reported -1.00c."""
+        e = pf.fill_edge(0.68, 0.6853, None)
+        assert e == pytest.approx(-0.0053, abs=1e-9)
+        assert e > -0.01
+
+    def test_the_epsilon_can_actually_fire_now(self):
+        """SAME_PRICE_EPS is 0.001 -- a tenth of a cent. Against a
+        cent-quantized input it could never be the deciding rule."""
+        assert pf.SAME_PRICE_EPS == 0.001
+        e = pf.fill_edge(0.68, 0.6805, None)
+        assert abs(e) < pf.SAME_PRICE_EPS
+
+    def test_the_day_that_read_as_perfect(self):
+        """70 fills of 365 shares, his 0.68, our VWAP 0.6849. This
+        reported at_or_better 70/70, median +0.00c, worst +0.00c and
+        '$+0.00 versus paying exactly what he paid'."""
+        rows = [{"his_price": 0.68, "fill_price": 0.6849,
+                 "intent": None, "filled_shares": 365.0}
+                for _ in range(70)]
+        b = pf.assess(rows)
+        assert b["at_or_better"] == 0, \
+            "70 fills of real slippage still scoring as at-or-better"
+        assert b["dollar_edge_vs_his_price"] == pytest.approx(-125.19,
+                                                              abs=0.5)
+        assert b["median_edge_cents"] == pytest.approx(-0.49, abs=0.01)
+
+    def test_a_genuinely_better_fill_still_scores_better(self):
+        rows = [{"his_price": 0.68, "fill_price": 0.6751,
+                 "intent": None, "filled_shares": 365.0}]
+        b = pf.assess(rows)
+        assert b["at_or_better"] == 1
+        assert b["dollar_edge_vs_his_price"] > 0
+
+    def test_the_short_denomination_is_preserved(self):
+        """A short's cost is (1 - price). The split must not have
+        quietly turned every fill into long math."""
+        from sportsassets import live_executor as le
+
+        assert le.cost_per_share(0.30, None) == pytest.approx(0.30)
+        if le.short_model_confirmed():
+            assert le.cost_per_share(
+                0.30, "ORDER_INTENT_BUY_SHORT") == pytest.approx(0.70)
+
+
+class TestTheTwoCallersStayInAgreement:
+    def test_fill_cash_is_cost_per_share_times_shares(self):
+        """One definition. fill_cash keeps its cent rounding, which is
+        right for a dollar total; a caller wanting a RATE takes it
+        unrounded from cost_per_share."""
+        from sportsassets import live_executor as le
+
+        for px in (0.6849, 0.6853, 0.23, 0.995, 0.005):
+            for sh in (1.0, 365.0, 1086.0):
+                assert le.fill_cash(sh, px, None) == pytest.approx(
+                    round(sh * le.cost_per_share(px, None), 2),
+                    abs=1e-9)
+
+    def test_fill_cash_still_rounds_dollars(self):
+        from sportsassets import live_executor as le
+
+        assert le.fill_cash(1086.0, 0.89, None) == pytest.approx(966.54)
+        assert le.fill_cash(781.0, 0.6853, None) == pytest.approx(535.22)
+
+    def test_fill_edge_no_longer_routes_through_fill_cash(self):
+        import inspect
+
+        # CODE only. The comment above the fix names fill_cash on
+        # purpose, to record what it used to call.
+        src = inspect.getsource(pf.fill_edge)
+        code = "\n".join(l for l in src.splitlines()
+                         if not l.strip().startswith("#"))
+        assert "fill_cash" not in code
+        assert "cost_per_share" in code

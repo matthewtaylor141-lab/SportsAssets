@@ -1977,8 +1977,44 @@ def fill_cash(filled_shares: float, fill_price: float | None,
     px = float(fill_price or 0)
     if px <= 0 or filled_shares <= 0:
         return 0.0
-    per = (1.0 - px) if _use_short_math(intent) else px
-    return round(filled_shares * per, 2)
+    return round(filled_shares * cost_per_share(px, intent), 2)
+
+
+def cost_per_share(fill_price: float, intent: str | None = None) -> float:
+    """Our cost for ONE share, UNROUNDED.
+
+    Split out of fill_cash (2026-08-26, adversarial round 4) because
+    fill_cash rounds to the CENT -- correct for a dollar total, and
+    silently destructive when the caller wants a rate.
+
+    price_fidelity.fill_edge asked for our per-share cost by calling
+    fill_cash(1.0, price, intent), so `round(1.0 * per, 2)` quantized
+    the rate to a whole cent before subtracting the whale's price. Every
+    number that instrument produces -- at_or_better, the median and
+    worst edge in cents, dollar_edge_vs_his_price, edge_per_100_deployed
+    and the owner-facing verdict string -- was built on that.
+
+    Production fill prices are not cent-aligned: submit_fok returns
+    round(notional / filled, 4), a VWAP across executions, and the
+    venue's own receipts in this repo include 0.6853. So the rounding
+    was live on ordinary fills, not an edge case:
+
+        his 0.68, our 0.6849  ->  reported +0.00c, true -0.49c
+        his 0.68, our 0.6853  ->  reported -1.00c, true -0.53c
+
+    It erases real slippage AND fabricates slippage that never
+    happened. Seventy fills of 365 shares at that first pair is $125 of
+    edge given away on $17,374 -- 72bp, against a whale edge measured at
+    94bp -- reported as "$0.00, 100% of fills at his price or better".
+    SAME_PRICE_EPS is 0.001, a tenth of a cent, so the tolerance was ten
+    times finer than the resolution of the number it filtered and could
+    never fire.
+
+    ONE definition, used by both. fill_cash keeps its cent rounding,
+    which is right for money; callers wanting a rate take it from here.
+    """
+    px = float(fill_price or 0)
+    return (1.0 - px) if _use_short_math(intent) else px
 
 
 # Per-whale staleness ceilings, in seconds. Absent whales take the
