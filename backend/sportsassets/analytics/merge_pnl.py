@@ -160,6 +160,9 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None):
         "lots": 0, "lot_s": 0.0, "lot_p": 0.0,
         "lot_ss": 0.0, "lot_pp": 0.0, "lot_ps": 0.0,
         # counterfactual, populated only when `payouts` is supplied
+        # Positions that ended at RESOLUTION rather than at a fill.
+        "settled_lots": 0, "settled_shares": 0.0,
+        "ungraded_open_shares": 0.0, "ungraded_open_cost": 0.0,
         "cf_closed_shares": 0.0, "cf_graded_shares": 0.0,
         "cf_ungraded_shares": 0.0,
         "cf_actual_on_graded": 0.0, "cf_hold_on_graded": 0.0,
@@ -255,12 +258,71 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None):
             out["n_entries"] += 1
     def finish() -> dict:
         """Summarise. Called once, after the last fill."""
+        # SETTLED POSITIONS ARE CLOSED LOTS TOO (2026-08-26, round 3).
+        #
+        # _lot was booked only when a FILL closed shares — a sell or a
+        # complement merge. On this venue a position that simply
+        # RESOLVES produces no fill at all, so it never entered a lot;
+        # it accumulated into open_shares/open_cost, which nothing read.
+        #
+        # edge_roi therefore graded each whale ONLY on the positions he
+        # CHOSE TO CLOSE, and stamped a 95% verdict on that
+        # self-selected subset. Reproduced on a synthetic book: 100
+        # markets, 1000 shares at 0.50, 30 closed by buying the
+        # complement at 0.30 and 70 held to a zero payout. True result
+        # -$29,000 on $50,000 = -58%. The estimator returned
+        # "PROFITABLE at 95% - +40.00%".
+        #
+        # That is survivorship bias of the plainest kind — grading a
+        # trader on the trades he decided to close — and it is the
+        # estimator behind the published +16.26% / +3.69% / +2.11%,
+        # behind the HomeRunHazard cut, and behind the sample-size
+        # target on /api/admin/proof. The payouts needed to close these
+        # balances were already fetched, for the exit counterfactual,
+        # and simply were not applied to them.
+        #
+        # A resolved-but-never-closed position is a CLOSED lot at its
+        # payout. An UNRESOLVED one is genuinely still open and is left
+        # out and reported, because guessing its outcome would be
+        # inventing the number this exists to check.
+        for cid, st in per_cond.items():
+            bal, cost = st[0], st[1]
+            for leg in (0, 1):
+                q = bal[leg]
+                if q <= DUST:
+                    continue
+                po = _payout(cid, leg)
+                if po is None:
+                    out["ungraded_open_shares"] += q
+                    out["ungraded_open_cost"] += cost[leg]
+                    continue
+                # settled: stake is what it cost, return is the payout
+                out["settled_lots"] += 1
+                out["settled_shares"] += q
+                _lot(cost[leg], q * po - cost[leg])
         for st in per_cond.values():
             out["open_shares"] += st[0][0] + st[0][1]
             out["open_cost"] += st[1][0] + st[1][1]
+            # HOW MUCH OF HIS BOOK THE EDGE ACTUALLY COVERS. Without this
+        # a reader cannot tell a whole-book number from a subset one,
+        # which is exactly how the subset number went unquestioned.
+        _ung = out["ungraded_open_cost"]
+        out["edge_coverage"] = (
+            round(out["lot_s"] / (out["lot_s"] + _ung), 4)
+            if (out["lot_s"] + _ung) > 0 else None)
+        if _ung > 0:
+            out["edge_coverage_note"] = (
+                f"${_ung:,.0f} of cost sits in positions that are still "
+                f"open OR whose market has no recorded payout. They are "
+                f"EXCLUDED, not assumed — but the edge below describes "
+                f"the rest of the book, not all of it")
+        for k in ("ungraded_open_shares", "ungraded_open_cost",
+                  "settled_shares"):
+            out[k] = round(out[k], 2)
         for k in ("entry_notional", "merge_shares", "realized_merge_pnl",
                   "realized_sell_pnl", "open_shares", "open_cost",
-                  "cf_closed_shares", "cf_graded_shares", "cf_ungraded_shares",
+                  "cf_closed_shares", "cf_graded_shares",
+                  "cf_ungraded_shares",
                   "cf_actual_on_graded", "cf_hold_on_graded"):
             out[k] = round(out[k], 2)
         # EXIT VALUE: what the exits themselves were worth, on the shares

@@ -874,3 +874,122 @@ class TestItActuallyStreamsThisTime:
         r = mp.replay([{"condition_id": "c", "outcome_index": 0,
                         "side": "BUY", "size": "x", "price": 0.4}])
         assert r["n_fills"] == 0 and r["n_entries"] == 0
+
+
+class TestSurvivorshipInTheEdgeEstimator:
+    """edge_roi graded each whale ONLY on the positions he CHOSE to
+    close, and stamped a 95% verdict on that self-selected subset.
+
+    _lot was booked only when a FILL closed shares — a sell, or a
+    complement merge. On this venue a position that simply RESOLVES
+    produces no fill at all, so it never entered a lot; it accumulated
+    into open_shares/open_cost, which nothing read.
+
+    Survivorship bias of the plainest kind: grading a trader on the
+    trades he decided to close. And it is the estimator behind the
+    published +16.26% / +3.69% / +2.11%, behind the HomeRunHazard cut,
+    and behind the sample-size target on /api/admin/proof.
+
+    The payouts needed to close those balances were ALREADY FETCHED,
+    for the exit counterfactual, and simply were not applied to them.
+    """
+
+    def _book(self, n_closed=30, n_held=70, entry=0.50, complement=0.30,
+              held_payout=0.0):
+        fills, pay = [], {}
+        for i in range(n_closed + n_held):
+            c = f"c{i}"
+            fills.append({"condition_id": c, "outcome_index": 0,
+                          "side": "BUY", "size": 1000.0, "price": entry})
+            if i < n_closed:
+                fills.append({"condition_id": c, "outcome_index": 1,
+                              "side": "BUY", "size": 1000.0,
+                              "price": complement})
+            pay[c] = [held_payout, 1.0 - held_payout]
+        return fills, pay
+
+    def test_the_loser_who_looked_profitable(self):
+        """The reproduction. 30 winners closed by merging out, 70 losers
+        ridden to a zero payout. True result -58%; the old estimator
+        said PROFITABLE at 95%, +40.00%."""
+        fills, pay = self._book()
+        r = mp.replay(fills, pay)
+        assert r["edge_roi"] == pytest.approx(-0.58, abs=0.001)
+        assert "LOSING at 95%" in r["edge_verdict"]
+
+    def test_it_matches_the_hand_computed_whole_book(self):
+        fills, pay = self._book()
+        true_pnl = 30 * 1000 * (1 - 0.50 - 0.30) + 70 * 1000 * (0.0 - 0.50)
+        true_stake = 100 * 1000 * 0.50
+        r = mp.replay(fills, pay)
+        assert r["edge_roi"] == pytest.approx(true_pnl / true_stake,
+                                              abs=1e-6)
+
+    def test_every_position_is_now_a_lot(self):
+        fills, pay = self._book()
+        r = mp.replay(fills, pay)
+        assert r["edge_lots"] == 100
+        assert r["settled_lots"] == 70
+
+    def test_a_genuine_winner_still_reads_profitable(self):
+        """The fix must not simply invert the answer."""
+        fills, pay = self._book(n_closed=70, n_held=30, held_payout=1.0)
+        r = mp.replay(fills, pay)
+        assert r["edge_roi"] > 0
+        assert "PROFITABLE at 95%" in r["edge_verdict"]
+
+
+class TestAnUnresolvedPositionIsNotGuessed:
+    """A resolved-but-never-closed position is a closed lot at its
+    payout. An UNRESOLVED one is genuinely still open, and inventing
+    its outcome would fabricate the number this exists to check."""
+
+    def _open_book(self):
+        return [{"condition_id": "c", "outcome_index": 0, "side": "BUY",
+                 "size": 1000.0, "price": 0.50}]
+
+    def test_no_payout_means_no_lot(self):
+        r = mp.replay(self._open_book(), {})
+        assert r["settled_lots"] == 0
+        assert r["edge_lots"] == 0
+        assert r["ungraded_open_cost"] == 500.0
+
+    def test_the_exclusion_is_reported_as_coverage(self):
+        fills, pay = TestSurvivorshipInTheEdgeEstimator()._book()
+        fills += self._open_book()
+        r = mp.replay(fills, pay)
+        assert r["edge_coverage"] is not None
+        assert r["edge_coverage"] < 1.0
+        assert "EXCLUDED, not assumed" in r["edge_coverage_note"]
+
+    def test_full_coverage_carries_no_note(self):
+        fills, pay = TestSurvivorshipInTheEdgeEstimator()._book()
+        r = mp.replay(fills, pay)
+        assert r["edge_coverage"] == 1.0
+        assert "edge_coverage_note" not in r
+
+    def test_a_reader_can_tell_a_subset_number_from_a_whole_book_one(self):
+        """Which is precisely what was missing: nothing on the response
+        distinguished 'his edge' from 'his edge on the part he chose to
+        close', so the subset number went unquestioned."""
+        fills, pay = TestSurvivorshipInTheEdgeEstimator()._book()
+        r = mp.replay(fills, pay)
+        assert "edge_coverage" in r
+
+
+class TestTheCounterfactualIsUnaffected:
+    """exit_value measures what the EXITS were worth. A position that
+    never exited contributes nothing to it in either world, so settling
+    it must not move that number."""
+
+    def test_settling_open_positions_does_not_change_exit_value(self):
+        fills, pay = TestSurvivorshipInTheEdgeEstimator()._book()
+        r = mp.replay(fills, pay)
+        # only the 30 merges are graded for the exit comparison
+        assert r["cf_closed_shares"] == 30000.0
+
+    def test_realized_totals_still_mean_REALISED(self):
+        fills, pay = TestSurvivorshipInTheEdgeEstimator()._book()
+        a = mp.replay(fills)
+        b = mp.replay(fills, pay)
+        assert a["realized_total"] == b["realized_total"]
