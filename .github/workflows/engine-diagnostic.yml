@@ -2584,6 +2584,72 @@ jobs:
               print(f"BEST {side} {band}-{band+5}c: net {net:+.2f}c/contract on {cnt} contracts (sigma {sig:.1f})")
           PY
 
+  tennis-desk-census:
+    # OWN JOB, like side-truth, and for the same reason: the probe step
+    # emits megabytes and GitHub truncates the log after it. This one
+    # answers a single question the container cannot ask (the network
+    # policy blocks the venue; the runner has open internet).
+    #
+    # THE QUESTION (owner 2026-08-26): the Kalshi app shows tennis
+    # SPREAD with alternate lines (5.5 / 2.5 / 1.5), Set Winner, Total
+    # Games and Exact Match Score on a match our desk lists as a plain
+    # two-outcome winner board. The desk browses KXATPMATCH and
+    # KXWTAMATCH only, so if those derivatives live in their own series
+    # the desk cannot see them by construction.
+    #
+    # The existing census answered a NARROWER question than it looked
+    # like it did: `head -80` on the series list cut off before KXATP*,
+    # and the tennis loop's `head -25` truncated so hard that
+    # KXATPMATCH itself -- a series we KNOW exists -- was missing from
+    # its own output. Reading that as 'tennis has no spread series'
+    # would have been reading a truncation as a finding.
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: TENNIS DESK CENSUS - every tennis series the venue lists
+        if: always()
+        run: |
+          B="https://api.elections.kalshi.com/trade-api/v2"
+          curl -sS --max-time 30 "$B/series?category=Sports&limit=1000" \
+            -o /tmp/series.json || true
+          echo "TDC-TOTAL $(jq -r '.series | length' /tmp/series.json 2>/dev/null)"
+          echo ""
+          echo "-- EVERY tennis-family series, untruncated --"
+          jq -r '.series[]? | "\(.ticker)\t\(.title)"' /tmp/series.json 2>/dev/null \
+            | grep -iE 'atp|wta|tennis|challenger' | sort \
+            | awk -F'\t' '{printf "  TDC %s | %s\n", $1, $2}' || true
+          echo ""
+          echo "-- every series whose TITLE names a derivative we need --"
+          jq -r '.series[]? | "\(.ticker)\t\(.title)"' /tmp/series.json 2>/dev/null \
+            | grep -iE 'spread|total|handicap|games|set ' | sort \
+            | awk -F'\t' '{printf "  TDCD %s | %s\n", $1, $2}' | head -60 || true
+          echo ""
+          echo "-- OPEN EVENTS per tennis series: does it have a live board? --"
+          for S in $(jq -r '.series[]?.ticker' /tmp/series.json 2>/dev/null \
+                       | grep -iE 'atp|wta|tennis|challenger' | sort); do
+            N=$(curl -sS --max-time 15 \
+                  "$B/events?series_ticker=$S&status=open&limit=200" \
+                  | jq -r '.events | length' 2>/dev/null || echo '?')
+            echo "  TDC-OPEN $S open_events=$N"
+          done
+          echo ""
+          echo "-- STRIKE SHAPE: what an alternate line looks like on the wire --"
+          echo "   (the desk needs the strike to build a ticket, and the"
+          echo "    card builder keys on ticker parts -- so the exact"
+          echo "    field names matter, not the shape I would guess)"
+          for S in $(jq -r '.series[]?.ticker' /tmp/series.json 2>/dev/null \
+                       | grep -iE 'atp|wta' | sort); do
+            R=$(curl -sS --max-time 15 \
+                  "$B/events?series_ticker=$S&status=open&with_nested_markets=true&limit=1")
+            HAS=$(echo "$R" | jq -r '[.events[]?.markets[]?] | length' 2>/dev/null || echo 0)
+            [ "$HAS" = "0" ] && continue
+            echo "== $S =="
+            echo "$R" | jq -c '.events[0] | {event_ticker, title,
+              markets: [.markets[]? | {ticker, yes_sub_title, subtitle,
+                strike_type, floor_strike, cap_strike, status,
+                yes_ask, volume}]}' 2>/dev/null | head -4 || true
+          done
+
   side-truth:
     # OWN JOB (2026-08-24): the probe step emits ~8MB, and GitHub's log
     # API truncates everything after it — the ground-truth answers this
