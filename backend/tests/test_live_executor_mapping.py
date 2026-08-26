@@ -84,7 +84,7 @@ def test_exact_grammar_maps_first_and_fuzzy_never_runs(monkeypatch):
     _wire(monkeypatch, pool)
     calls = {"exact": 0, "fuzzy": 0}
 
-    def fake_exact(slugs, outcome):
+    def fake_exact(slugs, outcome, diag_out=None):
         calls["exact"] += 1
         assert slugs and slugs[0].startswith("atc-epl-ars-che-"), \
             "side-coded atc candidate must lead"
@@ -123,7 +123,7 @@ def test_exact_miss_still_falls_through_to_fuzzy(monkeypatch):
     _wire(monkeypatch, pool)
     calls = {"exact": 0, "fuzzy": 0}
 
-    def fake_exact(slugs, outcome):
+    def fake_exact(slugs, outcome, diag_out=None):
         calls["exact"] += 1
         return None
 
@@ -150,7 +150,7 @@ def test_derivative_slugs_never_take_the_exact_path(monkeypatch):
     _wire(monkeypatch, pool)
     calls = {"exact": 0, "fuzzy": 0}
 
-    def fake_exact(slugs, outcome):
+    def fake_exact(slugs, outcome, diag_out=None):
         calls["exact"] += 1
         return {"market_slug": "wrong-moneyline", "title": "x",
                 "outcome": outcome, "matched_by": "desk_exact",
@@ -200,7 +200,7 @@ def test_kalshi_claim_landing_mid_flight_blocks_the_order(monkeypatch):
     pool.fetchval = fetchval
     _wire(monkeypatch, pool)
 
-    def fake_exact(slugs, outcome):
+    def fake_exact(slugs, outcome, diag_out=None):
         return {"market_slug": slugs[0], "title": "x", "outcome": outcome,
                 "matched_by": "desk_exact", "score": 1.0}
 

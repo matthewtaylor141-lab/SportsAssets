@@ -3542,6 +3542,12 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # pipeline its full budget; a timeout falls through, it
             # never rejects.
             _EXACT_BOX_S = 20.0
+            # Why the EXACT path missed — see resolve_market_exact.
+            # Collected per row rather than on a function attribute:
+            # four of these run concurrently under to_thread, and a
+            # shared attribute hands one row's reason to another.
+            _ex_diag: list[str] = []
+            _ex_cands: list[str] = []
             if mapping is None and mtype == "moneyline":
                 # Tennis first (owner order 2026-08-13): the feed's
                 # surname slugs can never hit the US first3+last3
@@ -3551,12 +3557,15 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                                             src_slug)
                          + _us_slug_candidates(src_slug,
                                                ctx.get("outcome") or ""))
+                _ex_cands = list(cands)
                 try:
                     mapping = await asyncio.wait_for(
                         asyncio.to_thread(pmus.resolve_market_exact,
-                                          cands, ctx.get("outcome")),
+                                          cands, ctx.get("outcome"),
+                                          _ex_diag),
                         timeout=_EXACT_BOX_S)
                 except asyncio.TimeoutError:
+                    _ex_diag.append("timeout")
                     mapping = None
             elif mapping is None and mtype in ("spread", "total"):
                 # MAPPING RECOVERY (owner order 2026-08-12: spreads +
@@ -3574,6 +3583,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                                           ctx.get("market_title")),
                         timeout=_EXACT_BOX_S)
                 except asyncio.TimeoutError:
+                    _ex_diag.append("timeout")
                     mapping = None
             if mapping_src is None:
                 mapping_src = "exact" if mapping is not None else None
@@ -3586,9 +3596,34 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     mapping_src = "fuzzy"
             if mapping is None:
                 diag = getattr(pmus.resolve_market, "last_diag", "") or ""
+                # THE EXACT ATTEMPT, FIRST AND BUDGETED. Every unmapped
+                # diagnostic anyone has read describes the FUZZY
+                # attempt, because that is the only one that recorded
+                # anything — so the class that dies one step earlier
+                # has been invisible. Tennis is 48% of the recent
+                # funnel and dies exactly there.
+                #
+                # Counted rather than listed: 4,919 rows a week is a
+                # distribution question, and "6x404" aggregates where
+                # six separate lines do not. The first candidate is
+                # kept verbatim so the generated grammar can be read
+                # back at a glance.
+                _ex = ""
+                if _ex_diag:
+                    _c: dict[str, int] = {}
+                    for _d in _ex_diag:
+                        _k = _d.split(":")[0]
+                        _c[_k] = _c.get(_k, 0) + 1
+                    _ex = ("exact[" + (_ex_cands[0] if _ex_cands else "-")
+                           + " " + ",".join(f"{v}x{k}" for k, v
+                                            in sorted(_c.items()))
+                           + "] ")
+                elif _ex_cands:
+                    _ex = f"exact[{_ex_cands[0]} not-run] "
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 WHERE id=$1",
-                    row_id, ("unmapped: " + diag)[:300] if diag
+                    row_id, ("unmapped: " + _ex + diag)[:300]
+                    if (diag or _ex)
                     else "no verified Polymarket US market for this outcome",
                 )
                 log.info("LIVE (US) unmapped: %s / %s", ctx.get("market_title"),

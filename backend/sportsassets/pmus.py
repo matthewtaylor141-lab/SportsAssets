@@ -852,13 +852,42 @@ def order_intent_for(market: dict, side: dict | None) -> str | None:
 
 
 def resolve_market_exact(candidate_slugs: list[str],
-                         outcome: str | None) -> dict | None:
+                         outcome: str | None,
+                         diag_out: list | None = None) -> dict | None:
     """Deterministic US-market resolution for the manual desk: try each
     candidate slug via direct lookup ONLY — no fuzzy fallback. The
     desk's first live ticket proved why (2026-08-07): the full-text
     search mapped 'Casper Ruud' onto an astatc PLAYER PROP instead of
     the match moneyline. A human's directed trade must map to exactly
-    the market implied by the slug grammar or refuse outright."""
+    the market implied by the slug grammar or refuse outright.
+
+    WHY IT MISSED, WHEN IT MISSES (2026-08-26). This returned None
+    silently and recorded nothing, so a failure here was indistinguishable
+    from never having been tried. Only resolve_market (the fuzzy
+    fallback) carried a last_diag, which is why every diagnostic anyone
+    has ever read about an unmapped row describes the FUZZY attempt —
+    and tennis, at 48% of the recent unmapped funnel and 4,919 ATP rows
+    in seven days, dies HERE, one step earlier, invisibly.
+
+    diag_out collects one compact code per candidate:
+      404      the venue does not list that slug
+      closed   listed but closed
+      low:S    a market, but the outcome scored S below MATCH_FLOOR
+      parent   scored, but it carries sides — not itself orderable
+      amb:A/B  two sides both plausible; refusing beats a coin flip
+      noint    sides share an identifier and no long/short is named
+      ok       matched
+
+    A LIST PARAMETER, NOT A FUNCTION ATTRIBUTE. resolve_market's
+    last_diag is shared mutable state and this runs under
+    asyncio.to_thread with four copies in flight, so an attribute would
+    hand one row's reason to another row — a diagnostic that lies is
+    worse than none, and this file has paid for that lesson already.
+    """
+    def _note(code: str) -> None:
+        if diag_out is not None and len(diag_out) < 24:
+            diag_out.append(code)
+
     client = _get_client()
     for slug in candidate_slugs:
         if not slug:
@@ -866,8 +895,13 @@ def resolve_market_exact(candidate_slugs: list[str],
         try:
             m = (client.markets.retrieve_by_slug(slug) or {}).get("market") or {}
         except Exception:  # noqa: BLE001 — 404 is expected; next candidate
+            _note("404")
             continue
-        if not m.get("slug") or m.get("closed"):
+        if not m.get("slug"):
+            _note("404")
+            continue
+        if m.get("closed"):
+            _note("closed")
             continue
         score = _outcome_score(m, outcome)
         # A market that CARRIES sides is a two-outcome contract: its
@@ -880,10 +914,18 @@ def resolve_market_exact(candidate_slugs: list[str],
                          and s.get("description")
                          for s in (m.get("marketSides") or []))
         if score >= MATCH_FLOOR and not _has_sides:
+            _note("ok")
             return {"market_slug": m["slug"], "title": m.get("title"),
                     "outcome": m.get("outcome"),
                     "intent": order_intent_for(m, None),
                     "matched_by": "desk_exact", "score": score}
+        if not _has_sides:
+            # Listed, not closed, no sides — so the only thing between
+            # this and a mapping is the outcome score. Recording the
+            # NUMBER is the point: a floor problem and a wrong-market
+            # problem look identical without it.
+            _note(f"low:{score:.2f}")
+            continue
         # Two-sided markets (tennis aec- especially) score near zero on
         # the PARENT outcome — the tradable sides live in marketSides,
         # each side its own orderable slug (the copy sleeve's tennis
@@ -912,12 +954,15 @@ def resolve_market_exact(candidate_slugs: list[str],
             if _int is None:
                 # sides share an identifier and the venue named no
                 # long/short: unorderable, never a coin flip
+                _note("noint")
                 continue
+            _note("ok")
             return {"market_slug": best_side["identifier"],
                     "title": m.get("question") or m.get("title"),
                     "outcome": best_side["description"],
                     "intent": _int,
                     "matched_by": "desk_exact_side", "score": best_sc}
+        _note(f"amb:{best_sc:.2f}/{second_sc:.2f}")
     return None
 
 
