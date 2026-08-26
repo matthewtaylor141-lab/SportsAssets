@@ -42,9 +42,22 @@ def _explain(**kw):
 
 
 class TestEverySilentFailureNowHasAName:
-    def test_no_keys_built(self):
+    def test_a_signal_with_no_slug_is_now_caught_EARLIER(self):
+        """no_keys_built used to catch this. The dateless guard now
+        precedes it, which is the more specific and more useful name:
+        the reason a slugless signal builds nothing is that it cannot
+        say which game it is on, and bare title keys match that pairing
+        on every date."""
         r = _explain(title=None, event=None, slug=None)
-        assert r["step"] == "no_keys_built"
+        assert r["step"] == "no_date_on_his_signal"
+
+    def test_a_DATED_signal_always_builds_at_least_the_slug_key(self):
+        """Which is why no_keys_built is now unreachable rather than
+        merely rare — stated here so a reader does not go looking for
+        it in a census that can never report it."""
+        from sportsassets.workers.premap import event_keys_for
+
+        assert event_keys_for(None, "lpa-tig-cac-2026-08-24-tig")
 
     def test_no_key_intersection(self):
         """Keys were built and matched nothing — either the sweep never

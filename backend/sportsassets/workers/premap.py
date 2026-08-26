@@ -1086,7 +1086,36 @@ async def resolve_explain(pool, market_title: str | None,
     from ..copy_sports import market_type_of
 
     out: dict = {"step": None, "detail": None, "keys": 0, "rows": 0}
+    # A DATELESS SIGNAL CANNOT ESTABLISH GAME AGREEMENT (2026-08-26).
+    #
+    # When the whale's slug carries no date, event_keys_for is called
+    # with slug=None and _dated_admissible is skipped, so the key set is
+    # BARE TITLES with no date stamp. A bare "tigre vs cacique" matches
+    # the venue's row for that pairing on ANY date — the 2026-08-24 game
+    # and the 2026-09-14 game alike. That is the whale's pick reaching
+    # another game's row, which is the incident this entire lane exists
+    # to prevent.
+    #
+    # It was latent before and I ARMED IT. Until the event_title fix
+    # earlier tonight, a dateless signal produced only {market_title}
+    # ("tigre"), which intersected nothing because venue rows are keyed
+    # off event titles. Supplying event_title turned "matches nothing"
+    # into "may match the wrong date's game". Found by the coverage
+    # fleet's own verifiers, rejecting the proposal I had already
+    # shipped.
+    #
+    # Refusing costs nothing that was ever safe: with no date, no slug
+    # key is built either, so bare titles were the ONLY keys such a
+    # signal had. Game agreement is the basis of the deterministic lane,
+    # and a signal that cannot say which game it is on has no business
+    # selecting a market.
     d = date_of(global_slug)
+    if not d:
+        out["step"] = "no_date_on_his_signal"
+        out["detail"] = ("his slug carries no date, so no key can "
+                         "establish which game he bet — bare title keys "
+                         "match that pairing on every date")
+        return out
     keys: set[str] = set()
     for t in (market_title, event_title):
         keys.update(event_keys_for(t, global_slug if d else None))
@@ -1208,7 +1237,32 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     # GAME AGREEMENT (leak-hunt round 2): when the whale's signal names
     # a date, ONLY date-stamped keys may match, so another day's game
     # can never be a candidate. Dateless signals keep the bare keys.
+    # A DATELESS SIGNAL CANNOT ESTABLISH GAME AGREEMENT (2026-08-26).
+    #
+    # When the whale's slug carries no date, event_keys_for is called
+    # with slug=None and _dated_admissible is skipped, so the key set is
+    # BARE TITLES with no date stamp. A bare "tigre vs cacique" matches
+    # the venue's row for that pairing on ANY date — the 2026-08-24 game
+    # and the 2026-09-14 game alike. That is the whale's pick reaching
+    # another game's row, which is the incident this entire lane exists
+    # to prevent.
+    #
+    # It was latent before and I ARMED IT. Until the event_title fix
+    # earlier tonight, a dateless signal produced only {market_title}
+    # ("tigre"), which intersected nothing because venue rows are keyed
+    # off event titles. Supplying event_title turned "matches nothing"
+    # into "may match the wrong date's game". Found by the coverage
+    # fleet's own verifiers, rejecting the proposal I had already
+    # shipped.
+    #
+    # Refusing costs nothing that was ever safe: with no date, no slug
+    # key is built either, so bare titles were the ONLY keys such a
+    # signal had. Game agreement is the basis of the deterministic lane,
+    # and a signal that cannot say which game it is on has no business
+    # selecting a market.
     d = date_of(global_slug)
+    if not d:
+        return None
     keys: set[str] = set()
     for t in (market_title, event_title):
         keys.update(event_keys_for(t, global_slug if d else None))

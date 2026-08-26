@@ -86,10 +86,18 @@ async def sweep_once() -> dict:
                -- construction produced nothing on every copy.
                -- The markets join is already here for the resolved
                -- filter, so this costs no extra query.
-               COALESCE(t.market_title, m.title) AS market_title,
+               -- ONLY event_title is sourced from markets. The other
+               -- three COALESCEs were wrong to add and are reverted:
+               -- market_title feeds match_side's yes/no question
+               -- agreement and its line extraction, and market_slug is
+               -- the global_slug that date_of and slug_lines read — so
+               -- swapping their source silently changes SIDE and GAME
+               -- selection on any row where the two disagree. That is
+               -- not the coverage-only change I labelled it.
+               t.market_title,
                m.event_title,
-               COALESCE(t.market_slug, m.slug) AS market_slug,
-               COALESCE(t.event_slug, m.event_slug) AS event_slug,
+               t.market_slug,
+               t.event_slug,
                t.sport,
                extract(epoch FROM t.ts)::float8 AS ts_epoch
         FROM trades t
