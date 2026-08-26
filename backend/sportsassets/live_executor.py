@@ -26,6 +26,7 @@ Settlement runs through the platform's resolution pipeline.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -875,8 +876,21 @@ async def mirror_exit(payload: dict) -> str:
                 return _exit_done("mx_no_bid_for_partial", slug=us_slug,
                                   full=bool(_full))
             limit = sell_limit_price(bid)
-    except Exception:
-        await _release_exit_claim(pool, row["id"])
+    except BaseException:
+        # BaseException, NOT Exception (2026-08-26, adversarial round 4).
+        # asyncio.CancelledError derives from BaseException, so a
+        # cancellation between the claim above and the terminal UPDATE
+        # sailed straight past this handler and left the row in
+        # 'exiting' with the claim never released. A canceller is live
+        # on this path: copy_sweep wraps maybe_execute in
+        # asyncio.wait_for(ROW_TIMEOUT_S=60) and reaches mirror_exit
+        # through classify_exit; Render's redeploy SIGTERM is a second.
+        #
+        # Nothing has been sent to the venue yet at this point, so
+        # releasing back to 'filled' is unambiguously right. shield()
+        # because awaiting inside a cancelled task is itself cancelled.
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(_release_exit_claim(pool, row["id"]))
         raise
     try:
         if _flatten:
@@ -887,6 +901,27 @@ async def mirror_exit(payload: dict) -> str:
             result = await asyncio.to_thread(
                 pmus.submit_fok, us_slug, limit, qty, True,
                 "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+    except asyncio.CancelledError:
+        # THE SALE MAY ALREADY HAVE HAPPENED. asyncio.to_thread cannot
+        # be cancelled — the thread runs to completion — so a
+        # cancellation here can land AFTER the venue filled the order.
+        # Releasing to 'filled' would then claim we still hold shares
+        # that are gone, and the next cycle would sell them again.
+        # Leaving it 'exiting' silently is the other bad option: the
+        # settlement sweep targets 'filled', mirror_exit's row query
+        # requires 'filled', and copy_sweep blocks the asset while it
+        # reads 'exiting' — the row becomes invisible and unsellable.
+        #
+        # So it is marked for RECONCILIATION and _reap_stale_exiting
+        # resolves it against the venue's own position, which is the
+        # only thing that knows the answer.
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(pool.execute(
+                "UPDATE live_orders SET error=$2 WHERE id=$1",
+                row["id"],
+                "exit cancelled mid-venue-call — reconcile: the sale "
+                "may have executed"))
+        raise
     except Exception:
         await _release_exit_claim(pool, row["id"])
         raise
@@ -2412,6 +2447,83 @@ async def _reap_stale_submitting(pool) -> None:
         "reconcile against the venue account' "
         "WHERE status = 'submitting' "
         "AND placed_at < now() - interval '10 minutes'")
+
+
+async def _reap_stale_exiting(pool) -> int:
+    """Resolve rows stranded in 'exiting' AGAINST THE VENUE.
+
+    Nothing reaped this status. _reap_stale_submitting covers
+    'submitting' only, and a row can reach 'exiting' and stay there:
+    mirror_exit claims it with an atomic UPDATE and every path back out
+    was an `except Exception`, which asyncio.CancelledError bypasses.
+    copy_sweep wraps maybe_execute in a 60s wait_for and reaches
+    mirror_exit through classify_exit, and Render's redeploy SIGTERM
+    cancels every in-flight exit at once.
+
+    A stranded row is invisible three ways over: the settlement sweep
+    selects status='filled' so it is never graded, mirror_exit's own row
+    query requires 'filled' so it can never be sold, and copy_sweep's
+    blocking list contains 'exiting' so the market can never be
+    re-entered. The shares sit at the venue and no number in the system
+    moves.
+
+    A timestamp cannot answer this and neither can we: the question is
+    whether the sale executed, and only the venue knows. So each row is
+    reconciled against the account's live position.
+
+      venue holds nothing  -> the sale went through. Mark it cashed_out
+                              with settled_at, and say in the error text
+                              that the fill price was never captured, so
+                              the P&L on this row is not trustworthy.
+      venue still holds    -> the order never landed. Release to
+                              'filled' and let the normal path retry.
+      venue unreadable     -> leave it alone. An outage must not be able
+                              to decide either way.
+
+    Ten minutes, matching the submitting reaper: an exit is a claim, a
+    held lookup, and one IOC — tens of seconds at worst.
+    """
+    try:
+        rows = await pool.fetch(
+            "SELECT id, us_market_slug FROM live_orders "
+            "WHERE status = 'exiting' "
+            "  AND placed_at < now() - interval '10 minutes' "
+            "LIMIT 50")
+    except Exception:  # noqa: BLE001 — a reaper never breaks its caller
+        log.exception("stale-exiting reap could not read")
+        return 0
+    fixed = 0
+    for r in rows or []:
+        slug = r["us_market_slug"]
+        if not slug:
+            continue
+        try:
+            held, _avg = await _pm_held(slug)
+        except Exception:  # noqa: BLE001 — unreadable venue decides nothing
+            log.warning("stale-exiting %s: venue unreadable, left alone",
+                        slug)
+            continue
+        try:
+            if held < 1:
+                await pool.execute(
+                    "UPDATE live_orders SET status='cashed_out', "
+                    "settled_at=now(), error=$2 WHERE id=$1 "
+                    "AND status='exiting'",
+                    r["id"],
+                    "exit completed but the process died before "
+                    "recording it — venue holds nothing; fill price and "
+                    "pnl on this row were never captured")
+                log.warning("stale-exiting %s: venue holds nothing — the "
+                            "sale executed; row retired", slug)
+            else:
+                await _release_exit_claim(pool, r["id"])
+                log.warning("stale-exiting %s: venue still holds %d — "
+                            "the order never landed; released to filled",
+                            slug, held)
+            fixed += 1
+        except Exception:  # noqa: BLE001 — one row, not the sweep
+            log.exception("stale-exiting %s: could not resolve", slug)
+    return fixed
 
 
 async def execute_manual(asset: str, usd: float, note: str = "",

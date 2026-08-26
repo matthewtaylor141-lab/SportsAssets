@@ -68,11 +68,17 @@ async def sweep_once() -> dict:
     # Phantom 'submitting' rows (process died mid-order) hold the
     # one-fill-per-asset claim forever and silently retire the asset
     # from copying (audit 2026-08-21) — reap them every pass.
-    from ..live_executor import _reap_stale_submitting
+    from ..live_executor import (_reap_stale_exiting,
+                                 _reap_stale_submitting)
     await _reap_stale_submitting(pool)
+    # 'exiting' had no reaper at all. A cancellation between
+    # mirror_exit's atomic claim and its terminal UPDATE strands the row
+    # there permanently, and this sweep is itself the canceller (the
+    # 60s wait_for below), so it is the right place to clean up after.
+    _reaped_exiting = await _reap_stale_exiting(pool)
     whales = sorted(settings().source_whales())
     rows = await pool.fetch(
-        """
+        r"""
         SELECT DISTINCT ON (t.asset)
                t.id, t.whale_id, w.username AS whale_username, t.tx_hash, t.asset,
                t.condition_id, t.side, t.outcome, t.outcome_index,
@@ -251,6 +257,10 @@ async def sweep_once() -> dict:
     _n = _QUEUE_STATS["n"] or 0
     return {"candidates": len(rows), "attempted": attempted,
             "deferred_to_next_pass": deferred,
+            # Always present, never conditionally added: an absent key
+            # and a zero key look identical to a reader, and this
+            # codebase has shipped that confusion before.
+            "reaped_exiting": _reaped_exiting,
             "exit_census": _cen["counts"],
             "exit_recent": exit_census_lines(),
             "copy_queue": {
