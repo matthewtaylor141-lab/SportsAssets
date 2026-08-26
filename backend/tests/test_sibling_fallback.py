@@ -94,11 +94,19 @@ class TestCoverageIsMeasuredNotAssumed:
 class TestTheFallbackIsNeverAGuess:
     @pytest.fixture(autouse=True)
     def _clear(self):
+        # None, NOT 0.0. This fixture predates the cold-start fix and
+        # kept planting the old sentinel, overriding conftest's None --
+        # so on any host up less than the 300s TTL the refresh was
+        # skipped and these tests read '' from an empty cache. Local
+        # containers (long uptime) passed; fresh CI runners (~90s
+        # uptime) failed. The test class was re-creating the exact
+        # production bug it exists to guard against, selectively by
+        # environment -- the same trap, one level up.
         le._SIBLING_CACHE = {}
-        le._SIBLING_CACHE_AT = 0.0
+        le._SIBLING_CACHE_AT = None
         yield
         le._SIBLING_CACHE = {}
-        le._SIBLING_CACHE_AT = 0.0
+        le._SIBLING_CACHE_AT = None
 
     class _Pool:
         def __init__(self, val):
