@@ -235,6 +235,11 @@ ASK_GUARD_SINCE = "2026-08-25T02:20:00"
 # A scale-out smaller than this is not worth crossing a spread for —
 # the fee and the half-spread eat a 2% trim. Above it we follow him.
 MIN_EXIT_FRAC = float(os.environ.get("LIVE_MIN_EXIT_FRAC", "0.10"))
+# One venue call, on the copy hot path, to repair a token neither of our
+# own caches knows. Short on purpose: a slow answer is worth less than
+# the staleness it costs, and the pre-existing fallback is right there.
+TOKEN_LOOKUP_TIMEOUT_S = float(
+    os.environ.get("LIVE_TOKEN_LOOKUP_TIMEOUT_S", "2.0"))
 # At or above this he is treated as fully out, and so are we. Below it
 # the position stays open with the remainder still tracked.
 FULL_EXIT_FRAC = float(os.environ.get("LIVE_FULL_EXIT_FRAC", "0.95"))
@@ -553,11 +558,52 @@ async def classify_exit(pool, asset: str, whale: str,
         # empty, this changes nothing, and the heartbeat's sib_rows
         # says so. The fallback is never a guess: no entry, no
         # classification.
-        sibling = await _sibling_from_positions(pool, asset)
-        if not sibling:
-            return _exit_stop("cls_token_unenriched", asset=asset,
-                              whale=whale)
-        _exit_stop("cls_sibling_from_venue_map", asset=asset)
+        #
+        # ASK GAMMA FIRST. IT HAS ALWAYS BEEN ABLE TO ANSWER
+        # (2026-08-26). cls_token_unenriched reached 1,337 -- as many
+        # exit signals discarded as we successfully classified -- and
+        # both sources consulted above are OUR OWN caches.
+        # gamma.lookup_token_live already existed, is production-tested
+        # and runs on the ingestion path: one
+        # GET /markets?clob_token_ids=<tid>&limit=1 returns
+        # clobTokenIds (BOTH legs) plus conditionId, and upsert_market
+        # writes every token into market_tokens -- the exact table the
+        # join above reads. One call repairs this token PERMANENTLY,
+        # for both legs, and the next exit on either side resolves
+        # locally with no venue call at all.
+        #
+        # Why it was missing rather than merely late: a trade arriving
+        # with its own condition_id is stamped enriched_at at INSERT
+        # and never calls Gamma, so its market never enters
+        # market_tokens -- and the trade-driven repair lane selected
+        # WHERE enriched_at IS NULL, permanently excluding exactly
+        # those rows. That selector is re-keyed in this same commit so
+        # the population also heals in the background.
+        #
+        # BOUNDED, because this is the copy hot path: one attempt, a
+        # short timeout, and any failure falls through to the venue map
+        # exactly as before. lookup_token_live caches its own misses,
+        # so a genuinely unknown token is not re-fetched.
+        try:
+            from . import gamma as _gamma
+
+            await asyncio.wait_for(_gamma.lookup_token_live(asset),
+                                   timeout=TOKEN_LOOKUP_TIMEOUT_S)
+            _re = await pool.fetch(
+                "SELECT s.token_id FROM market_tokens mt "
+                "JOIN market_tokens s USING (condition_id) "
+                "WHERE mt.token_id = $1 AND s.token_id <> $1", asset)
+        except Exception:  # noqa: BLE001 — enrichment is best-effort
+            _re = []
+        if _re and len(_re) == 1:
+            sibling = str(_re[0]["token_id"])
+            _exit_stop("cls_sibling_from_gamma", asset=asset)
+        else:
+            sibling = await _sibling_from_positions(pool, asset)
+            if not sibling:
+                return _exit_stop("cls_token_unenriched", asset=asset,
+                                  whale=whale)
+            _exit_stop("cls_sibling_from_venue_map", asset=asset)
     if not sibling:
         # Multi-outcome markets and negative-risk baskets have no
         # single complement. Refusing is correct; counting it tells us

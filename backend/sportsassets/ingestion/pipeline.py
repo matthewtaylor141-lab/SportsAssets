@@ -380,16 +380,37 @@ async def backfill_unenriched(limit: int = 200) -> int:
             _enrich_fails.pop(next(iter(_enrich_fails)), None)
     dead = [a for a, (n, _) in _enrich_fails.items()
             if n >= MAX_ENRICH_FAILS]
+    # KEYED ON market_tokens COVERAGE, NOT ON enriched_at (2026-08-26).
+    #
+    # enriched_at is stamped at INSERT for any trade arriving with its
+    # own condition_id, so that row never calls Gamma and its market
+    # never enters market_tokens -- and this lane, selecting WHERE
+    # enriched_at IS NULL, then excluded it permanently. The population
+    # it was built to repair was the one population it could not see.
+    #
+    # classify_exit joins market_tokens to itself to find a token's
+    # complementary leg, so a token absent from that table cannot be
+    # classified as an exit at all: cls_token_unenriched was 1,337. The
+    # selector now asks the question that matters -- which traded
+    # tokens does market_tokens not cover -- so the backlog drains
+    # instead of standing forever. Grouped by asset because the same
+    # token is traded many times and one repair fixes them all.
     rows = await pool.fetch(
-        "SELECT id, asset FROM trades WHERE enriched_at IS NULL "
-        "AND NOT (asset = ANY($2::text[])) "
-        "ORDER BY id DESC LIMIT $1", limit, dead[:4000]
+        "SELECT max(t.id) AS id, t.asset FROM trades t "
+        "LEFT JOIN market_tokens mt ON mt.token_id = t.asset "
+        "WHERE mt.token_id IS NULL "
+        "  AND NOT (t.asset = ANY($2::text[])) "
+        "GROUP BY t.asset ORDER BY max(t.id) DESC LIMIT $1",
+        limit, dead[:4000]
     )
     # Visibility for the heartbeat: how big is the standing backlog in
     # the newest slice, and how much of it is known-dead.
+    # The backlog that matters is the same population the selector
+    # above walks: distinct traded tokens market_tokens does not cover.
     backlog = await pool.fetchval(
-        "SELECT count(*) FROM (SELECT 1 FROM trades "
-        "WHERE enriched_at IS NULL ORDER BY id DESC LIMIT 1000) t")
+        "SELECT count(*) FROM (SELECT DISTINCT t.asset FROM trades t "
+        "LEFT JOIN market_tokens mt ON mt.token_id = t.asset "
+        "WHERE mt.token_id IS NULL LIMIT 1000) t")
     enrich_stats.update(unenriched_1k=int(backlog or 0),
                         dead_tokens=len(dead))
     fixed = 0

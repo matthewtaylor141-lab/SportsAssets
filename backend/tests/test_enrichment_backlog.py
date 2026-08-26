@@ -17,7 +17,7 @@ SRC = (pathlib.Path(__file__).resolve().parents[1]
 
 def test_dead_tokens_leave_the_window():
     assert "MAX_ENRICH_FAILS" in SRC
-    assert "NOT (asset = ANY($2::text[]))" in SRC, \
+    assert "NOT (t.asset = ANY($2::text[]))" in SRC, \
         "dead tokens must be excluded in the SELECT, not just skipped " \
         "after fetch — they were CLOGGING the window itself"
 
