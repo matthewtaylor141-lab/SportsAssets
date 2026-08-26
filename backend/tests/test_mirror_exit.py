@@ -74,13 +74,17 @@ class TestItCannotSellWhatWeDoNotHold:
         assert "_pm_held(us_slug)" in src
         assert "min(int(row[\"qty\"]), held)" in src
 
-    def test_a_partial_still_refuses_without_a_bid(self):
-        """A partial needs a quantity and a price, so an unreadable bid
-        still defers it — selling into an empty book at a guessed price
-        is worse than holding."""
+    def test_a_quantity_sale_still_refuses_without_a_bid(self):
+        """Selling a QUANTITY needs a price, so an unreadable bid defers
+        it — into an empty book at a guessed price is worse than
+        holding. This now covers a full exit on a CO-HELD slug as well
+        as a partial: both sell a quantity rather than flattening, and
+        "cannot price our own shares" must not escalate to "flatten
+        somebody else's"."""
         src = inspect.getsource(le.mirror_exit)
         assert "slug_bid" in src
-        assert "partial exit \n" in src or "partial exit " in src
+        assert "exit deferred " in src
+        assert "mx_no_bid_for_partial" in src
 
     def test_a_full_exit_no_longer_needs_a_bid_at_all(self):
         """This was the blocker that made detection worthless: every
@@ -139,13 +143,26 @@ class TestPartialExitsAreNowMirroredProportionally:
         assert "closed_frac >= FULL_EXIT_FRAC" in src
         assert "qty = ours" in src
 
-    def test_a_partial_sale_does_not_retire_the_whole_row(self):
-        """'cashed_out' after selling a fraction orphans the remainder:
-        the settlement sweep targets status='filled', so the shares we
-        still hold would never be graded."""
+    def test_a_sale_that_leaves_shares_does_not_retire_the_row(self):
+        """'cashed_out' while shares remain orphans them: the settlement
+        sweep targets status='filled', so they would never be graded;
+        mirror_exit's own row query requires 'filled', so they could
+        never be sold again; and copy_sweep's blocking list contains
+        'cashed_out', so we would never re-enter either.
+
+        The condition must be about SHARES, not about the whale's
+        fraction. Gating on closed_frac covered a partial exit and
+        missed a FULL exit that only partially filled — the branch that
+        runs an unlimited close against a book thin enough to exhaust
+        its slippage bound."""
         src = inspect.getsource(le.mirror_exit)
-        assert "remaining = max(0, int(row[\"qty\"]) - int(filled))" in src
+        assert "remaining = max(0, int(row[\"qty\"]) - int(booked))" in src
         assert "SET status='filled', " in src
+        code = "\n".join(l for l in src.splitlines()
+                         if not l.strip().startswith("#"))
+        assert "if remaining > 0:" in code
+        assert "remaining > 0 and closed_frac" not in code, \
+            "the remainder test is gated on the whale's fraction again"
 
     def test_a_partial_is_logged_with_what_is_left(self):
         src = inspect.getsource(le.mirror_exit)

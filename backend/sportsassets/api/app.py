@@ -4770,8 +4770,14 @@ async def admin_exit_census() -> dict:
     # so the verdict could point a reader at "post_position_refusals"
     # and show them an empty object while the sleeve sat halted. A
     # diagnostic that names a bucket must be able to put things in it.
-    defect_keys = ("mx_overspend_halt", "mx_venue_holds_nothing",
+    defect_keys = ("mx_overspend_halt", "mx_paused",
+                   "mx_venue_holds_nothing",
                    "mx_no_bid_for_partial", "mx_venue_unfilled",
+                   # A full exit that only partly filled. We still hold
+                   # shares the whale does not — the row stays live and
+                   # the exit is retried, but a standing count here is
+                   # a book we keep failing to get out of.
+                   "mx_partial_full_exit",
                    "mx_bad_supplied_fraction", "mx_already_claimed",
                    "mx_below_floor", "mx_no_ledger_position",
                    # mx_exit_already_mirrored is the replay guard doing

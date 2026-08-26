@@ -352,6 +352,10 @@ EXIT_PENDING_REASONS: frozenset[str] = frozenset({
     # Liquidity, not position. Both come back.
     "mx_no_bid_for_partial",
     "mx_venue_unfilled",
+    # The whale is out and we are only partly out. The row still holds
+    # shares and stays 'filled', so this is a real position to finish
+    # exiting, not a settled one.
+    "mx_partial_full_exit",
 })
 
 
@@ -832,21 +836,50 @@ async def mirror_exit(payload: dict) -> str:
         # held".
         #
         # A partial still needs a quantity, so it keeps the limit IOC.
+        #
+        # ONLY WHEN OUR COPY IS THE WHOLE VENUE POSITION (2026-08-26,
+        # adversarial round 4). close_position takes ONLY a market slug
+        # — no side, no quantity, no limit — and flattens whatever the
+        # ACCOUNT holds there. `held` comes from _pm_held, which reads
+        # the account-wide netPosition, so on a slug another sleeve also
+        # holds it sells their shares too.
+        #
+        # Co-holding is designed in, not accidental: the no-stack
+        # carve-out lets a copy proceed when the other holder is the
+        # underdog sleeve, and the manual desk is never blocked from a
+        # slug the copy sleeve holds. So a whale exit would flatten the
+        # underdog sleeve's position, leave its row reading 'filled'
+        # with nothing behind it, and book the P&L of shares this row
+        # never owned onto this row.
+        #
+        # When we ARE the whole position the flatten is exactly right
+        # and keeps its no-price property. When we are not, selling a
+        # QUANTITY is the only correct action, so it takes the limit IOC
+        # path — and if the bid is unreadable it refuses, because
+        # "cannot price our own shares" must not escalate to
+        # "flatten somebody else's".
         _full = closed_frac >= FULL_EXIT_FRAC
+        _sole = ours >= held
+        _flatten = _full and _sole
+        if _full and not _sole:
+            log.warning("MIRROR-EXIT %s: venue holds %d on this slug and "
+                        "only %d is ours — selling our quantity instead "
+                        "of flattening the market", us_slug, held, ours)
         limit = None
-        if not _full:
+        if not _flatten:
             bid = await asyncio.to_thread(pmus.slug_bid, us_slug)
             if bid is None or not (0 < bid < 1):
-                log.warning("MIRROR-EXIT no bid for %s — partial exit "
-                            "deferred rather than sold blind", us_slug)
+                log.warning("MIRROR-EXIT no bid for %s — exit deferred "
+                            "rather than sold blind", us_slug)
                 await _release_exit_claim(pool, row["id"])
-                return _exit_done("mx_no_bid_for_partial", slug=us_slug)
+                return _exit_done("mx_no_bid_for_partial", slug=us_slug,
+                                  full=bool(_full))
             limit = sell_limit_price(bid)
     except Exception:
         await _release_exit_claim(pool, row["id"])
         raise
     try:
-        if _full:
+        if _flatten:
             result = await asyncio.to_thread(
                 pmus.close_position, us_slug,
                 slippage_bips=EXIT_SLIPPAGE_BIPS)
@@ -865,18 +898,48 @@ async def mirror_exit(payload: dict) -> str:
         await _release_exit_claim(pool, row["id"])
         return _exit_done("mx_venue_unfilled", slug=us_slug)
     entry = row["entry"] or 0
+    # BOOK ONLY WHAT WAS OURS (2026-08-26, adversarial round 4).
+    #
+    # `filled` is the quantity the VENUE closed. On the flatten path
+    # that is the account's whole position on the slug, so on a
+    # co-held market it included another sleeve's shares — and feeding
+    # it to realized_pnl priced those shares at OUR entry and added the
+    # result to this row's pnl. A dollar counted on a position the row
+    # never owned, in the row and in every aggregate that sums it.
+    #
+    # The flatten is now reserved for the case where our copy IS the
+    # whole position, so the two agree. This clamp is the belt: it can
+    # only ever reduce what is booked, and it holds even if some future
+    # path reintroduces the difference.
+    booked = min(float(filled), float(ours))
     # SHORT EXITS WERE SIGN-INVERTED. See realized_pnl: on a short the
     # venue's price field names the LONG leg, so the realized amount is
     # (entry - exit), not (exit - entry). Six shorts filled before the
     # branch was banned and we may still hold them.
-    pnl = realized_pnl(entry, px, filled, row["intent"])
-    # PARTIAL EXITS MUST NOT RETIRE THE WHOLE POSITION. Writing
-    # 'cashed_out' after selling a fraction would orphan the remainder:
-    # the settlement sweep targets status='filled', so the shares we
-    # still hold would never be graded, and copy_sweep's blocking list
-    # would stop us re-entering a market we are still in.
-    remaining = max(0, int(row["qty"]) - int(filled))
-    if remaining > 0 and closed_frac < FULL_EXIT_FRAC:
+    pnl = realized_pnl(entry, px, booked, row["intent"])
+    # A POSITION IS NEVER RETIRED WHILE SHARES REMAIN.
+    #
+    # Writing 'cashed_out' after selling only part of the row orphans
+    # the rest: the settlement sweep targets status='filled', so shares
+    # we still hold would never be graded; mirror_exit's own row query
+    # requires status='filled', so they could never be sold again; and
+    # copy_sweep's blocking list contains 'cashed_out', so we would
+    # never re-enter either. The shares sit at the venue, invisible
+    # everywhere.
+    #
+    # The old condition was `remaining > 0 AND closed_frac <
+    # FULL_EXIT_FRAC` — it gated on the WHALE'S FRACTION rather than on
+    # whether shares actually remained. That covered one of the two ways
+    # a remainder arises and not the other: a FULL exit that only
+    # partially fills. Partial fills are a shape this venue produces and
+    # the parser explicitly sums (see pmus EXECUTION_TYPE_PARTIAL_FILL),
+    # and the full branch runs an unlimited close whose slippage bound
+    # can exhaust a thin book long before the position is gone.
+    #
+    # So the test is now only about shares. Whatever the whale did, if
+    # we still hold something the row stays live and carries it.
+    remaining = max(0, int(row["qty"]) - int(booked))
+    if remaining > 0:
         await pool.execute(
             "UPDATE live_orders SET status='filled', "
             "filled_shares=$2, pnl=COALESCE(pnl,0)+$3 WHERE id=$1",
@@ -914,12 +977,25 @@ async def mirror_exit(payload: dict) -> str:
             log.warning("MIRROR-EXIT: sold but could not record exit "
                         "trade %s — a replay is possible next cycle",
                         _xtid)
+    if _full and remaining > 0:
+        # A full exit that did not fully fill. The whale is out and we
+        # are not, so this is not finished — it comes back as PENDING so
+        # the position-diff lane brings the residual round again next
+        # cycle rather than recording the exit as done. The row now
+        # carries `remaining` as its quantity, so the retry prices and
+        # sizes against what is actually left.
+        log.warning("MIRROR-EXIT %s: full exit filled %d of %d — %d "
+                    "share(s) still held, row kept live for a retry",
+                    us_slug, int(booked), int(row["qty"]), remaining)
+        return _exit_done("mx_partial_full_exit", whale=username,
+                          slug=us_slug, sold=int(booked),
+                          remaining=remaining, pnl=pnl or 0)
     _exit_done("mx_SOLD", whale=username, slug=us_slug,
-               shares=int(filled), pnl=pnl or 0,
+               shares=int(booked), pnl=pnl or 0,
                full=bool(closed_frac >= FULL_EXIT_FRAC))
     log.warning("MIRROR-EXIT %s %s: sold %d of %d @ %.3f (entry %.3f) "
                 "pnl %.2f — mirroring his %.1f%% exit, %d left",
-                username, us_slug, int(filled), int(row["qty"]),
+                username, us_slug, int(booked), int(row["qty"]),
                 float(px or limit or 0), entry, pnl or 0,
                 closed_frac * 100, remaining)
     return "mx_SOLD"
