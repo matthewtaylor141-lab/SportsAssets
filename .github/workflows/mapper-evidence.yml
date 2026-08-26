@@ -29,7 +29,14 @@ jobs:
             jq -r '"  summary: \(.summary // .totals // "?" | tostring | .[0:400])"' \
               /tmp/unm_$H.json 2>/dev/null || true
             if jq -e . /tmp/unm_$H.json >/dev/null 2>&1; then
-              echo "UNMBLOB_$H $(gzip -c /tmp/unm_$H.json | base64 -w0)"
+              # PLAIN, FOLDED, LINE-TAGGED -- not gzip+base64. The blob
+              # form has to be hand-transcribed out of the log viewer,
+              # and a 1.5KB base64 line does not survive that: the first
+              # attempt decoded with transposed characters mid-key.
+              # Folded plain text is diffable, greppable, and each line
+              # carries its own tag so a lost line is visible.
+              jq -c . /tmp/unm_$H.json | fold -w 240 | nl -ba -w3 -s: \
+                | sed "s/^/UNMTXT_${H}_/"
             else
               echo "UNMBLOB_$H FAILED"
             fi
