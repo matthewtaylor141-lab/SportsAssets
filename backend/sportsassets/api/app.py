@@ -6174,6 +6174,77 @@ async def api_whale_true_edge(since_day: str = "2026-08-01",
                      "settlement incident.")}
 
 
+@app.get("/api/admin/copy-latency", dependencies=[Depends(require_admin)])
+async def api_copy_latency(hours: int = Query(24, ge=1, le=24 * 60)) -> dict:
+    """Reaction time on the copy sleeve over a WINDOW YOU CHOOSE.
+
+    WHY THIS EXISTS (owner challenge 2026-08-26). edge-decay reports
+    latency_median_s and the hourly probe prints it as "lat_med", and I
+    read 187.2s off it as if it described how fast we copy TODAY. It
+    does not, on two counts, and the owner caught both:
+
+      * its window is since_day, defaulting to 2026-08-01 -- a
+        month-to-date figure spanning the era before the latency work;
+      * it selects `status = 'settled'` ONLY, so a copy placed today
+        contributes nothing until its market resolves. The number is
+        structurally incapable of describing current latency.
+
+    A metric that cannot see the period you are asking about is the
+    failure mode that has cost the most here, and quoting it as current
+    was mine.
+
+    This reads live_orders over a real time window and EVERY status, so
+    "how fast are we right now" is a question with an answer.
+
+    fresh_share is the other half of the honesty. copy_sweep's reclaim
+    path calls maybe_execute with reaction=None (live_executor.py), so
+    reclaimed rows carry a NULL reaction_s and drop out of every
+    percentile silently. If most copies arrive that way, a fast median
+    describes a minority of the sleeve -- so the share is reported next
+    to the percentiles rather than left for someone to discover.
+    """
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT lower(COALESCE(whale_username, '?')) AS whale,
+               count(*)::int AS n,
+               count(reaction_s)::int AS n_timed,
+               count(*) FILTER (WHERE status = 'filled')::int AS filled,
+               count(*) FILTER (WHERE status = 'settled')::int AS settled,
+               count(*) FILTER (WHERE status = 'rejected')::int AS rejected,
+               count(*) FILTER (WHERE status = 'unfilled')::int AS unfilled,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY reaction_s)
+                   AS p50,
+               percentile_cont(0.9) WITHIN GROUP (ORDER BY reaction_s)
+                   AS p90,
+               percentile_cont(0.99) WITHIN GROUP (ORDER BY reaction_s)
+                   AS p99,
+               max(reaction_s)::float8 AS worst,
+               count(*) FILTER (WHERE reaction_s <= 5)::int AS under_5s,
+               count(*) FILTER (WHERE reaction_s <= 30)::int AS under_30s
+        FROM live_orders
+        WHERE placed_at > now() - make_interval(hours => $1)
+          AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+        GROUP BY 1 ORDER BY n DESC
+        """, hours)
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k in ("p50", "p90", "p99", "worst"):
+            d[k] = round(float(d[k]), 2) if d[k] is not None else None
+        d["fresh_share"] = (round(d["n_timed"] / d["n"], 3)
+                            if d["n"] else None)
+        out.append(d)
+    return {
+        "hours": hours, "whales": out,
+        "note": ("reaction_s over EVERY status in the window, not the "
+                 "settled-only month-to-date figure edge-decay reports. "
+                 "fresh_share is the fraction with a reaction stamp at "
+                 "all: reclaimed copies carry NULL and are invisible to "
+                 "the percentiles."),
+    }
+
+
 @app.get("/api/admin/edge-decay", dependencies=[Depends(require_admin)])
 async def api_edge_decay(since_day: str = "2026-08-01") -> dict:
     """The syllogism test, per whale (owner order 2026-08-24: 'if we copy

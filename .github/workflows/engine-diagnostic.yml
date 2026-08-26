@@ -300,6 +300,23 @@ jobs:
                -o /tmp/edge.json "$BASE/api/admin/edge-decay" || true
           jq -r '.whales[]? | "  EDGE \(.whale)  n=\(.n)  at_his=\(.at_his)  at_ours=\(.at_ours_feefree)  actual=\(.actual)  cappedout=\(.actual_capped_out)/\(.over_cap_n)  drag=\(.price_drag)  unmod=\(.unmodeled)  slip=\(.avg_slip // "?")  lat_med=\(.latency_median_s // "?")s  lat_p90=\(.latency_p90_s // "?")s  wins=\(.wins)"' /tmp/edge.json 2>/dev/null || true
 
+          # ── HOW FAST ARE WE RIGHT NOW (owner challenge 2026-08-26).
+          # The EDGE line above is month-to-date AND settled-only: its
+          # since_day defaults to 2026-08-01 and it selects
+          # status='settled', so a copy placed today cannot appear in it
+          # until its market resolves. I quoted its lat_med as current
+          # latency; the owner correctly said it describes the month.
+          # These two lines read live_orders over real windows and EVERY
+          # status, so the recent number and the month number sit side
+          # by side and any disagreement is visible rather than argued.
+          for H in 24 168; do
+            curl -sS --max-time 45 -H "X-Admin-Token: $ADMIN_TOKEN" \
+                 -o /tmp/lat.json "$BASE/api/admin/copy-latency?hours=$H" || true
+            jq -r --arg h "$H" '.whales[]? | select(.n > 0)
+              | "  LAT\($h) \(.whale)  n=\(.n) timed=\(.n_timed) fresh=\(.fresh_share)  p50=\(.p50)s p90=\(.p90)s p99=\(.p99)s worst=\(.worst)s  under5=\(.under_5s) under30=\(.under_30s)  filled=\(.filled) rej=\(.rejected) unf=\(.unfilled)"' \
+              /tmp/lat.json 2>/dev/null || echo "  LAT$H unavailable"
+          done
+
           # ── premap coverage (owner order 2026-08-24: copy-time mapping
           # becomes a lookup; this line watches the table fill)
           curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \
