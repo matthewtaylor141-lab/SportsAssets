@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import time
 import uuid
@@ -103,17 +104,45 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 # (currently pm_only-paused) leg can never resurrect them. swisstony
 # holds pending paper certification at the new detection latency;
 # homerunhazard upsized to $300 parity (his sport cells scaled x2.667).
-PER_COPY_USD = {"rn1": 0.00, "swisstony": 300.00,
-                _W2C33: 0.00, "homerunhazard": 300.00,
-                "ferrarichampions2026": 0.00,
-                "0x076daa87": 300.00,
+# ROSTER RESET 2026-08-25/26 — THIS MAP WAS THE EXACT INVERSE OF IT.
+#
+# The comment block above describes a decision that has since been
+# reversed on a better basis. Every prior roster call graded at
+# RESOLUTION; these whales close by MERGING complementary outcomes back
+# to USDC, which is not a trade and appears in no trade feed, so the
+# settlement basis was blind to the exits that decide their P&L.
+# Re-graded merge-inclusive over full ledgers, rn1 and ferrari are the
+# two best books on the roster and swisstony is the second worst; the
+# owner then cut homerunhazard outright on 2026-08-26.
+#
+# This map still read rn1 0.00, ferrari 0.00, swisstony 300.00 and
+# homerunhazard 300.00 — blocking both whales we copy and sizing both
+# whales we cut, with a ("homerunhazard","baseball") cell at 600.00. It
+# is the FOURTH literal encoding one decision (live_executor's
+# PER_FILL_BY_WHALE, COPY_CUT_WHALES and VERIFIED_PROFITABLE_DEFAULT are
+# the other three), and the pinning tests only ever covered those three.
+#
+# The leg is dark only by env default: runner.py's EDGE_KCOPY_PM_ONLY
+# defaults to "1", and its own comment advertises the single flip as the
+# way to re-arm. One environment variable would have resumed copying the
+# two cut whales at $300-$900 an order while refusing the two we trade.
+#
+# Pinned to live_executor by test_kalshi_roster_parity.py from here on.
+PER_COPY_USD = {"rn1": 250.00, "swisstony": 0.00,
+                _W2C33: 0.00, "homerunhazard": 0.00,
+                "ferrarichampions2026": 250.00,
+                "0x076daa87": 250.00,
                 # kch123 pre-sized for his (out-of-season) NBA/NFL/NHL
                 # cells, matching the PMUS leg (owner go 2026-08-20).
                 "kch123": 150.00}
-PER_COPY_USD_SPORT = {("swisstony", "soccer"): 150.00,
+# Sport overrides for a whale whose base clip is 0.00 are dead cells,
+# and a dead cell that carries a number is one edit away from being a
+# live one. The blocked whales' overrides are zeroed rather than left
+# to disagree with the map above them.
+PER_COPY_USD_SPORT = {("swisstony", "soccer"): 0.00,
                       (_W2C33, "tennis"): 0.00,
-                      ("homerunhazard", "baseball"): 600.00,
-                      ("homerunhazard", "football"): 100.00}
+                      ("homerunhazard", "baseball"): 0.00,
+                      ("homerunhazard", "football"): 0.00}
 PER_COPY_DEFAULT = 75.00
 # Inverse volume<->size scaling (owner order 2026-08-12): past this
 # many fills in a venue-day, the clip shrinks proportionally — 10x
@@ -131,20 +160,45 @@ TYPE_MULT = {("*", "spread"): 1.5, ("kch123", "spread"): 2.0,
              ("rn1", "btts"): 1.5}
 
 
+# WHALES THIS DESK DOES NOT COPY, ON ANY VENUE.
+#
+# A structural block, not a cell value. The map above is a set of
+# numbers somebody can edit; this is the decision, and _per_copy_usd
+# refuses on it before it ever reads a clip. Kept identical to
+# live_executor.COPY_CUT_WHALES by test_kalshi_roster_parity.py.
+CUT_WHALES = frozenset({"swisstony", _W2C33, "homerunhazard"})
+# HARD CEILING on the resolved clip, applied AFTER every override and
+# multiplier — the analogue of live_executor's LIVE_MAX_CLIP_USD, which
+# this leg had no equivalent of at all.
+#
+# Without it TYPE_MULT ran unbounded on top of a resolved cell: a
+# ("homerunhazard","baseball") override of 600.00 times a spread's 1.5
+# is $900 an order, 3.6x the $250 the PMUS leg enforces "after every
+# override and multiplier". A cap that sits below the maps cannot be
+# defeated by a cell edit, which is the point of putting it here rather
+# than trusting the cells.
+MAX_COPY_USD = float(os.environ.get("EDGE_KCOPY_MAX_CLIP_USD", "250"))
+
+
 def _per_copy_usd(whale: str, slug: str) -> float:
     """Clip for this whale on this market: the (whale, sport) override
     wins, then the whale clip, then the default — scaled by the
-    market-type multiplier when one applies."""
+    market-type multiplier when one applies, then capped."""
     from edge.shadow.copy_sports import market_type_of, sport_of
 
     w = (whale or "").lower()
+    if w in CUT_WHALES:
+        return 0.00
     ov = PER_COPY_USD_SPORT.get((w, sport_of(slug or "")))
     base = ov if ov is not None else PER_COPY_USD.get(w, PER_COPY_DEFAULT)
     if base <= 0:
         return base
     mtype = market_type_of(slug or "")
     mult = TYPE_MULT.get((w, mtype)) or TYPE_MULT.get(("*", mtype)) or 1.0
-    return base * mult
+    out = base * mult
+    if MAX_COPY_USD > 0:
+        out = min(out, MAX_COPY_USD)
+    return out
 # A copy's edge is the whale's ENTRY edge, and it decays in minutes — the
 # decay study prices our ~90s reaction at 1.3-1.5c of surviving edge.
 # Copying an old position at today's price is buying fair value minus
