@@ -454,7 +454,22 @@ def exit_census_lines(limit: int = 12) -> list[str]:
 # on the copy hot path and this is a fallback, not a lookup we want to
 # pay for on every miss.
 _SIBLING_CACHE: dict[str, str] = {}
-_SIBLING_CACHE_AT = 0.0
+# None means NEVER LOADED, and that has to be its own state.
+#
+# This was 0.0, and the refresh test was `now - _SIBLING_CACHE_AT >
+# _SIBLING_TTL_S`. time.monotonic() is time since boot, so on any
+# process whose host has been up less than 300 seconds the very first
+# call computed 263.9 - 0.0 = 263.9, decided the cache was FRESH, and
+# answered every lookup from an empty dict. _sibling_from_positions
+# returns '' for an absent map and every caller refuses on '', so for
+# the first five minutes of such a process every sibling-dependent exit
+# silently declined -- a guard blocking everything while reporting
+# itself as safety, keyed off host uptime, which this code does not
+# control and cannot see.
+#
+# It also made the tests flaky rather than red: whether they passed
+# depended on how long the container had been up when they ran.
+_SIBLING_CACHE_AT: float | None = None
 _SIBLING_TTL_S = 300.0
 
 
@@ -468,7 +483,7 @@ async def _sibling_from_positions(pool, asset: str) -> str:
     import time as _t
 
     now = _t.monotonic()
-    if now - _SIBLING_CACHE_AT > _SIBLING_TTL_S:
+    if _SIBLING_CACHE_AT is None or now - _SIBLING_CACHE_AT > _SIBLING_TTL_S:
         try:
             raw = await pool.fetchval(
                 "SELECT value FROM ingestion_state WHERE key=$1",

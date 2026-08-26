@@ -79,7 +79,7 @@ def _clear_module_caches():
     from sportsassets import live_executor as _le
 
     _le._SIBLING_CACHE.clear()
-    _le._SIBLING_CACHE_AT = 0.0
+    _le._SIBLING_CACHE_AT = None
     yield
     _le._SIBLING_CACHE.clear()
-    _le._SIBLING_CACHE_AT = 0.0
+    _le._SIBLING_CACHE_AT = None

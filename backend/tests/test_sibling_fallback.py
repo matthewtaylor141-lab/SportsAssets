@@ -168,3 +168,67 @@ class TestClassifyExitStillRefusesWhenItShould:
         src = inspect.getsource(le.classify_exit)
         assert src.index("_sibling_from_positions") < src.index(
             "cls_no_sibling_holding")
+
+
+class TestTheFirstLoadDoesNotDependOnHostUptime:
+    """The sentinel was 0.0 and the refresh test was
+    `now - _SIBLING_CACHE_AT > _SIBLING_TTL_S`.
+
+    time.monotonic() is time since boot. On a host up less than 300s the
+    first call computed (e.g.) 263.9 - 0.0 = 263.9, concluded the cache
+    was FRESH, and answered every lookup from an empty dict. Callers
+    refuse on '', so for the first five minutes of such a process every
+    sibling-dependent exit silently declined -- a guard blocking
+    everything while reporting itself as safety.
+
+    It never failed honestly either: whether the suite went green
+    depended on how long the container had been up. These tests pin the
+    property directly instead of waiting for the clock to disagree.
+    """
+
+    class _Pool:
+        def __init__(self, m):
+            self.m = m
+            self.calls = 0
+
+        async def fetchval(self, *a):
+            self.calls += 1
+            return self.m
+
+    def test_never_loaded_is_its_own_state(self):
+        assert le._SIBLING_CACHE_AT is None, (
+            "0.0 conflates 'never loaded' with 'loaded at t=0'")
+
+    def test_the_refresh_test_checks_that_state_first(self):
+        src = inspect.getsource(le._sibling_from_positions)
+        assert "_SIBLING_CACHE_AT is None or" in src
+
+    def test_a_cold_process_loads_however_small_monotonic_is(self,
+                                                             monkeypatch):
+        """The exact failure: monotonic below the TTL."""
+        import time as _t
+
+        monkeypatch.setattr(_t, "monotonic", lambda: 1.0)
+        le._SIBLING_CACHE.clear()
+        le._SIBLING_CACHE_AT = None
+        p = self._Pool({"7": "8"})
+        assert asyncio.run(le._sibling_from_positions(p, "7")) == "8"
+        assert p.calls == 1
+
+    def test_a_loaded_cache_still_expires(self, monkeypatch):
+        """Fixing the cold start must not turn the TTL off."""
+        import time as _t
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(_t, "monotonic", lambda: clock["t"])
+        le._SIBLING_CACHE.clear()
+        le._SIBLING_CACHE_AT = None
+        p = self._Pool({"7": "8"})
+        assert asyncio.run(le._sibling_from_positions(p, "7")) == "8"
+        assert p.calls == 1
+        clock["t"] += le._SIBLING_TTL_S / 2          # still fresh
+        asyncio.run(le._sibling_from_positions(p, "7"))
+        assert p.calls == 1
+        clock["t"] += le._SIBLING_TTL_S              # now stale
+        asyncio.run(le._sibling_from_positions(p, "7"))
+        assert p.calls == 2
