@@ -110,7 +110,30 @@ jobs:
             M=$(curl -sS --max-time 25 "https://user-pnl-api.polymarket.com/user-pnl?user_address=$ADDR&interval=1m&fidelity=1d" 2>/dev/null)
             LASTM=$(echo "$M" | jq -r 'if type=="array" and length>1 then "start=$\(.[0].p) end=$\(.[-1].p) delta=$\((.[-1].p - .[0].p) * 100 | round / 100)" else "unreadable" end' 2>/dev/null)
             echo "PNL30D $NAME $LASTM"
+            # Accumulate for the production POST below: the venue's
+            # number is only useful if code can read it, and the
+            # container cannot reach the venue itself.
+            echo "$P" | jq -c --arg n "$NAME" --arg a "$ADDR" --argjson m "$(echo "$M" | jq 'if type=="array" and length>1 then (.[-1].p - .[0].p) else null end' 2>/dev/null || echo null)" \
+              'if type=="array" and length>0 then {username:$n, address:$a, alltime:.[-1].p, d30:$m, points:length, first_t:.[0].t, last_t:.[-1].t} else empty end' \
+              >> /tmp/venue_pnl.jsonl 2>/dev/null || true
           done < /tmp/roster.txt
+
+          # PUBLISH into production (display/grading input only; the
+          # order path never reads it). Failure is printed, not fatal:
+          # the census's own output above remains the record.
+          if [ -s /tmp/venue_pnl.jsonl ]; then
+            jq -s '{whales: ., source: "user-pnl-api via ledger-census"}' \
+              /tmp/venue_pnl.jsonl > /tmp/venue_pnl.json
+            HTTP=$(curl -sS --max-time 30 -o /tmp/vp_resp.json \
+              -w "%{http_code}" -X POST \
+              -H "X-Admin-Token: $ADMIN_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data @/tmp/venue_pnl.json \
+              "$BASE/api/admin/venue-pnl" || echo 000)
+            echo "VENUEPNL-POST HTTP $HTTP $(cat /tmp/vp_resp.json 2>/dev/null | head -c 200)"
+          else
+            echo "VENUEPNL-POST skipped: nothing accumulated"
+          fi
 
           python3 - <<'PYEOF'
           import glob

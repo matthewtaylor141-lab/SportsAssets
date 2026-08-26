@@ -6174,6 +6174,72 @@ async def api_whale_true_edge(since_day: str = "2026-08-01",
                      "settlement incident.")}
 
 
+class VenuePnlWhale(BaseModel):
+    username: str
+    address: str = ""
+    alltime: float
+    d30: float | None = None
+    points: int | None = None
+    first_t: int | None = None
+    last_t: int | None = None
+
+
+class VenuePnlBody(BaseModel):
+    whales: list[VenuePnlWhale] = Field(max_length=50)
+    source: str = "user-pnl-api"
+
+
+@app.post("/api/admin/venue-pnl", dependencies=[Depends(require_admin)])
+async def api_venue_pnl_ingest(body: VenuePnlBody) -> dict:
+    """Store the VENUE'S OWN per-wallet P&L, pulled by a runner.
+
+    WHY THIS EXISTS (2026-08-26). The roster was being graded -- and two
+    whales were CUT -- on a merge-graded estimator that cannot see
+    redemptions: REDEEM is not a trade, never enters our trades feed,
+    and these whales realize almost everything through it. The
+    estimator read swisstony at -0.94% while the venue's own books put
+    him at +$23.6M lifetime and +$1.36M in the trailing 30 days. It was
+    not measuring profitability; it was measuring which exit mechanism
+    a whale prefers.
+
+    The container's network policy blocks the venue, so the numbers are
+    pulled by the census/probe runners (open internet) and POSTed here.
+    Display and grading input only -- NOTHING on the order path reads
+    this key, and roster changes remain owner decisions.
+    """
+    pool = await get_pool()
+    doc = {
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source": body.source[:40],
+        "whales": {w.username.lower(): {
+            "address": w.address.lower()[:64],
+            "alltime": round(float(w.alltime), 2),
+            "d30": round(float(w.d30), 2) if w.d30 is not None else None,
+            "points": w.points, "first_t": w.first_t, "last_t": w.last_t,
+        } for w in body.whales},
+    }
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        "venue_pnl", json.dumps(doc))
+    return {"ok": True, "stored": len(doc["whales"])}
+
+
+@app.get("/api/admin/venue-pnl", dependencies=[Depends(require_admin)])
+async def api_venue_pnl() -> dict:
+    """The stored venue P&L snapshot, with its age stated -- a reader
+    must be able to tell yesterday's truth from today's."""
+    pool = await get_pool()
+    raw = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1", "venue_pnl")
+    doc = raw if isinstance(raw, dict) else (json.loads(raw) if raw
+                                             else None)
+    if not doc:
+        return {"whales": {}, "note": "never populated -- trigger the "
+                                      "whale-ledger-census workflow"}
+    return doc
+
+
 @app.get("/api/admin/copy-tolerance", dependencies=[Depends(require_admin)])
 async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
     """Did Option A pay for itself? Graded on the MARGINAL cohort only.
