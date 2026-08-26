@@ -185,10 +185,30 @@ async def execute_copy(payload: dict) -> str | None:
             await maybe_execute(payload, reaction)
     except Exception:  # noqa: BLE001 — execution must never disturb ingestion
         log.exception("copy execution failed for trade %s", payload.get("id"))
-        # No reason, so no retry. An exception on the SELL path may have
-        # left an order in flight — this lane carries no trade id and so
-        # no idempotency key, and selling the same position twice is a
-        # worse outcome than losing one exit.
+        # AN EXCEPTION ON THE SELL PATH IS PENDING, NOT SILENCE
+        # (2026-08-26, adversarial workflow). This returned None for
+        # every side, and whale_exits reads a non-pending return as
+        # "handled" and advances its snapshot -- so a transient DB blip
+        # or the sweep's 60s wait_for cancellation didn't delay an exit,
+        # it ERASED it: next cycle's baseline already agreed the whale
+        # was out, and we held against him to resolution.
+        #
+        # The old comment here refused a retry because "an order may be
+        # in flight and selling twice is worse than losing one exit".
+        # That was true when written and is answered by machinery that
+        # exists now: mirror_exit's atomic claim leaves a retried row in
+        # 'exiting' (mx_already_claimed, itself a pending reason), a
+        # cancellation mid-venue-call marks the row for reconciliation
+        # and does NOT release it, and _reap_stale_exiting resolves the
+        # stranded ones against the venue's own position. A retry
+        # cannot double-sell; it can only re-enter a state machine that
+        # already refuses duplicates.
+        #
+        # BUY-path exceptions keep returning None -- no caller reads it.
+        if (payload.get("side") or "").upper() == "SELL":
+            return _exit_done("mx_exception_pending",
+                              whale=payload.get("whale_username"),
+                              asset=str(payload.get("asset") or "")[:20])
     return None
 
 
@@ -381,6 +401,11 @@ EXIT_PENDING_REASONS: frozenset[str] = frozenset({
     # and the exit is real; only the arithmetic came up short, and the
     # next observation measures a bigger cumulative fraction.
     "mx_exit_rounds_to_zero",
+    # The dispatcher itself raised. Transient by presumption; a retry
+    # re-enters mirror_exit's state machine, which refuses duplicates
+    # (atomic claim, reconciliation marker, stale-exiting reaper), so
+    # pinning is safe and silence was the only thing this could lose.
+    "mx_exception_pending",
     # THE SUB-FLOOR TRIM, WHICH IS WHY DRIFT NEVER ACCUMULATED
     # (2026-08-26).
     #

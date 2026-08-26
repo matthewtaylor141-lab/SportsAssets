@@ -324,11 +324,17 @@ class TestTheCounterStopsLying:
 
 
 class TestTheAllowlistIsOwnedByTheProducer:
-    def test_every_pending_reason_is_a_real_mirror_exit_reason(self):
+    def test_every_pending_reason_is_actually_produced_somewhere(self):
         import inspect
         import re
 
-        src = inspect.getsource(le.mirror_exit)
+        # BOTH producers: mirror_exit for the in-path refusals, and
+        # execute_copy for the dispatcher's own exception path
+        # (mx_exception_pending, 2026-08-26). A pending reason nothing
+        # can produce is a dead allowlist entry that reads like
+        # coverage.
+        src = (inspect.getsource(le.mirror_exit)
+               + inspect.getsource(le.execute_copy))
         real = set(re.findall(r'_exit_(?:stop|done)\(\s*"(mx_[a-z_]+)"',
                               src))
         unknown = le.EXIT_PENDING_REASONS - real
