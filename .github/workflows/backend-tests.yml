@@ -1,0 +1,39 @@
+# BACKEND TEST SUITE IN CI (2026-08-26).
+#
+# Until now the suite ran only in the development sandbox, and twice
+# today that sandbox's permission layer refused to run pytest at all --
+# once while an edit to the ORDER-PLACEMENT PATH was sitting unverified,
+# which forced the edit to be reverted rather than shipped. A
+# verification path that can be withdrawn mid-change is not a
+# verification path.
+#
+# This runs the identical suite on every push. It needs no database and
+# no secrets: the tests run against stub pools by design, which is also
+# why 1,800+ of them finish in ~20 seconds.
+name: backend-tests
+on:
+  push:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-tests.yml"
+  workflow_dispatch: {}
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          cd backend
+          pip install --quiet -e ".[dev]"
+      - name: Run the suite
+        run: |
+          cd backend
+          python -m pytest tests -q --tb=short 2>&1 | tail -30
+          exit ${PIPESTATUS[0]}

@@ -4726,30 +4726,59 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     row_id)
                 if any(_us_game_key(r["us_market_slug"]) == gk
                        for r in held):
-                    # PAIR-COMPLETION CARVE-OUT: NOT WIRED IN YET.
+                    # PAIR-COMPLETION CARVE-OUT (owner order 2026-08-26).
                     #
-                    # The owner ordered this refusal changed
-                    # (2026-08-26) and the machinery to do it exists
-                    # above -- pair_completion_edge,
-                    # pair_completion_allowed, _pair_completion_context.
-                    # The wiring was written and then REMOVED before
-                    # commit, because the sandbox began refusing to run
-                    # the test suite immediately after it was added and
-                    # an unverified edit to the order path is the one
-                    # thing that must not ship on "probably fine".
+                    # The refusal above this line said "RN1 completes
+                    # pairs, we must not", and it is backwards about
+                    # RN1: his completions average +1.02c and he has
+                    # made 95,474 of them. A YES+NO pair redeems for
+                    # exactly $1 whatever the outcome, so completing at
+                    # p + q < $1 is a locked profit with no directional
+                    # exposure left, and completing at p + q > $1 is a
+                    # locked loss. The old refusal could not tell them
+                    # apart and declined both.
                     #
-                    # What it will do, once it can be verified: lift
-                    # this refusal ONLY when the market is the
-                    # venue-confirmed complement of a leg we hold AND
-                    # our cost plus its live ask clears a dollar by
-                    # PAIR_MIN_EDGE_CENTS -- a proved profit, sized at
-                    # no more than the shares already held so it can
-                    # only complete a pair, never open net exposure.
-                    await pool.execute(
-                        "UPDATE live_orders SET status='rejected', "
-                        "error=$2 WHERE id=$1", row_id,
-                        "one position per game")
-                    return
+                    # The refusal is lifted ONLY when the profit is
+                    # already proved: venue-confirmed complement of a
+                    # leg we hold, our cost plus its live ask clearing a
+                    # dollar by PAIR_MIN_EDGE_CENTS.
+                    # _pair_completion_context returns None on anything
+                    # unknown, so an unreadable price refuses exactly as
+                    # this branch always has.
+                    _pair = await _pair_completion_context(
+                        pool, mapping["market_slug"],
+                        [r["us_market_slug"] for r in held])
+                    if _pair and _pair["allowed"]:
+                        # Cap at the shares already held: buying more
+                        # than the other leg would leave net directional
+                        # exposure, which is a different trade wearing
+                        # this one's justification. usd is recomputed
+                        # from the capped share count so downstream
+                        # spend accounting sees the real order.
+                        shares = min(shares, _pair["held"])
+                        usd = round(shares * limit, 2)
+                        log.warning(
+                            "PAIR-COMPLETE %s against %s: our %.4f + "
+                            "ask %.4f locks %.2fc x %d shares",
+                            mapping["market_slug"], _pair["sibling"],
+                            _pair["our_cost"], _pair["ask"],
+                            _pair["edge_cents"], shares)
+                    else:
+                        # The near-miss is logged WITH its edge: a
+                        # refusal that records what it declined is how
+                        # PAIR_MIN_EDGE_CENTS gets set from evidence
+                        # rather than taste.
+                        if _pair:
+                            log.info(
+                                "PAIR-DECLINED %s: edge %.2fc below "
+                                "%.2fc floor", mapping["market_slug"],
+                                _pair["edge_cents"],
+                                PAIR_MIN_EDGE_CENTS)
+                        await pool.execute(
+                            "UPDATE live_orders SET status='rejected', "
+                            "error=$2 WHERE id=$1", row_id,
+                            "one position per game")
+                        return
             # NO-STACK (owner 2026-08-08: "trades are higher than $10 per
             # trade"): the engine, the desk, and this copy path each cap
             # their own tickets but shared no ledger, so two sleeves could
