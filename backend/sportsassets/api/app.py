@@ -1314,9 +1314,57 @@ def _mirror_dead_prop_sides(mkts: list[dict]) -> None:
 # Public Kalshi market data (no auth needed for market/book reads).
 KALSHI_PUBLIC_API = os.environ.get(
     "KALSHI_PUBLIC_API", "https://api.elections.kalshi.com/trade-api/v2")
-# The sports series the desk browses — same universe the engine trades.
+# TENNIS IS NOT TWO SERIES (census ground truth 2026-08-26, run against
+# the venue's own /series?category=Sports -- 3,516 series).
+#
+# The desk browsed KXATPMATCH and KXWTAMATCH and nothing else. Both were
+# reporting ZERO open events at census time, while live tennis sat under
+# the challenger and doubles boards -- which is how the Kalshi tennis
+# board could read empty while the venue was quoting matches.
+#
+# ONE list, referenced everywhere, because this was already the same
+# decision written in THREE places (_DESK_KALSHI_SERIES, and a
+# series_by_league map in each of desk-games and desk-feed) and any fix
+# that updated some of them would look like it worked.
+_TENNIS_MATCH_SERIES = [
+    "KXATPMATCH", "KXWTAMATCH",
+    # Live at census: 9 / 12 / 4 / 4 open events respectively, against
+    # 0 for the two above.
+    "KXATPCHALLENGERMATCH", "KXWTACHALLENGERMATCH",
+    "KXATPCHALLENGERDOUBLES", "KXATPDOUBLES", "KXWTADOUBLES",
+]
+
+# The sports series the desk browses -- same universe the engine trades.
 _DESK_KALSHI_SERIES = ["KXMLBGAME", "KXWNBAGAME", "KXNBAGAME", "KXNFLGAME",
-                       "KXNHLGAME", "KXATPMATCH", "KXWTAMATCH"]
+                       "KXNHLGAME"] + _TENNIS_MATCH_SERIES
+
+# THE DERIVATIVE FAMILIES A TENNIS MATCH ACTUALLY HAS, appended to the
+# match series stem (KXATPMATCH -> KXATP + suffix). Owner 2026-08-26:
+# the venue app shows Spread with alternate lines, Total Games, Set
+# Winner and Exact Match Score on a match our desk rendered as a bare
+# two-outcome board.
+#
+# SETWINNER / GWINNER / EXACTMATCH were already here and the census
+# confirms all three are real tickers -- my first reading, that they
+# were wrong names, was itself wrong. What is genuinely absent is every
+# SPREAD and TOTAL family, which is exactly what was asked for:
+#
+#   KXATPGAMESPREAD  ATP Game Spread     KXATPGAMETOTAL  ATP Total Games
+#   KXATPGSPREAD     ATO Game Spread     KXATPGTOTAL     ATP Total Games
+#   KXATPSSPREAD     ATP Set Spread      KXATPTOTALSETS  ATP Total Sets
+#   KXWTAGTOTAL      WTA Total Games
+#
+# Both spellings of each (GAMESPREAD and GSPREAD, GAMETOTAL and GTOTAL)
+# are separate real series on the venue -- one is not a typo for the
+# other, so both are asked for. Unknown siblings 404 or come back empty
+# and cost one concurrent request.
+_TENNIS_SIBLING_SUFFIXES = (
+    "SETWINNER", "GWINNER", "EXACTMATCH",
+    "GAMESPREAD", "GSPREAD", "SSPREAD",
+    "GAMETOTAL", "GTOTAL", "TOTALSETS",
+    "ANYSET", "SETSWEEP", "TIEBREAK",
+    "S1GWINNER", "S2GWINNER", "S3GWINNER",
+)
 
 
 def _kcents(m: dict, key: str) -> float | None:
@@ -1361,6 +1409,34 @@ def _kvol(m: dict) -> float | None:
     return None
 
 
+def _kalshi_group_label(series: str) -> str:
+    """Which board group a Kalshi series belongs to.
+
+    A NAMED FUNCTION so the tests can call the ladder production uses
+    instead of restating it. A test that rebuilds the answer grades its
+    own arithmetic and goes green on a mutated build -- which is exactly
+    how a cut-whale test passed earlier today.
+
+    ORDER MATTERS, AND SPREAD/TOTAL SIT ABOVE MONEYLINE. The Moneyline
+    test is endswith("MATCH"), and KXATPEXACTMATCH ends in MATCH -- so
+    the specific families must be decided before the generic one,
+    leaving the fallthrough as the only loose branch.
+    """
+    if series.endswith("EXACTMATCH"):
+        return "Exact Score"
+    if "SPREAD" in series:
+        return "Spreads"
+    if "TOTAL" in series:
+        return "Totals"
+    if series.endswith(("SETWINNER", "ANYSET", "SETSWEEP")):
+        return "Set Winners"
+    if series.endswith(("GWINNER", "TIEBREAK")):
+        return "Game Props"
+    if series.endswith(("GAME", "MATCH")):
+        return "Moneyline"
+    return "More"
+
+
 def _kalshi_shape(m: dict, series: str) -> dict:
     return {
         "ticker": m.get("ticker"),
@@ -1383,8 +1459,12 @@ async def _kalshi_fetch_boards(series_list: list[str]) -> list[dict]:
     quali matches, played Aug 26, close Sep 6) — a game-time window
     structurally hides every tennis market, so tennis series fetch
     unwindowed while game sports keep the 7-day slate."""
-    tennis = [x for x in series_list
-              if x.startswith(("KXATPMATCH", "KXWTAMATCH"))]
+    # Membership in the ONE list, not a startswith on two of its
+    # members: KXATPCHALLENGERMATCH does not start with KXATPMATCH, so
+    # the prefix test would have handed every newly-added tennis board
+    # the 7-day game-sport window -- the exact window this function
+    # exists to keep tennis out of.
+    tennis = [x for x in series_list if x in _TENNIS_MATCH_SERIES]
     rest = [x for x in series_list if x not in tennis]
     out: list[dict] = []
     if rest:
@@ -1747,7 +1827,8 @@ async def api_desk_games(venue: str = Query("polymarket"),
         series_by_league = {
             "mlb": ["KXMLBGAME"], "wnba": ["KXWNBAGAME"],
             "nba": ["KXNBAGAME"], "nfl": ["KXNFLGAME"],
-            "nhl": ["KXNHLGAME"], "tennis": ["KXATPMATCH", "KXWTAMATCH"],
+            "nhl": ["KXNHLGAME"],
+            "tennis": list(_TENNIS_MATCH_SERIES),
         }
         series_list = (_DESK_KALSHI_SERIES if league == "all"
                        else series_by_league.get(league, []))
@@ -1888,7 +1969,8 @@ async def api_desk_feed(venue: str = Query("polymarket"),
         series_by_league = {
             "mlb": ["KXMLBGAME"], "wnba": ["KXWNBAGAME"],
             "nba": ["KXNBAGAME"], "nfl": ["KXNFLGAME"],
-            "nhl": ["KXNHLGAME"], "tennis": ["KXATPMATCH", "KXWTAMATCH"],
+            "nhl": ["KXNHLGAME"],
+            "tennis": list(_TENNIS_MATCH_SERIES),
         }
         series_list = (_DESK_KALSHI_SERIES if league == "all"
                        else series_by_league.get(league, []))
@@ -1991,8 +2073,17 @@ async def api_desk_game(venue: str = Query(...),
         sibs: list[str] = []
         if series0.endswith("MATCH"):
             stem = series0[: -len("MATCH")]
-            sibs = [stem + s for s in ("SETWINNER", "GWINNER",
-                                       "EXACTMATCH")]
+            # A challenger or doubles board stems to KXATPCHALLENGER /
+            # KXWTADOUBLES, and no derivative series is named off those.
+            # The derivatives hang off the TOUR stem, so ask for both: a
+            # wrong guess costs one empty response, a missing one costs
+            # the whole Spreads group.
+            stems = {stem}
+            for tour in ("KXATP", "KXWTA"):
+                if series0.startswith(tour):
+                    stems.add(tour)
+            sibs = [st + suf for st in sorted(stems)
+                    for suf in _TENNIS_SIBLING_SUFFIXES]
         elif series0.endswith("GAME"):
             stem = series0[: -len("GAME")]
             sibs = [stem + s for s in ("SPREAD", "TOTAL", "TEAMTOTAL",
@@ -2035,13 +2126,7 @@ async def api_desk_game(venue: str = Query(...),
         for rm in raw_markets:
             series = (rm.get("ticker") or "").split("-", 1)[0]
             m = _kalshi_shape(rm, series)
-            label = ("Exact Score" if series.endswith("EXACTMATCH") else
-                     "Set Winners" if series.endswith("SETWINNER") else
-                     "Game Props" if series.endswith("GWINNER") else
-                     "Moneyline" if series.endswith("GAME")
-                     or series.endswith("MATCH") else
-                     "Spreads" if "SPREAD" in series else
-                     "Totals" if "TOTAL" in series else "More")
+            label = _kalshi_group_label(series)
             row_label = m.get("sub_title") or m.get("title")
             if label not in ("Moneyline",):
                 # Sibling markets repeat the matchup in the title —

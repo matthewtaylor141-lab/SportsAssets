@@ -210,7 +210,16 @@ async def test_kalshi_league_param_picks_series(monkeypatch):
 
     monkeypatch.setattr(app_mod, "_kalshi_fetch", fake_fetch)
     out = await app_mod.api_desk_feed(venue="kalshi", league="tennis")
-    assert seen["series"] == ["KXATPMATCH", "KXWTAMATCH"]
+    # READ PRODUCTION'S LIST, do not restate it. The literal pair this
+    # used to pin was the defect: KXATPMATCH and KXWTAMATCH both had
+    # ZERO open events at the 2026-08-26 census while live tennis sat
+    # under the challenger and doubles boards, so the desk's tennis
+    # board was empty at the source. A test that spells the answer out
+    # again would have gone green through exactly that.
+    assert seen["series"] == list(app_mod._TENNIS_MATCH_SERIES)
+    assert "KXATPMATCH" in seen["series"], "the tour board must stay"
+    assert "KXATPCHALLENGERMATCH" in seen["series"], (
+        "the boards that actually had open events must be browsable")
     # Tennis fetches UNWINDOWED (KDESKG-T 2026-08-22): the venue stamps
     # tennis with the tournament's close (Sep 6 for Aug 26 matches), so
     # any game-time window structurally hides the whole tennis board.
