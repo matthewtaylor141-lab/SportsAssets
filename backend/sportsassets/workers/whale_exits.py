@@ -71,7 +71,12 @@ _KEY = "whale_positions:%s"
 # uses 100/2000 against the same endpoint; matched here so the two
 # cannot disagree about what "his whole book" means.
 POSITIONS_PAGE = int(os.environ.get("WHALE_EXIT_POS_PAGE", "100"))
-POSITIONS_MAX = int(os.environ.get("WHALE_EXIT_POS_MAX", "2000"))
+# 2000 -> 6000 (2026-08-26): four of seven whale books exceeded
+# 2000 and were forfeited every cycle. RAISED IN LOCKSTEP with
+# positions_sync.MAX_POSITIONS_PER_WALLET -- two readers
+# disagreeing about what "his whole book" means is how one of
+# them ends up wrong, and a test pins them together.
+POSITIONS_MAX = int(os.environ.get("WHALE_EXIT_POS_MAX", "6000"))
 
 
 class EmptyPositions(RuntimeError):
@@ -93,11 +98,30 @@ class EmptyPositions(RuntimeError):
 class TruncatedPositions(RuntimeError):
     """The venue still had more positions when we stopped reading.
 
-    Raised rather than returned because a partial book must never reach
-    diff_exits: every asset past the cut is absent from `now`, which
-    reads as a FULL EXIT and fires a 100% close on a position the whale
-    still holds. Losing a cycle costs a delay; diffing a truncated book
-    costs real sell orders."""
+    A partial book must never decide a VANISH: every asset past the cut
+    is absent from `now`, which reads as a FULL EXIT and fires a 100%
+    close on a position the whale still holds. Losing a cycle costs a
+    delay; diffing a truncated book costs real sell orders.
+
+    But a SHRINK is different, and forfeiting it was too strong. An
+    asset present in BOTH reads was observed twice and its size fell by
+    a measured amount; nothing beyond the cut changes that. So the
+    partial book travels on the exception and the caller acts on
+    shrinks only.
+
+    It mattered: the census read truncated_books=4 against whales=3, so
+    most of the roster was skipped on every cycle, permanently, and the
+    position-diff lane -- built precisely for whales who exit by
+    merging -- had detected exactly zero exits.
+    """
+
+    def __init__(self, msg: str, book=None, sibs=None, seen: int = 0):
+        super().__init__(msg)
+        self.book = book or {}
+        self.sibs = sibs or {}
+        self.seen = seen
+
+
 # The sibling map is merged across cycles, so it needs a ceiling.
 MAX_SIBLINGS = int(os.environ.get("WHALE_EXIT_MAX_SIBLINGS", "20000"))
 
@@ -327,9 +351,23 @@ async def _fetch_positions(http: httpx.AsyncClient,
     else:
         truncated = True
     if truncated:
+        # THE PARTIAL BOOK TRAVELS WITH THE EXCEPTION (2026-08-26).
+        #
+        # It was built and then discarded, and the caller forfeited the
+        # whole whale. That is right for a VANISHED position -- an asset
+        # past the cut is absent from `now` and reads as a full exit --
+        # and far too strong for a SHRINK. An asset present in BOTH
+        # reads was observed twice; its size fell by a measured amount
+        # and nothing beyond the cut changes that.
+        #
+        # It mattered: the census read truncated_books=4 against
+        # whales=3, so most of the roster was skipped every cycle,
+        # permanently, and the position-diff lane -- built precisely for
+        # whales who exit by merging -- had found exactly zero exits.
         raise TruncatedPositions(
             f"{address}: still returning full pages at {POSITIONS_MAX} "
-            f"positions — refusing to diff against an incomplete book")
+            f"positions — vanished positions unusable, shrinks still "
+            f"real", out, sibs, seen)
     return out, sibs, seen
 
 
@@ -424,6 +462,7 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
     # to a reader, and that has bitten this codebase before.
     stats = {"whales": 0, "exits": 0, "first_snapshots": 0,
              "exit_attempts": 0, "exits_sold": 0,
+             "partial_vanished_skipped": 0,
              "exits_pending": 0, "exits_no_action": 0,
              # Coverage of the venue's sibling field, measured rather
              # than assumed. sib_rows == 0 means the field is not there
@@ -438,6 +477,7 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
         uname = r["username"] or ""
         if uname.lower() not in wanted:
             continue
+        partial = False
         try:
             now, sibs, seen = await _fetch_positions(http, r["address"])
         except EmptyPositions as exc:
@@ -445,13 +485,16 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
             stats["empty_books"] = stats.get("empty_books", 0) + 1
             continue
         except TruncatedPositions as exc:
-            # Forfeit this whale's cycle rather than diff a book we know
-            # is incomplete. Counted, because a lane that silently skips
-            # a whale every cycle looks exactly like a whale who never
-            # exits.
+            # SHRINK-ONLY rather than forfeiting the whale outright.
+            # A vanished asset may simply sit past the cut, so every
+            # disappearance is skipped; a shrink was seen twice and is
+            # real. See the note where this is raised.
             log.warning("whale-exit: %s", exc)
             stats["truncated_books"] = stats.get("truncated_books", 0) + 1
-            continue
+            now, sibs, seen = exc.book, exc.sibs, exc.seen
+            if not now:
+                continue
+            partial = True
         except Exception as exc:  # noqa: BLE001 — one whale, not the loop
             log.warning("whale-exit positions failed for %s: %s", uname, exc)
             stats["fetch_failed"] = stats.get("fetch_failed", 0) + 1
@@ -548,7 +591,13 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
                             "treating every vanished position as "
                             "possibly resolved and skipping it")
                 not_an_exit = None
-        if not_an_exit is None:
+        if partial:
+            # Every disappearance is unusable here whatever the market
+            # table says: the asset may simply sit past the read cut.
+            stats["partial_vanished_skipped"] = (
+                stats.get("partial_vanished_skipped", 0) + len(gone))
+            found = diff_exits(prev, now, set(gone))
+        elif not_an_exit is None:
             found = diff_exits(prev, now, set(gone))
         else:
             found = diff_exits(prev, now, not_an_exit)
@@ -586,7 +635,13 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
         # pre-exit against post-exit and finds them again. Acted-on
         # exits are recorded as done and cannot re-fire; a crash after
         # the save still cannot replay them.
-        to_save = dict(now)
+        # A PARTIAL READ MUST NOT BECOME THE SNAPSHOT. Saving `now`
+        # wholesale after a truncated read makes every unread position
+        # look VANISHED next cycle -- turning a read limit into a fleet
+        # of false full exits, the exact hazard the forfeit protected
+        # against. Update what we saw; keep what we could not see.
+        to_save = dict(prev) if partial else {}
+        to_save.update(now)
         for asset, _frac in deferred:
             if asset in prev:
                 to_save[asset] = prev[asset]

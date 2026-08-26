@@ -109,7 +109,7 @@ class TestDeferredExitsAreDeferredNotDISCARDED:
         import inspect
 
         src = inspect.getsource(we._cycle)
-        assert "to_save = dict(now)" in src
+        assert "to_save.update(now)" in src
         assert "to_save[asset] = prev[asset]" in src
 
     def test_the_pinning_happens_before_the_save(self):
@@ -305,10 +305,14 @@ class TestATruncatedPositionListIsNotAnExit:
         import sportsassets.workers.whale_exits as _we
 
         assert we.POSITIONS_PAGE == 100
-        assert we.POSITIONS_MAX == 2000
+        assert we.POSITIONS_MAX == 6000
         other = (Path(_we.__file__).resolve().parents[1]
                  / "positions_sync.py").read_text()
         assert '"limit": 100' in other
+        # And the CEILING, not just the page size -- that is the number
+        # that decides what "his whole book" means, and it is the one
+        # that moved.
+        assert f"MAX_POSITIONS_PER_WALLET = {we.POSITIONS_MAX}" in other
 
     def test_hitting_the_ceiling_RAISES_rather_than_returning(self):
         """Returning a partial book would let it reach diff_exits.
@@ -317,6 +321,11 @@ class TestATruncatedPositionListIsNotAnExit:
 
         src = inspect.getsource(we._fetch_positions)
         assert "raise TruncatedPositions(" in src
+        # It now carries the partial book so the CALLER can act on
+        # shrinks. The invariant that matters is not "no partial book
+        # exists" but "a vanish on a partial book is never an exit" --
+        # pinned in test_truncated_shrink_only.py.
+        assert "out, sibs, seen)" in src
 
     def test_the_cycle_skips_that_whale_and_counts_it(self):
         import inspect
