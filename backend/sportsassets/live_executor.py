@@ -73,6 +73,25 @@ _QUEUE_STATS: dict = {"n": 0, "total_s": 0.0, "max_s": 0.0}
 # in maybe_execute.
 _FIRST_FILL_LOCK = asyncio.Lock()
 
+# SHORT PROBATION (owner approval 2026-08-26).
+#
+# The BUY_SHORT branch is banned by default and LIVE_ALLOW_SHORT=on
+# reopens it. That flag was all-or-nothing: flipping it lets four short
+# orders reach the venue before the first verdict returns, on the one
+# class whose end-to-end behaviour has never been proved.
+#
+# This does not change what the flag means or lower any gate. It makes
+# the flag SAFE TO USE: while shorts are unproven they go one at a time,
+# each settled by the venue's own netPosition sign, and a single
+# confirmed mismatch shuts the branch again with nobody watching.
+#
+# Why a separate tally from side_echo_last: that key mixes every intent,
+# so one verified LONG would open the short gate on evidence about a
+# different question — the recurring defect in this codebase.
+_SHORT_LOCK = asyncio.Lock()
+SHORT_PROOF_KEY = "short_side_proof"
+SHORT_PROBATION_N = int(os.environ.get("LIVE_SHORT_PROBATION_N", "3"))
+
 
 async def execute_copy(payload: dict) -> str | None:
     """Fresh-detection execution entry point, spawned by the ingestion
@@ -3315,6 +3334,15 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                               f"hold netPosition={net}")
                 elif verdict == "unverified":
                     verdict, detail = "ok", f"position sign agrees ({net})"
+                # THE SHORT CLASS EARNS ITS OWN PROOF HERE. This is the
+                # only place the venue's position sign is read against
+                # the intent we sent, so it is the only place a short
+                # can be certified. Recorded on real fills only — a
+                # shadow row holds nothing to check.
+                if is_short_intent(intent):
+                    await _record_short_proof(
+                        pool, ok=(verdict != "mismatch"), net=net,
+                        slug=us_slug)
         except Exception as exc:  # noqa: BLE001 — never raises
             detail = f"{detail} | position check failed: {exc}"[:200]
 
@@ -3415,18 +3443,103 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
     return verdict
 
 
+async def _record_short_proof(pool, *, ok: bool, net, slug: str) -> None:
+    """Tally the position-sign verdict for SHORT fills only.
+
+    netPosition's SIGN is the only end-to-end proof that BUY_SHORT buys
+    the short side, and it exists only on a real fill — which is why the
+    probation has to place one to earn the next.
+
+    Its own key, because side_echo_last mixes intents: a verified LONG
+    says nothing about this question.
+    """
+    try:
+        raw = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            SHORT_PROOF_KEY)
+        prev = (json.loads(raw) if isinstance(raw, str) else raw) or {}
+    except Exception:  # noqa: BLE001 — an unreadable tally is not a verdict
+        prev = {}
+    cur = {"ok": int(prev.get("ok", 0)) + (1 if ok else 0),
+           "mismatch": int(prev.get("mismatch", 0)) + (0 if ok else 1),
+           "last_net": net, "last_slug": slug,
+           "last_at": datetime.now(tz=timezone.utc).isoformat(
+               timespec="seconds")}
+    try:
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            SHORT_PROOF_KEY, json.dumps(cur))
+    except Exception:  # noqa: BLE001 — bookkeeping never breaks a fill
+        log.warning("short-proof write failed for %s", slug)
+
+
+async def _short_gate(pool) -> tuple[bool, str, bool]:
+    """(allowed, reason, still_on_probation) for placing a SHORT.
+
+    The third value matters: once the class is proved the caller must
+    NOT take the serialising lock, or every short thereafter would queue
+    behind the one before it forever — a probation that never ends is
+    just a slower ban.
+
+    Fails CLOSED on an unreadable tally: not knowing whether shorts are
+    proved is not permission to place four of them at once.
+    """
+    try:
+        raw = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            SHORT_PROOF_KEY)
+        st = (json.loads(raw) if isinstance(raw, str) else raw) or {}
+    except Exception:  # noqa: BLE001
+        return False, "short-probation: proof tally unreadable", True
+    if int(st.get("mismatch", 0)) > 0:
+        return False, ("short-probation: a SHORT fill held the WRONG SIDE "
+                       "— the branch re-armed itself and needs a human"), True
+    done = int(st.get("ok", 0))
+    if done >= SHORT_PROBATION_N:
+        return True, "", False
+    if _SHORT_LOCK.locked():
+        return False, ("short-probation: one short at a time until "
+                       f"{SHORT_PROBATION_N} are side-verified "
+                       f"({done} so far)"), True
+    return True, "", True
+
+
+async def _echo_then_release_short(coro):
+    """Run the echo, then drop the short-probation lock.
+
+    THE HANDOFF IS THE POINT. The placement path returns as soon as the
+    order is acknowledged, but the proof this probation waits for —
+    netPosition's sign — is only read inside the echo, seconds later.
+    Releasing in the placer's finally would let SHORT_PROBATION_N orders
+    go out before the first verdict exists, which is exactly the race
+    the probation was built to close. So ownership moves to the echo and
+    is dropped in a finally: cancellation still runs it, and a process
+    that dies takes the in-memory lock with it.
+    """
+    try:
+        return await coro
+    finally:
+        if _SHORT_LOCK.locked():
+            _SHORT_LOCK.release()
+
+
 def _spawn_echo(pool, row_id: int, us_slug: str, outcome: str | None,
                 his_title: str | None, *, shadow: bool,
                 his_slug: str | None = None,
                 intent: str | None = None,
                 mapping_src: str | None = None,
-                state_key: str | None = None) -> None:
+                state_key: str | None = None,
+                owns_short_lock: bool = False) -> None:
     """Fire-and-forget echo with a strong task ref (a bare create_task
     can be garbage-collected mid-flight)."""
-    t = asyncio.create_task(_side_echo_verify(
+    coro = _side_echo_verify(
         pool, row_id, us_slug, outcome, his_title, shadow=shadow,
         his_slug=his_slug, intent=intent, mapping_src=mapping_src,
-        state_key=state_key))
+        state_key=state_key)
+    if owns_short_lock:
+        coro = _echo_then_release_short(coro)
+    t = asyncio.create_task(coro)
     _ECHO_TASKS.add(t)
     t.add_done_callback(_ECHO_TASKS.discard)
 
@@ -3881,6 +3994,10 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         await _FIRST_FILL_LOCK.acquire()
 
     _echo_args: tuple | None = None
+    # Bound BEFORE the try: the finally reads it, so an exception raised
+    # anywhere above the probation branch would turn a real error into a
+    # NameError from the cleanup path and lose the original traceback.
+    _short_probation_held = False
     try:
         if venue == "polymarket-us":
             from . import pmus
@@ -4425,6 +4542,42 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # the cause to stop doing the thing that is 6-for-6 wrong.
             #
             # LIVE_ALLOW_SHORT=on re-opens it once the cause is known.
+            #
+            # THE CAUSE IS NOW KNOWN, AND THE OVERSPEND HALF OF THE
+            # EVIDENCE ABOVE IS RETRACTED IN THIS FILE (2026-08-26).
+            # fill_cash's docstring re-costs all six of those receipts
+            # under the short denomination (1-p)*qty: "Every one at or
+            # under what we authorised, one exact to the cent, worst
+            # overage across all six $0.00. There was no overspend.
+            # There was a units bug in our own bookkeeping." At scale
+            # the endpoint agrees: short_model 50/50 within
+            # authorization against long_model 23/50.
+            #
+            # What is still NOT proved is the side itself. The venue's
+            # netPosition sign is the only end-to-end answer and it has
+            # never run on a short, because we have not placed one since
+            # the model was corrected. So the flag stays OFF by default
+            # and this is unchanged for anyone who does not set it.
+            #
+            # What changes is that setting it is now bounded rather than
+            # all-or-nothing: see _short_gate. Owner-approved 2026-08-26.
+            if (_intent == "ORDER_INTENT_BUY_SHORT"
+                    and os.getenv("LIVE_ALLOW_SHORT", "").strip().lower()
+                    == "on"):
+                _ok, _why, _probation = await _short_gate(pool)
+                if not _ok:
+                    await pool.execute(
+                        "UPDATE live_orders SET status='rejected', "
+                        "error=$2 WHERE id=$1", row_id, _why)
+                    log.warning("LIVE (US) held %s: %s",
+                                mapping["market_slug"], _why)
+                    return
+                if _probation:
+                    # Serialise ONLY while unproven. Taking this lock
+                    # after the class is proved would queue every short
+                    # behind the one before it forever.
+                    await _SHORT_LOCK.acquire()
+                    _short_probation_held = True
             if (_intent == "ORDER_INTENT_BUY_SHORT"
                     and os.getenv("LIVE_ALLOW_SHORT", "").strip().lower()
                     != "on"):
@@ -4718,8 +4871,14 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                  venue, "FILLED" if result["ok"] and filled > 0 else "unfilled",
                  payload.get("whale_username"), filled, fill_price or limit, his_price)
         if _echo_args and result["ok"] and filled > 0:
+            # Hand the probation lock to the echo (see
+            # _echo_then_release_short) and stop owning it here, so the
+            # finally below does not release it out from under the
+            # verdict we are waiting on.
             _spawn_echo(pool, row_id, *_echo_args, shadow=False,
+                        owns_short_lock=_short_probation_held,
                         **_echo_kw)
+            _short_probation_held = False
     except Exception as exc:  # noqa: BLE001 — record, never crash ingestion
         log.exception("live order failed for trade %s", payload.get("id"))
         await pool.execute(
@@ -4729,3 +4888,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     finally:
         if _first_fill_gate and _FIRST_FILL_LOCK.locked():
             _FIRST_FILL_LOCK.release()
+        # Released on EVERY path out, including the refusals and the
+        # exception ones. A probation lock that leaks stops shorts
+        # permanently and would look exactly like the ban it replaced.
+        if _short_probation_held and _SHORT_LOCK.locked():
+            _SHORT_LOCK.release()
