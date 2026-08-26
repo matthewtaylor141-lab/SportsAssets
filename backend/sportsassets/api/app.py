@@ -5973,6 +5973,8 @@ async def api_edge_decay(since_day: str = "2026-08-01") -> dict:
     unlucky in our subset (selection effect) or not worth copying."""
     from datetime import datetime as _dt
 
+    from ..live_executor import ORDER_INTENT_SQL, cost_per_share
+
     pool = await get_pool()
     since_d = _dt.fromisoformat(since_day).date()
     # v2 (2026-08-24): resolution-settled rows ONLY — a cash-out row's
@@ -5981,11 +5983,12 @@ async def api_edge_decay(since_day: str = "2026-08-01") -> dict:
     # unmodeled instead of silently blended (v1's decomposition mixed
     # both and produced visibly inconsistent columns).
     rows = await pool.fetch(
-        """
+        f"""
         SELECT lower(COALESCE(whale_username, '?')) AS whale,
                his_price::float8 AS his, fill_price::float8 AS fp,
                filled_usd::float8 AS stake, pnl::float8 AS pnl,
                reaction_s::float8 AS rs,
+               {ORDER_INTENT_SQL} AS intent,
                abs(COALESCE(pnl, 0)) > 100 AS over_cap
         FROM live_orders
         WHERE status = 'settled'
@@ -6012,7 +6015,35 @@ async def api_edge_decay(since_day: str = "2026-08-01") -> dict:
         if r["rs"] is not None:
             w["rs"].append(float(r["rs"]))
         if fp and his:
-            w["slip_sum"] += (fp - his)
+            # OUR COST PER SHARE MINUS HIS, IN ONE DENOMINATION
+            # (2026-08-26). This was a raw `fp - his`. fill_price on a
+            # SHORT names the LONG leg, while his_price is what the
+            # whale paid on his own side, so the subtraction compared
+            # two different legs -- the same class of error that
+            # inverted realized_pnl and fill_cash, both of which now
+            # take an intent. cost_per_share is that single definition.
+            #
+            # WHAT THIS DOES NOT EXPLAIN, stated so nobody inherits a
+            # wrong story: the production table reports avg_slip of
+            # -0.195 (rn1), -0.246 (ferrari), -0.126 (076daa87), i.e.
+            # "we filled twelve to twenty-five cents a share BETTER
+            # than the whale", on a FOK at his price plus two cents.
+            # Short-leg mixing cannot be the cause -- for a short filled
+            # at his own price the raw formula returns +(1 - 2*his),
+            # which is POSITIVE on any book under 50c. The sign is
+            # wrong for that theory.
+            #
+            # So this corrects a real denomination bug and leaves the
+            # negative reading unexplained. Re-read the column after
+            # this deploys; if it is still large and negative the cause
+            # is upstream of here, in what his_price or fill_price
+            # actually contain.
+            #
+            # Still accumulated on EVERY priced row, including ones the
+            # payout model below declares unmodeled -- mostly the
+            # shorts. Their slippage is real and dropping them would
+            # silently scope this number to longs only.
+            w["slip_sum"] += (cost_per_share(fp, r["intent"]) - his)
             w["slip_n"] += 1
         if abs(pnl) < 0.005:
             w["voids"] += 1
