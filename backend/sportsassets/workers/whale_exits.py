@@ -357,7 +357,7 @@ def guard_empty(prev: dict[str, float], now: dict[str, float],
 
 def diff_exits(prev: dict[str, float],
                now: dict[str, float],
-               resolved: set[str] | None = None) -> list[tuple[str, float]]:
+               not_an_exit: set[str] | None = None) -> list[tuple[str, float]]:
     """(asset, closed_fraction) for holdings that SHRANK.
 
     Pure, so the rule is testable without a venue:
@@ -368,7 +368,13 @@ def diff_exits(prev: dict[str, float],
       * shrank by less than MIN_SHRINK of the position -> noise.
     """
     out: list[tuple[str, float]] = []
-    res = resolved or set()
+    # NAMED FOR WHAT IT IS. It used to be called `resolved`, and the
+    # caller passed only markets it had positively confirmed as
+    # resolved — so a vanished token the caller could say NOTHING about
+    # fell through to the full-exit branch. The set is the tokens a
+    # disappearance must not be read as an exit on, whatever the reason,
+    # and "we have no idea" is one of the reasons.
+    res = not_an_exit or set()
     for asset, before in prev.items():
         if before <= 0:
             continue
@@ -390,10 +396,10 @@ def diff_exits(prev: dict[str, float],
             # have fired on partial scale-outs, which these whales
             # barely do.
             #
-            # We already know which markets resolved: the caller passes
-            # the resolved set. Unresolved and gone is a close, at
-            # 100%. Resolved and gone is still skipped, so the original
-            # protection is intact rather than traded away.
+            # The caller passes every token a disappearance must NOT be
+            # read as an exit on: resolved, closed, or unknown to us.
+            # Gone from a market we can see is still trading is a close,
+            # at 100%.
             if asset not in res:
                 out.append((asset, 1.0))
             continue
@@ -478,24 +484,74 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
         # falls back to the old behaviour (skip every disappearance),
         # which forfeits coverage rather than risking orders.
         gone = [a for a in prev if a not in now]
-        resolved: set[str] | None = set()
+        # "NOT RESOLVED" AND "WE HAVE NEVER HEARD OF THIS TOKEN" WERE
+        # THE SAME ANSWER (2026-08-26, adversarial round 4).
+        #
+        # The old query INNER JOINed market_tokens to markets and
+        # returned only tokens with resolved=true. A vanished token that
+        # is absent from market_tokens — or whose market row does not
+        # exist — produced no row, and the caller read absence as
+        # positive proof the market had NOT resolved, emitting a 100%
+        # exit. The full-exit branch of mirror_exit calls
+        # pmus.close_position: an unlimited market sell bounded only by
+        # EXIT_SLIPPAGE_BIPS (300). So a position we simply had no
+        # metadata for got flattened at the bid.
+        #
+        # The module's designed protection is that unknown-ness must
+        # forfeit the cycle — that is what the except branch below is
+        # for. But it only ever fired when the query RAISED, never when
+        # the query simply could not see, and those are the same shape
+        # coming back. This codebase has already measured that
+        # population: EXITCENSUS cls_token_unenriched: 56 in one window.
+        #
+        # CLOSED COUNTS TOO, not just resolved. markets.resolved is fed
+        # by an unordered LIMIT 500 sweep on a 300s cycle, so a
+        # just-finished game is not guaranteed to be flagged yet, and in
+        # that window a redemption reads as an exit and we sell a
+        # near-certain $1.00 payout at the bid. `closed` is set when the
+        # market stops trading, ahead of resolution, and a whale cannot
+        # trade out of a closed market — so a disappearance there is a
+        # redemption by construction.
+        #
+        # Every branch here only ever REFUSES more than before. There is
+        # no input on which this sells something the old code would not.
+        not_an_exit: set[str] | None = set()
         if gone:
             try:
                 rows = await pool.fetch(
-                    "SELECT DISTINCT mt.token_id FROM market_tokens mt "
+                    "SELECT DISTINCT mt.token_id, "
+                    "       COALESCE(m.resolved, false) AS resolved, "
+                    "       COALESCE(m.closed, false) AS closed "
+                    "FROM market_tokens mt "
                     "JOIN markets m ON m.condition_id = mt.condition_id "
-                    "WHERE mt.token_id = ANY($1::text[]) "
-                    "  AND COALESCE(m.resolved, false) = true", gone)
-                resolved = {str(r["token_id"]) for r in rows}
+                    "WHERE mt.token_id = ANY($1::text[])", gone)
+                known = {str(r["token_id"]) for r in rows}
+                settled = {str(r["token_id"]) for r in rows
+                           if r["resolved"] or r["closed"]}
+                unknown = set(gone) - known
+                if unknown:
+                    log.warning(
+                        "whale-exit: %s — %d vanished position(s) on "
+                        "tokens we have NO market metadata for; refusing "
+                        "to read them as exits (an unlimited close on a "
+                        "market that may simply have settled)",
+                        uname, len(unknown))
+                stats["vanished_unknown"] = \
+                    stats.get("vanished_unknown", 0) + len(unknown)
+                stats["vanished_settled"] = \
+                    stats.get("vanished_settled", 0) + len(settled)
+                stats["vanished_live"] = stats.get("vanished_live", 0) + (
+                    len(gone) - len(settled | unknown))
+                not_an_exit = settled | unknown
             except Exception:  # noqa: BLE001 — unknown, so assume all
                 log.warning("whale-exit: resolution lookup failed; "
                             "treating every vanished position as "
                             "possibly resolved and skipping it")
-                resolved = None
-        if resolved is None:
+                not_an_exit = None
+        if not_an_exit is None:
             found = diff_exits(prev, now, set(gone))
         else:
-            found = diff_exits(prev, now, resolved)
+            found = diff_exits(prev, now, not_an_exit)
         # Round-robin across a backlog, so a refused exit that keeps
         # being pinned cannot crowd out one that has never been tried.
         tried = await _load_retry(pool, uname.lower())

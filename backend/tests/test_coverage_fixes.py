@@ -118,7 +118,7 @@ class TestTheCallerFailsTowardSafety:
         against a position the venue already closed. The query failing
         must forfeit coverage, not risk orders."""
         src = inspect.getsource(we._cycle)
-        assert "resolved = None" in src
+        assert "not_an_exit = None" in src
         assert "diff_exits(prev, now, set(gone))" in src
 
     def test_it_only_asks_about_positions_that_vanished(self):
@@ -128,4 +128,9 @@ class TestTheCallerFailsTowardSafety:
 
     def test_it_asks_the_markets_table_not_a_guess(self):
         src = inspect.getsource(we._cycle)
-        assert "COALESCE(m.resolved, false) = true" in src
+        assert "COALESCE(m.resolved, false) AS resolved" in src
+        # `closed` as well as `resolved`: markets.resolved is fed by an
+        # unordered LIMIT 500 sweep on a 300s cycle, so a just-finished
+        # game need not be flagged yet, and in that window a redemption
+        # reads as an exit.
+        assert "COALESCE(m.closed, false) AS closed" in src

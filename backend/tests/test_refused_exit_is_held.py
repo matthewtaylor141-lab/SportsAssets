@@ -37,9 +37,16 @@ from sportsassets.workers import whale_exits as we
 class FakePool:
     """ingestion_state as a dict, plus the two SELECTs _cycle issues."""
 
-    def __init__(self, resolved: set[str] | None = None):
+    def __init__(self, resolved: set[str] | None = None,
+                 unknown: set[str] | None = None,
+                 closed: set[str] | None = None):
         self.state: dict[str, str] = {}
         self.resolved = resolved or set()
+        self.closed = closed or set()
+        # Tokens with no market metadata at all. Everything else is
+        # KNOWN and still trading, which is the only state on which a
+        # disappearance may be read as an exit.
+        self.unknown = unknown or set()
         self.saves: list[dict[str, float]] = []
 
     async def fetch(self, sql, *args):
@@ -47,7 +54,10 @@ class FakePool:
             return [{"username": "rn1", "address": "0xrn1"}]
         if "market_tokens" in sql:
             gone = args[0] if args else []
-            return [{"token_id": a} for a in gone if a in self.resolved]
+            return [{"token_id": a,
+                     "resolved": a in self.resolved,
+                     "closed": a in self.closed}
+                    for a in gone if a not in self.unknown]
         return []
 
     async def fetchval(self, sql, *args):

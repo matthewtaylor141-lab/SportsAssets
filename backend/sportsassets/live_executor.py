@@ -343,6 +343,7 @@ def _exit_done(reason: str, **ctx) -> str:
 EXIT_PENDING_REASONS: frozenset[str] = frozenset({
     # Kill switch or breaker. Clears by operator action.
     "mx_halted",
+    "mx_paused",
     "mx_overspend_halt",
     # Infrastructure said "I don't know", which is not "nothing to do".
     "mx_exit_ledger_unreadable",
@@ -655,6 +656,26 @@ async def mirror_exit(payload: dict) -> str:
     if not asset:
         return _exit_done("mx_no_asset")
     pool = await get_pool()
+    # THE ADMIN KILL SWITCH DID NOT REACH THIS PATH (2026-08-26,
+    # adversarial round 4).
+    #
+    # The module docstring lists the safety model as the layers EVERY
+    # order passes, with the admin pause second. _is_paused was read in
+    # exactly two places — the manual desk and maybe_execute — and
+    # mirror_exit is neither. So POST /api/admin/live/pause, documented
+    # as "no further orders", stopped entries while the whale_exits
+    # worker went on sending order after order at 120s cadence, and the
+    # full-exit branch sends close_position: no limit price, bounded
+    # only by EXIT_SLIPPAGE_BIPS. The operator believes the account is
+    # stopped; the account is still transacting, unpriced, into
+    # whatever book condition prompted the pause.
+    #
+    # It is the newest order-placing path and it grew outside the gate
+    # rather than through it — the same shape as a new lane missing a
+    # cap. Pending, not settled: a pause is cleared by the operator and
+    # the exit is still real when it clears.
+    if await _is_paused(pool):
+        return _exit_done("mx_paused", whale=username, asset=asset)
     if await overspend_halt(pool):
         return _exit_done("mx_overspend_halt")
     # STAMPED AFTER THE HALT GATE, NOT BEFORE (2026-08-25, adversarial
@@ -1149,10 +1170,32 @@ async def _caps_room(pool) -> tuple[float, float]:
 
 
 async def _is_paused(pool) -> bool:
-    val = await pool.fetchval("SELECT value FROM ingestion_state WHERE key=$1", PAUSE_KEY)
+    """The admin kill switch. AN UNREADABLE SWITCH COUNTS AS ENGAGED.
+
+    This guards real money and "the database did not answer" is not
+    evidence that trading is safe — the same stance overspend_halt
+    already takes, and it was missing here. The read used to propagate,
+    which on the exit path meant an exception, which meant an outcome
+    the caller could not classify and therefore treated as settled: a
+    DB blip would have discarded the exit rather than holding it.
+
+    A malformed value is engaged too. Somebody wrote something we do
+    not understand into the kill switch row; refusing is the only
+    reading of that which cannot lose money.
+    """
+    try:
+        val = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1", PAUSE_KEY)
+    except Exception:  # noqa: BLE001
+        log.exception("kill switch unreadable — treating as PAUSED")
+        return True
     if val is None:
         return False
-    parsed = json.loads(val) if isinstance(val, str) else val
+    try:
+        parsed = json.loads(val) if isinstance(val, str) else val
+    except (TypeError, ValueError):
+        log.warning("kill switch value is not JSON — treating as PAUSED")
+        return True
     return bool(parsed)
 
 
