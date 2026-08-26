@@ -179,15 +179,33 @@ def test_copy_guards_scope_around_the_sleeve():
     one-position-per-game and venue no-stack must all scope around
     whale_username='underdog' — the sleeve's $2 dogs neither consume
     a game's one copy slot nor read as a copy stack."""
+    # WINDOWED TO THE QUERY, NOT TO A CHARACTER COUNT. This read
+    # src[anchor - 1500:anchor], and a comment added above the
+    # one-position-per-game refusal pushed its SQL past 1500 characters
+    # -- so the test failed while the guard was untouched and correct.
+    # A slice width guessed against today's formatting is a test that
+    # reads the wrong text tomorrow; this file's neighbours have been
+    # re-anchored for the same reason.
     src = open("sportsassets/live_executor.py").read()
-    never_add = src.index("never-add: this market was already copied")
-    one_per_game = src.index("one position per game")
+
+    def _query_before(anchor_text: str) -> str:
+        """The SQL the guard runs, from the pool call that issues it to
+        the refusal it produces -- however much prose sits between."""
+        end = src.index(anchor_text)
+        head = src.rfind("await pool.fetch", 0, end)
+        assert head != -1, f"no query found before {anchor_text!r}"
+        return src[head:end]
+
+    for anchor_text in ("never-add: this market was already copied",
+                        "one position per game"):
+        assert "<> 'underdog'" in _query_before(anchor_text), (
+            f"the guard behind {anchor_text!r} must exclude the sleeve")
+
     no_stack = src.index("no-stack: account already holds")
-    for anchor in (never_add, one_per_game):
-        window = src[anchor - 1500:anchor]
-        assert "<> 'underdog'" in window, "guard must exclude the sleeve"
-    assert "bool_or(whale_username = 'underdog')" in src[
-        no_stack - 1800:no_stack], (
+    head = src.rfind("await pool.fetchval", 0, no_stack)
+    if head == -1:
+        head = src.rfind("await pool.fetch", 0, no_stack)
+    assert "bool_or(whale_username = 'underdog')" in src[head:no_stack], (
         "a venue holding explained ONLY by the sleeve must not refuse "
         "the copy; unexplained holdings still fail closed")
 

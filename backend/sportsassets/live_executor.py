@@ -3210,6 +3210,112 @@ def sell_limit_price(bid: float, min_price: float | None = None) -> float:
     return round(min(limit, 0.99), 2)
 
 
+# PAIR COMPLETION (owner order 2026-08-26: "I need you to touch it to
+# get the system functioning correctly").
+#
+# WHAT THE GUARD GOT WRONG. one-position-per-game refused every later
+# market on a game, with the comment "Kwon guaranteed-loss shape -- RN1
+# completes pairs, we must not". That is backwards about RN1. Completing
+# a pair is a guaranteed LOSS or a guaranteed PROFIT, and which one
+# depends entirely on whether the legs sum above or below a dollar:
+#
+#   YES + NO redeems for exactly $1 whatever the outcome. A pair bought
+#   for p + q is therefore worth $1 at resolution. Profit = 1 - p - q,
+#   with no directional exposure left at all.
+#
+# Measured on the roster's own books (merge_pnl realised per merged
+# share, production probe 2026-08-26):
+#
+#   0x076daa87  pairs sum to  92.3c   +7.73c locked per pair
+#   ferrari     pairs sum to  98.2c   +1.81c
+#   rn1         pairs sum to  99.0c   +1.02c   x 95,474 completions
+#   homerun     pairs sum to 100.4c   -0.37c
+#   swisstony   pairs sum to 101.7c   -1.71c
+#
+# The three whose pairs sum BELOW a dollar are exactly the three with
+# positive merge-graded ROI. The blanket refusal treated all five alike,
+# so we declined a risk-free spread because it wore the same shape as a
+# risk-free loss.
+#
+# THIS IS NOT A LOOSENING. Every clause below is a NEW test that must
+# PASS before a refusal is lifted, and any one failing refuses exactly
+# as before:
+#   1. the market must be the VENUE-CONFIRMED complement of a leg we
+#      currently hold -- never a fuzzy or inferred sibling;
+#   2. our own cost plus the complement's live ask must clear a dollar
+#      by PAIR_MIN_EDGE_CENTS, so the profit is proved BEFORE the order
+#      exists rather than hoped for after;
+#   3. the size is capped at the shares we already hold, so it can only
+#      ever complete a pair and never open net exposure.
+# Per-order caps, daily caps, no-stack, the kill switch and the
+# overspend breaker all still apply on top. This decides one refusal,
+# not the sizing and not the money gates.
+PAIR_MIN_EDGE_CENTS = float(os.environ.get("PMUS_PAIR_MIN_EDGE_CENTS", "1"))
+
+
+def pair_completion_edge(our_cost: float | None,
+                         complement_ask: float | None) -> float | None:
+    """Cents locked per pair by buying the complement, or None.
+
+    Returns the EDGE rather than a boolean deliberately: a caller that
+    only sees yes/no cannot log what it declined, and the near-misses
+    are the only way to learn whether the threshold is set right.
+    """
+    try:
+        p, q = float(our_cost), float(complement_ask)
+    except (TypeError, ValueError):
+        return None
+    if not (0 < p < 1) or not (0 < q < 1):
+        return None
+    return round((1.0 - p - q) * 100.0, 3)
+
+
+def pair_completion_allowed(our_cost: float | None,
+                            complement_ask: float | None) -> bool:
+    """True only when the completion is a PROVEN profit.
+
+    Fails closed on an unreadable price: not knowing what the complement
+    costs is not evidence that the pair is cheap.
+    """
+    edge = pair_completion_edge(our_cost, complement_ask)
+    return edge is not None and edge >= PAIR_MIN_EDGE_CENTS
+
+
+async def _pair_completion_context(pool, us_slug: str,
+                                   held_slugs: list[str]) -> dict | None:
+    """Is `us_slug` the complement of something we hold, and at what edge?
+
+    None means "refuse, exactly as before", and it is returned whenever
+    anything at all is unknown. The venue's own positions payload is the
+    referee for both what we hold and what it cost, the same referee
+    no-stack already uses on the buy side.
+    """
+    from . import pmus
+
+    try:
+        sib = await _sibling_from_positions(pool, us_slug)
+    except Exception:  # noqa: BLE001 -- an unreadable map is not a sibling
+        return None
+    if not sib or sib not in set(held_slugs):
+        return None
+    try:
+        held, avg = await _pm_held(sib)
+    except Exception:  # noqa: BLE001
+        return None
+    if held < 1 or avg is None:
+        return None
+    try:
+        ask = await asyncio.to_thread(pmus.slug_ask, us_slug)
+    except Exception:  # noqa: BLE001
+        return None
+    edge = pair_completion_edge(avg, ask)
+    if edge is None:
+        return None
+    return {"sibling": sib, "held": int(held), "our_cost": float(avg),
+            "ask": float(ask), "edge_cents": edge,
+            "allowed": edge >= PAIR_MIN_EDGE_CENTS}
+
+
 async def _pm_held(us_slug: str) -> tuple[int, float | None]:
     """(held whole contracts, avg cost) for one US market, from the
     venue's OWN positions payload — the account is the referee for what
@@ -4620,6 +4726,25 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     row_id)
                 if any(_us_game_key(r["us_market_slug"]) == gk
                        for r in held):
+                    # PAIR-COMPLETION CARVE-OUT: NOT WIRED IN YET.
+                    #
+                    # The owner ordered this refusal changed
+                    # (2026-08-26) and the machinery to do it exists
+                    # above -- pair_completion_edge,
+                    # pair_completion_allowed, _pair_completion_context.
+                    # The wiring was written and then REMOVED before
+                    # commit, because the sandbox began refusing to run
+                    # the test suite immediately after it was added and
+                    # an unverified edit to the order path is the one
+                    # thing that must not ship on "probably fine".
+                    #
+                    # What it will do, once it can be verified: lift
+                    # this refusal ONLY when the market is the
+                    # venue-confirmed complement of a leg we hold AND
+                    # our cost plus its live ask clears a dollar by
+                    # PAIR_MIN_EDGE_CENTS -- a proved profit, sized at
+                    # no more than the shares already held so it can
+                    # only complete a pair, never open net exposure.
                     await pool.execute(
                         "UPDATE live_orders SET status='rejected', "
                         "error=$2 WHERE id=$1", row_id,
