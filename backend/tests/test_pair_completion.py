@@ -94,11 +94,29 @@ class TestTheContextFailsClosed:
 
     @pytest.mark.asyncio
     async def test_a_sibling_we_do_not_hold_refuses(self, monkeypatch):
+        """Mutation-caught gap (2026-08-26): without the stubs below,
+        this passed even with the membership check DELETED -- the
+        un-patched venue call failed in the sandbox and refused for the
+        wrong reason. In production that mutant would have priced the
+        pair against a position from a DIFFERENT game than the one whose
+        guard it was lifting. The stubs make the venue path succeed, so
+        only the membership check itself can produce the refusal."""
         monkeypatch.setattr(le, "_SIBLING_CACHE", {})
         monkeypatch.setattr(le, "_SIBLING_CACHE_AT", None)
+
+        async def fake_held(slug):
+            return 40, 0.47        # venue would happily price it
+
+        from sportsassets import pmus
+
+        monkeypatch.setattr(le, "_pm_held", fake_held)
+        monkeypatch.setattr(pmus, "slug_ask", lambda s: 0.51)
         out = await le._pair_completion_context(
             self._Pool({"slug-b": "slug-z"}), "slug-b", ["slug-a"])
-        assert out is None
+        assert out is None, (
+            "the complement is held NOWHERE in this guard's rows; "
+            "pricing it against another game's position lifts the "
+            "wrong refusal")
 
     @pytest.mark.asyncio
     async def test_held_leg_plus_cheap_ask_allows(self, monkeypatch):
