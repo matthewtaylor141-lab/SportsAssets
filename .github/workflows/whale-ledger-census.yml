@@ -132,6 +132,12 @@ jobs:
                           a = json.loads(line)
                       except json.JSONDecodeError:
                           continue
+                      # A line can parse and still not be a row -- the
+                      # crawler appends whatever jq emitted, and one
+                      # bare string crashed the whole analysis pass
+                      # after every wallet had already printed.
+                      if not isinstance(a, dict):
+                          continue
                       # DEDUP. The crawl re-anchors with end=<oldest-1>
                       # when the offset cap nears; if the server ever
                       # ignores `end`, pages would repeat and every
