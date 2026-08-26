@@ -377,6 +377,10 @@ EXIT_PENDING_REASONS: frozenset[str] = frozenset({
     # Liquidity, not position. Both come back.
     "mx_no_bid_for_partial",
     "mx_venue_unfilled",
+    # A fraction too small to buy a whole share. The position is real
+    # and the exit is real; only the arithmetic came up short, and the
+    # next observation measures a bigger cumulative fraction.
+    "mx_exit_rounds_to_zero",
     # THE SUB-FLOOR TRIM, WHICH IS WHY DRIFT NEVER ACCUMULATED
     # (2026-08-26).
     #
@@ -957,11 +961,47 @@ async def mirror_exit(payload: dict) -> str:
         held, _avg = await _pm_held(us_slug)
         ours = min(int(row["qty"]), held)
         # His fraction OF OUR position — the proportional relationship.
-        qty = int(ours * closed_frac)
+        #
+        # HALF-UP, NOT TRUNCATION (2026-08-26). int() floors, so a
+        # 4-share remainder against a 20% trim computed int(0.8) = 0 and
+        # the exit was dropped. Shares are the smallest unit the venue
+        # sells, so 0.8 of one has to resolve to 1 or to 0 — and 1 is
+        # the answer that moves us toward the whale. The overshoot is
+        # bounded above by a single share.
+        #
+        # int(x + 0.5), not round(x): round() is banker's, so round(10.5)
+        # is 10 and round(11.5) is 12. A sizing rule that depends on the
+        # parity of the share count is not a rule.
+        qty = int(ours * closed_frac + 0.5)
         if closed_frac >= FULL_EXIT_FRAC:
             qty = ours          # he is out; so are we, to the share
         if qty <= 0:
             await _release_exit_claim(pool, row["id"])
+            if ours > 1:
+                # ROUNDING, NOT A POSITION FACT. Filing this under
+                # "venue holds nothing" was false — the venue holds
+                # `ours` — and the false name is what hid it: the census
+                # showed a ledger/venue disagreement where the real
+                # event was a fraction too small to buy a whole share.
+                #
+                # PENDING, so whale_exits pins the asset at its pre-trim
+                # size instead of advancing past it. The next cycle then
+                # measures a cumulative fraction against the same
+                # position and crosses 1 share within a few observations
+                # — the same ratchet that fixed the sub-floor trims.
+                #
+                # ours == 1 is excluded deliberately: no partial can
+                # ever round a single share up (it would have to reach
+                # 50%, and a 1-share position that big a fraction is
+                # what FULL_EXIT_FRAC flattens anyway), so pinning it
+                # would hold a retry slot that can never resolve.
+                # A whale who trims and then stops does keep a 2-4 share
+                # residual pinned until his full exit. That is a known,
+                # bounded cost and it is the honest one: the alternative
+                # is discarding an exit we detected.
+                return _exit_done("mx_exit_rounds_to_zero", slug=us_slug,
+                                  ours=ours, held=held,
+                                  closed_frac=round(closed_frac, 4))
             # Our ledger says filled, the VENUE says we hold nothing.
             # A disagreement between the two is its own class of
             # problem and must never be filed under "no position".

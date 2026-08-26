@@ -134,7 +134,15 @@ class TestPartialExitsAreNowMirroredProportionally:
 
     def test_our_quantity_is_his_fraction_of_our_position(self):
         src = inspect.getsource(le.mirror_exit)
-        assert "qty = int(ours * closed_frac)" in src
+        # Pinned as ARITHMETIC, not as a literal: the truncating form
+        # dropped a 20% trim on a 4-share remainder (int(0.8) == 0), so
+        # the rule is now half-up. Asserting the old source string would
+        # have blocked that fix while claiming to protect the
+        # proportional relationship it broke.
+        assert "ours * closed_frac" in src
+        for ours, frac, want in ((100, 0.25, 25), (4, 0.20, 1),
+                                 (10, 0.105, 1), (4, 0.10, 0)):
+            assert int(ours * frac + 0.5) == want
 
     def test_a_full_exit_closes_everything_to_the_share(self):
         """Rounding a 99% exit down would leave a permanent dust

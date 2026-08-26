@@ -4778,6 +4778,12 @@ async def admin_exit_census() -> dict:
     # diagnostic that names a bucket must be able to put things in it.
     defect_keys = ("mx_overspend_halt", "mx_paused",
                    "mx_venue_holds_nothing",
+                   # A trim too small to buy a whole share. Distinct
+                   # from holds_nothing on purpose: the venue holds our
+                   # shares in this case, and lumping the two together
+                   # is what made a rounding outcome read as a
+                   # ledger/venue disagreement.
+                   "mx_exit_rounds_to_zero",
                    "mx_no_bid_for_partial", "mx_venue_unfilled",
                    # A full exit that only partly filled. We still hold
                    # shares the whale does not — the row stays live and
