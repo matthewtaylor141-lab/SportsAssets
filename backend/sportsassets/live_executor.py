@@ -1047,6 +1047,38 @@ async def overspend_halt(pool) -> Any:
                 "failure mode before the order is sent",
                 _at, ASK_GUARD_SINCE)
             return None
+        # A RECORD THAT DISPROVES ITSELF (2026-08-26).
+        #
+        # The breaker records the ratio it fired on. When that ratio is
+        # at or below the halting boundary, the record is evidence that
+        # the breaker was wrong to write it, not evidence about the
+        # venue — and the sleeve is being held down by its own
+        # arithmetic. This is not a judgement call and it reads no
+        # outside state: the number in the record is compared with the
+        # threshold in the code.
+        #
+        # It is why this clause exists at all. The sleeve sat halted
+        # from 2026-08-25 19:20:51Z on a record reading ratio 0.957 —
+        # an UNDERSPEND, asked $67.68 and filled $64.80 — written by a
+        # breaker that was comparing a short's cost against a long's
+        # denomination. That bug is fixed; the record it left could
+        # only be cleared by hand.
+        #
+        # Deliberately NOT time-bounded like the clause above. A false
+        # positive is false whenever it was written.
+        _ratio = _rec.get("ratio")
+        if isinstance(_ratio, (int, float)) \
+                and float(_ratio) <= OVERSPEND_HALT_RATIO:
+            await pool.execute(
+                "DELETE FROM ingestion_state WHERE key=$1",
+                "copy_overspend_halt")
+            log.warning(
+                "overspend breaker CLEARED: it recorded ratio %.3f, "
+                "which is at or below the halting boundary %.2f — the "
+                "record is evidence the breaker misfired, not evidence "
+                "about the venue",
+                float(_ratio), OVERSPEND_HALT_RATIO)
+            return None
     except (TypeError, ValueError, AttributeError):
         pass  # an unparseable record is not a cleared one
     return rec
@@ -1156,14 +1188,82 @@ def overspend_ratio(requested_usd: float, filled_shares: float,
                  / requested_usd, 4)
 
 
+# ONE DECISION — HOW MUCH OVERSPEND IS ACCEPTABLE — WAS ENCODED IN TWO
+# LITERALS THAT DISAGREED (2026-08-26, adversarial round 4).
+#
+# The pre-trade ask guard ADMITS a fill whose ask is up to 1.08x our
+# limit, and says so: "worst case this now permits is an 8% overspend on
+# a clip — about $20 — against losing every copy". It was widened to
+# exactly that after `ask > limit` made the sleeve sterile within the
+# hour.
+#
+# The post-fill breaker then halted the ENTIRE sleeve — every whale,
+# every entry, every exit — above 1.01x, and its halt record self-clears
+# BACKWARDS ONLY, so the halt is permanent until a human edits the
+# database.
+#
+# The two populations this was calibrated against are recorded in
+# tests/test_ask_guard.py. Every honest refusal the 1.08 threshold was
+# raised to admit trips the 1.01 breaker:
+#
+#   limit 0.57, ask 0.59  ->  ratio 1.035   admitted, then HALTS
+#   limit 0.88, ask 0.89  ->  ratio 1.011   admitted, then HALTS
+#   limit 0.84, ask 0.85  ->  ratio 1.012   admitted, then HALTS
+#
+# The whole premise of the ask guard is that our limit is not enforced
+# at execution — "the order behaves like a market IOC and takes the
+# book". So a fill AT the admitted ask is the expected outcome, and the
+# expected outcome bricked the sleeve. One ordinary two-cent copy stops
+# everything until someone opens the database, which is the same shape
+# as the short-fill halt found in the previous pass: a guard that blocks
+# everything, reporting itself as safety.
+#
+# The fix is not a looser breaker. It is to stop conflating two
+# questions that have different answers:
+#
+#   RECORDING — "did the venue charge more than we asked?" Anything at
+#   all above rounding is worth stamping on the row and counting.
+#   Unchanged at 1.01. Nothing becomes invisible.
+#
+#   HALTING — "is this evidence of the wrong-side defect, which must
+#   stop the whole sleeve?" That question was already answered on real
+#   data when the ask guard was calibrated: worst honest 1.035, cheapest
+#   real overspend 1.146. The wrong-side population runs 1.15x-3.87x. A
+#   halt anywhere in that gap catches 100% of the incident it was built
+#   for; at 1.01 it also catches every honest copy.
+#
+# So the halt boundary IS the ask tolerance, derived rather than
+# restated. A fill at or under what the pre-trade guard AUTHORIZED
+# cannot be evidence that something went wrong — it is the thing we
+# asked for. max() rather than a plain env read so the halt can never
+# sit below what we authorize: to tighten the halt, tighten
+# LIVE_ASK_TOLERANCE_PCT and the halt follows it down.
+ASK_TOLERANCE = 1.0 + float(os.getenv("LIVE_ASK_TOLERANCE_PCT", "0.08"))
 OVERSPEND_TOLERANCE = 1.01  # a cent of rounding on a whole-unit fill
+OVERSPEND_HALT_RATIO = max(
+    ASK_TOLERANCE,
+    float(os.environ.get("LIVE_OVERSPEND_HALT_RATIO", "1.08")))
 
 
 def is_overspend(requested_usd: float, filled_shares: float,
                  fill_price: float | None,
                  intent: str | None = None) -> bool:
+    """Did the venue charge more than we asked? RECORDING, not halting."""
     r = overspend_ratio(requested_usd, filled_shares, fill_price, intent)
     return r is not None and r > OVERSPEND_TOLERANCE
+
+
+def is_halting_overspend(requested_usd: float, filled_shares: float,
+                         fill_price: float | None,
+                         intent: str | None = None) -> bool:
+    """Is this the wrong-side defect, which must stop the whole sleeve?
+
+    Strictly implies is_overspend — OVERSPEND_HALT_RATIO cannot be below
+    OVERSPEND_TOLERANCE while ASK_TOLERANCE is above it, and a test pins
+    that ordering.
+    """
+    r = overspend_ratio(requested_usd, filled_shares, fill_price, intent)
+    return r is not None and r > OVERSPEND_HALT_RATIO
 
 
 # MIRROR HIS SIZE, NEVER EXCEED IT (owner order 2026-08-25).
@@ -3913,7 +4013,10 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # Worst case this now permits is an 8% overspend on a clip
             # — about $20 — against losing every copy. The complement
             # case starts at 1.146 and is still refused.
-            _tol = 1.0 + float(os.getenv("LIVE_ASK_TOLERANCE_PCT", "0.08"))
+            # THE SHARED CONSTANT, not a fourth reading of the env.
+            # This threshold and the halt boundary are one decision;
+            # restating it here is how they came to disagree.
+            _tol = ASK_TOLERANCE
             if _ask is None or _ask > limit * _tol:
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 "
@@ -3976,6 +4079,13 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         # Passing the price and letting the breaker re-derive the cost
         # is what made the predicate and the halt record disagree.
         overspent = is_overspend(usd, filled, fill_price, _fill_intent)
+        # A SEPARATE, HIGHER BAR FOR STOPPING EVERYTHING. See
+        # OVERSPEND_HALT_RATIO: the row below is still stamped OVERSPEND
+        # at 1.01 and the log below still fires, so an overspend in the
+        # authorized band stays fully visible — it just does not brick
+        # the sleeve the pre-trade guard admitted it into.
+        halting = is_halting_overspend(usd, filled, fill_price,
+                                       _fill_intent)
         if overspent:
             # `mapping` is bound only on the PMUS branch; the CLOB leg
             # names its market by asset. Never let the alarm itself
@@ -4007,24 +4117,35 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             #
             # Persisted, so it survives a worker restart and holds until
             # a human clears it — a breaker that forgets is not one.
-            try:
-                await pool.execute(
-                    "INSERT INTO ingestion_state (key, value) "
-                    "VALUES ('copy_overspend_halt', $1::jsonb) "
-                    "ON CONFLICT (key) DO UPDATE SET value = $1::jsonb",
-                    json.dumps({
-                        "at": datetime.now(timezone.utc).isoformat(),
-                        "whale": payload.get("whale_username"),
-                        "slug": (locals().get("mapping") or {}).get(
-                            "market_slug") or payload.get("asset"),
-                        "asked": usd, "spent": spent,
-                        "ratio": round(spent / usd, 3),
-                        "limit": limit, "fill_price": fill_price,
-                        "why": "venue filled above our limit — copying "
-                               "halted after the first occurrence"}))
-                log.error("COPY SLEEVE HALTED by overspend breaker")
-            except Exception:  # noqa: BLE001 — never lose the fill record
-                log.exception("could not persist the overspend halt")
+            if not halting:
+                _exit_stop("overspend_within_authorized_band",
+                           ratio=round(spent / usd, 3),
+                           halt_at=OVERSPEND_HALT_RATIO)
+                log.warning(
+                    "LIVE OVERSPEND ratio %.3f is inside the band the "
+                    "pre-trade ask guard authorizes (<= %.2f) — recorded "
+                    "on the row, NOT halting the sleeve",
+                    spent / usd, OVERSPEND_HALT_RATIO)
+            else:
+                try:
+                    await pool.execute(
+                        "INSERT INTO ingestion_state (key, value) "
+                        "VALUES ('copy_overspend_halt', $1::jsonb) "
+                        "ON CONFLICT (key) DO UPDATE SET value = $1::jsonb",
+                        json.dumps({
+                            "at": datetime.now(timezone.utc).isoformat(),
+                            "whale": payload.get("whale_username"),
+                            "slug": (locals().get("mapping") or {}).get(
+                                "market_slug") or payload.get("asset"),
+                            "asked": usd, "spent": spent,
+                            "ratio": round(spent / usd, 3),
+                            "halt_at": OVERSPEND_HALT_RATIO,
+                            "limit": limit, "fill_price": fill_price,
+                            "why": "venue filled above our limit — copying "
+                                   "halted after the first occurrence"}))
+                    log.error("COPY SLEEVE HALTED by overspend breaker")
+                except Exception:  # noqa: BLE001 — never lose the fill
+                    log.exception("could not persist the overspend halt")
         await pool.execute(
             """
             UPDATE live_orders
