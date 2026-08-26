@@ -74,6 +74,22 @@ POSITIONS_PAGE = int(os.environ.get("WHALE_EXIT_POS_PAGE", "100"))
 POSITIONS_MAX = int(os.environ.get("WHALE_EXIT_POS_MAX", "2000"))
 
 
+class EmptyPositions(RuntimeError):
+    """The venue returned NO positions for a whale we know holds some.
+
+    Sibling of TruncatedPositions and the more dangerous of the two,
+    because it needs no unusual book size to happen — one transient
+    empty 200 is enough. Every asset in the previous snapshot is then
+    absent from `now`, diff_exits reads absent-and-unresolved as a FULL
+    exit, and the cycle fires MAX_EXITS_PER_CYCLE real sell orders on
+    positions the whale still holds. Measured on a 30-position book: 30
+    exits detected, 10 placed.
+
+    I guarded the truncated case and not this one. A partial book is a
+    different truth; an empty book is a different truth too, and this
+    is the shape that arrives without warning."""
+
+
 class TruncatedPositions(RuntimeError):
     """The venue still had more positions when we stopped reading.
 
@@ -235,6 +251,28 @@ async def _fetch_positions(http: httpx.AsyncClient,
     return out, sibs, seen
 
 
+def guard_empty(prev: dict[str, float], now: dict[str, float],
+                address: str) -> None:
+    """Refuse an EMPTY read against a non-empty prior snapshot.
+
+    A whale does not close his entire book between two 120-second
+    polls. A read that says he did is a venue hiccup, and acting on it
+    fires a full close on every position he holds — up to the cycle
+    cap, then again next cycle.
+
+    Deliberately narrow: only the fully-empty case. A whale who
+    genuinely goes flat will read empty on the cycle AFTER this one
+    too, and by then `prev` is empty as well and nothing fires. The
+    cost of the guard is one cycle of delay on a real full flatten; the
+    cost of not having it is real sell orders on a transient blip."""
+    if prev and not now:
+        raise EmptyPositions(
+            f"{address}: /positions returned NOTHING against a prior "
+            f"snapshot of {len(prev)} — a whale does not close his "
+            f"whole book in 120s, so this is refused rather than "
+            f"mirrored as {len(prev)} full exits")
+
+
 def diff_exits(prev: dict[str, float],
                now: dict[str, float],
                resolved: set[str] | None = None) -> list[tuple[str, float]]:
@@ -306,6 +344,10 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
             continue
         try:
             now, sibs, seen = await _fetch_positions(http, r["address"])
+        except EmptyPositions as exc:
+            log.warning("whale-exit: %s", exc)
+            stats["empty_books"] = stats.get("empty_books", 0) + 1
+            continue
         except TruncatedPositions as exc:
             # Forfeit this whale's cycle rather than diff a book we know
             # is incomplete. Counted, because a lane that silently skips
@@ -323,6 +365,12 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
         all_sibs.update(sibs)
         stats["whales"] += 1
         prev = await _load(pool, uname.lower())
+        try:
+            guard_empty(prev, now, r["address"])
+        except EmptyPositions as exc:
+            log.warning("whale-exit: %s", exc)
+            stats["empty_books"] = stats.get("empty_books", 0) + 1
+            continue
         if not prev:
             # No previous state: diffing against nothing would read every
             # holding as a fresh exit and fire a full close on each.

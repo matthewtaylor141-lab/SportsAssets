@@ -335,3 +335,65 @@ class TestATruncatedPositionListIsNotAnExit:
 
     def test_the_exception_explains_the_money_consequence(self):
         assert "real sell orders" in (we.TruncatedPositions.__doc__ or "")
+
+
+class TestAnEmptyReadIsNotAFullFlatten:
+    """One transient empty /positions response fired ten real sell
+    orders on positions the whale still held.
+
+    Sibling of the truncation hazard and the more dangerous of the two,
+    because it needs no unusual book size — a single empty 200 is
+    enough. Every asset in the previous snapshot is then absent from
+    `now`, diff_exits reads absent-and-unresolved as a FULL exit, and
+    the cycle fires up to MAX_EXITS_PER_CYCLE closes. Measured on a
+    30-position book before the guard: 30 exits detected, 10 placed,
+    and the same again next cycle.
+
+    I guarded truncation and not this. Found by the second adversarial
+    round."""
+
+    def test_the_hazard_reproduces_without_the_guard(self):
+        prev = {f"a{i}": 100.0 for i in range(30)}
+        assert len(we.diff_exits(prev, {}, set())) == 30
+
+    def test_an_empty_read_against_a_held_book_raises(self):
+        import pytest as _pt
+
+        with _pt.raises(we.EmptyPositions):
+            we.guard_empty({"a": 100.0}, {}, "0xabc")
+
+    def test_the_message_says_what_it_refused_to_do(self):
+        import pytest as _pt
+
+        with _pt.raises(we.EmptyPositions) as ei:
+            we.guard_empty({"a": 1.0, "b": 2.0}, {}, "0xabc")
+        assert "2 full exits" in str(ei.value)
+
+    def test_a_first_snapshot_is_not_affected(self):
+        """No prior book, nothing to mirror."""
+        we.guard_empty({}, {}, "0xabc")
+
+    def test_a_NON_empty_read_passes_through(self):
+        we.guard_empty({"a": 100.0}, {"a": 40.0}, "0xabc")
+
+    def test_a_genuine_flatten_still_lands_one_cycle_later(self):
+        """The guard costs a cycle, not the exit. Next poll `prev` is
+        empty too, so nothing is suppressed thereafter."""
+        we.guard_empty({}, {}, "0xabc")
+
+    def test_the_cycle_skips_and_COUNTS_it(self):
+        import inspect
+
+        src = inspect.getsource(we._cycle)
+        assert "except EmptyPositions" in src
+        assert 'stats["empty_books"]' in src
+        assert "guard_empty(prev, now" in src
+
+    def test_the_guard_runs_before_the_snapshot_is_saved(self):
+        """Saving the empty read would make it the new baseline and
+        erase the whole book from our state."""
+        import inspect
+
+        src = inspect.getsource(we._cycle)
+        assert src.index("guard_empty(prev, now") < \
+            src.index("_save(pool, uname.lower(), now)")
