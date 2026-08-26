@@ -6112,6 +6112,11 @@ async def api_premap_status() -> dict:
                      ("workers_boot", "workers_boot"),
                      ("side_echo_last", "side_echo"),
                      ("side_echo_shadow", "side_echo_shadow"),
+                     # The fuzzy class's own certification streak. Kept
+                     # separate from side_echo_shadow so the premap
+                     # number that justified the `exact` resume stays a
+                     # clean answer to its own question.
+                     ("side_echo_fuzzy", "side_echo_fuzzy"),
                      ("side_echo_tripped", "side_echo_tripped")):
         try:
             val = await pool.fetchval(

@@ -1266,6 +1266,9 @@ def overspend_ratio(requested_usd: float, filled_shares: float,
 # allowlist, same premap_live operator switch -- so this widens exactly
 # one thing and inherits every other gate unchanged.
 QUARANTINE_RESUME_SRC = frozenset({"premap", "exact"})
+# Where the fuzzy class's certification streak accumulates. Its own key
+# on purpose: see the state_key note in _side_echo_verify.
+FUZZY_CERT_KEY = "side_echo_fuzzy"
 ASK_TOLERANCE = 1.0 + float(os.getenv("LIVE_ASK_TOLERANCE_PCT", "0.08"))
 OVERSPEND_TOLERANCE = 1.01  # a cent of rounding on a whole-unit fill
 OVERSPEND_HALT_RATIO = max(
@@ -2810,7 +2813,8 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                             attempts: int = 3, shadow: bool = False,
                             his_slug: str | None = None,
                             intent: str | None = None,
-                            mapping_src: str | None = None) -> None:
+                            mapping_src: str | None = None,
+                            state_key: str | None = None) -> str:
     """POST-FILL SIDE ECHO (owner order 2026-08-24: "verify that we
     never ever take the wrong position ever again"): seconds after a
     copy fills, re-derive the mapping from the venue's LIVE event board
@@ -2957,7 +2961,17 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
     # independent certification instrument: the mapper's choice is
     # re-derived from LIVE venue data by the same precision matcher,
     # so the evidence is not the mapper grading its own homework.
-    state_key = "side_echo_shadow" if shadow else "side_echo_last"
+    # A SEPARATE COUNTER FOR A SEPARATE POPULATION (2026-08-26).
+    #
+    # The owner reads SHADOW-CERT to decide whether a mapping class may
+    # trade, and it decided tonight's `exact` resume at 691 ok / 0
+    # mismatch. Certifying a NEW class into the same counter would
+    # dilute the streak that justified the last decision with evidence
+    # about a different question, and nobody reading the number
+    # afterwards could separate them. Callers certifying a new class
+    # pass their own key.
+    state_key = state_key or ("side_echo_shadow" if shadow
+                              else "side_echo_last")
     try:
         if verdict == "mismatch" and not shadow:
             # The un-overridable circuit FIRST (leak-hunt 2026-08-24):
@@ -3010,18 +3024,26 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                         .isoformat(timespec="seconds")}), state_key)
     except Exception:  # noqa: BLE001 — bookkeeping must not raise either
         log.exception("side-echo bookkeeping failed for row %s", row_id)
+    # RETURNED so a caller can gate on it. Nothing reads this today —
+    # every call site is fire-and-forget through _spawn_echo — but the
+    # verdict is the whole product of this function and having it
+    # reachable is what lets the fuzzy class be certified before it is
+    # ever trusted, rather than trusted and then measured.
+    return verdict
 
 
 def _spawn_echo(pool, row_id: int, us_slug: str, outcome: str | None,
                 his_title: str | None, *, shadow: bool,
                 his_slug: str | None = None,
                 intent: str | None = None,
-                mapping_src: str | None = None) -> None:
+                mapping_src: str | None = None,
+                state_key: str | None = None) -> None:
     """Fire-and-forget echo with a strong task ref (a bare create_task
     can be garbage-collected mid-flight)."""
     t = asyncio.create_task(_side_echo_verify(
         pool, row_id, us_slug, outcome, his_title, shadow=shadow,
-        his_slug=his_slug, intent=intent, mapping_src=mapping_src))
+        his_slug=his_slug, intent=intent, mapping_src=mapping_src,
+        state_key=state_key))
     _ECHO_TASKS.add(t)
     t.add_done_callback(_ECHO_TASKS.discard)
 
@@ -3754,7 +3776,41 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                                 ctx.get("outcome"),
                                 ctx.get("market_title"), shadow=True,
                                 his_slug=src_slug,
-                                intent=mapping.get("intent"))
+                                intent=mapping.get("intent"),
+                                mapping_src=mapping_src)
+                elif mapping_src == "fuzzy":
+                    # CERTIFY THE CLASS THE OWNER ACTUALLY WANTS BACK
+                    # (2026-08-26).
+                    #
+                    # The owner's goal is that no trade is missed for
+                    # being "fuzzy", because every trade is verified.
+                    # The instrument that can answer that already
+                    # exists and has never been pointed at this class:
+                    # the side echo re-derives a mapping from LIVE
+                    # venue rows through an independent matcher, and
+                    # produced 691 ok / 0 mismatch for premap, which is
+                    # what justified tonight's `exact` resume.
+                    #
+                    # `fuzzy` was never certified, so there is NO
+                    # evidence either way about the class that is 20 of
+                    # every 21 refusals. Not "it is dangerous" — there
+                    # is no measurement at all, and the 2026-08-23
+                    # incident is one data point about six orders.
+                    #
+                    # This spends no money and changes no gate. A fuzzy
+                    # mapping is still refused; it is refused and then
+                    # MEASURED, under its own counter so the premap
+                    # streak stays a clean answer to its own question.
+                    # In a few hours it turns "we do not trust fuzzy"
+                    # into a number, which is the only honest basis for
+                    # widening the lane or leaving it shut.
+                    _spawn_echo(pool, row_id, mapping["market_slug"],
+                                ctx.get("outcome"),
+                                ctx.get("market_title"), shadow=True,
+                                his_slug=src_slug,
+                                intent=mapping.get("intent"),
+                                mapping_src=mapping_src,
+                                state_key=FUZZY_CERT_KEY)
                 log.warning("LIVE (US) quarantined %s mapping: %s / %s",
                             mapping_src, ctx.get("market_title"),
                             _q_slug)
