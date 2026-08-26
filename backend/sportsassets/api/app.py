@@ -2349,6 +2349,44 @@ class ManualTradeBody(BaseModel):
     ask: float | None = None   # PM slug rows: bounded fallback quote
 
 
+# HOW LONG A DESK TICKET MAY SIT UNCLAIMED BEFORE WE CALL IT DEAD.
+# The relay polls every 2s and sleeps 30s once at thread start, so five
+# minutes is far past any healthy delay and well short of a trading
+# session.
+DESK_QUEUE_STALE_S = int(os.environ.get("DESK_QUEUE_STALE_S", "300"))
+DESK_RELAY_SEEN_KEY = "desk_relay_last_seen"
+
+
+async def reap_stale_desk_queue(pool) -> int:
+    """Retire desk tickets the relay never claimed. Returns the count.
+
+    ONLY 'pending'. A pending row was never handed to the venue -- the
+    relay picks rows up by moving them to 'placed' -- so failing it is a
+    statement we can prove. A 'placed' row may have money behind it and
+    only the venue knows; it is surfaced in the status block instead of
+    being guessed at here, the same discipline as the stranded-exit
+    reaper.
+    """
+    try:
+        rows = await pool.fetch(
+            "UPDATE manual_kalshi_queue SET status='error', "
+            "updated_at=now(), error=$1 "
+            "WHERE status='pending' "
+            "AND created_at < now() - ($2 || ' seconds')::interval "
+            "RETURNING id",
+            f"relay never claimed this ticket within "
+            f"{DESK_QUEUE_STALE_S}s - the desk relay looks down; "
+            f"nothing was sent to the venue",
+            str(DESK_QUEUE_STALE_S))
+        if rows:
+            log.warning("DESK RELAY: retired %d unclaimed ticket(s) - "
+                        "the Kalshi relay has not picked up work in %ds",
+                        len(rows), DESK_QUEUE_STALE_S)
+        return len(rows)
+    except Exception:  # noqa: BLE001 -- bookkeeping never blocks a ticket
+        return 0
+
+
 @app.post("/api/admin/manual-trade")
 async def api_manual_trade(body: ManualTradeBody,
                            role: str = Depends(require_desk)) -> dict:
@@ -2359,7 +2397,7 @@ async def api_manual_trade(body: ManualTradeBody,
     if role == "wall":
         raise HTTPException(status_code=403, detail="wall is read-only")
     from ..live_executor import (MANUAL_DAILY_USD, MANUAL_MAX_PER_ORDER_USD,
-                                 execute_manual)
+                                 _is_paused, execute_manual)
 
     if body.venue == "polymarket-us":
         return await execute_manual(
@@ -2370,6 +2408,20 @@ async def api_manual_trade(body: ManualTradeBody,
     if not (0 < body.usd <= MANUAL_MAX_PER_ORDER_USD):
         return {"ok": False,
                 "error": f"size must be $0-{MANUAL_MAX_PER_ORDER_USD:.0f}"}
+    # THE KILL SWITCH APPLIED TO ONE VENUE AND NOT THE OTHER.
+    #
+    # _execute_manual checks _is_paused before a Polymarket ticket
+    # (live_executor.py). This branch never did, so flipping
+    # live_trading_paused stopped PM desk orders and left the Kalshi
+    # desk placing at full size — one decision written in two places
+    # with only one of them updated, which is how the pause looked like
+    # it worked while it didn't.
+    #
+    # A tightening, and it fails CLOSED on an unreadable flag, same as
+    # every other reader of it.
+    if await _is_paused(await get_pool()):
+        return {"ok": False,
+                "error": "live trading is paused by the admin switch"}
     # The venue is YES-denominated per outcome ticker. A NO buy is the
     # SAME BET as YES on the event's sibling ticker (NO Ruud 55c == YES
     # Fonseca 55c), so NO routes through the one order path the venue
@@ -2379,6 +2431,13 @@ async def api_manual_trade(body: ManualTradeBody,
     if not ticker:
         return {"ok": False, "error": "pick a market"}
     pool = await get_pool()
+    # A WEDGED QUEUE USED TO EAT THE DAY BUDGET FOREVER. 'pending' rows
+    # count toward the 24h cap below, and nothing ever retired one: if
+    # the relay thread is not running (it returns silently when
+    # EDGE_PLATFORM_API or EDGE_INGEST_TOKEN is unset) every ticket
+    # queues, never places, and the desk locks itself out with an
+    # "exhausted budget" that was never spent.
+    await reap_stale_desk_queue(pool)
     day_spent = float(await pool.fetchval(
         """
         SELECT COALESCE((SELECT sum(filled_usd) FROM live_orders
@@ -2514,6 +2573,19 @@ async def api_manual_kalshi_queue(
     cfg = settings()
     check_engine_token(x_engine_token)
     pool = await get_pool()
+    # HEARTBEAT. This pull is the only proof the relay process is alive,
+    # and until now nothing recorded it -- so "the desk is live" was not
+    # a question anyone could answer, and a relay that never started
+    # looked exactly like a quiet desk.
+    try:
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            DESK_RELAY_SEEN_KEY,
+            json.dumps({"at": datetime.now(timezone.utc).isoformat(
+                timespec="seconds")}))
+    except Exception:  # noqa: BLE001 -- never block the relay's work
+        pass
     rows = await pool.fetch(
         "SELECT id, ticker, side, action, "
         "limit_price::float8 AS limit_price, "
@@ -3537,6 +3609,51 @@ async def _live_status_uncached() -> dict:
             "left(COALESCE(error, ''), 200) AS error "
             "FROM live_orders WHERE whale_username = 'manual' "
             "ORDER BY placed_at DESC LIMIT 5")],
+    }
+    # THE BLOCK BUILT FOR "trades aren't being processed" COULD NOT SEE
+    # HALF THE DESK. live_orders holds the Polymarket leg only. Kalshi
+    # tickets live in manual_kalshi_queue and are placed by a relay
+    # thread in another process, so the entire failure mode this block
+    # exists to diagnose -- a ticket accepted and never executed -- was
+    # invisible in it.
+    #
+    # relay_last_seen is the only proof that process is alive. Absent or
+    # stale means every Kalshi ticket is queuing into nothing, which
+    # reads identically to a quiet desk unless it is stated.
+    try:
+        _seen = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            DESK_RELAY_SEEN_KEY)
+        _seen = (json.loads(_seen) if isinstance(_seen, str)
+                 else _seen) or {}
+        _seen_at = _seen.get("at")
+    except Exception:  # noqa: BLE001
+        _seen_at = None
+    _age = None
+    if _seen_at:
+        try:
+            _age = int((datetime.now(timezone.utc)
+                        - datetime.fromisoformat(_seen_at)).total_seconds())
+        except Exception:  # noqa: BLE001
+            _age = None
+    manual_desk["kalshi_queue"] = {
+        "by_status": {r["status"]: r["n"] for r in await pool.fetch(
+            "SELECT status, count(*)::int AS n FROM manual_kalshi_queue "
+            "GROUP BY 1")},
+        "stuck_pending": int(await pool.fetchval(
+            "SELECT count(*)::int FROM manual_kalshi_queue "
+            "WHERE status='pending' AND created_at < now() "
+            "- ($1 || ' seconds')::interval", str(DESK_QUEUE_STALE_S)) or 0),
+        # 'placed' is NOT terminal and nothing retires it, so a relay
+        # that died mid-ticket leaves a row the desk UI polls forever.
+        # Counted, not guessed at: only the venue knows if it filled.
+        "stuck_placed": int(await pool.fetchval(
+            "SELECT count(*)::int FROM manual_kalshi_queue "
+            "WHERE status='placed' AND updated_at < now() "
+            "- ($1 || ' seconds')::interval", str(DESK_QUEUE_STALE_S)) or 0),
+        "relay_last_seen": _seen_at,
+        "relay_age_s": _age,
+        "relay_alive": bool(_age is not None and _age < DESK_QUEUE_STALE_S),
     }
     venue = active_venue()
     # Fill-vs-miss aggregate rides the public status (5-min cache) so
