@@ -450,6 +450,57 @@ def diff_exits(prev: dict[str, float],
     return out
 
 
+async def _confirm_gone(http: httpx.AsyncClient, pool, address: str,
+                        asset: str) -> bool:
+    """POSITIVE per-market confirmation that a whale no longer holds
+    `asset`. Absence from a partial book is never evidence; this is.
+
+    Fails CLOSED on everything: no condition id, an error, and --
+    critically -- a response the server did not actually filter. The
+    /positions `market` parameter narrows to one condition id; if the
+    venue ever ignored an unknown parameter it would hand back the
+    unfiltered first page, and reading the asset's absence from THAT as
+    proof of exit would fire a 100% sell on a position the whale still
+    holds. So a non-empty response containing any row from a DIFFERENT
+    market is treated as unfiltered and refused, and an empty response
+    is refused too -- a roster whale with no positions at all is not a
+    plausible read, it is a failure mode.
+    """
+    try:
+        cid = await pool.fetchval(
+            "SELECT condition_id FROM market_tokens WHERE token_id = $1",
+            asset)
+        if not cid:
+            return False
+        resp = await http.get("/positions", params={
+            "user": address, "market": cid, "limit": 100,
+            "sizeThreshold": 0})
+        if resp.status_code != 200:
+            return False
+        body = resp.json()
+        rows = body if isinstance(body, list) else (
+            body.get("data") or body.get("positions") or [])
+        if not rows:
+            return False
+        for p in rows:
+            if not isinstance(p, dict):
+                return False
+            row_cid = str(p.get("conditionId") or p.get("market") or "")
+            if row_cid and row_cid != str(cid):
+                return False        # unfiltered response -- refuse
+            if str(p.get("asset") or p.get("tokenId") or "") == asset:
+                try:
+                    sz = float(p.get("size") or 0)
+                except (TypeError, ValueError):
+                    return False
+                return sz <= 0
+        # The venue answered FOR THIS MARKET (rows present, all from
+        # this condition) and the leg is not among them: gone.
+        return True
+    except Exception:  # noqa: BLE001 -- unknown is not gone
+        return False
+
+
 async def _cycle(http: httpx.AsyncClient, pool) -> dict:
     from ..api.copies_record import COPY_WHALES
     from ..live_executor import EXIT_PENDING_REASONS, execute_copy
@@ -592,11 +643,48 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
                             "possibly resolved and skipping it")
                 not_an_exit = None
         if partial:
-            # Every disappearance is unusable here whatever the market
-            # table says: the asset may simply sit past the read cut.
+            # A disappearance from a PARTIAL book is not evidence -- the
+            # asset may simply sit past the read cut. But it is not
+            # nothing either, and skipping ALL of them made truncation a
+            # permanent blind spot: the census read vanished_live:89
+            # against exit_attempts:3, because the two whales with books
+            # past POSITIONS_MAX (RN1 at 10k+ rows, 0x076daa87 at 7.8k,
+            # per the 2026-08-26 venue ledger census) are exactly the
+            # ones whose every full exit vanished into this branch. A
+            # vanished-live position is a whale who has FULLY left while
+            # we hold 100% of the copied notional -- the single largest
+            # dollar class the exit lane exists for.
+            #
+            # So: for the vanished assets WE ACTUALLY HOLD (the only
+            # ones that can produce dollars), and that the liveness
+            # classification above did not already rule out, ask the
+            # venue POSITIVELY, one market at a time. Absence from a
+            # partial page is never proof; a filtered per-market read
+            # that comes back without the leg is. Anything unconfirmed
+            # -- errors, unfiltered responses, unknown tokens -- stays
+            # skipped exactly as before.
+            exclusion = set(gone)
+            if not_an_exit is not None:
+                live_gone = [a for a in gone if a not in not_an_exit]
+                if live_gone:
+                    ours = await pool.fetch(
+                        "SELECT DISTINCT asset FROM live_orders "
+                        "WHERE status = 'filled' "
+                        "AND asset = ANY($1::text[])", live_gone)
+                    held_here = {str(x["asset"]) for x in ours}
+                    for a in live_gone:
+                        if a not in held_here:
+                            continue
+                        if await _confirm_gone(http, pool,
+                                               r["address"], a):
+                            exclusion.discard(a)
+                            stats["partial_vanished_confirmed"] = (
+                                stats.get("partial_vanished_confirmed",
+                                          0) + 1)
             stats["partial_vanished_skipped"] = (
-                stats.get("partial_vanished_skipped", 0) + len(gone))
-            found = diff_exits(prev, now, set(gone))
+                stats.get("partial_vanished_skipped", 0)
+                + len([a for a in gone if a in exclusion]))
+            found = diff_exits(prev, now, exclusion)
         elif not_an_exit is None:
             found = diff_exits(prev, now, set(gone))
         else:
@@ -645,6 +733,28 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
         for asset, _frac in deferred:
             if asset in prev:
                 to_save[asset] = prev[asset]
+        # THE SUB-MIN_SHRINK DEAD BAND (2026-08-26, adversarial
+        # workflow). diff_exits drops a shrink under MIN_SHRINK (5%) as
+        # noise -- right, per observation -- but this save then advanced
+        # the baseline anyway, so a whale trimming 3% a cycle was
+        # measured 3% against a fresh baseline every time and NEVER
+        # accumulated. The mx_below_floor pending ratchet downstream
+        # only engages at >= MIN_SHRINK, so the 0-5%-per-cycle band was
+        # structurally invisible: he could walk out of a position in
+        # twenty steps while every observation read "noise".
+        #
+        # PIN, do not lower: the baseline stays at the pre-trim size
+        # until the CUMULATIVE fraction crosses MIN_SHRINK and enters
+        # the diff, then rides the existing ratchet across
+        # MIN_EXIT_FRAC. A re-add at or above the pinned size clears
+        # the pin through the `after >= before` skip, so noise cannot
+        # accumulate into a false exit. No floor moved.
+        for asset, before in prev.items():
+            after = now.get(asset)
+            if after is None or before <= 0 or after >= before:
+                continue
+            if (before - after) / before < MIN_SHRINK:
+                to_save[asset] = before
         await _save(pool, uname.lower(), to_save)
         # A REFUSED EXIT WAS ERASED FOREVER (2026-08-26, adversarial
         # round 3).

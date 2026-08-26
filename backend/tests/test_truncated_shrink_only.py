@@ -60,12 +60,25 @@ class TestOnlyShrinksSurviveATruncatedRead:
         prev, now = {"held": 100.0}, {"held": 40.0}
         assert we.diff_exits(prev, now, set()) == [("held", 0.6)]
 
-    def test_the_cycle_takes_the_shrink_only_branch(self):
+    def test_the_partial_branch_starts_from_full_exclusion(self):
+        """Updated 2026-08-26: the branch no longer excludes ALL gone
+        assets unconditionally -- that made truncation a permanent blind
+        spot for exactly the whales whose books exceed POSITIONS_MAX
+        (vanished_live:89 against exit_attempts:3). It still STARTS
+        from full exclusion; an asset leaves the exclusion set only via
+        _confirm_gone's positive per-market read, and only when we hold
+        it. Absence from a partial page is still never evidence."""
         src = inspect.getsource(we._cycle)
         assert "if partial:" in src
         i = src.index("if partial:")
-        block = src[i:i + 700]
-        assert "diff_exits(prev, now, set(gone))" in block
+        block = src[i:src.index("elif not_an_exit is None:")]
+        assert "exclusion = set(gone)" in block
+        assert "_confirm_gone(" in block
+        assert "diff_exits(prev, now, exclusion)" in block
+        # only a discard can shrink it, and only behind the held check
+        assert "exclusion.discard(a)" in block
+        assert block.index("if a not in held_here:") \
+            < block.index("exclusion.discard(a)")
 
     def test_skipped_vanishes_are_counted(self):
         src = inspect.getsource(we._cycle)
