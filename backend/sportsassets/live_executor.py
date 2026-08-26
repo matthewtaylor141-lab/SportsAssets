@@ -73,7 +73,7 @@ _QUEUE_STATS: dict = {"n": 0, "total_s": 0.0, "max_s": 0.0}
 _FIRST_FILL_LOCK = asyncio.Lock()
 
 
-async def execute_copy(payload: dict) -> None:
+async def execute_copy(payload: dict) -> str | None:
     """Fresh-detection execution entry point, spawned by the ingestion
     pipeline ALONGSIDE (not inside) the measurement probe.
 
@@ -81,25 +81,37 @@ async def execute_copy(payload: dict) -> None:
     probe cohort's measurement integrity, but for EXECUTION the
     pipeline's 600s fresh gate plus the FOK at his+2% already bound
     staleness — a 2-10 minute detection is a copy the sleeve previously
-    forfeited to the 10-minute sweep for no risk reason."""
+    forfeited to the 10-minute sweep for no risk reason.
+
+    Returns the exit-path reason for a SELL (see EXIT_PENDING_REASONS),
+    None otherwise. The BUY path's return is unchanged and unread; every
+    existing caller ignores the value.
+    """
     try:
+        # HIS SELL IS A SIGNAL TOO (owner order 2026-08-25). This path
+        # returned early on anything that was not a BUY, so his exits
+        # were discarded at the door — we copied entries and then held
+        # to resolution while he took the move. mirror_exit carries its
+        # own gates; it is not a bypass of this one.
+        #
+        # DISPATCHED ABOVE THE copy_probe_enabled RETURN, which used to
+        # sit first. That is not a loosened gate: mirror_exit's own
+        # first check is `not copy_probe_enabled or copy_halted()`, a
+        # strict superset, and it refuses before touching an order.
+        # What changes is that the refusal now has a NAME the caller can
+        # read ("mx_halted") instead of a bare return, so the exits
+        # refused while the sleeve is off are held rather than erased.
+        if payload.get("side") == "SELL":
+            return await mirror_exit(payload)
         # copy_probe_enabled was the fresh-copy path's de facto master
         # switch while execution lived inside the probe; it stays one
         # (same-day review finding — an operator flipping it expects
         # copies to stop, and silently un-braking a kill dial is worse
         # than the naming being imperfect).
         if not settings().copy_probe_enabled:
-            return
-        # HIS SELL IS A SIGNAL TOO (owner order 2026-08-25). This path
-        # returned early on anything that was not a BUY, so his exits
-        # were discarded at the door — we copied entries and then held
-        # to resolution while he took the move. mirror_exit carries its
-        # own gates; it is not a bypass of this one.
-        if payload.get("side") == "SELL":
-            await mirror_exit(payload)
-            return
+            return None
         if payload.get("side") != "BUY":
-            return
+            return None
         # QUEUE WAIT IS OUR OWN LATENCY, AND IT WAS INVISIBLE.
         #
         # reaction is stamped INSIDE the semaphore, which is right — the
@@ -153,6 +165,11 @@ async def execute_copy(payload: dict) -> None:
             await maybe_execute(payload, reaction)
     except Exception:  # noqa: BLE001 — execution must never disturb ingestion
         log.exception("copy execution failed for trade %s", payload.get("id"))
+        # No reason, so no retry. An exception on the SELL path may have
+        # left an order in flight — this lane carries no trade id and so
+        # no idempotency key, and selling the same position twice is a
+        # worse outcome than losing one exit.
+    return None
 
 
 # EMERGENCY HALT — CONFIRMED OVERSPEND ON PROBABLE WRONG SIDE
@@ -282,6 +299,59 @@ def _exit_stop(reason: str, **ctx) -> None:
                    else str(v)[:64]) for k, v in ctx.items()}})
         del _EXIT_RING[:-_EXIT_RING_MAX]
     return None
+
+
+def _exit_done(reason: str, **ctx) -> str:
+    """Record why the exit path stopped, and RETURN THE REASON.
+
+    Deliberately separate from _exit_stop even though the recording is
+    identical. _exit_stop must keep returning None because classify_exit
+    refuses with `return _exit_stop(...)` and its caller reads that
+    return as "not an exit" — handing it a truthy string would turn
+    every refusal into a classified exit on the money path.
+
+    So the reason travels out of mirror_exit only, through its own
+    helper, and nothing INSIDE this module branches on it. The one
+    reader is the whale_exits worker, deciding whether to keep the
+    position in its snapshot.
+    """
+    _exit_stop(reason, **ctx)
+    return reason
+
+
+# WHICH REFUSALS MEAN "STILL PENDING" RATHER THAN "SETTLED".
+#
+# The whale_exits worker advances its snapshot the moment it hands an
+# exit to execute_copy, so a refused exit is erased and never seen
+# again. Whether that is right depends entirely on WHY it was refused:
+#
+#   * a halted sleeve, an unreadable ledger, a venue that did not fill
+#     -- he is out and we are still in. The exit is real and pending;
+#     erasing it means holding to resolution against him, which is the
+#     divergence this worker exists to close.
+#
+#   * we hold nothing, he was never copied, the position is below the
+#     dust floor, it already sold -- there is nothing left to do. These
+#     must NOT be retried: the worker would re-pin the asset and rediff
+#     it every cycle forever.
+#
+# An ALLOWLIST, not a denylist, and the unknown case (a reason not
+# listed, or None from the exception path) advances the snapshot --
+# exactly today's behaviour. A reason nobody classified cannot create a
+# retry loop, and an exception may have left an order in flight, where
+# re-pinning would risk selling twice.
+EXIT_PENDING_REASONS: frozenset[str] = frozenset({
+    # Kill switch or breaker. Clears by operator action.
+    "mx_halted",
+    "mx_overspend_halt",
+    # Infrastructure said "I don't know", which is not "nothing to do".
+    "mx_exit_ledger_unreadable",
+    # Another lane holds the claim on this slug right now.
+    "mx_already_claimed",
+    # Liquidity, not position. Both come back.
+    "mx_no_bid_for_partial",
+    "mx_venue_unfilled",
+})
 
 
 def exit_census() -> dict:
@@ -550,7 +620,7 @@ async def classify_exit(pool, asset: str, whale: str,
             "his_open_shares": open_sh, "his_exit_shares": qty}
 
 
-async def mirror_exit(payload: dict) -> None:
+async def mirror_exit(payload: dict) -> str:
     """The whale sold. Sell our copy of the same market.
 
     Owner order 2026-08-25: "copy both buys and sells at a proportional
@@ -575,18 +645,18 @@ async def mirror_exit(payload: dict) -> None:
     correct rather than being written in a hurry against live money.
     """
     if payload.get("side") != "SELL":
-        return _exit_stop("mx_not_a_sell")
+        return _exit_done("mx_not_a_sell")
     if not settings().copy_probe_enabled or copy_halted():
-        return _exit_stop("mx_halted")
+        return _exit_done("mx_halted")
     username = (payload.get("whale_username") or "").lower()
     if username not in _whale_set("LIVE_VERIFIED_WHALES"):
-        return _exit_stop("mx_whale_not_verified", whale=username)
+        return _exit_done("mx_whale_not_verified", whale=username)
     asset = str(payload.get("asset") or "")
     if not asset:
-        return _exit_stop("mx_no_asset")
+        return _exit_done("mx_no_asset")
     pool = await get_pool()
     if await overspend_halt(pool):
-        return _exit_stop("mx_overspend_halt")
+        return _exit_done("mx_overspend_halt")
     # STAMPED AFTER THE HALT GATE, NOT BEFORE (2026-08-25, adversarial
     # review). It was counted before overspend_halt and before the
     # query, so a sleeve stopped by a tripped breaker still reported
@@ -635,9 +705,9 @@ async def mirror_exit(payload: dict) -> None:
                 int(_xtid))
         except Exception:  # noqa: BLE001 — an unreadable ledger is not
             # permission to replay a sale. Refuse and retry next cycle.
-            return _exit_stop("mx_exit_ledger_unreadable", trade=_xtid)
+            return _exit_done("mx_exit_ledger_unreadable", trade=_xtid)
         if _seen is not None:
-            return _exit_stop("mx_exit_already_mirrored", trade=_xtid)
+            return _exit_done("mx_exit_already_mirrored", trade=_xtid)
     row = await pool.fetchrow(
         "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
         "       fill_price::float8 AS entry, "
@@ -652,7 +722,7 @@ async def mirror_exit(payload: dict) -> None:
         # there is nothing to sell. Counting it separately is what
         # stops "mirror_exit never fired" from being read as a broken
         # exit path when it is actually a coverage number.
-        return _exit_stop("mx_no_position_of_ours", whale=username,
+        return _exit_done("mx_no_position_of_ours", whale=username,
                           asset=asset)
     # HIS fraction: how much of his own position did this sale close?
     # Sum his own ledger for this asset rather than trusting one row.
@@ -680,10 +750,10 @@ async def mirror_exit(payload: dict) -> None:
         try:
             closed_frac = max(0.0, min(float(supplied), 1.0))
         except (TypeError, ValueError):
-            return _exit_stop("mx_bad_supplied_fraction", frac=supplied)
+            return _exit_done("mx_bad_supplied_fraction", frac=supplied)
     else:
         if bought <= 0:
-            return _exit_stop("mx_no_ledger_position", asset=asset)
+            return _exit_done("mx_no_ledger_position", asset=asset)
         closed_frac = min(sold / bought, 1.0)
     # PROPORTIONAL, BOTH LEGS (owner order 2026-08-25: "copy buys and
     # 'sells' in the correct proportional relationship").
@@ -701,7 +771,7 @@ async def mirror_exit(payload: dict) -> None:
         log.info("MIRROR-EXIT below floor: %s closed %.1f%% of %s "
                  "(floor %.0f%%) — not worth a spread crossing",
                  username, closed_frac * 100, asset, MIN_EXIT_FRAC * 100)
-        return _exit_stop("mx_below_floor", whale=username,
+        return _exit_done("mx_below_floor", whale=username,
                           closed_frac=round(closed_frac, 4))
     from . import pmus
 
@@ -715,7 +785,7 @@ async def mirror_exit(payload: dict) -> None:
         "WHERE id=$1 AND status='filled' RETURNING id", row["id"])
     if claimed is None:
         log.info("MIRROR-EXIT %s already claimed by another task", us_slug)
-        return _exit_stop("mx_already_claimed", slug=us_slug)
+        return _exit_done("mx_already_claimed", slug=us_slug)
     try:
         held, _avg = await _pm_held(us_slug)
         ours = min(int(row["qty"]), held)
@@ -728,7 +798,7 @@ async def mirror_exit(payload: dict) -> None:
             # Our ledger says filled, the VENUE says we hold nothing.
             # A disagreement between the two is its own class of
             # problem and must never be filed under "no position".
-            return _exit_stop("mx_venue_holds_nothing", slug=us_slug,
+            return _exit_done("mx_venue_holds_nothing", slug=us_slug,
                               our_qty=int(row["qty"] or 0), held=held)
         # FULL EXIT: use the venue's own flatten, which needs no price.
         #
@@ -749,7 +819,7 @@ async def mirror_exit(payload: dict) -> None:
                 log.warning("MIRROR-EXIT no bid for %s — partial exit "
                             "deferred rather than sold blind", us_slug)
                 await _release_exit_claim(pool, row["id"])
-                return _exit_stop("mx_no_bid_for_partial", slug=us_slug)
+                return _exit_done("mx_no_bid_for_partial", slug=us_slug)
             limit = sell_limit_price(bid)
     except Exception:
         await _release_exit_claim(pool, row["id"])
@@ -772,7 +842,7 @@ async def mirror_exit(payload: dict) -> None:
         log.warning("MIRROR-EXIT unfilled %s: %s", us_slug,
                     str(result.get("raw"))[:160])
         await _release_exit_claim(pool, row["id"])
-        return _exit_stop("mx_venue_unfilled", slug=us_slug)
+        return _exit_done("mx_venue_unfilled", slug=us_slug)
     entry = row["entry"] or 0
     # SHORT EXITS WERE SIGN-INVERTED. See realized_pnl: on a short the
     # venue's price field names the LONG leg, so the realized amount is
@@ -823,7 +893,7 @@ async def mirror_exit(payload: dict) -> None:
             log.warning("MIRROR-EXIT: sold but could not record exit "
                         "trade %s — a replay is possible next cycle",
                         _xtid)
-    _exit_stop("mx_SOLD", whale=username, slug=us_slug,
+    _exit_done("mx_SOLD", whale=username, slug=us_slug,
                shares=int(filled), pnl=pnl or 0,
                full=bool(closed_frac >= FULL_EXIT_FRAC))
     log.warning("MIRROR-EXIT %s %s: sold %d of %d @ %.3f (entry %.3f) "
@@ -831,6 +901,7 @@ async def mirror_exit(payload: dict) -> None:
                 username, us_slug, int(filled), int(row["qty"]),
                 float(px or limit or 0), entry, pnl or 0,
                 closed_frac * 100, remaining)
+    return "mx_SOLD"
 
 
 async def overspend_halt(pool) -> Any:

@@ -51,16 +51,32 @@ class TestItCannotChangeAnOrder:
         assert le._exit_stop("anything") is None
         assert le._exit_stop("anything", whale="x", n=1) is None
 
+    def test_the_recorder_that_returns_a_value_is_a_different_function(self):
+        """classify_exit refuses with `return _exit_stop(...)` and its
+        caller reads that return as "not an exit". If the recorder ever
+        returned its reason, every refusal would become a truthy dict
+        stand-in on the money path — so the reason-returning variant is
+        a SEPARATE helper and _exit_stop stays None forever."""
+        assert le._exit_done("anything") == "anything"
+        assert le._exit_done("mx_x", whale="y") == "mx_x"
+        assert le._exit_stop("anything") is None
+
+    def test_classify_exit_never_uses_the_returning_variant(self):
+        assert "_exit_done(" not in inspect.getsource(le.classify_exit), \
+            "a cls_ refusal returning a string would read as an exit"
+
     def test_no_call_site_reads_its_value(self):
-        """Every call is `return _exit_stop(...)` or a bare statement —
-        never an assignment, a condition, or a comparison."""
+        """Every call is `return _exit_(stop|done)(...)` or a bare
+        statement — never an assignment, a condition, or a comparison.
+        _exit_done hands its reason to the CALLER of mirror_exit; nothing
+        inside this module may branch on it."""
         for fn in (le.classify_exit, le.mirror_exit):
             for line in inspect.getsource(fn).splitlines():
                 t = line.strip()
-                if "_exit_stop(" not in t:
+                if "_exit_stop(" not in t and "_exit_done(" not in t:
                     continue
-                assert t.startswith("return _exit_stop(") \
-                    or t.startswith("_exit_stop("), \
+                assert t.startswith(("return _exit_stop(", "_exit_stop(",
+                                     "return _exit_done(", "_exit_done(")), \
                     f"census value used in a decision: {t!r}"
 
     def test_it_never_raises_on_an_unserialisable_context(self):
@@ -145,7 +161,7 @@ class TestEveryRefusalIsNamedDistinctly:
 
         src = (inspect.getsource(le.classify_exit)
                + inspect.getsource(le.mirror_exit))
-        names = re.findall(r'_exit_stop\(\s*"([a-zA-Z_]+)"', src)
+        names = re.findall(r'_exit_(?:stop|done)\(\s*"([a-zA-Z_]+)"', src)
         assert len(names) == len(set(names)), \
             f"two paths share a reason: {names}"
         assert len(names) >= 18
@@ -153,9 +169,9 @@ class TestEveryRefusalIsNamedDistinctly:
     def test_the_two_functions_use_distinct_prefixes(self):
         import re
 
-        cls = re.findall(r'_exit_stop\(\s*"([a-zA-Z_]+)"',
+        cls = re.findall(r'_exit_(?:stop|done)\(\s*"([a-zA-Z_]+)"',
                          inspect.getsource(le.classify_exit))
-        mx = re.findall(r'_exit_stop\(\s*"([a-zA-Z_]+)"',
+        mx = re.findall(r'_exit_(?:stop|done)\(\s*"([a-zA-Z_]+)"',
                         inspect.getsource(le.mirror_exit))
         assert all(n.startswith("cls_") for n in cls)
         assert all(n.startswith("mx_") for n in mx)
@@ -294,7 +310,7 @@ class TestTheVerdictCanPointAtEveryPostLookupRefusal:
 
         src = inspect.getsource(le.mirror_exit)
         after = src[src.index("mx_reached_position_lookup"):]
-        reasons = set(re.findall(r'_exit_stop\(\s*"(mx_[a-z_]+)"', after))
+        reasons = set(re.findall(r'_exit_(?:stop|done)\(\s*"(mx_[a-z_]+)"', after))
         reasons.discard("mx_SOLD")
         listed = set(re.findall(r'"(mx_[a-z_]+)"', self._src()))
         missing = reasons - listed
@@ -344,7 +360,7 @@ class TestOneWhaleExitIsMirroredOnce:
         src = inspect.getsource(le.mirror_exit)
         insert = src.index("INSERT INTO copy_exit_applied")
         assert src.index("mx_SOLD") > insert
-        assert src.index("_exit_stop(\"mx_no_position_of_ours\"") < insert
+        assert src.index("_exit_done(\"mx_no_position_of_ours\"") < insert
 
     def test_an_unreadable_ledger_refuses_rather_than_replays(self):
         src = inspect.getsource(le.mirror_exit)

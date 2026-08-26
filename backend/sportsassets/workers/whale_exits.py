@@ -133,6 +133,88 @@ async def _save(pool, whale: str, snap: dict[str, float]) -> None:
         _KEY % whale, json.dumps(snap))
 
 
+# FAIRNESS ACROSS A BACKLOG OF REFUSED EXITS.
+#
+# When exits are refused they are pinned back into the snapshot so they
+# are found again. With a backlog larger than MAX_EXITS_PER_CYCLE that
+# is not enough on its own: the cycle acts on the first N of whatever
+# order the snapshot comes back in, so the same N are retried forever
+# and the rest never get a turn.
+#
+# The obvious fix — rely on the pinned assets landing at the end of the
+# dict's insertion order — DOES NOT WORK, and would have passed a test
+# while failing in production. The snapshot is stored as `jsonb`, and
+# PostgreSQL's jsonb does not preserve object key order; it normalises
+# keys into sorted order on write. Insertion order survives json.dumps
+# and dies in the column. A stub pool that keeps the string round-trips
+# it perfectly and proves nothing.
+#
+# So the cursor is EXPLICIT and lives in its own row: a list of assets
+# most recently attempted and still pending, oldest first.
+_RETRY_KEY = "whale_exit_retry:%s"
+# Bounded. A whale's book is bounded, but a row that only ever grows is
+# a row that eventually breaks a write.
+MAX_RETRY_CURSOR = 500
+
+
+def rotate_for_fairness(found: list[tuple[str, float]],
+                        tried: list[str]) -> list[tuple[str, float]]:
+    """Never-attempted exits first, then least-recently-attempted.
+
+    Pure, and the whole point of the fix, so it is testable without a
+    venue or a database. Stable within each group: an exit that has
+    never been tried keeps its position relative to other untried ones.
+    """
+    rank = {a: i for i, a in enumerate(tried)}
+    fresh = [x for x in found if x[0] not in rank]
+    stale = sorted((x for x in found if x[0] in rank),
+                   key=lambda x: rank[x[0]])
+    return fresh + stale
+
+
+def next_cursor(tried: list[str], attempted: list[str],
+                pending: set[str]) -> list[str]:
+    """The cursor after a cycle.
+
+    An asset we attempted and SETTLED leaves the cursor entirely — it
+    will not be found again. One we attempted and that is still pending
+    moves to the BACK, behind everything that has been waiting longer.
+    """
+    done = set(attempted)
+    out = [a for a in tried if a not in done]
+    out += [a for a in attempted if a in pending]
+    return out[-MAX_RETRY_CURSOR:]
+
+
+async def _load_retry(pool, whale: str) -> list[str]:
+    try:
+        raw = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            _RETRY_KEY % whale)
+    except Exception:  # noqa: BLE001 — a missing cursor is not an error
+        return []
+    if not raw:
+        return []
+    try:
+        d = raw if isinstance(raw, list) else json.loads(raw)
+        return [str(x) for x in (d or []) if x]
+    except (TypeError, ValueError):
+        return []
+
+
+async def _save_retry(pool, whale: str, assets: list[str]) -> None:
+    try:
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) "
+            "VALUES ($1, $2::jsonb) ON CONFLICT (key) DO UPDATE "
+            "SET value = $2::jsonb",
+            _RETRY_KEY % whale, json.dumps(assets))
+    except Exception:  # noqa: BLE001 — fairness is not correctness. A
+        # cursor that fails to write costs us round-robin ordering, not
+        # an exit; the pin in the snapshot is what preserves the exit.
+        log.warning("whale-exit: retry cursor write failed for %s", whale)
+
+
 # THE SIBLING TOKEN, IF THE VENUE ACTUALLY SENDS IT.
 #
 # classify_exit answers "is this buy really an exit?" by asking whether
@@ -326,9 +408,17 @@ def diff_exits(prev: dict[str, float],
 
 async def _cycle(http: httpx.AsyncClient, pool) -> dict:
     from ..api.copies_record import COPY_WHALES
-    from ..live_executor import execute_copy
+    from ..live_executor import EXIT_PENDING_REASONS, execute_copy
 
+    # "exits" counted ATTEMPTS, not sales, because it was incremented
+    # before execute_copy was called and execute_copy reported nothing
+    # back. A halted sleeve therefore published the same number as a
+    # working one. The four counters below are always present, never
+    # conditionally added: an absent key and a zero key look identical
+    # to a reader, and that has bitten this codebase before.
     stats = {"whales": 0, "exits": 0, "first_snapshots": 0,
+             "exit_attempts": 0, "exits_sold": 0,
+             "exits_pending": 0, "exits_no_action": 0,
              # Coverage of the venue's sibling field, measured rather
              # than assumed. sib_rows == 0 means the field is not there
              # and the fallback below contributes nothing — which is a
@@ -406,6 +496,10 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
             found = diff_exits(prev, now, set(gone))
         else:
             found = diff_exits(prev, now, resolved)
+        # Round-robin across a backlog, so a refused exit that keeps
+        # being pinned cannot crowd out one that has never been tried.
+        tried = await _load_retry(pool, uname.lower())
+        found = rotate_for_fairness(found, tried)
         acting = found[:MAX_EXITS_PER_CYCLE]
         deferred = found[MAX_EXITS_PER_CYCLE:]
         if deferred:
@@ -441,12 +535,64 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
             if asset in prev:
                 to_save[asset] = prev[asset]
         await _save(pool, uname.lower(), to_save)
+        # A REFUSED EXIT WAS ERASED FOREVER (2026-08-26, adversarial
+        # round 3).
+        #
+        # The snapshot above is saved before acting, which is right for
+        # crash safety — a crash mid-cycle must not replay the diff and
+        # fire the sells twice. But it advanced the asset the moment the
+        # exit was HANDED to execute_copy, and execute_copy reported
+        # nothing back. So an exit the sleeve REFUSED read as an exit
+        # the sleeve COMPLETED, and next cycle's prev already agreed the
+        # whale was out. The position was ours to hold to resolution
+        # against him, permanently, with no counter saying so.
+        #
+        # It is not hypothetical: the census shows mx_overspend_halt 326
+        # while the breaker sat tripped on a false positive. 326 real
+        # exits destroyed by a refusal that cleared with one POST.
+        #
+        # Same instrument as the deferred fix — PIN the asset at its
+        # pre-exit size — but applied only to the reasons that mean "we
+        # still hold and he is still out" (EXIT_PENDING_REASONS, an
+        # allowlist owned by the module that produces them). Anything
+        # else, an unrecognised reason included, advances exactly as it
+        # does today: a reason nobody classified must not be able to
+        # create a snapshot that re-diffs forever.
+        pending: list[str] = []
         for asset, frac in acting:
-            stats["exits"] += 1
+            stats["exit_attempts"] += 1
             log.warning("WHALE EXIT %s %s: closed %.0f%% (positions, not "
                         "a trade)", uname, asset, frac * 100)
-            await execute_copy({"whale_username": uname, "asset": asset,
-                                "side": "SELL", "closed_frac": frac})
+            reason = await execute_copy({"whale_username": uname,
+                                         "asset": asset, "side": "SELL",
+                                         "closed_frac": frac})
+            if reason == "mx_SOLD":
+                stats["exits_sold"] += 1
+                stats["exits"] += 1
+            elif reason in EXIT_PENDING_REASONS:
+                pending.append(asset)
+                stats["exits_pending"] += 1
+                # Named per reason as well as totalled. "held back" is
+                # only actionable if the reader can see WHAT to clear.
+                key = "pend_" + str(reason)
+                stats[key] = stats.get(key, 0) + 1
+            else:
+                stats["exits_no_action"] += 1
+        if pending:
+            for asset in pending:
+                if asset in prev:
+                    to_save[asset] = prev[asset]
+            log.warning("whale-exit: %s — %d exit(s) REFUSED and held in "
+                        "the snapshot for a retry next cycle", uname,
+                        len(pending))
+            await _save(pool, uname.lower(), to_save)
+        # Advance the cursor even when nothing is pending: an asset that
+        # settled this cycle has to LEAVE the cursor, or it keeps a
+        # stale rank and sorts ahead of genuinely older work forever.
+        attempted = [a for a, _f in acting]
+        if attempted or tried:
+            await _save_retry(pool, uname.lower(),
+                              next_cursor(tried, attempted, set(pending)))
     # PUBLISH THE SIBLING MAP, MERGED not replaced.
     #
     # A whale's positions payload only describes the markets he is in
