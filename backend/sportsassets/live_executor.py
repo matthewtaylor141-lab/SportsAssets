@@ -655,8 +655,33 @@ async def mirror_exit(payload: dict) -> str:
     if not settings().copy_probe_enabled or copy_halted():
         return _exit_done("mx_halted")
     username = (payload.get("whale_username") or "").lower()
-    if username not in _whale_set("LIVE_VERIFIED_WHALES"):
+    # CUTTING A WHALE MUST NOT STRAND HIS POSITIONS (2026-08-26).
+    #
+    # This was the verified-whale set -- an ENTRY gate -- applied to the
+    # EXIT path. The moment a whale is cut he leaves LIVE_VERIFIED_WHALES,
+    # and every position we already copied from him becomes permanently
+    # un-exitable: we hold it to resolution against a whale who has
+    # already left it. That is the exact divergence the exit leg exists
+    # to close, and it fires on every roster change rather than as a
+    # one-off.
+    #
+    # It is live right now for homerunhazard, swisstony, 0x2c33 and
+    # kch123 -- four cut whales whose open copies cannot be sold.
+    #
+    # Selling cannot create exposure. mirror_exit only ever reduces a
+    # position, and the row query below scopes to a live_orders row that
+    # is already 'filled' for this exact whale and asset -- so there is
+    # nothing here to sell unless we genuinely bought it from him.
+    #
+    # Kept to whales we have ACTUALLY ROSTERED rather than opened to any
+    # string: verified, cut, or carrying a clip entry. A username that
+    # was never on the roster still refuses.
+    if username not in exitable_whales():
         return _exit_done("mx_whale_not_verified", whale=username)
+    if username not in _whale_set("LIVE_VERIFIED_WHALES"):
+        # Visible, because a standing count means we are still unwinding
+        # a cut whale's book and that should not be silent.
+        _exit_stop("mx_exit_of_cut_whale", whale=username)
     asset = str(payload.get("asset") or "")
     if not asset:
         return _exit_done("mx_no_asset")
@@ -1016,6 +1041,32 @@ async def mirror_exit(payload: dict) -> str:
             "UPDATE live_orders SET status='cashed_out', "
             "pnl=COALESCE(pnl,0)+$2, settled_at=now() WHERE id=$1",
             row["id"], pnl or 0)
+    # AN INCOMPLETE EXIT IS NOT AN APPLIED EXIT (2026-08-26).
+    #
+    # The partial-full-exit branch below returns mx_partial_full_exit, a
+    # PENDING reason, precisely so the position lane brings the residual
+    # round again. Recording the ledger first made that retry impossible:
+    # the next attempt hits mx_exit_recently_applied (position lane,
+    # inside EXIT_DEDUP_MINUTES) or mx_exit_already_mirrored (trade
+    # lane) and is refused -- and mx_exit_recently_applied is a SETTLED
+    # reason, so the snapshot advances and the residual is lost for good.
+    #
+    # I introduced both halves of this within an hour of each other and
+    # the retry has never been reachable. The row keeps its shares, so
+    # nothing is orphaned, but it is never sold either.
+    #
+    # So the ledger is written only when the exit actually COMPLETED.
+    # An unrecorded incomplete exit is exactly what should be re-offered,
+    # and the row now carries `remaining` as its quantity, so the retry
+    # sizes against what is genuinely left rather than re-selling.
+    if _full and remaining > 0:
+        log.warning("MIRROR-EXIT %s: full exit filled %d of %d — %d "
+                    "share(s) still held, NOT recorded as applied so "
+                    "the residual can be retried",
+                    us_slug, int(booked), int(row["qty"]), remaining)
+        return _exit_done("mx_partial_full_exit", whale=username,
+                          slug=us_slug, sold=int(booked),
+                          remaining=remaining, pnl=pnl or 0)
     # RECORD IT, now that a sale actually happened.
     if _xtid is None:
         # The position lane has no trade id, so it records against a
@@ -1049,19 +1100,6 @@ async def mirror_exit(payload: dict) -> str:
             log.warning("MIRROR-EXIT: sold but could not record exit "
                         "trade %s — a replay is possible next cycle",
                         _xtid)
-    if _full and remaining > 0:
-        # A full exit that did not fully fill. The whale is out and we
-        # are not, so this is not finished — it comes back as PENDING so
-        # the position-diff lane brings the residual round again next
-        # cycle rather than recording the exit as done. The row now
-        # carries `remaining` as its quantity, so the retry prices and
-        # sizes against what is actually left.
-        log.warning("MIRROR-EXIT %s: full exit filled %d of %d — %d "
-                    "share(s) still held, row kept live for a retry",
-                    us_slug, int(booked), int(row["qty"]), remaining)
-        return _exit_done("mx_partial_full_exit", whale=username,
-                          slug=us_slug, sold=int(booked),
-                          remaining=remaining, pnl=pnl or 0)
     _exit_done("mx_SOLD", whale=username, slug=us_slug,
                shares=int(booked), pnl=pnl or 0,
                full=bool(closed_frac >= FULL_EXIT_FRAC))
@@ -1372,6 +1410,31 @@ FUZZY_CERT_KEY = "side_echo_fuzzy"
 # position he is partly out of, over-selling exits a position he is
 # still in and pays a spread to do it.
 EXIT_DEDUP_MINUTES = int(os.environ.get("LIVE_EXIT_DEDUP_MIN", "10"))
+
+
+def exitable_whales() -> set[str]:
+    """Whales whose open positions we are allowed to SELL.
+
+    A named function rather than an expression inlined in mirror_exit,
+    so a test can assert against the thing production actually uses. The
+    first version of this fix was pinned by tests that rebuilt the set
+    themselves, and restoring the bug did not fail one of them -- an
+    instrument reading something other than its subject, which is the
+    recurring defect in this codebase.
+
+    Deliberately WIDER than the verified set. The verified set is an
+    ENTRY gate; applying it to exits means cutting a whale strands every
+    position we already copied from him, held to resolution against a
+    whale who has left it. Selling cannot create exposure, and
+    mirror_exit's row query already scopes to a 'filled' row for that
+    exact whale and asset.
+
+    Still bounded to whales we have ACTUALLY ROSTERED -- verified, cut,
+    or carrying a clip entry -- so a username that was never on the
+    roster is refused.
+    """
+    return (_whale_set("LIVE_VERIFIED_WHALES") | set(COPY_CUT_WHALES)
+            | set(PER_FILL_BY_WHALE))
 ASK_TOLERANCE = 1.0 + float(os.getenv("LIVE_ASK_TOLERANCE_PCT", "0.08"))
 OVERSPEND_TOLERANCE = 1.01  # a cent of rounding on a whole-unit fill
 OVERSPEND_HALT_RATIO = max(
