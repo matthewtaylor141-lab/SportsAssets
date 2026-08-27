@@ -472,8 +472,9 @@ class TestTheSignedColumnIsActuallyPersisted:
             # 'event_slug' joined the list 2026-08-27 when gate 11 of
             # the bridge stopped being vacuous; signed must still be
             # selected by BOTH readers.
-            assert ("intent, signed, event_slug FROM us_premap"
-                    in inspect.getsource(fn)), fn.__name__
+            assert ("intent, signed, event_slug, market_slug "
+                    "FROM us_premap" in inspect.getsource(fn)), \
+                fn.__name__
 
     def test_the_column_exists_in_the_table_definition(self):
         import inspect

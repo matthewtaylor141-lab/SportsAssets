@@ -520,7 +520,16 @@ _BRIDGE_SCOPE_TOKENS = frozenset({
     "u19", "u21", "u23", "b", "ii", "first", "second", "third", "1st",
     "2nd", "3rd", "quarter", "period", "inning", "innings", "session",
     "map", "set", "sets", "tiebreak", "draw", "tie", "advance",
-    "advances"})
+    "advances",
+    # Round 2.3 additions, each an EXECUTED round-3 fleet kill or its
+    # sibling: aggregate synonyms, period synonyms, and the
+    # translation space the English-only list lost to.
+    "overall", "combined", "cumulative", "global", "decider",
+    "qualify", "aet", "ht", "ft", "friendly", "friendlies",
+    "exhibition", "testimonial", "amateur", "iii", "iv",
+    "femenino", "feminino", "femenina", "femenil", "damen", "frauen",
+    "feminine", "reservas", "reservi", "juvenil", "juveniles",
+    "sub20", "sub21", "sub23", "shoot", "play"})
 # SCOPE IS NOT IDENTITY (round 2.2). The round-2.1 fleet executed an
 # admission where the whale feed hung his match pick off a tie-level
 # container ('SC Braga vs Austin FC (Aggregate)') and the fifth
@@ -617,8 +626,19 @@ def _code_prefix_hit(name: str, code: str) -> bool:
 
 
 def _has_scope_token(norm_name: str) -> bool:
-    """Any reviewed scope token in a normalized name string?"""
-    return any(t in _BRIDGE_SCOPE_TOKENS for t in norm_name.split())
+    """Any reviewed scope token in a normalized name string?
+
+    Adjacent-pair COLLAPSE included (round 2.3): _norm splits
+    punctuation, so '(Shoot-Out)' arrives as 'shoot out' and a
+    single-token membership test on a list containing 'shootout'
+    walks straight past its own entry — an executed round-3 kill.
+    Any adjacent pair whose concatenation is a listed token refuses
+    too."""
+    toks = norm_name.split()
+    if any(t in _BRIDGE_SCOPE_TOKENS for t in toks):
+        return True
+    return any(a + b in _BRIDGE_SCOPE_TOKENS
+               for a, b in zip(toks, toks[1:]))
 
 
 def _bridge_title_subject(his_title: str | None,
@@ -769,7 +789,8 @@ def _q_parse_strict(question: str | None, his_dist: frozenset,
 
 
 def _bridge_ident_ok(identifier: str | None, slug_date: str,
-                     c1: str = "", c2: str = "") -> bool:
+                     c1: str = "", c2: str = "",
+                     whale_lg: str = "") -> bool:
     """A candidate row's identifier must carry at most ONE post-date
     token, purely alphabetic — a '-2' or '-game-2' doubleheader
     disambiguator refuses the row — its embedded YYYY-MM-DD triple
@@ -806,16 +827,25 @@ def _bridge_ident_ok(identifier: str | None, slug_date: str,
             body = parts[1:i]
             if len(body) != 3 or {body[1], body[2]} != {c1, c2}:
                 return False
-            # The league slot stays unread for ALIASING (whale 'bol1',
-            # venue 'lpb', same game — measured), but a reviewed SCOPE
-            # token in it ('agg', 'fh', 'yth') is a sub-market marker,
-            # not a league alias, and refuses (round-2.2 kill).
-            return body[0] not in _BRIDGE_SCOPE_TOKENS
+            # LEAGUE-TOKEN EQUALITY (round 2.3). Round 2.2 left this
+            # slot unread-except-denylist for aliasing, and the
+            # round-3 fleet walked the translation space straight
+            # through it: 'femenino', 'reservas', 'juvenil', 'sub20'
+            # all admitted where 'women'/'reserves'/'youth' refused.
+            # A vocabulary can never be proven closed; an equality
+            # can. The venue's league token must EQUAL the whale
+            # slug's own league token. Aliased leagues (whale 'bol1',
+            # venue 'lpb') become honest misses the trace counts —
+            # and the youth-mirror residual (whale 'uyl' onto venue
+            # 'ucl') dies with them. The scope check stays as belt.
+            return (body[0] == whale_lg
+                    and body[0] not in _BRIDGE_SCOPE_TOKENS)
     return False
 
 
 def _bridge_event_slug_ok(event_slug: str | None, slug_date: str,
-                          c1: str, c2: str) -> bool:
+                          c1: str, c2: str, whale_lg: str = "",
+                          ident_prefix: str = "") -> bool:
     """The row's event_slug must carry the same fixture shape as the
     identifier: [prefix, league, a, b, YYYY, MM, DD] with {a, b} equal
     to the whale slug's codes, no post-date tokens, a scope-free
@@ -834,10 +864,16 @@ def _bridge_event_slug_ok(event_slug: str | None, slug_date: str,
                 return False
             body = parts[:i]
             if len(body) == 4:
+                # The dropped prefix must be the row's own identifier
+                # prefix — round-3 shape-lens finding: an arbitrary
+                # blob in the prefix position was silently discarded.
+                if body[0] != ident_prefix:
+                    return False
                 body = body[1:]
             if len(body) != 3 or {body[1], body[2]} != {c1, c2}:
                 return False
-            return body[0] not in _BRIDGE_SCOPE_TOKENS
+            return (body[0] == whale_lg
+                    and body[0] not in _BRIDGE_SCOPE_TOKENS)
     return False
 
 
@@ -956,6 +992,7 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
                 "mine": mine, "theirs": theirs,
             }
         return None, "slug_corroboration_failed"
+    whale_lg = parts[0] if parts else ""
     sides_h = re.split(r"\s+vs\.?\s+", _norm(his_event_title or ""))
     sides_h = [" ".join(s.split()) for s in sides_h if s.strip()]
     if len(sides_h) != 2:
@@ -964,6 +1001,17 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
         # cannot be split refuses — fail closed; the probe's
         # bridge['his'] channel measures what this costs.
         return None, "his_event_unsplittable"
+    if any(len(s.split()) < 2 for s in sides_h):
+        # EVIDENCE FLOOR (round 2.3). The round-3 fleet executed an
+        # identical-terse wrong-game admission: both feeds rendering
+        # 'Rapid vs Union' — string identity is not game identity
+        # when each side carries one bare token; the terse prefixes
+        # corroborate the wrong fixture's codes by construction. A
+        # single-token side is insufficient identity; single-name
+        # clubs (Floriana) become honest misses the census counts,
+        # until the market_slug witness (captured, unobserved,
+        # ungated) is attested for a round-2.4 gate.
+        return None, "his_event_side_thin"
     if any(_has_scope_token(s) for s in sides_h):
         # Round 2.2: his own feed can hang a match pick off a
         # tie-level container ('SC Braga vs Austin FC (Aggregate)') —
@@ -1003,9 +1051,13 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
             gate = "lined_or_signed"
         elif not r.get("intent"):
             gate = "no_intent"
-        elif not _bridge_ident_ok(r.get("identifier"), d, c1, c2):
+        elif not _bridge_ident_ok(r.get("identifier"), d, c1, c2,
+                                  whale_lg):
             gate = "ident_suffix_or_date"
-        elif not _bridge_event_slug_ok(r.get("event_slug"), d, c1, c2):
+        elif not _bridge_event_slug_ok(
+                r.get("event_slug"), d, c1, c2, whale_lg,
+                ((r.get("identifier") or "").lower().split("-")
+                 or [""])[0]):
             gate = "event_slug_shape"
         else:
             qd, qwhy = _q_parse_strict(r.get("question"), his_dist,
@@ -1768,7 +1820,8 @@ async def resolve_explain(pool, market_title: str | None,
     try:
         rows = [dict(r) for r in await pool.fetch(
             "SELECT identifier, side_norm, kind, line, question, "
-            "event_title, intent, signed, event_slug FROM us_premap "
+            "event_title, "
+            "intent, signed, event_slug, market_slug FROM us_premap "
             "WHERE event_keys && $1::text[]", sorted(keys))]
     except Exception as exc:  # noqa: BLE001
         out["step"] = "premap_query_failed"
@@ -1893,6 +1946,13 @@ async def resolve_explain(pool, market_title: str | None,
                 _wparts = [x for x in (global_slug or "").lower()
                            .split("-") if x]
                 out["bridge"]["audit"] = {
+                    # market_slug: the venue's fullest club-naming
+                    # witness (round-3 fleet found it stored on every
+                    # row and read by NOTHING). Captured here so its
+                    # production shape is OBSERVED before any round-2.4
+                    # gate consumes it — grammars built on imagined
+                    # shapes recover zero; that lesson is paid for.
+                    "market_slug": str(bhit.get("market_slug"))[:120],
                     "his_slug": global_slug,
                     "his_lg": (_wparts[0] if _wparts else ""),
                     "his_event_title": str(event_title)[:120],
@@ -1925,6 +1985,8 @@ async def resolve_explain(pool, market_title: str | None,
                 q = str(r.get("question"))
                 return {"side": str(r.get("side_norm"))[:30],
                         "q": q[:300], "qlen": len(q),
+                        "market_slug":
+                            str(r.get("market_slug"))[:100],
                         "event_title": str(r.get("event_title"))[:120],
                         "identifier": str(r.get("identifier"))[:80],
                         "line": str(r.get("line") or ""),
@@ -2031,7 +2093,8 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     try:
         rows = [dict(r) for r in await pool.fetch(
             "SELECT identifier, side_norm, kind, line, question, "
-            "event_title, intent, signed, event_slug FROM us_premap "
+            "event_title, "
+            "intent, signed, event_slug, market_slug FROM us_premap "
             "WHERE event_keys && $1::text[]",
             sorted(keys))]
     except Exception:  # noqa: BLE001 — table absent/degraded: fall through

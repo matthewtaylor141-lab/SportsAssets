@@ -345,8 +345,8 @@ class TestConstructedAttacks:
             (None, "multi_event_pool")
         for fn in (pm.resolve_explain, pm.resolve):
             src = inspect.getsource(fn)
-            assert "signed, event_slug FROM us_premap" in src, \
-                fn.__name__
+            assert ("signed, event_slug, market_slug "
+                    "FROM us_premap") in src, fn.__name__
 
     def test_game2_disambiguated_identifier_refuses(self):
         """The one-game-captured doubleheader: the identifier's own
@@ -409,22 +409,32 @@ class TestRoundTwoKills:
             (None, "no_candidate_row")
         assert pm._bridge_ident_ok(
             "atc-uecl-scb-aus-2026-08-21-ma", "2026-08-27",
-            "aus", "scb") is False
+            "aus", "scb", "uecl") is False
         assert pm._bridge_ident_ok(
             "atc-uecl-scb-aus-2026-08-27-ma", "2026-08-27",
-            "aus", "scb") is True
+            "aus", "scb", "uecl") is True
         assert pm._bridge_ident_ok(
             "atc-mlb-nyy-bos-2026-07-22-2-nyy", "2026-07-22",
-            "nyy", "bos") is False
+            "nyy", "bos", "mlb") is False
         # Round 2.1: the identifier's own codes must name the whale's
         # game — a wrong-fixture identifier refuses even on the right
         # date, and a sub-event token in the body refuses the shape.
         assert pm._bridge_ident_ok(
             "atc-apn-smsj-ebac-2026-08-27-ma", "2026-08-27",
-            "san", "est") is False
+            "san", "est", "apn") is False
         assert pm._bridge_ident_ok(
             "atc-uecl-scb-aus-agg-2026-08-27-ma", "2026-08-27",
-            "aus", "scb") is False
+            "aus", "scb", "uecl") is False
+        # Round 2.3: the venue league token must EQUAL the whale's —
+        # the translation-vocabulary channel ('femenino', 'reservas',
+        # 'juvenil') died on this equality, and the youth-mirror
+        # residual ('uyl' whale onto 'ucl' venue) died with it.
+        assert pm._bridge_ident_ok(
+            "atc-femenino-scb-aus-2026-08-27-ma", "2026-08-27",
+            "aus", "scb", "col") is False
+        assert pm._bridge_ident_ok(
+            "atc-col-aus-scb-2026-08-27-ma", "2026-08-27",
+            "aus", "scb", "col") is True
 
     def test_league_whitelist_is_closed_and_kills_each_construction(self):
         """D3: an open league slot admitted a same-day basketball
@@ -838,7 +848,7 @@ class TestRoundTwoPointOneKills:
                       "Will CA San Martin win on 2026-08-27?",
                       "apn-san-est-2026-08-27-san",
                       evt="CA San Martin vs Estudiantes") == \
-            (None, "no_candidate_row")
+            (None, "his_event_side_thin")
 
     def test_wrong_fixture_identifier_codes_refuse(self):
         """T-K1's second lock: even if the wording collides, a venue
@@ -853,7 +863,7 @@ class TestRoundTwoPointOneKills:
                       "Will CA San Martin win on 2026-08-27?",
                       "apn-san-est-2026-08-27-san",
                       evt="CA San Martin vs Estudiantes") == \
-            (None, "no_candidate_row")
+            (None, "his_event_side_thin")
 
     def test_rapid_name_twins_refuse_in_the_mirror_direction(self):
         """W-K3: the direction the round-2 analysis missed — the OTHER
@@ -894,7 +904,7 @@ class TestRoundTwoPointOneKills:
                       "Will Santa Coloma win on 2026-07-09?",
                       "uecl-san-flo-2026-07-09-san",
                       evt="UE Santa Coloma vs Floriana") == \
-            (None, "his_event_side_mismatch")
+            (None, "his_event_side_thin")
 
     def test_empty_event_slug_pool_refuses(self):
         """W-K4: the markets-mode ingest fallback can stamp '' on
@@ -918,7 +928,7 @@ class TestRoundTwoPointOneKills:
             (None, "his_event_side_mismatch")
         assert bridge(b, b, "Yes", TITLE, SLUG,
                       evt="FC Porto vs Benfica") == \
-            (None, "his_event_side_mismatch")
+            (None, "his_event_side_thin")
 
     def test_whale_derivative_league_token_is_recorded_not_trusted(self):
         """D-K4 (residual, consciously priced): the whale slug's
@@ -986,10 +996,12 @@ class TestRoundTwoPointTwoKills:
                       "Will FC Union win against FC Rapid" + self.T,
                       "atc-uecl-rap-uni-2026-08-27",
                       "FC Rapid vs FC Union")]
+        # Round 2.3 refuses EARLIER: a single-token side is below
+        # the evidence floor before any venue row is read.
         assert bridge(b2, b2, "Yes", "Will Rapid win on 2026-08-27?",
                       "uecl-rap-uni-2026-08-27-rap",
                       evt="Rapid vs Union") == \
-            (None, "no_candidate_row")
+            (None, "his_event_side_thin")
 
     def test_alpha_scope_post_date_tokens_refuse(self):
         """IG-1: '-agg'/'-fh'/'-et'/'-yth' post-date tokens are
@@ -1033,13 +1045,22 @@ class TestRoundTwoPointTwoKills:
             (None, "no_candidate_row")
         assert pm._bridge_event_slug_ok(
             "ucl-sha-mid-agg-2026-08-26", "2026-08-26",
-            "sha", "mid") is False
+            "sha", "mid", "ucl", "atc") is False
         assert pm._bridge_event_slug_ok(
             "atc-col-aus-scb-2026-08-27", "2026-08-27",
-            "aus", "scb") is True
+            "aus", "scb", "col", "atc") is True
         assert pm._bridge_event_slug_ok(
             "atc-col-aus-scb-2026-08-27-2", "2026-08-27",
-            "aus", "scb") is False
+            "aus", "scb", "col", "atc") is False
+        # Round 2.3: the dropped prefix must be the row's own
+        # identifier prefix, and the league slot must equal the
+        # whale's league token.
+        assert pm._bridge_event_slug_ok(
+            "xxx-col-aus-scb-2026-08-27", "2026-08-27",
+            "aus", "scb", "col", "atc") is False
+        assert pm._bridge_event_slug_ok(
+            "atc-femenino-aus-scb-2026-08-27", "2026-08-27",
+            "aus", "scb", "col", "atc") is False
 
     def test_the_documented_residual_is_the_sibling_competition(self):
         """RS-B: a whale youth/women pick (league slot 'uyl'/'uwcl')
@@ -1058,7 +1079,7 @@ class TestRoundTwoPointTwoKills:
         assert "b" in pm._BRIDGE_SCOPE_TOKENS
         assert "braga" not in pm._BRIDGE_SCOPE_TOKENS
         assert "fc" not in pm._BRIDGE_SCOPE_TOKENS
-        assert len(pm._BRIDGE_SCOPE_TOKENS) < 60
+        assert len(pm._BRIDGE_SCOPE_TOKENS) < 110
 
     def test_feed_furniture_drift_is_an_honest_miss(self):
         """Raw-sequence agreement's cost, pinned consciously: the
@@ -1069,4 +1090,78 @@ class TestRoundTwoPointTwoKills:
         bb = board(QB)
         assert bridge(bb, bb, "Yes", TITLE, SLUG,
                       evt="Austin vs SC Braga") == \
+            (None, "his_event_side_thin")
+        # Two-token drift ('Austin City' for 'Austin FC') clears the
+        # floor and still refuses at raw feed agreement:
+        assert bridge(bb, bb, "Yes", TITLE, SLUG,
+                      evt="Austin City vs SC Braga") == \
+            (None, "no_candidate_row")
+
+
+class TestRoundThreeKills:
+    """The third fleet round's 5 executed kills, pinned. The shape
+    lens came back DRY (first clean lens in three rounds); vocabulary
+    and feed-agreement did not. The structural answers: vocabulary can
+    never be proven closed, so the league slot moved from denylist to
+    EQUALITY with the whale's own league token; string identity is not
+    game identity, so single-token sides fell below a new evidence
+    floor; and listed scope words split by _norm are re-joined by
+    bigram collapse."""
+
+    def test_translation_vocabulary_dies_on_league_equality(self):
+        """V-K1/2/3: 'femenino', 'reservas', 'juvenil', 'sub20',
+        'damen' in the league slot admitted where English equivalents
+        refused. No translation list can be complete; equality can."""
+        for lg in ("femenino", "reservas", "juvenil", "sub20",
+                   "damen", "friendly", "iii"):
+            bb = [row(f"atc-{lg}-aus-scb-2026-08-27-ma", "yes", QB,
+                      ev=f"atc-{lg}-aus-scb-2026-08-27",
+                      evt="Austin FC vs SC Braga")]
+            assert bridge(bb, bb, "Yes", TITLE, SLUG) == \
+                (None, "no_candidate_row"), lg
+
+    def test_identical_terse_wrong_game_dies_on_evidence_floor(self):
+        """FA-K1: both feeds rendering 'Rapid vs Union' — the venue
+        row being FC Rapid Bucuresti vs FC Union Berlin, a different
+        game whose only textual witness (market_slug) no gate read
+        yet. Single-token sides are below the evidence floor; the
+        market_slug witness is now CAPTURED by the probe for a
+        round-2.4 gate once its production shape is attested."""
+        t = " in the UECL match scheduled for Aug 27, 2026?"
+        b2 = [row("atc-uecl-rap-uni-2026-08-27-ma", "yes",
+                  "Will FC Rapid win against FC Union" + t,
+                  ev="atc-uecl-rap-uni-2026-08-27",
+                  evt="Rapid vs Union")]
+        assert bridge(b2, b2, "Yes", "Will Rapid win on 2026-08-27?",
+                      "uecl-rap-uni-2026-08-27-rap",
+                      evt="Rapid vs Union") == \
+            (None, "his_event_side_thin")
+        for fn in (pm.resolve_explain,):
+            assert '"market_slug"' in inspect.getsource(fn)
+
+    def test_scope_synonyms_and_split_forms_refuse(self):
+        """FA-K2: '(Overall)', '(Combined)', '(To Qualify)', '(AET)'
+        walked the closed list; '(Shoot-Out)' and '(Play-Off)' beat
+        their own listed entries via _norm's punctuation split. The
+        synonyms are listed now and adjacent pairs re-join."""
+        for scope in ("Overall", "Combined", "To Qualify", "AET",
+                      "Shoot-Out", "Play-Off", "Cumulative"):
+            evt = f"SC Braga vs Austin FC ({scope})"
+            b = board(QB)
+            assert bridge(b, b, "Yes", TITLE, SLUG, evt=evt) == \
+                (None, "his_event_has_scope"), scope
+        assert pm._has_scope_token("shoot out")
+        assert pm._has_scope_token("play off")
+        assert not pm._has_scope_token("sc braga")
+        assert not pm._has_scope_token("austin fc")
+
+    def test_league_equality_costs_are_conscious(self):
+        """The aliased-league class (whale 'bol1', venue 'lpb', same
+        game — measured production behavior) becomes an honest miss
+        under league equality, counted by the trace. Loosening this
+        back to unread is what the translation kills rode in on."""
+        bb = [row("atc-lpb-aus-scb-2026-08-27-ma", "yes", QB,
+                  ev="atc-lpb-aus-scb-2026-08-27",
+                  evt="Austin FC vs SC Braga")]
+        assert bridge(bb, bb, "Yes", TITLE, SLUG) == \
             (None, "no_candidate_row")
