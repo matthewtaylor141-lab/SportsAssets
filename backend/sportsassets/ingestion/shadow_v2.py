@@ -54,6 +54,7 @@ MATURE_S = 900.0          # venue publication lag measured 90-500s; evaluate pas
 ORPHAN_FINAL_S = 4200.0   # one deferral window covering the hourly reconciler
 REPLAY_STALE_S = 7200.0   # replayed events older than the join window: drop, count
 TS_FIRST_TRY_S = 1.5      # hot-path-like first resolution attempt
+TS_RESOLVE_BUDGET_S = 12.0  # a trickling RPC must never starve reconcile/flush
 TICK_S = 2.0
 RECONCILE_EVERY = 30      # ticks  -> ~60s
 REVERSE_EVERY = 5         # reconciles -> ~5min
@@ -72,7 +73,8 @@ GATING = ("div.side", "div.asset", "div.size", "div.price", "div.ts",
           "poll_uncovered_unexplained", "ts_never_resolved_live")
 # counters that reset the instrument-health window when they move
 HEALTH = ("shadow_errors", "cycle_errors", "db_errors", "flush_failures",
-          "writer_conflict", "pending_overflow_dropped")
+          "writer_conflict", "pending_overflow_dropped", "log_index_missing",
+          "ts_resolve_timeout")
 # watermarked at window reset so the probe reads deltas-since-window
 VOLUME_KEYS = ("compared_execs", "sim_exec_suppressed", "sim_agg_suppressed",
                "sim_exec_supp_hup_only", "mint_transformed", "poll_rows_seen",
@@ -96,6 +98,21 @@ FROM trades
 WHERE source IN ('chain','poll')
   AND detected_at > now() - interval '20 minutes'
   AND whale_id = ANY($1::bigint[])
+"""
+
+# The upsert is CONDITIONAL so two processes racing past the in-python
+# fence cannot silently discard each other's merge: the write lands only
+# if the row is ours, unowned, or stale. CASE guarantees the epoch cast
+# is only attempted on a numeric value (a corrupt row must not abort the
+# statement — it matches the writer-IS-NULL arm after corrupt_reset).
+SQL_FLUSH = """
+INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb)
+ON CONFLICT (key) DO UPDATE SET value = $2::jsonb
+WHERE ingestion_state.value->>'writer' IS NULL
+   OR ingestion_state.value->>'writer' = $3
+   OR (CASE WHEN jsonb_typeof(ingestion_state.value->'updated_at_epoch') = 'number'
+            THEN (ingestion_state.value->>'updated_at_epoch')::float < $4
+            ELSE true END)
 """
 
 
@@ -186,7 +203,15 @@ def classify_mints(recs_for_tx: list[dict]) -> dict[str, dict]:
         for r in raw:
             if r["view"] == "exec_counter" and r["asset"] not in agg_assets:
                 if not aggs:
+                    # No aggregate view exists for this wallet (whale-vs-
+                    # whale maker match, or the taker log was lost). The
+                    # counter decode is self-contained, so the record
+                    # STAYS an exec and gets key-tested against the
+                    # wallet's poll rows — dropping it here would hide a
+                    # whole fill class from the simulation. agg_missing
+                    # remains as the diagnostic count of the condition.
                     flags["agg_missing"] = flags.get("agg_missing", 0) + 1
+                    execs.append(r)
                     continue
                 if len(aggs) > 1:
                     flags["per_exec_ambiguous"] = flags.get("per_exec_ambiguous", 0) + 1
@@ -262,6 +287,9 @@ class ShadowV2:
         self.last_observe_at = 0.0
         self.last_ensure_at = 0.0
         self.last_flush_ok = 0.0
+        self.boot_at = time.time()      # reverse probe warms up past this
+        self._await_ack: tuple[str, dict] | None = None  # (snap_id, snap)
+        self._lix_fallback = -1         # unique keys for logIndex-less events
         self.rpc_tokens = float(RPC_PER_MIN)
         self.rpc_token_at = time.time()
         self.rpc_backoff_until = 0.0
@@ -294,6 +322,8 @@ class ShadowV2:
             self.per_whale_mem[wallet] = m
             while len(self.per_whale_mem) > PER_WHALE_CAP:
                 self.per_whale_mem.popitem(last=False)
+        else:
+            self.per_whale_mem.move_to_end(wallet)   # LRU, not FIFO
         return m
 
     # ── ts resolution (own client, own cache, explicit None) ────────
@@ -366,9 +396,19 @@ class ShadowV2:
 
     # ── the reconciler ──────────────────────────────────────────────
     async def tick(self) -> None:
-        await self._resolve_ts()
+        # tick_n advances FIRST so a hanging resolver (httpx read timeout
+        # is between-bytes; a trickling provider outlives any deadline)
+        # can never starve reconcile/flush — the instrument must keep
+        # measuring during exactly the degraded regimes it characterizes.
         self.tick_n += 1
-        if self.tick_n % RECONCILE_EVERY == 0:
+        due_reconcile = self.tick_n % RECONCILE_EVERY == 0
+        try:
+            await asyncio.wait_for(self._resolve_ts(),
+                                   timeout=TS_RESOLVE_BUDGET_S)
+        except asyncio.TimeoutError:
+            self.bump("ts_resolve_timeout")
+            self.rpc_backoff_until = time.time() + RPC_BACKOFF_S
+        if due_reconcile:
             await self._reconcile()
 
     async def _reconcile(self) -> None:
@@ -418,54 +458,70 @@ class ShadowV2:
                               else "ts_never_resolved_live")
             return logged  # not evaluable yet — wait for ts
         groups = classify_mints(recs)
+        by_wallet: dict[str, list[dict]] = {}
+        for r in recs:
+            by_wallet.setdefault(r["wallet"], []).append(r)
         for wallet, g in groups.items():
-            for k, n in g["flags"].items():
-                self.bump(k, n)
-                if k in ("mint_side_anomaly", "per_exec_ambiguous"):
-                    self.note_example(k, tx=tx[:14], wallet=wallet[:12])
-            tie = agg_tieout(g)
-            if tie != "skip":
-                self.bump("agg_tieout_" + tie)
-                if tie == "fail":
-                    self.note_example("agg_tieout_fail", tx=tx[:14], wallet=wallet[:12])
-                    log.warning("SHADOW-V2 AGG-TIEOUT tx=%s wallet=%s", tx[:14], wallet[:12])
             whale_id = (g["execs"] + g["aggs"])[0]["whale_id"] if (g["execs"] or g["aggs"]) else None
             rows = rows_by.get((tx, whale_id), [])
             poll_rows = [x for x in rows if x["source"] == "poll"]
             chain_rows = [x for x in rows if x["source"] == "chain"]
-            logged = self._match_wallet(tx, wallet, g, poll_rows, chain_rows,
-                                        oldest, now, logged)
+            logged = self._match_wallet(tx, wallet, g, by_wallet[wallet],
+                                        poll_rows, chain_rows, oldest, now, logged)
         return logged
 
-    def _match_wallet(self, tx: str, wallet: str, g: dict, poll_rows: list[dict],
-                      chain_rows: list[dict], oldest: float, now: float,
-                      logged: int) -> int:
+    def _match_wallet(self, tx: str, wallet: str, g: dict, all_recs: list[dict],
+                      poll_rows: list[dict], chain_rows: list[dict],
+                      oldest: float, now: float, logged: int) -> int:
         execs, aggs = g["execs"], g["aggs"]
         ins_exec: dict[str, tuple[str, dict]] = {}
         for c in execs:
             for variant, key in rec_keys(c):
                 ins_exec.setdefault(key, (variant, c))
-        prim = [rec_keys(c)[0][1] for c in execs]
-        self.bump("dup_exec", len(prim) - len(set(prim)))
         ins_agg: dict[str, tuple[str, dict]] = {}
         for a in aggs:
             for variant, key in rec_keys(a):
                 ins_agg.setdefault(key, (variant, a))
+        # Scan first, COUNT NOTHING: a mature tx is re-scanned every ~60s
+        # until it finalizes, and per-pass bumping inflated tieout/pw/
+        # poll_mult/flag counters up to ~55x per tx. All counting for a
+        # (tx, wallet) happens exactly once, at the pass that finalizes it.
         consumed: set[int] = set()
+        hits: list[tuple[dict, Any, Any]] = []
         residual_rows: list[dict] = []
         for row in poll_rows:
             hit = ins_exec.get(row["dedupe_key"])
             hit_a = ins_agg.get(row["dedupe_key"])
+            hits.append((row, hit, hit_a))
+            if hit:
+                consumed.add(id(hit[1]))
+            else:
+                residual_rows.append(row)
+        matched_any = bool(consumed) or bool(poll_rows)
+        finalize = oldest >= ORPHAN_FINAL_S or matched_any
+        if not finalize:
+            return logged   # rows not landed yet — no evidence, no counting
+        for k, n in g["flags"].items():
+            self.bump(k, n)
+            if k in ("mint_side_anomaly", "per_exec_ambiguous"):
+                self.note_example(k, tx=tx[:14], wallet=wallet[:12])
+        tie = agg_tieout(g)
+        if tie != "skip":
+            self.bump("agg_tieout_" + tie)
+            if tie == "fail":
+                self.note_example("agg_tieout_fail", tx=tx[:14], wallet=wallet[:12])
+                log.warning("SHADOW-V2 AGG-TIEOUT tx=%s wallet=%s", tx[:14], wallet[:12])
+        prim = [rec_keys(c)[0][1] for c in execs]
+        self.bump("dup_exec", len(prim) - len(set(prim)))
+        for row, hit, hit_a in hits:
             self.bump("sim_agg_suppressed" if hit_a else "sim_agg_residual_dup")
             if hit:
                 self.bump("sim_exec_suppressed")
                 if hit[0] == "hup":
                     self.bump("sim_exec_supp_hup_only")
-                consumed.add(id(hit[1]))
                 self._record_latency(hit[1], row)
             else:
                 self.bump("sim_exec_residual_dup")
-                residual_rows.append(row)
         # field diagnosis for rows the exec policy failed to suppress
         free = [c for c in execs if id(c) not in consumed]
         for row in residual_rows:
@@ -481,28 +537,28 @@ class ShadowV2:
                   sum(1 for c in execs if id(c) in consumed))
         # sim extra: would-be inserts with no row at all (checked at finalization)
         all_row_keys = {r["dedupe_key"] for r in poll_rows} | {r["dedupe_key"] for r in chain_rows}
-        matched_any = bool(consumed) or bool(poll_rows)
-        finalize = oldest >= ORPHAN_FINAL_S or matched_any
-        if finalize:
-            for c in execs + aggs:
-                self.pending.pop((c["tx"], c["log_index"], c["wallet"]), None)
-            for key, (variant, c) in ins_exec.items():
-                if variant == "round" and key not in all_row_keys and id(c) not in consumed:
-                    if not poll_rows and not chain_rows:
-                        self.bump("orphan_no_row")
-                        self.note_example("orphan_no_row", tx=tx[:14], wallet=wallet[:12],
-                                          view=c["view"], side=c["side"])
-                        log.info("SHADOW-V2 ORPHAN tx=%s wallet=%s no rows", tx[:14], wallet[:12])
-                    elif self._chain_exact(c, chain_rows):
-                        self.bump("orphan_chain_exact")
-                    elif chain_rows and not poll_rows:
-                        self.bump("orphan_chain_mismatch")
-                        self.note_example("orphan_chain_mismatch", tx=tx[:14],
-                                          wallet=wallet[:12], side=c["side"], asset=c["asset"][:12])
-                    else:
-                        self.bump("orphan_excess_exec")
-            self.bump("compared_execs", len(execs))
-            self.bump("txs_reconciled")
+        # pop EVERY pending record of this (tx, wallet) — including
+        # classifier-dropped anomalies, which previously leaked in
+        # pending forever and re-bumped their flags every minute
+        for c in all_recs:
+            self.pending.pop((c["tx"], c["log_index"], c["wallet"]), None)
+        for key, (variant, c) in ins_exec.items():
+            if variant == "round" and key not in all_row_keys and id(c) not in consumed:
+                if not poll_rows and not chain_rows:
+                    self.bump("orphan_no_row")
+                    self.note_example("orphan_no_row", tx=tx[:14], wallet=wallet[:12],
+                                      view=c["view"], side=c["side"])
+                    log.info("SHADOW-V2 ORPHAN tx=%s wallet=%s no rows", tx[:14], wallet[:12])
+                elif self._chain_exact(c, chain_rows):
+                    self.bump("orphan_chain_exact")
+                elif chain_rows and not poll_rows:
+                    self.bump("orphan_chain_mismatch")
+                    self.note_example("orphan_chain_mismatch", tx=tx[:14],
+                                      wallet=wallet[:12], side=c["side"], asset=c["asset"][:12])
+                else:
+                    self.bump("orphan_excess_exec")
+        self.bump("compared_execs", len(execs))
+        self.bump("txs_reconciled")
         return logged
 
     def _chain_exact(self, c: dict, chain_rows: list[dict]) -> bool:
@@ -529,7 +585,8 @@ class ShadowV2:
         if exact:
             pick = min(exact, key=lambda c: abs(rec_prices(c)[0] - float(rp)))
         elif free:
-            pick = min(free, key=lambda c: abs(c["size_units"] / 1e6 - float(rp or 0)))
+            pick = min(free, key=lambda c: abs(
+                Decimal(c["size_units"]) / Decimal(10 ** 6) - Decimal(rs)))
             fields.append("size")
         if pick is None:
             return logged  # excess poll row for this wallet — granularity signal
@@ -589,6 +646,12 @@ class ShadowV2:
 
     # ── reverse probe: what did the shadow NOT see ──────────────────
     async def _reverse_probe(self, pool: Any) -> None:
+        if time.time() - self.boot_at < REVERSE_LOOKBACK_S:
+            # seen_tx/gaps are process memory: right after a restart every
+            # pre-boot poll row would read "uncovered" and falsely reset
+            # the 7-day window. Warm up for one full lookback first.
+            self.bump("reverse_probe_warmup")
+            return
         if self.seen_tx:
             oldest_seen = next(iter(self.seen_tx.values()))
             if time.time() - oldest_seen < REVERSE_LOOKBACK_S and \
@@ -629,25 +692,56 @@ class ShadowV2:
 
     # ── persistence: delta-only, writer-fenced, window bookkeeping ──
     async def _flush(self, pool: Any) -> None:
-        snap = dict(self.deltas)
         nowf = time.time()
-        if not snap and self.last_flush_ok and nowf - self.last_flush_ok < 300:
+        if (not self.deltas and self._await_ack is None
+                and self.last_flush_ok and nowf - self.last_flush_ok < 300):
             return
         try:
             raw = await pool.fetchval(
                 "SELECT value FROM ingestion_state WHERE key=$1", STATE_KEY, timeout=5.0)
             stored: dict = {}
-            if raw:
+            if raw is not None:
+                parsed: Any = None
                 try:
-                    stored = json.loads(raw) if isinstance(raw, str) else dict(raw)
+                    parsed = json.loads(raw) if isinstance(raw, str) else raw
                 except (TypeError, ValueError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    stored = dict(parsed)
+                else:
+                    # jsonb 'null', arrays, scalars: valid JSON that is
+                    # NOT our document. Reset instead of failing forever.
                     stored = {"corrupt_reset": int(nowf)}
+            # lost-ack reconciliation (undercount-only guarantee): if the
+            # previous write COMMITTED but its ack was lost to a timeout
+            # or cancellation, the snap_id in the stored row proves it —
+            # decrement that snap now instead of re-adding it (which
+            # doubled every counter in it, including the pro-flip ones).
+            if self._await_ack is not None:
+                sid, prev = self._await_ack
+                if stored.get("writer") == WRITER_ID and stored.get("snap_id") == sid:
+                    for k, v in prev.items():
+                        left = self.deltas.get(k, 0) - v
+                        if left:
+                            self.deltas[k] = left
+                        else:
+                            self.deltas.pop(k, None)
+                self._await_ack = None
             w = stored.get("writer")
-            if w and w != WRITER_ID and nowf - float(stored.get("updated_at_epoch") or 0) < 300:
+            try:
+                stored_epoch = float(stored.get("updated_at_epoch") or 0)
+            except (TypeError, ValueError):
+                stored_epoch = 0.0
+            if w and w != WRITER_ID and nowf - stored_epoch < 300:
                 self.bump("writer_conflict")
                 log.warning("SHADOW-V2 WRITER-CONFLICT theirs=%s mine=%s", w, WRITER_ID)
                 return
-            counters = {k: int(v) for k, v in (stored.get("counters") or {}).items()}
+            snap = dict(self.deltas)
+            raw_counters = stored.get("counters")
+            counters = {k: int(v)
+                        for k, v in (raw_counters.items()
+                                     if isinstance(raw_counters, dict) else ())
+                        if isinstance(v, (int, float))}
             if not self.booted:
                 snap["boots"] = snap.get("boots", 0) + 1
                 self.deltas["boots"] = self.deltas.get("boots", 0) + 1
@@ -656,7 +750,8 @@ class ShadowV2:
                 counters[k] = counters.get(k, 0) + v
             window_start = stored.get("window_start")
             health_start = stored.get("health_start")
-            at_window = stored.get("at_window") or {}
+            at_window = stored.get("at_window")
+            at_window = dict(at_window) if isinstance(at_window, dict) else {}
             if stored.get("commit") not in (None, self.commit):
                 window_start = health_start = None
             leading = ("exec" if counters.get("sim_exec_suppressed", 0)
@@ -667,21 +762,38 @@ class ShadowV2:
                 window_start = nowf
                 at_window = {k: counters.get(k, 0) for k in VOLUME_KEYS}
                 at_window["pw"] = {k: v for k, v in counters.items() if k.startswith("pw.")}
+                at_window["emitter"] = {k: v for k, v in counters.items()
+                                        if k.startswith("emitter.")}
             if health_start is None or any(snap.get(k) for k in HEALTH):
                 health_start = nowf
+            # per_whale is built from the pw.* COUNTERS (which survive
+            # restarts), not from process memory — otherwise the TARGET
+            # evidence vanished on every deploy and never existed for a
+            # whale whose rows only diverge. Memory overlays lag medians.
+            lst = self.listener() if self.listener else None
+            roster = getattr(lst, "_roster", {}) or {}
+            wallets = sorted({k.split(".")[1] for k in counters
+                              if k.startswith("pw.")})[:PER_WHALE_CAP]
             per_whale = {}
-            for wallet, m in self.per_whale_mem.items():
+            for wallet in wallets:
+                m = self.per_whale_mem.get(wallet)
+                uname = ((m or {}).get("username")
+                         or (roster.get(wallet) or {}).get("username"))
                 per_whale[wallet] = {
-                    "username": m["username"],
+                    "username": uname,
                     "n": counters.get(f"pw.{wallet}.n", 0),
                     "matched": counters.get(f"pw.{wallet}.matched", 0),
                     "supp": counters.get(f"pw.{wallet}.supp", 0),
                     "div": counters.get(f"pw.{wallet}.div", 0),
-                    "lag_p50_s": round(median(m["sh"]), 2) if m["sh"] else None,
-                    "poll_lag_p50_s": round(median(m["po"]), 2) if m["po"] else None,
+                    "lag_p50_s": (round(median(m["sh"]), 2)
+                                  if m and m["sh"] else None),
+                    "poll_lag_p50_s": (round(median(m["po"]), 2)
+                                       if m and m["po"] else None),
                 }
+            sid_new = uuid.uuid4().hex[:8]
             value = {
                 "schema_v": SCHEMA_V, "writer": WRITER_ID, "commit": self.commit,
+                "snap_id": sid_new,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(nowf)),
                 "updated_at_epoch": int(nowf),
                 "window_start": window_start, "health_start": health_start,
@@ -693,10 +805,20 @@ class ShadowV2:
                 "examples": list(self.examples),
                 "gaps": [dict(g) for g in self.gaps][-8:],
             }
-            await pool.execute(
-                "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
-                "ON CONFLICT (key) DO UPDATE SET value=$2::jsonb",
-                STATE_KEY, json.dumps(value), timeout=5.0)
+            # arm the ack BEFORE the write so a cancellation or timeout
+            # that lands after the server committed is reconciled by
+            # snap_id on the next flush instead of double-counted
+            self._await_ack = (sid_new, snap)
+            status = await pool.execute(SQL_FLUSH, STATE_KEY, json.dumps(value),
+                                        WRITER_ID, nowf - 300, timeout=5.0)
+            if isinstance(status, str) and status.split()[-1] == "0":
+                # conditional write rejected: a live foreign writer won
+                # the race after our fence read — nothing committed
+                self._await_ack = None
+                self.bump("writer_conflict")
+                log.warning("SHADOW-V2 WRITER-CONFLICT (atomic) mine=%s", WRITER_ID)
+                return
+            self._await_ack = None
             for k, v in snap.items():
                 left = self.deltas.get(k, 0) - v
                 if left:
@@ -784,7 +906,11 @@ def shadow_observe(listener: Any, log_entry: dict[str, Any]) -> None:
                 st.bump(ek2)
             else:
                 st.bump("emitter.other")
-            r.update(log_index=lix if lix is not None else -1,
+            if lix is None:
+                # unique per event: a shared -1 collapsed two same-tx
+                # fills onto one pending key, re-hiding events 2..N
+                st._lix_fallback -= 1
+            r.update(log_index=lix if lix is not None else st._lix_fallback,
                      replay=replay, seen_at=now, ts=None, ts_tries=0)
             k = (r["tx"], r["log_index"], r["wallet"])
             if k in st.pending:

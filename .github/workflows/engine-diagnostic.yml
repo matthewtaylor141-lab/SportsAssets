@@ -374,20 +374,29 @@ jobs:
               || echo "  SPORTS-PROV $W: feed parse failed"
           done
           # ── SHADOW-V2 (S0): per-event 0xd543adfd decode vs poll truth.
-          # Flip gate math is done HERE, from deltas since window_start.
+          # Flip gate math is done HERE, from deltas since window_start —
+          # every N2/N10 volume figure subtracts its at_window watermark
+          # (cumulative counters read green on stale volume otherwise).
           curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/shadow.json "$BASE/api/admin/shadow-v2" || true
-          jq -r '.state as $s | ($s.counters // {}) as $c | ($s.at_window // {}) as $w
-            | "  SHADOW-V2 pend=\($s.pending // "?")  policy=\($s.leading_policy // "?")  supp=\(($c.sim_exec_suppressed // 0) - ($w.sim_exec_suppressed // 0))  hup_only=\(($c.sim_exec_supp_hup_only // 0) - ($w.sim_exec_supp_hup_only // 0))  residual=\($c["sim_exec_residual_dup"] // 0)  agg_supp=\($c.sim_agg_suppressed // 0)",
-              "  SHADOW-V2 div side=\($c["div.side"] // 0) asset=\($c["div.asset"] // 0) size=\($c["div.size"] // 0) price=\($c["div.price"] // 0) ts=\($c["div.ts"] // 0) keyimpl=\($c.key_impl_mismatch // 0)  tieout=\($c.agg_tieout_ok // 0)/\($c.agg_tieout_fail // 0)  mint=\($c.mint_transformed // 0)/\($c.mint_side_anomaly // 0)",
-              "  SHADOW-V2 orphan none=\($c.orphan_no_row // 0) chainX=\($c.orphan_chain_mismatch // 0) chainOK=\($c.orphan_chain_exact // 0) excess=\($c.orphan_excess_exec // 0)  uncov unexp=\($c.poll_uncovered_unexplained // 0) quiet=\($c.poll_uncovered_quiet_gap // 0)/\($c.poll_rows_seen // 0)",
-              "  SHADOW-V2 ts avail le3=\($c["ts_avail.le3s"] // 0) le6=\($c["ts_avail.le6s"] // 0) le15=\($c["ts_avail.le15s"] // 0) gt60=\($c["ts_avail.gt60s"] // 0) never=\($c.ts_never_resolved_live // 0) empty1st=\($c.ts_rpc_empty_first // 0)  cache hit/miss=\($c.live_cache_hit // 0)/\($c.live_cache_miss // 0)",
-              "  SHADOW-V2 mult eq=\($c["poll_mult.eq"] // 0) one=\($c["poll_mult.one"] // 0) other=\($c["poll_mult.other"] // 0)  lag_p50=\($s.lag_p50_s // "?")s poll_p50=\($s.poll_lag_p50_s // "?")s  window_age_d=\(if $s.window_start then ((now - $s.window_start) / 86400 * 10 | floor / 10) else "?" end) health_age_d=\(if $s.health_start then ((now - $s.health_start) / 86400 * 10 | floor / 10) else "?" end) boots=\($c.boots // 0) commit=\($s.commit // "?")",
-              (($s.per_whale // {}) | to_entries[] | select(.value.username == "0x076daa87")
-               | "  SHADOW-V2 TARGET 0x076daa87 n=\(.value.n) supp=\(.value.supp) div=\(.value.div) lag_p50=\(.value.lag_p50_s // "?")s poll_p50=\(.value.poll_lag_p50_s // "?")s"),
-              (if ($c.writer_conflict // 0) > 0 then "  SHADOW-V2 ALARM writer_conflict=\($c.writer_conflict)" else empty end),
-              (if $s.updated_at_epoch and (now - $s.updated_at_epoch) > 600 then "  SHADOW-V2 ALARM state stale \((now - $s.updated_at_epoch) | floor)s" else empty end)' \
-            /tmp/shadow.json 2>/dev/null || echo "  SHADOW-V2: no state (deploy pending or SHADOW_V2=off)"
+          jq -r '.state as $s
+            | if $s == null then "  SHADOW-V2: no state (deploy pending, SHADOW_V2=off, or corrupt row)" else (
+              ($s.counters // {}) as $c | ($s.at_window // {}) as $w
+              | (($w.pw // {})) as $wp | (($w.emitter // {})) as $we
+              | "  SHADOW-V2 pend=\($s.pending // "?")  policy=\($s.leading_policy // "?")  supp=\(($c.sim_exec_suppressed // 0) - ($w.sim_exec_suppressed // 0))  hup_only=\(($c.sim_exec_supp_hup_only // 0) - ($w.sim_exec_supp_hup_only // 0))  cmp=\(($c.compared_execs // 0) - ($w.compared_execs // 0))  residual=\($c["sim_exec_residual_dup"] // 0)  agg_supp=\(($c.sim_agg_suppressed // 0) - ($w.sim_agg_suppressed // 0))",
+                "  SHADOW-V2 div side=\($c["div.side"] // 0) asset=\($c["div.asset"] // 0) size=\($c["div.size"] // 0) price=\($c["div.price"] // 0) ts=\($c["div.ts"] // 0) keyimpl=\($c.key_impl_mismatch // 0)  tieout=\($c.agg_tieout_ok // 0)/\($c.agg_tieout_fail // 0)  mint=\(($c.mint_transformed // 0) - ($w.mint_transformed // 0))/\($c.mint_side_anomaly // 0)",
+                "  SHADOW-V2 orphan none=\($c.orphan_no_row // 0) chainX=\($c.orphan_chain_mismatch // 0) chainOK=\($c.orphan_chain_exact // 0) excess=\($c.orphan_excess_exec // 0)  uncov unexp=\($c.poll_uncovered_unexplained // 0) quiet=\($c.poll_uncovered_quiet_gap // 0)/\(($c.poll_rows_seen // 0) - ($w.poll_rows_seen // 0))",
+                "  SHADOW-V2 ts avail le3=\($c["ts_avail.le3s"] // 0) le6=\($c["ts_avail.le6s"] // 0) le15=\($c["ts_avail.le15s"] // 0) gt60=\($c["ts_avail.gt60s"] // 0) never=\($c.ts_never_resolved_live // 0) empty1st=\($c.ts_rpc_empty_first // 0)  cache hit/miss=\($c.live_cache_hit // 0)/\($c.live_cache_miss // 0)",
+                "  SHADOW-V2 mult eq=\($c["poll_mult.eq"] // 0) one=\($c["poll_mult.one"] // 0) other=\($c["poll_mult.other"] // 0)  lag_p50=\($s.lag_p50_s // "?")s poll_p50=\($s.poll_lag_p50_s // "?")s  window_age_d=\(if $s.window_start then ((now - $s.window_start) / 86400 * 10 | floor / 10) else "?" end) health_age_d=\(if $s.health_start then ((now - $s.health_start) / 86400 * 10 | floor / 10) else "?" end) boots=\($c.boots // 0) commit=\($s.commit // "?")",
+                (($c | to_entries[] | select(.key | startswith("emitter."))
+                  | "  SHADOW-V2 emitter \(.key[8:] | .[0:12]) Δ\(.value - ($we[.key] // 0))")),
+                (($s.per_whale // {}) | to_entries[] | select(.value.username == "0x076daa87")
+                 | .key as $wk
+                 | "  SHADOW-V2 TARGET 0x076daa87 nΔ=\(.value.n - ($wp["pw." + $wk + ".n"] // 0)) suppΔ=\(.value.supp - ($wp["pw." + $wk + ".supp"] // 0)) divΔ=\(.value.div - ($wp["pw." + $wk + ".div"] // 0)) lag_p50=\(.value.lag_p50_s // "?")s poll_p50=\(.value.poll_lag_p50_s // "?")s"),
+                (if ($c.writer_conflict // 0) > 0 then "  SHADOW-V2 ALARM writer_conflict=\($c.writer_conflict)" else empty end),
+                (if $s.updated_at_epoch and (now - $s.updated_at_epoch) > 600 then "  SHADOW-V2 ALARM state stale \((now - $s.updated_at_epoch) | floor)s" else empty end)
+              ) end' \
+            /tmp/shadow.json 2>/dev/null || echo "  SHADOW-V2: probe fetch/parse failed"
           # ROSTER-GUARD (2026-08-24: rn1 + swisstony silently dropped
           # off the active roster — no detection, no paper cohort, no
           # TRUEEDGE updates). Every configured source whale must be

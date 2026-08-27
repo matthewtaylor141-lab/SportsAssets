@@ -6014,9 +6014,14 @@ async def api_shadow_v2() -> dict:
     """Phase S0 shadow evidence: the shadow_v2_fill state row plus the
     chain_listener heartbeat's shadow gauge. Read-only."""
     pool = await get_pool()
-    val = await pool.fetchval(
+    row = await pool.fetchrow(
         "SELECT value FROM ingestion_state WHERE key=$1", "shadow_v2_fill")
-    state = (json.loads(val) if isinstance(val, str) else val) if val else None
+    state = None
+    if row is not None and row["value"] is not None:
+        val = row["value"]
+        state = json.loads(val) if isinstance(val, str) else val
+    if not isinstance(state, dict):
+        state = None   # a corrupt row must read as "no state", not crash jq
     hb = await pool.fetchrow(
         "SELECT beat_at, status, detail FROM service_heartbeats "
         "WHERE service='chain_listener'")
@@ -6024,6 +6029,7 @@ async def api_shadow_v2() -> dict:
     if hb and hb["detail"]:
         detail = json.loads(hb["detail"]) if isinstance(hb["detail"], str) else hb["detail"]
     return {"state": state,
+            "state_row_present": row is not None,
             "listener_status": hb["status"] if hb else None,
             "listener_beat_at": hb["beat_at"].isoformat() if hb else None,
             "listener_shadow": detail.get("shadow")}
