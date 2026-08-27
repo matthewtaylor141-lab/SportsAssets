@@ -1,0 +1,1300 @@
+{
+ "source": "mapper-evidence run 10 (2026-08-27T16:28Z), unmapped-census hours=48 sample=400",
+ "named_ml_reasons": {
+  "ok": 62,
+  "his_event_unsplittable": 24,
+  "no_candidate_row": 56,
+  "outcome_thin": 1,
+  "wrong_type": 2,
+  "title_slug_mismatch": 3,
+  "tour_unknown": 4,
+  "not_named": 5
+ },
+ "lg_pairs": {
+  "itf->itfwo": 112,
+  "mlb": 3,
+  "kbo": 1
+ },
+ "audits": [
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "30",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "alerit",
+    "yardem"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Oviedo (Spain), clay: Alexander Ritschard vs Yaroslav Demin",
+    "yaroslav demin"
+   ],
+   "identifier": "aec-itfme-alerit-yardem-2026-08-27",
+   "market_slug": "aec-itfme-alerit-yardem-2026-08-27",
+   "event_slug": "itfme-alerit-yardem-2026-08-27",
+   "kind": "side",
+   "side_norm": "alexander ritschard",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "yaroslav demin",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Alexander Ritschard vs Yaroslav Demin scheduled for August 27, 2026 at 9:30 AM UTC?",
+   "qlen": 125,
+   "line_before": "30",
+   "event_title": "Alexander Ritschard vs. Yaroslav Demin",
+   "his_slug": "itf-ritscha-demin-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Oviedo (Spain), clay: Alexander Ritschard vs Yaroslav Demin",
+   "his_event_title": "ITF MEN - SINGLES: M25 Oviedo (Spain), clay: Alexander Ritschard vs Yaroslav Demin",
+   "outcome": "Alexander Ritschard"
+  },
+  {
+   "clock": {
+    "hh": "1",
+    "mm": "00",
+    "ap": "pm"
+   },
+   "venue_codes": [
+    "sebhei",
+    "lucawie"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Sebastian Heinrich vs Luca Wiedenmann",
+    "luca wiedenmann"
+   ],
+   "identifier": "aec-itfme-sebhei-lucawie-2026-08-27",
+   "market_slug": "aec-itfme-sebhei-lucawie-2026-08-27",
+   "event_slug": "itfme-sebhei-lucawie-2026-08-27",
+   "kind": "side",
+   "side_norm": "sebastian heinrich",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "luca wiedenmann",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Sebastian Heinrich vs Luca Wiedenmann scheduled for August 27, 2026 at 1:00 PM UTC?",
+   "qlen": 125,
+   "line_before": "00",
+   "event_title": "Sebastian Heinrich vs. Luca Wiedenmann",
+   "his_slug": "itf-heinric-wiedenm-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Sebastian Heinrich vs Luca Wiedenmann",
+   "his_event_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Sebastian Heinrich vs Luca Wiedenmann",
+   "outcome": "Sebastian Heinrich"
+  },
+  {
+   "clock": {
+    "hh": "2",
+    "mm": "00",
+    "ap": "pm"
+   },
+   "venue_codes": [
+    "tommar",
+    "ezemon"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M15 Mar Del Plata (Argentina), clay: Tomas Martinez vs Ezequiel Monferrer",
+    "ezequiel monferrer"
+   ],
+   "identifier": "aec-itfme-tommar-ezemon-2026-08-27",
+   "market_slug": "aec-itfme-tommar-ezemon-2026-08-27",
+   "event_slug": "itfme-tommar-ezemon-2026-08-27",
+   "kind": "side",
+   "side_norm": "tomas martinez",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "ezequiel monferrer",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Tomas Martinez vs Ezequiel Monferrer scheduled for August 27, 2026 at 2:00 PM UTC?",
+   "qlen": 124,
+   "line_before": "00",
+   "event_title": "Tomas Martinez vs. Ezequiel Monferrer",
+   "his_slug": "itf-mart-monferr-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M15 Mar Del Plata (Argentina), clay: Tomas Martinez vs Ezequiel Monferrer",
+   "his_event_title": "ITF MEN - SINGLES: M15 Mar Del Plata (Argentina), clay: Tomas Martinez vs Ezequiel Monferrer",
+   "outcome": "Tomas Martinez"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "pm"
+   },
+   "venue_codes": [
+    "jelsel",
+    "pielan"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+    "pieter de lange"
+   ],
+   "identifier": "aec-itfme-jelsel-pielan-2026-08-27",
+   "market_slug": "aec-itfme-jelsel-pielan-2026-08-27",
+   "event_slug": "itfme-jelsel-pielan-2026-08-27",
+   "kind": "side",
+   "side_norm": "jelle sels",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "pieter de lange",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Jelle Sels vs Pieter De Lange scheduled for August 27, 2026 at 12:00 PM UTC?",
+   "qlen": 118,
+   "line_before": "00",
+   "event_title": "Jelle Sels vs. Pieter De Lange",
+   "his_slug": "itf-sel-lange-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+   "his_event_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+   "outcome": "Jelle Sels"
+  },
+  {
+   "clock": {
+    "hh": "2",
+    "mm": "00",
+    "ap": "pm"
+   },
+   "venue_codes": [
+    "gonzei",
+    "lorgag"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M15 Mar Del Plata (Argentina), clay: Gonzalo Zeitune vs Lorenzo Gagliardo",
+    "gonzalo zeitune"
+   ],
+   "identifier": "aec-itfme-gonzei-lorgag-2026-08-27",
+   "market_slug": "aec-itfme-gonzei-lorgag-2026-08-27",
+   "event_slug": "itfme-gonzei-lorgag-2026-08-27",
+   "kind": "side",
+   "side_norm": "lorenzo gagliardo",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "gonzalo zeitune",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Gonzalo Zeitune vs Lorenzo Gagliardo scheduled for August 27, 2026 at 2:00 PM UTC?",
+   "qlen": 124,
+   "line_before": "00",
+   "event_title": "Gonzalo Zeitune vs. Lorenzo Gagliardo",
+   "his_slug": "itf-zeitun-gagliar-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M15 Mar Del Plata (Argentina), clay: Gonzalo Zeitune vs Lorenzo Gagliardo",
+   "his_event_title": "ITF MEN - SINGLES: M15 Mar Del Plata (Argentina), clay: Gonzalo Zeitune vs Lorenzo Gagliardo",
+   "outcome": "Lorenzo Gagliardo"
+  },
+  {
+   "clock": {
+    "hh": "11",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "matujv",
+    "lorrot"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M15 Vienna (Austria), clay: Matthias Ujvary vs Lorenzo Rottoli",
+    "matthias ujvary"
+   ],
+   "identifier": "aec-itfme-matujv-lorrot-2026-08-27",
+   "market_slug": "aec-itfme-matujv-lorrot-2026-08-27",
+   "event_slug": "itfme-matujv-lorrot-2026-08-27",
+   "kind": "side",
+   "side_norm": "lorenzo rottoli",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "matthias ujvary",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Matthias Ujvary vs Lorenzo Rottoli scheduled for August 27, 2026 at 11:00 AM UTC?",
+   "qlen": 123,
+   "line_before": "00",
+   "event_title": "Matthias Ujvary vs. Lorenzo Rottoli",
+   "his_slug": "itf-ujvary-rottoli-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M15 Vienna (Austria), clay: Matthias Ujvary vs Lorenzo Rottoli",
+   "his_event_title": "ITF MEN - SINGLES: M15 Vienna (Austria), clay: Matthias Ujvary vs Lorenzo Rottoli",
+   "outcome": "Lorenzo Rottoli"
+  },
+  {
+   "clock": {
+    "hh": "11",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "matujv",
+    "lorrot"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M15 Vienna (Austria), clay: Matthias Ujvary vs Lorenzo Rottoli",
+    "matthias ujvary"
+   ],
+   "identifier": "aec-itfme-matujv-lorrot-2026-08-27",
+   "market_slug": "aec-itfme-matujv-lorrot-2026-08-27",
+   "event_slug": "itfme-matujv-lorrot-2026-08-27",
+   "kind": "side",
+   "side_norm": "lorenzo rottoli",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "matthias ujvary",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Matthias Ujvary vs Lorenzo Rottoli scheduled for August 27, 2026 at 11:00 AM UTC?",
+   "qlen": 123,
+   "line_before": "00",
+   "event_title": "Matthias Ujvary vs. Lorenzo Rottoli",
+   "his_slug": "itf-ujvary-rottoli-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M15 Vienna (Austria), clay: Matthias Ujvary vs Lorenzo Rottoli",
+   "his_event_title": "ITF MEN - SINGLES: M15 Vienna (Austria), clay: Matthias Ujvary vs Lorenzo Rottoli",
+   "outcome": "Lorenzo Rottoli"
+  },
+  {
+   "clock": {
+    "hh": "11",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "matujv",
+    "lorrot"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M15 Vienna (Austria), clay: Matthias Ujvary vs Lorenzo Rottoli",
+    "matthias ujvary"
+   ],
+   "identifier": "aec-itfme-matujv-lorrot-2026-08-27",
+   "market_slug": "aec-itfme-matujv-lorrot-2026-08-27",
+   "event_slug": "itfme-matujv-lorrot-2026-08-27",
+   "kind": "side",
+   "side_norm": "lorenzo rottoli",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "matthias ujvary",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Matthias Ujvary vs Lorenzo Rottoli scheduled for August 27, 2026 at 11:00 AM UTC?",
+   "qlen": 123,
+   "line_before": "00",
+   "event_title": "Matthias Ujvary vs. Lorenzo Rottoli",
+   "his_slug": "itf-ujvary-rottoli-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M15 Vienna (Austria), clay: Matthias Ujvary vs Lorenzo Rottoli",
+   "his_event_title": "ITF MEN - SINGLES: M15 Vienna (Austria), clay: Matthias Ujvary vs Lorenzo Rottoli",
+   "outcome": "Lorenzo Rottoli"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "jefsch",
+    "ninehr"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+    "nino ehrenschneider"
+   ],
+   "identifier": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "market_slug": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "event_slug": "itfme-jefsch-ninehr-2026-08-27",
+   "kind": "side",
+   "side_norm": "jeffrey von der schulenburg",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "nino ehrenschneider",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Jeffrey Von Der Schulenburg vs Nino Ehrenschneider scheduled for August 27, 2026 at 12:00 AM UTC?",
+   "qlen": 139,
+   "line_before": "00",
+   "event_title": "Jeffrey Von Der Schulenburg vs. Nino Ehrenschneider",
+   "his_slug": "itf-schulen-ehrensc-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "his_event_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "outcome": "Jeffrey Von Der Schulenburg"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "jefsch",
+    "ninehr"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+    "nino ehrenschneider"
+   ],
+   "identifier": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "market_slug": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "event_slug": "itfme-jefsch-ninehr-2026-08-27",
+   "kind": "side",
+   "side_norm": "jeffrey von der schulenburg",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "nino ehrenschneider",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Jeffrey Von Der Schulenburg vs Nino Ehrenschneider scheduled for August 27, 2026 at 12:00 AM UTC?",
+   "qlen": 139,
+   "line_before": "00",
+   "event_title": "Jeffrey Von Der Schulenburg vs. Nino Ehrenschneider",
+   "his_slug": "itf-schulen-ehrensc-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "his_event_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "outcome": "Jeffrey Von Der Schulenburg"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "jefsch",
+    "ninehr"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+    "nino ehrenschneider"
+   ],
+   "identifier": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "market_slug": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "event_slug": "itfme-jefsch-ninehr-2026-08-27",
+   "kind": "side",
+   "side_norm": "jeffrey von der schulenburg",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "nino ehrenschneider",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Jeffrey Von Der Schulenburg vs Nino Ehrenschneider scheduled for August 27, 2026 at 12:00 AM UTC?",
+   "qlen": 139,
+   "line_before": "00",
+   "event_title": "Jeffrey Von Der Schulenburg vs. Nino Ehrenschneider",
+   "his_slug": "itf-schulen-ehrensc-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "his_event_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "outcome": "Jeffrey Von Der Schulenburg"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "jefsch",
+    "ninehr"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+    "nino ehrenschneider"
+   ],
+   "identifier": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "market_slug": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "event_slug": "itfme-jefsch-ninehr-2026-08-27",
+   "kind": "side",
+   "side_norm": "jeffrey von der schulenburg",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "nino ehrenschneider",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Jeffrey Von Der Schulenburg vs Nino Ehrenschneider scheduled for August 27, 2026 at 12:00 AM UTC?",
+   "qlen": 139,
+   "line_before": "00",
+   "event_title": "Jeffrey Von Der Schulenburg vs. Nino Ehrenschneider",
+   "his_slug": "itf-schulen-ehrensc-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "his_event_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "outcome": "Jeffrey Von Der Schulenburg"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "aljjer",
+    "andmar"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+    "aljaz jeran"
+   ],
+   "identifier": "aec-itfme-aljjer-andmar-2026-08-27",
+   "market_slug": "aec-itfme-aljjer-andmar-2026-08-27",
+   "event_slug": "itfme-aljjer-andmar-2026-08-27",
+   "kind": "side",
+   "side_norm": "andrea de marchi",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "aljaz jeran",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Aljaz Jeran vs Andrea De Marchi scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 119,
+   "line_before": "00",
+   "event_title": "Aljaz Jeran vs. Andrea De Marchi",
+   "his_slug": "itf-jeran-marchi-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "his_event_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "outcome": "Andrea De Marchi"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "jefsch",
+    "ninehr"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+    "nino ehrenschneider"
+   ],
+   "identifier": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "market_slug": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "event_slug": "itfme-jefsch-ninehr-2026-08-27",
+   "kind": "side",
+   "side_norm": "jeffrey von der schulenburg",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "nino ehrenschneider",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Jeffrey Von Der Schulenburg vs Nino Ehrenschneider scheduled for August 27, 2026 at 12:00 AM UTC?",
+   "qlen": 139,
+   "line_before": "00",
+   "event_title": "Jeffrey Von Der Schulenburg vs. Nino Ehrenschneider",
+   "his_slug": "itf-schulen-ehrensc-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "his_event_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "outcome": "Jeffrey Von Der Schulenburg"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "pm"
+   },
+   "venue_codes": [
+    "jelsel",
+    "pielan"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+    "jelle sels"
+   ],
+   "identifier": "aec-itfme-jelsel-pielan-2026-08-27",
+   "market_slug": "aec-itfme-jelsel-pielan-2026-08-27",
+   "event_slug": "itfme-jelsel-pielan-2026-08-27",
+   "kind": "side",
+   "side_norm": "pieter de lange",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "jelle sels",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Jelle Sels vs Pieter De Lange scheduled for August 27, 2026 at 12:00 PM UTC?",
+   "qlen": 118,
+   "line_before": "00",
+   "event_title": "Jelle Sels vs. Pieter De Lange",
+   "his_slug": "itf-sel-lange-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+   "his_event_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+   "outcome": "Pieter De Lange"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "pm"
+   },
+   "venue_codes": [
+    "jelsel",
+    "pielan"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+    "jelle sels"
+   ],
+   "identifier": "aec-itfme-jelsel-pielan-2026-08-27",
+   "market_slug": "aec-itfme-jelsel-pielan-2026-08-27",
+   "event_slug": "itfme-jelsel-pielan-2026-08-27",
+   "kind": "side",
+   "side_norm": "pieter de lange",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "jelle sels",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Jelle Sels vs Pieter De Lange scheduled for August 27, 2026 at 12:00 PM UTC?",
+   "qlen": 118,
+   "line_before": "00",
+   "event_title": "Jelle Sels vs. Pieter De Lange",
+   "his_slug": "itf-sel-lange-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+   "his_event_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+   "outcome": "Pieter De Lange"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "pm"
+   },
+   "venue_codes": [
+    "jelsel",
+    "pielan"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+    "jelle sels"
+   ],
+   "identifier": "aec-itfme-jelsel-pielan-2026-08-27",
+   "market_slug": "aec-itfme-jelsel-pielan-2026-08-27",
+   "event_slug": "itfme-jelsel-pielan-2026-08-27",
+   "kind": "side",
+   "side_norm": "pieter de lange",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "jelle sels",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Jelle Sels vs Pieter De Lange scheduled for August 27, 2026 at 12:00 PM UTC?",
+   "qlen": 118,
+   "line_before": "00",
+   "event_title": "Jelle Sels vs. Pieter De Lange",
+   "his_slug": "itf-sel-lange-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+   "his_event_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+   "outcome": "Pieter De Lange"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "aljjer",
+    "andmar"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+    "andrea de marchi"
+   ],
+   "identifier": "aec-itfme-aljjer-andmar-2026-08-27",
+   "market_slug": "aec-itfme-aljjer-andmar-2026-08-27",
+   "event_slug": "itfme-aljjer-andmar-2026-08-27",
+   "kind": "side",
+   "side_norm": "aljaz jeran",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "andrea de marchi",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Aljaz Jeran vs Andrea De Marchi scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 119,
+   "line_before": "00",
+   "event_title": "Aljaz Jeran vs. Andrea De Marchi",
+   "his_slug": "itf-jeran-marchi-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "his_event_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "outcome": "Aljaz Jeran"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "aljjer",
+    "andmar"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+    "andrea de marchi"
+   ],
+   "identifier": "aec-itfme-aljjer-andmar-2026-08-27",
+   "market_slug": "aec-itfme-aljjer-andmar-2026-08-27",
+   "event_slug": "itfme-aljjer-andmar-2026-08-27",
+   "kind": "side",
+   "side_norm": "aljaz jeran",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "andrea de marchi",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Aljaz Jeran vs Andrea De Marchi scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 119,
+   "line_before": "00",
+   "event_title": "Aljaz Jeran vs. Andrea De Marchi",
+   "his_slug": "itf-jeran-marchi-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "his_event_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "outcome": "Aljaz Jeran"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "aljjer",
+    "andmar"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+    "andrea de marchi"
+   ],
+   "identifier": "aec-itfme-aljjer-andmar-2026-08-27",
+   "market_slug": "aec-itfme-aljjer-andmar-2026-08-27",
+   "event_slug": "itfme-aljjer-andmar-2026-08-27",
+   "kind": "side",
+   "side_norm": "aljaz jeran",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "andrea de marchi",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Aljaz Jeran vs Andrea De Marchi scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 119,
+   "line_before": "00",
+   "event_title": "Aljaz Jeran vs. Andrea De Marchi",
+   "his_slug": "itf-jeran-marchi-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "his_event_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "outcome": "Aljaz Jeran"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "pm"
+   },
+   "venue_codes": [
+    "jelsel",
+    "pielan"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+    "pieter de lange"
+   ],
+   "identifier": "aec-itfme-jelsel-pielan-2026-08-27",
+   "market_slug": "aec-itfme-jelsel-pielan-2026-08-27",
+   "event_slug": "itfme-jelsel-pielan-2026-08-27",
+   "kind": "side",
+   "side_norm": "jelle sels",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "pieter de lange",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Jelle Sels vs Pieter De Lange scheduled for August 27, 2026 at 12:00 PM UTC?",
+   "qlen": 118,
+   "line_before": "00",
+   "event_title": "Jelle Sels vs. Pieter De Lange",
+   "his_slug": "itf-sel-lange-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+   "his_event_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Jelle Sels vs Pieter De Lange",
+   "outcome": "Jelle Sels"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "aljjer",
+    "andmar"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+    "andrea de marchi"
+   ],
+   "identifier": "aec-itfme-aljjer-andmar-2026-08-27",
+   "market_slug": "aec-itfme-aljjer-andmar-2026-08-27",
+   "event_slug": "itfme-aljjer-andmar-2026-08-27",
+   "kind": "side",
+   "side_norm": "aljaz jeran",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "andrea de marchi",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Aljaz Jeran vs Andrea De Marchi scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 119,
+   "line_before": "00",
+   "event_title": "Aljaz Jeran vs. Andrea De Marchi",
+   "his_slug": "itf-jeran-marchi-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "his_event_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "outcome": "Aljaz Jeran"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "aljjer",
+    "andmar"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+    "andrea de marchi"
+   ],
+   "identifier": "aec-itfme-aljjer-andmar-2026-08-27",
+   "market_slug": "aec-itfme-aljjer-andmar-2026-08-27",
+   "event_slug": "itfme-aljjer-andmar-2026-08-27",
+   "kind": "side",
+   "side_norm": "aljaz jeran",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "andrea de marchi",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Aljaz Jeran vs Andrea De Marchi scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 119,
+   "line_before": "00",
+   "event_title": "Aljaz Jeran vs. Andrea De Marchi",
+   "his_slug": "itf-jeran-marchi-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "his_event_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "outcome": "Aljaz Jeran"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "aljjer",
+    "andmar"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+    "andrea de marchi"
+   ],
+   "identifier": "aec-itfme-aljjer-andmar-2026-08-27",
+   "market_slug": "aec-itfme-aljjer-andmar-2026-08-27",
+   "event_slug": "itfme-aljjer-andmar-2026-08-27",
+   "kind": "side",
+   "side_norm": "aljaz jeran",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "andrea de marchi",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Aljaz Jeran vs Andrea De Marchi scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 119,
+   "line_before": "00",
+   "event_title": "Aljaz Jeran vs. Andrea De Marchi",
+   "his_slug": "itf-jeran-marchi-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "his_event_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "outcome": "Aljaz Jeran"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "blubak",
+    "henber"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Blu Baker vs Henry Bernet",
+    "henry bernet"
+   ],
+   "identifier": "aec-itfme-blubak-henber-2026-08-27",
+   "market_slug": "aec-itfme-blubak-henber-2026-08-27",
+   "event_slug": "itfme-blubak-henber-2026-08-27",
+   "kind": "side",
+   "side_norm": "blu baker",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "henry bernet",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Blu Baker vs Henry Bernet scheduled for August 27, 2026 at 12:00 AM UTC?",
+   "qlen": 114,
+   "line_before": "00",
+   "event_title": "Blu Baker vs. Henry Bernet",
+   "his_slug": "itf-bake-bernet-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Blu Baker vs Henry Bernet",
+   "his_event_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Blu Baker vs Henry Bernet",
+   "outcome": "Blu Baker"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "blubak",
+    "henber"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Blu Baker vs Henry Bernet",
+    "henry bernet"
+   ],
+   "identifier": "aec-itfme-blubak-henber-2026-08-27",
+   "market_slug": "aec-itfme-blubak-henber-2026-08-27",
+   "event_slug": "itfme-blubak-henber-2026-08-27",
+   "kind": "side",
+   "side_norm": "blu baker",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "henry bernet",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Blu Baker vs Henry Bernet scheduled for August 27, 2026 at 12:00 AM UTC?",
+   "qlen": 114,
+   "line_before": "00",
+   "event_title": "Blu Baker vs. Henry Bernet",
+   "his_slug": "itf-bake-bernet-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Blu Baker vs Henry Bernet",
+   "his_event_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Blu Baker vs Henry Bernet",
+   "outcome": "Blu Baker"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "blubak",
+    "henber"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Blu Baker vs Henry Bernet",
+    "henry bernet"
+   ],
+   "identifier": "aec-itfme-blubak-henber-2026-08-27",
+   "market_slug": "aec-itfme-blubak-henber-2026-08-27",
+   "event_slug": "itfme-blubak-henber-2026-08-27",
+   "kind": "side",
+   "side_norm": "blu baker",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "henry bernet",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Blu Baker vs Henry Bernet scheduled for August 27, 2026 at 12:00 AM UTC?",
+   "qlen": 114,
+   "line_before": "00",
+   "event_title": "Blu Baker vs. Henry Bernet",
+   "his_slug": "itf-bake-bernet-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Blu Baker vs Henry Bernet",
+   "his_event_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Blu Baker vs Henry Bernet",
+   "outcome": "Blu Baker"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "aljjer",
+    "andmar"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+    "andrea de marchi"
+   ],
+   "identifier": "aec-itfme-aljjer-andmar-2026-08-27",
+   "market_slug": "aec-itfme-aljjer-andmar-2026-08-27",
+   "event_slug": "itfme-aljjer-andmar-2026-08-27",
+   "kind": "side",
+   "side_norm": "aljaz jeran",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "andrea de marchi",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Aljaz Jeran vs Andrea De Marchi scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 119,
+   "line_before": "00",
+   "event_title": "Aljaz Jeran vs. Andrea De Marchi",
+   "his_slug": "itf-jeran-marchi-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "his_event_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "outcome": "Aljaz Jeran"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "filpie",
+    "olepri"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Poznan (Poland), clay: Filip Pieczonka vs Oleg Prihodko",
+    "oleg prihodko"
+   ],
+   "identifier": "aec-itfme-filpie-olepri-2026-08-27",
+   "market_slug": "aec-itfme-filpie-olepri-2026-08-27",
+   "event_slug": "itfme-filpie-olepri-2026-08-27",
+   "kind": "side",
+   "side_norm": "filip pieczonka",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "oleg prihodko",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Filip Pieczonka vs Oleg Prihodko scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 120,
+   "line_before": "00",
+   "event_title": "Filip Pieczonka vs. Oleg Prihodko",
+   "his_slug": "itf-pieczon-prihodk-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Poznan (Poland), clay: Filip Pieczonka vs Oleg Prihodko",
+   "his_event_title": "ITF MEN - SINGLES: M25 Poznan (Poland), clay: Filip Pieczonka vs Oleg Prihodko",
+   "outcome": "Filip Pieczonka"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "aljjer",
+    "andmar"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+    "andrea de marchi"
+   ],
+   "identifier": "aec-itfme-aljjer-andmar-2026-08-27",
+   "market_slug": "aec-itfme-aljjer-andmar-2026-08-27",
+   "event_slug": "itfme-aljjer-andmar-2026-08-27",
+   "kind": "side",
+   "side_norm": "aljaz jeran",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "andrea de marchi",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Aljaz Jeran vs Andrea De Marchi scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 119,
+   "line_before": "00",
+   "event_title": "Aljaz Jeran vs. Andrea De Marchi",
+   "his_slug": "itf-jeran-marchi-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "his_event_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "outcome": "Aljaz Jeran"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "aljjer",
+    "andmar"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+    "andrea de marchi"
+   ],
+   "identifier": "aec-itfme-aljjer-andmar-2026-08-27",
+   "market_slug": "aec-itfme-aljjer-andmar-2026-08-27",
+   "event_slug": "itfme-aljjer-andmar-2026-08-27",
+   "kind": "side",
+   "side_norm": "aljaz jeran",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "andrea de marchi",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Aljaz Jeran vs Andrea De Marchi scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 119,
+   "line_before": "00",
+   "event_title": "Aljaz Jeran vs. Andrea De Marchi",
+   "his_slug": "itf-jeran-marchi-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "his_event_title": "ITF MEN - SINGLES: M25 Maribor (Slovenia), clay: Aljaz Jeran vs Andrea De Marchi",
+   "outcome": "Aljaz Jeran"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "filpie",
+    "olepri"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Poznan (Poland), clay: Filip Pieczonka vs Oleg Prihodko",
+    "filip pieczonka"
+   ],
+   "identifier": "aec-itfme-filpie-olepri-2026-08-27",
+   "market_slug": "aec-itfme-filpie-olepri-2026-08-27",
+   "event_slug": "itfme-filpie-olepri-2026-08-27",
+   "kind": "side",
+   "side_norm": "oleg prihodko",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "filip pieczonka",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Filip Pieczonka vs Oleg Prihodko scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 120,
+   "line_before": "00",
+   "event_title": "Filip Pieczonka vs. Oleg Prihodko",
+   "his_slug": "itf-pieczon-prihodk-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Poznan (Poland), clay: Filip Pieczonka vs Oleg Prihodko",
+   "his_event_title": "ITF MEN - SINGLES: M25 Poznan (Poland), clay: Filip Pieczonka vs Oleg Prihodko",
+   "outcome": "Oleg Prihodko"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "jefsch",
+    "ninehr"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+    "nino ehrenschneider"
+   ],
+   "identifier": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "market_slug": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "event_slug": "itfme-jefsch-ninehr-2026-08-27",
+   "kind": "side",
+   "side_norm": "jeffrey von der schulenburg",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "nino ehrenschneider",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Jeffrey Von Der Schulenburg vs Nino Ehrenschneider scheduled for August 27, 2026 at 12:00 AM UTC?",
+   "qlen": 139,
+   "line_before": "00",
+   "event_title": "Jeffrey Von Der Schulenburg vs. Nino Ehrenschneider",
+   "his_slug": "itf-schulen-ehrensc-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "his_event_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "outcome": "Jeffrey Von Der Schulenburg"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "jefsch",
+    "ninehr"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+    "jeffrey von der schulenburg"
+   ],
+   "identifier": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "market_slug": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "event_slug": "itfme-jefsch-ninehr-2026-08-27",
+   "kind": "side",
+   "side_norm": "nino ehrenschneider",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "jeffrey von der schulenburg",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Jeffrey Von Der Schulenburg vs Nino Ehrenschneider scheduled for August 27, 2026 at 12:00 AM UTC?",
+   "qlen": 139,
+   "line_before": "00",
+   "event_title": "Jeffrey Von Der Schulenburg vs. Nino Ehrenschneider",
+   "his_slug": "itf-schulen-ehrensc-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "his_event_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "outcome": "Nino Ehrenschneider"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "filpie",
+    "olepri"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Poznan (Poland), clay: Filip Pieczonka vs Oleg Prihodko",
+    "filip pieczonka"
+   ],
+   "identifier": "aec-itfme-filpie-olepri-2026-08-27",
+   "market_slug": "aec-itfme-filpie-olepri-2026-08-27",
+   "event_slug": "itfme-filpie-olepri-2026-08-27",
+   "kind": "side",
+   "side_norm": "oleg prihodko",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "filip pieczonka",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Filip Pieczonka vs Oleg Prihodko scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 120,
+   "line_before": "00",
+   "event_title": "Filip Pieczonka vs. Oleg Prihodko",
+   "his_slug": "itf-pieczon-prihodk-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Poznan (Poland), clay: Filip Pieczonka vs Oleg Prihodko",
+   "his_event_title": "ITF MEN - SINGLES: M25 Poznan (Poland), clay: Filip Pieczonka vs Oleg Prihodko",
+   "outcome": "Oleg Prihodko"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "filpie",
+    "olepri"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Poznan (Poland), clay: Filip Pieczonka vs Oleg Prihodko",
+    "filip pieczonka"
+   ],
+   "identifier": "aec-itfme-filpie-olepri-2026-08-27",
+   "market_slug": "aec-itfme-filpie-olepri-2026-08-27",
+   "event_slug": "itfme-filpie-olepri-2026-08-27",
+   "kind": "side",
+   "side_norm": "oleg prihodko",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "filip pieczonka",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Filip Pieczonka vs Oleg Prihodko scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 120,
+   "line_before": "00",
+   "event_title": "Filip Pieczonka vs. Oleg Prihodko",
+   "his_slug": "itf-pieczon-prihodk-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Poznan (Poland), clay: Filip Pieczonka vs Oleg Prihodko",
+   "his_event_title": "ITF MEN - SINGLES: M25 Poznan (Poland), clay: Filip Pieczonka vs Oleg Prihodko",
+   "outcome": "Oleg Prihodko"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "danver",
+    "eervas"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Daniel Verbeek vs Eero Vasa",
+    "daniel verbeek"
+   ],
+   "identifier": "aec-itfme-danver-eervas-2026-08-27",
+   "market_slug": "aec-itfme-danver-eervas-2026-08-27",
+   "event_slug": "itfme-danver-eervas-2026-08-27",
+   "kind": "side",
+   "side_norm": "eero vasa",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "daniel verbeek",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Daniel Verbeek vs Eero Vasa scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 115,
+   "line_before": "00",
+   "event_title": "Daniel Verbeek vs. Eero Vasa",
+   "his_slug": "itf-verbeek-vas-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Daniel Verbeek vs Eero Vasa",
+   "his_event_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Daniel Verbeek vs Eero Vasa",
+   "outcome": "Eero Vasa"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "jefsch",
+    "ninehr"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+    "jeffrey von der schulenburg"
+   ],
+   "identifier": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "market_slug": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "event_slug": "itfme-jefsch-ninehr-2026-08-27",
+   "kind": "side",
+   "side_norm": "nino ehrenschneider",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "jeffrey von der schulenburg",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Jeffrey Von Der Schulenburg vs Nino Ehrenschneider scheduled for August 27, 2026 at 12:00 AM UTC?",
+   "qlen": 139,
+   "line_before": "00",
+   "event_title": "Jeffrey Von Der Schulenburg vs. Nino Ehrenschneider",
+   "his_slug": "itf-schulen-ehrensc-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "his_event_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "outcome": "Nino Ehrenschneider"
+  },
+  {
+   "clock": {
+    "hh": "9",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "danver",
+    "eervas"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Daniel Verbeek vs Eero Vasa",
+    "daniel verbeek"
+   ],
+   "identifier": "aec-itfme-danver-eervas-2026-08-27",
+   "market_slug": "aec-itfme-danver-eervas-2026-08-27",
+   "event_slug": "itfme-danver-eervas-2026-08-27",
+   "kind": "side",
+   "side_norm": "eero vasa",
+   "intent": "ORDER_INTENT_BUY_SHORT",
+   "sibling_side": "daniel verbeek",
+   "sibling_intent": "ORDER_INTENT_BUY_LONG",
+   "question": "Who will win in the upcoming tennis event Daniel Verbeek vs Eero Vasa scheduled for August 27, 2026 at 9:00 AM UTC?",
+   "qlen": 115,
+   "line_before": "00",
+   "event_title": "Daniel Verbeek vs. Eero Vasa",
+   "his_slug": "itf-verbeek-vas-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Daniel Verbeek vs Eero Vasa",
+   "his_event_title": "ITF MEN - SINGLES: M25 Oldenzaal (Netherlands), clay: Daniel Verbeek vs Eero Vasa",
+   "outcome": "Eero Vasa"
+  },
+  {
+   "clock": {
+    "hh": "12",
+    "mm": "00",
+    "ap": "am"
+   },
+   "venue_codes": [
+    "jefsch",
+    "ninehr"
+   ],
+   "his_opponent_vs_other_side": [
+    "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+    "nino ehrenschneider"
+   ],
+   "identifier": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "market_slug": "aec-itfme-jefsch-ninehr-2026-08-27",
+   "event_slug": "itfme-jefsch-ninehr-2026-08-27",
+   "kind": "side",
+   "side_norm": "jeffrey von der schulenburg",
+   "intent": "ORDER_INTENT_BUY_LONG",
+   "sibling_side": "nino ehrenschneider",
+   "sibling_intent": "ORDER_INTENT_BUY_SHORT",
+   "question": "Who will win in the upcoming tennis event Jeffrey Von Der Schulenburg vs Nino Ehrenschneider scheduled for August 27, 2026 at 12:00 AM UTC?",
+   "qlen": 139,
+   "line_before": "00",
+   "event_title": "Jeffrey Von Der Schulenburg vs. Nino Ehrenschneider",
+   "his_slug": "itf-schulen-ehrensc-2026-08-27",
+   "his_lg": "itf",
+   "his_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "his_event_title": "ITF MEN - SINGLES: M25 Lausanne (Switzerland), clay: Jeffrey Von Der Schulenburg vs Nino Ehrenschneider",
+   "outcome": "Jeffrey Von Der Schulenburg"
+  }
+ ]
+}
