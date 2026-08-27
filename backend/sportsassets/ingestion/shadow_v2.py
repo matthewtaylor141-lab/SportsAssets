@@ -1,0 +1,857 @@
+"""Phase S0 — shadow per-event decoder for the 0xd543adfd fill event.
+
+Observes every 0xd543adfd log the listener receives, decodes it per-event
+with the empirically verified v2 layout (chain.py:68-81, tied out against
+p382s.log:4452-4476 to the cent), INGESTS NOTHING, and measures — against
+the poller's authoritative rows in the trades table — whether a per-event
+Path A could replace the v3 receipt path without changing one ingested
+field. The decisive output is a dedupe-outcome SIMULATION: the exact
+would-be insert-key set per tx under each candidate ingest policy, tested
+against every real poll row's stored dedupe_key.
+
+Hard rules (each enforced by backend/tests/test_shadow_v2.py):
+  * shadow_observe: sync, zero I/O, never raises.
+  * no pipeline/bus import; never calls ingest_trade; never writes
+    trades/notification_outbox; never touches BlockTimestampCache values.
+  * one reconcile task per process; delta-only writer-fenced flushes.
+  * all in-memory structures FIFO-bounded with counted eviction.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+import uuid
+import weakref
+from collections import OrderedDict, deque
+from decimal import ROUND_HALF_UP, Decimal
+from statistics import median
+from typing import Any
+
+import httpx
+
+from .dedupe import _num, make_dedupe_key  # byte-identical normalization on purpose
+
+log = logging.getLogger(__name__)
+
+STATE_KEY = "shadow_v2_fill"
+SCHEMA_V = 1
+WRITER_ID = uuid.uuid4().hex[:12]
+
+PENDING_CAP = 3000
+SEEN_EVENTS_CAP = 8192
+SEEN_TX_CAP = 16384
+TS_CACHE_CAP = 1024
+PER_WHALE_CAP = 32
+EXAMPLES_CAP = 12
+GAPS_CAP = 16
+LAG_RESERVOIR = 512
+
+MATURE_S = 900.0          # venue publication lag measured 90-500s; evaluate past it
+ORPHAN_FINAL_S = 4200.0   # one deferral window covering the hourly reconciler
+REPLAY_STALE_S = 7200.0   # replayed events older than the join window: drop, count
+TS_FIRST_TRY_S = 1.5      # hot-path-like first resolution attempt
+TICK_S = 2.0
+RECONCILE_EVERY = 30      # ticks  -> ~60s
+REVERSE_EVERY = 5         # reconciles -> ~5min
+REVERSE_LOOKBACK_S = 1200.0
+MAX_TX_PER_RECONCILE = 200
+RPC_PER_TICK = 4
+RPC_PER_MIN = 40
+RPC_BACKOFF_S = 120.0
+DIVERGE_LOG_PER_CYCLE = 10
+LATE_POLL_ROW_S = 900.0   # detected_at - ts beyond this = reconciler artifact
+
+# counters that reset the measurement window when they move
+GATING = ("div.side", "div.asset", "div.size", "div.price", "div.ts",
+          "key_impl_mismatch", "agg_tieout_fail", "mint_side_anomaly",
+          "per_exec_ambiguous", "orphan_no_row", "orphan_chain_mismatch",
+          "poll_uncovered_unexplained", "ts_never_resolved_live")
+# counters that reset the instrument-health window when they move
+HEALTH = ("shadow_errors", "cycle_errors", "db_errors", "flush_failures",
+          "writer_conflict", "pending_overflow_dropped")
+# watermarked at window reset so the probe reads deltas-since-window
+VOLUME_KEYS = ("compared_execs", "sim_exec_suppressed", "sim_agg_suppressed",
+               "sim_exec_supp_hup_only", "mint_transformed", "poll_rows_seen",
+               "decoded_exec_counter", "decoded_exec_owner", "decoded_agg")
+
+SQL_TX = """
+SELECT lower(tx_hash) AS tx, whale_id, asset, side,
+       size::text  AS size, price::text AS price,
+       extract(epoch FROM ts)::bigint AS ts_epoch, source, dedupe_key,
+       extract(epoch FROM detected_at) AS det_epoch
+FROM trades
+WHERE source IN ('chain','poll')                      -- partial idx 009 predicate
+  AND detected_at > now() - interval '2 hours'
+  AND lower(tx_hash) = ANY($1::text[])
+"""
+
+SQL_REVERSE = """
+SELECT lower(tx_hash) AS tx, whale_id, source, dedupe_key,
+       extract(epoch FROM ts)::bigint AS ts_epoch
+FROM trades
+WHERE source IN ('chain','poll')
+  AND detected_at > now() - interval '20 minutes'
+  AND whale_id = ANY($1::bigint[])
+"""
+
+
+def _addr(topic: Any) -> str:
+    return "0x" + str(topic)[-40:].lower()
+
+
+def decode_shadow_views(log_entry: dict[str, Any], roster: dict[str, dict],
+                        exchange_addrs: set[str]) -> tuple[list[dict], str | None, bool]:
+    """Pure per-event decode of BOTH views of one 0xd543adfd log.
+
+    Returns (records, refusal_reason, roster_involved). Layout per the
+    verified spec: t1 orderHash, t2 order owner, t3 counterparty-or-
+    exchange; w0 side flag (0=owner bought), w1 token id, w2 gave,
+    w3 got, w4 fee in its own word. The aggregate/taker view is
+    self-describing: topics[3] == the emitting exchange address.
+    THIS FUNCTION IS THE S1 PRODUCTION DECODER (flip contract C1)."""
+    topics = log_entry.get("topics") or []
+    if len(topics) < 4:
+        return [], "short_topics", False
+    owner, cpty = _addr(topics[2]), _addr(topics[3])
+    involved = owner in roster or cpty in roster
+    data = str(log_entry.get("data", "0x"))[2:]
+    if len(data) < 4 * 64:
+        return [], "short_data", involved
+    words = [int(data[i * 64:(i + 1) * 64], 16)
+             for i in range(min(len(data) // 64, 5))]
+    side_flag, token, gave, got = words[0], words[1], words[2], words[3]
+    fee = words[4] if len(words) > 4 else 0
+    if side_flag not in (0, 1):
+        return [], "bad_flag", involved
+    if gave == 0 or got == 0:
+        return [], "zero_amount", involved
+    if side_flag == 0:
+        o_side, usdc_units, size_units = "BUY", gave, got
+    else:
+        o_side, size_units, usdc_units = "SELL", gave, got
+    price_r = round(usdc_units / size_units, 6)   # bit-exact replica of chain.py:205
+    if not (0 < price_r < 1):
+        return [], "price_oob", involved
+    emitter = str(log_entry.get("address", "")).lower()
+    tx = str(log_entry.get("transactionHash", "")).lower()
+    try:
+        blk = int(str(log_entry.get("blockNumber", "0x0")), 16)
+    except ValueError:
+        blk = 0
+    recs: list[dict] = []
+
+    def _rec(wallet: str, view: str, side: str, f_units: int) -> dict:
+        w = roster[wallet]
+        return {"tx": tx, "block": blk, "wallet": wallet, "whale_id": w["id"],
+                "username": w.get("username"), "view": view, "side": side,
+                "owner_side": o_side, "asset": str(token),
+                "size_units": size_units, "usdc_units": usdc_units,
+                "fee_units": f_units, "emitter": emitter}
+
+    if owner in roster:
+        is_agg = cpty == emitter or cpty in exchange_addrs
+        r = _rec(owner, "agg" if is_agg else "exec_owner", o_side, fee)
+        if is_agg and cpty != emitter:
+            r["agg_by_set_only"] = True
+        recs.append(r)
+    if (cpty in roster and cpty != owner and cpty != emitter
+            and cpty not in exchange_addrs):
+        recs.append(_rec(cpty, "exec_counter",
+                         "SELL" if o_side == "BUY" else "BUY", 0))
+    return recs, None, involved
+
+
+def classify_mints(recs_for_tx: list[dict]) -> dict[str, dict]:
+    """Group one tx's records per wallet and resolve exec_counter records
+    against the wallet's aggregate event. Returns wallet -> {"aggs": [...],
+    "execs": [...], "flags": {counter: n}} where execs contains exec_owner,
+    normal exec_counter, and mint-TRANSFORMED records:
+      mint leg (maker traded the COMPLEMENT token, matched via mint/merge):
+      asset := agg.asset, side := agg.side,
+      usdc_units := size_units - maker_usdc_units   (exact: one share pair
+      costs exactly 1.000000 collateral). Detected by asset != agg.asset
+      with the maker's raw side EQUAL to the aggregate side.
+    Anomalies are counted, never guessed through. Pure."""
+    out: dict[str, dict] = {}
+    for wallet in {r["wallet"] for r in recs_for_tx}:
+        aggs = [r for r in recs_for_tx if r["wallet"] == wallet and r["view"] == "agg"]
+        raw = [r for r in recs_for_tx if r["wallet"] == wallet
+               and r["view"] in ("exec_owner", "exec_counter")]
+        agg_assets = {a["asset"] for a in aggs}
+        execs, flags = [], {}
+        for r in raw:
+            if r["view"] == "exec_counter" and r["asset"] not in agg_assets:
+                if not aggs:
+                    flags["agg_missing"] = flags.get("agg_missing", 0) + 1
+                    continue
+                if len(aggs) > 1:
+                    flags["per_exec_ambiguous"] = flags.get("per_exec_ambiguous", 0) + 1
+                    continue
+                a = aggs[0]
+                if r["owner_side"] != a["side"] or r["usdc_units"] >= r["size_units"]:
+                    flags["mint_side_anomaly"] = flags.get("mint_side_anomaly", 0) + 1
+                    continue
+                execs.append(dict(r, view="exec_mint", asset=a["asset"], side=a["side"],
+                                  usdc_units=r["size_units"] - r["usdc_units"]))
+                flags["mint_transformed"] = flags.get("mint_transformed", 0) + 1
+            else:
+                execs.append(r)
+        out[wallet] = {"aggs": aggs, "execs": execs, "flags": flags}
+    return out
+
+
+def agg_tieout(group: dict) -> str:
+    """'ok' | 'fail' | 'skip' — mint-aware integer identity: the taker
+    aggregate must equal the sum of its per-exec legs exactly, with mint
+    legs contributing their TRANSFORMED usdc (s - maker_usdc). Pure."""
+    aggs = group["aggs"]
+    legs = [e for e in group["execs"] if e["view"] in ("exec_counter", "exec_mint")]
+    if len(aggs) != 1 or not legs or group["flags"].get("per_exec_ambiguous") \
+            or group["flags"].get("mint_side_anomaly") or group["flags"].get("agg_missing"):
+        return "skip"
+    a = aggs[0]
+    if (sum(e["size_units"] for e in legs) == a["size_units"]
+            and sum(e["usdc_units"] for e in legs) == a["usdc_units"]):
+        return "ok"
+    return "fail"
+
+
+def rec_prices(rec: dict) -> tuple[Any, Any]:
+    """(price_round, price_halfup) — the naive-S1 float rounding
+    (chain.py:205 replica) and the Decimal HALF_UP variant. Both are
+    simulated so the rounding question is settled in one window."""
+    pr = round(rec["usdc_units"] / rec["size_units"], 6)
+    ph = (Decimal(rec["usdc_units"]) / Decimal(rec["size_units"])
+          ).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+    return pr, ph
+
+
+def rec_keys(rec: dict) -> list[tuple[str, str]]:
+    """[('round', key)] plus ('hup', key) when the variants differ.
+    Requires rec['ts']. Size is exact from integer micro-units."""
+    size = Decimal(rec["size_units"]) / Decimal(10 ** 6)
+    pr, ph = rec_prices(rec)
+    out = [("round", make_dedupe_key(rec["tx"], rec["asset"], rec["side"],
+                                     size, pr, rec["ts"]))]
+    if _num(pr) != _num(ph):
+        out.append(("hup", make_dedupe_key(rec["tx"], rec["asset"], rec["side"],
+                                           size, ph, rec["ts"])))
+    return out
+
+
+class ShadowV2:
+    def __init__(self) -> None:
+        self.enabled = os.getenv("SHADOW_V2", "on").lower() not in ("off", "0", "false")
+        self.listener: Any = None                     # weakref.ref
+        self.http_url = ""
+        self.commit = (os.environ.get("RENDER_GIT_COMMIT") or "?")[:7]
+        self.pending: OrderedDict[tuple, dict] = OrderedDict()
+        self.seen_events: OrderedDict[tuple, float] = OrderedDict()
+        self.seen_tx: OrderedDict[str, float] = OrderedDict()
+        self.ts_cache: OrderedDict[int, int] = OrderedDict()
+        self.reverse_counted: OrderedDict[str, float] = OrderedDict()
+        self.deltas: dict[str, int] = {}
+        self.per_whale_mem: OrderedDict[str, dict] = OrderedDict()  # wallet -> lag deques
+        self.examples: deque = deque(maxlen=EXAMPLES_CAP)
+        self.lags: deque = deque(maxlen=LAG_RESERVOIR)
+        self.gaps: deque = deque(maxlen=GAPS_CAP)
+        self.last_observe_at = 0.0
+        self.last_ensure_at = 0.0
+        self.last_flush_ok = 0.0
+        self.rpc_tokens = float(RPC_PER_MIN)
+        self.rpc_token_at = time.time()
+        self.rpc_backoff_until = 0.0
+        self.tick_n = 0
+        self.reconcile_n = 0
+        self.booted = False
+        self._client: httpx.AsyncClient | None = None
+        self._exch_cache: tuple[int, set[str]] | None = None
+
+    # ── tiny helpers ────────────────────────────────────────────────
+    def bump(self, key: str, n: int = 1) -> None:
+        if n:
+            self.deltas[key] = self.deltas.get(key, 0) + n
+
+    def exchange_set(self, listener: Any) -> set[str]:
+        addrs = getattr(listener, "_addresses", None) or []
+        if self._exch_cache and self._exch_cache[0] == id(addrs):
+            return self._exch_cache[1]
+        s = {str(a).lower() for a in addrs}
+        self._exch_cache = (id(addrs), s)
+        return s
+
+    def note_example(self, kind: str, **kw: Any) -> None:
+        self.examples.append({"kind": kind, "at": int(time.time()), **kw})
+
+    def whale_mem(self, wallet: str, username: str | None) -> dict:
+        m = self.per_whale_mem.get(wallet)
+        if m is None:
+            m = {"username": username, "sh": deque(maxlen=64), "po": deque(maxlen=64)}
+            self.per_whale_mem[wallet] = m
+            while len(self.per_whale_mem) > PER_WHALE_CAP:
+                self.per_whale_mem.popitem(last=False)
+        return m
+
+    # ── ts resolution (own client, own cache, explicit None) ────────
+    async def _resolve_ts(self) -> None:
+        now = time.time()
+        if not self.http_url or now < self.rpc_backoff_until:
+            return
+        due: dict[int, list[dict]] = {}
+        for r in self.pending.values():
+            if r["ts"] is None and r["block"] and now - r["seen_at"] >= TS_FIRST_TRY_S:
+                due.setdefault(r["block"], []).append(r)
+        for blk in list(due):
+            if blk in self.ts_cache:
+                self._assign_ts(blk, self.ts_cache[blk], due.pop(blk))
+        if not due:
+            return
+        self.rpc_tokens = min(float(RPC_PER_MIN), self.rpc_tokens
+                              + (now - self.rpc_token_at) * RPC_PER_MIN / 60.0)
+        self.rpc_token_at = now
+        for blk in sorted(due)[:RPC_PER_TICK]:
+            if self.rpc_tokens < 1:
+                self.bump("ts_resolve_deferred")
+                break
+            self.rpc_tokens -= 1
+            ts = await self._fetch_block_ts(blk, due[blk])
+            if ts is not None:
+                self._assign_ts(blk, ts, due[blk])
+
+    async def _fetch_block_ts(self, blk: int, recs: list[dict]) -> int | None:
+        first = all(r["ts_tries"] == 0 for r in recs)
+        for r in recs:
+            r["ts_tries"] += 1
+        self.bump("ts_rpc_calls")
+        try:
+            if self._client is None:
+                self._client = httpx.AsyncClient(timeout=4)
+            resp = await self._client.post(self.http_url, json={
+                "jsonrpc": "2.0", "id": 1, "method": "eth_getBlockByNumber",
+                "params": [hex(blk), False]})
+            if resp.status_code == 429 or resp.status_code >= 500:
+                self.rpc_backoff_until = time.time() + RPC_BACKOFF_S
+                self.bump("ts_rpc_backoffs")
+                return None
+            raw = ((resp.json() or {}).get("result") or {}).get("timestamp")
+            if raw is None:
+                # the condition chain.py:291 papers over with wallclock —
+                # the shadow records the truth instead of inventing one
+                self.bump("ts_rpc_empty_first" if first else "ts_rpc_empty_retry")
+                return None
+            return int(str(raw), 16)
+        except Exception:  # noqa: BLE001
+            self.bump("ts_rpc_errors")
+            return None
+
+    def _assign_ts(self, blk: int, ts: int, recs: list[dict]) -> None:
+        self.ts_cache[blk] = ts
+        while len(self.ts_cache) > TS_CACHE_CAP:
+            self.ts_cache.popitem(last=False)
+        now = time.time()
+        for r in recs:
+            r["ts"] = ts
+            if not r["replay"]:
+                age = now - r["seen_at"]
+                b = ("le3s" if age <= 3 else "le6s" if age <= 6 else
+                     "le15s" if age <= 15 else "le60s" if age <= 60 else "gt60s")
+                self.bump("ts_avail." + b)
+            if now - ts > REPLAY_STALE_S:
+                self.pending.pop((r["tx"], r["log_index"], r["wallet"]), None)
+                self.bump("replay_stale_dropped" if r["replay"] else "stale_live_dropped")
+
+    # ── the reconciler ──────────────────────────────────────────────
+    async def tick(self) -> None:
+        await self._resolve_ts()
+        self.tick_n += 1
+        if self.tick_n % RECONCILE_EVERY == 0:
+            await self._reconcile()
+
+    async def _reconcile(self) -> None:
+        from ..db import get_pool  # lazy: no import cycle, no import-time DB
+        self.reconcile_n += 1
+        now = time.time()
+        by_tx: dict[str, list[dict]] = {}
+        for r in self.pending.values():
+            by_tx.setdefault(r["tx"], []).append(r)
+        mature = sorted(
+            (tx for tx, rs in by_tx.items()
+             if now - min(x["seen_at"] for x in rs) >= MATURE_S),
+            key=lambda tx: min(x["seen_at"] for x in by_tx[tx]))[:MAX_TX_PER_RECONCILE]
+        pool = None
+        try:
+            pool = await get_pool()
+        except Exception:  # noqa: BLE001
+            self.bump("db_errors")
+        if pool is not None and mature:
+            try:
+                rows = await pool.fetch(SQL_TX, mature, timeout=5.0)
+                rows_by: dict[tuple, list[dict]] = {}
+                for row in rows:
+                    rows_by.setdefault((row["tx"], row["whale_id"]), []).append(dict(row))
+                logged = 0
+                for tx in mature:
+                    logged = self._reconcile_tx(tx, by_tx[tx], rows_by, now, logged)
+            except Exception:  # noqa: BLE001
+                self.bump("db_errors")
+                log.info("SHADOW-V2 join failed", exc_info=True)
+        if pool is not None and self.reconcile_n % REVERSE_EVERY == 0:
+            try:
+                await self._reverse_probe(pool)
+            except Exception:  # noqa: BLE001
+                self.bump("db_errors")
+        if pool is not None:
+            await self._flush(pool)
+
+    def _reconcile_tx(self, tx: str, recs: list[dict],
+                      rows_by: dict, now: float, logged: int) -> int:
+        oldest = now - min(r["seen_at"] for r in recs)
+        if any(r["ts"] is None for r in recs):
+            if oldest >= ORPHAN_FINAL_S:
+                for r in recs:
+                    self.pending.pop((r["tx"], r["log_index"], r["wallet"]), None)
+                    self.bump("ts_never_resolved_replay" if r["replay"]
+                              else "ts_never_resolved_live")
+            return logged  # not evaluable yet — wait for ts
+        groups = classify_mints(recs)
+        for wallet, g in groups.items():
+            for k, n in g["flags"].items():
+                self.bump(k, n)
+                if k in ("mint_side_anomaly", "per_exec_ambiguous"):
+                    self.note_example(k, tx=tx[:14], wallet=wallet[:12])
+            tie = agg_tieout(g)
+            if tie != "skip":
+                self.bump("agg_tieout_" + tie)
+                if tie == "fail":
+                    self.note_example("agg_tieout_fail", tx=tx[:14], wallet=wallet[:12])
+                    log.warning("SHADOW-V2 AGG-TIEOUT tx=%s wallet=%s", tx[:14], wallet[:12])
+            whale_id = (g["execs"] + g["aggs"])[0]["whale_id"] if (g["execs"] or g["aggs"]) else None
+            rows = rows_by.get((tx, whale_id), [])
+            poll_rows = [x for x in rows if x["source"] == "poll"]
+            chain_rows = [x for x in rows if x["source"] == "chain"]
+            logged = self._match_wallet(tx, wallet, g, poll_rows, chain_rows,
+                                        oldest, now, logged)
+        return logged
+
+    def _match_wallet(self, tx: str, wallet: str, g: dict, poll_rows: list[dict],
+                      chain_rows: list[dict], oldest: float, now: float,
+                      logged: int) -> int:
+        execs, aggs = g["execs"], g["aggs"]
+        ins_exec: dict[str, tuple[str, dict]] = {}
+        for c in execs:
+            for variant, key in rec_keys(c):
+                ins_exec.setdefault(key, (variant, c))
+        prim = [rec_keys(c)[0][1] for c in execs]
+        self.bump("dup_exec", len(prim) - len(set(prim)))
+        ins_agg: dict[str, tuple[str, dict]] = {}
+        for a in aggs:
+            for variant, key in rec_keys(a):
+                ins_agg.setdefault(key, (variant, a))
+        consumed: set[int] = set()
+        residual_rows: list[dict] = []
+        for row in poll_rows:
+            hit = ins_exec.get(row["dedupe_key"])
+            hit_a = ins_agg.get(row["dedupe_key"])
+            self.bump("sim_agg_suppressed" if hit_a else "sim_agg_residual_dup")
+            if hit:
+                self.bump("sim_exec_suppressed")
+                if hit[0] == "hup":
+                    self.bump("sim_exec_supp_hup_only")
+                consumed.add(id(hit[1]))
+                self._record_latency(hit[1], row)
+            else:
+                self.bump("sim_exec_residual_dup")
+                residual_rows.append(row)
+        # field diagnosis for rows the exec policy failed to suppress
+        free = [c for c in execs if id(c) not in consumed]
+        for row in residual_rows:
+            logged = self._diagnose(tx, wallet, row, free, logged)
+        # granularity histogram
+        if len(execs) >= 2:
+            b = ("eq" if len(poll_rows) == len(execs)
+                 else "one" if len(poll_rows) == 1 else "other")
+            self.bump("poll_mult." + b)
+        # per-whale rollup
+        self.bump(f"pw.{wallet}.n", len(execs))
+        self.bump(f"pw.{wallet}.supp",
+                  sum(1 for c in execs if id(c) in consumed))
+        # sim extra: would-be inserts with no row at all (checked at finalization)
+        all_row_keys = {r["dedupe_key"] for r in poll_rows} | {r["dedupe_key"] for r in chain_rows}
+        matched_any = bool(consumed) or bool(poll_rows)
+        finalize = oldest >= ORPHAN_FINAL_S or matched_any
+        if finalize:
+            for c in execs + aggs:
+                self.pending.pop((c["tx"], c["log_index"], c["wallet"]), None)
+            for key, (variant, c) in ins_exec.items():
+                if variant == "round" and key not in all_row_keys and id(c) not in consumed:
+                    if not poll_rows and not chain_rows:
+                        self.bump("orphan_no_row")
+                        self.note_example("orphan_no_row", tx=tx[:14], wallet=wallet[:12],
+                                          view=c["view"], side=c["side"])
+                        log.info("SHADOW-V2 ORPHAN tx=%s wallet=%s no rows", tx[:14], wallet[:12])
+                    elif self._chain_exact(c, chain_rows):
+                        self.bump("orphan_chain_exact")
+                    elif chain_rows and not poll_rows:
+                        self.bump("orphan_chain_mismatch")
+                        self.note_example("orphan_chain_mismatch", tx=tx[:14],
+                                          wallet=wallet[:12], side=c["side"], asset=c["asset"][:12])
+                    else:
+                        self.bump("orphan_excess_exec")
+            self.bump("compared_execs", len(execs))
+            self.bump("txs_reconciled")
+        return logged
+
+    def _chain_exact(self, c: dict, chain_rows: list[dict]) -> bool:
+        """orphan_chain_exact requires the FULL mechanism: only a chain row
+        equal on asset+side+size+price+ts could have key-suppressed the
+        poll row at poller.py:116-126. Anything else must not hide here."""
+        size = _num(Decimal(c["size_units"]) / Decimal(10 ** 6))
+        pr, ph = rec_prices(c)
+        for row in chain_rows:
+            if (row["asset"] == c["asset"] and row["side"] == c["side"]
+                    and _num(row["size"]) == size
+                    and _num(row["price"]) in (_num(pr), _num(ph))
+                    and int(row["ts_epoch"]) == int(c["ts"])):
+                return True
+        return False
+
+    def _diagnose(self, tx: str, wallet: str, row: dict,
+                  free: list[dict], logged: int) -> int:
+        rs, rp = _num(row["size"]), _num(row["price"])
+        exact = [c for c in free
+                 if _num(Decimal(c["size_units"]) / Decimal(10 ** 6)) == rs]
+        pick = None
+        fields = []
+        if exact:
+            pick = min(exact, key=lambda c: abs(rec_prices(c)[0] - float(rp)))
+        elif free:
+            pick = min(free, key=lambda c: abs(c["size_units"] / 1e6 - float(rp or 0)))
+            fields.append("size")
+        if pick is None:
+            return logged  # excess poll row for this wallet — granularity signal
+        free.remove(pick)
+        pr, ph = rec_prices(pick)
+        if pick["side"] != row["side"]:
+            fields.append("side")
+        if pick["asset"] != str(row["asset"]):
+            fields.append("asset")
+        if not fields or fields == ["size"]:
+            if _num(pr) != rp and _num(ph) != rp:
+                fields.append("price")
+                if pick["fee_units"]:
+                    self.bump("div.price_feepos")
+            if int(pick["ts"]) != int(row["ts_epoch"]):
+                fields.append("ts")
+                d = int(pick["ts"]) - int(row["ts_epoch"])
+                self.bump("ts_delta." + (str(d) if -3 <= d <= 3 else "other"))
+        for f in fields:
+            self.bump("div." + f)
+        self.bump(f"pw.{wallet}.div", 1 if fields else 0)
+        if not fields:
+            # every field equal yet the key did not match: our key
+            # construction model is wrong — the loudest possible alarm
+            self.bump("key_impl_mismatch")
+            fields = ["key"]
+        self.note_example("diverge", tx=tx[:14], wallet=wallet[:12],
+                          fields=fields, view=pick["view"],
+                          shadow={"side": pick["side"], "asset": pick["asset"][:16],
+                                  "size_u": pick["size_units"], "pr": float(pr),
+                                  "ph": str(ph), "ts": pick["ts"], "fee_u": pick["fee_units"]},
+                          poll={"side": row["side"], "asset": str(row["asset"])[:16],
+                                "size": row["size"], "price": row["price"],
+                                "ts": int(row["ts_epoch"])})
+        if logged < DIVERGE_LOG_PER_CYCLE:
+            log.warning("SHADOW-V2 DIVERGE tx=%s wallet=%s fields=%s shadow=%s/%s/%s "
+                        "poll=%s/%s/%s", tx[:14], wallet[:12], ",".join(fields),
+                        pick["side"], pick["asset"][:12], float(pr),
+                        row["side"], str(row["asset"])[:12], row["price"])
+            logged += 1
+        return logged
+
+    def _record_latency(self, rec: dict, row: dict) -> None:
+        if rec["replay"] or rec["ts"] is None:
+            return
+        det, ts = float(row["det_epoch"]), int(row["ts_epoch"])
+        if det - ts > LATE_POLL_ROW_S:
+            self.bump("late_poll_row")
+            return
+        sh = rec["seen_at"] - rec["ts"]
+        po = det - ts
+        self.lags.append((sh, po))
+        m = self.whale_mem(rec["wallet"], rec.get("username"))
+        m["sh"].append(sh)
+        m["po"].append(po)
+        self.bump(f"pw.{rec['wallet']}.matched")
+
+    # ── reverse probe: what did the shadow NOT see ──────────────────
+    async def _reverse_probe(self, pool: Any) -> None:
+        if self.seen_tx:
+            oldest_seen = next(iter(self.seen_tx.values()))
+            if time.time() - oldest_seen < REVERSE_LOOKBACK_S and \
+                    len(self.seen_tx) >= SEEN_TX_CAP - 8:
+                self.bump("reverse_probe_skipped")
+                return
+        lst = self.listener() if self.listener else None
+        roster = getattr(lst, "_roster", {}) or {}
+        ids = [w["id"] for w in roster.values()]
+        if not ids:
+            return
+        rows = [dict(r) for r in await pool.fetch(SQL_REVERSE, ids, timeout=5.0)]
+        chain_txs = {r["tx"] for r in rows if r["source"] == "chain"}
+        for row in rows:
+            if row["source"] != "poll" or row["dedupe_key"] in self.reverse_counted:
+                continue
+            self.reverse_counted[row["dedupe_key"]] = time.time()
+            while len(self.reverse_counted) > 4096:
+                self.reverse_counted.popitem(last=False)
+            self.bump("poll_rows_seen")
+            if row["tx"] in self.seen_tx:
+                self.bump("poll_covered")
+            elif row["tx"] in chain_txs:
+                self.bump("poll_uncovered_chainrow")   # legacy topic / v3 partial
+            else:
+                ts = int(row["ts_epoch"])
+                gap = next((gp for gp in self.gaps
+                            if gp["from"] - 2 <= ts <= gp["to"] + 2), None)
+                if gap:
+                    self.bump("poll_uncovered_quiet_gap" if gap["kind"] == "quiet_or_outage"
+                              else "poll_uncovered_ws_gap")
+                else:
+                    self.bump("poll_uncovered_unexplained")
+                    self.note_example("poll_uncovered", tx=row["tx"][:14],
+                                      whale_id=row["whale_id"])
+                    log.warning("SHADOW-V2 UNCOVERED tx=%s whale=%s",
+                                row["tx"][:14], row["whale_id"])
+
+    # ── persistence: delta-only, writer-fenced, window bookkeeping ──
+    async def _flush(self, pool: Any) -> None:
+        snap = dict(self.deltas)
+        nowf = time.time()
+        if not snap and self.last_flush_ok and nowf - self.last_flush_ok < 300:
+            return
+        try:
+            raw = await pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1", STATE_KEY, timeout=5.0)
+            stored: dict = {}
+            if raw:
+                try:
+                    stored = json.loads(raw) if isinstance(raw, str) else dict(raw)
+                except (TypeError, ValueError):
+                    stored = {"corrupt_reset": int(nowf)}
+            w = stored.get("writer")
+            if w and w != WRITER_ID and nowf - float(stored.get("updated_at_epoch") or 0) < 300:
+                self.bump("writer_conflict")
+                log.warning("SHADOW-V2 WRITER-CONFLICT theirs=%s mine=%s", w, WRITER_ID)
+                return
+            counters = {k: int(v) for k, v in (stored.get("counters") or {}).items()}
+            if not self.booted:
+                snap["boots"] = snap.get("boots", 0) + 1
+                self.deltas["boots"] = self.deltas.get("boots", 0) + 1
+                self.booted = True
+            for k, v in snap.items():
+                counters[k] = counters.get(k, 0) + v
+            window_start = stored.get("window_start")
+            health_start = stored.get("health_start")
+            at_window = stored.get("at_window") or {}
+            if stored.get("commit") not in (None, self.commit):
+                window_start = health_start = None
+            leading = ("exec" if counters.get("sim_exec_suppressed", 0)
+                       >= counters.get("sim_agg_suppressed", 0) else "agg")
+            gating_hit = (any(snap.get(k) for k in GATING)
+                          or snap.get(f"sim_{leading}_residual_dup"))
+            if window_start is None or gating_hit:
+                window_start = nowf
+                at_window = {k: counters.get(k, 0) for k in VOLUME_KEYS}
+                at_window["pw"] = {k: v for k, v in counters.items() if k.startswith("pw.")}
+            if health_start is None or any(snap.get(k) for k in HEALTH):
+                health_start = nowf
+            per_whale = {}
+            for wallet, m in self.per_whale_mem.items():
+                per_whale[wallet] = {
+                    "username": m["username"],
+                    "n": counters.get(f"pw.{wallet}.n", 0),
+                    "matched": counters.get(f"pw.{wallet}.matched", 0),
+                    "supp": counters.get(f"pw.{wallet}.supp", 0),
+                    "div": counters.get(f"pw.{wallet}.div", 0),
+                    "lag_p50_s": round(median(m["sh"]), 2) if m["sh"] else None,
+                    "poll_lag_p50_s": round(median(m["po"]), 2) if m["po"] else None,
+                }
+            value = {
+                "schema_v": SCHEMA_V, "writer": WRITER_ID, "commit": self.commit,
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(nowf)),
+                "updated_at_epoch": int(nowf),
+                "window_start": window_start, "health_start": health_start,
+                "leading_policy": leading, "at_window": at_window,
+                "counters": counters, "per_whale": per_whale,
+                "pending": len(self.pending),
+                "lag_p50_s": round(median(x[0] for x in self.lags), 2) if self.lags else None,
+                "poll_lag_p50_s": round(median(x[1] for x in self.lags), 2) if self.lags else None,
+                "examples": list(self.examples),
+                "gaps": [dict(g) for g in self.gaps][-8:],
+            }
+            await pool.execute(
+                "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+                "ON CONFLICT (key) DO UPDATE SET value=$2::jsonb",
+                STATE_KEY, json.dumps(value), timeout=5.0)
+            for k, v in snap.items():
+                left = self.deltas.get(k, 0) - v
+                if left:
+                    self.deltas[k] = left
+                else:
+                    self.deltas.pop(k, None)
+            self.last_flush_ok = nowf
+            log.info("SHADOW-V2 recon: pend=%d supp=+%d res=+%d div=+%d orphan=+%d",
+                     len(self.pending), snap.get("sim_exec_suppressed", 0),
+                     snap.get("sim_exec_residual_dup", 0),
+                     sum(snap.get("div." + f, 0) for f in ("side", "asset", "size", "price", "ts")),
+                     snap.get("orphan_no_row", 0) + snap.get("orphan_chain_mismatch", 0))
+        except Exception:  # noqa: BLE001
+            self.bump("flush_failures")
+            log.info("SHADOW-V2 flush failed", exc_info=True)
+
+
+# ── module singleton + hot-path entry points ────────────────────────
+_STATE = ShadowV2()
+_TASK: asyncio.Task | None = None
+
+
+def shadow_observe(listener: Any, log_entry: dict[str, Any]) -> None:
+    """Hot-path hook (chain.py _handle_log, BEFORE the _handle_v3 dispatch
+    so the _v3_seen per-tx early-return at chain.py:405-406 cannot hide
+    events 2..N). Synchronous, zero I/O, NEVER raises."""
+    try:
+        st = _STATE
+        if not st.enabled:
+            return
+        st.last_observe_at = time.time()
+        st.bump("events_seen")
+        if log_entry.get("removed"):
+            st.bump("reorg_removed")
+            return
+        tx = str(log_entry.get("transactionHash", "")).lower()
+        if tx:
+            st.seen_tx[tx] = time.time()
+            while len(st.seen_tx) > SEEN_TX_CAP:
+                st.seen_tx.popitem(last=False)
+                st.bump("seen_tx_evicted")
+        try:
+            lix: int | None = int(str(log_entry.get("logIndex")), 16)
+        except (TypeError, ValueError):
+            lix = None
+            st.bump("log_index_missing")
+        if lix is not None and tx:
+            ek = (tx, lix)
+            if ek in st.seen_events:
+                st.bump("dup_event")
+                return
+            st.seen_events[ek] = time.time()
+            while len(st.seen_events) > SEEN_EVENTS_CAP:
+                st.seen_events.popitem(last=False)
+        roster = getattr(listener, "_roster", {}) or {}
+        recs, reason, involved = decode_shadow_views(
+            log_entry, roster, st.exchange_set(listener))
+        if reason is not None:
+            st.bump(("undecodable_roster." if involved else "undecodable_foreign.")
+                    + reason)
+            return
+        if not recs:
+            st.bump("non_roster")
+            return
+        tps = log_entry.get("topics") or []
+        if len(tps) >= 4 and _addr(tps[2]) == _addr(tps[3]):
+            st.bump("self_trade")
+        replay = bool(getattr(listener, "_shadow_replay", False))
+        if replay:
+            st.bump("replay_seen")
+        now = time.time()
+        try:  # read-only membership peek: what cache-warmth would the
+            # flipped live path have had? (never .get(), never write)
+            blocks = getattr(listener, "_blocks", None)
+            warm = recs[0]["block"] in getattr(blocks, "_cache", {})
+            st.bump("live_cache_hit" if warm else "live_cache_miss")
+        except Exception:  # noqa: BLE001
+            pass
+        for r in recs:
+            st.bump("decoded_" + ("agg" if r["view"] == "agg" else r["view"]))
+            if r.get("agg_by_set_only"):
+                st.bump("agg_by_set_only")
+            ek2 = "emitter." + r["emitter"]
+            if ek2 in st.deltas or sum(1 for k in st.deltas if k.startswith("emitter.")) < 8:
+                st.bump(ek2)
+            else:
+                st.bump("emitter.other")
+            r.update(log_index=lix if lix is not None else -1,
+                     replay=replay, seen_at=now, ts=None, ts_tries=0)
+            k = (r["tx"], r["log_index"], r["wallet"])
+            if k in st.pending:
+                st.bump("dup_record")
+                continue
+            st.pending[k] = r
+            while len(st.pending) > PENDING_CAP:
+                st.pending.popitem(last=False)
+                st.bump("pending_overflow_dropped")
+    except Exception:  # noqa: BLE001 — the wall
+        try:
+            _STATE.deltas["shadow_errors"] = _STATE.deltas.get("shadow_errors", 0) + 1
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def ensure_shadow_task(listener: Any) -> None:
+    """Called at the top of every ChainListener.run() iteration. Idempotent,
+    never raises. ONE task per process (module-level handle) — supervisor-
+    built replacement listener instances rebind the weakref and inherit the
+    same shadow state, so no zombies and no concurrent writers. Also records
+    the reconnect-gap ledger the reverse probe classifies against."""
+    global _TASK
+    try:
+        st = _STATE
+        if not st.enabled:
+            return
+        now = time.time()
+        prev = st.last_ensure_at
+        st.last_ensure_at = now
+        if prev and now - prev > 5:
+            since = max(st.last_observe_at, prev)
+            kind = "quiet_or_outage" if now - since > 55 else "reconnect"
+            st.gaps.append({"from": since, "to": now, "kind": kind})
+            st.bump("gap_" + kind)
+        st.listener = weakref.ref(listener)
+        st.http_url = getattr(listener, "_http_url", "") or st.http_url
+        if _TASK is None or _TASK.done():
+            _TASK = asyncio.get_running_loop().create_task(_run(st))
+    except Exception:  # noqa: BLE001
+        try:
+            _STATE.deltas["shadow_errors"] = _STATE.deltas.get("shadow_errors", 0) + 1
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _run(st: ShadowV2) -> None:
+    while True:
+        await asyncio.sleep(TICK_S)
+        try:
+            await asyncio.wait_for(st.tick(), timeout=45)
+        except Exception:  # noqa: BLE001
+            st.bump("cycle_errors")
+            log.info("SHADOW-V2 cycle error", exc_info=True)
+
+
+def beat_summary() -> dict:
+    """Additive heartbeat gauge. Never raises; {} when unavailable."""
+    try:
+        st = _STATE
+        if not st.enabled:
+            return {"enabled": False}
+        return {"pend": len(st.pending),
+                "recon_n": st.reconcile_n,
+                "flush_age_s": (round(time.time() - st.last_flush_ok)
+                                if st.last_flush_ok else None),
+                "err_unflushed": st.deltas.get("shadow_errors", 0)
+                + st.deltas.get("cycle_errors", 0)}
+    except Exception:  # noqa: BLE001
+        return {}

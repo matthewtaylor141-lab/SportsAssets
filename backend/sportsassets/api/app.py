@@ -6009,6 +6009,26 @@ async def api_quarantine_set(action: str) -> dict:
     return {"ok": True, "quarantine": action == "on"}
 
 
+@app.get("/api/admin/shadow-v2", dependencies=[Depends(require_admin)])
+async def api_shadow_v2() -> dict:
+    """Phase S0 shadow evidence: the shadow_v2_fill state row plus the
+    chain_listener heartbeat's shadow gauge. Read-only."""
+    pool = await get_pool()
+    val = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1", "shadow_v2_fill")
+    state = (json.loads(val) if isinstance(val, str) else val) if val else None
+    hb = await pool.fetchrow(
+        "SELECT beat_at, status, detail FROM service_heartbeats "
+        "WHERE service='chain_listener'")
+    detail = {}
+    if hb and hb["detail"]:
+        detail = json.loads(hb["detail"]) if isinstance(hb["detail"], str) else hb["detail"]
+    return {"state": state,
+            "listener_status": hb["status"] if hb else None,
+            "listener_beat_at": hb["beat_at"].isoformat() if hb else None,
+            "listener_shadow": detail.get("shadow")}
+
+
 @app.post("/api/admin/premap-live/{action}",
           dependencies=[Depends(require_admin)])
 async def api_premap_live_set(action: str) -> dict:

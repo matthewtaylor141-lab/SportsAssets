@@ -34,6 +34,7 @@ import websockets
 from ..config import settings
 from ..db import get_pool, heartbeat
 from .pipeline import TradeEvent, ingest_trade_result
+from .shadow_v2 import beat_summary as _shadow_beat, ensure_shadow_task, shadow_observe
 
 log = logging.getLogger(__name__)
 
@@ -341,7 +342,8 @@ class ChainListener:
                 "decoded": self.decoded,
                 "ingested": self.ingested,
                 "detect_lag_s": self.last_lag_s,
-                "roster": len(self._roster)}
+                "roster": len(self._roster),
+                "shadow": _shadow_beat()}
 
     async def refresh_roster(self) -> None:
         pool = await get_pool()
@@ -354,6 +356,10 @@ class ChainListener:
         self.events_seen += 1
         topics = log_entry.get("topics") or []
         if topics and str(topics[0]).lower() == FILL_V3_TOPIC:
+            try:  # S0 shadow: observe-only, sync, no I/O (shadow_v2.py)
+                shadow_observe(self, log_entry)
+            except Exception:  # noqa: BLE001 — wall body must stay bare
+                pass
             await self._handle_v3(log_entry)
             return
         if topics and str(topics[0]).lower() == ORDER_FILLED_V2_TOPIC:
@@ -518,21 +524,25 @@ class ChainListener:
         count = 0
         step = 2000
         start = from_block
-        while start <= to_block:
-            end = min(start + step - 1, to_block)
-            try:
-                entries = await self._get_logs(start, end)
-            except RuntimeError:
-                if step > 10:
-                    step = max(10, step // 10)
-                    log.warning("backfill chunk %s..%s rejected — retrying "
-                                "at %s-block spans", start, end, step)
-                    continue
-                raise
-            for entry in entries:
-                await self._handle_log(entry)
-                count += 1
-            start = end + 1
+        self._shadow_replay = True
+        try:
+            while start <= to_block:
+                end = min(start + step - 1, to_block)
+                try:
+                    entries = await self._get_logs(start, end)
+                except RuntimeError:
+                    if step > 10:
+                        step = max(10, step // 10)
+                        log.warning("backfill chunk %s..%s rejected — retrying "
+                                    "at %s-block spans", start, end, step)
+                        continue
+                    raise
+                for entry in entries:
+                    await self._handle_log(entry)
+                    count += 1
+                start = end + 1
+        finally:
+            self._shadow_replay = False
         return count
 
     async def _current_block(self) -> int:
@@ -551,6 +561,7 @@ class ChainListener:
         while True:
             try:
                 await self.refresh_roster()
+                ensure_shadow_task(self)  # S0 shadow: idempotent, never raises
                 # Recover any gap before subscribing — but NEVER let the
                 # catch-up block the live stream. On 2026-08-11 a rejected
                 # getLogs threw here, so every reconnect died before
