@@ -5357,13 +5357,31 @@ async def api_short_restate() -> dict:
         """)
     examined = len(rows)
     restated, delta, detail = 0, 0.0, []
+    # classification census: the first firing found restated=0 across
+    # 155 shorts — before loosening any predicate, the next probe must
+    # SHOW where stored values actually sit relative to the two models
+    buckets = {"near_long": 0, "near_short": 0, "neither": 0,
+               "skipped": 0}
+    neither_eg: list = []
     for r in rows:
         qty, px = float(r["qty"] or 0), float(r["fill_px"] or 0)
         if qty <= 0 or not (0 < px < 1):
+            buckets["skipped"] += 1
             continue
         long_model = round(px * qty, 2)
         short_model = round((1.0 - px) * qty, 2)
         booked = float(r["booked_usd"] or 0)
+        if abs(booked - short_model) <= 0.01:
+            buckets["near_short"] += 1
+        elif abs(booked - long_model) <= 0.01:
+            buckets["near_long"] += 1
+        else:
+            buckets["neither"] += 1
+            if len(neither_eg) < 12:
+                neither_eg.append({"id": r["id"],
+                                   "slug": r["us_market_slug"],
+                                   "booked": booked, "long": long_model,
+                                   "short": short_model})
         if abs(booked - long_model) > 0.01 or abs(booked - short_model) <= 0.01:
             continue   # not provably long-math, or already correct
         await pool.execute(
@@ -5376,7 +5394,8 @@ async def api_short_restate() -> dict:
                            "was": long_model, "now": short_model})
     summary = {"at": datetime.now(timezone.utc).isoformat(),
                "examined": examined, "restated": restated,
-               "delta_usd": delta, "rows": detail}
+               "delta_usd": delta, "rows": detail,
+               "buckets": buckets, "neither_examples": neither_eg}
     await pool.execute(
         "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
         "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",

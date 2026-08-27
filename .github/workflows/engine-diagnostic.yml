@@ -962,7 +962,8 @@ jobs:
           if jq -e '.verdict | test("SHORT IS A SELL")' /tmp/shorttruth.json >/dev/null 2>&1; then
             curl -sS --max-time 60 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
                  -o /tmp/shortrestate.json "$BASE/api/admin/short-restate" || true
-            jq -r '"  SHORT-RESTATE examined=\(.examined // "?") restated=\(.restated // "?") delta=$\(.delta_usd // "?")"' \
+            jq -r '"  SHORT-RESTATE examined=\(.examined // "?") restated=\(.restated // "?") delta=$\(.delta_usd // "?") buckets=\(.buckets // {} | tostring)",
+                   ((.neither_examples // [])[0:6][] | "  SHORT-NEITHER \(.slug) booked=$\(.booked) long=$\(.long) short=$\(.short)")' \
               /tmp/shortrestate.json 2>/dev/null || echo "  SHORT-RESTATE unreadable"
           fi
 
