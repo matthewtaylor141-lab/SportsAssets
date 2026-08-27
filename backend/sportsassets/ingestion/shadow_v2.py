@@ -530,11 +530,15 @@ class ShadowV2:
                 rows = await pool.fetch(SQL_TX, fetch_txs, timeout=5.0)
                 fetch_set = set(fetch_txs)
                 for (t, _wal), w_e in self.watch.items():
-                    if t in fetch_set and now < w_e["until"]:
+                    if t in fetch_set and (
+                            now < w_e["until"]
+                            or now - w_e.get("armed_at", now) < 90):
                         # only a fetch that actually RETURNED counts, and
-                        # never the terminal pass of an already-expired
-                        # watch — a window-long outage's recovery fetch
-                        # must not mask starvation as coverage
+                        # never the terminal pass of a LONG-starved watch
+                        # — but a watch born with less than one reconcile
+                        # spacing of life has no pre-expiry opportunity,
+                        # and its successful terminal fetch is coverage,
+                        # not starvation
                         w_e["fetched"] = True
                 rows_by: dict[tuple, list[dict]] = {}
                 for row in rows:
@@ -594,7 +598,7 @@ class ShadowV2:
                     # unmerged, its late row fabricated a gating residual.
                     # Its flags stay uncounted here (a redelivery must
                     # never double-bump GATING) — undercount, by design.
-                    for c in g["execs"] + g["aggs"] + g.get("dropped", []):
+                    for c in g["execs"] + g["aggs"]:
                         if c.get("ts") is None:
                             continue
                         tgt = w["agg_keys"] if c["view"] == "agg" else w["exec_keys"]
@@ -604,6 +608,13 @@ class ShadowV2:
                             w["agg_assets"].add(c["asset"])
                         else:
                             w["has_execs"] = True
+                    for c in g.get("dropped", []):
+                        # dropped raws are outside the flip's insert set:
+                        # their rows score dropped coverage, not
+                        # suppression (semantic parity with first delivery)
+                        if c.get("ts") is not None:
+                            for _var, key in rec_keys(c):
+                                w.setdefault("dropped_keys", set()).add(key)
                 for c in by_wallet[wallet]:
                     self.pending.pop((c["tx"], c["log_index"], c["wallet"], c["view"]), None)
                 self.bump("refinalize_blocked")
@@ -621,6 +632,15 @@ class ShadowV2:
                       oldest: float, now: float, logged: int) -> int:
         execs, aggs = g["execs"], g["aggs"]
         agg_assets_set = {a["asset"] for a in aggs}
+        # a classifier-DROPPED record is outside the flip's insert set
+        # (S1 ingests the post-classification set), so its venue row is
+        # neither suppressed nor a double-ingest — it must never score a
+        # gating residual, on ANY delivery path (rounds 6+7)
+        dropped_keys: set = set()
+        for c in g.get("dropped", []):
+            if c.get("ts") is not None:
+                for _var, key in rec_keys(c):
+                    dropped_keys.add(key)
         ins_exec: dict[str, tuple[str, dict]] = {}
         for c in execs:
             for variant, key in rec_keys(c):
@@ -636,9 +656,13 @@ class ShadowV2:
         consumed: set[int] = set()
         hits: list[tuple[dict, Any, Any]] = []
         residual_rows: list[dict] = []
+        dropped_rows: set[str] = set()
         for row in poll_rows:
             hit = ins_exec.get(row["dedupe_key"])
             hit_a = ins_agg.get(row["dedupe_key"])
+            if hit is None and hit_a is None and row["dedupe_key"] in dropped_keys:
+                dropped_rows.add(row["dedupe_key"])
+                continue   # scored as dropped coverage, never residual
             hits.append((row, hit, hit_a))
             if hit:
                 consumed.add(id(hit[1]))
@@ -684,6 +708,8 @@ class ShadowV2:
                         | {r["dedupe_key"] for r in chain_rows},
                 "has_execs": bool(execs), "has_aggs": bool(aggs),
                 "agg_assets": set(agg_assets_set),
+                "dropped_keys": set(dropped_keys),
+                "armed_at": now,
             }
             while len(self.watch) > WATCH_CAP:
                 self.watch.popitem(last=False)
@@ -700,6 +726,7 @@ class ShadowV2:
                 log.warning("SHADOW-V2 AGG-TIEOUT tx=%s wallet=%s", tx[:14], wallet[:12])
         prim = [rec_keys(c)[0][1] for c in execs]
         self.bump("dup_exec", len(prim) - len(set(prim)))
+        self.bump("dropped_row_seen", len(dropped_rows))
         agg_row_matched = False
         for row, hit, hit_a in hits:
             if hit_a:
@@ -824,6 +851,9 @@ class ShadowV2:
                     continue
                 w["seen"].add(k)
                 self.bump("late_row_seen")
+                if k in w.get("dropped_keys", ()):
+                    self.bump("dropped_row_seen")
+                    continue
                 if k in w["exec_keys"]:
                     self.bump("sim_exec_suppressed")
                     if w["exec_keys"][k] == "hup":

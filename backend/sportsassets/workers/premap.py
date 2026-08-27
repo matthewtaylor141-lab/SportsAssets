@@ -1283,6 +1283,37 @@ _NAMED_ORDINAL_RE = re.compile(r"\d+(st|nd|rd|th)")
 # 2026-08-27, 289 rows; the pinned 'Qualification ITF' shape). Extend by
 # observation, never by assumption — exactly the _NAMED_TOUR_OF law.
 _NAMED_TOUR_MARKERS = frozenset({"itf"})
+# The header grammar a marker-bearing segment must fullmatch, and the
+# tier codes (M15/W35/J300) that attest a tournament segment. One 'itf'
+# token flattened into the whole prefix laundered any prop noun phrase
+# riding the same banner (round-7 critical): attestation is now
+# PER-SEGMENT — every colon segment must be a pure tour header or carry
+# a tier code. Extended by observation only.
+_NAMED_HEADER_TOKENS = frozenset({"itf", "wta", "atp", "men", "women",
+                                  "ladies", "junior", "juniors",
+                                  "singles"})
+_NAMED_TIER_RE = re.compile(r"[mwj]\d{2,3}")
+
+
+def _named_prefix_attested(prefix: str) -> bool:
+    for seg in prefix.split(":"):
+        toks = _norm(seg).split()
+        if not toks:
+            return False
+        header = (all(t in _NAMED_HEADER_TOKENS for t in toks)
+                  and any(t in _NAMED_TOUR_MARKERS for t in toks))
+        tiered = any(_NAMED_TIER_RE.fullmatch(t) for t in toks)
+        if not (header or tiered):
+            return False
+    return True
+
+
+def _tok_subseq(small: list[str], big: list[str]) -> bool:
+    i = 0
+    for tok in big:
+        if i < len(small) and small[i] == tok:
+            i += 1
+    return i == len(small)
 
 
 def _named_title_danger(toks: list[str]) -> bool:
@@ -1448,11 +1479,12 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
             # spellings ('Tie Break') cannot walk past the single-token
             # set.
             return None, "title_prefix_derivative"
-        if not any(t in _NAMED_TOUR_MARKERS for t in ptoks):
-            # the POSITIVE gate: 'Most Double Faults', 'Fastest Serve',
-            # 'Number of Tiebreaks' — every prop-market prefix, present
-            # and future — refuses here structurally, because it cannot
-            # attest a tour. Blocking may over-refuse; selection may not.
+        if not _named_prefix_attested(prefix):
+            # the POSITIVE gate, per segment: 'Most Double Faults',
+            # 'ITF Most Double Faults', '...clay: Fastest Serve' —
+            # every prop-market segment refuses structurally, because
+            # no amount of tour banner in SIBLING segments attests it.
+            # Blocking may over-refuse; selection may not.
             return None, "title_prefix_unattested"
     halves = [" ".join(h.split()) for h in
               re.split(r"\s+vs\.?\s+", _norm(matchup)) if h.strip()]
@@ -1497,6 +1529,15 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
     ea, eb = _builds_one(wa, et), _builds_one(wb, et)
     if ea is None or eb is None or ea == eb:
         return None, "his_event_mismatch"
+    for h in ht:
+        # EVERY title-half token must live, in order, inside one of the
+        # corroborated event-title sides (or its reversal). A colonless
+        # prop title ('Most Double Faults Koyama vs Castelnuovo') hides
+        # its market nouns inside a half where the prefix gates cannot
+        # see them; the event witness can (round-7 fleet).
+        if not any(_tok_subseq(h, s) or _tok_subseq(h, s[::-1])
+                   for s in et):
+            return None, "title_half_alien"
     oc = [c for c in (wa, wb) if _name_code_builds(c, on_t)]
     if len(oc) != 1:
         return None, "outcome_code_ambiguous"

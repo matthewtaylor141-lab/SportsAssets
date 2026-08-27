@@ -1820,7 +1820,10 @@ def test_tombstone_merge_covers_classifier_dropped(st):
     assert st.deltas.get("sim_exec_residual_dup") is None, \
         "an anomaly-classified fill's raw key must merge — its late row " \
         "is coverage, not a fabricated gating residual"
-    assert st.deltas.get("sim_exec_suppressed") == 2
+    # round-7 semantic: a dropped record is OUTSIDE the flip's insert
+    # set, so its row is dedicated dropped coverage, not suppression
+    assert st.deltas.get("dropped_row_seen") == 1
+    assert st.deltas.get("sim_exec_suppressed") == 1
 
 
 # ── fleet6 K1: terminal-pass fetch cannot mask starvation ───────────
@@ -1839,3 +1842,69 @@ def test_terminal_fetch_does_not_mask_starvation(st):
     st._watch_pass({}, now)
     assert st.deltas.get("watch_expired_unfetched") == 1, \
         "a window-long-starved watch must fire the HEALTH signal"
+
+
+# ════════════════════════════════════════════════════════════════════
+# Implementation-fleet kills (round 7) — 2 shadow (2 named-lane pinned
+# in test_bridge_named_tennis.py), fixed and pinned.
+# ════════════════════════════════════════════════════════════════════
+
+# ── fleet7 K0: dropped raws never fabricate residuals, ANY path ─────
+def test_dropped_raw_covered_on_first_delivery(st):
+    own = _mkrec(view="exec_owner", asset="1000", log_index=1,
+                 seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    anomaly = _mkrec(view="exec_counter", side="BUY", owner_side="SELL",
+                     asset="2000", size_units=3_000_000,
+                     usdc_units=1_800_000, log_index=2,
+                     seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    agg = _mkrec(view="agg", side="BUY", asset="1000",
+                 size_units=4_000_000, usdc_units=2_400_000, log_index=3,
+                 seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = classify_mints([own, anomaly, agg])[MAKER]
+    assert g["flags"].get("mint_side_anomaly") == 1
+    raw_row = _poll_row(anomaly)     # venue books the RAW shape
+
+    # (B) row present AT finalize — first delivery, no redelivery
+    st._match_wallet(TX, MAKER, g, [own, anomaly, agg],
+                     [raw_row, _poll_row(own)], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("sim_exec_residual_dup") is None, \
+        "the anomaly's own venue row must NEVER read as a gating residual"
+    assert st.deltas.get("dropped_row_seen") == 1
+
+    # (A) row lands LATE on a first-delivery watch
+    st2 = ShadowV2()
+    e1 = _mkrec(asset="1000", log_index=1, seen_at=time.time() - 1000)
+    g2 = classify_mints([e1, dict(anomaly, log_index=5),
+                         dict(agg, log_index=6)])[MAKER]
+    st2._match_wallet(TX, MAKER, g2,
+                      [e1, dict(anomaly, log_index=5), dict(agg, log_index=6)],
+                      [_poll_row(e1)], [], 1000.0, time.time(), 0)
+    assert (TX, MAKER) in st2.watch
+    assert st2.watch[(TX, MAKER)]["dropped_keys"], \
+        "the first-delivery watch must carry the dropped raws' keys"
+    st2._watch_pass({(TX, 1): [_poll_row(e1), raw_row]}, time.time())
+    assert st2.deltas.get("sim_exec_residual_dup") is None
+    assert st2.deltas.get("dropped_row_seen") == 1
+
+
+# ── fleet7 K1: a watch with no pre-expiry opportunity is not starved ─
+def test_short_lived_watch_terminal_fetch_counts(st):
+    now = time.time()
+    st.watch[("0xshort", "0xa")] = {
+        "until": now + 30, "whale_id": 1, "exec_keys": {},
+        "agg_keys": {}, "seen": set(), "has_execs": True,
+        "has_aggs": False, "agg_assets": set(), "dropped_keys": set(),
+        "armed_at": now - 10}
+    # simulate the stamp loop at the terminal pass: expired by wall
+    # clock but armed <90s ago — no pre-expiry pass could have existed
+    later = now + 40
+    fetch_set = {"0xshort"}
+    for (t, _w), w_e in st.watch.items():
+        if t in fetch_set and (later < w_e["until"]
+                               or later - w_e.get("armed_at", later) < 90):
+            w_e["fetched"] = True
+    st.watch[("0xshort", "0xa")]["until"] = later - 1
+    st._watch_pass({}, later)
+    assert st.deltas.get("watch_expired_unfetched") is None, \
+        "a fetched, fully-covered short-lived watch is NOT starvation"

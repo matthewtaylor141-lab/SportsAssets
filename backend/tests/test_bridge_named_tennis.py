@@ -67,11 +67,17 @@ class TestAttestedRecovery:
         assert w == "ok" and h is C
         assert h["intent"] == "ORDER_INTENT_BUY_SHORT"
 
-    def test_tournament_prefixed_title_recovers(self):
+    def test_tournament_prefixed_title_refuses_unattested_shape(self):
+        """CONSCIOUS RE-PIN (round 7). This shape was INVENTED in the
+        round-1 tests, never census-attested — and the flattened
+        attestation it survived under is exactly what let 'ITF Most
+        Double Faults' smuggle through. Under the per-segment grammar
+        an unattested tournament segment refuses; if the census ever
+        attests this shape, the grammar extends by observation."""
         h, w, _ = run([K, C], "Hiromasa Koyama",
                       "US Open, Qualification ITF: Koyama vs "
                       "Castelnuovo", WS, WE)
-        assert w == "ok"
+        assert h is None and w == "title_prefix_unattested"
 
     def test_unlined_rows_also_recover(self):
         """B1d: the WTA-style already-unlined shape."""
@@ -627,8 +633,36 @@ class TestRoundSixKills:
     def test_attested_prefixes_still_recover(self):
         for title in ("ITF MEN - SINGLES: M15 Cap d'Agde (France), "
                       "clay: Hiromasa Koyama vs Luca Castelnuovo",
-                      "US Open, Qualification ITF: Koyama vs "
-                      "Castelnuovo",
+                      "ITF MEN - SINGLES: Koyama vs Castelnuovo",
+                      "M15 Antalya, hard: Koyama vs Castelnuovo",
                       "Hiromasa Koyama vs Luca Castelnuovo"):
             h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
             assert w == "ok" and h is K, (title, w)
+
+
+class TestRoundSevenKills:
+    """Round-7 fleet: the attestation must be per-segment and the
+    closure must not be keyed on colon presence."""
+
+    def test_tour_marker_cannot_launder_prop_segments(self):
+        for title in ("ITF Most Double Faults: Koyama vs Castelnuovo",
+                      "ITF MEN - SINGLES: M15 Cap d'Agde (France), "
+                      "clay: Most Double Faults: Koyama vs Castelnuovo",
+                      "ITF Fastest Serve: Koyama vs Castelnuovo"):
+            h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
+            assert h is None, title
+            assert w in ("title_prefix_unattested",
+                         "title_prefix_derivative"), (title, w)
+
+    def test_colonless_prop_titles_refuse_at_the_event_witness(self):
+        for title in ("Most Double Faults Koyama vs Castelnuovo",
+                      "Fastest Serve Koyama vs Castelnuovo",
+                      "Most Double Faults - Koyama vs Castelnuovo"):
+            h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
+            assert h is None, title
+
+    def test_reversed_half_order_still_recovers(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama",
+                      "Koyama Hiromasa vs Castelnuovo Luca", WS, WE)
+        assert w == "ok" and h is K, \
+            "the subsequence gate honours full reversal like _name_seq_eq"
