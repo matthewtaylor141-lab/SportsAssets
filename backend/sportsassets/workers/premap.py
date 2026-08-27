@@ -478,8 +478,17 @@ GENERIC_CLUB_TOKENS = frozenset({"fc", "cf", "sc", "ac", "afc", "ca",
 # Rapid Bucharest — in Austrian/Balkan naming the legal-form prefix IS
 # the disambiguator between same-name clubs).
 
-_BRIDGE_LEAGUES = frozenset({"uecl", "primera nacional",
-                             "uefa champions league"})
+_BRIDGE_LEAGUES = frozenset({"uecl", "uefa champions league"})
+# 'primera nacional' REMOVED 2026-08-27 (round-2.1 verification): the
+# seed leagues were never put through the same-day-sibling + in-league
+# homonym review the constant demands of ADDITIONS, and the execution
+# fleet killed through it four ways — Primera Nacional is the richest
+# homonym league in world football (two Estudiantes, two San Martin,
+# two Gimnasia y Esgrima, Defensores x2, Almirante Brown/Almagro), the
+# venue writes clubs city-less, and a round-robin matchday satisfies
+# every date gate on the wrong game. Re-entry requires the written
+# review plus a homonym-disambiguation gate proven against those exact
+# pairs. The probe's lg_seen channel keeps counting its occurrences.
 # EXACTLY these three, each attested by >=1 complete untruncated
 # win-question in the 2026-08-26 production census (uecl: 5 samples
 # across 3 events; primera nacional: 1 win-question plus a
@@ -634,7 +643,9 @@ def _q_parse_raw(question: str | None):
 
 def _q_parse_strict(question: str | None, his_dist: frozenset,
                     other_code: str, event_title: str | None,
-                    slug_date: str) -> tuple[frozenset | None, str]:
+                    slug_date: str,
+                    his_opp_dist: frozenset) -> tuple[frozenset | None,
+                                                      str]:
     """Step-2 SELECTION form: the ONE measured template, validated.
 
     All clauses conjunctive; any miss refuses the row. The opponent
@@ -671,8 +682,28 @@ def _q_parse_strict(question: str | None, his_dist: frozenset,
         return None, "event_title_unsplittable"
     od = _distinctive(opp)
     other_sides = [s for s in sides if _distinctive(s) != his_dist]
+    if len(other_sides) != 1:
+        # Zero: a derby rendering. Two: the row's event does not even
+        # CONTAIN his team — executed in round-2.1 verification: a
+        # 'FC Porto vs Austin FC' row took a Braga pick because
+        # his side was only ever used to EXCLUDE, never REQUIRED.
+        return None, "row_event_missing_his_team"
     if not any(_distinctive(s) == od for s in other_sides):
         return None, "opp_not_event_team"
+    if od != his_opp_dist:
+        # THE FIFTH WITNESS (round 2.1). Every executed kill in the
+        # verification fleet rode a channel with no EXTERNAL anchor:
+        # the question's opp was validated against the row's OWN
+        # event_title — a sub-event row always agrees with itself —
+        # so '(Aggregate)' / '(First Half)' / 'in extra time' rode in
+        # the opp slot, and name-twin fixtures (FC Rapid Bucuresti
+        # for SK Rapid Wien) self-corroborated. The whale's own feed
+        # names his ACTUAL opponent in his event title; the question's
+        # opponent must set-equal it, or the row is about a different
+        # proposition or a different game. Fail-closed: a whale event
+        # title that cannot name the opponent refuses upstream, and
+        # the census prices what that costs.
+        return None, "opp_not_his_opponent"
     if not (_code_prefix_hit(opp, other_code)
             or any(_code_prefix_hit(s, other_code)
                    for s in other_sides)):
@@ -680,15 +711,24 @@ def _q_parse_strict(question: str | None, his_dist: frozenset,
     return _distinctive(subj), "ok"
 
 
-def _bridge_ident_ok(identifier: str | None, slug_date: str) -> bool:
+def _bridge_ident_ok(identifier: str | None, slug_date: str,
+                     c1: str = "", c2: str = "") -> bool:
     """A candidate row's identifier must carry at most ONE post-date
     token, purely alphabetic — a '-2' or '-game-2' doubleheader
-    disambiguator refuses the row — AND its embedded YYYY-MM-DD triple
-    must equal the whale slug's date. The date clause is round 2's
-    wrong-game fix: the tournament executed an admission against
-    shipped code through a pool whose identifiers carried 2026-08-21
-    under a 2026-08-27 slug, because no gate compared any venue-side
-    date to the slug when the question was dateless."""
+    disambiguator refuses the row — its embedded YYYY-MM-DD triple
+    must equal the whale slug's date, AND (round 2.1) its pre-date
+    body must be exactly [prefix, league, a, b] with {a, b} equal to
+    the whale slug's two team codes.
+
+    The date clause is round 2's wrong-game fix (a 2026-08-21 pool
+    admitted under a 2026-08-27 slug). The shape clause is round
+    2.1's: the verification fleet rode sub-event identifiers
+    ('...-scb-aus-AGG-2026-08-27-ma') and wrong-game identifiers
+    whose own codes named the other fixture ('...-smsj-ebac-...' for
+    a san/est pick) through a gate that never read the identifier's
+    body. The venue's own codes are a witness; now they testify. The
+    venue LEAGUE token stays unread — league aliasing (whale 'bol1',
+    venue 'lpb', same game) is measured production behavior."""
     from ..copy_sports import _post_date_tokens
 
     parts = [p for p in (identifier or "").lower().split("-") if p]
@@ -699,8 +739,12 @@ def _bridge_ident_ok(identifier: str | None, slug_date: str) -> bool:
     for i in range(len(parts) - 2):
         if (re.fullmatch(r"\d{4}", parts[i]) and parts[i + 1].isdigit()
                 and parts[i + 2].isdigit()):
-            return (f"{parts[i]}-{parts[i + 1]}-{parts[i + 2]}"
-                    == slug_date)
+            if (f"{parts[i]}-{parts[i + 1]}-{parts[i + 2]}"
+                    != slug_date):
+                return False
+            body = parts[1:i]
+            return (len(body) == 3
+                    and {body[1], body[2]} == {c1, c2})
     return False
 
 
@@ -748,6 +792,7 @@ def _bridge_trace_row(trace: dict, r: dict, gate: str,
 def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
                    outcome: str | None, his_title: str | None,
                    his_slug: str | None,
+                   his_event_title: str | None = None,
                    trace: dict | None = None) -> tuple[dict | None, str]:
     """The full bridge: (hit, 'ok') or (None, named_refusal).
 
@@ -818,6 +863,31 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
                 "mine": mine, "theirs": theirs,
             }
         return None, "slug_corroboration_failed"
+    sides_h = re.split(r"\s+vs\.?\s+", _norm(his_event_title or ""))
+    sides_h = [" ".join(s.split()) for s in sides_h if s.strip()]
+    if len(sides_h) != 2:
+        # FIFTH WITNESS, whale side (round 2.1): his own event title
+        # names both teams of the game he actually bet. A title that
+        # cannot be split refuses — fail closed; the probe's
+        # bridge['his'] channel measures what this costs.
+        return None, "his_event_unsplittable"
+    hd = [_distinctive(s) for s in sides_h]
+    mine_side = [i for i, d in enumerate(hd) if d == his_dist]
+    if len(mine_side) != 1:
+        # Zero: his title's team is not in his own event title (feeds
+        # disagree about his own game). Two: a derby rendering. Both
+        # refuse.
+        return None, "his_event_side_mismatch"
+    his_opp_dist = hd[1 - mine_side[0]]
+    if not his_opp_dist:
+        return None, "his_event_opp_empty"
+    if any(not (r.get("event_slug") or "").strip() for r in rows_all):
+        # Round 2.1: the markets-mode ingest fallback can stamp ''
+        # on every row, collapsing the multi-event set to {''} and
+        # silently disarming this gate — executed in verification
+        # with a two-event pool. An unlabeled pool is unverifiable;
+        # unverifiable refuses.
+        return None, "event_slug_missing"
     if len({r.get("event_slug") or "" for r in rows_all}) > 1:
         return None, "multi_event_pool"
     cands = []
@@ -831,11 +901,12 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
             gate = "lined_or_signed"
         elif not r.get("intent"):
             gate = "no_intent"
-        elif not _bridge_ident_ok(r.get("identifier"), d):
+        elif not _bridge_ident_ok(r.get("identifier"), d, c1, c2):
             gate = "ident_suffix_or_date"
         else:
             qd, qwhy = _q_parse_strict(r.get("question"), his_dist,
-                                       other, r.get("event_title"), d)
+                                       other, r.get("event_title"), d,
+                                       his_opp_dist)
             if qd is None:
                 gate = qwhy
             elif qd != his_dist:
@@ -870,10 +941,11 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
 
 def match_side_bridge(rows_kept: list[dict], rows_all: list[dict],
                       outcome: str | None, his_title: str | None,
-                      his_slug: str | None) -> dict | None:
+                      his_slug: str | None,
+                      his_event_title: str | None = None) -> dict | None:
     """bridge_explain's hit, reasonless — the match_side-shaped form."""
     hit, _why = bridge_explain(rows_kept, rows_all, outcome, his_title,
-                               his_slug)
+                               his_slug, his_event_title)
     return hit
 
 
@@ -1687,6 +1759,7 @@ async def resolve_explain(pool, market_title: str | None,
             btrace: dict = {}
             bhit, breason = bridge_explain(kept, rows, outcome,
                                            market_title, global_slug,
+                                           event_title,
                                            trace=btrace)
             out["bridge"] = {
                 "would_resolve": bool(bhit),
@@ -1713,8 +1786,12 @@ async def resolve_explain(pool, market_title: str | None,
             if bhit:
                 tq = " ".join(_norm(bhit.get("question")).split())
                 tm = _BRIDGE_Q_STRICT_RE.fullmatch(tq)
+                _wparts = [x for x in (global_slug or "").lower()
+                           .split("-") if x]
                 out["bridge"]["audit"] = {
                     "his_slug": global_slug,
+                    "his_lg": (_wparts[0] if _wparts else ""),
+                    "his_event_title": str(event_title)[:120],
                     "his_title": str(market_title)[:120],
                     "event_slug": str(bhit.get("event_slug"))[:60],
                     "event_title": str(bhit.get("event_title"))[:120],
@@ -1730,6 +1807,7 @@ async def resolve_explain(pool, market_title: str | None,
             out["bridge"]["his"] = {
                 "market_type": _mt(global_slug or ""),
                 "title": str(market_title)[:120],
+                "event_title": str(event_title)[:120],
                 "outcome": str(outcome)[:40],
             }
             # THE VENUE'S OWN WORDINGS, CAPTURED ON REFUSAL —

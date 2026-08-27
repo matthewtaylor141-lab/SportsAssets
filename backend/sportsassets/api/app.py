@@ -4630,7 +4630,8 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
                           # furniture-token miss class).
                           "gate_histogram": {}, "lg_seen": {},
                           "month_seen": {}, "named_types": {},
-                          "audits": [], "gate10_shadow": []}
+                          "audits": [], "gate10_shadow": [],
+                          "opp_shadow": [], "blocker_sets": []}
     for r in rows:
         try:
             ex = await resolve_explain(
@@ -4715,6 +4716,12 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
                 _brs["audits"].append(_br["audit"])
             if _br.get("gate10") and len(_brs["gate10_shadow"]) < 15:
                 _brs["gate10_shadow"].append(_br["gate10"])
+            for g in (_br.get("row_gates") or []):
+                if g.get("shadow") and len(_brs["opp_shadow"]) < 15:
+                    _brs["opp_shadow"].append(g["shadow"])
+            _blk = _br.get("blockers")
+            if _blk and len(_brs["blocker_sets"]) < 10:
+                _brs["blocker_sets"].append(_blk)
         w = (r["whale_username"] or "?").lower()
         by_whale.setdefault(w, {})
         by_whale[w][step] = by_whale[w].get(step, 0) + 1

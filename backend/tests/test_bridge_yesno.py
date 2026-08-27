@@ -65,8 +65,16 @@ def board(*qs, date="2026-08-27"):
     return out
 
 
-def bridge(rows_kept, rows_all, outcome, title, slug):
-    return pm.bridge_explain(rows_kept, rows_all, outcome, title, slug)
+# The whale's own event title — the FIFTH WITNESS (round 2.1). Every
+# executed kill in the round-2.1 verification fleet rode a channel
+# with no external anchor; his feed's event title names his ACTUAL
+# opponent, and the candidate question's opponent must set-equal it.
+HIS_EVT = "Austin FC vs SC Braga"
+
+
+def bridge(rows_kept, rows_all, outcome, title, slug, evt=HIS_EVT):
+    return pm.bridge_explain(rows_kept, rows_all, outcome, title, slug,
+                             evt)
 
 
 class TestBaselineRecovery:
@@ -222,7 +230,8 @@ class TestHistoricalIncidents:
                   ev="atc-wta-mito-aito-2026-08-27",
                   evt="Mai Ito vs Aoi Ito")]
         assert bridge(bb, bb, "Yes", "Will Ito win on 2026-08-27?",
-                      "wta-mito-aito-2026-08-27-ito") == \
+                      "wta-mito-aito-2026-08-27-ito",
+                      evt="Mai Ito vs Aoi Ito") == \
             (None, "code_not_team")
 
     def test_inversion_yes_never_takes_a_named_side(self):
@@ -315,7 +324,8 @@ class TestConstructedAttacks:
                   evt="Manchester United vs Manchester City")]
         assert bridge(bb, bb, "Yes",
                       "Will Manchester City win on 2026-08-27?",
-                      "epl-man-mci-2026-08-27-man") == \
+                      "epl-man-mci-2026-08-27-man",
+                      evt="Manchester United vs Manchester City") == \
             (None, "no_candidate_row")
 
     def test_subject_matching_neither_code_refuses(self):
@@ -349,13 +359,16 @@ class TestConstructedAttacks:
                   evt="New York Yankees vs Boston Red Sox")]
         assert bridge(bb, bb, "Yes",
                       "Will the New York Yankees win on 2026-07-22?",
-                      "mlb-nyy-bos-2026-07-22-nyy")[0] is None
+                      "mlb-nyy-bos-2026-07-22-nyy",
+                      evt="New York Yankees vs Boston Red Sox")[0] \
+            is None
 
     def test_digit_subject_refuses_in_the_safe_direction(self):
         bb = board("Will FC Schalke 04 win against Austin FC" + TAIL)
         assert bridge(bb, bb, "Yes",
                       "Will FC Schalke 04 win on 2026-08-27?",
-                      "col-aus-s04-2026-08-27-s04")[0] is None
+                      "col-aus-s04-2026-08-27-s04",
+                      evt="Austin FC vs FC Schalke 04")[0] is None
 
     def test_dateless_and_bare_slugs_refuse(self):
         b = board(QB)
@@ -372,7 +385,8 @@ class TestConstructedAttacks:
                   evt="River Plate vs River Plate")]
         assert bridge(bb, bb, "Yes",
                       "Will River Plate win on 2026-08-27?",
-                      "arg-riv-rvp-2026-08-27-riv")[0] is None
+                      "arg-riv-rvp-2026-08-27-riv",
+                      evt="River Plate vs River Plate")[0] is None
 
 
 class TestRoundTwoKills:
@@ -394,11 +408,23 @@ class TestRoundTwoKills:
         assert bridge(bb, bb, "Yes", TITLE, SLUG) == \
             (None, "no_candidate_row")
         assert pm._bridge_ident_ok(
-            "atc-uecl-scb-aus-2026-08-21-ma", "2026-08-27") is False
+            "atc-uecl-scb-aus-2026-08-21-ma", "2026-08-27",
+            "aus", "scb") is False
         assert pm._bridge_ident_ok(
-            "atc-uecl-scb-aus-2026-08-27-ma", "2026-08-27") is True
+            "atc-uecl-scb-aus-2026-08-27-ma", "2026-08-27",
+            "aus", "scb") is True
         assert pm._bridge_ident_ok(
-            "atc-mlb-nyy-bos-2026-07-22-2-nyy", "2026-07-22") is False
+            "atc-mlb-nyy-bos-2026-07-22-2-nyy", "2026-07-22",
+            "nyy", "bos") is False
+        # Round 2.1: the identifier's own codes must name the whale's
+        # game — a wrong-fixture identifier refuses even on the right
+        # date, and a sub-event token in the body refuses the shape.
+        assert pm._bridge_ident_ok(
+            "atc-apn-smsj-ebac-2026-08-27-ma", "2026-08-27",
+            "san", "est") is False
+        assert pm._bridge_ident_ok(
+            "atc-uecl-scb-aus-agg-2026-08-27-ma", "2026-08-27",
+            "aus", "scb") is False
 
     def test_league_whitelist_is_closed_and_kills_each_construction(self):
         """D3: an open league slot admitted a same-day basketball
@@ -423,7 +449,8 @@ class TestRoundTwoKills:
                   evt="River Plate vs Defensa y Justicia")]
         assert bridge(bb, bb, "Yes",
                       "Will River Plate win on 2026-08-27?",
-                      "arg-riv-def-2026-08-27-riv") == \
+                      "arg-riv-def-2026-08-27-riv",
+                      evt="River Plate vs Defensa y Justicia") == \
             (None, "no_candidate_row")
 
     def test_league_scope_smuggle_refuses_and_blocks(self):
@@ -476,14 +503,15 @@ class TestRoundTwoKills:
                        evt="Olympique Lyonnais vs Fenerbahce SK")
         tf = "Will Fenerbahce SK win on 2026-08-26?"
         sf = "ucl-oly-fen-2026-08-26-fen"
+        ef = "Olympique Lyonnais vs Fenerbahce SK"
         bb = [frow("atc-ucl-oly-fen-2026-08-26-ma", full)]
-        assert bridge(bb, bb, "Yes", tf, sf)[1] == "ok"
+        assert bridge(bb, bb, "Yes", tf, sf, evt=ef)[1] == "ok"
         bb = [frow("atc-ucl-oly-fen-2026-08-26-ma", trunc)]
-        assert bridge(bb, bb, "Yes", tf, sf) == \
+        assert bridge(bb, bb, "Yes", tf, sf, evt=ef) == \
             (None, "no_candidate_row")
         bb = [frow("atc-ucl-oly-fen-2026-08-26-ma", full),
               frow("atc-ucl-oly-fen-2026-08-26-mb", trunc)]
-        assert bridge(bb, bb, "Yes", tf, sf) == \
+        assert bridge(bb, bb, "Yes", tf, sf, evt=ef) == \
             (None, "event_scan_ambiguous")
 
     def test_the_delta_b_kill_boundary_west_midlands_police(self):
@@ -502,12 +530,14 @@ class TestRoundTwoKills:
         bb = [wrow("Will SC Braga win against West Midlands Police FC "
                    "in the UECL match scheduled for Aug 27, 2026?",
                    "SC Braga vs West Midlands Police FC")]
-        assert bridge(bb, bb, "Yes", tb, sb) == \
+        assert bridge(bb, bb, "Yes", tb, sb,
+                      evt="SC Braga vs West Midlands Police FC") == \
             (None, "no_candidate_row")
         bb = [wrow("Will SC Braga win against FC Midtjylland in the "
                    "UECL match scheduled for Aug 27, 2026?",
                    "SC Braga vs FC Midtjylland")]
-        assert bridge(bb, bb, "Yes", tb, sb)[1] == "ok"
+        assert bridge(bb, bb, "Yes", tb, sb,
+                      evt="SC Braga vs FC Midtjylland")[1] == "ok"
 
     def test_the_delta_c_kill_boundary_sk_rapid(self):
         """D9: the killed loosening stripped 'sk', merging SK Rapid
@@ -519,9 +549,14 @@ class TestRoundTwoKills:
                   "the UECL match scheduled for Aug 27, 2026?",
                   ev="atc-uecl-rap-fcr-2026-08-27",
                   evt="SK Rapid vs FC Rapid Bucharest")]
+        # Round 2.1 refuses this EARLIER than round 2 did: his terse
+        # 'Rapid' cannot set-equal either side of his own event title
+        # ({'sk','rapid'} / {'rapid','bucharest'}), so the fifth
+        # witness refuses before any venue row is read at all.
         assert bridge(bb, bb, "Yes", "Will Rapid win on 2026-08-27?",
-                      "uecl-rap-fcr-2026-08-27-rap") == \
-            (None, "no_candidate_row")
+                      "uecl-rap-fcr-2026-08-27-rap",
+                      evt="SK Rapid vs FC Rapid Bucharest") == \
+            (None, "his_event_side_mismatch")
 
     def test_the_vikingur_name_twins_both_refuse(self):
         """D10: KF Vikingur vs Vikingur Reykjavik — furniture ('kf')
@@ -600,19 +635,24 @@ class TestRecoveryPins:
     """D14: the two-form corroboration's INTENDED recoveries, pinned
     so a regression is loud."""
 
-    def test_ca_patronato_parana_board_resolves(self):
-        """The measured Primera Nacional shape: 'ca' is in the ten, so
-        'patronatoparana'.startswith('pat') corroborates."""
+    def test_ca_patronato_parana_is_now_an_honest_miss(self):
+        """FLIPPED 2026-08-27 (round 2.1): 'primera nacional' left the
+        whitelist after the verification fleet executed four wrong-game
+        admissions through it (the venue writes clubs city-less and
+        the league is saturated with same-name pairs). The measured
+        Atlanta/Patronato shape refuses again — a priced miss; the
+        probe's lg_seen channel counts what re-admission would buy."""
         bb = [row("atc-arg2-pat-atl-2026-08-26-ma", "yes",
                   "Will CA Atlanta win against CA Patronato Parana in "
                   "the Primera Nacional match scheduled for "
                   "Aug 26, 2026?",
                   ev="atc-arg2-pat-atl-2026-08-26",
                   evt="CA Patronato Parana vs CA Atlanta")]
-        h, why = bridge(bb, bb, "Yes",
-                        "Will CA Atlanta win on 2026-08-26?",
-                        "arg2-pat-atl-2026-08-26-atl")
-        assert why == "ok" and h is not None
+        assert bridge(bb, bb, "Yes",
+                      "Will CA Atlanta win on 2026-08-26?",
+                      "arg2-pat-atl-2026-08-26-atl",
+                      evt="CA Patronato Parana vs CA Atlanta") == \
+            (None, "no_candidate_row")
 
     def test_subject_containing_win_parses_stably(self):
         """Grammar-stability pin: a club named 'Win City' must parse
@@ -655,12 +695,14 @@ class TestPropertyPins:
             assert mr is not None, q
             assert ms.group("subj") == mr.group("subj"), q
 
-    def test_the_league_whitelist_is_exactly_the_three_attested(self):
-        """Each attested by a complete untruncated production
-        win-question (2026-08-26 census). An addition is a LOOSENING
-        with the review obligations written beside the constant."""
+    def test_the_league_whitelist_is_exactly_the_two_surviving(self):
+        """'primera nacional' removed 2026-08-27: the seeds were never
+        put through the addition-review bar, and the verification
+        fleet killed through it. An addition is a LOOSENING with the
+        review obligations written beside the constant — including the
+        homonym analysis that Primera Nacional failed."""
         assert pm._BRIDGE_LEAGUES == frozenset(
-            {"uecl", "primera nacional", "uefa champions league"})
+            {"uecl", "uefa champions league"})
 
     def test_the_name_token_cap_is_five(self):
         assert pm._BRIDGE_NAME_TOKEN_CAP == 5
@@ -716,3 +758,180 @@ class TestPhaseZeroBoundaries:
 
         assert "bridge_explain" not in _i.getsource(le)
         assert "match_side_bridge" not in _i.getsource(le)
+
+
+class TestRoundTwoPointOneKills:
+    """The 12 executed wrong-market admissions from the round-2.1
+    verification fleet (three lenses attacking the IMPLEMENTED round-2
+    code by execution), each pinned as a refusal. Phase 0 meant none of
+    them ever touched money; these pins mean none of them ever can."""
+
+    def _srow(self, ident, q, evt, ev="uecl-scb-aus-2026-08-27"):
+        return row(ident, "yes", q, ev=ev, evt=evt)
+
+    TB = "Will SC Braga win on 2026-08-27?"
+    SB = "col-aus-scb-2026-08-27-scb"
+    EB = "Austin FC vs SC Braga"
+
+    def test_aggregate_subevent_smuggle_refuses(self):
+        """D-K1: '(Aggregate)' melted into the opp slot and the
+        sub-event row validated itself against its own title. The
+        fifth witness refuses: {'austin','aggregate'} != {'austin'} —
+        and the identifier's 'agg' body token independently fails the
+        shape gate."""
+        bb = [self._srow("atc-uecl-scb-aus-agg-2026-08-27-ma",
+                         "Will SC Braga win against Austin FC "
+                         "(Aggregate) in the UECL match scheduled for "
+                         "Aug 27, 2026?",
+                         "SC Braga vs Austin FC (Aggregate)")]
+        assert bridge(bb, bb, "Yes", self.TB, self.SB, evt=self.EB) == \
+            (None, "no_candidate_row")
+
+    def test_first_half_subevent_smuggle_refuses(self):
+        """D-K2: same channel, '(First Half)'."""
+        bb = [self._srow("atc-uecl-scb-aus-fh-2026-08-27-ma",
+                         "Will SC Braga win against Austin FC "
+                         "(First Half) in the UECL match scheduled "
+                         "for Aug 27, 2026?",
+                         "SC Braga vs Austin FC (First Half)")]
+        assert bridge(bb, bb, "Yes", self.TB, self.SB, evt=self.EB) == \
+            (None, "no_candidate_row")
+
+    def test_extra_time_inline_smuggle_refuses(self):
+        """D-K3: fully inline scope, exactly at the 5-token cap. The
+        fifth witness refuses regardless of the cap arithmetic."""
+        bb = [self._srow("atc-uecl-scb-aus-et-2026-08-27-ma",
+                         "Will SC Braga win against Austin FC in "
+                         "extra time in the UECL match scheduled for "
+                         "Aug 27, 2026?",
+                         "SC Braga vs Austin FC in Extra Time")]
+        assert bridge(bb, bb, "Yes", self.TB, self.SB, evt=self.EB) == \
+            (None, "no_candidate_row")
+
+    def test_row_event_missing_his_team_refuses(self):
+        """The 'FC Porto vs Austin FC' hole: his side was only ever
+        used to EXCLUDE event-title sides, never REQUIRED — a row for
+        somebody else's game took his pick. Now exactly one non-his
+        side must remain after exclusion."""
+        bb = [self._srow("atc-col-aus-scb-2026-08-27-ma", QB,
+                         "FC Porto vs Austin FC",
+                         ev="atc-col-aus-scb-2026-08-27")]
+        assert bridge(bb, bb, "Yes", self.TB, self.SB, evt=self.EB) == \
+            (None, "no_candidate_row")
+
+    def test_primera_nacional_homonym_family_refuses(self):
+        """W-K1/W-K2, T-K1/T-K2/T-K4: the city-less homonym family
+        inside 'primera nacional'. The league left the whitelist, so
+        the whole class refuses at league_not_whitelisted even when
+        the whale's own event title cannot disambiguate."""
+        q = ("Will CA San Martin win against Estudiantes in the "
+             "Primera Nacional match scheduled for Aug 27, 2026?")
+        bb = [row("atc-apn-san-est-2026-08-27-ma", "yes", q,
+                  ev="atc-apn-san-est-2026-08-27",
+                  evt="CA San Martin vs Estudiantes")]
+        assert bridge(bb, bb, "Yes",
+                      "Will CA San Martin win on 2026-08-27?",
+                      "apn-san-est-2026-08-27-san",
+                      evt="CA San Martin vs Estudiantes") == \
+            (None, "no_candidate_row")
+
+    def test_wrong_fixture_identifier_codes_refuse(self):
+        """T-K1's second lock: even if the wording collides, a venue
+        identifier whose own codes name the OTHER fixture
+        ('smsj'/'ebac' for a san/est pick) fails the shape gate."""
+        q = ("Will CA San Martin win against Estudiantes in the UECL "
+             "match scheduled for Aug 27, 2026?")
+        bb = [row("atc-apn-smsj-ebac-2026-08-27-ma", "yes", q,
+                  ev="atc-apn-smsj-ebac-2026-08-27",
+                  evt="CA San Martin vs Estudiantes")]
+        assert bridge(bb, bb, "Yes",
+                      "Will CA San Martin win on 2026-08-27?",
+                      "apn-san-est-2026-08-27-san",
+                      evt="CA San Martin vs Estudiantes") == \
+            (None, "no_candidate_row")
+
+    def test_rapid_name_twins_refuse_in_the_mirror_direction(self):
+        """W-K3: the direction the round-2 analysis missed — the OTHER
+        twin's furniture ('fc') IS in the reviewed ten, so venue
+        'FC Rapid' collapsed onto a terse whale 'Rapid'. The fifth
+        witness refuses: his opponent 'Union Saint-Gilloise' can never
+        set-equal 'Universitatea Craiova'."""
+        q = ("Will FC Rapid win against Universitatea Craiova in the "
+             "UECL match scheduled for Aug 27, 2026?")
+        bb = [row("atc-uecl-rap-uni-2026-08-27-ma", "yes", q,
+                  ev="atc-uecl-rap-uni-2026-08-27",
+                  evt="FC Rapid vs Universitatea Craiova")]
+        # Dies even earlier than the designed gate: 'sk rapid wien'
+        # keeps its 'sk' under both corroboration forms, so gate 10
+        # refuses before any venue row is read. The fifth witness
+        # stands behind it for the terse-title variant.
+        assert bridge(bb, bb, "Yes",
+                      "Will SK Rapid Wien win on 2026-08-27?",
+                      "uecl-rap-uni-2026-08-27-rap",
+                      evt="SK Rapid Wien vs Union Saint-Gilloise") == \
+            (None, "slug_corroboration_failed")
+
+    def test_santa_coloma_furniture_merge_refuses(self):
+        """T-K3: 'fc' stripping merged UE Santa Coloma into FC Santa
+        Coloma — the reviewed-ten 'furniture is safe' claim falsified
+        by execution. The fifth witness refuses on the opponent:
+        {'floriana'} != {'flora'}."""
+        q = ("Will FC Santa Coloma win against FC Flora in the UECL "
+             "match scheduled for Jul 9, 2026?")
+        bb = [row("atc-uecl-fcsc-fla-2026-07-09-ma", "yes", q,
+                  ev="atc-uecl-fcsc-fla-2026-07-09",
+                  evt="FC Santa Coloma vs FC Flora")]
+        # Dies even earlier than the designed gate: his terse title
+        # 'Santa Coloma' cannot set-equal his own event title's
+        # 'UE Santa Coloma' side, so the fifth witness refuses before
+        # any venue row is read.
+        assert bridge(bb, bb, "Yes",
+                      "Will Santa Coloma win on 2026-07-09?",
+                      "uecl-san-flo-2026-07-09-san",
+                      evt="UE Santa Coloma vs Floriana") == \
+            (None, "his_event_side_mismatch")
+
+    def test_empty_event_slug_pool_refuses(self):
+        """W-K4: the markets-mode ingest fallback can stamp '' on
+        every row, collapsing gate 11's set to {''} on a MIXED pool.
+        An unlabeled pool is unverifiable; unverifiable refuses."""
+        bb = [dict(r, event_slug="") for r in board(QB, QA)]
+        assert bridge(bb, bb, "Yes", TITLE, SLUG) == \
+            (None, "event_slug_missing")
+
+    def test_whale_event_title_gates_fail_closed(self):
+        """The fifth witness's own failure modes each refuse: no
+        title, a tournament-level title, a derby rendering, and his
+        team absent from his own event title."""
+        b = board(QB, QA, QD)
+        assert bridge(b, b, "Yes", TITLE, SLUG, evt=None) == \
+            (None, "his_event_unsplittable")
+        assert bridge(b, b, "Yes", TITLE, SLUG, evt="UECL Playoffs") \
+            == (None, "his_event_unsplittable")
+        assert bridge(b, b, "Yes", TITLE, SLUG,
+                      evt="SC Braga vs SC Braga") == \
+            (None, "his_event_side_mismatch")
+        assert bridge(b, b, "Yes", TITLE, SLUG,
+                      evt="FC Porto vs Benfica") == \
+            (None, "his_event_side_mismatch")
+
+    def test_whale_derivative_league_token_is_recorded_not_trusted(self):
+        """D-K4 (residual, consciously priced): the whale slug's
+        league token is unread because production shows league
+        ALIASING for the same game (whale 'col', venue 'uecl'). The
+        probe's audit record carries his_lg verbatim so the Phase-1
+        hand audit SEES a derivative-marked token. Pin the telemetry."""
+        src = inspect.getsource(pm.resolve_explain)
+        assert '"his_lg"' in src
+        assert '"his_event_title"' in src
+
+    def test_the_fifth_witness_is_wired_in_the_probe(self):
+        """The probe must pass the whale's event title through —
+        a bridge_explain call without it refuses everything, which
+        would read as would_resolve=0 and hide the recovery."""
+        src = inspect.getsource(pm.resolve_explain)
+        assert ("bridge_explain(kept, rows, outcome,\n"
+                "                                           "
+                "market_title, global_slug,\n"
+                "                                           "
+                "event_title," in src)
