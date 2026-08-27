@@ -69,7 +69,12 @@ async def sync_whale_positions(http: httpx.AsyncClient, whale: dict) -> int:
     offset = 0
     while offset < MAX_POSITIONS_PER_WALLET:
         resp = await polite_get(
-            http, "/positions", params={"user": whale["address"], "limit": 100, "offset": offset}
+            # 100 -> 500 (2026-08-27, in lockstep with
+            # whale_exits.POSITIONS_PAGE): at the 24k ceiling a
+            # 100-row page means 240 sequential requests per whale and
+            # the venue throttles the burst — the endpoint accepted
+            # limit=500 from the start.
+            http, "/positions", params={"user": whale["address"], "limit": 500, "offset": offset}
         )
         resp.raise_for_status()
         batch = resp.json()
@@ -79,9 +84,9 @@ async def sync_whale_positions(http: httpx.AsyncClient, whale: dict) -> int:
             p = parse_api_position(raw)
             if p:
                 parsed.append(p)
-        if len(batch) < 100:
+        if len(batch) < 500:
             break
-        offset += 100
+        offset += 500
 
     pool = await get_pool()
     async with pool.acquire() as conn:

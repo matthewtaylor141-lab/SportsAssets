@@ -70,7 +70,12 @@ _KEY = "whale_positions:%s"
 # Page size and hard ceiling for the positions read. positions_sync.py
 # uses 100/2000 against the same endpoint; matched here so the two
 # cannot disagree about what "his whole book" means.
-POSITIONS_PAGE = int(os.environ.get("WHALE_EXIT_POS_PAGE", "100"))
+# 100 -> 500 (2026-08-27): the 24k ceiling made a 100-row page 240
+# sequential requests per whale (~1700/cycle across the roster); the
+# venue throttled the burst and raise_for_status forfeited whole books
+# (fetch_failed=4..6 in every post-ceiling beat). The endpoint accepted
+# limit=500 from the start; kept in lockstep with positions_sync.
+POSITIONS_PAGE = int(os.environ.get("WHALE_EXIT_POS_PAGE", "500"))
 # 2000 -> 6000 (2026-08-26): four of seven whale books exceeded
 # 2000 and were forfeited every cycle. 6000 -> 24000 (2026-08-27):
 # three books were still pinned at 6000 (truncated_books=3 in every
@@ -321,6 +326,15 @@ async def _fetch_positions(http: httpx.AsyncClient,
                               params={"user": address,
                                       "limit": POSITIONS_PAGE,
                                       "offset": offset})
+        if resp.status_code == 429 or resp.status_code >= 500:
+            # one polite retry before forfeiting the whole book — a
+            # single throttled page was costing the whale's entire
+            # exit coverage for the cycle
+            await asyncio.sleep(2.0)
+            resp = await http.get("/positions",
+                                  params={"user": address,
+                                          "limit": POSITIONS_PAGE,
+                                          "offset": offset})
         resp.raise_for_status()
         body = resp.json()
         rows = body if isinstance(body, list) else (

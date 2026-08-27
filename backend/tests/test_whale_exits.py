@@ -304,11 +304,11 @@ class TestATruncatedPositionListIsNotAnExit:
 
         import sportsassets.workers.whale_exits as _we
 
-        assert we.POSITIONS_PAGE == 100
+        assert we.POSITIONS_PAGE == 500
         assert we.POSITIONS_MAX == 24000
         other = (Path(_we.__file__).resolve().parents[1]
                  / "positions_sync.py").read_text()
-        assert '"limit": 100' in other
+        assert '"limit": 500' in other
         # And the CEILING, not just the page size -- that is the number
         # that decides what "his whole book" means, and it is the one
         # that moved.
