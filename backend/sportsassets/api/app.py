@@ -5341,17 +5341,16 @@ async def api_short_restate() -> dict:
     Rows already written correctly (post-arm) are untouched; a second
     run finds nothing. The summary persists under
     ingestion_state['short_restate'] for the probe."""
+    from ..live_executor import ORDER_INTENT_SQL
     pool = await get_pool()
     rows = await pool.fetch(
-        """
+        f"""
         SELECT id, us_market_slug,
                round(filled_shares, 6)::float8 AS qty,
                round(fill_price, 6)::float8    AS fill_px,
                round(filled_usd, 2)::float8    AS booked_usd
           FROM live_orders
-         WHERE COALESCE(
-                 raw #>> '{response,executions,0,order,intent}',
-                 raw #>> '{preview,intent}', '') LIKE '%SHORT%'
+         WHERE COALESCE({ORDER_INTENT_SQL}, '') LIKE '%SHORT%'
            AND COALESCE(filled_shares, 0) > 0
            AND fill_price IS NOT NULL
            AND status IN ('filled', 'settled', 'cashed_out')
