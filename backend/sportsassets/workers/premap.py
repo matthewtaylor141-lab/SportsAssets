@@ -473,6 +473,34 @@ GENERIC_CLUB_TOKENS = frozenset({"fc", "cf", "sc", "ac", "afc", "ca",
 # 'reserves' would merge 'SC Braga B' into 'SC Braga' — the
 # reserve-team collapse the attack corpus measured. An addition is a
 # LOOSENING and needs the same review as a grammar change. Pinned.
+# The round-2 tournament re-affirmed the pin the hard way: a design
+# that added 'sk' died with an executed kill (SK Rapid Wien vs FC
+# Rapid Bucharest — in Austrian/Balkan naming the legal-form prefix IS
+# the disambiguator between same-name clubs).
+
+_BRIDGE_LEAGUES = frozenset({"uecl", "primera nacional",
+                             "uefa champions league"})
+# EXACTLY these three, each attested by >=1 complete untruncated
+# win-question in the 2026-08-26 production census (uecl: 5 samples
+# across 3 events; primera nacional: 1 win-question plus a
+# corroborating draw-question; uefa champions league: the complete
+# 107-char Viking FK sample). The league slot is COMPETITION IDENTITY:
+# the round-2 tournament killed a design that left it open-vocabulary
+# (a same-day basketball derby, a UEFA Youth League fixture and a
+# Primera Division homonym all walked through an open [a-z ]+ slot).
+# An addition is a LOOSENING with GENERIC_CLUB_TOKENS-grade review and
+# must cite (i) a verbatim untruncated production win-question from
+# >=2 distinct events, (ii) a written same-day-sibling analysis for
+# that league's sport (doubleheaders share teams AND date, so the tail
+# date cannot separate them; youth/women/reserve sections share club
+# names; homonym clubs exist inside one league), and (iii) a full
+# attack-harness re-run.
+
+_BRIDGE_NAME_TOKEN_CAP = 5
+# Max tokens in a strict-parsed subject or opponent. The longest
+# observed real name is 4 ('fk borac banja luka'); the cap refuses the
+# generic-token padding class ('... FK Austria Wien de the club in
+# the ...', 6 tokens) which distinctive-set equality alone admits.
 
 _BRIDGE_TITLE_RE = re.compile(
     r"^will (?:the )?(?P<subj>.+?) win"
@@ -484,6 +512,30 @@ _BRIDGE_Q_RE = re.compile(
     r"(?: (?:against|vs) (?P<opp>[a-z0-9 ]+?))?"
     r"(?: (?:in|on) (?:their )?(?:match|game))?"
     r"(?: on (?P<qmon>[a-z]+) (?P<qday>\d{1,2})(?: (?P<qyr>\d{4}))?)?$")
+
+_BRIDGE_Q_STRICT_RE = re.compile(
+    r"^will (?:the )?(?P<subj>[a-z ]+?) win"
+    r" against (?P<opp>[a-z ]+?)"
+    r" in the (?P<lg>[a-z ]+?) match"
+    r" scheduled for (?P<qmon>[a-z]+) (?P<qday>\d{1,2}) (?P<qyr>\d{4})$")
+# THE ONE MEASURED TEMPLATE (round 2, 2026-08-26 census): "Will X win
+# against Y in the <league> match scheduled for <Mon> <D>, <YYYY>?".
+# 'against' only — 'vs' appears in zero observed win-questions, so a
+# 'vs'-tailed row is unselectable but still raw-parses and BLOCKS.
+# Year MANDATORY. The [a-z ] charsets make any digit in a name
+# structurally unmatchable (subsuming round 1's digit checks). The
+# end anchor makes the venue's own 110-char truncation ('... Aug 26,
+# 202') a miss that still blocks via raw. Round 1's imagined strict
+# branches (bare 'win against Y?', 'vs', 'in their match/game', 'on
+# <mon> <day>') are gone from SELECTION: the census measured
+# would_resolve=0 through them, and the round-2 tournament executed
+# wrong-market admissions through the dateless bare form against
+# shipped code (an aggregate-market pool, and a 2026-08-21 identifier
+# pool under a 2026-08-27 slug). They remain in _BRIDGE_Q_RE, so such
+# rows still block. STRICT ⊂ RAW is a pinned property: every string
+# this pattern accepts also fullmatches _BRIDGE_Q_RE with the
+# identical subj group, so a strict candidate is always self-visible
+# to the Step-3 blocking scan.
 
 _BRIDGE_MONTHS = {m: i + 1 for i, m in enumerate(
     ["january", "february", "march", "april", "may", "june", "july",
@@ -505,6 +557,25 @@ def _collapsed(s: str) -> str:
     return _norm(s).replace(" ", "")
 
 
+def _collapsed_distinctive(s: str) -> str:
+    """_collapsed with the reviewed-ten furniture removed, ORDER KEPT.
+
+    The two-form corroboration's second form: 'FC Midtjylland' whose
+    code is 'mid' misses under _collapsed ('fcmidtjylland') and hits
+    here ('midtjylland'). Built from GENERIC_CLUB_TOKENS only — no new
+    tokens, no reordering, no containment — so the Ito kill stays
+    dead, and FK/HNK/KF/GNK/SK furniture (deliberately NOT in the ten;
+    see the SK Rapid kill above) still misses BY DESIGN."""
+    return "".join(t for t in _norm(s).split()
+                   if t not in GENERIC_CLUB_TOKENS)
+
+
+def _code_prefix_hit(name: str, code: str) -> bool:
+    """Does a slug team-code prefix either form of the name?"""
+    return (_collapsed(name).startswith(code)
+            or _collapsed_distinctive(name).startswith(code))
+
+
 def _bridge_title_subject(his_title: str | None,
                           his_slug: str | None) -> tuple[str | None, str]:
     """The team his 'Will X win …?' title asks about, or (None, why).
@@ -517,6 +588,15 @@ def _bridge_title_subject(his_title: str | None,
     m = _BRIDGE_TITLE_RE.fullmatch(n)
     if not m:
         return None, "title_not_win_shape"
+    if not m.group("iso") and not m.group("mon"):
+        # DATED TITLES ONLY (round-2 tightening). A bare 'Will X win?'
+        # can be an aggregate/advance market riding a dated
+        # moneyline-shaped slug onto a single-match venue row — the
+        # tournament constructed that admission. No pinned recovery
+        # uses a dateless title; if a round-3 census shows real
+        # moneyline picks with dateless titles, re-admitting is a
+        # reviewed change.
+        return None, "title_undated"
     d = date_of(his_slug)
     if m.group("iso"):
         if not d or m.group("iso").replace(" ", "-") != d:
@@ -553,29 +633,38 @@ def _q_parse_raw(question: str | None):
 
 
 def _q_parse_strict(question: str | None, his_dist: frozenset,
-                    other_code: str,
-                    event_title: str | None) -> tuple[frozenset | None,
-                                                      str]:
-    """Step-2 SELECTION form. All clauses conjunctive; any miss refuses.
+                    other_code: str, event_title: str | None,
+                    slug_date: str) -> tuple[frozenset | None, str]:
+    """Step-2 SELECTION form: the ONE measured template, validated.
 
-    The against/vs clause is MANDATORY: the attested venue wording
-    family names the opponent, and requiring it closes the
-    same-day-rematch residue. The opp group is then VALIDATED against
-    the row's own event_title by distinctive-set EQUALITY — a lazy
-    regex group that absorbed 'in extra time' pollutes the set and
-    fails equality, which is exactly the point."""
-    m = _q_parse_raw(question)
+    All clauses conjunctive; any miss refuses the row. The opponent
+    clause is MANDATORY and validated against the row's own event_title
+    by distinctive-set EQUALITY; the league is a CLOSED whitelist; the
+    tail date must equal the whale slug's date exactly. slug_date is
+    guaranteed non-empty by bridge_explain's gate 5."""
+    n = " ".join(_norm(question).split())
+    m = _BRIDGE_Q_STRICT_RE.fullmatch(n)
     if m is None:
-        return None, "q_not_win_shape"
+        return None, "q_not_strict_shape"
     subj = " ".join(m.group("subj").split())
-    if any(ch.isdigit() for ch in subj):
-        return None, "q_subject_has_digit"
-    opp = m.group("opp")
-    if opp is None:
-        return None, "no_against_clause"
-    opp = " ".join(_norm(opp).split())
-    if any(ch.isdigit() for ch in opp):
-        return None, "opp_has_digit"
+    if len(subj.split()) > _BRIDGE_NAME_TOKEN_CAP:
+        return None, "q_subject_too_long"
+    opp = " ".join(m.group("opp").split())
+    if len(opp.split()) > _BRIDGE_NAME_TOKEN_CAP:
+        return None, "q_opp_too_long"
+    lg = " ".join(m.group("lg").split())
+    if lg not in _BRIDGE_LEAGUES:
+        return None, "league_not_whitelisted"
+    mo = _BRIDGE_MONTHS.get(m.group("qmon"))
+    if mo is None:
+        # 'sept' is unknown TODAY — a conscious September cliff. The
+        # probe's strict_trace records the month token verbatim, so
+        # the cliff resolves itself within days of the venue first
+        # emitting 'Sept'/'Sep' — by observation, not guess.
+        return None, "q_month_unknown"
+    want = (int(slug_date[0:4]), int(slug_date[5:7]), int(slug_date[8:10]))
+    if (int(m.group("qyr")), mo, int(m.group("qday"))) != want:
+        return None, "q_date_mismatch"
     sides = re.split(r"\s+vs\.?\s+", _norm(event_title or ""))
     sides = [" ".join(s.split()) for s in sides if s.strip()]
     if len(sides) != 2:
@@ -584,36 +673,96 @@ def _q_parse_strict(question: str | None, his_dist: frozenset,
     other_sides = [s for s in sides if _distinctive(s) != his_dist]
     if not any(_distinctive(s) == od for s in other_sides):
         return None, "opp_not_event_team"
-    if not (_collapsed(opp).startswith(other_code)
-            or any(_collapsed(s).startswith(other_code)
+    if not (_code_prefix_hit(opp, other_code)
+            or any(_code_prefix_hit(s, other_code)
                    for s in other_sides)):
         return None, "opp_not_corroborated"
     return _distinctive(subj), "ok"
 
 
-def _bridge_ident_suffix_ok(identifier: str | None) -> bool:
+def _bridge_ident_ok(identifier: str | None, slug_date: str) -> bool:
     """A candidate row's identifier must carry at most ONE post-date
-    token, purely alphabetic — a '-2' or '-game-2' disambiguator
-    refuses the row, closing the one-game-captured doubleheader
-    window."""
+    token, purely alphabetic — a '-2' or '-game-2' doubleheader
+    disambiguator refuses the row — AND its embedded YYYY-MM-DD triple
+    must equal the whale slug's date. The date clause is round 2's
+    wrong-game fix: the tournament executed an admission against
+    shipped code through a pool whose identifiers carried 2026-08-21
+    under a 2026-08-27 slug, because no gate compared any venue-side
+    date to the slug when the question was dateless."""
     from ..copy_sports import _post_date_tokens
 
-    toks = _post_date_tokens([p for p in (identifier or "").lower()
-                              .split("-") if p])
-    if toks is None or len(toks) > 1:
+    parts = [p for p in (identifier or "").lower().split("-") if p]
+    toks = _post_date_tokens(parts)
+    if toks is None or len(toks) > 1 or not all(t.isalpha()
+                                               for t in toks):
         return False
-    return all(t.isalpha() for t in toks)
+    for i in range(len(parts) - 2):
+        if (re.fullmatch(r"\d{4}", parts[i]) and parts[i + 1].isdigit()
+                and parts[i + 2].isdigit()):
+            return (f"{parts[i]}-{parts[i + 1]}-{parts[i + 2]}"
+                    == slug_date)
+    return False
+
+
+def _bridge_trace_row(trace: dict, r: dict, gate: str,
+                      qd: frozenset | None, his_dist: frozenset,
+                      other: str) -> None:
+    """Record ONE kept row's first failing Step-2 gate (probe only).
+
+    Bounded to 12 rows. The extras exist so a round-3 review reads
+    evidence instead of guessing: the verbatim league value names
+    whitelist candidates with counts; the verbatim month token
+    resolves the September cliff by observation; the set differences
+    and the two-form shadow-eval size the furniture-token miss class
+    before anyone proposes stripping a token."""
+    rows = trace.setdefault("row_gates", [])
+    if len(rows) >= 12:
+        return
+    ident = (r.get("identifier") or "")
+    entry: dict = {"ident_tail": ident[-40:], "gate": gate}
+    n = " ".join(_norm(r.get("question")).split())
+    m = _BRIDGE_Q_STRICT_RE.fullmatch(n)
+    if gate == "league_not_whitelisted" and m:
+        entry["lg_seen"] = " ".join(m.group("lg").split())[:60]
+    elif gate == "q_month_unknown" and m:
+        entry["month_seen"] = m.group("qmon")[:20]
+    elif gate == "subject_set_mismatch" and qd is not None:
+        entry["dist_diff"] = sorted(qd ^ his_dist)[:8]
+    elif gate == "opp_not_event_team" and m:
+        opp = " ".join(m.group("opp").split())
+        entry["opp_dist"] = sorted(_distinctive(opp))[:8]
+        sides = re.split(r"\s+vs\.?\s+",
+                         _norm(r.get("event_title") or ""))
+        entry["side_dists"] = [sorted(_distinctive(
+            " ".join(s.split())))[:8] for s in sides if s.strip()][:2]
+    elif gate == "opp_not_corroborated" and m:
+        opp = " ".join(m.group("opp").split())
+        entry["shadow"] = {
+            "other": other,
+            "collapsed": _collapsed(opp)[:40],
+            "collapsed_distinctive": _collapsed_distinctive(opp)[:40],
+        }
+    rows.append(entry)
 
 
 def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
                    outcome: str | None, his_title: str | None,
-                   his_slug: str | None) -> tuple[dict | None, str]:
+                   his_slug: str | None,
+                   trace: dict | None = None) -> tuple[dict | None, str]:
     """The full bridge: (hit, 'ok') or (None, named_refusal).
 
     Consulted only AFTER match_side returns None — a primary hit always
     wins. rows_kept is the prefix-filtered pool selection runs over;
     rows_all is the PRE-filter pool the event-wide blocking scan runs
-    over, any prefix family, lined or not."""
+    over, any prefix family, lined or not.
+
+    trace, when a dict, is filled with the probe's evidence: per-row
+    first-failing gates (with the league value on
+    league_not_whitelisted, the month token on q_month_unknown, and
+    set differences on subject/opp mismatches), the two-form
+    corroboration shadow-eval on every corroboration refusal, and the
+    blocker set on event_scan_ambiguous. Tracing changes NO decision —
+    it only records why each was made."""
     from ..copy_sports import _post_date_tokens, market_type_of
 
     on = _norm(outcome)
@@ -649,33 +798,52 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
     his_dist = _distinctive(subj)
     if not his_dist:
         return None, "empty_distinctive"
-    cs = _collapsed(subj)
-    if not cs.startswith(code) or cs.startswith(other):
-        # whale-internal corroboration, veto-only: the title's team
-        # must prefix-match HIS slug code and must not also match the
-        # opponent's. Both or neither is a collision, and a collision
-        # refuses. (When the slug's codes collide the other way —
-        # 'man' prefixing 'manchestercity' — the opp-corroboration
-        # clause in _q_parse_strict lands the refusal instead.)
+    mine = _code_prefix_hit(subj, code)
+    theirs = _code_prefix_hit(subj, other)
+    if not mine or theirs:
+        # whale-internal corroboration, veto-only, two-form and
+        # SYMMETRIC: the title's team must prefix-match HIS slug code
+        # under either form ('fcmidtjylland' OR 'midtjylland') and
+        # must not also match the opponent's under either form. Both
+        # or neither is a collision, and a collision refuses. (When
+        # the slug's codes collide the other way — 'man' prefixing
+        # 'manchestercity' — the opp-corroboration clause in
+        # _q_parse_strict lands the refusal instead.)
+        if trace is not None:
+            trace["gate10"] = {
+                "code": code, "other": other,
+                "collapsed": _collapsed(subj)[:40],
+                "collapsed_distinctive":
+                    _collapsed_distinctive(subj)[:40],
+                "mine": mine, "theirs": theirs,
+            }
         return None, "slug_corroboration_failed"
     if len({r.get("event_slug") or "" for r in rows_all}) > 1:
         return None, "multi_event_pool"
     cands = []
     for r in rows_kept:
+        gate = None
+        qd = None
         if _norm(r.get("side_norm")) != on:
-            continue
-        if (r.get("line") or "").strip() or (r.get("signed")
-                                             or "").strip():
-            continue
-        if not r.get("intent"):
-            continue
-        if not _bridge_ident_suffix_ok(r.get("identifier")):
-            continue
-        qd, _qwhy = _q_parse_strict(r.get("question"), his_dist, other,
-                                    r.get("event_title"))
-        if qd is None or qd != his_dist:
-            continue
-        cands.append(r)
+            gate = "side_polarity"
+        elif (r.get("line") or "").strip() or (r.get("signed")
+                                               or "").strip():
+            gate = "lined_or_signed"
+        elif not r.get("intent"):
+            gate = "no_intent"
+        elif not _bridge_ident_ok(r.get("identifier"), d):
+            gate = "ident_suffix_or_date"
+        else:
+            qd, qwhy = _q_parse_strict(r.get("question"), his_dist,
+                                       other, r.get("event_title"), d)
+            if qd is None:
+                gate = qwhy
+            elif qd != his_dist:
+                gate = "subject_set_mismatch"
+        if gate is None:
+            cands.append(r)
+        elif trace is not None:
+            _bridge_trace_row(trace, r, gate, qd, his_dist, other)
     if len(cands) != 1:
         return None, ("no_candidate_row" if not cands
                       else "multiple_candidates")
@@ -691,6 +859,11 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
     want = ((cands[0].get("identifier") or "").lower(),
             _norm(cands[0].get("question")))
     if blockers != {want}:
+        if trace is not None:
+            trace["blockers"] = {
+                "n": len(blockers),
+                "identifiers": sorted(b[0][:40] for b in blockers)[:12],
+            }
         return None, "event_scan_ambiguous"
     return cands[0], "ok"
 
@@ -1419,7 +1592,7 @@ async def resolve_explain(pool, market_title: str | None,
     try:
         rows = [dict(r) for r in await pool.fetch(
             "SELECT identifier, side_norm, kind, line, question, "
-            "event_title, intent, signed FROM us_premap "
+            "event_title, intent, signed, event_slug FROM us_premap "
             "WHERE event_keys && $1::text[]", sorted(keys))]
     except Exception as exc:  # noqa: BLE001
         out["step"] = "premap_query_failed"
@@ -1511,36 +1684,92 @@ async def resolve_explain(pool, market_title: str | None,
         # tails exist, before any executor code consumes it. The step
         # string above is unchanged so census bucketing stays stable.
         try:
+            btrace: dict = {}
             bhit, breason = bridge_explain(kept, rows, outcome,
-                                           market_title, global_slug)
+                                           market_title, global_slug,
+                                           trace=btrace)
             out["bridge"] = {
                 "would_resolve": bool(bhit),
                 "identifier": (bhit or {}).get("identifier"),
                 "matched_question": (bhit or {}).get("question"),
                 "reason": breason,
             }
-            # THE VENUE'S OWN WORDINGS, CAPTURED ON REFUSAL (Phase 0
-            # round 2). The first census measured would_resolve=0 with
-            # not_yes_no at 213/267 -- the dominant shape is a NAMED
-            # team pick against a yes/no board, the mirror image of the
-            # built variant -- and questions=[] left the grammar
-            # designer with nothing real to design against. Designing
-            # a matcher against imagined strings is how the O/U branch
-            # once refused every totals copy, so the probe now records
-            # what the venue actually says: up to three distinct
-            # (side_norm, question) pairs from the pool, plus the
-            # outcome shape, on every no_side_match.
-            seenq: list[list[str]] = []
-            for r in kept:
-                pair = [str(r.get("side_norm"))[:30],
-                        str(r.get("question"))[:110]]
-                if pair not in seenq:
-                    seenq.append(pair)
-                if len(seenq) >= 3:
+            # ROUND-3 PROBE (2026-08-27). Round 2 measured
+            # would_resolve=0 and captured the venue's real wordings;
+            # the tournament that consumed them demanded EVIDENCE
+            # channels, not just a verdict bit:
+            #   * a would_resolve AUDIT RECORD — Phase 1 is gated on a
+            #     zero-mismatch hand audit of every one of these rows,
+            #     resolution-rules reading included;
+            #   * his market_type/title/outcome on every refusal — the
+            #     202-strong named class ships NO code this round, so
+            #     its composition must be measured before its round-3
+            #     tournament (E1/E3 evidence bar);
+            #   * strict_trace per kept row — the league values seen,
+            #     the month tokens seen, the set differences — so
+            #     whitelist and furniture decisions cite counts;
+            #   * the corroboration shadow-eval and blocker telemetry
+            #     recorded by the trace above.
+            if bhit:
+                tq = " ".join(_norm(bhit.get("question")).split())
+                tm = _BRIDGE_Q_STRICT_RE.fullmatch(tq)
+                out["bridge"]["audit"] = {
+                    "his_slug": global_slug,
+                    "his_title": str(market_title)[:120],
+                    "event_slug": str(bhit.get("event_slug"))[:60],
+                    "event_title": str(bhit.get("event_title"))[:120],
+                    "matched_question":
+                        str(bhit.get("question"))[:300],
+                    "lg": (" ".join(tm.group("lg").split())
+                           if tm else None),
+                    "tail_date": (f"{tm.group('qyr')}-"
+                                  f"{tm.group('qmon')}-"
+                                  f"{tm.group('qday')}" if tm else None),
+                }
+            from ..copy_sports import market_type_of as _mt
+            out["bridge"]["his"] = {
+                "market_type": _mt(global_slug or ""),
+                "title": str(market_title)[:120],
+                "outcome": str(outcome)[:40],
+            }
+            # THE VENUE'S OWN WORDINGS, CAPTURED ON REFUSAL —
+            # STRATIFIED (round 3). Round 2's 3-pair cap let the MLB
+            # pool's inning-winner rows crowd out the plain moneyline
+            # wording, which is exactly the string the named-variant
+            # tournament is waiting to observe. Win-shaped yes/no rows
+            # are captured FIRST; question[:300] plus the raw length
+            # separates venue-side truncation from probe-side.
+            def _q_entry(r):
+                q = str(r.get("question"))
+                return {"side": str(r.get("side_norm"))[:30],
+                        "q": q[:300], "qlen": len(q),
+                        "event_title": str(r.get("event_title"))[:120],
+                        "identifier": str(r.get("identifier"))[:80],
+                        "line": str(r.get("line") or ""),
+                        "signed": str(r.get("signed") or ""),
+                        "event_slug": str(r.get("event_slug"))[:60]}
+
+            def _is_win_yesno(r):
+                return (" win " in f" {_norm(r.get('question'))} "
+                        and _norm(r.get("side_norm")) in ("yes", "no"))
+
+            seenq: list[dict] = []
+            seen_keys: set = set()
+            for r in (sorted(kept, key=lambda x: not _is_win_yesno(x))):
+                e = _q_entry(r)
+                k = (e["side"], e["q"])
+                if k in seen_keys:
+                    continue
+                seen_keys.add(k)
+                seenq.append(e)
+                if len(seenq) >= 12:
                     break
             out["bridge"]["venue_q_sample"] = seenq
             out["bridge"]["outcome_shape"] = (
                 "yes_no" if _norm(outcome) in ("yes", "no") else "named")
+            for k in ("row_gates", "gate10", "blockers"):
+                if k in btrace:
+                    out["bridge"][k] = btrace[k]
         except Exception as exc:  # noqa: BLE001 — a probe never breaks
             out["bridge"] = {"error": type(exc).__name__}
         # Split the two failure modes this counter conflates: wording
@@ -1620,7 +1849,7 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     try:
         rows = [dict(r) for r in await pool.fetch(
             "SELECT identifier, side_norm, kind, line, question, "
-            "event_title, intent, signed FROM us_premap "
+            "event_title, intent, signed, event_slug FROM us_premap "
             "WHERE event_keys && $1::text[]",
             sorted(keys))]
     except Exception:  # noqa: BLE001 — table absent/degraded: fall through

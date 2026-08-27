@@ -4614,7 +4614,23 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
     alias_hits = 0
     alias_examples: list[dict] = []
     bridge_stats: dict = {"would_resolve": 0, "reasons": {},
-                          "questions": [], "venue_wordings": {}}
+                          "questions": [], "venue_wordings": {},
+                          # ROUND-3 EVIDENCE CHANNELS (2026-08-27).
+                          # The tournament that designed the round-2
+                          # grammar demanded counts, not anecdotes:
+                          # per-row first-failing gates, the league
+                          # values and month tokens actually seen
+                          # (whitelist candidates enumerate
+                          # themselves), the named class's market-type
+                          # composition (the E1 bar for the named
+                          # variant), the would_resolve AUDIT ROWS
+                          # (Phase 1 is gated on a zero-mismatch hand
+                          # audit of every one), and the two-form
+                          # corroboration shadow-eval (sizes the
+                          # furniture-token miss class).
+                          "gate_histogram": {}, "lg_seen": {},
+                          "month_seen": {}, "named_types": {},
+                          "audits": [], "gate10_shadow": []}
     for r in rows:
         try:
             ex = await resolve_explain(
@@ -4679,6 +4695,26 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
             for pair in (_br.get("venue_q_sample") or []):
                 if pair not in bucket and len(bucket) < 30:
                     bucket.append(pair)
+            for g in (_br.get("row_gates") or []):
+                gate = str(g.get("gate") or "?")
+                _brs["gate_histogram"][gate] = \
+                    _brs["gate_histogram"].get(gate, 0) + 1
+                if g.get("lg_seen"):
+                    lg = str(g["lg_seen"])
+                    _brs["lg_seen"][lg] = _brs["lg_seen"].get(lg, 0) + 1
+                if g.get("month_seen"):
+                    mo = str(g["month_seen"])
+                    _brs["month_seen"][mo] = \
+                        _brs["month_seen"].get(mo, 0) + 1
+            _his = _br.get("his") or {}
+            if shape == "named" and _his:
+                mt = str(_his.get("market_type") or "?")
+                _brs["named_types"][mt] = \
+                    _brs["named_types"].get(mt, 0) + 1
+            if _br.get("audit") and len(_brs["audits"]) < 40:
+                _brs["audits"].append(_br["audit"])
+            if _br.get("gate10") and len(_brs["gate10_shadow"]) < 15:
+                _brs["gate10_shadow"].append(_br["gate10"])
         w = (r["whale_username"] or "?").lower()
         by_whale.setdefault(w, {})
         by_whale[w][step] = by_whale[w].get(step, 0) + 1
