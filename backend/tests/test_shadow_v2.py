@@ -1251,20 +1251,42 @@ def test_both_residuals_and_leading_flip_reset_window(st):
     written = json.loads(pool.executes[-1][1][1])
     assert written["window_start"] != 1000.0, \
         "a residual of EITHER policy must restart the evidence clock"
-    assert "sim_exec_residual_dup" in sv.VOLUME_KEYS
-    assert "sim_agg_residual_dup" in sv.VOLUME_KEYS
+    # round-3 kill: gating + watermarked = Δ structurally 0 in the very
+    # flush that moved it — residuals render cumulatively instead
+    assert "sim_exec_residual_dup" not in sv.VOLUME_KEYS
+    assert "sim_agg_residual_dup" not in sv.VOLUME_KEYS
 
     pool2 = _FakePool(stored=json.dumps(
         {"counters": {"sim_exec_suppressed": 1, "sim_agg_suppressed": 100},
+         "at_window": {"sim_exec_suppressed": 1, "sim_agg_suppressed": 0},
          "window_start": 1000.0, "health_start": 1000.0,
          "leading_policy": "exec", "writer": None}))
     st2 = ShadowV2()
     st2.deltas = {"events_seen": 1}
     asyncio.run(st2._flush(pool2))
     written2 = json.loads(pool2.executes[-1][1][1])
-    assert written2["leading_policy"] == "agg"
+    assert written2["leading_policy"] == "agg", \
+        "a DECISIVE since-window inversion flips leading"
     assert written2["window_start"] != 1000.0, \
         "a leading-policy crossover restarts the clock too"
+    assert written2["counters"].get("leading_flip") == 1
+
+
+def test_leading_does_not_flap_on_cumulative_tie(st):
+    # round-3 kill: cumulative >= tie-break reset the window every flush
+    # on balanced traffic; hysteresis on window deltas must hold steady
+    pool = _FakePool(stored=json.dumps(
+        {"counters": {"sim_exec_suppressed": 100, "sim_agg_suppressed": 101},
+         "at_window": {"sim_exec_suppressed": 98, "sim_agg_suppressed": 99},
+         "window_start": 1000.0, "health_start": 1000.0,
+         "leading_policy": "exec", "writer": None}))
+    st.deltas = {"events_seen": 1}
+    asyncio.run(st._flush(pool))
+    written = json.loads(pool.executes[-1][1][1])
+    assert written["leading_policy"] == "exec", \
+        "a knife-edge cumulative crossover must NOT flip leading"
+    assert written["window_start"] == 1000.0, \
+        "balanced mixed traffic must not reset the window every flush"
 
 
 # ── fleet2 K18: partial corruption resets whole-window coherently ───
@@ -1290,3 +1312,220 @@ def test_partial_corruption_resets_coherently(st):
     written2 = json.loads(pool2.executes[-1][1][1])
     assert isinstance(written2["window_start"], (int, float)), \
         "a non-numeric window_start heals instead of poisoning jq forever"
+
+
+# ════════════════════════════════════════════════════════════════════
+# Implementation-fleet kills (round 3) — 11 confirmed on the twice-
+# fixed build, each fixed and pinned here permanently.
+# ════════════════════════════════════════════════════════════════════
+
+# ── fleet3 K0: late rows after early finalize are STILL key-tested ──
+def test_late_row_after_early_finalize_is_tested(st):
+    e1 = _mkrec(log_index=1, seen_at=time.time() - 1000)
+    e2 = _mkrec(size_units=6_000_000, usdc_units=3_720_000, log_index=2,
+                seen_at=time.time() - 1000)
+    g = {"execs": [e1, e2], "aggs": [], "flags": {}}
+    rows = [_poll_row(e1), _poll_row(e2)]
+    st._match_wallet(TX, MAKER, g, [e1, e2], rows, [], 1000.0, time.time(), 0)
+    assert st.deltas.get("sim_exec_suppressed") == 2
+    assert (TX, MAKER) in st.watch, "early finalize must arm a row watch"
+
+    late_extra = _poll_row(e1, size="6.500000")   # divergent LATE sibling
+    rows_by = {(TX, 1): rows + [late_extra]}
+    st._watch_pass(rows_by, time.time())
+    assert st.deltas.get("sim_exec_residual_dup") == 1, \
+        "a poll row landing AFTER the finalizing pass must still be " \
+        "key-tested — the shape that could read the flip green"
+    assert st.deltas.get("late_row_seen") == 1
+    st._watch_pass(rows_by, time.time())
+    assert st.deltas.get("sim_exec_residual_dup") == 1, \
+        "the same late row is scored exactly once"
+
+    # deadline expiry drops the watch
+    st.watch[(TX, MAKER)]["until"] = time.time() - 1
+    st._watch_pass({}, time.time())
+    assert (TX, MAKER) not in st.watch
+
+
+def test_agg_only_wallet_late_rows_watched(st):
+    ag = _mkrec(view="agg", size_units=10_000_000, usdc_units=6_200_000,
+                log_index=3, seen_at=time.time() - 1000)
+    g = {"execs": [], "aggs": [ag], "flags": {}}
+    first = _poll_row(ag)
+    st._match_wallet(TX, MAKER, g, [ag], [first], [], 1000.0, time.time(), 0)
+    assert (TX, MAKER) in st.watch, \
+        "one landed row proves nothing about an agg-only wallet's siblings"
+    late1 = _poll_row(ag, size="4.000000")
+    late2 = _poll_row(ag, size="6.000000")
+    st._watch_pass({(TX, 1): [first, late1, late2]}, time.time())
+    assert st.deltas.get("sim_agg_residual_dup") == 2, \
+        "late per-exec-granularity legs are agg-policy residuals"
+
+
+# ── fleet3 K1/K5: ts gating is per-record; block=0 dropped early ────
+def test_unresolved_sibling_does_not_poison_resolved_records(st):
+    good = _mkrec(log_index=1, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    bad = _mkrec(log_index=2, ts=None,
+                 seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    for r in (good, bad):
+        st.pending[(r["tx"], r["log_index"], r["wallet"], r["view"])] = r
+    row = _poll_row(good)
+    st._reconcile_tx(TX, [good, bad], {(TX, 1): [row]}, time.time(), 0)
+    assert st.deltas.get("ts_never_resolved_live") == 1, \
+        "only the truly unresolved record counts (GATING must not lie)"
+    assert st.deltas.get("sim_exec_suppressed") == 1, \
+        "the resolved sibling's evidence is evaluated, not discarded"
+    assert not st.pending
+
+
+def test_blockless_record_dropped_at_observe(st):
+    lst = _Listener(roster=_roster((MAKER, 1, "m")))
+    ev = _ev(MAKER, TAKER, 0, TOKEN_INT, 0x747548, 0xBBD5F0, log_index=41)
+    ev["blockNumber"] = "not-hex"
+    shadow_observe(lst, ev)
+    assert st.deltas.get("block_missing") == 1
+    assert not st.pending, \
+        "a record that can never resolve a ts must not poison its tx"
+
+
+# ── fleet3 K2: agg-row absorption covers tie legs ONLY ──────────────
+def test_agg_absorption_excludes_non_tie_execs(st):
+    own = _mkrec(view="exec_owner", side="BUY",
+                 size_units=5_000_000, usdc_units=3_100_000, log_index=1,
+                 seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    leg = _mkrec(view="exec_counter", side="SELL", owner_side="BUY",
+                 size_units=10_000_000, usdc_units=6_200_000, log_index=2,
+                 seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    ag = _mkrec(view="agg", side="BUY",
+                size_units=10_000_000, usdc_units=6_200_000, log_index=3,
+                seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [own, leg], "aggs": [ag], "flags": {}}
+    rows = [_poll_row(ag)]
+    st._match_wallet(TX, MAKER, g, [own, leg, ag], rows, [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("exec_covered_by_agg_row") == 1, \
+        "only the tie-out LEG is proven by the agg-matched row"
+    assert st.deltas.get("orphan_excess_exec") == 1, \
+        "the exec_owner outside the tie is a would-be extra, not covered"
+
+
+# ── fleet3 K3: the mint transform must prove itself ─────────────────
+def test_unprovable_mint_transform_reverts_to_raw(st):
+    agg = _mkrec(view="agg", side="BUY", asset="1111",
+                 size_units=10_000_000, usdc_units=6_200_000, log_index=1)
+    cross = _mkrec(view="exec_counter", side="SELL", owner_side="BUY",
+                   asset="2222", size_units=500_000, usdc_units=310_000,
+                   log_index=2)   # a DIFFERENT market's fill, agg lost
+    g = classify_mints([agg, cross])[MAKER]
+    assert g["flags"].get("mint_transformed") is None, \
+        "a transform that does not tie out is a GUESS and must revert"
+    assert g["flags"].get("mint_unresolved") == 1
+    assert g["execs"][0]["asset"] == "2222", "the RAW record survives"
+    assert g["execs"][0]["side"] == "SELL"
+    assert agg_tieout(g) == "skip", \
+        "a reverted transform must not read as a layout failure"
+
+    row = _poll_row(g["execs"][0])
+    for r in g["execs"] + g["aggs"]:
+        r.update(replay=False, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10,
+                 ts_tries=0)
+    st._match_wallet(TX, MAKER, g, g["execs"] + g["aggs"], [row], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("sim_exec_suppressed") == 1, \
+        "the raw cross-market record key-tests against its real poll row"
+    assert st.deltas.get("div.side") is None
+    assert st.deltas.get("agg_tieout_fail") is None
+
+    # the genuine mint (ties out) still transforms — pinned in test 8,
+    # re-asserted here against the new revert path
+    roster = _roster((MAKER, 7, "whale7"))
+    recs = _mint_tx_recs(roster)
+    g2 = classify_mints(recs)[MAKER]
+    assert g2["flags"] == {"mint_transformed": 1}
+    assert agg_tieout(g2) == "ok"
+
+
+# ── fleet3 K4: the agg-only no-row orphan is visible and gates ──────
+def test_agg_only_orphan_no_row_fires(st):
+    ag = _mkrec(view="agg", size_units=10_000_000, usdc_units=6_200_000,
+                log_index=1, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [], "aggs": [ag], "flags": {}}
+    st._match_wallet(TX, MAKER, g, [ag], [], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("orphan_agg_no_row") == 1, \
+        "'the venue never published it' must be visible for agg-only fills"
+    assert "orphan_agg_no_row" in sv.GATING
+    assert any(e["kind"] == "orphan_agg_no_row" for e in st.examples)
+
+
+# ── fleet3 K6: partial corruption of at_window heals ────────────────
+def test_at_window_corruption_is_caught(st):
+    for bad_aw in ("nope", {"pw": "clobbered"},
+                   {"sim_exec_suppressed": "many"}):
+        s = ShadowV2()
+        s.deltas = {"events_seen": 1}
+        pool = _FakePool(stored=json.dumps(
+            {"counters": {}, "window_start": 1000.0,
+             "at_window": bad_aw, "writer": None}))
+        asyncio.run(s._flush(pool))
+        written = json.loads(pool.executes[0][1][1])
+        assert written["counters"].get("corrupt_reset") == 1, \
+            f"at_window={bad_aw!r} must trigger a visible corrupt reset"
+        assert written["window_start"] != 1000.0
+
+
+# ── fleet3 K7: prune drops the watermark with the counter ───────────
+def test_prune_drops_at_window_watermark_too(st):
+    target = "0xffff" + "ff" * 18
+    lst = _Listener(roster={target: {"id": 9, "username": "0x076daa87"}})
+    st.listener = __import__("weakref").ref(lst)
+    counters = {f"pw.0x{i:040x}.n": 1 for i in range(70)}
+    counters[f"pw.{target}.n"] = 120
+    aw_pw = {k: v for k, v in counters.items()}
+    stored = {"counters": counters, "window_start": 1000.0,
+              "health_start": 1000.0,
+              "at_window": {"pw": aw_pw}, "writer": None}
+    st.deltas = {"events_seen": 1}
+    pool = _FakePool(stored=json.dumps(stored))
+    asyncio.run(st._flush(pool))
+    written = json.loads(pool.executes[-1][1][1])
+    pruned = [k for k in aw_pw
+              if k not in written["counters"]
+              and k in (written["at_window"].get("pw") or {})]
+    assert not pruned, \
+        "a pruned counter must take its at_window watermark with it — " \
+        "a stale high watermark renders negative TARGET deltas forever"
+
+
+def test_prune_never_runs_without_a_roster(st):
+    st.listener = None     # listener GC'd: roster unknown, prune must wait
+    counters = {f"pw.0x{i:040x}.n": 1 for i in range(70)}
+    st.deltas = {"events_seen": 1}
+    pool = _FakePool(stored=json.dumps({"counters": counters, "writer": None}))
+    asyncio.run(st._flush(pool))
+    written = json.loads(pool.executes[-1][1][1])
+    kept = [k for k in counters if k in written["counters"]]
+    assert len(kept) == len(counters), \
+        "an empty roster view must never nuke roster whales' history"
+
+
+# ── fleet3 K8: within-roster ranking is by activity ─────────────────
+def test_roster_cohort_ranked_by_activity(st):
+    roster = {}
+    counters = {}
+    for i in range(40):    # 40 ROSTER wallets, low-hex, low activity
+        w = f"0x{i:040x}"
+        roster[w] = {"id": i, "username": f"w{i}"}
+        counters[f"pw.{w}.n"] = 1
+    target = "0xffff" + "ff" * 18   # roster, sorts LAST, most active
+    roster[target] = {"id": 99, "username": "0x076daa87"}
+    counters[f"pw.{target}.n"] = 400
+    lst = _Listener(roster=roster)
+    st.listener = __import__("weakref").ref(lst)
+    st.deltas = {"events_seen": 1}
+    pool = _FakePool(stored=json.dumps({"counters": counters, "writer": None}))
+    asyncio.run(st._flush(pool))
+    written = json.loads(pool.executes[-1][1][1])
+    assert target in written["per_whale"], \
+        "the most-active roster whale must survive a 33+ roster"
+    assert written["counters"].get("per_whale_truncated", 0) >= 1
