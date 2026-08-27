@@ -33,7 +33,9 @@ import websockets
 
 from ..config import settings
 from ..db import get_pool, heartbeat
+from . import claim_registry
 from .pipeline import TradeEvent, ingest_trade_result
+from .s1_emitter import emitter_beat, emitter_observe, ensure_emitter_task
 from .shadow_v2 import beat_summary as _shadow_beat, ensure_shadow_task, shadow_observe
 
 log = logging.getLogger(__name__)
@@ -343,7 +345,8 @@ class ChainListener:
                 "ingested": self.ingested,
                 "detect_lag_s": self.last_lag_s,
                 "roster": len(self._roster),
-                "shadow": _shadow_beat()}
+                "shadow": _shadow_beat(),
+                "s1": emitter_beat()}
 
     async def refresh_roster(self) -> None:
         pool = await get_pool()
@@ -358,6 +361,11 @@ class ChainListener:
         if topics and str(topics[0]).lower() == FILL_V3_TOPIC:
             try:  # S0 shadow: observe-only, sync, no I/O (shadow_v2.py)
                 shadow_observe(self, log_entry)
+            except Exception:  # noqa: BLE001 — wall body must stay bare
+                pass
+            try:  # S1 emitter: buffers only; its own independent wall,
+                # BEFORE _handle_v3 so _v3_seen cannot hide events 2..N
+                emitter_observe(self, log_entry)
             except Exception:  # noqa: BLE001 — wall body must stay bare
                 pass
             await self._handle_v3(log_entry)
@@ -415,6 +423,12 @@ class ChainListener:
         if tx in self._v3_seen:
             return
         self._v3_seen[tx] = time.time()
+        # S1 collision protocol: the receipt path claims every matched
+        # (tx, wallet) synchronously at the _v3_seen set point — before
+        # any await — so the emitter's 3s debounce always finds the
+        # claim. Outcomes land below; the emitter reads them.
+        for wallet in matched:
+            claim_registry.claim(tx, wallet, "receipt")
         if len(self._v3_seen) > 512:
             cutoff = sorted(self._v3_seen.values())[128]
             self._v3_seen = {k: v for k, v in self._v3_seen.items()
@@ -428,6 +442,10 @@ class ChainListener:
             receipt = (resp.json() or {}).get("result") or {}
         except Exception:  # noqa: BLE001 — the poller still carries it
             log.warning("v3 receipt fetch failed for %s", tx)
+            for wallet in matched:
+                # _v3_seen means this path never retries: the class is
+                # the emitter's (or the poller's) from here on
+                claim_registry.finish(tx, wallet, "receipt", "refused")
             return
         logs = receipt.get("logs") or []
         for wallet in matched:
@@ -435,6 +453,27 @@ class ChainListener:
             if fill is None:
                 log.info("v3 fill undecodable for %s in %s (bundle?)",
                          wallet[:10], tx[:14])
+                claim_registry.finish(tx, wallet, "receipt", "refused")
+                continue
+            reg = claim_registry.get(tx, wallet)
+            if reg is not None and reg["owner"] == "emitter":
+                # ordering inversion inside one process: the emitter got
+                # here first — its row stands, this path steps back
+                self._v3_skip_emitter = getattr(
+                    self, "_v3_skip_emitter", 0) + 1
+                continue
+            pool = await get_pool()
+            pre = await pool.fetchrow(
+                "SELECT 1 FROM trades WHERE lower(tx_hash) = $1 "
+                "AND whale_id = $2 AND source = 'chain' LIMIT 1",
+                tx, self._roster[wallet]["id"])
+            if pre is not None:
+                # cross-restart authority: a chain row (emitter's, or a
+                # pre-crash twin) already exists — never write a second
+                # view of the same fill with a possibly-divergent key
+                self._v3_skip_preexist = getattr(
+                    self, "_v3_skip_preexist", 0) + 1
+                claim_registry.finish(tx, wallet, "receipt", "ingested")
                 continue
             self.decoded += 1
             whale = self._roster[wallet]
@@ -453,6 +492,7 @@ class ChainListener:
                 source="chain",
             )
             trade_id, was_new = await ingest_trade_result(ev)
+            claim_registry.finish(tx, wallet, "receipt", "ingested")
             if was_new:
                 self.ingested += 1
                 self.last_lag_s = round(time.time() - ts_epoch, 1)
@@ -562,6 +602,7 @@ class ChainListener:
             try:
                 await self.refresh_roster()
                 ensure_shadow_task(self)  # S0 shadow: idempotent, never raises
+                ensure_emitter_task(self)  # S1 emitter: idempotent, flag-off default
                 # Recover any gap before subscribing — but NEVER let the
                 # catch-up block the live stream. On 2026-08-11 a rejected
                 # getLogs threw here, so every reconnect died before
