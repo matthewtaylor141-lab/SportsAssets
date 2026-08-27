@@ -1946,3 +1946,42 @@ def test_poll_mult_counts_covered_rows_only(st):
     assert st.deltas.get("poll_mult.one") == 1, \
         "an aggregate-granularity tx must not read 'eq' off a dropped row"
     assert st.deltas.get("poll_mult.eq") is None
+
+
+# ── the venue-shaped policy: the mixed-granularity candidate ────────
+def test_venue_policy_matches_what_the_venue_publishes(st):
+    # taker fill: agg view exists, venue publishes ONE aggregate row
+    e1 = _mkrec(size_units=4_000_000, usdc_units=2_480_000, log_index=1,
+                seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    e2 = _mkrec(size_units=6_000_000, usdc_units=3_720_000, log_index=2,
+                seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    ag = _mkrec(view="agg", size_units=10_000_000, usdc_units=6_200_000,
+                log_index=3, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [e1, e2], "aggs": [ag], "flags": {}}
+    st._match_wallet(TX, MAKER, g, [e1, e2, ag], [_poll_row(ag)], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("sim_ven_suppressed") == 1, \
+        "agg view present -> the venue policy ingests the agg record"
+    assert st.deltas.get("sim_ven_residual_dup") is None
+
+    # maker fill: no agg view, venue publishes per-exec rows
+    st2 = ShadowV2()
+    m1 = _mkrec(view="exec_owner", log_index=1,
+                seen_at=time.time() - 1000)
+    g2 = {"execs": [m1], "aggs": [], "flags": {}}
+    st2._match_wallet(TX, MAKER, g2, [m1], [_poll_row(m1)], [],
+                      1000.0, time.time(), 0)
+    assert st2.deltas.get("sim_ven_suppressed") == 1, \
+        "no agg view -> the venue policy ingests the exec set"
+
+    # the mismatch case gates: agg view exists but venue published
+    # per-exec rows — the venue policy would double-ingest them
+    st3 = ShadowV2()
+    g3 = {"execs": [dict(e1), dict(e2)], "aggs": [dict(ag)], "flags": {}}
+    st3._match_wallet(TX, MAKER, g3,
+                      [g3["execs"][0], g3["execs"][1], g3["aggs"][0]],
+                      [_poll_row(e1), _poll_row(e2)], [],
+                      sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st3.deltas.get("sim_ven_residual_dup") == 2, \
+        "per-exec rows under an agg view ARE the venue policy's dups"
+    assert "sim_ven_suppressed" in sv.VOLUME_KEYS

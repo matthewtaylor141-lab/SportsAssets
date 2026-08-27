@@ -92,7 +92,8 @@ HEALTH = ("shadow_errors", "cycle_errors", "db_errors", "flush_failures",
 # that moved it (round-3 kill): they render cumulatively instead.
 VOLUME_KEYS = ("compared_execs", "sim_exec_suppressed", "sim_agg_suppressed",
                "sim_exec_supp_hup_only", "mint_transformed", "poll_rows_seen",
-               "decoded_exec_counter", "decoded_exec_owner", "decoded_agg")
+               "decoded_exec_counter", "decoded_exec_owner", "decoded_agg",
+               "sim_ven_suppressed")
 
 SQL_TX = """
 SELECT lower(tx_hash) AS tx, whale_id, asset, side,
@@ -728,7 +729,23 @@ class ShadowV2:
         self.bump("dup_exec", len(prim) - len(set(prim)))
         self.bump("dropped_row_seen", len(dropped_rows))
         agg_row_matched = False
+        # THE VENUE-SHAPED POLICY (third candidate, measured like the
+        # others): production settled into MIXED granularity (eq=33 /
+        # one=44 at 2026-08-27T14:13Z) — N3 blocks both pure policies.
+        # The venue's own shape is 'aggregate row for a taker fill,
+        # per-exec rows otherwise', so S1's natural candidate ingests
+        # the agg view when one exists and the exec set when none does.
+        # sim_ven_residual_dup is the would-be double-ingest count for
+        # THAT policy, and it gates exactly like the other two.
+        ven_keys = ins_agg if aggs else ins_exec
         for row, hit, hit_a in hits:
+            hit_v = ven_keys.get(row["dedupe_key"])
+            if hit_v:
+                self.bump("sim_ven_suppressed")
+            elif (aggs and str(row["asset"]) in agg_assets_set) or (not aggs and execs):
+                self.bump("sim_ven_residual_dup")
+            else:
+                self.bump("sim_ven_uncovered")
             if hit_a:
                 self.bump("sim_agg_suppressed")
                 agg_row_matched = True
@@ -883,6 +900,14 @@ class ShadowV2:
                     # no aggregate exists for this row's MARKET — the agg
                     # policy would ingest nothing for it (no-coverage)
                     self.bump("sim_agg_uncovered")
+                vkeys = w["agg_keys"] if w["has_aggs"] else w["exec_keys"]
+                if k in vkeys:
+                    self.bump("sim_ven_suppressed")
+                elif (w["has_aggs"] and str(row["asset"]) in w["agg_assets"]) \
+                        or (not w["has_aggs"] and w["has_execs"]):
+                    self.bump("sim_ven_residual_dup")
+                else:
+                    self.bump("sim_ven_uncovered")
             if now >= w["until"]:
                 if not w.get("fetched"):
                     self.bump("watch_expired_unfetched")
@@ -1242,6 +1267,7 @@ class ShadowV2:
             gating_hit = (any(snap.get(k) for k in GATING)
                           or snap.get("sim_exec_residual_dup")
                           or snap.get("sim_agg_residual_dup")
+                          or snap.get("sim_ven_residual_dup")
                           or (stored_leading is not None
                               and leading != stored_leading))
             if window_start is None or gating_hit:
