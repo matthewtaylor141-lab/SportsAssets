@@ -1218,6 +1218,382 @@ def match_side_bridge(rows_kept: list[dict], rows_all: list[dict],
     return hit
 
 
+# ── THE NAMED-TENNIS BRIDGE (Phase 0, 2026-08-27) ───────────────────
+#
+# The census measured the named class at moneyline 91 / spread 83 /
+# total 62 per 48h and captured the venue's plain named-moneyline
+# wording — tennis, named sides. The grounding then proved the tennis
+# class dies at ONE clause: _market_rows stamps the question's
+# '1:30 AM UTC' clock time as line='30' (the ':' _LINE_CTX context) on
+# both aec- sides, and match_side's _lined_ok vetoes the already-
+# successful exact name-equality hit. The same misparse family as the
+# date-as-line bug that killed the yes/no class.
+#
+# THE STAMP IS NOT FIXED. Un-poisoning the line arms match_side's
+# surname CONTAINMENT tier on the live order path — the tournament
+# executed a wrong-person fill through exactly that ('Sena Saito'
+# taking Airi Saito's row). This lane instead QUARANTINES the clock
+# artifact behind its own witness (the row's line must equal the
+# strict parse's own minutes group verbatim) and selects by set
+# equality only. Two designs died in attack (9 verified kills); this
+# is the judge's synthesis, validated by a 41-assertion executed
+# harness before transplant.
+#
+# PHASE 0: consumed ONLY by resolve_explain's probe. resolve() takes
+# no named argument; match_side, _market_rows, _lines_of and
+# bridge_explain are byte-untouched.
+
+_NAMED_TOUR_OF = {"itf": "itf", "itfme": "itf"}
+# ONLY the attested venue family (itfme, 2026-08-27 census) plus the
+# presumed whale spelling 'itf' — itself unattested, so recovery may
+# be 0 until lg_pair_seen confirms it; a wrong seed costs a census
+# count, never a dollar. atp/wta DO NOT ship: they refuse
+# tour_unknown/tour_pair_mismatch with the verbatim pair recorded,
+# and enter only via a future round citing production-attested venue
+# questions per family.
+_NAMED_NAME_FLOOR, _NAMED_NAME_CAP = 2, 4
+# Cap 4, not 5: the longest attested tennis name is 2 tokens; 4
+# admits 'juan martin del potro'; 5 exactly fits the executed doubles
+# kill ('First Last and First Last').
+_NAMED_BAD_TOKENS = frozenset({
+    "and", "y", "e", "set", "sets", "tiebreak", "tiebreaker", "game",
+    "games", "match", "doubles", "winner", "meeting", "first",
+    "second", "third", "retirement", "retired", "retire", "retires",
+    "walkover", "withdrew", "withdrawal", "withdraws"})
+# This lane OWNS its vocabulary — person identity is not club
+# identity, and it must not ride on _BRIDGE_SCOPE_TOKENS surviving a
+# refactor. Single-letter tokens refuse (O'Connell → honest miss,
+# counted); 'y'/'e' are doubles conjunctions HERE and refuse even
+# though the club helper exempts them.
+_NAMED_DERIV_TOKENS = frozenset({"set", "sets", "tiebreak",
+                                 "tiebreaker", "game", "games",
+                                 "doubles"})
+_NAMED_MONTHS = dict(_BRIDGE_MONTHS)
+# Copied at import — a month added for one lane must never widen the
+# other.
+_NAMED_Q_PREFIX = "who will win in the upcoming tennis event "
+_NAMED_Q_STRICT_RE = re.compile(
+    r"^who will win in the upcoming tennis event (?P<a>[a-z ]+?) vs "
+    r"(?P<b>[a-z ]+?) scheduled for (?P<mon>[a-z]+) (?P<day>\d{1,2}) "
+    r"(?P<yr>\d{4}) at (?P<hh>\d{1,2}) (?P<mm>\d{2}) (?P<ap>am|pm) utc$")
+
+
+def _name_toks(s) -> list[str]:
+    """ORDERED token list — NEVER a set. The tournament proved a
+    frozenset here turns code-building into a hash-seed lottery
+    ('hirkoy' builds from [hiromasa, koyama], not the reverse)."""
+    return _norm(s).split()
+
+
+def _named_name_ok(toks: list[str]) -> bool:
+    if not (_NAMED_NAME_FLOOR <= len(toks) <= _NAMED_NAME_CAP):
+        return False
+    for t in toks:
+        if len(t) < 2 or not t.isalpha() or t in _NAMED_BAD_TOKENS:
+            return False
+    return True
+
+
+def _name_code_builds(code: str, toks: list[str]) -> bool:
+    """Does the venue/slug code build from an ORDERED name?
+
+    A code is a concatenation of prefixes of a strictly-increasing
+    subsequence of the tokens, each piece >= 3 chars or a whole
+    token: 'hirkoy' = hir+koy, 'lucacas' = luca+cas, 'koyama' whole,
+    'maiito' = mai+ito. Deterministic; order-sensitive by design."""
+    code = (code or "").strip()
+    toks = list(toks)
+
+    def rec(pos: int, ti: int) -> bool:
+        if pos == len(code):
+            return True
+        for j in range(ti, len(toks)):
+            t = toks[j]
+            for ln in range(1, min(len(t), len(code) - pos) + 1):
+                if code[pos:pos + ln] == t[:ln] and (ln == len(t)
+                                                    or ln >= 3):
+                    if rec(pos + ln, j + 1):
+                        return True
+        return False
+
+    return bool(code) and rec(0, 0)
+
+
+def _builds_one(code: str, sides: list[list[str]]) -> int | None:
+    """Index of the ONE side the code builds from; None on zero or
+    two — every use site refuses ambiguity."""
+    hits = [i for i, s in enumerate(sides) if _name_code_builds(code, s)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
+                            outcome: str | None, his_title: str | None,
+                            his_slug: str | None,
+                            his_event_title: str | None = None,
+                            trace: dict | None = None
+                            ) -> tuple[dict | None, str]:
+    """The tennis named-moneyline lane: (hit, 'ok') or (None, why).
+
+    Consulted only AFTER match_side returns None; Phase 0 — only the
+    probe calls it. Every gate is conjunctive and every refusal is
+    named; the clock quarantine is the lane's replacement for
+    _lined_ok, and the opponent-equality twin gate is its replacement
+    for trust."""
+    from ..copy_sports import _post_date_tokens, market_type_of
+
+    tr = trace if isinstance(trace, dict) else {}
+    on_t = _name_toks(outcome)
+    on = " ".join(on_t)
+    if not on or on in ("yes", "no", "draw", "tie") or \
+            (on_t and on_t[0] in ("over", "under")):
+        return None, "not_named"
+    if any(ch in str(outcome or "") for ch in "/&"):
+        return None, "doubles_shape"
+    if _folds_away(outcome):
+        return None, "nonlatin_content"
+    if len(on_t) < _NAMED_NAME_FLOOR:
+        return None, "outcome_thin"
+    if not _named_name_ok(on_t):
+        return None, "outcome_name_bad"
+    if market_type_of(his_slug or "") != "moneyline":
+        return None, "wrong_type"
+    d = date_of(his_slug)
+    if not d:
+        return None, "no_date"
+    parts = [p for p in (his_slug or "").lower().split("-") if p]
+    pre = parts[:parts.index(d[:4])] if d[:4] in parts else None
+    if not pre or len(pre) != 3:
+        return None, "slug_shape"
+    wlg, wa, wb = pre
+    if wa == wb:
+        return None, "degenerate_codes"
+    suffix = _post_date_tokens(parts)
+    if suffix and (len(suffix) != 1 or not suffix[0].isalpha()):
+        return None, "slug_suffix_shape"
+    if wlg not in _NAMED_TOUR_OF:
+        tr["lg_pair_seen"] = {"whale_lg": wlg[:20]}
+        return None, "tour_unknown"
+    rawt = str(his_title or "")
+    if rawt.count(":") > 1:
+        return None, "title_shape"
+    if _folds_away(rawt):
+        return None, "nonlatin_content"
+    prefix, _, matchup = rawt.rpartition(":")
+    if prefix and any(t in _NAMED_DERIV_TOKENS
+                      for t in _norm(prefix).split()):
+        # 'First Set Winner: X vs Y' — the dropped tournament prefix
+        # is first scanned for derivative markers.
+        return None, "title_prefix_derivative"
+    halves = [" ".join(h.split()) for h in
+              re.split(r"\s+vs\.?\s+", _norm(matchup)) if h.strip()]
+    if len(halves) != 2:
+        return None, "title_shape"
+    ht = [h.split() for h in halves]
+    for h in ht:
+        if not (1 <= len(h) <= _NAMED_NAME_CAP):
+            return None, "title_half_bad"
+        if any((not t.isalpha()) or t in _NAMED_BAD_TOKENS for t in h):
+            return None, "title_half_bad"
+    ia, ib = _builds_one(wa, ht), _builds_one(wb, ht)
+    if ia is None or ib is None or ia == ib:
+        # THE ITO LAW, enforced by the witness itself: on a
+        # same-surname board the codes carry more than the surname
+        # ('maiito'/'aoiito'), so a surname-only title cannot
+        # corroborate them and the pick safely refuses; a full-name
+        # title recovers.
+        return None, "title_slug_mismatch"
+    if _folds_away(his_event_title):
+        return None, "nonlatin_content"
+    if any(ch in str(his_event_title or "") for ch in "/&"):
+        return None, "doubles_shape"
+    esides = [" ".join(s.split()) for s in
+              re.split(r"\s+vs\.?\s+", _norm(his_event_title or ""))
+              if s.strip()]
+    if len(esides) != 2:
+        return None, "his_event_unsplittable"
+    et = [s.split() for s in esides]
+    for s in et:
+        if any((not t.isalpha()) or len(t) < 2
+               or t in _NAMED_BAD_TOKENS for t in s):
+            return None, "his_event_side_bad"
+    ea, eb = _builds_one(wa, et), _builds_one(wb, et)
+    if ea is None or eb is None or ea == eb:
+        return None, "his_event_mismatch"
+    oc = [c for c in (wa, wb) if _name_code_builds(c, on_t)]
+    if len(oc) != 1:
+        return None, "outcome_code_ambiguous"
+    his_code = oc[0]
+    my_i = ea if his_code == wa else eb
+    his_side_t, opp_t = et[my_i], et[1 - my_i]
+    if not (set(his_side_t) == set(on_t)
+            or (len(his_side_t) == 1 and his_side_t[0] == on_t[-1])):
+        return None, "his_event_side_mismatch"
+    if not _named_name_ok(opp_t):
+        # THE TWIN GATE'S PRECONDITION: the opponent witness is
+        # full-name, no exceptions. A feed that does not state the
+        # opponent's full name cannot rule out a name twin — an
+        # honest miss the census counts.
+        return None, "opponent_witness_thin"
+    if suffix and not (_name_code_builds(suffix[0], on_t)
+                       and not _name_code_builds(suffix[0], opp_t)):
+        return None, "slug_pick_mismatch"
+    if (_lines_of(matchup) | _lines_of(outcome)
+            | slug_lines(his_slug)):
+        return None, "his_signal_lined"
+    if signed_line(outcome) or signed_line(matchup):
+        return None, "his_signal_signed"
+    if any(not (r.get("event_slug") or "").strip() for r in rows_all):
+        return None, "event_slug_missing"
+    if len({r.get("event_slug") or "" for r in rows_all}) > 1:
+        return None, "multi_event_pool"
+    passing = []
+    for r in rows_kept:
+        gate = None
+        ident = str(r.get("identifier") or "").lower()
+        rq = str(r.get("question") or "")
+        nq = " ".join(_norm(rq).split())
+        m = None
+        if _prefix_of(ident) != "aec":
+            gate = "prefix_not_aec"
+        elif r.get("kind") != "side":
+            gate = "kind_not_side"
+        elif str(r.get("signed") or "").strip():
+            gate = "row_signed"
+        elif not r.get("intent"):
+            gate = "no_intent"
+        elif _folds_away(rq) or _folds_away(r.get("event_title")) or \
+                _folds_away(r.get("side_norm")):
+            gate = "nonlatin_content"
+        elif any(ch in rq for ch in "/&"):
+            gate = "doubles_shape"
+        else:
+            ip = [p for p in ident.split("-") if p]
+            if len(ip) != 7:
+                # EXACTLY ['aec', lg, ca, cb, YYYY, MM, DD]: every
+                # set1/-2/-s2 derivative identifier is structurally
+                # non-candidate.
+                gate = "ident_shape"
+            elif "-".join(ip[4:]) != d:
+                gate = "ident_date_mismatch"
+            elif ident != str(r.get("market_slug") or "").lower() or \
+                    str(r.get("event_slug") or "").lower() != ident[4:]:
+                gate = "slug_family_mismatch"
+            elif ip[1] not in _NAMED_TOUR_OF or \
+                    _NAMED_TOUR_OF[ip[1]] != _NAMED_TOUR_OF.get(wlg):
+                gate = "tour_pair_mismatch"
+                tr.setdefault("lg_pairs", []).append((wlg, ip[1]))
+            elif len(rq) >= 290:
+                gate = "question_maybe_truncated"
+            else:
+                m = _NAMED_Q_STRICT_RE.fullmatch(nq)
+                if not m:
+                    gate = "q_not_strict_shape"
+                elif m.group("mon") not in _NAMED_MONTHS:
+                    gate = "q_month_unknown"
+                elif (int(m.group("yr")),
+                      _NAMED_MONTHS[m.group("mon")],
+                      int(m.group("day"))) != tuple(
+                          int(x) for x in d.split("-")):
+                    gate = "q_date_mismatch"
+                elif not (1 <= int(m.group("hh")) <= 12
+                          and 0 <= int(m.group("mm")) <= 59):
+                    gate = "q_clock_invalid"
+        if gate is None and m is not None:
+            at, bt = m.group("a").split(), m.group("b").split()
+            if not (_named_name_ok(at) and _named_name_ok(bt)):
+                gate = "q_name_bad"
+            elif set(at) == set(bt):
+                gate = "question_degenerate"
+            else:
+                vt = [s.split() for s in
+                      (" ".join(x.split()) for x in
+                       re.split(r"\s+vs\.?\s+",
+                                _norm(r.get("event_title") or "")))
+                      if s]
+                if len(vt) != 2 or {frozenset(x) for x in vt} != \
+                        {frozenset(at), frozenset(bt)}:
+                    gate = "event_title_feed_mismatch"
+                else:
+                    ca, cb = ident.split("-")[2], ident.split("-")[3]
+                    ja = _builds_one(ca, [at, bt])
+                    jb = _builds_one(cb, [at, bt])
+                    if ja is None or jb is None or ja == jb:
+                        gate = "venue_code_mismatch"
+                    else:
+                        rl = str(r.get("line") or "").strip()
+                        if rl and not (_lines_of(rq) == {rl}
+                                       and rl == m.group("mm")):
+                            # THE CLOCK QUARANTINE — the lane's
+                            # replacement for _lined_ok. A line is
+                            # admissible ONLY as the authenticated
+                            # clock artifact: the question's sole
+                            # parsed line AND verbatim-equal to the
+                            # strict parse's own minutes group. A
+                            # smuggled real bet line fails both ways.
+                            gate = "line_not_clock_artifact"
+                        else:
+                            ka = _builds_one(wa, [at, bt])
+                            kb = _builds_one(wb, [at, bt])
+                            if ka is None or kb is None or ka == kb:
+                                gate = "cross_code_mismatch"
+                            else:
+                                st = set(_name_toks(
+                                    r.get("side_norm")))
+                                if st not in (set(at), set(bt)):
+                                    gate = "side_not_in_question"
+                                elif not ((set(on_t) == set(at)
+                                           and set(opp_t) == set(bt))
+                                          or (set(on_t) == set(bt)
+                                              and set(opp_t)
+                                              == set(at))):
+                                    # THE TWIN GATE: whale pair ==
+                                    # venue pair, bijectively, full
+                                    # names, set equality, never
+                                    # containment.
+                                    gate = "opponent_mismatch"
+        if gate is None:
+            passing.append(r)
+        else:
+            g = tr.setdefault("row_gates", [])
+            if len(g) < 12:
+                g.append({"ident_tail": ident[-40:], "gate": gate})
+    cands = [r for r in passing
+             if set(_name_toks(r.get("side_norm"))) == set(on_t)]
+    if len(cands) != 1:
+        return None, ("no_candidate_row" if not cands
+                      else "multiple_candidates")
+    sel = cands[0]
+    sibs = [r for r in passing
+            if str(r.get("identifier") or "").lower()
+            == str(sel.get("identifier") or "").lower()]
+    if len(sibs) != 2 or \
+            {frozenset(_name_toks(r.get("side_norm"))) for r in sibs} \
+            != {frozenset(on_t), frozenset(opp_t)}:
+        # SIBLING CORROBORATION: on the aec- family only intent names
+        # a side; a candidate whose sibling is absent is unverifiable.
+        return None, "sibling_side_missing"
+    if {r.get("intent") for r in sibs} != \
+            {"ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"}:
+        return None, "sibling_intent_broken"
+    blockers = set()
+    for r in rows_all:
+        if _folds_away(r.get("question")):
+            return None, "nonlatin_in_pool"
+        nq = " ".join(_norm(str(r.get("question") or "")).split())
+        if nq.startswith(_NAMED_Q_PREFIX.rstrip()):
+            blockers.add((str(r.get("identifier") or "").lower(), nq))
+    want = (str(sel.get("identifier") or "").lower(),
+            " ".join(_norm(str(sel.get("question") or "")).split()))
+    if blockers != {want}:
+        # ANY tennis-named question in the pool must BE the selected
+        # market — prefix startswith, no token analysis, so marker
+        # placement cannot hide. Blocking may over-refuse (lawful);
+        # selection may not.
+        tr["blockers"] = sorted(b[0][-40:] for b in blockers)[:12]
+        return None, "event_scan_ambiguous"
+    return sel, "ok"
+
+
 def match_side(rows: list[dict], outcome: str | None,
                his_title: str | None,
                his_slug: str | None = None) -> dict | None:
@@ -2147,6 +2523,70 @@ async def resolve_explain(pool, market_title: str | None,
                 }
             except Exception as exc:  # noqa: BLE001
                 out["yn_detail"] = {"error": type(exc).__name__}
+        # NAMED-TENNIS PROBE (Phase 0, 2026-08-27): the named lane's
+        # own read-only measurement, mirroring the yes/no probe's
+        # discipline. The step string stays 'no_side_match'.
+        if _norm(outcome) not in ("yes", "no"):
+            try:
+                nt: dict = {}
+                nhit, nreason = named_ml_bridge_explain(
+                    kept, rows, outcome, market_title, global_slug,
+                    event_title, trace=nt)
+                out["named_ml"] = {
+                    "would_resolve": bool(nhit), "reason": nreason,
+                    "identifier": (nhit or {}).get("identifier"),
+                    "side_norm": (nhit or {}).get("side_norm"),
+                    "attested_family": bool(nhit) and str(
+                        (nhit or {}).get("identifier") or ""
+                    ).split("-")[1:2] == ["itfme"],
+                    "sub_gate": (
+                        "line_poison_recovered" if nhit and any(
+                            str(r.get("line") or "").strip()
+                            for r in kept)
+                        else "no_named_candidate" if kept and all(
+                            _norm(r.get("side_norm")) in ("yes", "no")
+                            for r in kept)
+                        else nreason),
+                    "has_tennis_raw_row": any(
+                        " ".join(_norm(str(r.get("question") or ""))
+                                 .split())
+                        .startswith(_NAMED_Q_PREFIX.rstrip())
+                        for r in kept),
+                }
+                for k in ("row_gates", "blockers", "lg_pair_seen",
+                          "lg_pairs"):
+                    if k in nt:
+                        out["named_ml"][k] = nt[k]
+                if nhit:
+                    sib = [r for r in kept
+                           if str(r.get("identifier") or "").lower()
+                           == str(nhit.get("identifier")
+                                  or "").lower()
+                           and r is not nhit]
+                    out["named_ml"]["audit"] = {
+                        "identifier": nhit.get("identifier"),
+                        "market_slug": nhit.get("market_slug"),
+                        "event_slug": nhit.get("event_slug"),
+                        "kind": nhit.get("kind"),
+                        "side_norm": nhit.get("side_norm"),
+                        "intent": nhit.get("intent"),
+                        "sibling_side": (sib[0].get("side_norm")
+                                         if sib else None),
+                        "sibling_intent": (sib[0].get("intent")
+                                           if sib else None),
+                        "question": str(nhit.get("question"))[:300],
+                        "qlen": len(str(nhit.get("question") or "")),
+                        "line_before": nhit.get("line"),
+                        "event_title":
+                            str(nhit.get("event_title"))[:120],
+                        "his_slug": global_slug,
+                        "his_lg": (global_slug or "").split("-")[0],
+                        "his_title": str(market_title)[:120],
+                        "his_event_title": str(event_title)[:120],
+                        "outcome": str(outcome)[:40],
+                    }
+            except Exception as exc:  # noqa: BLE001 — a probe never breaks
+                out["named_ml"] = {"error": type(exc).__name__}
         return out
     if not hit.get("intent"):
         out["step"] = "side_has_no_intent"
