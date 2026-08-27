@@ -1400,10 +1400,17 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
         tr["lg_pair_seen"] = {"whale_lg": wlg}
         return None, "tour_unknown"
     rawt = str(his_title or "")
-    if rawt.count(":") > 1:
-        return None, "title_shape"
     if _folds_away(rawt):
         return None, "nonlatin_content"
+    # The real daytime ITF title carries TWO colons — 'ITF MEN -
+    # SINGLES: M15 Cap d'Agde (France), clay: A vs B' (census 2026-08-27:
+    # 289 of 309 named refusals were this shape; the overnight corpus
+    # that sized the old single-colon gate never showed it). rpartition
+    # takes the LAST colon, so the matchup clause is unchanged, and the
+    # ENTIRE multi-segment prefix is scanned for derivative markers
+    # below — 'DOUBLES:' and 'First Set Winner:' refuse wherever the
+    # marker sits. A colon inside the matchup (no attested case) still
+    # refuses at the two-halves check.
     prefix, _, matchup = rawt.rpartition(":")
     if prefix and any(t in _NAMED_DERIV_TOKENS
                       for t in _norm(prefix).split()):

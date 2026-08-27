@@ -493,3 +493,38 @@ class TestImplementationFleetKills:
     def test_tb_and_vs_are_bad_name_tokens(self):
         for t in ("tb", "vs", "sf", "qf"):
             assert t in pm._NAMED_BAD_TOKENS, t
+
+
+class TestTwoColonTitles:
+    """Census 2026-08-27 daytime: 289 of 309 named refusals were the
+    REAL ITF title shape — 'ITF MEN - SINGLES: {tournament}, {surface}:
+    A vs B' — which the overnight-sized single-colon gate refused
+    wholesale. The last-colon partition recovers it; the derivative
+    quarantine must hold across every prefix segment."""
+
+    ATTESTED = ("ITF MEN - SINGLES: M15 Cap d'Agde (France), clay: "
+                "Hiromasa Koyama vs Luca Castelnuovo")
+
+    def test_attested_two_colon_title_recovers(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama", self.ATTESTED, WS, WE)
+        assert w == "ok" and h is K
+        h, w, _ = run([K, C], "Luca Castelnuovo", self.ATTESTED, WS, WE)
+        assert w == "ok" and h is C
+
+    def test_doubles_prefix_refuses_wherever_it_sits(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama",
+                      "ITF MEN - DOUBLES: M15 Cap d'Agde (France), "
+                      "clay: Koyama vs Castelnuovo", WS, WE)
+        assert h is None and w == "title_prefix_derivative"
+
+    def test_derivative_marker_in_middle_segment_refuses(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama",
+                      "First Set Winner: M15 Cap d'Agde (France), "
+                      "clay: Koyama vs Castelnuovo", WS, WE)
+        assert h is None and w == "title_prefix_derivative"
+
+    def test_colon_inside_matchup_still_refuses(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama",
+                      "ITF MEN - SINGLES: M15 Cap d'Agde: Koyama vs "
+                      "Castelnuovo: 6:4", WS, WE)
+        assert h is None, "a trailing score fragment is not a matchup"
