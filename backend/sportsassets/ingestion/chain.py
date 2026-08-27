@@ -463,10 +463,14 @@ class ChainListener:
                     self, "_v3_skip_emitter", 0) + 1
                 continue
             pool = await get_pool()
+            # asset-scoped, both chain sources: a (tx, whale)-only probe
+            # would block legitimate other-market rows of the same tx,
+            # and an emitter row must count (fleet r1)
             pre = await pool.fetchrow(
                 "SELECT 1 FROM trades WHERE lower(tx_hash) = $1 "
-                "AND whale_id = $2 AND source = 'chain' LIMIT 1",
-                tx, self._roster[wallet]["id"])
+                "AND whale_id = $2 AND asset = $3 "
+                "AND source IN ('chain', 's1') LIMIT 1",
+                tx, self._roster[wallet]["id"], fill.token_id)
             if pre is not None:
                 # cross-restart authority: a chain row (emitter's, or a
                 # pre-crash twin) already exists — never write a second

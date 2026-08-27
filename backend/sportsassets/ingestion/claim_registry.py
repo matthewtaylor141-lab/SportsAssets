@@ -47,6 +47,12 @@ def claim(tx: str, wallet: str, owner: str) -> bool:
         if cur["owner"] == owner:
             _claims.move_to_end(k)
             return True
+        if cur["done"] and cur["outcome"] == "refused":
+            # a refused outcome releases ownership: the fill class
+            # belongs to whichever path can still carry it
+            _claims[k] = {"owner": owner, "done": False, "outcome": None}
+            _claims.move_to_end(k)
+            return True
         return False
     _claims[k] = {"owner": owner, "done": False, "outcome": None}
     while len(_claims) > _CAP:

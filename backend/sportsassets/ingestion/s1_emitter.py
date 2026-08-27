@@ -93,9 +93,14 @@ CERT_MIN_AGG = 50
 STATE_KEY = "s1_emitter"
 SHADOW_KEY = "shadow_v2_fill"
 
+# Scoped per FILL (asset included): a (tx, whale)-only probe finds the
+# row the emitter itself just wrote for the FIRST market of a bundle
+# and silently forfeits every later market — the exact class S1 exists
+# for (fleet round 1, confirmed major). Both chain sources count: a
+# receipt row or an earlier emitter row equally forbids a second view.
 SQL_PROBE = (
     "SELECT 1 FROM trades WHERE lower(tx_hash) = $1 AND whale_id = $2 "
-    "AND source = 'chain' LIMIT 1"
+    "AND asset = $3 AND source IN ('chain', 's1') LIMIT 1"
 )
 SQL_READ = "SELECT value FROM ingestion_state WHERE key = $1"
 SQL_WRITE = (
@@ -130,6 +135,7 @@ class S1Emitter:
         self.rpc_backoff_until = 0.0
         self._client: httpx.AsyncClient | None = None
         self._state_loaded = False
+        self._pending_arm_at: float | None = None
         self._exch_cache: tuple[tuple, set[str]] | None = None
 
     # ── tiny helpers ────────────────────────────────────────────────
@@ -164,6 +170,14 @@ class S1Emitter:
             if not tx:
                 return
             blk = int(str(log_entry.get("blockNumber", "0x0")), 16)
+            bh = str(log_entry.get("blockHash", "")).lower()
+            if not blk or not bh:
+                # no block number = no timestamp = no key ever; no block
+                # hash = no reorg check — either way this log can never
+                # emit safely, and buffering it would crash or blind the
+                # finalize path (fleet r1: wedged-loop + silent-reorg)
+                self.bump("s1.abstain.no_block")
+                return
             if blk > self.head:
                 self.head = blk
             now = time.time()
@@ -179,8 +193,7 @@ class S1Emitter:
                     self.bump("s1.abstain.overflow")
             e["logs"].append(log_entry)
             e["last_seen"] = now
-            if blk:
-                e["blocks"][blk] = str(log_entry.get("blockHash", "")).lower()
+            e["blocks"][blk] = bh
         except Exception:  # noqa: BLE001 — the wall
             try:
                 self.deltas["s1.errors"] = self.deltas.get("s1.errors", 0) + 1
@@ -282,6 +295,20 @@ class S1Emitter:
             doc = None
         green, reason = self._judge_cert(doc, now)
         self.cert_green, self.cert_reason = green, reason
+        pend = getattr(self, "_pending_arm_at", None)
+        if pend is not None:
+            # a persisted arm survives a restart only if the window it
+            # was granted under is still standing
+            self._pending_arm_at = None
+            ws = (doc or {}).get("window_start")
+            if green and self.tripped is None and \
+                    isinstance(ws, (int, float)) and ws <= pend:
+                self.armed = True
+                self.armed_at = pend
+            else:
+                self.bump("s1.trip.window_reset")
+                log.warning("S1 persisted arm NOT adopted: %s",
+                            reason if not green else "window_reset_while_down")
         if self.armed:
             ws = (doc or {}).get("window_start")
             if not green or (isinstance(ws, (int, float)) and ws > self.armed_at):
@@ -332,6 +359,11 @@ class S1Emitter:
                 self.bump("s1.abstain.ts_unresolved")
                 return True
             return False
+        if not e["ts"]:
+            # cannot happen while observe refuses block-less logs, but a
+            # crash here wedges the whole run loop — guard, never trust
+            self.bump("s1.abstain.no_block")
+            return True
         # freshness on BLOCK time, never first_seen
         newest_ts = max(e["ts"].values())
         if now - newest_ts > EMIT_MAX_AGE_S:
@@ -442,12 +474,26 @@ class S1Emitter:
                 self.bump("s1.abstain.price_variant")
                 continue
             if not self.armed or not self.cert_green or self.tripped:
-                self.bump("s1.would_emit")
+                # burn-in: idempotent per (wallet, asset) — the
+                # collision-wait retry path re-runs whole groups, and
+                # re-counting would overstate armed coverage in the
+                # evidence a human reviews before arming (fleet r1)
+                mark = (wallet, rec["asset"], rec["view"])
+                if mark not in e.setdefault("counted", set()):
+                    e["counted"].add(mark)
+                    self.bump("s1.would_emit")
                 emitted = True                # burn-in counts as handled
+                continue
+            # CLAIM BEFORE ANY AWAIT and honor refusal: awaiting the
+            # probe between the registry read and the claim opened a
+            # window where the receipt path could claim-and-ingest a
+            # key-divergent row (fleet r1, confirmed CRITICAL)
+            if not _claim(tx, wallet, "emitter"):
+                self.bump("s1.abstain.v3_ingested")
                 continue
             try:
                 row = await pool.fetchrow(SQL_PROBE, tx, rec["whale_id"],
-                                          timeout=6)
+                                          rec["asset"], timeout=6)
             except Exception:  # noqa: BLE001
                 self.bump("s1.errors")
                 return False                  # no probe = no emit
@@ -457,19 +503,24 @@ class S1Emitter:
             from .pipeline import TradeEvent, ingest_trade_result
             size = float(Decimal(rec["size_units"]) / Decimal(10 ** 6))
             price = rec_prices(rec)[0]
+            # source='s1', not 'chain': the shadow buckets evidence rows
+            # strictly by 'chain'/'poll', so the instrument never sees
+            # the emitter's own rows as coverage — a wrong emission can
+            # no longer silence the orphan GATING alarms that would
+            # catch it (fleet r1: self-certification kill). Downstream
+            # the pipeline/executor are source-agnostic.
             ev = TradeEvent(
                 whale_id=rec["whale_id"],
                 whale_username=rec.get("username"),
                 tx_hash=tx, asset=rec["asset"], side=rec["side"],
                 size=size, price=price, ts_epoch=rec["ts"],
-                source="chain")
+                source="s1")
             if ev.dedupe_key != keys[0][1]:
                 # the built event does not reproduce the certified key —
                 # the one condition that must never be guessed around
                 self.bump("s1.abstain.key_selfcheck")
                 self._trip("key_selfcheck")
                 return False
-            _claim(tx, wallet, "emitter")
             try:
                 _tid, was_new = await ingest_trade_result(ev)
             except Exception:  # noqa: BLE001
@@ -510,13 +561,22 @@ class S1Emitter:
         if not isinstance(counters, dict):
             counters = {}
         if not self._state_loaded:
-            # boot: adopt persisted arm state (sticky across restarts)
+            # boot: adopt persisted arm state (sticky across restarts).
+            # The arm is adopted PROVISIONALLY armed=False: honoring a
+            # stale armed=true before the first certification read could
+            # emit under a window that reset while we were down (fleet
+            # r1). _check_cert promotes a pending arm only after it has
+            # verified GREEN and window_start <= armed_at.
             self._state_loaded = True
             if doc.get("tripped"):
                 self.tripped = str(doc["tripped"])
             if doc.get("armed") and self.tripped is None:
-                self.armed = True
-                self.armed_at = float(doc.get("armed_at") or now)
+                self._pending_arm_at = float(doc.get("armed_at") or now)
+        elif doc.get("tripped") and self.tripped is None:
+            # another process tripped since our last read: a sticky trip
+            # is global — adopt it, never clobber it (fleet r1)
+            self.tripped = str(doc["tripped"])
+            self.armed = False
         snap, self.deltas = self.deltas, {}
         for k, v in snap.items():
             base = counters.get(k)

@@ -41,6 +41,7 @@ def _ev(owner, cpty, w0, token, gave, got, fee=0, tx=TX, log_index=1,
                                for v in (w0, token, gave, got, fee)),
         "transactionHash": tx,
         "blockNumber": hex(block),
+        "blockHash": "0x" + "77" * 32,
         "logIndex": hex(log_index),
         "address": address,
     }
@@ -154,7 +155,7 @@ def test_maker_own_event_emits_one_exec_owner_row(st, monkeypatch):
     assert done is True
     assert len(calls) == 1
     ev = calls[0]
-    assert ev.source == "chain" and ev.whale_id == 7
+    assert ev.source == "s1" and ev.whale_id == 7
     assert ev.tx_hash == TX and ev.ts_epoch == TS0
     assert st.deltas.get("s1.emitted") == 1
     assert st.deltas.get("s1.emitted_exec_owner") == 1
@@ -470,6 +471,172 @@ def test_disabled_emitter_buffers_nothing(monkeypatch):
     e = S1Emitter()
     e.observe(_Listener(), MAKER_EV)
     assert e.pending == {} and e.deltas == {}
+
+
+# ── fleet round 1 pins ──────────────────────────────────────────────
+class _MarketPool:
+    """Models the trades table with per-(tx, whale, asset) chain rows —
+    what the asset-scoped probe actually queries."""
+
+    def __init__(self):
+        self.rows = set()
+
+    async def fetchrow(self, sql, *a, timeout=None):
+        return {"x": 1} if (str(a[0]).lower(), a[1], a[2]) in self.rows \
+            else None
+
+    async def fetchval(self, sql, *a, timeout=None):
+        return None
+
+    async def execute(self, sql, *a, timeout=None):
+        pass
+
+
+OTHER = "0x" + "cc" * 20
+TOKEN_B = int("bbbb" + "22" * 30, 16)
+
+
+def test_multimarket_tx_emits_every_market(st, monkeypatch):
+    """fleet r1 (major): the (tx,whale)-scoped probe self-collided
+    after the first market's emit and forfeited the rest — the exact
+    bundle class S1 exists for. The probe is asset-scoped now."""
+    lst = _Listener(roster={TAKER: {"id": 9, "username": "tk"}})
+    _wire(st, lst)
+    _arm(st)
+    pool = _MarketPool()
+    calls = []
+
+    async def fake_ingest(ev, notify=True):
+        pool.rows.add((ev.tx_hash.lower(), ev.whale_id, ev.asset))
+        calls.append(ev)
+        return (len(calls), True)
+
+    import sportsassets.ingestion.pipeline as pipeline
+    monkeypatch.setattr(pipeline, "ingest_trade_result", fake_ingest)
+    # taker agg in market A + maker own event in market B, one tx
+    ev_b = _ev(TAKER, OTHER, 0, TOKEN_B, 0x747548, 0xBBD5F0, log_index=3)
+    _observe_all(st, lst, [MAKER_EV, TAKER_EV, ev_b])
+    done = asyncio.run(st._finalize_tx(pool, TX, st.pending[TX],
+                                       time.time()))
+    assert done is True
+    assert sorted(c.asset for c in calls) == \
+        sorted([str(TOKEN_INT), str(TOKEN_B)]), \
+        "every market of the bundle must emit, not just the first"
+    assert st.deltas.get("s1.abstain.chain_row_preexists") is None
+
+
+def test_emitter_rows_carry_source_s1_for_instrument_independence(st,
+                                                                  monkeypatch):
+    """fleet r1 (major): rows the emitter writes must be invisible to
+    the shadow's evidence buckets ('chain'/'poll'), or a wrong emission
+    silences the very orphan alarms that would catch it."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    asyncio.run(st._finalize_tx(_Pool(), TX, st.pending[TX], time.time()))
+    assert calls and calls[0].source == "s1"
+
+
+def test_emit_claims_before_probe_and_registry_shows_emitter(st,
+                                                             monkeypatch):
+    """fleet r1 (CRITICAL): the claim must be taken synchronously
+    BEFORE the awaited probe, so the receipt path can never interleave
+    a key-divergent ingest inside that window."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    seen_at_probe = {}
+
+    class _ProbePool(_Pool):
+        async def fetchrow(self, sql, *a, timeout=None):
+            seen_at_probe["claim"] = cr.get(TX, MAKER)
+            return None
+
+    calls = _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    asyncio.run(st._finalize_tx(_ProbePool(), TX, st.pending[TX],
+                                time.time()))
+    assert len(calls) == 1
+    assert seen_at_probe["claim"] is not None and \
+        seen_at_probe["claim"]["owner"] == "emitter", \
+        "the emitter claim must already be held while the probe awaits"
+    assert cr.claim(TX, MAKER, "receipt") is False
+
+
+def test_burnin_would_emit_is_idempotent_across_retries(st, monkeypatch):
+    """fleet r1 (minor): the collision-wait retry re-ran whole groups
+    and re-counted would_emit, overstating armed coverage."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    st.cert_green = True                     # burn-in: green, unarmed
+    _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    e = st.pending[TX]
+    asyncio.run(st._finalize_tx(_Pool(), TX, e, time.time()))
+    asyncio.run(st._finalize_tx(_Pool(), TX, e, time.time()))
+    assert st.deltas.get("s1.would_emit") == 1
+
+
+def test_blockless_and_hashless_logs_never_buffer(st):
+    """fleet r1 (major/minor): a log with no blockNumber crashed the
+    finalize path and wedged the loop; a log with no blockHash blinded
+    the reorg check. Neither may buffer."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    no_blk = {k: v for k, v in MAKER_EV.items() if k != "blockNumber"}
+    st.observe(lst, no_blk)
+    no_hash = {k: v for k, v in MAKER_EV.items() if k != "blockHash"}
+    st.observe(lst, no_hash)
+    assert st.pending == {}
+    assert st.deltas.get("s1.abstain.no_block") == 2
+    # and the finalize guard holds even if such an entry appeared
+    st.pending[TX] = {"logs": [MAKER_EV], "first_seen": 0, "last_seen": 0,
+                      "evicted": False, "blocks": {}, "ts": {},
+                      "ts_started": None, "v3_wait_started": None}
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, st.pending[TX],
+                                       time.time()))
+    assert done is True
+    assert st.deltas.get("s1.abstain.no_block") == 3
+
+
+def test_persisted_arm_requires_standing_window_at_boot(st):
+    """fleet r1 (minor): a stale persisted armed=true must not emit
+    under a window that reset while the process was down."""
+    now = time.time()
+    st._state_loaded = False
+    doc = {"counters": {}, "armed": True, "armed_at": now - 3600,
+           "tripped": None}
+    pool = _Pool(stored=json.dumps(doc))
+    asyncio.run(st._flush(pool, now))
+    assert st.armed is False, "adoption is provisional until cert"
+    good = _green_doc(now)
+    good["window_start"] = now - s1.CERT_WINDOW_S - 10   # ws <= armed_at
+    asyncio.run(st._check_cert(_Pool(stored=json.dumps(good)), now))
+    assert st.armed is True and st.armed_at == now - 3600
+
+    st2 = S1Emitter()
+    st2._state_loaded = False
+    asyncio.run(st2._flush(_Pool(stored=json.dumps(doc)), now))
+    reset = _green_doc(now)
+    reset["window_start"] = now - 60          # reset AFTER armed_at
+    asyncio.run(st2._check_cert(_Pool(stored=json.dumps(reset)), now))
+    assert st2.armed is False
+    assert st2.deltas.get("s1.trip.window_reset") == 1
+
+
+def test_foreign_trip_is_adopted_never_clobbered(st):
+    """fleet r1 (major): another process's sticky trip must disarm this
+    one at the next flush, not be overwritten by our clean state."""
+    now = time.time()
+    st.armed = True
+    pool = _Pool(stored=json.dumps({"counters": {},
+                                    "tripped": "key_selfcheck"}))
+    asyncio.run(st._flush(pool, now))
+    assert st.tripped == "key_selfcheck" and st.armed is False
+    written = json.loads(pool.executes[-1][1][1])
+    assert written["tripped"] == "key_selfcheck"
 
 
 def test_emitter_never_imports_at_module_load_into_shadow(st):
