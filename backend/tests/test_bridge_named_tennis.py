@@ -193,7 +193,38 @@ class TestTourAttestation:
         assert h is None and w == "tour_unknown"
 
     def test_the_tour_map_is_exactly_the_attested_family(self):
-        assert pm._NAMED_TOUR_OF == {"itf": "itf", "itfme": "itf"}
+        """itfwo entered by observation: mapper-evidence run 10
+        (2026-08-27) recorded itf->itfwo verbatim 112 times."""
+        assert pm._NAMED_TOUR_OF == {"itf": "itf", "itfme": "itf",
+                                     "itfwo": "itf"}
+
+    def test_itfwo_family_recovers_with_womens_banner(self):
+        """The 112-count census class: whale lg 'itf', venue itfwo,
+        ITF WOMEN two-colon banner, W-tier, poisoned clock line —
+        recovers bijectively for both polarities."""
+        qw = ("Who will win in the upcoming tennis event Maria "
+              "Kononova vs Elena Pridankina scheduled for August 27, "
+              "2026 at 9:30 AM UTC?")
+        w1 = vrow("maria kononova", "ORDER_INTENT_BUY_LONG",
+                  ident="aec-itfwo-markon-elepri-2026-08-27", q=qw,
+                  ev_title="Maria Kononova vs. Elena Pridankina")
+        w2 = vrow("elena pridankina", "ORDER_INTENT_BUY_SHORT",
+                  ident="aec-itfwo-markon-elepri-2026-08-27", q=qw,
+                  ev_title="Maria Kononova vs. Elena Pridankina")
+        h, w, _ = run([w1, w2], "Maria Kononova",
+                      "ITF WOMEN - SINGLES: W15 Monastir (Tunisia), "
+                      "hard: Maria Kononova vs Elena Pridankina",
+                      "itf-kononova-pridankina-2026-08-27",
+                      "Maria Kononova vs Elena Pridankina")
+        assert w == "ok" and h is w1
+        assert h["intent"] == "ORDER_INTENT_BUY_LONG"
+        h, w, _ = run([w1, w2], "Elena Pridankina",
+                      "ITF WOMEN - SINGLES: W15 Monastir (Tunisia), "
+                      "hard: Maria Kononova vs Elena Pridankina",
+                      "itf-kononova-pridankina-2026-08-27",
+                      "Maria Kononova vs Elena Pridankina")
+        assert w == "ok" and h is w2
+        assert h["intent"] == "ORDER_INTENT_BUY_SHORT"
 
 
 class TestDerivativeSiblings:

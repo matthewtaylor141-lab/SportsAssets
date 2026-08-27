@@ -1243,11 +1243,13 @@ def match_side_bridge(rows_kept: list[dict], rows_all: list[dict],
 # no named argument; match_side, _market_rows, _lines_of and
 # bridge_explain are byte-untouched.
 
-_NAMED_TOUR_OF = {"itf": "itf", "itfme": "itf"}
-# ONLY the attested venue family (itfme, 2026-08-27 census) plus the
-# presumed whale spelling 'itf' — itself unattested, so recovery may
-# be 0 until lg_pair_seen confirms it; a wrong seed costs a census
-# count, never a dollar. atp/wta DO NOT ship: they refuse
+_NAMED_TOUR_OF = {"itf": "itf", "itfme": "itf", "itfwo": "itf"}
+# ONLY census-attested venue families. itfme: 2026-08-27 census.
+# itfwo: mapper-evidence run 10 (2026-08-27) recorded the verbatim
+# pair itf->itfwo 112 times in one 48h sample — the women's ITF
+# family entered by observation, exactly the path the lg_pairs
+# telemetry exists for (the whale spelling 'itf' was confirmed by the
+# same run: 62 itfme recoveries). atp/wta DO NOT ship: they refuse
 # tour_unknown/tour_pair_mismatch with the verbatim pair recorded,
 # and enter only via a future round citing production-attested venue
 # questions per family.
@@ -2696,7 +2698,7 @@ async def resolve_explain(pool, market_title: str | None,
                     "side_norm": (nhit or {}).get("side_norm"),
                     "attested_family": bool(nhit) and str(
                         (nhit or {}).get("identifier") or ""
-                    ).split("-")[1:2] == ["itfme"],
+                    ).split("-")[1:2] in (["itfme"], ["itfwo"]),
                     "sub_gate": (
                         "line_poison_recovered" if nhit and any(
                             str(r.get("line") or "").strip()
