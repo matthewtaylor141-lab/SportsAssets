@@ -399,9 +399,14 @@ def test_policy_simulation_separates_views(st):
     assert st.deltas.get("poll_mult.eq") == 1
 
     st.deltas = {}
+    st.finalized.clear()
     g2 = {"execs": [dict(e1), dict(e2)], "aggs": [dict(ag)], "flags": {}}
     rows2 = [_poll_row(ag)]
-    st._match_wallet(TX, MAKER, g2, g2["execs"] + g2["aggs"], rows2, [], 1000.0, time.time(), 0)
+    # partial exec coverage no longer finalizes early (fleet-2 kill: a
+    # late-landing divergent sibling must stay testable) — the aggregate
+    # verdict is counted at the deadline pass with complete evidence
+    st._match_wallet(TX, MAKER, g2, g2["execs"] + g2["aggs"], rows2, [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
     assert st.deltas.get("sim_agg_suppressed") == 1
     assert st.deltas.get("sim_exec_residual_dup") == 1, \
         "a per-exec S1 would re-ingest the venue's aggregate row"
@@ -428,18 +433,22 @@ def test_asset_and_side_are_falsifiable_fields(st):
     c = _mkrec(asset="999", seen_at=time.time() - 1000)
     row = _poll_row(c, asset="111")          # venue truth says a different asset
     g = {"execs": [c], "aggs": [], "flags": {}}
-    st._match_wallet(TX, MAKER, g, g["execs"] + g["aggs"], [row], [], 1000.0, time.time(), 0)
+    st._match_wallet(TX, MAKER, g, g["execs"] + g["aggs"], [row], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
     assert st.deltas.get("div.asset") == 1, "wrong asset must diverge, loudly"
     assert st.deltas.get("orphan_no_row") is None
 
     st.deltas = {}
+    st.finalized.clear()
     c2 = _mkrec(seen_at=time.time() - 1000)
     row2 = _poll_row(c2, side="SELL")
     g2 = {"execs": [c2], "aggs": [], "flags": {}}
-    st._match_wallet(TX, MAKER, g2, g2["execs"] + g2["aggs"], [row2], [], 1000.0, time.time(), 0)
+    st._match_wallet(TX, MAKER, g2, g2["execs"] + g2["aggs"], [row2], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
     assert st.deltas.get("div.side") == 1, "a flipped side must diverge"
 
     st.deltas = {}
+    st.finalized.clear()
     c3 = _mkrec(seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
     chain_row = _poll_row(c3, source="chain", side="SELL")
     g3 = {"execs": [c3], "aggs": [], "flags": {}}
@@ -525,7 +534,7 @@ def test_ts_avail_histogram_and_delta_histogram(st):
     row = _poll_row(c, ts=TS0,
                     key=make_dedupe_key(TX, c["asset"], c["side"],
                                         Decimal("4.000000"), 0.62, TS0))
-    st._diagnose(TX, MAKER, row, [c], 0)
+    st._diagnose_pair(TX, MAKER, row, c, 0)
     assert st.deltas.get("div.ts") == 1
     assert st.deltas.get("ts_delta.2") == 1, \
         "a +2s systematic offset must be visible as an offset, not jitter"
@@ -558,7 +567,7 @@ def test_replay_and_dup_handling(st):
     ev2 = _ev(MAKER, TAKER, 0, TOKEN_INT, 0x747548, 0xBBD5F0,
               log_index=8, tx="0x" + "f4" * 32)
     shadow_observe(lst, ev2)
-    rep = st.pending[("0x" + "f4" * 32, 8, MAKER)]
+    rep = st.pending[("0x" + "f4" * 32, 8, MAKER, "exec_owner")]
     assert rep["replay"] is True and st.deltas.get("replay_seen") == 1
 
     rep["ts"] = TS0
@@ -567,7 +576,7 @@ def test_replay_and_dup_handling(st):
 
     rep["ts"] = None
     st._assign_ts(65_000_000, int(time.time()) - 10_801, [rep])
-    assert ("0x" + "f4" * 32, 8, MAKER) not in st.pending
+    assert ("0x" + "f4" * 32, 8, MAKER, "exec_owner") not in st.pending
     assert st.deltas.get("replay_stale_dropped") == 1
 
 
@@ -576,7 +585,10 @@ def test_self_trade_and_whale_vs_whale(st):
     ev = _ev(MAKER, MAKER, 0, 1111, 620_000, 1_000_000, log_index=21)
     shadow_observe(_Listener(roster=_roster((MAKER, 1, "m"))), ev)
     assert st.deltas.get("self_trade") == 1
-    assert len(st.pending) == 1, "self-trade yields ONE record, not two"
+    assert len(st.pending) == 2, \
+        "self-trade yields BOTH view records — the venue books both sides"
+    sides_st = sorted(r["side"] for r in st.pending.values())
+    assert sides_st == ["BUY", "SELL"]
 
     recs, _, _ = decode_shadow_views(
         MAKER_EV, _roster((MAKER, 1, "m"), (TAKER, 2, "t")), {EXCH})
@@ -693,7 +705,8 @@ def test_key_impl_mismatch_alarm(st):
     c = _mkrec(seen_at=time.time() - 1000)
     row = _poll_row(c, key="deadbeef" * 8)   # doctored: fields equal, key not
     g = {"execs": [c], "aggs": [], "flags": {}}
-    st._match_wallet(TX, MAKER, g, g["execs"] + g["aggs"], [row], [], 1000.0, time.time(), 0)
+    st._match_wallet(TX, MAKER, g, g["execs"] + g["aggs"], [row], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
     assert st.deltas.get("key_impl_mismatch") == 1, \
         "all five fields equal yet key mismatch = our key model is WRONG"
     assert st.deltas.get("sim_exec_residual_dup") == 1
@@ -801,7 +814,9 @@ def test_diagnose_fallback_compares_size_to_size(st):
                    size_units=620_000, usdc_units=310_000,        # 0.62 shares
                    log_index=2, seen_at=time.time() - 1000)
     row = _poll_row(right, size="10.500000")   # true divergence: size only
-    st._diagnose(TX, MAKER, row, [right, decoy], 0)
+    pairs = st._assign_pairs([row], [right, decoy])
+    assert pairs[0][1] is right, "assignment must pair size to SIZE"
+    st._diagnose_pair(TX, MAKER, row, pairs[0][1], 0)
     assert st.deltas.get("div.size") == 1
     assert st.deltas.get("div.side") is None, \
         "a size-only divergence must never fabricate a side divergence"
@@ -844,7 +859,7 @@ def test_anomalous_records_are_popped_at_finalize(st):
                  asset="2222", size_units=6_000_000, usdc_units=2_280_000,
                  log_index=2, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
     for r in (agg, bad):
-        st.pending[(r["tx"], r["log_index"], r["wallet"])] = r
+        st.pending[(r["tx"], r["log_index"], r["wallet"], r["view"])] = r
     rows_by = {}
     st._reconcile_tx(TX, [agg, bad], rows_by, time.time(), 0)
     assert not st.pending, \
@@ -942,3 +957,336 @@ def test_atomic_fence_rejects_racing_write(st):
     assert st._await_ack is None
     assert "WHERE" in sv.SQL_FLUSH and "writer" in sv.SQL_FLUSH, \
         "the flush upsert must stay conditional"
+
+
+# ════════════════════════════════════════════════════════════════════
+# Implementation-fleet kills (round 2) — the fixed build re-attacked;
+# 20 confirmed kills, each fixed and pinned here permanently.
+# ════════════════════════════════════════════════════════════════════
+
+# ── fleet2 K0/K16: unverifiable ack DROPS, never re-adds ────────────
+def test_unverifiable_ack_drops_snap_never_doubles(st):
+    st._await_ack = ("aaaa1111", {"sim_exec_suppressed": 10, "div.side": 1})
+    st.deltas = {"sim_exec_suppressed": 10, "div.side": 1, "events_seen": 3}
+    pool = _FakePool(stored=json.dumps(
+        {"writer": "deadbeef", "snap_id": "bbbb2222",
+         "updated_at_epoch": time.time() - 3600,
+         "counters": {"sim_exec_suppressed": 10, "div.side": 1}}))
+    asyncio.run(st._flush(pool))
+    written = json.loads(pool.executes[-1][1][1])
+    assert written["counters"]["sim_exec_suppressed"] == 10, \
+        "a takeover-inherited snap must NOT be re-added (undercount-only)"
+    assert written["counters"]["div.side"] == 1
+    assert written["counters"]["events_seen"] == 3
+    assert st.deltas.get("ack_dropped_unverified") is None  # flushed through
+    assert written["counters"]["ack_dropped_unverified"] == 1
+    assert "ack_dropped_unverified" in sv.HEALTH
+
+
+def test_never_committed_ack_keeps_deltas(st):
+    # mirror: our own row WITHOUT our snap_id = provably never landed
+    st._await_ack = ("aaaa1111", {"sim_exec_suppressed": 5})
+    st.deltas = {"sim_exec_suppressed": 5}
+    pool = _FakePool(stored=json.dumps(
+        {"writer": sv.WRITER_ID, "snap_id": "older999",
+         "updated_at_epoch": time.time() - 30, "counters": {}}))
+    asyncio.run(st._flush(pool))
+    written = json.loads(pool.executes[-1][1][1])
+    assert written["counters"]["sim_exec_suppressed"] == 5, \
+        "an uncommitted snap lands exactly once on retry"
+
+
+# ── fleet2 K1: keepalive stays under the takeover threshold ─────────
+def test_keepalive_beats_takeover_threshold(st):
+    assert sv.FLUSH_IDLE_S + 90 < sv.TAKEOVER_S, \
+        "max idle (keepalive + reconcile cadence) must undercut takeover"
+    now = time.time()
+    st.deltas = {}
+    st._await_ack = None
+    st.last_flush_ok = now - sv.FLUSH_IDLE_S - 1
+    pool = _FakePool(stored=json.dumps({"counters": {}}))
+    asyncio.run(st._flush(pool))
+    assert len(pool.executes) == 1, "idle keepalive fires past FLUSH_IDLE_S"
+
+    st2 = ShadowV2()
+    st2.bump("events_seen")
+    pool2 = _FakePool(stored=json.dumps(
+        {"writer": "deadbeef", "updated_at_epoch": now - 360, "counters": {}}))
+    asyncio.run(st2._flush(pool2))
+    assert pool2.executes == [], \
+        "a 360s-old row is a HEALTHY writer's row, not abandoned"
+    assert st2.deltas.get("writer_conflict") == 1
+
+
+# ── fleet2 K2/K17: TARGET evidence cannot be hex-sorted away ────────
+def test_per_whale_ranks_roster_and_activity_not_hex(st):
+    target = "0xffff" + "ff" * 18    # sorts LAST lexicographically
+    lst = _Listener(roster={target: {"id": 9, "username": "0x076daa87"}})
+    st.listener = __import__("weakref").ref(lst)
+    counters = {}
+    for i in range(70):              # 70 dead wallets that sort before it
+        counters[f"pw.0x{i:040x}.n"] = 1
+    counters[f"pw.{target}.n"] = 120
+    counters[f"pw.{target}.div"] = 3
+    st.deltas = {"events_seen": 1}
+    pool = _FakePool(stored=json.dumps({"counters": counters}))
+    asyncio.run(st._flush(pool))
+    written = json.loads(pool.executes[-1][1][1])
+    assert target in written["per_whale"], \
+        "the roster/target whale must NEVER be evicted by hex order"
+    assert written["per_whale"][target]["div"] == 3
+    assert written["counters"].get("pw_pruned", 0) > 0, \
+        "immortal dead-wallet pw.* keys are pruned, not hoarded"
+
+
+# ── fleet2 K3: seen_tx recency tracks position ──────────────────────
+def test_seen_tx_refresh_moves_to_end(st):
+    lst = _Listener(roster=_roster((MAKER, 1, "m")))
+    e_old = _ev(MAKER, TAKER, 0, TOKEN_INT, 0x747548, 0xBBD5F0,
+                tx="0x" + "aa" * 32, log_index=1)
+    e_new = _ev(MAKER, TAKER, 0, TOKEN_INT, 0x747548, 0xBBD5F0,
+                tx="0x" + "bb" * 32, log_index=2)
+    shadow_observe(lst, e_old)
+    shadow_observe(lst, e_new)
+    e_old2 = _ev(MAKER, TAKER, 0, TOKEN_INT, 0x747548, 0xBBD5F0,
+                 tx="0x" + "aa" * 32, log_index=3)
+    shadow_observe(lst, e_old2)      # re-touch the OLD tx
+    assert next(iter(st.seen_tx)) == "0x" + "bb" * 32, \
+        "position 0 must be the true oldest or the skip guard lies"
+
+
+# ── fleet2 K4: gap ledger merges flaps and outlives the lookback ────
+def test_gap_ledger_merges_and_prunes_by_age(st):
+    now = time.time()
+    lst = _Listener(roster=_roster((MAKER, 1, "m")))
+    st.last_ensure_at = now - 70
+    st.last_observe_at = now - 70
+    ensure_shadow_task_backup = sv._TASK
+
+    async def _go():
+        sv._TASK = None
+        try:
+            for i in range(20):      # sustained flapping: 20 reconnects
+                st.last_ensure_at = time.time() - 70
+                st.last_observe_at = time.time() - 70
+                sv.ensure_shadow_task(lst)
+        finally:
+            if sv._TASK is not None:
+                sv._TASK.cancel()
+                try:
+                    await sv._TASK
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+            sv._TASK = ensure_shadow_task_backup
+    asyncio.run(_go())
+    assert len(st.gaps) == 1, \
+        "contiguous flap gaps merge into one span, not one entry each"
+    st.gaps.appendleft({"from": now - sv.REVERSE_LOOKBACK_S - 400,
+                        "to": now - sv.REVERSE_LOOKBACK_S - 350,
+                        "kind": "reconnect"})
+    st.last_ensure_at = time.time() - 70
+    st.last_observe_at = time.time() - 70
+
+    async def _go2():
+        sv._TASK = None
+        try:
+            sv.ensure_shadow_task(lst)
+        finally:
+            if sv._TASK is not None:
+                sv._TASK.cancel()
+                try:
+                    await sv._TASK
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+            sv._TASK = None
+    asyncio.run(_go2())
+    assert all(g["to"] >= time.time() - sv.REVERSE_LOOKBACK_S - 300
+               for g in st.gaps), "gaps older than the lookback are pruned"
+
+
+# ── fleet2 K5: exchange_set keyed by value, immune to id() reuse ────
+def test_exchange_set_survives_id_reuse(st):
+    l1 = _Listener(addresses=["0xAAA1"])
+    s1 = st.exchange_set(l1)
+    assert s1 == {"0xaaa1"}
+    l2 = _Listener(addresses=["0xBBB2"])
+    s2 = st.exchange_set(l2)
+    assert s2 == {"0xbbb2"}, "a different address list must never hit stale cache"
+
+
+# ── fleet2 K6: logIndex-less redelivery dedupes by content ──────────
+def test_logindex_less_redelivery_dedupes_by_content(st):
+    lst = _Listener(roster=_roster((MAKER, 1, "m")))
+    e1 = _ev(MAKER, TAKER, 0, TOKEN_INT, 0x747548, 0xBBD5F0)
+    del e1["logIndex"]
+    shadow_observe(lst, e1)
+    shadow_observe(lst, dict(e1))    # exact redelivery
+    assert st.deltas.get("dup_event") == 1, \
+        "same content redelivered = dup, even without logIndex"
+    assert len(st.pending) == 1
+    e2 = _ev(MAKER, TAKER, 0, TOKEN_INT, 0x747548, 0xBBD5F0 + 1_000_000)
+    del e2["logIndex"]
+    shadow_observe(lst, e2)          # DIFFERENT fill, same tx
+    assert len(st.pending) == 2, "distinct fills still both kept"
+
+
+# ── fleet2 K7: an agg-matched row fabricates no field divergence ────
+def test_agg_matched_row_is_granularity_not_divergence(st):
+    e1 = _mkrec(log_index=1, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    e2 = _mkrec(size_units=6_000_000, usdc_units=3_720_000, log_index=2,
+                seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    ag = _mkrec(view="agg", size_units=10_000_000, usdc_units=6_200_000,
+                log_index=3, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [e1, e2], "aggs": [ag], "flags": {}}
+    rows = [_poll_row(ag)]           # venue published AGGREGATE granularity
+    st._match_wallet(TX, MAKER, g, g["execs"] + g["aggs"], rows, [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("div.size") is None, \
+        "aggregate granularity is N3 evidence, NOT a decode divergence"
+    assert st.deltas.get("orphan_excess_exec") is None, \
+        "legs that tie out against an agg-matched row are not extras"
+    assert st.deltas.get("exec_covered_by_agg_row") == 2
+    assert st.deltas.get("granularity_row") == 1
+    assert st.deltas.get("sim_agg_suppressed") == 1
+
+
+# ── fleet2 K8: a late-landing divergent sibling is never invisible ──
+def test_late_sibling_row_still_tested(st):
+    def _grp(seen_at):
+        e1 = _mkrec(log_index=1, seen_at=seen_at)
+        e2 = _mkrec(size_units=6_000_000, usdc_units=3_720_000,
+                    log_index=2, seen_at=seen_at)
+        return {"execs": [e1, e2], "aggs": [], "flags": {}}
+
+    early = time.time() - 1000
+    g = _grp(early)
+    first_row = _poll_row(g["execs"][0])
+    st._match_wallet(TX, MAKER, g, g["execs"] + g["aggs"],
+                     [first_row], [], 1000.0, time.time(), 0)
+    assert st.deltas.get("compared_execs") is None, \
+        "ONE landed row of two must NOT finalize — the sibling is pending"
+
+    g2 = _grp(early)
+    late_row = _poll_row(g2["execs"][1], size="6.500000")   # DIVERGENT
+    st._match_wallet(TX, MAKER, g2, g2["execs"] + g2["aggs"],
+                     [first_row, late_row], [], sv.ORPHAN_FINAL_S + 10,
+                     time.time(), 0)
+    assert st.deltas.get("div.size") == 1, \
+        "the late divergent row MUST be tested — this was the one shape " \
+        "that could read the flip green on bad evidence"
+
+
+# ── fleet2 K9: tombstones block recount after seen_events eviction ──
+def test_finalized_tombstone_blocks_recount(st):
+    r1 = _mkrec(log_index=1, seen_at=time.time() - 1000)
+    row = _poll_row(r1)
+    g = {"execs": [r1], "aggs": [], "flags": {}}
+    st._match_wallet(TX, MAKER, g, [r1], [row], [], 1000.0, time.time(), 0)
+    assert st.deltas.get("compared_execs") == 1
+    assert (TX, MAKER) in st.finalized
+
+    r2 = _mkrec(log_index=1, seen_at=time.time() - 1000)
+    st.pending[(r2["tx"], r2["log_index"], r2["wallet"], r2["view"])] = r2
+    st._reconcile_tx(TX, [r2], {(TX, 1): [row]}, time.time(), 0)
+    assert st.deltas.get("compared_execs") == 1, \
+        "a re-pended finalized fill must never count twice"
+    assert st.deltas.get("refinalize_blocked") == 1
+    assert not st.pending
+
+
+# ── fleet2 K11: no-coverage is not a residual dup ───────────────────
+def test_uncovered_policy_rows_do_not_gate(st):
+    c = _mkrec(view="exec_owner", seen_at=time.time() - 1000)  # maker fill
+    row = _poll_row(c)
+    g = {"execs": [c], "aggs": [], "flags": {}}
+    st._match_wallet(TX, MAKER, g, [c], [row], [], 1000.0, time.time(), 0)
+    assert st.deltas.get("sim_agg_residual_dup") is None, \
+        "no aggregate view exists — the agg policy ingests NOTHING here"
+    assert st.deltas.get("sim_agg_uncovered") == 1
+    assert st.deltas.get("sim_exec_suppressed") == 1
+
+
+# ── fleet2 K12: every orphan_excess_exec instance is attributed ─────
+def test_orphan_excess_exec_writes_example(st):
+    c1 = _mkrec(log_index=1, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    c2 = _mkrec(size_units=9_000_000, usdc_units=5_580_000, log_index=2,
+                seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [c1, c2], "aggs": [], "flags": {}}
+    row = _poll_row(c1)
+    st._match_wallet(TX, MAKER, g, [c1, c2], [row], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("orphan_excess_exec") == 1
+    assert any(e["kind"] == "orphan_excess_exec" for e in st.examples), \
+        "N4 demands every excess instance attributed in examples"
+
+
+# ── fleet2 K13: global assignment beats greedy stealing ─────────────
+def test_global_assignment_prevents_candidate_stealing(st):
+    a = _mkrec(size_units=10_000_000, usdc_units=5_000_000, log_index=1)  # 10@0.50
+    b = _mkrec(size_units=10_000_000, usdc_units=6_000_000, log_index=2)  # 10@0.60
+    r1 = _poll_row(a, price=0.58)            # closest to B but belongs to A's slot
+    r2 = _poll_row(b, ts=TS0 + 2)            # exact price match to B, ts differs
+    pairs = dict((id(row), pick) for row, pick in st._assign_pairs([r1, r2], [a, b]))
+    assert pairs[id(r2)] is b, "the exact-price row keeps ITS candidate"
+    assert pairs[id(r1)] is a, "the noisy row takes the remaining one"
+
+
+# ── fleet2 K14: price sanity honours both rounding variants ─────────
+def test_price_sanity_uses_both_variants(st):
+    ev = _ev(MAKER, TAKER, 0, TOKEN_INT, 1, 2_000_000, log_index=31)
+    recs, reason, _ = decode_shadow_views(ev, _roster((MAKER, 1, "m")), {EXCH})
+    assert reason is None, \
+        "round() ties-to-even 0.0 must not refuse what HALF_UP keeps"
+    assert recs and recs[0].get("price_variant_disagree") is True
+
+
+# ── fleet2 K15: residuals of BOTH policies reset the window ─────────
+def test_both_residuals_and_leading_flip_reset_window(st):
+    pool = _FakePool(stored=json.dumps(
+        {"counters": {"sim_exec_suppressed": 100, "sim_agg_suppressed": 1},
+         "window_start": 1000.0, "health_start": 1000.0,
+         "leading_policy": "exec", "writer": None}))
+    st.deltas = {"sim_agg_residual_dup": 1}   # NON-leading policy residual
+    asyncio.run(st._flush(pool))
+    written = json.loads(pool.executes[-1][1][1])
+    assert written["window_start"] != 1000.0, \
+        "a residual of EITHER policy must restart the evidence clock"
+    assert "sim_exec_residual_dup" in sv.VOLUME_KEYS
+    assert "sim_agg_residual_dup" in sv.VOLUME_KEYS
+
+    pool2 = _FakePool(stored=json.dumps(
+        {"counters": {"sim_exec_suppressed": 1, "sim_agg_suppressed": 100},
+         "window_start": 1000.0, "health_start": 1000.0,
+         "leading_policy": "exec", "writer": None}))
+    st2 = ShadowV2()
+    st2.deltas = {"events_seen": 1}
+    asyncio.run(st2._flush(pool2))
+    written2 = json.loads(pool2.executes[-1][1][1])
+    assert written2["leading_policy"] == "agg"
+    assert written2["window_start"] != 1000.0, \
+        "a leading-policy crossover restarts the clock too"
+
+
+# ── fleet2 K18: partial corruption resets whole-window coherently ───
+def test_partial_corruption_resets_coherently(st):
+    pool = _FakePool(stored=json.dumps(
+        {"counters": "clobbered", "window_start": 1000.0,
+         "at_window": {"sim_exec_suppressed": 85},
+         "writer": None}))
+    st.deltas = {"sim_exec_suppressed": 2}
+    asyncio.run(st._flush(pool))
+    written = json.loads(pool.executes[-1][1][1])
+    assert written["counters"]["sim_exec_suppressed"] == 2
+    assert written["at_window"].get("sim_exec_suppressed", 0) <= 2, \
+        "old watermarks must not survive a counter reset (negative deltas)"
+    assert written["counters"]["corrupt_reset"] == 1, "the wipe is VISIBLE"
+    assert "corrupt_reset" in sv.HEALTH
+
+    pool2 = _FakePool(stored=json.dumps(
+        {"counters": {}, "window_start": "garbage", "writer": None}))
+    st2 = ShadowV2()
+    st2.deltas = {"events_seen": 1}
+    asyncio.run(st2._flush(pool2))
+    written2 = json.loads(pool2.executes[-1][1][1])
+    assert isinstance(written2["window_start"], (int, float)), \
+        "a non-numeric window_start heals instead of poisoning jq forever"
