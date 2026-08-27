@@ -659,7 +659,7 @@ def _folds_away(raw: str | None) -> bool:
     import unicodedata as _ud
 
     for ch in _ud.normalize("NFKD", str(raw or "")):
-        if ord(ch) > 127 and _ud.category(ch)[0] not in ("M", "C"):
+        if ord(ch) > 127 and _ud.category(ch) not in ("Mn", "Cf"):
             # Round 2.6: letters-only was one category too narrow —
             # the sixth fleet erased a '(٢)' game-2 marker (category
             # Nd) through the letter check, mapping a full-match pick
@@ -1259,7 +1259,11 @@ _NAMED_BAD_TOKENS = frozenset({
     "and", "y", "e", "set", "sets", "tiebreak", "tiebreaker", "game",
     "games", "match", "doubles", "winner", "meeting", "first",
     "second", "third", "retirement", "retired", "retire", "retires",
-    "walkover", "withdrew", "withdrawal", "withdraws"})
+    "walkover", "withdrew", "withdrawal", "withdraws",
+    # Named 1.1: abbreviation family + the separator itself — the
+    # implementation fleet rode 'TB' through the title witness and
+    # 'vs' through regex backtracking into a name slot.
+    "vs", "tb", "sf", "qf", "ret", "wo"})
 # This lane OWNS its vocabulary — person identity is not club
 # identity, and it must not ride on _BRIDGE_SCOPE_TOKENS surviving a
 # refactor. Single-letter tokens refuse (O'Connell → honest miss,
@@ -1319,6 +1323,18 @@ def _name_code_builds(code: str, toks: list[str]) -> bool:
     return bool(code) and rec(0, 0)
 
 
+def _name_seq_eq(a: list[str], b: list[str]) -> bool:
+    """Person-name equality, ORDER-AWARE (named 1.1).
+
+    Set equality erased order and admitted 'Jose Maria Perez' for a
+    'Maria Jose Perez' pick — distinct compound-name people. Exact
+    sequence, or the FULL reversal (the surname-first/given-first
+    feed variance set-equality deliberately recovered — 'Koyama
+    Hiromasa' == 'Hiromasa Koyama'), and nothing else: permutations
+    of 3+-token names are different people until proven otherwise."""
+    return a == b or a == b[::-1]
+
+
 def _builds_one(code: str, sides: list[list[str]]) -> int | None:
     """Index of the ONE side the code builds from; None on zero or
     two — every use site refuses ambiguity."""
@@ -1370,8 +1386,18 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
     suffix = _post_date_tokens(parts)
     if suffix and (len(suffix) != 1 or not suffix[0].isalpha()):
         return None, "slug_suffix_shape"
+    if suffix and (suffix[0] in _NAMED_BAD_TOKENS
+                   or suffix[0] in _NAMED_DERIV_TOKENS
+                   or suffix[0] not in (wa, wb)):
+        # NAMED 1.1 (implementation-fleet kill): a '-set' derivative
+        # suffix LAUNDERED as a pick marker through a name-prefix
+        # collision — 'set' is a 3-char DP prefix of 'Setkic', so the
+        # builds test authenticated a set-winner marker as his pick.
+        # The suffix must BE one of his slug's own codes, and never a
+        # derivative/bad token, before any building is consulted.
+        return None, "slug_suffix_not_code"
     if wlg not in _NAMED_TOUR_OF:
-        tr["lg_pair_seen"] = {"whale_lg": wlg[:20]}
+        tr["lg_pair_seen"] = {"whale_lg": wlg}
         return None, "tour_unknown"
     rawt = str(his_title or "")
     if rawt.count(":") > 1:
@@ -1413,6 +1439,8 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
         return None, "his_event_unsplittable"
     et = [s.split() for s in esides]
     for s in et:
+        if not (1 <= len(s) <= _NAMED_NAME_CAP):
+            return None, "his_event_side_bad"
         if any((not t.isalpha()) or len(t) < 2
                or t in _NAMED_BAD_TOKENS for t in s):
             return None, "his_event_side_bad"
@@ -1425,7 +1453,7 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
     his_code = oc[0]
     my_i = ea if his_code == wa else eb
     his_side_t, opp_t = et[my_i], et[1 - my_i]
-    if not (set(his_side_t) == set(on_t)
+    if not (_name_seq_eq(his_side_t, on_t)
             or (len(his_side_t) == 1 and his_side_t[0] == on_t[-1])):
         return None, "his_event_side_mismatch"
     if not _named_name_ok(opp_t):
@@ -1537,15 +1565,16 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
                             if ka is None or kb is None or ka == kb:
                                 gate = "cross_code_mismatch"
                             else:
-                                st = set(_name_toks(
-                                    r.get("side_norm")))
-                                if st not in (set(at), set(bt)):
+                                st = _name_toks(r.get("side_norm"))
+                                if not (_name_seq_eq(st, at)
+                                        or _name_seq_eq(st, bt)):
                                     gate = "side_not_in_question"
-                                elif not ((set(on_t) == set(at)
-                                           and set(opp_t) == set(bt))
-                                          or (set(on_t) == set(bt)
-                                              and set(opp_t)
-                                              == set(at))):
+                                elif not ((_name_seq_eq(on_t, at)
+                                           and _name_seq_eq(opp_t,
+                                                            bt))
+                                          or (_name_seq_eq(on_t, bt)
+                                              and _name_seq_eq(
+                                                  opp_t, at))):
                                     # THE TWIN GATE: whale pair ==
                                     # venue pair, bijectively, full
                                     # names, set equality, never
@@ -1558,7 +1587,7 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
             if len(g) < 12:
                 g.append({"ident_tail": ident[-40:], "gate": gate})
     cands = [r for r in passing
-             if set(_name_toks(r.get("side_norm"))) == set(on_t)]
+             if _name_seq_eq(_name_toks(r.get("side_norm")), on_t)]
     if len(cands) != 1:
         return None, ("no_candidate_row" if not cands
                       else "multiple_candidates")
@@ -1566,9 +1595,11 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
     sibs = [r for r in passing
             if str(r.get("identifier") or "").lower()
             == str(sel.get("identifier") or "").lower()]
-    if len(sibs) != 2 or \
-            {frozenset(_name_toks(r.get("side_norm"))) for r in sibs} \
-            != {frozenset(on_t), frozenset(opp_t)}:
+    sib_ok = (len(sibs) == 2 and any(
+        _name_seq_eq(_name_toks(a.get("side_norm")), on_t)
+        and _name_seq_eq(_name_toks(b.get("side_norm")), opp_t)
+        for a, b in (sibs, sibs[::-1])))
+    if not sib_ok:
         # SIBLING CORROBORATION: on the aec- family only intent names
         # a side; a candidate whose sibling is absent is unverifiable.
         return None, "sibling_side_missing"
@@ -1580,7 +1611,12 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
         if _folds_away(r.get("question")):
             return None, "nonlatin_in_pool"
         nq = " ".join(_norm(str(r.get("question") or "")).split())
-        if nq.startswith(_NAMED_Q_PREFIX.rstrip()):
+        if _NAMED_Q_PREFIX.rstrip() in nq:
+            # NAMED 1.1: startswith let a LEADING marker escape
+            # ('2nd Meeting: Who will win...') — the implementation
+            # fleet admitted meeting 1 for a meeting-2 pick. The
+            # venue wording ANYWHERE in a question blocks; blocking
+            # may over-refuse, selection may not.
             blockers.add((str(r.get("identifier") or "").lower(), nq))
     want = (str(sel.get("identifier") or "").lower(),
             " ".join(_norm(str(sel.get("question") or "")).split()))
@@ -2563,7 +2599,21 @@ async def resolve_explain(pool, market_title: str | None,
                            == str(nhit.get("identifier")
                                   or "").lower()
                            and r is not nhit]
+                    _nq = " ".join(_norm(str(
+                        nhit.get("question") or "")).split())
+                    _nm = _NAMED_Q_STRICT_RE.fullmatch(_nq)
+                    _nip = [x for x in str(nhit.get("identifier")
+                                           or "").split("-") if x]
                     out["named_ml"]["audit"] = {
+                        "clock": ({"hh": _nm.group("hh"),
+                                   "mm": _nm.group("mm"),
+                                   "ap": _nm.group("ap")}
+                                  if _nm else None),
+                        "venue_codes": _nip[2:4],
+                        "his_opponent_vs_other_side": [
+                            str(event_title)[:120],
+                            (sib[0].get("side_norm")
+                             if sib else None)],
                         "identifier": nhit.get("identifier"),
                         "market_slug": nhit.get("market_slug"),
                         "event_slug": nhit.get("event_slug"),

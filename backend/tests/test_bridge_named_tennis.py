@@ -235,9 +235,11 @@ class TestDerivativeSiblings:
     def test_whale_set_suffix_refuses(self):
         """B9f: a '-set' post-date suffix that does not build from
         his outcome refuses slug_pick_mismatch."""
+        # Named 1.1 refuses EARLIER: the suffix must BE one of his
+        # slug's codes before any building is consulted.
         h, w, _ = run([K, C], "Hiromasa Koyama", WT,
                       "itf-koyama-castelnuovo-2026-08-27-set", WE)
-        assert h is None and w == "slug_pick_mismatch"
+        assert h is None and w == "slug_suffix_not_code"
 
     def test_derivative_marker_in_title_prefix_refuses(self):
         """B9g: 'First Set Winner: X vs Y' — the dropped tournament
@@ -414,3 +416,80 @@ class TestPhaseZeroBoundary:
     def test_named_months_is_a_copy_not_an_alias(self):
         assert pm._NAMED_MONTHS == pm._BRIDGE_MONTHS
         assert pm._NAMED_MONTHS is not pm._BRIDGE_MONTHS
+
+
+class TestImplementationFleetKills:
+    """The implementation fleet's 3 executed kills (the tournament
+    attacked the spec; this fleet attacked the CODE), each pinned."""
+
+    def test_setkic_suffix_laundering_refuses(self):
+        """NS-K1: 'set' is a 3-char DP prefix of 'Setkic', so the
+        builds test authenticated a set-winner marker as his pick —
+        a first-set pick mapped onto the moneyline. The suffix must
+        now BE one of his slug's own codes."""
+        qs = ("Who will win in the upcoming tennis event Aldin "
+              "Setkic vs Dustin Brown scheduled for August 27, 2026 "
+              "at 1:30 AM UTC?")
+        s1 = vrow("aldin setkic", "ORDER_INTENT_BUY_LONG",
+                  ident="aec-itfme-aldset-dusbro-2026-08-27", q=qs,
+                  ev_title="Aldin Setkic vs. Dustin Brown")
+        s2 = vrow("dustin brown", "ORDER_INTENT_BUY_SHORT",
+                  ident="aec-itfme-aldset-dusbro-2026-08-27", q=qs,
+                  ev_title="Aldin Setkic vs. Dustin Brown")
+        h, w, _ = run([s1, s2], "Aldin Setkic", "Setkic vs Brown",
+                      "itf-setkic-brown-2026-08-27-set",
+                      "Aldin Setkic vs Dustin Brown")
+        assert h is None and w == "slug_suffix_not_code"
+        # (A code-valued suffix would pass this gate; upstream
+        # market_type_of types long suffixes differently, so the
+        # suffixless recovery pin in TestAttestedRecovery is the
+        # positive control.)
+
+    def test_compound_name_order_is_identity(self):
+        """NS-K2: set equality admitted 'Jose Maria Perez' for a
+        'Maria Jose Perez' pick — distinct compound-name people.
+        Sequence or full reversal only; the reversal keeps the
+        surname-first feed variance recovering."""
+        qp = ("Who will win in the upcoming tennis event Jose Maria "
+              "Perez vs Ana Diaz scheduled for August 27, 2026 at "
+              "1:30 AM UTC?")
+        p1 = vrow("jose maria perez", "ORDER_INTENT_BUY_LONG",
+                  ident="aec-itfme-josper-anadia-2026-08-27", q=qp,
+                  ev_title="Jose Maria Perez vs. Ana Diaz")
+        p2 = vrow("ana diaz", "ORDER_INTENT_BUY_SHORT",
+                  ident="aec-itfme-josper-anadia-2026-08-27", q=qp,
+                  ev_title="Jose Maria Perez vs. Ana Diaz")
+        h, w, _ = run([p1, p2], "Maria Jose Perez",
+                      "Maria Jose Perez vs Ana Diaz",
+                      "itf-josper-anadia-2026-08-27",
+                      "Maria Jose Perez vs Ana Diaz")
+        assert h is None
+        assert pm._name_seq_eq(["koyama", "hiromasa"],
+                               ["hiromasa", "koyama"])
+        assert not pm._name_seq_eq(["maria", "jose", "perez"],
+                                   ["jose", "maria", "perez"])
+
+    def test_leading_marker_blocks_via_containment(self):
+        """PC-K1: '2nd Meeting: Who will win...' escaped the
+        startswith blocking scan — the venue wording ANYWHERE in a
+        question blocks now, both pick polarities."""
+        q2 = ("2nd Meeting: Who will win in the upcoming tennis "
+              "event Hiromasa Koyama vs Luca Castelnuovo scheduled "
+              "for August 27, 2026 at 4:30 AM UTC?")
+        m1 = vrow("hiromasa koyama", "ORDER_INTENT_BUY_LONG",
+                  ident="aec-itfme-hirkoy-lucacas-2026-08-27-2",
+                  q=q2, ev_slug="itfme-hirkoy-lucacas-2026-08-27")
+        for pick in ("Hiromasa Koyama", "Luca Castelnuovo"):
+            h, w, _ = run([K, C, m1], pick, WT, WS, WE,
+                          all_rows=[K, C, m1])
+            assert h is None and w == "event_scan_ambiguous", pick
+
+    def test_folds_away_is_exactly_mn_and_cf(self):
+        """Fleet finding: whole-category M*/C* exemptions let
+        private-use and control characters erase silently."""
+        assert not pm._folds_away("Fenerbahçe")
+        assert pm._folds_away("x  y")
+
+    def test_tb_and_vs_are_bad_name_tokens(self):
+        for t in ("tb", "vs", "sf", "qf"):
+            assert t in pm._NAMED_BAD_TOKENS, t
