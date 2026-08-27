@@ -46,12 +46,23 @@ class TestEnrichmentLands:
 
     def test_the_money_fields_are_not_updatable_at_all(self):
         """price, size, side and notional are what money was staked
-        against. A re-ingest must not be able to move them."""
+        against. A re-ingest must not be able to move them.
+
+        The check extracts the SET list's actual ASSIGNMENT TARGETS —
+        a naive substring scan false-positived on the venue_seen_at
+        stamp's whale-equality COMPARISON (EXCLUDED.whale_id =
+        trades.whale_id), which updates nothing."""
+        import re
         src = inspect.getsource(pipeline)
         upd = src[src.index("DO UPDATE SET"):src.index("RETURNING id")]
+        targets = set(re.findall(r"^\s*(\w+)\s*=[^=]", upd, re.M))
+        targets.discard("AND")
         for forbidden in ("price", "size", "side", "notional",
-                          "whale_id", "asset"):
-            assert f"{forbidden} =" not in upd, forbidden
+                          "whale_id", "asset", "tx_hash", "ts",
+                          "source", "detected_at", "dedupe_key"):
+            assert forbidden not in targets, forbidden
+        assert "venue_seen_at" in targets, \
+            "the corroboration stamp is part of the update contract"
 
     def test_a_refill_cannot_fire_a_duplicate_copy(self):
         """THE TRAP IN THIS FIX. `row is None` WAS the entire duplicate
