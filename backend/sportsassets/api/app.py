@@ -4632,6 +4632,16 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
                           "month_seen": {}, "named_types": {},
                           "audits": [], "gate10_shadow": [],
                           "opp_shadow": [], "blocker_sets": []}
+    # THE NAMED-TENNIS LANE'S CENSUS (2026-08-27): would_resolve,
+    # reason and sub_gate histograms (line_poison_recovered vs
+    # no_named_candidate is the stratification of the named class the
+    # earlier rounds lacked), the verbatim whale/venue lg pairs that
+    # earn future tour-map entries by observation, and the audit
+    # records the Phase-1 zero-mismatch hand audit consumes.
+    named_stats: dict = {"would_resolve": 0, "reasons": {},
+                         "sub_gates": {}, "lg_pairs": {},
+                         "row_gate_histogram": {}, "audits": [],
+                         "attested_family": 0}
     for r in rows:
         try:
             ex = await resolve_explain(
@@ -4714,6 +4724,32 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
                     _brs["named_types"].get(mt, 0) + 1
             if _br.get("audit") and len(_brs["audits"]) < 40:
                 _brs["audits"].append(_br["audit"])
+        _nm = ex.get("named_ml") or {}
+        if _nm:
+            _ns = named_stats
+            _ns["reasons"][str(_nm.get("reason") or _nm.get("error")
+                               or "?")] = _ns["reasons"].get(
+                str(_nm.get("reason") or _nm.get("error") or "?"),
+                0) + 1
+            sg = str(_nm.get("sub_gate") or "?")
+            _ns["sub_gates"][sg] = _ns["sub_gates"].get(sg, 0) + 1
+            if _nm.get("would_resolve"):
+                _ns["would_resolve"] += 1
+                if _nm.get("attested_family"):
+                    _ns["attested_family"] += 1
+            lgp = _nm.get("lg_pair_seen") or {}
+            if lgp.get("whale_lg"):
+                k = str(lgp["whale_lg"])
+                _ns["lg_pairs"][k] = _ns["lg_pairs"].get(k, 0) + 1
+            for pair in (_nm.get("lg_pairs") or []):
+                k = "->".join(str(x) for x in pair)
+                _ns["lg_pairs"][k] = _ns["lg_pairs"].get(k, 0) + 1
+            for g in (_nm.get("row_gates") or []):
+                gk = str(g.get("gate") or "?")
+                _ns["row_gate_histogram"][gk] = \
+                    _ns["row_gate_histogram"].get(gk, 0) + 1
+            if _nm.get("audit") and len(_ns["audits"]) < 40:
+                _ns["audits"].append(_nm["audit"])
             if _br.get("gate10") and len(_brs["gate10_shadow"]) < 15:
                 _brs["gate10_shadow"].append(_br["gate10"])
             for g in (_br.get("row_gates") or []):
@@ -4759,6 +4795,7 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
         # closed grammars cost in coverage), and every distinct venue
         # question the bridge would have consumed — the certification
         # bar demands zero non-whitelisted tails in that list.
+        "named_ml": named_stats,
         "bridge": {
             **bridge_stats,
             "share_of_no_side_match": (
