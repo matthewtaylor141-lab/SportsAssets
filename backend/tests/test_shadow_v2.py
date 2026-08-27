@@ -1908,3 +1908,41 @@ def test_short_lived_watch_terminal_fetch_counts(st):
     st._watch_pass({}, later)
     assert st.deltas.get("watch_expired_unfetched") is None, \
         "a fetched, fully-covered short-lived watch is NOT starvation"
+
+
+# ── fleet8: path parity on collision keys; honest granularity ───────
+def test_watch_collision_key_scores_like_finalize(st):
+    e1 = _mkrec(asset="1000", log_index=1, seen_at=time.time() - 1000)
+    row = _poll_row(e1)
+    g = {"execs": [e1], "aggs": [], "flags": {},
+         "dropped": [dict(e1, view="exec_counter", log_index=2)]}
+    st._match_wallet(TX, MAKER, g, [e1], [row], [],
+                     1000.0, time.time(), 0)
+    w = st.watch.get((TX, MAKER))
+    assert w is not None and w["dropped_keys"] & set(w["exec_keys"]), \
+        "fixture: the key collides between insert set and dropped set"
+    late_same = _poll_row(e1, ts=e1["ts"])
+    st.deltas = {}
+    w["seen"].discard(late_same["dedupe_key"])
+    st._watch_pass({(TX, 1): [late_same]}, time.time())
+    assert st.deltas.get("sim_exec_suppressed") == 1, \
+        "a collision key IS in the insert set: suppression, on BOTH paths"
+    assert st.deltas.get("dropped_row_seen") is None
+
+
+def test_poll_mult_counts_covered_rows_only(st):
+    e1 = _mkrec(asset="1000", log_index=1,
+                seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    e2 = _mkrec(asset="1000", size_units=6_000_000, usdc_units=3_720_000,
+                log_index=2, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    dropped = _mkrec(view="exec_counter", asset="2000", log_index=3,
+                     seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    agg_row = _mkrec(side="BUY", asset="1000",
+                     size_units=10_000_000, usdc_units=6_200_000)
+    g = {"execs": [e1, e2], "aggs": [], "flags": {}, "dropped": [dropped]}
+    rows = [_poll_row(agg_row), _poll_row(dropped)]
+    st._match_wallet(TX, MAKER, g, [e1, e2, dropped], rows, [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("poll_mult.one") == 1, \
+        "an aggregate-granularity tx must not read 'eq' off a dropped row"
+    assert st.deltas.get("poll_mult.eq") is None

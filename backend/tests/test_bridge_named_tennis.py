@@ -666,3 +666,22 @@ class TestRoundSevenKills:
                       "Koyama Hiromasa vs Castelnuovo Luca", WS, WE)
         assert w == "ok" and h is K, \
             "the subsequence gate honours full reversal like _name_seq_eq"
+
+
+class TestRoundEightKills:
+    """Round-8 fleet: a bare tier code laundered prop segments."""
+
+    def test_tier_code_cannot_launder_prop_segments(self):
+        for title in ("M15 Most Double Faults: Koyama vs Castelnuovo",
+                      "M15 Fastest Serve: Koyama vs Castelnuovo",
+                      "W35 Most Points Won: Koyama vs Castelnuovo",
+                      "M15: Koyama vs Castelnuovo"):
+            h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
+            assert h is None, title
+
+    def test_surface_terminated_tier_segments_recover(self):
+        for title in ("ITF MEN - SINGLES: M15 Cap d'Agde (France), "
+                      "clay: Hiromasa Koyama vs Luca Castelnuovo",
+                      "M15 Antalya, hard: Koyama vs Castelnuovo"):
+            h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
+            assert w == "ok" and h is K, (title, w)

@@ -759,10 +759,14 @@ class ShadowV2:
             if pick is not None:
                 free.remove(pick)
             logged = self._diagnose_pair(tx, wallet, row, pick, logged)
-        # granularity histogram
+        # granularity histogram — covered rows only: a dropped raw's
+        # diverted row padded an aggregate-granularity tx into 'eq',
+        # masquerading as per-exec in the very histogram that settles
+        # the policy question
+        n_rows = len(poll_rows) - len(dropped_rows)
         if len(execs) >= 2:
-            b = ("eq" if len(poll_rows) == len(execs)
-                 else "one" if len(poll_rows) == 1 else "other")
+            b = ("eq" if n_rows == len(execs)
+                 else "one" if n_rows == 1 else "other")
             self.bump("poll_mult." + b)
         # per-whale rollup
         self.bump(f"pw.{wallet}.n", len(execs))
@@ -851,7 +855,12 @@ class ShadowV2:
                     continue
                 w["seen"].add(k)
                 self.bump("late_row_seen")
-                if k in w.get("dropped_keys", ()):
+                if (k in w.get("dropped_keys", ())
+                        and k not in w["exec_keys"]
+                        and k not in w["agg_keys"]):
+                    # finalize-order parity: a key that ALSO lives in the
+                    # insert set is factual suppression, not dropped
+                    # coverage — the two paths must never disagree
                     self.bump("dropped_row_seen")
                     continue
                 if k in w["exec_keys"]:

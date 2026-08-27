@@ -1293,6 +1293,7 @@ _NAMED_HEADER_TOKENS = frozenset({"itf", "wta", "atp", "men", "women",
                                   "ladies", "junior", "juniors",
                                   "singles"})
 _NAMED_TIER_RE = re.compile(r"[mwj]\d{2,3}")
+_NAMED_SURFACES = frozenset({"clay", "hard", "grass", "carpet"})
 
 
 def _named_prefix_attested(prefix: str) -> bool:
@@ -1302,7 +1303,14 @@ def _named_prefix_attested(prefix: str) -> bool:
             return False
         header = (all(t in _NAMED_HEADER_TOKENS for t in toks)
                   and any(t in _NAMED_TOUR_MARKERS for t in toks))
-        tiered = any(_NAMED_TIER_RE.fullmatch(t) for t in toks)
+        # a bare tier code laundered arbitrary prop nouns riding its
+        # segment ('M15 Most Double Faults', round-8 critical). The ONE
+        # census-attested tournament shape ends with its surface —
+        # 'M15 Cap d'Agde (France), clay' — so a tier segment attests
+        # only as tier code + anything + terminal surface. No real
+        # prop market ends ', clay'.
+        tiered = (any(_NAMED_TIER_RE.fullmatch(t) for t in toks)
+                  and toks[-1] in _NAMED_SURFACES)
         if not (header or tiered):
             return False
     return True
