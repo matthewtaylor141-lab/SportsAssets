@@ -1240,36 +1240,90 @@ def test_price_sanity_uses_both_variants(st):
     assert recs and recs[0].get("price_variant_disagree") is True
 
 
-# ── fleet2 K15: residuals of BOTH policies reset the window ─────────
-def test_both_residuals_and_leading_flip_reset_window(st):
+# ── CONSCIOUS RE-PIN of fleet2 K15 (granularity verdict MIXED) ──────
+# The round-2 rule gated the window on both pure policies' residuals
+# and on leading crossovers. The venue's proven mixed granularity
+# means per-exec residuals grow with ORDINARY taker fills — they
+# indict the disqualified per-exec policy, not the decode — and under
+# that rule the 7-day criterion was structurally unreachable. The
+# corrected rule gates on GATING and the venue candidate's own
+# residual; everything else is diagnostic.
+def test_pure_policy_residuals_are_diagnostic_not_window_gates(st):
     pool = _FakePool(stored=json.dumps(
         {"counters": {"sim_exec_suppressed": 100, "sim_agg_suppressed": 1},
          "window_start": 1000.0, "health_start": 1000.0,
+         "decoder_fp": sv.DECODER_FP,
          "leading_policy": "exec", "writer": None}))
-    st.deltas = {"sim_agg_residual_dup": 1}   # NON-leading policy residual
+    st.deltas = {"sim_agg_residual_dup": 1, "sim_exec_residual_dup": 3}
     asyncio.run(st._flush(pool))
     written = json.loads(pool.executes[-1][1][1])
-    assert written["window_start"] != 1000.0, \
-        "a residual of EITHER policy must restart the evidence clock"
-    # round-3 kill: gating + watermarked = Δ structurally 0 in the very
-    # flush that moved it — residuals render cumulatively instead
+    assert written["window_start"] == 1000.0, \
+        "pure-policy residuals are venue-granularity facts, not resets"
     assert "sim_exec_residual_dup" not in sv.VOLUME_KEYS
     assert "sim_agg_residual_dup" not in sv.VOLUME_KEYS
 
+
+def test_ven_residual_still_resets_the_window(st):
+    pool = _FakePool(stored=json.dumps(
+        {"counters": {}, "window_start": 1000.0, "health_start": 1000.0,
+         "decoder_fp": sv.DECODER_FP, "writer": None}))
+    st.deltas = {"sim_ven_residual_dup": 1}
+    asyncio.run(st._flush(pool))
+    written = json.loads(pool.executes[-1][1][1])
+    assert written["window_start"] != 1000.0, \
+        "the CANDIDATE's own residual must restart the evidence clock"
+
+
+def test_leading_flip_counts_but_does_not_reset_window(st):
     pool2 = _FakePool(stored=json.dumps(
         {"counters": {"sim_exec_suppressed": 1, "sim_agg_suppressed": 100},
          "at_window": {"sim_exec_suppressed": 1, "sim_agg_suppressed": 0},
          "window_start": 1000.0, "health_start": 1000.0,
+         "decoder_fp": sv.DECODER_FP,
          "leading_policy": "exec", "writer": None}))
+    st.deltas = {"events_seen": 1}
+    asyncio.run(st._flush(pool2))
+    written2 = json.loads(pool2.executes[-1][1][1])
+    assert written2["leading_policy"] == "agg", \
+        "a DECISIVE since-window inversion still flips leading"
+    assert written2["counters"].get("leading_flip") == 1
+    assert written2["window_start"] == 1000.0, \
+        "a diagnostic crossover must no longer burn the 7-day clock"
+
+
+def test_decoder_fp_governs_the_reset_not_the_commit(st):
+    # unrelated deploy: commit differs, fingerprint matches -> survives
+    pool = _FakePool(stored=json.dumps(
+        {"counters": {}, "window_start": 1000.0, "health_start": 1000.0,
+         "decoder_fp": sv.DECODER_FP, "commit": "0000000",
+         "writer": None}))
+    st.deltas = {"events_seen": 1}
+    asyncio.run(st._flush(pool))
+    written = json.loads(pool.executes[-1][1][1])
+    assert written["window_start"] == 1000.0, \
+        "a docs/workflow deploy must not burn the evidence clock"
+    assert written["decoder_fp"] == sv.DECODER_FP
+
+    # decode change (or unknown provenance): fingerprint differs -> reset
+    pool2 = _FakePool(stored=json.dumps(
+        {"counters": {}, "window_start": 1000.0, "health_start": 1000.0,
+         "decoder_fp": "stale_fp", "writer": None}))
     st2 = ShadowV2()
     st2.deltas = {"events_seen": 1}
     asyncio.run(st2._flush(pool2))
     written2 = json.loads(pool2.executes[-1][1][1])
-    assert written2["leading_policy"] == "agg", \
-        "a DECISIVE since-window inversion flips leading"
     assert written2["window_start"] != 1000.0, \
-        "a leading-policy crossover restarts the clock too"
-    assert written2["counters"].get("leading_flip") == 1
+        "evidence from a different decoder must never certify this one"
+
+    # pre-upgrade row with NO fingerprint: unknown provenance -> reset
+    pool3 = _FakePool(stored=json.dumps(
+        {"counters": {}, "window_start": 1000.0, "health_start": 1000.0,
+         "writer": None}))
+    st3 = ShadowV2()
+    st3.deltas = {"events_seen": 1}
+    asyncio.run(st3._flush(pool3))
+    written3 = json.loads(pool3.executes[-1][1][1])
+    assert written3["window_start"] != 1000.0
 
 
 def test_leading_does_not_flap_on_cumulative_tie(st):
@@ -1279,6 +1333,7 @@ def test_leading_does_not_flap_on_cumulative_tie(st):
         {"counters": {"sim_exec_suppressed": 100, "sim_agg_suppressed": 101},
          "at_window": {"sim_exec_suppressed": 98, "sim_agg_suppressed": 99},
          "window_start": 1000.0, "health_start": 1000.0,
+         "decoder_fp": sv.DECODER_FP,
          "leading_policy": "exec", "writer": None}))
     st.deltas = {"events_seen": 1}
     asyncio.run(st._flush(pool))

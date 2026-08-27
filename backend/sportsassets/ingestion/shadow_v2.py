@@ -20,6 +20,8 @@ Hard rules (each enforced by backend/tests/test_shadow_v2.py):
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
 import json
 import logging
 import os
@@ -352,6 +354,26 @@ def rec_keys(rec: dict) -> list[tuple[str, str]]:
         out.append(("hup", make_dedupe_key(rec["tx"], rec["asset"], rec["side"],
                                            size, ph, rec["ts"])))
     return out
+
+
+def _decoder_fp() -> str:
+    """Fingerprint of the decode-critical function SOURCES.
+
+    The certification window must reset when the DECODER changes —
+    evidence gathered by one decode does not vouch for another — but
+    not when an unrelated file deploys. The original rule keyed on the
+    repo commit, which reset the window on every push (docs included)
+    and made the 7-day criterion structurally unreachable during
+    active development. Any edit to these functions changes the hash;
+    a workflow or docs push does not.
+    """
+    src = "".join(inspect.getsource(f) for f in (
+        decode_shadow_views, classify_mints, agg_tieout,
+        rec_prices, rec_keys))
+    return hashlib.sha256(src.encode()).hexdigest()[:16]
+
+
+DECODER_FP = _decoder_fp()
 
 
 class ShadowV2:
@@ -1249,7 +1271,11 @@ class ShadowV2:
             health_start = stored.get("health_start")
             at_window = stored.get("at_window")
             at_window = dict(at_window) if isinstance(at_window, dict) else {}
-            if stored.get("commit") not in (None, self.commit):
+            # DECODER change resets the evidence clocks; an unrelated
+            # deploy does not. Strict equality: a stored row with no
+            # fingerprint (pre-upgrade) has unknown decode provenance
+            # and must not certify — reset once at the boundary.
+            if stored.get("decoder_fp") != DECODER_FP:
                 window_start = health_start = None
             stored_leading = (stored.get("leading_policy")
                               if stored.get("leading_policy") in ("exec", "agg")
@@ -1273,16 +1299,20 @@ class ShadowV2:
                     # direct write: snap was taken already, and this is
                     # flush-time derived bookkeeping like pw_pruned
                     counters["leading_flip"] = counters.get("leading_flip", 0) + 1
-            # BOTH residual counters gate: watching only the leading
-            # policy's residuals let the eventually-chosen policy's
-            # double-ingests hide inside an unbroken 7-day window, and a
-            # decisive leading crossover restarts the evidence clock too.
+            # CONSCIOUS RE-PIN of fleet2 K15 (2026-08-27, granularity
+            # verdict MIXED). The round-2 rule gated the window on BOTH
+            # pure policies' residuals and on leading crossovers — right
+            # when the flip target WAS the leading pure policy. The
+            # verdict changed what those counters mean: the venue
+            # publishes aggregates for taker fills, so per-exec
+            # residuals now grow with ordinary venue behavior and gate
+            # nothing about the decode; they indict the per-exec POLICY,
+            # which is disqualified. Under the venue-shaped candidate
+            # the window gates on decode wrongness (GATING) and on the
+            # CANDIDATE's own residual only. Leading and the pure-policy
+            # residuals remain counted and rendered as diagnostics.
             gating_hit = (any(snap.get(k) for k in GATING)
-                          or snap.get("sim_exec_residual_dup")
-                          or snap.get("sim_agg_residual_dup")
-                          or snap.get("sim_ven_residual_dup")
-                          or (stored_leading is not None
-                              and leading != stored_leading))
+                          or snap.get("sim_ven_residual_dup"))
             if window_start is None or gating_hit:
                 window_start = nowf
                 at_window = {k: counters.get(k, 0) for k in VOLUME_KEYS}
@@ -1346,6 +1376,7 @@ class ShadowV2:
             sid_new = uuid.uuid4().hex[:8]
             value = {
                 "schema_v": SCHEMA_V, "writer": WRITER_ID, "commit": self.commit,
+                "decoder_fp": DECODER_FP,
                 "snap_id": sid_new,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(nowf)),
                 "updated_at_epoch": int(nowf),
