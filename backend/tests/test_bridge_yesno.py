@@ -498,36 +498,36 @@ class TestRoundTwoKills:
                       "col-aus-scb-2026-09-03-scb") == \
             (None, "no_candidate_row")
 
-    def test_long_questions_refuse_as_possibly_truncated(self):
-        """D6 REWRITTEN by round 2.2. The round-2.1 fleet proved the
-        truncation defense pointed one way only: a scope qualifier
-        rendered AFTER the date is amputated by a ~110-char cut,
-        leaving the EXACT clean template — a 3-char window real name
-        lengths hit. So any question >= 108 raw chars refuses as
-        unprovable (question_maybe_truncated): the 113-char Fenerbahce
-        recovery flips to an honest miss, and the 110-cut string still
-        refuses AND still blocks a clean sibling via raw."""
+    def test_the_truncation_guard_sits_at_the_real_cap(self):
+        """D6, THIRD REVISION — each on new evidence. Round 2.2 set
+        the guard at 108 on a presumed ~110 venue truncation; the
+        2026-08-27 census falsified it (119/121-char questions arrive
+        intact — the '110-cut' was our own probe's display cap). The
+        guard now sits at the one real cap in the pipeline (the
+        probe's [:300]): full venue questions RECOVER, and the
+        end-anchor still makes any actually-cut string a miss that
+        blocks."""
         full = ("Will Fenerbahce SK win against Olympique Lyonnais in "
                 "the UEFA Champions League match scheduled for "
                 "Aug 26, 2026?")
-        trunc = ("Will Fenerbahce SK win against Olympique Lyonnais "
-                 "in the UEFA Champions League match scheduled for "
-                 "Aug 26, 202")
-        assert len(full) >= 108 and len(trunc) >= 108
+        assert 108 <= len(full) < 290
         def frow(ident, q):
             return row(ident, "yes", q, ev="atc-ucl-oly-fen-2026-08-26",
                        evt="Olympique Lyonnais vs Fenerbahce SK")
         tf = "Will Fenerbahce SK win on 2026-08-26?"
         sf = "ucl-oly-fen-2026-08-26-fen"
         ef = "Olympique Lyonnais vs Fenerbahce SK"
-        for q in (full, trunc):
-            bb = [frow("atc-ucl-oly-fen-2026-08-26-ma", q)]
-            assert bridge(bb, bb, "Yes", tf, sf, evt=ef) == \
-                (None, "no_candidate_row"), q[:40]
-        short_ok = QB
-        assert len(short_ok) < 108
-        b = board(short_ok)
-        assert bridge(b, b, "Yes", TITLE, SLUG)[1] == "ok"
+        bb = [frow("atc-ucl-oly-fen-2026-08-26-ma", full)]
+        assert bridge(bb, bb, "Yes", tf, sf, evt=ef)[1] == "ok"
+        trunc = full[:110]
+        bb = [frow("atc-ucl-oly-fen-2026-08-26-ma", trunc)]
+        assert bridge(bb, bb, "Yes", tf, sf, evt=ef) == \
+            (None, "no_candidate_row")
+        padded = full[:-1] + " " * 200 + "?"
+        assert len(padded) >= 290
+        bb = [frow("atc-ucl-oly-fen-2026-08-26-ma", padded)]
+        assert bridge(bb, bb, "Yes", tf, sf, evt=ef) == \
+            (None, "no_candidate_row")
 
     def test_the_delta_b_kill_boundary_west_midlands_police(self):
         """D8: the killed loosening matched a code against ANY

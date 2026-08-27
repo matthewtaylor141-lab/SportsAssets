@@ -779,13 +779,15 @@ def _q_parse_strict(question: str | None, his_dist: frozenset,
     tail date must equal the whale slug's date exactly. slug_date is
     guaranteed non-empty by bridge_explain's gate 5."""
     question = str(question or "")
-    if len(question) >= 108:
-        # Round 2.2: a scope qualifier rendered AFTER the date is
-        # amputated by any ~110-char truncation in the pipeline,
-        # leaving the exact clean template. A question long enough to
-        # have been cut cannot prove it was not; unprovable refuses.
-        # Long fixtures become honest misses; the probe's qlen channel
-        # measures the cost and whether truncation exists at all.
+    if len(question) >= 290:
+        # Round 2.2 set this at 108 on the premise of a ~110-char
+        # venue truncation; the 2026-08-27 census FALSIFIED it —
+        # 119/121-char USL/Copa do Brasil questions arrive intact
+        # (the earlier "110-cut" was our own probe's [:110] display
+        # cap). The guard survives at the one real cap left in the
+        # pipeline (the probe's own [:300] capture), so a string long
+        # enough to have been cut by US still refuses; full venue
+        # questions recover.
         return None, "question_maybe_truncated"
     n = " ".join(_norm(question).split())
     m = _BRIDGE_Q_STRICT_RE.fullmatch(n)
