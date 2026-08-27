@@ -1309,8 +1309,16 @@ def _named_prefix_attested(prefix: str) -> bool:
         # 'M15 Cap d'Agde (France), clay' — so a tier segment attests
         # only as tier code + anything + terminal surface. No real
         # prop market ends ', clay'.
+        # Flashscore (the feed's tournament-name source) writes indoor
+        # events 'hard (indoor)' — the terminal token is then the
+        # modifier, with the surface immediately before it. Accepted
+        # only in that adjacent shape, ahead of the ~October indoor
+        # swing that would otherwise silently refuse the census class.
+        tail_ok = (toks[-1] in _NAMED_SURFACES
+                   or (len(toks) >= 2 and toks[-1] in ("indoor", "outdoor")
+                       and toks[-2] in _NAMED_SURFACES))
         tiered = (any(_NAMED_TIER_RE.fullmatch(t) for t in toks)
-                  and toks[-1] in _NAMED_SURFACES)
+                  and tail_ok)
         if not (header or tiered):
             return False
     return True

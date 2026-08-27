@@ -685,3 +685,24 @@ class TestRoundEightKills:
                       "M15 Antalya, hard: Koyama vs Castelnuovo"):
             h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
             assert w == "ok" and h is K, (title, w)
+
+
+class TestRoundNineForwardFix:
+    """Round-9 fleet flagged it before the season could: Flashscore
+    writes indoor events 'hard (indoor)', which the surface-terminal
+    grammar would refuse from ~October. Accepted only surface-adjacent."""
+
+    def test_indoor_modifier_recovers_surface_adjacent(self):
+        for title in ("ITF WOMEN - SINGLES: W35 Helsinki (Finland), "
+                      "hard (indoor): Hiromasa Koyama vs Luca "
+                      "Castelnuovo",
+                      "M15 Antalya, clay (outdoor): Koyama vs "
+                      "Castelnuovo"):
+            h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
+            assert w == "ok" and h is K, (title, w)
+
+    def test_bare_indoor_does_not_attest(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama",
+                      "M15 Most Double Faults, indoor: Koyama vs "
+                      "Castelnuovo", WS, WE)
+        assert h is None, "indoor without an adjacent surface is nothing"
