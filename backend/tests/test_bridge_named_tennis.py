@@ -706,3 +706,34 @@ class TestRoundNineForwardFix:
                       "M15 Most Double Faults, indoor: Koyama vs "
                       "Castelnuovo", WS, WE)
         assert h is None, "indoor without an adjacent surface is nothing"
+
+
+class TestEventTitleBanner:
+    """Census run 9 (post title-fix): the funnel moved one gate down —
+    his_event_side_bad 247 + unsplittable 55, because the EVENT title
+    wears the same Flashscore banner. Same strip, same gates."""
+
+    BWE = ("ITF MEN - SINGLES: M15 Cap d'Agde (France), clay: "
+           "Hiromasa Koyama vs Luca Castelnuovo")
+
+    def test_bannered_event_title_recovers(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama", WT, WS, self.BWE)
+        assert w == "ok" and h is K
+        h, w, _ = run([K, C], "Luca Castelnuovo",
+                      "ITF MEN - SINGLES: M15 Antalya, hard: Koyama vs "
+                      "Castelnuovo", WS, self.BWE)
+        assert w == "ok" and h is C
+
+    def test_event_banner_gates_hold(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama", WT, WS,
+                      "ITF MEN - DOUBLES: M15 X, clay: Koyama vs "
+                      "Castelnuovo")
+        assert h is None and w == "event_prefix_derivative"
+        h, w, _ = run([K, C], "Hiromasa Koyama", WT, WS,
+                      "Most Double Faults: Hiromasa Koyama vs Luca "
+                      "Castelnuovo")
+        assert h is None and w == "event_prefix_unattested"
+
+    def test_plain_event_title_unchanged(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama", WT, WS, WE)
+        assert w == "ok" and h is K

@@ -1530,8 +1530,20 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
         return None, "nonlatin_content"
     if any(ch in str(his_event_title or "") for ch in "/&"):
         return None, "doubles_shape"
+    # The EVENT title wears the same Flashscore banner as the whale
+    # title (census 2026-08-27 run 9: his_event_side_bad 247 +
+    # unsplittable 55 — the banner tokens flooded the side split).
+    # Same treatment, same gates, distinct census reasons.
+    rawe = str(his_event_title or "")
+    eprefix, _, ematchup = rawe.rpartition(":")
+    if eprefix:
+        eptoks = _norm(eprefix).split()
+        if _named_title_danger(eptoks):
+            return None, "event_prefix_derivative"
+        if not _named_prefix_attested(eprefix):
+            return None, "event_prefix_unattested"
     esides = [" ".join(s.split()) for s in
-              re.split(r"\s+vs\.?\s+", _norm(his_event_title or ""))
+              re.split(r"\s+vs\.?\s+", _norm(ematchup))
               if s.strip()]
     if len(esides) != 2:
         return None, "his_event_unsplittable"
