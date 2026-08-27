@@ -537,6 +537,18 @@ _BRIDGE_SCOPE_TOKENS = frozenset({
     "agregado", "agregada", "aggregato", "gesamt", "samlet",
     "totale", "prolongacion", "prorroga", "verlangerung",
     "penales", "penaltis", "rigori"})
+
+_BRIDGE_SCOPE_STEMS = (
+    "prorrog", "prolong", "agregad", "aggregat", "verlanger",
+    "penalt", "penales", "qualif", "reserv", "juvenil", "femin",
+    "femen", "shootout", "playoff", "overtime", "aggregate")
+# Round 2.5: exact-token membership loses to MORPHOLOGY — the fifth
+# fleet resurrected the container class through Portuguese
+# 'Prorrogação' (folds to 'prorrogacao'; the list held 'prorroga').
+# A reviewed STEM family closes each inflection space with one entry.
+# Stems are >= 5 chars and checked by startswith; reviewed against
+# real club vocabulary ('penarol' diverges from 'penalt' at char 5).
+# Same review bar as the token list.
 # SCOPE IS NOT IDENTITY (round 2.2). The round-2.1 fleet executed an
 # admission where the whale feed hung his match pick off a tie-level
 # container ('SC Braga vs Austin FC (Aggregate)') and the fifth
@@ -632,6 +644,26 @@ def _code_prefix_hit(name: str, code: str) -> bool:
             or _collapsed_distinctive(name).startswith(code))
 
 
+def _folds_away(raw: str | None) -> bool:
+    """Does ascii-folding DELETE letters from this string?
+
+    Round 2.5, the fifth fleet's structural find: _norm is
+    NFKD -> encode('ascii','ignore'), which does not TRANSLITERATE
+    non-Latin scripts — it ERASES them. A Greek/Cyrillic/CJK scope
+    qualifier ('(Затяжний)', '(Παράταση)', '(加時)') vanished before
+    any gate could read it, leaving the clean template. Accented
+    Latin survives folding (é decomposes to e + combining mark);
+    any LETTER that would be deleted outright means the string
+    carries content our entire gate stack is blind to — and blind
+    refuses."""
+    import unicodedata as _ud
+
+    for ch in _ud.normalize("NFKD", str(raw or "")):
+        if ord(ch) > 127 and _ud.category(ch).startswith("L"):
+            return True
+    return False
+
+
 def _has_scope_token(norm_name: str) -> bool:
     """Any reviewed scope token in a normalized name string?
 
@@ -643,6 +675,8 @@ def _has_scope_token(norm_name: str) -> bool:
     too."""
     toks = norm_name.split()
     if any(t in _BRIDGE_SCOPE_TOKENS for t in toks):
+        return True
+    if any(t.startswith(_BRIDGE_SCOPE_STEMS) for t in toks):
         return True
     # Round 2.4: pairs were not enough — '(P l ay Off)'-style
     # 3+-fragment splits evaded the bigram, and '(S.O.)' arrived as
@@ -1018,6 +1052,8 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
             }
         return None, "slug_corroboration_failed"
     whale_lg = parts[0] if parts else ""
+    if _folds_away(his_event_title) or _folds_away(his_title):
+        return None, "nonlatin_content"
     sides_h = re.split(r"\s+vs\.?\s+", _norm(his_event_title or ""))
     sides_h = [" ".join(s.split()) for s in sides_h if s.strip()]
     if len(sides_h) != 2:
@@ -1093,6 +1129,9 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
             gate = "lined_or_signed"
         elif not r.get("intent"):
             gate = "no_intent"
+        elif _folds_away(r.get("question")) or \
+                _folds_away(r.get("event_title")):
+            gate = "nonlatin_content"
         elif not _bridge_ident_ok(r.get("identifier"), d, c1, c2,
                                   whale_lg):
             gate = "ident_suffix_or_date"
@@ -1118,14 +1157,20 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
                       else "multiple_candidates")
     blockers = set()
     for r in rows_all:
+        if _folds_away(r.get("question")):
+            # A question whose letters fold away raw-parses as a
+            # DIFFERENT string than the venue wrote. Unreadable rows
+            # in the pool make the blocking scan itself unreliable;
+            # unreliable refuses (round 2.5).
+            return None, "nonlatin_in_pool"
         m = _q_parse_raw(r.get("question"))
         if m is None:
             continue
         sd = _distinctive(" ".join(m.group("subj").split()))
         if sd == his_dist:
-            blockers.add(((r.get("identifier") or "").lower(),
+            blockers.add((str(r.get("identifier") or "").lower(),
                           _norm(r.get("question"))))
-    want = ((cands[0].get("identifier") or "").lower(),
+    want = (str(cands[0].get("identifier") or "").lower(),
             _norm(cands[0].get("question")))
     if blockers != {want}:
         if trace is not None:

@@ -1253,3 +1253,80 @@ class TestRoundFourKills:
         witness, and the league equality is their cross-check."""
         assert pm._BRIDGE_LEAGUES == frozenset(
             {"uecl", "uefa champions league"})
+
+
+class TestRoundFiveKills:
+    """The fifth fleet: two lenses DRY (multi-token twin space
+    exhausted down to the conceded market_slug residual; every floor
+    seam self-closed or folded into it). Fresh-eyes executed 2 kills,
+    both through _norm itself — pinned here with their structural
+    closures."""
+
+    def test_nonlatin_scope_qualifiers_refuse_not_vanish(self):
+        """FE-K1: ascii-folding DELETED '(Затяжний)'/'(Παράταση)'
+        before any gate could read it, leaving the clean template. A
+        letter that folding erases means content the gate stack is
+        blind to — and blind refuses, on either feed."""
+        t = " in the UECL match scheduled for Aug 27, 2026"
+        for qual in ("Затяжний", "Παράταση", "加時"):
+            bb = [row("atc-col-aus-scb-2026-08-27-ma", "yes",
+                      f"Will SC Braga Norte win against Austin FC{t} "
+                      f"({qual})?",
+                      ev="atc-col-aus-scb-2026-08-27",
+                      evt=f"Austin FC vs SC Braga Norte ({qual})")]
+            assert bridge(bb, bb, "Yes", TITLE, SLUG)[0] is None, qual
+        assert bridge(board(QB), board(QB), "Yes", TITLE, SLUG,
+                      evt="Austin FC vs SC Braga Norte (Доп время)") \
+            == (None, "nonlatin_content")
+        assert pm._folds_away("SC Braga (Затяжний)")
+        assert not pm._folds_away("Fenerbahçe SK")
+        assert not pm._folds_away("Bamin Real Potosí")
+
+    def test_scope_morphology_refuses_via_stems(self):
+        """FE-K2: 'Prorrogação' (folds to 'prorrogacao') walked past
+        the listed 'prorroga' — exact tokens lose to inflection. The
+        reviewed stem family closes each morphology space."""
+        b = board(QB, QA, QD)
+        for scope in ("Prorrogação", "Prorrogacion", "Aggregata",
+                      "Verlangerungen", "Qualifikation"):
+            assert bridge(b, b, "Yes", TITLE, SLUG,
+                          evt=f"SC Braga Norte vs Austin FC "
+                              f"({scope})") == \
+                (None, "his_event_has_scope"), scope
+        assert not pm._has_scope_token("penarol")
+        assert not pm._has_scope_token("sc braga norte")
+
+    def test_unreadable_pool_rows_refuse_the_pool(self):
+        """A non-Latin question anywhere in rows_all makes the
+        blocking scan unreliable (it would scan a scrubbed string);
+        the pool refuses rather than trusting a blind read."""
+        b = board(QB)
+        bad = row("atc-col-aus-scb-2026-08-27-mz", "yes",
+                  "Will SC Braga Norte win against Austin FC (Доп "
+                  "время) in the UECL match scheduled for Aug 27, "
+                  "2026?")
+        allr = b + [bad]
+        assert bridge(b, allr, "Yes", TITLE, SLUG) == \
+            (None, "nonlatin_in_pool")
+
+    def test_blocking_scan_coerces_non_string_identifiers(self):
+        """Fifth-fleet hygiene: a list/int identifier on a raw-parsing
+        blocker row must not raise mid-scan."""
+        b = board(QB)
+        weird = dict(row("x", "yes", QB), identifier=[1, 2])
+        allr = b + [weird]
+        h, why = bridge(b, allr, "Yes", TITLE, SLUG)
+        assert h is None and why == "event_scan_ambiguous"
+
+    def test_cska_digit_family_stays_dead_by_charset(self):
+        """Twin-hunter finding, pinned before it can drift: CSKA
+        Sofia / CSKA 1948 (a real same-season qualifying twin family)
+        are separated ONLY by the [a-z ] charset and the digit
+        refusals. Widening either silently reopens the family."""
+        assert "0" not in pm._BRIDGE_Q_STRICT_RE.pattern.split(
+            "(?P<qday>")[0].split("subj>")[1]
+        b = board("Will CSKA 1948 win against Austin FC in the UECL "
+                  "match scheduled for Aug 27, 2026?")
+        assert bridge(b, b, "Yes", "Will CSKA 1948 win on 2026-08-27?",
+                      "uecl-csk-aus-2026-08-27-csk",
+                      evt="CSKA 1948 vs Austin FC")[0] is None
