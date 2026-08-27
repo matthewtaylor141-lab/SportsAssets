@@ -529,7 +529,14 @@ _BRIDGE_SCOPE_TOKENS = frozenset({
     "exhibition", "testimonial", "amateur", "iii", "iv",
     "femenino", "feminino", "femenina", "femenil", "damen", "frauen",
     "feminine", "reservas", "reservi", "juvenil", "juveniles",
-    "sub20", "sub21", "sub23", "shoot", "play"})
+    "sub20", "sub21", "sub23", "shoot", "play",
+    # Round 2.4: the fourth fleet resurrected the aggregate smuggle
+    # through Portuguese ('Agregado'). The list stays a BELT — the
+    # name-slot vocabulary is asymptotic by nature (documented below)
+    # — but every executed word joins it.
+    "agregado", "agregada", "aggregato", "gesamt", "samlet",
+    "totale", "prolongacion", "prorroga", "verlangerung",
+    "penales", "penaltis", "rigori"})
 # SCOPE IS NOT IDENTITY (round 2.2). The round-2.1 fleet executed an
 # admission where the whale feed hung his match pick off a tie-level
 # container ('SC Braga vs Austin FC (Aggregate)') and the fifth
@@ -637,8 +644,24 @@ def _has_scope_token(norm_name: str) -> bool:
     toks = norm_name.split()
     if any(t in _BRIDGE_SCOPE_TOKENS for t in toks):
         return True
-    return any(a + b in _BRIDGE_SCOPE_TOKENS
-               for a, b in zip(toks, toks[1:]))
+    # Round 2.4: pairs were not enough — '(P l ay Off)'-style
+    # 3+-fragment splits evaded the bigram, and '(S.O.)' arrived as
+    # 's o', two letters that can never re-join to 'shootout'. All
+    # adjacent runs up to 4 fragments re-join; any SINGLE-LETTER
+    # token in a name slot refuses outright (no attested club name
+    # carries one — 'SC Braga B' is already scope-refused via 'b',
+    # and an abbreviation dot-split is exactly this shape).
+    if any(len(t) == 1 and t not in ("y", "e") for t in toks):
+        # 'y'/'e' are the Romance conjunctions real club names carry
+        # ('Defensa y Justicia', 'Gimnasia y Esgrima') — exempted,
+        # reviewed. Every other single letter refuses: '(S.O.)'
+        # arrives as 's o', and no attested club name carries one.
+        return True
+    for n in (2, 3, 4):
+        for i in range(len(toks) - n + 1):
+            if "".join(toks[i:i + n]) in _BRIDGE_SCOPE_TOKENS:
+                return True
+    return False
 
 
 def _bridge_title_subject(his_title: str | None,
@@ -809,7 +832,7 @@ def _bridge_ident_ok(identifier: str | None, slug_date: str,
     venue 'lpb', same game) is measured production behavior."""
     from ..copy_sports import _post_date_tokens
 
-    parts = [p for p in (identifier or "").lower().split("-") if p]
+    parts = [p for p in str(identifier or "").lower().split("-") if p]
     toks = _post_date_tokens(parts)
     if toks is None or len(toks) > 1:
         return False
@@ -853,7 +876,7 @@ def _bridge_event_slug_ok(event_slug: str | None, slug_date: str,
     fleet rode sub-market container slugs ('ucl-sha-mid-AGG-...') and
     variant suffixes that no gate read. A self-description is a
     witness; now it testifies."""
-    parts = [p for p in (event_slug or "").lower().split("-") if p]
+    parts = [p for p in str(event_slug or "").lower().split("-") if p]
     for i in range(len(parts) - 2):
         if (re.fullmatch(r"\d{4}", parts[i]) and parts[i + 1].isdigit()
                 and parts[i + 2].isdigit()):
@@ -863,13 +886,15 @@ def _bridge_event_slug_ok(event_slug: str | None, slug_date: str,
             if parts[i + 3:]:
                 return False
             body = parts[:i]
-            if len(body) == 4:
-                # The dropped prefix must be the row's own identifier
-                # prefix — round-3 shape-lens finding: an arbitrary
-                # blob in the prefix position was silently discarded.
-                if body[0] != ident_prefix:
-                    return False
-                body = body[1:]
+            if len(body) != 4:
+                # Round 2.4: the attested event_slug shape carries a
+                # venue prefix; a 3-body slug skipped the prefix
+                # check entirely (fourth-fleet finding). Exactly four,
+                # fail closed.
+                return False
+            if not ident_prefix or body[0] != ident_prefix:
+                return False
+            body = body[1:]
             if len(body) != 3 or {body[1], body[2]} != {c1, c2}:
                 return False
             return (body[0] == whale_lg
@@ -1001,6 +1026,23 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
         # cannot be split refuses — fail closed; the probe's
         # bridge['his'] channel measures what this costs.
         return None, "his_event_unsplittable"
+    if all(len(_distinctive(s)) < 2 for s in sides_h):
+        # THE TWIN CLASS, CLOSED INTERIM (round 2.4). The fourth
+        # fleet executed wrong-game admissions with REAL club pairs:
+        # 'FC Rapid' (Wien) taking FC Rapid Bucuresti's fixture,
+        # 'FC Dinamo' (Zagreb) taking Kyiv's — furniture clears a
+        # raw-token floor while carrying zero identity, and UECL is
+        # saturated with Rapid/Dinamo/Union/Sparta/Slavia twins. When
+        # BOTH sides reduce to one distinctive token, no readable
+        # witness separates same-named fixtures; the one that could —
+        # market_slug, which carries city/country — is captured by
+        # the probe but its production shape is UNATTESTED, and
+        # grammars built on imagined shapes recover zero. So the
+        # class refuses until the census attests market_slug and a
+        # round-2.4b gate reopens it on the real witness. Phase 0
+        # makes this free: nothing trades on the bridge, so the cost
+        # is a census count, not a dollar.
+        return None, "sides_single_distinctive"
     if any(len(s.split()) < 2 for s in sides_h):
         # EVIDENCE FLOOR (round 2.3). The round-3 fleet executed an
         # identical-terse wrong-game admission: both feeds rendering
@@ -1056,8 +1098,8 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
             gate = "ident_suffix_or_date"
         elif not _bridge_event_slug_ok(
                 r.get("event_slug"), d, c1, c2, whale_lg,
-                ((r.get("identifier") or "").lower().split("-")
-                 or [""])[0]):
+                next(iter([p for p in str(r.get("identifier") or "")
+                           .lower().split("-") if p]), "")):
             gate = "event_slug_shape"
         else:
             qd, qwhy = _q_parse_strict(r.get("question"), his_dist,

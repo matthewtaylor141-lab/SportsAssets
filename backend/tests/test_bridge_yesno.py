@@ -37,19 +37,19 @@ import inspect
 from sportsassets.workers import premap as pm
 
 SLUG = "col-aus-scb-2026-08-27-scb"
-TITLE = "Will SC Braga win on 2026-08-27?"
+TITLE = "Will SC Braga Norte win on 2026-08-27?"
 TAIL = " in the UECL match scheduled for Aug 27, 2026?"
-QB = "Will SC Braga win against Austin FC" + TAIL
-QA = "Will Austin FC win against SC Braga" + TAIL
-QD = ("Will the UECL match Austin FC vs SC Braga scheduled for "
+QB = "Will SC Braga Norte win against Austin FC" + TAIL
+QA = "Will Austin FC win against SC Braga Norte" + TAIL
+QD = ("Will the UECL match Austin FC vs SC Braga Norte scheduled for "
       "Aug 27, 2026 end in a draw?")
 # Round 1's recovery wording — now a REFUSAL shape (unselectable alone,
 # blocking beside the true tailed market).
-QB_BARE = "Will SC Braga win against Austin FC?"
+QB_BARE = "Will SC Braga Norte win against Austin FC?"
 
 
 def row(ident, side, q, ev="atc-col-aus-scb-2026-08-27",
-        evt="Austin FC vs SC Braga", line="", signed="",
+        evt="Austin FC vs SC Braga Norte", line="", signed="",
         intent="ORDER_INTENT_BUY_LONG"):
     return {"identifier": ident, "side_norm": side, "question": q,
             "event_slug": ev, "event_title": evt, "line": line,
@@ -69,7 +69,7 @@ def board(*qs, date="2026-08-27"):
 # executed kill in the round-2.1 verification fleet rode a channel
 # with no external anchor; his feed's event title names his ACTUAL
 # opponent, and the candidate question's opponent must set-equal it.
-HIS_EVT = "Austin FC vs SC Braga"
+HIS_EVT = "Austin FC vs SC Braga Norte"
 
 
 def bridge(rows_kept, rows_all, outcome, title, slug, evt=HIS_EVT):
@@ -103,13 +103,13 @@ class TestBaselineRecovery:
 
     def test_month_name_title_resolves_and_mismatch_refuses(self):
         b = board(QB, QA, QD)
-        assert bridge(b, b, "Yes", "Will SC Braga win on August 27?",
+        assert bridge(b, b, "Yes", "Will SC Braga Norte win on August 27?",
                       SLUG)[1] == "ok"
-        assert bridge(b, b, "Yes", "Will SC Braga win on August 28?",
+        assert bridge(b, b, "Yes", "Will SC Braga Norte win on August 28?",
                       SLUG) == (None, "title_date_mismatch")
-        assert bridge(b, b, "Yes", "Will SC Braga win on 2026-08-28?",
+        assert bridge(b, b, "Yes", "Will SC Braga Norte win on 2026-08-28?",
                       SLUG) == (None, "title_date_mismatch")
-        assert bridge(b, b, "Yes", "Will SC Braga win on Floop 27?",
+        assert bridge(b, b, "Yes", "Will SC Braga Norte win on Floop 27?",
                       SLUG) == (None, "title_month_unknown")
 
     def test_the_date_never_reaches_the_line_parsers(self):
@@ -133,29 +133,29 @@ class TestVenueQuestionSinks:
     winners, covers, totals, halftime) to the round-1 constructions."""
 
     SINKS = [
-        "Will SC Braga win or draw against Austin FC?",
-        "Will SC Braga win the first half against Austin FC?",
-        "Will SC Braga win to nil against Austin FC?",
-        "Will SC Braga win without conceding against Austin FC?",
-        "Will SC Braga win by 2 or more goals against Austin FC?",
-        "Will SC Braga win in their match on aggregate?",
-        "Will SC Braga win in their match in extra time?",
-        "Will SC Braga win in their match by two or more goals?",
-        "Will SC Braga win against Austin FC in extra time?",
-        "Will SC Braga win against Austin FC on aggregate?",
-        "Will SC Braga win against Austin FC in game 2 of the "
+        "Will SC Braga Norte win or draw against Austin FC?",
+        "Will SC Braga Norte win the first half against Austin FC?",
+        "Will SC Braga Norte win to nil against Austin FC?",
+        "Will SC Braga Norte win without conceding against Austin FC?",
+        "Will SC Braga Norte win by 2 or more goals against Austin FC?",
+        "Will SC Braga Norte win in their match on aggregate?",
+        "Will SC Braga Norte win in their match in extra time?",
+        "Will SC Braga Norte win in their match by two or more goals?",
+        "Will SC Braga Norte win against Austin FC in extra time?",
+        "Will SC Braga Norte win against Austin FC on aggregate?",
+        "Will SC Braga Norte win against Austin FC in game 2 of the "
         "doubleheader?",
-        "Will SC Braga win against Austin FC in the second game?",
-        "Will SC Braga win on penalties?",
-        "Will SC Braga keep a clean sheet?",
+        "Will SC Braga Norte win against Austin FC in the second game?",
+        "Will SC Braga Norte win on penalties?",
+        "Will SC Braga Norte keep a clean sheet?",
         "Will both teams score?",
         # Round-2 corpus, verbatim venue derivative families:
-        "Will the SC Braga win the 7th inning vs the Austin FC?",
-        "Will the SC Braga cover +17.5 vs the Austin FC in SCB vs AUS?",
+        "Will the SC Braga Norte win the 7th inning vs the Austin FC?",
+        "Will the SC Braga Norte cover +17.5 vs the Austin FC in SCB vs AUS?",
         "Will the total in SCB vs AUS be more than 4.5?",
-        "Will SC Braga lead Austin FC at halftime?",
+        "Will SC Braga Norte lead Austin FC at halftime?",
         "Will SCB vs AUS be tied at halftime?",
-        "Will the first 5 innings of Austin FC vs SC Braga end in a "
+        "Will the first 5 innings of Austin FC vs SC Braga Norte end in a "
         "tie?",
     ]
 
@@ -171,10 +171,10 @@ class TestVenueQuestionSinks:
         unparseable different-proposition is invisible, and the true
         market is selected. Both directions are load-bearing: partial
         capture is a measured production state."""
-        b = board(QB, "Will SC Braga win against Austin FC in extra "
+        b = board(QB, "Will SC Braga Norte win against Austin FC in extra "
                       "time?")
         assert bridge(b, b, "Yes", TITLE, SLUG)[0] is None
-        b = board(QB, "Will SC Braga win or draw against Austin FC?")
+        b = board(QB, "Will SC Braga Norte win or draw against Austin FC?")
         h, why = bridge(b, b, "Yes", TITLE, SLUG)
         assert why == "ok" and h["question"] == QB
 
@@ -198,7 +198,7 @@ class TestRoundOneWordingsNowRefuse:
 
     def test_vs_tail_alone_refuses_and_blocks_beside(self):
         """D7: 'vs' appears in zero observed win-questions."""
-        qvs = "Will SC Braga win vs Austin FC" + TAIL
+        qvs = "Will SC Braga Norte win vs Austin FC" + TAIL
         b = board(qvs)
         assert bridge(b, b, "Yes", TITLE, SLUG) == \
             (None, "no_candidate_row")
@@ -207,10 +207,10 @@ class TestRoundOneWordingsNowRefuse:
             (None, "event_scan_ambiguous")
 
     def test_their_match_and_on_date_forms_refuse_alone(self):
-        for q in ("Will SC Braga win against Austin FC in their "
+        for q in ("Will SC Braga Norte win against Austin FC in their "
                   "match?",
-                  "Will SC Braga win against Austin FC on Aug 27?",
-                  "Will SC Braga win against Austin FC on August 27 "
+                  "Will SC Braga Norte win against Austin FC on Aug 27?",
+                  "Will SC Braga Norte win against Austin FC on August 27 "
                   "2026?"):
             b = board(q)
             assert bridge(b, b, "Yes", TITLE, SLUG)[0] is None, q
@@ -277,11 +277,11 @@ class TestHistoricalIncidents:
 
 class TestConstructedAttacks:
     def test_reserve_team_marker_survives_stripping(self):
-        """'SC Braga B' must never merge into 'SC Braga' — which is why
+        """'SC Braga Norte B' must never merge into 'SC Braga Norte' — which is why
         GENERIC_CLUB_TOKENS is furniture-only and there is no
         length-based token stripping."""
         b = board(QB)
-        assert bridge(b, b, "Yes", "Will SC Braga B win on 2026-08-27?",
+        assert bridge(b, b, "Yes", "Will SC Braga Norte B win on 2026-08-27?",
                       SLUG)[0] is None
         assert pm._distinctive("sc braga b") == frozenset({"braga", "b"})
 
@@ -297,13 +297,13 @@ class TestConstructedAttacks:
     def test_both_teams_title_refuses(self):
         b = board(QB)
         assert bridge(b, b, "Yes",
-                      "Will SC Braga win vs Austin FC on 2026-08-27?",
+                      "Will SC Braga Norte win vs Austin FC on 2026-08-27?",
                       SLUG) == (None, "title_not_win_shape")
 
     def test_negated_title_refuses(self):
         b = board(QB)
         assert bridge(b, b, "Yes",
-                      "Will SC Braga not win on 2026-08-27?",
+                      "Will SC Braga Norte not win on 2026-08-27?",
                       SLUG)[0] is None
 
     def test_same_city_code_collision_lands_as_refusal(self):
@@ -372,7 +372,7 @@ class TestConstructedAttacks:
 
     def test_dateless_and_bare_slugs_refuse(self):
         b = board(QB)
-        assert bridge(b, b, "Yes", "Will SC Braga win?",
+        assert bridge(b, b, "Yes", "Will SC Braga Norte win?",
                       "col-aus-scb-scb")[0] is None
         assert bridge(b, b, "Yes", TITLE,
                       "col-aus-scb-2026-08-27") == \
@@ -445,7 +445,7 @@ class TestRoundTwoKills:
         Plate ARG/URU homonym passes every name gate."""
         for lg in ("Greek Basket League", "UEFA Youth League",
                    "UEFA Womens Champions League", "MLB"):
-            q = ("Will SC Braga win against Austin FC in the "
+            q = ("Will SC Braga Norte win against Austin FC in the "
                  f"{lg} match scheduled for Aug 27, 2026?")
             b = board(q)
             assert bridge(b, b, "Yes", TITLE, SLUG) == \
@@ -467,12 +467,12 @@ class TestRoundTwoKills:
         """D4: scope words hiding inside the league slot."""
         for lg in ("first half of the UECL", "first leg of the UECL",
                    "UECL playoff"):
-            q = ("Will SC Braga win against Austin FC in the "
+            q = ("Will SC Braga Norte win against Austin FC in the "
                  f"{lg} match scheduled for Aug 27, 2026?")
             b = board(q)
             assert bridge(b, b, "Yes", TITLE, SLUG) == \
                 (None, "no_candidate_row"), lg
-        q = ("Will SC Braga win against Austin FC in the first half "
+        q = ("Will SC Braga Norte win against Austin FC in the first half "
              "of the UECL match scheduled for Aug 27, 2026?")
         b = board(QB, q)
         assert bridge(b, b, "Yes", TITLE, SLUG) == \
@@ -490,11 +490,11 @@ class TestRoundTwoKills:
         b = board(QB.replace("Aug 27", "Floop 27"))
         assert bridge(b, b, "Yes", TITLE, SLUG) == \
             (None, "no_candidate_row")
-        qsept = ("Will SC Braga win against Austin FC in the UECL "
+        qsept = ("Will SC Braga Norte win against Austin FC in the UECL "
                  "match scheduled for Sept 3, 2026?")
         b = board(qsept, date="2026-09-03")
         assert bridge(b, b, "Yes",
-                      "Will SC Braga win on 2026-09-03?",
+                      "Will SC Braga Norte win on 2026-09-03?",
                       "col-aus-scb-2026-09-03-scb") == \
             (None, "no_candidate_row")
 
@@ -540,19 +540,19 @@ class TestRoundTwoKills:
         def wrow(q, evt):
             return row("atc-uecl-bra-mid-2026-08-27-ma", "yes", q,
                        ev="atc-uecl-bra-mid-2026-08-27", evt=evt)
-        tb = "Will SC Braga win on 2026-08-27?"
+        tb = "Will SC Braga Norte win on 2026-08-27?"
         sb = "uecl-bra-mid-2026-08-27-bra"
-        bb = [wrow("Will SC Braga win against West Midlands Police FC "
+        bb = [wrow("Will SC Braga Norte win against West Midlands Police FC "
                    "in the UECL match scheduled for Aug 27, 2026?",
-                   "SC Braga vs West Midlands Police FC")]
+                   "SC Braga Norte vs West Midlands Police FC")]
         assert bridge(bb, bb, "Yes", tb, sb,
-                      evt="SC Braga vs West Midlands Police FC") == \
+                      evt="SC Braga Norte vs West Midlands Police FC") == \
             (None, "no_candidate_row")
-        bb = [wrow("Will SC Braga win against FC Midtjylland in the "
+        bb = [wrow("Will SC Braga Norte win against FC Midtjylland in the "
                    "UECL match scheduled for Aug 27, 2026?",
-                   "SC Braga vs FC Midtjylland")]
+                   "SC Braga Norte vs FC Midtjylland")]
         assert bridge(bb, bb, "Yes", tb, sb,
-                      evt="SC Braga vs FC Midtjylland")[1] == "ok"
+                      evt="SC Braga Norte vs FC Midtjylland")[1] == "ok"
 
     def test_the_delta_c_kill_boundary_sk_rapid(self):
         """D9: the killed loosening stripped 'sk', merging SK Rapid
@@ -603,14 +603,14 @@ class TestRoundTwoKills:
         market riding a dated moneyline-shaped slug — the tournament
         constructed that admission through shipped code."""
         b = board(QB, QA, QD)
-        assert bridge(b, b, "Yes", "Will SC Braga win?", SLUG) == \
+        assert bridge(b, b, "Yes", "Will SC Braga Norte win?", SLUG) == \
             (None, "title_undated")
 
     def test_generic_pad_opponent_refuses_via_token_cap(self):
         """D12: set-equality alone admits furniture padding; the
         5-token cap refuses it. The padded row still raw-parses, so
         beside the true market it blocks."""
-        qpad = ("Will SC Braga win against FK Austria Wien de the "
+        qpad = ("Will SC Braga Norte win against FK Austria Wien de the "
                 "club in the UECL match scheduled for Aug 27, 2026?")
         b = board(qpad)
         assert bridge(b, b, "Yes", TITLE, SLUG) == \
@@ -630,8 +630,8 @@ class TestHonestMisses:
         other='aus' — 'fk' is not in the reviewed ten, so neither form
         starts with 'aus'. The probe's shadow-eval sizes this class."""
         bb = [row("atc-col-aus-scb-2026-08-27-ma", "yes",
-                  "Will SC Braga win against FK Austria Wien" + TAIL,
-                  evt="SC Braga vs FK Austria Wien")]
+                  "Will SC Braga Norte win against FK Austria Wien" + TAIL,
+                  evt="SC Braga Norte vs FK Austria Wien")]
         assert bridge(bb, bb, "Yes", TITLE, SLUG) == \
             (None, "no_candidate_row")
 
@@ -784,9 +784,9 @@ class TestRoundTwoPointOneKills:
     def _srow(self, ident, q, evt, ev="uecl-scb-aus-2026-08-27"):
         return row(ident, "yes", q, ev=ev, evt=evt)
 
-    TB = "Will SC Braga win on 2026-08-27?"
+    TB = "Will SC Braga Norte win on 2026-08-27?"
     SB = "col-aus-scb-2026-08-27-scb"
-    EB = "Austin FC vs SC Braga"
+    EB = "Austin FC vs SC Braga Norte"
 
     def test_aggregate_subevent_smuggle_refuses(self):
         """D-K1: '(Aggregate)' melted into the opp slot and the
@@ -795,20 +795,20 @@ class TestRoundTwoPointOneKills:
         and the identifier's 'agg' body token independently fails the
         shape gate."""
         bb = [self._srow("atc-uecl-scb-aus-agg-2026-08-27-ma",
-                         "Will SC Braga win against Austin FC "
+                         "Will SC Braga Norte win against Austin FC "
                          "(Aggregate) in the UECL match scheduled for "
                          "Aug 27, 2026?",
-                         "SC Braga vs Austin FC (Aggregate)")]
+                         "SC Braga Norte vs Austin FC (Aggregate)")]
         assert bridge(bb, bb, "Yes", self.TB, self.SB, evt=self.EB) == \
             (None, "no_candidate_row")
 
     def test_first_half_subevent_smuggle_refuses(self):
         """D-K2: same channel, '(First Half)'."""
         bb = [self._srow("atc-uecl-scb-aus-fh-2026-08-27-ma",
-                         "Will SC Braga win against Austin FC "
+                         "Will SC Braga Norte win against Austin FC "
                          "(First Half) in the UECL match scheduled "
                          "for Aug 27, 2026?",
-                         "SC Braga vs Austin FC (First Half)")]
+                         "SC Braga Norte vs Austin FC (First Half)")]
         assert bridge(bb, bb, "Yes", self.TB, self.SB, evt=self.EB) == \
             (None, "no_candidate_row")
 
@@ -816,10 +816,10 @@ class TestRoundTwoPointOneKills:
         """D-K3: fully inline scope, exactly at the 5-token cap. The
         fifth witness refuses regardless of the cap arithmetic."""
         bb = [self._srow("atc-uecl-scb-aus-et-2026-08-27-ma",
-                         "Will SC Braga win against Austin FC in "
+                         "Will SC Braga Norte win against Austin FC in "
                          "extra time in the UECL match scheduled for "
                          "Aug 27, 2026?",
-                         "SC Braga vs Austin FC in Extra Time")]
+                         "SC Braga Norte vs Austin FC in Extra Time")]
         assert bridge(bb, bb, "Yes", self.TB, self.SB, evt=self.EB) == \
             (None, "no_candidate_row")
 
@@ -924,11 +924,11 @@ class TestRoundTwoPointOneKills:
         assert bridge(b, b, "Yes", TITLE, SLUG, evt="UECL Playoffs") \
             == (None, "his_event_unsplittable")
         assert bridge(b, b, "Yes", TITLE, SLUG,
-                      evt="SC Braga vs SC Braga") == \
+                      evt="SC Braga Norte vs SC Braga Norte") == \
             (None, "his_event_side_mismatch")
         assert bridge(b, b, "Yes", TITLE, SLUG,
                       evt="FC Porto vs Benfica") == \
-            (None, "his_event_side_thin")
+            (None, "sides_single_distinctive")
 
     def test_whale_derivative_league_token_is_recorded_not_trusted(self):
         """D-K4 (residual, consciously priced): the whale slug's
@@ -960,7 +960,7 @@ class TestRoundTwoPointTwoKills:
     identifier's post-date slot, the event_slug body, or amputated by
     truncation — plus terse renderings collapsing name twins."""
 
-    TB = "Will SC Braga win on 2026-08-27?"
+    TB = "Will SC Braga Norte win on 2026-08-27?"
     SB = "col-aus-scb-2026-08-27-scb"
     T = " in the UECL match scheduled for Aug 27, 2026?"
 
@@ -973,13 +973,13 @@ class TestRoundTwoPointTwoKills:
         venue's aggregate market — {'austin','aggregate'} equalled
         itself. A scope token in his own event title is a scope
         disagreement inside his feed; unresolvable refuses."""
-        q = ("Will SC Braga win against Austin FC (Aggregate)"
+        q = ("Will SC Braga Norte win against Austin FC (Aggregate)"
              + self.T)
         bb = [self._r("atc-uecl-scb-aus-2026-08-27-mc", q,
                       "atc-uecl-scb-aus-2026-08-27",
-                      "SC Braga vs Austin FC (Aggregate)")]
+                      "SC Braga Norte vs Austin FC (Aggregate)")]
         assert bridge(bb, bb, "Yes", self.TB, self.SB,
-                      evt="SC Braga vs Austin FC (Aggregate)") == \
+                      evt="SC Braga Norte vs Austin FC (Aggregate)") == \
             (None, "his_event_has_scope")
 
     def test_double_terse_name_twins_refuse(self):
@@ -1001,7 +1001,7 @@ class TestRoundTwoPointTwoKills:
         assert bridge(b2, b2, "Yes", "Will Rapid win on 2026-08-27?",
                       "uecl-rap-uni-2026-08-27-rap",
                       evt="Rapid vs Union") == \
-            (None, "his_event_side_thin")
+            (None, "sides_single_distinctive")
 
     def test_alpha_scope_post_date_tokens_refuse(self):
         """IG-1: '-agg'/'-fh'/'-et'/'-yth' post-date tokens are
@@ -1010,7 +1010,7 @@ class TestRoundTwoPointTwoKills:
         for tok in ("agg", "fh", "et", "yth"):
             bb = [self._r(f"atc-uecl-aus-scb-2026-08-27-{tok}",
                           QB, "atc-uecl-aus-scb-2026-08-27",
-                          "Austin FC vs SC Braga")]
+                          "Austin FC vs SC Braga Norte")]
             assert bridge(bb, bb, "Yes", self.TB, self.SB) == \
                 (None, "no_candidate_row"), tok
         assert pm._BRIDGE_MARKET_TOKEN_RE.fullmatch("ma")
@@ -1022,7 +1022,7 @@ class TestRoundTwoPointTwoKills:
         reviewed scope token there is a sub-market marker."""
         bb = [self._r("atc-agg-aus-scb-2026-08-27-ma", QB,
                       "atc-agg-aus-scb-2026-08-27",
-                      "Austin FC vs SC Braga")]
+                      "Austin FC vs SC Braga Norte")]
         assert bridge(bb, bb, "Yes", self.TB, self.SB) == \
             (None, "no_candidate_row")
 
@@ -1089,12 +1089,12 @@ class TestRoundTwoPointTwoKills:
         back toward set-equality is what the round-2.1 fleet killed."""
         bb = board(QB)
         assert bridge(bb, bb, "Yes", TITLE, SLUG,
-                      evt="Austin vs SC Braga") == \
+                      evt="Austin vs SC Braga Norte") == \
             (None, "his_event_side_thin")
         # Two-token drift ('Austin City' for 'Austin FC') clears the
         # floor and still refuses at raw feed agreement:
         assert bridge(bb, bb, "Yes", TITLE, SLUG,
-                      evt="Austin City vs SC Braga") == \
+                      evt="Austin City vs SC Braga Norte") == \
             (None, "no_candidate_row")
 
 
@@ -1116,7 +1116,7 @@ class TestRoundThreeKills:
                    "damen", "friendly", "iii"):
             bb = [row(f"atc-{lg}-aus-scb-2026-08-27-ma", "yes", QB,
                       ev=f"atc-{lg}-aus-scb-2026-08-27",
-                      evt="Austin FC vs SC Braga")]
+                      evt="Austin FC vs SC Braga Norte")]
             assert bridge(bb, bb, "Yes", TITLE, SLUG) == \
                 (None, "no_candidate_row"), lg
 
@@ -1135,7 +1135,7 @@ class TestRoundThreeKills:
         assert bridge(b2, b2, "Yes", "Will Rapid win on 2026-08-27?",
                       "uecl-rap-uni-2026-08-27-rap",
                       evt="Rapid vs Union") == \
-            (None, "his_event_side_thin")
+            (None, "sides_single_distinctive")
         for fn in (pm.resolve_explain,):
             assert '"market_slug"' in inspect.getsource(fn)
 
@@ -1146,7 +1146,7 @@ class TestRoundThreeKills:
         synonyms are listed now and adjacent pairs re-join."""
         for scope in ("Overall", "Combined", "To Qualify", "AET",
                       "Shoot-Out", "Play-Off", "Cumulative"):
-            evt = f"SC Braga vs Austin FC ({scope})"
+            evt = f"SC Braga Norte vs Austin FC ({scope})"
             b = board(QB)
             assert bridge(b, b, "Yes", TITLE, SLUG, evt=evt) == \
                 (None, "his_event_has_scope"), scope
@@ -1162,6 +1162,94 @@ class TestRoundThreeKills:
         back to unread is what the translation kills rode in on."""
         bb = [row("atc-lpb-aus-scb-2026-08-27-ma", "yes", QB,
                   ev="atc-lpb-aus-scb-2026-08-27",
-                  evt="Austin FC vs SC Braga")]
+                  evt="Austin FC vs SC Braga Norte")]
         assert bridge(bb, bb, "Yes", TITLE, SLUG) == \
             (None, "no_candidate_row")
+
+
+class TestRoundFourKills:
+    """The fourth fleet's 5 executed kills, pinned. The league-equality
+    lens came back DRY (second clean lens). The remaining kills all
+    reduced to one truth: for fixtures whose sides carry a single
+    identity token, text cannot rule out a same-named twin — and the
+    one witness that can (market_slug, carrying city/country) is
+    captured but unattested. Phase 0 makes the interim refusal free."""
+
+    def test_furniture_padded_twins_refuse(self):
+        """TT-K1/K2: 'FC Rapid' (Wien) took FC Rapid Bucuresti's
+        fixture, 'FC Dinamo' (Zagreb) took Kyiv's — two raw tokens,
+        ONE identity token, twins real. Both-sides-single-distinctive
+        refuses until market_slug is attested and gated."""
+        t = " in the UECL match scheduled for Aug 27, 2026?"
+        for evt, q, title, slug in (
+            ("FC Rapid vs FC Union",
+             "Will FC Rapid win against FC Union" + t,
+             "Will FC Rapid win on 2026-08-27?",
+             "uecl-rap-uni-2026-08-27-rap"),
+            ("FC Dinamo vs FC Shakhtar",
+             "Will FC Dinamo win against FC Shakhtar" + t,
+             "Will FC Dinamo win on 2026-08-27?",
+             "uecl-din-sha-2026-08-27-din")):
+            parts = slug.split("-")
+            ev = "atc-" + "-".join(parts[:-1])
+            bb = [row(f"atc-{slug[:-4]}-ma".replace("--", "-"), "yes",
+                      q, ev=ev, evt=evt)]
+            assert bridge(bb, bb, "Yes", title, slug, evt=evt) == \
+                (None, "sides_single_distinctive"), evt
+
+    def test_the_interim_cost_is_the_measured_corpus_class(self):
+        """CONSCIOUS COST, loudly pinned: the flagship measured
+        recovery shape (SC Braga vs Austin FC — both single identity
+        tokens) is refused by the same floor. Phase 0 means this
+        costs a census count, not a dollar; the reopening path is the
+        market_slug gate once the now-deployed telemetry attests its
+        production shape. This pin EXPECTS the refusal so the reopen
+        is a reviewed change, not a drift."""
+        t = " in the UECL match scheduled for Aug 27, 2026?"
+        bb = [row("atc-col-aus-scb-2026-08-27-ma", "yes",
+                  "Will SC Braga win against Austin FC" + t,
+                  ev="atc-col-aus-scb-2026-08-27",
+                  evt="Austin FC vs SC Braga")]
+        assert bridge(bb, bb, "Yes", "Will SC Braga win on 2026-08-27?",
+                      "col-aus-scb-2026-08-27-scb",
+                      evt="Austin FC vs SC Braga") == \
+            (None, "sides_single_distinctive")
+
+    def test_translated_aggregate_and_abbreviations_refuse(self):
+        """RS-K1/RS-K3: '(Agregado)' walked the English-only list;
+        '(S.O.)' split to letters the bigram could never re-join;
+        'P l ay Off' evaded pairs. Listed, single-letter-refused (with
+        the y/e conjunction exemption), and n-grams to 4 re-join."""
+        for scope in ("Agregado", "S.O.", "P l ay Off", "Prorroga"):
+            evt = f"SC Braga Norte vs Austin FC ({scope})"
+            b = board(QB, QA, QD)
+            assert bridge(b, b, "Yes", TITLE, SLUG, evt=evt) == \
+                (None, "his_event_has_scope"), scope
+        assert pm._has_scope_token("s o")
+        assert pm._has_scope_token("p l ay off")
+        assert not pm._has_scope_token("defensa y justicia")
+        assert not pm._has_scope_token("gimnasia y esgrima")
+
+    def test_mechanical_hygiene_refuses_not_raises(self):
+        """Fourth-fleet weaknesses: a non-string identifier must
+        refuse, not raise; a 3-body event_slug (no venue prefix) must
+        refuse; a leading-dash identifier yields a real prefix."""
+        assert pm._bridge_ident_ok(5, "2026-08-27", "a", "b",
+                                   "col") is False
+        assert pm._bridge_event_slug_ok(
+            "col-aus-scb-2026-08-27", "2026-08-27",
+            "aus", "scb", "col", "atc") is False
+        assert pm._bridge_event_slug_ok(
+            "atc-col-aus-scb-2026-08-27", "2026-08-27",
+            "aus", "scb", "col", "atc") is True
+
+    def test_league_equality_lens_survived_and_stays_pinned(self):
+        """The second dry lens: every cross-section admission through
+        the league slot is now structurally impossible while the
+        whale and venue tokens must be EQUAL. The latent coupling the
+        lens flagged (the token pair is never checked against the
+        QUESTION whitelist) is documented here: competition identity
+        rests on the question whitelist + codes + date + the fifth
+        witness, and the league equality is their cross-check."""
+        assert pm._BRIDGE_LEAGUES == frozenset(
+            {"uecl", "uefa champions league"})
