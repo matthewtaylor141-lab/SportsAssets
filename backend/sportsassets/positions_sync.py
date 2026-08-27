@@ -19,9 +19,9 @@ from .ratelimit import polite_get
 
 log = logging.getLogger(__name__)
 
-# 2000 -> 6000 (2026-08-26), in lockstep with
-# whale_exits.POSITIONS_MAX. See the note there.
-MAX_POSITIONS_PER_WALLET = 6000
+# 2000 -> 6000 (2026-08-26), 6000 -> 24000 (2026-08-27), in lockstep
+# with whale_exits.POSITIONS_MAX. See the note there.
+MAX_POSITIONS_PER_WALLET = 24000
 
 
 def parse_api_position(raw: dict[str, Any]) -> dict[str, Any] | None:

@@ -305,7 +305,7 @@ class TestATruncatedPositionListIsNotAnExit:
         import sportsassets.workers.whale_exits as _we
 
         assert we.POSITIONS_PAGE == 100
-        assert we.POSITIONS_MAX == 6000
+        assert we.POSITIONS_MAX == 24000
         other = (Path(_we.__file__).resolve().parents[1]
                  / "positions_sync.py").read_text()
         assert '"limit": 100' in other

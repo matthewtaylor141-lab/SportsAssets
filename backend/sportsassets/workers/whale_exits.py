@@ -72,11 +72,13 @@ _KEY = "whale_positions:%s"
 # cannot disagree about what "his whole book" means.
 POSITIONS_PAGE = int(os.environ.get("WHALE_EXIT_POS_PAGE", "100"))
 # 2000 -> 6000 (2026-08-26): four of seven whale books exceeded
-# 2000 and were forfeited every cycle. RAISED IN LOCKSTEP with
-# positions_sync.MAX_POSITIONS_PER_WALLET -- two readers
+# 2000 and were forfeited every cycle. 6000 -> 24000 (2026-08-27):
+# three books were still pinned at 6000 (truncated_books=3 in every
+# probe, 23k position rows across the roster). RAISED IN LOCKSTEP
+# with positions_sync.MAX_POSITIONS_PER_WALLET -- two readers
 # disagreeing about what "his whole book" means is how one of
 # them ends up wrong, and a test pins them together.
-POSITIONS_MAX = int(os.environ.get("WHALE_EXIT_POS_MAX", "6000"))
+POSITIONS_MAX = int(os.environ.get("WHALE_EXIT_POS_MAX", "24000"))
 
 
 class EmptyPositions(RuntimeError):
