@@ -82,7 +82,12 @@ GATING = ("div.side", "div.asset", "div.size", "div.price", "div.ts",
           "key_impl_mismatch", "agg_tieout_fail", "mint_side_anomaly",
           "per_exec_ambiguous", "orphan_no_row", "orphan_agg_no_row",
           "orphan_chain_mismatch",
-          "poll_uncovered_unexplained", "ts_never_resolved_live")
+          "poll_uncovered_unexplained", "ts_never_resolved_live",
+          # S1 emissions (source='s1') answer to their own alarms: a
+          # row our decode cannot reproduce is version skew, and a row
+          # the venue's feed never corroborates (venue_seen_at NULL at
+          # the finalize deadline) is a fill nothing at the venue backs
+          "s1_key_mismatch", "s1_uncorroborated")
 # counters that reset the instrument-health window when they move
 HEALTH = ("shadow_errors", "cycle_errors", "db_errors", "flush_failures",
           "writer_conflict", "pending_overflow_dropped", "log_index_missing",
@@ -95,15 +100,16 @@ HEALTH = ("shadow_errors", "cycle_errors", "db_errors", "flush_failures",
 VOLUME_KEYS = ("compared_execs", "sim_exec_suppressed", "sim_agg_suppressed",
                "sim_exec_supp_hup_only", "mint_transformed", "poll_rows_seen",
                "decoded_exec_counter", "decoded_exec_owner", "decoded_agg",
-               "sim_ven_suppressed")
+               "sim_ven_suppressed", "s1_confirmed")
 
 SQL_TX = """
 SELECT lower(tx_hash) AS tx, whale_id, asset, side,
        size::text  AS size, price::text AS price,
        extract(epoch FROM ts)::bigint AS ts_epoch, source, dedupe_key,
-       extract(epoch FROM detected_at) AS det_epoch
+       extract(epoch FROM detected_at) AS det_epoch,
+       extract(epoch FROM venue_seen_at) AS venue_seen_epoch
 FROM trades
-WHERE source IN ('chain','poll')                      -- partial idx 009 predicate
+WHERE source IN ('chain','poll','s1')                 -- partial idx 033 predicate
   AND detected_at > now() - interval '2 hours'
   AND lower(tx_hash) = ANY($1::text[])
 """
@@ -649,13 +655,23 @@ class ShadowV2:
             rows = rows_by.get((tx, whale_id), [])
             poll_rows = [x for x in rows if x["source"] == "poll"]
             chain_rows = [x for x in rows if x["source"] == "chain"]
+            # s1 rows are the EMITTER's — never venue evidence. They are
+            # excluded from coverage/matching (so s1-won txs finalize at
+            # the deadline, by which time the venue's poll duplicate has
+            # stamped venue_seen_at through the ingest conflict branch)
+            # and judged by their own ladder inside _match_wallet.
+            s1_rows = [x for x in rows if x["source"] == "s1"]
             logged = self._match_wallet(tx, wallet, g, by_wallet[wallet],
-                                        poll_rows, chain_rows, oldest, now, logged)
+                                        poll_rows, chain_rows, oldest, now,
+                                        logged, s1_rows)
         return logged
 
     def _match_wallet(self, tx: str, wallet: str, g: dict, all_recs: list[dict],
                       poll_rows: list[dict], chain_rows: list[dict],
-                      oldest: float, now: float, logged: int) -> int:
+                      oldest: float, now: float, logged: int,
+                      s1_rows: list[dict] | None = None) -> int:
+        s1_rows = s1_rows or []
+        s1_keys = {str(r["dedupe_key"]): r for r in s1_rows}
         execs, aggs = g["execs"], g["aggs"]
         agg_assets_set = {a["asset"] for a in aggs}
         # a classifier-DROPPED record is outside the flip's insert set
@@ -860,6 +876,26 @@ class ShadowV2:
                     # asset+side across ALL execs, so no cross-market
                     # leg can reach it
                     self.bump("exec_covered_by_chain_agg_row")
+                elif s1_keys and (
+                        any(k in s1_keys for _v, k in rec_keys(c))
+                        or (c["asset"] in agg_assets_set
+                            and agg_tieout(g) == "ok"
+                            and any(k in s1_keys
+                                    for a in aggs if a["asset"] == c["asset"]
+                                    for _v, k in rec_keys(a)))):
+                    # the S1 emitter won this fill: its row carries our
+                    # own certified key (directly, or via the agg view
+                    # this leg ties out into). Corroboration is judged
+                    # once per s1 row below, not per exec.
+                    self.bump("exec_covered_by_s1_row")
+                elif s1_keys and not poll_rows and not chain_rows:
+                    # an s1 row exists for this (tx, wallet) but matches
+                    # NOTHING our decode produces: the emitter and the
+                    # instrument have diverged (version skew) — loudest
+                    # possible post-flip alarm
+                    self.bump("s1_key_mismatch")
+                    self.note_example("s1_key_mismatch", tx=tx[:14],
+                                      wallet=wallet[:12], view=c["view"])
                 elif not poll_rows and not chain_rows:
                     self.bump("orphan_no_row")
                     self.note_example("orphan_no_row", tx=tx[:14], wallet=wallet[:12],
@@ -885,11 +921,42 @@ class ShadowV2:
             if (variant == "round" and key not in all_row_keys
                     and id(a) not in matched_agg_ids
                     and not poll_rows and not chain_rows):
+                if key in s1_keys:
+                    self.bump("agg_covered_by_s1_row")
+                    continue
+                if s1_keys:
+                    self.bump("s1_key_mismatch")
+                    self.note_example("s1_key_mismatch", tx=tx[:14],
+                                      wallet=wallet[:12], side=a["side"])
+                    continue
                 self.bump("orphan_agg_no_row")
                 self.note_example("orphan_agg_no_row", tx=tx[:14],
                                   wallet=wallet[:12], side=a["side"])
                 log.info("SHADOW-V2 AGG-ORPHAN tx=%s wallet=%s no rows",
                          tx[:14], wallet[:12])
+        # VENUE CORROBORATION, judged once per s1 row at finalize. Any
+        # finalize that sees s1 rows happens at the deadline (s1 rows
+        # never count toward coverage), so the venue's poll duplicate —
+        # 130-200s behind — has had over an hour to stamp venue_seen_at
+        # through the ingest conflict branch. Unstamped at that age
+        # means the venue's own feed never showed the fill: the
+        # emission is uncorroborated, and it gates.
+        for key, row in s1_keys.items():
+            det = row.get("det_epoch")
+            aged = isinstance(det, (int, float)) and \
+                now - det >= ORPHAN_FINAL_S * 0.9
+            if row.get("venue_seen_epoch") is not None:
+                self.bump("s1_confirmed")
+            elif aged:
+                self.bump("s1_uncorroborated")
+                self.note_example("s1_uncorroborated", tx=tx[:14],
+                                  wallet=wallet[:12], key=key[:16])
+                log.warning("SHADOW-V2 S1-UNCORROBORATED tx=%s wallet=%s",
+                            tx[:14], wallet[:12])
+            else:
+                # young and unstamped: counted next reconcile via the
+                # tombstone-merge redelivery path — undercount only
+                self.bump("s1_pending_corroboration")
         self.bump("compared_execs", len(execs))
         self.bump("txs_reconciled")
         return logged

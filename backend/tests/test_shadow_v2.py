@@ -657,9 +657,14 @@ def test_reverse_probe_honesty(st):
 
 # ── 22. A1: the SQL rides the partial index, verbatim ───────────────
 def test_sql_uses_partial_index_predicate():
+    # SQL_TX matches migration 033's widened predicate (s1 rows are
+    # fetched for the corroboration ladder); SQL_REVERSE keeps 009's —
+    # the reverse probe hunts poll rows the shadow never decoded, and
+    # s1 rows are by definition our own decode.
+    assert "source IN ('chain','poll','s1')" in sv.SQL_TX, \
+        "migrations/033's predicate is load-bearing — it cannot drift"
+    assert "source IN ('chain','poll')" in sv.SQL_REVERSE
     for sql in (sv.SQL_TX, sv.SQL_REVERSE):
-        assert "source IN ('chain','poll')" in sql, \
-            "migrations/009's predicate is load-bearing — it cannot drift"
         assert "detected_at > now() - interval" in sql
 
 
@@ -2086,3 +2091,77 @@ def test_venue_policy_is_per_market_in_a_mixed_tx(st):
         "a per-TX ven set would misscore market B as uncovered"
     assert st.deltas.get("sim_ven_residual_dup") == 2, \
         "market A's per-exec rows under its agg stay the ven dups"
+
+
+# ── fleet round 2 (S1): the emitter's rows answer to their own ladder
+def _s1_row(rec, key=None, venue_seen=None, det_lag=5.0):
+    r = _poll_row(rec, source="s1", key=key, det_lag=det_lag)
+    r["venue_seen_epoch"] = venue_seen
+    return r
+
+
+def test_s1_won_fill_confirms_instead_of_orphaning(st):
+    """fleet r2 (major): a correct armed emission absorbs the venue's
+    poll row via dedupe, so the shadow sees no poll evidence — it must
+    read the s1 row's venue stamp as corroboration, never book orphan
+    GATING for a fill the emitter won."""
+    ag = _mkrec(view="agg", size_units=10_000_000, usdc_units=6_200_000,
+                log_index=1, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [], "aggs": [ag], "flags": {}}
+    key = rec_keys(ag)[0][1]
+    row = _s1_row(ag, key=key, venue_seen=time.time() - 100)
+    row["det_epoch"] = time.time() - sv.ORPHAN_FINAL_S - 5
+    st._match_wallet(TX, MAKER, g, [ag], [], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0, [row])
+    assert st.deltas.get("orphan_agg_no_row") is None, \
+        "an s1-claimed fill is not an orphan"
+    assert st.deltas.get("agg_covered_by_s1_row") == 1
+    assert st.deltas.get("s1_confirmed") == 1
+    assert "s1_confirmed" in sv.VOLUME_KEYS
+
+
+def test_s1_row_unstamped_at_deadline_gates(st):
+    """The venue's own feed never showed the fill: uncorroborated
+    emission is the post-flip wrongness alarm, immune to shared-decode
+    bugs because the stamp originates at the venue."""
+    ag = _mkrec(view="agg", size_units=10_000_000, usdc_units=6_200_000,
+                log_index=1, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [], "aggs": [ag], "flags": {}}
+    key = rec_keys(ag)[0][1]
+    row = _s1_row(ag, key=key, venue_seen=None)
+    row["det_epoch"] = time.time() - sv.ORPHAN_FINAL_S - 5
+    st._match_wallet(TX, MAKER, g, [ag], [], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0, [row])
+    assert st.deltas.get("s1_uncorroborated") == 1
+    assert "s1_uncorroborated" in sv.GATING
+
+
+def test_s1_key_mismatch_gates_as_version_skew(st):
+    """An s1 row matching NOTHING our decode produces means the emitter
+    and the instrument have diverged — the loudest post-flip alarm."""
+    ag = _mkrec(view="agg", size_units=10_000_000, usdc_units=6_200_000,
+                log_index=1, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [], "aggs": [ag], "flags": {}}
+    row = _s1_row(ag, key="0" * 64, venue_seen=time.time() - 100)
+    row["det_epoch"] = time.time() - 300
+    st._match_wallet(TX, MAKER, g, [ag], [], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0, [row])
+    assert st.deltas.get("s1_key_mismatch") == 1
+    assert st.deltas.get("orphan_agg_no_row") is None
+    assert "s1_key_mismatch" in sv.GATING
+
+
+def test_young_unstamped_s1_row_counts_pending_not_gating(st):
+    """Corroboration takes poll-lag time to arrive; a young unstamped
+    row is pending, never an alarm."""
+    e1 = _mkrec(log_index=1, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [e1], "aggs": [], "flags": {}}
+    key = rec_keys(e1)[0][1]
+    row = _s1_row(e1, key=key, venue_seen=None)
+    row["det_epoch"] = time.time() - 60
+    st._match_wallet(TX, MAKER, g, [e1], [], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0, [row])
+    assert st.deltas.get("s1_pending_corroboration") == 1
+    assert st.deltas.get("s1_uncorroborated") is None
+    assert st.deltas.get("exec_covered_by_s1_row") == 1
+    assert st.deltas.get("orphan_no_row") is None

@@ -115,9 +115,16 @@ class Poller:
         # whales and the hourly reconciler back-filled the rest).
         keys = [ev.dedupe_key for ev in events]
         try:
+            # an UNSTAMPED s1 row is deliberately NOT "known": the poll
+            # duplicate must flow through ingest once so the conflict
+            # branch stamps venue_seen_at — the venue-anchored
+            # corroboration the shadow requires of every S1 emission
+            # (fleet round 2). Once stamped, the key is known again.
             seen = {r["dedupe_key"] for r in await pool.fetch(
                 "SELECT dedupe_key FROM trades "
-                "WHERE dedupe_key = ANY($1::text[])", keys)}
+                "WHERE dedupe_key = ANY($1::text[]) "
+                "AND NOT (source = 's1' AND venue_seen_at IS NULL)",
+                keys)}
         except Exception:  # noqa: BLE001 — pre-filter is an optimization
             seen = set()
         new = 0

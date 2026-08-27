@@ -169,7 +169,17 @@ async def ingest_trade_result(ev: TradeEvent,
             event_slug    = COALESCE(trades.event_slug,
                                      EXCLUDED.event_slug),
             enriched_at   = COALESCE(trades.enriched_at,
-                                     EXCLUDED.enriched_at)
+                                     EXCLUDED.enriched_at),
+            -- VENUE CORROBORATION for S1-won fills (fleet round 2):
+            -- when the venue's own feed re-delivers a fill the S1
+            -- emitter already ingested, the poll duplicate lands here
+            -- and stamps the row. The stamp originates at the VENUE,
+            -- so it corroborates the emission in a way a shared decode
+            -- bug cannot fake; the shadow gates s1 rows left
+            -- unstamped past its deadline. First stamp wins.
+            venue_seen_at = COALESCE(trades.venue_seen_at,
+                                     CASE WHEN EXCLUDED.source = 'poll'
+                                          THEN now() END)
         -- xmax = 0 IS THE ONLY THING SEPARATING A FILL FROM A REFILL.
         --
         -- Under DO NOTHING a duplicate returned no row, and `row is

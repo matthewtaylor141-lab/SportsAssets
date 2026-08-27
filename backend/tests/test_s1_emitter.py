@@ -80,19 +80,23 @@ class _FakeClient:
 
 
 class _Pool:
-    def __init__(self, probe_row=None, stored=None):
-        self.probe_row = probe_row
+    def __init__(self, probe_rows=None, stored=None, cas_fails=False):
+        self.probe_rows = probe_rows or []
         self.stored = stored
-        self.executes = []
+        self.cas_fails = cas_fails
+        self.writes = []
 
-    async def fetchrow(self, sql, *a, timeout=None):
-        return self.probe_row
+    async def fetch(self, sql, *a, timeout=None):
+        return self.probe_rows
 
     async def fetchval(self, sql, *a, timeout=None):
+        if sql.lstrip().startswith("INSERT"):
+            self.writes.append(a)
+            return None if self.cas_fails else "s1_emitter"
         return self.stored
 
     async def execute(self, sql, *a, timeout=None):
-        self.executes.append((sql, a))
+        self.writes.append(a)
 
 
 @pytest.fixture(autouse=True)
@@ -289,7 +293,8 @@ def test_preexisting_chain_row_abstains(st, monkeypatch):
     _arm(st)
     calls = _capture_ingest(monkeypatch)
     _observe_all(st, lst, [MAKER_EV])
-    done = asyncio.run(st._finalize_tx(_Pool(probe_row={"?": 1}), TX,
+    pool = _Pool(probe_rows=[{"source": "chain", "dedupe_key": "zzz"}])
+    done = asyncio.run(st._finalize_tx(pool, TX,
                                        st.pending[TX], time.time()))
     assert done is True and calls == []
     assert st.deltas.get("s1.abstain.chain_row_preexists") == 1
@@ -476,14 +481,15 @@ def test_disabled_emitter_buffers_nothing(monkeypatch):
 # ── fleet round 1 pins ──────────────────────────────────────────────
 class _MarketPool:
     """Models the trades table with per-(tx, whale, asset) chain rows —
-    what the asset-scoped probe actually queries."""
+    what the asset-scoped probe actually queries. Rows are stored as
+    (tx, whale_id, asset) -> (source, dedupe_key)."""
 
     def __init__(self):
-        self.rows = set()
+        self.rows = {}
 
-    async def fetchrow(self, sql, *a, timeout=None):
-        return {"x": 1} if (str(a[0]).lower(), a[1], a[2]) in self.rows \
-            else None
+    async def fetch(self, sql, *a, timeout=None):
+        hit = self.rows.get((str(a[0]).lower(), a[1], a[2]))
+        return [{"source": hit[0], "dedupe_key": hit[1]}] if hit else []
 
     async def fetchval(self, sql, *a, timeout=None):
         return None
@@ -507,7 +513,8 @@ def test_multimarket_tx_emits_every_market(st, monkeypatch):
     calls = []
 
     async def fake_ingest(ev, notify=True):
-        pool.rows.add((ev.tx_hash.lower(), ev.whale_id, ev.asset))
+        pool.rows[(ev.tx_hash.lower(), ev.whale_id, ev.asset)] = \
+            ("s1", ev.dedupe_key)
         calls.append(ev)
         return (len(calls), True)
 
@@ -550,9 +557,9 @@ def test_emit_claims_before_probe_and_registry_shows_emitter(st,
     seen_at_probe = {}
 
     class _ProbePool(_Pool):
-        async def fetchrow(self, sql, *a, timeout=None):
+        async def fetch(self, sql, *a, timeout=None):
             seen_at_probe["claim"] = cr.get(TX, MAKER)
-            return None
+            return []
 
     calls = _capture_ingest(monkeypatch)
     _observe_all(st, lst, [MAKER_EV])
@@ -602,14 +609,14 @@ def test_blockless_and_hashless_logs_never_buffer(st):
 
 
 def test_persisted_arm_requires_standing_window_at_boot(st):
-    """fleet r1 (minor): a stale persisted armed=true must not emit
-    under a window that reset while the process was down."""
+    """fleet r1/r2: a stale persisted armed=true must not emit under a
+    window that reset while the process was down, and nothing arms
+    before the state row is actually loaded."""
     now = time.time()
     st._state_loaded = False
     doc = {"counters": {}, "armed": True, "armed_at": now - 3600,
            "tripped": None}
-    pool = _Pool(stored=json.dumps(doc))
-    asyncio.run(st._flush(pool, now))
+    asyncio.run(st._load_state(_Pool(stored=json.dumps(doc)), now))
     assert st.armed is False, "adoption is provisional until cert"
     good = _green_doc(now)
     good["window_start"] = now - s1.CERT_WINDOW_S - 10   # ws <= armed_at
@@ -618,7 +625,7 @@ def test_persisted_arm_requires_standing_window_at_boot(st):
 
     st2 = S1Emitter()
     st2._state_loaded = False
-    asyncio.run(st2._flush(_Pool(stored=json.dumps(doc)), now))
+    asyncio.run(st2._load_state(_Pool(stored=json.dumps(doc)), now))
     reset = _green_doc(now)
     reset["window_start"] = now - 60          # reset AFTER armed_at
     asyncio.run(st2._check_cert(_Pool(stored=json.dumps(reset)), now))
@@ -626,17 +633,76 @@ def test_persisted_arm_requires_standing_window_at_boot(st):
     assert st2.deltas.get("s1.trip.window_reset") == 1
 
 
+def test_boot_trip_is_loaded_before_anything_can_arm(st, monkeypatch):
+    """fleet r2 (major x3): a restarted sticky-tripped emitter must not
+    arm via S1_ARM in the window before its first flush — the trip is
+    loaded by _load_state, and _check_cert refuses to certify while the
+    state row is unloaded (fail-closed on load failure too)."""
+    now = time.time()
+    monkeypatch.setenv("S1_ARM", "on")
+    st._state_loaded = False
+    # cert BEFORE load: refuses outright
+    asyncio.run(st._check_cert(_Pool(stored=json.dumps(_green_doc(now))),
+                               now))
+    assert st.armed is False and st.cert_reason == "state_unloaded"
+    # load adopts the trip and disarms
+    doc = {"counters": {}, "armed": True, "armed_at": now - 60,
+           "tripped": "key_selfcheck"}
+    asyncio.run(st._load_state(_Pool(stored=json.dumps(doc)), now))
+    assert st._state_loaded and st.tripped == "key_selfcheck"
+    assert st.armed is False
+    # even with cert green + S1_ARM, the trip blocks arming
+    asyncio.run(st._check_cert(_Pool(stored=json.dumps(_green_doc(now))),
+                               now))
+    assert st.armed is False
+
+
+def test_cert_read_failure_never_consumes_the_arm(st):
+    """fleet r2 (major): a transient shadow-state read failure must not
+    destroy a pending or live arm, nor fabricate trip evidence."""
+    now = time.time()
+
+    class _FailPool(_Pool):
+        async def fetchval(self, sql, *a, timeout=None):
+            raise RuntimeError("db blip")
+
+    st._pending_arm_at = now - 3600
+    asyncio.run(st._check_cert(_FailPool(), now))
+    assert st.cert_reason == "cert_read_failed"
+    assert st._pending_arm_at == now - 3600, "pending arm survives"
+    assert st.deltas.get("s1.trip.window_reset") is None
+    _arm(st)
+    asyncio.run(st._check_cert(_FailPool(), now))
+    assert st.armed is True, "a read blip must not disarm"
+    assert st.cert_green is False, "but emission stays fail-closed"
+
+
+def test_flush_cas_loss_adopts_and_never_clobbers(st):
+    """fleet r2 (CRITICAL): a concurrent process's sticky trip must
+    survive our read-modify-write. The CAS write refuses when the
+    stored trip changed under us; the deltas are restored and the beat
+    counters never show the unlanded merge."""
+    now = time.time()
+    st.deltas = {"s1.emitted": 3}
+    pool = _Pool(stored=json.dumps({"counters": {}}), cas_fails=True)
+    asyncio.run(st._flush(pool, now))
+    assert st.deltas.get("s1.emitted") == 3, "deltas restored on CAS loss"
+    assert st.counters.get("s1.emitted") is None, \
+        "the beat must not show a merge that did not land"
+
+
 def test_foreign_trip_is_adopted_never_clobbered(st):
-    """fleet r1 (major): another process's sticky trip must disarm this
-    one at the next flush, not be overwritten by our clean state."""
+    """fleet r1/r2: another process's sticky trip must disarm this one
+    at the next flush and be written back, never overwritten."""
     now = time.time()
     st.armed = True
     pool = _Pool(stored=json.dumps({"counters": {},
                                     "tripped": "key_selfcheck"}))
     asyncio.run(st._flush(pool, now))
     assert st.tripped == "key_selfcheck" and st.armed is False
-    written = json.loads(pool.executes[-1][1][1])
+    written = json.loads(pool.writes[-1][1])
     assert written["tripped"] == "key_selfcheck"
+    assert written["armed"] is False, "armed never persists beside a trip"
 
 
 def test_emitter_never_imports_at_module_load_into_shadow(st):

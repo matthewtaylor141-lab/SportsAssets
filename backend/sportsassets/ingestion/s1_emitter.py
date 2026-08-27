@@ -99,14 +99,21 @@ SHADOW_KEY = "shadow_v2_fill"
 # for (fleet round 1, confirmed major). Both chain sources count: a
 # receipt row or an earlier emitter row equally forbids a second view.
 SQL_PROBE = (
-    "SELECT 1 FROM trades WHERE lower(tx_hash) = $1 AND whale_id = $2 "
-    "AND asset = $3 AND source IN ('chain', 's1') LIMIT 1"
+    "SELECT source, dedupe_key FROM trades "
+    "WHERE lower(tx_hash) = $1 AND whale_id = $2 "
+    "AND asset = $3 AND source IN ('chain', 's1')"
 )
 SQL_READ = "SELECT value FROM ingestion_state WHERE key = $1"
-SQL_WRITE = (
-    "INSERT INTO ingestion_state (key, value) VALUES ($1, $2) "
-    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
-)
+# Compare-and-swap on the tripped field: a concurrent process's sticky
+# trip must never be erased by our read-modify-write (fleet round 2,
+# CRITICAL). The write lands only if the stored trip still equals the
+# trip we read; a lost swap is re-read and merged next flush.
+SQL_WRITE = """
+INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb)
+ON CONFLICT (key) DO UPDATE SET value = $2::jsonb
+WHERE COALESCE(ingestion_state.value->>'tripped', '') = $3
+RETURNING key
+"""
 
 
 class S1Emitter:
@@ -256,6 +263,32 @@ class S1Emitter:
         self.rpc_tokens -= 1
         return True
 
+    # ── persisted state (read-only load; fail-closed until loaded) ──
+    async def _load_state(self, pool: Any, now: float) -> None:
+        """Adopt the persisted trip/arm BEFORE anything can certify or
+        emit. Until this succeeds the emitter stays disarmed with
+        cert_reason='state_unloaded' — a restarted sticky-tripped
+        process must never arm in the window before its first flush
+        (fleet round 2, confirmed major x3)."""
+        try:
+            raw = await pool.fetchval(SQL_READ, STATE_KEY, timeout=6)
+        except Exception:  # noqa: BLE001 — stay unloaded, stay closed
+            self.bump("s1.errors")
+            return
+        doc = raw if isinstance(raw, dict) else (
+            json.loads(raw) if raw else {})
+        if not isinstance(doc, dict):
+            doc = {}
+        if doc.get("tripped"):
+            self.tripped = str(doc["tripped"])
+            self.armed = False
+        elif doc.get("armed"):
+            self._pending_arm_at = float(doc.get("armed_at") or now)
+        self._stored_trip = str(doc.get("tripped") or "")
+        c = doc.get("counters")
+        self.counters = c if isinstance(c, dict) else {}
+        self._state_loaded = True
+
     # ── certification ───────────────────────────────────────────────
     def _judge_cert(self, doc: dict | None, now: float) -> tuple[bool, str]:
         if not isinstance(doc, dict):
@@ -286,13 +319,23 @@ class S1Emitter:
 
     async def _check_cert(self, pool: Any, now: float) -> None:
         self.cert_checked_at = now
+        if not self._state_loaded:
+            self.cert_green = False
+            self.cert_reason = "state_unloaded"
+            return
         try:
             raw = await pool.fetchval(SQL_READ, SHADOW_KEY, timeout=6)
             doc = raw if isinstance(raw, dict) else (
                 json.loads(raw) if raw else None)
         except Exception:  # noqa: BLE001
+            # a transient READ failure is not evidence of anything: it
+            # must not consume a pending arm, disarm a live one, or
+            # fabricate trip counters (fleet round 2). Emission is
+            # fail-closed anyway via cert_green.
             self.bump("s1.errors")
-            doc = None
+            self.cert_green = False
+            self.cert_reason = "cert_read_failed"
+            return
         green, reason = self._judge_cert(doc, now)
         self.cert_green, self.cert_reason = green, reason
         pend = getattr(self, "_pending_arm_at", None)
@@ -394,9 +437,14 @@ class S1Emitter:
         groups = classify_mints(recs)
         emitted_any = False
         for wallet, g in groups.items():
+            if wallet in e.setdefault("done_wallets", set()):
+                continue                      # a retry never re-runs a
+                                              # completed group (fleet r2:
+                                              # straggler re-representation)
             done = await self._emit_group(pool, tx, wallet, g, e, now)
             if done is None:
                 return False                  # v3 outcome pending — retry
+            e["done_wallets"].add(wallet)
             emitted_any = emitted_any or done
         return True
 
@@ -474,11 +522,12 @@ class S1Emitter:
                 self.bump("s1.abstain.price_variant")
                 continue
             if not self.armed or not self.cert_green or self.tripped:
-                # burn-in: idempotent per (wallet, asset) — the
-                # collision-wait retry path re-runs whole groups, and
-                # re-counting would overstate armed coverage in the
-                # evidence a human reviews before arming (fleet r1)
-                mark = (wallet, rec["asset"], rec["view"])
+                # burn-in: idempotent per (wallet, asset) — no view in
+                # the mark (a straggler can flip the representative
+                # record's view across a retry) and the armed path marks
+                # too, so a disarm mid-retry cannot re-count an emitted
+                # fill as would_emit (fleet r2)
+                mark = (wallet, rec["asset"])
                 if mark not in e.setdefault("counted", set()):
                     e["counted"].add(mark)
                     self.bump("s1.would_emit")
@@ -492,13 +541,24 @@ class S1Emitter:
                 self.bump("s1.abstain.v3_ingested")
                 continue
             try:
-                row = await pool.fetchrow(SQL_PROBE, tx, rec["whale_id"],
-                                          rec["asset"], timeout=6)
+                rows = await pool.fetch(SQL_PROBE, tx, rec["whale_id"],
+                                        rec["asset"], timeout=6)
             except Exception:  # noqa: BLE001
                 self.bump("s1.errors")
                 return False                  # no probe = no emit
-            if row is not None:
+            # a receipt-path row for this (tx, whale, asset) is the
+            # key-divergent-twin risk — abstain. Our own earlier s1 row
+            # with THIS key is a dup — skip. An s1 row with a DIFFERENT
+            # key is a sibling fill in the same market (fleet round 2:
+            # the conflation forfeited the whale's second fill) —
+            # proceed; the dedupe collapses anything truly identical.
+            srcs = {str(r["source"]) for r in (rows or [])}
+            stored_keys = {str(r["dedupe_key"]) for r in (rows or [])}
+            if "chain" in srcs:
                 self.bump("s1.abstain.chain_row_preexists")
+                continue
+            if keys[0][1] in stored_keys:
+                self.bump("s1.emit_dup")
                 continue
             from .pipeline import TradeEvent, ingest_trade_result
             size = float(Decimal(rec["size_units"]) / Decimal(10 ** 6))
@@ -526,6 +586,7 @@ class S1Emitter:
             except Exception:  # noqa: BLE001
                 self.bump("s1.errors")
                 return False
+            e.setdefault("counted", set()).add((wallet, rec["asset"]))
             emitted = True
             self.last_emit_at = now
             if was_new:
@@ -546,8 +607,6 @@ class S1Emitter:
     # ── flush (own state key; observability, not evidence) ──────────
     async def _flush(self, pool: Any, now: float) -> None:
         self.last_flush_at = now
-        if not self.deltas and self._state_loaded:
-            pass
         try:
             raw = await pool.fetchval(SQL_READ, STATE_KEY, timeout=6)
             doc = raw if isinstance(raw, dict) else (
@@ -557,45 +616,44 @@ class S1Emitter:
         except Exception:  # noqa: BLE001
             self.bump("s1.flush_failures")
             return
+        stored_trip = str(doc.get("tripped") or "")
+        if stored_trip and self.tripped is None:
+            # another process tripped since our last read: a sticky
+            # trip is global — adopt it, never clobber it (fleet r1/r2)
+            self.tripped = stored_trip
+            self.armed = False
         counters = doc.get("counters") or {}
         if not isinstance(counters, dict):
             counters = {}
-        if not self._state_loaded:
-            # boot: adopt persisted arm state (sticky across restarts).
-            # The arm is adopted PROVISIONALLY armed=False: honoring a
-            # stale armed=true before the first certification read could
-            # emit under a window that reset while we were down (fleet
-            # r1). _check_cert promotes a pending arm only after it has
-            # verified GREEN and window_start <= armed_at.
-            self._state_loaded = True
-            if doc.get("tripped"):
-                self.tripped = str(doc["tripped"])
-            if doc.get("armed") and self.tripped is None:
-                self._pending_arm_at = float(doc.get("armed_at") or now)
-        elif doc.get("tripped") and self.tripped is None:
-            # another process tripped since our last read: a sticky trip
-            # is global — adopt it, never clobber it (fleet r1)
-            self.tripped = str(doc["tripped"])
-            self.armed = False
         snap, self.deltas = self.deltas, {}
+        merged = dict(counters)
         for k, v in snap.items():
-            base = counters.get(k)
-            counters[k] = (base if isinstance(base, (int, float)) else 0) + v
-        self.counters = counters
-        payload = {"counters": counters, "armed": self.armed,
-                   "armed_at": self.armed_at, "tripped": self.tripped,
+            base = merged.get(k)
+            merged[k] = (base if isinstance(base, (int, float)) else 0) + v
+        armed_out = bool(self.armed and not self.tripped)
+        payload = {"counters": merged, "armed": armed_out,
+                   "armed_at": self.armed_at,
+                   "tripped": self.tripped or stored_trip or None,
                    "cert_green": self.cert_green,
                    "cert_reason": self.cert_reason,
                    "decoder_fp": DECODER_FP,
                    "updated_at_epoch": now}
         try:
-            await pool.execute(SQL_WRITE, STATE_KEY, json.dumps(payload),
-                               timeout=6)
+            got = await pool.fetchval(SQL_WRITE, STATE_KEY,
+                                      json.dumps(payload), stored_trip,
+                                      timeout=6)
         except Exception:  # noqa: BLE001
-            # restore so the deltas land on the next flush
+            got = None
+        if got is None:
+            # write failed or the CAS lost to a concurrent trip: restore
+            # the deltas for the next flush and adopt on the next read.
+            # self.counters is NOT updated — the beat must never show a
+            # merge that did not land (fleet r2: double-count)
             for k, v in snap.items():
                 self.deltas[k] = self.deltas.get(k, 0) + v
             self.bump("s1.flush_failures")
+            return
+        self.counters = merged
 
     # ── the task loop ───────────────────────────────────────────────
     async def run(self) -> None:
@@ -613,6 +671,8 @@ class S1Emitter:
                     continue
                 pool = await get_pool()
                 now = time.time()
+                if not self._state_loaded:
+                    await self._load_state(pool, now)
                 if now - last_cert >= CERT_EVERY_S:
                     last_cert = now
                     await self._check_cert(pool, now)
