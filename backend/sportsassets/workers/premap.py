@@ -511,6 +511,37 @@ _BRIDGE_NAME_TOKEN_CAP = 5
 # generic-token padding class ('... FK Austria Wien de the club in
 # the ...', 6 tokens) which distinctive-set equality alone admits.
 
+_BRIDGE_SCOPE_TOKENS = frozenset({
+    "aggregate", "agg", "half", "halves", "fh", "sh", "extra", "et",
+    "time", "penalties", "penalty", "pens", "shootout", "overtime",
+    "ot", "leg", "legs", "qualification", "qualifying", "qualifier",
+    "playoff", "playoffs", "series", "doubleheader", "game", "games",
+    "reserve", "reserves", "res", "youth", "yth", "women", "womens",
+    "u19", "u21", "u23", "b", "ii", "first", "second", "third", "1st",
+    "2nd", "3rd", "quarter", "period", "inning", "innings", "session",
+    "map", "set", "sets", "tiebreak", "draw", "tie", "advance",
+    "advances"})
+# SCOPE IS NOT IDENTITY (round 2.2). The round-2.1 fleet executed an
+# admission where the whale feed hung his match pick off a tie-level
+# container ('SC Braga vs Austin FC (Aggregate)') and the fifth
+# witness CORROBORATED the venue's aggregate market instead of vetoing
+# it — every token of a side was read as club identity. Any of these
+# tokens appearing in a name slot (either feed's event-title sides,
+# the strict question's subject/opponent, the identifier's league
+# slot, the event_slug's league slot) refuses the row. The list is
+# CLOSED and reviewed: collisions with real club names ('First
+# Vienna', a 'B' reserve side) refuse in the safe direction — an
+# honest miss, never an admission. Additions/removals carry
+# GENERIC_CLUB_TOKENS-grade review.
+
+_BRIDGE_MARKET_TOKEN_RE = re.compile(r"^m[a-z]$")
+# The identifier's post-date market token, ATTESTED SHAPE ONLY. The
+# round-2.1 fleet rode '-agg'/'-fh'/'-et'/'-yth' post-date tokens
+# (alphabetic, so the round-2 gate admitted them) onto sub-markets
+# whose questions had lost their qualifier. Production identifiers
+# carry 'ma'-family tokens; anything else refuses until a census
+# attests otherwise.
+
 _BRIDGE_TITLE_RE = re.compile(
     r"^will (?:the )?(?P<subj>.+?) win"
     r"(?: on (?P<iso>\d{4} \d{2} \d{2})"
@@ -585,6 +616,11 @@ def _code_prefix_hit(name: str, code: str) -> bool:
             or _collapsed_distinctive(name).startswith(code))
 
 
+def _has_scope_token(norm_name: str) -> bool:
+    """Any reviewed scope token in a normalized name string?"""
+    return any(t in _BRIDGE_SCOPE_TOKENS for t in norm_name.split())
+
+
 def _bridge_title_subject(his_title: str | None,
                           his_slug: str | None) -> tuple[str | None, str]:
     """The team his 'Will X win …?' title asks about, or (None, why).
@@ -643,9 +679,9 @@ def _q_parse_raw(question: str | None):
 
 def _q_parse_strict(question: str | None, his_dist: frozenset,
                     other_code: str, event_title: str | None,
-                    slug_date: str,
-                    his_opp_dist: frozenset) -> tuple[frozenset | None,
-                                                      str]:
+                    slug_date: str, his_opp_dist: frozenset,
+                    his_sides: frozenset) -> tuple[frozenset | None,
+                                                   str]:
     """Step-2 SELECTION form: the ONE measured template, validated.
 
     All clauses conjunctive; any miss refuses the row. The opponent
@@ -653,6 +689,14 @@ def _q_parse_strict(question: str | None, his_dist: frozenset,
     by distinctive-set EQUALITY; the league is a CLOSED whitelist; the
     tail date must equal the whale slug's date exactly. slug_date is
     guaranteed non-empty by bridge_explain's gate 5."""
+    if len(question or "") >= 108:
+        # Round 2.2: a scope qualifier rendered AFTER the date is
+        # amputated by any ~110-char truncation in the pipeline,
+        # leaving the exact clean template. A question long enough to
+        # have been cut cannot prove it was not; unprovable refuses.
+        # Long fixtures become honest misses; the probe's qlen channel
+        # measures the cost and whether truncation exists at all.
+        return None, "question_maybe_truncated"
     n = " ".join(_norm(question).split())
     m = _BRIDGE_Q_STRICT_RE.fullmatch(n)
     if m is None:
@@ -676,10 +720,23 @@ def _q_parse_strict(question: str | None, his_dist: frozenset,
     want = (int(slug_date[0:4]), int(slug_date[5:7]), int(slug_date[8:10]))
     if (int(m.group("qyr")), mo, int(m.group("qday"))) != want:
         return None, "q_date_mismatch"
+    if _has_scope_token(subj) or _has_scope_token(opp):
+        return None, "scope_token_in_name"
     sides = re.split(r"\s+vs\.?\s+", _norm(event_title or ""))
     sides = [" ".join(s.split()) for s in sides if s.strip()]
     if len(sides) != 2:
         return None, "event_title_unsplittable"
+    if any(_has_scope_token(s) for s in sides):
+        return None, "scope_token_in_event"
+    if frozenset(sides) != his_sides:
+        # RAW-SEQUENCE FEED AGREEMENT (round 2.2). Distinctive-set
+        # equality let two independently TERSE renderings corroborate
+        # a name-twin's fixture ('Rapid vs Union' taking FC Rapid
+        # Bucuresti vs FC Union Berlin — different game). The two
+        # feeds must render the fixture identically, unstripped;
+        # furniture drift between feeds is an honest miss the census
+        # counts, never a match.
+        return None, "event_title_feed_mismatch"
     od = _distinctive(opp)
     other_sides = [s for s in sides if _distinctive(s) != his_dist]
     if len(other_sides) != 1:
@@ -733,8 +790,12 @@ def _bridge_ident_ok(identifier: str | None, slug_date: str,
 
     parts = [p for p in (identifier or "").lower().split("-") if p]
     toks = _post_date_tokens(parts)
-    if toks is None or len(toks) > 1 or not all(t.isalpha()
-                                               for t in toks):
+    if toks is None or len(toks) > 1:
+        return False
+    if toks and not _BRIDGE_MARKET_TOKEN_RE.fullmatch(toks[0]):
+        # Round 2.2: alphabetic was not enough — '-agg'/'-fh'/'-et'
+        # post-date tokens rode sub-markets whose questions had lost
+        # the qualifier. Only the attested market-token family passes.
         return False
     for i in range(len(parts) - 2):
         if (re.fullmatch(r"\d{4}", parts[i]) and parts[i + 1].isdigit()
@@ -743,8 +804,40 @@ def _bridge_ident_ok(identifier: str | None, slug_date: str,
                     != slug_date):
                 return False
             body = parts[1:i]
-            return (len(body) == 3
-                    and {body[1], body[2]} == {c1, c2})
+            if len(body) != 3 or {body[1], body[2]} != {c1, c2}:
+                return False
+            # The league slot stays unread for ALIASING (whale 'bol1',
+            # venue 'lpb', same game — measured), but a reviewed SCOPE
+            # token in it ('agg', 'fh', 'yth') is a sub-market marker,
+            # not a league alias, and refuses (round-2.2 kill).
+            return body[0] not in _BRIDGE_SCOPE_TOKENS
+    return False
+
+
+def _bridge_event_slug_ok(event_slug: str | None, slug_date: str,
+                          c1: str, c2: str) -> bool:
+    """The row's event_slug must carry the same fixture shape as the
+    identifier: [prefix, league, a, b, YYYY, MM, DD] with {a, b} equal
+    to the whale slug's codes, no post-date tokens, a scope-free
+    league slot, and the date equal to the whale's. Round 2.2: the
+    fleet rode sub-market container slugs ('ucl-sha-mid-AGG-...') and
+    variant suffixes that no gate read. A self-description is a
+    witness; now it testifies."""
+    parts = [p for p in (event_slug or "").lower().split("-") if p]
+    for i in range(len(parts) - 2):
+        if (re.fullmatch(r"\d{4}", parts[i]) and parts[i + 1].isdigit()
+                and parts[i + 2].isdigit()):
+            if (f"{parts[i]}-{parts[i + 1]}-{parts[i + 2]}"
+                    != slug_date):
+                return False
+            if parts[i + 3:]:
+                return False
+            body = parts[:i]
+            if len(body) == 4:
+                body = body[1:]
+            if len(body) != 3 or {body[1], body[2]} != {c1, c2}:
+                return False
+            return body[0] not in _BRIDGE_SCOPE_TOKENS
     return False
 
 
@@ -871,6 +964,14 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
         # cannot be split refuses — fail closed; the probe's
         # bridge['his'] channel measures what this costs.
         return None, "his_event_unsplittable"
+    if any(_has_scope_token(s) for s in sides_h):
+        # Round 2.2: his own feed can hang a match pick off a
+        # tie-level container ('SC Braga vs Austin FC (Aggregate)') —
+        # the fleet executed the fifth witness CORROBORATING the
+        # venue's aggregate market through exactly this. A scope token
+        # in his event title is a scope disagreement inside his own
+        # feed; unresolvable refuses.
+        return None, "his_event_has_scope"
     hd = [_distinctive(s) for s in sides_h]
     mine_side = [i for i, d in enumerate(hd) if d == his_dist]
     if len(mine_side) != 1:
@@ -881,6 +982,7 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
     his_opp_dist = hd[1 - mine_side[0]]
     if not his_opp_dist:
         return None, "his_event_opp_empty"
+    his_sides = frozenset(sides_h)
     if any(not (r.get("event_slug") or "").strip() for r in rows_all):
         # Round 2.1: the markets-mode ingest fallback can stamp ''
         # on every row, collapsing the multi-event set to {''} and
@@ -903,10 +1005,12 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
             gate = "no_intent"
         elif not _bridge_ident_ok(r.get("identifier"), d, c1, c2):
             gate = "ident_suffix_or_date"
+        elif not _bridge_event_slug_ok(r.get("event_slug"), d, c1, c2):
+            gate = "event_slug_shape"
         else:
             qd, qwhy = _q_parse_strict(r.get("question"), his_dist,
                                        other, r.get("event_title"), d,
-                                       his_opp_dist)
+                                       his_opp_dist, his_sides)
             if qd is None:
                 gate = qwhy
             elif qd != his_dist:

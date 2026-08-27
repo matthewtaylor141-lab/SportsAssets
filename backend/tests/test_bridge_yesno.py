@@ -488,31 +488,36 @@ class TestRoundTwoKills:
                       "col-aus-scb-2026-09-03-scb") == \
             (None, "no_candidate_row")
 
-    def test_venue_truncation_is_a_miss_that_still_blocks(self):
-        """D6: the verbatim 110-char cut from the census. The end
-        anchor makes it a strict miss; raw still parses it, so beside
-        a complete sibling it BLOCKS — the safe direction."""
+    def test_long_questions_refuse_as_possibly_truncated(self):
+        """D6 REWRITTEN by round 2.2. The round-2.1 fleet proved the
+        truncation defense pointed one way only: a scope qualifier
+        rendered AFTER the date is amputated by a ~110-char cut,
+        leaving the EXACT clean template — a 3-char window real name
+        lengths hit. So any question >= 108 raw chars refuses as
+        unprovable (question_maybe_truncated): the 113-char Fenerbahce
+        recovery flips to an honest miss, and the 110-cut string still
+        refuses AND still blocks a clean sibling via raw."""
         full = ("Will Fenerbahce SK win against Olympique Lyonnais in "
                 "the UEFA Champions League match scheduled for "
                 "Aug 26, 2026?")
         trunc = ("Will Fenerbahce SK win against Olympique Lyonnais "
                  "in the UEFA Champions League match scheduled for "
                  "Aug 26, 202")
+        assert len(full) >= 108 and len(trunc) >= 108
         def frow(ident, q):
             return row(ident, "yes", q, ev="atc-ucl-oly-fen-2026-08-26",
                        evt="Olympique Lyonnais vs Fenerbahce SK")
         tf = "Will Fenerbahce SK win on 2026-08-26?"
         sf = "ucl-oly-fen-2026-08-26-fen"
         ef = "Olympique Lyonnais vs Fenerbahce SK"
-        bb = [frow("atc-ucl-oly-fen-2026-08-26-ma", full)]
-        assert bridge(bb, bb, "Yes", tf, sf, evt=ef)[1] == "ok"
-        bb = [frow("atc-ucl-oly-fen-2026-08-26-ma", trunc)]
-        assert bridge(bb, bb, "Yes", tf, sf, evt=ef) == \
-            (None, "no_candidate_row")
-        bb = [frow("atc-ucl-oly-fen-2026-08-26-ma", full),
-              frow("atc-ucl-oly-fen-2026-08-26-mb", trunc)]
-        assert bridge(bb, bb, "Yes", tf, sf, evt=ef) == \
-            (None, "event_scan_ambiguous")
+        for q in (full, trunc):
+            bb = [frow("atc-ucl-oly-fen-2026-08-26-ma", q)]
+            assert bridge(bb, bb, "Yes", tf, sf, evt=ef) == \
+                (None, "no_candidate_row"), q[:40]
+        short_ok = QB
+        assert len(short_ok) < 108
+        b = board(short_ok)
+        assert bridge(b, b, "Yes", TITLE, SLUG)[1] == "ok"
 
     def test_the_delta_b_kill_boundary_west_midlands_police(self):
         """D8: the killed loosening matched a code against ANY
@@ -935,3 +940,133 @@ class TestRoundTwoPointOneKills:
                 "market_title, global_slug,\n"
                 "                                           "
                 "event_title," in src)
+
+
+class TestRoundTwoPointTwoKills:
+    """The round-2.1 verification fleet's 6 executed kills, pinned.
+    Two rounds of fleet attacks have now each killed the shipped
+    grammar; the pattern both times: a scope or identity qualifier
+    living where no gate read — the whale's own event container, the
+    identifier's post-date slot, the event_slug body, or amputated by
+    truncation — plus terse renderings collapsing name twins."""
+
+    TB = "Will SC Braga win on 2026-08-27?"
+    SB = "col-aus-scb-2026-08-27-scb"
+    T = " in the UECL match scheduled for Aug 27, 2026?"
+
+    def _r(self, ident, q, ev, evt):
+        return row(ident, "yes", q, ev=ev, evt=evt)
+
+    def test_whale_side_aggregate_container_refuses(self):
+        """FW-A: his feed hung a match pick off the tie-level event
+        ('... (Aggregate)') and the fifth witness CORROBORATED the
+        venue's aggregate market — {'austin','aggregate'} equalled
+        itself. A scope token in his own event title is a scope
+        disagreement inside his feed; unresolvable refuses."""
+        q = ("Will SC Braga win against Austin FC (Aggregate)"
+             + self.T)
+        bb = [self._r("atc-uecl-scb-aus-2026-08-27-mc", q,
+                      "atc-uecl-scb-aus-2026-08-27",
+                      "SC Braga vs Austin FC (Aggregate)")]
+        assert bridge(bb, bb, "Yes", self.TB, self.SB,
+                      evt="SC Braga vs Austin FC (Aggregate)") == \
+            (None, "his_event_has_scope")
+
+    def test_double_terse_name_twins_refuse(self):
+        """FW-B: whale renders 'Rapid vs Union', venue lists FC Rapid
+        Bucuresti vs FC Union Berlin — a DIFFERENT game whose stripped
+        sets and derived codes collide by construction. Raw-sequence
+        feed agreement refuses: {'rapid','union'} != {'fc rapid',
+        'fc union'} unstripped."""
+        b2 = [self._r("atc-uecl-rap-uni-2026-08-27-ma",
+                      "Will FC Rapid win against FC Union" + self.T,
+                      "atc-uecl-rap-uni-2026-08-27",
+                      "FC Rapid vs FC Union"),
+              self._r("atc-uecl-rap-uni-2026-08-27-mb",
+                      "Will FC Union win against FC Rapid" + self.T,
+                      "atc-uecl-rap-uni-2026-08-27",
+                      "FC Rapid vs FC Union")]
+        assert bridge(b2, b2, "Yes", "Will Rapid win on 2026-08-27?",
+                      "uecl-rap-uni-2026-08-27-rap",
+                      evt="Rapid vs Union") == \
+            (None, "no_candidate_row")
+
+    def test_alpha_scope_post_date_tokens_refuse(self):
+        """IG-1: '-agg'/'-fh'/'-et'/'-yth' post-date tokens are
+        sub-market markers wearing the market-id slot; only the
+        attested m<letter> family passes now."""
+        for tok in ("agg", "fh", "et", "yth"):
+            bb = [self._r(f"atc-uecl-aus-scb-2026-08-27-{tok}",
+                          QB, "atc-uecl-aus-scb-2026-08-27",
+                          "Austin FC vs SC Braga")]
+            assert bridge(bb, bb, "Yes", self.TB, self.SB) == \
+                (None, "no_candidate_row"), tok
+        assert pm._BRIDGE_MARKET_TOKEN_RE.fullmatch("ma")
+        assert not pm._BRIDGE_MARKET_TOKEN_RE.fullmatch("agg")
+
+    def test_scope_token_in_ident_league_slot_refuses(self):
+        """IG-2: 'agg' in the identifier's LEAGUE slot with codes
+        matching. The league slot stays unread for aliasing, but a
+        reviewed scope token there is a sub-market marker."""
+        bb = [self._r("atc-agg-aus-scb-2026-08-27-ma", QB,
+                      "atc-agg-aus-scb-2026-08-27",
+                      "Austin FC vs SC Braga")]
+        assert bridge(bb, bb, "Yes", self.TB, self.SB) == \
+            (None, "no_candidate_row")
+
+    def test_amputated_scope_and_container_slug_refuse(self):
+        """RS-A: '... scheduled for Aug 26, 2026 (Aggregate)?' cut at
+        ~110 chars leaves the EXACT clean template (109-char body —
+        real name lengths hit the window). Two independent locks now:
+        the >=108 length guard, and the sub-market container
+        event_slug ('...-agg-...') failing the shape gate."""
+        q = ("Will Shamrock Rovers win against FC Midtjylland in the "
+             "UEFA Champions League match scheduled for Aug 26, 2026")
+        assert len(q) == 109
+        bb = [self._r("atc-ucl-sha-mid-2026-08-26-ma", q + "?",
+                      "ucl-sha-mid-agg-2026-08-26",
+                      "Shamrock Rovers vs FC Midtjylland")]
+        assert bridge(bb, bb, "Yes",
+                      "Will Shamrock Rovers win on 2026-08-26?",
+                      "ucl-sha-mid-2026-08-26-sha",
+                      evt="Shamrock Rovers vs FC Midtjylland") == \
+            (None, "no_candidate_row")
+        assert pm._bridge_event_slug_ok(
+            "ucl-sha-mid-agg-2026-08-26", "2026-08-26",
+            "sha", "mid") is False
+        assert pm._bridge_event_slug_ok(
+            "atc-col-aus-scb-2026-08-27", "2026-08-27",
+            "aus", "scb") is True
+        assert pm._bridge_event_slug_ok(
+            "atc-col-aus-scb-2026-08-27-2", "2026-08-27",
+            "aus", "scb") is False
+
+    def test_the_documented_residual_is_the_sibling_competition(self):
+        """RS-B: a whale youth/women pick (league slot 'uyl'/'uwcl')
+        mirrors the senior tie — same clubs, same date — and the whale
+        league token is unreadable BY DESIGN (league aliasing is
+        measured production behavior: whale 'bol1' == venue 'lpb',
+        same game). No textual gate can separate the sections. This
+        residual is priced into Phase 1's zero-mismatch HAND AUDIT,
+        which sees his_lg verbatim in every audit record. Pin the
+        telemetry that makes the audit possible."""
+        src = inspect.getsource(pm.resolve_explain)
+        assert '"his_lg"' in src
+
+    def test_scope_tokens_are_the_reviewed_closed_list(self):
+        assert "aggregate" in pm._BRIDGE_SCOPE_TOKENS
+        assert "b" in pm._BRIDGE_SCOPE_TOKENS
+        assert "braga" not in pm._BRIDGE_SCOPE_TOKENS
+        assert "fc" not in pm._BRIDGE_SCOPE_TOKENS
+        assert len(pm._BRIDGE_SCOPE_TOKENS) < 60
+
+    def test_feed_furniture_drift_is_an_honest_miss(self):
+        """Raw-sequence agreement's cost, pinned consciously: the
+        whale rendering 'Austin' where the venue says 'Austin FC'
+        refuses (event_title_feed_mismatch folded to
+        no_candidate_row). The census counts this class; loosening it
+        back toward set-equality is what the round-2.1 fleet killed."""
+        bb = board(QB)
+        assert bridge(bb, bb, "Yes", TITLE, SLUG,
+                      evt="Austin vs SC Braga") == \
+            (None, "no_candidate_row")
