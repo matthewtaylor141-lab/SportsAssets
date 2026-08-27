@@ -1330,3 +1330,58 @@ class TestRoundFiveKills:
         assert bridge(b, b, "Yes", "Will CSKA 1948 win on 2026-08-27?",
                       "uecl-csk-aus-2026-08-27-csk",
                       evt="CSKA 1948 vs Austin FC")[0] is None
+
+
+class TestRoundSixKills:
+    """Sixth fleet: unicode lens DRY (third dry lens — and it PROVED
+    the letter-fold gate sound: every confusable folds to its true
+    spelling and dies at the scope list). The two remaining lenses
+    converged on ONE hole — the fold guard checked letters only, and
+    non-Latin DIGITS erase just as silently."""
+
+    def test_nonlatin_digit_markers_refuse_on_every_entry_point(self):
+        """The '(٢)' game-2 marker (category Nd) erased through the
+        letter-only check on all three entry points; each now refuses.
+        The ASCII twin '(2)' always refused — the digit was the one
+        blind spot."""
+        t = " in the UECL match scheduled for Aug 27, 2026"
+        q2 = f"Will SC Braga Norte win against Austin FC{t} (٢)?"
+        bb = [row("atc-col-aus-scb-2026-08-27-ma", "yes", q2,
+                  ev="atc-col-aus-scb-2026-08-27",
+                  evt="Austin FC vs SC Braga Norte (٢)")]
+        assert bridge(bb, bb, "Yes", TITLE, SLUG)[0] is None
+        b = board(QB)
+        assert bridge(b, b, "Yes", TITLE, SLUG,
+                      evt="Austin FC vs SC Braga Norte (٢)") == \
+            (None, "nonlatin_content")
+        assert bridge(b, b, "Yes",
+                      "Will SC Braga Norte win on 2026-08-27 (٢)?",
+                      SLUG)[0] is None
+        for ch in ("٢", "২", "२", "➁", "❷"):
+            assert pm._folds_away(f"x ({ch})"), repr(ch)
+        assert not pm._folds_away("Fenerbahçe SK")
+        assert not pm._folds_away("Bamin Real Potosí")
+
+    def test_kind_is_read_now(self):
+        """'kind' was the next SELECTed-but-unread field: a
+        kind='contract' whole-market fallback row must never be a
+        bridge candidate."""
+        bb = [dict(r, kind="contract") for r in board(QB)]
+        assert bridge(bb, bb, "Yes", TITLE, SLUG) == \
+            (None, "no_candidate_row")
+
+    def test_non_string_question_refuses_not_raises(self):
+        bb = board(QB) + [dict(row("atc-col-aus-scb-2026-08-27-mz",
+                                   "yes", QB), question=12345)]
+        h, why = bridge(bb, bb, "Yes", TITLE, SLUG)
+        assert h is None or h.get("question") == QB
+
+    def test_unicode_digit_dates_refuse_by_string_inequality(self):
+        """Pinned before it can drift: Python's \\d and int() accept
+        non-ASCII digits, but every bridge date check compares
+        STRINGS against the whale slug's ASCII date — an Arabic-digit
+        date triple can never equal it. If any date gate ever moves
+        to int() comparison, this family reopens."""
+        assert pm._bridge_ident_ok(
+            "atc-col-aus-scb-٢٠٢٦-08-27-ma",
+            "2026-08-27", "aus", "scb", "col") is False

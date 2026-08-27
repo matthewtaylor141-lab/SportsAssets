@@ -659,7 +659,16 @@ def _folds_away(raw: str | None) -> bool:
     import unicodedata as _ud
 
     for ch in _ud.normalize("NFKD", str(raw or "")):
-        if ord(ch) > 127 and _ud.category(ch).startswith("L"):
+        if ord(ch) > 127 and _ud.category(ch)[0] not in ("M", "C"):
+            # Round 2.6: letters-only was one category too narrow —
+            # the sixth fleet erased a '(٢)' game-2 marker (category
+            # Nd) through the letter check, mapping a full-match pick
+            # onto the second-instance market. ANY erased character
+            # outside combining marks (Mn — the accent case that must
+            # keep recovering Fenerbahçe/Potosí) and format controls
+            # (Cf — cosmetic, verified) is content the gate stack
+            # goes blind to: digits, number symbols, dingbats,
+            # non-decomposing punctuation. Blind refuses.
             return True
     return False
 
@@ -749,8 +758,11 @@ def _q_parse_raw(question: str | None):
     Deliberately permissive relative to strict: a question that parses
     here but fails strict validation is unselectable but still BLOCKS
     uniqueness — refusing whether or not the true sibling was captured.
+    (Input coerced to str, round 2.6 — a poisoned non-string row must
+    refuse at the gates, not detonate the scan; the REGEX itself stays
+    byte-frozen.)
     """
-    n = " ".join(_norm(question).split())
+    n = " ".join(_norm(str(question or "")).split())
     return _BRIDGE_Q_RE.fullmatch(n)
 
 
@@ -766,7 +778,8 @@ def _q_parse_strict(question: str | None, his_dist: frozenset,
     by distinctive-set EQUALITY; the league is a CLOSED whitelist; the
     tail date must equal the whale slug's date exactly. slug_date is
     guaranteed non-empty by bridge_explain's gate 5."""
-    if len(question or "") >= 108:
+    question = str(question or "")
+    if len(question) >= 108:
         # Round 2.2: a scope qualifier rendered AFTER the date is
         # amputated by any ~110-char truncation in the pipeline,
         # leaving the exact clean template. A question long enough to
@@ -806,7 +819,10 @@ def _q_parse_strict(question: str | None, his_dist: frozenset,
     if any(_has_scope_token(s) for s in sides):
         return None, "scope_token_in_event"
     if frozenset(sides) != his_sides:
-        # RAW-SEQUENCE FEED AGREEMENT (round 2.2). Distinctive-set
+        # FEED AGREEMENT (round 2.2; wording corrected 2.6: both
+        # sides are compared post-_norm — accent-folded, never
+        # stripped — and _folds_away now guarantees the folded form
+        # lost nothing content-bearing). Distinctive-set
         # equality let two independently TERSE renderings corroborate
         # a name-twin's fixture ('Rapid vs Union' taking FC Rapid
         # Bucuresti vs FC Union Berlin — different game). The two
@@ -1124,8 +1140,16 @@ def bridge_explain(rows_kept: list[dict], rows_all: list[dict],
         qd = None
         if _norm(r.get("side_norm")) != on:
             gate = "side_polarity"
-        elif (r.get("line") or "").strip() or (r.get("signed")
-                                               or "").strip():
+        elif r.get("kind") != "side":
+            # Round 2.6: 'kind' was the next SELECTed-but-unread
+            # field. The sweep writes exactly two values — 'side'
+            # (marketSides rows, the only shape the bridge grammar
+            # was built for) and 'contract' (whole-market fallback
+            # rows with a hardcoded intent). Only the attested shape
+            # passes.
+            gate = "kind_not_side"
+        elif str(r.get("line") or "").strip() or \
+                str(r.get("signed") or "").strip():
             gate = "lined_or_signed"
         elif not r.get("intent"):
             gate = "no_intent"
