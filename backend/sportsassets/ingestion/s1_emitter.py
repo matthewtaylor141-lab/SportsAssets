@@ -103,6 +103,23 @@ SQL_PROBE = (
     "WHERE lower(tx_hash) = $1 AND whale_id = $2 "
     "AND asset = $3 AND source IN ('chain', 's1')"
 )
+# The corroboration sweep: judgment anchors to the durable rows, not
+# process memory (fleet round 3) — restart-proof, exactly-once via the
+# s1_checked_at stamp, and the consequence of a venue-refuted emission
+# lands on the responsible component: this emitter trips STICKY. A row
+# whose whale left the roster is unjudgeable (no poll carrier remains)
+# — counted, never alarmed (round 3: stamp starvation via roster ban).
+CORROBORATE_S = 45 * 60
+SQL_SWEEP = """
+SELECT t.id, t.dedupe_key,
+       (t.venue_seen_at IS NOT NULL) AS ok,
+       (w.active AND NOT w.banned)   AS pollable
+FROM trades t JOIN whales w ON w.id = t.whale_id
+WHERE t.source = 's1' AND t.s1_checked_at IS NULL
+  AND t.detected_at < now() - make_interval(secs => $1)
+LIMIT 50
+"""
+SQL_MARK = "UPDATE trades SET s1_checked_at = now() WHERE id = ANY($1::bigint[])"
 SQL_READ = "SELECT value FROM ingestion_state WHERE key = $1"
 # Compare-and-swap on the tripped field: a concurrent process's sticky
 # trip must never be erased by our read-modify-write (fleet round 2,
@@ -275,18 +292,24 @@ class S1Emitter:
         except Exception:  # noqa: BLE001 — stay unloaded, stay closed
             self.bump("s1.errors")
             return
-        doc = raw if isinstance(raw, dict) else (
-            json.loads(raw) if raw else {})
-        if not isinstance(doc, dict):
-            doc = {}
-        if doc.get("tripped"):
-            self.tripped = str(doc["tripped"])
-            self.armed = False
-        elif doc.get("armed"):
-            self._pending_arm_at = float(doc.get("armed_at") or now)
-        self._stored_trip = str(doc.get("tripped") or "")
-        c = doc.get("counters")
-        self.counters = c if isinstance(c, dict) else {}
+        try:
+            doc = raw if isinstance(raw, dict) else (
+                json.loads(raw) if raw else {})
+            if not isinstance(doc, dict):
+                doc = {}
+            if doc.get("tripped"):
+                self.tripped = self._trip_str(doc["tripped"])
+                self.armed = False
+            elif doc.get("armed"):
+                aa = doc.get("armed_at")
+                self._pending_arm_at = (float(aa) if isinstance(
+                    aa, (int, float)) else now)
+            c = doc.get("counters")
+            self.counters = c if isinstance(c, dict) else {}
+        except Exception:  # noqa: BLE001 — a corrupt row must not wedge
+            # the loop; fail-closed with nothing adopted (round 3)
+            self.bump("s1.state_corrupt")
+            self.tripped = self.tripped or "state_corrupt"
         self._state_loaded = True
 
     # ── certification ───────────────────────────────────────────────
@@ -604,9 +627,56 @@ class S1Emitter:
                 self.bump("s1.emit_dup")
         return emitted
 
+    # ── the corroboration sweep ─────────────────────────────────────
+    async def _corroboration_sweep(self, pool: Any) -> None:
+        try:
+            rows = await pool.fetch(SQL_SWEEP, float(CORROBORATE_S),
+                                    timeout=10)
+        except Exception:  # noqa: BLE001
+            self.bump("s1.errors")
+            return
+        if not rows:
+            return
+        ids = []
+        for r in rows:
+            ids.append(r["id"])
+            if r["ok"]:
+                self.bump("s1.confirmed")
+            elif not r["pollable"]:
+                # the whale left the roster: no poll carrier can ever
+                # stamp this row — unjudgeable, counted, never alarmed
+                self.bump("s1.corroboration_unjudgeable")
+            else:
+                self.bump("s1.uncorroborated")
+                log.error("S1 UNCORROBORATED row id=%s key=%s — the "
+                          "venue's feed never showed this fill",
+                          r["id"], str(r["dedupe_key"])[:16])
+                self._trip("uncorroborated")
+        try:
+            await pool.execute(SQL_MARK, ids, timeout=10)
+        except Exception:  # noqa: BLE001
+            # unmarked rows are re-judged next sweep: confirmed/
+            # unjudgeable recount (observability overcount), and a
+            # re-tripped trip is idempotent — never a lost alarm
+            self.bump("s1.errors")
+
     # ── flush (own state key; observability, not evidence) ──────────
+    @staticmethod
+    def _trip_str(v: Any) -> str:
+        # must reproduce Postgres ->> for the CAS comparison: text as
+        # itself, other JSON scalars in JSON form (round 3: a boolean
+        # trip made str(True) != 'true' and starved every flush)
+        if v is None:
+            return ""
+        return v if isinstance(v, str) else json.dumps(v)
+
     async def _flush(self, pool: Any, now: float) -> None:
         self.last_flush_at = now
+        if not self._state_loaded:
+            # writing before the persisted state is known can erase a
+            # pending arm or a foreign trip (round 3) — deltas simply
+            # accumulate until the loader succeeds
+            return
         try:
             raw = await pool.fetchval(SQL_READ, STATE_KEY, timeout=6)
             doc = raw if isinstance(raw, dict) else (
@@ -616,7 +686,7 @@ class S1Emitter:
         except Exception:  # noqa: BLE001
             self.bump("s1.flush_failures")
             return
-        stored_trip = str(doc.get("tripped") or "")
+        stored_trip = self._trip_str(doc.get("tripped"))
         if stored_trip and self.tripped is None:
             # another process tripped since our last read: a sticky
             # trip is global — adopt it, never clobber it (fleet r1/r2)
@@ -630,9 +700,14 @@ class S1Emitter:
         for k, v in snap.items():
             base = merged.get(k)
             merged[k] = (base if isinstance(base, (int, float)) else 0) + v
-        armed_out = bool(self.armed and not self.tripped)
+        # a pending (not-yet-validated) arm is still an arm on disk —
+        # persisting armed=false before validation erased legitimate
+        # arms across boot blips (round 3)
+        armed_out = bool((self.armed or self._pending_arm_at is not None)
+                         and not self.tripped)
         payload = {"counters": merged, "armed": armed_out,
-                   "armed_at": self.armed_at,
+                   "armed_at": (self.armed_at if self.armed
+                                else (self._pending_arm_at or 0.0)),
                    "tripped": self.tripped or stored_trip or None,
                    "cert_green": self.cert_green,
                    "cert_reason": self.cert_reason,
@@ -643,12 +718,16 @@ class S1Emitter:
                                       json.dumps(payload), stored_trip,
                                       timeout=6)
         except Exception:  # noqa: BLE001
-            got = None
+            # AMBIGUOUS: the write may have committed and lost its ack.
+            # Restoring the snap would double-count on the next flush,
+            # so the snap is DROPPED — undercount-only, the same choice
+            # the shadow's ack protocol makes (round 3)
+            self.bump("s1.flush_failures")
+            self.bump("s1.snap_dropped_ambiguous")
+            return
         if got is None:
-            # write failed or the CAS lost to a concurrent trip: restore
-            # the deltas for the next flush and adopt on the next read.
-            # self.counters is NOT updated — the beat must never show a
-            # merge that did not land (fleet r2: double-count)
+            # unambiguous: the CAS WHERE refused, nothing was written —
+            # restore the deltas and adopt the foreign trip next read
             for k, v in snap.items():
                 self.deltas[k] = self.deltas.get(k, 0) + v
             self.bump("s1.flush_failures")
@@ -676,6 +755,8 @@ class S1Emitter:
                 if now - last_cert >= CERT_EVERY_S:
                     last_cert = now
                     await self._check_cert(pool, now)
+                    if self._state_loaded:
+                        await self._corroboration_sweep(pool)
                 # head poll only when someone is waiting on confirmation
                 waiting = any(
                     max(e["blocks"], default=0) + CONFIRM_DEPTH > self.head

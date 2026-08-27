@@ -170,15 +170,20 @@ async def ingest_trade_result(ev: TradeEvent,
                                      EXCLUDED.event_slug),
             enriched_at   = COALESCE(trades.enriched_at,
                                      EXCLUDED.enriched_at),
-            -- VENUE CORROBORATION for S1-won fills (fleet round 2):
+            -- VENUE CORROBORATION for S1-won fills (fleet rounds 2-3):
             -- when the venue's own feed re-delivers a fill the S1
             -- emitter already ingested, the poll duplicate lands here
             -- and stamps the row. The stamp originates at the VENUE,
             -- so it corroborates the emission in a way a shared decode
-            -- bug cannot fake; the shadow gates s1 rows left
-            -- unstamped past its deadline. First stamp wins.
+            -- bug cannot fake — INCLUDING wallet attribution: the
+            -- whale_id equality means a fill booked under the wrong
+            -- whale is never stamped by the true whale's poll row
+            -- (round 3: the whale-blind stamp self-corroborated
+            -- exactly the owner/cpty confusion class). First stamp
+            -- wins; the emitter's sweep judges unstamped rows.
             venue_seen_at = COALESCE(trades.venue_seen_at,
                                      CASE WHEN EXCLUDED.source = 'poll'
+                                          AND EXCLUDED.whale_id = trades.whale_id
                                           THEN now() END)
         -- xmax = 0 IS THE ONLY THING SEPARATING A FILL FROM A REFILL.
         --

@@ -83,11 +83,13 @@ GATING = ("div.side", "div.asset", "div.size", "div.price", "div.ts",
           "per_exec_ambiguous", "orphan_no_row", "orphan_agg_no_row",
           "orphan_chain_mismatch",
           "poll_uncovered_unexplained", "ts_never_resolved_live",
-          # S1 emissions (source='s1') answer to their own alarms: a
-          # row our decode cannot reproduce is version skew, and a row
-          # the venue's feed never corroborates (venue_seen_at NULL at
-          # the finalize deadline) is a fill nothing at the venue backs
-          "s1_key_mismatch", "s1_uncorroborated")
+          # An s1 row our decode cannot reproduce is version skew
+          # between the emitter and this instrument — the certification
+          # that armed the emitter certified THIS decode, so the
+          # evidence clock resets. Venue corroboration is judged by the
+          # EMITTER's own row-anchored sweep (fleet round 3), which
+          # trips the emitter sticky — not a shadow concern.
+          "s1_key_mismatch")
 # counters that reset the instrument-health window when they move
 HEALTH = ("shadow_errors", "cycle_errors", "db_errors", "flush_failures",
           "writer_conflict", "pending_overflow_dropped", "log_index_missing",
@@ -100,7 +102,7 @@ HEALTH = ("shadow_errors", "cycle_errors", "db_errors", "flush_failures",
 VOLUME_KEYS = ("compared_execs", "sim_exec_suppressed", "sim_agg_suppressed",
                "sim_exec_supp_hup_only", "mint_transformed", "poll_rows_seen",
                "decoded_exec_counter", "decoded_exec_owner", "decoded_agg",
-               "sim_ven_suppressed", "s1_confirmed")
+               "sim_ven_suppressed")
 
 SQL_TX = """
 SELECT lower(tx_hash) AS tx, whale_id, asset, side,
@@ -878,7 +880,8 @@ class ShadowV2:
                     self.bump("exec_covered_by_chain_agg_row")
                 elif s1_keys and (
                         any(k in s1_keys for _v, k in rec_keys(c))
-                        or (c["asset"] in agg_assets_set
+                        or (c["view"] in ("exec_counter", "exec_mint")
+                            and c["asset"] in agg_assets_set
                             and agg_tieout(g) == "ok"
                             and any(k in s1_keys
                                     for a in aggs if a["asset"] == c["asset"]
@@ -889,13 +892,11 @@ class ShadowV2:
                     # once per s1 row below, not per exec.
                     self.bump("exec_covered_by_s1_row")
                 elif s1_keys and not poll_rows and not chain_rows:
-                    # an s1 row exists for this (tx, wallet) but matches
-                    # NOTHING our decode produces: the emitter and the
-                    # instrument have diverged (version skew) — loudest
-                    # possible post-flip alarm
-                    self.bump("s1_key_mismatch")
-                    self.note_example("s1_key_mismatch", tx=tx[:14],
-                                      wallet=wallet[:12], view=c["view"])
+                    # an s1 row exists but none matches this exec: the
+                    # per-row version-skew judge below carries the
+                    # gating; this exec is neither orphaned (a chain
+                    # emitter DID claim the tx) nor absorbed
+                    self.bump("exec_under_mismatched_s1")
                 elif not poll_rows and not chain_rows:
                     self.bump("orphan_no_row")
                     self.note_example("orphan_no_row", tx=tx[:14], wallet=wallet[:12],
@@ -925,38 +926,27 @@ class ShadowV2:
                     self.bump("agg_covered_by_s1_row")
                     continue
                 if s1_keys:
-                    self.bump("s1_key_mismatch")
-                    self.note_example("s1_key_mismatch", tx=tx[:14],
-                                      wallet=wallet[:12], side=a["side"])
+                    # the per-row version-skew judge carries the gating
+                    self.bump("agg_under_mismatched_s1")
                     continue
                 self.bump("orphan_agg_no_row")
                 self.note_example("orphan_agg_no_row", tx=tx[:14],
                                   wallet=wallet[:12], side=a["side"])
                 log.info("SHADOW-V2 AGG-ORPHAN tx=%s wallet=%s no rows",
                          tx[:14], wallet[:12])
-        # VENUE CORROBORATION, judged once per s1 row at finalize. Any
-        # finalize that sees s1 rows happens at the deadline (s1 rows
-        # never count toward coverage), so the venue's poll duplicate —
-        # 130-200s behind — has had over an hour to stamp venue_seen_at
-        # through the ingest conflict branch. Unstamped at that age
-        # means the venue's own feed never showed the fill: the
-        # emission is uncorroborated, and it gates.
+        # VERSION SKEW, judged per s1 row, unconditionally: an s1 row
+        # whose key matches nothing this decode produces (insert sets
+        # and dropped raws included) means the emitter's decode and the
+        # certified one have diverged — poll rows being present must
+        # not hide it behind a non-gating orphan (fleet round 3).
+        all_our_keys = set(ins_exec) | set(ins_agg) | set(dropped_keys)
         for key, row in s1_keys.items():
-            det = row.get("det_epoch")
-            aged = isinstance(det, (int, float)) and \
-                now - det >= ORPHAN_FINAL_S * 0.9
-            if row.get("venue_seen_epoch") is not None:
-                self.bump("s1_confirmed")
-            elif aged:
-                self.bump("s1_uncorroborated")
-                self.note_example("s1_uncorroborated", tx=tx[:14],
+            if key not in all_our_keys:
+                self.bump("s1_key_mismatch")
+                self.note_example("s1_key_mismatch", tx=tx[:14],
                                   wallet=wallet[:12], key=key[:16])
-                log.warning("SHADOW-V2 S1-UNCORROBORATED tx=%s wallet=%s",
+                log.warning("SHADOW-V2 S1-KEY-MISMATCH tx=%s wallet=%s",
                             tx[:14], wallet[:12])
-            else:
-                # young and unstamped: counted next reconcile via the
-                # tombstone-merge redelivery path — undercount only
-                self.bump("s1_pending_corroboration")
         self.bump("compared_execs", len(execs))
         self.bump("txs_reconciled")
         return logged

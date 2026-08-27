@@ -710,3 +710,106 @@ def test_emitter_never_imports_at_module_load_into_shadow(st):
     import sportsassets.ingestion.shadow_v2 as sv
     src = open(sv.__file__).read()
     assert "s1_emitter" not in src and "claim_registry" not in src
+
+
+# ── fleet round 3: the row-anchored corroboration sweep ─────────────
+class _SweepPool(_Pool):
+    def __init__(self, sweep_rows):
+        super().__init__()
+        self.sweep_rows = sweep_rows
+        self.marked = []
+
+    async def fetch(self, sql, *a, timeout=None):
+        return self.sweep_rows
+
+    async def execute(self, sql, *a, timeout=None):
+        self.marked.append(a[0])
+
+
+def test_sweep_confirms_trips_and_skips_unjudgeable(st):
+    """The verdict anchors to durable rows: stamped -> confirmed;
+    unstamped with a live poll carrier -> STICKY TRIP (the consequence
+    lands on the emitter, never the shadow's window); whale gone from
+    the roster -> unjudgeable, counted, never alarmed."""
+    _arm(st)
+    pool = _SweepPool([
+        {"id": 1, "dedupe_key": "k1", "ok": True, "pollable": True},
+        {"id": 2, "dedupe_key": "k2", "ok": False, "pollable": False},
+        {"id": 3, "dedupe_key": "k3", "ok": False, "pollable": True},
+    ])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert st.deltas.get("s1.confirmed") == 1
+    assert st.deltas.get("s1.corroboration_unjudgeable") == 1
+    assert st.deltas.get("s1.uncorroborated") == 1
+    assert st.tripped == "uncorroborated" and st.armed is False
+    assert pool.marked == [[1, 2, 3]], "every judged row is stamped once"
+
+
+def test_sweep_empty_is_free(st):
+    pool = _SweepPool([])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert st.deltas == {} and pool.marked == []
+
+
+def test_flush_never_writes_before_state_loads(st):
+    """fleet r3 (major): writing armed=false while the persisted state
+    is unknown erased legitimate arms across boot blips."""
+    st._state_loaded = False
+    st.deltas = {"s1.emitted": 2}
+    pool = _Pool(stored=json.dumps({"armed": True, "counters": {}}))
+    asyncio.run(st._flush(pool, time.time()))
+    assert pool.writes == [], "no write before the loader succeeds"
+    assert st.deltas.get("s1.emitted") == 2
+
+
+def test_pending_arm_survives_the_flush_write(st):
+    """A not-yet-validated arm is still an arm on disk."""
+    now = time.time()
+    st._pending_arm_at = now - 3600
+    asyncio.run(st._flush(_Pool(stored=json.dumps({"counters": {}})), now))
+    # fixture note: _state_loaded is True here, so the write happens
+
+
+def test_ambiguous_write_drops_snap_clean_cas_loss_restores(st):
+    """fleet r3 (minor): an exception mid-write may have committed —
+    restoring would double-count, so the snap drops (undercount-only);
+    a clean CAS refusal provably wrote nothing and restores."""
+    now = time.time()
+
+    class _BoomPool(_Pool):
+        async def fetchval(self, sql, *a, timeout=None):
+            if sql.lstrip().startswith("INSERT"):
+                raise RuntimeError("socket died mid-write")
+            return self.stored
+
+    st.deltas = {"s1.emitted": 5}
+    asyncio.run(st._flush(_BoomPool(stored=json.dumps({"counters": {}})),
+                          now))
+    assert st.deltas.get("s1.emitted") is None, "ambiguous -> dropped"
+    assert st.deltas.get("s1.snap_dropped_ambiguous") == 1
+
+    st2 = S1Emitter()
+    st2._state_loaded = True
+    st2.deltas = {"s1.emitted": 5}
+    pool = _Pool(stored=json.dumps({"counters": {}}), cas_fails=True)
+    asyncio.run(st2._flush(pool, now))
+    assert st2.deltas.get("s1.emitted") == 5, "clean CAS loss -> restored"
+
+
+def test_boolean_trip_in_state_row_does_not_starve_the_cas(st):
+    """fleet r3 (minor): ->> renders a JSON boolean as 'true'; the CAS
+    comparison must reproduce that, not str(True)."""
+    assert S1Emitter._trip_str(True) == "true"
+    assert S1Emitter._trip_str("key_selfcheck") == "key_selfcheck"
+    assert S1Emitter._trip_str(None) == ""
+
+
+def test_corrupt_state_row_fails_closed_not_wedged(st):
+    """fleet r3 (minor): a non-numeric armed_at must not crash the run
+    loop forever — the loader fails closed with a visible counter."""
+    st._state_loaded = False
+    doc = {"armed": True, "armed_at": {"bad": "shape"}, "counters": []}
+    asyncio.run(st._load_state(_Pool(stored=json.dumps(doc)),
+                               time.time()))
+    assert st._state_loaded is True
+    assert st.armed is False
