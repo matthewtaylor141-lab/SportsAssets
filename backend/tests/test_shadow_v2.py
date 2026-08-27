@@ -1694,3 +1694,97 @@ def test_junk_counter_and_watermark_values_are_corrupt(st):
         written = json.loads(pool.executes[0][1][1])
         assert written["counters"].get("corrupt_reset") == 1, \
             f"{stored} must reset VISIBLY, not half-heal into lies"
+
+
+# ════════════════════════════════════════════════════════════════════
+# Implementation-fleet kills (round 5) — 3 shadow (3 named-lane pinned
+# in test_bridge_named_tennis.py), fixed and pinned.
+# ════════════════════════════════════════════════════════════════════
+
+# ── fleet5 K0: absorption is asset-scoped like the tie ──────────────
+def test_absorption_excludes_cross_asset_legs(st):
+    leg1 = _mkrec(view="exec_counter", side="SELL", owner_side="BUY",
+                  asset="1000", size_units=4_000_000,
+                  usdc_units=2_480_000, log_index=1,
+                  seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    leg2 = _mkrec(view="exec_counter", side="SELL", owner_side="BUY",
+                  asset="1000", size_units=6_000_000,
+                  usdc_units=3_720_000, log_index=2,
+                  seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    ag = _mkrec(view="agg", side="SELL", asset="1000",
+                size_units=10_000_000, usdc_units=6_200_000, log_index=3,
+                seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    guess = _mkrec(view="exec_counter", side="SELL", asset="3000",
+                   size_units=500_000, usdc_units=310_000, log_index=4,
+                   seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [leg1, leg2, guess], "aggs": [ag], "flags": {}}
+    chain_row = _poll_row(ag, source="chain")
+    st._match_wallet(TX, MAKER, g, [leg1, leg2, guess, ag], [], [chain_row],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("exec_covered_by_chain_agg_row") == 2, \
+        "only the tie's OWN asset legs are proven by the aggregate"
+    assert st.deltas.get("orphan_chain_mismatch") == 1, \
+        "the cross-asset leg must fall through to the orphan ladder"
+
+
+# ── fleet5 K1: tombstone merge books TRANSFORMED mint keys ──────────
+def test_tombstone_merge_uses_transformed_keys(st):
+    e1 = _mkrec(asset="1000", log_index=1, seen_at=time.time() - 1000)
+    g0 = {"execs": [e1], "aggs": [], "flags": {}}
+    st._match_wallet(TX, MAKER, g0, [e1], [_poll_row(e1)], [],
+                     1000.0, time.time(), 0)
+    assert (TX, MAKER) in st.watch
+
+    agg = _mkrec(view="agg", side="BUY", asset="1000",
+                 size_units=4_000_000, usdc_units=2_400_000, log_index=2,
+                 seen_at=time.time() - 1000)
+    raw_mint = _mkrec(view="exec_counter", side="SELL", owner_side="BUY",
+                      asset="2000", size_units=4_000_000,
+                      usdc_units=1_600_000, log_index=3,
+                      seen_at=time.time() - 1000)
+    for r in (agg, raw_mint):
+        st.pending[(r["tx"], r["log_index"], r["wallet"], r["view"])] = r
+    st._reconcile_tx(TX, [agg, raw_mint], {}, time.time(), 0)
+    assert st.deltas.get("refinalize_blocked") == 1
+
+    transformed = dict(raw_mint, view="exec_mint", asset="1000",
+                       side="BUY", usdc_units=4_000_000 - 1_600_000)
+    late_row = _poll_row(transformed)   # the venue books the TRANSFORMED shape
+    st._watch_pass({(TX, 1): [late_row]}, time.time())
+    assert st.deltas.get("sim_exec_residual_dup") is None, \
+        "a perfectly-decoded mint redelivery must not fabricate a residual"
+    assert st.deltas.get("sim_exec_suppressed") == 2
+
+
+# ── fleet5 K2: fetched stamps only after a fetch RETURNED ───────────
+def test_fetched_flag_requires_successful_fetch(st):
+    async def _go():
+        import sportsassets.db as db
+        e1 = _mkrec(log_index=1, seen_at=time.time() - 1000)
+        g = {"execs": [e1], "aggs": [], "flags": {}}
+        st._match_wallet(TX, MAKER, g, [e1], [_poll_row(e1)], [],
+                         1000.0, time.time(), 0)
+        assert (TX, MAKER) in st.watch
+
+        class _DeadPool:
+            async def fetch(self, *a, **k):
+                raise RuntimeError("db down")
+            async def fetchval(self, *a, **k):
+                raise RuntimeError("db down")
+            async def execute(self, *a, **k):
+                raise RuntimeError("db down")
+
+        orig = db.get_pool
+
+        async def _gp():
+            return _DeadPool()
+        db.get_pool = _gp
+        try:
+            st.tick_n = sv.RECONCILE_EVERY - 1
+            st.http_url = ""
+            await st.tick()
+        finally:
+            db.get_pool = orig
+        assert not st.watch[(TX, MAKER)].get("fetched"), \
+            "a failed fetch must not mask starvation as coverage"
+    asyncio.run(_go())

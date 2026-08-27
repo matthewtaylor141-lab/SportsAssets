@@ -571,3 +571,37 @@ class TestRoundFourKills:
                       WS, WE)
         assert w == "ok" and h is K, \
             "the 289-row census class must survive every new refusal"
+
+
+class TestRoundFiveKills:
+    """Round-5 fleet: marker spellings the round-4 vocabulary missed."""
+
+    def test_ace_markers_refuse_in_halves_and_prefix(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama",
+                      "Koyama vs Castelnuovo Most Aces", WS, WE)
+        assert h is None
+        h, w, _ = run([K, C], "Hiromasa Koyama",
+                      "Ace Count: Koyama vs Castelnuovo", WS, WE)
+        assert h is None
+
+    def test_split_and_dotted_bad_markers_refuse(self):
+        for title in ("Walk Over: Koyama vs Castelnuovo",
+                      "With Drawal: Koyama vs Castelnuovo",
+                      "T.B.: Koyama vs Castelnuovo",
+                      "W.O.: Koyama vs Castelnuovo"):
+            h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
+            assert h is None, title
+
+    def test_whole_number_lined_markets_refuse(self):
+        for title in ("Total 22: Koyama vs Castelnuovo",
+                      "Games Handicap: Koyama vs Castelnuovo",
+                      "Over Under: Koyama vs Castelnuovo"):
+            h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
+            assert h is None, title
+
+    def test_attested_class_survives_round_five(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama",
+                      "ITF MEN - SINGLES: M15 Cap d'Agde (France), "
+                      "clay: Hiromasa Koyama vs Luca Castelnuovo",
+                      WS, WE)
+        assert w == "ok" and h is K

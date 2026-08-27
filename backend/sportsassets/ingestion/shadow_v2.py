@@ -521,13 +521,16 @@ class ShadowV2:
             if len(watch_txs) >= 100:
                 break
         fetch_txs = mature + watch_txs
-        fetch_set = set(fetch_txs)
-        for (t, _wal), w in self.watch.items():
-            if t in fetch_set:
-                w["fetched"] = True
         if pool is not None and fetch_txs:
             try:
                 rows = await pool.fetch(SQL_TX, fetch_txs, timeout=5.0)
+                fetch_set = set(fetch_txs)
+                for (t, _wal), w_e in self.watch.items():
+                    if t in fetch_set:
+                        # only a fetch that actually RETURNED counts —
+                        # stamping before the DB call let a failed pass
+                        # mask starvation as coverage
+                        w_e["fetched"] = True
                 rows_by: dict[tuple, list[dict]] = {}
                 for row in rows:
                     rows_by.setdefault((row["tx"], row["whale_id"]), []).append(dict(row))
@@ -578,8 +581,13 @@ class ShadowV2:
                 # row landed before this merge, the residual already
                 # counted — conservative direction, accepted.
                 w = self.watch.get((tx, wallet))
-                for c in by_wallet[wallet]:
-                    if w is not None and c.get("ts") is not None:
+                if w is not None:
+                    # merge the CLASSIFIED records: a mint leg's venue row
+                    # arrives in TRANSFORMED shape, so merging the raw
+                    # key would still fabricate a gating residual
+                    for c in g["execs"] + g["aggs"]:
+                        if c.get("ts") is None:
+                            continue
                         tgt = w["agg_keys"] if c["view"] == "agg" else w["exec_keys"]
                         for var, key in rec_keys(c):
                             tgt.setdefault(key, var)
@@ -587,6 +595,7 @@ class ShadowV2:
                             w["agg_assets"].add(c["asset"])
                         else:
                             w["has_execs"] = True
+                for c in by_wallet[wallet]:
                     self.pending.pop((c["tx"], c["log_index"], c["wallet"], c["view"]), None)
                 self.bump("refinalize_blocked")
                 continue
@@ -745,15 +754,22 @@ class ShadowV2:
                                  and self._chain_sum_covers(execs, chain_rows)))
         for key, (variant, c) in ins_exec.items():
             if variant == "round" and key not in all_row_keys and id(c) not in consumed:
-                if exec_sum_covered and c["view"] in ("exec_counter", "exec_mint"):
+                if (exec_sum_covered
+                        and c["view"] in ("exec_counter", "exec_mint")
+                        and c["asset"] in agg_assets_set):
                     # ONLY the legs agg_tieout actually summed are proven
-                    # by the agg-matched row — an exec_owner (self-trade
-                    # dual record) is outside the tie and must fall
-                    # through to the orphan ladder like any other exec
+                    # by the agg-matched row — the tie is asset-scoped,
+                    # so the absorption must be too: a reverted
+                    # cross-market guess (different asset) and an
+                    # exec_owner both fall through to the orphan ladder
                     self.bump("exec_covered_by_agg_row")
                 elif chain_sum_covered and (
-                        c["view"] in ("exec_counter", "exec_mint")
-                        or (not aggs and c["view"] == "exec_owner")):
+                        (aggs and c["view"] in ("exec_counter", "exec_mint")
+                         and c["asset"] in agg_assets_set)
+                        or not aggs):
+                    # not-aggs arm: _chain_sum_covers enforced a single
+                    # asset+side across ALL execs, so no cross-market
+                    # leg can reach it
                     self.bump("exec_covered_by_chain_agg_row")
                 elif not poll_rows and not chain_rows:
                     self.bump("orphan_no_row")

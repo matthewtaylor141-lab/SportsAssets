@@ -1260,6 +1260,8 @@ _NAMED_BAD_TOKENS = frozenset({
     "games", "match", "doubles", "winner", "meeting", "first",
     "second", "third", "retirement", "retired", "retire", "retires",
     "walkover", "withdrew", "withdrawal", "withdraws",
+    "ace", "aces", "total", "totals", "handicap", "spread",
+    "over", "under",
     # Named 1.1: abbreviation family + the separator itself — the
     # implementation fleet rode 'TB' through the title witness and
     # 'vs' through regex backtracking into a name slot.
@@ -1283,8 +1285,11 @@ def _named_title_danger(toks: list[str]) -> bool:
     danger = _NAMED_DERIV_TOKENS | _NAMED_BAD_TOKENS
     if any(t in danger or _NAMED_ORDINAL_RE.fullmatch(t) for t in toks):
         return True
-    return any("".join(toks[i:i + n]) in _NAMED_DERIV_TOKENS
-               for n in (2, 3) for i in range(len(toks) - n + 1))
+    # joins hit the FULL danger set: 'Walk Over', 'With Drawal' and
+    # dotted initials ('T.B.' -> 't b' -> 'tb') are still their marker
+    return any(len(j) >= 2 and j in danger
+               for n in (2, 3) for i in range(len(toks) - n + 1)
+               for j in ("".join(toks[i:i + n]),))
 _NAMED_MONTHS = dict(_BRIDGE_MONTHS)
 # Copied at import — a month added for one lane must never widen the
 # other.
@@ -1442,8 +1447,9 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
             return None, "title_half_bad"
         if any((not t.isalpha()) or t in _NAMED_BAD_TOKENS for t in h):
             return None, "title_half_bad"
-        if any("".join(h[i:i + n]) in _NAMED_DERIV_TOKENS
-               for n in (2, 3) for i in range(len(h) - n + 1)):
+        if any(len(j) >= 2 and j in (_NAMED_DERIV_TOKENS | _NAMED_BAD_TOKENS)
+               for n in (2, 3) for i in range(len(h) - n + 1)
+               for j in ("".join(h[i:i + n]),)):
             # 'Tie Break' joins to 'tiebreak' — a marker split across
             # tokens is still a marker, in the halves as in the prefix
             return None, "title_half_bad"
