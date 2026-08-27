@@ -1275,6 +1275,14 @@ _NAMED_DERIV_TOKENS = frozenset({"set", "sets", "tiebreak",
                                  "tiebreaker", "game", "games",
                                  "doubles", "ace", "aces"})
 _NAMED_ORDINAL_RE = re.compile(r"\d+(st|nd|rd|th)")
+# POSITIVE prefix grammar (round-6 fleet): refusing market nouns one by
+# one is a vocabulary, and a vocabulary can never be proven closed — the
+# round-5 additions killed 'Most Aces' while 'Most Double Faults' (whose
+# winner is routinely the match LOSER) walked past. A dropped prefix must
+# now ATTEST its tour: the only attested family is itf (census
+# 2026-08-27, 289 rows; the pinned 'Qualification ITF' shape). Extend by
+# observation, never by assumption — exactly the _NAMED_TOUR_OF law.
+_NAMED_TOUR_MARKERS = frozenset({"itf"})
 
 
 def _named_title_danger(toks: list[str]) -> bool:
@@ -1430,13 +1438,22 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
     # marker sits. A colon inside the matchup (no attested case) still
     # refuses at the two-halves check.
     prefix, _, matchup = rawt.rpartition(":")
-    if prefix and _named_title_danger(_norm(prefix).split()):
-        # 'First Set Winner: X vs Y', 'Match Tie-Break: ...',
-        # '2nd Meeting: ...' — the dropped prefix is scanned against
-        # the lane's FULL danger vocabulary (deriv + bad + ordinals)
-        # with adjacent-token joins, so the venue's two-word spellings
-        # ('Tie Break') cannot walk past the single-token set.
-        return None, "title_prefix_derivative"
+    if prefix:
+        ptoks = _norm(prefix).split()
+        if _named_title_danger(ptoks):
+            # 'First Set Winner: X vs Y', 'Match Tie-Break: ...',
+            # '2nd Meeting: ...' — the dropped prefix is scanned against
+            # the lane's FULL danger vocabulary (deriv + bad + ordinals)
+            # with adjacent-token joins, so the venue's two-word
+            # spellings ('Tie Break') cannot walk past the single-token
+            # set.
+            return None, "title_prefix_derivative"
+        if not any(t in _NAMED_TOUR_MARKERS for t in ptoks):
+            # the POSITIVE gate: 'Most Double Faults', 'Fastest Serve',
+            # 'Number of Tiebreaks' — every prop-market prefix, present
+            # and future — refuses here structurally, because it cannot
+            # attest a tour. Blocking may over-refuse; selection may not.
+            return None, "title_prefix_unattested"
     halves = [" ".join(h.split()) for h in
               re.split(r"\s+vs\.?\s+", _norm(matchup)) if h.strip()]
     if len(halves) != 2:

@@ -1788,3 +1788,54 @@ def test_fetched_flag_requires_successful_fetch(st):
         assert not st.watch[(TX, MAKER)].get("fetched"), \
             "a failed fetch must not mask starvation as coverage"
     asyncio.run(_go())
+
+
+# ════════════════════════════════════════════════════════════════════
+# Implementation-fleet kills (round 6) — 2 shadow (1 named-lane pinned
+# in test_bridge_named_tennis.py), fixed and pinned.
+# ════════════════════════════════════════════════════════════════════
+
+# ── fleet6 K0: classifier-dropped raws merge into the watch ─────────
+def test_tombstone_merge_covers_classifier_dropped(st):
+    e1 = _mkrec(asset="1000", log_index=1, seen_at=time.time() - 1000)
+    g0 = {"execs": [e1], "aggs": [], "flags": {}}
+    st._match_wallet(TX, MAKER, g0, [e1], [_poll_row(e1)], [],
+                     1000.0, time.time(), 0)
+    assert (TX, MAKER) in st.watch
+
+    agg = _mkrec(view="agg", side="BUY", asset="1000",
+                 size_units=4_000_000, usdc_units=2_400_000, log_index=2,
+                 seen_at=time.time() - 1000)
+    anomaly = _mkrec(view="exec_counter", side="BUY", owner_side="SELL",
+                     asset="2000", size_units=3_000_000,
+                     usdc_units=1_800_000, log_index=3,
+                     seen_at=time.time() - 1000)   # NOT a mint leg: raw shape
+    for r in (agg, anomaly):
+        st.pending[(r["tx"], r["log_index"], r["wallet"], r["view"])] = r
+    st._reconcile_tx(TX, [agg, anomaly], {}, time.time(), 0)
+    assert st.deltas.get("refinalize_blocked") == 1
+
+    late_row = _poll_row(anomaly)   # venue books the RAW shape
+    st._watch_pass({(TX, 1): [late_row]}, time.time())
+    assert st.deltas.get("sim_exec_residual_dup") is None, \
+        "an anomaly-classified fill's raw key must merge — its late row " \
+        "is coverage, not a fabricated gating residual"
+    assert st.deltas.get("sim_exec_suppressed") == 2
+
+
+# ── fleet6 K1: terminal-pass fetch cannot mask starvation ───────────
+def test_terminal_fetch_does_not_mask_starvation(st):
+    now = time.time()
+    st.watch[("0xstarved", "0xa")] = {
+        "until": now - 1, "whale_id": 1, "exec_keys": {},
+        "agg_keys": {}, "seen": set(), "has_execs": True,
+        "has_aggs": False, "agg_assets": set()}
+    # the recovery pass fetches it, but the watch is ALREADY expired:
+    # the stamp loop must skip it so expiry counts as unfetched
+    fetch_set = {"0xstarved"}
+    for (t, _w), w_e in st.watch.items():
+        if t in fetch_set and now < w_e["until"]:
+            w_e["fetched"] = True
+    st._watch_pass({}, now)
+    assert st.deltas.get("watch_expired_unfetched") == 1, \
+        "a window-long-starved watch must fire the HEALTH signal"

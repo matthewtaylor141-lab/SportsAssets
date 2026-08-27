@@ -605,3 +605,30 @@ class TestRoundFiveKills:
                       "clay: Hiromasa Koyama vs Luca Castelnuovo",
                       WS, WE)
         assert w == "ok" and h is K
+
+
+class TestRoundSixKills:
+    """Round-6 fleet: the vocabulary was an enumeration, not a closure.
+    The prefix gate is now POSITIVE — it must attest a tour — so every
+    prop-market noun phrase, present and future, refuses structurally."""
+
+    def test_prop_market_prefixes_refuse_without_enumeration(self):
+        for title in ("Most Double Faults: Koyama vs Castelnuovo",
+                      "Most Points Won: Koyama vs Castelnuovo",
+                      "Fastest Serve: Koyama vs Castelnuovo",
+                      "Number of Tiebreaks: Koyama vs Castelnuovo",
+                      "Most Break Points Won: Koyama vs Castelnuovo",
+                      "Presented by Anyone: Koyama vs Castelnuovo"):
+            h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
+            assert h is None, title
+            assert w in ("title_prefix_unattested",
+                         "title_prefix_derivative"), (title, w)
+
+    def test_attested_prefixes_still_recover(self):
+        for title in ("ITF MEN - SINGLES: M15 Cap d'Agde (France), "
+                      "clay: Hiromasa Koyama vs Luca Castelnuovo",
+                      "US Open, Qualification ITF: Koyama vs "
+                      "Castelnuovo",
+                      "Hiromasa Koyama vs Luca Castelnuovo"):
+            h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
+            assert w == "ok" and h is K, (title, w)

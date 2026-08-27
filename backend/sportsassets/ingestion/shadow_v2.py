@@ -226,6 +226,7 @@ def classify_mints(recs_for_tx: list[dict]) -> dict[str, dict]:
                and r["view"] in ("exec_owner", "exec_counter")]
         agg_assets = {a["asset"] for a in aggs}
         execs, flags = [], {}
+        dropped: list[dict] = []
         for r in raw:
             if r["view"] == "exec_counter" and r["asset"] not in agg_assets:
                 if not aggs:
@@ -241,10 +242,12 @@ def classify_mints(recs_for_tx: list[dict]) -> dict[str, dict]:
                     continue
                 if len(aggs) > 1:
                     flags["per_exec_ambiguous"] = flags.get("per_exec_ambiguous", 0) + 1
+                    dropped.append(r)
                     continue
                 a = aggs[0]
                 if r["owner_side"] != a["side"] or r["usdc_units"] >= r["size_units"]:
                     flags["mint_side_anomaly"] = flags.get("mint_side_anomaly", 0) + 1
+                    dropped.append(r)
                     continue
                 execs.append(dict(r, view="exec_mint", asset=a["asset"], side=a["side"],
                                   usdc_units=r["size_units"] - r["usdc_units"],
@@ -252,7 +255,8 @@ def classify_mints(recs_for_tx: list[dict]) -> dict[str, dict]:
                 flags["mint_transformed"] = flags.get("mint_transformed", 0) + 1
             else:
                 execs.append(r)
-        g = {"aggs": aggs, "execs": execs, "flags": flags}
+        g = {"aggs": aggs, "execs": execs, "flags": flags,
+             "dropped": dropped}
         # THE TRANSFORM MUST PROVE ITSELF (round-3 kill): the mint
         # predicate cannot tell a complement-token mint leg from a fill
         # in a DIFFERENT market whose own agg event was lost — token ids
@@ -526,10 +530,11 @@ class ShadowV2:
                 rows = await pool.fetch(SQL_TX, fetch_txs, timeout=5.0)
                 fetch_set = set(fetch_txs)
                 for (t, _wal), w_e in self.watch.items():
-                    if t in fetch_set:
-                        # only a fetch that actually RETURNED counts —
-                        # stamping before the DB call let a failed pass
-                        # mask starvation as coverage
+                    if t in fetch_set and now < w_e["until"]:
+                        # only a fetch that actually RETURNED counts, and
+                        # never the terminal pass of an already-expired
+                        # watch — a window-long outage's recovery fetch
+                        # must not mask starvation as coverage
                         w_e["fetched"] = True
                 rows_by: dict[tuple, list[dict]] = {}
                 for row in rows:
@@ -582,10 +587,14 @@ class ShadowV2:
                 # counted — conservative direction, accepted.
                 w = self.watch.get((tx, wallet))
                 if w is not None:
-                    # merge the CLASSIFIED records: a mint leg's venue row
-                    # arrives in TRANSFORMED shape, so merging the raw
-                    # key would still fabricate a gating residual
-                    for c in g["execs"] + g["aggs"]:
+                    # merge the CLASSIFIED records (a mint leg's venue row
+                    # arrives in TRANSFORMED shape) PLUS the classifier-
+                    # DROPPED raws: an anomaly-flagged fill is provably
+                    # NOT a mint leg, so the venue books its RAW shape —
+                    # unmerged, its late row fabricated a gating residual.
+                    # Its flags stay uncounted here (a redelivery must
+                    # never double-bump GATING) — undercount, by design.
+                    for c in g["execs"] + g["aggs"] + g.get("dropped", []):
                         if c.get("ts") is None:
                             continue
                         tgt = w["agg_keys"] if c["view"] == "agg" else w["exec_keys"]
