@@ -128,8 +128,13 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 # two cut whales at $300-$900 an order while refusing the two we trade.
 #
 # Pinned to live_executor by test_kalshi_roster_parity.py from here on.
-PER_COPY_USD = {"rn1": 250.00, "swisstony": 0.00,
-                _W2C33: 0.00, "homerunhazard": 0.00,
+# swisstony + homerunhazard REINSTATED 2026-08-27 (owner order),
+# venue parity with the PMUS leg: the 2026-08-25 cuts were graded on
+# the merge-only instrument since proven blind to REDEEM exits; the
+# venue's own ledger reads swisstony +$23.6M lifetime / +$1.36M 30d
+# and homerunhazard +$2.32M / +$869k 30d. 0x2c33 stays cut.
+PER_COPY_USD = {"rn1": 250.00, "swisstony": 250.00,
+                _W2C33: 0.00, "homerunhazard": 250.00,
                 "ferrarichampions2026": 250.00,
                 "0x076daa87": 250.00,
                 # kch123 pre-sized for his (out-of-season) NBA/NFL/NHL
@@ -139,10 +144,11 @@ PER_COPY_USD = {"rn1": 250.00, "swisstony": 0.00,
 # and a dead cell that carries a number is one edit away from being a
 # live one. The blocked whales' overrides are zeroed rather than left
 # to disagree with the map above them.
-PER_COPY_USD_SPORT = {("swisstony", "soccer"): 0.00,
-                      (_W2C33, "tennis"): 0.00,
-                      ("homerunhazard", "baseball"): 0.00,
-                      ("homerunhazard", "football"): 0.00}
+# The reinstated whales' zeroed sport cells are REMOVED, not resized:
+# with live base clips a 0.00 override would silently block those
+# sports on this venue only — a roster decision nobody made. The cut
+# whale's dead cell stays zeroed.
+PER_COPY_USD_SPORT = {(_W2C33, "tennis"): 0.00}
 PER_COPY_DEFAULT = 75.00
 # Inverse volume<->size scaling (owner order 2026-08-12): past this
 # many fills in a venue-day, the clip shrinks proportionally — 10x
@@ -166,7 +172,9 @@ TYPE_MULT = {("*", "spread"): 1.5, ("kch123", "spread"): 2.0,
 # numbers somebody can edit; this is the decision, and _per_copy_usd
 # refuses on it before it ever reads a clip. Kept identical to
 # live_executor.COPY_CUT_WHALES by test_kalshi_roster_parity.py.
-CUT_WHALES = frozenset({"swisstony", _W2C33, "homerunhazard"})
+CUT_WHALES = frozenset({_W2C33})
+# swisstony + homerunhazard removed from the cut 2026-08-27 (owner
+# order, venue-ledger basis above).
 # HARD CEILING on the resolved clip, applied AFTER every override and
 # multiplier — the analogue of live_executor's LIVE_MAX_CLIP_USD, which
 # this leg had no equivalent of at all.

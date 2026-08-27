@@ -168,13 +168,17 @@ class TestTheCutRosterIsTheSameOnBothVenues:
             assert k[w] == pytest.approx(usd), \
                 f"{w}: PMUS {usd}, Kalshi {k[w]}"
 
-    def test_the_inversion_is_stated_so_it_cannot_be_lost(self):
-        """The whales this got backwards, named. If a future edit
-        reverses them again these assertions are what fails."""
+    def test_the_roster_state_is_stated_so_it_cannot_be_lost(self):
+        """The current membership, named. rn1/ferrari restored
+        2026-08-25; swisstony/homerunhazard reinstated 2026-08-27
+        (owner order, venue-ledger basis); 0x2c33 stays cut. If a
+        future edit reverses any of them these assertions are what
+        fails."""
         src = _kalshi_src()
         k = _literal(src, "PER_COPY_USD")
         assert k["rn1"] > 0 and k["ferrarichampions2026"] > 0
-        assert k["swisstony"] == 0.0 and k["homerunhazard"] == 0.0
+        assert k["swisstony"] > 0 and k["homerunhazard"] > 0
+        assert k[le._W2C33] == 0.0
 
 
 class TestTheClipHasACeiling:

@@ -31,34 +31,35 @@ from sportsassets import live_executor as le
 
 
 def test_the_verified_set_names_the_certified_whales():
-    """HomeRunHazard removed 2026-08-25 (owner order): merge-inclusive
-    he is -0.14% on $27.56M of entries across 46,905 closed lots, while
-    the three that remain are +2.05%, +1.66% and +0.94%. He was our
-    second-largest allocation at $5,514 in 24 hours."""
+    """swisstony + homerunhazard REINSTATED 2026-08-27 (owner order).
+    The 2026-08-25 removals were graded on the merge-only instrument
+    since proven blind to REDEEM exits; the venue's own ledger reads
+    swisstony +$23.6M lifetime / +$1.36M 30d and homerunhazard +$2.32M
+    / +$869k 30d."""
     assert le.VERIFIED_PROFITABLE_DEFAULT == (
-        "0x076daa87,rn1,ferrarichampions2026")
+        "0x076daa87,rn1,ferrarichampions2026,swisstony,homerunhazard")
 
 
 def test_the_cut_whale_is_out_of_both_gates():
-    for w in ("swisstony", "homerunhazard"):
-        assert w not in le._whale_set("LIVE_VERIFIED_WHALES"), w
-        assert w not in le._whale_set("LIVE_PREMAP_WHALES"), w
+    w = le._W2C33
+    assert w not in le._whale_set("LIVE_VERIFIED_WHALES"), w
+    assert w not in le._whale_set("LIVE_PREMAP_WHALES"), w
 
 
 def test_the_restored_whales_are_in_both_gates():
-    """rn1 and ferrari are the two best books on the roster and were
-    cut on a settlement basis that could not see how they take profit.
-    A restore that leaves either out of an allowlist is not a restore —
-    that is precisely the 2,897-rejection failure this file exists
-    for."""
-    for w in ("rn1", "ferrarichampions2026"):
+    """A restore that leaves a whale out of an allowlist is not a
+    restore — that is precisely the 2,897-rejection failure this file
+    exists for. All four restorations (rn1/ferrari 2026-08-25,
+    swisstony/homerunhazard 2026-08-27) must hold in BOTH gates."""
+    for w in ("rn1", "ferrarichampions2026", "swisstony",
+              "homerunhazard"):
         assert w in le._whale_set("LIVE_VERIFIED_WHALES"), w
         assert w in le._whale_set("LIVE_PREMAP_WHALES"), w
 
 
 def test_the_cut_whale_is_in_neither_gate():
-    assert "swisstony" not in le._whale_set("LIVE_VERIFIED_WHALES")
-    assert "swisstony" not in le._whale_set("LIVE_PREMAP_WHALES")
+    assert le._W2C33 not in le._whale_set("LIVE_VERIFIED_WHALES")
+    assert le._W2C33 not in le._whale_set("LIVE_PREMAP_WHALES")
 
 
 def test_both_gates_default_to_the_same_membership(monkeypatch):
@@ -72,9 +73,9 @@ def test_both_gates_default_to_the_same_membership(monkeypatch):
 def test_each_gate_still_takes_its_own_override(monkeypatch):
     """Shared DEFAULT, independent OVERRIDE: an asymmetric change stays
     possible on purpose — it just has to be made on purpose."""
-    monkeypatch.setenv("LIVE_PREMAP_WHALES", "homerunhazard")
+    monkeypatch.setenv("LIVE_PREMAP_WHALES", "kch123")
     monkeypatch.delenv("LIVE_VERIFIED_WHALES", raising=False)
-    assert le._whale_set("LIVE_PREMAP_WHALES") == {"homerunhazard"}
+    assert le._whale_set("LIVE_PREMAP_WHALES") == {"kch123"}
     assert "rn1" in le._whale_set("LIVE_VERIFIED_WHALES")
 
 

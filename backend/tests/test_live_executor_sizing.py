@@ -26,20 +26,17 @@ from sportsassets.live_executor import COPY_CUT_WHALES, per_fill_usd
 
 
 def test_verified_profitable_whales_clip_at_the_probe_size():
-    """SUPERSEDED by the owner's 2026-08-24 evening authorization: the
-    resume is a bounded proof at $100 per clip, not a return to $300.
-    Scale follows real fills.
-
-    HomeRunHazard REMOVED 2026-08-25 (owner order) on the
-    merge-inclusive re-grade: -0.14% on $27.56M of entries across
-    46,905 closed lots, against +2.05% / +1.66% / +0.94% for the three
-    that stay. His old case was a settlement-basis read taken before
-    merges were priced as the exits they are."""
+    """swisstony + homerunhazard REINSTATED 2026-08-27 (owner order):
+    their 2026-08-25 cuts were graded on the merge-only instrument
+    since proven blind to REDEEM exits; the venue ledger reads
+    swisstony +$23.6M lifetime / +$1.36M 30d and homerunhazard +$2.32M
+    / +$869k 30d. All reinstated books clip at the standard $250 —
+    scale still follows real fills, the ceiling still caps."""
     assert per_fill_usd("0x076daa87") == 250.00
     assert per_fill_usd("RN1") == 250.00
     assert per_fill_usd("ferrarichampions2026") == 250.00
-    assert per_fill_usd("HomeRunHazard") == 0.00
-    assert per_fill_usd("homerunhazard") == 0.00
+    assert per_fill_usd("HomeRunHazard") == 250.00
+    assert per_fill_usd("swisstony") == 250.00
 
 
 def test_cut_whales_clip_at_zero_everywhere():
@@ -49,21 +46,14 @@ def test_cut_whales_clip_at_zero_everywhere():
     over the 0.00 base, which is exactly the leak this test pins."""
     from sportsassets.live_executor import _W2C33
 
-    assert per_fill_usd("swisstony") == 0.00
-    assert per_fill_usd("SwissTony") == 0.00
     assert per_fill_usd(_W2C33) == 0.00
-    assert per_fill_usd(_W2C33) == 0.00
-    # The old rn1 sport cells (tennis 112.50 / baseball 375 / soccer
-    # 300) must not survive anywhere:
-    assert per_fill_usd("swisstony", "aec-atp-rafjod-artfil-2026-08-21-raf") == 0.00
-    assert per_fill_usd("swisstony", "aec-mlb-nyy-bos-2026-08-24") == 0.00
-    assert per_fill_usd("swisstony", "atc-epl-ars-che-2026-08-15-ars") == 0.00
-    # Multipliers never resurrect a cut whale (0 x anything = 0):
-    assert per_fill_usd("swisstony", "epl-ars-che-2026-08-20-1pt5") == 0.00
+    assert per_fill_usd(_W2C33.upper()) == 0.00, "case must not revive"
+    # Multipliers never resurrect a cut whale (0 x anything = 0), and
+    # the one whale still cut stays zero across every sport and type:
     assert per_fill_usd(_W2C33,
                         "aec-atp-rafjod-artfil-2026-08-11") == 0.00
     assert per_fill_usd(_W2C33,
-                        "aec-atp-rafjod-artfil-2026-08-11") == 0.00
+                        "epl-ars-che-2026-08-20-1pt5") == 0.00
 
 
 def test_cut_set_names_exactly_the_verified_negative_books():
@@ -76,7 +66,9 @@ def test_cut_set_names_exactly_the_verified_negative_books():
     from sportsassets.live_executor import (
         VERIFIED_PROFITABLE_DEFAULT, _W2C33)
 
-    assert COPY_CUT_WHALES == {"swisstony", _W2C33, "homerunhazard"}
+    # swisstony + homerunhazard reinstated 2026-08-27 (owner order,
+    # venue-ledger basis — see the record beside COPY_CUT_WHALES).
+    assert COPY_CUT_WHALES == {_W2C33}
     # and the three literals must agree with each other
     verified = {w.strip() for w in
                 VERIFIED_PROFITABLE_DEFAULT.lower().split(",")}
@@ -97,17 +89,17 @@ def test_every_whale_is_bounded_by_the_probe_ceiling():
     assert per_fill_usd("kch123", "atc-nhl-tor-mtl-2026-10-15-tor") == 150.00
 
 
-def test_hrh_sport_cells_cannot_outrank_the_cut():
-    """A (whale, sport) cell WINS over the whale clip, so a surviving
-    baseball cell would resurrect a CUT whale at full size. This is the
-    same leak the swisstony cut had to close, and HomeRunHazard's cells
-    are still in CELLS by design — the cut has to hold above them."""
+def test_hrh_sport_cells_cannot_outrank_the_ceiling():
+    """A (whale, sport) cell WINS over the whale clip — his old cells
+    carried 375/600-sized numbers. Reinstated 2026-08-27, the cells may
+    resolve again, but the $250 ceiling caps every one of them: the
+    owner authorization binds AFTER every override and multiplier."""
     assert per_fill_usd("homerunhazard",
-                        "aec-mlb-nyy-bos-2026-08-24") == 0.00
+                        "aec-mlb-nyy-bos-2026-08-24") == 250.00
     assert per_fill_usd("homerunhazard",
-                        "aec-nfl-kc-buf-2026-09-07") == 0.00
+                        "aec-nfl-kc-buf-2026-09-07") == 250.00
     assert per_fill_usd("homerunhazard",
-                        "asc-nba-lal-bos-2026-11-01-neg-2pt5") == 0.00
+                        "asc-nba-lal-bos-2026-11-01-neg-2pt5") == 250.00
 
 
 def test_default_and_kch123_unchanged():
@@ -315,8 +307,6 @@ class TestProbeAuthorization:
     def test_cut_whales_are_still_zero(self):
         from sportsassets.live_executor import _W2C33
 
-        assert per_fill_usd("swisstony") == 0.00
-        assert per_fill_usd(_W2C33) == 0.00
         assert per_fill_usd(_W2C33) == 0.00
 
     def test_the_ceiling_is_env_adjustable_for_promotion(self, monkeypatch):

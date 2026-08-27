@@ -21,14 +21,19 @@ Owner granted the change 2026-08-25.
 
 from sportsassets import live_executor as le
 
-RESTORED = ("rn1", "ferrarichampions2026")
-# HomeRunHazard moved from KEPT to CUT on 2026-08-25 (owner order),
-# on the merge-inclusive re-grade: -0.14% on $27.56M of entries over
-# 46,905 closed lots. The three that remain are +2.05% (0x076daa87),
-# +1.66% (ferrari) and +0.94% (rn1). His earlier case — baseball
-# totals +1.89%, WNBA +6.50% — was a SETTLEMENT-basis read taken
-# before merges were priced as the exits they are.
-CUT = ("swisstony", le._W2C33, "homerunhazard")
+RESTORED = ("rn1", "ferrarichampions2026", "swisstony",
+            "homerunhazard")
+# swisstony + homerunhazard REINSTATED 2026-08-27 (owner order), and
+# the reinstatement is the same lesson one level deeper: their
+# 2026-08-25 cuts were graded on the merge-only instrument, which was
+# then proven blind to REDEEM — the exit these accounts actually use
+# (rn1: $7.7M of redeems vs $7.5M of buys in one window). The venue's
+# own per-wallet ledger reads swisstony +$23.6M lifetime / +$1.36M
+# last 30d and homerunhazard +$2.32M / +$869k. Every grading basis so
+# far has been wrong in the direction of cutting winners; the venue's
+# books are the authority now. 0x2c33 STAYS cut — negative on the
+# venue's own 30d AND -$1.9M merge-graded on a book that does merge.
+CUT = (le._W2C33,)
 KEPT = ("0x076daa87",)
 
 
@@ -50,7 +55,6 @@ class TestTheClipMapMatchesTheDecision:
         """per_fill_usd returning 0 is the cut mechanism — the caller
         skips on 0. If a multiplier could lift a blocked cell off zero
         the block would be decorative."""
-        assert le.per_fill_usd("swisstony") == 0.0
         assert le.per_fill_usd(le._W2C33) == 0.0
 
     def test_no_clip_exceeds_the_owners_ceiling(self):
@@ -94,9 +98,12 @@ class TestTheTwoListsCannotDiverge:
             assert le.PER_FILL_BY_WHALE.get(w, 0) > 0
             assert w in self._verified()
 
-    def test_swisstony_is_in_neither(self):
-        assert le.PER_FILL_BY_WHALE["swisstony"] == 0.0
-        assert "swisstony" not in self._verified()
+    def test_the_reinstated_whales_are_in_both(self):
+        """The 2026-08-27 reinstatement must not recreate the
+        2,897-rejection shape: in one list and refused by another."""
+        for w in ("swisstony", "homerunhazard"):
+            assert le.PER_FILL_BY_WHALE[w] > 0, w
+            assert w in self._verified(), w
 
 
 class TestTheEvidenceIsOnTheRecord:
@@ -155,10 +162,11 @@ class TestAllTHREEGatesAgree:
             assert w.lower() not in {
                 c.lower() for c in le.COPY_CUT_WHALES}, w
 
-    def test_the_cut_whale_fails_all_three(self):
-        assert le.PER_FILL_BY_WHALE["swisstony"] == 0.0
-        assert "swisstony" not in self._verified()
-        assert "swisstony" in {c.lower() for c in le.COPY_CUT_WHALES}
+    def test_the_reinstated_whales_pass_all_three(self):
+        for w in ("swisstony", "homerunhazard"):
+            assert le.PER_FILL_BY_WHALE[w] > 0, w
+            assert w in self._verified(), w
+            assert w not in {c.lower() for c in le.COPY_CUT_WHALES}, w
 
     def test_the_worst_book_stays_cut_in_all_three(self):
         w = le._W2C33.lower()

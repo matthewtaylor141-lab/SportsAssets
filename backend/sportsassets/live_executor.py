@@ -1437,7 +1437,9 @@ def copy_halted() -> bool:
 # +1.89%, WNBA +6.50%) taken before merges were counted as the exits
 # they are. Once his exits are priced, the book is negative.
 VERIFIED_PROFITABLE_DEFAULT = (
-    "0x076daa87,rn1,ferrarichampions2026")
+    "0x076daa87,rn1,ferrarichampions2026,swisstony,homerunhazard")
+# swisstony + homerunhazard REINSTATED 2026-08-27 (owner order: "Yes!
+# Reinstate", on the venue-ledger basis below at COPY_CUT_WHALES).
 
 
 def _whale_set(env_name: str) -> set[str]:
@@ -1971,7 +1973,22 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 # Three literals for one decision is a standing hazard. They are pinned
 # against each other in test_verified_set and test_roster_reset so a
 # future roster move cannot land in two of the three again.
-COPY_CUT_WHALES = frozenset({"swisstony", _W2C33, "homerunhazard"})
+# REINSTATEMENT 2026-08-27 (owner order). The merge-inclusive re-grade
+# that cut swisstony (-$187,613) and homerunhazard (-$35,363) has since
+# been proven BLIND: it counts only MERGE events as realized and never
+# sees REDEEM, which is how these accounts realize nearly everything
+# (rn1: $7.7M of redeems against $7.5M of buys in one window). The
+# venue's own per-wallet P&L — pulled from the Polymarket ledger and
+# user-pnl APIs, stored via /api/admin/venue-pnl — reads:
+#   swisstony      +$23.6M lifetime   +$1.36M last 30d
+#   homerunhazard   +$2.32M lifetime  +$869k  last 30d
+#   0x2c33...       +$7.1M lifetime   -$90k   last 30d  STAYS CUT
+# The old figures above remain on the record because the instrument
+# that produced them measured exit mechanism, not profitability — the
+# lesson is priced into the estimator work, not erased. 0x2c33 stays
+# cut: negative 30d on the venue's own books AND -$1,910,412 on the
+# merge-graded window that CAN see his exits (he does merge).
+COPY_CUT_WHALES = frozenset({_W2C33})
 # PROBE CLIPS (owner authorization 2026-08-24 evening: "$100 per clip
 # on the actually verified profitable whales"). The resume is a bounded
 # proof, not a return to size: the venue's side model is verified by
@@ -2018,10 +2035,15 @@ COPY_CUT_WHALES = frozenset({"swisstony", _W2C33, "homerunhazard"})
 # still outstanding (ferrari $7.5M, rn1 $12.3M), and ROI on entries
 # flatters high-turnover books. If the next re-grade moves these lines,
 # this map moves with it.
-PER_FILL_BY_WHALE = {"rn1": 250.00, "swisstony": 0.00,
+PER_FILL_BY_WHALE = {"rn1": 250.00,
+                     # REINSTATED 2026-08-27 (owner order) at the
+                     # standard $250 clip on the venue-ledger basis
+                     # (see COPY_CUT_WHALES): the 2026-08-25 cuts were
+                     # made on the merge-only instrument since proven
+                     # blind to REDEEM exits.
+                     "swisstony": 250.00,
+                     "homerunhazard": 250.00,
                      _W2C33: 0.00,
-                     # CUT 2026-08-25: -0.14% on $27.56M merge-inclusive.
-                     "homerunhazard": 0.00,
                      "kch123": 150.00,
                      "ferrarichampions2026": 250.00,
                      "0x076daa87": 250.00}
