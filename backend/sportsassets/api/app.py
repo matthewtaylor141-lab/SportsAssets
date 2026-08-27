@@ -5323,6 +5323,68 @@ async def api_short_truth(days: int = 7) -> dict:
                 sum(1 for r in out if r["long_model_within_authorization"])}
 
 
+@app.post("/api/admin/short-restate",
+          dependencies=[Depends(require_admin)])
+async def api_short_restate() -> dict:
+    """Restate stored filled_usd on short rows WRITTEN UNDER THE LONG
+    MODEL — the venue's own receipts settled the cost question
+    (short-truth 2026-08-25: every short booked ORDER_SIDE_SELL, cost
+    is (1-price)*qty), fill_cash has booked new rows correctly since,
+    and settled pnl comes from the venue ledger either way. What
+    remains wrong is HISTORY: pre-arm short rows carry filled_usd
+    inflated by p/(1-p), polluting deployed totals, day-room displays,
+    ROI denominators and allocate_venue_pnl weights.
+
+    IDEMPOTENT by construction: a row is restated only when its stored
+    value matches the LONG model to the cent AND differs from the short
+    model — i.e. only rows provably written under the old arithmetic.
+    Rows already written correctly (post-arm) are untouched; a second
+    run finds nothing. The summary persists under
+    ingestion_state['short_restate'] for the probe."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, us_market_slug,
+               round(filled_shares, 6)::float8 AS qty,
+               round(fill_price, 6)::float8    AS fill_px,
+               round(filled_usd, 2)::float8    AS booked_usd
+          FROM live_orders
+         WHERE COALESCE(
+                 raw #>> '{response,executions,0,order,intent}',
+                 raw #>> '{preview,intent}', '') LIKE '%SHORT%'
+           AND COALESCE(filled_shares, 0) > 0
+           AND fill_price IS NOT NULL
+           AND status IN ('filled', 'settled', 'cashed_out')
+        """)
+    examined = len(rows)
+    restated, delta, detail = 0, 0.0, []
+    for r in rows:
+        qty, px = float(r["qty"] or 0), float(r["fill_px"] or 0)
+        if qty <= 0 or not (0 < px < 1):
+            continue
+        long_model = round(px * qty, 2)
+        short_model = round((1.0 - px) * qty, 2)
+        booked = float(r["booked_usd"] or 0)
+        if abs(booked - long_model) > 0.01 or abs(booked - short_model) <= 0.01:
+            continue   # not provably long-math, or already correct
+        await pool.execute(
+            "UPDATE live_orders SET filled_usd = $2 WHERE id = $1",
+            r["id"], short_model)
+        restated += 1
+        delta = round(delta + short_model - long_model, 2)
+        if len(detail) < 20:
+            detail.append({"id": r["id"], "slug": r["us_market_slug"],
+                           "was": long_model, "now": short_model})
+    summary = {"at": datetime.now(timezone.utc).isoformat(),
+               "examined": examined, "restated": restated,
+               "delta_usd": delta, "rows": detail}
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        "short_restate", json.dumps(summary))
+    return summary
+
+
 @app.get("/api/admin/overspend-receipts",
          dependencies=[Depends(require_admin)])
 async def api_overspend_receipts(hours: int = 48) -> dict:

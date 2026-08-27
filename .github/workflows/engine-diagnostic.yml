@@ -953,6 +953,18 @@ jobs:
             /tmp/shorttruth.json 2>/dev/null || true
           jq -r '.rows[]? | "  SHORTROW \(.slug) lim=\(.limit) req$\(.requested_usd) qty=\(.qty) fill=\(.fill_px) | long_model $\(.cost_if_long_model) short_model $\(.cost_if_short_model) | venue_side=\(.venue_side // "absent") cashQty=\(.venue_cash_order_qty // "absent") avgPx=\(.venue_avg_px // "absent")"' \
             /tmp/shorttruth.json 2>/dev/null | head -10 || true
+          # SHORT-RESTATE: the venue's receipts settled the cost model
+          # (SHORTVERDICT above), so history written under long math is
+          # restated to (1-p)*qty. Idempotent by construction — a row is
+          # touched only when it matches the LONG model to the cent, so
+          # re-firing every probe is a no-op once history is clean.
+          # Same precedent as the RESCORE lever.
+          if jq -e '.verdict | test("SHORT IS A SELL")' /tmp/shorttruth.json >/dev/null 2>&1; then
+            curl -sS --max-time 60 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+                 -o /tmp/shortrestate.json "$BASE/api/admin/short-restate" || true
+            jq -r '"  SHORT-RESTATE examined=\(.examined // "?") restated=\(.restated // "?") delta=$\(.delta_usd // "?")"' \
+              /tmp/shortrestate.json 2>/dev/null || echo "  SHORT-RESTATE unreadable"
+          fi
 
           # OVERSPEND: raw requested-vs-filled per fill. ratio > 1 means
           # filled_usd exceeded what we asked to spend, which an IOC buy
