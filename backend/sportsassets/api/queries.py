@@ -301,11 +301,11 @@ async def latency_stats(hours: int = 24) -> dict:
         SELECT source, EXTRACT(EPOCH FROM (detected_at - ts))::float8 AS lat
         FROM trades
         WHERE detected_at > now() - make_interval(hours => $1)
-          AND source IN ('chain', 'poll')  -- imported history is not a detection
+          AND source IN ('chain', 'poll', 's1')  -- imported history is not a detection
         """,
         hours,
     )
-    by_source: dict[str, list[float]] = {"chain": [], "poll": []}
+    by_source: dict[str, list[float]] = {"chain": [], "poll": [], "s1": []}
     all_lat: list[float] = []
     for r in rows:
         lat = max(r["lat"], 0.0)
@@ -316,4 +316,5 @@ async def latency_stats(hours: int = 24) -> dict:
         "overall": latency_summary(all_lat),
         "chain": latency_summary(by_source.get("chain", [])),
         "poll": latency_summary(by_source.get("poll", [])),
+        "s1": latency_summary(by_source.get("s1", [])),
     }
