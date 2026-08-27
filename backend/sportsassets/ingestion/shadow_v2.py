@@ -607,8 +607,11 @@ class ShadowV2:
                             tgt.setdefault(key, var)
                         if c["view"] == "agg":
                             w["agg_assets"].add(c["asset"])
+                            w["has_aggs"] = True   # the ven arm's mode
+                            # switch must follow the merge (mini-round)
                         else:
                             w["has_execs"] = True
+                            w.setdefault("exec_assets", set()).add(c["asset"])
                     for c in g.get("dropped", []):
                         # dropped raws are outside the flip's insert set:
                         # their rows score dropped coverage, not
@@ -709,6 +712,7 @@ class ShadowV2:
                         | {r["dedupe_key"] for r in chain_rows},
                 "has_execs": bool(execs), "has_aggs": bool(aggs),
                 "agg_assets": set(agg_assets_set),
+                "exec_assets": {c["asset"] for c in execs},
                 "dropped_keys": set(dropped_keys),
                 "armed_at": now,
             }
@@ -737,12 +741,18 @@ class ShadowV2:
         # the agg view when one exists and the exec set when none does.
         # sim_ven_residual_dup is the would-be double-ingest count for
         # THAT policy, and it gates exactly like the other two.
-        ven_keys = ins_agg if aggs else ins_exec
+        # per-MARKET, because the venue publishes per FILL: a taker fill
+        # (agg view) yields one aggregate row for ITS market; maker fills
+        # in OTHER markets of the same tx still publish per-exec rows.
+        exec_assets_set = {c["asset"] for c in execs}
         for row, hit, hit_a in hits:
-            hit_v = ven_keys.get(row["dedupe_key"])
-            if hit_v:
+            r_asset = str(row["asset"])
+            ven_hit = (row["dedupe_key"] in ins_agg
+                       or (row["dedupe_key"] in ins_exec
+                           and r_asset not in agg_assets_set))
+            if ven_hit:
                 self.bump("sim_ven_suppressed")
-            elif (aggs and str(row["asset"]) in agg_assets_set) or (not aggs and execs):
+            elif r_asset in agg_assets_set or r_asset in exec_assets_set:
                 self.bump("sim_ven_residual_dup")
             else:
                 self.bump("sim_ven_uncovered")
@@ -900,11 +910,14 @@ class ShadowV2:
                     # no aggregate exists for this row's MARKET — the agg
                     # policy would ingest nothing for it (no-coverage)
                     self.bump("sim_agg_uncovered")
-                vkeys = w["agg_keys"] if w["has_aggs"] else w["exec_keys"]
-                if k in vkeys:
+                r_asset = str(row["asset"])
+                ven_hit = (k in w["agg_keys"]
+                           or (k in w["exec_keys"]
+                               and r_asset not in w["agg_assets"]))
+                if ven_hit:
                     self.bump("sim_ven_suppressed")
-                elif (w["has_aggs"] and str(row["asset"]) in w["agg_assets"]) \
-                        or (not w["has_aggs"] and w["has_execs"]):
+                elif (r_asset in w["agg_assets"]
+                      or r_asset in w.get("exec_assets", ())):
                     self.bump("sim_ven_residual_dup")
                 else:
                     self.bump("sim_ven_uncovered")

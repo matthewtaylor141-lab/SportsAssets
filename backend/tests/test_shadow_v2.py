@@ -1985,3 +1985,49 @@ def test_venue_policy_matches_what_the_venue_publishes(st):
     assert st3.deltas.get("sim_ven_residual_dup") == 2, \
         "per-exec rows under an agg view ARE the venue policy's dups"
     assert "sim_ven_suppressed" in sv.VOLUME_KEYS
+
+
+# ── mini-round 11: the merge flips the ven arm's mode switch ────────
+def test_merged_late_agg_scores_ven_suppressed_not_residual(st):
+    e1 = _mkrec(log_index=1, seen_at=time.time() - 1000)
+    g = {"execs": [e1], "aggs": [], "flags": {}}
+    st._match_wallet(TX, MAKER, g, [e1], [_poll_row(e1)], [],
+                     1000.0, time.time(), 0)
+    assert (TX, MAKER) in st.watch
+
+    ag = _mkrec(view="agg", size_units=10_000_000, usdc_units=6_200_000,
+                log_index=3, seen_at=time.time() - 1000)
+    st.pending[(ag["tx"], ag["log_index"], ag["wallet"], ag["view"])] = ag
+    st._reconcile_tx(TX, [ag], {}, time.time(), 0)   # tombstone-blocked
+    assert st.deltas.get("refinalize_blocked") == 1
+    w = st.watch[(TX, MAKER)]
+    assert w["has_aggs"] is True and ag["asset"] in w["agg_assets"], \
+        "the merge must flip the ven arm's mode switch"
+
+    st._watch_pass({(TX, 1): [_poll_row(ag)]}, time.time())
+    assert st.deltas.get("sim_ven_suppressed") == 2, \
+        "a merged late aggregate's own row is the venue policy's hit"
+    assert st.deltas.get("sim_ven_residual_dup") is None, \
+        "it must NOT fabricate a gating residual for the venue candidate"
+
+
+# ── mini-round 11: the venue policy is per-MARKET, not per-TX ───────
+def test_venue_policy_is_per_market_in_a_mixed_tx(st):
+    old = time.time() - sv.ORPHAN_FINAL_S - 10
+    a1 = _mkrec(asset="1111", size_units=4_000_000, usdc_units=2_480_000,
+                log_index=1, seen_at=old)
+    a2 = _mkrec(asset="1111", size_units=6_000_000, usdc_units=3_720_000,
+                log_index=2, seen_at=old)
+    ag = _mkrec(view="agg", asset="1111", size_units=10_000_000,
+                usdc_units=6_200_000, log_index=3, seen_at=old)
+    b1 = _mkrec(asset="2222", log_index=4, seen_at=old)
+    g = {"execs": [a1, a2, b1], "aggs": [ag], "flags": {}}
+    rows = [_poll_row(a1), _poll_row(a2), _poll_row(b1)]
+    st._match_wallet(TX, MAKER, g, [a1, a2, ag, b1], rows, [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("sim_ven_suppressed") == 1, \
+        "market B has no agg view -> its exec row IS the venue's row"
+    assert st.deltas.get("sim_ven_uncovered") is None, \
+        "a per-TX ven set would misscore market B as uncovered"
+    assert st.deltas.get("sim_ven_residual_dup") == 2, \
+        "market A's per-exec rows under its agg stay the ven dups"
