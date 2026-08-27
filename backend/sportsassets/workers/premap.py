@@ -1271,7 +1271,20 @@ _NAMED_BAD_TOKENS = frozenset({
 # though the club helper exempts them.
 _NAMED_DERIV_TOKENS = frozenset({"set", "sets", "tiebreak",
                                  "tiebreaker", "game", "games",
-                                 "doubles"})
+                                 "doubles", "ace", "aces"})
+_NAMED_ORDINAL_RE = re.compile(r"\d+(st|nd|rd|th)")
+
+
+def _named_title_danger(toks: list[str]) -> bool:
+    """True when a dropped title segment carries ANY marker from the
+    lane's danger vocabulary — single tokens (deriv + bad + ordinals)
+    or adjacent-token joins ('tie break' -> 'tiebreak'). Blocking may
+    over-refuse; selection may not (round-4 fleet, three kills)."""
+    danger = _NAMED_DERIV_TOKENS | _NAMED_BAD_TOKENS
+    if any(t in danger or _NAMED_ORDINAL_RE.fullmatch(t) for t in toks):
+        return True
+    return any("".join(toks[i:i + n]) in _NAMED_DERIV_TOKENS
+               for n in (2, 3) for i in range(len(toks) - n + 1))
 _NAMED_MONTHS = dict(_BRIDGE_MONTHS)
 # Copied at import — a month added for one lane must never widen the
 # other.
@@ -1412,10 +1425,12 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
     # marker sits. A colon inside the matchup (no attested case) still
     # refuses at the two-halves check.
     prefix, _, matchup = rawt.rpartition(":")
-    if prefix and any(t in _NAMED_DERIV_TOKENS
-                      for t in _norm(prefix).split()):
-        # 'First Set Winner: X vs Y' — the dropped tournament prefix
-        # is first scanned for derivative markers.
+    if prefix and _named_title_danger(_norm(prefix).split()):
+        # 'First Set Winner: X vs Y', 'Match Tie-Break: ...',
+        # '2nd Meeting: ...' — the dropped prefix is scanned against
+        # the lane's FULL danger vocabulary (deriv + bad + ordinals)
+        # with adjacent-token joins, so the venue's two-word spellings
+        # ('Tie Break') cannot walk past the single-token set.
         return None, "title_prefix_derivative"
     halves = [" ".join(h.split()) for h in
               re.split(r"\s+vs\.?\s+", _norm(matchup)) if h.strip()]
@@ -1426,6 +1441,11 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
         if not (1 <= len(h) <= _NAMED_NAME_CAP):
             return None, "title_half_bad"
         if any((not t.isalpha()) or t in _NAMED_BAD_TOKENS for t in h):
+            return None, "title_half_bad"
+        if any("".join(h[i:i + n]) in _NAMED_DERIV_TOKENS
+               for n in (2, 3) for i in range(len(h) - n + 1)):
+            # 'Tie Break' joins to 'tiebreak' — a marker split across
+            # tokens is still a marker, in the halves as in the prefix
             return None, "title_half_bad"
     ia, ib = _builds_one(wa, ht), _builds_one(wb, ht)
     if ia is None or ib is None or ia == ib:
@@ -1472,10 +1492,13 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
     if suffix and not (_name_code_builds(suffix[0], on_t)
                        and not _name_code_builds(suffix[0], opp_t)):
         return None, "slug_pick_mismatch"
-    if (_lines_of(matchup) | _lines_of(outcome)
+    if (_lines_of(rawt) | _lines_of(outcome)
             | slug_lines(his_slug)):
+        # rawt, not matchup: 'Handicap -3.5: A vs B' states its line in
+        # the DROPPED prefix — the invisible-evidence family (round-4
+        # fleet). The attested census title carries no _lines_of hits.
         return None, "his_signal_lined"
-    if signed_line(outcome) or signed_line(matchup):
+    if signed_line(outcome) or signed_line(rawt):
         return None, "his_signal_signed"
     if any(not (r.get("event_slug") or "").strip() for r in rows_all):
         return None, "event_slug_missing"

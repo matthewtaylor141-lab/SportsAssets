@@ -1529,3 +1529,168 @@ def test_roster_cohort_ranked_by_activity(st):
     assert target in written["per_whale"], \
         "the most-active roster whale must survive a 33+ roster"
     assert written["counters"].get("per_whale_truncated", 0) >= 1
+
+
+# ════════════════════════════════════════════════════════════════════
+# Implementation-fleet kills (round 4) — 11 confirmed (8 shadow, 3
+# named-lane pinned in test_bridge_named_tennis.py), fixed and pinned.
+# ════════════════════════════════════════════════════════════════════
+
+# ── fleet4 K3 (critical): chain-path aggregate proves the legs ──────
+def test_chain_aggregate_row_absorbs_tie_proven_legs(st):
+    """The live v3 receipt path books ONE AGGREGATE chain row that also
+    SUPPRESSES the poll row — tie-proven legs must read covered, never
+    orphan_chain_mismatch (GATING) on a perfect decode."""
+    leg1 = _mkrec(view="exec_counter", side="SELL", owner_side="BUY",
+                  size_units=4_000_000, usdc_units=2_480_000, log_index=1,
+                  seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    leg2 = _mkrec(view="exec_counter", side="SELL", owner_side="BUY",
+                  size_units=6_000_000, usdc_units=3_720_000, log_index=2,
+                  seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    ag = _mkrec(view="agg", side="SELL",
+                size_units=10_000_000, usdc_units=6_200_000, log_index=3,
+                seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [leg1, leg2], "aggs": [ag], "flags": {}}
+    chain_row = _poll_row(ag, source="chain")   # key-identical to agg
+    st._match_wallet(TX, MAKER, g, [leg1, leg2, ag], [], [chain_row],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("orphan_chain_mismatch") is None, \
+        "a chain-won multi-leg tx must NOT read as a gating mismatch"
+    assert st.deltas.get("exec_covered_by_chain_agg_row") == 2
+
+
+def test_maker_side_chain_sum_cover(st):
+    """No decoded agg view (maker-only) but the chain row IS the exact
+    sum of the legs: covered, with side agreement REQUIRED."""
+    l1 = _mkrec(view="exec_owner", side="BUY", size_units=4_000_000,
+                usdc_units=2_480_000, log_index=1,
+                seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    l2 = _mkrec(view="exec_owner", side="BUY", size_units=6_000_000,
+                usdc_units=3_720_000, log_index=2,
+                seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    total = _mkrec(side="BUY", size_units=10_000_000,
+                   usdc_units=6_200_000)
+    g = {"execs": [l1, l2], "aggs": [], "flags": {}}
+    st._match_wallet(TX, MAKER, g, [l1, l2],
+                     [], [_poll_row(total, source="chain")],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("exec_covered_by_chain_agg_row") == 2
+    assert st.deltas.get("orphan_chain_mismatch") is None
+
+
+# ── fleet4 K4: the mint proof is per-subset ─────────────────────────
+def test_subset_provable_mint_keeps_the_genuine_leg(st):
+    agg = _mkrec(view="agg", side="BUY", asset="1111",
+                 size_units=10_000_000, usdc_units=6_200_000, log_index=1)
+    normal = _mkrec(view="exec_counter", side="SELL", owner_side="SELL",
+                    asset="1111", size_units=6_000_000,
+                    usdc_units=3_720_000, log_index=2)
+    genuine = _mkrec(view="exec_counter", side="SELL", owner_side="BUY",
+                     asset="9999", size_units=4_000_000,
+                     usdc_units=1_520_000, log_index=3)  # -> 1111 BUY 2.48
+    cross = _mkrec(view="exec_counter", side="SELL", owner_side="BUY",
+                   asset="2222", size_units=500_000,
+                   usdc_units=310_000, log_index=4)      # different market
+    g = classify_mints([agg, normal, genuine, cross])[MAKER]
+    assert g["flags"].get("mint_transformed") == 1, \
+        "the PROVEN transform survives; all-or-nothing revert is a lie"
+    assert g["flags"].get("mint_unresolved") == 1
+    kept = [e for e in g["execs"] if e["view"] == "exec_mint"]
+    assert len(kept) == 1 and kept[0]["asset"] == "1111" \
+        and kept[0]["usdc_units"] == 2_480_000
+    raws = [e for e in g["execs"] if e["asset"] == "2222"]
+    assert raws and raws[0]["side"] == "SELL", "the guess reverts to raw"
+    assert agg_tieout(g) == "ok", \
+        "a proven subset ties out — mint_unresolved must not skip it"
+
+
+# ── fleet4 K5: agg residual is scoped by ASSET ──────────────────────
+def test_cross_market_row_is_uncovered_not_agg_residual(st):
+    ag = _mkrec(view="agg", asset="1111", size_units=10_000_000,
+                usdc_units=6_200_000, log_index=1,
+                seen_at=time.time() - 1000)
+    other = _mkrec(view="exec_counter", asset="2222", log_index=2,
+                   seen_at=time.time() - 1000)
+    g = {"execs": [other], "aggs": [ag], "flags": {}}
+    row = _poll_row(other)     # market 2222: NO agg view exists for it
+    st._match_wallet(TX, MAKER, g, [other, ag], [row], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0)
+    assert st.deltas.get("sim_agg_residual_dup") is None, \
+        "an agg for a DIFFERENT market proves nothing — must not gate"
+    assert st.deltas.get("sim_agg_uncovered") == 1
+
+
+# ── fleet4 K0: a late second fill's keys merge into the watch ───────
+def test_late_second_fill_scores_suppressed_not_residual(st):
+    e1 = _mkrec(log_index=1, seen_at=time.time() - 1000)
+    g = {"execs": [e1], "aggs": [], "flags": {}}
+    st._match_wallet(TX, MAKER, g, [e1], [_poll_row(e1)], [],
+                     1000.0, time.time(), 0)
+    assert (TX, MAKER) in st.watch
+
+    e2 = _mkrec(size_units=6_000_000, usdc_units=3_720_000, log_index=2,
+                seen_at=time.time() - 1000)
+    st.pending[(e2["tx"], e2["log_index"], e2["wallet"], e2["view"])] = e2
+    st._reconcile_tx(TX, [e2], {}, time.time(), 0)   # tombstone-blocked
+    assert st.deltas.get("refinalize_blocked") == 1
+
+    row2 = _poll_row(e2)     # the late fill's row lands AFTER the merge
+    st._watch_pass({(TX, 1): [_poll_row(e1), row2]}, time.time())
+    assert st.deltas.get("sim_exec_suppressed") == 2, \
+        "the merged key must score suppressed"
+    assert st.deltas.get("sim_exec_residual_dup") is None, \
+        "a correctly-decoded late fill must NOT fabricate a gating residual"
+
+
+# ── fleet4 K1: expiring watches fetch first; starvation is counted ──
+def test_watch_fetch_prioritizes_earliest_expiry(st):
+    now = time.time()
+    for i in range(150):
+        st.watch[(f"0xw{i}", "0xa")] = {
+            "until": now + 3000 + i, "whale_id": 1, "exec_keys": {},
+            "agg_keys": {}, "seen": set(), "has_execs": True,
+            "has_aggs": False, "agg_assets": set()}
+    st.watch[("0xurgent", "0xa")] = {
+        "until": now + 10, "whale_id": 1, "exec_keys": {},
+        "agg_keys": {}, "seen": set(), "has_execs": True,
+        "has_aggs": False, "agg_assets": set()}
+    order = sorted(st.watch.items(), key=lambda kv: kv[1]["until"])
+    assert order[0][0] == ("0xurgent", "0xa"), \
+        "the soonest-expiring watch must be first in fetch order"
+    assert "watch_expired_unfetched" in sv.HEALTH
+    w = st.watch[("0xurgent", "0xa")]
+    st._watch_pass({}, now + 20)     # expires without ever being fetched
+    assert st.deltas.get("watch_expired_unfetched", 0) >= 1
+
+
+# ── fleet4 K2: tombstone eviction is counted (HEALTH) ───────────────
+def test_finalized_eviction_counted_and_aged(st):
+    now = time.time()
+    st.finalized[("0xold", "w")] = now - sv.ORPHAN_FINAL_S - sv.REPLAY_STALE_S - 10
+    e1 = _mkrec(log_index=1, seen_at=now - 1000)
+    g = {"execs": [e1], "aggs": [], "flags": {}}
+    st._match_wallet(TX, MAKER, g, [e1], [_poll_row(e1)], [],
+                     1000.0, now, 0)
+    assert ("0xold", "w") not in st.finalized, \
+        "tombstones past the replay-fresh horizon age out by design"
+    assert "finalized_evicted" in sv.HEALTH
+    assert st.deltas.get("finalized_evicted") is None, \
+        "age-expiry is designed, only CAP eviction is a health event"
+
+
+# ── fleet4 K6/K7: junk VALUES inside counters / pw watermarks heal ──
+def test_junk_counter_and_watermark_values_are_corrupt(st):
+    for stored in (
+        {"counters": {"div.price": "corrupted"}, "writer": None},
+        {"counters": {}, "window_start": 1000.0,
+         "at_window": {"pw": {"pw.0xa.n": "junk"}}, "writer": None},
+        {"counters": {}, "window_start": 1000.0,
+         "at_window": {"emitter": {"emitter.0xe": None}}, "writer": None},
+    ):
+        s = ShadowV2()
+        s.deltas = {"events_seen": 1}
+        pool = _FakePool(stored=json.dumps(stored))
+        asyncio.run(s._flush(pool))
+        written = json.loads(pool.executes[0][1][1])
+        assert written["counters"].get("corrupt_reset") == 1, \
+            f"{stored} must reset VISIBLY, not half-heal into lies"

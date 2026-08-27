@@ -528,3 +528,46 @@ class TestTwoColonTitles:
                       "ITF MEN - SINGLES: M15 Cap d'Agde: Koyama vs "
                       "Castelnuovo: 6:4", WS, WE)
         assert h is None, "a trailing score fragment is not a matchup"
+
+
+class TestRoundFourKills:
+    """Round-4 fleet: three wrong-market admissions the 1.2 widening
+    opened, each now a refusal wherever the marker or signal sits."""
+
+    def test_tie_break_two_word_spelling_refuses(self):
+        for title in ("Match Tie-Break: M15 Cap d'Agde, clay: "
+                      "Koyama vs Castelnuovo",
+                      "Tie Break Winner: Koyama vs Castelnuovo"):
+            h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
+            assert h is None, title
+        # and split across the MATCHUP half too
+        h, w, _ = run([K, C], "Hiromasa Koyama",
+                      "ITF MEN - SINGLES: M15: Koyama Tie Break vs "
+                      "Castelnuovo", WS, WE)
+        assert h is None
+
+    def test_danger_vocabulary_covers_the_prefix(self):
+        for title in ("2nd Meeting: Koyama vs Castelnuovo",
+                      "Most Aces: Koyama vs Castelnuovo",
+                      "Retirement Market: Koyama vs Castelnuovo",
+                      "Winner Match 2: Koyama vs Castelnuovo"):
+            h, w, _ = run([K, C], "Hiromasa Koyama", title, WS, WE)
+            assert h is None, title
+
+    def test_line_and_sign_in_dropped_prefix_refuse(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama",
+                      "Handicap -3.5: Koyama vs Castelnuovo", WS, WE)
+        assert h is None and w in ("his_signal_lined",
+                                   "his_signal_signed",
+                                   "title_prefix_derivative")
+        h, w, _ = run([K, C], "Hiromasa Koyama",
+                      "Total 22.5: Koyama vs Castelnuovo", WS, WE)
+        assert h is None
+
+    def test_attested_census_title_still_recovers(self):
+        h, w, _ = run([K, C], "Hiromasa Koyama",
+                      "ITF MEN - SINGLES: M15 Cap d'Agde (France), "
+                      "clay: Hiromasa Koyama vs Luca Castelnuovo",
+                      WS, WE)
+        assert w == "ok" and h is K, \
+            "the 289-row census class must survive every new refusal"

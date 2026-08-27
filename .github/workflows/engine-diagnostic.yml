@@ -393,10 +393,10 @@ jobs:
                 "  SHADOW-V2 ts avail le3=\($c["ts_avail.le3s"] // 0) le6=\($c["ts_avail.le6s"] // 0) le15=\($c["ts_avail.le15s"] // 0) gt60=\($c["ts_avail.gt60s"] // 0) never=\($c.ts_never_resolved_live // 0) empty1st=\($c.ts_rpc_empty_first // 0)  cache hit/miss=\($c.live_cache_hit // 0)/\($c.live_cache_miss // 0)",
                 "  SHADOW-V2 mult eq=\($c["poll_mult.eq"] // 0) one=\($c["poll_mult.one"] // 0) other=\($c["poll_mult.other"] // 0)  lag_p50=\($s.lag_p50_s // "?")s poll_p50=\($s.poll_lag_p50_s // "?")s  window_age_d=\(if $s.window_start then ((now - $s.window_start) / 86400 * 10 | floor / 10) else "?" end) health_age_d=\(if $s.health_start then ((now - $s.health_start) / 86400 * 10 | floor / 10) else "?" end) boots=\($c.boots // 0) commit=\($s.commit // "?")",
                 (($c | to_entries[] | select(.key | startswith("emitter."))
-                  | "  SHADOW-V2 emitter \(.key[8:] | .[0:12]) Δ\(.value - ($we[.key] // 0))")),
+                  | "  SHADOW-V2 emitter \(.key[8:] | .[0:12]) Δ\(.value - (($we[.key] // 0) | if type == "number" then . else 0 end))")),
                 (($s.per_whale // {}) | to_entries[] | select(.value.username == "0x076daa87")
                  | .key as $wk
-                 | "  SHADOW-V2 TARGET 0x076daa87 nΔ=\(.value.n - ($wp["pw." + $wk + ".n"] // 0)) suppΔ=\(.value.supp - ($wp["pw." + $wk + ".supp"] // 0)) divΔ=\(.value.div - ($wp["pw." + $wk + ".div"] // 0)) lag_p50=\(.value.lag_p50_s // "?")s poll_p50=\(.value.poll_lag_p50_s // "?")s"),
+                 | "  SHADOW-V2 TARGET 0x076daa87 nΔ=\(.value.n - (($wp["pw." + $wk + ".n"] // 0) | if type == "number" then . else 0 end)) suppΔ=\(.value.supp - (($wp["pw." + $wk + ".supp"] // 0) | if type == "number" then . else 0 end)) divΔ=\(.value.div - (($wp["pw." + $wk + ".div"] // 0) | if type == "number" then . else 0 end)) lag_p50=\(.value.lag_p50_s // "?")s poll_p50=\(.value.poll_lag_p50_s // "?")s"),
                 (if ($c.writer_conflict // 0) > 0 then "  SHADOW-V2 ALARM writer_conflict=\($c.writer_conflict)" else empty end),
                 (if $s.updated_at_epoch and (now - $s.updated_at_epoch) > 600 then "  SHADOW-V2 ALARM state stale \((now - $s.updated_at_epoch) | floor)s" else empty end)
               ) end' \

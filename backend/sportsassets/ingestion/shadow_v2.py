@@ -84,7 +84,8 @@ GATING = ("div.side", "div.asset", "div.size", "div.price", "div.ts",
 # counters that reset the instrument-health window when they move
 HEALTH = ("shadow_errors", "cycle_errors", "db_errors", "flush_failures",
           "writer_conflict", "pending_overflow_dropped", "log_index_missing",
-          "ts_resolve_timeout", "ack_dropped_unverified", "corrupt_reset")
+          "ts_resolve_timeout", "ack_dropped_unverified", "corrupt_reset",
+          "watch_expired_unfetched", "finalized_evicted")
 # watermarked at window reset so the probe reads deltas-since-window
 # NB: the residual-dup counters are deliberately NOT here — they gate, and
 # a gating counter that is also watermarked reads Δ==0 in the very flush
@@ -261,12 +262,41 @@ def classify_mints(recs_for_tx: list[dict]) -> dict[str, dict]:
         # rows) and count mint_unresolved instead of fabricating
         # divergences and a tie-out failure on a self-consistent tx.
         if flags.get("mint_transformed") and agg_tieout(g) != "ok":
-            g["execs"] = [e.pop("_mint_raw") if e.get("_mint_raw") else e
-                          for e in execs]
-            flags["mint_unresolved"] = flags.pop("mint_transformed")
-        else:
-            for e in g["execs"]:
-                e.pop("_mint_raw", None)
+            # Prove per-SUBSET before reverting everything: one genuine
+            # complement-token mint plus one cross-market guess must
+            # keep the proven transform and revert only the guess —
+            # all-or-nothing revert fabricated divergences on the
+            # genuine leg (round-4 fleet). k is tiny; the unique subset
+            # that ties out integer-exact wins; ambiguity reverts all.
+            from itertools import combinations
+            tr_idx = [i for i, e in enumerate(execs) if e.get("_mint_raw")]
+            winner = None
+            for keep_n in range(len(tr_idx) - 1, -1, -1):
+                ok_subsets = []
+                for keep in combinations(tr_idx, keep_n):
+                    kset = set(keep)
+                    trial = [e if (i in kset or not e.get("_mint_raw"))
+                             else e["_mint_raw"] for i, e in enumerate(execs)]
+                    if agg_tieout({"aggs": aggs, "execs": trial,
+                                   "flags": {}}) == "ok":
+                        ok_subsets.append(kset)
+                if len(ok_subsets) == 1:
+                    winner = ok_subsets[0]
+                    break
+                if ok_subsets:
+                    break   # ambiguous at this cardinality: revert all
+            kept = winner or set()
+            g["execs"] = [e if (i in kept or not e.get("_mint_raw"))
+                          else e["_mint_raw"] for i, e in enumerate(execs)]
+            reverted = len(tr_idx) - len(kept)
+            if reverted:
+                flags["mint_unresolved"] = reverted
+            if kept:
+                flags["mint_transformed"] = len(kept)
+            else:
+                flags.pop("mint_transformed", None)
+        for e in g["execs"]:
+            e.pop("_mint_raw", None)
         out[wallet] = g
     return out
 
@@ -276,12 +306,20 @@ def agg_tieout(group: dict) -> str:
     aggregate must equal the sum of its per-exec legs exactly, with mint
     legs contributing their TRANSFORMED usdc (s - maker_usdc). Pure."""
     aggs = group["aggs"]
-    legs = [e for e in group["execs"] if e["view"] in ("exec_counter", "exec_mint")]
-    if len(aggs) != 1 or not legs or group["flags"].get("per_exec_ambiguous") \
+    if len(aggs) != 1 or group["flags"].get("per_exec_ambiguous") \
             or group["flags"].get("mint_side_anomaly") or group["flags"].get("agg_missing") \
-            or group["flags"].get("mint_unresolved"):
+            or (group["flags"].get("mint_unresolved")
+                and not group["flags"].get("mint_transformed")):
         return "skip"
     a = aggs[0]
+    # legs of THIS aggregate only: a cross-market fill sharing the tx
+    # (its own agg lost) is not a leg of this market's aggregate, and
+    # summing it broke provable ties (round-4 fleet)
+    legs = [e for e in group["execs"]
+            if e["view"] in ("exec_counter", "exec_mint")
+            and e["asset"] == a["asset"]]
+    if not legs:
+        return "skip"
     if (sum(e["size_units"] for e in legs) == a["size_units"]
             and sum(e["usdc_units"] for e in legs) == a["usdc_units"]):
         return "ok"
@@ -472,9 +510,21 @@ class ShadowV2:
             pool = await get_pool()
         except Exception:  # noqa: BLE001
             self.bump("db_errors")
-        watch_txs = [t for t in dict.fromkeys(t for t, _ in self.watch)
-                     if t not in mature][:100]
+        # earliest-expiring watches fetch FIRST: oldest-first starved a
+        # short-lived watch behind 100 older ones until it expired with
+        # its late residual unscored and uncounted (round-4 fleet)
+        watch_order = sorted(self.watch.items(), key=lambda kv: kv[1]["until"])
+        watch_txs = []
+        for (t, _wal), _w in watch_order:
+            if t not in mature and t not in watch_txs:
+                watch_txs.append(t)
+            if len(watch_txs) >= 100:
+                break
         fetch_txs = mature + watch_txs
+        fetch_set = set(fetch_txs)
+        for (t, _wal), w in self.watch.items():
+            if t in fetch_set:
+                w["fetched"] = True
         if pool is not None and fetch_txs:
             try:
                 rows = await pool.fetch(SQL_TX, fetch_txs, timeout=5.0)
@@ -520,8 +570,23 @@ class ShadowV2:
         for wallet, g in groups.items():
             if (tx, wallet) in self.finalized:
                 # a re-delivered event past seen_events eviction re-pended
-                # an already-counted fill: drop it, never count twice
+                # an already-counted fill: drop it, never count twice.
+                # But a genuinely NEW late fill event of a watched
+                # (tx, wallet) lands here too — merge its keys into the
+                # watch FIRST so its poll row scores suppressed instead
+                # of a fabricated gating residual (round-4 fleet). If the
+                # row landed before this merge, the residual already
+                # counted — conservative direction, accepted.
+                w = self.watch.get((tx, wallet))
                 for c in by_wallet[wallet]:
+                    if w is not None and c.get("ts") is not None:
+                        tgt = w["agg_keys"] if c["view"] == "agg" else w["exec_keys"]
+                        for var, key in rec_keys(c):
+                            tgt.setdefault(key, var)
+                        if c["view"] == "agg":
+                            w["agg_assets"].add(c["asset"])
+                        else:
+                            w["has_execs"] = True
                     self.pending.pop((c["tx"], c["log_index"], c["wallet"], c["view"]), None)
                 self.bump("refinalize_blocked")
                 continue
@@ -537,6 +602,7 @@ class ShadowV2:
                       poll_rows: list[dict], chain_rows: list[dict],
                       oldest: float, now: float, logged: int) -> int:
         execs, aggs = g["execs"], g["aggs"]
+        agg_assets_set = {a["asset"] for a in aggs}
         ins_exec: dict[str, tuple[str, dict]] = {}
         for c in execs:
             for variant, key in rec_keys(c):
@@ -576,8 +642,13 @@ class ShadowV2:
         if not finalize:
             return logged   # evidence incomplete — wait, count nothing
         self.finalized[(tx, wallet)] = now
+        horizon = now - (ORPHAN_FINAL_S + REPLAY_STALE_S)
+        while self.finalized and next(iter(self.finalized.values())) < horizon:
+            self.finalized.popitem(last=False)   # age-expired by design
         while len(self.finalized) > FINALIZED_CAP:
             self.finalized.popitem(last=False)
+            self.bump("finalized_evicted")   # a live tombstone lost = a
+            # redelivery can double-count; HEALTH so the window shows it
         if oldest < ORPHAN_FINAL_S:
             # EARLY finalize: coverage was exec->row only, so a poll row
             # landing after this pass (the documented >15min lag tail)
@@ -594,6 +665,7 @@ class ShadowV2:
                 "seen": {r["dedupe_key"] for r in poll_rows}
                         | {r["dedupe_key"] for r in chain_rows},
                 "has_execs": bool(execs), "has_aggs": bool(aggs),
+                "agg_assets": set(agg_assets_set),
             }
             while len(self.watch) > WATCH_CAP:
                 self.watch.popitem(last=False)
@@ -615,12 +687,13 @@ class ShadowV2:
             if hit_a:
                 self.bump("sim_agg_suppressed")
                 agg_row_matched = True
-            elif aggs:
+            elif str(row["asset"]) in agg_assets_set:
                 self.bump("sim_agg_residual_dup")
             else:
-                # no aggregate view exists for this fill class — the agg
-                # policy would ingest NOTHING, so this is no-coverage,
-                # not a would-be double-ingest (it must not gate)
+                # no aggregate view exists for this row's MARKET — an agg
+                # for a DIFFERENT market in the same tx proves nothing;
+                # the agg policy would ingest NOTHING here (no-coverage,
+                # must not gate)
                 self.bump("sim_agg_uncovered")
             if hit:
                 self.bump("sim_exec_suppressed")
@@ -651,13 +724,25 @@ class ShadowV2:
         self.bump(f"pw.{wallet}.supp",
                   sum(1 for c in execs if id(c) in consumed))
         # sim extra: would-be inserts with no row at all (checked at finalization)
-        all_row_keys = {r["dedupe_key"] for r in poll_rows} | {r["dedupe_key"] for r in chain_rows}
+        chain_keys = {r["dedupe_key"] for r in chain_rows}
+        all_row_keys = {r["dedupe_key"] for r in poll_rows} | chain_keys
         # pop EVERY pending record of this (tx, wallet) — including
         # classifier-dropped anomalies, which previously leaked in
         # pending forever and re-bumped their flags every minute
         for c in all_recs:
             self.pending.pop((c["tx"], c["log_index"], c["wallet"], c["view"]), None)
+        # The live chain path (decode_fill_v3_receipt) writes ONE
+        # AGGREGATE row per (tx, wallet), key-identical to the shadow's
+        # agg record — and it SUPPRESSES the poll row at the poller's
+        # pre-dedupe, so poll evidence never lands. Tie-proven legs must
+        # be absorbed by the CHAIN aggregate exactly as by a poll one,
+        # or every multi-leg chain-won tx reads orphan_chain_mismatch
+        # (GATING) on a perfect decode (round-4 critical).
+        agg_key_in_chain = any(k in chain_keys for k in ins_agg)
         exec_sum_covered = (agg_row_matched and tie == "ok")
+        chain_sum_covered = ((agg_key_in_chain and tie == "ok")
+                             or (not aggs and not poll_rows
+                                 and self._chain_sum_covers(execs, chain_rows)))
         for key, (variant, c) in ins_exec.items():
             if variant == "round" and key not in all_row_keys and id(c) not in consumed:
                 if exec_sum_covered and c["view"] in ("exec_counter", "exec_mint"):
@@ -666,6 +751,10 @@ class ShadowV2:
                     # dual record) is outside the tie and must fall
                     # through to the orphan ladder like any other exec
                     self.bump("exec_covered_by_agg_row")
+                elif chain_sum_covered and (
+                        c["view"] in ("exec_counter", "exec_mint")
+                        or (not aggs and c["view"] == "exec_owner")):
+                    self.bump("exec_covered_by_chain_agg_row")
                 elif not poll_rows and not chain_rows:
                     self.bump("orphan_no_row")
                     self.note_example("orphan_no_row", tx=tx[:14], wallet=wallet[:12],
@@ -724,11 +813,15 @@ class ShadowV2:
                     self.bump("sim_exec_uncovered")
                 if k in w["agg_keys"]:
                     self.bump("sim_agg_suppressed")
-                elif w["has_aggs"]:
+                elif str(row["asset"]) in w["agg_assets"]:
                     self.bump("sim_agg_residual_dup")
                 else:
+                    # no aggregate exists for this row's MARKET — the agg
+                    # policy would ingest nothing for it (no-coverage)
                     self.bump("sim_agg_uncovered")
             if now >= w["until"]:
+                if not w.get("fetched"):
+                    self.bump("watch_expired_unfetched")
                 self.watch.pop((tx, wallet), None)
 
     @staticmethod
@@ -789,6 +882,34 @@ class ShadowV2:
                 cand_used.add(ci)
                 picks[ri] = cands[ci]
         return [(row, picks.get(ri)) for ri, row in enumerate(rows)]
+
+    def _chain_sum_covers(self, execs: list[dict],
+                          chain_rows: list[dict]) -> bool:
+        """True when some chain row IS the aggregate of the decoded
+        legs — one asset, sizes summing exactly, price matching either
+        rounding of the summed ratio. The v3 receipt path books exactly
+        this shape for a maker's multi-leg tx."""
+        if not execs or not chain_rows:
+            return False
+        if len({c["asset"] for c in execs}) != 1:
+            return False
+        if len({c["side"] for c in execs}) != 1:
+            return False
+        tot_size = sum(c["size_units"] for c in execs)
+        tot_usdc = sum(c["usdc_units"] for c in execs)
+        if not tot_size:
+            return False
+        pr = round(tot_usdc / tot_size, 6)
+        ph = (Decimal(tot_usdc) / Decimal(tot_size)
+              ).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+        size = _num(Decimal(tot_size) / Decimal(10 ** 6))
+        for row in chain_rows:
+            if (row["asset"] == execs[0]["asset"]
+                    and row["side"] == execs[0]["side"]
+                    and _num(row["size"]) == size
+                    and _num(row["price"]) in (_num(pr), _num(ph))):
+                return True
+        return False
 
     def _chain_exact(self, c: dict, chain_rows: list[dict]) -> bool:
         """orphan_chain_exact requires the FULL mechanism: only a chain row
@@ -940,6 +1061,12 @@ class ShadowV2:
             if stored:
                 if "counters" in stored and not isinstance(stored.get("counters"), dict):
                     corrupt = True
+                if isinstance(stored.get("counters"), dict) and any(
+                        not isinstance(v, (int, float))
+                        for v in stored["counters"].values()):
+                    # silently filtering a junk VALUE erased gating and
+                    # volume evidence with zero signal (round-4 fleet)
+                    corrupt = True
                 if (stored.get("window_start") is not None
                         and not isinstance(stored.get("counters"), dict)):
                     # a window without counters is a half-corrupt doc: fresh
@@ -952,7 +1079,9 @@ class ShadowV2:
                     else:
                         for k2, v2 in aw_chk.items():
                             if k2 in ("pw", "emitter"):
-                                if not isinstance(v2, dict):
+                                if not isinstance(v2, dict) or any(
+                                        not isinstance(x, (int, float))
+                                        for x in v2.values()):
                                     corrupt = True
                             elif not isinstance(v2, (int, float)):
                                 corrupt = True
@@ -1205,6 +1334,7 @@ def shadow_observe(listener: Any, log_entry: dict[str, Any]) -> None:
             st.seen_events[ek] = time.time()
             while len(st.seen_events) > SEEN_EVENTS_CAP:
                 st.seen_events.popitem(last=False)
+                st.bump("seen_events_evicted")
         roster = getattr(listener, "_roster", {}) or {}
         recs, reason, involved = decode_shadow_views(
             log_entry, roster, st.exchange_set(listener))
