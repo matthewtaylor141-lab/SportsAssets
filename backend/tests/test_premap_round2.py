@@ -544,3 +544,47 @@ class TestTheSignGuardIsNowFunctionalNotBlanket:
                  "question": "Moneyline"}]
         hit = premap.match_side(rows, "Kansas City Chiefs", "Moneyline")
         assert hit is not None
+
+
+class TestQuestionLineSurvivesDates:
+    """Round 28 (owner's unmapped report, 60% no_side_match): the line
+    stamp demanded exactly ONE number in the market question, so a
+    date ('Aug 28', '8/28', '2026-08-28') voided the stamp and every
+    over/under pick on that market refused. Dates are never lines;
+    a lone decimal among leftovers is the line; real ambiguity still
+    stamps '' and refuses — the wrong-line class stays impossible."""
+
+    def test_iso_date_no_longer_voids_the_line(self):
+        from sportsassets.workers.premap import _question_line
+        assert _question_line(
+            'Total runs in TEX-MIL on 2026-08-28: over 6.5?') == '6.5'
+
+    def test_slash_and_word_dates_are_stripped(self):
+        from sportsassets.workers.premap import _question_line
+        assert _question_line(
+            'Rangers @ Brewers 8/28: total runs over/under 6.5?') == '6.5'
+        assert _question_line(
+            'NFL: over/under 47 points, Aug 28 kickoff') == '47'
+
+    def test_genuine_two_line_ambiguity_still_refuses(self):
+        from sportsassets.workers.premap import _question_line
+        assert _question_line('over 6.5 or under 9.5 double market') == ''
+
+    def test_market_rows_stamp_the_recovered_line(self):
+        from sportsassets.workers.premap import _market_rows, match_side
+        ev = {'slug': 'tex-mil-2026-08-28', 'title': 'TEX vs MIL'}
+        m = {'slug': 'tsc-tex-mil-2026-08-28-tot-6pt5',
+             'question': 'Total runs in TEX-MIL on 2026-08-28: over 6.5?',
+             'marketSides': [
+                 {'identifier': 'tsc-tex-mil-2026-08-28-tot-6pt5',
+                  'description': 'Over'},
+                 {'identifier': 'tsc-tex-mil-2026-08-28-tot-6pt5',
+                  'description': 'Under'},
+             ]}
+        rows = _market_rows(ev, m)
+        assert [r['line'] for r in rows] == ['6.5', '6.5'], \
+            'the date in the question must not void the line stamp'
+        # and the whale's Over on total-6pt5 now maps end-to-end
+        hit = match_side(rows, 'Over', 'TEX vs MIL total 6.5',
+                         'mlb-tex-mil-2026-08-28-total-6pt5')
+        assert hit is not None and hit['side_norm'] == 'over'

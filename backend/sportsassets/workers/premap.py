@@ -2021,6 +2021,37 @@ def side_intent(side: dict, sides: list[dict]) -> str | None:
     return None
 
 
+_QDATE_RE = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}\b"
+    r"|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b"
+    r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* "
+    r"\d{1,2}\b",
+    re.I)
+
+
+def _question_line(q: str) -> str:
+    """The ONE line a question states, or ''.
+
+    Round 28 (owner's unmapped report): the stamp was `_lines_of(q)`
+    demanding exactly one candidate — a DATE in the question ('Aug
+    28', '8/28', '2026-08-28') added its digits to the set, voided
+    the stamp, and every over/under pick on that market refused with
+    no_side_match (60% of the unmapped census). Dates are never
+    lines: strip them first. If several candidates still remain and
+    exactly ONE is a decimal, that decimal is the line (half-point
+    lines dominate this domain and a date fragment is never .5); any
+    remaining ambiguity still stamps '' and the pick refuses — the
+    wrong-line class stays impossible.
+    """
+    ql = _lines_of(_QDATE_RE.sub(" ", q or ""))
+    if len(ql) == 1:
+        return next(iter(ql))
+    decs = {x for x in ql if "." in x}
+    if len(decs) == 1:
+        return next(iter(decs))
+    return ""
+
+
 def _market_rows(ev: dict, m: dict) -> list[dict]:
     """Rows for one venue market: each side its own orderable row.
 
@@ -2034,8 +2065,7 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
     # WHOLE NUMBERS COUNT (leak-hunt round 3): only \d+\.5 was stamped,
     # so a whole-number line ('-3', 'O/U 47') left the row unlined and
     # the line comparison was skipped on both sides.
-    _ql = _lines_of(q)
-    line = next(iter(_ql)) if len(_ql) == 1 else ""
+    line = _question_line(q)
     ev_slug = ev.get("slug") or ev.get("eventSlug") or ""
     ev_title = ev.get("title") or ""
     out: list[dict] = []
@@ -2553,8 +2583,11 @@ async def resolve_explain(pool, market_title: str | None,
     hit = match_side(kept, outcome, market_title, global_slug)
     if hit is None:
         out["step"] = "no_side_match"
+        _hl = sorted(_lines_of(market_title) | _lines_of(outcome)
+                     | slug_lines(global_slug))
         out["detail"] = (f"outcome {outcome!r} matched none of "
-                         f"{[r.get('side_norm') for r in kept][:6]}")
+                         f"{[(r.get('side_norm'), r.get('line') or '-') for r in kept][:6]}"
+                         f" his_lines={_hl[:4]}")
         # PHASE-0 BRIDGE PROBE (2026-08-26): read-only. Mirrors exactly
         # the composition resolve would run (match_side first, bridge
         # only on refusal) so the census can MEASURE what the bridge
