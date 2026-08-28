@@ -278,3 +278,55 @@ def test_all_junk_list_page_is_also_a_poll_failure(fake_env, monkeypatch):
     loop.close()
     assert new == 1 and len(ingested) == 1, \
         "one junk row still costs one row, never the page"
+
+
+def test_total_ingest_loss_fails_the_cycle(fake_env, monkeypatch):
+    """fleet r24 (minor): the round-23 arithmetic one layer down — a
+    cycle whose EVERY attempted row failed inside ingest (constraint
+    drift; the 2026-08-21 side-CHECK incident is the documented
+    precedent) still returned success and reset the failure counter.
+    Total ingest loss now fails the cycle; a mixed outcome stays
+    per-row (round 15)."""
+    class _R2:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [RAW_TRADE,
+                    dict(RAW_TRADE, asset="99", transactionHash="0x" + "cc" * 32)]
+
+    async def two_rows(http, path, params=None):
+        return _R2()
+
+    monkeypatch.setattr("sportsassets.ratelimit.polite_get", two_rows)
+
+    async def always_boom(ev):
+        raise RuntimeError("constraint drift")
+
+    monkeypatch.setattr(poller_mod, "ingest_trade_result", always_boom)
+    p = Poller.__new__(Poller)
+    p._http = None
+    p.last_lag_s = None
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    with pytest.raises(ValueError):
+        loop.run_until_complete(p.poll_wallet(
+            {"id": 1, "address": "0xw", "username": "w"}))
+    loop.close()
+
+    booms = {"n": 0}
+
+    async def boom_once(ev):
+        if booms["n"] == 0:
+            booms["n"] += 1
+            raise RuntimeError("constraint drift")
+        return 7, True
+
+    monkeypatch.setattr(poller_mod, "ingest_trade_result", boom_once)
+    p2 = Poller.__new__(Poller)
+    p2._http = None
+    p2.last_lag_s = None
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    new = loop.run_until_complete(p2.poll_wallet(
+        {"id": 1, "address": "0xw", "username": "w"}))
+    loop.close()
+    assert new == 1, "a mixed outcome stays per-row — never the cycle"

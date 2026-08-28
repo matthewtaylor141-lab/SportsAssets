@@ -174,9 +174,12 @@ class Poller:
         except Exception:  # noqa: BLE001 — pre-filter is an optimization
             seen = set()
         new = 0
+        attempted = 0
+        ingest_bad = 0
         for ev, key in zip(events, keys):
             if key in seen:
                 continue
+            attempted += 1
             # per-row containment around the INGEST too (fleet round
             # 15: a gate-passing row can still fail inside ingest —
             # DB constraint, column overflow, datetime range — and an
@@ -196,6 +199,7 @@ class Poller:
             except Exception:  # noqa: BLE001
                 log.warning("poll: row failed to ingest, skipping: %s",
                             key[:16])
+                ingest_bad += 1
                 continue
             if was_new:
                 new += 1
@@ -203,6 +207,17 @@ class Poller:
                     import time as _t
 
                     self.last_lag_s = round(_t.time() - ev.ts_epoch, 1)
+        if attempted and ingest_bad == attempted:
+            # round 24 (minor): the round-23 arithmetic one layer
+            # down — a cycle whose EVERY attempted row failed inside
+            # ingest (constraint drift, DB refusals: the 2026-08-21
+            # side-CHECK incident is the documented precedent) still
+            # returned success, reset the failure counter and
+            # heartbeated ok while zero rows and zero venue_seen_at
+            # stamps could land. Total ingest loss fails the cycle;
+            # a mixed outcome stays per-row (round 15).
+            raise ValueError(
+                f"all {attempted} attempted rows failed inside ingest")
         return new
 
     async def _priority_loop(self) -> None:

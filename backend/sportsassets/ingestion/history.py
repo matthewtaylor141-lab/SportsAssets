@@ -28,6 +28,7 @@ import httpx
 from ..config import settings
 from ..db import get_pool, heartbeat
 from ..ratelimit import polite_get
+from .dedupe import key_fields_valid
 from .poller import parse_data_api_trade
 
 log = logging.getLogger(__name__)
@@ -92,16 +93,57 @@ async def backfill_whale_history(http: httpx.AsyncClient, whale: dict) -> int:
             )
             resp.raise_for_status()
             batch = resp.json()
-            if not isinstance(batch, list) or not batch:
+            if not isinstance(batch, list):
+                # round 24 (major): an HTTP-200 error envelope (a
+                # dict, a bare string) silently broke EVERY window,
+                # scanned 0 fills — and line "SET history_backfilled=
+                # TRUE" below then marked the whale's entire deep
+                # history imported, permanently, behind an ok
+                # heartbeat: a transient venue burp truncated months
+                # of history with zero alarm and zero retry, while
+                # the identical outage as HTTP 500 raised and stayed
+                # pending. The venue error shape now raises like its
+                # siblings (poller round 23, reconciler round 19), so
+                # the per-whale handler leaves the whale PENDING and
+                # the next cycle retries.
+                raise ValueError(
+                    "venue served a non-list /activity body: "
+                    + type(batch).__name__)
+            if not batch:
                 break
 
             rows: list[tuple] = []
+            evs = []
+            bad = 0
+            for raw in batch:
+                # per-row containment (round 24, major: one JSON null
+                # in a page raised at the parse, escaped the per-whale
+                # except tuple, aborted the ENTIRE pass — every whale
+                # after the poisoned one starved forever while the 60s
+                # retry loop re-crashed identically. And the old
+                # tx/size-only gate let a side-less stub through to
+                # kill the whole executemany batch on the side CHECK
+                # constraint). One junk row costs one row; the shared
+                # validity gate guards the INSERT exactly as it does
+                # in the poll and reconcile carriers.
+                try:
+                    ev = parse_data_api_trade(
+                        raw, whale["id"], whale["username"])
+                    if not key_fields_valid(ev):
+                        bad += 1
+                        continue
+                except Exception:  # noqa: BLE001
+                    bad += 1
+                    continue
+                evs.append(ev)
+            if batch and bad == len(batch):
+                # an all-junk page is venue degradation, not history
+                # exhaustion — fail the whale, stay pending, retry
+                raise ValueError(
+                    f"venue served {bad} activity rows, none usable")
             fresh = 0
             oldest = None
-            for raw in batch:
-                ev = parse_data_api_trade(raw, whale["id"], whale["username"])
-                if not ev.tx_hash or ev.size <= 0:
-                    continue
+            for ev in evs:
                 oldest = ev.ts_epoch if oldest is None else min(oldest, ev.ts_epoch)
                 if _fill_key(ev) in boundary:
                     continue
@@ -127,11 +169,10 @@ async def backfill_whale_history(http: httpx.AsyncClient, whale: dict) -> int:
                 boundary = set()
             else:
                 end_cursor = oldest
-                boundary = {
-                    _fill_key(parse_data_api_trade(r, whale["id"], whale["username"]))
-                    for r in batch
-                    if int(r.get("timestamp", 0)) == oldest
-                }
+                # from the already-parsed events — never a second
+                # unguarded parse of the raw batch (round 24)
+                boundary = {_fill_key(ev) for ev in evs
+                            if ev.ts_epoch == oldest}
             if end_cursor <= window_start:
                 break
         window_start += WINDOW_SECONDS
@@ -177,7 +218,15 @@ async def _backfill_pending_inner() -> int:
         for whale in whales:
             try:
                 total += await backfill_whale_history(http, dict(whale))
-            except (httpx.HTTPError, ValueError) as exc:
+            except Exception as exc:  # noqa: BLE001 — round 24: one
+                # whale must never abort the pass. The old narrow
+                # tuple (HTTPError, ValueError) let a parse
+                # AttributeError or a DB constraint error escape,
+                # killing the whole pass every 60s and starving every
+                # whale AFTER the poisoned one forever. Any failure
+                # leaves THIS whale pending for retry; the rest of
+                # the roster still backfills. (CancelledError is a
+                # BaseException and still propagates.)
                 log.warning("history backfill failed for %s: %s (will retry next cycle)",
                             whale["address"], exc)
                 await heartbeat("backfill", "error", {"whale": whale["address"], "error": str(exc)})
