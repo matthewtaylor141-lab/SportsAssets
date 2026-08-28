@@ -1087,7 +1087,20 @@ class S1Emitter:
                 # One economic fill must be one row regardless of how
                 # the timestamp moved between passes: per-asset
                 # exclusion is structural, never the executor's job.
-                self.bump("s1.emit_dup")
+                #
+                # DESIGN DECISION (fleet round 14, documented): this
+                # cap also defers a GENUINE second distinct same-asset
+                # exec_owner fill of one tx (a taker sweep filling two
+                # resting orders of one whale in one market). No
+                # re-mine-stable identity exists that separates that
+                # rare shape from the round-13 twin (logIndex, ts and
+                # even amounts can all shift across a re-mine), and
+                # admitting it re-opens the key-divergent double
+                # emission class — so the second fill DEFERS to the
+                # poller, counted honestly under its own reason, and
+                # burn-in parity holds (counted_marks is per-asset
+                # too).
+                self.bump("s1.abstain.same_asset_entry")
                 continue
             # CLAIM BEFORE ANY AWAIT and honor refusal: awaiting the
             # probe between the registry read and the claim opened a

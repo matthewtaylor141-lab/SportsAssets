@@ -16,6 +16,7 @@ import httpx
 from ..config import settings
 from ..db import get_pool, heartbeat
 from ..ratelimit import polite_get
+from .dedupe import key_fields_valid
 from .pipeline import ingest_trade_result
 from .poller import _sport_for_condition, parse_data_api_trade
 
@@ -82,12 +83,17 @@ async def reconcile_once(depth: int = 500) -> dict:
                         complete = offset > 0
                         break
                     for raw in batch:
-                        ev = parse_data_api_trade(raw, whale["id"], whale["username"])
-                        if (not ev.tx_hash or ev.size <= 0
-                                or not ev.asset
-                                or ev.side not in ("BUY", "SELL")
-                                or ev.price <= 0
-                                or not ev.ts_epoch or ev.ts_epoch <= 1e9):
+                        # per-row containment (round 14): a hostile
+                        # field can make the PARSE itself raise
+                        # (Infinity timestamp -> int() overflow) — one
+                        # junk row must cost one row, never the walk
+                        try:
+                            ev = parse_data_api_trade(
+                                raw, whale["id"], whale["username"])
+                            usable = key_fields_valid(ev)
+                        except Exception:  # noqa: BLE001
+                            usable = False
+                        if not usable:
                             # a row unusable for ingest must not
                             # testify for coverage either (fleet round
                             # 9, major: a degraded-index stub with

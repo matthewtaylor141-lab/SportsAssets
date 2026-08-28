@@ -16,6 +16,7 @@ import httpx
 
 from ..config import settings
 from ..db import get_pool, heartbeat
+from .dedupe import key_fields_valid
 from .pipeline import TradeEvent, ingest_trade_result
 
 log = logging.getLogger(__name__)
@@ -95,16 +96,19 @@ class Poller:
         resp.raise_for_status()
         events = []
         for raw in resp.json():
-            ev = parse_data_api_trade(raw, whale["id"], whale["username"])
-            if (not ev.tx_hash or ev.size <= 0
-                    or not ev.asset or ev.side not in ("BUY", "SELL")
-                    or ev.price <= 0
-                    or not ev.ts_epoch or ev.ts_epoch <= 1e9):
-                # same validity the reconciler enforces (fleet rounds
-                # 12+13): EVERY dedupe-key field (tx, asset, side,
-                # size, price, ts) gates ingest — a stub missing any
-                # of them would ingest as a key-divergent junk row of
-                # a fill the venue already served correctly
+            # same validity the reconciler enforces (fleet rounds
+            # 12-14): every dedupe-key field gates ingest, checked on
+            # the NORMALIZED, FINITE values the key itself derives —
+            # and contained per row, because a hostile field can make
+            # the parse itself raise (round 14: one Infinity row was
+            # aborting the wallet's ENTIRE poll cycle at the key-list
+            # build, killing the poll carrier every healthy fill and
+            # every S1 abstention leans on, below the alert threshold)
+            try:
+                ev = parse_data_api_trade(raw, whale["id"], whale["username"])
+                if not key_fields_valid(ev):
+                    continue
+            except Exception:  # noqa: BLE001 — one junk row costs one row
                 continue
             events.append(ev)
         if not events:

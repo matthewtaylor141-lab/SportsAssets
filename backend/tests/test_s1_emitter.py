@@ -1448,7 +1448,7 @@ def test_unusable_rows_never_testify_for_coverage():
     import inspect
     from sportsassets.ingestion import reconciler as rec
     src = inspect.getsource(rec)
-    skip = src.index("if (not ev.tx_hash or ev.size <= 0")
+    skip = src.index("if not usable:")
     span = src.index("oldest_ts = float(ev.ts_epoch)")
     assert skip < span, "validity check precedes the span update"
     assert "ev.ts_epoch > 1e9" in src, "sentinel-timestamp floor"
@@ -1758,29 +1758,49 @@ def test_ts_mangled_rows_are_unusable_everywhere():
     was garbage, false STICKY on a correct emission. The ts sentinel
     floor is part of validity in BOTH carriers."""
     import inspect
+    from sportsassets.ingestion import dedupe as dd
     from sportsassets.ingestion import poller as pol
     from sportsassets.ingestion import reconciler as rec
     for src in (inspect.getsource(rec), inspect.getsource(pol)):
-        assert "or not ev.ts_epoch or ev.ts_epoch <= 1e9" in src, \
-            "ts validity gates ingest in the poller AND the reconciler"
+        assert "key_fields_valid(ev)" in src, \
+            "ONE shared validity gate guards ingest in both carriers"
+    assert "ts <= 1e9" in inspect.getsource(dd), "ts sentinel floor"
 
 
 # ── fleet round 13 pins ─────────────────────────────────────────────
 def test_validity_floor_covers_every_dedupe_key_field():
-    """fleet r13 (major): round 12 floored only ts — but the dedupe
-    key is (tx, asset, side, size, price, ts), and a degraded stub
-    missing the PRICE (parse defaults 0.0) or ASSET (defaults '')
-    passed validity, ingested as a key-divergent junk row that could
-    never stamp venue_seen_at, left dirty at 0, and false-tripped
-    STICKY on a correct venue-served emission. Every key field is
-    validity, in BOTH carriers."""
-    import inspect
-    from sportsassets.ingestion import poller as pol
-    from sportsassets.ingestion import reconciler as rec
-    for src in (inspect.getsource(rec), inspect.getsource(pol)):
-        assert "not ev.asset" in src
-        assert 'ev.side not in ("BUY", "SELL")' in src
-        assert "ev.price <= 0" in src
+    """fleet r13 (major) + r14 (major x3): the validity gate must
+    judge each dedupe-key field AS THE KEY NORMALIZES IT — raw checks
+    let whitespace tx/asset (truthy, strips to ''), sub-quantum
+    size/price (1e-7 > 0, quantizes to 0.000000), NaN (every ordered
+    comparison is False) and Infinity (raises inside the key, killing
+    the whole wallet's poll batch) through. Functional, not grepped:
+    every hostile shape is refused, no shape raises."""
+    from types import SimpleNamespace as NS
+
+    from sportsassets.ingestion.dedupe import key_fields_valid
+
+    good = dict(tx_hash="0x" + "ab" * 32, asset="123", side="BUY",
+                size=10.0, price=0.5, ts_epoch=1_724_000_000)
+    assert key_fields_valid(NS(**good)) is True
+    hostile = [
+        {"tx_hash": ""}, {"tx_hash": "   "},
+        {"asset": ""}, {"asset": "  "}, {"asset": None},
+        {"side": ""}, {"side": "HOLD"},
+        {"size": 0.0}, {"size": -1.0}, {"size": 1e-7},
+        {"size": float("nan")}, {"size": float("inf")},
+        {"price": 0.0}, {"price": 4e-7}, {"price": float("nan")},
+        {"price": float("-inf")},
+        {"ts_epoch": 0}, {"ts_epoch": 1}, {"ts_epoch": int(1e9)},
+        {"ts_epoch": float("nan")}, {"ts_epoch": float("inf")},
+        {"ts_epoch": None},
+    ]
+    for mut in hostile:
+        ev = NS(**{**good, **mut})
+        assert key_fields_valid(ev) is False, f"must refuse {mut}"
+    # a lowercase side is venue formatting, not degradation — the key
+    # uppercases it and so does the gate
+    assert key_fields_valid(NS(**{**good, "side": "buy"})) is True
 
 
 TOKEN_B_INT = int("9c546cfe" + "33" * 28, 16)
@@ -1837,8 +1857,27 @@ def test_bundle_retry_after_remine_never_reemits_an_asset(
     assert len(calls) == 2 and len(set(assets)) == 2, \
         "each asset ingests EXACTLY once across the retry — the " \
         "re-mine-shifted key must never produce a second row"
-    assert st.deltas.get("s1.emit_dup", 0) >= 1, \
-        "the re-emission attempt is refused as a dup"
+    assert st.deltas.get("s1.abstain.same_asset_entry", 0) >= 1, \
+        "the re-emission attempt is refused under its own honest " \
+        "reason (r14: mislabeling it emit_dup lied about the gauge)"
+
+
+def test_second_distinct_same_asset_fill_defers_by_design():
+    """fleet r14 (minor, DOCUMENTED DESIGN): the r13 per-asset cap
+    also defers a genuine second distinct same-asset exec_owner fill
+    of one tx (taker sweep filling two resting orders of one whale in
+    one market). No re-mine-stable identity separates that rare shape
+    from the r13 key-divergent twin — logIndex, ts and amounts can
+    ALL shift across a re-mine — and admitting it re-opens the double
+    emission class. The second fill defers to the poller under its
+    own named reason; the decision is written at the refusal site."""
+    import inspect
+
+    import sportsassets.ingestion.s1_emitter as mod
+    src = inspect.getsource(mod)
+    assert "s1.abstain.same_asset_entry" in src
+    assert "DESIGN DECISION (fleet round 14" in src, \
+        "the trade-off must stay documented where it is enforced"
 
 
 def test_db_clock_anchor_survives_wall_clock_steps(st, monkeypatch):

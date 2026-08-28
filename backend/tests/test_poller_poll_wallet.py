@@ -104,3 +104,47 @@ def test_dedupe_key_is_a_property_not_a_method():
     key = ev.dedupe_key
     assert isinstance(key, str) and key
     assert not callable(key)
+
+
+# ── fleet round 14 (major): one hostile row costs ONE row ───────────
+HOSTILE_INF = dict(RAW_TRADE, transactionHash="0x" + "cd" * 32,
+                   size=float("inf"))
+HOSTILE_TS = dict(RAW_TRADE, transactionHash="0x" + "ef" * 32,
+                  timestamp=float("inf"))
+HOSTILE_NAN = dict(RAW_TRADE, transactionHash="0x" + "aa" * 32,
+                   price=float("nan"))
+
+
+class _MixedResp:
+    """One healthy row buried between hostile ones."""
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self) -> list[dict]:
+        return [HOSTILE_INF, HOSTILE_TS, RAW_TRADE, HOSTILE_NAN]
+
+
+def test_one_hostile_row_never_kills_the_wallet_poll(fake_env, monkeypatch):
+    """fleet r14 (major): a single Infinity row aborted the ENTIRE
+    poll_wallet batch at the upfront dedupe-key build — the wallet's
+    poll carrier (which every S1 abstention and the venue_seen_at
+    stamp lean on) died on every cycle, below the alert threshold
+    because the failure counter resets on the next wallet's success.
+    Validity now refuses non-finite values BEFORE the key, the parse
+    is contained per row, and the healthy fill still ingests."""
+    pool, ingested = fake_env
+
+    async def mixed_get(http, path, params=None):
+        return _MixedResp()
+
+    monkeypatch.setattr("sportsassets.ratelimit.polite_get", mixed_get)
+    p = Poller.__new__(Poller)
+    p._http = None
+    p.last_lag_s = None
+    new = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        p.poll_wallet({"id": 28, "address": "0xf705", "username": "0xf7"})
+    )
+    assert new == 1, "the healthy row ingests despite three hostile ones"
+    assert len(ingested) == 1
+    assert ingested[0].tx_hash == RAW_TRADE["transactionHash"]
