@@ -81,6 +81,9 @@ class _Pool:
             return self.whales
         return []                                   # sport map
 
+    async def fetchval(self, sql, *a):
+        return None                     # no prior trades unless a test says so
+
     async def execute(self, sql, *a):
         self.executes.append((sql, a))
 
@@ -197,3 +200,136 @@ def test_db_failure_leaves_the_whale_pending_not_the_pass_dead(
     assert total == 1
     assert _backfilled_ids(pool) == [2]
     assert any(s == "error" for _, s, _ in beats)
+
+
+def test_pinned_tie_second_accumulates_the_boundary(monkeypatch):
+    """r25 major #1: a >PAGE_SIZE tie second under the venue's
+    unstable tie order (the proven rounds-17/18 feed property)
+    re-serves different subsets forever; replacing the boundary each
+    page let re-served keys count as fresh, spinning the cursor and
+    burning the cap on duplicates while older history was never
+    queried. With accumulation at a pinned cursor the walk steps
+    past and the deep rows import — nothing counted twice."""
+    monkeypatch.setattr(hist, "PAGE_SIZE", 4)
+    T = 1_787_011_300                # inside the first window
+    ties = [dict(RAW, transactionHash="0x" + f"{i:02x}" * 32,
+                 asset=str(700 + i), timestamp=T) for i in range(6)]
+    older = [dict(RAW, transactionHash="0x" + f"a{i}" * 32,
+                  asset=str(800 + i), timestamp=T - 50)
+             for i in range(3)]
+    served = {"tie_calls": 0}
+
+    async def fake_get(http, path, params=None):
+        start, end = params["start"], params["end"]
+        if start <= T <= end:        # the venue honors the window
+            subsets = [ties[0:4], ties[2:6],
+                       [ties[4], ties[5], ties[0], ties[1]]]
+            i = min(served["tie_calls"], len(subsets) - 1)
+            served["tie_calls"] += 1
+            return _Resp(subsets[i])
+        if start <= T - 50 <= end:
+            return _Resp(older)      # len 3 < PAGE_SIZE: window done
+        return _Resp([])
+
+    pool = _Pool([W_A])
+    beats: list[tuple] = []
+
+    async def fake_pool():
+        return pool
+
+    async def fake_beat(name, status, detail=None):
+        beats.append((name, status, detail))
+
+    monkeypatch.setattr(hist, "get_pool", fake_pool)
+    monkeypatch.setattr(hist, "polite_get", fake_get)
+    monkeypatch.setattr(hist, "heartbeat", fake_beat)
+    monkeypatch.setattr(hist, "settings", lambda: SimpleNamespace(
+        history_max_trades=10_000,
+        history_start_date="2026-08-18",
+        data_api_base="http://feed.test"))
+    total = asyncio.run(hist._backfill_pending_inner())
+    assert total == 9, "6 tie fills + 3 older fills, each counted once"
+    txs = [r[1] for r in pool.inserted]
+    assert len(txs) == len(set(txs)) == 9, \
+        "re-served tie keys never re-append"
+    assert served["tie_calls"] == 3, \
+        "fresh==0 on the third tie page steps the cursor past"
+
+
+def test_batch_insert_failure_falls_back_to_row_by_row(monkeypatch):
+    """r25 major #2 (containment half): a row the gate cannot
+    pre-judge kills only itself — the page's healthy fills land."""
+    class _PickyConn:
+        def __init__(self, sink):
+            self._sink = sink
+
+        async def executemany(self, sql, rows):
+            raise RuntimeError("numeric field overflow")
+
+        async def execute(self, sql, *row):
+            if row[2] == "poison":
+                raise RuntimeError("numeric field overflow")
+            self._sink.append(row)
+
+    class _PickyPool(_Pool):
+        def acquire(self):
+            return _Acquire(_PickyConn(self.inserted))
+
+    pool = _PickyPool([W_A])
+
+    async def run():
+        await hist._insert_page(pool, [
+            (1, "0xok", "ok-asset", None, "BUY", None, None, 1.0, 0.5,
+             0.5, None, None, None, "sports", None, None, "k1"),
+            (1, "0xpo", "poison", None, "BUY", None, None, 1.0, 0.5,
+             0.5, None, None, None, "sports", None, None, "k2"),
+        ])
+
+    asyncio.run(run())
+    assert len(pool.inserted) == 1 and pool.inserted[0][2] == "ok-asset"
+
+
+def test_derived_notional_is_part_of_validity():
+    """r25 major #2 (gate half): size and price individually storable
+    but size x price >= 1e18 overflows the stored notional column —
+    the product is validity in the ONE shared gate."""
+    from types import SimpleNamespace as NS
+
+    from sportsassets.ingestion.dedupe import key_fields_valid
+
+    def ev(size, price):
+        return NS(tx_hash="0x" + "ab" * 32, asset="1", side="BUY",
+                  size=size, price=price, ts_epoch=1_760_000_000)
+
+    assert not key_fields_valid(ev(1e15, 2e3)), \
+        "storable factors, unstorable product — refused"
+    assert key_fields_valid(ev(1e10, 1e3)), "a big-but-storable row passes"
+
+
+def test_empty_history_for_a_known_whale_defers(monkeypatch):
+    """r25 minor: 200-[] on every window durably marked a whale with
+    KNOWN fills as fully imported — the round-7 class through the one
+    body round 24 did not cover. With any trades row present the
+    empty answer defers; a genuinely tradeless wallet still
+    completes."""
+    pool, beats = _wire(monkeypatch, [W_A], {"0xaaa": []})
+    pool.has_trades = True
+
+    async def fetchval(sql, *a):
+        return 1 if pool.has_trades else None
+
+    pool.fetchval = fetchval
+    total = asyncio.run(hist._backfill_pending_inner())
+    assert total == 0
+    assert _backfilled_ids(pool) == [], "a cold index never flags TRUE"
+    assert any(s == "error" for _, s, _ in beats)
+
+    pool2, _ = _wire(monkeypatch, [W_B], {"0xbbb": []})
+
+    async def fetchval2(sql, *a):
+        return None
+
+    pool2.fetchval = fetchval2
+    asyncio.run(hist._backfill_pending_inner())
+    assert _backfilled_ids(pool2) == [2], \
+        "a genuinely tradeless wallet's [] is a valid, complete answer"

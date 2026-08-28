@@ -3062,6 +3062,32 @@ def kalshi_accounts_view(detail: dict, now: float) -> dict:
             "positions": positions}
 
 
+@app.get("/api/desk/stream")
+async def api_desk_stream(request: Request, token: str = Query("")) -> StreamingResponse:
+    """SSE order confirmations (owner order 2026-08-28): every
+    live_orders INSERT / status change, pushed the instant it commits
+    (migration-037 trigger -> pg_notify -> one listener -> fan-out).
+    EventSource cannot set headers, so the desk token rides a query
+    param; the header paths still work for tooling. The wall token is
+    deliberately NOT accepted: order flow is desk-scoped."""
+    import hmac as _hmac
+
+    supplied = (token or request.headers.get("X-Desk-Token", "") or "").strip()
+    admin = (request.headers.get("X-Admin-Token", "") or "").strip()
+    expected = (settings().admin_token or "").strip()
+    ok = bool(expected and _hmac.compare_digest(admin, expected)) \
+        or desk_token_ok(supplied) \
+        or bool(expected and _hmac.compare_digest(supplied, expected))
+    if not ok:
+        raise HTTPException(status_code=403, detail="desk token required")
+    from .order_stream import sse_events
+    return StreamingResponse(
+        sse_events(request),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/api/desk/history", dependencies=[Depends(require_desk)])
 async def api_desk_history(venue: str = Query(...), id: str = Query(...),
                            hours: int = Query(24, ge=1, le=336)) -> dict:

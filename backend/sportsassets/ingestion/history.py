@@ -65,9 +65,23 @@ def _fill_key(ev) -> tuple:
 
 
 async def _insert_page(pool, rows: list[tuple]) -> None:
-    if rows:
-        async with pool.acquire() as conn:
+    if not rows:
+        return
+    async with pool.acquire() as conn:
+        try:
             await conn.executemany(_INSERT, rows)
+        except Exception:  # noqa: BLE001 — round 25 (major): one row
+            # the gate cannot pre-judge (a DB constraint drift) used
+            # to kill the whole page's healthy fills inside this
+            # uncontained batch, wedging the whale's import on the
+            # retry loop. One row costs one row: fall back to
+            # row-by-row, land what can land, skip what cannot.
+            for row in rows:
+                try:
+                    await conn.execute(_INSERT, *row)
+                except Exception:  # noqa: BLE001
+                    log.warning("backfill: row cannot land, skipping "
+                                "tx %s", str(row[1])[:16])
 
 
 async def backfill_whale_history(http: httpx.AsyncClient, whale: dict) -> int:
@@ -168,21 +182,56 @@ async def backfill_whale_history(http: httpx.AsyncClient, whale: dict) -> int:
                 end_cursor = oldest - 1  # >500 fills in one second — step past it
                 boundary = set()
             else:
-                end_cursor = oldest
                 # from the already-parsed events — never a second
                 # unguarded parse of the raw batch (round 24)
-                boundary = {_fill_key(ev) for ev in evs
-                            if ev.ts_epoch == oldest}
+                new_boundary = {_fill_key(ev) for ev in evs
+                                if ev.ts_epoch == oldest}
+                if oldest == end_cursor:
+                    # round 25 (major): the cursor is PINNED at a
+                    # >PAGE_SIZE tie second and the venue's unstable
+                    # tie order (the proven feed property from fleet
+                    # rounds 17-18) re-serves a different subset each
+                    # query. Replacing the boundary every page let
+                    # re-served keys count as fresh forever: the walk
+                    # spun at the tie second, burned the cap and
+                    # `scanned` on duplicates, and the older history
+                    # was never queried behind a durable
+                    # history_backfilled=TRUE. ACCUMULATE at a pinned
+                    # cursor so each key counts fresh at most once and
+                    # fresh==0 eventually steps past the second.
+                    boundary |= new_boundary
+                else:
+                    boundary = new_boundary
+                end_cursor = oldest
             if end_cursor <= window_start:
                 break
         window_start += WINDOW_SECONDS
 
     if scanned >= max_trades:
-        log.warning("backfill for %s hit HISTORY_MAX_TRADES=%s — raise it (and the DB plan) "
-                    "for complete history", whale["address"], max_trades)
+        # honest hint (round 25): the flag below is durable, so a
+        # raised cap alone changes nothing for THIS wallet — the flag
+        # must be cleared too for a re-import.
+        log.warning("backfill for %s hit HISTORY_MAX_TRADES=%s — raise it AND clear "
+                    "history_backfilled on this wallet for complete history",
+                    whale["address"], max_trades)
         await heartbeat("backfill", "capped",
                         {"whale": whale["username"] or whale["address"], "scanned": scanned,
                          "hint": f"HISTORY_MAX_TRADES={max_trades} reached"})
+
+    if scanned == 0:
+        has_any = await pool.fetchval(
+            "SELECT 1 FROM trades WHERE whale_id=$1 LIMIT 1", whale["id"])
+        if has_any:
+            # round 25 (minor): 200-[] on every window for a whale we
+            # KNOW has fills is a cold venue index, not an empty
+            # history — the round-7/round-24 class through the one
+            # body shape round 24 did not cover. Defer: the whale
+            # stays PENDING (per-whale handler), retried next cycle,
+            # with an error heartbeat instead of a silent TRUE flag.
+            # A genuinely tradeless wallet (no rows from any carrier)
+            # still completes: [] is its valid answer.
+            raise ValueError(
+                "venue served an empty history for a whale with known fills")
 
     await pool.execute("UPDATE whales SET history_backfilled=TRUE WHERE id=$1", whale["id"])
     log.info("history backfill for %s: %s fills imported",

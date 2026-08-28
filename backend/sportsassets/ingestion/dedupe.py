@@ -56,6 +56,15 @@ def key_fields_valid(ev) -> bool:
             # wallet's whole batch one call later)
             if v >= cap:
                 return False
+        # round 25 (major): the caps above mirror size and price
+        # SEPARATELY, but every carrier also stores the DERIVED
+        # notional = size x price into NUMERIC(24,6) — a stub with
+        # each factor individually storable (size 1e15, price 2e3)
+        # overflowed the column inside the history batch insert and
+        # took the page's healthy fills with it. A stored value is a
+        # stored value: the product is part of validity too.
+        if float(ev.size) * float(ev.price) >= 1e18:
+            return False
         ts = ev.ts_epoch
         if isinstance(ts, float) and not math.isfinite(ts):
             return False
