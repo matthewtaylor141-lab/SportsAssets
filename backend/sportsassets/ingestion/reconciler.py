@@ -22,6 +22,10 @@ from .poller import _sport_for_condition, parse_data_api_trade
 
 log = logging.getLogger(__name__)
 
+# Continuity-witness depth (rounds 17-18): the rows each page re-requests
+# from the previous page's tail. See the walk-loop comment for why 3.
+OVERLAP_K = 3
+
 
 def _row_ident(raw: dict) -> tuple:
     """Raw-field identity of one served row — the continuity witness
@@ -79,11 +83,22 @@ async def reconcile_once(depth: int = 500) -> dict:
             # stayed 0, complete=true, spanning oldest — a clean
             # coverage claim over a walk that skipped the S1 fill.
             # Every page after the first now re-requests the previous
-            # page's LAST row (offset advances by len-1); if the
-            # boundary row does not come back first, the feed shifted
-            # between queries and the walk is DIRTY — it may have
-            # dropped a row it can no longer prove it saw.
-            prev_tail: tuple | None = None
+            # page's last OVERLAP_K rows (offset advances by len-K);
+            # if that witness run does not come back verbatim and in
+            # order, the feed shifted between queries and the walk is
+            # DIRTY — it may have dropped a row it can no longer prove
+            # it saw. K is 3, not 1 (fleet round 18, major): a RAW-
+            # IDENTICAL twin — equal legs of one same-second taker
+            # bundle — could impersonate a single-row witness after a
+            # shift by exactly the twin distance, silently resuming
+            # the walk below the skipped fill. Masking a 3-row witness
+            # needs three consecutive rows EACH with an ident-twin at
+            # the identical distance; and a witness row that has a
+            # twin visible in its own page makes the boundary
+            # ambiguous, which also dirties. The residual (invisible
+            # aligned triple twins) fails toward defer, never toward a
+            # clean claim.
+            witness: list[tuple] = []
             try:
                 while offset < depth:
                     resp = await polite_get(
@@ -105,18 +120,20 @@ async def reconcile_once(depth: int = 500) -> dict:
                         # evidence. Only an end reached AFTER real
                         # rows proves the feed was walked; an empty
                         # start defers (no cov claim of completeness).
-                        if prev_tail is not None:
-                            # the overlap row we re-requested VANISHED
+                        if witness:
+                            # the overlap rows we re-requested VANISHED
                             # between queries — shift evidence (r17)
                             dirty += 1
                         complete = offset > 0
                         break
+                    idents = [_row_ident(r) for r in batch]
                     rows = batch
-                    if prev_tail is not None:
-                        if _row_ident(batch[0]) == prev_tail:
-                            rows = batch[1:]
+                    if witness:
+                        k = len(witness)
+                        if idents[:k] == witness:
+                            rows = batch[k:]
                             if not rows:
-                                # only the overlap row came back — the
+                                # only the witness came back — the
                                 # feed is exhausted at the boundary
                                 complete = True
                                 break
@@ -197,13 +214,23 @@ async def reconcile_once(depth: int = 500) -> dict:
                             continue
                         if was_new:
                             wallet_missed += 1
-                    prev_tail = _row_ident(batch[-1])
-                    # advance by len-1: the next page re-requests the
-                    # tail as its continuity witness (round 17)
-                    offset += max(1, len(batch) - 1)
+                    witness = idents[-OVERLAP_K:]
                     if len(batch) < 100:
                         complete = True
                         break
+                    if any(idents.count(w) > 1 for w in witness):
+                        # a witness row has an ident-twin visible in
+                        # its own page: the boundary about to be
+                        # crossed is ambiguous — a twin could
+                        # impersonate it after a shift (round 18).
+                        # The walk continues but can never claim
+                        # clean coverage past this seam. (Only
+                        # boundaries actually crossed matter — a twin
+                        # in the FINAL page's tail is harmless.)
+                        dirty += 1
+                    # advance by len-K: the next page re-requests the
+                    # witness run first (rounds 17-18)
+                    offset += max(1, len(batch) - len(witness))
                 per_wallet["cov:" + whale["address"]] = {
                     "complete": complete, "oldest": oldest_ts,
                     "dirty": dirty}

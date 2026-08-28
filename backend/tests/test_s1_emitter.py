@@ -2089,12 +2089,31 @@ def test_walk_pages_overlap_and_a_boundary_shift_dirties():
     import inspect
     from sportsassets.ingestion import reconciler as rec
     src = inspect.getsource(rec)
-    assert "_row_ident(batch[0]) == prev_tail" in src
-    assert "offset += max(1, len(batch) - 1)" in src, \
-        "each page re-requests the previous tail"
-    assert src.count("dirty += 1") >= 4, \
-        "validity, ingest-failure, boundary mismatch AND vanished " \
-        "overlap all dirty the walk"
+    assert "idents[:k] == witness" in src, \
+        "the witness run must return verbatim and in order"
+    assert "offset += max(1, len(batch) - len(witness))" in src, \
+        "each page re-requests the previous tail rows"
+    assert src.count("dirty += 1") >= 5, \
+        "validity, ingest-failure, boundary mismatch, vanished " \
+        "overlap AND ambiguous witness all dirty the walk"
+
+
+def test_witness_is_a_run_of_rows_and_twins_make_it_ambiguous():
+    """fleet r18 (major): a RAW-IDENTICAL twin (equal legs of one
+    same-second taker bundle) could impersonate a single-row witness
+    after a shift by exactly the twin distance — the walk resumed
+    below the skipped fill with dirty=0 and clean coverage claimed.
+    The witness is now OVERLAP_K=3 consecutive rows (masking needs
+    three consecutive rows each with an aligned ident-twin), and a
+    witness row with a twin visible in its own page dirties the
+    boundary before it is crossed. The residual fails toward defer."""
+    import inspect
+    from sportsassets.ingestion import reconciler as rec
+    assert rec.OVERLAP_K >= 3, "a 1-row witness is impersonable"
+    src = inspect.getsource(rec)
+    assert "idents.count(w) > 1" in src, \
+        "visible twins make the boundary ambiguous — dirty"
+    assert "witness = idents[-OVERLAP_K:]" in src
 
 
 def test_db_clock_anchor_survives_wall_clock_steps(st, monkeypatch):
