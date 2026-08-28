@@ -460,6 +460,16 @@ class S1Emitter:
                     _k, victim = self.pending.popitem(last=False)
                     victim["evicted"] = True
                     self.bump("s1.abstain.overflow")
+            if e["blocks"] and blk not in e["blocks"]:
+                # ONE tx lives in ONE canonical block — a second block
+                # number for the same tx is reorg evidence in itself
+                # (fleet round 9: a re-mined fill joined the still-
+                # pending entry and the strictly-earned old timestamp
+                # was never re-verified). Every earned timestamp is
+                # void; the old block's strict re-resolution then fails
+                # its hash check and the whole tx abstains as reorged.
+                e["ts"] = {}
+                self._purge_ts_cache(min(list(e["blocks"]) + [blk]))
             lix = str(log_entry.get("logIndex", ""))
             if lix and lix in e.setdefault("lix_seen", set()):
                 # one duplicated WS delivery of either leg was making
@@ -691,7 +701,12 @@ class S1Emitter:
         CAS let concurrent full-document writes erase a trip with zero
         failures on either side). False = not yet durable; the reason
         is retried at every flush until it lands."""
-        at = self.trips.get(reason) or time.time()
+        # `or` would rewrite a falsy 0.0 — the legacy-scalar migration
+        # timestamp — to now(), which outruns any tombstone and durably
+        # resurrects an operator-cleared trip (fleet round 9, major)
+        at = self.trips.get(reason)
+        if not isinstance(at, (int, float)):
+            at = time.time()
         try:
             await pool.execute(SQL_TRIP, STATE_KEY, reason, float(at),
                                timeout=6)

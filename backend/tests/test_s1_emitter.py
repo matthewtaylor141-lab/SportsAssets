@@ -1341,6 +1341,56 @@ def test_sweep_windows_rotate_instead_of_starving():
     assert "ORDER BY t.detected_at" not in s1.SQL_SWEEP
 
 
+# ── fleet round 9 pins ──────────────────────────────────────────────
+def test_migration_persist_keeps_the_epoch_zero_timestamp(st):
+    """fleet r9 (major): `or time.time()` rewrote the legacy scalar's
+    falsy 0.0 migration timestamp to now(), which outruns any
+    tombstone — a cleared trip durably resurrected fleet-wide. The
+    persist carries the true timestamp; the tombstone then refuses the
+    stale re-persist exactly as designed."""
+    pool = _Pool()
+    st.trips = {"key_selfcheck": 0.0}
+    ok = asyncio.run(st._persist_trip(pool, "key_selfcheck"))
+    assert ok is True
+    assert pool.trip_writes[0][2] == 0.0, \
+        "the falsy epoch-zero timestamp survives the persist"
+
+
+def test_unusable_rows_never_testify_for_coverage():
+    """fleet r9 (major): the cov span floor updated BEFORE the
+    validity skip, so a degraded-index stub row (ts=1, no tx, zero
+    size) set oldest=1.0 — a universal span waiver that false-tripped
+    STICKY on a correct emission. Validity gates evidence; a sentinel
+    floor rejects absurd timestamps outright."""
+    import inspect
+    from sportsassets.ingestion import reconciler as rec
+    src = inspect.getsource(rec)
+    skip = src.index("if not ev.tx_hash or ev.size <= 0:")
+    span = src.index("oldest_ts = float(ev.ts_epoch)")
+    assert skip < span, "validity check precedes the span update"
+    assert "ev.ts_epoch > 1e9" in src, "sentinel-timestamp floor"
+
+
+def test_second_block_for_one_tx_voids_every_earned_timestamp(st):
+    """fleet r9 (major): one tx lives in one canonical block — a
+    re-mined fill joined the still-pending entry and its strictly
+    earned pre-reorg timestamp was never re-verified, emitting a
+    divergent-key twin. A second block number is reorg evidence in
+    itself: earned timestamps void, and the old block's re-resolution
+    then fails its hash check and abstains the whole tx."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    st.observe(lst, MAKER_EV)
+    e = st.pending[TX]
+    e["ts"][BLK] = TS0                      # strictly earned, pre-reorg
+    st._ts_cache[(BLK, "0x" + "77" * 32)] = TS0
+    st.observe(lst, dict(MAKER_EV, blockNumber=hex(BLK + 2),
+                         blockHash="0x" + "88" * 32, logIndex="0x9"))
+    assert e["ts"] == {}, "every earned timestamp is void"
+    assert (BLK, "0x" + "77" * 32) not in st._ts_cache
+    assert set(e["blocks"]) == {BLK, BLK + 2}
+
+
 def test_observe_stamps_ws_head_advances(st):
     lst = _Listener(roster={})
     st.head = 0                              # fixture pre-advances it

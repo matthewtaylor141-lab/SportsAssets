@@ -70,11 +70,21 @@ async def reconcile_once(depth: int = 500) -> dict:
                         break
                     for raw in batch:
                         ev = parse_data_api_trade(raw, whale["id"], whale["username"])
-                        if ev.ts_epoch and (oldest_ts is None
-                                            or ev.ts_epoch < oldest_ts):
-                            oldest_ts = float(ev.ts_epoch)
                         if not ev.tx_hash or ev.size <= 0:
+                            # a row unusable for ingest must not
+                            # testify for coverage either (fleet round
+                            # 9, major: a degraded-index stub with
+                            # ts=1 set oldest=1.0 and faked full-
+                            # history span coverage — a universal
+                            # waiver that false-tripped STICKY on a
+                            # correct emission)
                             continue
+                        if (ev.ts_epoch and ev.ts_epoch > 1e9
+                                and (oldest_ts is None
+                                     or ev.ts_epoch < oldest_ts)):
+                            # the 1e9 floor (2001) rejects sentinel
+                            # timestamps a degraded venue might emit
+                            oldest_ts = float(ev.ts_epoch)
                         sport = await _sport_for_condition(ev.condition_id)
                         if sport:
                             ev.sport = sport
