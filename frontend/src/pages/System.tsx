@@ -1,3 +1,4 @@
+import { StrikeWindow } from '../components/StrikeWindow'
 import { useMemo, useState } from 'react'
 import { usePolled } from '../lib/poll'
 import { API_BASE } from '../lib/api'
@@ -288,6 +289,12 @@ export function System() {
 
   return (
     <div className="page tr-page">
+      <div className="card nd-reticle">
+        <div className="card-title">DETECTION LATENCY · STRIKE WINDOW · live detections decay 60s</div>
+        <div className="scroll-x" style={{ marginTop: 8 }}>
+          <StrikeWindow w={720} />
+        </div>
+      </div>
       <div className="card">
         <div className="tr-ledger-head">
           <div className="card-title">ENGINE TELEMETRY</div>

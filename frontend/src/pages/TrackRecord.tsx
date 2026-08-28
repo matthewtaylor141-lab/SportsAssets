@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
+import { Quote } from '../components/Quote'
+import { Lamp } from '../components/Lamp'
+import { useLiveFeed } from '../lib/sse'
 import { EmptyState } from '../components/EmptyState'
 import { PnlCalendar } from '../components/PnlCalendar'
 import { LiveToday } from '../components/LiveToday'
@@ -20,18 +23,18 @@ const MIN_SETTLED = 30
 
 /** Sport buckets as the backend's sport_of() names them. */
 const SPORT_META: Record<string, { icon: string; label: string }> = {
-  basketball: { icon: '🏀', label: 'Basketball' },
-  wnba: { icon: '🏀', label: 'WNBA' },
-  football: { icon: '🏈', label: 'Football' },
-  baseball: { icon: '⚾', label: 'Baseball' },
-  hockey: { icon: '🏒', label: 'Hockey' },
-  tennis: { icon: '🎾', label: 'Tennis' },
-  soccer: { icon: '⚽', label: 'Soccer / Intl' },
-  esports: { icon: '🎮', label: 'Esports' },
-  unknown: { icon: '🎯', label: 'Other' },
+  basketball: { icon: 'BSK', label: 'Basketball' },
+  wnba: { icon: 'WNB', label: 'WNBA' },
+  football: { icon: 'FBL', label: 'Football' },
+  baseball: { icon: 'BSE', label: 'Baseball' },
+  hockey: { icon: 'HKY', label: 'Hockey' },
+  tennis: { icon: 'TEN', label: 'Tennis' },
+  soccer: { icon: 'SOC', label: 'Soccer / Intl' },
+  esports: { icon: 'ESP', label: 'Esports' },
+  unknown: { icon: 'OTH', label: 'Other' },
 }
 export function sportMeta(sport: string): { icon: string; label: string } {
-  return SPORT_META[sport] || { icon: '🎯', label: sport || 'Other' }
+  return SPORT_META[sport] || { icon: 'OTH', label: sport || 'Other' }
 }
 
 /** 'mlb-nyy-bos-2026-08-20-nyy' -> 'MLB · nyy bos 2026-08-20 nyy' */
@@ -61,41 +64,6 @@ export function fmtLatency(s: number): string {
 /** localStorage key for the epoch/all-time display choice. */
 const WINDOW_KEY = 'sa_tr_alltime'
 
-/* Pointer-tracked 3D tilt for the hero tiles: writes --rx/--ry custom
- * properties the CSS consumes under a perspective parent. Pure transform,
- * so it composites on the GPU; hover-only media query keeps it off touch. */
-function tilt(e: React.MouseEvent<HTMLDivElement>) {
-  const el = e.currentTarget
-  const r = el.getBoundingClientRect()
-  const px = (e.clientX - r.left) / r.width - 0.5
-  const py = (e.clientY - r.top) / r.height - 0.5
-  el.style.setProperty('--rx', `${(-py * 5).toFixed(2)}deg`)
-  el.style.setProperty('--ry', `${(px * 7).toFixed(2)}deg`)
-}
-function untilt(e: React.MouseEvent<HTMLDivElement>) {
-  e.currentTarget.style.setProperty('--rx', '0deg')
-  e.currentTarget.style.setProperty('--ry', '0deg')
-}
-
-function useCountUp(target: number, ms = 1100): number {
-  const [v, setV] = useState(0)
-  const from = useRef(0)
-  useEffect(() => {
-    const start = performance.now()
-    const begin = from.current
-    let raf = 0
-    const tick = (t: number) => {
-      const k = Math.min(1, (t - start) / ms)
-      const eased = 1 - Math.pow(1 - k, 3)
-      setV(begin + (target - begin) * eased)
-      if (k < 1) raf = requestAnimationFrame(tick)
-      else from.current = target
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [target, ms])
-  return v
-}
 
 /** Scrolling ticker of the latest settled copy results. */
 function ResultsTicker({ trades }: { trades: CopiesTrade[] }) {
@@ -247,7 +215,7 @@ function SportBreakdown({ rows }: { rows: CopiesWhaleSport[] }) {
           <div key={sport} className="tr-sport-row"
             title={`${m.label}: ${r.n} settled (${r.wins} won), staked ${fmtUsd(r.staked, 2)}`}>
             <span className="tr-sport-name">
-              <span className="tr-sport-ico">{m.icon}</span> {m.label}
+              <span className="nd-sport">{m.icon}</span> {m.label}
               <span className="muted mono"> {r.wins}–{r.n - r.wins}</span>
             </span>
             <div className="tr-sport-bar">
@@ -268,9 +236,17 @@ function SportBreakdown({ rows }: { rows: CopiesWhaleSport[] }) {
 }
 
 /** Per-whale split of the copy record — who earns the capital. */
+const CAT_COLORS = ['var(--cat1)', 'var(--cat2)', 'var(--cat3)', 'var(--cat4)', 'var(--cat5)', 'var(--cat6)']
+
+/** G2: a whale that traded in the last 10 minutes breathes in its
+ * categorical color — the operator sees who is awake at a glance. */
 function WhalesCard({ c }: { c: CopiesRecord }) {
   if (!c.by_whale.length) return null
   const maxAbs = Math.max(...c.by_whale.map((w) => Math.abs(w.pnl)), 0.01)
+  const { live } = useLiveFeed()
+  const awake = new Set(
+    live.filter((t) => t.ts && Date.now() - new Date(t.ts).getTime() < 600_000)
+        .map((t) => (t.whale_username || '').toLowerCase()))
   return (
     <div className="card">
       <div className="tr-ledger-head">
@@ -280,9 +256,14 @@ function WhalesCard({ c }: { c: CopiesRecord }) {
         </span>
       </div>
       <div className="tr-whales">
-        {c.by_whale.map((w) => (
+        {c.by_whale.map((w, i) => (
           <div key={w.whale} className="tr-whale-row">
-            <span className="tr-whale-name">{w.whale}</span>
+            <span className="tr-whale-name" style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+              {awake.has(w.whale.toLowerCase()) && (
+                <Lamp mode="breathe" color={CAT_COLORS[i % CAT_COLORS.length]} />
+              )}
+              {w.whale}
+            </span>
             <span className="muted mono">{w.wins}W–{w.losses}L</span>
             <span className="muted mono">{fmtUsd(w.staked, 0)} staked</span>
             <div className="tr-sport-bar">
@@ -334,8 +315,8 @@ export function TrackRecord() {
   const [limit, setLimit] = useState(60)
 
   const t = data?.total
-  const heroPnl = useCountUp(t?.pnl ?? 0)
-  const heroOpen = useCountUp(data?.open?.stake ?? 0)
+  const heroPnl = t?.pnl ?? 0
+  const heroOpen = data?.open?.stake ?? 0
 
   // Chronological daily series (the API serves newest-first).
   const chrono = useMemo(() => [...(data?.daily || [])].reverse(), [data])
@@ -456,11 +437,11 @@ export function TrackRecord() {
         )}
 
         <div className="tr-hero-grid">
-          <div className="tr-stat tr-stat-main" onMouseMove={tilt} onMouseLeave={untilt}>
+          <div className="tr-stat tr-stat-main">
             <span className="tr-sheen" aria-hidden />
             <div className="tr-stat-label">NET P&amp;L · COPY PORTFOLIO</div>
             <div className={`tr-stat-value tr-grad v9-money ${t.pnl >= 0 ? 'pos' : 'neg'}`}>
-              {fmtSignedUsd(heroPnl)}
+              <Quote value={heroPnl} render={fmtSignedUsd} />
             </div>
             <div className="tr-stat-foot muted">
               {t.wins}W – {t.losses}L
@@ -480,7 +461,7 @@ export function TrackRecord() {
               )}
             </div>
           </div>
-          <div className="tr-stat" onMouseMove={tilt} onMouseLeave={untilt}>
+          <div className="tr-stat">
             <span className="tr-sheen" aria-hidden />
             <div className="tr-stat-label">CAPITAL DEPLOYED · LIVE</div>
             <div className="tr-stat-value">{fmtUsd(heroOpen, 2)}</div>
@@ -498,7 +479,7 @@ export function TrackRecord() {
               </div>
             )}
           </div>
-          <div className="tr-stat" onMouseMove={tilt} onMouseLeave={untilt}>
+          <div className="tr-stat">
             <span className="tr-sheen" aria-hidden />
             <div className="tr-stat-label">ROI · SETTLED STAKE</div>
             <div className="tr-ring-wrap">
@@ -549,7 +530,7 @@ export function TrackRecord() {
 
         {early && (
           <div className="tr-honesty">
-            ⚖️ EARLY SAMPLE — {t.settled} of the {MIN_SETTLED} settlements this record
+            EARLY SAMPLE — {t.settled} of the {MIN_SETTLED} settlements this record
             requires before its return means anything. The platform holds itself to
             the same bar: no size increases until the record is earned.
           </div>

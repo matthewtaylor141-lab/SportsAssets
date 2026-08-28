@@ -314,7 +314,7 @@ function SportRoi({ rows }: { rows: CopiesWhaleSport[] }) {
             const m = sportMeta(sport)
             return (
               <tr key={sport} className={g.n && g.n < MIN_N ? 'thin' : ''}>
-                <td>{m.icon} {m.label}</td>
+                <td><span className="nd-sport">{m.icon}</span> {m.label}</td>
                 <td className="mono">{g.n}</td>
                 <td className="mono">{g.wins}–{g.n - g.wins}</td>
                 <td className="mono">{fmtUsd(g.staked, 2)}</td>
@@ -360,7 +360,7 @@ function WhaleSportTable({ rows }: { rows: CopiesWhaleSport[] }) {
             return (
               <tr key={`${r.whale}-${r.sport}`} className={r.settled < MIN_N ? 'thin' : ''}>
                 <td>{r.whale}</td>
-                <td>{m.icon} {m.label}</td>
+                <td><span className="nd-sport">{m.icon}</span> {m.label}</td>
                 <td className="mono">{r.settled}</td>
                 <td className="mono">{r.wins}–{r.losses}</td>
                 <td className="mono">{fmtUsd(r.staked, 2)}</td>

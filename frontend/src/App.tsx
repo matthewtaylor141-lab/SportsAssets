@@ -1,6 +1,9 @@
-import { Suspense, lazy, useEffect, useState, type ComponentType } from 'react'
+import { Suspense, lazy, useEffect, useRef, useState, type ComponentType } from 'react'
 import { NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import { Brand } from './components/Brand'
+import { CommandPalette } from './components/CommandPalette'
+import { PulseLine } from './components/PulseLine'
+import { Tape } from './components/Tape'
 import { Admin } from './pages/Admin'
 import { Analytics } from './pages/Analytics'
 import { Engine } from './pages/Engine'
@@ -124,6 +127,32 @@ function TabBar() {
   )
 }
 
+/** UTC + local console clock: seconds tick because they are data. */
+function NavClock() {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const utc = now.toISOString().slice(11, 19)
+  return <span className="nd-clock">{utc}Z</span>
+}
+
+/** The single sliding amber caret under the active tab. */
+function NavCaret({ nav }: { nav: React.RefObject<HTMLElement | null> }) {
+  const { pathname } = useLocation()
+  const [style, setStyle] = useState<{ transform: string; width: number } | null>(null)
+  useEffect(() => {
+    const el = nav.current?.querySelector('a.tab.active') as HTMLElement | null
+    if (!el || !nav.current) { setStyle(null); return }
+    const nb = nav.current.getBoundingClientRect()
+    const b = el.getBoundingClientRect()
+    setStyle({ transform: `translateX(${b.left - nb.left}px)`, width: b.width })
+  }, [pathname, nav])
+  if (!style) return null
+  return <span className="nd-caret" style={{ transform: style.transform, width: style.width }} aria-hidden />
+}
+
 /** Standalone (Add to Home Screen) detection → body class, so CSS can pad
  * for the translucent status bar and home indicator only when installed. */
 function useStandaloneClass() {
@@ -154,10 +183,11 @@ export default function App() {
   // it owns its full viewport too: no site chrome may frame the venue.
   const cockpit = pathname === '/jarvis' || pathname === '/meridian'
     || pathname === '/desk' || pathname.startsWith('/wall')
+  const navRef = useRef<HTMLElement | null>(null)
   return (
     <div className="app">
       {!cockpit && (
-      <nav className="nav">
+      <nav className="nav" ref={navRef} style={{ position: 'sticky' }}>
         <Brand />
         {TABS.map((t) => (
           <NavLink
@@ -170,6 +200,9 @@ export default function App() {
           </NavLink>
         ))}
         <span className="spacer" />
+        <NavClock />
+        <PulseLine />
+        <NavCaret nav={navRef} />
       </nav>
       )}
       <main className={cockpit ? 'main' : 'main page-fade'} key={pathname}>
@@ -199,7 +232,9 @@ export default function App() {
         </p>
         )}
       </main>
+      {!cockpit && <Tape />}
       {!cockpit && <TabBar />}
+      {!cockpit && <CommandPalette />}
     </div>
   )
 }

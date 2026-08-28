@@ -1,3 +1,4 @@
+import { ArmGuard } from '../components/ArmGuard'
 import { useCallback, useEffect, useState } from 'react'
 import { EmptyState } from '../components/EmptyState'
 import { adminApi } from '../lib/api'
@@ -231,9 +232,7 @@ export function Admin() {
                       <button className="btn" onClick={() => action(w.pinned ? 'unpin' : 'pin', { whale_id: w.id })}>
                         {w.pinned ? 'Unpin' : 'Pin'}
                       </button>
-                      <button className="btn danger" onClick={() => action(w.banned ? 'unban' : 'ban', { whale_id: w.id })}>
-                        {w.banned ? 'Unban' : 'Ban'}
-                      </button>
+                      <ArmGuard label={w.banned ? 'UNBAN' : 'BAN'} onConfirm={() => action(w.banned ? 'unban' : 'ban', { whale_id: w.id })} />
                     </td>
                   </tr>
                 ))}

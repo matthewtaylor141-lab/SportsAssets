@@ -2,19 +2,64 @@
 
 :root {
   color-scheme: dark;
-  --page: #0b0c0e;
-  --surface: #16181b;
-  --surface-2: #1e2126;
-  --surface-3: #262a30;
-  --ink: #f4f5f2;
-  --ink-2: #c3c2b7;
-  --muted: #8b8983;
-  --grid: #24272c;
-  --baseline: #34383f;
-  --border: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.14);
 
-  /* categorical (validated order, dark steps) */
+  /* ── NIGHT DESK v11 · flat phosphor instrument console ──
+     BG layers are flat; borders replace shadows entirely. */
+  --bg0: #050607;
+  --bg1: #0a0c0d;
+  --bg2: #101314;
+  --bg3: #161a1c;
+  --line: #1d2224;
+  --line-strong: #2b3236;
+  --ink0: #e9ede9;
+  --ink1: #a9b4ad;
+  --ink2v: #6b7671;
+  --ink3: #454e4a;
+
+  /* command color + informational cyan */
+  --amber: #ffb224;
+  --amber-hot: #ffd25e;
+  --amber-dim: rgba(255, 178, 36, 0.14);
+  --cyan: #45c4ff;
+
+  /* semantic P&L */
+  --pos: #34d17b; --pos-flash: #6ef2a8;
+  --neg: #ff5c5c; --neg-flash: #ff8d88;
+  --flat: #6b7671;
+
+  /* venue chips */
+  --pm: #5b8cff; --kalshi: #21c9a8;
+
+  /* categorical (whale series / awake lamps) */
+  --cat1: #ffb224; --cat2: #45c4ff; --cat3: #a78bfa;
+  --cat4: #f472b6; --cat5: #a3e635; --cat6: #fb923c;
+
+  /* type registers */
+  --font-data: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-prose: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  /* motion doctrine: the interface never moves — the DATA moves */
+  --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-hover: 120ms; --dur-tick: 180ms; --dur-flash: 500ms;
+  --dur-tape: 240ms; --dur-sweep: 320ms; --dur-route: 300ms;
+  --dur-draw: 600ms; --sonar-period: 1.6s; --disarm-ms: 5000;
+  --r-panel: 5px; --r-ctl: 4px;
+
+  /* ── legacy aliases: every v9 name stays alive, remapped, so
+        wall/jarvis/desk and un-passed pages keep rendering ── */
+  --page: var(--bg0);
+  --surface: var(--bg1);
+  --surface-2: var(--bg2);
+  --surface-3: var(--bg3);
+  --ink: var(--ink0);
+  --ink-2: var(--ink1);
+  --muted: var(--ink2v);
+  --grid: var(--line);
+  --baseline: var(--line-strong);
+  --border: var(--line);
+  --border-strong: var(--line-strong);
+
+  /* categorical chart series: VERBATIM v9 hexes — charts never rebrand */
   --s1: #3987e5;
   --s2: #d95926;
   --s3: #199e70;
@@ -24,29 +69,49 @@
   --s7: #9085e9;
   --s8: #e66767;
 
-  /* status (icon+label always accompanies color) */
-  --good: #21b021;
-  --warning: #fab219;
-  --critical: #e05252;
+  --good: var(--pos);
+  --warning: var(--amber);
+  --critical: var(--neg);
 
-  --accent: var(--s1);
-  --radius: 10px;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.25);
-  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --accent: var(--amber);
+  --radius: var(--r-panel);
+  --radius-lg: 8px;
+  --shadow: none;
+  --bt-gold: var(--amber); --bt-gold-2: var(--amber-hot);
+  --bt-gold-dim: var(--amber-dim);
+  --bt-cyan: var(--cyan); --bt-cyan-dim: rgba(69, 196, 255, 0.12);
+  --ease: cubic-bezier(0.22, 0.9, 0.24, 1);
+  --ease-swift: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-snap: cubic-bezier(0.2, 0.9, 0.27, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.44, 1);
+  --glow-accent: none; --glow-good: none;
+  --ring-a: rgba(255, 178, 36, 0.35);
+  font-family: var(--font-prose);
 }
 
 * { box-sizing: border-box; }
-::selection { background: rgba(57, 135, 229, 0.35); }
+::selection { background: rgba(255, 178, 36, 0.28); }
 
 body {
   margin: 0;
-  background:
-    radial-gradient(1200px 400px at 50% -200px, rgba(57, 135, 229, 0.07), transparent),
-    var(--page);
+  background: var(--bg0);
   color: var(--ink);
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+}
+/* page texture: ONE fixed scanline + faint amber top vignette —
+   never on panels or text */
+body::before {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+  background: repeating-linear-gradient(0deg,
+    rgba(255, 255, 255, 0.02) 0px, rgba(255, 255, 255, 0.02) 1px,
+    transparent 1px, transparent 3px);
+}
+body::after {
+  content: ''; position: fixed; left: 0; right: 0; top: 0; height: 220px;
+  pointer-events: none; z-index: 0;
+  background: radial-gradient(700px 220px at 50% -80px, rgba(255, 178, 36, 0.05), transparent);
 }
 
 ::-webkit-scrollbar { height: 8px; width: 10px; }
@@ -1843,3 +1908,315 @@ h2::after {
   .rpt-wcell { max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rpt-pivot td, .rpt-pivot th { padding: 7px 6px; font-size: 12.5px; }
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   NIGHT DESK v11 — flat phosphor instrument console (owner order
+   2026-08-28: "different vibe, more innovative, impressive, engaging,
+   interactive"). Doctrine: the interface never moves — the DATA moves.
+   Depth is borders + bg steps, never shadows. Two type registers:
+   Plex Mono for every figure, Inter for sentences. Amber = command
+   (ONE solid amber button exists in the app: the Accounts cash-out).
+   Cyan = information. This layer overrides the v9 grammar above it;
+   the desk/wall/jarvis surfaces consume the legacy aliases only.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── register + primitives ── */
+body { font-family: var(--font-prose); }
+.mono, .num, table.data td, table.data th, .stat b, .chip,
+.tr-stat-value, .tr-slip-nums, .tr-curve-tip, .an-table td, .sy-kv,
+.nd-clock, .nd-data {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'zero' 1;
+}
+h1 {
+  font: 600 15px/1.2 var(--font-data); text-transform: uppercase;
+  letter-spacing: 0.14em; color: var(--ink0);
+  border-left: 3px solid var(--amber); padding-left: 8px;
+}
+h2 {
+  font: 500 10px/1.2 var(--font-data); text-transform: uppercase;
+  letter-spacing: 0.14em; color: var(--ink2v);
+}
+.sub { font-size: 12.5px; }
+a { color: var(--cyan); }
+a:hover { color: var(--ink0); }
+:focus-visible { outline: 1px solid var(--amber); outline-offset: 2px; border-radius: 2px; }
+
+/* ── panels: flat, hairline, frame bars, no shadows anywhere ── */
+.card, .tr-skel {
+  background: var(--bg1); border: 1px solid var(--line);
+  border-radius: var(--r-panel); box-shadow: none;
+}
+.card:hover { transform: none; box-shadow: none; }
+.card-title {
+  font: 500 10px/1.2 var(--font-data); text-transform: uppercase;
+  letter-spacing: 0.14em; color: var(--ink2v);
+  display: flex; align-items: baseline; gap: 8px;
+}
+.card-title::after {
+  content: ''; flex: 1; width: auto; height: 0; margin-top: 0;
+  border-bottom: 1px dotted var(--line-strong); background: none;
+  transform: translateY(-3px);
+}
+/* reticle corners for flagship panels */
+.nd-reticle { position: relative; }
+.nd-reticle::before, .nd-reticle::after {
+  content: ''; position: absolute; width: 10px; height: 10px; pointer-events: none;
+}
+.nd-reticle::before { left: -1px; top: -1px; border-left: 1px solid var(--amber); border-top: 1px solid var(--amber); }
+.nd-reticle::after { right: -1px; bottom: -1px; border-right: 1px solid var(--amber); border-bottom: 1px solid var(--amber); }
+
+/* ── tables: dense mono, amber hover rail ── */
+table.data th { color: var(--ink2v); border-bottom: 1px solid var(--line-strong); }
+table.data td { border-bottom: 1px solid var(--line); font-size: 13px; }
+table.data tbody tr:hover { background: var(--bg3); box-shadow: inset 2px 0 0 var(--amber); }
+
+/* ── buttons: ghost by default; exactly ONE solid amber (.btn-money) ── */
+.btn, .btn.primary {
+  font: 500 11.5px/1 var(--font-data); letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--ink1); background: transparent;
+  border: 1px solid var(--line-strong); border-radius: var(--r-ctl);
+  padding: 9px 14px; min-height: 34px;
+  transition: background var(--dur-hover) ease-out, color var(--dur-hover) ease-out;
+}
+.btn:hover, .btn.primary:hover { background: var(--bg3); color: var(--ink0); filter: none; border-color: var(--line-strong); }
+.btn.primary { color: var(--amber); border-color: rgba(255, 178, 36, 0.4); }
+.btn.danger, .btn-danger-outline { color: var(--neg); border-color: rgba(255, 92, 92, 0.4); background: transparent; }
+.btn-money {
+  font: 600 11.5px/1 var(--font-data); letter-spacing: 0.06em; text-transform: uppercase;
+  background: var(--amber); color: #1a1204; border: none; border-radius: var(--r-ctl);
+  padding: 10px 16px; min-height: 36px; cursor: pointer;
+}
+.btn-money:hover { background: var(--amber-hot); }
+
+/* ── nav: the command rail (the ONE glass surface) ── */
+.nav {
+  height: 52px; gap: 4px;
+  background: rgba(5, 6, 7, 0.88);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+.nav .brand, .nav .brand span {
+  font: 600 13px/1 var(--font-data); letter-spacing: 0.04em;
+  background: none; -webkit-background-clip: initial; background-clip: initial;
+  color: var(--ink0); animation: none;
+}
+.nav .brand span { color: var(--amber); }
+.nav a.tab {
+  font: 500 11.5px/1 var(--font-data); text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--ink2v); border-radius: 3px; padding: 8px 10px;
+}
+.nav a.tab::after { content: none; }
+.nav a.tab.active { background: none; color: var(--ink0); box-shadow: none; }
+.nav a.tab:hover:not(.active) { background: var(--bg3); color: var(--ink1); }
+.nd-caret {
+  position: absolute; bottom: 0; height: 2px; background: var(--amber);
+  transition: transform 200ms ease-out, width 200ms ease-out;
+  will-change: transform;
+}
+.nd-clock { font-size: 11.5px; color: var(--ink2v); white-space: nowrap; letter-spacing: 0.02em; }
+.conn { border: 0; background: none; padding: 0; }
+.conn .dot { display: none; }
+
+/* ── power-on route transition (replaces page-fade) ── */
+.page-fade { animation: nd-power-on var(--dur-route) var(--ease-enter) both; }
+@keyframes nd-power-on {
+  from { opacity: 0; clip-path: inset(0 0 2% 0); }
+  to { opacity: 1; clip-path: inset(0); }
+}
+.tr-page > * { animation: none; }
+
+/* ── hero: kill the aurora, flatten to instrument panels ── */
+.tr-hero { background: var(--bg1); border: 1px solid var(--line); border-radius: var(--r-panel); }
+.tr-hero::before { content: none; }
+.tr-hero::after { content: none; }
+.tr-stat {
+  backdrop-filter: none; background: var(--bg2);
+  border: 1px solid var(--line); border-radius: var(--r-panel);
+  transform: none !important; transition: background var(--dur-hover) ease-out;
+}
+.tr-stat:hover { transform: none !important; background: var(--bg3); border-color: var(--line-strong); }
+.tr-grad.pos { background: none; -webkit-background-clip: initial; background-clip: initial; color: var(--pos); }
+.tr-grad.neg { background: none; -webkit-background-clip: initial; background-clip: initial; color: var(--neg); }
+.tr-stat-value { font-weight: 600; }
+.tr-stat-value .cents { font-size: 55%; opacity: 0.6; }
+
+/* ── lamp ── */
+.lamp {
+  position: relative; width: 8px; height: 8px; border-radius: 50%;
+  background: currentColor; display: inline-block; flex: none;
+}
+.lamp-sonar::after, .lamp-breathe::after {
+  content: ''; position: absolute; inset: 0; border-radius: 50%;
+  border: 1px solid currentColor;
+  animation: nd-sonar var(--sonar-period) ease-out infinite;
+}
+@keyframes nd-sonar { from { transform: scale(1); opacity: 0.8; } to { transform: scale(2.6); opacity: 0; } }
+.lamp-breathe { animation: nd-breathe 2.4s ease-in-out infinite alternate; }
+@keyframes nd-breathe { from { opacity: 0.55; } to { opacity: 1; } }
+
+/* ── quote: exchange-board digit replacement + decay flash ── */
+.quote { display: inline-block; }
+.quote[data-flash='up'] { animation: nd-flash-up var(--dur-flash) ease-out; }
+.quote[data-flash='down'] { animation: nd-flash-down var(--dur-flash) ease-out; }
+@keyframes nd-flash-up { from { color: var(--pos-flash); } }
+@keyframes nd-flash-down { from { color: var(--neg-flash); } }
+
+/* ── the tape ── */
+.nd-tape {
+  position: sticky; bottom: 0; z-index: 30; height: 28px;
+  display: flex; align-items: center; overflow: hidden;
+  background: rgba(5, 6, 7, 0.94); border-top: 1px solid var(--line);
+  font: 500 11.5px/1 var(--font-data);
+}
+.nd-tape-track { display: flex; gap: 26px; white-space: nowrap; will-change: transform; padding-left: 8px; }
+.nd-tape-cell { display: inline-flex; gap: 8px; align-items: center; color: var(--ink1); cursor: pointer; }
+.nd-tape-cell .w { color: var(--ink0); }
+.nd-tape-cell .b { color: var(--pos); }
+.nd-tape-cell .s { color: var(--neg); }
+.nd-tape-cell .l { color: var(--cyan); }
+.nd-tape-new { animation: nd-sweep var(--dur-sweep) linear; }
+@keyframes nd-sweep {
+  from { background: linear-gradient(90deg, var(--amber-dim), transparent 30%); }
+  to { background: none; }
+}
+
+/* ── command palette ── */
+.nd-palette-scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 300; }
+.nd-palette {
+  position: fixed; left: 50%; top: 18vh; transform: translateX(-50%);
+  width: min(560px, calc(100vw - 32px)); z-index: 301;
+  background: var(--bg1); border: 1px solid var(--line-strong); border-radius: var(--r-panel);
+  font-family: var(--font-data);
+}
+.nd-palette input {
+  width: 100%; box-sizing: border-box; background: transparent; border: 0;
+  border-bottom: 1px solid var(--line); color: var(--ink0);
+  font: 500 14px/1 var(--font-data); padding: 14px 14px 14px 34px; outline: none;
+}
+.nd-palette-prompt {
+  position: absolute; left: 14px; top: 15px; color: var(--amber);
+  animation: nd-caret-blink 1s steps(2) infinite;
+}
+@keyframes nd-caret-blink { 50% { opacity: 0; } }
+.nd-palette-list { max-height: 320px; overflow-y: auto; padding: 6px 0; }
+.nd-palette-row {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 9px 14px; font-size: 12.5px; color: var(--ink1); cursor: pointer;
+}
+.nd-palette-row.sel { background: var(--bg3); color: var(--ink0); box-shadow: inset 2px 0 0 var(--amber); }
+.nd-palette-row .k { color: var(--ink3); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; }
+
+/* ── edge meter ── */
+.nd-edge { display: block; }
+.nd-edge .track { stroke: var(--line-strong); }
+.nd-edge .band { fill: var(--amber-dim); }
+.nd-edge .hatch { fill: url(#ndhatch); }
+.nd-edge text { font: 500 10px var(--font-data); fill: var(--ink2v); letter-spacing: 0.08em; }
+
+/* ── strike window (latency instrument) ── */
+.nd-strike text { font: 500 10px var(--font-data); fill: var(--ink3); }
+.nd-strike .grid { stroke: var(--line); stroke-dasharray: 1 3; }
+.nd-strike .notch { stroke: var(--cyan); }
+.nd-strike .notch-lb { fill: var(--cyan); }
+.nd-strike circle { animation: nd-dot-decay 60s linear forwards; }
+@keyframes nd-dot-decay { from { opacity: 1; } to { opacity: 0; } }
+
+/* ── arm guard ── */
+.guard[data-state='armed'] {
+  border-color: var(--neg) !important; color: var(--neg) !important;
+  animation: nd-armed-glow 1.2s ease-in-out infinite alternate;
+}
+@keyframes nd-armed-glow {
+  from { box-shadow: 0 0 0 3px rgba(255, 92, 92, 0.12); }
+  to { box-shadow: 0 0 0 3px rgba(255, 92, 92, 0.30); }
+}
+
+/* ── dossier drawer ── */
+.nd-drawer-scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); z-index: 280; }
+.nd-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(420px, 92vw); z-index: 281;
+  background: var(--bg1); border-left: 1px solid var(--line-strong);
+  animation: nd-drawer-in var(--dur-tape) var(--ease-enter);
+  overflow-y: auto; padding: 18px;
+}
+@keyframes nd-drawer-in { from { clip-path: inset(0 0 0 100%); } to { clip-path: inset(0); } }
+@media (max-width: 720px) {
+  .nd-drawer {
+    top: auto; left: 0; width: auto; max-height: 78vh;
+    border-left: 0; border-top: 1px solid var(--line-strong);
+    border-radius: 12px 12px 0 0;
+    animation: nd-sheet-in var(--dur-tape) var(--ease-enter);
+  }
+  @keyframes nd-sheet-in { from { transform: translateY(100%); } to { transform: none; } }
+}
+.nd-drawer pre {
+  font: 400 11.5px/1.5 var(--font-data); background: var(--bg2);
+  border: 1px solid var(--line); border-radius: 4px; padding: 10px; overflow-x: auto;
+}
+
+/* ── pulse line ── */
+.nd-pulse { display: block; }
+.nd-pulse polyline { fill: none; stroke-width: 1.5; }
+.nd-pulse[data-conn='connecting'] polyline { stroke: var(--ink2v); stroke-dasharray: 1 3; }
+.nd-pulse[data-conn='live'] polyline { stroke: var(--amber); }
+.nd-pulse[data-conn='down'] polyline { stroke: var(--neg); stroke-dasharray: 4 3; }
+
+/* ── ticker restyle (results tape) ── */
+.tk-wrap { border-radius: var(--r-panel); background: var(--bg1); border: 1px solid var(--line); }
+.tk-wrap::before { background: linear-gradient(90deg, var(--bg1), transparent); }
+.tk-wrap::after { background: linear-gradient(-90deg, var(--bg1), transparent); }
+.tk-item { font-family: var(--font-data); font-size: 11.5px; }
+
+/* ── sport badges (replace emoji tiles) ── */
+.nd-sport {
+  display: inline-grid; place-items: center; min-width: 34px; height: 20px;
+  padding: 0 5px; border-radius: 3px; background: var(--bg2);
+  border: 1px solid var(--line);
+  font: 600 10px/1 var(--font-data); letter-spacing: 0.1em; color: var(--ink1);
+}
+
+/* ── vault (Accounts) ── */
+.nd-vault { position: relative; }
+.nd-vault[data-venue='pm']::before, .nd-vault[data-venue='pm']::after { border-color: var(--pm); }
+.nd-vault[data-venue='kx']::before, .nd-vault[data-venue='kx']::after { border-color: var(--kalshi); }
+.nd-tieout {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline;
+  font: 500 12.5px/1.4 var(--font-data); color: var(--ink1);
+}
+.nd-tieout .ok { color: var(--pos); }
+.nd-tieout .pend { color: var(--ink3); }
+.nd-tieout .delta { color: var(--neg); }
+
+/* ── pipeline schematic (System) ── */
+.nd-pipe .edge { stroke: var(--line-strong); stroke-dasharray: 4 6; animation: nd-dash 1.6s linear infinite; }
+@keyframes nd-dash { to { stroke-dashoffset: -20; } }
+.nd-pipe text { font: 500 10px var(--font-data); fill: var(--ink2v); }
+
+/* ── mobile bar re-skin ── */
+.tabbar { background: rgba(5, 6, 7, 0.92); backdrop-filter: blur(8px); border-top: 1px solid var(--line); }
+.tabbar a { font-family: var(--font-data); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+.sheet { background: var(--bg1); border: 1px solid var(--line-strong); }
+
+/* ── one consolidated reduced-motion doctrine ── */
+@media (prefers-reduced-motion: reduce) {
+  .page-fade, .tr-page > *, .lamp-sonar::after, .lamp-breathe,
+  .lamp-breathe::after, .quote[data-flash], .nd-tape-new, .nd-palette-prompt,
+  .guard[data-state='armed'], .nd-drawer, .nd-pipe .edge, .tk-track,
+  .nd-strike circle {
+    animation: none !important;
+  }
+  .nd-strike circle { opacity: 0.5; }
+  .quote[data-flash] { box-shadow: inset 2px 0 0 var(--amber); }
+}
+
+/* ── the ONE solid amber control in the app: cash-out (G4) ── */
+.ac-cashout {
+  font: 600 11px/1 var(--font-data) !important; letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: var(--amber) !important; color: #1a1204 !important;
+  border: none !important; border-radius: var(--r-ctl);
+  padding: 8px 12px; cursor: pointer;
+}
+.ac-cashout:hover { background: var(--amber-hot) !important; }

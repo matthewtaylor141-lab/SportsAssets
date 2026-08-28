@@ -11,6 +11,7 @@ import {
 } from '../components/PriceChart'
 import { MarketFeed, Spark, type FeedCard } from '../components/MarketFeed'
 import { MarketPage, type MarketMeta } from '../components/MarketPage'
+import { OrderToasts, tapeLine, useOrderStream } from '../components/DeskOrderStream'
 import '../styles/desk2.css'
 import '../styles/desk10.css'
 
@@ -312,11 +313,26 @@ export function TradeDesk() {
     deskApi<Blotter>('/api/admin/manual-trades').then(setBlotter).catch(() => {})
   }, [])
 
+  // Live order confirmations (owner order 2026-08-28): every
+  // live_orders insert/status change streams in the instant it
+  // commits — the autonomous trader's fills surface as venue-styled
+  // toasts + a tape line in the portal strip, and a terminal fill
+  // refreshes the blotter/balances immediately instead of waiting
+  // out the poll.
+  const orders = useOrderStream(authed)
+
   const loadAcct = useCallback(() => {
     deskApi<DeskAccounts>('/api/desk/accounts')
       .then((d) => { setAcct(d); setAcctAt(Date.now()); setAcctDown(false) })
       .catch(() => setAcctDown(true))
   }, [])
+
+  useEffect(() => {
+    const st = orders.last?.status
+    if (st === 'filled' || st === 'cashed_out' || st === 'settled') {
+      loadBlotter(); loadAcct()
+    }
+  }, [orders.last, loadBlotter, loadAcct])
 
   // v9: open orders (PM resting book + Kalshi queue). Read-only GET.
   const loadOpenOrders = useCallback(() => {
@@ -1832,6 +1848,11 @@ export function TradeDesk() {
               )}</>
           )}
         </span>
+        {orders.last && (
+          <span className="dxp-tape" title="live order stream">
+            <i />{tapeLine(orders.last)}
+          </span>
+        )}
         <span className="dxp-sync">
           {acctDown ? 'retrying' : acctAgeS == null ? 'syncing…'
             : acctAgeS < 3 ? 'synced now' : `synced ${acctAgeS}s`}
@@ -1847,6 +1868,7 @@ export function TradeDesk() {
         </div>
         <Link className="dxp-exit" to="/" aria-label="Exit the venue portal">✕</Link>
       </div>
+      <OrderToasts toasts={orders.toasts} dismiss={orders.dismiss} />
 
       {/* ── venue top nav (wordmark, search, sections, account) ── */}
       <header className="dxp-nav">
