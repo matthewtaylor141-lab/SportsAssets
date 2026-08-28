@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { adminApi } from '../lib/api'
 import {
   DESK_RELOCK_EVENT, deskAdminToken, deskApi, deskToken, deskUnlock,
-  type DeskAccounts,
+  type DeskAccounts, type KPosition,
 } from '../lib/desk'
 import {
   PriceChart, useDeskHistory,
@@ -97,6 +97,39 @@ export interface ManualTrade {
 }
 interface Blotter { trades: ManualTrade[]; day_spent: number; day_budget: number; max_per_order: number }
 
+// ── v9: GET /api/admin/open-orders payload (PM resting book, reconciled
+// against the venue on each read, + Kalshi pending queue) ─────────────
+interface OOPmRow {
+  id: number | string; us_market_slug: string; title?: string | null
+  side: string; limit_price: number; requested_shares: number
+  filled_shares: number; requested_usd: number; placed_at: string | null
+  order_id: string
+}
+interface OOKRow {
+  id: number | string; ticker: string; title?: string | null
+  side: string; action: string; limit_price: number | null
+  count: number | null; usd: number | null; status: string
+  created_at: string | null
+}
+interface OpenOrdersPayload { polymarket: OOPmRow[]; kalshi: OOKRow[] }
+/** One unified Open-orders row, either venue. Display-grade only. */
+interface OORow {
+  key: string; venue: Venue; id: number | string; title: string
+  sub: string; px: number | null; filled: number; total: number | null
+  usd: number | null; at: string | null; status: string
+}
+
+// ── v9: POST /api/admin/manual-limit run — a SEPARATE, additive state
+// machine so the market ticket's OrderRun flow stays byte-identical. ──
+type LimPhase = 'submitting' | 'open' | 'filled' | 'partial' | 'error'
+interface LimRun {
+  phase: LimPhase; t0: number; ms?: number
+  px: number                    // requested limit, in cents
+  restPx?: number | null        // server-confirmed limit_price (dollars)
+  fillPrice?: number | null; filledShares?: number
+  error?: string; title?: string
+}
+
 interface PMSearchMarket {
   slug: string
   title: string
@@ -115,6 +148,19 @@ const cents = (v: number | null | undefined) => (v == null ? '—' : `${Math.rou
 const pct = (v: number | null | undefined) => (v == null ? '—' : `${Math.round(v * 100)}%`)
 const money = (v: number | null | undefined) =>
   v == null ? '—' : `${v < 0 ? '-' : ''}$${Math.abs(v).toFixed(2)}`
+// v9: compact order age ("41s", "12m", "3h 05m", "2d") for Open orders.
+const ageOf = (iso: string | null | undefined) => {
+  if (!iso) return '—'
+  const t = new Date(iso).getTime()
+  if (!Number.isFinite(t)) return '—'
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000))
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 48) return `${h}h ${String(m % 60).padStart(2, '0')}m`
+  return `${Math.floor(h / 24)}d`
+}
 const signed = (v: number | null | undefined) =>
   v == null ? '—' : `${v > 0 ? '+' : v < 0 ? '-' : ''}$${Math.abs(v).toFixed(2)}`
 // Kalshi's published taker-fee formula, computed at the protective limit.
@@ -146,7 +192,7 @@ export function TradeDesk() {
   const [reviewing, setReviewing] = useState(false)
   const [run, setRun] = useState<OrderRun | null>(null)
   const [blotter, setBlotter] = useState<Blotter | null>(null)
-  const [blotTab, setBlotTab] = useState<'open' | 'history'>('open')
+  const [blotTab, setBlotTab] = useState<'open' | 'orders' | 'history'>('open')
   const [depth, setDepth] = useState<{ bids: number[][]; asks: number[][] } | null>(null)
   const [q, setQ] = useState('')
   const [searching, setSearching] = useState(false)
@@ -164,6 +210,15 @@ export function TradeDesk() {
   const [coBid, setCoBid] = useState<number | null>(null)
   const [cancelling, setCancelling] = useState<number | string | null>(null)
   const [cancelErr, setCancelErr] = useState('')
+  // ── v9 additive state: PM limit ticket + unified Open-orders tab ──
+  const [orderType, setOrderType] = useState<'market' | 'limit'>('market')
+  const [limitPx, setLimitPx] = useState('')       // cents string, 1-99
+  const [limRun, setLimRun] = useState<LimRun | null>(null)
+  const [oo, setOo] = useState<OpenOrdersPayload | null>(null)
+  const [ooAt, setOoAt] = useState<number | null>(null)
+  const [ooArmed, setOoArmed] = useState<string | null>(null)
+  const [ooBusy, setOoBusy] = useState<string | null>(null)
+  const [ooNote, setOoNote] = useState('')
   const [searchParams, setSearchParams] = useSearchParams()
   const pollRef = useRef<number | null>(null)
   const placingRef = useRef(false)
@@ -174,6 +229,12 @@ export function TradeDesk() {
   const dragYRef = useRef<number | null>(null)
   const prevRunPhase = useRef<Phase | null>(null)
   const prevCoPhase = useRef<Phase | null>(null)
+  // v9 refs: limit-order dup guard + one-shot prefills.
+  const limPlacingRef = useRef(false)
+  const limPrefilled = useRef(false)
+  const prevLimPhase = useRef<LimPhase | null>(null)
+  const ooArmTimer = useRef<number | null>(null)
+  const deepLinkDone = useRef(false)
 
   const isK = venue === 'kalshi'
 
@@ -204,6 +265,13 @@ export function TradeDesk() {
     deskApi<DeskAccounts>('/api/desk/accounts')
       .then((d) => { setAcct(d); setAcctAt(Date.now()); setAcctDown(false) })
       .catch(() => setAcctDown(true))
+  }, [])
+
+  // v9: open orders (PM resting book + Kalshi queue). Read-only GET.
+  const loadOpenOrders = useCallback(() => {
+    deskApi<OpenOrdersPayload>('/api/admin/open-orders')
+      .then((d) => { setOo(d); setOoAt(Date.now()) })
+      .catch(() => {})
   }, [])
 
   // ── Desk session gate ────────────────────────────────────────────
@@ -263,6 +331,20 @@ export function TradeDesk() {
     const t = setInterval(loadAcct, 30000)
     return () => clearInterval(t)
   }, [authed, loadAcct])
+
+  // v9: one read on unlock feeds the Open-orders badge; the 5s poll
+  // runs ONLY while the Open-orders tab is actually on screen.
+  useEffect(() => {
+    if (!authed) return
+    loadOpenOrders()
+  }, [authed, loadOpenOrders])
+  const ooVisible = authed && tab === 'activity' && blotTab === 'orders'
+  useEffect(() => {
+    if (!ooVisible) return
+    loadOpenOrders()
+    const t = window.setInterval(loadOpenOrders, 5000)
+    return () => window.clearInterval(t)
+  }, [ooVisible, loadOpenOrders])
 
   // v8: feed loading (desk-feed, 30s poll, league counts) lives inside
   // MarketFeed.tsx — the shell only owns the market-page detail fetch.
@@ -338,6 +420,43 @@ export function TradeDesk() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pick])
 
+  // v9: prefill the limit input once per pick with best bid + 1¢ the
+  // moment a book is loaded — never overwrites anything already typed.
+  useEffect(() => {
+    if (isK || orderType !== 'limit' || limPrefilled.current) return
+    if (limitPx !== '') { limPrefilled.current = true; return }
+    const bb = depth?.bids?.[0]?.[0]
+    if (bb == null) return
+    limPrefilled.current = true
+    setLimitPx(String(Math.min(99, Math.max(1, Math.round(bb * 100) + 1))))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depth, orderType, isK])
+
+  // ── v9 deep-link prefill: another page drops a token/asset string
+  // into sessionStorage 'sa_desk_prefill' (or links /desk?market=…)
+  // and the desk runs its existing market search with it on arrival. ──
+  useEffect(() => {
+    if (!authed || deepLinkDone.current) return
+    deepLinkDone.current = true
+    let stored: string | null = null
+    try {
+      stored = sessionStorage.getItem('sa_desk_prefill')
+      if (stored != null) sessionStorage.removeItem('sa_desk_prefill')
+    } catch { stored = null }
+    const fromUrl = searchParams.get('market')
+    if (fromUrl != null) {
+      const next = new URLSearchParams(searchParams)
+      next.delete('market')
+      setSearchParams(next, { replace: true })
+    }
+    const val = (stored || fromUrl || '').trim()
+    if (!val) return
+    setTab('markets')
+    setGame(null); setGameMeta(null)
+    setQ(val)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed, searchParams])
+
   // While an order is in flight, re-picking is locked (audit 2026-08-21):
   // choose() reset `run`, which un-hid the Trade button mid-submit — a
   // second click fired a second real-money POST, and the first order's
@@ -345,9 +464,12 @@ export function TradeDesk() {
   // ticket. The lock lifts the moment the run reaches a terminal phase.
   const inFlight = () =>
     run?.phase === 'submitting' || run?.phase === 'relaying'
+  // v9: the limit ticket carries the same re-pick lock discipline.
+  const limInFlight = () => limRun?.phase === 'submitting'
   const choose = (p: Pick) => {
-    if (inFlight()) return
+    if (inFlight() || limInFlight()) return
     setPick(p); setRun(null); setReviewing(false); setSide('buy')
+    setLimRun(null); setLimitPx(''); limPrefilled.current = false
   }
 
   // ── Live order lifecycle ─────────────────────────────────────────
@@ -445,6 +567,75 @@ export function TradeDesk() {
         error: e?.name === 'TimeoutError'
           ? 'Still working after 90s — check Open Orders before retrying.'
           : `Request failed (${e?.message || 'network'}) — check Open Orders before retrying.`,
+      }))
+    }
+  }
+
+  // ── v9: GTC limit order (PM ticket, Limit mode) ──────────────────
+  // POST /api/admin/manual-limit — a NEW endpoint with its own state
+  // machine. Same fail-closed grammar as the market ticket: synchronous
+  // re-entry lock, no auto-retry ever, API error strings verbatim.
+  // status 'open' means the order is RESTING on the venue's book (GTC).
+  const placeLimit = async () => {
+    if (!pick || pick.venue !== 'polymarket' || limPlacingRef.current || limInFlight()) return
+    const amt = parseFloat(usd)
+    const px = parseInt(limitPx || '', 10)
+    if (!(amt > 0)) { setErr('Enter a dollar amount.'); return }
+    if (!(Number.isFinite(px) && px >= 1 && px <= 99)) return
+    limPlacingRef.current = true
+    const t0 = performance.now()
+    setLimRun({ phase: 'submitting', t0, px, title: pick.label })
+    try {
+      // Same identity rules as the market ticket: catalog picks carry
+      // the token asset; venue-board rows carry the market slug.
+      const body: Record<string, unknown> = {
+        usd: amt, limit_price: px / 100,
+        note: `${pick.label} — ${pick.side}`,
+      }
+      if (pick.asset) body.asset = pick.asset
+      if (pick.usSlug) body.us_slug = pick.usSlug
+      const r = await deskApi<any>('/api/admin/manual-limit', {
+        method: 'POST', body: JSON.stringify(body),
+        signal: AbortSignal.timeout(90000),
+      })
+      const ms = Math.round(performance.now() - t0)
+      limPlacingRef.current = false
+      loadBlotter()
+      loadOpenOrders()
+      if (r.ok && r.status === 'open') {
+        setLimRun((prev) => prev && ({
+          ...prev, phase: 'open', ms,
+          restPx: r.limit_price ?? null,
+          fillPrice: r.fill_price ?? null,
+          filledShares: r.filled_shares || 0,
+        }))
+      } else if (r.ok && (r.status === 'filled' || r.status === 'settled'
+        || (r.filled_shares ?? 0) > 0)) {
+        const wanted = Math.floor(amt / (px / 100))
+        const partial = r.status !== 'filled' && r.status !== 'settled'
+          && wanted > 0 && (r.filled_shares || 0) < wanted
+        setLimRun((prev) => prev && ({
+          ...prev, phase: partial ? 'partial' : 'filled', ms,
+          restPx: r.limit_price ?? null,
+          fillPrice: r.fill_price ?? null,
+          filledShares: r.filled_shares || 0,
+        }))
+        if (game) openGame({ id: game.id, venue: game.venue }, true)
+      } else {
+        setLimRun((prev) => prev && ({
+          ...prev, phase: 'error', ms,
+          error: r.error || (r.status ? `Order ${r.status}.` : 'Limit order refused.'),
+        }))
+      }
+    } catch (e: any) {
+      limPlacingRef.current = false
+      loadBlotter()
+      loadOpenOrders()
+      setLimRun((prev) => prev && ({
+        ...prev, phase: 'error',
+        error: e?.name === 'TimeoutError'
+          ? 'Still working after 90s — check Open orders before retrying.'
+          : `Request failed (${e?.message || 'network'}) — check Open orders before retrying.`,
       }))
     }
   }
@@ -576,9 +767,14 @@ export function TradeDesk() {
   }
 
   // ── Account positions for the active venue skin ──────────────────
+  // v9: the backend now enriches Kalshi positions with a human title —
+  // prefer it wherever a raw ticker used to show (ticker stays as the
+  // sub-line / identity key).
+  const kTitle = (p: KPosition) =>
+    (p as KPosition & { title?: string | null }).title || p.ticker
   const venuePositions: CoTarget[] = !acct ? [] : isK
     ? (acct.kalshi.positions || []).map((p) => ({
-      venue: 'kalshi' as const, title: p.ticker, ticker: p.ticker,
+      venue: 'kalshi' as const, title: kTitle(p), ticker: p.ticker,
       held: p.qty, cost: p.cost_usd, mark: p.mark_bid,
       value: p.value_usd, unrealized: p.unrealized,
     }))
@@ -601,7 +797,7 @@ export function TradeDesk() {
       const tk = searchParams.get('co_ticker')
       const p = (acct.kalshi.positions || []).find((x) => x.ticker === tk)
       if (p) openCashOut({
-        venue: 'kalshi', title: p.ticker, ticker: p.ticker, held: p.qty,
+        venue: 'kalshi', title: kTitle(p), ticker: p.ticker, held: p.qty,
         cost: p.cost_usd, mark: p.mark_bid, value: p.value_usd, unrealized: p.unrealized,
       })
     } else {
@@ -637,6 +833,39 @@ export function TradeDesk() {
     loadBlotter()
   }
 
+  // ── v9: unified Open-orders cancel — two-tap inline confirm, then
+  // DELETE /api/desk/manual-order/{id}?venue=… (polymarket cancels the
+  // resting book order; kalshi is the existing pending-queue cancel).
+  // A cancel that raced a fill reports the fill — surfaced verbatim. ──
+  const armOoCancel = (key: string) => {
+    setOoArmed(key); setOoNote('')
+    if (ooArmTimer.current != null) window.clearTimeout(ooArmTimer.current)
+    ooArmTimer.current = window.setTimeout(() => setOoArmed(null), 4000)
+  }
+  useEffect(() => () => {
+    if (ooArmTimer.current != null) window.clearTimeout(ooArmTimer.current)
+  }, [])
+  const ooCancel = async (row: OORow) => {
+    if (ooBusy != null) return
+    setOoBusy(row.key); setOoArmed(null); setOoNote('')
+    try {
+      const r = await deskApi<{ ok: boolean; cancelled?: boolean; filled_shares?: number; error?: string }>(
+        `/api/desk/manual-order/${row.id}?venue=${row.venue}`, { method: 'DELETE' })
+      if (r.ok && (r.filled_shares ?? 0) > 0) {
+        setOoNote(`Cancel raced a fill — ${Math.round(r.filled_shares!)} contracts filled before the cancel landed${r.cancelled ? '; the remainder is cancelled' : ''}.`)
+      } else if (r.ok && r.cancelled) {
+        fireToast('Order cancelled — nothing filled.', true)
+      } else {
+        setOoNote(r.error || 'Not cancelled — the venue may have already filled it. List refreshed.')
+      }
+    } catch {
+      setOoNote('Cancel failed — the order may still be resting. Check the list before retrying.')
+    }
+    setOoBusy(null)
+    loadOpenOrders()
+    loadBlotter()
+  }
+
   const amount = parseFloat(usd)
   const askKnown = !!pick && pick.ask > 0
   const estLimit = askKnown ? Math.min(pick!.ask + 0.02, 0.99) : 0
@@ -646,6 +875,23 @@ export function TradeDesk() {
   const available = blotter ? Math.max(0, blotter.day_budget - blotter.day_spent) : null
   const busy = run?.phase === 'submitting' || run?.phase === 'relaying'
   const coBusy = coInFlight()
+
+  // ── v9: limit-mode derived values (display only until placeLimit) ──
+  const limPxNum = parseInt(limitPx || '', 10)
+  const limPxOk = Number.isFinite(limPxNum) && limPxNum >= 1 && limPxNum <= 99
+  const limPrice = limPxOk ? limPxNum / 100 : 0
+  const limContracts = limPxOk && amount > 0 ? Math.floor(amount / limPrice) : 0
+  const limCost = limContracts * limPrice
+  const limBusy = limRun?.phase === 'submitting'
+  const limReady = limPxOk && amount > 0 && limContracts > 0 && !limBusy
+  const limitMode = !isK && orderType === 'limit'
+  const stepPx = (d: number) => {
+    const bb = depth?.bids?.[0]?.[0]
+    const cur = Number.isFinite(limPxNum) ? limPxNum
+      : bb != null ? Math.min(99, Math.max(1, Math.round(bb * 100) + 1)) : 50
+    limPrefilled.current = true
+    setLimitPx(String(Math.min(99, Math.max(1, cur + d))))
+  }
 
   // ── Presentation pulses (v7 portal skin — no money-path changes) ──
   // 1s clock re-render drives the "synced Ns ago" age in the portal
@@ -660,11 +906,11 @@ export function TradeDesk() {
 
   const [execNow, setExecNow] = useState(0)
   useEffect(() => {
-    if (!(busy || coBusy)) return
+    if (!(busy || coBusy || limBusy)) return
     setExecNow(performance.now())
     const t = window.setInterval(() => setExecNow(performance.now()), 100)
     return () => window.clearInterval(t)
-  }, [busy, coBusy])
+  }, [busy, coBusy, limBusy])
 
   // Result toasts + a 30ms haptic tap, observed from run/coRun phase
   // transitions — the placing/polling callbacks stay untouched.
@@ -714,12 +960,33 @@ export function TradeDesk() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [coRun?.phase])
 
+  // v9: limit-order result toasts (same observer pattern as above).
+  useEffect(() => {
+    const p = limRun?.phase ?? null
+    if (p === prevLimPhase.current) return
+    prevLimPhase.current = p
+    if (p === 'open') {
+      buzz()
+      fireToast(
+        `Resting on the book at ${limRun?.restPx != null ? cents(limRun.restPx) : `${limRun?.px}¢`} — manage under Open orders`,
+        true)
+    } else if (p === 'filled' || p === 'partial') {
+      buzz()
+      fireToast(
+        `${p === 'partial' ? 'Partially filled' : 'Filled'} · ${Math.round(limRun?.filledShares || 0)} @ ${cents(limRun?.fillPrice)}${limRun?.ms != null ? ` · ${(limRun.ms / 1000).toFixed(1)}s` : ''}`,
+        true)
+    } else if (p === 'error') {
+      buzz(); fireToast('Limit order not placed — see the ticket for details.', false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [limRun?.phase])
+
   const acctAgeS = acctAt == null ? null : Math.max(0, Math.round((Date.now() - acctAt) / 1000))
   // Bottom-sheet dismissal (mobile scrim tap / drag-down). Locked while
   // any order is in flight — same visibility rule the CTA already uses.
   const sheetOpen = !!pick || side === 'sell'
   const dismissSheet = () => {
-    if (busy || coBusy) return
+    if (busy || coBusy || limBusy) return
     setPick(null)
     if (side === 'sell') setSide('buy')
   }
@@ -822,6 +1089,67 @@ export function TradeDesk() {
     </div>
   )
   const runPanel = run && execTimeline(run, false, isK)
+
+  // ── v9: limit-order execution panel (separate machine — the market
+  // execTimeline above stays untouched). 'open' = resting GTC. ───────
+  const goOpenOrders = () => { setTab('activity'); setBlotTab('orders') }
+  const limPanel = limRun && (
+    <div className={`dx-run ${limRun.phase}`}>
+      {limRun.phase === 'submitting' && (
+        <>
+          <div className="dx-run-row on">
+            <span className="dx-spin" /> Limit order submitted
+          </div>
+          <div className="dx-run-row">
+            <span className="dx-spin" /> AI counterparty placing on the Polymarket book…
+          </div>
+          <div className="dx-run-clock">
+            <span>live execution clock</span>
+            <b>{(Math.max(0, (execNow || performance.now()) - limRun.t0) / 1000).toFixed(2)}s</b>
+          </div>
+        </>
+      )}
+      {limRun.phase === 'open' && (
+        <>
+          <div className="dx-run-big v9-open">
+            <span className="dx-check">✓</span> Resting on the book
+          </div>
+          <div className="dx-run-fill">
+            Resting on the book at{' '}
+            <b>{limRun.restPx != null ? cents(limRun.restPx) : `${limRun.px}¢`}</b>
+            {' '}(good-til-cancelled)
+            {(limRun.filledShares || 0) > 0 && (
+              <> — <b>{Math.round(limRun.filledShares!)}</b> already filled
+                {limRun.fillPrice != null ? <> @ <b>{cents(limRun.fillPrice)}</b></> : null}</>
+            )} — manage under Open orders.
+          </div>
+          <button className="v9-goto" onClick={goOpenOrders}>View open orders →</button>
+        </>
+      )}
+      {(limRun.phase === 'filled' || limRun.phase === 'partial') && (
+        <>
+          <div className="dx-run-big">
+            <span className="dx-check">✓</span>
+            {limRun.phase === 'partial' ? 'Partially filled' : 'Order filled'}
+          </div>
+          <div className="dx-run-fill">
+            <b>{Math.round(limRun.filledShares || 0)}</b> contracts @{' '}
+            <b>{cents(limRun.fillPrice)}</b>
+            {' '}· {money((limRun.filledShares || 0) * (limRun.fillPrice || 0))}
+          </div>
+          {limRun.ms != null && (
+            <div className="dx-run-lat">executed by the AI in {(limRun.ms / 1000).toFixed(1)}s</div>
+          )}
+        </>
+      )}
+      {limRun.phase === 'error' && (
+        <>
+          <div className="dx-run-big neg"><span className="dx-x">✕</span> Not placed</div>
+          <div className="dx-run-fill">{limRun.error}</div>
+        </>
+      )}
+    </div>
+  )
 
   // ── Sell tab / positions panel content ───────────────────────────
   const sellList = (
@@ -948,7 +1276,24 @@ export function TradeDesk() {
         <div className="dx-tabs">
           <button className={`dx-tab${side === 'buy' ? ' on' : ''}`} onClick={() => setSide('buy')}>Buy</button>
           <button className={`dx-tab${side === 'sell' ? ' on' : ''}`} onClick={() => setSide('sell')}>Sell</button>
-          <span className="dx-tab-right">Market ▾</span>
+          {/* v9: PM ticket gets Polymarket's segmented Market/Limit pill;
+              the Kalshi ticket keeps its static label. */}
+          {!isK && side === 'buy' ? (
+            <div className="v9-otype" role="group" aria-label="Order type">
+              <button
+                className={orderType === 'market' ? 'on' : ''}
+                disabled={busy || limBusy}
+                onClick={() => setOrderType('market')}
+              >Market</button>
+              <button
+                className={orderType === 'limit' ? 'on' : ''}
+                disabled={busy || limBusy}
+                onClick={() => setOrderType('limit')}
+              >Limit</button>
+            </div>
+          ) : (
+            <span className="dx-tab-right">Market ▾</span>
+          )}
         </div>
 
         {side === 'sell' ? (
@@ -1033,6 +1378,59 @@ export function TradeDesk() {
                   <b className="dx-big pos">{estContracts > 0 ? money(estPayout) : '$0'}</b>
                 </div>
               </>
+            ) : limitMode ? (
+              <>
+                {/* v9: Limit mode — price in cents (1-99), GTC. */}
+                <div className="v9-limit">
+                  <span className="dx-amount-label">Limit price</span>
+                  <div className="v9-limitbox">
+                    <button
+                      className="v9-step" disabled={limBusy}
+                      onClick={() => stepPx(-1)} aria-label="Lower limit price 1 cent"
+                    >−</button>
+                    <div className="v9-pxwrap">
+                      <input
+                        className="v9-px" inputMode="numeric"
+                        value={limitPx}
+                        placeholder={bestBid != null
+                          ? String(Math.min(99, Math.max(1, Math.round(bestBid * 100) + 1)))
+                          : '50'}
+                        disabled={limBusy}
+                        onChange={(e) => {
+                          limPrefilled.current = true
+                          setLimitPx(e.target.value.replace(/[^0-9]/g, '').slice(0, 2))
+                        }}
+                        aria-label="Limit price in cents"
+                      />
+                      <span className="v9-cent">¢</span>
+                    </div>
+                    <button
+                      className="v9-step" disabled={limBusy}
+                      onClick={() => stepPx(1)} aria-label="Raise limit price 1 cent"
+                    >+</button>
+                  </div>
+                  {limitPx !== '' && !limPxOk && (
+                    <p className="dxm-err">Limit price must be 1–99¢.</p>
+                  )}
+                </div>
+                {(bestBid != null || bestAsk != null) && (
+                  <div className="dx-line sub">
+                    <span>Best bid {cents(bestBid)} · best ask {cents(bestAsk)}</span>
+                    {limPxOk && bestAsk != null && limPxNum >= Math.round(bestAsk * 100) && (
+                      <span>crosses the ask — fills now</span>
+                    )}
+                  </div>
+                )}
+                <div className="dx-line"><span>Shares (floor)</span><b>{limContracts > 0 ? limContracts : '—'}</b></div>
+                <div className="dx-line"><span>Est. cost</span><b>{limContracts > 0 ? money(limCost) : '—'}</b></div>
+                <div className="dx-line">
+                  <span>To win</span>
+                  <b className="dx-big pos">{limContracts > 0 ? money(limContracts) : '$0'}
+                    {limContracts > 0 && limCost > 0 && (
+                      <span className="dx-ret"> (+{Math.round(((limContracts - limCost) / limCost) * 100)}%)</span>
+                    )}</b>
+                </div>
+              </>
             ) : (
               estContracts > 0 && (
                 <>
@@ -1062,23 +1460,46 @@ export function TradeDesk() {
                   )}
                   <i className={bookOpen ? 'up' : ''}>▾</i>
                 </button>
-                {bookOpen && (
+                {bookOpen && (() => {
+                  // v9: full venue depth — every level the book returns
+                  // (up to 10/side), each with a background bar scaled to
+                  // the CUMULATIVE size from best price (venue-app look).
+                  // Display only; same 5s poll, same payload.
+                  const cum = (rows: number[][]) => {
+                    let c = 0
+                    return rows.map(([p, s]) => ({ p, s, c: c += s }))
+                  }
+                  const askLvls = cum(depth.asks)
+                  const bidLvls = cum(depth.bids)
+                  const maxC = Math.max(
+                    askLvls.length ? askLvls[askLvls.length - 1].c : 0,
+                    bidLvls.length ? bidLvls[bidLvls.length - 1].c : 0,
+                    1)
+                  return (
               <div className="dx-book">
                 <div>
                   <div className="dx-book-h">Asks</div>
-                  {depth.asks.slice(0, 5).map(([p, s], i) => (
-                    <div className="dx-book-row" key={i}>
-                      <span className="neg">{cents(p)}</span>
-                      <span>{Math.round(s).toLocaleString()}</span>
+                  {askLvls.map((l, i) => (
+                    <div className="dx-book-row v9-lvl" key={i}>
+                      <i
+                        className="v9-dbar ask" aria-hidden="true"
+                        style={{ width: `${Math.min(100, (l.c / maxC) * 100)}%` }}
+                      />
+                      <span className="neg">{cents(l.p)}</span>
+                      <span>{Math.round(l.s).toLocaleString()}</span>
                     </div>
                   ))}
                 </div>
                 <div>
                   <div className="dx-book-h">Bids</div>
-                  {depth.bids.slice(0, 5).map(([p, s], i) => (
-                    <div className="dx-book-row" key={i}>
-                      <span className="pos">{cents(p)}</span>
-                      <span>{Math.round(s).toLocaleString()}</span>
+                  {bidLvls.map((l, i) => (
+                    <div className="dx-book-row v9-lvl" key={i}>
+                      <i
+                        className="v9-dbar bid" aria-hidden="true"
+                        style={{ width: `${Math.min(100, (l.c / maxC) * 100)}%` }}
+                      />
+                      <span className="pos">{cents(l.p)}</span>
+                      <span>{Math.round(l.s).toLocaleString()}</span>
                     </div>
                   ))}
                 </div>
@@ -1089,12 +1510,36 @@ export function TradeDesk() {
                   </div>
                 )}
               </div>
-                )}
+                  )
+                })()}
               </div>
             )}
 
-            {runPanel}
+            {limitMode ? limPanel : runPanel}
 
+            {limitMode ? (
+              <>
+                {/* v9: manual-limit CTA — its own dup-guarded flow; the
+                    market Trade button below stays byte-identical. */}
+                {(!limRun || limRun.phase === 'error') && (
+                  <button
+                    className={`pmx-cta${limReady ? ' ready' : ''}`}
+                    disabled={!limReady}
+                    onClick={placeLimit}
+                  >{limReady
+                    ? `Place limit order · ${limContracts} @ ${limPxNum}¢`
+                    : 'Place limit order'}</button>
+                )}
+                {(limRun?.phase === 'open' || limRun?.phase === 'filled'
+                  || limRun?.phase === 'partial') && (
+                  <button
+                    className="pmx-cta ready"
+                    onClick={() => { setLimRun(null); setUsd('') }}
+                  >Place another order</button>
+                )}
+              </>
+            ) : (
+              <>
             {(!run || run.phase === 'unfilled' || run.phase === 'error') && (
               isK ? (
                 !reviewing ? (
@@ -1122,10 +1567,16 @@ export function TradeDesk() {
                 onClick={() => { setRun(null); setUsd('') }}
               >Place another order</button>
             )}
+              </>
+            )}
 
             <p className="dx-fine">
-              Fill up to your amount at your price or better — never worse.
-              Unfilled remainder cancels instantly. Cash out any time from the Sell tab.
+              {limitMode
+                ? <>Good-til-cancelled: your order rests on the venue book at
+                  your price until it fills or you cancel it — manage it any
+                  time under Activity → Open orders.</>
+                : <>Fill up to your amount at your price or better — never worse.
+                  Unfilled remainder cancels instantly. Cash out any time from the Sell tab.</>}
             </p>
           </>
         )}
@@ -1254,6 +1705,29 @@ export function TradeDesk() {
   const cancellable = (t: ManualTrade) =>
     t.status === 'queued' && (t.venue || '').startsWith('kalshi')
 
+  // ── v9: unified Open-orders rows (PM resting book, reconciled with
+  // the venue on each read, + Kalshi pending queue), newest first. ────
+  const ooRows: OORow[] = !oo ? [] : [
+    ...(oo.polymarket || []).map((r): OORow => ({
+      key: `pm-${r.id}`, venue: 'polymarket', id: r.id,
+      title: r.title || r.us_market_slug,
+      sub: (r.side || 'buy').toUpperCase(),
+      px: r.limit_price ?? null, filled: r.filled_shares || 0,
+      total: r.requested_shares ?? null, usd: r.requested_usd ?? null,
+      at: r.placed_at, status: 'resting',
+    })),
+    ...(oo.kalshi || []).map((r): OORow => ({
+      key: `k-${r.id}`, venue: 'kalshi', id: r.id,
+      title: r.title || r.ticker,
+      sub: `${(r.action || 'buy').toUpperCase()} ${(r.side || 'yes').toUpperCase()}`,
+      px: r.limit_price ?? null, filled: 0, total: r.count ?? null,
+      usd: r.usd ?? null, at: r.created_at, status: r.status || 'queued',
+    })),
+  ].sort((a, b) =>
+    (b.at ? new Date(b.at).getTime() : 0) - (a.at ? new Date(a.at).getTime() : 0))
+  const ooCount = ooRows.length
+  const ooAgeS = ooAt == null ? null : Math.max(0, Math.round((Date.now() - ooAt) / 1000))
+
   return (
     <>
       <div className={`dx-topbar${onMarketPage ? ' mp-mode' : ''}`}>
@@ -1273,9 +1747,11 @@ export function TradeDesk() {
                 key={v}
                 className={`vd-venue${venue === v ? ' on' : ''} ${v}`}
                 onClick={() => {
-                  if (inFlight()) return
+                  if (inFlight() || limInFlight()) return
                   setVenue(v); setGame(null); setPick(null); setQ(''); setRun(null)
                   setGameMeta(null)
+                  setLimRun(null); setLimitPx(''); setOrderType('market')
+                  limPrefilled.current = false
                 }}
               >
                 {v === 'polymarket' ? 'Polymarket' : 'Kalshi'} mode
@@ -1516,10 +1992,86 @@ export function TradeDesk() {
           <button className={blotTab === 'open' ? 'on' : ''} onClick={() => setBlotTab('open')}>
             Open {openTrades.length ? `(${openTrades.length})` : ''}
           </button>
+          <button className={blotTab === 'orders' ? 'on' : ''} onClick={() => setBlotTab('orders')}>
+            Open orders
+            {ooCount > 0 && <span className="v8-tab-n">{ooCount}</span>}
+          </button>
           <button className={blotTab === 'history' ? 'on' : ''} onClick={() => setBlotTab('history')}>
             History
           </button>
         </div>
+        {blotTab === 'orders' ? (
+          /* ── v9: unified Open-orders view — PM resting limit orders
+             (reconciled against the venue book on every read) plus the
+             Kalshi pending queue, with two-tap inline cancel. ── */
+          <div className="v9-oo">
+            <div className="v9-oo-head">
+              <span className="pulse-dot" aria-hidden="true" />
+              <span>Working orders on the venue books — reconciled live</span>
+              <span className="v9-oo-age">
+                {ooAgeS == null ? 'syncing…'
+                  : ooAgeS < 3 ? 'checked just now' : `checked ${ooAgeS}s ago`}
+              </span>
+            </div>
+            {ooNote && <p className="dk-gate-err">{ooNote}</p>}
+            {!oo ? (
+              <div className="v9-oo-skel" aria-label="Loading open orders">
+                <div className="skel" /><div className="skel" /><div className="skel" />
+              </div>
+            ) : ooRows.length === 0 ? (
+              <p style={{ opacity: 0.6 }}>
+                No working orders. Limit orders resting on the book and queued
+                Kalshi tickets appear here the moment they're live.
+              </p>
+            ) : (
+              <div className="v9-oo-list">
+                <div className="oo-row v9-oo-h" aria-hidden="true">
+                  <span>Market</span><span>Side</span><span>Limit</span>
+                  <span>Filled / size</span><span />
+                </div>
+                {ooRows.map((r) => (
+                  <div className="oo-row" key={r.key}>
+                    <div className="v9-oo-mkt">
+                      <span className="v9-oo-title">{r.title}</span>
+                      <small>
+                        <span className={`v9-chip ${r.venue === 'kalshi' ? 'venue-k' : 'venue-pm'}`}>
+                          {r.venue === 'kalshi' ? 'Kalshi' : 'Polymarket'}
+                        </span>
+                        <span>{ageOf(r.at)} old · {r.status}</span>
+                      </small>
+                    </div>
+                    <span className="v9-oo-side">{r.sub}</span>
+                    <span className="v9-oo-px">{cents(r.px)}</span>
+                    <span className="v9-oo-size">
+                      {r.total != null
+                        ? `${Math.round(r.filled)}/${Math.round(r.total)}`
+                        : r.usd != null ? money(r.usd) : '—'}
+                    </span>
+                    <span className="v9-oo-act">
+                      {ooArmed === r.key ? (
+                        <span className="v9-oo-conf">
+                          <small>Cancel?</small>
+                          <button
+                            className="oo-cancel v9-armed"
+                            disabled={ooBusy != null}
+                            onClick={() => ooCancel(r)}
+                          >Yes</button>
+                        </span>
+                      ) : (
+                        <button
+                          className="oo-cancel"
+                          disabled={ooBusy != null}
+                          onClick={() => armOoCancel(r.key)}
+                        >{ooBusy === r.key ? 'Cancelling…' : 'Cancel'}</button>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+        <>
         {cancelErr && blotTab === 'open' && <p className="dk-gate-err">{cancelErr}</p>}
         {blotRows.length > 0 ? (
           <>
@@ -1615,6 +2167,8 @@ export function TradeDesk() {
             <div className="tr-skel" /><div className="tr-skel" /><div className="tr-skel" />
           </div>
         ) : <p style={{ opacity: 0.6 }}>{blotTab === 'open' ? 'No open positions.' : 'No settled trades yet.'}</p>}
+        </>
+        )}
       </div>
       )}
 
