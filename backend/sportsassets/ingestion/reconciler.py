@@ -59,7 +59,14 @@ async def reconcile_once(depth: int = 500) -> dict:
                     resp.raise_for_status()
                     batch = resp.json()
                     if not batch:
-                        complete = True
+                        # An empty FIRST page is not "feed exhausted"
+                        # (fleet round 7): a degraded venue serving
+                        # 200-[] would brand a correct emission
+                        # uncorroborated with the strongest possible
+                        # evidence. Only an end reached AFTER real
+                        # rows proves the feed was walked; an empty
+                        # start defers (no cov claim of completeness).
+                        complete = offset > 0
                         break
                     for raw in batch:
                         ev = parse_data_api_trade(raw, whale["id"], whale["username"])

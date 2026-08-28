@@ -133,29 +133,34 @@ CORROBORATE_S = 75 * 60
 # them of its alarm. Departed-whale rows stay unstamped and invisible
 # to this query until the whale returns; the backlog gauge counts them
 # separately.
+# ROTATING windows (fleet round 7): deterministic oldest-first order
+# rebuilt the starvation one tier up TWICE — 20 permanently-deferring
+# wallets owned the wallet list forever, and a wallet's own 10 oldest
+# deferring rows owned its window forever, so a younger judgable
+# wrong emission behind either was never examined. Both windows now
+# order by a per-sweep salted hash: every wallet and every row has
+# equal probability of entering each 60s sweep, so nothing can be
+# starved indefinitely — deferral defers, it no longer blocks.
 SQL_SWEEP_WALLETS = """
-SELECT w.id AS whale_id, w.address, min(t.detected_at) AS oldest
+SELECT w.id AS whale_id, w.address
 FROM trades t JOIN whales w ON w.id = t.whale_id
 WHERE t.source = 's1' AND t.s1_checked_at IS NULL
   AND t.detected_at < now() - make_interval(secs => $1)
   AND w.active AND NOT w.banned
 GROUP BY w.id, w.address
-ORDER BY oldest
-LIMIT 20
+ORDER BY md5(w.address || $2::text)
+LIMIT 200
 """
-# PER-WALLET windows (fleet round 6): round 5 moved the departed-whale
-# filter into the SQL, but rows DEFERRING at the coverage check (their
-# whale's reconciler sweep keeps failing) re-entered a single global
-# LIMIT at the front of the oldest-first order and could pin it
-# forever, hiding a genuinely wrong emission behind them. Each wallet
-# now gets its own window: a deferring whale can only starve itself.
+# PER-WALLET windows (fleet round 6): rows DEFERRING at the coverage
+# check defer only their own whale; rotation (round 7) stops them
+# pinning even that.
 SQL_SWEEP = """
 SELECT t.id, t.dedupe_key, t.detected_at, t.ts,
        (t.venue_seen_at IS NOT NULL) AS ok
 FROM trades t
 WHERE t.whale_id = $2 AND t.source = 's1' AND t.s1_checked_at IS NULL
   AND t.detected_at < now() - make_interval(secs => $1)
-ORDER BY t.detected_at
+ORDER BY md5(t.id::text || $3::text)
 LIMIT 10
 """
 SQL_BACKLOG = """
@@ -179,9 +184,13 @@ SQL_MARK = "UPDATE trades SET s1_checked_at = now() WHERE id = ANY($1::bigint[])
 #     data-api's indexing lag and cannot possibly contain the fill.
 #     The covering run must start RECON_VENUE_LAG_S after detection.
 # A run without the cov key (old format) never covers; rows defer.
+# $1 is CAST (fleet round 7, CRITICAL): untyped, Postgres resolved
+# '$1 + interval' as interval+interval at prepare and the statement
+# could never execute — the alarm was structurally silent, which only
+# a real-Postgres execution pin catches (tests/test_s1_sql_real_pg).
 SQL_RECON_SINCE = """
 SELECT 1 FROM reconciliation_runs
-WHERE started_at > $1 + make_interval(secs => $4)
+WHERE started_at > $1::timestamptz + make_interval(secs => $4)
   AND finished_at IS NOT NULL
   AND details->'per_wallet' ? $2
   AND NOT (details->'per_wallet' ? ('failed:' || $2))
@@ -203,13 +212,22 @@ SQL_READ = "SELECT value FROM ingestion_state WHERE key = $1"
 # counts), and structurally cannot name 'trips'/'trips_cleared'. If
 # the stored trips are non-empty after the merge, armed is forced
 # false in the same statement.
+# Hostile-shape guards (fleet round 7, minor): a stored value or a
+# stored counters field that is valid JSON but not an OBJECT made
+# jsonb_set/jsonb_each raise on every flush forever — a silent gauge
+# blackhole, because the failure counter's own persist is what fails.
+# A non-object doc is replaced by the payload (fail-visible under
+# 'state_repaired'); a non-object counters field is treated as empty.
 SQL_WRITE = """
 INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = (
   SELECT CASE WHEN COALESCE(nv.v->'trips', '{}'::jsonb) <> '{}'::jsonb
               THEN jsonb_set(nv.v, '{armed}', 'false'::jsonb)
               ELSE nv.v END
-  FROM (SELECT jsonb_set(
+  FROM (SELECT CASE
+          WHEN jsonb_typeof(ingestion_state.value) <> 'object'
+          THEN $2::jsonb || jsonb_build_object('state_repaired', true)
+          ELSE jsonb_set(
           ingestion_state.value || ($2::jsonb - 'counters'),
           '{counters}',
           (SELECT COALESCE(jsonb_object_agg(m.k, to_jsonb(m.a + m.b)),
@@ -219,42 +237,67 @@ ON CONFLICT (key) DO UPDATE SET value = (
                              THEN (s.v)::numeric ELSE 0 END AS a,
                         CASE WHEN jsonb_typeof(d.v) = 'number'
                              THEN (d.v)::numeric ELSE 0 END AS b
-                 FROM jsonb_each(COALESCE(
-                        ingestion_state.value->'counters',
-                        '{}'::jsonb)) s(k, v)
+                 FROM jsonb_each(CASE
+                        WHEN jsonb_typeof(
+                          ingestion_state.value->'counters') = 'object'
+                        THEN ingestion_state.value->'counters'
+                        ELSE '{}'::jsonb END) s(k, v)
                  FULL OUTER JOIN jsonb_each(COALESCE(
                         $2::jsonb->'counters', '{}'::jsonb)) d(k, v)
-                   ON s.k = d.k) m)) AS v) nv)
+                   ON s.k = d.k) m)) END AS v) nv)
 """
 # A trip is durable the moment it fires: one atomic union (existing
 # timestamp wins), disarming in the same statement. The WHERE refuses
 # a stale re-persist of a reason an operator already cleared (the
 # tombstone is newer than the trip) — the round-6 resurrection class.
+# Round 7: a non-object stored doc is replaced wholesale (the trip
+# must land — fail-visible via 'state_repaired'); a non-object trips
+# field is treated as empty; and when the legacy 'tripped' scalar
+# names THIS reason it is stripped in the same statement, completing
+# the scalar's migration into the dict.
 SQL_TRIP = """
 INSERT INTO ingestion_state (key, value)
 VALUES ($1, jsonb_build_object(
     'trips', jsonb_build_object($2::text, $3::float8), 'armed', false))
-ON CONFLICT (key) DO UPDATE SET value = jsonb_set(
-  jsonb_set(ingestion_state.value, '{trips}',
-    jsonb_build_object($2::text, $3::float8)
-      || COALESCE(ingestion_state.value->'trips', '{}'::jsonb)),
-  '{armed}', 'false'::jsonb)
-WHERE COALESCE((ingestion_state.value->'trips_cleared'->>$2)::float8,
+ON CONFLICT (key) DO UPDATE SET value = (
+  SELECT CASE WHEN nv.v->>'tripped' = $2::text
+              THEN nv.v #- '{tripped}' ELSE nv.v END
+  FROM (SELECT CASE
+          WHEN jsonb_typeof(ingestion_state.value) <> 'object'
+          THEN jsonb_build_object(
+            'trips', jsonb_build_object($2::text, $3::float8),
+            'armed', false, 'state_repaired', true)
+          ELSE jsonb_set(
+            jsonb_set(ingestion_state.value, '{trips}',
+              jsonb_build_object($2::text, $3::float8)
+                || CASE WHEN jsonb_typeof(
+                          ingestion_state.value->'trips') = 'object'
+                        THEN ingestion_state.value->'trips'
+                        ELSE '{}'::jsonb END),
+            '{armed}', 'false'::jsonb) END AS v) nv)
+WHERE jsonb_typeof(ingestion_state.value) <> 'object'
+   OR COALESCE((ingestion_state.value->'trips_cleared'->>$2)::float8,
                -1) < $3::float8
 """
 # The operator clear: atomic removal of exactly one reason plus a
 # PER-REASON tombstone (round 6: the single trip_cleared_* slot forgot
 # every clear but the last, so a late-merging process resurrected an
-# already-cleared trip). The legacy 'tripped' scalar is removed so a
-# restart can never re-adopt it. Exposed via /api/admin/s1-clear-trip.
+# already-cleared trip). The legacy 'tripped' scalar is removed ONLY
+# when it names the cleared reason (fleet round 7: the unconditional
+# strip destroyed a DIFFERENT uncleared sticky trip's only durable
+# record — a clear must never clear more than the reason it names).
+# Non-object docs are refused (0 rows) rather than raising.
 SQL_CLEAR = """
 UPDATE ingestion_state SET value = jsonb_set(
-  (value #- ARRAY['trips', $2::text]) #- '{tripped}',
+  (CASE WHEN value->>'tripped' = $2::text
+        THEN value #- '{tripped}' ELSE value END)
+    #- ARRAY['trips', $2::text],
   '{trips_cleared}',
-  COALESCE(value->'trips_cleared', '{}'::jsonb)
+  (CASE WHEN jsonb_typeof(value->'trips_cleared') = 'object'
+        THEN value->'trips_cleared' ELSE '{}'::jsonb END)
     || jsonb_build_object($2::text,
          to_jsonb(extract(epoch from now())::float8)))
-WHERE key = $1
+WHERE key = $1 AND jsonb_typeof(value) = 'object'
 RETURNING value->'trips' AS trips, value->'trips_cleared' AS cleared
 """
 
@@ -310,6 +353,12 @@ class S1Emitter:
         if n:
             self.deltas[key] = self.deltas.get(key, 0) + n
 
+    def _purge_ts_cache(self, from_blk: int) -> None:
+        """A reorg at block B rewrites the whole suffix — drop every
+        cached timestamp at or above it (fleet round 7)."""
+        for k in [k for k in self._ts_cache if k[0] >= from_blk]:
+            self._ts_cache.pop(k, None)
+
     def _mark_counted(self, tx: str, wallet: str, asset: str) -> bool:
         """True the first time a (tx, wallet, asset) is handled. Lives
         OUTSIDE the pending entry (round 6): the per-entry set died at
@@ -347,6 +396,16 @@ class S1Emitter:
                 tx0 = str(log_entry.get("transactionHash", "")).lower()
                 if tx0 and self.pending.pop(tx0, None) is not None:
                     self.bump("s1.abstain.reorged")
+                # a removed notice rewrites the chain suffix — every
+                # cached block timestamp at or above it is now suspect
+                # (fleet round 7: a sibling tx borrowing a stale
+                # (blk, oldhash) entry skipped the reorg check)
+                try:
+                    rblk = int(str(log_entry.get("blockNumber", "0x0")), 16)
+                except (TypeError, ValueError):
+                    rblk = 0
+                if rblk:
+                    self._purge_ts_cache(rblk)
                 return
             tx = str(log_entry.get("transactionHash", "")).lower()
             if not tx:
@@ -470,18 +529,26 @@ class S1Emitter:
             cleared = tc if isinstance(tc, dict) else {}
             adopted: dict[str, float] = {}
             if isinstance(lt, dict):
-                # the trips dict is authoritative even when EMPTY — the
-                # legacy scalar is only for pre-round-6 docs, and
-                # falling back to it after a clear emptied the dict
-                # would resurrect the cleared trip at every boot (r6)
                 for k, v in lt.items():
                     at = v if isinstance(v, (int, float)) else 0.0
                     ca = cleared.get(str(k))
                     if isinstance(ca, (int, float)) and ca > at:
                         continue
                     adopted[str(k)] = at
-            elif doc.get("tripped"):
-                adopted = {self._trip_str(doc["tripped"]): 0.0}
+            # The legacy scalar folds IN, it never merely falls back
+            # (fleet round 7): the first round-6 trip created the dict
+            # and silently shadowed an uncleared pre-round-6 sticky
+            # trip out of existence. A live scalar is adopted alongside
+            # the dict — tombstone-aware — and queued for durable
+            # migration into the dict via _persist_trip.
+            legacy = doc.get("tripped")
+            if legacy:
+                reason = self._trip_str(legacy)
+                ca = cleared.get(reason)
+                if reason not in adopted and not (
+                        isinstance(ca, (int, float)) and ca > 0.0):
+                    adopted[reason] = 0.0
+                    self._unpersisted.add(reason)
             if adopted:
                 self.trips = adopted
                 self.armed = False
@@ -655,13 +722,20 @@ class S1Emitter:
                 continue
             cached = self._ts_cache.get((blk, want_hash))
             if cached is not None:
+                # a cached ts skipped the LIVE canonical-hash check, so
+                # the entry is marked: burn-in may use it freely, the
+                # ARMED path refuses it structurally (fleet round 7 —
+                # a sibling tx borrowing a stale entry after a deep
+                # reorg would emit a fill from an orphaned block)
                 e["ts"][blk] = cached
+                e["ts_cached"] = True
                 continue
             if not self._take_token():
                 break
             got = await self._resolve_block(blk, want_hash)
             if got == "reorged":
                 self.bump("s1.abstain.reorged")
+                self._purge_ts_cache(blk)
                 return True
             if got is None:
                 break
@@ -785,6 +859,13 @@ class S1Emitter:
                     self.bump("s1.would_emit")
                 emitted = True                # burn-in counts as handled
                 continue
+            if e.get("ts_cached"):
+                # ARMED emission never trusts a borrowed timestamp: the
+                # cache exists for the burn-in gauge's RPC economics;
+                # a real emission re-earns its reorg check or abstains
+                # (fleet round 7 — the poller carries what this skips)
+                self.bump("s1.abstain.ts_cached")
+                continue
             # CLAIM BEFORE ANY AWAIT and honor refusal: awaiting the
             # probe between the registry read and the claim opened a
             # window where the receipt path could claim-and-ingest a
@@ -878,10 +959,10 @@ class S1Emitter:
 
     # ── the corroboration sweep ─────────────────────────────────────
     async def _sweep_wallet(self, pool: Any, whale_id: int,
-                            address: str) -> None:
+                            address: str, salt: str) -> None:
         try:
             rows = await pool.fetch(SQL_SWEEP, float(CORROBORATE_S),
-                                    whale_id, timeout=10)
+                                    whale_id, salt, timeout=10)
         except Exception:  # noqa: BLE001
             self.bump("s1.errors")
             return
@@ -932,9 +1013,13 @@ class S1Emitter:
         self.bump("s1.uncorroborated", len(ok_judged))
 
     async def _corroboration_sweep(self, pool: Any) -> None:
+        # per-sweep rotation salt (round 7): every wallet and row gets
+        # an equal shot at each sweep — deferral can defer, not block
+        salt = str(int(time.time()))
         try:
             wallets = await pool.fetch(SQL_SWEEP_WALLETS,
-                                       float(CORROBORATE_S), timeout=10)
+                                       float(CORROBORATE_S), salt,
+                                       timeout=10)
             backlog = await pool.fetchval(SQL_BACKLOG,
                                           float(CORROBORATE_S), timeout=10)
         except Exception:  # noqa: BLE001
@@ -944,7 +1029,8 @@ class S1Emitter:
         for w in wallets or []:
             # per-wallet windows (round 6): a whale whose reconciler
             # sweep keeps failing defers only its OWN rows
-            await self._sweep_wallet(pool, w["whale_id"], w["address"])
+            await self._sweep_wallet(pool, w["whale_id"], w["address"],
+                                     salt)
 
     # ── flush (own state key; observability, not evidence) ──────────
     @staticmethod
@@ -983,9 +1069,12 @@ class S1Emitter:
         # tombstone releases stale in-memory copies in every process —
         # a second clear can no longer forget the first (r6).
         lt = doc.get("trips")
-        stored_trips = lt if isinstance(lt, dict) else (
-            {self._trip_str(doc["tripped"]): 0.0}
-            if doc.get("tripped") else {})
+        stored_trips = dict(lt) if isinstance(lt, dict) else {}
+        # the legacy scalar FOLDS IN beside the dict (fleet round 7:
+        # falling back only when the dict was absent let the first
+        # round-6 trip shadow an uncleared pre-round-6 trip)
+        if doc.get("tripped"):
+            stored_trips.setdefault(self._trip_str(doc["tripped"]), 0.0)
         tc = doc.get("trips_cleared")
         cleared = tc if isinstance(tc, dict) else {}
         merged_trips: dict[str, float] = {}

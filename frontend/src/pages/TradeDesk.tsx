@@ -1338,7 +1338,7 @@ export function TradeDesk() {
               <input
                 className="dx-amount-in" inputMode="decimal" placeholder="$0"
                 value={usd ? `$${usd}` : ''}
-                disabled={busy}
+                disabled={busy || limBusy}
                 onChange={(e) => setUsd(
                   // Comma is a decimal point, never deleted: stripping it
                   // turned "12,50" into a $1,250 request (audit 2026-08-21).
@@ -1347,12 +1347,12 @@ export function TradeDesk() {
               />
               <div className="dx-quick">
                 {[1, 20, 100].map((v) => (
-                  <button key={v} disabled={busy} onClick={() => setUsd(String((amount > 0 ? amount : 0) + v))}>
+                  <button key={v} disabled={busy || limBusy} onClick={() => setUsd(String((amount > 0 ? amount : 0) + v))}>
                     +${v}
                   </button>
                 ))}
                 <button
-                  disabled={busy || available == null}
+                  disabled={busy || limBusy || available == null}
                   onClick={() => available != null && setUsd(String(Math.floor(Math.min(available, blotter?.max_per_order ?? available))))}
                 >Max</button>
               </div>

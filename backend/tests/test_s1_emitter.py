@@ -786,7 +786,7 @@ class _SweepPool(_Pool):
         self.marked = []
 
     async def fetch(self, sql, *a, timeout=None):
-        if "min(t.detected_at)" in sql:
+        if "GROUP BY w.id" in sql:
             return self.wallets
         if isinstance(self.sweep_rows, dict):
             return self.sweep_rows.get(a[1], [])
@@ -850,7 +850,9 @@ def test_recon_coverage_requires_depth_and_lag(st):
     (the depth-500 truncation and the t0+30s run were both counted as
     coverage and falsely tripped correct emissions)."""
     q = s1.SQL_RECON_SINCE
-    assert "make_interval(secs => $4)" in q, "venue-lag margin on start"
+    assert "$1::timestamptz + make_interval(secs => $4)" in q, \
+        "round 7 CRITICAL: untyped $1 resolved as interval at prepare " \
+        "and the statement could never execute"
     assert "'cov:' || $2" in q
     assert "'complete'" in q and "'oldest'" in q
     # and the reconciler records that evidence
@@ -859,8 +861,11 @@ def test_recon_coverage_requires_depth_and_lag(st):
     src = inspect.getsource(rec)
     assert '"cov:" + whale["address"]' in src
     assert '"complete": complete, "oldest": oldest_ts' in src
-    assert src.count("complete = True") == 2, \
+    assert src.count("complete = True") == 1, \
         "complete only when the feed was exhausted inside the depth"
+    assert "complete = offset > 0" in src, \
+        "round 7: an empty FIRST page is venue degradation, not " \
+        "'feed exhausted' — it must never brand a fill uncorroborated"
 
 
 def test_one_deferring_wallet_cannot_starve_another(st):
@@ -1171,6 +1176,104 @@ def test_head_poll_fires_only_when_the_ws_goes_quiet(st):
     assert st._should_poll_head(now) is True
     st.head = BLK + s1.CONFIRM_DEPTH + 1
     assert st._should_poll_head(now) is False, "nobody is waiting"
+
+
+# ── fleet round 7 pins ──────────────────────────────────────────────
+def test_legacy_scalar_folds_beside_the_dict(st):
+    """fleet r7 (major): the first round-6 trip created the trips dict
+    and the dict-is-authoritative rule silently shadowed an uncleared
+    pre-round-6 scalar trip out of existence — the fleet re-armed past
+    it. The scalar now folds IN beside the dict and is queued for
+    durable migration."""
+    now = time.time()
+    st._state_loaded = False
+    doc = {"counters": {}, "tripped": "key_selfcheck",
+           "trips": {"uncorroborated:55": now - 100}}
+    asyncio.run(st._load_state(_Pool(stored=json.dumps(doc)), now))
+    assert set(st.trips) == {"key_selfcheck", "uncorroborated:55"}
+    assert st.armed is False
+    assert "key_selfcheck" in st._unpersisted, \
+        "the scalar migrates into the dict via the next persist"
+    # a tombstoned scalar stays released
+    st2 = S1Emitter()
+    st2._state_loaded = False
+    doc2 = {"tripped": "key_selfcheck", "trips": {},
+            "trips_cleared": {"key_selfcheck": now}}
+    asyncio.run(st2._load_state(_Pool(stored=json.dumps(doc2)), now))
+    assert st2.trips == {}
+
+
+def test_flush_folds_the_scalar_beside_the_dict(st):
+    now = time.time()
+    pool = _Pool(stored=json.dumps({
+        "counters": {}, "tripped": "key_selfcheck",
+        "trips": {"uncorroborated:7": now - 200}}))
+    asyncio.run(st._flush(pool, now))
+    assert set(st.trips) == {"key_selfcheck", "uncorroborated:7"}
+
+
+def test_clear_strips_the_scalar_only_for_its_own_reason():
+    """fleet r7 (major): SQL_CLEAR's unconditional #- '{tripped}' let a
+    clear for reason A destroy uncleared reason B's only durable
+    record. The strip is now scoped to equality; behavior itself is
+    pinned end-to-end in test_s1_sql_real_pg."""
+    assert "WHEN value->>'tripped' = $2::text" in s1.SQL_CLEAR
+    assert "jsonb_typeof(value) = 'object'" in s1.SQL_CLEAR
+
+
+def test_armed_path_refuses_a_borrowed_timestamp(st, monkeypatch):
+    """fleet r7 (major): a cached (block, hash) timestamp skipped the
+    live reorg check, so a sibling tx after a deep reorg could emit a
+    fill from an orphaned block. Burn-in may borrow (gauge economics);
+    an ARMED emission re-earns its check or abstains."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    st._ts_cache[(BLK, "0x" + "77" * 32)] = TS0
+    _observe_all(st, lst, [MAKER_EV])
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, st.pending[TX],
+                                       time.time()))
+    assert done is True and calls == []
+    assert st.deltas.get("s1.abstain.ts_cached") == 1
+    assert st.deltas.get("s1.rpc_calls") is None, "the cache was used"
+    # burn-in on identical traffic still counts the fill
+    st2 = S1Emitter()
+    st2.head = BLK + s1.CONFIRM_DEPTH + 1
+    st2.http_url = "http://rpc.test"
+    st2._state_loaded = True
+    st2.cert_green = True
+    _wire(st2, lst)
+    st2._ts_cache[(BLK, "0x" + "77" * 32)] = TS0
+    _observe_all(st2, lst, [MAKER_EV])
+    asyncio.run(st2._finalize_tx(_Pool(), TX, st2.pending[TX],
+                                 time.time()))
+    assert st2.deltas.get("s1.would_emit") == 1
+
+
+def test_removed_notice_purges_the_cache_suffix(st):
+    """fleet r7: a reorg at block B rewrites the whole suffix — every
+    cached timestamp at or above B is dropped the moment any reorg
+    signal arrives."""
+    lst = _Listener(roster={})
+    h = "0xabc"
+    st._ts_cache[(99, h)] = 1
+    st._ts_cache[(100, h)] = 2
+    st._ts_cache[(101, h)] = 3
+    st.observe(lst, dict(MAKER_EV, removed=True,
+                         blockNumber=hex(100)))
+    assert set(st._ts_cache) == {(99, h)}
+
+
+def test_sweep_windows_rotate_instead_of_starving():
+    """fleet r7 (major x2): oldest-first ordering let 20 deferring
+    wallets own the wallet list, and a wallet's own 10 oldest
+    deferring rows own its window, forever. Both windows now order by
+    a per-sweep salted hash — deferral defers, it cannot block."""
+    assert "ORDER BY md5(w.address || $2::text)" in s1.SQL_SWEEP_WALLETS
+    assert "ORDER BY md5(t.id::text || $3::text)" in s1.SQL_SWEEP
+    assert "ORDER BY oldest" not in s1.SQL_SWEEP_WALLETS
+    assert "ORDER BY t.detected_at" not in s1.SQL_SWEEP
 
 
 def test_observe_stamps_ws_head_advances(st):
