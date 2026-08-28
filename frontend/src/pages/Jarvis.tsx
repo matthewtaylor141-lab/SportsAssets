@@ -34,17 +34,35 @@ interface JarvisConfig {
   voiceSpeed: number
 }
 
+// v9 rename (owner order 2026-08-28): MERIDIAN is the product name.
+// Config lives under meridian_*; legacy jarvis_* values migrate on
+// first read and are cleaned up on the next save.
 const LS = {
-  anthropic: 'jarvis_anthropic_key',
-  eleven: 'jarvis_eleven_key',
-  voice: 'jarvis_eleven_voice',
-  browserVoice: 'jarvis_browser_voice',
-  admin: 'jarvis_admin_token',
-  speed: 'jarvis_voice_speed',
+  anthropic: 'meridian_anthropic_key',
+  eleven: 'meridian_eleven_key',
+  voice: 'meridian_eleven_voice',
+  browserVoice: 'meridian_browser_voice',
+  admin: 'meridian_admin_token',
+  speed: 'meridian_voice_speed',
+}
+const LS_LEGACY: Record<string, string> = {
+  meridian_anthropic_key: 'jarvis_anthropic_key',
+  meridian_eleven_key: 'jarvis_eleven_key',
+  meridian_eleven_voice: 'jarvis_eleven_voice',
+  meridian_browser_voice: 'jarvis_browser_voice',
+  meridian_admin_token: 'jarvis_admin_token',
+  meridian_voice_speed: 'jarvis_voice_speed',
 }
 
 function loadConfig(): JarvisConfig {
-  const g = (k: string) => { try { return localStorage.getItem(k) || '' } catch { return '' } }
+  const g = (k: string) => {
+    try {
+      const v = localStorage.getItem(k)
+      if (v) return v
+      const legacy = LS_LEGACY[k]
+      return (legacy && localStorage.getItem(legacy)) || ''
+    } catch { return '' }
+  }
   let admin = g(LS.admin)
   if (!admin) { try { admin = sessionStorage.getItem('sa_admin_token') || '' } catch { /* noop */ } }
   // Stored old-default voice migrates to the owner's chosen voice.
@@ -72,6 +90,10 @@ function saveConfig(c: JarvisConfig): void {
     localStorage.setItem(LS.admin, c.adminToken)
     // Mirror the admin token where the Desk/Ops pages already look for it.
     if (c.adminToken) sessionStorage.setItem('sa_admin_token', c.adminToken)
+    // The rename is complete once the legacy keys are gone.
+    for (const legacy of Object.values(LS_LEGACY)) {
+      localStorage.removeItem(legacy)
+    }
   } catch { /* private mode — session-only config */ }
 }
 
@@ -284,6 +306,105 @@ const WAKE = /\b(meridian|jarvis|claude)\b/i
 
 /* ── the page ────────────────────────────────────────────────────────── */
 
+/* ── mission-control HUD (v9, owner order 2026-08-28) ────────────────
+ * Three quiet panels on the stage's left edge: the S1 chain emitter,
+ * copy latency, and the shadow certification window — the numbers the
+ * flip decision actually reads, live in the room. Real data only;
+ * panels render nothing while the telemetry is absent. */
+
+interface HubTelemetry {
+  s1: {
+    armed: boolean; trips: Record<string, number>
+    cert_reason: string | null
+    emitted: number; would_emit: number
+    confirmed: number; uncorroborated: number
+    beat?: Record<string, unknown> | null
+  }
+  shadow: {
+    window_age_h: number | null; health_age_h: number | null
+    window_target_h: number
+  }
+  latency: {
+    n_24h: number; p50_24h_s: number | null
+    n_7d: number; p50_7d_s: number | null; p90_7d_s: number | null
+  }
+  today: { settled: number; wins: number; losses: number; pnl: number | null }
+  open: { count: number; stake: number | null }
+  committed_usd: number | null
+  epoch: string
+}
+
+const hudSecs = (v: number | null | undefined) =>
+  v == null ? '—' : v < 90 ? `${v.toFixed(1)}s` : `${(v / 60).toFixed(1)}m`
+
+function MissionHud({ hub }: { hub: HubTelemetry }) {
+  const trips = Object.keys(hub.s1.trips || {})
+  const winPct = hub.shadow.window_age_h != null
+    ? Math.min(100, (hub.shadow.window_age_h / hub.shadow.window_target_h) * 100)
+    : 0
+  return (
+    <aside className="jv-mhud" aria-label="Mission telemetry">
+      <div className={`jv-mhud-panel${trips.length ? ' jv-mhud-alert' : ''}`}>
+        <span className="jv-mhud-title">S1 · chain emitter</span>
+        <div className="jv-mhud-row">
+          <span>{hub.s1.armed ? 'ARMED' : 'burn-in'}</span>
+          <span className={hub.s1.armed ? 'jv-mhud-gold' : ''}>
+            {hub.s1.cert_reason || '—'}
+          </span>
+        </div>
+        <div className="jv-mhud-row">
+          <span>would emit</span><span>{hub.s1.would_emit}</span>
+        </div>
+        <div className="jv-mhud-row">
+          <span>emitted</span><span>{hub.s1.emitted}</span>
+        </div>
+        <div className="jv-mhud-row">
+          <span>corroborated</span>
+          <span>{hub.s1.confirmed}{hub.s1.uncorroborated
+            ? ` · ${hub.s1.uncorroborated} refuted` : ''}</span>
+        </div>
+        {trips.length > 0 && (
+          <div className="jv-mhud-trip">STICKY TRIP: {trips[0]}</div>
+        )}
+      </div>
+      <div className="jv-mhud-panel">
+        <span className="jv-mhud-title">Copy latency</span>
+        <div className="jv-mhud-row">
+          <span>p50 · 24h</span>
+          <span className="jv-mhud-cyan">{hudSecs(hub.latency.p50_24h_s)}</span>
+        </div>
+        <div className="jv-mhud-row">
+          <span>p50 · 7d</span>
+          <span className="jv-mhud-cyan">{hudSecs(hub.latency.p50_7d_s)}</span>
+        </div>
+        <div className="jv-mhud-row">
+          <span>p90 · 7d</span>
+          <span>{hudSecs(hub.latency.p90_7d_s)}</span>
+        </div>
+        <div className="jv-mhud-row">
+          <span>fills 24h</span><span>{hub.latency.n_24h}</span>
+        </div>
+      </div>
+      <div className="jv-mhud-panel">
+        <span className="jv-mhud-title">Shadow certification</span>
+        <div className="jv-mhud-bar" role="img"
+          aria-label={`window ${winPct.toFixed(0)}% of 7 days`}>
+          <i style={{ width: `${winPct}%` }} />
+        </div>
+        <div className="jv-mhud-row">
+          <span>window</span>
+          <span>{hub.shadow.window_age_h != null
+            ? `${(hub.shadow.window_age_h / 24).toFixed(1)}d / 7d` : '—'}</span>
+        </div>
+        <div className="jv-mhud-row">
+          <span>open book</span>
+          <span>{hub.open.count} · ${(hub.open.stake ?? 0).toFixed(0)}</span>
+        </div>
+      </div>
+    </aside>
+  )
+}
+
 export default function Jarvis() {
   const [cfg, setCfg] = useState<JarvisConfig>(loadConfig)
   const cfgRef = useRef(cfg)
@@ -324,6 +445,8 @@ export default function Jarvis() {
   })
   /** Open positions with unrealized P&L, cycled by the exposure ribbon. */
   const [exposure, setExposure] = useState<string[]>([])
+  /** Mission-control HUD (v9): S1 / latency / shadow, from one poll. */
+  const [hub, setHub] = useState<HubTelemetry | null>(null)
   const [journal, setJournal] = useState<{ entry: string; mood: string; at: string } | null>(null)
   /** POCKET MODE: standalone PWA or small viewport → immersive layout. */
   const [pocket, setPocket] = useState(detectPocket)
@@ -865,10 +988,15 @@ export default function Jarvis() {
     let dead = false
     const load = async () => {
       const token = cfgRef.current.adminToken
-      const [today, live, engine, accounts] = await Promise.all([
+      const [today, live, engine, hubT, accounts] = await Promise.all([
         api<{ pnl: number; settled: number; wins: number }>('/api/today-live').catch(() => null),
         api<{ enabled: boolean; paused: boolean }>('/api/live-status').catch(() => null),
         api<{ beat_at?: string }>('/api/engine/status').catch(() => null),
+        // Mission HUD (v9): S1 + latency + shadow in one DB-only poll.
+        token
+          ? adminApi<HubTelemetry>('/api/admin/hub-telemetry', token)
+            .catch(() => null)
+          : Promise.resolve(null),
         // Account awareness: with a desk-capable token, "how much cash do
         // we have" answers straight from the snapshot — zero tool calls.
         token
@@ -902,11 +1030,14 @@ export default function Jarvis() {
         if (handsFreeRef.current && mouth && !mouth.speaking) mouth.speak(line)
       }
       if (today) prevSettledRef.current = today.settled
+      setHub(hubT)
       snapshotRef.current = [
         today && `today: ${today.pnl >= 0 ? '+' : ''}$${today.pnl.toFixed(0)} on ${today.settled} settled (${today.wins}W-${today.settled - today.wins}L)`,
         accounts?.totals && `accounts (both venues): total value $${accounts.totals.value.toFixed(0)}, cash $${accounts.totals.cash.toFixed(0)}, unrealized ${accounts.totals.unrealized >= 0 ? '+' : ''}$${accounts.totals.unrealized.toFixed(0)}`,
         live && `copy engine: ${live.paused ? 'PAUSED' : live.enabled ? 'armed' : 'off'}`,
         engine?.beat_at && `edge engine heartbeat: ${Math.max(0, Math.round((Date.now() - new Date(engine.beat_at).getTime()) / 1000))}s ago`,
+        hubT && `S1 emitter: ${hubT.s1.armed ? 'ARMED' : 'burn-in'} (cert ${hubT.s1.cert_reason || 'unknown'}, would_emit ${hubT.s1.would_emit}, emitted ${hubT.s1.emitted}${Object.keys(hubT.s1.trips || {}).length ? `, STICKY TRIPS: ${Object.keys(hubT.s1.trips).join(', ')}` : ''})`,
+        hubT && `copy latency: p50 ${hubT.latency.p50_24h_s != null ? hubT.latency.p50_24h_s.toFixed(1) + 's' : 'n/a'} over ${hubT.latency.n_24h} fills (24h), p50 ${hubT.latency.p50_7d_s != null ? hubT.latency.p50_7d_s.toFixed(1) + 's' : 'n/a'} / p90 ${hubT.latency.p90_7d_s != null ? hubT.latency.p90_7d_s.toFixed(1) + 's' : 'n/a'} (7d)`,
       ].filter(Boolean).join(' | ')
       // EXPOSURE RIBBON: every open position with its unrealized P&L
       // cycles under the core — the book stays in the room even when
@@ -1069,9 +1200,23 @@ export default function Jarvis() {
                         getLevel={() => mouthRef.current?.level() ?? 0} />
           <VoiceArc active={speaking}
                     getLevel={() => mouthRef.current?.level() ?? 0} />
+          {/* v9 today-arc: the day's record drawn around the core —
+              gold sweep = wins share of settled. Real numbers only. */}
+          {pills.settled != null && pills.settled > 0 && (() => {
+            const C = 2 * Math.PI * 96
+            const frac = Math.max(0, Math.min(1, (pills.wins ?? 0) / pills.settled))
+            return (
+              <svg className="jv-today-arc" viewBox="0 0 200 200" aria-hidden>
+                <circle className="jv-arc-track" cx="100" cy="100" r="96" />
+                <circle className="jv-arc-fill" cx="100" cy="100" r="96"
+                  strokeDasharray={`${C * frac} ${C}`} />
+              </svg>
+            )
+          })()}
           <div className={`jv-state jv-state-${avatarState}`}>{stateLabel}</div>
           <BootSequence />
         </div>
+        {hub && !pocket && panels.length === 0 && <MissionHud hub={hub} />}
         <TelemetryRibbon items={ribbon} />
         {exposure.length > 0 && (
           <div className="jv-exposure" aria-hidden>

@@ -1313,3 +1313,76 @@
   margin-right: 6px;
   vertical-align: -1px;
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   v9 — mission-control HUD + today-arc (owner order 2026-08-28).
+   Appended layer, same discipline as the site theme. ═══════════════ */
+
+.jv-mhud {
+  position: fixed; left: 18px; top: 50%; transform: translateY(-50%);
+  z-index: 3; display: flex; flex-direction: column; gap: 10px;
+  width: 216px; pointer-events: none;
+  animation: jvMHudIn 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes jvMHudIn {
+  from { opacity: 0; transform: translate(-14px, -50%); }
+  to { opacity: 1; transform: translate(0, -50%); }
+}
+.jv-mhud-panel {
+  border: 1px solid var(--jv-border);
+  border-radius: 12px; padding: 10px 12px;
+  background: rgba(8, 13, 20, 0.62);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+}
+.jv-mhud-panel.jv-mhud-alert {
+  border-color: rgba(255, 107, 107, 0.5);
+  box-shadow: 0 0 18px rgba(255, 107, 107, 0.12);
+}
+.jv-mhud-title {
+  display: block; font-size: 9.5px; font-weight: 700;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: rgba(232, 200, 119, 0.85); margin-bottom: 6px;
+}
+.jv-mhud-row {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 11px; line-height: 1.7; color: rgba(214, 226, 238, 0.78);
+  font-variant-numeric: tabular-nums;
+}
+.jv-mhud-row > span:last-child { color: rgba(232, 240, 248, 0.95); }
+.jv-mhud-gold { color: #e8c877 !important; }
+.jv-mhud-cyan { color: #69e0ff !important; }
+.jv-mhud-trip {
+  margin-top: 6px; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.06em; color: #ff8484;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.jv-mhud-bar {
+  height: 4px; border-radius: 3px; overflow: hidden;
+  background: rgba(255, 255, 255, 0.08); margin: 2px 0 6px;
+}
+.jv-mhud-bar i {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, #69e0ff, #e8c877);
+  transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* The HUD yields to narrow stages and pocket mode. */
+@media (max-width: 1080px) { .jv-mhud { display: none; } }
+.jv-pocket .jv-mhud { display: none; }
+
+/* Today-arc: the day's W share, drawn just outside the HUD ring —
+   sized exactly like the ring SVG so it hugs the orb, then a touch
+   larger to sit outside the ring's outer circle. */
+.jv-today-arc {
+  position: absolute; left: 50%; top: 50%;
+  width: min(60vmin, 556px); height: min(60vmin, 556px);
+  transform: translate(-50%, -50%) rotate(-90deg);
+  pointer-events: none; z-index: 1;
+}
+.jv-arc-track {
+  fill: none; stroke: rgba(255, 255, 255, 0.06); stroke-width: 2.5;
+}
+.jv-arc-fill {
+  fill: none; stroke: rgba(232, 200, 119, 0.75); stroke-width: 2.5;
+  stroke-linecap: round; filter: drop-shadow(0 0 6px rgba(232, 200, 119, 0.4));
+  transition: stroke-dasharray 1.1s cubic-bezier(0.22, 1, 0.36, 1);
+}
