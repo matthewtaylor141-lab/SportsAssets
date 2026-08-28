@@ -16,10 +16,16 @@
   --ink2v: #6b7671;
   --ink3: #454e4a;
 
-  /* command color + informational cyan */
-  --amber: #ffb224;
-  --amber-hot: #ffd25e;
-  --amber-dim: rgba(255, 178, 36, 0.14);
+  /* ── BRAND (official logo 2026-08-28): Bettor Token blue ── */
+  --brand: #0066ff;
+  --brand-hot: #4d94ff;
+  --brand-dim: rgba(0, 102, 255, 0.16);
+  --brand-deep: #0a2d66;
+
+  /* command color rides the brand; cyan stays informational */
+  --amber: var(--brand);
+  --amber-hot: var(--brand-hot);
+  --amber-dim: var(--brand-dim);
   --cyan: #45c4ff;
 
   /* semantic P&L */
@@ -31,8 +37,8 @@
   --pm: #5b8cff; --kalshi: #21c9a8;
 
   /* categorical (whale series / awake lamps) */
-  --cat1: #ffb224; --cat2: #45c4ff; --cat3: #a78bfa;
-  --cat4: #f472b6; --cat5: #a3e635; --cat6: #fb923c;
+  --cat1: #4d94ff; --cat2: #a78bfa; --cat3: #f472b6;
+  --cat4: #a3e635; --cat5: #fb923c; --cat6: #2dd4bf;
 
   /* type registers */
   --font-data: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
@@ -85,12 +91,12 @@
   --ease-snap: cubic-bezier(0.2, 0.9, 0.27, 1);
   --ease-spring: cubic-bezier(0.34, 1.4, 0.44, 1);
   --glow-accent: none; --glow-good: none;
-  --ring-a: rgba(255, 178, 36, 0.35);
+  --ring-a: rgba(0, 102, 255, 0.4);
   font-family: var(--font-prose);
 }
 
 * { box-sizing: border-box; }
-::selection { background: rgba(255, 178, 36, 0.28); }
+::selection { background: rgba(0, 102, 255, 0.30); }
 
 body {
   margin: 0;
@@ -111,7 +117,7 @@ body::before {
 body::after {
   content: ''; position: fixed; left: 0; right: 0; top: 0; height: 220px;
   pointer-events: none; z-index: 0;
-  background: radial-gradient(700px 220px at 50% -80px, rgba(255, 178, 36, 0.05), transparent);
+  background: radial-gradient(700px 220px at 50% -80px, rgba(0, 102, 255, 0.07), transparent);
 }
 
 ::-webkit-scrollbar { height: 8px; width: 10px; }
@@ -1723,17 +1729,15 @@ body {
    branded, cinematic). Same override-layer discipline as v3–v7:
    appended, cascade-winning, reversible as one block.
 
-   The signature move: the MERIDIAN wall's palette — gold for money,
-   cyan for live data — is promoted from /wall into the whole app.
-   Gold is a SIGNATURE, not a paint bucket: the wordmark, the live
-   pulse, hero money numbers, active-state underlines. The dataviz
-   categorical palette (--s1..--s8) is untouched — chart series never
-   rebrand. ══════════════════════════════════════════════════════════ */
+   The signature: the OFFICIAL Bettor Token blue (logo 2026-08-28)
+   carries money, brand, and command; cyan carries live data. The
+   dataviz categorical palette (--s1..--s8) is untouched — chart
+   series never rebrand. ═════════════════════════════════════════ */
 
 :root {
-  --bt-gold: #e8c877;          /* money, brand, headline numbers */
-  --bt-gold-2: #f2dfae;        /* gold highlight */
-  --bt-gold-dim: rgba(232, 200, 119, 0.14);
+  --bt-gold: #4d94ff;          /* brand-lit money & headline numbers */
+  --bt-gold-2: #8ab8ff;        /* highlight */
+  --bt-gold-dim: rgba(0, 102, 255, 0.16);
   --bt-cyan: #69e0ff;          /* live data, telemetry, latency */
   --bt-cyan-dim: rgba(105, 224, 255, 0.12);
   --ease-swift: cubic-bezier(0.22, 1, 0.36, 1);
@@ -1743,7 +1747,7 @@ body {
 /* Wordmark: TOKEN turns gold — the one identity move (wall parity). */
 .nav .bt-brand span,
 .bt-brand span {
-  background: linear-gradient(94deg, #d9b45c, var(--bt-gold) 45%, var(--bt-gold-2) 85%);
+  background: linear-gradient(94deg, #0066ff, var(--bt-gold) 45%, var(--bt-gold-2) 85%);
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 
@@ -1756,16 +1760,15 @@ body {
 /* Page wash: gold-warmed top light instead of the blue-only wash. */
 body {
   background:
-    linear-gradient(180deg, rgba(232, 200, 119, 0.045), transparent 320px),
-    radial-gradient(1100px 380px at 72% -180px, rgba(105, 224, 255, 0.05), transparent),
-    radial-gradient(1200px 400px at 30% -200px, rgba(57, 135, 229, 0.05), transparent),
+    linear-gradient(180deg, rgba(0, 102, 255, 0.05), transparent 320px),
+    radial-gradient(1100px 380px at 72% -180px, rgba(105, 224, 255, 0.04), transparent),
     var(--page);
 }
 
 /* Nav active state carries the signature. */
 .nav a.tab.active {
-  border-color: rgba(232, 200, 119, 0.35);
-  box-shadow: inset 0 -2px 0 rgba(232, 200, 119, 0.55),
+  border-color: rgba(0, 102, 255, 0.4);
+  box-shadow: inset 0 -2px 0 rgba(0, 102, 255, 0.6),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 .tabbar-item.active { color: var(--bt-gold); }
@@ -1782,9 +1785,9 @@ body {
 }
 .pulse-dot.gold { background: var(--bt-gold); animation-name: v9-sonar-g; }
 @keyframes v9-sonar-g {
-  0% { box-shadow: 0 0 0 0 rgba(232, 200, 119, 0.45); }
-  70% { box-shadow: 0 0 0 9px rgba(232, 200, 119, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(232, 200, 119, 0); }
+  0% { box-shadow: 0 0 0 0 rgba(0, 102, 255, 0.45); }
+  70% { box-shadow: 0 0 0 9px rgba(0, 102, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 102, 255, 0); }
 }
 
 /* Money numbers in heroes wear the gold; data chips wear cyan. */
@@ -1799,7 +1802,7 @@ body {
 .v9-chip.lat { color: var(--bt-cyan); border-color: rgba(105, 224, 255, 0.25); background: var(--bt-cyan-dim); }
 .v9-chip.venue-pm { color: #8fb7ff; }
 .v9-chip.venue-k { color: #57d9a3; }
-.v9-chip.gold { color: var(--bt-gold); border-color: rgba(232, 200, 119, 0.3); background: var(--bt-gold-dim); }
+.v9-chip.gold { color: var(--bt-gold); border-color: rgba(0, 102, 255, 0.35); background: var(--bt-gold-dim); }
 
 /* Skeleton shimmer for anything still loading — no more blank cards. */
 @keyframes v9-shimmer { from { background-position: -320px 0; } to { background-position: 320px 0; } }
@@ -1843,15 +1846,15 @@ h2::after {
   font-size: 12px; font-weight: 650; padding: 6px 12px; border-radius: 8px;
   border: 1px solid var(--border); background: var(--surface); color: var(--ink-2);
 }
-.rpt-dl a:hover { color: var(--bt-gold); border-color: rgba(232, 200, 119, 0.35); }
+.rpt-dl a:hover { color: var(--bt-gold); border-color: rgba(0, 102, 255, 0.4); }
 .rpt-whale-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .rpt-wc {
   border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--surface); padding: 12px 14px; cursor: pointer;
   transition: transform 0.16s var(--ease-swift), border-color 0.16s;
 }
-.rpt-wc:hover { transform: translateY(-2px); border-color: rgba(232, 200, 119, 0.3); }
-.rpt-wc.sel { border-color: var(--bt-gold); box-shadow: 0 0 0 1px rgba(232, 200, 119, 0.35); }
+.rpt-wc:hover { transform: translateY(-2px); border-color: rgba(0, 102, 255, 0.35); }
+.rpt-wc.sel { border-color: var(--bt-gold); box-shadow: 0 0 0 1px rgba(0, 102, 255, 0.4); }
 .rpt-wc .n { font-family: 'Space Grotesk', 'Inter', sans-serif; font-weight: 700; font-size: 14.5px; }
 .rpt-wc .line { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 5px; font-variant-numeric: tabular-nums; }
 .rpt-pivot td.num, .rpt-pivot th.num { text-align: right; }
@@ -1878,7 +1881,7 @@ h2::after {
 
 /* Hero lockup: TOKEN is gold everywhere — one wordmark, one identity. */
 .tr-name span {
-  background: linear-gradient(94deg, #d9b45c, var(--bt-gold) 45%, var(--bt-gold-2) 85%);
+  background: linear-gradient(94deg, #0066ff, var(--bt-gold) 45%, var(--bt-gold-2) 85%);
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 
@@ -1981,11 +1984,11 @@ table.data tbody tr:hover { background: var(--bg3); box-shadow: inset 2px 0 0 va
   transition: background var(--dur-hover) ease-out, color var(--dur-hover) ease-out;
 }
 .btn:hover, .btn.primary:hover { background: var(--bg3); color: var(--ink0); filter: none; border-color: var(--line-strong); }
-.btn.primary { color: var(--amber); border-color: rgba(255, 178, 36, 0.4); }
+.btn.primary { color: var(--brand-hot); border-color: rgba(0, 102, 255, 0.45); }
 .btn.danger, .btn-danger-outline { color: var(--neg); border-color: rgba(255, 92, 92, 0.4); background: transparent; }
 .btn-money {
   font: 600 11.5px/1 var(--font-data); letter-spacing: 0.06em; text-transform: uppercase;
-  background: var(--amber); color: #1a1204; border: none; border-radius: var(--r-ctl);
+  background: var(--brand); color: #fff; border: none; border-radius: var(--r-ctl);
   padding: 10px 16px; min-height: 36px; cursor: pointer;
 }
 .btn-money:hover { background: var(--amber-hot); }
@@ -2215,8 +2218,24 @@ table.data tbody tr:hover { background: var(--bg3); box-shadow: inset 2px 0 0 va
 .ac-cashout {
   font: 600 11px/1 var(--font-data) !important; letter-spacing: 0.06em;
   text-transform: uppercase;
-  background: var(--amber) !important; color: #1a1204 !important;
+  background: var(--brand) !important; color: #fff !important;
   border: none !important; border-radius: var(--r-ctl);
   padding: 8px 12px; cursor: pointer;
 }
 .ac-cashout:hover { background: var(--amber-hot) !important; }
+
+
+/* ── BETTOR TOKEN brand lockup (official logo 2026-08-28) ── */
+.bt-brand {
+  display: inline-flex; align-items: center; gap: 8px;
+  font: 700 13px/1 var(--font-data); letter-spacing: 0.14em;
+  color: var(--ink0); white-space: nowrap;
+}
+.bt-brand span { color: var(--brand); }
+.bt-mark-img { filter: drop-shadow(0 0 6px rgba(0, 102, 255, 0.35)); }
+.tr-bot-mark {
+  display: grid; place-items: center; width: 46px; height: 46px;
+  background: var(--bg2); border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.tr-name span { color: var(--brand); }

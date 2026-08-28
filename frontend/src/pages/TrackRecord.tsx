@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Quote } from '../components/Quote'
 import { Lamp } from '../components/Lamp'
+import { BrandMark } from '../components/Brand'
 import { useLiveFeed } from '../lib/sse'
 import { EmptyState } from '../components/EmptyState'
 import { PnlCalendar } from '../components/PnlCalendar'
@@ -402,9 +403,9 @@ export function TrackRecord() {
       <div className="tr-hero">
         <div className="tr-hero-head">
           <div className="tr-ident">
-            <span className="tr-bot">🐋</span>
+            <span className="tr-bot tr-bot-mark"><BrandMark size={30} /></span>
             <div>
-              <div className="tr-name">BETTOR<span>TOKEN</span></div>
+              <div className="tr-name">BETTOR<span>&nbsp;TOKEN</span></div>
               <div className="tr-sub muted">
                 whale copy portfolio · live from the order ledger · window {windowStart} → today
               </div>

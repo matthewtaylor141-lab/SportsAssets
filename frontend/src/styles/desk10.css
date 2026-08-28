@@ -1269,9 +1269,9 @@
   display: inline-flex; align-items: center; gap: 6px;
   max-width: 340px; overflow: hidden; white-space: nowrap;
   text-overflow: ellipsis; font-size: 10.5px; letter-spacing: .02em;
-  color: #ffd25e; opacity: .95;
+  color: #4d94ff; opacity: .95;
 }
-.dxp--kx .dxp-tape { color: #8a6d1a; }
+.dxp--kx .dxp-tape { color: #0052cc; }
 .dxp-tape i {
   width: 6px; height: 6px; border-radius: 50%; flex: none;
   background: currentColor; animation: dxp-tape-pulse 1.4s ease-in-out infinite;

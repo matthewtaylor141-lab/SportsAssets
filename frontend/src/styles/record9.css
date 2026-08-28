@@ -11,7 +11,7 @@
 .tr-epoch-line b { color: var(--ink-2); font-weight: 650; }
 .tr-epoch .tr-chipbtn { margin-left: auto; }
 .tr-epoch .tr-chipbtn.on {
-  background: var(--bt-gold-dim); border-color: rgba(232, 200, 119, 0.4);
+  background: var(--bt-gold-dim); border-color: rgba(0, 102, 255, 0.4);
   color: var(--bt-gold); box-shadow: none;
 }
 
@@ -19,7 +19,7 @@
    same clip + keyframes as theme.css, gold stops instead of green.
    Losses stay red: gold never paints a negative number. ─────────── */
 .tr-stat-main .tr-grad.v9-money.pos {
-  background: linear-gradient(100deg, #d9b45c, var(--bt-gold) 40%, var(--bt-gold-2) 60%, #d9b45c);
+  background: linear-gradient(100deg, #0066ff, var(--bt-gold) 40%, var(--bt-gold-2) 60%, #0066ff);
   background-size: 220% 100%;
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
