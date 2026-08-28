@@ -257,30 +257,32 @@ function WhalesCard({ c }: { c: CopiesRecord }) {
           {fmtSignedUsd(c.total.pnl)}
         </span>
       </div>
-      <div className="tr-whales">
+      <div className="v13-whales">
         {c.by_whale.map((w, i) => (
-          <div key={w.whale} className="tr-whale-row">
-            <span className="tr-whale-name" style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-              {awake.has(w.whale.toLowerCase()) && (
-                <Lamp mode="breathe" color={CAT_COLORS[i % CAT_COLORS.length]} />
-              )}
-              {w.whale}
-            </span>
-            <span className="muted mono">{w.wins}W–{w.losses}L</span>
-            <span className="muted mono">{fmtUsd(w.staked, 0)} staked</span>
-            <div className="tr-sport-bar">
-              <div className="tr-sport-zero" />
-              <div className={`tr-sport-fill ${w.pnl >= 0 ? 'pos-bg' : 'neg-bg'}`}
-                style={{ width: `${(Math.abs(w.pnl) / maxAbs) * 50}%`,
-                         ['--org' as string]: w.pnl >= 0 ? 'left' : 'right',
-                         [w.pnl >= 0 ? 'left' : 'right' as any]: '50%' }} />
+          <div key={w.whale} className="v13-wcard"
+            style={{ ['--wc' as string]: CAT_COLORS[i % CAT_COLORS.length] }}>
+            {awake.has(w.whale.toLowerCase()) && (
+              <span className="v13-wlamp">
+                <Lamp mode="breathe" color={CAT_COLORS[i % CAT_COLORS.length]} label="LIVE" />
+              </span>
+            )}
+            <div className="v13-ava">
+              {w.whale.replace(/^0x/i, '').slice(0, 2).toUpperCase()}
             </div>
-            <span className={`mono ${w.roi === null ? 'muted' : w.roi >= 0 ? 'pos' : 'neg'}`}>
-              {w.roi === null ? '—' : fmtPct(w.roi)}
-            </span>
-            <span className={`tr-sport-val mono ${w.pnl >= 0 ? 'pos' : 'neg'}`}>
+            <div className="v13-wname" title={w.whale}>{w.whale}</div>
+            <div className={`muted mono`} style={{ fontSize: 11.5 }}>
+              {w.wins}W–{w.losses}L · {fmtUsd(w.staked, 0)} staked
+            </div>
+            <div className={`v13-wpnl ${w.pnl >= 0 ? 'pos' : 'neg'}`}>
               {fmtSignedUsd(w.pnl)}
-            </span>
+            </div>
+            <div className="v13-wmeta muted mono">
+              {w.roi === null ? '— ROI' : `${fmtPct(w.roi)} ROI on settled stake`}
+            </div>
+            <div className="v13-wbar" aria-hidden>
+              <i className={w.pnl >= 0 ? 'pos-bg' : 'neg-bg'}
+                style={{ width: `${(Math.abs(w.pnl) / maxAbs) * 100}%` }} />
+            </div>
           </div>
         ))}
       </div>

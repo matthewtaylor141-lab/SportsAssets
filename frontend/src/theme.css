@@ -2488,3 +2488,128 @@ table.data td { border-bottom-color: rgba(122, 162, 255, 0.07); }
   .tr-stat-main .tr-grad.v9-money.pos { animation: none !important; }
   .card:hover, .tr-stat:hover, .btn:hover { transform: none !important; }
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   V13 — COMPOSITION (owner: still too simple). Not more chrome —
+   better ARCHITECTURE: the money floats free at display scale over a
+   full-bleed living chart; tiles become a designed bento; whales
+   become identity cards; section titles get display type. Data
+   honesty unchanged.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── the hero is one composed scene, edge-lit ── */
+@property --v13a { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
+.tr-hero {
+  padding: 26px 26px 0;
+  border-radius: 24px;
+}
+.tr-hero::after {
+  content: ''; position: absolute; inset: -1px; border-radius: 25px;
+  padding: 1px; pointer-events: none; z-index: 2;
+  background: conic-gradient(from var(--v13a),
+    transparent 0turn 0.62turn, rgba(0, 102, 255, 0.0) 0.68turn,
+    rgba(77, 148, 255, 0.9) 0.78turn, rgba(0, 102, 255, 0.0) 0.9turn,
+    transparent 1turn);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  animation: v13-edge 7s linear infinite;
+}
+@keyframes v13-edge { to { --v13a: 1turn; } }
+
+/* ── bento: the money is architecture, not a box ── */
+.tr-hero-grid {
+  display: grid; grid-template-columns: 1.55fr 1fr; grid-auto-rows: auto;
+  gap: 14px; align-items: stretch;
+}
+.tr-stat.tr-stat-main {
+  grid-row: 1 / span 2; grid-column: 1;
+  background: none; border: none; box-shadow: none; backdrop-filter: none;
+  padding-left: 2px; display: flex; flex-direction: column; justify-content: center;
+}
+.tr-stat.tr-stat-main:hover { transform: none !important; box-shadow: none; }
+.tr-stat.tr-stat-main .tr-stat-value {
+  font-size: 92px; line-height: 0.98; letter-spacing: -0.035em; font-weight: 600;
+}
+.tr-stat.tr-stat-main .tr-stat-label { font-size: 11px; margin-bottom: 10px; }
+.tr-stat.tr-stat-main .tr-stat-foot { font-size: 13px; margin-top: 14px; }
+
+/* ── the chart bleeds to the hero's edges: the scene's floor ── */
+.tr-curve { margin: 20px -26px 0; position: relative; }
+.tr-curve svg { display: block; width: 100%; height: 265px; }
+
+/* ── section titles: display register ── */
+.card > .card-title:first-child, .tr-ledger-head .card-title {
+  font: 600 15px/1.2 'Space Grotesk', 'Inter', sans-serif;
+  letter-spacing: 0.05em; color: #dce7ff; text-transform: none;
+}
+
+/* ── kpi chips: jewel pills ── */
+.tr-kpis { gap: 10px; }
+.tr-kpi {
+  border-radius: 999px; padding: 9px 16px;
+  background: linear-gradient(160deg, rgba(30, 48, 92, 0.55), rgba(12, 20, 40, 0.5));
+  border: 1px solid rgba(122, 162, 255, 0.16);
+  backdrop-filter: blur(10px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* ── whale identity cards ── */
+.v13-whales {
+  display: grid; grid-auto-flow: column; grid-auto-columns: 250px;
+  gap: 14px; overflow-x: auto; padding: 6px 2px 12px;
+  scroll-snap-type: x mandatory; scrollbar-width: thin;
+}
+.v13-wcard {
+  scroll-snap-align: start;
+  padding: 18px 16px 16px;
+  border-radius: 18px;
+  background: linear-gradient(170deg, rgba(26, 40, 76, 0.6), rgba(10, 16, 32, 0.55));
+  border: 1px solid rgba(122, 162, 255, 0.12);
+  backdrop-filter: blur(12px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: transform 220ms var(--ease-enter), border-color 220ms ease,
+              box-shadow 220ms ease;
+  position: relative;
+}
+.v13-wcard:hover {
+  transform: translateY(-4px);
+  border-color: rgba(140, 175, 255, 0.3);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), var(--glow);
+}
+.v13-ava {
+  width: 52px; height: 52px; display: grid; place-items: center;
+  clip-path: polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%);
+  background: linear-gradient(150deg, var(--wc, var(--brand)), rgba(4, 8, 18, 0.9) 130%);
+  color: #eaf2ff; font: 700 17px var(--font-data); letter-spacing: 0.02em;
+  margin-bottom: 12px;
+}
+.v13-wlamp { position: absolute; top: 16px; right: 16px; }
+.v13-wname {
+  font: 600 15px/1.2 'Space Grotesk', 'Inter', sans-serif; color: #e6eeff;
+  margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.v13-wpnl { font: 600 24px/1.15 var(--font-data); margin-top: 8px; }
+.v13-wmeta { font-size: 11.5px; margin-top: 4px; }
+.v13-wbar {
+  height: 5px; border-radius: 3px; margin-top: 12px;
+  background: rgba(122, 162, 255, 0.12); overflow: hidden;
+}
+.v13-wbar i { display: block; height: 100%; border-radius: 3px; }
+
+/* ── calendar cells pop ── */
+.cal-cell { border-radius: 8px; transition: transform 140ms var(--ease-enter); }
+.cal-cell:hover { transform: scale(1.14); z-index: 2; }
+
+@media (max-width: 720px) {
+  .tr-hero { padding: 18px 16px 0; }
+  .tr-hero-grid { grid-template-columns: 1fr; }
+  .tr-stat.tr-stat-main { grid-row: auto; grid-column: auto; }
+  .tr-stat.tr-stat-main .tr-stat-value { font-size: 54px; }
+  .tr-curve { margin: 14px -16px 0; }
+  .tr-curve svg { height: 190px; }
+  .v13-whales { grid-auto-columns: 78%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tr-hero::after { animation: none; }
+  .v13-wcard:hover, .cal-cell:hover { transform: none; }
+}

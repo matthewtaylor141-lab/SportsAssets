@@ -11,8 +11,8 @@
  *  - Only same-origin GET requests are ever cached.
  */
 
-const SHELL_CACHE = 'bt-shell-v1'
-const ASSET_CACHE = 'bt-assets-v1'
+const SHELL_CACHE = 'bt-shell-v2'
+const ASSET_CACHE = 'bt-assets-v2'
 const NAV_TIMEOUT_MS = 3000
 const ASSET_CACHE_MAX = 80
 
