@@ -462,3 +462,95 @@ export function TelemetryRibbon({ items }: { items: string[] }) {
     </div>
   )
 }
+
+/* ── whale constellation (v9, owner order 2026-08-28) ─────────────────
+ * The roster as a slow orbital system around the core: each copied
+ * whale is a named node on its own orbit — node size follows open
+ * stake, tint follows the record (gold when the book is up on them,
+ * dim ember when down, cyan when flat/unknown). Real numbers only;
+ * the canvas renders nothing until data arrives. Pure 2D canvas,
+ * device-pixel aware, paused when the tab is hidden. */
+
+export interface WhaleNode {
+  name: string
+  pnl: number | null
+  openStake: number
+}
+
+export function WhaleConstellation({ whales }: { whales: WhaleNode[] }) {
+  const ref = useRef<HTMLCanvasElement | null>(null)
+  const dataRef = useRef<WhaleNode[]>(whales)
+  dataRef.current = whales
+
+  useEffect(() => {
+    const canvas = ref.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    let raf = 0
+    let dead = false
+    const dpr = Math.min(2, window.devicePixelRatio || 1)
+
+    const size = () => {
+      const r = canvas.getBoundingClientRect()
+      canvas.width = Math.max(1, Math.round(r.width * dpr))
+      canvas.height = Math.max(1, Math.round(r.height * dpr))
+    }
+    size()
+    const ro = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(size) : null
+    ro?.observe(canvas)
+
+    const t0 = performance.now()
+    const draw = (now: number) => {
+      if (dead) return
+      raf = requestAnimationFrame(draw)
+      if (document.visibilityState !== 'visible') return
+      const w = canvas.width, h = canvas.height
+      ctx.clearRect(0, 0, w, h)
+      const nodes = dataRef.current
+      if (!nodes.length) return
+      const cx = w / 2, cy = h / 2
+      const base = Math.min(w, h) * 0.36
+      const spread = Math.min(w, h) * 0.115
+      const maxStake = Math.max(1, ...nodes.map((n) => n.openStake))
+      const t = (now - t0) / 1000
+      nodes.forEach((n, i) => {
+        const orbitR = base + spread * (i / Math.max(1, nodes.length - 1))
+        // Deterministic phase per node; geological angular speed.
+        const phase = (i * 2.399963) % (Math.PI * 2)   // golden angle
+        const speed = 0.017 + 0.006 * ((i * 7919) % 5) / 5
+        const a = phase + t * speed
+        const x = cx + Math.cos(a) * orbitR
+        const y = cy + Math.sin(a) * orbitR * 0.62      // ellipse: depth
+        // Orbit path, barely there.
+        ctx.beginPath()
+        ctx.ellipse(cx, cy, orbitR, orbitR * 0.62, 0, 0, Math.PI * 2)
+        ctx.strokeStyle = 'rgba(120, 150, 180, 0.045)'
+        ctx.lineWidth = 1
+        ctx.stroke()
+        const up = (n.pnl ?? 0) > 0.5
+        const down = (n.pnl ?? 0) < -0.5
+        const tint = up ? '232, 200, 119' : down ? '224, 112, 96'
+          : '105, 224, 255'
+        const r = (2.2 + 3.4 * Math.sqrt(n.openStake / maxStake)) * dpr
+        const glow = ctx.createRadialGradient(x, y, 0, x, y, r * 3.4)
+        glow.addColorStop(0, `rgba(${tint}, 0.5)`)
+        glow.addColorStop(1, `rgba(${tint}, 0)`)
+        ctx.beginPath(); ctx.arc(x, y, r * 3.4, 0, Math.PI * 2)
+        ctx.fillStyle = glow; ctx.fill()
+        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2)
+        ctx.fillStyle = `rgba(${tint}, 0.95)`; ctx.fill()
+        ctx.font = `${10.5 * dpr}px 'JetBrains Mono', monospace`
+        ctx.fillStyle = `rgba(${tint}, 0.6)`
+        ctx.textAlign = 'center'
+        ctx.fillText(n.name, x, y - r - 6 * dpr)
+      })
+    }
+    raf = requestAnimationFrame(draw)
+    return () => { dead = true; cancelAnimationFrame(raf); ro?.disconnect() }
+  }, [])
+
+  if (!whales.length) return null
+  return <canvas className="jv-constellation" ref={ref} aria-hidden />
+}

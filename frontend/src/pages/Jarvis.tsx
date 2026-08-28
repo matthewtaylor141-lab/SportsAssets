@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { JarvisAvatar, type AvatarState } from '../jarvis/avatar'
-import { BootSequence, DataStreams, GridFloor, HudRing, OrbitalFrame, Starfield, TelemetryRibbon, VoiceArc } from '../jarvis/stage'
+import { BootSequence, DataStreams, GridFloor, HudRing, OrbitalFrame, Starfield, TelemetryRibbon, VoiceArc, WhaleConstellation, type WhaleNode } from '../jarvis/stage'
 import { buildSystemPrompt, liveModel, MODEL_CHAIN, runConversation, type MessageParam, type TextBlock, type ToolResultBlock } from '../jarvis/claude'
 import { MeridianChart, parseChartSpec } from '../jarvis/chart'
 import { renderMarkdown } from '../jarvis/markdown'
@@ -447,6 +447,8 @@ export default function Jarvis() {
   const [exposure, setExposure] = useState<string[]>([])
   /** Mission-control HUD (v9): S1 / latency / shadow, from one poll. */
   const [hub, setHub] = useState<HubTelemetry | null>(null)
+  /** Whale constellation (v9): the roster orbiting the core. */
+  const [whaleNodes, setWhaleNodes] = useState<WhaleNode[]>([])
   const [journal, setJournal] = useState<{ entry: string; mood: string; at: string } | null>(null)
   /** POCKET MODE: standalone PWA or small viewport → immersive layout. */
   const [pocket, setPocket] = useState(detectPocket)
@@ -1094,6 +1096,31 @@ export default function Jarvis() {
     return () => { dead = true; clearInterval(t) }
   }, [])
 
+  /* ── whale constellation data (5-min cadence; public record) ── */
+
+  useEffect(() => {
+    let dead = false
+    const load = async () => {
+      try {
+        const rec = await api<{
+          by_whale?: { whale: string; pnl: number | null }[]
+          open?: { by_whale?: { whale: string; stake: number }[] }
+        }>('/api/copies-record')
+        if (dead) return
+        const open = new Map((rec.open?.by_whale || [])
+          .map((o) => [o.whale, o.stake]))
+        setWhaleNodes((rec.by_whale || []).slice(0, 8).map((w) => ({
+          name: w.whale,
+          pnl: w.pnl,
+          openStake: open.get(w.whale) || 0,
+        })))
+      } catch { /* constellation simply stays dark */ }
+    }
+    void load()
+    const t = setInterval(load, 300000)
+    return () => { dead = true; clearInterval(t) }
+  }, [])
+
   /* ── derived ── */
 
   const avatarState: AvatarState =
@@ -1191,6 +1218,9 @@ export default function Jarvis() {
       {/* ── stage ── */}
       <div className={`jv-stage${panels.length > 0 ? ' jv-with-panel' : ''}`}>
         <Starfield getWarp={() => (avatarState === 'thinking' ? 5 : 1)} />
+        {scene !== 'minimal' && !pocket && (
+          <WhaleConstellation whales={whaleNodes} />
+        )}
         {scene !== 'minimal' && <DataStreams items={[...ribbon, ...exposure]} />}
         {scene === 'hologram' && <GridFloor />}
         <div className="jv-orb-wrap">
