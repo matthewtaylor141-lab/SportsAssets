@@ -1392,3 +1392,18 @@
   position: absolute; inset: 0; width: 100%; height: 100%;
   pointer-events: none; z-index: 0; opacity: 0.85;
 }
+
+/* v9 review: the modal's single reason to exist deserved the strongest
+   affordance on the card, not the weakest. */
+.jv-btn-primary {
+  background: var(--jv-cyan);
+  color: #04121b;
+  border-color: var(--jv-cyan);
+  font-weight: 700;
+}
+.jv-btn-primary:hover { background: #8ae8ff; border-color: #8ae8ff; color: #04121b; }
+.jv-btn-primary:disabled {
+  background: rgba(105, 224, 255, 0.12); color: var(--jv-cyan-soft);
+  border-color: var(--jv-border); cursor: not-allowed;
+}
+.jv-setup input[type="range"] { accent-color: var(--jv-cyan); }

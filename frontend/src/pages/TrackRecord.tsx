@@ -505,8 +505,8 @@ export function TrackRecord() {
               {t.roi !== null && (
                 <div
                   className={`tr-ring${t.roi < 0 ? ' neg' : ''}`}
-                  style={{ ['--v' as string]: Math.min(100, Math.abs(t.roi) * 1000) }}
-                  title="Dial spans 0–10% ROI"
+                  style={{ ['--v' as string]: Math.min(100, Math.abs(t.roi) * 400) }}
+                  title="Dial spans 0–25% ROI"
                   aria-hidden
                 />
               )}
@@ -647,13 +647,13 @@ export function TrackRecord() {
             Show {Math.min(60, ledger.length - limit)} more
           </button>
         )}
+        {/* page-specific facts only — the boilerplate disclaimer lives
+            once, in the global footer (v9 review: it printed twice) */}
         <div className="tr-foot muted">
-          Performance shown is the whale copy portfolio: every settled copy
-          trade, uncapped, from the order-level audit — window {windowStart} →
-          today, refreshed every 30s. Cash-outs are counted at sale. The
-          ledger lists the {trades.length.toLocaleString()} newest settled
-          copies; the totals above cover the full window. Full account
-          statements available to investors on request.
+          Window {windowStart} → today, refreshed every 30s. Cash-outs are
+          counted at sale. The ledger lists the
+          {' '}{trades.length.toLocaleString()} newest settled copies; the
+          totals above cover the full window.
         </div>
       </div>
     </div>

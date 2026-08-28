@@ -108,3 +108,9 @@
   .ac9-act .ac-cashout, .ac9-act .ac9-chart { flex: 1; min-height: 44px; }
   .ac9-ride { margin-bottom: 12px; }
 }
+
+/* v9 review fixes */
+.ac9-stale { color: var(--warning); }
+.ac9-sw { width: 12px; height: 12px; border-radius: 3px; }
+.ac9-sw.teal { background: #0ab97f; }
+.ac9-arc-teal { stroke: #0ab97f; stroke-linecap: round; }

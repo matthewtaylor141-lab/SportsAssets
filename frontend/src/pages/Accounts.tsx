@@ -52,34 +52,46 @@ const asOfMs = (v: string | number): number | null => {
 type RideWhale = { whale: string; count: number; stake: number }
 type RidePayload = { open?: { by_whale?: RideWhale[] } }
 
-/** v9 committed-capital ring: an inline SVG donut over totals.value.
- * Gold = committed_usd, cyan = the rest of totals.value; a single
- * neutral segment when the payload carries no committed split — the
- * ring only ever draws what the payload actually says. */
-function CapitalRing({ value, committed }: {
+/** v9 capital ring: an inline SVG donut over totals.value. Gold =
+ * committed_usd when the payload provides a committed split. When it
+ * does not, the ring falls back to the VENUE split (Polymarket vs
+ * Kalshi) — both parts computed from the payload's own venue figures,
+ * drawn only when they reconcile to the total (v9 review: a
+ * one-segment gray ring encoded nothing and repeated the number). */
+function CapitalRing({ value, committed, kalshiPart }: {
   value: number | null | undefined
   committed: number | null | undefined
+  kalshiPart: number | null | undefined
 }) {
   const R = 48
   const C = 2 * Math.PI * R
   const split = value != null && value > 0 && committed != null && committed > 0
+  // Venue fallback: only when both parts are real and sum inside the
+  // total (never invented — a mismatch renders the neutral ring).
+  const vsplit = !split && value != null && value > 0
+    && kalshiPart != null && kalshiPart > 0 && kalshiPart <= value * 1.001
+  const pmPart = vsplit ? Math.max(0, Math.round((value! - kalshiPart!) * 100) / 100) : null
   // Drawing clamp only — the legend always shows the raw dollars.
-  const frac = split ? Math.min(1, Math.max(0, committed / value)) : 0
-  const rest = split ? Math.round((value - committed) * 100) / 100 : null
+  const frac = split ? Math.min(1, Math.max(0, committed! / value!))
+    : vsplit ? Math.min(1, Math.max(0, kalshiPart! / value!)) : 0
+  const rest = split ? Math.round((value! - committed!) * 100) / 100 : null
   const label = split
     ? `Total value ${money(value)}: committed capital ${money(committed)}, account ${money(rest)}`
-    : `Total value ${money(value)}`
+    : vsplit
+      ? `Total value ${money(value)}: Kalshi ${money(kalshiPart)}, Polymarket ${money(pmPart)}`
+      : `Total value ${money(value)}`
   return (
     <>
       <div className="ac9-ring" role="img" aria-label={label}>
         <svg width="120" height="120" viewBox="0 0 120 120" aria-hidden="true">
           <circle
-            className={`ac9-arc-base${split ? ' live' : ''}`}
+            className={`ac9-arc-base${split || vsplit ? ' live' : ''}`}
             cx="60" cy="60" r={R} fill="none" strokeWidth="13"
           />
-          {split && (
+          {(split || vsplit) && (
             <circle
-              className="ac9-arc-gold" cx="60" cy="60" r={R} fill="none"
+              className={split ? 'ac9-arc-gold' : 'ac9-arc-teal'}
+              cx="60" cy="60" r={R} fill="none"
               strokeWidth="13" strokeDasharray={`${frac * C} ${C}`}
               transform="rotate(-90 60 60)"
             />
@@ -100,6 +112,17 @@ function CapitalRing({ value, committed }: {
             <div>
               <i className="ac9-sw cyan" /> Account
               <b className="mono">{money(rest)}</b>
+            </div>
+          </>
+        ) : vsplit ? (
+          <>
+            <div>
+              <i className="ac9-sw teal" /> Kalshi
+              <b className="mono">{money(kalshiPart)}</b>
+            </div>
+            <div>
+              <i className="ac9-sw cyan" /> Polymarket
+              <b className="mono">{money(pmPart)}</b>
             </div>
           </>
         ) : (
@@ -281,6 +304,11 @@ export function Accounts() {
             <CapitalRing
               value={data.totals.value}
               committed={data.totals.committed_usd}
+              kalshiPart={data.kalshi?.balance_usd != null
+                ? Math.round(((data.kalshi.balance_usd || 0)
+                    + data.kalshi.positions.reduce((s, p) =>
+                        s + (p.value_usd ?? p.cost_usd ?? 0), 0)) * 100) / 100
+                : null}
             />
           </div>
           <div className="ac9-tiles">
@@ -509,7 +537,12 @@ export function Accounts() {
               <div className="ac-stat"><span>Resting orders</span><b>{k?.resting ?? '—'}</b></div>
               <div className="ac-stat">
                 <span>Feed age</span>
-                <b>{k?.stale_s != null ? `${Math.round(k.stale_s)}s` : '—'}</b>
+                <b className={k?.stale_s != null && k.stale_s > 120
+                  ? 'ac9-stale' : undefined}>
+                  {k?.stale_s == null ? '—'
+                    : k.stale_s < 90 ? `${Math.round(k.stale_s)}s`
+                    : `${Math.round(k.stale_s / 60)}m`}
+                </b>
               </div>
             </div>
             {(k?.positions?.length ?? 0) > 0 ? (

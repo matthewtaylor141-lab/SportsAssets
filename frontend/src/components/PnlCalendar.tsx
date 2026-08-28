@@ -69,7 +69,9 @@ export function PnlCalendar({
       }
     }
     const k = Math.min(1, Math.abs(d.pnl) / maxAbs)
-    const [r, g, b] = d.pnl >= 0 ? [57, 135, 229] : [230, 103, 103]
+    // profit is GREEN everywhere in this system — the calendar's old
+    // blue quietly reassigned the brand's live-data channel (v9 review)
+    const [r, g, b] = d.pnl >= 0 ? [33, 176, 33] : [230, 103, 103]
     return {
       background: `rgba(${r},${g},${b},${0.12 + 0.55 * k})`,
       color: k > 0.5 ? '#fff' : 'var(--ink-2)',

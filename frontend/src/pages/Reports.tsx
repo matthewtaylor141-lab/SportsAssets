@@ -50,6 +50,26 @@ const secs = (v: number | null | undefined) =>
 const cls = (v: number | null | undefined) =>
   (v ?? 0) > 0 ? 'pos' : (v ?? 0) < 0 ? 'neg' : ''
 
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+/** Bucket keys are ISO for sorting; people read short labels. */
+function fmtBucket(b: string, period: Period): string {
+  if (period === 'all' || !b) return b
+  const parts = b.split('-')
+  if (period === 'monthly' && parts.length === 2)
+    return `${MONTHS[+parts[1] - 1] ?? parts[1]} ${parts[0]}`
+  if (parts.length === 3) {
+    const d = `${MONTHS[+parts[1] - 1] ?? parts[1]} ${+parts[2]}`
+    return period === 'weekly' ? `wk of ${d}` : d
+  }
+  return b
+}
+const CAT_ABBR: Record<string, string> = {
+  Moneyline: 'ML', Spread: 'SPRD', Total: 'TOT',
+  Segment: 'SEG', 'Player Prop': 'PROP',
+}
+
 function venueChip(v: string | null) {
   if (!v) return null
   const k = v.includes('kalshi')
@@ -225,25 +245,25 @@ export default function Reports() {
             <tr>
               <th>Whale</th>
               {period !== 'all' && <th>{period === 'weekly' ? 'Week of' : period === 'monthly' ? 'Month' : 'Day'}</th>}
-              <th>Sport</th><th>Type</th>
-              <th className="num">N</th><th className="num">W-L</th>
-              <th className="num">Staked</th><th className="num">P&L</th>
+              <th className="m-hide">Sport</th><th>Type</th>
+              <th className="num">N</th><th className="num m-hide">W-L</th>
+              <th className="num m-hide">Staked</th><th className="num">P&L</th>
               <th className="num">ROI</th>
-              <th className="num">Lat avg</th><th className="num">Lat p50</th>
+              <th className="num m-hide">Lat avg</th><th className="num">Lat p50</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r, i) => (
               <tr key={i}>
-                <td>{r.whale}</td>
-                {period !== 'all' && <td>{r.bucket}</td>}
-                <td>{r.sport}</td><td>{r.category}</td>
+                <td className="rpt-wcell">{r.whale}</td>
+                {period !== 'all' && <td className="nowrap">{fmtBucket(r.bucket, period)}</td>}
+                <td className="m-hide">{r.sport}</td><td className="nowrap"><span className="m-only">{CAT_ABBR[r.category] ?? r.category}</span><span className="m-off">{r.category}</span></td>
                 <td className="num">{r.n}</td>
-                <td className="num">{r.wins}-{r.losses}</td>
-                <td className="num">{money(r.staked)}</td>
+                <td className="num m-hide">{r.wins}-{r.losses}</td>
+                <td className="num m-hide">{money(r.staked)}</td>
                 <td className={`num ${cls(r.pnl)}`}>{money(r.pnl)}</td>
                 <td className="num">{pct(r.roi)}</td>
-                <td className="num rpt-lat">{secs(r.lat_avg_s)}</td>
+                <td className="num rpt-lat m-hide">{secs(r.lat_avg_s)}</td>
                 <td className="num rpt-lat">{secs(r.lat_p50_s)}</td>
               </tr>
             ))}
@@ -261,31 +281,31 @@ export default function Reports() {
         <table className="data rpt-pivot">
           <thead>
             <tr>
-              <th>Day</th><th>Whale</th><th>Market</th><th>Sport</th>
-              <th>Type</th><th>Venue</th>
-              <th className="num">Stake</th><th className="num">P&L</th>
-              <th className="num">Latency</th><th className="num">Detect lag</th>
-              <th>Status</th>
+              <th>Day</th><th>Whale</th><th>Market</th><th className="m-hide">Sport</th>
+              <th className="m-hide">Type</th><th>Venue</th>
+              <th className="num m-hide">Stake</th><th className="num">P&L</th>
+              <th className="num">Latency</th><th className="num m-hide">Detect lag</th>
+              <th className="m-hide">Status</th>
             </tr>
           </thead>
           <tbody>
             {(ledger ?? []).map((r) => (
               <tr key={r.id}>
                 <td style={{ whiteSpace: 'nowrap' }}>{r.day ?? '—'}</td>
-                <td>{r.whale}</td>
+                <td className="rpt-wcell">{r.whale}</td>
                 <td style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                   title={r.slug ?? ''}>{r.slug ?? '—'}</td>
-                <td>{r.sport}</td><td>{r.category}</td>
+                <td className="m-hide">{r.sport}</td><td className="m-hide">{r.category}</td>
                 <td>{venueChip(r.venue)}</td>
-                <td className="num">{money(r.stake)}</td>
+                <td className="num m-hide">{money(r.stake)}</td>
                 <td className={`num ${cls(r.pnl)}`}>{money(r.pnl)}</td>
                 <td className="num">
                   {r.latency_s != null
                     ? <span className="v9-chip lat">{secs(r.latency_s)}</span>
                     : '—'}
                 </td>
-                <td className="num rpt-lat">{secs(r.detect_lag_s)}</td>
-                <td>{r.status ?? '—'}</td>
+                <td className="num rpt-lat m-hide">{secs(r.detect_lag_s)}</td>
+                <td className="m-hide">{r.status ?? '—'}</td>
               </tr>
             ))}
             {ledger && ledger.length === 0 && (

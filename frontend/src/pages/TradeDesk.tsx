@@ -113,6 +113,18 @@ interface OOKRow {
 }
 interface OpenOrdersPayload { polymarket: OOPmRow[]; kalshi: OOKRow[] }
 /** One unified Open-orders row, either venue. Display-grade only. */
+/** Venue slugs read like machine ids — surface the matchup instead
+ * ("aec-atp-fritz-rune-2026-08-28" -> "Fritz Rune · ATP · 2026-08-28").
+ * Display-only; the slug stays the identity everywhere else. */
+function prettyOoSlug(slug: string): string {
+  const m = slug.match(/^[a-z]+-([a-z0-9]+)-(.+?)(?:-(\d{4}-\d{2}-\d{2}))?(?:-[a-z0-9]*pt\d+)?$/)
+  if (!m) return slug
+  const names = (m[2] || '').split('-')
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w)).join(' ')
+  if (!names) return slug
+  return `${names} · ${m[1].toUpperCase()}${m[3] ? ` · ${m[3]}` : ''}`
+}
+
 interface OORow {
   key: string; venue: Venue; id: number | string; title: string
   sub: string; px: number | null; filled: number; total: number | null
@@ -1710,7 +1722,7 @@ export function TradeDesk() {
   const ooRows: OORow[] = !oo ? [] : [
     ...(oo.polymarket || []).map((r): OORow => ({
       key: `pm-${r.id}`, venue: 'polymarket', id: r.id,
-      title: r.title || r.us_market_slug,
+      title: r.title || prettyOoSlug(r.us_market_slug),
       sub: (r.side || 'buy').toUpperCase(),
       px: r.limit_price ?? null, filled: r.filled_shares || 0,
       total: r.requested_shares ?? null, usd: r.requested_usd ?? null,

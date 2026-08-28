@@ -117,7 +117,7 @@ function DailyColumns({ daily }: {
               {' '}· {daily[hover].settled} settled
             </span>
           </>
-        ) : <span className="muted">hover a day</span>}
+        ) : <span className="muted">hover a day for its scoreline</span>}
       </div>
     </div>
   )
@@ -415,11 +415,8 @@ export function Analytics() {
       <div className="card">
         <WhaleSportTable rows={data.by_whale_sport || []} />
       </div>
-      <div className="tr-foot muted" style={{ padding: '0 4px' }}>
-        Performance shown is the whale copy portfolio: every settled copy
-        trade, uncapped. Full account statements available to investors on
-        request.
-      </div>
+      {/* the boilerplate disclaimer lives once, in the global footer
+          (v9 review: it printed twice, back to back) */}
     </div>
   )
 }

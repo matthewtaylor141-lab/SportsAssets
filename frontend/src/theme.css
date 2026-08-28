@@ -1808,3 +1808,38 @@ h2::after {
   .oo-row { grid-template-columns: 1fr 70px 84px; }
   .oo-row > *:nth-child(2), .oo-row > *:nth-child(4) { display: none; }
 }
+
+/* ── v9 review fixes (independent design critique, 2026-08-28) ── */
+
+/* Hero lockup: TOKEN is gold everywhere — one wordmark, one identity. */
+.tr-name span {
+  background: linear-gradient(94deg, #d9b45c, var(--bt-gold) 45%, var(--bt-gold-2) 85%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+
+/* Mobile bottom bar: near-opaque surface; pages clear its height. */
+@media (max-width: 719px) {
+  .tabbar {
+    background: rgba(11, 12, 14, 0.96);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border-top: 1px solid var(--border-strong);
+  }
+  .main { padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
+  /* Reports on a phone: the payoff columns must fit — the long-tail
+     columns collapse (they stay in the CSV and on desktop). */
+  .m-hide { display: none; }
+}
+
+/* Analytics daily strip: bars cap at a bar's width, never a slab's. */
+.an-col { max-width: 38px; margin: 0 auto; }
+.an-table th { white-space: nowrap; }
+
+/* Reports mobile ergonomics: short labels, truncating whale cell. */
+.nowrap { white-space: nowrap; }
+.m-only { display: none; }
+@media (max-width: 719px) {
+  .m-only { display: inline; }
+  .m-off { display: none; }
+  .rpt-wcell { max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rpt-pivot td, .rpt-pivot th { padding: 7px 6px; font-size: 12.5px; }
+}
