@@ -102,11 +102,29 @@ def test_trades_list_copy_rows_only_display_named():
     assert out == [
         {"day": "2026-08-19", "whale": "SwissTony",
          "slug": "atc-epl-a-b-2026-08-19-a", "stake": 200.0,
-         "pnl": 60.0, "status": "settled"},
+         "pnl": 60.0, "status": "settled", "sport": None,
+         "venue": None, "latency_s": None},
         {"day": "2026-08-18", "whale": "RN1",
          "slug": "tsc-mlb-c-d-2026-08-18-o8pt5", "stake": 75.0,
-         "pnl": -25.0, "status": "cashed_out"},
+         "pnl": -25.0, "status": "cashed_out", "sport": None,
+         "venue": None, "latency_s": None},
     ]
+
+
+def test_trades_list_carries_latency_venue_sport():
+    """Owner order 2026-08-28: every copy trade on the public ledger
+    carries its whale AND the latency between the whale's fill and our
+    order, next to the trade itself."""
+    from sportsassets.api.copies_record import trades_list
+
+    rows = [dict(_row("rn1", "2026-08-27", 5.0, 100.0),
+                 us_market_slug="aec-atp-a-b-2026-08-27",
+                 status="settled", sport="tennis",
+                 venue="polymarket-us", latency_s=1.234)]
+    out = trades_list(rows)
+    assert out[0]["latency_s"] == 1.23
+    assert out[0]["venue"] == "polymarket-us"
+    assert out[0]["sport"] == "tennis"
 
 
 def test_trades_list_caps_at_limit_preserving_order():

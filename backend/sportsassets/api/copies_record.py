@@ -160,18 +160,27 @@ def scorecard(rows: list[dict]) -> dict:
 
 def trades_list(rows: list[dict], limit: int = 400) -> list[dict]:
     """The public copy ledger (owner order 2026-08-22): the newest
-    settled/cashed-out copy rows, one line each, display-named. Pure —
-    rows must arrive newest-first (build() orders by settled_at)."""
+    settled/cashed-out copy rows, one line each, display-named. Every
+    row carries its venue and the copy latency (owner order
+    2026-08-28: the latency lives NEXT TO the trade, not in a
+    separate report). Pure — rows must arrive newest-first (build()
+    orders by settled_at)."""
     out = []
     for r in rows:
         if (r.get("whale") or "") not in COPY_WHALES:
             continue
+        lat = r.get("latency_s")
         out.append({"day": r.get("day"),
                     "whale": DISPLAY.get(r["whale"], r["whale"]),
                     "slug": r.get("slug") or r.get("us_market_slug"),
                     "stake": round(float(r.get("filled_usd") or 0), 2),
                     "pnl": round(float(r.get("pnl") or 0), 2),
-                    "status": r.get("status") or "settled"})
+                    "status": r.get("status") or "settled",
+                    "sport": r.get("sport"),
+                    "venue": r.get("venue"),
+                    "latency_s": (round(float(lat), 2)
+                                  if isinstance(lat, (int, float))
+                                  else None)})
         if len(out) >= limit:
             break
     return out
@@ -201,14 +210,19 @@ async def build(since_day: str) -> dict:
     pool = await get_pool()
     rows = await pool.fetch(
         """
-        SELECT lower(COALESCE(whale_username, '')) AS whale,
-               to_char(settled_at AT TIME ZONE 'America/New_York',
+        SELECT lower(COALESCE(lo.whale_username, '')) AS whale,
+               to_char(lo.settled_at AT TIME ZONE 'America/New_York',
                        'YYYY-MM-DD') AS day,
-               pnl, filled_usd, us_market_slug, status
-        FROM live_orders
-        WHERE status IN ('settled', 'cashed_out')
-          AND settled_at IS NOT NULL
-        ORDER BY settled_at DESC
+               lo.pnl, lo.filled_usd, lo.us_market_slug, lo.status,
+               lo.venue,
+               COALESCE(lo.reaction_s,
+                        EXTRACT(EPOCH FROM (lo.placed_at - t.ts))
+                        )::float8 AS latency_s
+        FROM live_orders lo
+        LEFT JOIN trades t ON t.id = lo.trade_id
+        WHERE lo.status IN ('settled', 'cashed_out')
+          AND lo.settled_at IS NOT NULL
+        ORDER BY lo.settled_at DESC
         """)
     windowed = []
     for r in rows:
@@ -225,17 +239,27 @@ async def build(since_day: str) -> dict:
     # Live edge of the record (owner order 2026-08-22): what the copy
     # sleeves have ON the table right now, today's scoreline, and the
     # row-level ledger behind the aggregates.
-    open_row = await pool.fetchrow(
+    open_rows = await pool.fetch(
         """
-        SELECT count(*)::int AS count,
+        SELECT lower(COALESCE(whale_username, '')) AS whale,
+               count(*)::int AS count,
                COALESCE(sum(COALESCE(NULLIF(filled_usd, 0),
                                      requested_usd)), 0)::float8 AS stake
         FROM live_orders
         WHERE status IN ('submitting', 'filled')
           AND lower(COALESCE(whale_username, '')) = ANY($1::text[])
+        GROUP BY 1
         """, list(COPY_WHALES))
-    out["open"] = {"count": open_row["count"],
-                   "stake": round(open_row["stake"], 2)}
+    out["open"] = {
+        "count": sum(r["count"] for r in open_rows),
+        "stake": round(sum(r["stake"] for r in open_rows), 2),
+        # per-whale open exposure (owner order 2026-08-28: the hub's
+        # accounts view shows WHO the table is riding on)
+        "by_whale": sorted(
+            ({"whale": DISPLAY.get(r["whale"], r["whale"]),
+              "count": r["count"], "stake": round(r["stake"], 2)}
+             for r in open_rows),
+            key=lambda w: -w["stake"])}
     out["trades"] = trades_list(windowed)
     out["today"] = today_stats(
         windowed, datetime.now(RECORD_TZ).strftime("%Y-%m-%d"))
@@ -254,6 +278,7 @@ async def build(since_day: str) -> dict:
         kopen = kexp.get("open") or {}
         if kopen.get("count") or kopen.get("stake"):
             out["open"] = {
+                **out["open"],       # by_whale stays PM-side detail
                 "count": out["open"]["count"] + int(kopen.get("count") or 0),
                 "stake": round(out["open"]["stake"]
                                + float(kopen.get("stake") or 0), 2)}

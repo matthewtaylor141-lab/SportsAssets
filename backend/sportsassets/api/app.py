@@ -7441,6 +7441,119 @@ async def api_copy_ledger(whale: str | None = Query(None),
             "filters": {"whale": whale, "since": since, "until": until}}
 
 
+@app.get("/api/admin/hub-telemetry", dependencies=[Depends(require_desk)])
+async def api_hub_telemetry() -> dict:
+    """One poll for the Meridian HUD (owner order 2026-08-28): the S1
+    beat, the shadow certification gauge, copy-latency percentiles,
+    today's copy scoreline, open exposure, and committed capital.
+    DB-only — no venue HTTP — safe on a 15s cadence."""
+    from .copies_record import COPY_WHALES, RECORD_TZ
+
+    pool = await get_pool()
+
+    def _doc(raw):
+        if isinstance(raw, dict):
+            return raw
+        try:
+            return json.loads(raw) if raw else {}
+        except ValueError:
+            return {}
+
+    hb = await pool.fetchrow(
+        "SELECT beat_at, status, detail FROM service_heartbeats "
+        "WHERE service = 'chain_listener'")
+    s1_beat = (_doc(hb["detail"]).get("s1") if hb else None) or {}
+    s1_doc = _doc(await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key = 's1_emitter'"))
+    sh_doc = _doc(await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key = 'shadow_v2_fill'"))
+    now_e = time.time()
+    ws, hs = sh_doc.get("window_start"), sh_doc.get("health_start")
+    c = s1_doc.get("counters") or {}
+    lat = await pool.fetchrow(
+        """
+        WITH l AS (
+          SELECT COALESCE(lo.reaction_s,
+                          EXTRACT(EPOCH FROM (lo.placed_at - t.ts))
+                          )::float8 AS s,
+                 lo.placed_at
+          FROM live_orders lo
+          LEFT JOIN trades t ON t.id = lo.trade_id
+          WHERE lower(COALESCE(lo.whale_username, '')) = ANY($1::text[])
+            AND lo.placed_at > now() - interval '7 days'
+        )
+        SELECT count(*) FILTER (WHERE s IS NOT NULL)::int         AS n_7d,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY s)
+                 FILTER (WHERE s IS NOT NULL)                     AS p50_7d,
+               percentile_cont(0.9) WITHIN GROUP (ORDER BY s)
+                 FILTER (WHERE s IS NOT NULL)                     AS p90_7d,
+               count(*) FILTER (WHERE s IS NOT NULL AND
+                 placed_at > now() - interval '24 hours')::int    AS n_24h,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY s)
+                 FILTER (WHERE s IS NOT NULL AND
+                 placed_at > now() - interval '24 hours')         AS p50_24h
+        FROM l
+        """, list(COPY_WHALES))
+    today = datetime.now(RECORD_TZ).strftime("%Y-%m-%d")
+    day = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS settled,
+               count(*) FILTER (WHERE pnl > 0)::int AS wins,
+               count(*) FILTER (WHERE pnl < 0)::int AS losses,
+               COALESCE(sum(pnl), 0)::float8 AS pnl
+        FROM live_orders
+        WHERE status IN ('settled', 'cashed_out')
+          AND lower(COALESCE(whale_username, '')) = ANY($1::text[])
+          AND to_char(settled_at AT TIME ZONE 'America/New_York',
+                      'YYYY-MM-DD') = $2
+        """, list(COPY_WHALES), today)
+    open_row = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS count,
+               COALESCE(sum(COALESCE(NULLIF(filled_usd, 0),
+                                     requested_usd)), 0)::float8 AS stake
+        FROM live_orders
+        WHERE status IN ('submitting', 'filled')
+          AND lower(COALESCE(whale_username, '')) = ANY($1::text[])
+        """, list(COPY_WHALES))
+
+    def _r(v, nd=2):
+        return round(float(v), nd) if v is not None else None
+
+    return {
+        "s1": {
+            "beat": s1_beat,
+            "beat_at": hb["beat_at"] if hb else None,
+            "armed": bool(s1_doc.get("armed")),
+            "trips": s1_doc.get("trips") or {},
+            "cert_reason": s1_doc.get("cert_reason"),
+            "emitted": c.get("s1.emitted", 0),
+            "would_emit": c.get("s1.would_emit", 0),
+            "confirmed": c.get("s1.confirmed", 0),
+            "uncorroborated": c.get("s1.uncorroborated", 0),
+        },
+        "shadow": {
+            "window_age_h": (_r((now_e - ws) / 3600.0, 1)
+                             if isinstance(ws, (int, float)) else None),
+            "health_age_h": (_r((now_e - hs) / 3600.0, 1)
+                             if isinstance(hs, (int, float)) else None),
+            "window_target_h": 7 * 24,
+        },
+        "latency": {
+            "n_24h": lat["n_24h"], "p50_24h_s": _r(lat["p50_24h"]),
+            "n_7d": lat["n_7d"], "p50_7d_s": _r(lat["p50_7d"]),
+            "p90_7d_s": _r(lat["p90_7d"]),
+        },
+        "today": {"day": today, "settled": day["settled"],
+                  "wins": day["wins"], "losses": day["losses"],
+                  "pnl": _r(day["pnl"])},
+        "open": {"count": open_row["count"], "stake": _r(open_row["stake"])},
+        "committed_usd": _r(settings().committed_capital_pm_usd or 0),
+        "epoch": COPIES_EPOCH,
+        "generated_at": datetime.now(RECORD_TZ).isoformat(),
+    }
+
+
 @app.get("/api/venue-truth")
 async def api_venue_truth() -> dict:
     """Venue-truth P&L (task #74): the record rebuilt continuously from
