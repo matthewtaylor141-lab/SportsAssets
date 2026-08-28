@@ -30,4 +30,4 @@ dist/
 *.sqlite3-wal
 
 # Adversarial-fleet scratch reproductions (regenerated per round)
-backend/fleet7_repros/
+backend/fleet*_repros/
