@@ -371,6 +371,12 @@ WHERE jsonb_typeof(ingestion_state.value) <> 'object'
 # no healer (fleet round 10, minor). A non-object trips field is
 # healed to '{}' inside the clear itself.
 SQL_CLEAR = """
+WITH prev AS (
+  SELECT ((CASE WHEN jsonb_typeof(value->'trips') = 'object'
+                THEN value->'trips' ? $2::text ELSE false END)
+          OR value->>'tripped' = $2::text) AS had
+  FROM ingestion_state WHERE key = $1 FOR UPDATE
+)
 UPDATE ingestion_state SET value = jsonb_set(
   (SELECT CASE WHEN x.v->>'tripped' = $2::text
                THEN x.v #- '{tripped}' ELSE x.v END
@@ -384,8 +390,10 @@ UPDATE ingestion_state SET value = jsonb_set(
         THEN value->'trips_cleared' ELSE '{}'::jsonb END)
     || jsonb_build_object($2::text,
          to_jsonb(extract(epoch from now())::float8)))
+FROM prev
 WHERE key = $1 AND jsonb_typeof(value) = 'object'
-RETURNING value->'trips' AS trips, value->'trips_cleared' AS cleared
+RETURNING prev.had AS removed,
+          value->'trips' AS trips, value->'trips_cleared' AS cleared
 """
 
 
@@ -1404,8 +1412,8 @@ class S1Emitter:
                 continue           # trip stands; re-examined next sweep
             if cur is not None and bool(cur["ok"]):
                 try:
-                    await pool.fetchrow(SQL_CLEAR, STATE_KEY, reason,
-                                        timeout=6)
+                    rel = await pool.fetchrow(SQL_CLEAR, STATE_KEY, reason,
+                                              timeout=6)
                 except Exception:  # noqa: BLE001
                     self.bump("s1.errors")
                     continue       # the trip stays in self.trips, and
@@ -1419,7 +1427,14 @@ class S1Emitter:
                                    # never touched trip state)
                 self.trips.pop(reason, None)
                 self._unpersisted.discard(reason)
-                self.bump("s1.trip_self_cleared")
+                if rel is not None and bool(rel["removed"]):
+                    # round 26 (minor): count only a clear THIS call
+                    # actually transitioned — the round-8 law. Every
+                    # process holding an adopted copy of the trip used
+                    # to bump on its own redundant clear and the
+                    # delta-merge made the inflation durable (N bumps
+                    # for one release across N processes).
+                    self.bump("s1.trip_self_cleared")
                 log.warning("S1 trip '%s' self-cleared — the venue "
                             "stamped the row inside the judgment gap",
                             reason)
@@ -1456,14 +1471,18 @@ class S1Emitter:
             if cur is None or not bool(cur["ok"]):
                 continue               # genuinely unseen: trip stands
             try:
-                await pool.fetchrow(SQL_CLEAR, STATE_KEY, reason,
-                                    timeout=6)
+                rel = await pool.fetchrow(SQL_CLEAR, STATE_KEY, reason,
+                                          timeout=6)
             except Exception:  # noqa: BLE001 — heal again next sweep
                 self.bump("s1.errors")
                 continue
             self.trips.pop(reason, None)
             self._unpersisted.discard(reason)
-            self.bump("s1.trip_self_cleared")
+            if rel is not None and bool(rel["removed"]):
+                # round 26 (minor): transition-gated — see the race-
+                # lost branch. A redundant clear releases only the
+                # local memory, never the counter.
+                self.bump("s1.trip_self_cleared")
             log.warning("S1 trip '%s' healed — the venue has "
                         "corroborated the row", reason)
 

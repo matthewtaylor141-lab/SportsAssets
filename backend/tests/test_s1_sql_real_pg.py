@@ -108,6 +108,13 @@ def test_every_state_statement_prepares_and_executes():
             trips = trips if isinstance(trips, dict) else json.loads(trips)
             assert "uncorroborated:1" not in trips
             assert "uncorroborated:2" in trips
+            assert bool(row["removed"]) is True, \
+                "round 26: the clear that transitions says so"
+            row = await c.fetchrow(s1.SQL_CLEAR, K, "uncorroborated:1")
+            assert bool(row["removed"]) is False, \
+                "round 26: a redundant clear (another process already " \
+                "released the reason) reports NO transition — the " \
+                "caller must not bump s1.trip_self_cleared on it"
             doc = json.loads(await c.fetchval(s1.SQL_READ, K))
             assert doc.get("tripped") == "key_selfcheck", \
                 "round 7: clearing a DIFFERENT reason must not erase " \

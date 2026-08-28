@@ -333,3 +333,45 @@ def test_empty_history_for_a_known_whale_defers(monkeypatch):
     asyncio.run(hist._backfill_pending_inner())
     assert _backfilled_ids(pool2) == [2], \
         "a genuinely tradeless wallet's [] is a valid, complete answer"
+
+
+def test_end_violating_venue_fails_the_whale_not_the_cap(monkeypatch):
+    """r26 major: the round-25 accumulate fix assumed the venue
+    honors `end` — an end-violating venue served rows NEWER than
+    oldest every page, they never entered the boundary, the cursor
+    re-pinned forever, and the cap burned on re-serves behind a
+    durable history_backfilled=TRUE. The walk now verifies the
+    premise: any served row past the requested end fails the whale —
+    pending, error heartbeat, retried."""
+    monkeypatch.setattr(hist, "PAGE_SIZE", 4)
+    T = 1_787_011_300
+    ties = [dict(RAW, transactionHash="0x" + f"{i:02x}" * 32,
+                 asset=str(700 + i), timestamp=T) for i in range(3)]
+
+    async def violating(http, path, params=None):
+        # always serves one row NEWER than the requested end
+        rogue = dict(RAW, transactionHash="0x" + "ee" * 32,
+                     asset="999", timestamp=params["end"] + 500)
+        return _Resp(ties + [rogue])
+
+    pool = _Pool([W_A])
+    beats: list[tuple] = []
+
+    async def fake_pool():
+        return pool
+
+    async def fake_beat(name, status, detail=None):
+        beats.append((name, status, detail))
+
+    monkeypatch.setattr(hist, "get_pool", fake_pool)
+    monkeypatch.setattr(hist, "polite_get", violating)
+    monkeypatch.setattr(hist, "heartbeat", fake_beat)
+    monkeypatch.setattr(hist, "settings", lambda: SimpleNamespace(
+        history_max_trades=40,
+        history_start_date="2026-08-18",
+        data_api_base="http://feed.test"))
+    total = asyncio.run(hist._backfill_pending_inner())
+    assert total == 0
+    assert _backfilled_ids(pool) == [], \
+        "an end-violating venue never earns a durable success marker"
+    assert any(s == "error" for _, s, _ in beats)

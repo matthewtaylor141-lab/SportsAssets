@@ -155,6 +155,21 @@ async def backfill_whale_history(http: httpx.AsyncClient, whale: dict) -> int:
                 # exhaustion — fail the whale, stay pending, retry
                 raise ValueError(
                     f"venue served {bad} activity rows, none usable")
+            # END-CONTRACT ENFORCEMENT (round 26, major): every cursor
+            # inference below — the window math, the pinned-tie
+            # boundary, the fresh==0 step-past — assumes the venue
+            # honors `end` (rows ts <= end_cursor). Round 26 proved an
+            # end-violating venue defeats the round-25 accumulate fix:
+            # rows NEWER than oldest never enter the boundary, count
+            # fresh every page, the cursor re-pins forever, and the
+            # cap burns on re-serves behind a durable
+            # history_backfilled=TRUE. Verify the premise directly
+            # (the round-21 ordering-check philosophy): a served row
+            # past the requested end fails the whale — pending, error
+            # heartbeat, retried — never a silent wedge.
+            if any(ev.ts_epoch > end_cursor for ev in evs):
+                raise ValueError(
+                    "venue served rows past the requested end cursor")
             fresh = 0
             oldest = None
             for ev in evs:

@@ -2002,9 +2002,11 @@ def test_judged_stamp_lost_to_a_venue_stamp_self_clears(st):
 
         async def fetchrow(self, sql, *a, timeout=None):
             if "trips_cleared" in sql and \
-                    sql.lstrip().startswith("UPDATE ingestion_state"):
+                    sql.lstrip().startswith("WITH prev"):
+                # SQL_CLEAR (round 26 shape): reports whether THIS
+                # call transitioned the reason out
                 self.cleared.append(a[1])
-                return {"trips": {}, "cleared": {}}
+                return {"removed": True, "trips": {}, "cleared": {}}
             if "FROM trades WHERE id" in sql:
                 # unseen at the pre-trip recheck; SEEN at the post-
                 # mark recheck — the venue stamped inside the gap
@@ -2053,9 +2055,11 @@ def test_orphaned_uncorroborated_trip_heals_on_the_next_sweep(st):
 
         async def fetchrow(self, sql, *a, timeout=None):
             if "trips_cleared" in sql and \
-                    sql.lstrip().startswith("UPDATE ingestion_state"):
+                    sql.lstrip().startswith("WITH prev"):
+                # SQL_CLEAR (round 26 shape): reports whether THIS
+                # call transitioned the reason out
                 self.cleared.append(a[1])
-                return {"trips": {}, "cleared": {}}
+                return {"removed": True, "trips": {}, "cleared": {}}
             return await _SweepPool.fetchrow(self, sql, *a,
                                              timeout=timeout)
 
@@ -2242,3 +2246,36 @@ def test_finalize_pop_requires_entry_identity(st, monkeypatch):
     src_run = inspect.getsource(S1Emitter.run)
     assert "self.pending.get(tx) is e" in src_run, \
         "the pop is identity-guarded, never key-guarded"
+
+
+def test_redundant_clear_never_bumps_the_release_counter(st):
+    """fleet r26 (minor): every process holding an adopted copy of a
+    trip bumped s1.trip_self_cleared on its own redundant clear —
+    SQL_CLEAR carried no transition signal and the delta-merge made
+    the inflation durable (N bumps for one release across N
+    processes), violating the round-8 count-only-what-THIS-process-
+    transitioned law. SQL_CLEAR now RETURNs whether the reason was
+    actually present pre-update, and both call sites gate the bump
+    on it."""
+    _arm(st)
+    st.trips["uncorroborated:9"] = TS0 + 1.0
+
+    class _AdoptedPool(_SweepPool):
+        async def fetchrow(self, sql, *a, timeout=None):
+            if "trips_cleared" in sql and \
+                    sql.lstrip().startswith("WITH prev"):
+                # another process already released this reason: the
+                # UPDATE matched but removed nothing
+                return {"removed": False, "trips": {}, "cleared": {}}
+            if "FROM trades WHERE id" in sql:
+                return {"ok": True}          # venue-stamped
+            return await _SweepPool.fetchrow(self, sql, *a,
+                                             timeout=timeout)
+
+    pool = _AdoptedPool([], wallets=[])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert "uncorroborated:9" not in st.trips, \
+        "the local memory still releases"
+    assert st.deltas.get("s1.trip_self_cleared") is None, \
+        "but a transition another process made is never re-counted"
+    assert "removed" in s1.SQL_CLEAR, "the statement carries the signal"
