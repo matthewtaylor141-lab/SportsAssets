@@ -44,16 +44,25 @@ def key_fields_valid(ev) -> bool:
             return False
         if str(ev.side or "").upper().strip() not in ("BUY", "SELL"):
             return False
-        for v in (ev.size, ev.price):
+        for v, cap in ((ev.size, 1e18), (ev.price, 1e4)):
             if not isinstance(v, (int, float)) or not math.isfinite(v):
                 return False
             if Decimal(str(v)).quantize(
                     Decimal("0.000001"), rounding=ROUND_HALF_UP) <= 0:
                 return False
+            # storability bounds mirror the trades columns (round 15:
+            # a micro-scaled price of 420000 passed the >0 gate and
+            # overflowed NUMERIC(10,6) inside the INSERT, killing the
+            # wallet's whole batch one call later)
+            if v >= cap:
+                return False
         ts = ev.ts_epoch
         if isinstance(ts, float) and not math.isfinite(ts):
             return False
-        if not isinstance(ts, (int, float)) or ts <= 1e9:
+        # the upper bound refuses millisecond-scaled epochs (round 15:
+        # ts=1.756e12 passed the 1e9 floor and datetime.fromtimestamp
+        # raised 'year out of range' inside ingest)
+        if not isinstance(ts, (int, float)) or ts <= 1e9 or ts >= 4e10:
             return False
     except (InvalidOperation, ValueError, TypeError, AttributeError):
         return False

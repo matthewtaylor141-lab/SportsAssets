@@ -148,3 +148,50 @@ def test_one_hostile_row_never_kills_the_wallet_poll(fake_env, monkeypatch):
     assert new == 1, "the healthy row ingests despite three hostile ones"
     assert len(ingested) == 1
     assert ingested[0].tx_hash == RAW_TRADE["transactionHash"]
+
+
+# ── fleet round 15: stored-as-judged + ingest containment ───────────
+def test_side_is_stored_as_the_gate_judged_it():
+    """r15 (major): side='buy ' passed the gate on .upper().strip()
+    but the INSERT bound the raw 'BUY ' and the side CHECK constraint
+    killed the batch — parse now normalizes what it stores."""
+    raw = dict(RAW_TRADE, side="buy ", transactionHash=" 0x" + "11" * 32)
+    ev = poller_mod.parse_data_api_trade(raw, 28, "x")
+    assert ev.side == "BUY"
+    assert ev.tx_hash == "0x" + "11" * 32, "tx stored stripped too"
+
+
+def test_ingest_failure_costs_one_row_not_the_batch(fake_env, monkeypatch):
+    """r15 (major): a gate-passing row that fails INSIDE ingest (DB
+    constraint / overflow / datetime) must not abort the wallet's
+    poll batch — the round-14 promise, one call deeper."""
+    pool, ingested = fake_env
+    poison = dict(RAW_TRADE, transactionHash="0x" + "99" * 32)
+
+    class _TwoRows:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> list[dict]:
+            return [poison, RAW_TRADE]
+
+    async def two_get(http, path, params=None):
+        return _TwoRows()
+
+    async def picky_ingest(ev):
+        if ev.tx_hash == poison["transactionHash"]:
+            raise RuntimeError("constraint violated inside ingest")
+        ingested.append(ev)
+        return 42, True
+
+    monkeypatch.setattr("sportsassets.ratelimit.polite_get", two_get)
+    monkeypatch.setattr(poller_mod, "ingest_trade_result", picky_ingest)
+    p = Poller.__new__(Poller)
+    p._http = None
+    p.last_lag_s = None
+    new = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        p.poll_wallet({"id": 28, "address": "0xf705", "username": "0xf7"})
+    )
+    assert new == 1, "the healthy row still ingests"
+    assert len(ingested) == 1
+    assert ingested[0].tx_hash == RAW_TRADE["transactionHash"]

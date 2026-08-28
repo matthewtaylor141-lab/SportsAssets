@@ -819,6 +819,10 @@ class _SweepPool(_Pool):
         return self.stored
 
     async def fetchrow(self, sql, *a, timeout=None):
+        if "FROM trades WHERE id" in sql:
+            # SQL_RECHECK (r15): the verdict's last look at the row —
+            # False by default so judgment paths behave as before
+            return {"ok": getattr(self, "recheck_ok", False)}
         ran = (self.recon_ran.get(a[1], True)
                if isinstance(self.recon_ran, dict) else self.recon_ran)
         return {"?": 1} if ran else None
@@ -1511,7 +1515,8 @@ def test_same_height_remine_drops_the_orphaned_logs(st, monkeypatch):
     st.observe(lst, remined)
     assert len(e["logs"]) == 1, "the orphaned version's log is dropped"
     assert e["logs"][0]["blockHash"] == "0x" + "99" * 32
-    assert e["lix_seen"] == {"0x9"}, "lix_seen rebuilds from survivors"
+    assert e["lix_seen"] == {s1._lix_key(remined)}, \
+        "lix_seen rebuilds from survivors (r15: keyed by block+hash)"
     assert "recs" not in e and "recs_n" not in e, "decode invalidated"
     # the full armed path emits exactly ONE row — the canonical copy
     for entry in st.pending.values():
@@ -1794,6 +1799,10 @@ def test_validity_floor_covers_every_dedupe_key_field():
         {"ts_epoch": 0}, {"ts_epoch": 1}, {"ts_epoch": int(1e9)},
         {"ts_epoch": float("nan")}, {"ts_epoch": float("inf")},
         {"ts_epoch": None},
+        # r15: storability bounds — column overflow and ms-scaled
+        # epochs raised INSIDE ingest, past the r14 gate
+        {"price": 420000.0}, {"size": 1e19},
+        {"ts_epoch": 1_756_350_000_000},
     ]
     for mut in hostile:
         ev = NS(**{**good, **mut})
@@ -1878,6 +1887,86 @@ def test_second_distinct_same_asset_fill_defers_by_design():
     assert "s1.abstain.same_asset_entry" in src
     assert "DESIGN DECISION (fleet round 14" in src, \
         "the trade-off must stay documented where it is enforced"
+
+
+# ── fleet round 15 pins ─────────────────────────────────────────────
+def test_new_height_remine_with_reused_logindex_still_abstains(
+        st, monkeypatch):
+    """fleet r15 (CRITICAL): a re-mined copy at a NEW height that
+    reused the buffered logIndex hit the lix-only dup check and
+    returned BEFORE the second height was recorded — the entry stayed
+    single-block, the round-12 two-heights gate never fired, and a
+    stale replica re-verified the orphaned block and emitted it. The
+    new height is now recorded the moment the branch sees it, and
+    frame-dedupe is keyed by (block, hash, index) — a different block
+    version is never a duplicate frame."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    e = st.pending[TX]
+    # the re-mined copy: new height, new hash, SAME logIndex 0x1
+    st.observe(lst, dict(MAKER_EV, blockNumber=hex(BLK + 2),
+                         blockHash="0x" + "88" * 32))
+    assert set(e["blocks"]) == {BLK, BLK + 2}, \
+        "reorg evidence is recorded even when the logIndex collides"
+
+    resolved = []
+
+    async def never_resolve(blk, want_hash):
+        resolved.append(blk)
+        raise AssertionError("a split entry must never reach the RPC")
+
+    monkeypatch.setattr(st, "_resolve_block", never_resolve)
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, e, time.time()))
+    assert done is True and calls == [] and resolved == []
+    assert st.deltas.get("s1.abstain.reorged") == 1
+    # and a genuinely DUPLICATED frame (same block, hash, index) is
+    # still refused as a dup
+    st.observe(lst, MAKER_EV)
+    assert st.deltas.get("s1.dup_event") == 1
+
+
+def test_sweep_last_look_confirms_a_just_stamped_row(st):
+    """fleet r15 (major): the sweep's SQL_SWEEP snapshot read
+    ok=false, a covering reconcile run finished INSIDE the sweep's
+    awaited gap — stamping the row AND becoming the coverage evidence
+    — and the verdict, judged off the stale snapshot, branded a
+    venue-corroborated row uncorroborated permanently. The verdict
+    now re-reads the row after coverage is found: stamped now =
+    confirmed."""
+    _arm(st)
+    pool = _SweepPool([_srow(3, False)])
+    pool.recheck_ok = True             # the covering run stamped it
+    asyncio.run(st._corroboration_sweep(pool))
+    assert st.deltas.get("s1.confirmed") == 1, \
+        "a row stamped by the covering run itself CONFIRMS"
+    assert st.deltas.get("s1.uncorroborated") is None
+    assert st.trips == {} and st.armed is True
+    assert pool.marked == [[3]], "confirmed rows still stamp judged"
+
+
+def test_ingest_containment_is_per_row_in_both_carriers():
+    """fleet r15 (major): a gate-passing row can still fail INSIDE
+    ingest (side CHECK constraint on the raw value, NUMERIC overflow,
+    datetime range) — and the uncontained await killed the wallet's
+    whole poll batch / reconciler walk, re-opening the round-14 class
+    one call later. The parse now stores the gate's own normalized
+    values, the gate mirrors column bounds, and the ingest await is
+    contained per row: the poller skips the row, the reconciler
+    counts it dirty and keeps walking."""
+    import inspect
+    from sportsassets.ingestion import poller as pol
+    from sportsassets.ingestion import reconciler as rec
+    psrc = inspect.getsource(pol)
+    assert '.upper().strip()' in psrc, "side stored as judged"
+    assert psrc.count("except Exception") >= 2, \
+        "poller contains the ingest await, not just the parse"
+    rsrc = inspect.getsource(rec)
+    assert rsrc.count("dirty += 1") >= 2, \
+        "a row that cannot land counts into dirty — the walk " \
+        "continues and still never claims clean coverage"
 
 
 def test_db_clock_anchor_survives_wall_clock_steps(st, monkeypatch):

@@ -230,6 +230,16 @@ WHERE started_at > $1::timestamptz + make_interval(secs => $4)
         ELSE false END)
 LIMIT 1
 """
+# The verdict's LAST look at the row (fleet round 15, major): the
+# sweep's SQL_SWEEP snapshot read ok=false, then a covering reconcile
+# run finished INSIDE the sweep's awaited gap — stamping the row's
+# venue_seen_at AND becoming the very evidence SQL_RECON_SINCE found.
+# Judging off the stale snapshot branded a venue-corroborated row
+# uncorroborated, permanently. The covering run is FINISHED before it
+# testifies (its stamps are committed), so a re-read here is
+# authoritative: stamped now = confirmed, whatever the snapshot said.
+SQL_RECHECK = ("SELECT (venue_seen_at IS NOT NULL) AS ok "
+               "FROM trades WHERE id = $1")
 SQL_READ = "SELECT value FROM ingestion_state WHERE key = $1"
 # The judgment-site refresh clock (fleet round 11, minor): a refresh
 # past an operator tombstone compared an APP-clock timestamp against
@@ -351,6 +361,20 @@ UPDATE ingestion_state SET value = jsonb_set(
 WHERE key = $1 AND jsonb_typeof(value) = 'object'
 RETURNING value->'trips' AS trips, value->'trips_cleared' AS cleared
 """
+
+
+def _lix_key(log_entry: dict) -> str:
+    """Frame-dedupe identity for one delivered log: (block, hash,
+    logIndex). Round 15 (CRITICAL): index alone conflated a re-mined
+    copy at a new height with the old frame whenever the venue reused
+    the logIndex — a duplicate frame is the SAME log from the SAME
+    block version, nothing looser."""
+    lix = str(log_entry.get("logIndex", ""))
+    if not lix:
+        return ""
+    return "%s|%s|%s" % (
+        str(log_entry.get("blockNumber", "")),
+        str(log_entry.get("blockHash", "")).lower(), lix)
 
 
 class S1Emitter:
@@ -532,6 +556,16 @@ class S1Emitter:
                 e["ts"] = {}
                 e["ts_src"] = {}
                 self._purge_ts_cache(min(list(e["blocks"]) + [blk]))
+                # RECORD THE SECOND HEIGHT NOW (fleet round 15,
+                # CRITICAL): the lix dup check below returned early
+                # for a re-mined copy that reused the buffered
+                # logIndex, so the new height never landed in
+                # e['blocks'] — the entry stayed single-block, the
+                # round-12 two-heights gate never fired, and a stale
+                # replica re-verified the orphaned block and emitted
+                # it. Reorg evidence is recorded the moment it is
+                # seen; no later dedupe may swallow it.
+                e["blocks"][blk] = bh
             elif e["blocks"].get(blk) not in (None, bh):
                 # SAME-height re-mine (fleet round 10): a new hash for
                 # a known block number is the same reorg evidence — the
@@ -556,20 +590,24 @@ class S1Emitter:
                         or str(l.get("blockHash", "")).lower() == bh]
                 if len(kept) != len(e["logs"]):
                     e["logs"] = kept
-                    e["lix_seen"] = {
-                        str(l.get("logIndex", "")) for l in kept
-                        if str(l.get("logIndex", ""))}
+                    e["lix_seen"] = {_lix_key(l) for l in kept
+                                     if _lix_key(l)}
                     e.pop("recs", None)
                     e.pop("recs_n", None)
-            lix = str(log_entry.get("logIndex", ""))
-            if lix and lix in e.setdefault("lix_seen", set()):
-                # one duplicated WS delivery of either leg was making
-                # classify see two aggs / doubled legs and abstain the
-                # whole certified emission (fleet r5)
+            # the dup check dedupes DUPLICATED FRAMES of one log —
+            # same block, same hash, same index (fleet r5). Round 15
+            # (CRITICAL): keyed by index alone, it also swallowed a
+            # RE-MINED copy at a NEW height that happened to reuse the
+            # buffered logIndex, returning before the second height
+            # was recorded — the round-12 gate never fired and the
+            # orphaned block emitted. A different (block, hash) is
+            # never a duplicate frame.
+            lk = _lix_key(log_entry)
+            if lk and lk in e.setdefault("lix_seen", set()):
                 self.bump("s1.dup_event")
                 return
-            if lix:
-                e["lix_seen"].add(lix)
+            if lk:
+                e["lix_seen"].add(lk)
             e["logs"].append(log_entry)
             e["last_seen"] = now
             e["blocks"][blk] = bh
@@ -1251,6 +1289,18 @@ class S1Emitter:
             if ran is None:
                 continue               # no run provably covered THIS
                                        # fill's depth and lag — defer
+            # LAST LOOK before the verdict (round 15): the covering
+            # run may BE the run that just stamped this row — judge
+            # the row as it is now, not as the sweep snapshot saw it.
+            try:
+                cur = await pool.fetchrow(SQL_RECHECK, r["id"],
+                                          timeout=6)
+            except Exception:  # noqa: BLE001 — cannot re-look: defer
+                self.bump("s1.errors")
+                continue
+            if cur is not None and bool(cur["ok"]):
+                confirmed_ids.append(r["id"])
+                continue
             judged.append(r)
             log.error("S1 UNCORROBORATED row id=%s key=%s — the venue's "
                       "feed never showed this fill", r["id"],

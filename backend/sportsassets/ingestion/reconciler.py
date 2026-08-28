@@ -125,16 +125,31 @@ async def reconcile_once(depth: int = 500) -> dict:
                             # the 1e9 floor (2001) rejects sentinel
                             # timestamps a degraded venue might emit
                             oldest_ts = float(ev.ts_epoch)
-                        sport = await _sport_for_condition(ev.condition_id)
-                        if sport:
-                            ev.sport = sport
-                        # WAS IT NEW? `is not None` stopped meaning that
-                        # when ingest_trade switched to ON CONFLICT DO
-                        # UPDATE — it returns the id for duplicates too, so
-                        # this counted the ENTIRE 500-row-per-wallet
-                        # re-sweep as missed fills and reported permanent
-                        # drift on every run.
-                        _tid, was_new = await ingest_trade_result(ev)
+                        # per-row containment around the INGEST (fleet
+                        # round 15): a gate-passing row can still fail
+                        # inside ingest (constraint, overflow, datetime
+                        # range) — the uncontained raise aborted the
+                        # walk as failed:<addr> every run and lost the
+                        # healthy fills behind it. A row that cannot
+                        # land cannot corroborate either: it counts
+                        # into dirty like any other unusable serving,
+                        # so the walk keeps going and still never
+                        # claims clean coverage.
+                        try:
+                            sport = await _sport_for_condition(ev.condition_id)
+                            if sport:
+                                ev.sport = sport
+                            # WAS IT NEW? `is not None` stopped meaning
+                            # that when ingest_trade switched to ON
+                            # CONFLICT DO UPDATE — it returns the id for
+                            # duplicates too, so this counted the ENTIRE
+                            # 500-row-per-wallet re-sweep as missed
+                            # fills and reported permanent drift on
+                            # every run.
+                            _tid, was_new = await ingest_trade_result(ev)
+                        except Exception:  # noqa: BLE001
+                            dirty += 1
+                            continue
                         if was_new:
                             wallet_missed += 1
                     offset += 100

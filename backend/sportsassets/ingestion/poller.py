@@ -24,12 +24,16 @@ log = logging.getLogger(__name__)
 
 def parse_data_api_trade(raw: dict[str, Any], whale_id: int, username: str | None) -> TradeEvent:
     """Map a data-api trade payload onto our TradeEvent."""
+    # stored values are NORMALIZED exactly as the dedupe key and the
+    # validity gate normalize them (fleet round 15: side='buy ' passed
+    # the gate on .upper().strip() but the INSERT bound the raw value
+    # and the side CHECK constraint killed the whole batch)
     return TradeEvent(
         whale_id=whale_id,
         whale_username=username,
-        tx_hash=str(raw.get("transactionHash") or raw.get("txHash") or ""),
-        asset=str(raw.get("asset") or raw.get("tokenId") or ""),
-        side=str(raw.get("side", "")).upper(),
+        tx_hash=str(raw.get("transactionHash") or raw.get("txHash") or "").strip(),
+        asset=str(raw.get("asset") or raw.get("tokenId") or "").strip(),
+        side=str(raw.get("side", "")).upper().strip(),
         size=float(raw.get("size", 0)),
         price=float(raw.get("price", 0)),
         ts_epoch=int(raw.get("timestamp", 0)),
@@ -143,15 +147,26 @@ class Poller:
         for ev, key in zip(events, keys):
             if key in seen:
                 continue
-            sport = await _sport_for_condition(ev.condition_id)
-            if sport:
-                ev.sport = sport
-            # Same contract change as the reconciler: ingest_trade
-            # returns the id for duplicates too since the ON CONFLICT
-            # DO UPDATE, so `is not None` over-counted every re-polled
-            # fill as new and inflated this heartbeat's `new` on every
-            # pass.
-            _tid, was_new = await ingest_trade_result(ev)
+            # per-row containment around the INGEST too (fleet round
+            # 15: a gate-passing row can still fail inside ingest —
+            # DB constraint, column overflow, datetime range — and an
+            # uncontained raise here killed the wallet's whole batch
+            # every cycle, the exact round-14 class one call later).
+            # One row that cannot land costs one row, never the batch.
+            try:
+                sport = await _sport_for_condition(ev.condition_id)
+                if sport:
+                    ev.sport = sport
+                # Same contract change as the reconciler: ingest_trade
+                # returns the id for duplicates too since the ON
+                # CONFLICT DO UPDATE, so `is not None` over-counted
+                # every re-polled fill as new and inflated this
+                # heartbeat's `new` on every pass.
+                _tid, was_new = await ingest_trade_result(ev)
+            except Exception:  # noqa: BLE001
+                log.warning("poll: row failed to ingest, skipping: %s",
+                            key[:16])
+                continue
             if was_new:
                 new += 1
                 if ev.ts_epoch:
