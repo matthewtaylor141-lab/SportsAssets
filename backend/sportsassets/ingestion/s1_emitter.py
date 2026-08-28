@@ -394,13 +394,18 @@ class S1Emitter:
         # finalize redelivery double-counted would_emit)
         self.counted_marks: OrderedDict[tuple, bool] = OrderedDict()
         self._unpersisted: set[str] = set()  # trips awaiting SQL_TRIP
-        # DB-vs-app clock offset, learned from SQL_NOW (fleet round
-        # 12, minor): trip timestamps are compared against tombstones
+        # DB clock anchor, learned from SQL_NOW (fleet round 12,
+        # minor): trip timestamps are compared against tombstones
         # written with PG now(), so they must be stamped on PG's clock
         # in BOTH skew directions — an app-ahead trip outran every
         # tombstone (clears reported success but never released, and a
-        # queued retry resurrected a cleared trip durably).
-        self._db_clock_offset = 0.0
+        # queued retry resurrected a cleared trip durably). Round 13:
+        # the anchor pairs the PG reading with time.MONOTONIC, not the
+        # wall clock — a wall-clock STEP (NTP/VM migration) landing
+        # between the sweep's SQL_NOW read and a between-sweeps trip
+        # was re-stamping trips into PG's future, a stamp no tombstone
+        # could ever outrun and no healer could repair.
+        self._db_anchor: tuple[float, float] | None = None
         self._client: httpx.AsyncClient | None = None
         self._state_loaded = False
         self._pending_arm_at: float | None = None
@@ -790,19 +795,24 @@ class S1Emitter:
         try:
             v = await pool.fetchval(SQL_NOW, timeout=6)
             if isinstance(v, (int, float)):
-                self._db_clock_offset = float(v) - time.time()
+                self._db_anchor = (float(v), time.monotonic())
                 return float(v)
         except Exception:  # noqa: BLE001
             self.bump("s1.errors")
         return time.time()
 
     def _now_db(self) -> float:
-        """Best-known PG-clock 'now' without an await — app clock plus
-        the offset learned at the last SQL_NOW read (round 12: trips
-        stamped on the raw app clock outran PG tombstones under
-        app-ahead skew; before the first read the offset is 0 and this
-        degrades to the old behavior)."""
-        return time.time() + self._db_clock_offset
+        """Best-known PG-clock 'now' without an await — the last
+        SQL_NOW reading plus MONOTONIC elapsed time since it (round
+        12: trips stamped on the raw app clock outran PG tombstones
+        under app-ahead skew; round 13: monotonic elapsed makes the
+        stamp immune to wall-clock steps after the anchor is learned).
+        Before the first successful read this degrades to the app
+        clock — the anchor lands with the first sweep."""
+        if self._db_anchor is not None:
+            db0, m0 = self._db_anchor
+            return db0 + (time.monotonic() - m0)
+        return time.time()
 
     async def _persist_trip(self, pool: Any, reason: str) -> str:
         """One atomic server-side union — durable the moment the trip
@@ -1064,6 +1074,21 @@ class S1Emitter:
                 # (fleet round 7 — the poller carries what this skips)
                 self.bump("s1.abstain.ts_cached")
                 continue
+            if (wallet, rec["asset"]) in e.get("ingested_assets", set()):
+                # THIS ENTRY already emitted this (wallet, asset) on an
+                # earlier retry pass (fleet round 13, CRITICAL): a
+                # bundle whose second market hit a transient probe
+                # error retried per r5's design, a benign same-height
+                # re-mine landed between the passes, and pass 2's
+                # re-earned block ts shifted the first market's key —
+                # emit_dup missed on the new key and the r6 own-sibling
+                # allowance (built for DIFFERENT-asset bundle legs)
+                # whitelisted the entry's own earlier SAME-asset row.
+                # One economic fill must be one row regardless of how
+                # the timestamp moved between passes: per-asset
+                # exclusion is structural, never the executor's job.
+                self.bump("s1.emit_dup")
+                continue
             # CLAIM BEFORE ANY AWAIT and honor refusal: awaiting the
             # probe between the registry read and the claim opened a
             # window where the receipt path could claim-and-ingest a
@@ -1166,6 +1191,8 @@ class S1Emitter:
                                              # record that did commit
             self._mark_counted(tx, wallet, rec["asset"])
             e.setdefault("ingested_keys", set()).add(ev.dedupe_key)
+            e.setdefault("ingested_assets", set()).add(
+                (wallet, rec["asset"]))
             emitted = True
             self.last_emit_at = now
             if was_new:

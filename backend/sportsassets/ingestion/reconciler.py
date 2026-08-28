@@ -84,6 +84,9 @@ async def reconcile_once(depth: int = 500) -> dict:
                     for raw in batch:
                         ev = parse_data_api_trade(raw, whale["id"], whale["username"])
                         if (not ev.tx_hash or ev.size <= 0
+                                or not ev.asset
+                                or ev.side not in ("BUY", "SELL")
+                                or ev.price <= 0
                                 or not ev.ts_epoch or ev.ts_epoch <= 1e9):
                             # a row unusable for ingest must not
                             # testify for coverage either (fleet round
@@ -101,6 +104,13 @@ async def reconcile_once(depth: int = 500) -> dict:
                             # part of validity, and a served copy of
                             # the fill that cannot corroborate it must
                             # dirty the walk like any other stub.
+                            # Round 13 (major): the dedupe key is
+                            # (tx, asset, side, size, price, ts) — a
+                            # stub missing ANY key field (price -> 0.0,
+                            # asset -> "", side -> "") ingests as a
+                            # key-divergent junk row that can never
+                            # stamp venue_seen_at, so EVERY key field
+                            # is validity, not just tx/size/ts.
                             dirty += 1
                             continue
                         if (ev.ts_epoch and ev.ts_epoch > 1e9

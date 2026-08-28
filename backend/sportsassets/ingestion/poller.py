@@ -97,11 +97,14 @@ class Poller:
         for raw in resp.json():
             ev = parse_data_api_trade(raw, whale["id"], whale["username"])
             if (not ev.tx_hash or ev.size <= 0
+                    or not ev.asset or ev.side not in ("BUY", "SELL")
+                    or ev.price <= 0
                     or not ev.ts_epoch or ev.ts_epoch <= 1e9):
-                # same validity the reconciler enforces (fleet round
-                # 12): ts is a dedupe-key component, so a mangled-ts
-                # stub would ingest as a key-divergent 1970-dated row
-                # of a fill the venue already served correctly
+                # same validity the reconciler enforces (fleet rounds
+                # 12+13): EVERY dedupe-key field (tx, asset, side,
+                # size, price, ts) gates ingest — a stub missing any
+                # of them would ingest as a key-divergent junk row of
+                # a fill the venue already served correctly
                 continue
             events.append(ev)
         if not events:

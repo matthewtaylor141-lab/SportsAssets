@@ -1742,9 +1742,11 @@ def test_fresh_trips_stamp_the_db_clock(st):
     pool = _DbClockPool([_srow(3, False)])
     asyncio.run(st._corroboration_sweep(pool))
     assert pool.trip_writes, "the verdict trips"
-    assert pool.trip_writes[0][2] == _DbClockPool.DB_NOW, \
+    # r13: the anchor advances by MONOTONIC elapsed, so the stamp sits
+    # within real elapsed test time of the DB reading, never exact
+    assert abs(pool.trip_writes[0][2] - _DbClockPool.DB_NOW) < 2.0, \
         "a FRESH trip's timestamp is PG's clock, not the app host's"
-    assert st.trips["uncorroborated:3"] == _DbClockPool.DB_NOW
+    assert abs(st.trips["uncorroborated:3"] - _DbClockPool.DB_NOW) < 2.0
 
 
 def test_ts_mangled_rows_are_unusable_everywhere():
@@ -1761,3 +1763,93 @@ def test_ts_mangled_rows_are_unusable_everywhere():
     for src in (inspect.getsource(rec), inspect.getsource(pol)):
         assert "or not ev.ts_epoch or ev.ts_epoch <= 1e9" in src, \
             "ts validity gates ingest in the poller AND the reconciler"
+
+
+# ── fleet round 13 pins ─────────────────────────────────────────────
+def test_validity_floor_covers_every_dedupe_key_field():
+    """fleet r13 (major): round 12 floored only ts — but the dedupe
+    key is (tx, asset, side, size, price, ts), and a degraded stub
+    missing the PRICE (parse defaults 0.0) or ASSET (defaults '')
+    passed validity, ingested as a key-divergent junk row that could
+    never stamp venue_seen_at, left dirty at 0, and false-tripped
+    STICKY on a correct venue-served emission. Every key field is
+    validity, in BOTH carriers."""
+    import inspect
+    from sportsassets.ingestion import poller as pol
+    from sportsassets.ingestion import reconciler as rec
+    for src in (inspect.getsource(rec), inspect.getsource(pol)):
+        assert "not ev.asset" in src
+        assert 'ev.side not in ("BUY", "SELL")' in src
+        assert "ev.price <= 0" in src
+
+
+TOKEN_B_INT = int("9c546cfe" + "33" * 28, 16)
+
+
+def test_bundle_retry_after_remine_never_reemits_an_asset(
+        st, monkeypatch):
+    """fleet r13 (CRITICAL): a two-market bundle's second probe hit a
+    transient DB error, the tx retried per r5's design, a benign
+    same-height re-mine landed between the passes, and pass 2's
+    re-earned block ts shifted the first market's key — emit_dup
+    missed on the new key and the r6 own-sibling allowance (built for
+    DIFFERENT-asset legs) whitelisted the entry's own earlier row of
+    the SAME asset: one fill, two key-divergent trades rows. The
+    entry now tracks (wallet, asset) it has ingested and refuses a
+    re-emission structurally, whatever the timestamp did."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    ev_a = MAKER_EV
+    ev_b = _ev(MAKER, TAKER, 0, TOKEN_B_INT, 0x30D40, 0x61A80,
+               log_index=2)
+    _observe_all(st, lst, [ev_a, ev_b])
+    e = st.pending[TX]
+
+    class _FlakyProbePool(_Pool):
+        def __init__(self):
+            super().__init__()
+            self.n = 0
+
+        async def fetch(self, sql, *a, timeout=None):
+            self.n += 1
+            if self.n == 2:          # second market's probe, pass 1
+                raise RuntimeError("transient DB blip")
+            return []
+
+    pool = _FlakyProbePool()
+    done = asyncio.run(st._finalize_tx(pool, TX, e, time.time()))
+    assert done is False, "transient probe error = retry, not forfeit"
+    assert len(calls) == 1, "pass 1 ingested exactly the first market"
+    # between the passes: a benign same-height re-mine of the SAME tx
+    # (new hash, shifted log indexes) + the node re-serving a SHIFTED
+    # block timestamp for the new hash
+    st.observe(lst, dict(ev_a, blockHash="0x" + "99" * 32,
+                         logIndex="0x9"))
+    st.observe(lst, dict(ev_b, blockHash="0x" + "99" * 32,
+                         logIndex="0xa"))
+    st._client = _FakeClient(_Resp(200, {"result": {
+        "timestamp": hex(TS0 + 3)}}))
+    done = asyncio.run(st._finalize_tx(pool, TX, e, time.time()))
+    assert done is True
+    assets = [c.asset for c in calls]
+    assert len(calls) == 2 and len(set(assets)) == 2, \
+        "each asset ingests EXACTLY once across the retry — the " \
+        "re-mine-shifted key must never produce a second row"
+    assert st.deltas.get("s1.emit_dup", 0) >= 1, \
+        "the re-emission attempt is refused as a dup"
+
+
+def test_db_clock_anchor_survives_wall_clock_steps(st, monkeypatch):
+    """fleet r13 (minor): the round-12 offset was wall-clock-relative,
+    so an NTP/VM step landing between the sweep's SQL_NOW read and a
+    between-sweeps trip stamped the trip into PG's FUTURE — a stamp
+    no tombstone could outrun (clear wedged in-memory; a queued
+    persist retry resurrected the cleared trip durably). The anchor
+    now advances by time.monotonic, immune to any wall-clock step."""
+    import time as _t
+    st._db_anchor = (float(TS0 + 500), _t.monotonic())
+    monkeypatch.setattr(s1.time, "time", lambda: TS0 + 99_999.0)
+    assert abs(st._now_db() - (TS0 + 500)) < 2.0, \
+        "a +99999s wall-clock step must not move the trip clock"
