@@ -111,7 +111,26 @@ async def reconcile_once(depth: int = 500) -> dict:
                         },
                     )
                     resp.raise_for_status()
-                    batch = resp.json()
+                    page = resp.json()
+                    if not isinstance(page, list):
+                        # a non-list body is a venue error shape — the
+                        # walk cannot continue this run, but it DEFERS
+                        # (dirty, no coverage claim) instead of
+                        # aborting the wallet (round 19)
+                        dirty += 1
+                        break
+                    batch = [r for r in page if isinstance(r, dict)]
+                    if len(batch) != len(page):
+                        # round 19 (major): a JSON null in the batch
+                        # reached the witness build BEFORE the per-row
+                        # containment and its AttributeError killed the
+                        # wallet's ENTIRE walk — the round-14/15
+                        # one-row-costs-one-row promise, reintroduced
+                        # one line earlier by the witness machinery.
+                        # Non-dict elements are unusable rows: counted
+                        # dirty, excluded from idents, ingest and
+                        # witness alike; the healthy rows still walk.
+                        dirty += len(page) - len(batch)
                     if not batch:
                         # An empty FIRST page is not "feed exhausted"
                         # (fleet round 7): a degraded venue serving
@@ -215,7 +234,10 @@ async def reconcile_once(depth: int = 500) -> dict:
                         if was_new:
                             wallet_missed += 1
                     witness = idents[-OVERLAP_K:]
-                    if len(batch) < 100:
+                    if len(page) < 100:
+                        # completeness is judged on the page AS SERVED
+                        # (r19: dropped non-dict elements must not
+                        # fake a short page — dirty already defers)
                         complete = True
                         break
                     if any(idents.count(w) > 1 for w in witness):
@@ -228,9 +250,10 @@ async def reconcile_once(depth: int = 500) -> dict:
                         # boundaries actually crossed matter — a twin
                         # in the FINAL page's tail is harmless.)
                         dirty += 1
-                    # advance by len-K: the next page re-requests the
-                    # witness run first (rounds 17-18)
-                    offset += max(1, len(batch) - len(witness))
+                    # advance by len-K over the page AS SERVED: the
+                    # next page re-requests the witness run first
+                    # (rounds 17-19)
+                    offset += max(1, len(page) - len(witness))
                 per_wallet["cov:" + whale["address"]] = {
                     "complete": complete, "oldest": oldest_ts,
                     "dirty": dirty}

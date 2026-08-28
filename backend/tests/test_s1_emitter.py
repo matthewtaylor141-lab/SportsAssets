@@ -2091,8 +2091,9 @@ def test_walk_pages_overlap_and_a_boundary_shift_dirties():
     src = inspect.getsource(rec)
     assert "idents[:k] == witness" in src, \
         "the witness run must return verbatim and in order"
-    assert "offset += max(1, len(batch) - len(witness))" in src, \
-        "each page re-requests the previous tail rows"
+    assert "offset += max(1, len(page) - len(witness))" in src, \
+        "each page re-requests the previous tail rows (positional " \
+        "advance over the page AS SERVED — r19)"
     assert src.count("dirty += 1") >= 5, \
         "validity, ingest-failure, boundary mismatch, vanished " \
         "overlap AND ambiguous witness all dirty the walk"
@@ -2114,6 +2115,28 @@ def test_witness_is_a_run_of_rows_and_twins_make_it_ambiguous():
     assert "idents.count(w) > 1" in src, \
         "visible twins make the boundary ambiguous — dirty"
     assert "witness = idents[-OVERLAP_K:]" in src
+
+
+def test_non_dict_batch_elements_cost_one_row_not_the_walk():
+    """fleet r19 (major): the witness build ran _row_ident over the
+    RAW batch before the per-row containment — one JSON null raised
+    AttributeError, the wallet-level handler booked failed:<addr>,
+    and the wallet's entire hourly walk (the sole backstop for fills
+    beyond the poll window) died on every run while the heartbeat
+    said 'ok'. Non-dict elements are now pre-filtered and counted
+    dirty; a non-list body defers without aborting the wallet."""
+    import inspect
+    from sportsassets.ingestion import reconciler as rec
+    src = inspect.getsource(rec)
+    assert "isinstance(page, list)" in src, "non-list body defers"
+    assert "[r for r in page if isinstance(r, dict)]" in src, \
+        "non-dict elements are excluded before ANY per-element code"
+    assert "dirty += len(page) - len(batch)" in src, \
+        "and each exclusion counts into dirty — never a clean claim"
+    idx_filter = src.index("[r for r in page if isinstance(r, dict)]")
+    idx_idents = src.index("idents = [_row_ident(r) for r in batch]")
+    assert idx_filter < idx_idents, \
+        "the filter must precede the witness build it protects"
 
 
 def test_db_clock_anchor_survives_wall_clock_steps(st, monkeypatch):
