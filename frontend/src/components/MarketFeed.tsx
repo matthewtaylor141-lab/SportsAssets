@@ -29,10 +29,10 @@ export const LEAGUES: { key: string; label: string; icon: string }[] = [
   { key: 'nhl', label: 'NHL', icon: '🏒' },
   { key: 'esports', label: 'Esports', icon: '🎮' },
 ]
-const SPORT_NAME: Record<string, string> = {
-  mlb: 'BASEBALL', wnba: 'BASKETBALL', nba: 'BASKETBALL',
-  nfl: 'FOOTBALL', nhl: 'HOCKEY', tennis: 'TENNIS',
-  soccer: 'SOCCER', esports: 'ESPORTS',
+// v10 venue card anatomy: the icon tile every venue card leads with.
+const LEAGUE_ICON: Record<string, string> = {
+  mlb: '⚾', wnba: '🏀', nba: '🏀', nfl: '🏈', nhl: '🏒',
+  tennis: '🎾', soccer: '⚽', esports: '🎮', everything: '🌐',
 }
 
 // ── Lazy card charts (Wave-2 machinery, relocated from TradeDesk) ──
@@ -243,27 +243,44 @@ export function MarketFeed({ venue, league, onLeague, pick, choose, onOpen, spar
   const card = (c: FeedCard) => {
     const volTxt = fmtVol(c.volume_usd)
     const closeTxt = fmtClose(c.close_time)
-    const two = !isK && c.outcomes.length === 2
-    // Chartable id: any Kalshi ticker; PM only when the feed carries a
-    // real CLOB token (a us_slug can't be charted — no blank strip, no
-    // doomed fetches; lights up the moment the feed ships tokens).
-    const chartId = c.history_id && (isK || TOKEN_RE.test(c.history_id))
-      ? c.history_id : null
+    const two = c.outcomes.length === 2
+    const icon = LEAGUE_ICON[c.league] || '📊'
+    // v10: an explicit Yes/No market (single outcome, or Yes-labelled)
+    // gets the venue's "chance" dial; a matchup gets side buttons.
+    const single = c.outcomes.length === 1
+    const chance = single ? c.outcomes[0]?.price ?? null : null
+    // Kalshi cards carry the venue's mini price chart; Polymarket event
+    // cards don't chart on the browse grid — matching each venue.
+    const chartId = isK && c.history_id ? c.history_id : null
+    const arc = chance != null ? Math.max(0.02, Math.min(1, chance)) : 0
     return (
-      <article className={`mf-card ${isK ? 'kx8-card' : 'pm8-card'}`} key={`${c.venue}-${c.id}`}>
+      <article className="mf-card" key={`${c.venue}-${c.id}`}>
         <header
           className="mf-head" role="button" tabIndex={0}
           onClick={() => onOpen(c)}
           onKeyDown={(e) => { if (e.key === 'Enter') onOpen(c) }}
         >
-          <div className="mf-tags">
-            <span className={isK ? 'kx8-tag' : 'pm8-tag'}>
-              {(SPORT_NAME[c.league] || c.league).toUpperCase()}
-            </span>
-            {closeTxt && <span className="mf-close">{closeTxt}</span>}
-            {volTxt && <span className="mf-vol">{volTxt}</span>}
-          </div>
+          <span className="mf-ico" aria-hidden>{icon}</span>
           <h3 className="mf-title">{c.title}</h3>
+          {chance != null && (
+            <span className="mf-chance" aria-label={`${Math.round(chance * 100)}% chance`}>
+              <svg width="54" height="28" viewBox="0 0 54 28" aria-hidden>
+                <path
+                  d="M4 26 A 23 23 0 0 1 50 26" fill="none"
+                  stroke="currentColor" strokeOpacity="0.18" strokeWidth="4"
+                  strokeLinecap="round"
+                />
+                <path
+                  d="M4 26 A 23 23 0 0 1 50 26" fill="none"
+                  stroke={chance >= 0.5 ? 'var(--v-green)' : 'var(--v-red2)'}
+                  strokeWidth="4" strokeLinecap="round"
+                  strokeDasharray={`${arc * 72.3} 200`}
+                />
+              </svg>
+              <b>{Math.round(chance * 100)}%</b>
+              <small>chance</small>
+            </span>
+          )}
         </header>
         {chartId && (
           <div className="mf-chartrow" onClick={() => onOpen(c)} aria-hidden="true">
@@ -271,12 +288,27 @@ export function MarketFeed({ venue, league, onLeague, pick, choose, onOpen, spar
           </div>
         )}
         <div className="mf-outcomes">
-          {two ? (
+          {single ? (
+            <div className="mf-split">
+              <button
+                className={`g${sel(c.outcomes[0]) ? ' on' : ''}`}
+                disabled={!buyable(c.outcomes[0])}
+                onClick={() => buy(c, c.outcomes[0])}
+              >
+                Buy Yes {c.outcomes[0].price != null ? cents(c.outcomes[0].price) : ''}
+              </button>
+              {/* the No side is orderable from the full market page —
+                  the card button walks there, venue-style */}
+              <button className="r" onClick={() => onOpen(c)}>
+                Buy No {c.outcomes[0].price != null ? cents(1 - (c.outcomes[0].price as number)) : ''}
+              </button>
+            </div>
+          ) : two ? (
             <div className="mf-split">
               {c.outcomes.map((o, i) => (
                 <button
                   key={o.id || o.label}
-                  className={`pm8-buy ${i === 0 ? 'g' : 'r'}${sel(o) ? ' on' : ''}`}
+                  className={`t${i === 0 ? ' a' : ' b'}${sel(o) ? ' on' : ''}`}
                   disabled={!buyable(o)}
                   onClick={() => buy(c, o)}
                 >
@@ -288,17 +320,22 @@ export function MarketFeed({ venue, league, onLeague, pick, choose, onOpen, spar
             <div className="mf-row" key={o.id || o.label}>
               <span className="mf-oname">{o.label}</span>
               <span className="mf-opct">{pct(o.price)}</span>
-              <button
-                className={`${isK ? 'kx8-buy' : 'pm8-buy g'}${sel(o) ? ' on' : ''}`}
-                disabled={!buyable(o)}
-                onClick={() => buy(c, o)}
-              >{isK ? pct(o.price) : `Buy ${o.price != null ? cents(o.price) : ''}`}</button>
+              <span className="mf-yn">
+                <button
+                  className={`mf-yes${sel(o) ? ' on' : ''}`}
+                  disabled={!buyable(o)}
+                  onClick={() => buy(c, o)}
+                >{isK ? cents(o.price) : `Yes ${o.price != null ? cents(o.price) : ''}`}</button>
+              </span>
             </div>
           ))}
         </div>
         <footer className="mf-foot">
+          {volTxt && <span>{volTxt}.</span>}
+          {closeTxt && <span>{closeTxt}</span>}
+          <span className="spacer" />
           <button className="mf-open" onClick={() => onOpen(c)}>
-            {c.markets_n ? `${c.markets_n} markets ›` : 'View market ›'}
+            {c.markets_n ? `${c.markets_n} markets` : 'View'} ›
           </button>
         </footer>
       </article>
@@ -307,7 +344,7 @@ export function MarketFeed({ venue, league, onLeague, pick, choose, onOpen, spar
 
   return (
     <div className="mf">
-      <div className="mf-chips" role="tablist" aria-label="Leagues">
+      <div className="mf-chips" role="tablist" aria-label="Categories">
         {LEAGUES.map((l) => {
           const n = counts[l.key]
           return (
@@ -316,7 +353,7 @@ export function MarketFeed({ venue, league, onLeague, pick, choose, onOpen, spar
               className={`mf-chip${league === l.key ? ' on' : ''}`}
               onClick={() => onLeague(l.key)}
             >
-              {l.icon && `${l.icon} `}{l.label}{n != null ? ` · ${n}` : ''}
+              {isK && l.icon ? `${l.icon} ` : ''}{l.label}{n != null ? ` · ${n}` : ''}
             </button>
           )
         })}

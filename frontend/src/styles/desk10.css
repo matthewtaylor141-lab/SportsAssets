@@ -1,0 +1,1262 @@
+/* ═══ DESK v10 — THE VENUE PORTAL (owner order 2026-08-28) ═══════════
+   "I need it to be literally exactly the same UX/UI as Polymarket and
+   Kalshi (indistinguishable) … like our team is accessing the account
+   from a portal."
+
+   The desk is now a FULL-BLEED venue app. `.dxp` owns the viewport
+   (App.tsx treats /desk as a cockpit route — no site nav, no tabbar,
+   no notice). Everything inside is themed per venue:
+
+     .dxp--pm  → Polymarket: near-black navy chrome, Inter, event
+                 cards with icon tiles + Buy Yes/Buy No, blue links,
+                 green/red tinted trade buttons, Portfolio/Cash chips.
+     .dxp--kx  → Kalshi: white chrome, ink navy, kalshi-green Yes /
+                 red No price pills, light bordered cards.
+
+   Loaded AFTER desk2.css: this file re-skins the same class names the
+   money paths already render (dx-*, pmx-*, kx-*, mf-*, v8-*, v9-*,
+   mp-*) — zero logic moved, zero money-path markup renamed. */
+
+/* ── the portal root ──────────────────────────────────────────────── */
+.dxp {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  font-family: Inter, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.dxp *, .dxp *::before, .dxp *::after { box-sizing: border-box; }
+.dxp button { font-family: inherit; }
+.dxp input { font-family: inherit; }
+
+/* venue palettes */
+.dxp--pm {
+  --v-bg: #141a23;          /* page */
+  --v-bg2: #1c232f;         /* raised panel / card */
+  --v-bg3: #232b3a;         /* hover / inset */
+  --v-line: #2a3242;
+  --v-ink: #eceff4;
+  --v-ink2: #aab3c5;
+  --v-mut: #7c869b;
+  --v-green: #27ae60;
+  --v-green-t: rgba(39, 174, 96, 0.12);
+  --v-red: #e64800;
+  --v-red2: #eb5757;
+  --v-red-t: rgba(235, 87, 87, 0.12);
+  --v-blue: #2d9cdb;
+  --v-cta: #2e6be6;
+  /* legacy desk vars (desk2.css/theme.css rules) remapped to the venue
+     palette so no light-skin surface can leak into the dark chrome */
+  --vd-bg: #1c232f;
+  --vd-ink: #eceff4;
+  --vd-mut: #7c869b;
+  --vd-line: #2a3242;
+  --vd-soft: #232b3a;
+  --vda: #2e6be6;
+  --vda-ink: #7fa7ff;
+  --vda-soft: rgba(46, 107, 230, 0.14);
+  --vd-good: #27ae60;
+  --vd-bad: #eb5757;
+  background: var(--v-bg);
+  color: var(--v-ink);
+  color-scheme: dark;
+}
+.dxp--kx {
+  --v-bg: #ffffff;
+  --v-bg2: #ffffff;
+  --v-bg3: #f5f7f8;
+  --v-line: #e5e8ec;
+  --v-ink: #0b1e2d;
+  --v-ink2: #3f5261;
+  --v-mut: #7c8a96;
+  --v-green: #00a663;
+  --v-green-t: #e7f6ef;
+  --v-red: #e5484d;
+  --v-red2: #e5484d;
+  --v-red-t: #fdedee;
+  --v-blue: #00a663;
+  --v-cta: #00a663;
+  --vd-bg: #ffffff;
+  --vd-ink: #0b1e2d;
+  --vd-mut: #7c8a96;
+  --vd-line: #e5e8ec;
+  --vd-soft: #f5f7f8;
+  --vda: #00a663;
+  --vda-ink: #007a49;
+  --vda-soft: #e7f6ef;
+  --vd-good: #00a663;
+  --vd-bad: #e5484d;
+  background: var(--v-bg);
+  color: var(--v-ink);
+  color-scheme: light;
+}
+
+/* ── BettorToken portal strip (the ONLY non-venue chrome: 26px) ──── */
+.dxp-portal {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 14px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  background: #0b0e14;
+  color: #8b93a7;
+  border-bottom: 1px solid #1c2230;
+}
+.dxp--kx .dxp-portal {
+  background: #0d1b26;
+  border-bottom-color: #12283a;
+}
+.dxp-live { display: inline-flex; align-items: center; gap: 6px; font-weight: 800; color: #e8c877; }
+.dxp-live i {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #2fd575; box-shadow: 0 0 6px rgba(47, 213, 117, 0.8);
+  animation: dxp-pulse 2s ease-in-out infinite;
+}
+@keyframes dxp-pulse { 50% { opacity: 0.55; } }
+.dxp-note { overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+.dxp-note b { color: #c7cddb; font-weight: 700; }
+.dxp-sync { font-variant-numeric: tabular-nums; }
+.dxp-modes { display: inline-flex; gap: 4px; }
+.dxp-modes button {
+  border: 1px solid #262e40;
+  background: transparent;
+  color: #8b93a7;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.dxp-modes button.on { background: #1d2534; color: #fff; border-color: #35405a; }
+.dxp-exit {
+  color: #8b93a7;
+  text-decoration: none;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+.dxp-exit:hover { color: #fff; }
+
+/* ── venue top nav ────────────────────────────────────────────────── */
+.dxp-nav {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  background: var(--v-bg);
+  border-bottom: 1px solid var(--v-line);
+}
+.dxp--kx .dxp-nav { background: #fff; }
+
+/* wordmarks — pure text/SVG, venue-faithful weight & case */
+.dxp-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 800;
+  font-size: 17px;
+  letter-spacing: -0.02em;
+  color: var(--v-ink);
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+}
+.dxp--pm .dxp-logo .glyph {
+  width: 22px; height: 22px; display: inline-block;
+  color: #fff;
+}
+.dxp--kx .dxp-logo { font-size: 18px; letter-spacing: -0.03em; }
+.dxp--kx .dxp-logo .glyph {
+  width: 24px; height: 24px;
+  border-radius: 6px;
+  background: var(--v-green);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 900;
+}
+
+.dxp-search {
+  flex: 1;
+  max-width: 520px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--v-bg3);
+  border: 1px solid var(--v-line);
+  border-radius: 8px;
+  padding: 7px 12px;
+  min-width: 0;
+}
+.dxp--kx .dxp-search { background: #f2f4f6; border-color: #e7eaee; border-radius: 10px; }
+.dxp-search svg { flex: none; color: var(--v-mut); }
+.dxp-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--v-ink);
+  font-size: 13.5px;
+}
+.dxp-search input::placeholder { color: var(--v-mut); }
+.dxp-search .clr {
+  border: 0; background: transparent; color: var(--v-mut);
+  cursor: pointer; font-size: 12px; padding: 0 2px;
+}
+
+.dxp-links { display: flex; gap: 4px; margin-left: 2px; }
+.dxp-links button {
+  border: 0;
+  background: transparent;
+  color: var(--v-ink2);
+  font-size: 13.5px;
+  font-weight: 600;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.dxp-links button:hover { color: var(--v-ink); background: var(--v-bg3); }
+.dxp-links button.on { color: var(--v-ink); }
+.dxp-links .n {
+  background: var(--v-cta);
+  color: #fff;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 800;
+  min-width: 17px;
+  height: 17px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+}
+.dxp--kx .dxp-links .n { background: var(--v-green); }
+
+.dxp-acct {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.dxp-stat { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.15; }
+.dxp-stat small { font-size: 10.5px; color: var(--v-mut); font-weight: 600; }
+.dxp-stat b { font-size: 13.5px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--v-ink); }
+.dxp-stat.gain b { color: var(--v-green); }
+.dxp-deposit {
+  border: 0;
+  border-radius: 8px;
+  background: var(--v-cta);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  padding: 8px 14px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+.dxp--kx .dxp-deposit { background: var(--v-green); border-radius: 10px; }
+.dxp-avatar {
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #e8c877, #b98a2f);
+  color: #10141c;
+  font-size: 11px;
+  font-weight: 900;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.dxp--kx .dxp-avatar { background: linear-gradient(135deg, #0b3a53, #00a663); color: #fff; }
+
+/* ── category rail (venue chips row under the nav) ────────────────── */
+.dxp .mf-chips {
+  position: sticky;
+  top: 53px;
+  z-index: 25;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 10px 16px;
+  margin: 0;
+  background: var(--v-bg);
+  border-bottom: 1px solid var(--v-line);
+}
+.dxp .mf-chips::-webkit-scrollbar { display: none; }
+.dxp .mf-chip {
+  flex: none;
+  border: 0;
+  border-radius: 999px;
+  background: var(--v-bg3);
+  color: var(--v-ink2);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dxp--kx .mf-chip { background: #f2f4f6; color: #40566a; border-radius: 8px; }
+.dxp .mf-chip:hover { color: var(--v-ink); }
+.dxp .mf-chip.on { background: var(--v-ink); color: var(--v-bg); font-weight: 700; }
+.dxp--pm .mf-chip.on { background: #eceff4; color: #141a23; }
+.dxp--kx .mf-chip.on { background: #0b1e2d; color: #fff; }
+.dxp .mf-chip .live-dot {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: #f04438; margin-right: 5px; vertical-align: 1px;
+  animation: dxp-pulse 1.6s ease-in-out infinite;
+}
+
+/* ── page body / grid ─────────────────────────────────────────────── */
+.dxp-body {
+  padding: 14px 16px 96px;
+  max-width: 1240px;
+  margin: 0 auto;
+}
+.dxp .v8-body { display: block; }
+@media (min-width: 1000px) {
+  /* venue-true: the browse feed is full-width card grid (no rail);
+     the ticket rail appears on the market page and the moment a
+     price is picked — exactly when the venue shows its trade panel */
+  .dxp .v8-body.rail-on { display: grid; grid-template-columns: 1fr 340px; gap: 20px; align-items: start; }
+  .dxp .v8-body:not(.rail-on) .vd-rail { display: none; }
+}
+
+/* the old page-level surfaces vanish — the venue IS the page */
+.dxp .vdesk, .dxp .vdesk--v8, .dxp .vdesk--kx, .dxp .vdesk--pmx {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  box-shadow: none;
+}
+/* desk2 re-declares the --vd-* family ON .vdesk (a closer ancestor
+   than the portal root), so the remap must land there too or every
+   legacy var-consumer inside the ticket reverts to the light skin */
+.dxp--pm .vdesk {
+  --vd-bg: #1c232f; --vd-ink: #eceff4; --vd-mut: #7c869b;
+  --vd-line: #2a3242; --vd-soft: #232b3a;
+  --vda: #2e6be6; --vda-ink: #7fa7ff;
+  --vda-soft: rgba(46, 107, 230, 0.14);
+  --vd-good: #27ae60; --vd-bad: #eb5757;
+}
+.dxp--kx .vdesk {
+  --vd-bg: #ffffff; --vd-ink: #0b1e2d; --vd-mut: #7c8a96;
+  --vd-line: #e5e8ec; --vd-soft: #f5f7f8;
+  --vda: #00a663; --vda-ink: #007a49; --vda-soft: #e7f6ef;
+  --vd-good: #00a663; --vd-bad: #e5484d;
+}
+
+/* ── FEED: venue event-card grid ──────────────────────────────────── */
+.dxp .mf { margin-top: 2px; }
+.dxp .mf-feed {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+@media (min-width: 640px) {
+  .dxp .mf-feed { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+}
+@media (min-width: 1360px) {
+  .dxp .mf-feed { grid-template-columns: repeat(3, 1fr); }
+}
+
+.dxp .mf-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: var(--v-bg2);
+  border: 1px solid var(--v-line);
+  border-radius: 12px;
+  padding: 12px 12px 10px;
+  transition: border-color 0.12s ease, transform 0.12s ease;
+}
+.dxp .mf-card:hover { border-color: #3a4356; }
+.dxp--kx .mf-card { box-shadow: 0 1px 2px rgba(9, 30, 46, 0.04); }
+.dxp--kx .mf-card:hover { border-color: #cdd4da; }
+
+/* card header: icon tile + 2-line title (+ binary chance dial) */
+.dxp .mf-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: start;
+  cursor: pointer;
+  min-width: 0;
+}
+.dxp .mf-ico {
+  width: 38px; height: 38px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 19px;
+  flex: none;
+  background: var(--v-bg3);
+}
+.dxp--kx .mf-ico { background: #eef4f1; }
+.dxp .mf-title {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.32;
+  color: var(--v-ink);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 2.55em;
+}
+/* the % "chance" dial on binary cards (venue anatomy) */
+.dxp .mf-chance { text-align: center; width: 54px; flex: none; }
+.dxp .mf-chance svg { display: block; margin: 0 auto; }
+.dxp .mf-chance b {
+  display: block;
+  font-size: 15px;
+  font-weight: 800;
+  margin-top: -21px;
+  font-variant-numeric: tabular-nums;
+  color: var(--v-ink);
+}
+.dxp .mf-chance small { display: block; font-size: 9.5px; color: var(--v-mut); font-weight: 600; margin-top: 1px; }
+
+/* outcome rows (multi-outcome cards) */
+.dxp .mf-outcomes { display: flex; flex-direction: column; gap: 0; margin-top: 8px; }
+.dxp .mf-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+}
+.dxp .mf-row + .mf-row { border-top: 1px solid var(--v-line); }
+.dxp--kx .mf-row + .mf-row { border-top-color: #eef1f3; }
+.dxp .mf-oname {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--v-ink);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  text-align: left;
+}
+.dxp .mf-opct {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--v-ink);
+  font-variant-numeric: tabular-nums;
+}
+/* venue mini buy buttons: PM = tinted "Yes/No", KX = price pills */
+.dxp .mf-yn { display: inline-flex; gap: 5px; }
+.dxp .mf-yes, .dxp .mf-no {
+  border: 0;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.dxp .mf-yes { background: var(--v-green-t); color: var(--v-green); }
+.dxp .mf-no { background: var(--v-red-t); color: var(--v-red2); }
+.dxp .mf-yes:hover:not(:disabled) { background: var(--v-green); color: #fff; }
+.dxp .mf-no:hover:not(:disabled) { background: var(--v-red2); color: #fff; }
+.dxp .mf-yes.on { background: var(--v-green); color: #fff; }
+.dxp .mf-no.on { background: var(--v-red2); color: #fff; }
+.dxp .mf-yes:disabled, .dxp .mf-no:disabled { opacity: 0.35; cursor: default; }
+
+/* binary split: two big tinted buttons (PM card anatomy) */
+.dxp .mf-split { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+.dxp .mf-split button {
+  border: 0;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 9px 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.dxp .mf-split button span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  font-weight: 600;
+}
+.dxp .mf-split .g { background: var(--v-green-t); color: var(--v-green); }
+.dxp .mf-split .r { background: var(--v-red-t); color: var(--v-red2); }
+.dxp .mf-split .g:hover:not(:disabled), .dxp .mf-split .g.on { background: var(--v-green); color: #fff; }
+.dxp .mf-split .r:hover:not(:disabled), .dxp .mf-split .r.on { background: var(--v-red2); color: #fff; }
+.dxp .mf-split button:disabled { opacity: 0.4; cursor: default; }
+/* matchup side buttons: neutral fills, venue hover (PM blue / KX green) */
+.dxp .mf-split .t { background: var(--v-bg3); color: var(--v-ink); }
+.dxp--kx .mf-split .t { background: var(--v-green-t); color: var(--v-green); }
+.dxp--pm .mf-split .t:hover:not(:disabled), .dxp--pm .mf-split .t.on { background: var(--v-cta); color: #fff; }
+.dxp--kx .mf-split .t:hover:not(:disabled), .dxp--kx .mf-split .t.on { background: var(--v-green); color: #fff; }
+
+/* card footer: $vol + close, venue-muted */
+.dxp .mf-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  color: var(--v-mut);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.dxp .mf-foot .spacer { flex: 1; }
+.dxp .mf-open {
+  border: 0; background: transparent; color: var(--v-mut);
+  font-size: 12px; font-weight: 600; cursor: pointer; padding: 0;
+}
+.dxp .mf-open:hover { color: var(--v-ink); }
+.dxp .mf-bm { border: 0; background: transparent; color: var(--v-mut); cursor: pointer; padding: 0 2px; font-size: 13px; }
+
+/* card spark strip stays subtle (chart preview) */
+.dxp .mf-chartrow { margin-top: 8px; }
+.dxp .mf-spark { height: 44px; }
+.dxp .mf-spark svg { height: 44px; }
+
+/* feed skeletons on venue surface */
+.dxp .mf-skel {
+  height: 168px;
+  border-radius: 12px;
+  background: var(--v-bg2);
+  border: 1px solid var(--v-line);
+}
+
+/* ── MARKET PAGE (venue market screen) ────────────────────────────── */
+.dxp .mp { background: transparent; border: 0; padding: 0; }
+.dxp .mp-head {
+  position: sticky;
+  top: 53px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 8px;
+  padding: 8px 0;
+  background: var(--v-bg);
+  border-bottom: 1px solid var(--v-line);
+}
+@media (max-width: 999px) {
+  .dxp .mp-head { position: static; top: auto; margin: 0 0 8px; padding: 4px 0 8px; }
+}
+.dxp .mp-back {
+  border: 0;
+  background: var(--v-bg3);
+  color: var(--v-ink);
+  width: 32px; height: 32px;
+  border-radius: 8px;
+  font-size: 18px;
+  cursor: pointer;
+  flex: none;
+}
+.dxp .mp-ico {
+  width: 44px; height: 44px; border-radius: 10px;
+  background: var(--v-bg3);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 23px; flex: none;
+}
+.dxp--kx .mp-ico { background: #eef4f1; }
+.dxp .mp-title { font-size: 17px; font-weight: 700; color: var(--v-ink); line-height: 1.25; }
+.dxp .mp-title small { display: block; font-size: 12px; font-weight: 600; color: var(--v-mut); margin-top: 2px; }
+.dxp .mp-last {
+  margin-left: auto;
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--v-ink);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  line-height: 1.1;
+}
+.dxp .mp-last small { display: block; font-size: 12px; font-weight: 700; }
+.dxp .mp-last .pos, .dxp .pos { color: var(--v-green); }
+.dxp .mp-last .neg, .dxp .neg { color: var(--v-red2); }
+
+.dxp .mp-chart {
+  background: var(--v-bg2);
+  border: 1px solid var(--v-line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.dxp .mp-ranges { display: flex; gap: 4px; margin-bottom: 6px; }
+.dxp .mp-ranges button {
+  border: 0;
+  background: transparent;
+  color: var(--v-mut);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.dxp .mp-ranges button.on { background: var(--v-bg3); color: var(--v-ink); }
+.dxp--kx .mp-ranges button.on { background: #eef1f3; }
+.dxp .mp-chart-sub { font-size: 11.5px; color: var(--v-mut); margin-top: 4px; }
+
+/* market groups = venue market lists */
+.dxp .dx-group {
+  background: var(--v-bg2);
+  border: 1px solid var(--v-line);
+  border-radius: 12px;
+  padding: 4px 12px;
+  margin-bottom: 10px;
+}
+.dxp .dx-group-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--v-ink);
+  background: transparent;
+  padding: 9px 0 7px;
+  border-bottom: 1px solid var(--v-line);
+}
+.dxp .dx-group-n { color: var(--v-mut); font-weight: 600; }
+.dxp .dx-group-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+}
+.dxp .dx-group-row + .dx-group-row { border-top: 1px solid var(--v-line); }
+.dxp--kx .dx-group-row + .dx-group-row { border-top-color: #eef1f3; }
+.dxp .dx-group-label {
+  flex: 1;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--v-ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dxp .dx-mini {
+  border: 0;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 7px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.dxp .dx-mini.yes { background: var(--v-green-t); color: var(--v-green); }
+.dxp .dx-mini.no { background: var(--v-red-t); color: var(--v-red2); }
+.dxp .dx-mini.yes:hover:not(:disabled), .dxp .dx-mini.yes.on { background: var(--v-green); color: #fff; }
+.dxp .dx-mini.no:hover:not(:disabled), .dxp .dx-mini.no.on { background: var(--v-red2); color: #fff; }
+.dxp .dx-mini:disabled { opacity: 0.35; cursor: default; }
+
+.dxp .mp-pos, .dxp .dx-pos {
+  background: var(--v-bg2);
+  border: 1px solid var(--v-line);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+.dxp .mp-pos-h, .dxp .dx-pos-h {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; font-weight: 800; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--v-mut); margin-bottom: 8px;
+}
+.dxp .mp-pos-grid { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 10px; }
+.dxp .mp-pos-grid span { display: flex; flex-direction: column; font-size: 11px; color: var(--v-mut); font-weight: 600; }
+.dxp .mp-pos-grid b { font-size: 14px; color: var(--v-ink); font-variant-numeric: tabular-nums; }
+.dxp .dx-pos-row { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12.5px; color: var(--v-ink2); padding: 5px 0; }
+.dxp .mp-trades {
+  background: var(--v-bg2); border: 1px solid var(--v-line);
+  border-radius: 12px; padding: 8px 12px; margin-bottom: 10px;
+}
+.dxp .mp-trades-h { font-size: 12px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; color: var(--v-mut); padding: 4px 0 6px; }
+.dxp .mp-trade { display: flex; align-items: center; gap: 10px; font-size: 12.5px; padding: 5px 0; border-top: 1px solid var(--v-line); color: var(--v-ink2); }
+.dxp .mp-trade-o { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── THE TICKET (right rail / mobile sheet) — venue trade panel ───── */
+.dxp .vd-rail { position: relative; }
+.dxp .pmx-ticket, .dxp .kx-ticket {
+  background: var(--v-bg2);
+  border: 1px solid var(--v-line);
+  border-radius: 12px;
+  padding: 14px;
+  color: var(--v-ink);
+  box-shadow: none;
+}
+.dxp--kx .kx-ticket, .dxp--kx .pmx-ticket { box-shadow: 0 1px 3px rgba(9, 30, 46, 0.06); }
+@media (min-width: 1000px) {
+  .dxp .vd-rail { position: sticky; top: 108px; }
+}
+
+.dxp .dx-tabs {
+  display: flex; align-items: center; gap: 2px;
+  border-bottom: 1px solid var(--v-line);
+  margin: -4px 0 12px;
+}
+.dxp .dx-tab {
+  border: 0; background: transparent;
+  color: var(--v-mut); font-size: 14px; font-weight: 700;
+  padding: 8px 10px; cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.dxp .dx-tab.on { color: var(--v-ink); border-bottom-color: var(--v-ink); }
+.dxp--kx .dx-tab.on { border-bottom-color: var(--v-green); }
+.dxp .dx-tab-right { margin-left: auto; color: var(--v-mut); font-size: 12.5px; font-weight: 600; }
+.dxp .v9-otype {
+  margin-left: auto;
+  display: inline-flex;
+  background: var(--v-bg3);
+  border-radius: 8px;
+  padding: 2px;
+}
+.dxp--kx .v9-otype { background: #eef1f3; }
+.dxp .v9-otype button {
+  border: 0; background: transparent; color: var(--v-mut);
+  font-size: 12px; font-weight: 700; padding: 4px 10px;
+  border-radius: 6px; cursor: pointer;
+}
+.dxp .v9-otype button.on { background: var(--v-bg2); color: var(--v-ink); box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
+.dxp--kx .v9-otype button.on { background: #fff; box-shadow: 0 1px 2px rgba(9,30,46,0.12); }
+
+.dxp .dx-mkt-title { font-size: 14.5px; font-weight: 700; color: var(--v-ink); margin-bottom: 10px; line-height: 1.3; }
+.dxp .dx-outcome-line {
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--v-bg3); border-radius: 8px; padding: 9px 11px; margin-bottom: 10px;
+}
+.dxp--kx .dx-outcome-line { background: #f5f7f8; }
+.dxp .dx-outcome-name { font-size: 13.5px; font-weight: 700; color: var(--v-ink); }
+.dxp .pmx-price { font-size: 14px; font-weight: 800; color: var(--v-green); font-variant-numeric: tabular-nums; }
+
+.dxp .dx-yesno { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+.dxp .kx-pill {
+  border: 1px solid var(--v-line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--v-mut);
+  font-size: 13.5px;
+  font-weight: 800;
+  padding: 10px 8px;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.dxp .kx-pill.yes.on { background: var(--v-green); border-color: var(--v-green); color: #fff; }
+.dxp .kx-pill.no.on { background: var(--v-red2); border-color: var(--v-red2); color: #fff; }
+
+.dxp .dx-amount {
+  display: flex; flex-direction: column; gap: 8px;
+  border-top: 1px solid var(--v-line);
+  padding-top: 12px; margin-top: 2px;
+}
+.dxp .dx-amount-label { font-size: 12px; font-weight: 700; color: var(--v-mut); }
+.dxp .dx-amount-in {
+  border: 0; outline: 0; background: transparent;
+  color: var(--v-ink);
+  font-size: 34px; font-weight: 800; text-align: right;
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+  caret-color: var(--v-cta);
+}
+.dxp .dx-amount-in::placeholder { color: var(--v-line); }
+.dxp .dx-quick { display: flex; gap: 6px; justify-content: flex-end; }
+.dxp .dx-quick button {
+  border: 1px solid var(--v-line);
+  background: transparent;
+  color: var(--v-ink2);
+  border-radius: 999px;
+  font-size: 12px; font-weight: 700;
+  padding: 5px 11px; cursor: pointer;
+}
+.dxp .dx-quick button:hover:not(:disabled) { background: var(--v-bg3); color: var(--v-ink); }
+.dxp--kx .dx-quick button:hover:not(:disabled) { background: #f2f4f6; }
+
+.dxp .dx-line {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 13px; color: var(--v-mut); padding: 5px 0; font-weight: 600;
+}
+.dxp .dx-line b { color: var(--v-ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.dxp .dx-line .dx-big { font-size: 16px; }
+.dxp .dx-line .dx-big.pos { color: var(--v-green); }
+.dxp .dx-ret { font-size: 11.5px; font-weight: 700; }
+.dxp .dx-line.sub { font-size: 11.5px; }
+
+/* v9 limit box on venue surface */
+.dxp .v9-limitbox { display: flex; align-items: center; gap: 8px; }
+.dxp .v9-step {
+  width: 34px; height: 34px; border-radius: 8px;
+  border: 1px solid var(--v-line); background: transparent;
+  color: var(--v-ink); font-size: 17px; font-weight: 700; cursor: pointer;
+}
+.dxp .v9-pxwrap {
+  flex: 1; display: flex; align-items: baseline; justify-content: center; gap: 2px;
+  background: var(--v-bg3); border-radius: 8px; padding: 6px 8px;
+}
+.dxp--kx .v9-pxwrap { background: #f5f7f8; }
+.dxp .v9-px {
+  width: 52px; border: 0; outline: 0; background: transparent;
+  color: var(--v-ink); font-size: 22px; font-weight: 800; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.dxp .v9-cent { color: var(--v-mut); font-weight: 700; }
+
+/* order book on venue surface */
+.dxp .dx-bookwrap { border-top: 1px solid var(--v-line); margin-top: 8px; }
+.dxp .dx-booktoggle {
+  width: 100%;
+  display: flex; align-items: center; gap: 8px;
+  border: 0; background: transparent;
+  color: var(--v-ink); font-size: 13px; font-weight: 700;
+  padding: 10px 0; cursor: pointer;
+}
+.dxp .dx-booktoggle span { margin-left: auto; color: var(--v-mut); font-weight: 600; font-size: 12px; }
+.dxp .dx-book { border: 0; padding: 0 0 6px; }
+.dxp .dx-book-h {
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--v-mut); padding: 2px 0 4px;
+}
+.dxp .dx-book-row { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--v-ink2); }
+.dxp .dx-book-row .pos { color: var(--v-green); font-weight: 700; }
+.dxp .dx-book-row .neg { color: var(--v-red2); font-weight: 700; }
+.dxp .v9-dbar.bid { background: var(--v-green-t); }
+.dxp .v9-dbar.ask { background: var(--v-red-t); }
+.dxp .dx-book-mid { color: var(--v-mut); font-size: 11.5px; }
+
+/* CTAs — venue-native */
+.dxp .pmx-cta, .dxp .kx-cta, .dxp .dxm-cta {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 800;
+  padding: 13px 12px;
+  margin-top: 10px;
+  cursor: pointer;
+  background: var(--v-bg3);
+  color: var(--v-mut);
+  transition: filter 0.1s ease;
+}
+.dxp--kx .pmx-cta, .dxp--kx .kx-cta, .dxp--kx .dxm-cta { background: #eef1f3; border-radius: 10px; }
+.dxp .pmx-cta.ready, .dxp .kx-cta.ready, .dxp .dxm-cta.ready {
+  background: var(--v-green);
+  color: #fff;
+}
+.dxp .kx-cta.ready.confirm { background: #067647; }
+.dxp .pmx-cta.ready:hover, .dxp .kx-cta.ready:hover, .dxp .dxm-cta.ready:hover { filter: brightness(1.06); }
+.dxp .pmx-cta:disabled, .dxp .kx-cta:disabled, .dxp .dxm-cta:disabled { cursor: default; }
+.dxp .dx-fine { font-size: 11px; color: var(--v-mut); line-height: 1.5; margin: 10px 0 0; }
+.dxp .vd-empty { color: var(--v-mut); font-size: 13.5px; padding: 14px 2px; }
+
+/* execution timeline on venue surface */
+.dxp .dx-run {
+  border: 1px solid var(--v-line);
+  background: var(--v-bg3);
+  border-radius: 10px;
+  padding: 11px 12px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+.dxp--kx .dx-run { background: #f7f9fa; }
+.dxp .dx-run-row { display: flex; align-items: center; gap: 8px; color: var(--v-mut); padding: 2px 0; }
+.dxp .dx-run-row.on { color: var(--v-ink); font-weight: 600; }
+.dxp .dx-run-clock { display: flex; justify-content: space-between; color: var(--v-mut); font-size: 11.5px; margin-top: 6px; }
+.dxp .dx-run-clock b { color: var(--v-ink); font-variant-numeric: tabular-nums; }
+.dxp .dx-run-big { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 800; color: var(--v-green); }
+.dxp .dx-run-big.neg { color: var(--v-red2); }
+.dxp .dx-run-big.v9-open { color: var(--v-blue); }
+.dxp--kx .dx-run-big.v9-open { color: var(--v-green); }
+.dxp .dx-run-fill { color: var(--v-ink2); margin-top: 5px; line-height: 1.5; }
+.dxp .dx-run-fill b { color: var(--v-ink); }
+.dxp .dx-run-slip { color: var(--v-mut); font-size: 12px; margin-top: 4px; }
+.dxp .dx-run-lat { color: var(--v-mut); font-size: 11.5px; margin-top: 4px; }
+.dxp .dx-check { color: var(--v-green); }
+.dxp .dx-x { color: var(--v-red2); }
+.dxp .v9-goto {
+  border: 0; background: transparent; color: var(--v-blue);
+  font-size: 12.5px; font-weight: 700; cursor: pointer; padding: 6px 0 0;
+}
+.dxp--kx .v9-goto { color: var(--v-green); }
+
+/* sell list / positions inside ticket */
+.dxp .dx-sellpos-row {
+  border: 1px solid var(--v-line);
+  border-radius: 10px;
+  padding: 10px 11px;
+  margin-bottom: 8px;
+  background: var(--v-bg2);
+}
+.dxp .dx-sellpos-top { display: flex; justify-content: space-between; font-weight: 700; font-size: 13.5px; color: var(--v-ink); }
+.dxp .dx-sellpos-sub { display: flex; justify-content: space-between; color: var(--v-mut); font-size: 12px; margin-top: 3px; }
+.dxp .dx-cashout {
+  border: 0;
+  background: var(--v-red-t);
+  color: var(--v-red2);
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 7px 12px;
+  margin-top: 8px;
+  cursor: pointer;
+}
+.dxp .dx-cashout:hover:not(:disabled) { background: var(--v-red2); color: #fff; }
+
+/* ── PORTFOLIO page (positions) — venue portfolio table ───────────── */
+.dxp .dx-acct {
+  background: var(--v-bg2);
+  border: 1px solid var(--v-line);
+  border-radius: 12px;
+  padding: 6px 14px 10px;
+}
+.dxp .dx-acct-h {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 13px; font-weight: 800; color: var(--v-ink);
+  padding: 10px 0; border-bottom: 1px solid var(--v-line);
+}
+.dxp .dx-acct-h span { color: var(--v-mut); font-weight: 600; font-size: 12.5px; }
+.dxp .dx-acct-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 0; border-bottom: 1px solid var(--v-line);
+}
+.dxp--kx .dx-acct-row { border-bottom-color: #eef1f3; }
+.dxp .dx-acct-row:last-child { border-bottom: 0; }
+.dxp .dx-acct-name { flex: 1 1 240px; min-width: 0; font-weight: 600; font-size: 13.5px; color: var(--v-ink); }
+.dxp .dx-acct-name small { display: block; color: var(--v-mut); font-weight: 600; font-size: 11.5px; margin-top: 1px; }
+.dxp .dx-acct-num { font-size: 12.5px; color: var(--v-mut); font-weight: 600; }
+.dxp .dx-acct-num b { color: var(--v-ink); font-variant-numeric: tabular-nums; }
+.dxp .dx-acct-row .dx-cashout { margin-top: 0; }
+.dxp .dx-acct-empty { color: var(--v-mut); padding: 12px 0; font-size: 13px; }
+
+/* ── ACTIVITY (blotter + open orders) on venue surface ────────────── */
+.dxp .dxp-activity {
+  background: var(--v-bg2);
+  border: 1px solid var(--v-line);
+  border-radius: 12px;
+  padding: 8px 14px 12px;
+}
+.dxp .dx-blot-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--v-line); margin-bottom: 10px; }
+.dxp .dx-blot-tabs button {
+  border: 0; background: transparent; color: var(--v-mut);
+  font-size: 13.5px; font-weight: 700; padding: 9px 10px; cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.dxp .dx-blot-tabs button.on { color: var(--v-ink); border-bottom-color: var(--v-ink); }
+.dxp--kx .dx-blot-tabs button.on { border-bottom-color: var(--v-green); }
+.dxp .v8-tab-n {
+  background: var(--v-cta); color: #fff; border-radius: 999px;
+  font-size: 10px; font-weight: 800; min-width: 16px; height: 16px;
+  display: inline-flex; align-items: center; justify-content: center; padding: 0 4px;
+}
+.dxp--kx .v8-tab-n { background: var(--v-green); }
+.dxp .rpt-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.dxp .rpt-table th {
+  text-align: left; color: var(--v-mut); font-size: 10.5px;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 6px 8px; border-bottom: 1px solid var(--v-line);
+}
+.dxp .rpt-table td { padding: 8px; border-bottom: 1px solid var(--v-line); color: var(--v-ink2); }
+.dxp--kx .rpt-table td { border-bottom-color: #eef1f3; }
+.dxp .rpt-table-wrap { overflow-x: auto; }
+.dxp .dx-blot-card {
+  border: 1px solid var(--v-line); border-radius: 10px;
+  background: var(--v-bg2); padding: 10px 12px; margin-bottom: 8px;
+}
+.dxp .dx-blot-card-top { display: flex; justify-content: space-between; gap: 8px; font-size: 13.5px; color: var(--v-ink); }
+.dxp .dx-blot-card-sub { color: var(--v-mut); font-size: 11.5px; margin-top: 2px; }
+.dxp .dx-blot-nums { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 7px; font-size: 12px; color: var(--v-mut); }
+.dxp .dx-blot-nums b { color: var(--v-ink); font-variant-numeric: tabular-nums; }
+.dxp .dx-blot-st {
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.04em;
+  text-transform: uppercase; border-radius: 5px; padding: 2px 7px;
+  background: var(--v-bg3); color: var(--v-mut); white-space: nowrap;
+}
+.dxp .dx-blot-st.filled, .dxp .dx-blot-st.settled { background: var(--v-green-t); color: var(--v-green); }
+.dxp .dx-blot-st.queued, .dxp .dx-blot-st.submitting, .dxp .dx-blot-st.open { background: rgba(45, 156, 219, 0.14); color: var(--v-blue); }
+.dxp--kx .dx-blot-st.queued, .dxp--kx .dx-blot-st.submitting, .dxp--kx .dx-blot-st.open { background: #e8f2ff; color: #1570cd; }
+.dxp .dx-blot-st.error, .dxp .dx-blot-st.unfilled, .dxp .dx-blot-st.cancelled { background: var(--v-red-t); color: var(--v-red2); }
+.dxp .v9-oo-head { display: flex; align-items: center; gap: 8px; color: var(--v-mut); font-size: 12px; padding: 2px 0 10px; }
+.dxp .v9-oo-age { margin-left: auto; font-variant-numeric: tabular-nums; }
+.dxp .oo-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2.4fr) 0.8fr 0.7fr 1fr auto;
+  gap: 10px; align-items: center;
+  padding: 9px 0; border-bottom: 1px solid var(--v-line);
+  font-size: 12.5px; color: var(--v-ink2);
+}
+.dxp--kx .oo-row { border-bottom-color: #eef1f3; }
+.dxp .oo-row.v9-oo-h { color: var(--v-mut); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
+.dxp .v9-oo-title { color: var(--v-ink); font-weight: 600; }
+.dxp .v9-oo-mkt small { display: flex; gap: 6px; color: var(--v-mut); font-size: 11px; margin-top: 2px; align-items: center; }
+.dxp .oo-cancel {
+  border: 1px solid var(--v-line); background: transparent; color: var(--v-ink2);
+  border-radius: 6px; font-size: 11.5px; font-weight: 700; padding: 5px 10px; cursor: pointer;
+}
+.dxp .oo-cancel:hover:not(:disabled) { border-color: var(--v-red2); color: var(--v-red2); }
+.dxp .oo-cancel.v9-armed { background: var(--v-red2); border-color: var(--v-red2); color: #fff; }
+.dxp .v9-chip {
+  border-radius: 5px; padding: 1px 6px; font-size: 10px; font-weight: 800;
+  background: var(--v-bg3); color: var(--v-mut);
+}
+
+/* ── cash-out modal on venue surface ──────────────────────────────── */
+.dxp .dxm-overlay {
+  position: fixed; inset: 0; z-index: 80;
+  background: rgba(5, 8, 14, 0.62);
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+  backdrop-filter: blur(2px);
+}
+.dxp .dxm {
+  width: 100%; max-width: 420px; max-height: 88vh; overflow-y: auto;
+  background: var(--v-bg2); border: 1px solid var(--v-line);
+  border-radius: 14px; padding: 16px; color: var(--v-ink);
+}
+.dxp .dxm-h { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
+.dxp .dxm-title { font-size: 15px; font-weight: 700; }
+.dxp .dxm-title small { display: block; color: var(--v-mut); font-weight: 600; font-size: 12px; margin-top: 2px; }
+.dxp .dxm-x { margin-left: auto; border: 0; background: transparent; color: var(--v-mut); font-size: 15px; cursor: pointer; }
+.dxp .dxm-qty { display: flex; gap: 8px; margin: 10px 0 4px; }
+.dxp .dxm-all {
+  border: 1px solid var(--v-line); background: transparent; color: var(--v-ink2);
+  border-radius: 8px; font-weight: 700; font-size: 13px; padding: 8px 13px; cursor: pointer;
+}
+.dxp .dxm-all.on { background: var(--v-ink); color: var(--v-bg); border-color: var(--v-ink); }
+.dxp .dxm-qty input {
+  flex: 1; border: 1px solid var(--v-line); border-radius: 8px;
+  background: transparent; color: var(--v-ink);
+  font-size: 15px; font-weight: 700; padding: 8px 11px; outline: 0;
+  font-variant-numeric: tabular-nums;
+}
+.dxp .dxm-err { color: var(--v-red2); font-size: 12px; }
+
+/* ── search results on venue surface ──────────────────────────────── */
+.dxp .pmx-grid, .dxp .kx-list { display: grid; grid-template-columns: 1fr; gap: 10px; }
+@media (min-width: 640px) { .dxp .pmx-grid, .dxp .kx-list { grid-template-columns: repeat(2, 1fr); } }
+.dxp .pmx-card, .dxp .kx-card {
+  background: var(--v-bg2); border: 1px solid var(--v-line);
+  border-radius: 12px; padding: 12px;
+}
+.dxp .pmx-card-head { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.dxp .pmx-icon { font-size: 16px; }
+.dxp .pmx-title, .dxp .kx-title {
+  border: 0; background: transparent; text-align: left; padding: 0; cursor: pointer;
+  font-size: 14px; font-weight: 600; color: var(--v-ink); line-height: 1.3;
+}
+.dxp .pmx-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; }
+.dxp .pmx-oname { flex: 1; font-size: 13px; font-weight: 600; color: var(--v-ink); }
+.dxp .pmx-opct { font-size: 13px; font-weight: 700; color: var(--v-ink); font-variant-numeric: tabular-nums; }
+.dxp .pmx-btn {
+  border: 0; border-radius: 6px; font-size: 12px; font-weight: 700;
+  padding: 6px 10px; cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.dxp .pmx-btn.yes { background: var(--v-green-t); color: var(--v-green); }
+.dxp .pmx-btn.yes:hover:not(:disabled), .dxp .pmx-btn.yes.on { background: var(--v-green); color: #fff; }
+.dxp .kx-card-top { font-size: 10.5px; font-weight: 800; color: var(--v-mut); letter-spacing: 0.05em; margin-bottom: 4px; }
+.dxp .kx-outcomes { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.dxp .kx-outcome { display: flex; align-items: center; gap: 8px; }
+.dxp .kx-oname { flex: 1; font-size: 13px; font-weight: 600; color: var(--v-ink); }
+.dxp .kx-pct {
+  border: 0; border-radius: 6px; background: var(--v-green-t); color: var(--v-green);
+  font-size: 12px; font-weight: 700; padding: 6px 10px; cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.dxp .kx-pct:hover:not(:disabled), .dxp .kx-pct.on { background: var(--v-green); color: #fff; }
+.dxp .kx-card-foot { margin-top: 8px; }
+
+/* ── mobile: venue bottom nav + sheet ticket ──────────────────────── */
+.dxp-tabbar { display: none; }
+@media (max-width: 999px) {
+  .dxp-tabbar {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 70;
+    display: flex;
+    background: var(--v-bg);
+    border-top: 1px solid var(--v-line);
+    padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+  }
+  .dxp--kx .dxp-tabbar { background: #fff; }
+  .dxp-tabbar button {
+    flex: 1;
+    border: 0; background: transparent;
+    color: var(--v-mut);
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    font-size: 10px; font-weight: 700;
+    padding: 4px 0; cursor: pointer;
+    position: relative;
+  }
+  .dxp-tabbar button.on { color: var(--v-ink); }
+  .dxp--kx .dxp-tabbar button.on { color: var(--v-green); }
+  .dxp-tabbar svg { width: 22px; height: 22px; }
+  .dxp-tabbar .n {
+    position: absolute; top: 0; right: 24%;
+    background: var(--v-cta); color: #fff; border-radius: 999px;
+    font-size: 9px; font-weight: 800; min-width: 14px; height: 14px;
+    display: inline-flex; align-items: center; justify-content: center; padding: 0 3px;
+  }
+  .dxp--kx .dxp-tabbar .n { background: var(--v-green); }
+
+  .dxp-links { display: none; }
+  .dxp-acct .dxp-stat.hide-m { display: none; }
+  .dxp-deposit { display: none; }
+  .dxp-nav { flex-wrap: wrap; gap: 10px; padding: 10px 12px; }
+  .dxp-search { order: 3; flex-basis: 100%; max-width: none; }
+  /* chips scroll with content on the phone — a wrapped nav makes a
+     fixed sticky offset unreliable */
+  .dxp .mf-chips { position: static; top: auto; padding: 8px 12px; }
+  .dxp-body { padding: 12px 12px 96px; }
+  .dxp-portal { gap: 7px; padding: 5px 10px; }
+  .dxp-portal .dxp-note, .dxp-portal .dxp-sync { display: none; }
+  .dxp-portal .dxp-live { flex: 1; }
+
+  /* the ticket rides as a bottom sheet above the venue tab bar */
+  .dxp .vd-rail.has-pick .pmx-ticket,
+  .dxp .vd-rail.has-pick .kx-ticket {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 90;
+    border-radius: 16px 16px 0 0;
+    border-bottom: 0;
+    max-height: 86vh;
+    overflow-y: auto;
+    padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.45);
+    animation: dxp-sheet-up 0.22s ease;
+  }
+  .dxp .vd-rail:not(.has-pick) .pmx-ticket,
+  .dxp .vd-rail:not(.has-pick) .kx-ticket { display: none; }
+  .dxp .vd-rail.has-pick::after { content: ''; display: block; height: 40px; }
+  .dxp .dx-sheet-scrim {
+    position: fixed; inset: 0; z-index: 85;
+    background: rgba(5, 8, 14, 0.5);
+  }
+}
+@keyframes dxp-sheet-up { from { transform: translateY(24%); opacity: 0.6; } }
+@media (min-width: 1000px) {
+  .dxp .dx-sheet-scrim, .dxp .dx-sheet-handle { display: none; }
+}
+.dxp .dx-sheet-handle { padding: 2px 0 8px; display: flex; justify-content: center; }
+.dxp .dx-sheet-handle span {
+  width: 38px; height: 4px; border-radius: 2px; background: var(--v-line);
+}
+
+/* ── unlock gate: the portal sign-in ──────────────────────────────── */
+.dxp-gate {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background:
+    radial-gradient(700px 420px at 80% -10%, rgba(46, 107, 230, 0.16), transparent 60%),
+    radial-gradient(600px 380px at 10% 110%, rgba(232, 200, 119, 0.08), transparent 60%),
+    #10141c;
+}
+.dxp-gate-card {
+  width: 100%;
+  max-width: 360px;
+  background: #171d28;
+  border: 1px solid #262e40;
+  border-radius: 14px;
+  padding: 26px 24px;
+  color: #eceff4;
+}
+.dxp-gate-card h2 { margin: 14px 0 4px; font-size: 18px; font-weight: 800; letter-spacing: -0.01em; }
+.dxp-gate-card p { margin: 0 0 16px; color: #8b93a7; font-size: 13px; line-height: 1.5; }
+.dxp-gate-venues { display: flex; gap: 8px; align-items: center; color: #8b93a7; font-size: 12px; font-weight: 700; }
+.dxp-gate-venues i {
+  width: 8px; height: 8px; border-radius: 50%; background: #2fd575;
+  box-shadow: 0 0 6px rgba(47, 213, 117, 0.7);
+}
+.dxp-gate-card input {
+  width: 100%;
+  border: 1px solid #2b3447;
+  border-radius: 9px;
+  background: #10151f;
+  color: #eceff4;
+  font-size: 14px;
+  padding: 11px 12px;
+  outline: 0;
+}
+.dxp-gate-card input:focus { border-color: #2e6be6; }
+.dxp-gate-card button {
+  width: 100%;
+  margin-top: 10px;
+  border: 0;
+  border-radius: 9px;
+  background: #2e6be6;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 800;
+  padding: 12px;
+  cursor: pointer;
+}
+.dxp-gate-card button:hover { filter: brightness(1.07); }
+.dxp-gate-err { color: #ff7d7d; font-size: 12.5px; margin-top: 10px; }
+
+/* toast on venue surface */
+.dxp .dx-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(74px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 95;
+  background: #0d131d;
+  border: 1px solid #2fd575;
+  color: #e8fff1;
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  white-space: nowrap;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dxp .dx-toast.bad { border-color: #e5484d; color: #ffe9e9; }
+@media (min-width: 1000px) { .dxp .dx-toast { bottom: 28px; } }
+
+/* charts inherit venue ink — line in the venue accent, grid recessive */
+.dxp .pc-chart { border: 1px solid var(--v-line); border-radius: 10px; background: transparent; margin: 0 0 10px; }
+.dxp .pc-chart .pc-line { stroke: var(--v-blue); }
+.dxp--kx .pc-chart .pc-line { stroke: var(--v-green); }
+.dxp .pc-chart .pc-grid { stroke: var(--v-line); }
+.dxp .pc-chart .pc-mut { fill: var(--v-mut); }
+.dxp .pc-chart .pc-ink { fill: var(--v-ink); }
+.dxp .pc-chart text, .dxp .pc-caption { fill: var(--v-mut); color: var(--v-mut); }
+.dxp .pc-note { color: var(--v-mut); font-size: 12.5px; padding: 18px 4px; }
+
+/* reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .dxp-live i, .dxp .mf-chip .live-dot { animation: none; }
+  .dxp .vd-rail.has-pick .pmx-ticket, .dxp .vd-rail.has-pick .kx-ticket { animation: none; }
+}

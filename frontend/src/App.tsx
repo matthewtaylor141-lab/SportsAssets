@@ -149,9 +149,11 @@ export default function App() {
   // page-fade animation would trap its position:fixed root in a stacking
   // context under them — so /jarvis gets a bare, chrome-less main. The
   // TV wall boards (/wall/*) are full-screen always-on displays and get
-  // the same treatment.
+  // the same treatment. The Desk (owner order 2026-08-28) is a venue
+  // PORTAL — indistinguishable from Polymarket/Kalshi themselves — so
+  // it owns its full viewport too: no site chrome may frame the venue.
   const cockpit = pathname === '/jarvis' || pathname === '/meridian'
-    || pathname.startsWith('/wall')
+    || pathname === '/desk' || pathname.startsWith('/wall')
   return (
     <div className="app">
       {!cockpit && (

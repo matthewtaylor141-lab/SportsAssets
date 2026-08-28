@@ -114,6 +114,9 @@ export function MarketPage({
     <section className={`mp ${isK ? 'kx8' : 'pm8'}`}>
       <div className="mp-head">
         <button className="mp-back" onClick={onBack} aria-label="Back to markets">‹</button>
+        <span className="mp-ico" aria-hidden>
+          {isK ? '📊' : '📈'}
+        </span>
         <div className="mp-title">
           {game?.title || (loading ? 'Loading market…' : 'Market')}
           <small>

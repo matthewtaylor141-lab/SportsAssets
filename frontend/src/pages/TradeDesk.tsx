@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { adminApi } from '../lib/api'
 import {
   DESK_RELOCK_EVENT, deskAdminToken, deskApi, deskToken, deskUnlock,
@@ -12,6 +12,7 @@ import {
 import { MarketFeed, Spark, type FeedCard } from '../components/MarketFeed'
 import { MarketPage, type MarketMeta } from '../components/MarketPage'
 import '../styles/desk2.css'
+import '../styles/desk10.css'
 
 // Desk v8 (owner order 2026-08-22, via questionnaire): the desk IS the
 // venue app — opening it shows a venue-style FEED of large market cards
@@ -181,6 +182,44 @@ const kalshiFee = (count: number, price: number) =>
 
 // v8: the league list + lazy card-chart machinery (Spark) moved whole
 // into components/MarketFeed.tsx — the feed owns browsing now.
+
+// ── v10 venue chrome (owner order 2026-08-28: the desk is a PORTAL —
+// indistinguishable from the venue itself). Wordmarks are drawn in
+// code (text + tiny SVG glyph), no fetched assets. ──────────────────
+function PmWordmark() {
+  return (
+    <span className="dxp-logo" aria-label="Polymarket portal">
+      <svg className="glyph" viewBox="0 0 24 24" fill="none" aria-hidden>
+        <path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+        <path d="M12 22V12M12 12 3 7M12 12l9-5" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+      </svg>
+      Polymarket
+    </span>
+  )
+}
+function KxWordmark() {
+  return (
+    <span className="dxp-logo" aria-label="Kalshi portal">
+      <span className="glyph" aria-hidden>K</span>
+      kalshi
+    </span>
+  )
+}
+function DxpIcon({ name }: { name: 'markets' | 'portfolio' | 'activity' }) {
+  const common = {
+    viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+    strokeWidth: 1.8, strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const, 'aria-hidden': true,
+  }
+  switch (name) {
+    case 'markets':
+      return <svg {...common}><path d="M4 17l4.2-4.2 3 3L19 8" /><path d="M14 8h5v5" /></svg>
+    case 'portfolio':
+      return <svg {...common}><rect x="3" y="6" width="18" height="13" rx="2.5" /><path d="M16 12.5h.01" /><path d="M3 9.5h18" /></svg>
+    default:
+      return <svg {...common}><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></svg>
+  }
+}
 
 export function TradeDesk() {
   const [authed, setAuthed] = useState(() => deskToken() != null)
@@ -1004,26 +1043,35 @@ export function TradeDesk() {
   }
 
   if (!authed) {
+    // v10: the portal sign-in — the last BettorToken-branded screen
+    // before the venue takes over the viewport.
     return (
-      <>
-        <h1>Trade Desk</h1>
-        <div className="card dk-gate">
-          <p>Team access — enter the desk password (admin token also accepted).</p>
-          <div className="dk-gate-row">
+      <div className="dxp dxp--pm">
+        <div className="dxp-gate">
+          <div className="dxp-gate-card">
+            <div className="dxp-gate-venues">
+              <i /> LIVE VENUE PORTAL · POLYMARKET + KALSHI
+            </div>
+            <h2>BettorToken Desk</h2>
+            <p>
+              Direct access to the live venue accounts. Every order placed
+              here executes on the real exchange. Team password (admin
+              token also accepted).
+            </p>
             <input
-              className="input" type="password" value={pw}
+              type="password" value={pw} placeholder="Desk password"
               autoCapitalize="none" autoCorrect="off" autoComplete="current-password" spellCheck={false}
               onChange={(e) => setPw(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && unlock(pw.trim())}
               aria-label="Desk password"
             />
-            <button className="btn" onClick={() => unlock(pw.trim())} disabled={unlocking}>
-              {unlocking ? 'Unlocking…' : 'Unlock'}
+            <button onClick={() => unlock(pw.trim())} disabled={unlocking}>
+              {unlocking ? 'Unlocking…' : 'Enter the venue'}
             </button>
+            {err && <p className="dxp-gate-err">{err}</p>}
           </div>
-          {err && <p className="dk-gate-err">{err}</p>}
         </div>
-      </>
+      </div>
     )
   }
 
@@ -1265,6 +1313,10 @@ export function TradeDesk() {
       {sheetOpen && <div className="dx-sheet-scrim" onClick={dismissSheet} aria-hidden="true" />}
       <div
         className={isK ? 'kx-ticket' : 'pmx-ticket'}
+        // fresh DOM per open: the sheet is a promoted fixed layer, and
+        // a rebuilt subtree sidesteps stale-raster compositors (the
+        // v10 shot pass caught a capture of the pre-theme layer)
+        key={sheetOpen ? 'sheet-open' : 'sheet-closed'}
         style={sheetDrag > 0 ? { transform: `translateY(${sheetDrag}px)`, transition: 'none' } : undefined}
       >
         <div
@@ -1740,59 +1792,73 @@ export function TradeDesk() {
   const ooCount = ooRows.length
   const ooAgeS = ooAt == null ? null : Math.max(0, Math.round((Date.now() - ooAt) / 1000))
 
+  // ── v10 venue chrome derived values ──────────────────────────────
+  const pmPortfolio = acct
+    ? (acct.polymarket.account_value
+      ?? acct.polymarket.trading_capital ?? acct.polymarket.cash) : null
+  const kxPortfolio = acct
+    ? (acct.kalshi.balance_usd != null
+      ? acct.kalshi.balance_usd + (acct.kalshi.exposure_usd ?? 0) : null) : null
+  const portfolioVal = isK ? kxPortfolio : pmPortfolio
+  const cashVal = isK ? acct?.kalshi.balance_usd
+    : (acct?.polymarket.cash ?? acct?.polymarket.trading_capital)
+  const switchVenue = (v: Venue) => {
+    if (inFlight() || limInFlight()) return
+    setVenue(v); setGame(null); setPick(null); setQ(''); setRun(null)
+    setGameMeta(null)
+    setLimRun(null); setLimitPx(''); setOrderType('market')
+    limPrefilled.current = false
+  }
+  const goMarkets = () => { setTab('markets'); setGame(null); setGameMeta(null) }
+
   return (
-    <>
-      <div className={`dx-topbar${onMarketPage ? ' mp-mode' : ''}`}>
-        <div className="vd-pagehead">
-          <h1>Trade Desk</h1>
-          {acct && (
-            <span className="dx-cap" title="Live account capital">
-              <small>capital</small>
-              <b>{isK
-                ? money(acct.kalshi.balance_usd)
-                : money(acct.polymarket.trading_capital ?? acct.polymarket.cash)}</b>
-            </span>
+    // key={venue}: a venue switch rebuilds the whole portal DOM — the
+    // sticky nav lives on its own compositor layer and a pure CSS-var
+    // swap can leave the OLD venue's paint on screen (observed in the
+    // v10 shot pass: Kalshi nav rendering Polymarket's dark layer).
+    <div className={`dxp ${isK ? 'dxp--kx' : 'dxp--pm'}`} key={venue}>
+      {/* ── the ONLY non-venue chrome: a 26px portal strip ── */}
+      <div className="dxp-portal" role="status">
+        <span className="dxp-live"><i />BETTORTOKEN PORTAL</span>
+        <span className="dxp-note">
+          {acctDown ? (
+            <>reconnecting to the live {isK ? 'Kalshi' : 'Polymarket'} account feed…</>
+          ) : (
+            <>orders execute on the <b>real {isK ? 'Kalshi' : 'Polymarket'} account</b>
+              {' '}· manual sleeve
+              {blotter && (
+                <> · today <b>{money(blotter.day_spent)}</b> of {money(blotter.day_budget)}
+                  {' '}· max {money(blotter.max_per_order)}/order</>
+              )}</>
           )}
-          <div className="vd-venues">
-            {(['polymarket', 'kalshi'] as Venue[]).map((v) => (
-              <button
-                key={v}
-                className={`vd-venue${venue === v ? ' on' : ''} ${v}`}
-                onClick={() => {
-                  if (inFlight() || limInFlight()) return
-                  setVenue(v); setGame(null); setPick(null); setQ(''); setRun(null)
-                  setGameMeta(null)
-                  setLimRun(null); setLimitPx(''); setOrderType('market')
-                  limPrefilled.current = false
-                }}
-              >
-                {v === 'polymarket' ? 'Polymarket' : 'Kalshi'} mode
-              </button>
-            ))}
-          </div>
+        </span>
+        <span className="dxp-sync">
+          {acctDown ? 'retrying' : acctAgeS == null ? 'syncing…'
+            : acctAgeS < 3 ? 'synced now' : `synced ${acctAgeS}s`}
+        </span>
+        <div className="dxp-modes" role="group" aria-label="Venue">
+          {(['polymarket', 'kalshi'] as Venue[]).map((v) => (
+            <button
+              key={v}
+              className={venue === v ? 'on' : ''}
+              onClick={() => switchVenue(v)}
+            >{v === 'polymarket' ? 'Polymarket' : 'Kalshi'}</button>
+          ))}
         </div>
-        <div className={`dx-conn${acctDown ? ' down' : ''} ${isK ? 'k' : 'pm'}`} role="status">
-          <span className="dx-conn-dot" />
-          <span className="dx-conn-txt">
-            {acctDown ? (
-              <><b>RECONNECTING</b> · live {isK ? 'Kalshi' : 'Polymarket'} account feed
-                unreachable — retrying</>
-            ) : (
-              <><b className="dx-conn-bt">BETTORTOKEN</b> · <b>LIVE</b> · executed by
-                the AI trader · real {isK ? 'Kalshi' : 'Polymarket'} account</>
-            )}
-          </span>
-          <span className="dx-conn-age">
-            {acctDown ? 'retrying every 30s'
-              : acctAgeS == null ? 'syncing…'
-                : acctAgeS < 3 ? 'synced just now' : `synced ${acctAgeS}s ago`}
-          </span>
-        </div>
-        <div className="v8-searchrow">
+        <Link className="dxp-exit" to="/" aria-label="Exit the venue portal">✕</Link>
+      </div>
+
+      {/* ── venue top nav (wordmark, search, sections, account) ── */}
+      <header className="dxp-nav">
+        {isK ? <KxWordmark /> : <PmWordmark />}
+        <div className="dxp-search">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+            <circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" />
+          </svg>
           <input
-            className="v8-search" type="search"
-            placeholder={`Search ${isK ? 'Kalshi' : 'Polymarket'} markets…`}
-            value={q}
+            type="search" value={q}
+            placeholder={`Search ${isK ? 'Kalshi' : 'Polymarket'} markets`}
             onChange={(e) => {
               setQ(e.target.value)
               if (e.target.value.trim().length >= 2 && tab !== 'markets') setTab('markets')
@@ -1800,70 +1866,44 @@ export function TradeDesk() {
             aria-label="Search markets"
           />
           {q !== '' && (
-            <button className="v8-search-x" onClick={() => setQ('')} aria-label="Clear search">✕</button>
+            <button className="clr" onClick={() => setQ('')} aria-label="Clear search">✕</button>
           )}
         </div>
-      </div>
-      <p style={{ opacity: 0.75, marginTop: 0 }}>
-        Orders execute through the AI's live accounts as the <b>manual</b> sleeve —
-        separate budget, zero effect on autonomous trading.
-        {blotter && (
-          <> Today: <b>{money(blotter.day_spent)}</b> of {money(blotter.day_budget)} ·
-            max {money(blotter.max_per_order)}/ticket.</>
-        )}
-        {acct && (
-          <>
-            {' '}
-            <span className="dx-balances">
-              {isK ? (
-                <>Kalshi cash <b>{money(acct.kalshi.balance_usd)}</b> ·
-                  buying power <b>{money(acct.kalshi.balance_usd)}</b></>
-              ) : (
-                <>Polymarket trading capital{' '}
-                  <b>{money(acct.polymarket.trading_capital ?? acct.polymarket.cash)}</b>
-                  {(acct.polymarket.committed_usd ?? 0) > 0 &&
-                    <span className="vd-cc-note"> incl. committed capital</span>}
-                </>
-              )}
-            </span>
-          </>
-        )}
-      </p>
+        <nav className="dxp-links" aria-label="Venue sections">
+          <button className={tab === 'markets' ? 'on' : ''} onClick={goMarkets}>
+            Markets
+          </button>
+          <button className={tab === 'positions' ? 'on' : ''} onClick={() => setTab('positions')}>
+            Portfolio
+            {venuePositions.length > 0 && <span className="n">{venuePositions.length}</span>}
+          </button>
+          <button className={tab === 'activity' ? 'on' : ''} onClick={() => setTab('activity')}>
+            Activity
+            {ooCount + openTrades.length > 0 && (
+              <span className="n">{ooCount + openTrades.length}</span>
+            )}
+          </button>
+        </nav>
+        <div className="dxp-acct">
+          <span className={`dxp-stat hide-m${(portfolioVal ?? 0) > (cashVal ?? 0) ? ' gain' : ''}`}>
+            <small>Portfolio</small><b>{money(portfolioVal)}</b>
+          </span>
+          <span className="dxp-stat">
+            <small>Cash</small><b>{money(cashVal)}</b>
+          </span>
+          <Link to="/accounts" className="dxp-deposit">Deposit</Link>
+          <span className="dxp-avatar" title="BettorToken desk session">BT</span>
+        </div>
+      </header>
 
-      {/* ── v8 section tabs: venue-app navigation (bottom bar <720px) ── */}
-      <nav className="v8-tabs" aria-label="Desk sections">
-        <button
-          className={tab === 'markets' ? 'on' : ''}
-          onClick={() => { setTab('markets'); setGame(null); setGameMeta(null) }}
-        >
-          <span className="v8-tab-l">Markets</span>
-        </button>
-        <button
-          className={tab === 'positions' ? 'on' : ''}
-          onClick={() => setTab('positions')}
-        >
-          <span className="v8-tab-l">Positions</span>
-          {venuePositions.length > 0 && (
-            <span className="v8-tab-n">{venuePositions.length}</span>
-          )}
-        </button>
-        <button
-          className={tab === 'activity' ? 'on' : ''}
-          onClick={() => setTab('activity')}
-        >
-          <span className="v8-tab-l">Activity</span>
-          {openTrades.length > 0 && (
-            <span className="v8-tab-n">{openTrades.length}</span>
-          )}
-        </button>
-      </nav>
+      <div className="dxp-body">
 
       {/* the venue surface only exists where venue content renders —
           on Activity it painted an empty white pill (v9 shot pass) */}
       {tab !== 'activity' && (
       <div className={`vdesk vdesk--v8 ${isK ? 'vdesk--kx' : 'vdesk--pmx'}`}>
         {tab === 'markets' && (
-          <div className="v8-body">
+          <div className={`v8-body${onMarketPage || sheetOpen ? ' rail-on' : ''}`}>
             <main className="v8-main">
               {q.trim().length >= 2 ? searchBlock : onMarketPage ? (
                 <MarketPage
@@ -2003,7 +2043,7 @@ export function TradeDesk() {
       )}
 
       {tab === 'activity' && (
-      <div className="card">
+      <div className="dxp-activity">
         <div className="dx-blot-tabs">
           <button className={blotTab === 'open' ? 'on' : ''} onClick={() => setBlotTab('open')}>
             Open {openTrades.length ? `(${openTrades.length})` : ''}
@@ -2188,11 +2228,31 @@ export function TradeDesk() {
       </div>
       )}
 
-      <div className="v8-tabspace" aria-hidden="true" />
+      </div>{/* /.dxp-body */}
+
+      {/* ── mobile: the venue's own bottom nav ── */}
+      <nav className="dxp-tabbar" aria-label="Venue sections">
+        <button className={tab === 'markets' ? 'on' : ''} onClick={goMarkets}>
+          <DxpIcon name="markets" />
+          <span>Markets</span>
+        </button>
+        <button className={tab === 'positions' ? 'on' : ''} onClick={() => setTab('positions')}>
+          <DxpIcon name="portfolio" />
+          <span>Portfolio</span>
+          {venuePositions.length > 0 && <span className="n">{venuePositions.length}</span>}
+        </button>
+        <button className={tab === 'activity' ? 'on' : ''} onClick={() => setTab('activity')}>
+          <DxpIcon name="activity" />
+          <span>Activity</span>
+          {ooCount + openTrades.length > 0 && (
+            <span className="n">{ooCount + openTrades.length}</span>
+          )}
+        </button>
+      </nav>
 
       {toast && (
         <div className={`dx-toast${toast.ok ? '' : ' bad'}`} role="status">{toast.msg}</div>
       )}
-    </>
+    </div>
   )
 }
