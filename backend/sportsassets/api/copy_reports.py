@@ -32,6 +32,7 @@ from datetime import date, datetime
 from statistics import median
 from typing import Any
 
+from ..live_executor import ORDER_INTENT_SQL
 from .copies_record import COPY_WHALES, DISPLAY, RECORD_TZ
 from .track_record import classify_slug
 
@@ -44,8 +45,7 @@ SELECT lo.id,
                'YYYY-MM-DD')                               AS day,
        lo.us_market_slug                                   AS slug,
        lo.side, lo.status, lo.venue,
-       COALESCE(raw #>> '{response,executions,0,order,intent}',
-                raw #>> '{preview,intent}')                AS intent,
+       __INTENT__                                          AS intent,
        lo.his_price::float8                                AS his_price,
        lo.fill_price::float8                               AS fill_price,
        COALESCE(NULLIF(lo.filled_usd, 0),
@@ -64,7 +64,7 @@ LEFT JOIN trades t ON t.id = lo.trade_id
 WHERE lower(COALESCE(lo.whale_username, '')) = ANY($1::text[])
   AND lo.status IN ('settled', 'cashed_out', 'filled')
 ORDER BY COALESCE(lo.settled_at, lo.placed_at) DESC
-"""
+""".replace("__INTENT__", ORDER_INTENT_SQL)
 
 
 def _bucket(day: str, period: str) -> str:
