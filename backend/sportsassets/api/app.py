@@ -7328,6 +7328,14 @@ async def api_venue_export_raw(since: str | None = Query(None)) -> dict:
     return await venue_export_raw(since)
 
 
+# Display epoch for the copies record (owner order 2026-08-28: "start
+# from zero tonight"). Same pattern as RECORD_EPOCH: a display
+# re-baseline that moves the served window without touching history —
+# ?since= keeps every earlier day reachable, and the audit surfaces
+# (order-audit, breakdown-day-detail) never adopt it.
+COPIES_EPOCH = os.environ.get("COPIES_EPOCH", "2026-08-28")
+
+
 @app.get("/api/copies-record")
 async def api_copies_record(since: str | None = Query(None)) -> dict:
     """The COPIES cohort, uncapped, from the order-level audit table —
@@ -7336,7 +7344,74 @@ async def api_copies_record(since: str | None = Query(None)) -> dict:
     our own settled orders, venue-backed, no credentials involved."""
     from .copies_record import build as build_copies
 
-    return await build_copies(_parse_day(since, "2026-08-01"))
+    out = await build_copies(_parse_day(since, COPIES_EPOCH))
+    out["rebaselined"] = not since and COPIES_EPOCH > "2026-08-01"
+    out["epoch"] = COPIES_EPOCH
+    return out
+
+
+@app.get("/api/admin/copy-reports", dependencies=[Depends(require_desk)])
+async def api_copy_reports(period: str = Query("monthly"),
+                           whale: str | None = Query(None),
+                           since: str | None = Query(None),
+                           until: str | None = Query(None),
+                           format: str = Query("json")):
+    """Management reports (owner order 2026-08-28): whale x sport x
+    trade-type x period over the copy ledger, with the latency between
+    the whale's fill and our execution aggregated per bucket. Uncapped;
+    settled + cashed_out copy rows only."""
+    from . import copy_reports as cr
+
+    if period not in cr.PERIODS:
+        raise HTTPException(400, f"period must be one of {cr.PERIODS}")
+    pool = await get_pool()
+    raw = await cr.fetch_ledger(pool)
+    rows = cr.ledger_rows(raw, since=_parse_day(since, "") if since else "",
+                          until=_parse_day(until, "") if until else "")
+    if whale:
+        rows = [r for r in rows
+                if r["whale"].lower() == whale.strip().lower()]
+    # ledger_rows already display-names the whale; report() passes an
+    # unknown key through DISPLAY.get unchanged, so the names survive
+    rep = cr.report(rows, period=period)
+    if format == "csv":
+        return PlainTextResponse(
+            cr.to_csv(rep["rows"], cr.REPORT_CSV_COLS),
+            media_type="text/csv",
+            headers={"Content-Disposition":
+                     f"attachment; filename=copy-report-{period}.csv"})
+    rep["filters"] = {"whale": whale, "since": since, "until": until}
+    return rep
+
+
+@app.get("/api/admin/copy-ledger", dependencies=[Depends(require_desk)])
+async def api_copy_ledger(whale: str | None = Query(None),
+                          since: str | None = Query(None),
+                          until: str | None = Query(None),
+                          limit: int = Query(500, ge=1, le=5000),
+                          offset: int = Query(0, ge=0),
+                          format: str = Query("json")):
+    """The order-level copy ledger (owner order 2026-08-28): every
+    trade assigned to its whale with the full timestamp chain and the
+    whale-fill -> our-execution latency next to each row."""
+    from . import copy_reports as cr
+
+    pool = await get_pool()
+    raw = await cr.fetch_ledger(pool)
+    rows = cr.ledger_rows(raw, since=_parse_day(since, "") if since else "",
+                          until=_parse_day(until, "") if until else "")
+    if whale:
+        rows = [r for r in rows
+                if r["whale"].lower() == whale.strip().lower()]
+    if format == "csv":
+        return PlainTextResponse(
+            cr.to_csv(rows, cr.LEDGER_CSV_COLS),
+            media_type="text/csv",
+            headers={"Content-Disposition":
+                     "attachment; filename=copy-ledger.csv"})
+    return {"count": len(rows),
+            "rows": rows[offset:offset + limit],
+            "filters": {"whale": whale, "since": since, "until": until}}
 
 
 @app.get("/api/venue-truth")
