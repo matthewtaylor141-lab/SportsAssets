@@ -94,11 +94,16 @@ async def reconcile_once(depth: int = 500) -> dict:
             # row is caught by (a) at its successor; a misordered run
             # at the exact cap tail is caught by (a)-via-(b) when the
             # genuine feed resumes newer inside the border page. The
-            # residual needs ~BORDER_PAGE consecutively misordered
-            # rows spanning the cap boundary — a wholesale-reordered
-            # feed, which no depth-capped walk of any design can see
-            # through, and which the two-run rule still bounds.
-            # Failure direction, as always, is pure defer.
+            # residual (round-22 fleet, executed): >= BORDER_PAGE -
+            # OVERLAP_K consecutively misordered rows spanning the cap
+            # boundary escape with dirty=0 — a wholesale-reordered
+            # feed no depth-capped walk of any design can see through.
+            # HONEST direction there: if the reorder is DURABLE, both
+            # hourly walks cover identically and the failure is a
+            # false STICKY on a correct emission — over-alarm and
+            # disarm, NOT defer. Money fails closed (never a wrong or
+            # double emission); the cost is a spurious operator alarm
+            # under a non-physical feed pathology.
             ord_prev: float | None = None
             # DIRTY WALK (fleet round 11, major): a row skipped as
             # unusable below neither ingests nor testifies — correct —
