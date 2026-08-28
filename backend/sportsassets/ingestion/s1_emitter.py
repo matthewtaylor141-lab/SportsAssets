@@ -115,26 +115,39 @@ SQL_PROBE = (
 # hourly reconciler"). 2700s sat INSIDE the backstop's worst case and
 # falsely tripped correct emissions the /trades window slid past.
 CORROBORATE_S = 75 * 60
+# The pollable filter lives in the SQL (fleet round 5): unjudgeable
+# rows re-entering the window at the FRONT of the oldest-first order
+# could pin the LIMIT forever and starve every judgable row behind
+# them of its alarm. Departed-whale rows stay unstamped and invisible
+# to this query until the whale returns; the backlog gauge counts them
+# separately.
 SQL_SWEEP = """
-SELECT t.id, t.dedupe_key, t.detected_at,
-       (t.venue_seen_at IS NOT NULL) AS ok,
-       (w.active AND NOT w.banned)   AS pollable
+SELECT t.id, t.dedupe_key, t.detected_at, w.address,
+       (t.venue_seen_at IS NOT NULL) AS ok
 FROM trades t JOIN whales w ON w.id = t.whale_id
 WHERE t.source = 's1' AND t.s1_checked_at IS NULL
   AND t.detected_at < now() - make_interval(secs => $1)
+  AND w.active AND NOT w.banned
 ORDER BY t.detected_at
 LIMIT 50
 """
+SQL_BACKLOG = """
+SELECT count(*) FROM trades
+WHERE source = 's1' AND s1_checked_at IS NULL
+  AND detected_at < now() - make_interval(secs => $1)
+"""
 SQL_MARK = "UPDATE trades SET s1_checked_at = now() WHERE id = ANY($1::bigint[])"
 # The verdict is conditional on the backstop having actually had its
-# chance: an uncorroborated judgment requires a COMPLETED reconciler
-# run that STARTED after the row was detected (its 500-deep re-fetch
-# then provably re-delivered or refused the fill). No completed run =
-# defer, unstamped — a Path-B outage defers judgment, never mass-trips
-# (fleet round 4).
+# chance AT THIS WALLET (fleet round 5): a fault-isolated reconciler
+# run "completes" even when the row's own whale failed — or when every
+# whale failed — so completion alone proves nothing about this fill.
+# The run's details record per-wallet outcomes; the judgment requires
+# the wallet PRESENT as a success key and ABSENT as a failure key.
 SQL_RECON_SINCE = """
 SELECT 1 FROM reconciliation_runs
 WHERE started_at > $1 AND finished_at IS NOT NULL
+  AND details->'per_wallet' ? $2
+  AND NOT (details->'per_wallet' ? ('failed:' || $2))
 LIMIT 1
 """
 SQL_READ = "SELECT value FROM ingestion_state WHERE key = $1"
@@ -169,8 +182,11 @@ class S1Emitter:
         self.head = 0                                 # chain-head watermark
         self.armed = False
         self.armed_at = 0.0
-        self.tripped: str | None = None
-        self.tripped_at = 0.0
+        # STICKY TRIPS are a merged, row-specific SET (fleet round 5):
+        # a single-slot cell let two live trips CAS-overwrite each
+        # other and let one operator clear release BOTH processes. Each
+        # reason (e.g. 'uncorroborated:1234') is cleared individually.
+        self.trips: dict[str, float] = {}
         self.unjudged_backlog = 0
         self.cert_green = False
         self.cert_reason = "never_checked"
@@ -238,6 +254,15 @@ class S1Emitter:
                     _k, victim = self.pending.popitem(last=False)
                     victim["evicted"] = True
                     self.bump("s1.abstain.overflow")
+            lix = str(log_entry.get("logIndex", ""))
+            if lix and lix in e.setdefault("lix_seen", set()):
+                # one duplicated WS delivery of either leg was making
+                # classify see two aggs / doubled legs and abstain the
+                # whole certified emission (fleet r5)
+                self.bump("s1.dup_event")
+                return
+            if lix:
+                e["lix_seen"].add(lix)
             e["logs"].append(log_entry)
             e["last_seen"] = now
             e["blocks"][blk] = bh
@@ -320,8 +345,13 @@ class S1Emitter:
                 json.loads(raw) if raw else {})
             if not isinstance(doc, dict):
                 doc = {}
-            if doc.get("tripped"):
-                self.tripped = self._trip_str(doc["tripped"])
+            lt = doc.get("trips")
+            if isinstance(lt, dict) and lt:
+                self.trips = {str(k): (v if isinstance(v, (int, float))
+                                       else 0.0) for k, v in lt.items()}
+                self.armed = False
+            elif doc.get("tripped"):
+                self.trips = {self._trip_str(doc["tripped"]): 0.0}
                 self.armed = False
             elif doc.get("armed"):
                 aa = doc.get("armed_at")
@@ -332,7 +362,7 @@ class S1Emitter:
         except Exception:  # noqa: BLE001 — a corrupt row must not wedge
             # the loop; fail-closed with nothing adopted (round 3)
             self.bump("s1.state_corrupt")
-            self.tripped = self.tripped or "state_corrupt"
+            self.trips.setdefault("state_corrupt", 0.0)
         self._state_loaded = True
 
     # ── certification ───────────────────────────────────────────────
@@ -390,7 +420,7 @@ class S1Emitter:
             # was granted under is still standing
             self._pending_arm_at = None
             ws = (doc or {}).get("window_start")
-            if green and self.tripped is None and \
+            if green and not self.trips and \
                     isinstance(ws, (int, float)) and ws <= pend:
                 self.armed = True
                 self.armed_at = pend
@@ -406,18 +436,25 @@ class S1Emitter:
                 self.bump("s1.trip.window_reset")
                 log.warning("S1 auto-disarmed: %s", reason if not green
                             else "window_reset_after_arm")
-        elif (green and self.tripped is None
+        elif (green and not self.trips
               and os.getenv("S1_ARM", "").lower() in ("on", "1", "true")):
             self.armed = True
             self.armed_at = now
             log.warning("S1 ARMED at %s (cert green)", now)
 
+    @property
+    def tripped(self) -> str | None:
+        """First live trip reason, oldest first (beat/back-compat)."""
+        if not self.trips:
+            return None
+        return min(self.trips, key=self.trips.__getitem__)
+
     def _trip(self, reason: str) -> None:
         self.armed = False
-        self.tripped = reason
-        self.tripped_at = time.time()
-        self.bump("s1.trip." + reason)
-        log.error("S1 STICKY TRIP: %s — manual re-arm required", reason)
+        self.trips.setdefault(reason, time.time())
+        self.bump("s1.trip." + reason.split(":")[0])
+        log.error("S1 STICKY TRIP: %s — manual clear of THIS reason "
+                  "required", reason)
 
     # ── finalize one tx ─────────────────────────────────────────────
     async def _finalize_tx(self, pool: Any, tx: str, e: dict,
@@ -568,7 +605,7 @@ class S1Emitter:
                 # emit can diverge from the poll row's key (panel kill 2)
                 self.bump("s1.abstain.price_variant")
                 continue
-            if not self.armed or not self.cert_green or self.tripped:
+            if not self.armed or not self.cert_green or self.trips:
                 # burn-in: idempotent per (wallet, asset) — no view in
                 # the mark (a straggler can flip the representative
                 # record's view across a retry) and the armed path marks
@@ -591,8 +628,12 @@ class S1Emitter:
                 rows = await pool.fetch(SQL_PROBE, tx, rec["whale_id"],
                                         rec["asset"], timeout=6)
             except Exception:  # noqa: BLE001
+                # RETRY, not forfeit (fleet r5): one transient DB error
+                # mid-group was permanently losing every remaining
+                # market of an armed bundle. Already-ingested records
+                # skip via emit_dup on the retry pass.
                 self.bump("s1.errors")
-                return False                  # no probe = no emit
+                return None
             # a receipt-path row for this (tx, whale, asset) is the
             # key-divergent-twin risk — abstain. Our own earlier s1 row
             # with THIS key is a dup — skip. An s1 row with a DIFFERENT
@@ -632,7 +673,8 @@ class S1Emitter:
                 _tid, was_new = await ingest_trade_result(ev)
             except Exception:  # noqa: BLE001
                 self.bump("s1.errors")
-                return False
+                return None                  # retry; emit_dup skips any
+                                             # record that did commit
             e.setdefault("counted", set()).add((wallet, rec["asset"]))
             emitted = True
             self.last_emit_at = now
@@ -656,45 +698,37 @@ class S1Emitter:
         try:
             rows = await pool.fetch(SQL_SWEEP, float(CORROBORATE_S),
                                     timeout=10)
+            backlog = await pool.fetchval(SQL_BACKLOG,
+                                          float(CORROBORATE_S), timeout=10)
         except Exception:  # noqa: BLE001
             self.bump("s1.errors")
             return
+        self.unjudged_backlog = int(backlog or 0)
         if not rows:
-            self.unjudged_backlog = 0
             return
-        confirmed_ids, judged_ids = [], []
-        tripped_key = None
-        deferred = 0
+        confirmed_ids, judged = [], []
         for r in rows:
             if r["ok"]:
                 confirmed_ids.append(r["id"])
                 continue
-            if not r["pollable"]:
-                # roster departure is routinely TRANSIENT (fleet r4):
-                # never stamp — the row is re-judged when the whale
-                # returns; a permanently-departed whale's rows stay a
-                # visible backlog, never a silent amnesty
-                deferred += 1
-                continue
             try:
                 ran = await pool.fetchrow(SQL_RECON_SINCE,
-                                          r["detected_at"], timeout=6)
+                                          r["detected_at"], r["address"],
+                                          timeout=6)
             except Exception:  # noqa: BLE001
                 self.bump("s1.errors")
                 return
             if ran is None:
-                deferred += 1          # the backstop has not had its
-                continue               # chance yet — defer, never trip
-            self.bump("s1.uncorroborated")
-            judged_ids.append(r["id"])
-            tripped_key = str(r["dedupe_key"])[:16]
+                continue               # the backstop has not provably
+                                       # re-fetched THIS wallet — defer
+            judged.append(r)
             log.error("S1 UNCORROBORATED row id=%s key=%s — the venue's "
-                      "feed never showed this fill", r["id"], tripped_key)
-        self.unjudged_backlog = deferred
+                      "feed never showed this fill", r["id"],
+                      str(r["dedupe_key"])[:16])
         # STAMP BEFORE COUNTING (fleet r4): a failed stamp must not
-        # inflate s1.confirmed forever, and the trip only lands when
-        # its row is durably marked judged
-        ids = confirmed_ids + judged_ids
+        # inflate s1.confirmed forever, and a trip only lands when its
+        # row is durably marked judged
+        ids = confirmed_ids + [r["id"] for r in judged]
         if ids:
             try:
                 await pool.execute(SQL_MARK, ids, timeout=10)
@@ -702,8 +736,11 @@ class S1Emitter:
                 self.bump("s1.errors")
                 return                 # nothing counted, nothing tripped
         self.bump("s1.confirmed", len(confirmed_ids))
-        if tripped_key is not None:
-            self._trip("uncorroborated")
+        for r in judged:
+            self.bump("s1.uncorroborated")
+            # ROW-SPECIFIC reason (fleet r5): an operator clear releases
+            # exactly the verdict they investigated, never a sibling's
+            self._trip("uncorroborated:%s" % r["id"])
 
     # ── flush (own state key; observability, not evidence) ──────────
     @staticmethod
@@ -732,22 +769,34 @@ class S1Emitter:
             self.bump("s1.flush_failures")
             return
         stored_trip = self._trip_str(doc.get("tripped"))
+        stored_trips = doc.get("trips")
+        if not isinstance(stored_trips, dict):
+            stored_trips = {stored_trip: 0.0} if stored_trip else {}
+        # CLEAR-BY-REASON (fleet r5): an operator clear names exactly
+        # the reason it releases — a clear for row A's verdict can
+        # never absolve row B's, a concurrent un-flushed trip in
+        # another process, or a different trip class entirely.
         cleared_at = doc.get("trip_cleared_at")
-        if (self.tripped is not None and not stored_trip
-                and isinstance(cleared_at, (int, float))
-                and cleared_at > self.tripped_at):
-            # a human explicitly cleared the trip AFTER it fired: adopt
-            # the clear (stay disarmed until re-armed through cert).
-            # Without this, every running process silently re-asserted
-            # its in-memory trip over any manual recovery (fleet r4).
-            log.warning("S1 trip '%s' cleared by operator at %s",
-                        self.tripped, cleared_at)
-            self.tripped = None
-        if stored_trip and self.tripped is None:
-            # another process tripped since our last read: a sticky
-            # trip is global — adopt it, never clobber it (fleet r1/r2)
-            self.tripped = stored_trip
-            self.armed = False
+        cleared_reason = doc.get("trip_cleared_reason")
+        merged_trips: dict[str, float] = {}
+        for src in (stored_trips, self.trips):
+            for reason, at in src.items():
+                if not isinstance(at, (int, float)):
+                    at = 0.0
+                if (isinstance(cleared_at, (int, float))
+                        and cleared_reason == reason and cleared_at > at):
+                    continue
+                cur = merged_trips.get(reason)
+                merged_trips[reason] = at if cur is None else min(cur, at)
+        if merged_trips != self.trips:
+            adopted = set(merged_trips) - set(self.trips)
+            released = set(self.trips) - set(merged_trips)
+            if adopted:
+                # a foreign trip is global — adopt, never clobber
+                self.armed = False
+            for reason in released:
+                log.warning("S1 trip '%s' cleared by operator", reason)
+            self.trips = merged_trips
         counters = doc.get("counters") or {}
         if not isinstance(counters, dict):
             counters = {}
@@ -760,13 +809,14 @@ class S1Emitter:
         # persisting armed=false before validation erased legitimate
         # arms across boot blips (round 3)
         armed_out = bool((self.armed or self._pending_arm_at is not None)
-                         and not self.tripped)
+                         and not self.trips)
         payload = {"counters": merged, "armed": armed_out,
                    "armed_at": (self.armed_at if self.armed
                                 else (self._pending_arm_at or 0.0)),
-                   "tripped": self.tripped or stored_trip or None,
-                   "tripped_at": self.tripped_at,
+                   "tripped": self.tripped,
+                   "trips": self.trips,
                    "trip_cleared_at": cleared_at,
+                   "trip_cleared_reason": cleared_reason,
                    "unjudged_backlog": self.unjudged_backlog,
                    "cert_green": self.cert_green,
                    "cert_reason": self.cert_reason,

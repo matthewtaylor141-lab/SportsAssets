@@ -446,7 +446,7 @@ def test_arm_env_is_honoured_only_while_green(st, monkeypatch):
 def test_tripped_state_refuses_arming(st, monkeypatch):
     now = time.time()
     monkeypatch.setenv("S1_ARM", "on")
-    st.tripped = "key_selfcheck"
+    st._trip("key_selfcheck")
     pool = _Pool(stored=json.dumps(_green_doc(now)))
     asyncio.run(st._check_cert(pool, now))
     assert st.armed is False, "a sticky trip requires manual clearing"
@@ -743,39 +743,38 @@ class _SweepPool(_Pool):
         self.marked.append(a[0])
 
 
-def _srow(i, ok, pollable=True):
+def _srow(i, ok):
     return {"id": i, "dedupe_key": f"k{i}", "detected_at": 0,
-            "ok": ok, "pollable": pollable}
+            "address": "0xw", "ok": ok}
 
 
-def test_sweep_confirms_trips_and_defers_unjudgeable(st):
-    """fleet r4 re-pin: stamped -> confirmed; unstamped with a live
-    carrier AND a completed backstop run -> STICKY TRIP; whale off the
-    roster -> DEFERRED UNSTAMPED (roster churn is transient — a stamp
-    would amnesty a wrong emission forever). Judged rows are stamped
-    BEFORE counting, so a failed stamp can never inflate evidence."""
+def test_sweep_confirms_and_trips_row_specific(st):
+    """fleet r4/r5 re-pin: stamped -> confirmed; unstamped with a
+    wallet-covered backstop run -> STICKY TRIP under a ROW-SPECIFIC
+    reason. Unjudgeable (departed-whale) rows never enter the window —
+    the SQL filters them — and the backlog gauge counts everything
+    unjudged. Judged rows stamp BEFORE counting."""
     _arm(st)
-    pool = _SweepPool([_srow(1, True), _srow(2, False, pollable=False),
-                       _srow(3, False)])
+    pool = _SweepPool([_srow(1, True), _srow(3, False)])
+    pool.stored = 5                        # SQL_BACKLOG count
     asyncio.run(st._corroboration_sweep(pool))
     assert st.deltas.get("s1.confirmed") == 1
     assert st.deltas.get("s1.uncorroborated") == 1
-    assert st.tripped == "uncorroborated" and st.armed is False
-    assert pool.marked == [[1, 3]], \
-        "confirmed + judged rows stamp; the unjudgeable row does NOT"
-    assert st.unjudged_backlog == 1
+    assert st.trips and "uncorroborated:3" in st.trips
+    assert st.armed is False
+    assert pool.marked == [[1, 3]]
+    assert st.unjudged_backlog == 5
 
 
 def test_sweep_defers_when_the_backstop_never_ran(st):
-    """fleet r4 (major): a Path-B outage must defer judgment, never
-    mass-trip — an uncorroborated verdict requires a COMPLETED
-    reconciler run since the row's detection."""
+    """fleet r4/r5 (major): no completed, WALLET-COVERING reconciler
+    run since detection = defer, never trip."""
     _arm(st)
     pool = _SweepPool([_srow(3, False)], recon_ran=False)
     asyncio.run(st._corroboration_sweep(pool))
     assert st.deltas.get("s1.uncorroborated") is None
-    assert st.tripped is None and st.armed is True
-    assert pool.marked == [] and st.unjudged_backlog == 1
+    assert st.trips == {} and st.armed is True
+    assert pool.marked == []
 
 
 def test_sweep_stamp_failure_counts_nothing(st):
@@ -793,19 +792,69 @@ def test_sweep_stamp_failure_counts_nothing(st):
         "an unstamped judgment is not evidence"
 
 
-def test_operator_trip_clear_is_adopted(st):
-    """fleet r4 (major): the only manual recovery was silently reverted
-    by any running process — an explicit trip_cleared_at newer than the
-    trip is now adopted at flush."""
+def test_operator_clear_releases_exactly_one_reason(st):
+    """fleet r4/r5 (major): a clear names the reason it releases — it
+    frees exactly that verdict and can never absolve a sibling row's
+    trip, a concurrent process's un-flushed trip, or another class."""
     now = time.time()
-    st.tripped = "uncorroborated"
-    st.tripped_at = now - 600
+    st.trips = {"uncorroborated:11": now - 600,
+                "key_selfcheck": now - 300}
     pool = _Pool(stored=json.dumps({
-        "counters": {}, "tripped": None,
+        "counters": {}, "tripped": None, "trips": {},
+        "trip_cleared_reason": "uncorroborated:11",
         "trip_cleared_at": now - 60}))
     asyncio.run(st._flush(pool, now))
-    assert st.tripped is None, "the operator's clear stands"
-    assert st.armed is False, "cleared, not re-armed — cert re-arms"
+    assert "uncorroborated:11" not in st.trips, "the named clear stands"
+    assert "key_selfcheck" in st.trips, \
+        "an unrelated trip survives the clear"
+    assert st.armed is False
+    written = json.loads(pool.writes[-1][1])
+    assert "key_selfcheck" in written["trips"], \
+        "the surviving trip is re-persisted for every process to see"
+
+
+def test_concurrent_trips_merge_never_overwrite(st):
+    """fleet r5 (major): two processes' different trips union at flush
+    instead of last-writer-wins."""
+    now = time.time()
+    st.trips = {"key_selfcheck": now - 100}
+    pool = _Pool(stored=json.dumps({
+        "counters": {}, "tripped": "uncorroborated:7",
+        "trips": {"uncorroborated:7": now - 200}}))
+    asyncio.run(st._flush(pool, now))
+    assert set(st.trips) == {"key_selfcheck", "uncorroborated:7"}
+    written = json.loads(pool.writes[-1][1])
+    assert set(written["trips"]) == {"key_selfcheck", "uncorroborated:7"}
+
+
+def test_duplicate_ws_delivery_never_doubles_the_group(st):
+    """fleet r5 (major): one duplicated live delivery of a leg made
+    classify abstain the whole certified emission."""
+    lst = _Listener(roster={TAKER: {"id": 9, "username": "tk"}})
+    _wire(st, lst)
+    st.observe(lst, MAKER_EV)
+    st.observe(lst, TAKER_EV)
+    st.observe(lst, dict(TAKER_EV))          # duplicate delivery
+    assert len(st.pending[TX]["logs"]) == 2
+    assert st.deltas.get("s1.dup_event") == 1
+
+
+def test_probe_error_mid_group_retries_not_forfeits(st, monkeypatch):
+    """fleet r5 (major): a transient DB error mid-group must retry the
+    tx, not permanently forfeit the bundle's remaining markets."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    _capture_ingest(monkeypatch)
+
+    class _FlakyPool(_Pool):
+        async def fetch(self, sql, *a, timeout=None):
+            raise RuntimeError("db blip")
+
+    _observe_all(st, lst, [MAKER_EV])
+    done = asyncio.run(st._finalize_tx(_FlakyPool(), TX, st.pending[TX],
+                                       time.time()))
+    assert done is False, "the tx stays pending for the next tick"
 
 
 def test_sweep_empty_is_free(st):

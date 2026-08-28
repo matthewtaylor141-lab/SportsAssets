@@ -948,22 +948,34 @@ class ShadowV2:
         # all_our_keys check absolved exactly those (a forbidden
         # emission scored BETTER than emitting nothing). Unknown keys
         # remain version skew.
+        # legitimacy is judged over ALL records matching the key, in
+        # the ROUND variant only (fleet round 5): a self-trade's
+        # exec_counter can share the exec_owner's key and dict order
+        # made the judge see only the forbidden view (false GATING);
+        # and the certified emitter structurally cannot emit a
+        # HUP-variant key, so a hup match legitimizes nothing.
+        key_views: dict[str, list] = {}
+        for c in list(execs) + list(aggs):
+            for var, k in rec_keys(c):
+                if var == "round":
+                    key_views.setdefault(k, []).append(c)
         for key, row in s1_keys.items():
-            hit = ins_agg.get(key) or ins_exec.get(key)
-            view = hit[1]["view"] if hit else None
-            legit = (view == "agg"
-                     or (view == "exec_owner"
-                         and hit[1]["asset"] not in agg_assets_set))
+            matches = key_views.get(key, [])
+            legit = any(m["view"] == "agg"
+                        or (m["view"] == "exec_owner"
+                            and m["asset"] not in agg_assets_set)
+                        for m in matches)
             if legit:
                 continue
-            if hit is not None or key in dropped_keys:
+            if matches or key in dropped_keys:
+                views = ",".join(sorted({m["view"] for m in matches})) \
+                    or "dropped"
                 self.bump("s1_forbidden_emission")
                 self.note_example("s1_forbidden_emission", tx=tx[:14],
                                   wallet=wallet[:12], key=key[:16],
-                                  view=view or "dropped")
+                                  view=views)
                 log.error("SHADOW-V2 S1-FORBIDDEN tx=%s wallet=%s "
-                          "view=%s", tx[:14], wallet[:12],
-                          view or "dropped")
+                          "view=%s", tx[:14], wallet[:12], views)
             else:
                 self.bump("s1_key_mismatch")
                 self.note_example("s1_key_mismatch", tx=tx[:14],
