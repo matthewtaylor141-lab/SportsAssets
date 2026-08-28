@@ -1846,6 +1846,9 @@ export function TradeDesk() {
         </button>
       </nav>
 
+      {/* the venue surface only exists where venue content renders —
+          on Activity it painted an empty white pill (v9 shot pass) */}
+      {tab !== 'activity' && (
       <div className={`vdesk vdesk--v8 ${isK ? 'vdesk--kx' : 'vdesk--pmx'}`}>
         {tab === 'markets' && (
           <div className="v8-body">
@@ -1985,6 +1988,7 @@ export function TradeDesk() {
           </div>
         )}
       </div>
+      )}
 
       {tab === 'activity' && (
       <div className="card">
