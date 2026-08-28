@@ -138,3 +138,27 @@ def test_payload_end_to_end_with_fake_pool():
     row = [g for g in out["thesis"]["grid"]
            if g["principal"] == 2_000_000][0]
     assert "p_100pct_at_1x_flow" in row
+
+
+def test_sell_rows_mirror_the_drag_sign():
+    """First-print finding (2026-08-28): mirror-exit SELL rows carry
+    the OPPOSITE drag sign — exiting below his price is the cost.
+    The unsigned version scored a good exit as drag."""
+    good_exit = dict(_row(0.50, 0.55, 100), side="SELL")   # sold 5c ABOVE
+    bad_exit = dict(_row(0.50, 0.45, 100), side="SELL")    # sold 5c below
+    c = capture_from_rows([good_exit])
+    assert c["drag_usd"] < 0, "beating his exit price is negative drag"
+    c = capture_from_rows([bad_exit])
+    assert abs(c["drag_usd"] - 5.0) < 1e-9, \
+        "exiting below him costs (his - ours) x shares"
+
+
+def test_worst_rows_name_the_drag_carriers():
+    rows = [_row(0.50, 0.51, 10) for _ in range(10)]
+    rows.append(dict(_row(0.10, 0.70, 500), slug="the-culprit"))
+    c = capture_from_rows(rows)
+    assert len(c["worst_rows"]) <= 8
+    top = c["worst_rows"][0]
+    assert top["slug"] == "the-culprit"
+    assert abs(top["drag_usd"] - 300.0) < 1e-6
+    assert top["side"] == "BUY" and top["his"] == 0.1

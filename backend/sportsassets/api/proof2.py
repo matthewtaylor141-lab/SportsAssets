@@ -70,28 +70,54 @@ def capture_from_rows(rows: list[dict]) -> dict:
             continue
         if his <= 0 or ours <= 0:
             continue
+        # SELL sign (first-print finding 2026-08-28): for a mirror
+        # exit, paying LESS than his exit price is the drag — the
+        # per-share cost vs his execution is (his - ours), the mirror
+        # of the BUY case. The unsigned version scored a good exit as
+        # drag and a bad one as edge.
+        sell = str(r.get("side") or "").upper().startswith("S")
         usable.append((float(his), float(ours), float(sh),
                        str(r.get("venue") or ""),
-                       str(r.get("whale") or "")))
+                       str(r.get("whale") or ""), sell,
+                       str(r.get("slug") or "")))
     n = len(usable)
     if n == 0:
         return {"n": 0, "drag_rate": None, "drag_se": None,
                 "fee_rate": None, "per_whale_entry": {}}
-    tot_his = sum(h * s for h, o, s, v, w in usable)
-    drag_usd = sum((o - h) * s for h, o, s, v, w in usable)
+
+    def _drag(h: float, o: float, sell: bool) -> float:
+        return (h - o) if sell else (o - h)
+
+    tot_his = sum(h * s for h, o, s, v, w, sl, g in usable)
+    drag_usd = sum(_drag(h, o, sl) * s
+                   for h, o, s, v, w, sl, g in usable)
     fee_usd = sum(kalshi_fee(s, o) if v.startswith("kalshi") else 0.0
-                  for h, o, s, v, w in usable)
+                  for h, o, s, v, w, sl, g in usable)
     drag_rate = drag_usd / tot_his
     fee_rate = fee_usd / tot_his
     # weighted SE of the drag rate: w_i = his-notional share
     var = 0.0
-    for h, o, s, v, w in usable:
+    for h, o, s, v, w, sl, g in usable:
         wgt = (h * s) / tot_his
-        r_i = (o - h) / h
+        r_i = _drag(h, o, sl) / h
         var += (wgt ** 2) * ((r_i - drag_rate) ** 2)
     per_whale: dict[str, float] = {}
-    for h, o, s, v, w in usable:
+    for h, o, s, v, w, sl, g in usable:
         per_whale[w] = per_whale.get(w, 0.0) + h * s
+    # DIAGNOSTIC (first live print showed drag 33.6% — implausible
+    # for a FOK-at-his+2% fresh lane): name the rows that carry the
+    # drag so the next probe shows whether it is real execution cost
+    # or a pairing artifact (side-token mismatch, sweep-lane entries,
+    # stale his_price). Top by absolute drag dollars.
+    worst = sorted(usable, key=lambda u: -abs(_drag(u[0], u[1], u[5])
+                                              * u[2]))[:8]
+    worst_rows = [{
+        "slug": g[:60], "whale": w, "venue": v,
+        "side": "SELL" if sl else "BUY",
+        "his": round(h, 4), "ours": round(o, 4),
+        "shares": round(s, 2),
+        "drag_usd": round(_drag(h, o, sl) * s, 2),
+    } for h, o, s, v, w, sl, g in worst]
     return {
         "n": n,
         "entry_notional": round(tot_his, 2),
@@ -101,6 +127,7 @@ def capture_from_rows(rows: list[dict]) -> dict:
         "fee_usd": round(fee_usd, 2),
         "fee_rate": fee_rate,
         "per_whale_entry": per_whale,
+        "worst_rows": worst_rows,
     }
 
 

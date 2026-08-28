@@ -833,6 +833,11 @@ jobs:
           jq -r '.edge.unpublished_whales // [] | select(length > 0)
                  | "  PROOF2 note: no published whale CI yet for \(join(", ")) (diluted to zero edge)"' \
             /tmp/proof2.json 2>/dev/null || true
+          # the rows carrying the drag: real execution cost vs a
+          # pairing artifact reads directly off these lines
+          jq -r '.capture.worst_rows // [] | .[]
+                 | "  PROOF2WORST \(.whale) \(.side) \(.venue) his=\(.his) ours=\(.ours) sh=\(.shares) drag=$\(.drag_usd) \(.slug)"' \
+            /tmp/proof2.json 2>/dev/null || true
           # PRICEFID — "same or better price", measured at last.
           #
           # The status page's slippage median is (fill_price -
