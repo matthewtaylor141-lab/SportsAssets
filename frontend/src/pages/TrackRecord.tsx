@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
 import { Quote } from '../components/Quote'
 import { Lamp } from '../components/Lamp'
-import { BrandMark } from '../components/Brand'
+import { BrandLockup } from '../components/Brand'
+import { HexField } from '../components/HexField'
 import { useLiveFeed } from '../lib/sse'
 import { EmptyState } from '../components/EmptyState'
 import { PnlCalendar } from '../components/PnlCalendar'
@@ -400,13 +401,13 @@ export function TrackRecord() {
 
   return (
     <div className="page tr-page">
-      <div className="tr-hero">
+      <div className="tr-hero nd-reticle">
+        <HexField height={300} />
         <div className="tr-hero-head">
           <div className="tr-ident">
-            <span className="tr-bot tr-bot-mark"><BrandMark size={30} /></span>
             <div>
-              <div className="tr-name">BETTOR<span>&nbsp;TOKEN</span></div>
-              <div className="tr-sub muted">
+              <BrandLockup height={40} />
+              <div className="tr-sub muted" style={{ marginTop: 8 }}>
                 whale copy portfolio · live from the order ledger · window {windowStart} → today
               </div>
             </div>

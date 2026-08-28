@@ -1,10 +1,14 @@
-/* BETTOR TOKEN brand lockup (owner logo landed 2026-08-28).
+/* BETTOR TOKEN brand (owner logo + directive 2026-08-28).
  *
- * The mark is the company's hexagonal b — icon only, no lettering —
- * cut from the official logo and served brand-blue on transparency.
- * The wordmark is set in the data register beside it; TOKEN carries
- * the brand blue exactly like the official lettering. */
+ * THE WORDMARK IS THE OFFICIAL ARTWORK, NEVER RE-TYPESET: anywhere a
+ * header says BettorToken, the actual logo lettering renders as an
+ * image. The hexagonal-b icon may stand ALONE elsewhere (favicons,
+ * chips, tab strips). Both assets are cut from the delivered logo
+ * file, color-snapped to the brand #0066FF on transparency.
+ */
 import mark from '../assets/bt-mark.png'
+import wordmark from '../assets/bt-wordmark.png'
+import lockup from '../assets/bt-logo-full.png'
 
 export function BrandMark({ size = 20 }: { size?: number }) {
   return (
@@ -20,11 +24,30 @@ export function BrandMark({ size = 20 }: { size?: number }) {
   )
 }
 
+/** The official full lockup (icon + lettering) for hero surfaces. */
+export function BrandLockup({ height = 34 }: { height?: number }) {
+  return (
+    <img
+      className="bt-lockup-img"
+      src={lockup}
+      height={height}
+      alt="Bettor Token — Tokenized Asset Management"
+      style={{ display: 'block', width: 'auto', height }}
+    />
+  )
+}
+
+/** Nav brand: the icon + the ACTUAL wordmark artwork. */
 export function Brand() {
   return (
     <span className="brand bt-brand" aria-label="Bettor Token">
       <BrandMark />
-      BETTOR<span>&nbsp;TOKEN</span>
+      <img
+        className="bt-word-img"
+        src={wordmark}
+        alt="Bettor Token"
+        style={{ display: 'block', height: 16, width: 'auto' }}
+      />
     </span>
   )
 }
