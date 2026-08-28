@@ -825,7 +825,8 @@ class _SweepPool(_Pool):
             return {"ok": getattr(self, "recheck_ok", False)}
         ran = (self.recon_ran.get(a[1], True)
                if isinstance(self.recon_ran, dict) else self.recon_ran)
-        return {"?": 1} if ran else None
+        # r20: coverage is a COUNT — two runs cover, fewer defer
+        return {"n": 2} if ran else {"n": 0}
 
     async def execute(self, sql, *a, timeout=None):
         if sql.lstrip().startswith("UPDATE trades"):
@@ -2115,6 +2116,23 @@ def test_witness_is_a_run_of_rows_and_twins_make_it_ambiguous():
     assert "idents.count(w) > 1" in src, \
         "visible twins make the boundary ambiguous — dirty"
     assert "witness = idents[-OVERLAP_K:]" in src
+
+
+def test_uncorroborated_needs_two_independent_covering_runs():
+    """fleet r20 (major): round 20 executed the round-18 'improbable
+    residual' — an aligned twin TRIPLE plus an exact-distance shift
+    masked the 3-row witness and ONE walk claimed clean coverage over
+    a skipped fill. Content identity cannot prove positional
+    continuity against raw-identical rows, so no single walk is
+    trusted: the verdict requires TWO distinct clean covering runs,
+    whose feed geometry decorrelates between hourly walks. Failure
+    direction is pure deferral. Executed: test_s1_sql_real_pg."""
+    assert "LIMIT 2" in s1.SQL_RECON_SINCE
+    assert "count(*)" in s1.SQL_RECON_SINCE
+    import inspect
+    src = inspect.getsource(s1)
+    assert 'int(ran["n"] or 0) < 2' in src, \
+        "the sweep defers below two covering runs"
 
 
 def test_non_dict_batch_elements_cost_one_row_not_the_walk():

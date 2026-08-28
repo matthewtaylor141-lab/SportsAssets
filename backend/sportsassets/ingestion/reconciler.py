@@ -95,9 +95,15 @@ async def reconcile_once(depth: int = 500) -> dict:
             # needs three consecutive rows EACH with an ident-twin at
             # the identical distance; and a witness row that has a
             # twin visible in its own page makes the boundary
-            # ambiguous, which also dirties. The residual (invisible
-            # aligned triple twins) fails toward defer, never toward a
-            # clean claim.
+            # ambiguous, which also dirties. Round 20 PROVED the
+            # residual (invisible aligned triple twins + an exact-
+            # distance shift) can still yield a clean claim from ONE
+            # walk — content identity cannot prove positional
+            # continuity against raw-identical rows — so the sweep no
+            # longer trusts any single walk: an uncorroborated verdict
+            # requires TWO distinct clean covering runs (SQL_RECON_
+            # SINCE counts to 2), and the masking coincidence would
+            # have to recur across walks with decorrelated geometry.
             witness: list[tuple] = []
             try:
                 while offset < depth:

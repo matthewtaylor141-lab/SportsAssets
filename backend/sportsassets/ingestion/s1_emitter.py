@@ -225,24 +225,36 @@ SQL_MARK_JUDGED = (
 # The reconciler now counts skipped-unusable rows into cov->dirty; a
 # run is covering only when that key is absent (pre-round-11 format)
 # or the number 0 — any skip, and any malformed shape, DEFERS.
+# TWO independent covering runs (fleet round 20, major): rounds 17-19
+# armored one walk's pagination against feed shifts, and round 20
+# proved the arms race unwinnable — content identity can never prove
+# positional continuity when the venue serves raw-identical rows, so
+# a sufficiently aligned twin run + shift always exists that masks any
+# K-row witness. The firewall is statistical instead: the verdict
+# needs TWO distinct clean covering runs. New fills re-seat the feed
+# between hourly walks, so the masking coincidence must recur with
+# fresh, decorrelated geometry — and the failure direction is pure
+# deferral (a true alarm arrives one run later; it still arrives).
 SQL_RECON_SINCE = """
-SELECT 1 FROM reconciliation_runs
-WHERE started_at > $1::timestamptz + make_interval(secs => $4)
-  AND finished_at IS NOT NULL
-  AND details->'per_wallet' ? $2
-  AND NOT (details->'per_wallet' ? ('failed:' || $2))
-  AND (CASE WHEN jsonb_typeof(
-              details->'per_wallet'->('cov:' || $2)->'oldest') = 'number'
-            THEN (details->'per_wallet'->('cov:' || $2)->>'oldest')::float8
-            ELSE 'Infinity'::float8 END) <= $3
-  AND (CASE
-        WHEN NOT (COALESCE(details->'per_wallet'->('cov:' || $2),
-                           '{}'::jsonb) ? 'dirty') THEN true
-        WHEN jsonb_typeof(
-              details->'per_wallet'->('cov:' || $2)->'dirty') = 'number'
-        THEN (details->'per_wallet'->('cov:' || $2)->>'dirty')::float8 = 0
-        ELSE false END)
-LIMIT 1
+SELECT count(*) AS n FROM (
+  SELECT 1 FROM reconciliation_runs
+  WHERE started_at > $1::timestamptz + make_interval(secs => $4)
+    AND finished_at IS NOT NULL
+    AND details->'per_wallet' ? $2
+    AND NOT (details->'per_wallet' ? ('failed:' || $2))
+    AND (CASE WHEN jsonb_typeof(
+                details->'per_wallet'->('cov:' || $2)->'oldest') = 'number'
+              THEN (details->'per_wallet'->('cov:' || $2)->>'oldest')::float8
+              ELSE 'Infinity'::float8 END) <= $3
+    AND (CASE
+          WHEN NOT (COALESCE(details->'per_wallet'->('cov:' || $2),
+                             '{}'::jsonb) ? 'dirty') THEN true
+          WHEN jsonb_typeof(
+                details->'per_wallet'->('cov:' || $2)->'dirty') = 'number'
+          THEN (details->'per_wallet'->('cov:' || $2)->>'dirty')::float8 = 0
+          ELSE false END)
+  LIMIT 2
+) q
 """
 # The verdict's LAST look at the row (fleet round 15, major): the
 # sweep's SQL_SWEEP snapshot read ok=false, then a covering reconcile
@@ -1300,9 +1312,14 @@ class S1Emitter:
             except Exception:  # noqa: BLE001
                 self.bump("s1.errors")
                 return
-            if ran is None:
-                continue               # no run provably covered THIS
-                                       # fill's depth and lag — defer
+            if ran is None or int(ran["n"] or 0) < 2:
+                continue               # fewer than TWO runs provably
+                                       # covered THIS fill's depth and
+                                       # lag (round 20: one walk's
+                                       # pagination can be masked by
+                                       # aligned twins + a shift; two
+                                       # walks see different feed
+                                       # geometry) — defer
             # LAST LOOK before the verdict (round 15): the covering
             # run may BE the run that just stamped this row — judge
             # the row as it is now, not as the sweep snapshot saw it.

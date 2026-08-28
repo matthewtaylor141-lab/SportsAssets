@@ -151,8 +151,8 @@ def test_every_state_statement_prepares_and_executes():
             fill_epoch = rows[0]["ts"].timestamp()
             args = (det, "0xw", fill_epoch - s1.RECON_TS_MARGIN_S,
                     float(s1.RECON_VENUE_LAG_S))
-            assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) is None, \
-                "no run recorded -> defer"
+            row = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
+            assert int(row["n"]) == 0, "no run recorded -> defer"
             # round 8: complete=true with no reached-timestamp is a
             # truncated-feed shape and must NOT cover
             await c.execute(
@@ -162,7 +162,8 @@ def test_every_state_statement_prepares_and_executes():
                 "'110 minutes', 0, $1::jsonb)",
                 json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
                     "complete": True, "oldest": None}}}))
-            assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) is None, \
+            row = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
+            assert int(row["n"]) == 0, \
                 "round 8: 'complete' alone never waives the fill-span " \
                 "requirement — a degraded feed truncates politely"
             # a walk that provably reached below the fill's ts covers
@@ -171,16 +172,25 @@ def test_every_state_statement_prepares_and_executes():
                 json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
                     "complete": False,
                     "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
+            # round 20: coverage takes TWO independent clean runs
             ran = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
-            assert ran is not None, \
-                "a span-covering run started after the lag margin MUST " \
-                "cover — this exact call could never execute before " \
-                "the round-7 cast"
+            assert int(ran["n"]) == 1, "one covering run is not enough"
+            await c.execute(
+                "INSERT INTO reconciliation_runs (started_at, "
+                "finished_at, missed, details) SELECT started_at, "
+                "finished_at, missed, details FROM reconciliation_runs "
+                "LIMIT 1")
+            ran = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
+            assert int(ran["n"]) == 2, \
+                "TWO span-covering runs started after the lag margin " \
+                "MUST cover — this exact call could never execute " \
+                "before the round-7 cast"
             # the failed: key still blocks
             await c.execute("UPDATE reconciliation_runs SET details = "
                             "details || '{\"per_wallet\": {\"0xw\": 0, "
                             "\"failed:0xw\": 1}}'")
-            assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) is None
+            row = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
+            assert int(row["n"]) == 0, "failed: blocks every run"
 
             # ── SQL_MARK: a RETURNING transition, exactly-once ─────
             won = await c.fetch(s1.SQL_MARK, [rows[0]["id"]])
@@ -322,24 +332,33 @@ def test_round11_dirty_coverage_and_the_tombstone_clock():
                 "finished_at, missed, details) VALUES "
                 "(now() - interval '2 hours', now() - interval "
                 "'110 minutes', 0, $1::jsonb)", cov(2))
-            assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) is None, \
+            rn = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
+            assert int(rn["n"]) == 0, \
                 "a walk that skipped unusable rows NEVER covers — the " \
                 "fill's own row may be among what it skipped"
             await c.execute(
                 "UPDATE reconciliation_runs SET details = $1::jsonb",
                 cov("lots"))
-            assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) is None, \
+            rn = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
+            assert int(rn["n"]) == 0, \
                 "a malformed dirty shape defers, never covers"
             await c.execute(
                 "UPDATE reconciliation_runs SET details = $1::jsonb",
                 cov(0))
-            assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) \
-                is not None, "a clean (dirty=0) spanning walk covers"
+            # round 20: a SECOND clean covering run is required
+            await c.execute(
+                "INSERT INTO reconciliation_runs (started_at, "
+                "finished_at, missed, details) VALUES "
+                "(now() - interval '1 hour', now() - interval "
+                "'50 minutes', 0, $1::jsonb)", cov(0))
+            rn = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
+            assert int(rn["n"]) == 2, \
+                "two clean (dirty=0) spanning walks cover"
             await c.execute(
                 "UPDATE reconciliation_runs SET details = $1::jsonb",
                 cov(...))
-            assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) \
-                is not None, \
+            rn = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
+            assert int(rn["n"]) == 2, \
                 "pre-round-11 runs (no dirty key) keep covering"
 
             # ── SQL_NOW: the tombstone's own clock ─────────────────
