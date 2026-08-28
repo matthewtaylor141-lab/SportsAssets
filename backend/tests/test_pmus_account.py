@@ -205,3 +205,42 @@ def test_tennis_week_resolution_realized_wins_over_sell_sum():
     ]
     out = aggregate_tennis_week(acts, days)
     assert out["realized_total"] == 38.0
+
+
+def test_zero_asset_notional_falls_back_to_position_marks():
+    """Live defect 2026-08-28 (14:49Z and 15:48Z probes): the venue's
+    balances payload served assetNotional=0 while the positions API
+    still marked real open positions — the card undercounted the
+    account by the whole open book. The aggregate must agree with the
+    rows it lists: when assetNotional is absent/zero but open
+    positions carry marks, open_value is their sum."""
+    balances = {"balances": [{
+        "currentBalance": 35921.74, "buyingPower": 33009.74,
+        "assetNotional": 0, "unsettledFunds": 0}]}
+    positions = {
+        "aec-wta-luchav-naohib-2026-08-27": {
+            "netPosition": "278",
+            "cost": {"value": "137.60", "currency": "USD"},
+            "cashValue": {"value": "191.82", "currency": "USD"},
+            "realized": {"value": "0", "currency": "USD"},
+            "marketMetadata": {"title": "Havlickova vs. Hibino",
+                               "outcome": "Havlickova"},
+        },
+        "aec-cfb-bayl-aubrn-2026-09-05": {
+            "netPosition": "208",
+            "cost": {"value": "85.14", "currency": "USD"},
+            "cashValue": {"value": "59.70", "currency": "USD"},
+            "realized": {"value": "0", "currency": "USD"},
+            "marketMetadata": {"title": "Bears vs. Tigers",
+                               "outcome": "Bears"},
+        },
+    }
+    out = normalize(balances, positions, [])
+    assert out["open_value"] == 251.52, "sum of the rows' own marks"
+    assert out["account_value"] == 36173.26
+    assert out["cash"] == 35921.74
+
+    # and a genuinely flat account still reads zero — the fallback
+    # only fires when rows contradict the aggregate
+    flat = normalize(balances, {}, [])
+    assert flat["open_value"] == 0.0

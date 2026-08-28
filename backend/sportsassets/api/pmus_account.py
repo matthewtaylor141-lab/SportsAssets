@@ -228,6 +228,16 @@ def normalize(balances_resp: dict, positions: dict[str, dict],
             "realized_pnl": _amt(t.get("realizedPnl")),
         })
 
+    if asset_notional <= 0 and open_rows:
+        # The venue's balances payload intermittently serves
+        # assetNotional=0 while the positions API still marks real
+        # open positions (two consecutive live reads, 2026-08-28
+        # 14:49Z and 15:48Z — open list populated, aggregate zero).
+        # The positions' own cashValue marks are the truth the page
+        # lists row by row; the aggregate must agree with its own
+        # rows, so it falls back to their sum. Display-honesty only —
+        # no money path reads this field.
+        asset_notional = sum((r.get("value") or 0.0) for r in open_rows)
     return {
         "configured": True,
         "account_value": round(cash + asset_notional, 2),
