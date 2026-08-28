@@ -810,6 +810,14 @@ class _SweepPool(_Pool):
             return self.sweep_rows.get(a[1], [])
         return self.sweep_rows
 
+    async def fetchval(self, sql, *a, timeout=None):
+        if "extract(epoch from now())" in sql:
+            # r12: the sweep reads SQL_NOW for the clock offset — the
+            # fixture leaves it unlearned (None) so stamps stay pinned
+            # to the frozen app clock unless a test overrides this
+            return None
+        return self.stored
+
     async def fetchrow(self, sql, *a, timeout=None):
         ran = (self.recon_ran.get(a[1], True)
                if isinstance(self.recon_ran, dict) else self.recon_ran)
@@ -1440,7 +1448,7 @@ def test_unusable_rows_never_testify_for_coverage():
     import inspect
     from sportsassets.ingestion import reconciler as rec
     src = inspect.getsource(rec)
-    skip = src.index("if not ev.tx_hash or ev.size <= 0:")
+    skip = src.index("if (not ev.tx_hash or ev.size <= 0")
     span = src.index("oldest_ts = float(ev.ts_epoch)")
     assert skip < span, "validity check precedes the span update"
     assert "ev.ts_epoch > 1e9" in src, "sentinel-timestamp floor"
@@ -1677,3 +1685,79 @@ def test_refused_refresh_reads_the_tombstone_clock(st):
         "the refresh timestamp comes from the DB clock, not time.time()"
     assert pool.marked == [[3]], "the same-clock refresh lands and stamps"
     assert st.deltas.get("s1.uncorroborated") == 1
+
+
+# ── fleet round 12 pins ─────────────────────────────────────────────
+def test_multi_block_entry_abstains_the_whole_tx(st, monkeypatch):
+    """fleet r12 (CRITICAL): a two-height entry trusted per-block
+    strict re-resolution — but an eventually-consistent HTTP provider
+    verified the OLD height against the old chain on one finalize
+    pass and the NEW height against the new chain on the next, giving
+    one entry two strictly-earned timestamps from OPPOSITE sides of
+    the reorg; the armed path then emitted a key-divergent twin of
+    one fill. A second height in the buffer IS the reorg verdict: the
+    whole tx abstains at finalize with ZERO resolution attempts."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    st.observe(lst, dict(MAKER_EV, blockNumber=hex(BLK + 2),
+                         blockHash="0x" + "88" * 32, logIndex="0x9"))
+    e = st.pending[TX]
+    assert set(e["blocks"]) == {BLK, BLK + 2}
+
+    resolved = []
+
+    async def never_resolve(blk, want_hash):
+        resolved.append(blk)
+        raise AssertionError("a split entry must never reach the RPC")
+
+    monkeypatch.setattr(st, "_resolve_block", never_resolve)
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, e, time.time()))
+    assert done is True and calls == [] and resolved == [], \
+        "two heights = reorg verdict: abstain outright, zero RPC"
+    assert st.deltas.get("s1.abstain.reorged") == 1
+    assert st.deltas.get("s1.emitted") is None
+
+
+def test_fresh_trips_stamp_the_db_clock(st):
+    """fleet r12 (minor): trips stamped on the raw app clock outran
+    PG-written tombstones under app-ahead skew — an operator clear
+    reported success but never released the in-memory copy, and a
+    queued persist retry durably resurrected the cleared trip. The
+    sweep learns the DB clock offset from SQL_NOW and every fresh
+    trip stamps PG's 'now', both skew directions."""
+    _arm(st)
+
+    class _DbClockPool(_SweepPool):
+        DB_NOW = float(TS0 + 999)
+
+        async def fetchval(self, sql, *a, timeout=None):
+            if "extract(epoch from now())" in sql:
+                return self.DB_NOW
+            return await _SweepPool.fetchval(self, sql, *a,
+                                             timeout=timeout)
+
+    pool = _DbClockPool([_srow(3, False)])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert pool.trip_writes, "the verdict trips"
+    assert pool.trip_writes[0][2] == _DbClockPool.DB_NOW, \
+        "a FRESH trip's timestamp is PG's clock, not the app host's"
+    assert st.trips["uncorroborated:3"] == _DbClockPool.DB_NOW
+
+
+def test_ts_mangled_rows_are_unusable_everywhere():
+    """fleet r12 (major x2): a stub with tx and size intact but a
+    mangled timestamp passed validity, ingested as a key-divergent
+    1970-dated row (ts is a dedupe-key component) that could never
+    stamp the real fill's venue_seen_at, and left the walk's dirty
+    count at 0 — clean coverage claimed over a span whose fill row
+    was garbage, false STICKY on a correct emission. The ts sentinel
+    floor is part of validity in BOTH carriers."""
+    import inspect
+    from sportsassets.ingestion import poller as pol
+    from sportsassets.ingestion import reconciler as rec
+    for src in (inspect.getsource(rec), inspect.getsource(pol)):
+        assert "or not ev.ts_epoch or ev.ts_epoch <= 1e9" in src, \
+            "ts validity gates ingest in the poller AND the reconciler"

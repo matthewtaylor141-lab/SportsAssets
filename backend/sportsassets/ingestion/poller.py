@@ -96,7 +96,12 @@ class Poller:
         events = []
         for raw in resp.json():
             ev = parse_data_api_trade(raw, whale["id"], whale["username"])
-            if not ev.tx_hash or ev.size <= 0:
+            if (not ev.tx_hash or ev.size <= 0
+                    or not ev.ts_epoch or ev.ts_epoch <= 1e9):
+                # same validity the reconciler enforces (fleet round
+                # 12): ts is a dedupe-key component, so a mangled-ts
+                # stub would ingest as a key-divergent 1970-dated row
+                # of a fill the venue already served correctly
                 continue
             events.append(ev)
         if not events:

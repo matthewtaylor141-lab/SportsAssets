@@ -83,14 +83,24 @@ async def reconcile_once(depth: int = 500) -> dict:
                         break
                     for raw in batch:
                         ev = parse_data_api_trade(raw, whale["id"], whale["username"])
-                        if not ev.tx_hash or ev.size <= 0:
+                        if (not ev.tx_hash or ev.size <= 0
+                                or not ev.ts_epoch or ev.ts_epoch <= 1e9):
                             # a row unusable for ingest must not
                             # testify for coverage either (fleet round
                             # 9, major: a degraded-index stub with
                             # ts=1 set oldest=1.0 and faked full-
                             # history span coverage — a universal
                             # waiver that false-tripped STICKY on a
-                            # correct emission)
+                            # correct emission). Round 12 (major x2):
+                            # a MANGLED-TIMESTAMP stub (tx and size
+                            # intact, ts absent/zero/sentinel) passed
+                            # this filter, ingested as a key-divergent
+                            # 1970-dated row that could never stamp
+                            # the real fill's venue_seen_at, and left
+                            # dirty at 0 — the ts sentinel floor is
+                            # part of validity, and a served copy of
+                            # the fill that cannot corroborate it must
+                            # dirty the walk like any other stub.
                             dirty += 1
                             continue
                         if (ev.ts_epoch and ev.ts_epoch > 1e9

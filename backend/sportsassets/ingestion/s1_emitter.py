@@ -394,6 +394,13 @@ class S1Emitter:
         # finalize redelivery double-counted would_emit)
         self.counted_marks: OrderedDict[tuple, bool] = OrderedDict()
         self._unpersisted: set[str] = set()  # trips awaiting SQL_TRIP
+        # DB-vs-app clock offset, learned from SQL_NOW (fleet round
+        # 12, minor): trip timestamps are compared against tombstones
+        # written with PG now(), so they must be stamped on PG's clock
+        # in BOTH skew directions — an app-ahead trip outran every
+        # tombstone (clears reported success but never released, and a
+        # queued retry resurrected a cleared trip durably).
+        self._db_clock_offset = 0.0
         self._client: httpx.AsyncClient | None = None
         self._state_loaded = False
         self._pending_arm_at: float | None = None
@@ -512,8 +519,11 @@ class S1Emitter:
                 # (fleet round 9: a re-mined fill joined the still-
                 # pending entry and the strictly-earned old timestamp
                 # was never re-verified). Every earned timestamp is
-                # void; the old block's strict re-resolution then fails
-                # its hash check and the whole tx abstains as reorged.
+                # void — and the entry now holds two heights, which
+                # _finalize_tx abstains outright (round 12: trusting
+                # the old block's re-resolution to fail its hash check
+                # broke under an eventually-consistent provider that
+                # verified each height against a different chain).
                 e["ts"] = {}
                 e["ts_src"] = {}
                 self._purge_ts_cache(min(list(e["blocks"]) + [blk]))
@@ -766,7 +776,7 @@ class S1Emitter:
         if reason in self.trips:
             return                    # idempotent: a re-judged row must
                                       # not double-bump (round 6)
-        self.trips[reason] = time.time()
+        self.trips[reason] = self._now_db()   # tombstone clock (r12)
         self.bump("s1.trip." + reason.split(":")[0])
         log.error("S1 STICKY TRIP: %s — manual clear of THIS reason "
                   "required", reason)
@@ -774,14 +784,25 @@ class S1Emitter:
     async def _db_now(self, pool: Any) -> float:
         """The tombstone clock. A judgment-site refresh must outrun a
         tombstone written with PG's now() — refreshing from the app
-        clock loses forever when PG runs ahead (fleet round 11)."""
+        clock loses forever when PG runs ahead (fleet round 11). Every
+        successful read also refreshes the learned offset that lets
+        the SYNCHRONOUS trip path stamp PG's clock (round 12)."""
         try:
             v = await pool.fetchval(SQL_NOW, timeout=6)
             if isinstance(v, (int, float)):
+                self._db_clock_offset = float(v) - time.time()
                 return float(v)
         except Exception:  # noqa: BLE001
             self.bump("s1.errors")
         return time.time()
+
+    def _now_db(self) -> float:
+        """Best-known PG-clock 'now' without an await — app clock plus
+        the offset learned at the last SQL_NOW read (round 12: trips
+        stamped on the raw app clock outran PG tombstones under
+        app-ahead skew; before the first read the offset is 0 and this
+        degrades to the old behavior)."""
+        return time.time() + self._db_clock_offset
 
     async def _persist_trip(self, pool: Any, reason: str) -> str:
         """One atomic server-side union — durable the moment the trip
@@ -800,7 +821,7 @@ class S1Emitter:
         # resurrects an operator-cleared trip (fleet round 9, major)
         at = self.trips.get(reason)
         if not isinstance(at, (int, float)):
-            at = time.time()
+            at = self._now_db()
         try:
             tag = await pool.execute(SQL_TRIP, STATE_KEY, reason,
                                      float(at), timeout=6)
@@ -822,6 +843,23 @@ class S1Emitter:
             return False
         if e["evicted"]:
             return True                       # counted at eviction time
+        if len(e.get("blocks", {})) > 1:
+            # ONE tx lives in ONE canonical block (round 9). Round 12
+            # (CRITICAL): keeping both heights and trusting per-block
+            # strict re-resolution let an eventually-consistent HTTP
+            # provider verify the OLD block against the old chain on
+            # one finalize pass and the NEW block against the new
+            # chain on the next — two strictly-earned, hash-checked
+            # timestamps from OPPOSITE sides of the reorg in one
+            # entry, and the armed path emitted a key-divergent twin
+            # of one fill (per-block checks earned at different times
+            # do not describe one chain). A second height in the
+            # buffer IS the reorg verdict: the whole tx abstains here,
+            # unconditionally, and the poller carries whatever was
+            # real.
+            self.bump("s1.abstain.reorged")
+            self._purge_ts_cache(min(e["blocks"]))
+            return True
         # DECODE FIRST — it is pure and free (round 6): the buffer is
         # overwhelmingly foreign txs (the WS subscribes by exchange
         # address, not wallet), and resolving their timestamps before
@@ -1223,6 +1261,9 @@ class S1Emitter:
                   len([r for r in ok_judged if r["id"] in won]))
 
     async def _corroboration_sweep(self, pool: Any) -> None:
+        # refresh the DB clock offset once per sweep so every trip this
+        # cycle stamps PG's clock, not the app host's (round 12)
+        await self._db_now(pool)
         # per-sweep rotation salt (round 7): every wallet and row gets
         # an equal shot at each sweep — deferral can defer, not block
         salt = str(int(time.time()))
