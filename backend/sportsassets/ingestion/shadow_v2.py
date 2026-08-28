@@ -88,8 +88,11 @@ GATING = ("div.side", "div.asset", "div.size", "div.price", "div.ts",
           # that armed the emitter certified THIS decode, so the
           # evidence clock resets. Venue corroboration is judged by the
           # EMITTER's own row-anchored sweep (fleet round 3), which
-          # trips the emitter sticky — not a shadow concern.
-          "s1_key_mismatch")
+          # trips the emitter sticky — not a shadow concern. An s1 row
+          # carrying a key from a view the emit set FORBIDS (a counter/
+          # mint leg, an exec_owner under an agg, a classifier-dropped
+          # raw) is the wrong-outcome class itself: it gates loudest.
+          "s1_key_mismatch", "s1_forbidden_emission")
 # counters that reset the instrument-health window when they move
 HEALTH = ("shadow_errors", "cycle_errors", "db_errors", "flush_failures",
           "writer_conflict", "pending_overflow_dropped", "log_index_missing",
@@ -879,7 +882,9 @@ class ShadowV2:
                     # leg can reach it
                     self.bump("exec_covered_by_chain_agg_row")
                 elif s1_keys and (
-                        any(k in s1_keys for _v, k in rec_keys(c))
+                        (c["view"] == "exec_owner"
+                         and c["asset"] not in agg_assets_set
+                         and any(k in s1_keys for _v, k in rec_keys(c)))
                         or (c["view"] in ("exec_counter", "exec_mint")
                             and c["asset"] in agg_assets_set
                             and agg_tieout(g) == "ok"
@@ -934,14 +939,32 @@ class ShadowV2:
                                   wallet=wallet[:12], side=a["side"])
                 log.info("SHADOW-V2 AGG-ORPHAN tx=%s wallet=%s no rows",
                          tx[:14], wallet[:12])
-        # VERSION SKEW, judged per s1 row, unconditionally: an s1 row
-        # whose key matches nothing this decode produces (insert sets
-        # and dropped raws included) means the emitter's decode and the
-        # certified one have diverged — poll rows being present must
-        # not hide it behind a non-gating orphan (fleet round 3).
-        all_our_keys = set(ins_exec) | set(ins_agg) | set(dropped_keys)
+        # PER-ROW JUDGMENT, view-typed (fleet round 4). The emit set is
+        # the law: agg keys and exec_owner-without-agg keys are the only
+        # legitimate emissions. An s1 row carrying a counter/mint leg's
+        # key, an exec_owner-under-agg key, or a classifier-DROPPED
+        # raw's key is the forbidden wrong-outcome class — it gates
+        # HARDER than an unknown key, because round-3's blanket
+        # all_our_keys check absolved exactly those (a forbidden
+        # emission scored BETTER than emitting nothing). Unknown keys
+        # remain version skew.
         for key, row in s1_keys.items():
-            if key not in all_our_keys:
+            hit = ins_agg.get(key) or ins_exec.get(key)
+            view = hit[1]["view"] if hit else None
+            legit = (view == "agg"
+                     or (view == "exec_owner"
+                         and hit[1]["asset"] not in agg_assets_set))
+            if legit:
+                continue
+            if hit is not None or key in dropped_keys:
+                self.bump("s1_forbidden_emission")
+                self.note_example("s1_forbidden_emission", tx=tx[:14],
+                                  wallet=wallet[:12], key=key[:16],
+                                  view=view or "dropped")
+                log.error("SHADOW-V2 S1-FORBIDDEN tx=%s wallet=%s "
+                          "view=%s", tx[:14], wallet[:12],
+                          view or "dropped")
+            else:
                 self.bump("s1_key_mismatch")
                 self.note_example("s1_key_mismatch", tx=tx[:14],
                                   wallet=wallet[:12], key=key[:16])

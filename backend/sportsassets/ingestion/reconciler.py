@@ -35,39 +35,49 @@ async def reconcile_once(depth: int = 500) -> dict:
         for whale in whales:
             wallet_missed = 0
             offset = 0
-            while offset < depth:
-                resp = await polite_get(
-                    http, "/trades",
-                    params={
-                        "user": whale["address"],
-                        "limit": 100,
-                        "offset": offset,
-                        "takerOnly": "false",
-                    },
-                )
-                resp.raise_for_status()
-                batch = resp.json()
-                if not batch:
-                    break
-                for raw in batch:
-                    ev = parse_data_api_trade(raw, whale["id"], whale["username"])
-                    if not ev.tx_hash or ev.size <= 0:
-                        continue
-                    sport = await _sport_for_condition(ev.condition_id)
-                    if sport:
-                        ev.sport = sport
-                    # WAS IT NEW? `is not None` stopped meaning that
-                    # when ingest_trade switched to ON CONFLICT DO
-                    # UPDATE — it returns the id for duplicates too, so
-                    # this counted the ENTIRE 500-row-per-wallet
-                    # re-sweep as missed fills and reported permanent
-                    # drift on every run.
-                    _tid, was_new = await ingest_trade_result(ev)
-                    if was_new:
-                        wallet_missed += 1
-                offset += 100
-                if len(batch) < 100:
-                    break
+            try:
+                while offset < depth:
+                    resp = await polite_get(
+                        http, "/trades",
+                        params={
+                            "user": whale["address"],
+                            "limit": 100,
+                            "offset": offset,
+                            "takerOnly": "false",
+                        },
+                    )
+                    resp.raise_for_status()
+                    batch = resp.json()
+                    if not batch:
+                        break
+                    for raw in batch:
+                        ev = parse_data_api_trade(raw, whale["id"], whale["username"])
+                        if not ev.tx_hash or ev.size <= 0:
+                            continue
+                        sport = await _sport_for_condition(ev.condition_id)
+                        if sport:
+                            ev.sport = sport
+                        # WAS IT NEW? `is not None` stopped meaning that
+                        # when ingest_trade switched to ON CONFLICT DO
+                        # UPDATE — it returns the id for duplicates too, so
+                        # this counted the ENTIRE 500-row-per-wallet
+                        # re-sweep as missed fills and reported permanent
+                        # drift on every run.
+                        _tid, was_new = await ingest_trade_result(ev)
+                        if was_new:
+                            wallet_missed += 1
+                    offset += 100
+                    if len(batch) < 100:
+                        break
+            except Exception as exc:  # noqa: BLE001 — one wallet must
+                # never abort the whole run: this sweep is the sole
+                # backstop for the S1 corroboration stamp, and a single
+                # wallet's HTTP error was doubling the backstop gap for
+                # every wallet AFTER it in the roster (fleet round 4).
+                # Whatever this wallet ingested before failing stands.
+                log.warning("reconcile: wallet %s failed, continuing: %s",
+                            whale["address"][:10], exc)
+                per_wallet["failed:" + whale["address"]] = 1
             per_wallet[whale["address"]] = wallet_missed
             missed += wallet_missed
 

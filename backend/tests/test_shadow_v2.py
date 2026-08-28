@@ -2160,3 +2160,34 @@ def test_corroboration_is_not_the_shadows_job(st):
     that is the emitter sweep's row-anchored verdict."""
     assert "s1_uncorroborated" not in sv.GATING
     assert "s1_confirmed" not in sv.VOLUME_KEYS
+
+
+def test_forbidden_s1_emission_gates_harder_than_nothing(st):
+    """fleet r4 (major): an s1 row carrying a counter-leg's key — the
+    wrong-outcome class the emit set exists to forbid — must GATE, not
+    absorb, and a dropped raw's key is forbidden too."""
+    ag = _mkrec(view="agg", size_units=10_000_000, usdc_units=6_200_000,
+                log_index=1, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    leg = _mkrec(view="exec_counter", size_units=10_000_000,
+                 usdc_units=3_800_000, log_index=2,
+                 seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [leg], "aggs": [ag], "flags": {}}
+    bad = _s1_row(leg, key=rec_keys(leg)[0][1])   # the complement leg!
+    st._match_wallet(TX, MAKER, g, [leg, ag], [], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0, [bad])
+    assert st.deltas.get("s1_forbidden_emission") == 1, \
+        "a forbidden-view emission is the wrong-outcome class"
+    assert "s1_forbidden_emission" in sv.GATING
+
+
+def test_exec_owner_under_agg_s1_key_is_forbidden_not_legit(st):
+    ag = _mkrec(view="agg", size_units=10_000_000, usdc_units=6_200_000,
+                log_index=1, seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    own = _mkrec(view="exec_owner", size_units=4_000_000,
+                 usdc_units=2_480_000, log_index=2,
+                 seen_at=time.time() - sv.ORPHAN_FINAL_S - 10)
+    g = {"execs": [own], "aggs": [ag], "flags": {}}
+    bad = _s1_row(own, key=rec_keys(own)[0][1])
+    st._match_wallet(TX, MAKER, g, [own, ag], [], [],
+                     sv.ORPHAN_FINAL_S + 10, time.time(), 0, [bad])
+    assert st.deltas.get("s1_forbidden_emission") == 1

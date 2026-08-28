@@ -109,17 +109,34 @@ SQL_PROBE = (
 # lands on the responsible component: this emitter trips STICKY. A row
 # whose whale left the roster is unjudgeable (no poll carrier remains)
 # — counted, never alarmed (round 3: stamp starvation via roster ban).
-CORROBORATE_S = 45 * 60
+# 45min -> 75min (fleet round 4): the sole backstop is the HOURLY
+# reconciler, and the codebase's own sizing rule for exactly this
+# window is ORPHAN_FINAL_S=4200 ("one deferral window covering the
+# hourly reconciler"). 2700s sat INSIDE the backstop's worst case and
+# falsely tripped correct emissions the /trades window slid past.
+CORROBORATE_S = 75 * 60
 SQL_SWEEP = """
-SELECT t.id, t.dedupe_key,
+SELECT t.id, t.dedupe_key, t.detected_at,
        (t.venue_seen_at IS NOT NULL) AS ok,
        (w.active AND NOT w.banned)   AS pollable
 FROM trades t JOIN whales w ON w.id = t.whale_id
 WHERE t.source = 's1' AND t.s1_checked_at IS NULL
   AND t.detected_at < now() - make_interval(secs => $1)
+ORDER BY t.detected_at
 LIMIT 50
 """
 SQL_MARK = "UPDATE trades SET s1_checked_at = now() WHERE id = ANY($1::bigint[])"
+# The verdict is conditional on the backstop having actually had its
+# chance: an uncorroborated judgment requires a COMPLETED reconciler
+# run that STARTED after the row was detected (its 500-deep re-fetch
+# then provably re-delivered or refused the fill). No completed run =
+# defer, unstamped — a Path-B outage defers judgment, never mass-trips
+# (fleet round 4).
+SQL_RECON_SINCE = """
+SELECT 1 FROM reconciliation_runs
+WHERE started_at > $1 AND finished_at IS NOT NULL
+LIMIT 1
+"""
 SQL_READ = "SELECT value FROM ingestion_state WHERE key = $1"
 # Compare-and-swap on the tripped field: a concurrent process's sticky
 # trip must never be erased by our read-modify-write (fleet round 2,
@@ -149,6 +166,8 @@ class S1Emitter:
         self.armed = False
         self.armed_at = 0.0
         self.tripped: str | None = None
+        self.tripped_at = 0.0
+        self.unjudged_backlog = 0
         self.cert_green = False
         self.cert_reason = "never_checked"
         self.cert_checked_at = 0.0
@@ -392,6 +411,7 @@ class S1Emitter:
     def _trip(self, reason: str) -> None:
         self.armed = False
         self.tripped = reason
+        self.tripped_at = time.time()
         self.bump("s1.trip." + reason)
         log.error("S1 STICKY TRIP: %s — manual re-arm required", reason)
 
@@ -636,29 +656,50 @@ class S1Emitter:
             self.bump("s1.errors")
             return
         if not rows:
+            self.unjudged_backlog = 0
             return
-        ids = []
+        confirmed_ids, judged_ids = [], []
+        tripped_key = None
+        deferred = 0
         for r in rows:
-            ids.append(r["id"])
             if r["ok"]:
-                self.bump("s1.confirmed")
-            elif not r["pollable"]:
-                # the whale left the roster: no poll carrier can ever
-                # stamp this row — unjudgeable, counted, never alarmed
-                self.bump("s1.corroboration_unjudgeable")
-            else:
-                self.bump("s1.uncorroborated")
-                log.error("S1 UNCORROBORATED row id=%s key=%s — the "
-                          "venue's feed never showed this fill",
-                          r["id"], str(r["dedupe_key"])[:16])
-                self._trip("uncorroborated")
-        try:
-            await pool.execute(SQL_MARK, ids, timeout=10)
-        except Exception:  # noqa: BLE001
-            # unmarked rows are re-judged next sweep: confirmed/
-            # unjudgeable recount (observability overcount), and a
-            # re-tripped trip is idempotent — never a lost alarm
-            self.bump("s1.errors")
+                confirmed_ids.append(r["id"])
+                continue
+            if not r["pollable"]:
+                # roster departure is routinely TRANSIENT (fleet r4):
+                # never stamp — the row is re-judged when the whale
+                # returns; a permanently-departed whale's rows stay a
+                # visible backlog, never a silent amnesty
+                deferred += 1
+                continue
+            try:
+                ran = await pool.fetchrow(SQL_RECON_SINCE,
+                                          r["detected_at"], timeout=6)
+            except Exception:  # noqa: BLE001
+                self.bump("s1.errors")
+                return
+            if ran is None:
+                deferred += 1          # the backstop has not had its
+                continue               # chance yet — defer, never trip
+            self.bump("s1.uncorroborated")
+            judged_ids.append(r["id"])
+            tripped_key = str(r["dedupe_key"])[:16]
+            log.error("S1 UNCORROBORATED row id=%s key=%s — the venue's "
+                      "feed never showed this fill", r["id"], tripped_key)
+        self.unjudged_backlog = deferred
+        # STAMP BEFORE COUNTING (fleet r4): a failed stamp must not
+        # inflate s1.confirmed forever, and the trip only lands when
+        # its row is durably marked judged
+        ids = confirmed_ids + judged_ids
+        if ids:
+            try:
+                await pool.execute(SQL_MARK, ids, timeout=10)
+            except Exception:  # noqa: BLE001
+                self.bump("s1.errors")
+                return                 # nothing counted, nothing tripped
+        self.bump("s1.confirmed", len(confirmed_ids))
+        if tripped_key is not None:
+            self._trip("uncorroborated")
 
     # ── flush (own state key; observability, not evidence) ──────────
     @staticmethod
@@ -687,6 +728,17 @@ class S1Emitter:
             self.bump("s1.flush_failures")
             return
         stored_trip = self._trip_str(doc.get("tripped"))
+        cleared_at = doc.get("trip_cleared_at")
+        if (self.tripped is not None and not stored_trip
+                and isinstance(cleared_at, (int, float))
+                and cleared_at > self.tripped_at):
+            # a human explicitly cleared the trip AFTER it fired: adopt
+            # the clear (stay disarmed until re-armed through cert).
+            # Without this, every running process silently re-asserted
+            # its in-memory trip over any manual recovery (fleet r4).
+            log.warning("S1 trip '%s' cleared by operator at %s",
+                        self.tripped, cleared_at)
+            self.tripped = None
         if stored_trip and self.tripped is None:
             # another process tripped since our last read: a sticky
             # trip is global — adopt it, never clobber it (fleet r1/r2)
@@ -709,6 +761,9 @@ class S1Emitter:
                    "armed_at": (self.armed_at if self.armed
                                 else (self._pending_arm_at or 0.0)),
                    "tripped": self.tripped or stored_trip or None,
+                   "tripped_at": self.tripped_at,
+                   "trip_cleared_at": cleared_at,
+                   "unjudged_backlog": self.unjudged_backlog,
                    "cert_green": self.cert_green,
                    "cert_reason": self.cert_reason,
                    "decoder_fp": DECODER_FP,
@@ -829,6 +884,7 @@ def emitter_beat() -> dict:
                 + st.deltas.get("s1.emitted", 0),
                 "would": st.counters.get("s1.would_emit", 0)
                 + st.deltas.get("s1.would_emit", 0),
+                "unjudged": st.unjudged_backlog,
                 "last_emit_age_s": (round(time.time() - st.last_emit_at)
                                     if st.last_emit_at else None),
                 "err_unflushed": st.deltas.get("s1.errors", 0)}

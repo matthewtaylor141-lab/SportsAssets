@@ -714,35 +714,85 @@ def test_emitter_never_imports_at_module_load_into_shadow(st):
 
 # ── fleet round 3: the row-anchored corroboration sweep ─────────────
 class _SweepPool(_Pool):
-    def __init__(self, sweep_rows):
+    def __init__(self, sweep_rows, recon_ran=True):
         super().__init__()
         self.sweep_rows = sweep_rows
+        self.recon_ran = recon_ran
         self.marked = []
 
     async def fetch(self, sql, *a, timeout=None):
         return self.sweep_rows
 
+    async def fetchrow(self, sql, *a, timeout=None):
+        return {"?": 1} if self.recon_ran else None
+
     async def execute(self, sql, *a, timeout=None):
         self.marked.append(a[0])
 
 
-def test_sweep_confirms_trips_and_skips_unjudgeable(st):
-    """The verdict anchors to durable rows: stamped -> confirmed;
-    unstamped with a live poll carrier -> STICKY TRIP (the consequence
-    lands on the emitter, never the shadow's window); whale gone from
-    the roster -> unjudgeable, counted, never alarmed."""
+def _srow(i, ok, pollable=True):
+    return {"id": i, "dedupe_key": f"k{i}", "detected_at": 0,
+            "ok": ok, "pollable": pollable}
+
+
+def test_sweep_confirms_trips_and_defers_unjudgeable(st):
+    """fleet r4 re-pin: stamped -> confirmed; unstamped with a live
+    carrier AND a completed backstop run -> STICKY TRIP; whale off the
+    roster -> DEFERRED UNSTAMPED (roster churn is transient — a stamp
+    would amnesty a wrong emission forever). Judged rows are stamped
+    BEFORE counting, so a failed stamp can never inflate evidence."""
     _arm(st)
-    pool = _SweepPool([
-        {"id": 1, "dedupe_key": "k1", "ok": True, "pollable": True},
-        {"id": 2, "dedupe_key": "k2", "ok": False, "pollable": False},
-        {"id": 3, "dedupe_key": "k3", "ok": False, "pollable": True},
-    ])
+    pool = _SweepPool([_srow(1, True), _srow(2, False, pollable=False),
+                       _srow(3, False)])
     asyncio.run(st._corroboration_sweep(pool))
     assert st.deltas.get("s1.confirmed") == 1
-    assert st.deltas.get("s1.corroboration_unjudgeable") == 1
     assert st.deltas.get("s1.uncorroborated") == 1
     assert st.tripped == "uncorroborated" and st.armed is False
-    assert pool.marked == [[1, 2, 3]], "every judged row is stamped once"
+    assert pool.marked == [[1, 3]], \
+        "confirmed + judged rows stamp; the unjudgeable row does NOT"
+    assert st.unjudged_backlog == 1
+
+
+def test_sweep_defers_when_the_backstop_never_ran(st):
+    """fleet r4 (major): a Path-B outage must defer judgment, never
+    mass-trip — an uncorroborated verdict requires a COMPLETED
+    reconciler run since the row's detection."""
+    _arm(st)
+    pool = _SweepPool([_srow(3, False)], recon_ran=False)
+    asyncio.run(st._corroboration_sweep(pool))
+    assert st.deltas.get("s1.uncorroborated") is None
+    assert st.tripped is None and st.armed is True
+    assert pool.marked == [] and st.unjudged_backlog == 1
+
+
+def test_sweep_stamp_failure_counts_nothing(st):
+    """fleet r4 (minor): count-before-stamp inflated s1.confirmed +50
+    per minute forever under a write-degraded DB."""
+    _arm(st)
+
+    class _NoMarkPool(_SweepPool):
+        async def execute(self, sql, *a, timeout=None):
+            raise RuntimeError("read-only failover")
+
+    pool = _NoMarkPool([_srow(1, True)])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert st.deltas.get("s1.confirmed") is None, \
+        "an unstamped judgment is not evidence"
+
+
+def test_operator_trip_clear_is_adopted(st):
+    """fleet r4 (major): the only manual recovery was silently reverted
+    by any running process — an explicit trip_cleared_at newer than the
+    trip is now adopted at flush."""
+    now = time.time()
+    st.tripped = "uncorroborated"
+    st.tripped_at = now - 600
+    pool = _Pool(stored=json.dumps({
+        "counters": {}, "tripped": None,
+        "trip_cleared_at": now - 60}))
+    asyncio.run(st._flush(pool, now))
+    assert st.tripped is None, "the operator's clear stands"
+    assert st.armed is False, "cleared, not re-armed — cert re-arms"
 
 
 def test_sweep_empty_is_free(st):
