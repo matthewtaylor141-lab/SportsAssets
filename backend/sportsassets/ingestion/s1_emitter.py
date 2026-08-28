@@ -168,7 +168,13 @@ SELECT count(*) FROM trades
 WHERE source = 's1' AND s1_checked_at IS NULL
   AND detected_at < now() - make_interval(secs => $1)
 """
-SQL_MARK = "UPDATE trades SET s1_checked_at = now() WHERE id = ANY($1::bigint[])"
+# The stamp is a TRANSITION, not an overwrite (fleet round 8): only
+# rows still unstamped move, and the winners come back — counting from
+# the returned set is what makes judgment exactly-once across
+# concurrent processes, not merely across restarts.
+SQL_MARK = ("UPDATE trades SET s1_checked_at = now() "
+            "WHERE id = ANY($1::bigint[]) AND s1_checked_at IS NULL "
+            "RETURNING id")
 # The verdict is conditional on the backstop having actually had its
 # chance AT THIS FILL (fleet rounds 5+6). Round 5 required the wallet
 # present as a success key and absent as a failure key; round 6 proved
@@ -188,15 +194,26 @@ SQL_MARK = "UPDATE trades SET s1_checked_at = now() WHERE id = ANY($1::bigint[])
 # '$1 + interval' as interval+interval at prepare and the statement
 # could never execute — the alarm was structurally silent, which only
 # a real-Postgres execution pin catches (tests/test_s1_sql_real_pg).
+# complete NO LONGER waives the span (fleet round 8, major): a venue
+# whose per-wallet index degrades to its newest slice ends the walk
+# early with an ordinary short/empty page, records complete=true, and
+# the waiver false-tripped STICKY on a correct emission. Coverage now
+# always requires the walk to have provably reached at or below the
+# fill's own timestamp; a phantom fill older than the whale's entire
+# walked history therefore DEFERS instead of alarming — the safe
+# direction, and the poller/venue-stamp path remains primary. The
+# oldest cast is shape-guarded (round 8: an unguarded tombstone cast
+# in SQL_TRIP wedged persists — same lesson applies here).
 SQL_RECON_SINCE = """
 SELECT 1 FROM reconciliation_runs
 WHERE started_at > $1::timestamptz + make_interval(secs => $4)
   AND finished_at IS NOT NULL
   AND details->'per_wallet' ? $2
   AND NOT (details->'per_wallet' ? ('failed:' || $2))
-  AND ((details->'per_wallet'->('cov:' || $2)->>'complete')::bool
-       OR (details->'per_wallet'->('cov:' || $2)->>'oldest')::float8
-          <= $3)
+  AND (CASE WHEN jsonb_typeof(
+              details->'per_wallet'->('cov:' || $2)->'oldest') = 'number'
+            THEN (details->'per_wallet'->('cov:' || $2)->>'oldest')::float8
+            ELSE 'Infinity'::float8 END) <= $3
 LIMIT 1
 """
 SQL_READ = "SELECT value FROM ingestion_state WHERE key = $1"
@@ -276,8 +293,10 @@ ON CONFLICT (key) DO UPDATE SET value = (
                         ELSE '{}'::jsonb END),
             '{armed}', 'false'::jsonb) END AS v) nv)
 WHERE jsonb_typeof(ingestion_state.value) <> 'object'
-   OR COALESCE((ingestion_state.value->'trips_cleared'->>$2)::float8,
-               -1) < $3::float8
+   OR (CASE WHEN jsonb_typeof(
+              ingestion_state.value->'trips_cleared'->$2) = 'number'
+            THEN (ingestion_state.value->'trips_cleared'->>$2)::float8
+            ELSE -1 END) < $3::float8
 """
 # The operator clear: atomic removal of exactly one reason plus a
 # PER-REASON tombstone (round 6: the single trip_cleared_* slot forgot
@@ -355,9 +374,17 @@ class S1Emitter:
 
     def _purge_ts_cache(self, from_blk: int) -> None:
         """A reorg at block B rewrites the whole suffix — drop every
-        cached timestamp at or above it (fleet round 7)."""
+        cached timestamp at or above it (fleet round 7), INCLUDING the
+        copies already resolved into pending entries (fleet round 8: an
+        entry-local ts survived the purge and a retry pass emitted the
+        orphaned block with zero re-verification; dropping it forces
+        re-resolution against the buffered hash, which the strict
+        resolver then refuses as reorged)."""
         for k in [k for k in self._ts_cache if k[0] >= from_blk]:
             self._ts_cache.pop(k, None)
+        for e in self.pending.values():
+            for blk in [b for b in e.get("ts", {}) if b >= from_blk]:
+                e["ts"].pop(blk, None)
 
     def _mark_counted(self, tx: str, wallet: str, asset: str) -> bool:
         """True the first time a (tx, wallet, asset) is handled. Lives
@@ -754,6 +781,12 @@ class S1Emitter:
             # crash here wedges the whole run loop — guard, never trust
             self.bump("s1.abstain.no_block")
             return True
+        # the awaits above can interleave a WS reorg burst on the same
+        # loop: a removed notice pops the entry, and continuing with
+        # the raw dict would emit an orphaned-block fill (fleet r8) —
+        # membership is re-checked after every awaited section
+        if self.pending.get(tx) is not e:
+            return True                # the removed branch counted it
         # freshness on BLOCK time, never first_seen
         newest_ts = max(e["ts"].values())
         if now - newest_ts > EMIT_MAX_AGE_S:
@@ -932,6 +965,11 @@ class S1Emitter:
                 self._trip("key_selfcheck")
                 await self._persist_trip(pool, "key_selfcheck")
                 return False
+            if self.pending.get(tx) is not e:
+                # a removed notice popped this entry during the probe
+                # await — the fill is off the canonical chain (r8)
+                self.bump("s1.abstain.reorged")
+                return False
             try:
                 _tid, was_new = await ingest_trade_result(ev)
             except Exception:  # noqa: BLE001
@@ -1003,14 +1041,21 @@ class S1Emitter:
         # STAMP BEFORE COUNTING (fleet r4): a failed stamp must not
         # inflate s1.confirmed forever
         ids = confirmed_ids + [r["id"] for r in ok_judged]
+        won: set = set()
         if ids:
             try:
-                await pool.execute(SQL_MARK, ids, timeout=10)
+                rows_won = await pool.fetch(SQL_MARK, ids, timeout=10)
+                won = {r["id"] for r in rows_won or []}
             except Exception:  # noqa: BLE001
                 self.bump("s1.errors")
                 return                 # nothing counted; rows re-judge
-        self.bump("s1.confirmed", len(confirmed_ids))
-        self.bump("s1.uncorroborated", len(ok_judged))
+        # count only rows THIS process transitioned (fleet round 8:
+        # two overlapping sweeps both counted the same judgment and
+        # the server-side delta merge made the inflation durable)
+        self.bump("s1.confirmed",
+                  len([i for i in confirmed_ids if i in won]))
+        self.bump("s1.uncorroborated",
+                  len([r for r in ok_judged if r["id"] in won]))
 
     async def _corroboration_sweep(self, pool: Any) -> None:
         # per-sweep rotation salt (round 7): every wallet and row gets

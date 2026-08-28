@@ -786,6 +786,11 @@ class _SweepPool(_Pool):
         self.marked = []
 
     async def fetch(self, sql, *a, timeout=None):
+        if sql.lstrip().startswith("UPDATE trades"):
+            # SQL_MARK is a RETURNING transition (r8): this fixture
+            # grants every stamp; _PartialMarkPool models losing some
+            self.marked.append(list(a[0]))
+            return [{"id": i} for i in a[0]]
         if "GROUP BY w.id" in sql:
             return self.wallets
         if isinstance(self.sweep_rows, dict):
@@ -854,7 +859,11 @@ def test_recon_coverage_requires_depth_and_lag(st):
         "round 7 CRITICAL: untyped $1 resolved as interval at prepare " \
         "and the statement could never execute"
     assert "'cov:' || $2" in q
-    assert "'complete'" in q and "'oldest'" in q
+    assert "'oldest'" in q and "jsonb_typeof" in q
+    assert "'complete'" not in q, \
+        "round 8: complete=true from a truncated feed waived the " \
+        "fill-span check and false-tripped a correct emission — " \
+        "coverage always requires the walk to reach the fill's time"
     # and the reconciler records that evidence
     import inspect
     from sportsassets.ingestion import reconciler as rec
@@ -892,13 +901,37 @@ def test_sweep_stamp_failure_counts_nothing(st):
     _arm(st)
 
     class _NoMarkPool(_SweepPool):
-        async def execute(self, sql, *a, timeout=None):
-            raise RuntimeError("read-only failover")
+        async def fetch(self, sql, *a, timeout=None):
+            if sql.lstrip().startswith("UPDATE trades"):
+                raise RuntimeError("read-only failover")
+            return await _SweepPool.fetch(self, sql, *a, timeout=timeout)
 
     pool = _NoMarkPool([_srow(1, True)])
     asyncio.run(st._corroboration_sweep(pool))
     assert st.deltas.get("s1.confirmed") is None, \
         "an unstamped judgment is not evidence"
+
+
+def test_only_the_stamp_winner_counts(st):
+    """fleet r8 (minor x2): two overlapping sweeps both counted the
+    same judgment, and the server-side delta merge made the inflation
+    durable. Counting now follows the RETURNING set — the rows THIS
+    process actually transitioned."""
+    _arm(st)
+
+    class _PartialMarkPool(_SweepPool):
+        async def fetch(self, sql, *a, timeout=None):
+            if sql.lstrip().startswith("UPDATE trades"):
+                self.marked.append(list(a[0]))
+                # the other process already stamped row 1
+                return [{"id": i} for i in a[0] if i != 1]
+            return await _SweepPool.fetch(self, sql, *a, timeout=timeout)
+
+    pool = _PartialMarkPool([_srow(1, True), _srow(3, False)])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert st.deltas.get("s1.confirmed") is None, \
+        "a stamp another process won is not our count"
+    assert st.deltas.get("s1.uncorroborated") == 1
 
 
 def test_trip_persist_failure_defers_the_stamp(st):
@@ -1254,15 +1287,47 @@ def test_armed_path_refuses_a_borrowed_timestamp(st, monkeypatch):
 def test_removed_notice_purges_the_cache_suffix(st):
     """fleet r7: a reorg at block B rewrites the whole suffix — every
     cached timestamp at or above B is dropped the moment any reorg
-    signal arrives."""
+    signal arrives. r8: INCLUDING copies already resolved into pending
+    entries, or a retry pass would emit the orphaned block without
+    ever re-verifying it."""
     lst = _Listener(roster={})
     h = "0xabc"
     st._ts_cache[(99, h)] = 1
     st._ts_cache[(100, h)] = 2
     st._ts_cache[(101, h)] = 3
+    other_tx = "0x" + "ee" * 32
+    st.pending[other_tx] = {"logs": [], "blocks": {101: h},
+                            "ts": {99: 1, 101: 3}, "evicted": False}
     st.observe(lst, dict(MAKER_EV, removed=True,
                          blockNumber=hex(100)))
     assert set(st._ts_cache) == {(99, h)}
+    assert st.pending[other_tx]["ts"] == {99: 1}, \
+        "the entry-local copy is purged with the shared cache"
+
+
+def test_removed_entry_mid_finalize_never_emits(st, monkeypatch):
+    """fleet r8 (major): a WS reorg burst on the same event loop can
+    pop the pending entry while _finalize_tx awaits the probe — the
+    fill was counted abstain.reorged yet emitted anyway. Membership is
+    re-checked after every awaited section."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+
+    class _ReorgPool(_Pool):
+        async def fetch(self, sql, *a, timeout=None):
+            # the reorg burst lands during the probe await
+            st.pending.pop(TX, None)
+            return []
+
+    _observe_all(st, lst, [MAKER_EV])
+    done = asyncio.run(st._finalize_tx(_ReorgPool(), TX, st.pending[TX],
+                                       time.time()))
+    assert done is True and calls == [], \
+        "an entry popped mid-finalize must never reach ingest"
+    assert st.deltas.get("s1.abstain.reorged") == 1
+    assert st.deltas.get("s1.emitted") is None
 
 
 def test_sweep_windows_rotate_instead_of_starving():

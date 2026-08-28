@@ -153,6 +153,8 @@ def test_every_state_statement_prepares_and_executes():
                     float(s1.RECON_VENUE_LAG_S))
             assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) is None, \
                 "no run recorded -> defer"
+            # round 8: complete=true with no reached-timestamp is a
+            # truncated-feed shape and must NOT cover
             await c.execute(
                 "INSERT INTO reconciliation_runs (started_at, "
                 "finished_at, missed, details) VALUES "
@@ -160,19 +162,33 @@ def test_every_state_statement_prepares_and_executes():
                 "'110 minutes', 0, $1::jsonb)",
                 json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
                     "complete": True, "oldest": None}}}))
+            assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) is None, \
+                "round 8: 'complete' alone never waives the fill-span " \
+                "requirement — a degraded feed truncates politely"
+            # a walk that provably reached below the fill's ts covers
+            await c.execute(
+                "UPDATE reconciliation_runs SET details = $1::jsonb",
+                json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
+                    "complete": False,
+                    "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
             ran = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
             assert ran is not None, \
-                "a complete covering run started after the lag margin " \
-                "MUST cover — this exact call could never execute " \
-                "before the round-7 cast"
+                "a span-covering run started after the lag margin MUST " \
+                "cover — this exact call could never execute before " \
+                "the round-7 cast"
             # the failed: key still blocks
             await c.execute("UPDATE reconciliation_runs SET details = "
                             "details || '{\"per_wallet\": {\"0xw\": 0, "
                             "\"failed:0xw\": 1}}'")
             assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) is None
 
-            # ── SQL_MARK + SQL_PROBE bind and run ──────────────────
-            await c.execute(s1.SQL_MARK, [rows[0]["id"]])
+            # ── SQL_MARK: a RETURNING transition, exactly-once ─────
+            won = await c.fetch(s1.SQL_MARK, [rows[0]["id"]])
+            assert [r["id"] for r in won] == [rows[0]["id"]]
+            again = await c.fetch(s1.SQL_MARK, [rows[0]["id"]])
+            assert again == [], \
+                "round 8: a second stamper wins nothing and counts " \
+                "nothing — judgment is exactly-once across processes"
             assert await c.fetchval(s1.SQL_BACKLOG,
                                     float(s1.CORROBORATE_S)) == 0
             got = await c.fetch(s1.SQL_PROBE, "0xt", wid, "a")
@@ -195,6 +211,16 @@ def test_every_state_statement_prepares_and_executes():
             assert doc["trips"] == {"key_selfcheck": 5.0}
             assert doc.get("state_repaired") is True, \
                 "a scalar doc is replaced FAIL-VISIBLY, the trip lands"
+            # round 8: a NON-NUMERIC tombstone value must never wedge
+            # the persist — it reads as no tombstone and the trip lands
+            await c.execute(
+                "UPDATE ingestion_state SET value = jsonb_set(value, "
+                "'{trips_cleared}', '{\"stuck:1\": \"yesterday\"}') "
+                "WHERE key = $1", K)
+            await c.execute(s1.SQL_TRIP, K, "stuck:1", 6.0)
+            doc = json.loads(await c.fetchval(s1.SQL_READ, K))
+            assert doc["trips"].get("stuck:1") == 6.0, \
+                "garbage tombstone values are ignored, never fatal"
         finally:
             await _drop(admin, c, name)
 
