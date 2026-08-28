@@ -116,6 +116,7 @@ class Poller:
                 "venue served a non-list /trades body: "
                 + type(page).__name__)
         events = []
+        bad = 0
         for raw in page:
             # same validity the reconciler enforces (fleet rounds
             # 12-14): every dedupe-key field gates ingest, checked on
@@ -128,10 +129,22 @@ class Poller:
             try:
                 ev = parse_data_api_trade(raw, whale["id"], whale["username"])
                 if not key_fields_valid(ev):
+                    bad += 1
                     continue
             except Exception:  # noqa: BLE001 — one junk row costs one row
+                bad += 1
                 continue
             events.append(ev)
+        if page and bad == len(page):
+            # the round-23 shape one level down: a LIST page whose
+            # every element is unusable (nulls, junk dicts) is the
+            # same dead carrier as a non-list body — 0 as a
+            # "successful" poll would reset the failure counter and
+            # keep the Path B alert unreachable. One healthy row is a
+            # normal page; zero healthy rows out of a served page is
+            # venue degradation and fails the cycle.
+            raise ValueError(
+                f"venue served {bad} rows, none usable")
         if not events:
             return 0
         # BATCH PRE-DEDUPE (audit 2026-08-21): nearly every returned row

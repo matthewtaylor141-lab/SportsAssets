@@ -234,3 +234,47 @@ def test_non_list_body_is_a_poll_failure_not_an_empty_success(
             loop.run_until_complete(p.poll_wallet(
                 {"id": 1, "address": "0xw", "username": "w"}))
         loop.close()
+
+
+def test_all_junk_list_page_is_also_a_poll_failure(fake_env, monkeypatch):
+    """The round-23 shape one level down: a LIST page whose every
+    element is unusable is the same dead carrier as a non-list body —
+    it must fail the cycle, while a mixed page still ingests its
+    healthy rows per the round-14 one-row-costs-one-row design."""
+    class _R:
+        def __init__(self, body):
+            self._b = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._b
+
+    async def all_junk(http, path, params=None):
+        return _R([None, {"size": "inf"}, "garbage", {}])
+
+    monkeypatch.setattr("sportsassets.ratelimit.polite_get", all_junk)
+    p = Poller.__new__(Poller)
+    p._http = None
+    p.last_lag_s = None
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    with pytest.raises(ValueError):
+        loop.run_until_complete(p.poll_wallet(
+            {"id": 1, "address": "0xw", "username": "w"}))
+    loop.close()
+
+    async def mixed(http, path, params=None):
+        return _R([None, RAW_TRADE])
+
+    monkeypatch.setattr("sportsassets.ratelimit.polite_get", mixed)
+    _, ingested = fake_env
+    p2 = Poller.__new__(Poller)
+    p2._http = None
+    p2.last_lag_s = None
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    new = loop.run_until_complete(p2.poll_wallet(
+        {"id": 1, "address": "0xw", "username": "w"}))
+    loop.close()
+    assert new == 1 and len(ingested) == 1, \
+        "one junk row still costs one row, never the page"
