@@ -221,6 +221,22 @@ def test_every_state_statement_prepares_and_executes():
             doc = json.loads(await c.fetchval(s1.SQL_READ, K))
             assert doc["trips"].get("stuck:1") == 6.0, \
                 "garbage tombstone values are ignored, never fatal"
+            # round 10: the tombstone refusal is visible in the command
+            # tag — 'INSERT 0 0' — which _persist_trip reads as
+            # 'refused' instead of falsely reporting a landed trip
+            await c.fetchrow(s1.SQL_CLEAR, K, "stuck:1")
+            tag = await c.execute(s1.SQL_TRIP, K, "stuck:1", 6.0)
+            assert tag == "INSERT 0 0", tag
+            # round 10: an ARRAY trips field must not 500 the clear —
+            # the operator's only release path heals it to an object
+            await c.execute(
+                "UPDATE ingestion_state SET value = jsonb_set(value, "
+                "'{trips}', '[\"junk\"]'::jsonb) WHERE key = $1", K)
+            row = await c.fetchrow(s1.SQL_CLEAR, K, "whatever")
+            assert row is not None
+            doc = json.loads(await c.fetchval(s1.SQL_READ, K))
+            assert doc["trips"] == {}, \
+                "the clear heals a non-object trips field in place"
         finally:
             await _drop(admin, c, name)
 

@@ -306,11 +306,19 @@ WHERE jsonb_typeof(ingestion_state.value) <> 'object'
 # strip destroyed a DIFFERENT uncleared sticky trip's only durable
 # record — a clear must never clear more than the reason it names).
 # Non-object docs are refused (0 rows) rather than raising.
+# The '#-' delete raises on an ARRAY trips field ("path element not
+# an integer") — the operator's only release path 500ing forever with
+# no healer (fleet round 10, minor). A non-object trips field is
+# healed to '{}' inside the clear itself.
 SQL_CLEAR = """
 UPDATE ingestion_state SET value = jsonb_set(
-  (CASE WHEN value->>'tripped' = $2::text
-        THEN value #- '{tripped}' ELSE value END)
-    #- ARRAY['trips', $2::text],
+  (SELECT CASE WHEN x.v->>'tripped' = $2::text
+               THEN x.v #- '{tripped}' ELSE x.v END
+   FROM (SELECT CASE
+           WHEN jsonb_typeof(ingestion_state.value->'trips') = 'object'
+           THEN ingestion_state.value #- ARRAY['trips', $2::text]
+           ELSE jsonb_set(ingestion_state.value, '{trips}',
+                          '{}'::jsonb) END AS v) x),
   '{trips_cleared}',
   (CASE WHEN jsonb_typeof(value->'trips_cleared') = 'object'
         THEN value->'trips_cleared' ELSE '{}'::jsonb END)
@@ -470,6 +478,12 @@ class S1Emitter:
                 # its hash check and the whole tx abstains as reorged.
                 e["ts"] = {}
                 self._purge_ts_cache(min(list(e["blocks"]) + [blk]))
+            elif e["blocks"].get(blk) not in (None, bh):
+                # SAME-height re-mine (fleet round 10): a new hash for
+                # a known block number is the same reorg evidence — the
+                # earned timestamps from this height up are void, and
+                # resolution re-earns them against the new hash.
+                self._purge_ts_cache(blk)
             lix = str(log_entry.get("logIndex", ""))
             if lix and lix in e.setdefault("lix_seen", set()):
                 # one duplicated WS delivery of either leg was making
@@ -695,12 +709,18 @@ class S1Emitter:
         log.error("S1 STICKY TRIP: %s — manual clear of THIS reason "
                   "required", reason)
 
-    async def _persist_trip(self, pool: Any, reason: str) -> bool:
+    async def _persist_trip(self, pool: Any, reason: str) -> str:
         """One atomic server-side union — durable the moment the trip
-        fires, never carried by the flush (round 6: the flush's scalar
-        CAS let concurrent full-document writes erase a trip with zero
-        failures on either side). False = not yet durable; the reason
-        is retried at every flush until it lands."""
+        fires, never carried by the flush (round 6). Returns one of
+        three OUTCOMES (round 10: collapsing them let a sweep stamp a
+        re-judged row while SQL_TRIP's tombstone WHERE had refused the
+        write — an uncorroborated verdict with no trip anywhere):
+        'landed'  — the trip is durable;
+        'refused' — the tombstone is newer than this trip's timestamp,
+                    a DECISION, not a fault (a judgment site holding
+                    fresh evidence may refresh and re-persist; the
+                    migration retry must NOT — that would resurrect);
+        'error'   — transient; queued for retry at every flush."""
         # `or` would rewrite a falsy 0.0 — the legacy-scalar migration
         # timestamp — to now(), which outruns any tombstone and durably
         # resurrects an operator-cleared trip (fleet round 9, major)
@@ -708,14 +728,16 @@ class S1Emitter:
         if not isinstance(at, (int, float)):
             at = time.time()
         try:
-            await pool.execute(SQL_TRIP, STATE_KEY, reason, float(at),
-                               timeout=6)
+            tag = await pool.execute(SQL_TRIP, STATE_KEY, reason,
+                                     float(at), timeout=6)
         except Exception:  # noqa: BLE001
             self.bump("s1.errors")
             self._unpersisted.add(reason)
-            return False
+            return "error"
         self._unpersisted.discard(reason)
-        return True
+        if isinstance(tag, str) and tag.split()[-1] == "0":
+            return "refused"           # 0 rows: the tombstone won
+        return "landed"
 
     # ── finalize one tx ─────────────────────────────────────────────
     async def _finalize_tx(self, pool: Any, tx: str, e: dict,
@@ -978,7 +1000,12 @@ class S1Emitter:
                 # the one condition that must never be guessed around
                 self.bump("s1.abstain.key_selfcheck")
                 self._trip("key_selfcheck")
-                await self._persist_trip(pool, "key_selfcheck")
+                if await self._persist_trip(
+                        pool, "key_selfcheck") == "refused":
+                    # a NEW self-check failure after a clear is fresh
+                    # evidence — refresh past the tombstone (round 10)
+                    self.trips["key_selfcheck"] = time.time()
+                    await self._persist_trip(pool, "key_selfcheck")
                 return False
             if self.pending.get(tx) is not e:
                 # a removed notice popped this entry during the probe
@@ -1051,7 +1078,18 @@ class S1Emitter:
         for r in judged:
             reason = "uncorroborated:%s" % r["id"]
             self._trip(reason)
-            if await self._persist_trip(pool, reason):
+            out = await self._persist_trip(pool, reason)
+            if out == "refused":
+                # the tombstone predates THIS judgment: the row on the
+                # table right now is fresh evidence, and the pinned
+                # promise is that a post-clear re-trip STANDS — refresh
+                # the timestamp past the tombstone and re-persist
+                # (round 10: the idempotency-pinned stale timestamp
+                # kept losing to the tombstone and the row was stamped
+                # with no durable trip anywhere)
+                self.trips[reason] = time.time()
+                out = await self._persist_trip(pool, reason)
+            if out == "landed":
                 ok_judged.append(r)
         # STAMP BEFORE COUNTING (fleet r4): a failed stamp must not
         # inflate s1.confirmed forever

@@ -725,7 +725,7 @@ def test_trip_is_durable_the_moment_it_fires(st):
     pool = _Pool()
     st._trip("key_selfcheck")
     ok = asyncio.run(st._persist_trip(pool, "key_selfcheck"))
-    assert ok is True and len(pool.trip_writes) == 1
+    assert ok == "landed" and len(pool.trip_writes) == 1
     key, reason, at = pool.trip_writes[0]
     assert key == s1.STATE_KEY and reason == "key_selfcheck"
     assert at == st.trips["key_selfcheck"]
@@ -739,8 +739,21 @@ def test_trip_is_durable_the_moment_it_fires(st):
     st2 = S1Emitter()
     st2._trip("key_selfcheck")
     ok = asyncio.run(st2._persist_trip(_DownPool(), "key_selfcheck"))
-    assert ok is False and "key_selfcheck" in st2._unpersisted, \
+    assert ok == "error" and "key_selfcheck" in st2._unpersisted, \
         "an unpersisted trip is retried at every flush until durable"
+
+    class _RefusePool(_Pool):
+        async def execute(self, sql, *a, timeout=None):
+            return "INSERT 0 0"          # the tombstone WHERE won
+
+    st3 = S1Emitter()
+    st3._trip("key_selfcheck")
+    ok = asyncio.run(st3._persist_trip(_RefusePool(), "key_selfcheck"))
+    assert ok == "refused", \
+        "round 10: a 0-row tombstone refusal is a DECISION, never " \
+        "reported as landed"
+    assert "key_selfcheck" not in st3._unpersisted, \
+        "a refusal is not a transient fault — no retry queue"
 
 
 def test_foreign_trip_is_adopted_never_clobbered(st):
@@ -1250,7 +1263,7 @@ def test_clear_strips_the_scalar_only_for_its_own_reason():
     clear for reason A destroy uncleared reason B's only durable
     record. The strip is now scoped to equality; behavior itself is
     pinned end-to-end in test_s1_sql_real_pg."""
-    assert "WHEN value->>'tripped' = $2::text" in s1.SQL_CLEAR
+    assert "WHEN x.v->>'tripped' = $2::text" in s1.SQL_CLEAR
     assert "jsonb_typeof(value) = 'object'" in s1.SQL_CLEAR
 
 
@@ -1341,6 +1354,68 @@ def test_sweep_windows_rotate_instead_of_starving():
     assert "ORDER BY t.detected_at" not in s1.SQL_SWEEP
 
 
+# ── fleet round 10 pins ─────────────────────────────────────────────
+def test_sweep_never_stamps_on_a_refused_persist(st):
+    """fleet r10 (major): SQL_TRIP's tombstone refusal came back as
+    'landed' and the sweep stamped a re-judged row permanently with no
+    durable trip anywhere. A refusal at a judgment site means fresh
+    evidence vs an old tombstone: refresh past it and re-persist; only
+    a LANDED trip stamps."""
+    _arm(st)
+
+    class _AlwaysRefusedPool(_SweepPool):
+        async def execute(self, sql, *a, timeout=None):
+            if "trips_cleared" in sql:
+                self.trip_writes.append(a)
+                return "INSERT 0 0"
+            await _SweepPool.execute(self, sql, *a, timeout=timeout)
+
+    st.trips["uncorroborated:3"] = float(TS0)   # judged earlier at T1
+    pool = _AlwaysRefusedPool([_srow(3, False)])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert pool.marked == [], "no landed trip, no stamp — ever"
+    assert st.deltas.get("s1.uncorroborated") is None
+    assert len(pool.trip_writes) == 2, "one refresh retry, then stop"
+    assert pool.trip_writes[1][2] > pool.trip_writes[0][2], \
+        "the retry carries a FRESH timestamp past the tombstone"
+
+    class _ThenLandsPool(_SweepPool):
+        async def execute(self, sql, *a, timeout=None):
+            if "trips_cleared" in sql:
+                self.trip_writes.append(a)
+                return "INSERT 0 0" if len(self.trip_writes) == 1 \
+                    else "INSERT 0 1"
+            await _SweepPool.execute(self, sql, *a, timeout=timeout)
+
+    st2 = S1Emitter()
+    st2._state_loaded = True
+    st2.armed = True
+    st2.cert_green = True
+    pool2 = _ThenLandsPool([_srow(3, False)])
+    asyncio.run(st2._corroboration_sweep(pool2))
+    assert pool2.marked == [[3]], "the refreshed re-trip lands and stamps"
+    assert st2.deltas.get("s1.uncorroborated") == 1
+
+
+def test_same_height_remine_voids_the_earned_timestamp(st):
+    """fleet r10 (major): a new hash for a KNOWN block number silently
+    overwrote the buffered hash while the timestamp earned against the
+    old hash survived — the fill emitted with the orphaned block's ts.
+    A same-height re-mine is the same reorg evidence as a new height."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    st.observe(lst, MAKER_EV)
+    e = st.pending[TX]
+    e["ts"][BLK] = TS0                    # earned against 77…77
+    st._ts_cache[(BLK, "0x" + "77" * 32)] = TS0
+    st.observe(lst, dict(MAKER_EV, blockHash="0x" + "99" * 32,
+                         logIndex="0x9"))
+    assert e["ts"] == {}, "the earned timestamp is void"
+    assert (BLK, "0x" + "77" * 32) not in st._ts_cache
+    assert e["blocks"][BLK] == "0x" + "99" * 32, \
+        "resolution re-earns against the NEW hash"
+
+
 # ── fleet round 9 pins ──────────────────────────────────────────────
 def test_migration_persist_keeps_the_epoch_zero_timestamp(st):
     """fleet r9 (major): `or time.time()` rewrote the legacy scalar's
@@ -1351,7 +1426,7 @@ def test_migration_persist_keeps_the_epoch_zero_timestamp(st):
     pool = _Pool()
     st.trips = {"key_selfcheck": 0.0}
     ok = asyncio.run(st._persist_trip(pool, "key_selfcheck"))
-    assert ok is True
+    assert ok == "landed"
     assert pool.trip_writes[0][2] == 0.0, \
         "the falsy epoch-zero timestamp survives the persist"
 
