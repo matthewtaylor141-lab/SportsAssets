@@ -12,6 +12,9 @@ import { TradeDesk } from './pages/TradeDesk'
 // stack never weighs down the main record pages.
 const Jarvis = lazy(() => import('./pages/Jarvis'))
 const Wall = lazy(() => import('./pages/Wall'))
+// Management reports (owner order 2026-08-28): whale × sport × type ×
+// period pivots with copy latency — lazy, admin-token gated inside.
+const Reports = lazy(() => import('./pages/Reports'))
 // Desk accounts view (venue balances + cash-out): lazy for the same reason.
 // Tolerates either export style so the page module stays free to match
 // the codebase's named-export convention.
@@ -29,10 +32,12 @@ const Accounts = lazy(() =>
 const TABS = [
   { to: '/', label: 'Performance' },
   { to: '/analytics', label: 'Analytics' },
+  { to: '/reports', label: 'Reports' },
   { to: '/accounts', label: 'Accounts' },
+  { to: '/desk', label: 'Desk' },
+  { to: '/meridian', label: 'Meridian' },
   { to: '/system', label: 'System' },
   { to: '/engine', label: '⚙ Engine' },
-  { to: '/desk', label: 'Desk' },
   { to: '/admin', label: 'Ops' },
 ]
 
@@ -46,10 +51,11 @@ const MOBILE_TABS = [
   { to: '/', label: 'Performance' },
   { to: '/accounts', label: 'Accounts' },
   { to: '/desk', label: 'Desk' },
-  { to: '/jarvis', label: 'Meridian' },
+  { to: '/meridian', label: 'Meridian' },
 ]
 const MORE_TABS = [
   { to: '/analytics', label: 'Analytics' },
+  { to: '/reports', label: 'Reports' },
   { to: '/system', label: 'System' },
   { to: '/engine', label: 'Engine' },
   { to: '/admin', label: 'Ops' },
@@ -144,7 +150,8 @@ export default function App() {
   // context under them — so /jarvis gets a bare, chrome-less main. The
   // TV wall boards (/wall/*) are full-screen always-on displays and get
   // the same treatment.
-  const cockpit = pathname === '/jarvis' || pathname.startsWith('/wall')
+  const cockpit = pathname === '/jarvis' || pathname === '/meridian'
+    || pathname.startsWith('/wall')
   return (
     <div className="app">
       {!cockpit && (
@@ -172,6 +179,10 @@ export default function App() {
           <Route path="/engine" element={<Engine />} />
           <Route path="/desk" element={<TradeDesk />} />
           <Route path="/admin" element={<Admin />} />
+          <Route path="/reports" element={<Suspense fallback={null}><Reports /></Suspense>} />
+          {/* MERIDIAN is the product name (owner order 2026-08-28);
+              /jarvis stays as an alias so old bookmarks keep working. */}
+          <Route path="/meridian" element={<Suspense fallback={null}><Jarvis /></Suspense>} />
           <Route path="/jarvis" element={<Suspense fallback={null}><Jarvis /></Suspense>} />
           <Route path="/wall/*" element={<Suspense fallback={null}><Wall /></Suspense>} />
         </Routes>
