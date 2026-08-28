@@ -3477,6 +3477,33 @@ async def admin_ntfy_test() -> dict:
             "watch_addresses": sorted(ntfy.watch_addresses()) or "all whales"}
 
 
+@app.post("/api/admin/s1-clear-trip", dependencies=[Depends(require_admin)])
+async def admin_s1_clear_trip(body: dict) -> dict:
+    """Operator clear for ONE S1 sticky-trip reason (fleet round 6).
+
+    Atomic server-side: removes exactly the named reason from the trip
+    set and records a PER-REASON tombstone so a process still holding
+    the trip in memory can never union it back. Never clears more than
+    the reason named; re-arming stays a separate, deliberate act."""
+    from ..db import get_pool
+    from ..ingestion.s1_emitter import SQL_CLEAR, STATE_KEY
+
+    reason = str(body.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="reason required")
+    pool = await get_pool()
+    row = await pool.fetchrow(SQL_CLEAR, STATE_KEY, reason)
+    if row is None:
+        return {"ok": False, "error": "no s1_emitter state row"}
+
+    def _j(v):
+        return v if isinstance(v, (dict, type(None))) else json.loads(v)
+
+    return {"ok": True, "cleared": reason,
+            "trips": _j(row["trips"]) or {},
+            "trips_cleared": _j(row["cleared"]) or {}}
+
+
 @app.post("/api/admin/live/{action}", dependencies=[Depends(require_admin)])
 async def admin_live_switch(action: str) -> dict:
     """Kill switch for the LIVE beta. pause = no further orders; resume = re-arm."""

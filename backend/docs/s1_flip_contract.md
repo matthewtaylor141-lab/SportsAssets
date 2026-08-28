@@ -104,6 +104,38 @@ diagnostics but do not reset the window. This is an evolution the
 original flip criteria anticipated ("granularity verdict" was itself
 a criterion; the verdict is MIXED).
 
+### Round-6 protocol upgrades (2026-08-28)
+
+Ten confirmed kills (two CRITICAL) reshaped three subsystems:
+
+- **Trip state is server-side only.** The flush's document write can
+  no longer name `trips`/`trips_cleared` at all; a trip is one atomic
+  jsonb union (`SQL_TRIP`, existing timestamp wins, `armed` forced
+  false in the same statement, refused when the reason's tombstone is
+  newer), and an operator clear (`POST /api/admin/s1-clear-trip`,
+  `SQL_CLEAR`) removes exactly one reason and records a PER-REASON
+  tombstone dict — a second clear can never forget the first, and a
+  stale in-memory copy can never resurrect a cleared trip. Flush
+  counters ship as deltas the server adds under the row lock.
+- **Coverage means the fill, not the wallet.** The reconciler records
+  `cov:<addr>` per wallet (feed exhausted, or the oldest venue ts the
+  run reached); the sweep's covering run must start
+  `RECON_VENUE_LAG_S` after detection and provably span the fill's
+  own timestamp. The sweep judges per-wallet windows so a whale whose
+  reconciler sweep keeps failing defers only its own rows. A trip is
+  made durable BEFORE its row is stamped judged.
+- **Post-finalize re-entry is structurally excluded.** Any s1 row for
+  (tx, wallet, asset) that the current pending entry did not write
+  forbids emission (`s1.abstain.s1_row_preexists`) — the deep-reorg
+  re-add (new block ts, new key) and the straggler leg of an
+  already-emitted tx both refuse; genuine bundle siblings written by
+  this entry proceed via `ingested_keys`. Burn-in's `would_emit` is
+  deduped by a process-level (tx, wallet, asset) LRU that survives
+  entry pop. RPC economics: decode runs before timestamp resolution
+  (a foreign tx costs zero RPC), block timestamps are cached per
+  (block, hash), and the head poll fires only when the WS head feed
+  has actually gone quiet.
+
 ## Non-goals
 
 - S1 does not replace the poller. Poll remains the reconciliation

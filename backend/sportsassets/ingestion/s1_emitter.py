@@ -84,6 +84,18 @@ RPC_PER_TICK = 4
 RPC_PER_MIN = 30
 RPC_BACKOFF_S = 120.0
 TICK_S = 1.0
+# The head poll exists for when the logs-only WS goes QUIET — round 6
+# measured the un-gated version burning 60 tokens/min under live
+# traffic (there is always a tx younger than CONFIRM_DEPTH) and
+# starving timestamp resolution 30-to-1. observe() already advances
+# the head from every WS log; the poll fires only after the WS has
+# not advanced it for HEAD_QUIET_S, at most once per HEAD_POLL_MIN_S.
+HEAD_QUIET_S = 6.0
+HEAD_POLL_MIN_S = 5.0
+TS_CACHE_CAP = 1024                 # block ts is per-BLOCK, not per-tx
+COUNTED_CAP = 8192                  # burn-in marks survive entry pop
+RECON_VENUE_LAG_S = 600.0           # data-api indexing lag margin
+RECON_TS_MARGIN_S = 300.0           # venue ts vs block ts skew margin
 FLUSH_EVERY_S = 60.0
 CERT_EVERY_S = 60.0
 CERT_WINDOW_S = 7 * 86400.0
@@ -121,15 +133,30 @@ CORROBORATE_S = 75 * 60
 # them of its alarm. Departed-whale rows stay unstamped and invisible
 # to this query until the whale returns; the backlog gauge counts them
 # separately.
-SQL_SWEEP = """
-SELECT t.id, t.dedupe_key, t.detected_at, w.address,
-       (t.venue_seen_at IS NOT NULL) AS ok
+SQL_SWEEP_WALLETS = """
+SELECT w.id AS whale_id, w.address, min(t.detected_at) AS oldest
 FROM trades t JOIN whales w ON w.id = t.whale_id
 WHERE t.source = 's1' AND t.s1_checked_at IS NULL
   AND t.detected_at < now() - make_interval(secs => $1)
   AND w.active AND NOT w.banned
+GROUP BY w.id, w.address
+ORDER BY oldest
+LIMIT 20
+"""
+# PER-WALLET windows (fleet round 6): round 5 moved the departed-whale
+# filter into the SQL, but rows DEFERRING at the coverage check (their
+# whale's reconciler sweep keeps failing) re-entered a single global
+# LIMIT at the front of the oldest-first order and could pin it
+# forever, hiding a genuinely wrong emission behind them. Each wallet
+# now gets its own window: a deferring whale can only starve itself.
+SQL_SWEEP = """
+SELECT t.id, t.dedupe_key, t.detected_at, t.ts,
+       (t.venue_seen_at IS NOT NULL) AS ok
+FROM trades t
+WHERE t.whale_id = $2 AND t.source = 's1' AND t.s1_checked_at IS NULL
+  AND t.detected_at < now() - make_interval(secs => $1)
 ORDER BY t.detected_at
-LIMIT 50
+LIMIT 10
 """
 SQL_BACKLOG = """
 SELECT count(*) FROM trades
@@ -138,28 +165,97 @@ WHERE source = 's1' AND s1_checked_at IS NULL
 """
 SQL_MARK = "UPDATE trades SET s1_checked_at = now() WHERE id = ANY($1::bigint[])"
 # The verdict is conditional on the backstop having actually had its
-# chance AT THIS WALLET (fleet round 5): a fault-isolated reconciler
-# run "completes" even when the row's own whale failed — or when every
-# whale failed — so completion alone proves nothing about this fill.
-# The run's details record per-wallet outcomes; the judgment requires
-# the wallet PRESENT as a success key and ABSENT as a failure key.
+# chance AT THIS FILL (fleet rounds 5+6). Round 5 required the wallet
+# present as a success key and absent as a failure key; round 6 proved
+# two ways a "covering" run never actually saw the fill:
+#   - DEPTH: a busy whale does 500+ venue fills between the s1 fill
+#     and the run, the /trades sweep fetches only the newest `depth`
+#     rows, and no future run reaches deeper — a permanent false trip
+#     on a venue-visible fill. The run now records cov:<addr> with
+#     either complete=true (feed exhausted) or the oldest venue ts it
+#     actually reached; coverage requires that window to provably span
+#     the fill's own timestamp (with a margin for venue-vs-block skew).
+#   - LAG: a run STARTED seconds after detection sits inside the venue
+#     data-api's indexing lag and cannot possibly contain the fill.
+#     The covering run must start RECON_VENUE_LAG_S after detection.
+# A run without the cov key (old format) never covers; rows defer.
 SQL_RECON_SINCE = """
 SELECT 1 FROM reconciliation_runs
-WHERE started_at > $1 AND finished_at IS NOT NULL
+WHERE started_at > $1 + make_interval(secs => $4)
+  AND finished_at IS NOT NULL
   AND details->'per_wallet' ? $2
   AND NOT (details->'per_wallet' ? ('failed:' || $2))
+  AND ((details->'per_wallet'->('cov:' || $2)->>'complete')::bool
+       OR (details->'per_wallet'->('cov:' || $2)->>'oldest')::float8
+          <= $3)
 LIMIT 1
 """
 SQL_READ = "SELECT value FROM ingestion_state WHERE key = $1"
-# Compare-and-swap on the tripped field: a concurrent process's sticky
-# trip must never be erased by our read-modify-write (fleet round 2,
-# CRITICAL). The write lands only if the stored trip still equals the
-# trip we read; a lost swap is re-read and merged next flush.
+# THE FLUSH NEVER TOUCHES TRIP STATE (fleet round 6). The round-2 CAS
+# guarded only the scalar 'tripped' — the OLDEST reason — so once trips
+# became a dict (round 5), two processes sharing the oldest reason
+# passed each other's CAS while their trip SETS diverged, and a full-
+# document overwrite silently erased a concurrent process's sticky
+# trip (and any operator clear committed mid-flush). Trips now live
+# under server-side atomic jsonb operations only (SQL_TRIP/SQL_CLEAR);
+# this write merges the payload's top-level keys, adds counter DELTAS
+# server-side (concurrent flushes can no longer clobber each other's
+# counts), and structurally cannot name 'trips'/'trips_cleared'. If
+# the stored trips are non-empty after the merge, armed is forced
+# false in the same statement.
 SQL_WRITE = """
 INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb)
-ON CONFLICT (key) DO UPDATE SET value = $2::jsonb
-WHERE COALESCE(ingestion_state.value->>'tripped', '') = $3
-RETURNING key
+ON CONFLICT (key) DO UPDATE SET value = (
+  SELECT CASE WHEN COALESCE(nv.v->'trips', '{}'::jsonb) <> '{}'::jsonb
+              THEN jsonb_set(nv.v, '{armed}', 'false'::jsonb)
+              ELSE nv.v END
+  FROM (SELECT jsonb_set(
+          ingestion_state.value || ($2::jsonb - 'counters'),
+          '{counters}',
+          (SELECT COALESCE(jsonb_object_agg(m.k, to_jsonb(m.a + m.b)),
+                           '{}'::jsonb)
+           FROM (SELECT COALESCE(s.k, d.k) AS k,
+                        CASE WHEN jsonb_typeof(s.v) = 'number'
+                             THEN (s.v)::numeric ELSE 0 END AS a,
+                        CASE WHEN jsonb_typeof(d.v) = 'number'
+                             THEN (d.v)::numeric ELSE 0 END AS b
+                 FROM jsonb_each(COALESCE(
+                        ingestion_state.value->'counters',
+                        '{}'::jsonb)) s(k, v)
+                 FULL OUTER JOIN jsonb_each(COALESCE(
+                        $2::jsonb->'counters', '{}'::jsonb)) d(k, v)
+                   ON s.k = d.k) m)) AS v) nv)
+"""
+# A trip is durable the moment it fires: one atomic union (existing
+# timestamp wins), disarming in the same statement. The WHERE refuses
+# a stale re-persist of a reason an operator already cleared (the
+# tombstone is newer than the trip) — the round-6 resurrection class.
+SQL_TRIP = """
+INSERT INTO ingestion_state (key, value)
+VALUES ($1, jsonb_build_object(
+    'trips', jsonb_build_object($2::text, $3::float8), 'armed', false))
+ON CONFLICT (key) DO UPDATE SET value = jsonb_set(
+  jsonb_set(ingestion_state.value, '{trips}',
+    jsonb_build_object($2::text, $3::float8)
+      || COALESCE(ingestion_state.value->'trips', '{}'::jsonb)),
+  '{armed}', 'false'::jsonb)
+WHERE COALESCE((ingestion_state.value->'trips_cleared'->>$2)::float8,
+               -1) < $3::float8
+"""
+# The operator clear: atomic removal of exactly one reason plus a
+# PER-REASON tombstone (round 6: the single trip_cleared_* slot forgot
+# every clear but the last, so a late-merging process resurrected an
+# already-cleared trip). The legacy 'tripped' scalar is removed so a
+# restart can never re-adopt it. Exposed via /api/admin/s1-clear-trip.
+SQL_CLEAR = """
+UPDATE ingestion_state SET value = jsonb_set(
+  (value #- ARRAY['trips', $2::text]) #- '{tripped}',
+  '{trips_cleared}',
+  COALESCE(value->'trips_cleared', '{}'::jsonb)
+    || jsonb_build_object($2::text,
+         to_jsonb(extract(epoch from now())::float8)))
+WHERE key = $1
+RETURNING value->'trips' AS trips, value->'trips_cleared' AS cleared
 """
 
 
@@ -196,6 +292,14 @@ class S1Emitter:
         self.rpc_tokens = float(RPC_PER_MIN)
         self.rpc_token_at = time.time()
         self.rpc_backoff_until = 0.0
+        self.head_advanced_at = 0.0          # last WS-driven head move
+        self.last_head_poll_at = 0.0
+        self._ts_cache: OrderedDict[tuple[int, str], int] = OrderedDict()
+        # burn-in / armed (tx, wallet, asset) marks OUTLIVE the pending
+        # entry (round 6: the per-entry set died at pop, so a post-
+        # finalize redelivery double-counted would_emit)
+        self.counted_marks: OrderedDict[tuple, bool] = OrderedDict()
+        self._unpersisted: set[str] = set()  # trips awaiting SQL_TRIP
         self._client: httpx.AsyncClient | None = None
         self._state_loaded = False
         self._pending_arm_at: float | None = None
@@ -205,6 +309,21 @@ class S1Emitter:
     def bump(self, key: str, n: int = 1) -> None:
         if n:
             self.deltas[key] = self.deltas.get(key, 0) + n
+
+    def _mark_counted(self, tx: str, wallet: str, asset: str) -> bool:
+        """True the first time a (tx, wallet, asset) is handled. Lives
+        OUTSIDE the pending entry (round 6): the per-entry set died at
+        pop, so a post-finalize redelivery — deep-reorg re-add or a
+        late duplicate frame — re-counted would_emit for the same fill
+        and the burn-in gauge diverged from what armed would do."""
+        k = (tx, wallet, asset)
+        if k in self.counted_marks:
+            self.counted_marks.move_to_end(k)
+            return False
+        self.counted_marks[k] = True
+        while len(self.counted_marks) > COUNTED_CAP:
+            self.counted_marks.popitem(last=False)
+        return True
 
     def exchange_set(self, listener: Any) -> set[str]:
         addrs = getattr(listener, "_addresses", None) or []
@@ -241,9 +360,10 @@ class S1Emitter:
                 # finalize path (fleet r1: wedged-loop + silent-reorg)
                 self.bump("s1.abstain.no_block")
                 return
+            now = time.time()
             if blk > self.head:
                 self.head = blk
-            now = time.time()
+                self.head_advanced_at = now   # the WS is our head feed
             e = self.pending.get(tx)
             if e is None:
                 e = {"logs": [], "first_seen": now, "last_seen": now,
@@ -346,12 +466,24 @@ class S1Emitter:
             if not isinstance(doc, dict):
                 doc = {}
             lt = doc.get("trips")
-            if isinstance(lt, dict) and lt:
-                self.trips = {str(k): (v if isinstance(v, (int, float))
-                                       else 0.0) for k, v in lt.items()}
-                self.armed = False
+            tc = doc.get("trips_cleared")
+            cleared = tc if isinstance(tc, dict) else {}
+            adopted: dict[str, float] = {}
+            if isinstance(lt, dict):
+                # the trips dict is authoritative even when EMPTY — the
+                # legacy scalar is only for pre-round-6 docs, and
+                # falling back to it after a clear emptied the dict
+                # would resurrect the cleared trip at every boot (r6)
+                for k, v in lt.items():
+                    at = v if isinstance(v, (int, float)) else 0.0
+                    ca = cleared.get(str(k))
+                    if isinstance(ca, (int, float)) and ca > at:
+                        continue
+                    adopted[str(k)] = at
             elif doc.get("tripped"):
-                self.trips = {self._trip_str(doc["tripped"]): 0.0}
+                adopted = {self._trip_str(doc["tripped"]): 0.0}
+            if adopted:
+                self.trips = adopted
                 self.armed = False
             elif doc.get("armed"):
                 aa = doc.get("armed_at")
@@ -451,10 +583,30 @@ class S1Emitter:
 
     def _trip(self, reason: str) -> None:
         self.armed = False
-        self.trips.setdefault(reason, time.time())
+        if reason in self.trips:
+            return                    # idempotent: a re-judged row must
+                                      # not double-bump (round 6)
+        self.trips[reason] = time.time()
         self.bump("s1.trip." + reason.split(":")[0])
         log.error("S1 STICKY TRIP: %s — manual clear of THIS reason "
                   "required", reason)
+
+    async def _persist_trip(self, pool: Any, reason: str) -> bool:
+        """One atomic server-side union — durable the moment the trip
+        fires, never carried by the flush (round 6: the flush's scalar
+        CAS let concurrent full-document writes erase a trip with zero
+        failures on either side). False = not yet durable; the reason
+        is retried at every flush until it lands."""
+        at = self.trips.get(reason) or time.time()
+        try:
+            await pool.execute(SQL_TRIP, STATE_KEY, reason, float(at),
+                               timeout=6)
+        except Exception:  # noqa: BLE001
+            self.bump("s1.errors")
+            self._unpersisted.add(reason)
+            return False
+        self._unpersisted.discard(reason)
+        return True
 
     # ── finalize one tx ─────────────────────────────────────────────
     async def _finalize_tx(self, pool: Any, tx: str, e: dict,
@@ -465,11 +617,45 @@ class S1Emitter:
             return False
         if e["evicted"]:
             return True                       # counted at eviction time
-        # ts resolution for every block the tx touched (usually one)
+        # DECODE FIRST — it is pure and free (round 6): the buffer is
+        # overwhelmingly foreign txs (the WS subscribes by exchange
+        # address, not wallet), and resolving their timestamps before
+        # the decode discarded them starved the RPC budget 30-to-1 at
+        # observed production rates. A foreign tx now costs zero RPC.
+        if e.get("recs_n") != len(e["logs"]):
+            roster = getattr(lst, "_roster", {}) or {}
+            exch = self.exchange_set(lst)
+            recs: list[dict] = []
+            for le in e["logs"]:
+                got, reason, _inv = decode_shadow_views(le, roster, exch)
+                if reason is not None:
+                    self.bump("s1.abstain.decode_refusal")
+                    return True               # one bad event = whole tx
+                tps = le.get("topics") or []
+                if len(tps) >= 4 and str(tps[2]).lower()[-40:] == \
+                        str(tps[3]).lower()[-40:]:
+                    self.bump("s1.abstain.self_trade")
+                    return True
+                for r in got:
+                    if not r["block"]:
+                        self.bump("s1.abstain.decode_refusal")
+                        return True
+                    recs.append(r)
+            e["recs"], e["recs_n"] = recs, len(e["logs"])
+        if not e["recs"]:
+            return True                       # foreign tx — zero RPC
+        # ts resolution for every block the tx touched (usually one);
+        # the block->ts cache means N roster txs in one block cost one
+        # RPC, and the cache key includes the blockHash so a reorged
+        # sibling can never borrow a stale timestamp
         if e["ts_started"] is None:
             e["ts_started"] = now
         for blk, want_hash in list(e["blocks"].items()):
             if blk in e["ts"]:
+                continue
+            cached = self._ts_cache.get((blk, want_hash))
+            if cached is not None:
+                e["ts"][blk] = cached
                 continue
             if not self._take_token():
                 break
@@ -480,6 +666,9 @@ class S1Emitter:
             if got is None:
                 break
             e["ts"][blk] = got
+            self._ts_cache[(blk, want_hash)] = got
+            while len(self._ts_cache) > TS_CACHE_CAP:
+                self._ts_cache.popitem(last=False)
         unresolved = [b for b in e["blocks"] if b not in e["ts"]]
         if unresolved:
             if now - e["ts_started"] > TS_BUDGET_S:
@@ -496,29 +685,9 @@ class S1Emitter:
         if now - newest_ts > EMIT_MAX_AGE_S:
             self.bump("s1.abstain.too_old")
             return True
-
-        roster = getattr(lst, "_roster", {}) or {}
-        exch = self.exchange_set(lst)
-        recs: list[dict] = []
-        for le in e["logs"]:
-            got, reason, _inv = decode_shadow_views(le, roster, exch)
-            if reason is not None:
-                self.bump("s1.abstain.decode_refusal")
-                return True                   # one bad event = whole tx
-            tps = le.get("topics") or []
-            if len(tps) >= 4 and str(tps[2]).lower()[-40:] == \
-                    str(tps[3]).lower()[-40:]:
-                self.bump("s1.abstain.self_trade")
-                return True
-            for r in got:
-                if not r["block"]:
-                    self.bump("s1.abstain.decode_refusal")
-                    return True
-                r["ts"] = e["ts"].get(r["block"])
-                recs.append(r)
-        if not recs:
-            return True                       # foreign tx — nothing to do
-        groups = classify_mints(recs)
+        for r in e["recs"]:
+            r["ts"] = e["ts"].get(r["block"])
+        groups = classify_mints(e["recs"])
         emitted_any = False
         for wallet, g in groups.items():
             if wallet in e.setdefault("done_wallets", set()):
@@ -606,14 +775,13 @@ class S1Emitter:
                 self.bump("s1.abstain.price_variant")
                 continue
             if not self.armed or not self.cert_green or self.trips:
-                # burn-in: idempotent per (wallet, asset) — no view in
-                # the mark (a straggler can flip the representative
-                # record's view across a retry) and the armed path marks
-                # too, so a disarm mid-retry cannot re-count an emitted
-                # fill as would_emit (fleet r2)
-                mark = (wallet, rec["asset"])
-                if mark not in e.setdefault("counted", set()):
-                    e["counted"].add(mark)
+                # burn-in: idempotent per (tx, wallet, asset) — no view
+                # in the mark (a straggler can flip the representative
+                # record's view across a retry), the armed path marks
+                # too (a disarm mid-retry cannot re-count an emitted
+                # fill, fleet r2), and the mark OUTLIVES the entry so a
+                # post-finalize redelivery cannot re-count (fleet r6)
+                if self._mark_counted(tx, wallet, rec["asset"]):
                     self.bump("s1.would_emit")
                 emitted = True                # burn-in counts as handled
                 continue
@@ -637,9 +805,16 @@ class S1Emitter:
             # a receipt-path row for this (tx, whale, asset) is the
             # key-divergent-twin risk — abstain. Our own earlier s1 row
             # with THIS key is a dup — skip. An s1 row with a DIFFERENT
-            # key is a sibling fill in the same market (fleet round 2:
-            # the conflation forfeited the whale's second fill) —
-            # proceed; the dedupe collapses anything truly identical.
+            # key is a sibling ONLY if THIS entry wrote it (round 2's
+            # conflation forfeited the whale's second fill in a bundle;
+            # e['ingested_keys'] keeps that case working). Any OTHER s1
+            # row is a post-finalize re-entry — a deep-reorg re-add
+            # whose new block ts shifts the key, or a straggler leg of
+            # an already-emitted tx judged in isolation (fleet round 6,
+            # both CRITICAL: key-divergent double emission) — and per
+            # this probe's own rule an earlier emitter row equally
+            # forbids a second view. The poller carries anything real
+            # that this refuses.
             srcs = {str(r["source"]) for r in (rows or [])}
             stored_keys = {str(r["dedupe_key"]) for r in (rows or [])}
             if "chain" in srcs:
@@ -647,6 +822,12 @@ class S1Emitter:
                 continue
             if keys[0][1] in stored_keys:
                 self.bump("s1.emit_dup")
+                continue
+            own_keys = e.setdefault("ingested_keys", set())
+            if any(str(r["source"]) == "s1"
+                   and str(r["dedupe_key"]) not in own_keys
+                   for r in (rows or [])):
+                self.bump("s1.abstain.s1_row_preexists")
                 continue
             from .pipeline import TradeEvent, ingest_trade_result
             size = float(Decimal(rec["size_units"]) / Decimal(10 ** 6))
@@ -668,6 +849,7 @@ class S1Emitter:
                 # the one condition that must never be guessed around
                 self.bump("s1.abstain.key_selfcheck")
                 self._trip("key_selfcheck")
+                await self._persist_trip(pool, "key_selfcheck")
                 return False
             try:
                 _tid, was_new = await ingest_trade_result(ev)
@@ -675,7 +857,8 @@ class S1Emitter:
                 self.bump("s1.errors")
                 return None                  # retry; emit_dup skips any
                                              # record that did commit
-            e.setdefault("counted", set()).add((wallet, rec["asset"]))
+            self._mark_counted(tx, wallet, rec["asset"])
+            e.setdefault("ingested_keys", set()).add(ev.dedupe_key)
             emitted = True
             self.last_emit_at = now
             if was_new:
@@ -694,53 +877,74 @@ class S1Emitter:
         return emitted
 
     # ── the corroboration sweep ─────────────────────────────────────
-    async def _corroboration_sweep(self, pool: Any) -> None:
+    async def _sweep_wallet(self, pool: Any, whale_id: int,
+                            address: str) -> None:
         try:
             rows = await pool.fetch(SQL_SWEEP, float(CORROBORATE_S),
-                                    timeout=10)
+                                    whale_id, timeout=10)
+        except Exception:  # noqa: BLE001
+            self.bump("s1.errors")
+            return
+        confirmed_ids, judged = [], []
+        for r in rows or []:
+            if r["ok"]:
+                confirmed_ids.append(r["id"])
+                continue
+            ts = r["ts"]
+            ts_epoch = (ts.timestamp() if hasattr(ts, "timestamp")
+                        else float(ts or 0))
+            try:
+                ran = await pool.fetchrow(
+                    SQL_RECON_SINCE, r["detected_at"], address,
+                    ts_epoch - RECON_TS_MARGIN_S,
+                    float(RECON_VENUE_LAG_S), timeout=6)
+            except Exception:  # noqa: BLE001
+                self.bump("s1.errors")
+                return
+            if ran is None:
+                continue               # no run provably covered THIS
+                                       # fill's depth and lag — defer
+            judged.append(r)
+            log.error("S1 UNCORROBORATED row id=%s key=%s — the venue's "
+                      "feed never showed this fill", r["id"],
+                      str(r["dedupe_key"])[:16])
+        # TRIP BEFORE STAMP (round 6): the stamp makes the verdict
+        # permanent (the row is never re-judged), so a durable trip
+        # must exist first — a crash between stamp and trip silenced
+        # the alarm forever. The reverse order is idempotent: if the
+        # stamp then fails, the row re-judges and the trip unions.
+        ok_judged = []
+        for r in judged:
+            reason = "uncorroborated:%s" % r["id"]
+            self._trip(reason)
+            if await self._persist_trip(pool, reason):
+                ok_judged.append(r)
+        # STAMP BEFORE COUNTING (fleet r4): a failed stamp must not
+        # inflate s1.confirmed forever
+        ids = confirmed_ids + [r["id"] for r in ok_judged]
+        if ids:
+            try:
+                await pool.execute(SQL_MARK, ids, timeout=10)
+            except Exception:  # noqa: BLE001
+                self.bump("s1.errors")
+                return                 # nothing counted; rows re-judge
+        self.bump("s1.confirmed", len(confirmed_ids))
+        self.bump("s1.uncorroborated", len(ok_judged))
+
+    async def _corroboration_sweep(self, pool: Any) -> None:
+        try:
+            wallets = await pool.fetch(SQL_SWEEP_WALLETS,
+                                       float(CORROBORATE_S), timeout=10)
             backlog = await pool.fetchval(SQL_BACKLOG,
                                           float(CORROBORATE_S), timeout=10)
         except Exception:  # noqa: BLE001
             self.bump("s1.errors")
             return
         self.unjudged_backlog = int(backlog or 0)
-        if not rows:
-            return
-        confirmed_ids, judged = [], []
-        for r in rows:
-            if r["ok"]:
-                confirmed_ids.append(r["id"])
-                continue
-            try:
-                ran = await pool.fetchrow(SQL_RECON_SINCE,
-                                          r["detected_at"], r["address"],
-                                          timeout=6)
-            except Exception:  # noqa: BLE001
-                self.bump("s1.errors")
-                return
-            if ran is None:
-                continue               # the backstop has not provably
-                                       # re-fetched THIS wallet — defer
-            judged.append(r)
-            log.error("S1 UNCORROBORATED row id=%s key=%s — the venue's "
-                      "feed never showed this fill", r["id"],
-                      str(r["dedupe_key"])[:16])
-        # STAMP BEFORE COUNTING (fleet r4): a failed stamp must not
-        # inflate s1.confirmed forever, and a trip only lands when its
-        # row is durably marked judged
-        ids = confirmed_ids + [r["id"] for r in judged]
-        if ids:
-            try:
-                await pool.execute(SQL_MARK, ids, timeout=10)
-            except Exception:  # noqa: BLE001
-                self.bump("s1.errors")
-                return                 # nothing counted, nothing tripped
-        self.bump("s1.confirmed", len(confirmed_ids))
-        for r in judged:
-            self.bump("s1.uncorroborated")
-            # ROW-SPECIFIC reason (fleet r5): an operator clear releases
-            # exactly the verdict they investigated, never a sibling's
-            self._trip("uncorroborated:%s" % r["id"])
+        for w in wallets or []:
+            # per-wallet windows (round 6): a whale whose reconciler
+            # sweep keeps failing defers only its OWN rows
+            await self._sweep_wallet(pool, w["whale_id"], w["address"])
 
     # ── flush (own state key; observability, not evidence) ──────────
     @staticmethod
@@ -759,6 +963,10 @@ class S1Emitter:
             # pending arm or a foreign trip (round 3) — deltas simply
             # accumulate until the loader succeeds
             return
+        # trips that failed their immediate SQL_TRIP retry here first —
+        # durability is never left to chance across flush cycles
+        for reason in list(self._unpersisted):
+            await self._persist_trip(pool, reason)
         try:
             raw = await pool.fetchval(SQL_READ, STATE_KEY, timeout=6)
             doc = raw if isinstance(raw, dict) else (
@@ -768,23 +976,25 @@ class S1Emitter:
         except Exception:  # noqa: BLE001
             self.bump("s1.flush_failures")
             return
-        stored_trip = self._trip_str(doc.get("tripped"))
-        stored_trips = doc.get("trips")
-        if not isinstance(stored_trips, dict):
-            stored_trips = {stored_trip: 0.0} if stored_trip else {}
-        # CLEAR-BY-REASON (fleet r5): an operator clear names exactly
-        # the reason it releases — a clear for row A's verdict can
-        # never absolve row B's, a concurrent un-flushed trip in
-        # another process, or a different trip class entirely.
-        cleared_at = doc.get("trip_cleared_at")
-        cleared_reason = doc.get("trip_cleared_reason")
+        # READ-ONLY trip reconciliation (round 6): the disk trip set is
+        # maintained solely by SQL_TRIP/SQL_CLEAR server-side; this
+        # merge only decides what THIS process believes. An operator
+        # clear names exactly one reason (r5) and its PER-REASON
+        # tombstone releases stale in-memory copies in every process —
+        # a second clear can no longer forget the first (r6).
+        lt = doc.get("trips")
+        stored_trips = lt if isinstance(lt, dict) else (
+            {self._trip_str(doc["tripped"]): 0.0}
+            if doc.get("tripped") else {})
+        tc = doc.get("trips_cleared")
+        cleared = tc if isinstance(tc, dict) else {}
         merged_trips: dict[str, float] = {}
         for src in (stored_trips, self.trips):
             for reason, at in src.items():
                 if not isinstance(at, (int, float)):
                     at = 0.0
-                if (isinstance(cleared_at, (int, float))
-                        and cleared_reason == reason and cleared_at > at):
+                ca = cleared.get(reason)
+                if isinstance(ca, (int, float)) and ca > at:
                     continue
                 cur = merged_trips.get(reason)
                 merged_trips[reason] = at if cur is None else min(cur, at)
@@ -795,37 +1005,31 @@ class S1Emitter:
                 # a foreign trip is global — adopt, never clobber
                 self.armed = False
             for reason in released:
+                self._unpersisted.discard(reason)
                 log.warning("S1 trip '%s' cleared by operator", reason)
             self.trips = merged_trips
-        counters = doc.get("counters") or {}
-        if not isinstance(counters, dict):
-            counters = {}
+        c = doc.get("counters")
+        stored_counters = c if isinstance(c, dict) else {}
         snap, self.deltas = self.deltas, {}
-        merged = dict(counters)
-        for k, v in snap.items():
-            base = merged.get(k)
-            merged[k] = (base if isinstance(base, (int, float)) else 0) + v
         # a pending (not-yet-validated) arm is still an arm on disk —
         # persisting armed=false before validation erased legitimate
         # arms across boot blips (round 3)
         armed_out = bool((self.armed or self._pending_arm_at is not None)
                          and not self.trips)
-        payload = {"counters": merged, "armed": armed_out,
+        # counters ship as DELTAS — the server adds them under the row
+        # lock, so concurrent flushes compose instead of clobbering,
+        # and the payload structurally cannot name trip state (r6)
+        payload = {"counters": snap, "armed": armed_out,
                    "armed_at": (self.armed_at if self.armed
                                 else (self._pending_arm_at or 0.0)),
-                   "tripped": self.tripped,
-                   "trips": self.trips,
-                   "trip_cleared_at": cleared_at,
-                   "trip_cleared_reason": cleared_reason,
                    "unjudged_backlog": self.unjudged_backlog,
                    "cert_green": self.cert_green,
                    "cert_reason": self.cert_reason,
                    "decoder_fp": DECODER_FP,
                    "updated_at_epoch": now}
         try:
-            got = await pool.fetchval(SQL_WRITE, STATE_KEY,
-                                      json.dumps(payload), stored_trip,
-                                      timeout=6)
+            await pool.execute(SQL_WRITE, STATE_KEY, json.dumps(payload),
+                               timeout=6)
         except Exception:  # noqa: BLE001
             # AMBIGUOUS: the write may have committed and lost its ack.
             # Restoring the snap would double-count on the next flush,
@@ -834,14 +1038,28 @@ class S1Emitter:
             self.bump("s1.flush_failures")
             self.bump("s1.snap_dropped_ambiguous")
             return
-        if got is None:
-            # unambiguous: the CAS WHERE refused, nothing was written —
-            # restore the deltas and adopt the foreign trip next read
-            for k, v in snap.items():
-                self.deltas[k] = self.deltas.get(k, 0) + v
-            self.bump("s1.flush_failures")
-            return
-        self.counters = merged
+        # local mirror for the beat: stored view + what we just added
+        merged_view = dict(stored_counters)
+        for k, v in snap.items():
+            base = merged_view.get(k)
+            merged_view[k] = (base if isinstance(base, (int, float))
+                              else 0) + v
+        self.counters = merged_view
+
+    def _should_poll_head(self, now: float) -> bool:
+        """The poll is for when the logs-only WS goes QUIET (round 6:
+        the un-gated version fired every tick under live traffic —
+        there is always a tx younger than CONFIRM_DEPTH — and starved
+        ts resolution of the shared RPC budget). Someone must be
+        waiting on confirmation, the WS must not have advanced the
+        head recently, and polls are spaced HEAD_POLL_MIN_S apart."""
+        if now - self.head_advanced_at <= HEAD_QUIET_S:
+            return False
+        if now - self.last_head_poll_at < HEAD_POLL_MIN_S:
+            return False
+        return any(
+            max(e["blocks"], default=0) + CONFIRM_DEPTH > self.head
+            for e in self.pending.values() if e["blocks"])
 
     # ── the task loop ───────────────────────────────────────────────
     async def run(self) -> None:
@@ -866,11 +1084,8 @@ class S1Emitter:
                     await self._check_cert(pool, now)
                     if self._state_loaded:
                         await self._corroboration_sweep(pool)
-                # head poll only when someone is waiting on confirmation
-                waiting = any(
-                    max(e["blocks"], default=0) + CONFIRM_DEPTH > self.head
-                    for e in self.pending.values() if e["blocks"])
-                if waiting and self._take_token():
+                if self._should_poll_head(now) and self._take_token():
+                    self.last_head_poll_at = now
                     await self._poll_head()
                 now = time.time()
                 for tx in list(self.pending.keys())[:64]:

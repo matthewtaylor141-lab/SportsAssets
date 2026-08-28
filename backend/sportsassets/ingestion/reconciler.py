@@ -30,11 +30,21 @@ async def reconcile_once(depth: int = 500) -> dict:
     )
     whales = await pool.fetch("SELECT id, address, username FROM whales WHERE active AND NOT banned")
     missed = 0
-    per_wallet: dict[str, int] = {}
+    per_wallet: dict = {}
     async with httpx.AsyncClient(base_url=cfg.data_api_base, timeout=20) as http:
         for whale in whales:
             wallet_missed = 0
             offset = 0
+            # COVERAGE EVIDENCE for the S1 corroboration sweep (fleet
+            # round 6): a run that fetched only the newest `depth` rows
+            # of a busy wallet never had its chance at an older fill,
+            # and no later run reaches deeper — treating it as covering
+            # falsely tripped the emitter on a venue-visible fill. The
+            # sweep now requires either complete=true (feed exhausted
+            # inside the depth) or oldest (the oldest venue ts this run
+            # actually reached) at or before the fill's own time.
+            complete = False
+            oldest_ts: float | None = None
             try:
                 while offset < depth:
                     resp = await polite_get(
@@ -49,9 +59,13 @@ async def reconcile_once(depth: int = 500) -> dict:
                     resp.raise_for_status()
                     batch = resp.json()
                     if not batch:
+                        complete = True
                         break
                     for raw in batch:
                         ev = parse_data_api_trade(raw, whale["id"], whale["username"])
+                        if ev.ts_epoch and (oldest_ts is None
+                                            or ev.ts_epoch < oldest_ts):
+                            oldest_ts = float(ev.ts_epoch)
                         if not ev.tx_hash or ev.size <= 0:
                             continue
                         sport = await _sport_for_condition(ev.condition_id)
@@ -68,13 +82,18 @@ async def reconcile_once(depth: int = 500) -> dict:
                             wallet_missed += 1
                     offset += 100
                     if len(batch) < 100:
+                        complete = True
                         break
+                per_wallet["cov:" + whale["address"]] = {
+                    "complete": complete, "oldest": oldest_ts}
             except Exception as exc:  # noqa: BLE001 — one wallet must
                 # never abort the whole run: this sweep is the sole
                 # backstop for the S1 corroboration stamp, and a single
                 # wallet's HTTP error was doubling the backstop gap for
                 # every wallet AFTER it in the roster (fleet round 4).
                 # Whatever this wallet ingested before failing stands.
+                # No cov: key on failure — a partial sweep proves
+                # nothing about depth (round 6).
                 log.warning("reconcile: wallet %s failed, continuing: %s",
                             whale["address"][:10], exc)
                 per_wallet["failed:" + whale["address"]] = 1

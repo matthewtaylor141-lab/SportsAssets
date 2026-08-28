@@ -80,23 +80,23 @@ class _FakeClient:
 
 
 class _Pool:
-    def __init__(self, probe_rows=None, stored=None, cas_fails=False):
+    def __init__(self, probe_rows=None, stored=None):
         self.probe_rows = probe_rows or []
         self.stored = stored
-        self.cas_fails = cas_fails
-        self.writes = []
+        self.writes = []          # flush doc writes (SQL_WRITE)
+        self.trip_writes = []     # durable trip unions (SQL_TRIP)
 
     async def fetch(self, sql, *a, timeout=None):
         return self.probe_rows
 
     async def fetchval(self, sql, *a, timeout=None):
-        if sql.lstrip().startswith("INSERT"):
-            self.writes.append(a)
-            return None if self.cas_fails else "s1_emitter"
         return self.stored
 
     async def execute(self, sql, *a, timeout=None):
-        self.writes.append(a)
+        if "trips_cleared" in sql:            # SQL_TRIP's tombstone WHERE
+            self.trip_writes.append(a)
+        else:
+            self.writes.append(a)
 
 
 @pytest.fixture(autouse=True)
@@ -690,23 +690,63 @@ def test_cert_read_failure_never_consumes_the_arm(st):
     assert st.cert_green is False, "but emission stays fail-closed"
 
 
-def test_flush_cas_loss_adopts_and_never_clobbers(st):
-    """fleet r2 (CRITICAL): a concurrent process's sticky trip must
-    survive our read-modify-write. The CAS write refuses when the
-    stored trip changed under us; the deltas are restored and the beat
-    counters never show the unlanded merge."""
+def test_flush_write_never_carries_trip_state(st):
+    """fleet r6 (major x3): the round-2 CAS guarded only the OLDEST
+    reason, so full-document flushes silently erased concurrent trips
+    and operator clears. The flush payload now structurally cannot
+    name trip state — trips are maintained solely by the atomic
+    SQL_TRIP / SQL_CLEAR server-side operations — and counters ship
+    as DELTAS the server adds under the row lock."""
     now = time.time()
+    st.trips = {"key_selfcheck": now - 100}
     st.deltas = {"s1.emitted": 3}
-    pool = _Pool(stored=json.dumps({"counters": {}}), cas_fails=True)
+    pool = _Pool(stored=json.dumps(
+        {"counters": {"s1.emitted": 40}, "trips": {}}))
     asyncio.run(st._flush(pool, now))
-    assert st.deltas.get("s1.emitted") == 3, "deltas restored on CAS loss"
-    assert st.counters.get("s1.emitted") is None, \
-        "the beat must not show a merge that did not land"
+    written = json.loads(pool.writes[-1][1])
+    for forbidden in ("trips", "tripped", "trips_cleared",
+                      "trip_cleared_at", "trip_cleared_reason"):
+        assert forbidden not in written, forbidden
+    assert written["counters"] == {"s1.emitted": 3}, \
+        "deltas, not absolutes — the server composes concurrent flushes"
+    assert st.counters.get("s1.emitted") == 43, "local mirror = stored+snap"
+    # and the SQL itself: no scalar CAS, server-side counter addition,
+    # armed forced false whenever the stored trips are non-empty
+    assert "->>'tripped'" not in s1.SQL_WRITE
+    assert "jsonb_each" in s1.SQL_WRITE
+    assert "'{armed}', 'false'" in s1.SQL_WRITE
+
+
+def test_trip_is_durable_the_moment_it_fires(st):
+    """fleet r6: SQL_TRIP is one atomic union — existing timestamp
+    wins, armed is forced false in the same statement, and the WHERE
+    refuses a stale re-persist of a reason whose tombstone is newer
+    (the resurrection class)."""
+    pool = _Pool()
+    st._trip("key_selfcheck")
+    ok = asyncio.run(st._persist_trip(pool, "key_selfcheck"))
+    assert ok is True and len(pool.trip_writes) == 1
+    key, reason, at = pool.trip_writes[0]
+    assert key == s1.STATE_KEY and reason == "key_selfcheck"
+    assert at == st.trips["key_selfcheck"]
+    assert "'armed', false" in s1.SQL_TRIP
+    assert "trips_cleared" in s1.SQL_TRIP, "tombstone-guarded"
+
+    class _DownPool(_Pool):
+        async def execute(self, sql, *a, timeout=None):
+            raise RuntimeError("db down")
+
+    st2 = S1Emitter()
+    st2._trip("key_selfcheck")
+    ok = asyncio.run(st2._persist_trip(_DownPool(), "key_selfcheck"))
+    assert ok is False and "key_selfcheck" in st2._unpersisted, \
+        "an unpersisted trip is retried at every flush until durable"
 
 
 def test_foreign_trip_is_adopted_never_clobbered(st):
-    """fleet r1/r2: another process's sticky trip must disarm this one
-    at the next flush and be written back, never overwritten."""
+    """fleet r1/r2/r6: another process's sticky trip must disarm this
+    one at the next flush read; the write carries no trip fields, and
+    armed never persists beside a trip."""
     now = time.time()
     st.armed = True
     pool = _Pool(stored=json.dumps({"counters": {},
@@ -714,7 +754,7 @@ def test_foreign_trip_is_adopted_never_clobbered(st):
     asyncio.run(st._flush(pool, now))
     assert st.tripped == "key_selfcheck" and st.armed is False
     written = json.loads(pool.writes[-1][1])
-    assert written["tripped"] == "key_selfcheck"
+    assert "tripped" not in written and "trips" not in written
     assert written["armed"] is False, "armed never persists beside a trip"
 
 
@@ -727,33 +767,56 @@ def test_emitter_never_imports_at_module_load_into_shadow(st):
 
 # ── fleet round 3: the row-anchored corroboration sweep ─────────────
 class _SweepPool(_Pool):
-    def __init__(self, sweep_rows, recon_ran=True):
+    """Two-phase sweep fixture (round 6): the wallets query, then a
+    per-wallet rows window. sweep_rows may be a flat list (one wallet,
+    id 1, address '0xw') or a dict whale_id -> rows; recon_ran may be
+    a bool or a dict address -> bool."""
+
+    def __init__(self, sweep_rows, recon_ran=True, wallets=None):
         super().__init__()
         self.sweep_rows = sweep_rows
         self.recon_ran = recon_ran
+        if wallets is None:
+            has = sweep_rows if isinstance(sweep_rows, dict) else \
+                {1: sweep_rows}
+            wallets = [{"whale_id": wid, "address": "0xw%s" % wid
+                        if isinstance(sweep_rows, dict) else "0xw"}
+                       for wid, rr in has.items() if rr]
+        self.wallets = wallets
         self.marked = []
 
     async def fetch(self, sql, *a, timeout=None):
+        if "min(t.detected_at)" in sql:
+            return self.wallets
+        if isinstance(self.sweep_rows, dict):
+            return self.sweep_rows.get(a[1], [])
         return self.sweep_rows
 
     async def fetchrow(self, sql, *a, timeout=None):
-        return {"?": 1} if self.recon_ran else None
+        ran = (self.recon_ran.get(a[1], True)
+               if isinstance(self.recon_ran, dict) else self.recon_ran)
+        return {"?": 1} if ran else None
 
     async def execute(self, sql, *a, timeout=None):
-        self.marked.append(a[0])
+        if sql.lstrip().startswith("UPDATE trades"):
+            self.marked.append(a[0])
+        elif "trips_cleared" in sql:
+            self.trip_writes.append(a)
+        else:
+            self.writes.append(a)
 
 
 def _srow(i, ok):
-    return {"id": i, "dedupe_key": f"k{i}", "detected_at": 0,
-            "address": "0xw", "ok": ok}
+    return {"id": i, "dedupe_key": f"k{i}", "detected_at": 0, "ts": 0,
+            "ok": ok}
 
 
 def test_sweep_confirms_and_trips_row_specific(st):
     """fleet r4/r5 re-pin: stamped -> confirmed; unstamped with a
-    wallet-covered backstop run -> STICKY TRIP under a ROW-SPECIFIC
-    reason. Unjudgeable (departed-whale) rows never enter the window —
-    the SQL filters them — and the backlog gauge counts everything
-    unjudged. Judged rows stamp BEFORE counting."""
+    fill-covering backstop run -> STICKY TRIP under a ROW-SPECIFIC
+    reason, made durable via SQL_TRIP BEFORE the row is stamped.
+    Unjudgeable (departed-whale) rows never enter the window — the SQL
+    filters them — and the backlog gauge counts everything unjudged."""
     _arm(st)
     pool = _SweepPool([_srow(1, True), _srow(3, False)])
     pool.stored = 5                        # SQL_BACKLOG count
@@ -763,11 +826,13 @@ def test_sweep_confirms_and_trips_row_specific(st):
     assert st.trips and "uncorroborated:3" in st.trips
     assert st.armed is False
     assert pool.marked == [[1, 3]]
+    assert [w[1] for w in pool.trip_writes] == ["uncorroborated:3"], \
+        "the trip is durable via its own atomic write, not the flush"
     assert st.unjudged_backlog == 5
 
 
 def test_sweep_defers_when_the_backstop_never_ran(st):
-    """fleet r4/r5 (major): no completed, WALLET-COVERING reconciler
+    """fleet r4/r5 (major): no completed, FILL-COVERING reconciler
     run since detection = defer, never trip."""
     _arm(st)
     pool = _SweepPool([_srow(3, False)], recon_ran=False)
@@ -775,6 +840,45 @@ def test_sweep_defers_when_the_backstop_never_ran(st):
     assert st.deltas.get("s1.uncorroborated") is None
     assert st.trips == {} and st.armed is True
     assert pool.marked == []
+
+
+def test_recon_coverage_requires_depth_and_lag(st):
+    """fleet r6 (major x2): the covering run must have provably had a
+    chance at THE FILL — started after the venue's indexing lag, and
+    with a /trades window that either exhausted the feed or reached at
+    or below the fill's own timestamp. Completion alone proves neither
+    (the depth-500 truncation and the t0+30s run were both counted as
+    coverage and falsely tripped correct emissions)."""
+    q = s1.SQL_RECON_SINCE
+    assert "make_interval(secs => $4)" in q, "venue-lag margin on start"
+    assert "'cov:' || $2" in q
+    assert "'complete'" in q and "'oldest'" in q
+    # and the reconciler records that evidence
+    import inspect
+    from sportsassets.ingestion import reconciler as rec
+    src = inspect.getsource(rec)
+    assert '"cov:" + whale["address"]' in src
+    assert '"complete": complete, "oldest": oldest_ts' in src
+    assert src.count("complete = True") == 2, \
+        "complete only when the feed was exhausted inside the depth"
+
+
+def test_one_deferring_wallet_cannot_starve_another(st):
+    """fleet r6 (major): rows deferring at the coverage check re-
+    entered a single global LIMIT window at the front and could pin it
+    forever — a genuinely wrong emission behind them was never judged.
+    Per-wallet windows: X defers only X."""
+    _arm(st)
+    pool = _SweepPool(
+        {1: [_srow(1, False)], 2: [_srow(9, False)]},
+        recon_ran={"0xw1": False, "0xw2": True},
+        wallets=[{"whale_id": 1, "address": "0xw1"},
+                 {"whale_id": 2, "address": "0xw2"}])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert "uncorroborated:9" in st.trips, \
+        "wallet 2's verdict lands despite wallet 1 deferring"
+    assert "uncorroborated:1" not in st.trips
+    assert pool.marked == [[9]]
 
 
 def test_sweep_stamp_failure_counts_nothing(st):
@@ -792,39 +896,78 @@ def test_sweep_stamp_failure_counts_nothing(st):
         "an unstamped judgment is not evidence"
 
 
+def test_trip_persist_failure_defers_the_stamp(st):
+    """fleet r6: the stamp makes the verdict permanent, so it must
+    never land before the trip is durable — a crash between the two
+    silenced the alarm forever. Persist fails -> row stays unstamped
+    and re-judges next sweep; the in-memory trip still disarms."""
+    _arm(st)
+
+    class _TripDownPool(_SweepPool):
+        async def execute(self, sql, *a, timeout=None):
+            if "trips_cleared" in sql:
+                raise RuntimeError("db blip")
+            await _SweepPool.execute(self, sql, *a, timeout=timeout)
+
+    pool = _TripDownPool([_srow(3, False)])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert pool.marked == [], "no durable trip, no stamp"
+    assert st.deltas.get("s1.uncorroborated") is None
+    assert "uncorroborated:3" in st.trips and st.armed is False
+    assert "uncorroborated:3" in st._unpersisted
+
+
 def test_operator_clear_releases_exactly_one_reason(st):
-    """fleet r4/r5 (major): a clear names the reason it releases — it
-    frees exactly that verdict and can never absolve a sibling row's
-    trip, a concurrent process's un-flushed trip, or another class."""
+    """fleet r4/r5 (major): a clear names the reason it releases — its
+    PER-REASON tombstone frees exactly that verdict in every process
+    and can never absolve a sibling row's trip or another class."""
     now = time.time()
     st.trips = {"uncorroborated:11": now - 600,
                 "key_selfcheck": now - 300}
     pool = _Pool(stored=json.dumps({
-        "counters": {}, "tripped": None, "trips": {},
-        "trip_cleared_reason": "uncorroborated:11",
-        "trip_cleared_at": now - 60}))
+        "counters": {}, "trips": {"key_selfcheck": now - 300},
+        "trips_cleared": {"uncorroborated:11": now - 60}}))
     asyncio.run(st._flush(pool, now))
     assert "uncorroborated:11" not in st.trips, "the named clear stands"
     assert "key_selfcheck" in st.trips, \
         "an unrelated trip survives the clear"
     assert st.armed is False
-    written = json.loads(pool.writes[-1][1])
-    assert "key_selfcheck" in written["trips"], \
-        "the surviving trip is re-persisted for every process to see"
+
+
+def test_second_clear_never_resurrects_the_first(st):
+    """fleet r6 (major): the single trip_cleared_* slot forgot every
+    clear but the last, so a process that missed one flush cycle
+    unioned an already-cleared trip back and the fleet re-disarmed on
+    a verdict the operator had released. The tombstone DICT remembers
+    every clear; only a genuinely NEW trip (newer than its tombstone)
+    survives."""
+    now = time.time()
+    st.trips = {"uncorroborated:100": now - 900,   # cleared at now-500
+                "uncorroborated:101": now - 800,   # cleared at now-400
+                "uncorroborated:102": now - 100}   # NEW: post-clear
+    pool = _Pool(stored=json.dumps({
+        "counters": {}, "trips": {},
+        "trips_cleared": {"uncorroborated:100": now - 500,
+                          "uncorroborated:101": now - 400,
+                          "uncorroborated:102": now - 300}}))
+    asyncio.run(st._flush(pool, now))
+    assert set(st.trips) == {"uncorroborated:102"}, \
+        "every recorded clear holds; a post-clear re-trip stands"
 
 
 def test_concurrent_trips_merge_never_overwrite(st):
-    """fleet r5 (major): two processes' different trips union at flush
-    instead of last-writer-wins."""
+    """fleet r5 (major): two processes' different trips union in
+    memory instead of last-writer-wins; disk union is SQL_TRIP's job
+    (the flush write carries no trip state at all, r6)."""
     now = time.time()
     st.trips = {"key_selfcheck": now - 100}
     pool = _Pool(stored=json.dumps({
-        "counters": {}, "tripped": "uncorroborated:7",
+        "counters": {},
         "trips": {"uncorroborated:7": now - 200}}))
     asyncio.run(st._flush(pool, now))
     assert set(st.trips) == {"key_selfcheck", "uncorroborated:7"}
     written = json.loads(pool.writes[-1][1])
-    assert set(written["trips"]) == {"key_selfcheck", "uncorroborated:7"}
+    assert "trips" not in written
 
 
 def test_duplicate_ws_delivery_never_doubles_the_group(st):
@@ -882,30 +1025,22 @@ def test_pending_arm_survives_the_flush_write(st):
     # fixture note: _state_loaded is True here, so the write happens
 
 
-def test_ambiguous_write_drops_snap_clean_cas_loss_restores(st):
+def test_ambiguous_write_drops_snap(st):
     """fleet r3 (minor): an exception mid-write may have committed —
-    restoring would double-count, so the snap drops (undercount-only);
-    a clean CAS refusal provably wrote nothing and restores."""
+    restoring would double-count, so the snap drops (undercount-only).
+    With deltas added server-side there is no CAS-refusal path left to
+    restore from (r6)."""
     now = time.time()
 
     class _BoomPool(_Pool):
-        async def fetchval(self, sql, *a, timeout=None):
-            if sql.lstrip().startswith("INSERT"):
-                raise RuntimeError("socket died mid-write")
-            return self.stored
+        async def execute(self, sql, *a, timeout=None):
+            raise RuntimeError("socket died mid-write")
 
     st.deltas = {"s1.emitted": 5}
     asyncio.run(st._flush(_BoomPool(stored=json.dumps({"counters": {}})),
                           now))
     assert st.deltas.get("s1.emitted") is None, "ambiguous -> dropped"
     assert st.deltas.get("s1.snap_dropped_ambiguous") == 1
-
-    st2 = S1Emitter()
-    st2._state_loaded = True
-    st2.deltas = {"s1.emitted": 5}
-    pool = _Pool(stored=json.dumps({"counters": {}}), cas_fails=True)
-    asyncio.run(st2._flush(pool, now))
-    assert st2.deltas.get("s1.emitted") == 5, "clean CAS loss -> restored"
 
 
 def test_boolean_trip_in_state_row_does_not_starve_the_cas(st):
@@ -925,3 +1060,125 @@ def test_corrupt_state_row_fails_closed_not_wedged(st):
                                time.time()))
     assert st._state_loaded is True
     assert st.armed is False
+
+
+# ── fleet round 6: post-finalize re-entry, RPC economics ────────────
+def test_preexisting_s1_row_from_another_entry_forbids_emission(st,
+                                                                monkeypatch):
+    """fleet r6 (CRITICAL x2): once a tx finalizes and pops, a deep-
+    reorg re-add (new block ts = new key) or a straggler leg of the
+    same tx forms a FRESH entry with no memory, and the old different-
+    key-means-sibling rule waved the double emission through. An s1
+    row this entry did not write forbids the view; the poller carries
+    anything real."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    pool = _Pool(probe_rows=[{"source": "s1",
+                              "dedupe_key": "reorg-shifted-key"}])
+    done = asyncio.run(st._finalize_tx(pool, TX, st.pending[TX],
+                                       time.time()))
+    assert done is True and calls == []
+    assert st.deltas.get("s1.abstain.s1_row_preexists") == 1
+
+
+def test_own_entry_sibling_rows_still_proceed(st, monkeypatch):
+    """The r2 sibling case survives the r6 rule: a row THIS entry
+    wrote (a bundle's earlier market, or an earlier retry pass) is in
+    e['ingested_keys'] and never blocks the remaining records."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    e = st.pending[TX]
+    e["ingested_keys"] = {"our-own-earlier-sibling-key"}
+    pool = _Pool(probe_rows=[{"source": "s1",
+                              "dedupe_key": "our-own-earlier-sibling-key"}])
+    done = asyncio.run(st._finalize_tx(pool, TX, e, time.time()))
+    assert done is True and len(calls) == 1
+    assert st.deltas.get("s1.abstain.s1_row_preexists") is None
+
+
+def test_burnin_count_survives_the_entry_pop(st, monkeypatch):
+    """fleet r6 (minor): the per-entry counted set died at pop, so a
+    post-finalize redelivery re-counted would_emit and the gauge the
+    flip decision reads diverged from what armed would do. The mark
+    now lives in a process-level LRU keyed (tx, wallet, asset)."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    st.cert_green = True                     # burn-in
+    _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    asyncio.run(st._finalize_tx(_Pool(), TX, st.pending[TX], time.time()))
+    assert st.deltas.get("s1.would_emit") == 1
+    st.pending.pop(TX)                       # the run loop pops on done
+    _observe_all(st, lst, [MAKER_EV])        # post-finalize redelivery
+    asyncio.run(st._finalize_tx(_Pool(), TX, st.pending[TX], time.time()))
+    assert st.deltas.get("s1.would_emit") == 1, \
+        "one fill, one count — across entries, not per entry"
+
+
+def test_foreign_tx_costs_zero_rpc(st):
+    """fleet r6 (major): the buffer is overwhelmingly foreign txs (the
+    WS subscribes by exchange address); resolving their timestamps
+    before the decode discarded them starved the budget 30-to-1. The
+    decode is pure and free — a foreign tx must never spend a token."""
+    lst = _Listener(roster={})               # nobody we track
+    _wire(st, lst)
+    _observe_all(st, lst, [MAKER_EV])
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, st.pending[TX],
+                                       time.time()))
+    assert done is True
+    assert st.deltas.get("s1.rpc_calls") is None, "zero RPC spent"
+    assert st._client.calls == []
+
+
+def test_block_ts_cache_one_rpc_per_block(st, monkeypatch):
+    """fleet r6 (major): the block timestamp is per-BLOCK, not per-tx —
+    two roster txs in one block must cost one resolution. The cache
+    key includes the blockHash so a reorged sibling can never borrow
+    a stale timestamp."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    st.cert_green = True                     # burn-in: no pool traffic
+    _capture_ingest(monkeypatch)
+    tx2 = "0x" + "f2" * 32
+    _observe_all(st, lst, [MAKER_EV, dict(MAKER_EV, transactionHash=tx2)])
+    asyncio.run(st._finalize_tx(_Pool(), TX, st.pending[TX], time.time()))
+    asyncio.run(st._finalize_tx(_Pool(), tx2, st.pending[tx2], time.time()))
+    assert st.deltas.get("s1.rpc_calls") == 1, "second tx hits the cache"
+    assert st._ts_cache.get((BLK, "0x" + "77" * 32)) == TS0
+
+
+def test_head_poll_fires_only_when_the_ws_goes_quiet(st):
+    """fleet r6 (major): under live traffic there is always a tx
+    younger than CONFIRM_DEPTH, so the un-gated poll burned a token
+    every tick (60/min demand vs 30/min refill) with priority over ts
+    resolution. observe() advances the head from every WS log; the
+    poll exists for when that feed goes QUIET."""
+    now = time.time()
+    st.pending[TX] = {"blocks": {BLK: "0x77"}, "logs": []}
+    st.head = BLK                            # waiting on confirmation
+    st.head_advanced_at = now - 1.0
+    assert st._should_poll_head(now) is False, "the WS is feeding us"
+    st.head_advanced_at = now - s1.HEAD_QUIET_S - 1
+    st.last_head_poll_at = now - 1.0
+    assert st._should_poll_head(now) is False, "polls are spaced"
+    st.last_head_poll_at = now - s1.HEAD_POLL_MIN_S - 1
+    assert st._should_poll_head(now) is True
+    st.head = BLK + s1.CONFIRM_DEPTH + 1
+    assert st._should_poll_head(now) is False, "nobody is waiting"
+
+
+def test_observe_stamps_ws_head_advances(st):
+    lst = _Listener(roster={})
+    st.head = 0                              # fixture pre-advances it
+    assert st.head_advanced_at == 0.0
+    st.observe(lst, MAKER_EV)
+    assert st.head_advanced_at > 0.0
+    at = st.head_advanced_at
+    st.observe(lst, dict(MAKER_EV, logIndex="0x9"))   # same block: no move
+    assert st.head_advanced_at == at
