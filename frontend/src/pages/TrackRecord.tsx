@@ -3,8 +3,9 @@ import { EmptyState } from '../components/EmptyState'
 import { PnlCalendar } from '../components/PnlCalendar'
 import { LiveToday } from '../components/LiveToday'
 import { fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
-import { CopiesRecord, CopiesTrade, CopiesWhaleSport, SINCE,
+import { ALL_TIME_SINCE, CopiesRecord, CopiesTrade, CopiesWhaleSport,
   useCopiesRecord } from '../lib/record'
+import '../styles/record9.css'
 
 /* THE public record — the whale copy portfolio and nothing else (owner
  * order 2026-08-22: "the performance data must exclusively show the
@@ -40,6 +41,25 @@ function prettySlug(slug: string | null): string {
   if (parts.length < 2) return slug
   return `${parts[0].toUpperCase()} · ${parts.slice(1).join(' ')}`
 }
+
+/** Venue id from the order audit ('polymarket-us'/'kalshi'…) -> ledger
+ * chip. Unknown venues render nothing rather than guessing a label. */
+function venueChip(venue: string | null | undefined): { cls: string; label: string } | null {
+  if (!venue) return null
+  if (venue.startsWith('kalshi')) return { cls: 'venue-k', label: 'Kalshi' }
+  if (venue.startsWith('polymarket')) return { cls: 'venue-pm', label: 'Polymarket' }
+  return null
+}
+
+/** Whale fill → our order, compact: '1.2s', '48s', '3.5m'. */
+export function fmtLatency(s: number): string {
+  if (s < 10) return `${s.toFixed(1)}s`
+  if (s < 120) return `${Math.round(s)}s`
+  return `${(s / 60).toFixed(1)}m`
+}
+
+/** localStorage key for the epoch/all-time display choice. */
+const WINDOW_KEY = 'sa_tr_alltime'
 
 /* Pointer-tracked 3D tilt for the hero tiles: writes --rx/--ry custom
  * properties the CSS consumes under a perspective parent. Pure transform,
@@ -300,7 +320,13 @@ function fmtAge(s: number): string {
 }
 
 export function TrackRecord() {
-  const { data, err } = useCopiesRecord()
+  // Epoch/all-time is DISPLAY state only (owner order 2026-08-28): the
+  // API defaults to the epoch window; ?since= reaches the full history.
+  // Each window is its own fetch + cache — the two never blend.
+  const [allTime, setAllTime] = useState<boolean>(() => {
+    try { return localStorage.getItem(WINDOW_KEY) === '1' } catch { return false }
+  })
+  const { data, err } = useCopiesRecord(30_000, allTime ? ALL_TIME_SINCE : undefined)
   const [status, setStatus] = useState<Status>('all')
   const [whale, setWhale] = useState('all')
   const [q, setQ] = useState('')
@@ -366,6 +392,18 @@ export function TrackRecord() {
 
   const early = t.settled < MIN_SETTLED
 
+  const toggleWindow = () => {
+    const next = !allTime
+    try { localStorage.setItem(WINDOW_KEY, next ? '1' : '0') } catch { /* pref only */ }
+    setAllTime(next)
+  }
+  // The window's honest start label: the served `since` day — except in
+  // all-time mode, where the request floor (2020) predates the record,
+  // so the earliest settled day in the payload speaks instead.
+  const windowStart = allTime && data.daily.length
+    ? data.daily[data.daily.length - 1].day
+    : data.since
+
   // Freshness badge from the payload's own build stamp: green under 5
   // minutes, amber to 15, red past that. A page that cannot admit it is
   // stale trains its owner to distrust every number on it.
@@ -387,7 +425,7 @@ export function TrackRecord() {
             <div>
               <div className="tr-name">BETTOR<span>TOKEN</span></div>
               <div className="tr-sub muted">
-                whale copy portfolio · live from the order ledger · window {SINCE} → today
+                whale copy portfolio · live from the order ledger · window {windowStart} → today
               </div>
             </div>
           </div>
@@ -401,11 +439,27 @@ export function TrackRecord() {
           </div>
         </div>
 
+        {(data.rebaselined || allTime) && (
+          <div className="tr-epoch">
+            <span className="pulse-dot gold" aria-hidden />
+            <span className="tr-epoch-line">
+              {allTime
+                ? <>All-time record — every settled copy, {windowStart} → today</>
+                : <>Record since <b>{data.epoch ?? data.since}</b> — the live copy era</>}
+            </span>
+            <button className={`tr-chipbtn${allTime ? ' on' : ''}`}
+              onClick={toggleWindow}
+              title="Same ledger, wider window — the epoch record and the full history never blend">
+              ALL-TIME
+            </button>
+          </div>
+        )}
+
         <div className="tr-hero-grid">
           <div className="tr-stat tr-stat-main" onMouseMove={tilt} onMouseLeave={untilt}>
             <span className="tr-sheen" aria-hidden />
             <div className="tr-stat-label">NET P&amp;L · COPY PORTFOLIO</div>
-            <div className={`tr-stat-value tr-grad ${t.pnl >= 0 ? 'pos' : 'neg'}`}>
+            <div className={`tr-stat-value tr-grad v9-money ${t.pnl >= 0 ? 'pos' : 'neg'}`}>
               {fmtSignedUsd(heroPnl)}
             </div>
             <div className="tr-stat-foot muted">
@@ -432,8 +486,17 @@ export function TrackRecord() {
             <div className="tr-stat-value">{fmtUsd(heroOpen, 2)}</div>
             <div className="tr-stat-foot muted">
               {openCount} open cop{openCount === 1 ? 'y' : 'ies'} on the table
-              {' '}· {fmtUsd(t.staked, 0)} staked &amp; settled since {SINCE.slice(5)}
+              {' '}· {fmtUsd(t.staked, 0)} staked &amp; settled since {windowStart.slice(5)}
             </div>
+            {!!data.open?.by_whale?.length && (
+              <div className="tr-open-whales">
+                {data.open.by_whale.map((w) => (
+                  <span key={w.whale} className="v9-chip">
+                    {w.whale} <span className="muted">×{w.count}</span> {fmtUsd(w.stake, 0)}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
           <div className="tr-stat" onMouseMove={tilt} onMouseLeave={untilt}>
             <span className="tr-sheen" aria-hidden />
@@ -546,6 +609,7 @@ export function TrackRecord() {
             {ledger.slice(0, limit).map((r, i) => {
               const won = r.pnl > 0
               const st = won ? 'won' : 'lost'
+              const venue = venueChip(r.venue)
               return (
                 <div key={`${r.slug}-${r.whale}-${i}`} className={`tr-slip ${st}`}
                   style={{ ['--i' as string]: Math.min(i, 14) }}>
@@ -554,6 +618,12 @@ export function TrackRecord() {
                     <div className="tr-slip-top">
                       <span className="tr-slip-title">{prettySlug(r.slug)}</span>
                       <span className="tr-tag">{r.whale}</span>
+                      {venue && <span className={`v9-chip ${venue.cls}`}>{venue.label}</span>}
+                      {r.latency_s != null && (
+                        <span className="v9-chip lat" title="Whale fill → our order">
+                          {fmtLatency(r.latency_s)}
+                        </span>
+                      )}
                       {r.status === 'cashed_out' && <span className="tr-tag">CASHED OUT</span>}
                       <span className={`tr-chip ${st}`}>
                         {won ? '✓ WON' : '✕ LOST'}
@@ -579,7 +649,7 @@ export function TrackRecord() {
         )}
         <div className="tr-foot muted">
           Performance shown is the whale copy portfolio: every settled copy
-          trade, uncapped, from the order-level audit — window {SINCE} →
+          trade, uncapped, from the order-level audit — window {windowStart} →
           today, refreshed every 30s. Cash-outs are counted at sale. The
           ledger lists the {trades.length.toLocaleString()} newest settled
           copies; the totals above cover the full window. Full account

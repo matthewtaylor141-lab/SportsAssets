@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react'
 import { EmptyState } from '../components/EmptyState'
 import { fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
-import { CopiesDayWhale, CopiesWhaleSport, useCopiesRecord } from '../lib/record'
-import { sportMeta } from './TrackRecord'
+import { CopiesDayWhale, CopiesTrade, CopiesWhaleSport, useCopiesRecord } from '../lib/record'
+import { fmtLatency, sportMeta } from './TrackRecord'
+import '../styles/record9.css'
 
 /* Financial-grade analytics on the SAME copies record the Performance
  * page headlines (owner order 2026-08-22: copy-whale numbers only, no
@@ -200,6 +201,90 @@ function WhaleForm({ whales, dailyByWhale }: {
   )
 }
 
+/* Copy latency — whale fill → our order, computed CLIENT-SIDE from the
+ * public ledger rows (latency_s rides on each trade). Percentiles are
+ * nearest-rank over the non-null samples; under 5 samples the section
+ * reports that instead of a verdict. */
+const LAT_MIN_N = 5
+const LAT_BUCKETS = [
+  { label: '<2s', max: 2 },
+  { label: '2-5s', max: 5 },
+  { label: '5-15s', max: 15 },
+  { label: '15-60s', max: 60 },
+  { label: '>60s', max: Infinity },
+]
+
+function CopyLatency({ trades }: { trades: CopiesTrade[] }) {
+  const lat = useMemo(() => {
+    const xs = trades
+      .map((t) => t.latency_s)
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+      .sort((a, b) => a - b)
+    const q = (p: number) =>
+      xs[Math.min(xs.length - 1, Math.max(0, Math.ceil(p * xs.length) - 1))]
+    const buckets = LAT_BUCKETS.map((b) => ({ ...b, n: 0 }))
+    for (const v of xs) {
+      (buckets.find((b) => v < b.max) ?? buckets[buckets.length - 1]).n++
+    }
+    return {
+      n: xs.length,
+      avg: xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0,
+      p50: xs.length ? q(0.5) : 0,
+      p90: xs.length ? q(0.9) : 0,
+      buckets,
+    }
+  }, [trades])
+  const maxN = Math.max(...lat.buckets.map((b) => b.n), 1)
+  return (
+    <div>
+      <div className="an-row-title">
+        <span>COPY LATENCY · WHALE FILL → OUR ORDER</span>
+        <span className="muted">from the {lat.n} newest ledger rows that carry a measurement</span>
+      </div>
+      {lat.n < LAT_MIN_N ? (
+        <EmptyState>
+          Not enough data yet — {lat.n} of the {LAT_MIN_N} measured copies this
+          section needs before an average means anything.
+        </EmptyState>
+      ) : (
+        <>
+          <div className="lat-stats">
+            <div className="lat-stat">
+              <span className="lat-stat-k">SAMPLES</span>
+              <span className="lat-stat-v mono">{lat.n}</span>
+            </div>
+            <div className="lat-stat">
+              <span className="lat-stat-k">AVERAGE</span>
+              <span className="lat-stat-v mono">{fmtLatency(lat.avg)}</span>
+            </div>
+            <div className="lat-stat">
+              <span className="lat-stat-k">P50</span>
+              <span className="lat-stat-v mono">{fmtLatency(lat.p50)}</span>
+            </div>
+            <div className="lat-stat">
+              <span className="lat-stat-k">P90</span>
+              <span className="lat-stat-v mono">{fmtLatency(lat.p90)}</span>
+            </div>
+          </div>
+          <div className="lat-dist">
+            {lat.buckets.map((b) => (
+              <div key={b.label} className="lat-row">
+                <span className="lat-label mono">{b.label}</span>
+                <div className="lat-track">
+                  {b.n > 0 && (
+                    <div className="lat-bar" style={{ width: `${(b.n / maxN) * 100}%` }} />
+                  )}
+                </div>
+                <span className="lat-n mono">{b.n}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 /** ROI by sport, aggregated across whales from the whale×sport split. */
 function SportRoi({ rows }: { rows: CopiesWhaleSport[] }) {
   const sports = useMemo(() => {
@@ -320,6 +405,9 @@ export function Analytics() {
         <div className="card">
           <SportRoi rows={data.by_whale_sport || []} />
         </div>
+      </div>
+      <div className="card">
+        <CopyLatency trades={data.trades || []} />
       </div>
       <div className="card">
         <WhaleForm whales={data.by_whale} dailyByWhale={data.daily_by_whale || []} />

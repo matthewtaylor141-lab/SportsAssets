@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { api } from '../lib/api'
 import {
   DESK_RELOCK_EVENT, deskApi, deskAuthed, deskUnlock,
   type DeskAccounts, type KPosition, type PMPosition,
 } from '../lib/desk'
 import '../styles/desk2.css'
+import '../styles/accounts9.css'
 
 // Accounts (owner order 2026-08-22): the team's two-venue command
 // center — live balances, open positions with marks and unrealized,
@@ -37,6 +39,80 @@ const trNum = (t: Record<string, unknown>, keys: string[]): number | null => {
   return null
 }
 
+// as_of arrives as epoch seconds (or an ISO string) — normalize to ms.
+const asOfMs = (v: string | number): number | null => {
+  if (typeof v === 'number') {
+    return Number.isFinite(v) ? (v < 1e12 ? v * 1000 : v) : null
+  }
+  const p = Date.parse(v)
+  return Number.isFinite(p) ? p : null
+}
+
+// Per-whale open copy exposure from the PUBLIC record (no auth).
+type RideWhale = { whale: string; count: number; stake: number }
+type RidePayload = { open?: { by_whale?: RideWhale[] } }
+
+/** v9 committed-capital ring: an inline SVG donut over totals.value.
+ * Gold = committed_usd, cyan = the rest of totals.value; a single
+ * neutral segment when the payload carries no committed split — the
+ * ring only ever draws what the payload actually says. */
+function CapitalRing({ value, committed }: {
+  value: number | null | undefined
+  committed: number | null | undefined
+}) {
+  const R = 48
+  const C = 2 * Math.PI * R
+  const split = value != null && value > 0 && committed != null && committed > 0
+  // Drawing clamp only — the legend always shows the raw dollars.
+  const frac = split ? Math.min(1, Math.max(0, committed / value)) : 0
+  const rest = split ? Math.round((value - committed) * 100) / 100 : null
+  const label = split
+    ? `Total value ${money(value)}: committed capital ${money(committed)}, account ${money(rest)}`
+    : `Total value ${money(value)}`
+  return (
+    <>
+      <div className="ac9-ring" role="img" aria-label={label}>
+        <svg width="120" height="120" viewBox="0 0 120 120" aria-hidden="true">
+          <circle
+            className={`ac9-arc-base${split ? ' live' : ''}`}
+            cx="60" cy="60" r={R} fill="none" strokeWidth="13"
+          />
+          {split && (
+            <circle
+              className="ac9-arc-gold" cx="60" cy="60" r={R} fill="none"
+              strokeWidth="13" strokeDasharray={`${frac * C} ${C}`}
+              transform="rotate(-90 60 60)"
+            />
+          )}
+        </svg>
+        <div className="ac9-ring-c">
+          <div className="ac9-ring-v v9-money mono">{money(value)}</div>
+          <div className="ac9-ring-l">total value</div>
+        </div>
+      </div>
+      <div className="ac9-legend">
+        {split ? (
+          <>
+            <div>
+              <i className="ac9-sw gold" /> Committed capital
+              <b className="mono">{money(committed)}</b>
+            </div>
+            <div>
+              <i className="ac9-sw cyan" /> Account
+              <b className="mono">{money(rest)}</b>
+            </div>
+          </>
+        ) : (
+          <div>
+            <i className="ac9-sw neutral" /> Account
+            <b className="mono">{money(value)}</b>
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
 export function Accounts() {
   const [authed, setAuthed] = useState(() => deskAuthed())
   const [pw, setPw] = useState('')
@@ -45,6 +121,13 @@ export function Accounts() {
   const [data, setData] = useState<DeskAccounts | null>(null)
   const [loadErr, setLoadErr] = useState('')
   const [pmTab, setPmTab] = useState<'positions' | 'trades'>('positions')
+  const [ride, setRide] = useState<RideWhale[]>([])
+  const [chartBusy, setChartBusy] = useState<string | null>(null)
+  const [chartNote, setChartNote] = useState<{ kind: 'ok' | 'miss'; text: string } | null>(null)
+  const noteTimer = useRef<number | null>(null)
+  // Freshness clock: re-render every 15s so the live pulse-dot honestly
+  // decays once the snapshot crosses 60s of age.
+  const [now, setNow] = useState(() => Date.now())
   const navigate = useNavigate()
 
   // Compact sticky summary: once the combined tiles scroll out under
@@ -82,6 +165,27 @@ export function Accounts() {
     return () => clearInterval(t)
   }, [authed, load])
 
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 15000)
+    return () => clearInterval(t)
+  }, [])
+
+  // "Riding on": per-whale open copy exposure from the public record.
+  useEffect(() => {
+    if (!authed) return
+    let dead = false
+    const go = () => api<RidePayload>('/api/copies-record')
+      .then((d) => { if (!dead) setRide(d.open?.by_whale ?? []) })
+      .catch(() => { /* card simply stays hidden */ })
+    go()
+    const t = setInterval(go, 60000)
+    return () => { dead = true; clearInterval(t) }
+  }, [authed])
+
+  useEffect(() => () => {
+    if (noteTimer.current) window.clearTimeout(noteTimer.current)
+  }, [])
+
   const unlock = async () => {
     const secret = pw.trim()
     if (!secret || unlocking) return
@@ -96,6 +200,33 @@ export function Accounts() {
     navigate(`/desk?co_venue=polymarket&co_slug=${encodeURIComponent(p.market_slug)}&co_outcome=${encodeURIComponent(p.outcome || '')}`)
   const cashOutK = (p: KPosition) =>
     navigate(`/desk?co_venue=kalshi&co_ticker=${encodeURIComponent(p.ticker)}`)
+
+  // Chart a held PM position: resolve the venue slug to the global CLOB
+  // token the desk charts key on. TradeDesk deep-links only the co_*
+  // cash-out params (no market query param), so the token rides over in
+  // sessionStorage ('sa_desk_prefill') for the desk's search to pick up.
+  const chartPm = async (p: PMPosition) => {
+    if (chartBusy != null) return
+    setChartBusy(p.market_slug)
+    if (noteTimer.current) window.clearTimeout(noteTimer.current)
+    setChartNote(null)
+    try {
+      const r = await deskApi<{ asset: string | null; found: boolean }>(
+        `/api/admin/slug-token?slug=${encodeURIComponent(p.market_slug)}`)
+      if (r.found && r.asset) {
+        try { sessionStorage.setItem('sa_desk_prefill', r.asset) } catch { /* best-effort */ }
+        setChartNote({ kind: 'ok', text: 'market copied to desk search' })
+        noteTimer.current = window.setTimeout(() => navigate('/desk'), 900)
+        return
+      }
+      setChartNote({ kind: 'miss', text: 'no chartable token' })
+    } catch {
+      setChartNote({ kind: 'miss', text: 'token lookup failed' })
+    } finally {
+      setChartBusy(null)
+    }
+    noteTimer.current = window.setTimeout(() => setChartNote(null), 2500)
+  }
 
   if (!authed) {
     return (
@@ -145,44 +276,78 @@ export function Accounts() {
       )}
 
       {data && (
-        <div className="ac-head" ref={headRef}>
-          <div className="ac-tile">
-            <div className="ac-tile-l">Total value</div>
-            <div className="ac-tile-v mono">{money(data.totals.value)}</div>
+        <div className="ac9-hero" ref={headRef}>
+          <div className="ac9-ringcard">
+            <CapitalRing
+              value={data.totals.value}
+              committed={data.totals.committed_usd}
+            />
           </div>
-          <div className="ac-tile">
-            <div className="ac-tile-l">Trading capital</div>
-            <div className="ac-tile-v mono">
-              {money(data.totals.trading_capital ?? data.totals.cash)}
+          <div className="ac9-tiles">
+            <div className="ac-tile">
+              <div className="ac-tile-l">Trading capital</div>
+              <div className="ac-tile-v mono">
+                {money(data.totals.trading_capital ?? data.totals.cash)}
+              </div>
+              {(data.totals.committed_usd ?? 0) > 0 && (
+                <div className="ac-tile-note">incl. committed capital</div>
+              )}
             </div>
-            {(data.totals.committed_usd ?? 0) > 0 && (
-              <div className="ac-tile-note">incl. committed capital</div>
-            )}
-          </div>
-          <div className="ac-tile">
-            <div className="ac-tile-l">Unrealized P&L</div>
-            <div className={`ac-tile-v mono ${pnlCls(data.totals.unrealized)}`}>
-              {signed(data.totals.unrealized)}
+            <div className="ac-tile">
+              <div className="ac-tile-l">Unrealized P&L</div>
+              <div className={`ac-tile-v mono ${pnlCls(data.totals.unrealized)}`}>
+                {signed(data.totals.unrealized)}
+              </div>
             </div>
           </div>
         </div>
       )}
-      {data && (
-        <p className="ac-asof">
-          as of {new Date(data.as_of).toLocaleTimeString()} · refreshes every 30s
-        </p>
-      )}
+      {data && (() => {
+        const asOf = asOfMs(data.as_of)
+        const fresh = asOf != null && now - asOf < 60_000
+        return (
+          <p className="ac-asof ac9-asof">
+            {fresh && <span className="pulse-dot" aria-hidden="true" />}
+            <span>
+              as of {asOf != null ? new Date(asOf).toLocaleTimeString() : '—'}
+              {' '}· refreshes every 30s
+            </span>
+          </p>
+        )
+      })()}
       {loadErr && data && (
         <div className="ac-degraded">{loadErr} Showing the last good snapshot.</div>
       )}
       {loadErr && !data && <div className="card"><p className="ac-empty">{loadErr}</p></div>}
       {!data && !loadErr && (
         <div className="ac-skel" aria-label="Loading accounts">
-          <div className="tr-skel" style={{ height: 72 }} />
-          <div className="tr-skel" style={{ height: 72 }} />
-          <div className="tr-skel" style={{ height: 240 }} />
+          <div className="skel" style={{ height: 152 }} />
+          <div className="skel" style={{ height: 64 }} />
+          <div className="skel" style={{ height: 240 }} />
         </div>
       )}
+
+      {data && ride.length > 0 && (() => {
+        const maxStake = Math.max(...ride.map((r) => r.stake || 0))
+        return (
+          <div className="ac9-ride">
+            <div className="ac9-ride-h">
+              Riding on <small>open copy exposure by whale</small>
+            </div>
+            {ride.map((r) => (
+              <div className="ac9-ride-row" key={r.whale}>
+                <span className="ac9-ride-name">{r.whale}</span>
+                <div className="ac9-ride-bar" aria-hidden="true">
+                  <i style={{ width: `${maxStake > 0 ? (r.stake / maxStake) * 100 : 0}%` }} />
+                </div>
+                <span className="ac9-ride-num mono">
+                  <b>{money(r.stake)}</b> · {r.count} open
+                </span>
+              </div>
+            ))}
+          </div>
+        )
+      })()}
 
       {data && (
         <div className="ac-venues">
@@ -253,6 +418,11 @@ export function Accounts() {
                 Recent trades
               </button>
             </div>
+            {chartNote && pmTab === 'positions' && (
+              <div className={`ac9-note${chartNote.kind === 'miss' ? ' mut' : ''}`} role="status">
+                {chartNote.text}
+              </div>
+            )}
             {pmTab === 'positions' ? (
               (pm?.positions?.length ?? 0) > 0 ? (
                 <div className="ac-table">
@@ -277,8 +447,15 @@ export function Accounts() {
                         <span className={`ac-cell num mono ${pnlCls(ret)}`} data-l="Return">
                           {ret == null ? '—' : `${ret > 0 ? '+' : ''}${(ret * 100).toFixed(1)}%`}
                         </span>
-                        <span className="ac-cell ac-act">
+                        <span className="ac-cell ac-act ac9-act">
                           <button className="ac-cashout" onClick={() => cashOutPm(p)}>Cash out</button>
+                          <button
+                            className="ac9-chart"
+                            onClick={() => chartPm(p)}
+                            disabled={chartBusy != null}
+                          >
+                            {chartBusy === p.market_slug ? '…' : 'Chart'}
+                          </button>
                         </span>
                       </div>
                     )
@@ -338,12 +515,15 @@ export function Accounts() {
             {(k?.positions?.length ?? 0) > 0 ? (
               <div className="ac-table">
                 <div className="ac-thead ac-cols-k">
-                  <span>Ticker</span><span className="num">Qty</span><span className="num">Cost</span>
+                  <span>Market</span><span className="num">Qty</span><span className="num">Cost</span>
                   <span className="num">Bid</span><span className="num">Value</span><span className="num">Unrl</span><span />
                 </div>
                 {k!.positions.map((p) => (
                   <div className="ac-row ac-cols-k" key={p.ticker}>
-                    <span className="ac-cell ac-main mono">{p.ticker}</span>
+                    <span className={`ac-cell ac-main${p.title ? '' : ' mono'}`}>
+                      {p.title || p.ticker}
+                      {p.title && <span className="ac-sub mono">{p.ticker}</span>}
+                    </span>
                     <span className="ac-cell num mono" data-l="Qty">{Math.round(p.qty)}</span>
                     <span className="ac-cell num mono" data-l="Cost">{money(p.cost_usd)}</span>
                     <span className="ac-cell num mono" data-l="Bid">{cents(p.mark_bid)}</span>

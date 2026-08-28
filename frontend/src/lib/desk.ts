@@ -23,6 +23,8 @@ export interface PMPosition {
 export interface KPosition {
   ticker: string; qty: number; cost_usd: number | null
   mark_bid: number | null; value_usd: number | null; unrealized: number | null
+  /** Venue market title (v9 hub) — display it, ticker as the subline. */
+  title?: string | null
 }
 export interface DeskAccounts {
   as_of: string | number

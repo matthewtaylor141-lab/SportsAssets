@@ -1,0 +1,110 @@
+/* ═══ Accounts v9 (owner order 2026-08-28: THE HUB). Page-scoped layer
+   on top of desk2.css — every class here is ac9-*; desk2.css is owned
+   elsewhere and never edited. Palette discipline: gold = money
+   (--bt-gold), cyan = live (--bt-cyan), both from theme.css v9. All
+   presentation-only — numbers render exactly as the payload sends them. */
+
+/* ── Balances hero: committed-capital ring + regrouped totals tiles ── */
+.ac9-hero {
+  display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: 12px; margin: 12px 0 12px; align-items: stretch;
+}
+.ac9-ringcard {
+  display: flex; align-items: center; gap: 20px; min-width: 0;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px 18px;
+}
+.ac9-ring { position: relative; width: 120px; height: 120px; flex: none; }
+.ac9-ring svg { display: block; }
+.ac9-arc-base { stroke: var(--surface-3, #262a30); }
+.ac9-arc-base.live { stroke: rgba(105, 224, 255, 0.4); }
+.ac9-arc-gold { stroke: var(--bt-gold, #e8c877); }
+.ac9-ring-c {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 2px; pointer-events: none;
+}
+.ac9-ring-v { font-size: 15px; font-weight: 800; letter-spacing: -0.02em; }
+.ac9-ring-l {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--muted);
+}
+.ac9-legend {
+  display: flex; flex-direction: column; gap: 8px; min-width: 0; flex: 1;
+  font-size: 12.5px; color: var(--muted);
+}
+.ac9-legend > div { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ac9-legend b {
+  margin-left: auto; color: var(--ink); font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ac9-sw { width: 9px; height: 9px; border-radius: 3px; flex: none; }
+.ac9-sw.gold { background: var(--bt-gold, #e8c877); }
+.ac9-sw.cyan { background: rgba(105, 224, 255, 0.55); }
+.ac9-sw.neutral { background: var(--surface-3, #262a30); }
+.ac9-tiles { display: grid; gap: 12px; align-content: stretch; min-width: 0; }
+
+/* ── Live-pulse freshness line ───────────────────────────────────── */
+.ac9-asof { display: flex; align-items: center; gap: 7px; }
+.ac9-asof .pulse-dot { flex: none; }
+
+/* ── "Riding on": per-whale open copy exposure ───────────────────── */
+.ac9-ride {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 16px; margin: 0 0 14px;
+}
+.ac9-ride-h {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  font-size: 13.5px; font-weight: 800; margin-bottom: 10px;
+}
+.ac9-ride-h small { color: var(--muted); font-weight: 600; font-size: 11.5px; }
+.ac9-ride-row {
+  display: grid; grid-template-columns: minmax(80px, 150px) 1fr auto;
+  gap: 10px; align-items: center; padding: 4px 0; font-size: 12.5px;
+}
+.ac9-ride-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-weight: 600;
+}
+.ac9-ride-bar {
+  height: 8px; border-radius: 4px; overflow: hidden;
+  background: var(--surface-2, #1e2126);
+}
+.ac9-ride-bar i {
+  display: block; height: 100%; border-radius: 4px;
+  background: linear-gradient(90deg, #d9b45c, var(--bt-gold, #e8c877));
+}
+.ac9-ride-num { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ac9-ride-num b { color: var(--bt-gold, #e8c877); font-weight: 800; }
+
+/* ── PM position rows: Chart affordance + inline note ────────────── */
+.ac9-act { display: flex; flex-direction: column; gap: 5px; }
+.ac9-chart {
+  border: 1px solid var(--border-strong); background: transparent; color: var(--ink);
+  border-radius: 8px; padding: 6px 10px; font-size: 11px; font-weight: 800;
+  cursor: pointer; letter-spacing: 0.03em; white-space: nowrap;
+}
+.ac9-chart:hover:not(:disabled) { border-color: rgba(105, 224, 255, 0.5); color: var(--bt-cyan, #69e0ff); }
+.ac9-chart:disabled { opacity: 0.55; cursor: default; }
+.ac9-note {
+  border: 1px solid rgba(105, 224, 255, 0.3); background: var(--bt-cyan-dim, rgba(105, 224, 255, 0.12));
+  color: var(--bt-cyan, #69e0ff); border-radius: 8px; padding: 6px 10px;
+  font-size: 12px; margin: 0 0 8px;
+}
+.ac9-note.mut {
+  color: var(--muted); border-color: var(--border);
+  background: var(--surface-2, #1e2126);
+}
+
+/* ── Breakpoints ─────────────────────────────────────────────────── */
+@media (max-width: 980px) {
+  .ac9-hero { grid-template-columns: 1fr; }
+  .ac9-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .ac9-hero { gap: 8px; }
+  .ac9-ringcard { gap: 14px; padding: 14px; }
+  .ac9-tiles { grid-template-columns: 1fr; gap: 8px; }
+  .ac9-act { flex-direction: row; }
+  .ac9-act .ac-cashout, .ac9-act .ac9-chart { flex: 1; min-height: 44px; }
+  .ac9-ride { margin-bottom: 12px; }
+}

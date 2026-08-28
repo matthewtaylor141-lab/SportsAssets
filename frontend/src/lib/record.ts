@@ -227,6 +227,18 @@ export interface CopiesTrade {
   stake: number
   pnl: number
   status: string
+  sport?: string | null
+  /** Venue id as the executor recorded it, e.g. 'polymarket-us'/'kalshi'. */
+  venue?: string | null
+  /** Whale fill → our order, seconds; null when unmeasured. */
+  latency_s?: number | null
+}
+
+/** Per-whale open exposure — who the table is riding on right now. */
+export interface CopiesOpenWhale {
+  whale: string
+  count: number
+  stake: number
 }
 
 export interface CopiesRecord {
@@ -243,7 +255,7 @@ export interface CopiesRecord {
   daily: CopiesDay[]
   daily_by_whale?: CopiesDayWhale[]
   /** What the copy sleeves have on the table right now. */
-  open?: { count: number; stake: number }
+  open?: { count: number; stake: number; by_whale?: CopiesOpenWhale[] }
   trades?: CopiesTrade[]
   today?: { pnl: number; settled: number; wins: number; losses: number }
   /** Per-venue split — kalshi is null until the engine export lands. */
@@ -253,19 +265,36 @@ export interface CopiesRecord {
   }
   /** True when the Kalshi copy sleeve is merged into the totals. */
   kalshi_included?: boolean
+  /** True when the served window starts at the display epoch (no
+   * ?since= override) — the record restarted from zero on that day. */
+  rebaselined?: boolean
+  /** The display epoch day, ET (COPIES_EPOCH server-side). */
+  epoch?: string
 }
 
-export function useCopiesRecord(refreshMs = 30_000) {
+/** ?since= that reaches past the display epoch to the whole history. */
+export const ALL_TIME_SINCE = '2020-01-01'
+
+export function useCopiesRecord(refreshMs = 30_000, since?: string) {
+  // Each window is its own path, so usePolled's per-path cache and the
+  // monotone guard below both compare epoch-to-epoch or all-time-to-
+  // all-time — the two datasets never mix.
   return usePolled<CopiesRecord>(
-    '/api/copies-record',
+    since ? `/api/copies-record?since=${since}` : '/api/copies-record',
     refreshMs,
     undefined,
     // Same monotone guard as the account record: settlements since a
     // fixed start only grow, so a payload whose settled count collapses
     // is a degraded snapshot (mid-boot, partial hydrate) — hold the
-    // last good numbers instead of shrinking the public headline.
-    (prev, next) =>
-      (next.total?.settled ?? 0) >= (prev.total?.settled ?? 0) * 0.9,
+    // last good numbers instead of shrinking the public headline. The
+    // check binds payloads of the SAME window only: a server-side
+    // re-baseline (COPIES_EPOCH, owner order 2026-08-28) moves `since`
+    // forward on the default path and the count legitimately restarts —
+    // refusing that payload would pin the page to the pre-epoch cache.
+    (prev, next) => {
+      if ((prev.since || '') !== (next.since || '')) return true
+      return (next.total?.settled ?? 0) >= (prev.total?.settled ?? 0) * 0.9
+    },
   )
 }
 
