@@ -437,6 +437,7 @@ class S1Emitter:
         self.trips: dict[str, float] = {}
         self.unjudged_backlog = 0
         self.cert_green = False
+        self.cert_metrics: dict = {}
         self.cert_reason = "never_checked"
         self.cert_checked_at = 0.0
         self.last_flush_at = 0.0
@@ -766,17 +767,23 @@ class S1Emitter:
 
     # ── certification ───────────────────────────────────────────────
     def _judge_cert(self, doc: dict | None, now: float) -> tuple[bool, str]:
+        # CERT METRICS (owner ask 2026-08-28: "can we get S1 live
+        # right now?"): the reason string alone could not answer WHEN
+        # — every judged quantity is now stashed for the status
+        # surface, so the ops row and the probe print the window age,
+        # the floors' progress, and the exact epoch the gate goes
+        # green if the window stays clean. Observability only: the
+        # judgment order and every bar are byte-identical.
+        m: dict = {"window_needs_d": round(CERT_WINDOW_S / 86400.0, 1)}
+        self.cert_metrics = m
         if not isinstance(doc, dict):
             return False, "no_shadow_state"
         ws, hs = doc.get("window_start"), doc.get("health_start")
-        if not isinstance(ws, (int, float)) or now - ws < CERT_WINDOW_S:
-            return False, "window_young"
-        if not isinstance(hs, (int, float)) or now - hs < CERT_HEALTH_S:
-            return False, "health_young"
-        if doc.get("decoder_fp") != DECODER_FP:
-            # the emitter refuses to run a decode the window did not
-            # certify — version skew in either direction is RED
-            return False, "decoder_fp_mismatch"
+        if isinstance(ws, (int, float)):
+            m["window_age_d"] = round((now - ws) / 86400.0, 2)
+            m["green_at_epoch"] = round(ws + CERT_WINDOW_S)
+        if isinstance(hs, (int, float)):
+            m["health_age_d"] = round((now - hs) / 86400.0, 2)
         c = doc.get("counters") or {}
         aw = doc.get("at_window") or {}
 
@@ -786,9 +793,21 @@ class S1Emitter:
             wv = wv if isinstance(wv, (int, float)) else 0
             return int(cv - wv)
 
-        if _delta("sim_ven_suppressed") < CERT_MIN_VEN:
+        m["ven_suppressed"] = _delta("sim_ven_suppressed")
+        m["ven_floor"] = CERT_MIN_VEN
+        m["agg_decoded"] = _delta("decoded_agg")
+        m["agg_floor"] = CERT_MIN_AGG
+        if not isinstance(ws, (int, float)) or now - ws < CERT_WINDOW_S:
+            return False, "window_young"
+        if not isinstance(hs, (int, float)) or now - hs < CERT_HEALTH_S:
+            return False, "health_young"
+        if doc.get("decoder_fp") != DECODER_FP:
+            # the emitter refuses to run a decode the window did not
+            # certify — version skew in either direction is RED
+            return False, "decoder_fp_mismatch"
+        if m["ven_suppressed"] < CERT_MIN_VEN:
             return False, "volume_floor_ven"
-        if _delta("decoded_agg") < CERT_MIN_AGG:
+        if m["agg_decoded"] < CERT_MIN_AGG:
             return False, "volume_floor_agg"
         return True, "green"
 
@@ -1728,7 +1747,9 @@ def emitter_beat() -> dict:
     try:
         st = _STATE
         return {"enabled": st.enabled, "armed": st.armed,
-                "cert": st.cert_reason, "tripped": st.tripped,
+                "cert": st.cert_reason,
+                "cert_metrics": getattr(st, "cert_metrics", {}),
+                "tripped": st.tripped,
                 "pending": len(st.pending),
                 "emitted": st.counters.get("s1.emitted", 0)
                 + st.deltas.get("s1.emitted", 0),

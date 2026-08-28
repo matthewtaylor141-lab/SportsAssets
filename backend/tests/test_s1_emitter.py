@@ -2279,3 +2279,27 @@ def test_redundant_clear_never_bumps_the_release_counter(st):
     assert st.deltas.get("s1.trip_self_cleared") is None, \
         "but a transition another process made is never re-counted"
     assert "removed" in s1.SQL_CLEAR, "the statement carries the signal"
+
+
+def test_cert_metrics_answer_when_without_moving_the_bar(st):
+    """Owner ask 2026-08-28 ('can we get S1 live right now?'): the
+    cert reason alone could not answer WHEN. _judge_cert now stashes
+    every judged quantity — window age, the green epoch, floor
+    progress — while the judgment order and every bar stay
+    byte-identical. The status beat carries them."""
+    now = float(TS0)
+    doc = {"window_start": now - 3 * 86400, "health_start": now - 2 * 86400,
+           "decoder_fp": s1.DECODER_FP,
+           "counters": {"sim_ven_suppressed": 700, "decoded_agg": 90},
+           "at_window": {"sim_ven_suppressed": 100, "decoded_agg": 10}}
+    green, reason = st._judge_cert(doc, now)
+    assert (green, reason) == (False, "window_young")
+    m = st.cert_metrics
+    assert m["window_age_d"] == 3.0 and m["window_needs_d"] == 7.0
+    assert m["green_at_epoch"] == round(now + 4 * 86400)
+    assert m["ven_suppressed"] == 600 and m["agg_decoded"] == 80
+    # an aged window with the same floors goes green — bars unmoved
+    doc["window_start"] = now - 8 * 86400
+    assert st._judge_cert(doc, now) == (True, "green")
+    from sportsassets.ingestion.s1_emitter import emitter_beat
+    assert "cert_metrics" in emitter_beat()
