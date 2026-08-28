@@ -195,3 +195,42 @@ def test_ingest_failure_costs_one_row_not_the_batch(fake_env, monkeypatch):
     assert new == 1, "the healthy row still ingests"
     assert len(ingested) == 1
     assert ingested[0].tx_hash == RAW_TRADE["transactionHash"]
+
+
+def test_non_list_body_is_a_poll_failure_not_an_empty_success(
+        fake_env, monkeypatch):
+    """fleet r23 (major): an HTTP-200 body that is valid JSON but not
+    a list (error dict, pagination envelope, bare string) iterated
+    anyway — every element died in the per-row containment and the
+    cycle returned 0 as a SUCCESSFUL empty poll, resetting the
+    failure counter and heartbeating 'ok'. The 'Path B degraded'
+    alert (and the ops monitor reading the same heartbeat row) was
+    structurally unreachable while the carrier was dead. The poller
+    now fails the cycle — mirroring the reconciler's round-19
+    classification of the identical body — so run()'s failure
+    accounting counts it and the alert can fire."""
+    class _ErrResp:
+        def __init__(self, body):
+            self._body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._body
+
+    for body in ({"error": "upstream", "code": 503},
+                 {"data": [RAW_TRADE]},
+                 "service unavailable"):
+        async def fake_get(http, path, params=None, _b=body):
+            return _ErrResp(_b)
+
+        monkeypatch.setattr("sportsassets.ratelimit.polite_get", fake_get)
+        p = Poller.__new__(Poller)
+        p._http = None
+        p.last_lag_s = None
+        loop = asyncio.get_event_loop_policy().new_event_loop()
+        with pytest.raises(ValueError):
+            loop.run_until_complete(p.poll_wallet(
+                {"id": 1, "address": "0xw", "username": "w"}))
+        loop.close()

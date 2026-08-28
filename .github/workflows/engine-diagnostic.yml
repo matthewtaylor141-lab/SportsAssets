@@ -836,7 +836,7 @@ jobs:
           # the rows carrying the drag: real execution cost vs a
           # pairing artifact reads directly off these lines
           jq -r '.capture.worst_rows // [] | .[]
-                 | "  PROOF2WORST \(.whale) \(.side) \(.venue) his=\(.his) ours=\(.ours) sh=\(.shares) drag=$\(.drag_usd) \(.slug)"' \
+                 | "  PROOF2WORST \(.whale) \(.side) \(.intent // "?") \(.venue) his=\(.his) ours=\(.ours) sh=\(.shares) drag=$\(.drag_usd) \(.slug)"' \
             /tmp/proof2.json 2>/dev/null || true
           # PRICEFID — "same or better price", measured at last.
           #

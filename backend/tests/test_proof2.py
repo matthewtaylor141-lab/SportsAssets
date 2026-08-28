@@ -162,3 +162,36 @@ def test_worst_rows_name_the_drag_carriers():
     assert top["slug"] == "the-culprit"
     assert abs(top["drag_usd"] - 300.0) < 1e-6
     assert top["side"] == "BUY" and top["his"] == 0.1
+
+
+def test_short_copies_are_denominated_by_cost_per_share(monkeypatch):
+    """First-print finding #2 (the PRICEFID short bug's family): on a
+    BUY_SHORT copy the venue's fill_price names the LONG leg — his
+    0.10 underdog entry recorded as ~0.90 fabricated ~80c/share of
+    drag on our BEST fills. capture must denominate through
+    cost_per_share, the one owner of the long/short conversion."""
+    from sportsassets import live_executor as le
+
+    monkeypatch.setattr(le, "short_model_confirmed", lambda: True)
+    row = dict(_row(0.10, 0.87, 100),
+               intent="MARKET_ORDER_INTENT_BUY_SHORT")
+    c = capture_from_rows([row])
+    # our true cost is 1 - 0.87 = 0.13: drag = (0.13 - 0.10) x 100
+    assert abs(c["drag_usd"] - 3.0) < 1e-9, \
+        "3c of real slippage, not 77c of fabricated drag"
+    assert abs(c["worst_rows"][0]["ours"] - 0.13) < 1e-9
+    # a long row is untouched by the conversion
+    c2 = capture_from_rows([_row(0.50, 0.52, 100)])
+    assert abs(c2["drag_usd"] - 2.0) < 1e-9
+
+
+def test_ledger_sql_carries_the_one_intent_expression():
+    """The intent LEDGER_SQL exposes must stay the same expression
+    ORDER_INTENT_SQL owns — normalized-whitespace containment, so a
+    change to either side breaks this pin and forces a re-sync."""
+    from sportsassets.api.copy_reports import LEDGER_SQL
+    from sportsassets.live_executor import ORDER_INTENT_SQL
+
+    norm = " ".join(ORDER_INTENT_SQL.split())
+    assert norm in " ".join(LEDGER_SQL.split()), \
+        "one expression owns the intent read"

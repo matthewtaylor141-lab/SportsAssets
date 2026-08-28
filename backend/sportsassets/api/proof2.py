@@ -61,14 +61,27 @@ def capture_from_rows(rows: list[dict]) -> dict:
     (Kalshi's published formula; PM-US currently fee-free on these
     books).
     """
+    from ..live_executor import cost_per_share
+
     usable = []
     for r in rows:
         his = r.get("his_price")
-        ours = r.get("fill_price")
+        raw_fill = r.get("fill_price")
         sh = r.get("shares")
-        if his is None or ours is None or not sh or sh <= 0:
+        if his is None or raw_fill is None or not sh or sh <= 0:
             continue
-        if his <= 0 or ours <= 0:
+        if his <= 0 or raw_fill <= 0:
+            continue
+        # DENOMINATION (first-print finding #2, the PRICEFID short
+        # bug's family): fill_price names the venue's LONG leg. On a
+        # BUY_SHORT copy of his 0.10 underdog entry the row reads
+        # ~0.90, and raw (ours - his) fabricated ~80c/share of drag
+        # on our BEST fills — the meter's first print showed 33.6%
+        # drag built almost entirely from this. cost_per_share owns
+        # the long/short conversion; his_price is already the price
+        # of the leg he took.
+        ours = cost_per_share(float(raw_fill), r.get("intent"))
+        if ours <= 0:
             continue
         # SELL sign (first-print finding 2026-08-28): for a mirror
         # exit, paying LESS than his exit price is the drag — the
@@ -79,7 +92,8 @@ def capture_from_rows(rows: list[dict]) -> dict:
         usable.append((float(his), float(ours), float(sh),
                        str(r.get("venue") or ""),
                        str(r.get("whale") or ""), sell,
-                       str(r.get("slug") or "")))
+                       str(r.get("slug") or ""),
+                       str(r.get("intent") or "")))
     n = len(usable)
     if n == 0:
         return {"n": 0, "drag_rate": None, "drag_se": None,
@@ -88,21 +102,21 @@ def capture_from_rows(rows: list[dict]) -> dict:
     def _drag(h: float, o: float, sell: bool) -> float:
         return (h - o) if sell else (o - h)
 
-    tot_his = sum(h * s for h, o, s, v, w, sl, g in usable)
+    tot_his = sum(h * s for h, o, s, v, w, sl, g, it in usable)
     drag_usd = sum(_drag(h, o, sl) * s
-                   for h, o, s, v, w, sl, g in usable)
+                   for h, o, s, v, w, sl, g, it in usable)
     fee_usd = sum(kalshi_fee(s, o) if v.startswith("kalshi") else 0.0
-                  for h, o, s, v, w, sl, g in usable)
+                  for h, o, s, v, w, sl, g, it in usable)
     drag_rate = drag_usd / tot_his
     fee_rate = fee_usd / tot_his
     # weighted SE of the drag rate: w_i = his-notional share
     var = 0.0
-    for h, o, s, v, w, sl, g in usable:
+    for h, o, s, v, w, sl, g, it in usable:
         wgt = (h * s) / tot_his
         r_i = _drag(h, o, sl) / h
         var += (wgt ** 2) * ((r_i - drag_rate) ** 2)
     per_whale: dict[str, float] = {}
-    for h, o, s, v, w, sl, g in usable:
+    for h, o, s, v, w, sl, g, it in usable:
         per_whale[w] = per_whale.get(w, 0.0) + h * s
     # DIAGNOSTIC (first live print showed drag 33.6% — implausible
     # for a FOK-at-his+2% fresh lane): name the rows that carry the
@@ -113,11 +127,11 @@ def capture_from_rows(rows: list[dict]) -> dict:
                                               * u[2]))[:8]
     worst_rows = [{
         "slug": g[:60], "whale": w, "venue": v,
-        "side": "SELL" if sl else "BUY",
+        "side": "SELL" if sl else "BUY", "intent": it[-18:],
         "his": round(h, 4), "ours": round(o, 4),
         "shares": round(s, 2),
         "drag_usd": round(_drag(h, o, sl) * s, 2),
-    } for h, o, s, v, w, sl, g in worst]
+    } for h, o, s, v, w, sl, g, it in worst]
     return {
         "n": n,
         "entry_notional": round(tot_his, 2),

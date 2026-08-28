@@ -98,8 +98,25 @@ class Poller:
             params={"user": whale["address"], "limit": 100, "takerOnly": "false"},
         )
         resp.raise_for_status()
+        page = resp.json()
+        if not isinstance(page, list):
+            # round 23 (major): an HTTP-200 body that is valid JSON
+            # but NOT a list (an error dict, a pagination envelope, a
+            # bare JSON string) used to iterate anyway — every element
+            # died in the per-row containment below and the cycle
+            # returned 0 as a SUCCESSFUL empty poll, RESETTING the
+            # failure counter and heartbeating 'ok': the configured
+            # 'Path B degraded' alert was structurally unreachable
+            # while the carrier was dead, and the ops monitor reads
+            # the same heartbeat row. The reconciler has classified
+            # this exact body as a venue error shape since round 19;
+            # the poller now fails the cycle so run()'s failure
+            # accounting counts it and the alert can fire.
+            raise ValueError(
+                "venue served a non-list /trades body: "
+                + type(page).__name__)
         events = []
-        for raw in resp.json():
+        for raw in page:
             # same validity the reconciler enforces (fleet rounds
             # 12-14): every dedupe-key field gates ingest, checked on
             # the NORMALIZED, FINITE values the key itself derives —
