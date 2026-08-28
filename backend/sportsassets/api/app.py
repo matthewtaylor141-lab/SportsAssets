@@ -1680,11 +1680,11 @@ async def api_admin_book(venue: str = Query(...),
                 levels["asks"] = sorted(
                     ([float(x["price"]), float(x["size"])]
                      for x in (d.get("asks") or [])),
-                    key=lambda l: l[0])[:5]
+                    key=lambda l: l[0])[:10]
                 levels["bids"] = sorted(
                     ([float(x["price"]), float(x["size"])]
                      for x in (d.get("bids") or [])),
-                    key=lambda l: -l[0])[:5]
+                    key=lambda l: -l[0])[:10]
         elif venue == "kalshi":
             async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
                                          timeout=8) as client:
@@ -1704,10 +1704,10 @@ async def api_admin_book(venue: str = Query(...),
 
                 yes_bids = _lv(ob.get("yes_dollars") or ob.get("yes"))
                 no_bids = _lv(ob.get("no_dollars") or ob.get("no"))
-                levels["bids"] = sorted(yes_bids, key=lambda l: -l[0])[:5]
+                levels["bids"] = sorted(yes_bids, key=lambda l: -l[0])[:10]
                 levels["asks"] = sorted(
                     ([round(1 - p, 2), c] for p, c in no_bids),
-                    key=lambda l: l[0])[:5]
+                    key=lambda l: l[0])[:10]
     except Exception:  # noqa: BLE001 — depth is display, never a gate
         pass
     return levels
@@ -2525,7 +2525,12 @@ async def api_manual_trade(body: ManualTradeBody,
     await reap_stale_desk_queue(pool)
     day_spent = float(await pool.fetchval(
         """
-        SELECT COALESCE((SELECT sum(filled_usd) FROM live_orders
+        SELECT COALESCE((SELECT sum(CASE WHEN status IN ('submitting',
+                                                         'open')
+                                    THEN GREATEST(COALESCE(filled_usd, 0),
+                                              COALESCE(requested_usd, 0))
+                                    ELSE COALESCE(filled_usd, 0) END)
+                         FROM live_orders
                          WHERE whale_username = 'manual'
                            AND placed_at > now() - interval '24 hours'), 0)
              + COALESCE((SELECT sum(usd) FROM manual_kalshi_queue
@@ -2916,7 +2921,12 @@ async def api_manual_trades() -> dict:
     out.sort(key=lambda t: t["placed_at"] or "", reverse=True)
     day_spent = float(await pool.fetchval(
         """
-        SELECT COALESCE((SELECT sum(filled_usd) FROM live_orders
+        SELECT COALESCE((SELECT sum(CASE WHEN status IN ('submitting',
+                                                         'open')
+                                    THEN GREATEST(COALESCE(filled_usd, 0),
+                                              COALESCE(requested_usd, 0))
+                                    ELSE COALESCE(filled_usd, 0) END)
+                         FROM live_orders
                          WHERE whale_username = 'manual'
                            AND placed_at > now() - interval '24 hours'), 0)
              + COALESCE((SELECT sum(usd) FROM manual_kalshi_queue
@@ -2953,6 +2963,56 @@ async def _engine_heartbeat_detail() -> dict:
         except ValueError:
             return {}
     return detail if isinstance(detail, dict) else {}
+
+
+# ticker -> (fetched_at_epoch, title); the venue's market titles are
+# immutable in practice, so a long TTL is honest.
+_KALSHI_TITLE_CACHE: dict[str, tuple[float, str]] = {}
+_KALSHI_TITLE_TTL_S = 6 * 3600.0
+
+
+async def _enrich_kalshi_titles(positions: list[dict]) -> None:
+    """Attach venue titles to Kalshi position rows in place. Public
+    metadata, cached, concurrent, best-effort — a miss leaves the
+    ticker, never blocks the accounts card."""
+    import httpx
+
+    now = time.time()
+    need = []
+    for p in positions:
+        t = str(p.get("ticker") or "")
+        if not t or p.get("title"):
+            continue
+        hit = _KALSHI_TITLE_CACHE.get(t)
+        if hit and now - hit[0] < _KALSHI_TITLE_TTL_S:
+            p["title"] = hit[1]
+        else:
+            need.append(p)
+    if not need:
+        return
+
+    async def _one(client: httpx.AsyncClient, p: dict) -> None:
+        t = str(p.get("ticker") or "")
+        try:
+            resp = await client.get(f"/markets/{t}")
+            if resp.status_code != 200:
+                return
+            m = (resp.json() or {}).get("market") or {}
+            title = str(m.get("title") or "").strip()
+            sub = str(m.get("yes_sub_title") or "").strip()
+            full = f"{title} — {sub}" if title and sub else (title or None)
+            if full:
+                _KALSHI_TITLE_CACHE[t] = (now, full)
+                p["title"] = full
+        except Exception:  # noqa: BLE001 — display only
+            return
+
+    try:
+        async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                     timeout=6) as client:
+            await asyncio.gather(*(_one(client, p) for p in need[:24]))
+    except Exception:  # noqa: BLE001
+        return
 
 
 def kalshi_accounts_view(detail: dict, now: float) -> dict:
@@ -3092,6 +3152,10 @@ async def api_desk_accounts(role: str = Depends(require_desk)) -> dict:
         pm["trading_capital"] = round(pm["cash"] + committed, 2)
         pm["committed_usd"] = round(committed, 2)
     kalshi = kalshi_accounts_view(await _engine_heartbeat_detail(), now)
+    # Venue parity (owner order 2026-08-28): a Kalshi position shows
+    # its market TITLE, not a raw ticker — enriched from the venue's
+    # public metadata, cached, best-effort.
+    await _enrich_kalshi_titles(kalshi.get("positions") or [])
     k_pos_value = sum(
         (p["value_usd"] if p["value_usd"] is not None
          else (p["cost_usd"] or 0)) or 0
@@ -3235,12 +3299,19 @@ async def api_desk_cash_out(body: CashOutBody,
 
 @app.delete("/api/desk/manual-order/{id}")
 async def api_desk_cancel_manual_order(
-        id: int, role: str = Depends(require_desk)) -> dict:
-    """Cancel a queued (not yet relayed) Kalshi desk order. Only a
-    'pending' row can be cancelled — once the relay picked it up the
-    order is at the venue and this endpoint says so."""
+        id: int, venue: str = Query("kalshi"),
+        role: str = Depends(require_desk)) -> dict:
+    """Cancel a desk order. venue=kalshi (default, back-compat): a
+    queued not-yet-relayed row — once the relay picked it up the order
+    is at the venue and this endpoint says so. venue=polymarket: a
+    RESTING GTC row is cancelled at the venue itself; a cancel that
+    raced a fill records the fill, never erases it."""
     if role == "wall":
         raise HTTPException(status_code=403, detail="wall is read-only")
+    if venue == "polymarket":
+        from ..live_executor import cancel_manual_open
+
+        return await cancel_manual_open(id)
     pool = await get_pool()
     rid = await pool.fetchval(
         "UPDATE manual_kalshi_queue SET status='cancelled', "
@@ -3249,6 +3320,97 @@ async def api_desk_cancel_manual_order(
     if rid is None:
         return {"ok": False, "error": "already picked up"}
     return {"ok": True, "cancelled": True}
+
+
+class ManualLimitBody(BaseModel):
+    usd: float
+    limit_price: float
+    asset: str = ""
+    us_slug: str = ""
+    note: str = ""
+
+
+@app.post("/api/admin/manual-limit")
+async def api_manual_limit(body: ManualLimitBody,
+                           role: str = Depends(require_desk)) -> dict:
+    """Place a RESTING desk BUY at the user's own limit price (owner
+    order 2026-08-28, venue parity): a GTC on Polymarket US through
+    the same gate stack as every manual ticket — per-order cap, kill
+    switch, 24h budget that counts the commitment the moment it
+    rests, venue-named side or refusal."""
+    if role == "wall":
+        raise HTTPException(status_code=403, detail="wall is read-only")
+    from ..live_executor import execute_manual_limit
+
+    return await execute_manual_limit(body.usd, body.limit_price,
+                                      asset=body.asset,
+                                      us_slug=body.us_slug,
+                                      note=body.note)
+
+
+@app.get("/api/admin/open-orders", dependencies=[Depends(require_desk)])
+async def api_open_orders() -> dict:
+    """Every working desk order, both venues, one list: PM resting
+    GTCs (reconciled against the venue's own order records on each
+    read, so a fill that happened while nobody watched lands in the
+    audit row now) and queued Kalshi relay tickets."""
+    from ..live_executor import sync_open_manual_orders
+
+    pool = await get_pool()
+    try:
+        await sync_open_manual_orders(pool)
+    except Exception:  # noqa: BLE001 — the list still serves DB truth
+        pass
+    pm_rows = await pool.fetch(
+        """
+        SELECT id, us_market_slug, side, limit_price::float8 AS limit_price,
+               requested_shares::float8 AS requested_shares,
+               filled_shares::float8 AS filled_shares,
+               requested_usd::float8 AS requested_usd, placed_at, order_id
+        FROM live_orders
+        WHERE whale_username = 'manual' AND status = 'open'
+        ORDER BY placed_at DESC
+        """)
+    k_rows = await pool.fetch(
+        """
+        SELECT id, ticker, title, side,
+               COALESCE(action, 'buy') AS action,
+               limit_price::float8 AS limit_price, count, usd::float8 AS usd,
+               status, created_at
+        FROM manual_kalshi_queue
+        WHERE status = 'pending'
+        ORDER BY created_at DESC
+        """)
+    return {
+        "polymarket": [dict(r, placed_at=_iso_ts(r["placed_at"]))
+                       for r in pm_rows],
+        "kalshi": [dict(r, created_at=_iso_ts(r["created_at"]))
+                   for r in k_rows],
+    }
+
+
+def _iso_ts(v: Any) -> str | None:
+    if v is None:
+        return None
+    return v.isoformat() if hasattr(v, "isoformat") else str(v)
+
+
+@app.get("/api/admin/slug-token", dependencies=[Depends(require_desk)])
+async def api_slug_token(slug: str = Query(...)) -> dict:
+    """US venue market slug -> the global CLOB token our charts key on
+    (owner order 2026-08-28: a held position must chart like any other
+    market). Source of truth is our own order ledger — a mapping we
+    actually traded through — falling back to the whale ledger."""
+    pool = await get_pool()
+    s = slug.strip().lower()
+    asset = await pool.fetchval(
+        """
+        SELECT asset FROM live_orders
+        WHERE lower(COALESCE(us_market_slug, '')) = $1
+          AND asset IS NOT NULL AND asset NOT LIKE 'slug:%'
+        ORDER BY placed_at DESC LIMIT 1
+        """, s)
+    return {"slug": slug, "asset": asset, "found": asset is not None}
 
 
 class EngineMethodologyBody(BaseModel):

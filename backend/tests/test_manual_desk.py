@@ -20,7 +20,9 @@ class _Pool:
         self.executed = []
 
     async def fetchval(self, q, *a, **k):
-        if "sum(filled_usd)" in q:
+        # r6/hub: the budget sums open commitments too (GREATEST over
+        # requested_usd for submitting/open rows) — same dispatch key
+        if "whale_username = 'manual'" in q and "sum(" in q.lower():
             return self.day_spent
         if "INSERT INTO live_orders" in q:
             return 42

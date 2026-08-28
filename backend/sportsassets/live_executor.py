@@ -3051,15 +3051,14 @@ async def _execute_manual(asset: str, usd: float, note: str = "",
     pool = await get_pool()
     if await _is_paused(pool):
         return {"ok": False, "error": "live trading paused (kill switch)"}
-    day_spent = float(await pool.fetchval(
-        "SELECT COALESCE(sum(filled_usd), 0) FROM live_orders "
-        "WHERE whale_username = 'manual' "
-        "AND placed_at > now() - interval '24 hours'") or 0)
+    # open resting commitments count (owner order 2026-08-28) — the
+    # budget is what the day PROMISED, not only what already filled
+    day_spent = await _manual_day_spent(pool)
     if day_spent + usd > MANUAL_DAILY_USD:
         return {"ok": False,
                 "error": (f"manual day budget exhausted "
                           f"(${day_spent:.2f} of ${MANUAL_DAILY_USD:.0f} "
-                          "in 24h)")}
+                          "in 24h, open orders included)")}
     if us_slug and not asset:
         return await _execute_manual_slug(pool, us_slug, usd, note,
                                           ask_hint, venue)
@@ -3258,6 +3257,246 @@ async def _execute_manual_slug(pool, us_slug: str, usd: float, note: str,
             row_id, str(exc)[:300])
         return {"ok": False, "row_id": row_id,
                 "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+
+# Venue states that mean the manual GTC row is still working the book.
+_MANUAL_OPEN_STATES = frozenset({"new", "pending_new", "partially_filled",
+                                 "pending_replace", "pending_risk", "open"})
+
+
+async def _manual_day_spent(pool) -> float:
+    """The 24h manual spend INCLUDING open commitments (owner order
+    2026-08-28): a resting GTC is money promised to the book — counting
+    only fills would let $1000 of resting orders ride beside a full
+    day's fills. Strictly tighter than the old fills-only sum."""
+    return float(await pool.fetchval(
+        """
+        SELECT COALESCE(sum(CASE WHEN status IN ('submitting', 'open')
+                                 THEN GREATEST(COALESCE(filled_usd, 0),
+                                               COALESCE(requested_usd, 0))
+                                 ELSE COALESCE(filled_usd, 0) END), 0)
+        FROM live_orders
+        WHERE whale_username = 'manual'
+          AND placed_at > now() - interval '24 hours'
+        """) or 0)
+
+
+async def execute_manual_limit(usd: float, limit_price: float,
+                               asset: str = "", us_slug: str = "",
+                               note: str = "") -> dict:
+    """Place an admin-directed RESTING BUY: a GTC limit at the desk
+    user's own price (owner order 2026-08-28, venue parity — the desk
+    ticket works like the venue's own limit ticket). Same gates as
+    every manual order: per-order cap, kill switch, 24h budget (which
+    counts this order's commitment the moment it rests), venue-named
+    side or refusal. Returns a UI-ready dict, never raises."""
+    try:
+        return await _execute_manual_limit(usd, limit_price, asset,
+                                           us_slug, note)
+    except Exception as exc:  # noqa: BLE001 — the desk reports, never 500s
+        log.exception("manual limit order failed pre-flight")
+        return {"ok": False,
+                "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+
+async def _execute_manual_limit(usd: float, limit_price: float,
+                                asset: str, us_slug: str,
+                                note: str) -> dict:
+    from . import pmus
+
+    venue = active_venue()
+    if venue != "polymarket-us":
+        return {"ok": False, "error": "live venue not armed"}
+    if not (0 < usd <= MANUAL_MAX_PER_ORDER_USD):
+        return {"ok": False,
+                "error": f"size must be $0-{MANUAL_MAX_PER_ORDER_USD:.0f}"}
+    try:
+        limit = round(float(limit_price), 2)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "limit price must be a number"}
+    if not (0.01 <= limit <= 0.99):
+        return {"ok": False, "error": "limit must be $0.01-$0.99"}
+    pool = await get_pool()
+    if await _is_paused(pool):
+        return {"ok": False, "error": "live trading paused (kill switch)"}
+    day_spent = await _manual_day_spent(pool)
+    if day_spent + usd > MANUAL_DAILY_USD:
+        return {"ok": False,
+                "error": (f"manual day budget exhausted "
+                          f"(${day_spent:.2f} of ${MANUAL_DAILY_USD:.0f} "
+                          "in 24h, open orders included)")}
+    shares = int(usd / limit)
+    if shares < 1:
+        return {"ok": False, "error": "budget buys zero whole contracts"}
+    intent = None
+    title = note[:120] or us_slug
+    if us_slug and not asset:
+        row_asset = f"slug:{us_slug}"[:120]
+        slug = us_slug
+    else:
+        ctx = await _market_context(pool, {"asset": str(asset)})
+        if not ctx.get("outcome"):
+            return {"ok": False, "error": "unknown asset — pick from search"}
+        mapping = await asyncio.to_thread(
+            pmus.resolve_market_exact,
+            _us_slug_candidates(ctx.get("market_slug")
+                                or ctx.get("event_slug") or "",
+                                ctx.get("outcome") or ""),
+            ctx.get("outcome"))
+        if mapping is None:
+            return {"ok": False,
+                    "error": "no US market maps exactly to this outcome"}
+        row_asset, slug = str(asset), mapping["market_slug"]
+        intent = mapping.get("intent")
+        title = ctx.get("market_title") or title
+    await _reap_stale_submitting(pool)
+    row_id = await pool.fetchval(
+        """
+        INSERT INTO live_orders (trade_id, whale_username, asset,
+                                 condition_id, side, his_price,
+                                 limit_price, requested_usd,
+                                 requested_shares, status,
+                                 venue, us_market_slug)
+        VALUES (NULL, 'manual', $1, NULL, 'BUY', $2, $2, $3, $4,
+                'submitting', $5, $6)
+        RETURNING id
+        """,
+        row_asset, limit, round(shares * limit, 2), float(shares),
+        venue, slug)
+    try:
+        # submit_fok's whole safety stack rides along: the venue-named
+        # side (or ambiguous_side refusal), the preview cost agreement,
+        # and execution accounting — only the time-in-force differs.
+        result = await asyncio.to_thread(
+            pmus.submit_fok, slug, limit, shares, False,
+            "TIME_IN_FORCE_GOOD_TILL_CANCEL", intent)
+        filled = float(result.get("filled_shares") or 0)
+        fill_price = (float(result["fill_price"])
+                      if result.get("fill_price") else None)
+        state = str(result.get("status") or "")
+        order_id = result.get("order_id")
+        if filled >= shares:
+            status = "filled"
+        elif order_id and state in _MANUAL_OPEN_STATES:
+            status = "open"          # resting on the venue's book
+        elif filled > 0:
+            status = "filled"        # partial then terminal
+        else:
+            status = "rejected"
+        await pool.execute(
+            """
+            UPDATE live_orders
+            SET status=$2, order_id=$3, filled_shares=$4, fill_price=$5,
+                filled_usd=$6, raw=$7::jsonb, error=$8
+            WHERE id=$1
+            """,
+            row_id, status, order_id, filled, fill_price,
+            round(filled * (fill_price or 0), 2),
+            json.dumps(result.get("raw"), default=str),
+            None if status != "rejected" else
+            f"venue refused: {state or 'unknown'}")
+        log.info("MANUAL LIMIT %s: %s %.0f @ %.2f (filled %.0f) %s",
+                 status.upper(), slug, float(shares), limit, filled,
+                 note[:60] or "")
+        return {"ok": status in ("open", "filled"), "row_id": row_id,
+                "status": status, "order_id": order_id,
+                "filled_shares": filled, "fill_price": fill_price,
+                "limit_price": limit, "us_market_slug": slug,
+                "title": title,
+                "error": (None if status in ("open", "filled") else
+                          f"venue refused the order ({state or 'unknown'})")}
+    except Exception as exc:  # noqa: BLE001 — the desk reports, never crashes
+        log.exception("manual limit order failed (row %s)", row_id)
+        await pool.execute(
+            "UPDATE live_orders SET status='error', error=$2 WHERE id=$1",
+            row_id, str(exc)[:300])
+        return {"ok": False, "row_id": row_id,
+                "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+
+async def sync_open_manual_orders(pool=None) -> list[dict]:
+    """Reconcile every 'open' manual row against the venue's own order
+    record — called lazily when the desk reads its blotter or open-
+    orders list, so a resting order that filled while nobody watched
+    becomes a 'filled' audit row the next time anyone looks."""
+    from . import pmus
+
+    if pool is None:
+        pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id, order_id, us_market_slug, requested_shares "
+        "FROM live_orders WHERE whale_username = 'manual' "
+        "AND status = 'open' AND venue = 'polymarket-us' "
+        "ORDER BY placed_at LIMIT 20")
+    out = []
+    for r in rows:
+        if not r["order_id"]:
+            continue
+        try:
+            st = await asyncio.to_thread(pmus.order_status, r["order_id"])
+        except Exception:  # noqa: BLE001 — sync is best-effort, retry next read
+            continue
+        if st is None:
+            continue
+        filled = float(st.get("filled_shares") or 0)
+        avg = st.get("avg_px")
+        state = st.get("state")
+        if state in _MANUAL_OPEN_STATES:
+            new_status = "open"
+        elif filled > 0:
+            new_status = "filled"
+        else:
+            new_status = "cancelled"
+        await pool.execute(
+            """
+            UPDATE live_orders
+            SET status=$2, filled_shares=$3, fill_price=$4, filled_usd=$5
+            WHERE id=$1 AND status = 'open'
+            """,
+            r["id"], new_status, filled, avg,
+            round(filled * (avg or 0), 2))
+        out.append({"row_id": r["id"], "status": new_status,
+                    "filled_shares": filled})
+    return out
+
+
+async def cancel_manual_open(row_id: int) -> dict:
+    """Cancel one resting manual order at the venue, then record what
+    the venue says actually happened — a cancel that raced a fill
+    records the fill, never erases it."""
+    from . import pmus
+
+    pool = await get_pool()
+    r = await pool.fetchrow(
+        "SELECT id, order_id, us_market_slug FROM live_orders "
+        "WHERE id = $1 AND whale_username = 'manual' AND status = 'open'",
+        row_id)
+    if r is None:
+        return {"ok": False, "error": "no open resting order with that id"}
+    if not r["order_id"]:
+        await pool.execute(
+            "UPDATE live_orders SET status='cancelled' WHERE id=$1", row_id)
+        return {"ok": True, "cancelled": True}
+    res = await asyncio.to_thread(pmus.cancel_order, r["order_id"],
+                                  r["us_market_slug"] or "")
+    if not res.get("ok"):
+        return {"ok": False, "error": res.get("error") or "cancel refused"}
+    # venue truth after the cancel: a raced fill stays a fill
+    try:
+        st = await asyncio.to_thread(pmus.order_status, r["order_id"])
+    except Exception:  # noqa: BLE001
+        st = None
+    filled = float((st or {}).get("filled_shares") or 0)
+    avg = (st or {}).get("avg_px")
+    await pool.execute(
+        """
+        UPDATE live_orders
+        SET status=$2, filled_shares=$3, fill_price=$4, filled_usd=$5
+        WHERE id=$1
+        """,
+        row_id, "filled" if filled > 0 else "cancelled", filled, avg,
+        round(filled * (avg or 0), 2))
+    return {"ok": True, "cancelled": True, "filled_shares": filled}
 
 
 def sell_limit_price(bid: float, min_price: float | None = None) -> float:

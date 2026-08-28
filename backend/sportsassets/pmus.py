@@ -1450,6 +1450,64 @@ def _order_cost(order: dict, default: float | None = None) -> float | None:
     return default
 
 
+def _norm_order(o: dict) -> dict:
+    """One venue order -> the desk's open-order row shape."""
+    md = o.get("marketMetadata") or {}
+    return {
+        "order_id": o.get("id"),
+        "us_market_slug": o.get("marketSlug"),
+        "intent": o.get("intent"),
+        "side": ("SELL" if "SELL" in str(o.get("intent") or "") else "BUY"),
+        "price": _amount_value(o.get("price") or {}),
+        "quantity": float(o.get("quantity") or 0),
+        "filled_shares": float(o.get("cumQuantity") or 0),
+        "leaves": float(o.get("leavesQuantity") or 0),
+        "avg_px": (_amount_value(o.get("avgPx") or {}) or None),
+        "state": (str(o.get("state") or "")
+                  .replace("ORDER_STATE_", "").lower() or "unknown"),
+        "title": _clean_title(md.get("title") or md.get("question")
+                              or md.get("name")),
+        "created_at": o.get("createTime") or o.get("insertTime"),
+        "tif": str(o.get("tif") or "").replace("TIME_IN_FORCE_", ""),
+    }
+
+
+# Venue states that mean "this order is still working the book".
+OPEN_ORDER_STATES = frozenset({"new", "pending_new", "partially_filled",
+                               "pending_replace", "pending_risk", "open"})
+
+
+def open_orders(slugs: list[str] | None = None) -> list[dict]:
+    """The account's RESTING orders, venue truth (owner order
+    2026-08-28, venue parity: the desk shows and manages the same open
+    orders the venue app would). Read-only; raises to the caller."""
+    client = _get_client()
+    params = {"slugs": slugs} if slugs else None
+    resp = client.orders.list(params) or {}
+    return [_norm_order(o) for o in (resp.get("orders") or [])
+            if isinstance(o, dict)]
+
+
+def order_status(order_id: str) -> dict | None:
+    """One order by id, normalized; None if the venue has no record."""
+    client = _get_client()
+    resp = client.orders.retrieve(order_id) or {}
+    o = resp.get("order")
+    return _norm_order(o) if isinstance(o, dict) else None
+
+
+def cancel_order(order_id: str, us_market_slug: str) -> dict:
+    """Cancel one resting order. The venue's cancel returns no body;
+    success is the absence of an error. Never raises."""
+    try:
+        _get_client().orders.cancel(order_id,
+                                    {"marketSlug": us_market_slug})
+        return {"ok": True}
+    except Exception as exc:  # noqa: BLE001 — the desk reports, never 500s
+        return {"ok": False, "error": f"{type(exc).__name__}: "
+                                      f"{str(exc)[:160]}"}
+
+
 def probe() -> dict:
     """Connectivity/diag probe usable from the deployed API (admin panel):
     unauthenticated market list + whether creds are configured. Never orders."""
