@@ -27,6 +27,33 @@ from .notifications import telegram
 
 log = logging.getLogger(__name__)
 
+# ── track-only qualification cohort ─────────────────────────────────
+# Whale-qualification dossier round 1 (owner 95%-confidence program,
+# 2026-08-28): 52 censused candidates → 3 ranking lenses → skeptic
+# verification against the raw census rows → this shortlist. These
+# wallets are tracked for WHALEEDGE evidence ONLY (poller/reconciler
+# ingest their books; the analytics worker measures their per-whale
+# edge CIs). They are NEVER copied: copying is gated by COPY_WHALES /
+# CRYPTO_WHALES in api/copies_record.py, and promotion into those
+# sets is the OWNER'S decision alone — tests pin the disjointness.
+# They join the roster target WITHOUT consuming roster_size slots and
+# survive refreshes without being pinned. (0xf705fa04, the dossier's
+# crypto candidate, is absent here because it is already rostered in
+# the crypto leg.)
+TRACK_ONLY: dict[str, str] = {
+    "0xcd30f4698c6f5f3829893e68e183a8e5ea18f316": "SPCEXBUYER",
+    "0xf201a19b43471261a3c1ba9247335d55270e527e": "0xF201A19b",
+    "0xf23c5bc7b547867eb6532920144562718aa49f81": "DoNotTailMe",
+    "0xe30e74595517de48f1fb19f4553dd3d9f1e96b87": "0xE30E7459",
+    "0x16bb9951a36fce71e2ef57890b786145e0ba8492": "SDTrading",
+    "0x8546a601f7c7cc3dae7141f20b0e09e42bbf35b8": "OOOwhyOOO",
+    "0xdc41c39b95453c943174f369926018f6963bdd7e": "nigiri99",
+    "0xd235973291b2b75ff4070e9c0b01728c520b0f29": "zxgngl",
+    "0x65c18d740c8246af3353741c0b32e4b6da552988": "casualbet2020",
+    "0x4bff30af91642dc7d2b19a8664378fe55c45fc26": "Sassy-Bucket",
+    "0x6e2c0e9474af7d720e5aba2a5b0bb6f723b7787c": "0x99a093burst",
+}
+
 
 def parse_leaderboard(raw: Any) -> list[dict]:
     """Normalize leaderboard payload → [{address, username, profit, rank}]."""
@@ -170,6 +197,18 @@ async def apply_roster(candidates: list[dict]) -> dict:
         if any(t["address"] == cand["address"] for t in target):
             continue
         target.append(cand)
+
+    # track-only cohort: beyond the roster_size cap by design (they
+    # are evidence collection, not roster picks), banned still wins,
+    # and membership in target_addrs is what protects them from the
+    # retire loop below
+    for addr, uname in TRACK_ONLY.items():
+        if addr in banned:
+            continue
+        if any(t["address"] == addr for t in target):
+            continue
+        target.append({"address": addr, "username": uname,
+                       "profit": None, "rank": None})
 
     added, removed = [], []
     target_addrs = {t["address"] for t in target}
