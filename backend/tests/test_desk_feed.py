@@ -298,3 +298,38 @@ async def test_unknown_kalshi_league_is_empty_not_500(monkeypatch):
     monkeypatch.setattr(app_mod, "_kalshi_fetch", fake_fetch)
     out = await app_mod.api_desk_feed(venue="kalshi", league="curling")
     assert out["cards"] == []
+
+
+def test_active_in_play_markets_survive_and_tonight_sorts_first():
+    """Owner report 2026-08-28 19:35 ET: the Kalshi desk showed only
+    games three days out. Two causes, both pinned: (1) the venue
+    flips a game market's status to 'active' at first pitch and the
+    /markets fetch passed status=open — the whole same-day slate was
+    silently deleted (probe ground truth 21:44Z: tonight's KXMLBGAME
+    events all 'active'); acceptance is now client-side, open|active.
+    (2) _feed_finish sorted volume-desc, burying the imminent slate
+    under weekend boards — the slate now leads soonest-first."""
+    import sportsassets.api.app as app_mod
+
+    # (1) the fetch sends no status param; _keep accepts open|active
+    import inspect
+    src = inspect.getsource(app_mod._kalshi_fetch)
+    assert '"status": "open"' not in src.split("def _series_events")[0], \
+        "the /markets param that deleted the live slate stays gone"
+    assert '("open", "active")' in src
+
+    # (2) slate order: tonight's low-volume game outranks Saturday's
+    tonight = {"id": "a", "venue": "kalshi", "league": "mlb",
+               "title": "LAD vs DET", "volume_usd": 100.0,
+               "close_time": "2026-08-29T02:40:00Z",
+               "outcomes": [{"label": "LAD", "id": "x", "price": 65}]}
+    weekend = {"id": "b", "venue": "kalshi", "league": "mlb",
+               "title": "WSH vs MIA", "volume_usd": 99999.0,
+               "close_time": "2026-08-31T23:00:00Z",
+               "outcomes": [{"label": "WSH", "id": "y", "price": 52}]}
+    unknown = {"id": "c", "venue": "kalshi", "league": "mlb",
+               "title": "??", "volume_usd": 5.0, "close_time": None,
+               "outcomes": [{"label": "?", "id": "z", "price": 50}]}
+    out = app_mod._feed_finish([weekend, unknown, tonight], {})
+    assert [c["id"] for c in out["cards"]] == ["a", "b", "c"], \
+        "the imminent slate leads; unknown close sorts last"

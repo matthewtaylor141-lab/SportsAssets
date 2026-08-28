@@ -1492,12 +1492,25 @@ async def _kalshi_fetch(series_list: list[str], q: str = "",
 
     ql = q.strip()
     out: list[dict] = []
-    base_params: dict = {"status": "open", "limit": 1000,
+    # NO status param (owner report 2026-08-28 19:35 ET: "none of
+    # the games for tonight are showing up — all 3 days out"): the
+    # venue flips a game market's status from 'open' to 'ACTIVE' when
+    # play begins, and status=open silently deleted the ENTIRE
+    # same-day slate from the desk — the team could not execute on
+    # tonight's games while Kalshi itself still traded them live.
+    # Probe ground truth 21:44Z: KXMLBGAME's first open events were
+    # tonight's (26AUG281840LADDET ...) with every market 'active'.
+    # Acceptance is filtered client-side in _keep (open|active), the
+    # same set the events fallback and the everything branch always
+    # accepted; min_close_ts still drops finished games.
+    base_params: dict = {"limit": 1000,
                          "min_close_ts": int(_time.time())}
     if max_close_h is not None:
         base_params["max_close_ts"] = int(_time.time()) + max_close_h * 3600
 
     def _keep(m: dict, series: str) -> None:
+        if (m.get("status") or "open") not in ("open", "active"):
+            return
         title = m.get("title") or ""
         sub = m.get("yes_sub_title") or m.get("subtitle") or ""
         # Alias-aware: 'braves' finds the game Kalshi titles
@@ -1917,9 +1930,13 @@ def _feed_finish(cards: list[dict], counts: dict) -> dict:
     for c in cards:
         c["history_id"] = (c["outcomes"][0]["id"] if c["outcomes"]
                            else None)
-    cards.sort(key=lambda c: (c.get("volume_usd") is None,
-                              -(c.get("volume_usd") or 0.0),
-                              c.get("close_time") or "~"))
+    # SLATE ORDER (owner report 2026-08-28): volume-desc buried
+    # tonight's games under high-volume weekend boards — useless for a
+    # team executing NOW. The venues' own apps lead with the imminent
+    # slate: soonest close first (nulls last), volume breaks ties.
+    cards.sort(key=lambda c: (c.get("close_time") is None,
+                              c.get("close_time") or "~",
+                              -(c.get("volume_usd") or 0.0)))
     return {"cards": cards[:_DESK_FEED_CAP], "counts": counts}
 
 
