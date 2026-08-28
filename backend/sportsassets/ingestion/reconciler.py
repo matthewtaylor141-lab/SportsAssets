@@ -45,6 +45,19 @@ async def reconcile_once(depth: int = 500) -> dict:
             # actually reached) at or before the fill's own time.
             complete = False
             oldest_ts: float | None = None
+            # DIRTY WALK (fleet round 11, major): a row skipped as
+            # unusable below neither ingests nor testifies — correct —
+            # but when the skipped row was the S1 fill's OWN row (a
+            # degraded per-wallet index serving a size-0 / hash-less
+            # stub of exactly that fill), the healthy neighbors still
+            # handed the run complete=true and a spanning oldest, and
+            # the sweep branded a correct, venue-visible emission
+            # "never shown by the feed" — a permanent false STICKY
+            # trip. A walk that skipped ANY unusable row is recorded
+            # dirty and the sweep refuses its coverage claim outright:
+            # the wallet's rows DEFER until a clean run covers them,
+            # the same safe direction every degradation shape takes.
+            dirty = 0
             try:
                 while offset < depth:
                     resp = await polite_get(
@@ -78,6 +91,7 @@ async def reconcile_once(depth: int = 500) -> dict:
                             # history span coverage — a universal
                             # waiver that false-tripped STICKY on a
                             # correct emission)
+                            dirty += 1
                             continue
                         if (ev.ts_epoch and ev.ts_epoch > 1e9
                                 and (oldest_ts is None
@@ -102,7 +116,8 @@ async def reconcile_once(depth: int = 500) -> dict:
                         complete = True
                         break
                 per_wallet["cov:" + whale["address"]] = {
-                    "complete": complete, "oldest": oldest_ts}
+                    "complete": complete, "oldest": oldest_ts,
+                    "dirty": dirty}
             except Exception as exc:  # noqa: BLE001 — one wallet must
                 # never abort the whole run: this sweep is the sole
                 # backstop for the S1 corroboration stamp, and a single

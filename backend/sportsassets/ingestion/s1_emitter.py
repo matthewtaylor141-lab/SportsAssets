@@ -204,6 +204,13 @@ SQL_MARK = ("UPDATE trades SET s1_checked_at = now() "
 # direction, and the poller/venue-stamp path remains primary. The
 # oldest cast is shape-guarded (round 8: an unguarded tombstone cast
 # in SQL_TRIP wedged persists — same lesson applies here).
+# A DIRTY walk never covers (fleet round 11, major): round 9 stopped an
+# unusable row testifying FOR coverage, but a walk that skipped the
+# fill's OWN degraded stub still claimed clean span coverage off its
+# healthy neighbors and false-tripped STICKY on a correct emission.
+# The reconciler now counts skipped-unusable rows into cov->dirty; a
+# run is covering only when that key is absent (pre-round-11 format)
+# or the number 0 — any skip, and any malformed shape, DEFERS.
 SQL_RECON_SINCE = """
 SELECT 1 FROM reconciliation_runs
 WHERE started_at > $1::timestamptz + make_interval(secs => $4)
@@ -214,9 +221,26 @@ WHERE started_at > $1::timestamptz + make_interval(secs => $4)
               details->'per_wallet'->('cov:' || $2)->'oldest') = 'number'
             THEN (details->'per_wallet'->('cov:' || $2)->>'oldest')::float8
             ELSE 'Infinity'::float8 END) <= $3
+  AND (CASE
+        WHEN NOT (COALESCE(details->'per_wallet'->('cov:' || $2),
+                           '{}'::jsonb) ? 'dirty') THEN true
+        WHEN jsonb_typeof(
+              details->'per_wallet'->('cov:' || $2)->'dirty') = 'number'
+        THEN (details->'per_wallet'->('cov:' || $2)->>'dirty')::float8 = 0
+        ELSE false END)
 LIMIT 1
 """
 SQL_READ = "SELECT value FROM ingestion_state WHERE key = $1"
+# The judgment-site refresh clock (fleet round 11, minor): a refresh
+# past an operator tombstone compared an APP-clock timestamp against
+# the tombstone's PG now() — with the PG clock ahead, the refresh was
+# refused every cycle, and each flush's tombstone merge then released
+# the in-memory trip so the next sweep re-bumped the same verdict's
+# counter durably, once per cycle for the life of the skew. The
+# refresh timestamp now comes from the same clock the tombstone was
+# written with; falling back to the app clock on error keeps the
+# refused path degraded-but-alive rather than wedged.
+SQL_NOW = "SELECT extract(epoch from now())::float8"
 # THE FLUSH NEVER TOUCHES TRIP STATE (fleet round 6). The round-2 CAS
 # guarded only the scalar 'tripped' — the OLDEST reason — so once trips
 # became a dict (round 5), two processes sharing the oldest reason
@@ -393,6 +417,7 @@ class S1Emitter:
         for e in self.pending.values():
             for blk in [b for b in e.get("ts", {}) if b >= from_blk]:
                 e["ts"].pop(blk, None)
+                e.get("ts_src", {}).pop(blk, None)
 
     def _mark_counted(self, tx: str, wallet: str, asset: str) -> bool:
         """True the first time a (tx, wallet, asset) is handled. Lives
@@ -477,6 +502,7 @@ class S1Emitter:
                 # void; the old block's strict re-resolution then fails
                 # its hash check and the whole tx abstains as reorged.
                 e["ts"] = {}
+                e["ts_src"] = {}
                 self._purge_ts_cache(min(list(e["blocks"]) + [blk]))
             elif e["blocks"].get(blk) not in (None, bh):
                 # SAME-height re-mine (fleet round 10): a new hash for
@@ -484,6 +510,29 @@ class S1Emitter:
                 # earned timestamps from this height up are void, and
                 # resolution re-earns them against the new hash.
                 self._purge_ts_cache(blk)
+                # THE ORPHANED VERSION'S LOGS ARE VOID TOO (fleet round
+                # 11, CRITICAL): voiding only the timestamps left the
+                # old block-version's log in the buffer, where a re-
+                # mined copy with a shifted logIndex slipped the lix-
+                # only dup check and the single (blk, new-hash)
+                # resolution vouched for BOTH — the armed path emitted
+                # the canonical fill AND a phantom that exists only on
+                # the orphaned chain (key-divergent double emission).
+                # Only logs carrying the new canonical hash survive
+                # this height; lix_seen rebuilds from the survivors so
+                # the re-mined copy is admitted whatever its new index,
+                # and the decode cache is invalidated with the buffer.
+                kept = [l for l in e["logs"]
+                        if int(str(l.get("blockNumber", "0x0")), 16)
+                        != blk
+                        or str(l.get("blockHash", "")).lower() == bh]
+                if len(kept) != len(e["logs"]):
+                    e["logs"] = kept
+                    e["lix_seen"] = {
+                        str(l.get("logIndex", "")) for l in kept
+                        if str(l.get("logIndex", ""))}
+                    e.pop("recs", None)
+                    e.pop("recs_n", None)
             lix = str(log_entry.get("logIndex", ""))
             if lix and lix in e.setdefault("lix_seen", set()):
                 # one duplicated WS delivery of either leg was making
@@ -709,6 +758,18 @@ class S1Emitter:
         log.error("S1 STICKY TRIP: %s — manual clear of THIS reason "
                   "required", reason)
 
+    async def _db_now(self, pool: Any) -> float:
+        """The tombstone clock. A judgment-site refresh must outrun a
+        tombstone written with PG's now() — refreshing from the app
+        clock loses forever when PG runs ahead (fleet round 11)."""
+        try:
+            v = await pool.fetchval(SQL_NOW, timeout=6)
+            if isinstance(v, (int, float)):
+                return float(v)
+        except Exception:  # noqa: BLE001
+            self.bump("s1.errors")
+        return time.time()
+
     async def _persist_trip(self, pool: Any, reason: str) -> str:
         """One atomic server-side union — durable the moment the trip
         fires, never carried by the flush (round 6). Returns one of
@@ -792,6 +853,7 @@ class S1Emitter:
                 # a sibling tx borrowing a stale entry after a deep
                 # reorg would emit a fill from an orphaned block)
                 e["ts"][blk] = cached
+                e.setdefault("ts_src", {})[blk] = want_hash
                 e["ts_cached"] = True
                 continue
             if not self._take_token():
@@ -803,7 +865,19 @@ class S1Emitter:
                 return True
             if got is None:
                 break
+            if e["blocks"].get(blk) != want_hash:
+                # the await interleaved a same-height re-mine on this
+                # loop: observe() purged the earned timestamps and
+                # moved e['blocks'] to the new hash, but this iteration
+                # still holds the PRE-await snapshot — writing ts(old
+                # hash) back would silently undo the purge and the
+                # armed path would emit with the orphaned block's
+                # timestamp (fleet round 11, major). The earn is void;
+                # the block stays unresolved and re-earns against the
+                # CURRENT hash on the next pass.
+                continue
             e["ts"][blk] = got
+            e.setdefault("ts_src", {})[blk] = want_hash
             self._ts_cache[(blk, want_hash)] = got
             while len(self._ts_cache) > TS_CACHE_CAP:
                 self._ts_cache.popitem(last=False)
@@ -1004,12 +1078,30 @@ class S1Emitter:
                         pool, "key_selfcheck") == "refused":
                     # a NEW self-check failure after a clear is fresh
                     # evidence — refresh past the tombstone (round 10)
-                    self.trips["key_selfcheck"] = time.time()
+                    # from the tombstone's OWN clock (round 11)
+                    self.trips["key_selfcheck"] = await self._db_now(pool)
                     await self._persist_trip(pool, "key_selfcheck")
                 return False
             if self.pending.get(tx) is not e:
                 # a removed notice popped this entry during the probe
                 # await — the fill is off the canonical chain (r8)
+                self.bump("s1.abstain.reorged")
+                return False
+            if (e["ts"].get(rec["block"]) != rec["ts"]
+                    or e.get("ts_src", {}).get(rec["block"])
+                    != e["blocks"].get(rec["block"])):
+                # a re-mine never pops the entry, so the membership
+                # check above cannot see it: rec['ts'] was copied out
+                # of e['ts'] BEFORE the probe await, and a same-height
+                # re-mine landing during that await purges e['ts'] and
+                # moves e['blocks'] to the new hash while the copy
+                # survives (fleet round 11, major — armed emission
+                # with the orphaned block's timestamp, key-divergent
+                # twin of the venue's poll row). The timestamp under
+                # this record must still be the one in the entry AND
+                # must have been earned against the hash the entry
+                # currently believes canonical — anything else re-earns
+                # or abstains; the poller carries whatever was real.
                 self.bump("s1.abstain.reorged")
                 return False
             try:
@@ -1086,8 +1178,12 @@ class S1Emitter:
                 # the timestamp past the tombstone and re-persist
                 # (round 10: the idempotency-pinned stale timestamp
                 # kept losing to the tombstone and the row was stamped
-                # with no durable trip anywhere)
-                self.trips[reason] = time.time()
+                # with no durable trip anywhere). The refresh reads the
+                # tombstone's OWN clock (round 11: an app-clock refresh
+                # under PG-ahead skew was refused every cycle, and the
+                # flush's tombstone release then let the next sweep
+                # re-bump the same verdict's counter durably each time)
+                self.trips[reason] = await self._db_now(pool)
                 out = await self._persist_trip(pool, reason)
             if out == "landed":
                 ok_judged.append(r)

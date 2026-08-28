@@ -1475,3 +1475,151 @@ def test_observe_stamps_ws_head_advances(st):
     at = st.head_advanced_at
     st.observe(lst, dict(MAKER_EV, logIndex="0x9"))   # same block: no move
     assert st.head_advanced_at == at
+
+
+# ── fleet round 11 pins ─────────────────────────────────────────────
+def test_same_height_remine_drops_the_orphaned_logs(st, monkeypatch):
+    """fleet r11 (CRITICAL): round 10 voided the timestamps but left
+    the orphaned block-version's LOG in the buffer — a re-mined copy
+    with a shifted logIndex passed the lix-only dup check, the single
+    (blk, new-hash) resolution vouched for BOTH logs, and the armed
+    path emitted the canonical fill AND a phantom that exists only on
+    the orphaned chain (key-divergent double emission). Only logs
+    carrying the new canonical hash survive the height; lix_seen
+    rebuilds from the survivors; the decode cache invalidates."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    st.observe(lst, MAKER_EV)                      # hash 77…77, lix 1
+    e = st.pending[TX]
+    e["ts"][BLK] = TS0
+    e["recs"], e["recs_n"] = [{"stale": True}], 1  # decode cache primed
+    # the same fill re-mined at the same height: new hash, the tx
+    # order changed (new logIndex), the book replayed differently
+    # (different amounts — the phantom's would-be row)
+    remined = dict(_ev(MAKER, TAKER, 0, TOKEN_INT, 0xE8EA90, 0x177ABE0),
+                   blockHash="0x" + "99" * 32, logIndex="0x9")
+    st.observe(lst, remined)
+    assert len(e["logs"]) == 1, "the orphaned version's log is dropped"
+    assert e["logs"][0]["blockHash"] == "0x" + "99" * 32
+    assert e["lix_seen"] == {"0x9"}, "lix_seen rebuilds from survivors"
+    assert "recs" not in e and "recs_n" not in e, "decode invalidated"
+    # the full armed path emits exactly ONE row — the canonical copy
+    for entry in st.pending.values():
+        entry["last_seen"] = time.time() - s1.DEBOUNCE_S - 1
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, e, time.time()))
+    assert done is True and len(calls) == 1, \
+        "one fill, one row — the phantom never even decodes"
+
+
+def test_midawait_remine_never_writes_back_the_orphaned_ts(st, monkeypatch):
+    """fleet r11 (major): the resolution loop iterates a pre-await
+    snapshot — a same-height re-mine landing DURING the resolve await
+    was written back into e['ts'] AFTER observe()'s purge, silently
+    undoing it, and the armed path emitted with the orphaned block's
+    timestamp. The write-back now requires the hash it earned against
+    to still be the entry's current hash; otherwise the block stays
+    unresolved and re-earns against the new hash."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    e = st.pending[TX]
+    remined = dict(MAKER_EV, blockHash="0x" + "99" * 32, logIndex="0x9")
+
+    async def resolve_with_remine(blk, want_hash):
+        st.observe(lst, remined)   # the WS burst shares the event loop
+        return TS0                 # the node answered for the OLD hash
+
+    monkeypatch.setattr(st, "_resolve_block", resolve_with_remine)
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, e, time.time()))
+    assert calls == [], "nothing emits off the orphaned answer"
+    assert done is False, "the block re-earns on a later pass"
+    assert BLK not in e["ts"], "ts(old hash) is never written back"
+    assert BLK not in e.get("ts_src", {})
+    assert e["blocks"][BLK] == "0x" + "99" * 32
+
+
+def test_remine_during_probe_await_never_emits_the_orphaned_ts(
+        st, monkeypatch):
+    """fleet r11 (major, window E): rec['ts'] is copied out of e['ts']
+    BEFORE the probe await, so observe()'s purge could not reach it —
+    the membership check passes (a re-mine never pops the entry) and
+    the emission carried the orphaned block's timestamp, a key-
+    divergent twin of the venue's poll row. The emit path now re-
+    verifies, after the await, that the record's timestamp is still
+    the entry's own AND was earned against the entry's CURRENT hash."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    e = st.pending[TX]
+    remined = dict(MAKER_EV, blockHash="0x" + "99" * 32, logIndex="0x9")
+
+    class _ReminePool(_Pool):
+        async def fetch(self, sql, *a, timeout=None):
+            st.observe(lst, remined)   # lands during the probe await
+            return []
+
+    done = asyncio.run(st._finalize_tx(_ReminePool(), TX, e, time.time()))
+    assert done is True and calls == [], \
+        "the orphaned timestamp never reaches ingest"
+    assert st.deltas.get("s1.abstain.reorged") == 1
+    assert st.deltas.get("s1.emitted") is None
+
+
+def test_dirty_walks_never_cover():
+    """fleet r11 (major): round 9 stopped an unusable row testifying
+    FOR coverage — but a walk that skipped the fill's OWN degraded
+    stub still claimed clean span coverage off its healthy neighbors,
+    and the sweep branded a correct, venue-visible emission 'never
+    shown by the feed' — a permanent false STICKY trip. The reconciler
+    counts every skipped-unusable row into cov->dirty; SQL_RECON_SINCE
+    treats anything but a clean zero (absent = pre-round-11 format) as
+    non-covering. Executed semantics: test_s1_sql_real_pg."""
+    import inspect
+    from sportsassets.ingestion import reconciler as rec
+    src = inspect.getsource(rec)
+    assert "dirty += 1" in src and '"dirty": dirty' in src
+    assert "'dirty'" in s1.SQL_RECON_SINCE
+    assert "ELSE false END" in s1.SQL_RECON_SINCE, \
+        "a malformed dirty shape DEFERS — fail-safe, never fail-open"
+
+
+def test_refused_refresh_reads_the_tombstone_clock(st):
+    """fleet r11 (minor): the judgment-site refresh stamped an APP-
+    clock timestamp against a tombstone written with PG now() — with
+    the PG clock ahead the refresh lost every cycle, the flush's
+    tombstone merge then released the in-memory trip, and the next
+    sweep re-bumped the same verdict's counter durably, once per
+    cycle for the life of the skew. The refresh now reads the
+    tombstone's own clock (SQL_NOW), so fresh evidence always outruns
+    the tombstone it answers."""
+    _arm(st)
+
+    class _SkewPool(_SweepPool):
+        DB_NOW = float(TS0 + 999)
+
+        async def fetchval(self, sql, *a, timeout=None):
+            if "extract(epoch from now())" in sql:
+                return self.DB_NOW
+            return await _SweepPool.fetchval(self, sql, *a,
+                                             timeout=timeout)
+
+        async def execute(self, sql, *a, timeout=None):
+            if "trips_cleared" in sql:
+                self.trip_writes.append(a)
+                return ("INSERT 0 0" if len(self.trip_writes) == 1
+                        else "INSERT 0 1")
+            await _SweepPool.execute(self, sql, *a, timeout=timeout)
+
+    pool = _SkewPool([_srow(3, False)])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert len(pool.trip_writes) == 2
+    assert pool.trip_writes[1][2] == _SkewPool.DB_NOW, \
+        "the refresh timestamp comes from the DB clock, not time.time()"
+    assert pool.marked == [[3]], "the same-clock refresh lands and stamps"
+    assert st.deltas.get("s1.uncorroborated") == 1

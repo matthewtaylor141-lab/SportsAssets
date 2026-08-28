@@ -241,3 +241,85 @@ def test_every_state_statement_prepares_and_executes():
             await _drop(admin, c, name)
 
     asyncio.run(run())
+
+
+def test_round11_dirty_coverage_and_the_tombstone_clock():
+    """fleet r11, EXECUTED: (major) a reconciler walk that skipped ANY
+    unusable row is DIRTY and never covers — round 9 stopped a stub
+    testifying FOR coverage but left a stub-riddled walk free to claim
+    clean coverage of a span whose rows it skipped, false-tripping
+    STICKY on a correct emission; (minor) the judgment-site refresh
+    reads PG's own clock (SQL_NOW), so a tombstone written with now()
+    is always outrun by genuinely fresh evidence regardless of
+    app-host clock skew."""
+    async def run():
+        admin, c, name = await _scratch()
+        try:
+            wid = await c.fetchval(
+                "INSERT INTO whales (address, username) "
+                "VALUES ('0xw', 'w') RETURNING id")
+            await c.execute(
+                "INSERT INTO trades (whale_id, tx_hash, asset, source, "
+                "dedupe_key, ts, detected_at) VALUES ($1, '0xt', 'a', "
+                "'s1', 'k1', now() - interval '3 hours', "
+                "now() - interval '3 hours')", wid)
+            row = (await c.fetch(s1.SQL_SWEEP, float(s1.CORROBORATE_S),
+                                 wid, "salt"))[0]
+            args = (row["detected_at"], "0xw",
+                    row["ts"].timestamp() - s1.RECON_TS_MARGIN_S,
+                    float(s1.RECON_VENUE_LAG_S))
+
+            def cov(dirty):
+                d = {"complete": True,
+                     "oldest": row["ts"].timestamp()
+                     - s1.RECON_TS_MARGIN_S - 3600}
+                if dirty is not ...:
+                    d["dirty"] = dirty
+                return json.dumps({"per_wallet": {"0xw": 0,
+                                                  "cov:0xw": d}})
+
+            await c.execute(
+                "INSERT INTO reconciliation_runs (started_at, "
+                "finished_at, missed, details) VALUES "
+                "(now() - interval '2 hours', now() - interval "
+                "'110 minutes', 0, $1::jsonb)", cov(2))
+            assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) is None, \
+                "a walk that skipped unusable rows NEVER covers — the " \
+                "fill's own row may be among what it skipped"
+            await c.execute(
+                "UPDATE reconciliation_runs SET details = $1::jsonb",
+                cov("lots"))
+            assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) is None, \
+                "a malformed dirty shape defers, never covers"
+            await c.execute(
+                "UPDATE reconciliation_runs SET details = $1::jsonb",
+                cov(0))
+            assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) \
+                is not None, "a clean (dirty=0) spanning walk covers"
+            await c.execute(
+                "UPDATE reconciliation_runs SET details = $1::jsonb",
+                cov(...))
+            assert await c.fetchrow(s1.SQL_RECON_SINCE, *args) \
+                is not None, \
+                "pre-round-11 runs (no dirty key) keep covering"
+
+            # ── SQL_NOW: the tombstone's own clock ─────────────────
+            db_now = await c.fetchval(s1.SQL_NOW)
+            assert isinstance(db_now, float) and db_now > 1e9
+            K = s1.STATE_KEY
+            await c.execute(s1.SQL_TRIP, K, "uncorroborated:9", 1000.0)
+            await c.fetchrow(s1.SQL_CLEAR, K, "uncorroborated:9")
+            tag = await c.execute(s1.SQL_TRIP, K, "uncorroborated:9",
+                                  1000.0)
+            assert tag == "INSERT 0 0", \
+                "the stale re-persist is refused by the tombstone"
+            fresh = float(await c.fetchval(s1.SQL_NOW))
+            tag = await c.execute(s1.SQL_TRIP, K, "uncorroborated:9",
+                                  fresh)
+            assert tag != "INSERT 0 0", \
+                "a refresh read from the tombstone's own clock LANDS " \
+                "— the round-11 skew cycle terminates on first retry"
+        finally:
+            await _drop(admin, c, name)
+
+    asyncio.run(run())
