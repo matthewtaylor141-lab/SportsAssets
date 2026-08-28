@@ -2248,10 +2248,243 @@ table.data tbody tr:hover { background: var(--bg3); box-shadow: inset 2px 0 0 va
   pointer-events: none; z-index: 0;
   mask-image: linear-gradient(180deg, black, transparent 92%);
 }
-.tr-hero > *:not(.nd-hexfield) { position: relative; z-index: 1; }
+.tr-hero > *:not(.nd-hexfield):not(.nd-watermark) { position: relative; z-index: 1; }
+.tr-hero > .nd-watermark { position: absolute; }
 .bt-lockup-img { filter: drop-shadow(0 0 14px rgba(0, 102, 255, 0.30)); }
 .bt-word-img { filter: none; }
 @media (max-width: 720px) {
   .bt-lockup-img { height: 30px !important; }
   .bt-word-img { height: 13px !important; }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   V12 — "DEEP FIELD" (owner: "absolutely outstanding… a showstopper
+   mobile app and website"). The v11 instrument honesty stays — mono
+   data, honest digits, semantic P&L — but the room goes cinematic:
+   deep navy space, aurora light in the brand blue, glass panels with
+   real depth, dramatic typographic scale, an app-like floating
+   mobile bar. Depth returns deliberately: light and shadow are the
+   design now, not chrome. Desk/wall/jarvis remain untouched.
+   ════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --bg0: #04070f;                 /* deep navy space, not neutral black */
+  --bg1: rgba(13, 21, 40, 0.62);  /* glass panel */
+  --bg2: rgba(20, 31, 56, 0.55);  /* nested well */
+  --bg3: rgba(30, 45, 80, 0.55);  /* hover */
+  --line: rgba(122, 162, 255, 0.10);
+  --line-strong: rgba(140, 175, 255, 0.22);
+  --r-panel: 20px;
+  --glass-blur: 18px;
+  --glow: 0 10px 45px rgba(0, 102, 255, 0.16);
+  --panel-shadow: 0 24px 60px rgba(1, 5, 18, 0.55),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* ── the deep field: gradient mesh + brand hex weave, page-wide ── */
+body {
+  background:
+    radial-gradient(1100px 560px at 82% -12%, rgba(0, 102, 255, 0.17), transparent 62%),
+    radial-gradient(820px 480px at -8% 26%, rgba(0, 68, 190, 0.13), transparent 60%),
+    radial-gradient(900px 620px at 55% 118%, rgba(0, 40, 120, 0.18), transparent 60%),
+    #04070f;
+  background-attachment: fixed;
+}
+body::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='97' viewBox='0 0 56 97'%3E%3Cg fill='none' stroke='%230066ff' stroke-opacity='0.055'%3E%3Cpath d='M28 0l28 16v32L28 64 0 48V16z'/%3E%3Cpath d='M28 64l28 16v17H0V80z'/%3E%3C/g%3E%3C/svg%3E");
+  opacity: 1;
+}
+body::after { content: none; }
+
+/* ── aurora: two slow breathing light fields under everything ── */
+.nd-aurora { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
+.nd-aurora i {
+  position: absolute; border-radius: 50%; filter: blur(90px); opacity: 0.5;
+  will-change: transform;
+}
+.nd-aurora i:nth-child(1) {
+  width: 640px; height: 640px; left: -160px; top: -260px;
+  background: radial-gradient(circle, rgba(0, 102, 255, 0.34), transparent 65%);
+  animation: aurora-a 26s ease-in-out infinite alternate;
+}
+.nd-aurora i:nth-child(2) {
+  width: 560px; height: 560px; right: -180px; top: 8%;
+  background: radial-gradient(circle, rgba(77, 148, 255, 0.22), transparent 65%);
+  animation: aurora-b 34s ease-in-out infinite alternate;
+}
+.nd-aurora i:nth-child(3) {
+  width: 700px; height: 700px; left: 32%; bottom: -420px;
+  background: radial-gradient(circle, rgba(0, 60, 170, 0.28), transparent 65%);
+  animation: aurora-a 40s ease-in-out infinite alternate-reverse;
+}
+@keyframes aurora-a { from { transform: translate3d(0,0,0) scale(1); } to { transform: translate3d(90px, 50px, 0) scale(1.12); } }
+@keyframes aurora-b { from { transform: translate3d(0,0,0) scale(1.05); } to { transform: translate3d(-70px, 60px, 0) scale(0.95); } }
+.app { position: relative; z-index: 1; }
+
+/* ── glass panels with light and lift ── */
+.card, .tr-hero {
+  background: linear-gradient(172deg, rgba(22, 34, 64, 0.66), rgba(10, 16, 32, 0.6));
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.35);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.35);
+  box-shadow: var(--panel-shadow);
+  transition: transform 240ms var(--ease-enter), border-color 240ms ease,
+              box-shadow 240ms ease;
+}
+.card:hover {
+  transform: translateY(-2px);
+  border-color: var(--line-strong);
+  box-shadow: var(--panel-shadow), var(--glow);
+}
+.tr-stat {
+  background: linear-gradient(168deg, rgba(28, 42, 78, 0.5), rgba(12, 19, 38, 0.42));
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  backdrop-filter: blur(12px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: transform 240ms var(--ease-enter), border-color 240ms ease,
+              box-shadow 240ms ease;
+}
+.tr-stat:hover {
+  transform: translateY(-3px) !important;
+  border-color: var(--line-strong);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), var(--glow);
+}
+
+/* ── dramatic scale: the hero number is the room's headline ── */
+.tr-hero-grid { gap: 14px; }
+.tr-stat.tr-stat-main .tr-stat-value { font-size: 64px; letter-spacing: -0.02em; line-height: 1.05; }
+.tr-stat .tr-stat-value { font-size: 26px; }
+.tr-stat-main .tr-grad.v9-money.pos {
+  background: linear-gradient(100deg, #66a3ff, #0066ff 35%, #9dc2ff 55%, #3385ff 75%, #66a3ff);
+  background-size: 240% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: money-pan 9s linear infinite;
+  filter: drop-shadow(0 0 24px rgba(0, 102, 255, 0.35));
+}
+@keyframes money-pan { to { background-position: -240% 0; } }
+.tr-stat-label { font-size: 10.5px; letter-spacing: 0.16em; color: rgba(160, 185, 230, 0.75); }
+
+/* ── nav: glass over the aurora, wordmark artwork untouched ── */
+.nav {
+  background: rgba(4, 8, 18, 0.55);
+  backdrop-filter: blur(22px) saturate(1.5);
+  border-bottom: 1px solid rgba(122, 162, 255, 0.12);
+}
+.nav a.tab { border-radius: 999px; padding: 8px 13px; }
+.nav a.tab:hover:not(.active) { background: rgba(77, 148, 255, 0.10); color: var(--ink0); }
+.nav a.tab.active {
+  background: rgba(0, 102, 255, 0.14);
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px rgba(102, 163, 255, 0.30), 0 4px 18px rgba(0, 102, 255, 0.20);
+  color: #cfe0ff;
+}
+.nd-caret { box-shadow: 0 0 12px rgba(0, 102, 255, 0.8); border-radius: 2px; }
+
+/* ── buttons: gradient pills with bloom ── */
+.btn, .btn.primary {
+  border-radius: 999px; border-color: rgba(140, 175, 255, 0.22);
+  color: #b9cdf5;
+  transition: transform 160ms var(--ease-enter), box-shadow 160ms ease,
+              background 160ms ease, color 160ms ease;
+}
+.btn:hover, .btn.primary:hover {
+  background: rgba(0, 102, 255, 0.14); color: #e6efff;
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(0, 102, 255, 0.22);
+}
+.btn-money, .ac-cashout {
+  border-radius: 999px !important;
+  background: linear-gradient(120deg, #0066ff, #3385ff 60%, #0059dd) !important;
+  box-shadow: 0 10px 30px rgba(0, 102, 255, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+.btn-money:hover, .ac-cashout:hover {
+  box-shadow: 0 14px 40px rgba(0, 102, 255, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  transform: translateY(-1px);
+}
+
+/* ── chips, ticker, tape: rounded glass ── */
+.tr-chip, .v9-chip { border-radius: 999px; }
+.tk-wrap {
+  border-radius: 16px;
+  background: rgba(10, 16, 32, 0.5);
+  backdrop-filter: blur(12px);
+  border-color: var(--line);
+}
+.tk-wrap::before { background: linear-gradient(90deg, rgba(10, 16, 32, 0.9), transparent); }
+.tk-wrap::after { background: linear-gradient(-90deg, rgba(10, 16, 32, 0.9), transparent); }
+.nd-tape {
+  background: rgba(4, 8, 18, 0.72);
+  backdrop-filter: blur(18px);
+  border-top: 1px solid rgba(122, 162, 255, 0.12);
+  height: 32px;
+}
+
+/* ── tables: soft row glass, glow rail ── */
+table.data tbody tr:hover {
+  background: rgba(0, 102, 255, 0.07);
+  box-shadow: inset 2px 0 0 var(--brand);
+}
+table.data th { border-bottom-color: rgba(140, 175, 255, 0.16); }
+table.data td { border-bottom-color: rgba(122, 162, 255, 0.07); }
+
+/* ── entrance choreography: spring-rise stagger ── */
+.page-fade > * { animation: v12-rise 0.55s var(--ease-enter) both; }
+.page-fade > *:nth-child(2) { animation-delay: 0.05s; }
+.page-fade > *:nth-child(3) { animation-delay: 0.10s; }
+.page-fade > *:nth-child(4) { animation-delay: 0.15s; }
+.page-fade > *:nth-child(5) { animation-delay: 0.20s; }
+@keyframes v12-rise {
+  from { opacity: 0; transform: translateY(18px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ── the hero watermark: the mark as architecture ── */
+.nd-watermark {
+  position: absolute; right: -40px; top: -30px; width: 340px; height: 340px;
+  opacity: 0.07; pointer-events: none; z-index: 0;
+  filter: drop-shadow(0 0 40px rgba(0, 102, 255, 0.5));
+  animation: watermark-drift 18s ease-in-out infinite alternate;
+}
+@keyframes watermark-drift {
+  from { transform: rotate(-4deg) translateY(0); }
+  to { transform: rotate(3deg) translateY(14px); }
+}
+
+/* ── mobile: a floating app bar, not a browser strip ── */
+@media (max-width: 720px) {
+  .tabbar {
+    left: 12px; right: 12px;
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    border-radius: 24px;
+    background: rgba(6, 11, 24, 0.72);
+    backdrop-filter: blur(24px) saturate(1.5);
+    border: 1px solid rgba(122, 162, 255, 0.14);
+    box-shadow: 0 18px 50px rgba(1, 5, 18, 0.6);
+  }
+  .tabbar-item.active {
+    color: #cfe0ff;
+    text-shadow: 0 0 14px rgba(0, 102, 255, 0.9);
+  }
+  .main { padding-bottom: 120px; }
+  .tr-stat.tr-stat-main .tr-stat-value { font-size: 42px; }
+  .nd-tape {
+    position: fixed; left: 12px; right: 12px;
+    bottom: calc(82px + env(safe-area-inset-bottom, 0px));
+    border: 1px solid rgba(122, 162, 255, 0.14);
+    border-radius: 14px; height: 26px; font-size: 10.5px;
+    box-shadow: 0 12px 34px rgba(1, 5, 18, 0.55);
+  }
+}
+
+/* ── frame bars stay quiet on glass ── */
+.card-title { color: rgba(160, 185, 230, 0.8); }
+.card-title::after { border-bottom-color: rgba(140, 175, 255, 0.18); }
+
+/* ── reduced motion: the field goes still, nothing disappears ── */
+@media (prefers-reduced-motion: reduce) {
+  .nd-aurora i, .nd-watermark, .page-fade > *,
+  .tr-stat-main .tr-grad.v9-money.pos { animation: none !important; }
+  .card:hover, .tr-stat:hover, .btn:hover { transform: none !important; }
 }

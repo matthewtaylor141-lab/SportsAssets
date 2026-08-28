@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Quote } from '../components/Quote'
 import { Lamp } from '../components/Lamp'
-import { BrandLockup } from '../components/Brand'
+import { BrandLockup, BrandMark } from '../components/Brand'
 import { HexField } from '../components/HexField'
 import { useLiveFeed } from '../lib/sse'
 import { EmptyState } from '../components/EmptyState'
@@ -403,6 +403,7 @@ export function TrackRecord() {
     <div className="page tr-page">
       <div className="tr-hero nd-reticle">
         <HexField height={300} />
+        <span className="nd-watermark"><BrandMark size={340} /></span>
         <div className="tr-hero-head">
           <div className="tr-ident">
             <div>

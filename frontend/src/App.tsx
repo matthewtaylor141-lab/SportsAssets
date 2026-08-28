@@ -187,6 +187,9 @@ export default function App() {
   return (
     <div className="app">
       {!cockpit && (
+        <div className="nd-aurora" aria-hidden><i /><i /><i /></div>
+      )}
+      {!cockpit && (
       <nav className="nav" ref={navRef} style={{ position: 'sticky' }}>
         <Brand />
         {TABS.map((t) => (
