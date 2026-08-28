@@ -1542,6 +1542,60 @@ def test_midawait_remine_never_writes_back_the_orphaned_ts(st, monkeypatch):
     assert e["blocks"][BLK] == "0x" + "99" * 32
 
 
+def test_midawait_reorg_generation_blocks_the_writeback(st, monkeypatch):
+    """fleet r11 hardening: a NEW-height re-mine (and a sibling tx's
+    removed notice) voids timestamps WITHOUT moving this height's
+    buffered hash — the hash compare alone would let the post-await
+    write-back restore a voided, pre-reorg-earned ts. Every purge that
+    touches an entry's suffix advances its reorg generation; a write-
+    back is valid only when the generation it captured before the
+    await is still current."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    e = st.pending[TX]
+    new_height = dict(MAKER_EV, blockNumber=hex(BLK + 2),
+                      blockHash="0x" + "88" * 32, logIndex="0x9")
+
+    async def resolve_with_reorg(blk, want_hash):
+        st.observe(lst, new_height)   # voids ts; BLK's hash unchanged
+        return TS0
+
+    monkeypatch.setattr(st, "_resolve_block", resolve_with_reorg)
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, e, time.time()))
+    assert calls == [] and done is False
+    assert BLK not in e["ts"], \
+        "the generation guard blocks the write-back even though the " \
+        "buffered hash at this height never changed"
+    assert e.get("reorg_gen", 0) >= 1
+
+    # a SIBLING tx's removed notice at or below the height: same rule
+    st2 = S1Emitter()
+    st2.head = BLK + s1.CONFIRM_DEPTH + 1
+    st2.http_url = "http://rpc.test"
+    st2._state_loaded = True
+    st2.armed = True
+    st2.cert_green = True
+    _wire(st2, lst)
+    _observe_all(st2, lst, [MAKER_EV])
+    e2 = st2.pending[TX]
+    sibling_removed = dict(MAKER_EV, removed=True,
+                           transactionHash="0x" + "ab" * 32)
+
+    async def resolve_with_sibling_removed(blk, want_hash):
+        st2.observe(lst, sibling_removed)
+        return TS0
+
+    monkeypatch.setattr(st2, "_resolve_block",
+                        resolve_with_sibling_removed)
+    done = asyncio.run(st2._finalize_tx(_Pool(), TX, e2, time.time()))
+    assert calls == [] and done is False
+    assert BLK not in e2["ts"], \
+        "a sibling's removed notice mid-await voids this earn too"
+
+
 def test_remine_during_probe_await_never_emits_the_orphaned_ts(
         st, monkeypatch):
     """fleet r11 (major, window E): rec['ts'] is copied out of e['ts']

@@ -418,6 +418,19 @@ class S1Emitter:
             for blk in [b for b in e.get("ts", {}) if b >= from_blk]:
                 e["ts"].pop(blk, None)
                 e.get("ts_src", {}).pop(blk, None)
+            # REORG GENERATION (fleet round 11): the resolution loop's
+            # post-await write-back guard compares the earned-against
+            # hash to the entry's current one — but a NEW-height
+            # re-mine and a sibling's removed notice void timestamps
+            # WITHOUT changing this entry's buffered hash at the old
+            # height, so the hash compare alone would let the write-
+            # back silently restore a voided, pre-reorg-earned ts.
+            # Any purge that touches (or could touch) this entry's
+            # suffix advances its generation; a write-back is valid
+            # only when the generation it captured before the await
+            # is still current.
+            if any(b >= from_blk for b in e.get("blocks", {})):
+                e["reorg_gen"] = e.get("reorg_gen", 0) + 1
 
     def _mark_counted(self, tx: str, wallet: str, asset: str) -> bool:
         """True the first time a (tx, wallet, asset) is handled. Lives
@@ -858,6 +871,7 @@ class S1Emitter:
                 continue
             if not self._take_token():
                 break
+            gen = e.get("reorg_gen", 0)
             got = await self._resolve_block(blk, want_hash)
             if got == "reorged":
                 self.bump("s1.abstain.reorged")
@@ -865,16 +879,18 @@ class S1Emitter:
                 return True
             if got is None:
                 break
-            if e["blocks"].get(blk) != want_hash:
-                # the await interleaved a same-height re-mine on this
-                # loop: observe() purged the earned timestamps and
-                # moved e['blocks'] to the new hash, but this iteration
-                # still holds the PRE-await snapshot — writing ts(old
-                # hash) back would silently undo the purge and the
-                # armed path would emit with the orphaned block's
-                # timestamp (fleet round 11, major). The earn is void;
-                # the block stays unresolved and re-earns against the
-                # CURRENT hash on the next pass.
+            if (e.get("reorg_gen", 0) != gen
+                    or e["blocks"].get(blk) != want_hash):
+                # the await interleaved reorg evidence on this loop —
+                # a same-height re-mine (hash moved), a new-height
+                # re-mine, or a sibling's removed notice (generation
+                # advanced without moving THIS height's hash): this
+                # iteration still holds the PRE-await snapshot, and
+                # writing ts back would silently undo observe()'s
+                # purge — the armed path then emits with the orphaned
+                # block's timestamp (fleet round 11, major). The earn
+                # is void; the block stays unresolved and re-earns
+                # against the CURRENT chain on the next pass.
                 continue
             e["ts"][blk] = got
             e.setdefault("ts_src", {})[blk] = want_hash
