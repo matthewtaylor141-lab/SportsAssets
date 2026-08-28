@@ -2169,3 +2169,76 @@ def test_db_clock_anchor_survives_wall_clock_steps(st, monkeypatch):
     monkeypatch.setattr(s1.time, "time", lambda: TS0 + 99_999.0)
     assert abs(st._now_db() - (TS0 + 500)) < 2.0, \
         "a +99999s wall-clock step must not move the trip clock"
+
+
+# ── fleet round 21 pins ─────────────────────────────────────────────
+def test_finalize_pop_requires_entry_identity(st, monkeypatch):
+    """fleet r21 (major): run() popped self.pending by TX KEY after
+    _finalize_tx returned done — but finalize awaits, and a removed-
+    notice arriving mid-await pops the entry while the canonical
+    re-mined log creates a FRESH entry under the same key. The key-
+    only pop destroyed that fresh entry with zero accounting: the
+    canonical fill silently never finalized (poller-recovered at
+    best, minutes later, and invisible to every S1 counter). The pop
+    now requires ENTRY IDENTITY — pending.get(tx) must be the exact
+    entry finalize ran on; a successor entry is someone else's work.
+    Functional: the real run() loop drives a finalize that swaps in
+    a successor entry mid-call, and the successor must survive."""
+    import inspect
+
+    import sportsassets.db as db
+
+    monkeypatch.setattr(s1, "TICK_S", 0.001)
+    pool = _Pool()
+
+    async def fake_pool():
+        return pool
+
+    monkeypatch.setattr(db, "get_pool", fake_pool)
+
+    async def noop(*a, **k):
+        return None
+
+    st._check_cert = noop
+    st._corroboration_sweep = noop
+    st._flush = noop
+    st.listener = None
+    st.last_flush_at = TS0 + 10.0
+    monkeypatch.setattr(
+        S1Emitter, "_should_poll_head", lambda self, now: False)
+
+    e1 = {"last_seen": 0.0, "first_seen": 0.0, "blocks": {}}
+    e2 = {"last_seen": TS0 + 10_000.0, "first_seen": TS0 + 10.0,
+          "blocks": {}}
+    st.pending[TX] = e1
+    ran = []
+
+    async def fake_finalize(pool_, tx, entry, now):
+        # mid-finalize: a removed notice popped THIS entry and the
+        # canonical re-mined log registered a fresh one at the key
+        ran.append(entry)
+        st.pending[TX] = e2
+        return True
+
+    st._finalize_tx = fake_finalize
+
+    async def drive():
+        task = asyncio.ensure_future(st.run())
+        for _ in range(400):
+            await asyncio.sleep(0.005)
+            if ran:
+                break
+        await asyncio.sleep(0.02)      # let any post-finalize pop land
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(drive())
+    assert ran and ran[0] is e1, "finalize ran on the original entry"
+    assert st.pending.get(TX) is e2, \
+        "a successor entry under the same tx key survives the pop"
+    src_run = inspect.getsource(S1Emitter.run)
+    assert "self.pending.get(tx) is e" in src_run, \
+        "the pop is identity-guarded, never key-guarded"

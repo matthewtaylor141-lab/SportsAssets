@@ -1650,7 +1650,20 @@ class S1Emitter:
                             self.pending.pop(tx, None)
                         continue
                     done = await self._finalize_tx(pool, tx, e, now)
-                    if done:
+                    if done and self.pending.get(tx) is e:
+                        # ENTRY IDENTITY, not tx key (fleet round 21,
+                        # major): _finalize_tx awaits, and a removed-
+                        # notice arriving mid-finalize pops THIS entry
+                        # while the canonical re-mined log creates a
+                        # FRESH entry under the same tx key. A key-only
+                        # pop here destroyed that fresh entry with zero
+                        # accounting — the canonical fill silently
+                        # never finalized. Pop only the exact entry we
+                        # finalized; a successor entry is someone
+                        # else's work. (The orphaned entry we just ran
+                        # cannot arm-emit stale state: its post-await
+                        # ts write-backs are gen/hash-guarded and the
+                        # r7 armed path refuses cached-ts emission.)
                         self.pending.pop(tx, None)
                 now = time.time()
                 if now - self.last_flush_at >= FLUSH_EVERY_S:

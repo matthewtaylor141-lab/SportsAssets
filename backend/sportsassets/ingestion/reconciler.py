@@ -26,6 +26,18 @@ log = logging.getLogger(__name__)
 # from the previous page's tail. See the walk-loop comment for why 3.
 OVERLAP_K = 3
 
+# Feed-ordering tolerance (round 21): the venue feed is newest-first;
+# a usable row whose ts exceeds its predecessor's by more than this is
+# proof the ordering premise is broken and the walk's span testimony
+# is void. Same-second bundles (equal ts) and small re-indexing jitter
+# pass; a genuinely misplaced row does not.
+ORDER_TOL_S = 120
+
+# Border-witness page size (round 21): rows a clean walk verifies PAST
+# the depth cap so the cap-tail rows have ordered successors below
+# them. One venue page.
+BORDER_PAGE = 100
+
 
 def _row_ident(raw: dict) -> tuple:
     """Raw-field identity of one served row — the continuity witness
@@ -62,6 +74,32 @@ async def reconcile_once(depth: int = 500) -> dict:
             # actually reached) at or before the fill's own time.
             complete = False
             oldest_ts: float | None = None
+            # FEED ORDERING (fleet round 21, major): oldest was a bare
+            # min() over usable rows — an inference sound only under
+            # an UNCHECKED newest-first premise. One genuinely valid
+            # late-indexed OLD row inside the walked window (a durable
+            # feed property, served identically to every hourly walk,
+            # so the round-20 two-run rule could not decorrelate it)
+            # set oldest below an S1 fill that sat BELOW the depth
+            # cap: false span coverage, permanent false STICKY. The
+            # walk now verifies the premise it relies on: (a) a usable
+            # row whose ts exceeds its predecessor's by more than
+            # ORDER_TOL_S proves the feed is not newest-first-ordered
+            # — the walk is DIRTY (span testimony void; ingest still
+            # runs); and (b) a row only testifies for span if ordered
+            # successors are verified BELOW it — a clean walk that
+            # reaches the depth cap fetches ONE border-witness page
+            # past the cap whose rows are ordering-checked and
+            # ingested but never extend oldest. An interior misordered
+            # row is caught by (a) at its successor; a misordered run
+            # at the exact cap tail is caught by (a)-via-(b) when the
+            # genuine feed resumes newer inside the border page. The
+            # residual needs ~BORDER_PAGE consecutively misordered
+            # rows spanning the cap boundary — a wholesale-reordered
+            # feed, which no depth-capped walk of any design can see
+            # through, and which the two-run rule still bounds.
+            # Failure direction, as always, is pure defer.
+            ord_prev: float | None = None
             # DIRTY WALK (fleet round 11, major): a row skipped as
             # unusable below neither ingests nor testifies — correct —
             # but when the skipped row was the S1 fill's OWN row (a
@@ -106,7 +144,13 @@ async def reconcile_once(depth: int = 500) -> dict:
             # have to recur across walks with decorrelated geometry.
             witness: list[tuple] = []
             try:
-                while offset < depth:
+                # a dirty walk skips the border page — its coverage
+                # claim is already refused, so the extra fetch buys
+                # nothing (r21)
+                while offset < (depth if dirty else depth + BORDER_PAGE):
+                    # rows past the depth cap are the border witness:
+                    # ordering-checked and ingested, never span (r21)
+                    testify = offset < depth
                     resp = await polite_get(
                         http, "/trades",
                         params={
@@ -206,7 +250,17 @@ async def reconcile_once(depth: int = 500) -> dict:
                             # is validity, not just tx/size/ts.
                             dirty += 1
                             continue
-                        if (ev.ts_epoch and ev.ts_epoch > 1e9
+                        ts_r = float(ev.ts_epoch or 0.0)
+                        if ord_prev is not None and \
+                                ts_r > ord_prev + ORDER_TOL_S:
+                            # the feed served a row NEWER than its
+                            # predecessor on a newest-first walk: the
+                            # ordering premise behind span testimony
+                            # is broken somewhere — DIRTY (r21)
+                            dirty += 1
+                        if ts_r > 1e9:
+                            ord_prev = ts_r
+                        if (testify and ev.ts_epoch and ev.ts_epoch > 1e9
                                 and (oldest_ts is None
                                      or ev.ts_epoch < oldest_ts)):
                             # the 1e9 floor (2001) rejects sentinel
