@@ -855,7 +855,8 @@ def test_sweep_confirms_and_trips_row_specific(st):
     assert st.deltas.get("s1.uncorroborated") == 1
     assert st.trips and "uncorroborated:3" in st.trips
     assert st.armed is False
-    assert pool.marked == [[1, 3]]
+    # r16: confirmed and judged stamp through separate statements
+    assert pool.marked == [[1], [3]]
     assert [w[1] for w in pool.trip_writes] == ["uncorroborated:3"], \
         "the trip is durable via its own atomic write, not the flush"
     assert st.unjudged_backlog == 5
@@ -1967,6 +1968,65 @@ def test_ingest_containment_is_per_row_in_both_carriers():
     assert rsrc.count("dirty += 1") >= 2, \
         "a row that cannot land counts into dirty — the walk " \
         "continues and still never claims clean coverage"
+
+
+# ── fleet round 16 pins ─────────────────────────────────────────────
+def test_judged_stamp_is_conditional_on_still_unseen():
+    """fleet r16 (major): the round-15 last look read the row BEFORE
+    the trip — a venue stamp committing between the recheck and
+    SQL_TRIP still became a permanent false verdict. The judged stamp
+    now carries venue_seen_at IS NULL in its own WHERE: verdict-time
+    and permanence-time are one atomic instant. Executed semantics:
+    test_s1_sql_real_pg."""
+    assert "venue_seen_at IS NULL" in s1.SQL_MARK_JUDGED
+    assert "s1_checked_at IS NULL" in s1.SQL_MARK_JUDGED
+    assert "venue_seen_at" not in s1.SQL_MARK, \
+        "the confirmed stamp stays unconditional"
+
+
+def test_judged_stamp_lost_to_a_venue_stamp_self_clears(st):
+    """fleet r16 (major): when the judged stamp is refused because the
+    VENUE stamped the row inside the recheck→trip gap, the trip just
+    persisted brands a corroborated row — the sweep releases it
+    itself (SQL_CLEAR + in-memory), counts nothing, and leaves the
+    row unstamped for the next sweep to CONFIRM."""
+    _arm(st)
+
+    class _VenueRacePool(_SweepPool):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.rechecks = 0
+            self.cleared: list[str] = []
+
+        async def fetchrow(self, sql, *a, timeout=None):
+            if "trips_cleared" in sql and \
+                    sql.lstrip().startswith("UPDATE ingestion_state"):
+                self.cleared.append(a[1])
+                return {"trips": {}, "cleared": {}}
+            if "FROM trades WHERE id" in sql:
+                # unseen at the pre-trip recheck; SEEN at the post-
+                # mark recheck — the venue stamped inside the gap
+                self.rechecks += 1
+                return {"ok": self.rechecks > 1}
+            return await _SweepPool.fetchrow(self, sql, *a,
+                                             timeout=timeout)
+
+        async def fetch(self, sql, *a, timeout=None):
+            if "venue_seen_at IS NULL RETURNING" in sql:
+                self.marked.append(list(a[0]))
+                return []            # the conditional stamp refused
+            return await _SweepPool.fetch(self, sql, *a,
+                                          timeout=timeout)
+
+    pool = _VenueRacePool([_srow(3, False)])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert pool.trip_writes, "the trip persisted before the stamp"
+    assert pool.cleared == ["uncorroborated:3"], \
+        "the race-lost verdict is released durably, by the sweep"
+    assert st.trips == {}, "and released in-memory"
+    assert st.deltas.get("s1.uncorroborated") is None, \
+        "a verdict that lost to its own evidence counts nothing"
+    assert st.deltas.get("s1.trip_self_cleared") == 1
 
 
 def test_db_clock_anchor_survives_wall_clock_steps(st, monkeypatch):

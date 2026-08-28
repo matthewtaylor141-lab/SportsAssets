@@ -243,6 +243,45 @@ def test_every_state_statement_prepares_and_executes():
     asyncio.run(run())
 
 
+def test_round16_judged_stamp_is_conditional():
+    """fleet r16, EXECUTED: the judged stamp lands ONLY while the row
+    is still venue-unseen — a venue stamp committing before the stamp
+    instant refuses the transition atomically, so a false verdict can
+    never become permanent past its own evidence."""
+    async def run():
+        admin, c, name = await _scratch()
+        try:
+            wid = await c.fetchval(
+                "INSERT INTO whales (address, username) "
+                "VALUES ('0xw', 'w') RETURNING id")
+            unseen = await c.fetchval(
+                "INSERT INTO trades (whale_id, tx_hash, asset, source, "
+                "dedupe_key, ts, detected_at) VALUES ($1, '0xa', 'a', "
+                "'s1', 'k1', now(), now()) RETURNING id", wid)
+            seen = await c.fetchval(
+                "INSERT INTO trades (whale_id, tx_hash, asset, source, "
+                "dedupe_key, ts, detected_at, venue_seen_at) VALUES "
+                "($1, '0xb', 'b', 's1', 'k2', now(), now(), now()) "
+                "RETURNING id", wid)
+            won = await c.fetch(s1.SQL_MARK_JUDGED, [unseen, seen])
+            assert [r["id"] for r in won] == [unseen], \
+                "the venue-stamped row refuses the judged transition"
+            still = await c.fetchval(
+                "SELECT s1_checked_at FROM trades WHERE id = $1", seen)
+            assert still is None, \
+                "the refused row stays unstamped — the next sweep " \
+                "confirms it through the ok path"
+            ok = await c.fetchrow(s1.SQL_RECHECK, seen)
+            assert bool(ok["ok"]) is True
+            won2 = await c.fetch(s1.SQL_MARK, [seen])
+            assert [r["id"] for r in won2] == [seen], \
+                "the unconditional confirmed stamp still transitions"
+        finally:
+            await _drop(admin, c, name)
+
+    asyncio.run(run())
+
+
 def test_round11_dirty_coverage_and_the_tombstone_clock():
     """fleet r11, EXECUTED: (major) a reconciler walk that skipped ANY
     unusable row is DIRTY and never covers — round 9 stopped a stub

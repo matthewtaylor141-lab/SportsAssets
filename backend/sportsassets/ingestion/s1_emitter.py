@@ -175,6 +175,20 @@ WHERE source = 's1' AND s1_checked_at IS NULL
 SQL_MARK = ("UPDATE trades SET s1_checked_at = now() "
             "WHERE id = ANY($1::bigint[]) AND s1_checked_at IS NULL "
             "RETURNING id")
+# The JUDGED stamp is conditional on the row STILL being venue-unseen
+# at the stamp instant (fleet round 16, major): the round-15 last look
+# read the row before the trip, but a venue stamp committing between
+# the recheck and SQL_TRIP still became a permanent false verdict —
+# no lock spans the gap. This WHERE makes verdict-time and
+# permanence-time the same atomic instant: a stamp that lands proves
+# the row was venue-unseen when the verdict became permanent; a stamp
+# refused because venue_seen_at filled in means the trip just
+# persisted brands a corroborated row — the sweep self-clears it and
+# leaves the row unstamped for the next sweep to CONFIRM.
+SQL_MARK_JUDGED = (
+    "UPDATE trades SET s1_checked_at = now() "
+    "WHERE id = ANY($1::bigint[]) AND s1_checked_at IS NULL "
+    "AND venue_seen_at IS NULL RETURNING id")
 # The verdict is conditional on the backstop having actually had its
 # chance AT THIS FILL (fleet rounds 5+6). Round 5 required the wallet
 # present as a success key and absent as a failure key; round 6 proved
@@ -1332,23 +1346,66 @@ class S1Emitter:
             if out == "landed":
                 ok_judged.append(r)
         # STAMP BEFORE COUNTING (fleet r4): a failed stamp must not
-        # inflate s1.confirmed forever
-        ids = confirmed_ids + [r["id"] for r in ok_judged]
+        # inflate s1.confirmed forever. Round 16: confirmed and judged
+        # stamp through DIFFERENT statements — the judged stamp is
+        # atomic-conditional on the row still being venue-unseen, so
+        # the verdict can never outlive its own evidence.
         won: set = set()
-        if ids:
+        if confirmed_ids:
             try:
-                rows_won = await pool.fetch(SQL_MARK, ids, timeout=10)
+                rows_won = await pool.fetch(SQL_MARK, confirmed_ids,
+                                            timeout=10)
                 won = {r["id"] for r in rows_won or []}
             except Exception:  # noqa: BLE001
                 self.bump("s1.errors")
                 return                 # nothing counted; rows re-judge
+        judged_won: set = set()
+        if ok_judged:
+            try:
+                rows_jw = await pool.fetch(
+                    SQL_MARK_JUDGED, [r["id"] for r in ok_judged],
+                    timeout=10)
+                judged_won = {r["id"] for r in rows_jw or []}
+            except Exception:  # noqa: BLE001
+                self.bump("s1.errors")
+                return                 # trip stands; rows re-judge
+        for r in ok_judged:
+            if r["id"] in judged_won:
+                continue
+            # the judged stamp was refused. Either another sweep won
+            # the transition (they counted it), or the VENUE stamped
+            # the row inside our recheck→trip gap — in which case the
+            # trip we just persisted brands a corroborated row (round
+            # 16): release it ourselves, leave the row unstamped, and
+            # the next sweep confirms it through the ok path.
+            reason = "uncorroborated:%s" % r["id"]
+            try:
+                cur = await pool.fetchrow(SQL_RECHECK, r["id"],
+                                          timeout=6)
+            except Exception:  # noqa: BLE001
+                self.bump("s1.errors")
+                continue           # trip stands; re-examined next sweep
+            if cur is not None and bool(cur["ok"]):
+                try:
+                    await pool.fetchrow(SQL_CLEAR, STATE_KEY, reason,
+                                        timeout=6)
+                except Exception:  # noqa: BLE001
+                    self.bump("s1.errors")
+                    continue       # clear retries via the next sweep's
+                                   # race-lost branch (row unstamped)
+                self.trips.pop(reason, None)
+                self._unpersisted.discard(reason)
+                self.bump("s1.trip_self_cleared")
+                log.warning("S1 trip '%s' self-cleared — the venue "
+                            "stamped the row inside the judgment gap",
+                            reason)
         # count only rows THIS process transitioned (fleet round 8:
         # two overlapping sweeps both counted the same judgment and
         # the server-side delta merge made the inflation durable)
         self.bump("s1.confirmed",
                   len([i for i in confirmed_ids if i in won]))
         self.bump("s1.uncorroborated",
-                  len([r for r in ok_judged if r["id"] in won]))
+                  len([r for r in ok_judged if r["id"] in judged_won]))
 
     async def _corroboration_sweep(self, pool: Any) -> None:
         # refresh the DB clock offset once per sweep so every trip this
