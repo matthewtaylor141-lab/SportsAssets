@@ -896,8 +896,9 @@ def test_recon_coverage_requires_depth_and_lag(st):
     src = inspect.getsource(rec)
     assert '"cov:" + whale["address"]' in src
     assert '"complete": complete, "oldest": oldest_ts' in src
-    assert src.count("complete = True") == 1, \
-        "complete only when the feed was exhausted inside the depth"
+    assert src.count("complete = True") == 2, \
+        "complete only when the feed was exhausted inside the depth " \
+        "(short/empty page, or r17's only-the-witness-came-back page)"
     assert "complete = offset > 0" in src, \
         "round 7: an empty FIRST page is venue degradation, not " \
         "'feed exhausted' — it must never brand a fill uncorroborated"
@@ -2027,6 +2028,73 @@ def test_judged_stamp_lost_to_a_venue_stamp_self_clears(st):
     assert st.deltas.get("s1.uncorroborated") is None, \
         "a verdict that lost to its own evidence counts nothing"
     assert st.deltas.get("s1.trip_self_cleared") == 1
+
+
+# ── fleet round 17 pins ─────────────────────────────────────────────
+def test_orphaned_uncorroborated_trip_heals_on_the_next_sweep(st):
+    """fleet r17 (major): the round-16 self-clear could fail on one
+    transient error, and its claimed retry path was unreachable — the
+    row confirms through the ok path, which never touches trip state,
+    so the false trip stood forever against a database contradicting
+    it. Every sweep now reconciles the live trip set against the
+    evidence: an 'uncorroborated:<id>' whose row the venue has since
+    corroborated is released, durably and in-memory, whatever orphan
+    path created it."""
+    _arm(st)
+    st.trips["uncorroborated:3"] = float(TS0)   # orphaned somewhere
+    st.armed = False
+
+    class _HealPool(_SweepPool):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.cleared: list[str] = []
+            self.recheck_ok = True
+
+        async def fetchrow(self, sql, *a, timeout=None):
+            if "trips_cleared" in sql and \
+                    sql.lstrip().startswith("UPDATE ingestion_state"):
+                self.cleared.append(a[1])
+                return {"trips": {}, "cleared": {}}
+            return await _SweepPool.fetchrow(self, sql, *a,
+                                             timeout=timeout)
+
+    pool = _HealPool([], wallets=[])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert pool.cleared == ["uncorroborated:3"], \
+        "the healer releases the orphan durably"
+    assert st.trips == {}, "and in-memory"
+    assert st.deltas.get("s1.trip_self_cleared") == 1
+
+
+def test_genuinely_unseen_trips_never_heal(st):
+    """The healer keys strictly on the evidence: a row the venue has
+    NOT corroborated keeps its trip — healing is never a loophole."""
+    _arm(st)
+    st.trips["uncorroborated:3"] = float(TS0)
+    st.armed = False
+    pool = _SweepPool([], wallets=[])       # recheck default: False
+    asyncio.run(st._corroboration_sweep(pool))
+    assert "uncorroborated:3" in st.trips, "unseen = the trip stands"
+    assert st.deltas.get("s1.trip_self_cleared") is None
+
+
+def test_walk_pages_overlap_and_a_boundary_shift_dirties():
+    """fleet r17 (major): offset pagination issued a fresh query per
+    page — an unstable tiebreak on two same-second rows straddling a
+    boundary re-served the tie-mate and the S1 fill was NEVER walked,
+    while every page was individually valid: clean coverage claimed
+    over a skipped fill, permanent false STICKY. Pages now overlap by
+    one row as a continuity witness; a boundary that does not re-serve
+    the witness (or an overlap row that vanishes) dirties the walk."""
+    import inspect
+    from sportsassets.ingestion import reconciler as rec
+    src = inspect.getsource(rec)
+    assert "_row_ident(batch[0]) == prev_tail" in src
+    assert "offset += max(1, len(batch) - 1)" in src, \
+        "each page re-requests the previous tail"
+    assert src.count("dirty += 1") >= 4, \
+        "validity, ingest-failure, boundary mismatch AND vanished " \
+        "overlap all dirty the walk"
 
 
 def test_db_clock_anchor_survives_wall_clock_steps(st, monkeypatch):

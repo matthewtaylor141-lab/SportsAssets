@@ -1391,8 +1391,15 @@ class S1Emitter:
                                         timeout=6)
                 except Exception:  # noqa: BLE001
                     self.bump("s1.errors")
-                    continue       # clear retries via the next sweep's
-                                   # race-lost branch (row unstamped)
+                    continue       # the trip stays in self.trips, and
+                                   # the row is venue-stamped — exactly
+                                   # what _heal_corroborated_trips keys
+                                   # on: it releases the reason on the
+                                   # next sweep (round 17: the old
+                                   # comment claimed a race-lost retry
+                                   # that was unreachable — the row
+                                   # confirms via the ok path, which
+                                   # never touched trip state)
                 self.trips.pop(reason, None)
                 self._unpersisted.discard(reason)
                 self.bump("s1.trip_self_cleared")
@@ -1407,10 +1414,48 @@ class S1Emitter:
         self.bump("s1.uncorroborated",
                   len([r for r in ok_judged if r["id"] in judged_won]))
 
+    async def _heal_corroborated_trips(self, pool: Any) -> None:
+        """Release any 'uncorroborated:<id>' trip whose row the venue
+        has since corroborated (fleet round 17, major): the round-16
+        self-clear could fail on one transient error, and the claimed
+        next-sweep retry was unreachable — the row confirms through
+        the ok path, which never touches trip state, and the false
+        trip stood forever against a database that contradicts it.
+        This healer runs every sweep over the live trip set (normally
+        empty), so EVERY orphan path — failed self-clear, crash
+        windows, foreign trips adopted from other processes — heals
+        the moment the evidence says the alarm's premise is false."""
+        for reason in [k for k in self.trips
+                       if k.startswith("uncorroborated:")]:
+            try:
+                rid = int(reason.split(":", 1)[1])
+            except (TypeError, ValueError):
+                continue
+            try:
+                cur = await pool.fetchrow(SQL_RECHECK, rid, timeout=6)
+            except Exception:  # noqa: BLE001 — heal again next sweep
+                self.bump("s1.errors")
+                continue
+            if cur is None or not bool(cur["ok"]):
+                continue               # genuinely unseen: trip stands
+            try:
+                await pool.fetchrow(SQL_CLEAR, STATE_KEY, reason,
+                                    timeout=6)
+            except Exception:  # noqa: BLE001 — heal again next sweep
+                self.bump("s1.errors")
+                continue
+            self.trips.pop(reason, None)
+            self._unpersisted.discard(reason)
+            self.bump("s1.trip_self_cleared")
+            log.warning("S1 trip '%s' healed — the venue has "
+                        "corroborated the row", reason)
+
     async def _corroboration_sweep(self, pool: Any) -> None:
         # refresh the DB clock offset once per sweep so every trip this
         # cycle stamps PG's clock, not the app host's (round 12)
         await self._db_now(pool)
+        # trips-vs-evidence reconciliation BEFORE new judgments (r17)
+        await self._heal_corroborated_trips(pool)
         # per-sweep rotation salt (round 7): every wallet and row gets
         # an equal shot at each sweep — deferral can defer, not block
         salt = str(int(time.time()))

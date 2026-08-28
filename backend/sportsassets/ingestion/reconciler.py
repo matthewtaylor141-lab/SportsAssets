@@ -23,6 +23,18 @@ from .poller import _sport_for_condition, parse_data_api_trade
 log = logging.getLogger(__name__)
 
 
+def _row_ident(raw: dict) -> tuple:
+    """Raw-field identity of one served row — the continuity witness
+    for overlap pagination (fleet round 17). Raw values, not parsed:
+    the witness must match exactly what the venue re-serves."""
+    return (
+        str(raw.get("transactionHash") or raw.get("txHash") or ""),
+        str(raw.get("asset") or raw.get("tokenId") or ""),
+        str(raw.get("side", "")), str(raw.get("size", "")),
+        str(raw.get("price", "")), str(raw.get("timestamp", "")),
+    )
+
+
 async def reconcile_once(depth: int = 500) -> dict:
     cfg = settings()
     pool = await get_pool()
@@ -59,6 +71,19 @@ async def reconcile_once(depth: int = 500) -> dict:
             # the wallet's rows DEFER until a clean run covers them,
             # the same safe direction every degradation shape takes.
             dirty = 0
+            # OVERLAP PAGINATION (fleet round 17, major): each page is
+            # a FRESH query, and two same-timestamp rows straddling a
+            # page boundary under an unstable tiebreak could swap —
+            # the walk then re-served the tie-mate and NEVER saw the
+            # other row, while every individual page was valid: dirty
+            # stayed 0, complete=true, spanning oldest — a clean
+            # coverage claim over a walk that skipped the S1 fill.
+            # Every page after the first now re-requests the previous
+            # page's LAST row (offset advances by len-1); if the
+            # boundary row does not come back first, the feed shifted
+            # between queries and the walk is DIRTY — it may have
+            # dropped a row it can no longer prove it saw.
+            prev_tail: tuple | None = None
             try:
                 while offset < depth:
                     resp = await polite_get(
@@ -80,9 +105,29 @@ async def reconcile_once(depth: int = 500) -> dict:
                         # evidence. Only an end reached AFTER real
                         # rows proves the feed was walked; an empty
                         # start defers (no cov claim of completeness).
+                        if prev_tail is not None:
+                            # the overlap row we re-requested VANISHED
+                            # between queries — shift evidence (r17)
+                            dirty += 1
                         complete = offset > 0
                         break
-                    for raw in batch:
+                    rows = batch
+                    if prev_tail is not None:
+                        if _row_ident(batch[0]) == prev_tail:
+                            rows = batch[1:]
+                            if not rows:
+                                # only the overlap row came back — the
+                                # feed is exhausted at the boundary
+                                complete = True
+                                break
+                        else:
+                            # boundary mismatch: the feed reordered
+                            # between page queries — a row may have
+                            # slipped through the seam. Process what
+                            # we got (dedupe absorbs any repeats) but
+                            # the walk can never claim clean coverage.
+                            dirty += 1
+                    for raw in rows:
                         # per-row containment (round 14): a hostile
                         # field can make the PARSE itself raise
                         # (Infinity timestamp -> int() overflow) — one
@@ -152,7 +197,10 @@ async def reconcile_once(depth: int = 500) -> dict:
                             continue
                         if was_new:
                             wallet_missed += 1
-                    offset += 100
+                    prev_tail = _row_ident(batch[-1])
+                    # advance by len-1: the next page re-requests the
+                    # tail as its continuity witness (round 17)
+                    offset += max(1, len(batch) - 1)
                     if len(batch) < 100:
                         complete = True
                         break
