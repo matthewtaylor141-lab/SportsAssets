@@ -471,6 +471,19 @@ def test_registry_emitter_claim_survives_receipt_reclaim():
 
 
 # ── flag-off inertness ──────────────────────────────────────────────
+def test_default_is_burn_in_on_but_never_armed(monkeypatch):
+    """Owner directive 2026-08-28: the emitter tests itself in
+    production by default — and the default can never write: armed
+    requires cert green + persisted arm + S1_ARM, none of which a
+    fresh process has."""
+    monkeypatch.delenv("S1_EMITTER", raising=False)
+    monkeypatch.delenv("S1_ARM", raising=False)
+    e = S1Emitter()
+    assert e.enabled is True, "burn-in runs by default"
+    assert e.armed is False and e.cert_green is False
+    assert e.tripped is None
+
+
 def test_disabled_emitter_buffers_nothing(monkeypatch):
     monkeypatch.setenv("S1_EMITTER", "off")
     e = S1Emitter()

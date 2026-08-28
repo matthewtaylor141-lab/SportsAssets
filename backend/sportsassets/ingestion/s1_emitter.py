@@ -152,8 +152,12 @@ RETURNING key
 
 class S1Emitter:
     def __init__(self) -> None:
-        # the flag gates the whole task; armed gates real emission
-        self.enabled = os.getenv("S1_EMITTER", "off").lower() in ("on", "1", "true")
+        # BURN-IN BY DEFAULT (owner directive 2026-08-28): the full
+        # pipeline runs against live events and counts s1.would_emit,
+        # writing NOTHING — emission stays quadruple-gated behind cert
+        # GREEN + the 7-day window + the persisted arm + S1_ARM. Set
+        # S1_EMITTER=off to silence the emitter entirely.
+        self.enabled = os.getenv("S1_EMITTER", "on").lower() not in ("off", "0", "false")
         self.listener: Any = None                    # weakref.ref
         self.http_url = ""
         # tx -> {logs, first_seen, last_seen, replay, evicted,
