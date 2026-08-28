@@ -7539,6 +7539,24 @@ async def api_copies_record(since: str | None = Query(None)) -> dict:
     return out
 
 
+@app.get("/api/admin/proof2", dependencies=[Depends(require_desk)])
+async def api_proof2(since: str | None = Query(None)):
+    """PROOF-2 (owner order 2026-08-28): the decomposed thesis meter.
+    Sleeve edge = mix-weighted whale edge (their books, published CIs)
+    minus outcome-free capture drag (our fills vs the whale's own
+    prices, deterministic per fill) minus fees — with the combined CI,
+    P(edge > 0), and P(annual profit >= 100% of principal) across a
+    principal grid at measured flow and flow multiples. Every term is
+    measured; the meter moves when the evidence moves."""
+    from . import proof2 as p2
+
+    pool = await get_pool()
+    try:
+        return await p2.proof2_payload(pool, since)
+    except ValueError as exc:
+        raise HTTPException(400, f"bad since: {exc}") from exc
+
+
 @app.get("/api/admin/copy-reports", dependencies=[Depends(require_desk)])
 async def api_copy_reports(period: str = Query("monthly"),
                            whale: str | None = Query(None),

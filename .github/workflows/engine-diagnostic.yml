@@ -807,6 +807,32 @@ jobs:
             /tmp/proof.json 2>/dev/null || true
           jq -r '"  PROOF cohort_start=\(.cohort_start // "n/a")"' \
             /tmp/proof.json 2>/dev/null || true
+          # PROOF-2 — the decomposed thesis meter (owner order
+          # 2026-08-28): sleeve edge = mix-weighted whale edge (their
+          # books) - outcome-free capture drag (our fills vs theirs,
+          # deterministic per fill) - fees, with the combined CI and
+          # P(annual >= 100% of principal) at measured flow and the
+          # flow-multiple the thesis requires. The drag CI tightens in
+          # hundreds of fills, not 15k — this meter moves first.
+          P2CODE=$(curl -sS --max-time 60 -w '%{http_code}' \
+               -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/proof2.json "$BASE/api/admin/proof2" \
+               2>/dev/null || echo "000")
+          echo "  PROOF2HTTP code=$P2CODE bytes=$(wc -c < /tmp/proof2.json 2>/dev/null || echo 0)"
+          jq -r '.capture // {} |
+                 "  PROOF2 capture n=\(.n // 0) entries=$\(.entry_notional // 0) drag=\(.drag_rate // "n/a") (se \(.drag_se // "n/a")) fees=\(.fee_rate // "n/a")"' \
+            /tmp/proof2.json 2>/dev/null || echo "  PROOF2 unavailable"
+          jq -r '.edge // {} | select(.available)
+                 | "  PROOF2 edge: whales \(.whale_mix_edge) - drag \(.drag_rate) - fees \(.fee_rate) = sleeve \(.sleeve_edge) (se \(.sleeve_se))  P(edge>0)=\(.p_edge_positive)"' \
+            /tmp/proof2.json 2>/dev/null || true
+          jq -r '.thesis // {} | select(.available)
+                 | "  PROOF2 flow=$\(.measured_flow_per_day)/day",
+                   (.grid[]? | select(.principal == 2000000)
+                    | "  PROOF2 $2M thesis: P(>=100%/yr) at 1x flow \(.p_100pct_at_1x_flow) / 10x \(.p_100pct_at_10x_flow) / 50x \(.p_100pct_at_50x_flow) — needs \(.flow_x_for_p50 // "n/a")x flow at p50")' \
+            /tmp/proof2.json 2>/dev/null || true
+          jq -r '.edge.unpublished_whales // [] | select(length > 0)
+                 | "  PROOF2 note: no published whale CI yet for \(join(", ")) (diluted to zero edge)"' \
+            /tmp/proof2.json 2>/dev/null || true
           # PRICEFID — "same or better price", measured at last.
           #
           # The status page's slippage median is (fill_price -
