@@ -187,3 +187,39 @@ def test_ordering_pins_in_source():
     assert "depth if dirty else depth + BORDER_PAGE" in src, \
         "clean walks verify one page past the cap; dirty walks skip"
     assert "testify = offset < depth" in src
+
+
+def test_total_loss_run_heartbeats_error_not_ok(monkeypatch):
+    """r27 (minor): a run in which EVERY wallet's walk failed used to
+    heartbeat 'ok' {missed: 0} — the backstop carrier 100% dead,
+    indistinguishable on the ops row from a flawless run (status was
+    derived solely from missed). Total loss now says 'error', and
+    partial failure rides the detail."""
+    pool = _FakePool()
+    beats: list[tuple] = []
+
+    async def failing_get(http, path, params=None):
+        raise RuntimeError("venue refused")
+
+    async def fake_pool():
+        return pool
+
+    async def fake_hb(name, status, detail=None):
+        beats.append((name, status, detail))
+
+    monkeypatch.setattr(rec, "polite_get", failing_get)
+    monkeypatch.setattr(rec, "get_pool", fake_pool)
+    monkeypatch.setattr(rec, "heartbeat", fake_hb)
+    monkeypatch.setattr(
+        rec, "settings",
+        lambda: SimpleNamespace(data_api_base="http://feed.test"))
+    asyncio.run(rec.reconcile_once(depth=500))
+    assert beats and beats[-1][1] == "error", \
+        "a dead backstop must never wear a green heartbeat"
+    assert beats[-1][2] == {"missed": 0, "failed": 1}
+
+    # the healthy control keeps its ok, now with failed=0 visible
+    pool2, calls = _wire(monkeypatch, _feed())
+    monkeypatch.setattr(rec, "heartbeat", fake_hb)
+    asyncio.run(rec.reconcile_once(depth=500))
+    assert beats[-1][1] == "ok" and beats[-1][2]["failed"] == 0

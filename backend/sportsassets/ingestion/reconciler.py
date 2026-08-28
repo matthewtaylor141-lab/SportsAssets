@@ -342,8 +342,21 @@ async def reconcile_once(depth: int = 500) -> dict:
         missed,
         json.dumps({"per_wallet": per_wallet}),
     )
-    status = "ok" if missed == 0 else "drift"
-    await heartbeat("reconciler", status, {"missed": missed})
+    # round 27 (minor): status derived solely from `missed` let a
+    # TOTAL-LOSS run (every wallet's walk failed; nothing ingested,
+    # nothing covered, nothing stamped) heartbeat 'ok' — the backstop
+    # carrier 100% dead, byte-identical on the ops row to a flawless
+    # run, the same silent-success arithmetic rounds 23-25 killed in
+    # the other three carriers. Failure now speaks in status like
+    # every sibling: all wallets failed -> 'error'; partial failures
+    # ride the detail so the dashboard can see degradation.
+    failed_n = sum(1 for k in per_wallet if str(k).startswith("failed:"))
+    if whales and failed_n == len(whales):
+        status = "error"
+    else:
+        status = "ok" if missed == 0 else "drift"
+    await heartbeat("reconciler", status,
+                    {"missed": missed, "failed": failed_n})
     if missed:
         log.warning("reconciliation ingested %s missed fills: %s", missed, per_wallet)
     return {"run_id": run_id, "missed": missed, "per_wallet": per_wallet}
