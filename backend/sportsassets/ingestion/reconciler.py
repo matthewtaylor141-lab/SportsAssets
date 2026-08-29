@@ -113,7 +113,7 @@ async def reconcile_once(depth: int = 500) -> dict:
             # disarm, NOT defer. Money fails closed (never a wrong or
             # double emission); the cost is a spurious operator alarm
             # under a non-physical feed pathology.
-            ord_prev: float | None = None
+            ord_floor: float | None = None
             # DIRTY WALK (fleet round 11, major): a row skipped as
             # unusable below neither ingests nor testifies — correct —
             # but when the skipped row was the S1 fill's OWN row (a
@@ -280,15 +280,27 @@ async def reconcile_once(depth: int = 500) -> dict:
                             # head claims.
                             dirty += 1
                             continue
-                        if ord_prev is not None and \
-                                ts_r > ord_prev + ORDER_TOL_S:
+                        if ord_floor is not None and \
+                                ts_r > ord_floor + ORDER_TOL_S:
                             # the feed served a row NEWER than its
                             # predecessor on a newest-first walk: the
                             # ordering premise behind span testimony
                             # is broken somewhere — DIRTY (r21)
                             dirty += 1
                         if ts_r > 1e9:
-                            ord_prev = ts_r
+                            # CUMULATIVE floor, not the previous row
+                            # (round 42, executed): the adjacent-only
+                            # check let an ascending re-index ramp
+                            # climb back to trajectory in
+                            # <= ORDER_TOL_S steps, accumulating
+                            # unbounded inversion at dirty=0 and
+                            # sinking cov->oldest 7500s below the
+                            # walk's real reach. Under a genuine
+                            # newest-first feed ts is non-increasing,
+                            # so ts_r never exceeds the running floor
+                            # and this can never fire falsely.
+                            ord_floor = (ts_r if ord_floor is None
+                                         else min(ord_floor, ts_r))
                         if (testify and ev.ts_epoch and ev.ts_epoch > 1e9
                                 and (oldest_ts is None
                                      or ev.ts_epoch < oldest_ts)):
@@ -377,9 +389,18 @@ async def reconcile_once(depth: int = 500) -> dict:
                 # owns that boundary honestly.)
                 if newest_row is not None:
                     try:
+                        # r42 (F6, executed): lower() both sides —
+                        # SQL_PROBE and make_dedupe_key lowercase, a
+                        # mixed-case re-serve bypassed the r41 fix —
+                        # and compare against source='poll' rows only:
+                        # chain/s1 rows carry BLOCK timestamps whose
+                        # honest 120-300s venue skew fired the probe
+                        # on every clean walk and silenced the alarm.
                         mutant = await pool.fetchval(
-                            "SELECT 1 FROM trades WHERE tx_hash = $1 "
-                            "AND asset = $2 AND abs(extract(epoch "
+                            "SELECT 1 FROM trades "
+                            "WHERE lower(tx_hash) = lower($1) "
+                            "AND asset = $2 AND source = 'poll' "
+                            "AND abs(extract(epoch "
                             "from ts)::float8 - $3) > $4 LIMIT 1",
                             newest_row[0], newest_row[1],
                             newest_row[2], float(ORDER_TOL_S))

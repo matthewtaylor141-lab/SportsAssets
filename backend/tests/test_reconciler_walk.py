@@ -192,8 +192,11 @@ def test_ordering_pins_in_source():
     assert rec.ORDER_TOL_S <= 300, \
         "the ordering tolerance stays tight — jitter, not reordering"
     assert rec.BORDER_PAGE >= 100, "a full venue page past the cap"
-    assert "ts_r > ord_prev + ORDER_TOL_S" in src, \
-        "a row newer than its predecessor dirties the walk"
+    assert "ts_r > ord_floor + ORDER_TOL_S" in src, \
+        "a row newer than the walk's running floor dirties the walk"
+    assert "min(ord_floor, ts_r)" in src, \
+        "r42: the floor is CUMULATIVE — an ascending re-index ramp " \
+        "can never climb back to trajectory in tolerance-sized steps"
     assert "testify and ev.ts_epoch" in src, \
         "border rows are witnesses, never span testimony"
     assert "depth if dirty else depth + BORDER_PAGE" in src, \
@@ -292,3 +295,20 @@ def test_fresh_head_row_is_not_a_mutant(monkeypatch):
     asyncio.run(rec.reconcile_once(depth=500))
     cov = _cov(pool)
     assert cov["dirty"] == 0 and cov["newest"] == float(TOP_TS)
+
+
+def test_ascending_reindex_batch_dirties_the_walk(monkeypatch):
+    """fleet r42 (executed kill, design round): the adjacent-only
+    ordering check let an ascending re-index ramp — a 7000s drop then
+    steps each under ORDER_TOL_S — climb back to trajectory with
+    dirty=0 while cov->oldest sank far below the walk's real reach:
+    forged span over fills the walk never served. The CUMULATIVE
+    floor makes any climb above the walk's running minimum dirty."""
+    feed = _feed()
+    for j in range(60):
+        feed[50 + j]["timestamp"] = int(TOP_TS - 7000 + j * 110)
+    pool, _calls = _wire(monkeypatch, feed)
+    asyncio.run(rec.reconcile_once(depth=500))
+    cov = _cov(pool)
+    assert cov["dirty"] >= 1, \
+        "a ramp climbing in tolerance-sized steps is still inversion"

@@ -38,7 +38,8 @@ CREATE TABLE trades (
     id bigserial PRIMARY KEY, whale_id bigint, tx_hash text,
     asset text, source text, dedupe_key text,
     ts timestamptz, detected_at timestamptz,
-    venue_seen_at timestamptz, s1_checked_at timestamptz);
+    venue_seen_at timestamptz, s1_checked_at timestamptz,
+    s1_suspect_at timestamptz);
 CREATE TABLE reconciliation_runs (
     id bigserial PRIMARY KEY,
     started_at timestamptz DEFAULT now(), finished_at timestamptz,

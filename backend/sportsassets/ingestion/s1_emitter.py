@@ -100,6 +100,11 @@ BLOCKS_PER_TX_CAP = 8               # heights one entry may record (r33)
 REMOVED_TX_CAP = 8192               # proven-orphan tx marks (r39)
 RECON_VENUE_LAG_S = 600.0           # data-api indexing lag margin
 RECON_TS_MARGIN_S = 300.0           # venue ts vs block ts skew margin
+SUSPECT_HOLD_S = 3 * 3600.0         # r42: >= 3 further hourly walks
+                                    # and 3 full poller passes
+SUSPECT_BURST_WALLETS = 3           # r42: a feed degradation is per-
+                                    # wallet; a wrong decode is
+                                    # wallet-agnostic
 FLUSH_EVERY_S = 60.0
 CERT_EVERY_S = 60.0
 CERT_WINDOW_S = 7 * 86400.0
@@ -159,7 +164,7 @@ LIMIT 200
 # check defer only their own whale; rotation (round 7) stops them
 # pinning even that.
 SQL_SWEEP = """
-SELECT t.id, t.dedupe_key, t.detected_at, t.ts,
+SELECT t.id, t.dedupe_key, t.detected_at, t.ts, t.s1_suspect_at,
        (t.venue_seen_at IS NOT NULL) AS ok
 FROM trades t
 WHERE t.whale_id = $2 AND t.source = 's1' AND t.s1_checked_at IS NULL
@@ -193,6 +198,40 @@ SQL_MARK_JUDGED = (
     "UPDATE trades SET s1_checked_at = now() "
     "WHERE id = ANY($1::bigint[]) AND s1_checked_at IS NULL "
     "AND venue_seen_at IS NULL RETURNING id")
+# The SUSPECT stamp is a TRANSITION, exactly like SQL_MARK_JUDGED,
+# and conditional on the row still being venue-unseen: a row the
+# venue stamped inside the gap refuses and confirms via the ok path
+# (round 42 design round: DETECTION splits from ARREST — a first
+# qualification records a visible, counted, NON-disarming suspect).
+SQL_SUSPECT = ("UPDATE trades SET s1_suspect_at = now() "
+               "WHERE id = ANY($1::bigint[]) AND s1_suspect_at IS NULL "
+               "AND s1_checked_at IS NULL AND venue_seen_at IS NULL "
+               "RETURNING id")
+# Positive proof the wallet's venue index moved PAST this fill, from
+# a carrier independent of the reconciler's own testimony (r42).
+SQL_INDEX_LIVE = """
+SELECT EXISTS (
+  SELECT 1 FROM trades
+  WHERE whale_id = $1 AND source = 'poll'
+    AND detected_at > $2::timestamptz + make_interval(secs => $3)
+    AND ts > $4::timestamptz) AS live
+"""
+SQL_SUSPECT_WALLETS = ("SELECT count(DISTINCT whale_id) FROM trades "
+                       "WHERE source = 's1' AND s1_checked_at IS NULL "
+                       "AND venue_seen_at IS NULL "
+                       "AND s1_suspect_at IS NOT NULL")
+# R2 (round 42, prove-first): the venue's OWN row for the identical
+# (whale, tx, asset) under a DIFFERENT dedupe key is not venue
+# silence — it is a C6 key-fidelity failure and a C4-class duplicate
+# already sitting in the table the executor reads. Immediate sticky,
+# correctly named; venue_seen_at can never stamp across a key
+# mismatch, so no hold and no healer applies.
+SQL_KEY_TWIN = (
+    "SELECT v.id, v.dedupe_key FROM trades v "
+    "JOIN trades s ON s.id = $1 "
+    "WHERE v.id <> s.id AND v.whale_id = s.whale_id "
+    "AND v.source = 'poll' AND lower(v.tx_hash) = lower(s.tx_hash) "
+    "AND v.asset = s.asset AND v.dedupe_key <> s.dedupe_key LIMIT 1")
 # The verdict is conditional on the backstop having actually had its
 # chance AT THIS FILL (fleet rounds 5+6). Round 5 required the wallet
 # present as a success key and absent as a failure key; round 6 proved
@@ -320,7 +359,8 @@ SELECT count(DISTINCT q.nv) AS n FROM (
                 details->'per_wallet'->('cov:' || $2)->'dirty') = 'number'
           THEN (details->'per_wallet'->('cov:' || $2)->>'dirty')::float8 = 0
           ELSE false END)
-  LIMIT 8
+  ORDER BY started_at
+  LIMIT 64
 ) q
 """
 # The verdict's LAST look at the row (fleet round 15, major): the
@@ -592,6 +632,7 @@ class S1Emitter:
         self.counted_marks: OrderedDict[tuple, bool] = OrderedDict()
         self.contested: dict[int, float] = {}  # proven two-hash heights
         self.removed_txs: OrderedDict[str, float] = OrderedDict()
+        self._suspect_wallets = 0     # r42 burst census (per sweep)
         # Heights at or below this floor abstain unconditionally
         # (fleet round 34): an evicted mark FORGOT a proven verdict —
         # PENDING_CAP overflow discarded the buffered entries before
@@ -1711,6 +1752,8 @@ class S1Emitter:
             self.bump("s1.errors")
             return
         confirmed_ids, judged = [], []
+        new_suspects: list = []
+        key_divergent: list = []
         for r in rows or []:
             if r["ok"]:
                 confirmed_ids.append(r["id"])
@@ -1734,6 +1777,84 @@ class S1Emitter:
                                        # aligned twins + a shift; two
                                        # walks see different feed
                                        # geometry) — defer
+            # R2 KEY-DIVERGENT TWIN (round 42): before any deferred
+            # judgment, ask whether the venue in fact served this
+            # very (whale, tx, asset) under a DIFFERENT dedupe key —
+            # that is not silence, it is a key-fidelity failure with
+            # a duplicate already in the executor's table, and no
+            # amount of holding or healing can ever stamp across a
+            # key mismatch. Immediate sticky under its honest name.
+            try:
+                twin = await pool.fetchrow(SQL_KEY_TWIN, r["id"],
+                                           timeout=6)
+            except Exception:  # noqa: BLE001
+                self.bump("s1.errors")
+                continue
+            if twin is not None:
+                key_divergent.append(r)
+                # falls through to the trip path below via judged —
+                # tagged so the reason carries the true diagnosis
+                r = dict(r)
+                r["_key_divergent"] = True
+            # DEFERRED VERDICT (round 42, design round; judged winner
+            # 'direction-first'). Coverage testimony cannot be made
+            # airtight against an honest-but-degraded feed: rounds
+            # 38-41 each broke it one shape further, and the fill
+            # still sitting in the venue's indexing backlog while the
+            # head advances is observationally unreachable through
+            # /trades. Fifteen fleet rounds of realized alarms were
+            # ALL false positives on correct emissions; the caps
+            # bound a late TRUE trip to pocket change while a false
+            # trip disarms the priced latency edge for hours. The
+            # verdict is therefore two-phase: a first qualification
+            # records SUSPECT — visible, counted, NOT disarming —
+            # and only a suspicion that SURVIVES the hold with fresh
+            # covering evidence and a LIVE index becomes the sticky
+            # trip. A multi-wallet suspect burst bypasses the hold:
+            # a wrong decode is wallet-agnostic and still alarms at
+            # today's latency. The r17 healer already releases the
+            # false shapes post-thaw; the hold just moves that
+            # release BEFORE the alarm.
+            if not r.get("_key_divergent"):
+                if r["s1_suspect_at"] is None:
+                    new_suspects.append(r)
+                    continue
+                burst = (self._suspect_wallets
+                         >= SUSPECT_BURST_WALLETS)
+                sa = r["s1_suspect_at"]
+                sa_ts = (sa.timestamp() if hasattr(sa, "timestamp")
+                         else float(sa))
+                held = (await self._db_now(pool)) - sa_ts
+                if not burst:
+                    if held < SUSPECT_HOLD_S:
+                        continue
+                    # the hold must BEAR EVIDENCE, not merely
+                    # elapse: one clean covering run finished after
+                    # the suspicion was recorded (the venue lag was
+                    # already paid against detected_at)
+                    try:
+                        ran2 = await pool.fetchrow(
+                            SQL_RECON_SINCE, sa, address,
+                            ts_epoch - RECON_TS_MARGIN_S, 0.0,
+                            ts_epoch, timeout=6)
+                    except Exception:  # noqa: BLE001
+                        self.bump("s1.errors")
+                        return
+                    if ran2 is None or int(ran2["n"] or 0) < 1:
+                        continue
+                    try:
+                        live = await pool.fetchval(
+                            SQL_INDEX_LIVE, whale_id,
+                            r["detected_at"],
+                            float(RECON_VENUE_LAG_S), r["ts"],
+                            timeout=6)
+                    except Exception:  # noqa: BLE001
+                        self.bump("s1.errors")
+                        continue
+                    if not live:
+                        continue   # the wallet's index has not moved
+                                   # past this fill at all — defer,
+                                   # never alarm
             # LAST LOOK before the verdict (round 15): the covering
             # run may BE the run that just stamped this row — judge
             # the row as it is now, not as the sweep snapshot saw it.
@@ -1747,9 +1868,36 @@ class S1Emitter:
                 confirmed_ids.append(r["id"])
                 continue
             judged.append(r)
-            log.error("S1 UNCORROBORATED row id=%s key=%s — the venue's "
-                      "feed never showed this fill", r["id"],
-                      str(r["dedupe_key"])[:16])
+            if r.get("_key_divergent"):
+                log.error("S1 KEY-DIVERGENT row id=%s key=%s — the "
+                          "venue booked this very fill under a "
+                          "DIFFERENT dedupe key (C6 fidelity / C4 "
+                          "duplicate)", r["id"],
+                          str(r["dedupe_key"])[:16])
+            else:
+                log.error("S1 UNCORROBORATED row id=%s key=%s — no "
+                          "venue row corroborates this fill after a "
+                          "%.0fs suspect hold over live coverage",
+                          r["id"], str(r["dedupe_key"])[:16],
+                          SUSPECT_HOLD_S)
+        # SUSPECT STAMPING (round 42): first-qualification rows are
+        # recorded durably — visible, counted, NOT disarming — via a
+        # venue-unseen-conditional transition (a row the venue stamps
+        # inside the gap refuses and confirms next sweep).
+        if new_suspects:
+            try:
+                got = await pool.fetch(SQL_SUSPECT,
+                                       [r["id"] for r in new_suspects],
+                                       timeout=10)
+            except Exception:  # noqa: BLE001
+                self.bump("s1.errors")
+                got = []
+            self.bump("s1.suspect", len(got or []))
+            for g in got or []:
+                log.warning("S1 SUSPECT row id=%s — coverage says the "
+                            "venue should have shown this fill and "
+                            "has not; holding %.0fs before the "
+                            "verdict", g["id"], SUSPECT_HOLD_S)
         # TRIP BEFORE STAMP (round 6): the stamp makes the verdict
         # permanent (the row is never re-judged), so a durable trip
         # must exist first — a crash between stamp and trip silenced
@@ -1757,7 +1905,10 @@ class S1Emitter:
         # stamp then fails, the row re-judges and the trip unions.
         ok_judged = []
         for r in judged:
-            reason = "uncorroborated:%s" % r["id"]
+            reason = (("key_divergent:%s" if r.get("_key_divergent")
+                       else "uncorroborated:%s") % r["id"])
+            if r.get("_key_divergent"):
+                self.bump("s1.key_divergent")
             self._trip(reason)
             out = await self._persist_trip(pool, reason)
             if out == "refused":
@@ -1898,6 +2049,13 @@ class S1Emitter:
         await self._db_now(pool)
         # trips-vs-evidence reconciliation BEFORE new judgments (r17)
         await self._heal_corroborated_trips(pool)
+        # r42: the burst bypass reads the durable suspect census once
+        # per sweep — a failed probe never ARMS the bypass, it defers
+        try:
+            self._suspect_wallets = int(await pool.fetchval(
+                SQL_SUSPECT_WALLETS, timeout=6) or 0)
+        except Exception:  # noqa: BLE001
+            self._suspect_wallets = 0
         # per-sweep rotation salt (round 7): every wallet and row gets
         # an equal shot at each sweep — deferral can defer, not block
         salt = str(int(time.time()))
@@ -2182,6 +2340,7 @@ def emitter_beat() -> dict:
                 "would": st.counters.get("s1.would_emit", 0)
                 + st.deltas.get("s1.would_emit", 0),
                 "unjudged": st.unjudged_backlog,
+                "suspects": st._suspect_wallets,
                 "last_emit_age_s": (round(time.time() - st.last_emit_at)
                                     if st.last_emit_at else None),
                 "err_unflushed": st.deltas.get("s1.errors", 0)}

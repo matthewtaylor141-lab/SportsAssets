@@ -803,6 +803,10 @@ class _SweepPool(_Pool):
         self.marked = []
 
     async def fetch(self, sql, *a, timeout=None):
+        if "s1_suspect_at = now()" in sql:         # r42 suspect stamp
+            self.suspected = getattr(self, "suspected", [])
+            self.suspected.append(list(a[0]))
+            return [{"id": i} for i in a[0]]
         if sql.lstrip().startswith("UPDATE trades"):
             # SQL_MARK is a RETURNING transition (r8): this fixture
             # grants every stamp; _PartialMarkPool models losing some
@@ -820,6 +824,10 @@ class _SweepPool(_Pool):
             # fixture leaves it unlearned (None) so stamps stay pinned
             # to the frozen app clock unless a test overrides this
             return None
+        if "count(DISTINCT whale_id)" in sql:      # r42 burst census
+            return getattr(self, "suspect_wallets", 0)
+        if "AS live" in sql:                       # r42 index-live
+            return getattr(self, "index_live", True)
         return self.stored
 
     async def fetchrow(self, sql, *a, timeout=None):
@@ -827,6 +835,8 @@ class _SweepPool(_Pool):
             # SQL_TRIP (r29 shape): a fresh transition that lands
             self.trip_writes.append(a)
             return {"had": False, "wrote": True}
+        if "lower(v.tx_hash)" in sql:              # r42 key twin
+            return getattr(self, "key_twin", None)
         if "FROM trades WHERE id" in sql:
             # SQL_RECHECK (r15): the verdict's last look at the row —
             # False by default so judgment paths behave as before
@@ -843,9 +853,11 @@ class _SweepPool(_Pool):
             self.writes.append(a)
 
 
-def _srow(i, ok):
+def _srow(i, ok, suspect_at=float(TS0) - 4 * 3600):
+    # suspect_at defaults PRE-HELD (r42): the legacy pins assert the
+    # verdict machinery past the hold; the lifecycle pins pass None
     return {"id": i, "dedupe_key": f"k{i}", "detected_at": 0, "ts": 0,
-            "ok": ok}
+            "s1_suspect_at": suspect_at, "ok": ok}
 
 
 def test_sweep_confirms_and_trips_row_specific(st):
@@ -2161,7 +2173,10 @@ def test_uncorroborated_needs_two_independent_covering_runs():
     # r39: the decorrelation premise is explicit in the statement —
     # coverage counts DISTINCT newest testimony, so a frozen or
     # poisoned feed serving byte-identical geometry twice defers
-    assert "LIMIT 8" in s1.SQL_RECON_SINCE
+    assert "LIMIT 64" in s1.SQL_RECON_SINCE
+    assert "ORDER BY started_at" in s1.SQL_RECON_SINCE, \
+        "r42 F3: an unordered LIMIT starved the distinct count " \
+        "nondeterministically on a busy wallet"
     assert "count(DISTINCT q.nv)" in s1.SQL_RECON_SINCE
     import inspect
     src = inspect.getsource(s1)
@@ -2732,3 +2747,84 @@ def test_removed_tx_registry_is_bounded(st):
         st.observe(lst, dict(MAKER_EV, removed=True,
                              transactionHash="0x%064x" % i))
     assert len(st.removed_txs) == s1.REMOVED_TX_CAP
+
+
+# ── fleet round 42 pins (design round: the suspect lifecycle) ───────
+def test_first_qualification_records_suspect_not_a_trip(st):
+    """r42 P4: a row that satisfies the full composed coverage rule
+    for the FIRST time records a durable, counted, NON-disarming
+    suspect — zero trips, zero SQL_TRIP writes, no judged stamp."""
+    _arm(st)
+    pool = _SweepPool([_srow(3, False, suspect_at=None)])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert st.trips == {} and pool.trip_writes == [], \
+        "detection is not arrest"
+    assert st.armed is True, "a suspect never disarms"
+    assert getattr(pool, "suspected", []) == [[3]], \
+        "the suspicion is stamped durably on the row"
+    assert st.deltas.get("s1.suspect") == 1
+    assert pool.marked == [], "no judged stamp at suspicion time"
+
+
+def test_suspicion_surviving_the_hold_trips(st):
+    """r42 P6: past SUSPECT_HOLD_S with a fresh covering run and a
+    live index, the sticky trip and judged stamp land exactly as the
+    pre-r42 machinery pinned them (the _srow default is pre-held)."""
+    _arm(st)
+    pool = _SweepPool([_srow(3, False)])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert "uncorroborated:3" in st.trips and st.armed is False
+    assert pool.marked == [[3]]
+
+
+def test_index_not_live_defers_forever(st):
+    """r42 P8: SQL_INDEX_LIVE false holds the verdict indefinitely —
+    deferral defers, it never alarms."""
+    _arm(st)
+    pool = _SweepPool([_srow(3, False)])
+    pool.index_live = False
+    asyncio.run(st._corroboration_sweep(pool))
+    assert st.trips == {} and st.armed is True
+    assert pool.marked == []
+
+
+def test_multi_wallet_suspect_burst_bypasses_the_hold(st):
+    """r42 P7: >= SUSPECT_BURST_WALLETS distinct wallets holding live
+    suspects is the wallet-agnostic signature of a wrong DECODE — the
+    arrest path pays zero added latency (index-live not consulted)."""
+    _arm(st)
+    pool = _SweepPool([_srow(3, False,
+                             suspect_at=float(TS0) - 60)])  # young
+    pool.suspect_wallets = s1.SUSPECT_BURST_WALLETS
+    pool.index_live = False          # burst must not consult it
+    asyncio.run(st._corroboration_sweep(pool))
+    assert "uncorroborated:3" in st.trips, \
+        "systematic wrongness alarms at today's latency"
+
+
+def test_suspicion_healed_inside_the_hold_never_trips(st):
+    """r42 P5 — the pin that encodes the design decision: the venue
+    stamps the row mid-hold; the next sweep confirms via the ok path
+    and trips stays empty, armed never forced false."""
+    _arm(st)
+    pool = _SweepPool([_srow(3, True)])   # venue stamped mid-hold
+    asyncio.run(st._corroboration_sweep(pool))
+    assert st.trips == {} and st.armed is True
+    assert pool.marked == [[3]], "the row confirms, judged never runs"
+    assert st.deltas.get("s1.confirmed") == 1
+
+
+def test_key_divergent_twin_is_an_immediate_named_trip(st):
+    """r42 (prove-first R2): the venue's own row for the identical
+    (whale, tx, asset) under a DIFFERENT dedupe key is a key-fidelity
+    failure with a duplicate already in the executor's table — an
+    immediate sticky under its honest name, no hold, because
+    venue_seen_at can never stamp across a key mismatch."""
+    _arm(st)
+    pool = _SweepPool([_srow(3, False, suspect_at=None)])
+    pool.key_twin = {"id": 99, "dedupe_key": "other"}
+    asyncio.run(st._corroboration_sweep(pool))
+    assert "key_divergent:3" in st.trips and st.armed is False
+    assert st.deltas.get("s1.key_divergent") == 1
+    assert getattr(pool, "suspected", []) == [], \
+        "a twin skips the suspect lifecycle entirely"
