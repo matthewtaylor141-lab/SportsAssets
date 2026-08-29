@@ -601,6 +601,27 @@ class S1Emitter:
             if blk > self.head:
                 self.head = blk
                 self.head_advanced_at = now   # the WS is our head feed
+            # SIBLING-FRAME HASH CONFLICT IS REORG EVIDENCE (fleet
+            # round 30, major): two hashes at one height cannot both
+            # be canonical, and the emitter's own round-15 law says
+            # reorg evidence is recorded the moment it is seen — but
+            # this frame was filed only under its OWN tx entry, so a
+            # SIBLING entry's strictly-earned timestamp at the same
+            # height survived untouched, every post-await guard
+            # compared that entry to itself, and the armed path
+            # ingested a fill that exists only on the orphaned chain
+            # (~75 min before the corroboration sweep could trip).
+            # The removed channel already treats the identical
+            # information as a purge; the frame channel now does too:
+            # the suffix is voided and strict re-resolution refuses
+            # whichever side the live chain refutes. Pure deferral —
+            # the canonical side re-earns and proceeds.
+            for sib_tx, sib in self.pending.items():
+                sh = sib.get("blocks", {}).get(blk)
+                if sib_tx != tx and sh is not None and sh != bh:
+                    self.bump("s1.sibling_hash_conflict")
+                    self._purge_ts_cache(blk)
+                    break
             e = self.pending.get(tx)
             if e is None:
                 e = {"logs": [], "first_seen": now, "last_seen": now,

@@ -2351,3 +2351,48 @@ def test_cert_metrics_answer_when_without_moving_the_bar(st):
     assert st._judge_cert(doc, now) == (True, "green")
     from sportsassets.ingestion.s1_emitter import emitter_beat
     assert "cert_metrics" in emitter_beat()
+
+
+# ── fleet round 30 pins ─────────────────────────────────────────────
+def test_sibling_frame_hash_conflict_voids_the_earned_timestamp(st):
+    """fleet r30 (major): a DIFFERENT tx's frame carrying (height,
+    new-hash) against a pending sibling's recorded hash at that
+    height is delivered reorg evidence — two hashes at one height
+    cannot both be canonical — but observe() filed it only under its
+    own entry: no purge, no reorg_gen bump, and the sibling's
+    strictly-earned old-chain timestamp sailed through every
+    post-await self-comparison into an ARMED ingest of a fill that
+    exists only on the orphaned chain. The identical information
+    delivered as a removed notice already purged (round 7). The frame
+    channel now purges too; strict re-resolution then refuses the
+    orphaned side."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    st.observe(lst, MAKER_EV)
+    e = st.pending[TX]
+    e["ts"][BLK] = TS0                    # earned against 77…77
+    e.setdefault("ts_src", {})[BLK] = "0x" + "77" * 32
+    st._ts_cache[(BLK, "0x" + "77" * 32)] = TS0
+    gen0 = e.get("reorg_gen", 0)
+
+    # corroboration first: a sibling frame carrying the SAME hash at
+    # the height is agreement, never evidence — nothing is voided
+    st.observe(lst, dict(MAKER_EV, transactionHash="0x" + "e2" * 32,
+                         logIndex="0x7"))
+    assert e["ts"].get(BLK) == TS0, "agreement voids nothing"
+    assert st.deltas.get("s1.sibling_hash_conflict") is None
+
+    # the kill: a sibling frame at the same height, DIFFERENT hash
+    st.observe(lst, dict(MAKER_EV, transactionHash="0x" + "e3" * 32,
+                         blockHash="0x" + "99" * 32, logIndex="0x8"))
+    assert e["ts"] == {}, \
+        "the sibling's earned timestamp is void — re-resolution " \
+        "must re-earn against the recorded hash, which the live " \
+        "chain now refuses"
+    assert (BLK, "0x" + "77" * 32) not in st._ts_cache
+    assert e.get("reorg_gen", 0) > gen0, \
+        "the write-back guard must see a new generation"
+    assert st.deltas.get("s1.sibling_hash_conflict") == 1
+    # the conflicting frame's own entry proceeds against ITS hash —
+    # the canonical side re-earns and emits; deferral, not death
+    assert st.pending["0x" + "e3" * 32]["blocks"][BLK] == "0x" + "99" * 32
