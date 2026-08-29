@@ -160,6 +160,27 @@ const mapLegacy = (g: LegacyGame): FeedCard => ({
 // refreshes in place.
 const feedCache = new Map<string, { cards: FeedCard[]; counts?: Record<string, number> }>()
 
+// Cached-first paint (owner report 2026-08-29: "the desk takes forever
+// to load"): the in-memory cache died on every reload, so a mobile
+// visit always opened to blank skeletons while the venue listing was
+// fetched. The last good feed now persists per session and paints
+// INSTANTLY on open; the network fetch revalidates behind it.
+const FEED_SS_KEY = 'sa_desk_feed'
+try {
+  const raw = sessionStorage.getItem(FEED_SS_KEY)
+  if (raw) {
+    for (const [k, v] of Object.entries(JSON.parse(raw))) {
+      feedCache.set(k, v as { cards: FeedCard[]; counts?: Record<string, number> })
+    }
+  }
+} catch { /* cold start or blocked storage — fetch path unaffected */ }
+const persistFeed = () => {
+  try {
+    sessionStorage.setItem(FEED_SS_KEY,
+      JSON.stringify(Object.fromEntries(feedCache)))
+  } catch { /* quota/blocked — memory cache still works */ }
+}
+
 export function MarketFeed({ venue, league, onLeague, pick, choose, onOpen, sparkCache }: {
   venue: Venue
   league: string
@@ -186,6 +207,7 @@ export function MarketFeed({ venue, league, onLeague, pick, choose, onOpen, spar
     setErr('')
     const apply = (cs: FeedCard[], cn?: Record<string, number>) => {
       feedCache.set(key, { cards: cs, counts: cn })
+      persistFeed()
       if (dead) return
       setCards(cs)
       if (cn) setCounts(cn)

@@ -131,6 +131,24 @@ async def lifespan(_: FastAPI):
     # the request path (starved the copy leg 3x on 2026-08-05).
     asyncio.get_running_loop().create_task(refresh_whale_idents_loop())
 
+    # Desk-feed warmer (owner report 2026-08-29: "the desk takes forever
+    # to load"): the venue event listing behind /api/admin/desk-feed has
+    # a 30s TTL, so with today's deploy cadence nearly every desk open
+    # paid a cold venue sweep on the request path. Keep it warm in the
+    # background — one listing call per TTL — so the desk's first paint
+    # always reads a hot cache. Failures just retry next tick.
+    async def _desk_feed_warm_loop() -> None:
+        from .. import pmus as _pmus
+
+        while True:
+            try:
+                await asyncio.to_thread(_pmus.list_desk_events)
+            except Exception:  # noqa: BLE001 — venue blip, next tick
+                pass
+            await asyncio.sleep(25)
+
+    asyncio.get_running_loop().create_task(_desk_feed_warm_loop())
+
     # ONE-SHOT RESTATEMENT (owner emergency 2026-08-23): re-score every
     # settled US-venue copy row since Aug 1 from the venue's own ledger.
     # The old settlement sweep graded rows by the whale's global token,

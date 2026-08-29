@@ -2879,3 +2879,14 @@ h1 { letter-spacing: 0.1em; }
   .story-slide { animation: none; }
   .story-bars i.run::after { animation: none; transform: scaleX(1); }
 }
+
+/* ── iOS focus-zoom kill (owner report 2026-08-29: "loads all zoomed
+   in") ──────────────────────────────────────────────────────────────
+   Safari force-zooms the page when a focused input's font-size is
+   under 16px and never zooms back out — the desk search (13.5px) and
+   gate password did exactly that on every visit. On touch devices no
+   form control may render under 16px; max() leaves larger inputs
+   untouched. */
+@media (pointer: coarse) {
+  input, select, textarea { font-size: max(16px, 1em) !important; }
+}

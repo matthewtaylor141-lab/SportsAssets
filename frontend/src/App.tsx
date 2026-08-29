@@ -186,6 +186,13 @@ export default function App() {
   // on every route change — navigation feels composed, not swapped.
   const { pathname } = useLocation()
   useStandaloneClass()
+  // Desk chunk prefetch (owner report 2026-08-29): the desk is lazy so
+  // other pages load light, but the team opens it constantly — warm its
+  // chunk after first paint so the Desk tab opens without a fetch.
+  useEffect(() => {
+    const t = window.setTimeout(() => { void import('./pages/TradeDesk') }, 2500)
+    return () => window.clearTimeout(t)
+  }, [])
   // The MERIDIAN cockpit is a full-screen room with its own chrome (brand
   // strip, exit ✕). Site nav/tabbar must not float over it — and the
   // page-fade animation would trap its position:fixed root in a stacking
