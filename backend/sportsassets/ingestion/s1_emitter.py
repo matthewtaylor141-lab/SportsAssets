@@ -298,6 +298,15 @@ SQL_NOW = "SELECT extract(epoch from now())::float8"
 # blackhole, because the failure counter's own persist is what fails.
 # A non-object doc is replaced by the payload (fail-visible under
 # 'state_repaired'); a non-object counters field is treated as empty.
+# Round 35 (major x2): contested/contested_floor rode the top-level
+# || overwrite — a concurrent process that never saw the flood
+# flushed floor=0/marks={} over a proven floor, and a later boot
+# adopted the clobber and re-emitted a proven-contested height. Both
+# fields now fold SERVER-SIDE under the row lock, exactly like the
+# counter deltas: the floor takes GREATEST(stored, payload), the
+# marks union (payload wins duplicate keys — both are timestamps),
+# and marks at or below the folded floor are pruned in the same
+# expression (the floor already covers them).
 SQL_WRITE = """
 INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = (
@@ -307,8 +316,9 @@ ON CONFLICT (key) DO UPDATE SET value = (
   FROM (SELECT CASE
           WHEN jsonb_typeof(ingestion_state.value) <> 'object'
           THEN $2::jsonb || jsonb_build_object('state_repaired', true)
-          ELSE jsonb_set(
-          ingestion_state.value || ($2::jsonb - 'counters'),
+          ELSE jsonb_set(jsonb_set(jsonb_set(
+          ingestion_state.value
+            || ($2::jsonb - 'counters' - 'contested' - 'contested_floor'),
           '{counters}',
           (SELECT COALESCE(jsonb_object_agg(m.k, to_jsonb(m.a + m.b)),
                            '{}'::jsonb)
@@ -324,7 +334,34 @@ ON CONFLICT (key) DO UPDATE SET value = (
                         ELSE '{}'::jsonb END) s(k, v)
                  FULL OUTER JOIN jsonb_each(COALESCE(
                         $2::jsonb->'counters', '{}'::jsonb)) d(k, v)
-                   ON s.k = d.k) m)) END AS v) nv)
+                   ON s.k = d.k) m)),
+          '{contested_floor}',
+          to_jsonb(GREATEST(
+            CASE WHEN jsonb_typeof(
+                   ingestion_state.value->'contested_floor') = 'number'
+                 THEN (ingestion_state.value->>'contested_floor')::numeric
+                 ELSE 0 END,
+            CASE WHEN jsonb_typeof($2::jsonb->'contested_floor') = 'number'
+                 THEN ($2::jsonb->>'contested_floor')::numeric
+                 ELSE 0 END))),
+          '{contested}',
+          (SELECT COALESCE(jsonb_object_agg(t.k, t.v), '{}'::jsonb)
+           FROM jsonb_each(
+             (CASE WHEN jsonb_typeof(
+                     ingestion_state.value->'contested') = 'object'
+                   THEN ingestion_state.value->'contested'
+                   ELSE '{}'::jsonb END)
+             || (CASE WHEN jsonb_typeof($2::jsonb->'contested') = 'object'
+                      THEN $2::jsonb->'contested'
+                      ELSE '{}'::jsonb END)) t(k, v)
+           WHERE t.k ~ '^[0-9]+$' AND (t.k)::numeric > GREATEST(
+            CASE WHEN jsonb_typeof(
+                   ingestion_state.value->'contested_floor') = 'number'
+                 THEN (ingestion_state.value->>'contested_floor')::numeric
+                 ELSE 0 END,
+            CASE WHEN jsonb_typeof($2::jsonb->'contested_floor') = 'number'
+                 THEN ($2::jsonb->>'contested_floor')::numeric
+                 ELSE 0 END))) END AS v) nv)
 """
 # A trip is durable the moment it fires: one atomic union (existing
 # timestamp wins), disarming in the same statement. The WHERE refuses
@@ -1804,6 +1841,28 @@ class S1Emitter:
         except Exception:  # noqa: BLE001
             self.bump("s1.flush_failures")
             return
+        # round 35: a sibling process's contested verdicts are global
+        # — adopt the stored floor and marks at every flush read, so
+        # this process's OWN finalize gate learns them within one
+        # cycle (the SQL fold below already protects the disk copy;
+        # this protects the next 60s of local emission decisions)
+        scf = doc.get("contested_floor")
+        if isinstance(scf, (int, float)) and scf > self.contested_floor:
+            self.contested_floor = int(scf)
+        scm = doc.get("contested")
+        if isinstance(scm, dict):
+            for k, v in scm.items():
+                try:
+                    h = int(k)
+                except (TypeError, ValueError):
+                    continue
+                if h > 0 and h not in self.contested:
+                    self.contested[h] = (v if isinstance(
+                        v, (int, float)) else 0.0)
+            while len(self.contested) > CONTESTED_CAP:
+                old = min(self.contested)
+                self.contested.pop(old, None)
+                self.contested_floor = max(self.contested_floor, old)
         # READ-ONLY trip reconciliation (round 6): the disk trip set is
         # maintained solely by SQL_TRIP/SQL_CLEAR server-side; this
         # merge only decides what THIS process believes. An operator

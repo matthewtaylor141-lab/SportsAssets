@@ -2639,3 +2639,26 @@ def test_contested_state_survives_a_restart(st):
     assert len(w3["contested"]) == s1.CONTESTED_FLUSH_CAP
     assert w3["contested_floor"] == 1009, \
         "what the flush cannot carry raises the persisted floor"
+
+
+# ── fleet round 35 pins ─────────────────────────────────────────────
+def test_flush_adopts_a_sibling_processes_floor(st):
+    """fleet r35 (major x2): SQL_WRITE's top-level || let a process
+    that never saw the flood clobber the persisted floor to 0, and a
+    later boot re-emitted a proven-contested height. The disk copy is
+    now folded server-side (GREATEST/union — executed semantics in
+    test_s1_sql_real_pg); this pin covers the local half: every flush
+    READ adopts the stored floor and marks, so this process's own
+    finalize gate learns a sibling's verdict within one cycle."""
+    now = time.time()
+    st._state_loaded = True
+    pool = _Pool(stored=json.dumps({
+        "counters": {}, "contested_floor": 999,
+        "contested": {"888": 1.0, "junk": 2.0}}))
+    asyncio.run(st._flush(pool, now))
+    assert st.contested_floor == 999, "the stored floor is adopted"
+    assert 888 in st.contested and len(st.contested) == 1, \
+        "stored marks are adopted; junk keys are not"
+    assert "GREATEST" in s1.SQL_WRITE and \
+        "- 'contested' - 'contested_floor'" in s1.SQL_WRITE, \
+        "the disk fold is server-side, never a payload overwrite"

@@ -84,6 +84,28 @@ def test_every_state_statement_prepares_and_executes():
                 "counters are deltas the server ADDS, never absolutes"
             assert doc["armed"] is True
 
+            # ── round 35: contested fields fold server-side ────────
+            await c.execute(s1.SQL_WRITE, K, json.dumps(
+                {"counters": {}, "contested": {"500": 1.0, "600": 2.0},
+                 "contested_floor": 450}))
+            await c.execute(s1.SQL_WRITE, K, json.dumps(
+                {"counters": {}, "contested": {},
+                 "contested_floor": 0}))
+            doc = json.loads(await c.fetchval(s1.SQL_READ, K))
+            assert float(doc["contested_floor"]) == 450, \
+                "round 35: GREATEST — a concurrent process that " \
+                "never saw the flood cannot lower the proven floor"
+            assert set(doc["contested"]) == {"500", "600"}, \
+                "round 35: union — a bare flush cannot erase marks"
+            await c.execute(s1.SQL_WRITE, K, json.dumps(
+                {"counters": {}, "contested": {"700": 3.0},
+                 "contested_floor": 600}))
+            doc = json.loads(await c.fetchval(s1.SQL_READ, K))
+            assert float(doc["contested_floor"]) == 600
+            assert set(doc["contested"]) == {"700"}, \
+                "marks at or below the folded floor are pruned — " \
+                "the floor already covers them"
+
             # ── SQL_TRIP: union, disarm, tombstone refusal ─────────
             r = await c.fetchrow(s1.SQL_TRIP, K, "uncorroborated:1",
                                  1000.0)
