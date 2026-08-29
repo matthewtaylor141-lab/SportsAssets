@@ -16,6 +16,8 @@ import inspect
 import json
 from pathlib import Path
 
+import pytest
+
 from sportsassets.api import app as app_mod
 
 
@@ -95,10 +97,14 @@ def test_pnl_is_never_touched():
 
 
 def test_probe_fires_only_on_sell_verdict():
-    wf = Path(app_mod.__file__).parents[3].parent / \
+    # app.py sits at <root>/backend/sportsassets/api/app.py, so the
+    # repo root is parents[3] — the old parents[3].parent overshot by
+    # one and only a machine-specific fallback path kept this passing
+    # locally while CI failed on it.
+    wf = Path(app_mod.__file__).parents[3] / \
         ".github/workflows/engine-diagnostic.yml"
     if not wf.exists():
-        wf = Path("/home/user/SportsAssets/.github/workflows/engine-diagnostic.yml")
+        pytest.skip("workflow file not present in this checkout")
     src = wf.read_text()
     i = src.index("short-restate")
     guard = src[max(0, i - 600):i]
