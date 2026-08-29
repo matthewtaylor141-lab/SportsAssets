@@ -2612,12 +2612,24 @@ async def resolve_explain(pool, market_title: str | None,
         # signed, intent, identifier — ground truth first.
         if kept and all((r.get("side_norm") or "").replace(" ", "")
                         .replace(".", "").isdigit() for r in kept[:2]):
+            def _one_line(s: str | None) -> str:
+                # the venue's question text can carry raw newlines —
+                # jq -r prints them and the probe line shatters
+                return " ".join(str(s or "").split())
             anatomy = "; ".join(
-                f"id=…{(r.get('identifier') or '')[-32:]}"
-                f" q={(r.get('question') or '')[:60]!r}"
+                f"id=…{_one_line(r.get('identifier'))[-40:]}"
+                f" q={_one_line(r.get('question'))[:70]!r}"
                 f" sg={r.get('signed')!r} it={r.get('intent')}"
                 for r in kept[:3])
             out["detail"] += f" ANATOMY[{anatomy}]"
+        else:
+            # every refusal names its candidates — the id tail alone
+            # (market slug + side) answers "was the right market even
+            # in the kept set?"
+            ids = ",".join("…" + " ".join(
+                str(r.get("identifier") or "").split())[-28:]
+                for r in kept[:6])
+            out["detail"] += f" IDS[{ids}]"
         # PHASE-0 BRIDGE PROBE (2026-08-26): read-only. Mirrors exactly
         # the composition resolve would run (match_side first, bridge
         # only on refusal) so the census can MEASURE what the bridge
