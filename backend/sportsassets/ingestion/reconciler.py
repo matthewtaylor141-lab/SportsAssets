@@ -82,6 +82,7 @@ async def reconcile_once(depth: int = 500) -> dict:
             complete = False
             oldest_ts: float | None = None
             newest_ts: float | None = None    # upper bound (r38)
+            newest_row: tuple | None = None   # its identity (r41)
             # FEED ORDERING (fleet round 21, major): oldest was a bare
             # min() over usable rows — an inference sound only under
             # an UNCHECKED newest-first premise. One genuinely valid
@@ -308,6 +309,8 @@ async def reconcile_once(depth: int = 500) -> dict:
                             # NEWEST row it served; SQL_RECON_SINCE
                             # requires the fill to sit INSIDE the span
                             newest_ts = float(ev.ts_epoch)
+                            newest_row = (ev.tx_hash, ev.asset,
+                                          float(ev.ts_epoch))
                         # per-row containment around the INGEST (fleet
                         # round 15): a gate-passing row can still fail
                         # inside ingest (constraint, overflow, datetime
@@ -356,6 +359,34 @@ async def reconcile_once(depth: int = 500) -> dict:
                     # next page re-requests the witness run first
                     # (rounds 17-19)
                     offset += max(1, len(page) - len(witness))
+                # HEAD-MUTANT CHECK (fleet round 41, major): the
+                # round-40 future bound only catches a phantom head
+                # MORE than FUTURE_SKEW_S ahead — a present-dated
+                # phantom tracking each walk's own wallclock forged
+                # two DISTINCT newest values over a frozen feed and
+                # false-STICKY-tripped a correct emission. But a
+                # wallclock-tracking phantom re-serves the SAME
+                # (tx, asset) with a MUTATING timestamp, and our own
+                # trades table remembers its earlier ingests: the
+                # newest-testimony row already recorded at a ts more
+                # than ORDER_TOL_S away is feed corruption — dirty,
+                # never testimony. (A feed fabricating fresh tx
+                # hashes every walk is indistinguishable from real
+                # activity to ANY observer; negative certification is
+                # void against an adversarial feed — the design round
+                # owns that boundary honestly.)
+                if newest_row is not None:
+                    try:
+                        mutant = await pool.fetchval(
+                            "SELECT 1 FROM trades WHERE tx_hash = $1 "
+                            "AND asset = $2 AND abs(extract(epoch "
+                            "from ts)::float8 - $3) > $4 LIMIT 1",
+                            newest_row[0], newest_row[1],
+                            newest_row[2], float(ORDER_TOL_S))
+                    except Exception:  # noqa: BLE001 — probe only
+                        mutant = None
+                    if mutant:
+                        dirty += 1
                 per_wallet["cov:" + whale["address"]] = {
                     "complete": complete, "oldest": oldest_ts,
                     "newest": newest_ts, "dirty": dirty}

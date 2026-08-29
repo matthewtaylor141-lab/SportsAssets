@@ -66,6 +66,8 @@ class _FakePool:
         self.details = None
 
     async def fetchval(self, sql, *a, timeout=None):
+        if "abs(extract(epoch" in sql:
+            return None                           # no prior recording
         return 1                                  # run_id
 
     async def fetch(self, sql, *a, timeout=None):
@@ -253,3 +255,40 @@ def test_future_dated_head_row_dirties_the_walk(monkeypatch):
         "a future-dated row is corruption, not testimony"
     assert cov["newest"] <= time.time() + rec.FUTURE_SKEW_S, \
         "the forged head never reaches the newest testimony"
+
+
+def test_wallclock_tracking_phantom_head_dirties_via_mutation(monkeypatch):
+    """fleet r41 (major): a PRESENT-dated phantom head (inside
+    FUTURE_SKEW_S, no predecessor for ORDER_TOL_S) tracked each
+    walk's wallclock and forged two DISTINCT newest values over a
+    frozen feed. Its unforgeable-by-accident signature: the same
+    (tx, asset) re-served with a MUTATING timestamp — and our own
+    trades table remembers the earlier ingest. The newest-testimony
+    row found already recorded > ORDER_TOL_S away dirties the walk."""
+    rows = _feed()
+    phantom = dict(rows[0])
+    phantom["timestamp"] = int(time.time()) - 30      # present-dated
+    phantom["transactionHash"] = "0x" + "fe" * 32
+    pool, _calls = _wire(monkeypatch, [phantom] + rows)
+
+    async def mutant_fetchval(sql, *a, timeout=None):
+        if "abs(extract(epoch" in sql:
+            # the same tx+asset was ingested an hour ago at an
+            # earlier ts — the phantom's previous wallclock stamp
+            return 1
+        return 1                                       # run_id
+
+    pool.fetchval = mutant_fetchval
+    asyncio.run(rec.reconcile_once(depth=500))
+    cov = _cov(pool)
+    assert cov["dirty"] >= 1, \
+        "a mutating head is corruption, not distinct-newest testimony"
+
+
+def test_fresh_head_row_is_not_a_mutant(monkeypatch):
+    """A genuinely new head fill has no prior recording — the mutant
+    probe finds nothing and the clean walk still testifies."""
+    pool, _calls = _wire(monkeypatch, _feed())
+    asyncio.run(rec.reconcile_once(depth=500))
+    cov = _cov(pool)
+    assert cov["dirty"] == 0 and cov["newest"] == float(TOP_TS)
