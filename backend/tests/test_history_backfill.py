@@ -145,7 +145,7 @@ def test_one_junk_element_costs_one_row_not_the_pass(monkeypatch):
     total = asyncio.run(hist._backfill_pending_inner())
     assert total == 2, "both whales' healthy rows imported"
     assert sorted(_backfilled_ids(pool)) == [1, 2]
-    assert ("backfill", "ok", {"scanned": 2}) in beats
+    assert ("backfill", "ok", {"scanned": 2, "failed": 0}) in beats
 
 
 def test_all_junk_page_fails_the_whale_not_the_pass(monkeypatch):
@@ -375,3 +375,26 @@ def test_end_violating_venue_fails_the_whale_not_the_cap(monkeypatch):
     assert _backfilled_ids(pool) == [], \
         "an end-violating venue never earns a durable success marker"
     assert any(s == "error" for _, s, _ in beats)
+
+
+def test_total_loss_pass_ends_error_not_ok(monkeypatch):
+    """r28 (minor): the pass-final beat unconditionally said 'ok' and
+    overwrote the per-whale error beats on the ONE durable row — a
+    total-loss pass (venue down, every whale pending) ended green.
+    The round-27 law in its fifth home: total loss ends 'error', and
+    the failed count rides the durable detail on every pass."""
+    pool, beats = _wire(monkeypatch, [W_A, W_B],
+                        {"0xaaa": [{"error": 1}], "0xbbb": ["junk"]})
+    total = asyncio.run(hist._backfill_pending_inner())
+    assert total == 0
+    assert beats[-1][1] == "error", \
+        "the FINAL durable beat is the one the dashboard reads"
+    assert beats[-1][2] == {"scanned": 0, "failed": 2}
+    assert _backfilled_ids(pool) == []
+
+    # partial failure stays ok but the failed count is visible
+    pool2, beats2 = _wire(monkeypatch, [W_A, W_B],
+                          {"0xaaa": [{"error": 1}], "0xbbb": [[RAW2]]})
+    asyncio.run(hist._backfill_pending_inner())
+    assert beats2[-1][1] == "ok"
+    assert beats2[-1][2] == {"scanned": 1, "failed": 1}

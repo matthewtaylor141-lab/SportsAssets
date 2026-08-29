@@ -278,6 +278,7 @@ async def _backfill_pending_inner() -> int:
     if not whales:
         return 0
     total = 0
+    failed = 0
     async with httpx.AsyncClient(base_url=settings().data_api_base, timeout=30) as http:
         for whale in whales:
             try:
@@ -291,8 +292,19 @@ async def _backfill_pending_inner() -> int:
                 # leaves THIS whale pending for retry; the rest of
                 # the roster still backfills. (CancelledError is a
                 # BaseException and still propagates.)
+                failed += 1
                 log.warning("history backfill failed for %s: %s (will retry next cycle)",
                             whale["address"], exc)
                 await heartbeat("backfill", "error", {"whale": whale["address"], "error": str(exc)})
-    await heartbeat("backfill", "ok", {"scanned": total})
+    # round 28 (minor): this final beat unconditionally said 'ok' and,
+    # since service_heartbeats holds ONE durable row per service, it
+    # overwrote the per-whale error beats milliseconds after they
+    # landed — a total-loss pass (venue down, every whale still
+    # pending) ended green, byte-identical to a healthy pass over
+    # tradeless wallets. The round-27 law, in its fifth home: a dead
+    # carrier never wears a green heartbeat, and the failed count
+    # rides the durable detail on every pass.
+    status = "error" if whales and failed == len(whales) else "ok"
+    await heartbeat("backfill", status,
+                    {"scanned": total, "failed": failed})
     return total
