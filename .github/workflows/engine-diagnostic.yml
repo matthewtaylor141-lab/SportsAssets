@@ -341,7 +341,9 @@ jobs:
           jq -r '"  GATES verified(\(.verified_source)): \(.verified_effective | join(","))",
                  "  GATES env_set=\(.verified_env_set) stored=\(.verified_stored | tostring | .[0:160])",
                  "  GATES allow_short_env=\(.allow_short_env // "unset")  short_proof=\(.short_side_proof | tostring | .[0:200])",
-                 "  GATES exitable: \(.exitable | join(","))"' \
+                 "  GATES exitable: \(.exitable | join(","))",
+                 "  GATES sizing: mode=\(.sizing.copy_mode // "?") max_clip=\(.sizing.max_clip_usd // "?") probe_day=\(.sizing.probe_day_usd // "?") trial_day=\(.sizing.trial_daily_usd // "?") trial_total=\(.sizing.trial_total_usd // "?")",
+                 "  GATES clips: \(.sizing.per_fill_by_whale // {} | to_entries | map("\(.key)=\(.value)") | join(" "))"' \
              /tmp/gates.json 2>/dev/null || true
 
           # ── the thesis verification (owner order 2026-08-24: verified,

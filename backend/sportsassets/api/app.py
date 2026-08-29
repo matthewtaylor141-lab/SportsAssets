@@ -6503,6 +6503,24 @@ async def api_gates() -> dict:
         "short_side_proof": proof,
         "cut_whales": sorted(_le.COPY_CUT_WHALES),
         "exitable": sorted(_le.exitable_whales()),
+        # LIVE SIZING, the values that actually bind spend (owner
+        # question 2026-08-29 "I don't want to limit the flow" exposed
+        # that the config caps I kept quoting govern only the dormant
+        # 'full' mode — the answer must be READABLE, not inferred).
+        "sizing": {
+            "copy_mode": _le.COPY_MODE,
+            "per_fill_by_whale": dict(_le.PER_FILL_BY_WHALE),
+            "max_clip_usd": _le.LIVE_MAX_CLIP_USD,
+            "probe_day_usd": _le.PROBE_DAY_USD,   # 0 = no day cap
+            # inf (the shipped default: no cap) is not valid JSON —
+            # serialize the absence of a cap as null
+            "trial_daily_usd": (None if _le.PENNY_TRIAL_DAILY_USD
+                                == float("inf")
+                                else _le.PENNY_TRIAL_DAILY_USD),
+            "trial_total_usd": (None if _le.PENNY_TRIAL_TOTAL_USD
+                                == float("inf")
+                                else _le.PENNY_TRIAL_TOTAL_USD),
+        },
     }
 
 

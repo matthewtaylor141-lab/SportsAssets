@@ -171,9 +171,16 @@ class Settings(BaseSettings):
     pm_funder: str = ""            # your Polymarket profile (proxy) address
     pm_signature_type: int = 1     # 1/2 = web-account proxy, 0 = raw EOA
     live_copy_ratio: float = 0.001  # $1 per $1k the source whale trades
-    live_max_per_fill_usd: float = 25.0
-    live_max_daily_usd: float = 250.0
-    live_max_total_usd: float = 500.0
+    # These three govern only the dormant "full" COPY_MODE — the live
+    # penny_trial path takes its authority from the trial knobs and the
+    # per-whale clip map in live_executor. Defaults raised 2026-08-29
+    # (owner order: "I don't want to limit the flow"): the old 25/250/
+    # 500 were beta training wheels, and the $500 lifetime silently
+    # bound once already (2026-08-05, hours of no-op copies). A future
+    # mode flip must inherit the owner's sizing, not the beta's.
+    live_max_per_fill_usd: float = 250.0
+    live_max_daily_usd: float = 11000.0
+    live_max_total_usd: float = 1e12   # effectively no lifetime cap
     live_max_slippage_cents: float = 1.0
     # "*" = accept any origin (fine while testing; set to your site URL(s),
     # comma-separated, to lock down for production).
