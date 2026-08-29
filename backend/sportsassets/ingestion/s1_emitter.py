@@ -41,6 +41,16 @@ recorded in the flip contract):
   failure or observed key divergence trips STICKY (manual re-arm
   only). Unarmed with the flag on = burn-in: the full pipeline runs
   and counts s1.would_emit, writing nothing.
+- OWNER OVERRIDE (explicit owner order 2026-08-29, "get it live
+  now"): the `s1_arm_override` ingestion_state switch (or
+  S1_ARM_OVERRIDE env) arms WITHOUT the cert clock — the 7-day
+  window was structurally unreachable while deploys reset it several
+  times a day, and the owner accepted the residual risk against the
+  shadow record (0 side / 0 asset divergences, 48 storm rounds).
+  The override bypasses ONLY the certification clock: sticky trips
+  still refuse arming, still disarm a live arm, and still gate every
+  emit; certification keeps running as after-the-fact verification.
+  Flipping the switch off returns arming to the certified regime.
 
 Money safety: everything downstream of ingest_trade_result — dedupe,
 fan-out, every executor gate — is byte-untouched (contract C1). The
@@ -677,6 +687,12 @@ class S1Emitter:
         self._state_loaded = False
         self._pending_arm_at: float | None = None
         self._exch_cache: tuple[tuple, set[str]] | None = None
+        # Owner-override arm (2026-08-29): last successfully READ
+        # switch state. A transient read failure keeps the previous
+        # value — a DB blip is not evidence and must not flap a live
+        # arm (round-2 principle); trips remain the safety authority.
+        self.arm_override = (os.getenv("S1_ARM_OVERRIDE", "").lower()
+                             in ("on", "1", "true"))
 
     # ── tiny helpers ────────────────────────────────────────────────
     def bump(self, key: str, n: int = 1) -> None:
@@ -1241,6 +1257,20 @@ class S1Emitter:
             return
         green, reason = self._judge_cert(doc, now)
         self.cert_green, self.cert_reason = green, reason
+        # Owner-override switch, read fresh each sweep. Env keeps the
+        # boot value ON regardless of DB (an operator who set the env
+        # made the same decision); a read failure keeps the last known
+        # state — transient blips must not flap a live arm.
+        try:
+            ov = await pool.fetchval(SQL_READ, "s1_arm_override",
+                                     timeout=6)
+            if ov is not None:
+                ovv = json.loads(ov) if isinstance(ov, str) else ov
+                self.arm_override = bool(ovv) or (
+                    os.getenv("S1_ARM_OVERRIDE", "").lower()
+                    in ("on", "1", "true"))
+        except Exception:  # noqa: BLE001 — keep last known
+            self.bump("s1.errors")
         pend = getattr(self, "_pending_arm_at", None)
         if pend is not None:
             # a persisted arm survives a restart only if the window it
@@ -1256,18 +1286,33 @@ class S1Emitter:
                 log.warning("S1 persisted arm NOT adopted: %s",
                             reason if not green else "window_reset_while_down")
         if self.armed:
-            ws = (doc or {}).get("window_start")
-            if not green or (isinstance(ws, (int, float)) and ws > self.armed_at):
-                # ratchet: the evidence moved out from under the arm
-                self.armed = False
-                self.bump("s1.trip.window_reset")
-                log.warning("S1 auto-disarmed: %s", reason if not green
-                            else "window_reset_after_arm")
+            if self.arm_override:
+                # Owner override holds the arm through cert-clock
+                # movement (window resets on deploys are exactly what
+                # the owner overrode). Sticky trips still disarm — a
+                # trip fires through _trip(), never through here.
+                pass
+            else:
+                ws = (doc or {}).get("window_start")
+                if not green or (isinstance(ws, (int, float))
+                                 and ws > self.armed_at):
+                    # ratchet: the evidence moved out from under the arm
+                    self.armed = False
+                    self.bump("s1.trip.window_reset")
+                    log.warning("S1 auto-disarmed: %s", reason if not green
+                                else "window_reset_after_arm")
         elif (green and not self.trips
               and os.getenv("S1_ARM", "").lower() in ("on", "1", "true")):
             self.armed = True
             self.armed_at = now
             log.warning("S1 ARMED at %s (cert green)", now)
+        elif self.arm_override and not self.trips:
+            # OWNER OVERRIDE (2026-08-29): arm without the cert clock.
+            # Trips are the one authority the override never crosses.
+            self.armed = True
+            self.armed_at = now
+            log.warning("S1 ARMED BY OWNER OVERRIDE at %s (cert %s)",
+                        now, reason)
 
     @property
     def tripped(self) -> str | None:
@@ -1604,7 +1649,8 @@ class S1Emitter:
                 # emit can diverge from the poll row's key (panel kill 2)
                 self.bump("s1.abstain.price_variant")
                 continue
-            if not self.armed or not self.cert_green or self.trips:
+            if (not self.armed or self.trips
+                    or not (self.cert_green or self.arm_override)):
                 # burn-in: idempotent per (tx, wallet, asset) — no view
                 # in the mark (a straggler can flip the representative
                 # record's view across a retry), the armed path marks
@@ -2395,6 +2441,10 @@ def emitter_beat() -> dict:
     try:
         st = _STATE
         return {"enabled": st.enabled, "armed": st.armed,
+                "armed_via": ("override" if st.armed and st.arm_override
+                              and not st.cert_green
+                              else "cert" if st.armed else None),
+                "override": st.arm_override,
                 "cert": st.cert_reason,
                 "cert_metrics": getattr(st, "cert_metrics", {}),
                 "tripped": st.tripped,

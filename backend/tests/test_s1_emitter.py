@@ -90,6 +90,11 @@ class _Pool:
         return self.probe_rows
 
     async def fetchval(self, sql, *a, timeout=None):
+        if a and a[0] == "s1_arm_override":
+            # the override switch has its own key; without dispatch the
+            # shadow doc (any truthy JSON) would read as override-on in
+            # every cert test
+            return getattr(self, "override_stored", None)
         return self.stored
 
     async def execute(self, sql, *a, timeout=None):
@@ -453,6 +458,110 @@ def test_tripped_state_refuses_arming(st, monkeypatch):
     pool = _Pool(stored=json.dumps(_green_doc(now)))
     asyncio.run(st._check_cert(pool, now))
     assert st.armed is False, "a sticky trip requires manual clearing"
+
+
+# ── owner-override arm (owner order 2026-08-29, "get it live now") ──
+class TestOwnerOverrideArm:
+    """The override bypasses ONLY the certification clock. Sticky
+    trips keep full authority: they refuse the arm, disarm a live
+    one, and gate every emit."""
+
+    def test_override_arms_through_a_young_window(self, st):
+        now = time.time()
+        pool = _Pool(stored=json.dumps({"window_start": now - 60}))
+        pool.override_stored = json.dumps(True)
+        asyncio.run(st._check_cert(pool, now))
+        assert st.armed is True
+        assert st.cert_green is False, \
+            "the override arms; it must never fake the cert verdict"
+
+    def test_override_never_crosses_a_sticky_trip(self, st):
+        now = time.time()
+        st._trip("key_selfcheck")
+        pool = _Pool(stored=json.dumps(_green_doc(now)))
+        pool.override_stored = json.dumps(True)
+        asyncio.run(st._check_cert(pool, now))
+        assert st.armed is False
+
+    def test_trip_disarms_an_override_arm(self, st):
+        now = time.time()
+        pool = _Pool(stored=json.dumps({"window_start": now - 60}))
+        pool.override_stored = json.dumps(True)
+        asyncio.run(st._check_cert(pool, now))
+        assert st.armed is True
+        st._trip("key_divergent:9")
+        assert st.armed is False
+
+    def test_override_arm_survives_a_window_reset(self, st):
+        # deploys reset the window several times a day — exactly what
+        # the owner overrode; the reset ratchet must not disarm.
+        now = time.time()
+        pool = _Pool(stored=json.dumps({"window_start": now - 60}))
+        pool.override_stored = json.dumps(True)
+        asyncio.run(st._check_cert(pool, now))
+        assert st.armed is True
+        later = now + 120
+        pool2 = _Pool(stored=json.dumps({"window_start": later - 1}))
+        pool2.override_stored = json.dumps(True)
+        asyncio.run(st._check_cert(pool2, later))
+        assert st.armed is True
+
+    def test_switch_off_returns_to_the_certified_regime(self, st):
+        now = time.time()
+        pool = _Pool(stored=json.dumps({"window_start": now - 60}))
+        pool.override_stored = json.dumps(True)
+        asyncio.run(st._check_cert(pool, now))
+        assert st.armed is True
+        pool2 = _Pool(stored=json.dumps({"window_start": now - 60}))
+        pool2.override_stored = json.dumps(False)
+        asyncio.run(st._check_cert(pool2, now + 60))
+        assert st.armed is False, \
+            "override off + window young = certified regime disarms"
+
+    def test_override_emits_without_cert_green(self, st, monkeypatch):
+        lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+        _wire(st, lst)
+        st.armed = True
+        st.armed_at = time.time()
+        st.arm_override = True
+        st.cert_green = False              # window young — override path
+        calls = _capture_ingest(monkeypatch)
+        _observe_all(st, lst, [MAKER_EV])
+        asyncio.run(st._finalize_tx(_Pool(), TX, st.pending[TX],
+                                    time.time()))
+        assert len(calls) == 1, "armed via override must actually emit"
+        assert st.deltas.get("s1.emitted", 0) == 1
+
+    def test_tripped_override_stays_burn_in_at_the_emit_gate(
+            self, st, monkeypatch):
+        lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+        _wire(st, lst)
+        st.armed = True                    # stale flag: trip landed
+        st.arm_override = True             # after the arm decision
+        st.trips["key_selfcheck"] = time.time()
+        calls = _capture_ingest(monkeypatch)
+        _observe_all(st, lst, [MAKER_EV])
+        asyncio.run(st._finalize_tx(_Pool(), TX, st.pending[TX],
+                                    time.time()))
+        assert not calls, "a trip gates the emit even under override"
+
+    def test_read_failure_keeps_the_last_known_override(self, st):
+        now = time.time()
+        pool = _Pool(stored=json.dumps({"window_start": now - 60}))
+        pool.override_stored = json.dumps(True)
+        asyncio.run(st._check_cert(pool, now))
+        assert st.armed is True
+
+        class _BoomPool(_Pool):
+            async def fetchval(self, sql, *a, timeout=None):
+                if a and a[0] == "s1_arm_override":
+                    raise RuntimeError("db blip")
+                return self.stored
+
+        pool2 = _BoomPool(stored=json.dumps({"window_start": now - 60}))
+        asyncio.run(st._check_cert(pool2, now + 60))
+        assert st.arm_override is True and st.armed is True, \
+            "a transient read failure is not evidence — no flap"
 
 
 # ── registry semantics ──────────────────────────────────────────────
@@ -819,6 +928,8 @@ class _SweepPool(_Pool):
         return self.sweep_rows
 
     async def fetchval(self, sql, *a, timeout=None):
+        if a and a[0] == "s1_arm_override":        # own key, own slot
+            return getattr(self, "override_stored", None)
         if "extract(epoch from now())" in sql:
             # r12: the sweep reads SQL_NOW for the clock offset — the
             # fixture leaves it unlearned (None) so stamps stay pinned

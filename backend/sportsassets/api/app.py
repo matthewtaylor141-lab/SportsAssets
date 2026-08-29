@@ -6364,6 +6364,26 @@ async def api_premap_live_set(action: str) -> dict:
     return {"ok": True, "premap_live": action == "on"}
 
 
+@app.post("/api/admin/s1/arm-override/{action}",
+          dependencies=[Depends(require_admin)])
+async def api_s1_arm_override(action: str) -> dict:
+    """Owner-override arm for the S1 chain emitter (owner order
+    2026-08-29, "get it live now"): 'on' arms without the cert clock —
+    the 7-day window was structurally unreachable while deploys reset
+    it daily — while sticky trips keep full authority (they refuse the
+    arm, disarm a live one, and gate every emit). 'off' returns arming
+    to the certified regime. The emitter's sweep adopts the switch
+    within one cycle; every money gate downstream is untouched."""
+    if action not in ("on", "off"):
+        raise HTTPException(status_code=422, detail="action must be on|off")
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        "s1_arm_override", json.dumps(action == "on"))
+    return {"ok": True, "s1_arm_override": action == "on"}
+
+
 @app.post("/api/admin/side-echo-reset",
           dependencies=[Depends(require_admin)])
 async def api_side_echo_reset() -> dict:

@@ -31,6 +31,10 @@ on:
         description: "Type 'confirm' to clear the side-echo circuit AND lift the mapping quarantine (the full resume after an admin-reviewed trip; empty = leave alone). Owner-authorized 2026-08-29."
         required: false
         default: ""
+      s1_arm_override:
+        description: "Owner-override arm for the S1 chain emitter (on/off; empty = leave alone). Arms without the cert clock; sticky trips keep full authority. Owner order 2026-08-29: 'get it live now'."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -62,6 +66,7 @@ jobs:
           # parse exactly that way.
           PREMAP_LIVE_INPUT: ${{ inputs.premap_live }}
           SIDE_ECHO_RESET_INPUT: ${{ inputs.side_echo_reset }}
+          S1_ARM_OVERRIDE_INPUT: ${{ inputs.s1_arm_override }}
         run: |
           BASE="${OVERRIDE:-$DEFAULT_BASE}"
           echo "API base: $BASE"
@@ -294,6 +299,17 @@ jobs:
             echo "  LEVER quarantine -> off"
             curl -sS --max-time 30 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
               "$BASE/api/admin/quarantine/off" \
+              | head -c 400 || echo "  LEVER call failed"
+            echo ""
+          fi
+          # ── S1 OWNER-OVERRIDE ARM (owner order 2026-08-29, "get it
+          # live now"): arms the chain emitter without the cert clock;
+          # sticky trips keep full authority. 'off' returns to the
+          # certified regime.
+          if [ "$S1_ARM_OVERRIDE_INPUT" = "on" ] || [ "$S1_ARM_OVERRIDE_INPUT" = "off" ]; then
+            echo "  LEVER s1-arm-override -> $S1_ARM_OVERRIDE_INPUT"
+            curl -sS --max-time 30 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+              "$BASE/api/admin/s1/arm-override/$S1_ARM_OVERRIDE_INPUT" \
               | head -c 400 || echo "  LEVER call failed"
             echo ""
           fi
