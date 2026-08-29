@@ -259,6 +259,38 @@ SQL_MARK_JUDGED = (
 # newest testimony DIFFERS — a live feed re-seats between hourly
 # walks; a feed that cannot show two different heads cannot testify
 # that it would have shown this fill. Deferral is the honest cost.
+# Round 42 (design round): newest is TRADE-ts testimony and can never
+# observe INDEXING time, and distinct-newest proves only that two
+# walks saw two DIFFERENT snapshots — not that either was FRESH. Two
+# executed honest-degradation shapes forged counted coverage over
+# walks that never served the fill: (a) desynced replicas frozen at
+# slightly different depths just past the fill's trade-ts (the fill's
+# own row still in the indexing queue at both freezes) hand two
+# distinct stale heads; (b) a stale head re-served with its ts
+# jittered under ORDER_TOL_S between walks slips the r41 mutant probe
+# (needs > ORDER_TOL_S) and forges distinctness from ONE frozen
+# snapshot. The missing witness is INDEXING-TIME evidence, and the
+# feed already carries it: a served row whose TRADE time postdates
+# the fill's DETECTION wall-clock proves the venue indexed activity
+# that happened after the fill existed. A covering run's newest must
+# therefore ALSO reach detected_at + RECON_VENUE_LAG_S — sound under
+# the honest skew bound because a snapshot frozen before detection
+# cannot contain a trade-ts more than FUTURE_SKEW_S (300) past its
+# freeze, and RECON_VENUE_LAG_S (600) clears that with margin. The
+# residual is owned honestly: a PER-ROW indexing hole/straggler under
+# a live head (venue indexes the fill's neighbors but not the fill,
+# for longer than the judgment window) still counts coverage — that
+# absence is observationally IDENTICAL to a venue refuting a phantom,
+# for any observer limited to venue data, so no rule closes it. The
+# failure direction stays immediate STICKY + the r17 healer: no
+# persistence window can discriminate a hole from a refuted phantom
+# (waiting delays true and false alarms equally), the healer already
+# auto-releases the false case the moment the straggler lands and
+# stamps, and every deferred hour of a GENUINE wrong emission is live
+# money copying phantom fills — over-alarm + auto-heal beats blind
+# emission. Quiet wallets defer (unchanged since r38/r39: no post-
+# fill activity means no inside-span, no distinct heads) — deferral,
+# never a false verdict.
 SQL_RECON_SINCE = """
 SELECT count(DISTINCT q.nv) AS n FROM (
   SELECT (details->'per_wallet'->('cov:' || $2)->>'newest')::float8 AS nv
@@ -275,6 +307,12 @@ SELECT count(DISTINCT q.nv) AS n FROM (
                 details->'per_wallet'->('cov:' || $2)->'newest') = 'number'
               THEN (details->'per_wallet'->('cov:' || $2)->>'newest')::float8
               ELSE '-Infinity'::float8 END) >= $5
+    AND (CASE WHEN jsonb_typeof(
+                details->'per_wallet'->('cov:' || $2)->'newest') = 'number'
+              THEN (details->'per_wallet'->('cov:' || $2)->>'newest')::float8
+              ELSE '-Infinity'::float8 END)
+        >= extract(epoch from ($1::timestamptz
+                               + make_interval(secs => $4)))::float8
     AND (CASE
           WHEN NOT (COALESCE(details->'per_wallet'->('cov:' || $2),
                              '{}'::jsonb) ? 'dirty') THEN true

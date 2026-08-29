@@ -225,11 +225,15 @@ def test_every_state_statement_prepares_and_executes():
             assert int(row["n"]) == 0, \
                 "round 8: 'complete' alone never waives the fill-span " \
                 "requirement — a degraded feed truncates politely"
-            # a walk that provably reached below the fill's ts covers
+            # a walk that provably reached below the fill's ts covers.
+            # newest seats past detection + RECON_VENUE_LAG_S (round
+            # 42: trade-ts of post-detection activity is the indexing-
+            # time witness; detected_at == fill ts in this fixture)
             await c.execute(
                 "UPDATE reconciliation_runs SET details = $1::jsonb",
                 json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
-                    "complete": False, "newest": fill_epoch + 20,
+                    "complete": False,
+                    "newest": fill_epoch + s1.RECON_VENUE_LAG_S + 100,
                     "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
             # round 20: coverage takes TWO independent clean runs
             ran = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
@@ -248,7 +252,8 @@ def test_every_state_statement_prepares_and_executes():
                 "UPDATE reconciliation_runs SET details = $1::jsonb "
                 "WHERE id = (SELECT max(id) FROM reconciliation_runs)",
                 json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
-                    "complete": False, "newest": fill_epoch + 60,
+                    "complete": False,
+                    "newest": fill_epoch + s1.RECON_VENUE_LAG_S + 160,
                     "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
             ran = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
             assert int(ran["n"]) == 2, \
@@ -256,6 +261,44 @@ def test_every_state_statement_prepares_and_executes():
                 "testimony (the feed re-seated between walks) cover " \
                 "— this exact call could never execute before the " \
                 "round-7 cast"
+            # round 42 (design round, executed): distinct-newest proves
+            # two snapshots, not FRESH snapshots. Desynced replicas
+            # frozen just past the fill's trade-ts (or one stale head
+            # re-served with sub-ORDER_TOL_S ts jitter) hand two
+            # DISTINCT newest values that both sit hours before the
+            # fill's DETECTION wall-clock — walks that provably never
+            # served post-detection activity must not cover.
+            await c.execute(
+                "UPDATE reconciliation_runs SET details = $1::jsonb "
+                "WHERE id = (SELECT min(id) FROM reconciliation_runs)",
+                json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
+                    "complete": False, "newest": fill_epoch + 20,
+                    "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
+            await c.execute(
+                "UPDATE reconciliation_runs SET details = $1::jsonb "
+                "WHERE id = (SELECT max(id) FROM reconciliation_runs)",
+                json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
+                    "complete": False, "newest": fill_epoch + 60,
+                    "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
+            rn = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
+            assert int(rn["n"]) == 0, \
+                "round 42: two distinct STALE heads (frozen replicas / " \
+                "jittered re-serve) never cover — newest must postdate " \
+                "detection + RECON_VENUE_LAG_S"
+            await c.execute(
+                "UPDATE reconciliation_runs SET details = $1::jsonb "
+                "WHERE id = (SELECT min(id) FROM reconciliation_runs)",
+                json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
+                    "complete": False,
+                    "newest": fill_epoch + s1.RECON_VENUE_LAG_S + 100,
+                    "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
+            await c.execute(
+                "UPDATE reconciliation_runs SET details = $1::jsonb "
+                "WHERE id = (SELECT max(id) FROM reconciliation_runs)",
+                json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
+                    "complete": False,
+                    "newest": fill_epoch + s1.RECON_VENUE_LAG_S + 160,
+                    "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
             # round 38: a frozen-index walk spans BELOW the fill but
             # its newest served row never reached it — no cover; and a
             # pre-round-38 run with no 'newest' key defers fail-closed
@@ -280,7 +323,8 @@ def test_every_state_statement_prepares_and_executes():
             await c.execute(
                 "UPDATE reconciliation_runs SET details = $1::jsonb",
                 json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
-                    "complete": False, "newest": fill_epoch + 20,
+                    "complete": False,
+                    "newest": fill_epoch + s1.RECON_VENUE_LAG_S + 100,
                     "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
             # the failed: key still blocks
             await c.execute("UPDATE reconciliation_runs SET details = "
@@ -415,7 +459,9 @@ def test_round11_dirty_coverage_and_the_tombstone_clock():
                     row["ts"].timestamp() - s1.RECON_TS_MARGIN_S,
                     float(s1.RECON_VENUE_LAG_S), row["ts"].timestamp())
 
-            def cov(dirty, seat=30):
+            def cov(dirty, seat=700):
+                # seats clear detection + RECON_VENUE_LAG_S (round 42:
+                # stale-head walks never cover; detected_at == ts here)
                 d = {"complete": True,
                      "newest": row["ts"].timestamp() + seat,  # r38 span
                      "oldest": row["ts"].timestamp()
@@ -448,7 +494,7 @@ def test_round11_dirty_coverage_and_the_tombstone_clock():
                 "INSERT INTO reconciliation_runs (started_at, "
                 "finished_at, missed, details) VALUES "
                 "(now() - interval '1 hour', now() - interval "
-                "'50 minutes', 0, $1::jsonb)", cov(0, seat=90))
+                "'50 minutes', 0, $1::jsonb)", cov(0, seat=790))
             rn = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
             assert int(rn["n"]) == 2, \
                 "two clean (dirty=0) spanning walks with different " \
