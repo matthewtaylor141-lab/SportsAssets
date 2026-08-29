@@ -2174,9 +2174,11 @@ def test_uncorroborated_needs_two_independent_covering_runs():
     # coverage counts DISTINCT newest testimony, so a frozen or
     # poisoned feed serving byte-identical geometry twice defers
     assert "LIMIT 64" in s1.SQL_RECON_SINCE
-    assert "ORDER BY started_at" in s1.SQL_RECON_SINCE, \
-        "r42 F3: an unordered LIMIT starved the distinct count " \
-        "nondeterministically on a busy wallet"
+    assert "ORDER BY started_at DESC" in s1.SQL_RECON_SINCE, \
+        "r42 F3 + r44 (major): unordered starved nondeterministically; " \
+        "ASC anchored the window to the 64 EARLIEST runs forever — an " \
+        "ordinary 64h quiet spell then silenced the alarm for the " \
+        "life of the row. The window is the most RECENT runs."
     assert "count(DISTINCT q.nv)" in s1.SQL_RECON_SINCE
     import inspect
     src = inspect.getsource(s1)
@@ -2913,3 +2915,44 @@ def test_key_divergent_counter_counts_stamp_winners_only(st):
     assert st.deltas.get("s1.key_divergent") == 1
     assert st.deltas.get("s1.uncorroborated") is None, \
         "a kd row never double-counts as plain uncorroborated"
+
+
+# ── fleet round 44 pins ─────────────────────────────────────────────
+def test_kd_race_lost_self_clear_releases_its_own_reason(st):
+    """r44 (minor x3): the round-16 race-lost branch hardcoded
+    'uncorroborated:' while a key-divergent row's persisted trip was
+    'key_divergent:<id>' — the self-clear popped a reason that never
+    tripped and the refuted kd trip survived the sweep that proved it
+    false. The release names the row's own reason."""
+    _arm(st)
+
+    class _KdRacePool(_SweepPool):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.rechecks = 0
+            self.cleared: list[str] = []
+
+        async def fetchrow(self, sql, *a, timeout=None):
+            if "trips_cleared" in sql and "prev.admit" not in sql and \
+                    sql.lstrip().startswith("WITH prev"):
+                self.cleared.append(a[1])
+                return {"removed": True, "trips": {}, "cleared": {}}
+            if "FROM trades WHERE id" in sql:
+                self.rechecks += 1
+                return {"ok": self.rechecks > 1}
+            return await _SweepPool.fetchrow(self, sql, *a,
+                                             timeout=timeout)
+
+        async def fetch(self, sql, *a, timeout=None):
+            if "venue_seen_at IS NULL RETURNING" in sql:
+                self.marked.append(list(a[0]))
+                return []            # the conditional stamp refused
+            return await _SweepPool.fetch(self, sql, *a,
+                                          timeout=timeout)
+
+    pool = _KdRacePool([_srow(3, False, suspect_at=None)])
+    pool.key_twin = {"id": 99, "dedupe_key": "other"}
+    asyncio.run(st._corroboration_sweep(pool))
+    assert pool.cleared == ["key_divergent:3"], \
+        "the race-lost release names the reason that actually tripped"
+    assert st.trips == {}, "released in-memory in the SAME sweep"

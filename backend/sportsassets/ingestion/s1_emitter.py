@@ -377,7 +377,7 @@ SELECT count(DISTINCT q.nv) AS n FROM (
                 details->'per_wallet'->('cov:' || $2)->'dirty') = 'number'
           THEN (details->'per_wallet'->('cov:' || $2)->>'dirty')::float8 = 0
           ELSE false END)
-  ORDER BY started_at
+  ORDER BY started_at DESC
   LIMIT 64
 ) q
 """
@@ -1990,7 +1990,14 @@ class S1Emitter:
             # trip we just persisted brands a corroborated row (round
             # 16): release it ourselves, leave the row unstamped, and
             # the next sweep confirms it through the ok path.
-            reason = "uncorroborated:%s" % r["id"]
+            # r44 (minor x3): this branch hardcoded 'uncorroborated:'
+            # while the trip persisted for a key-divergent row was
+            # 'key_divergent:<id>' — the self-clear popped a reason
+            # that never tripped (spurious durable tombstone, wrong
+            # operator log) and the refuted kd trip survived the very
+            # sweep that proved it false. The reason is the row's own.
+            reason = (("key_divergent:%s" if r.get("_key_divergent")
+                       else "uncorroborated:%s") % r["id"])
             try:
                 cur = await pool.fetchrow(SQL_RECHECK, r["id"],
                                           timeout=6)
