@@ -113,23 +113,42 @@ def _lines_of(text: str | None) -> set[str]:
     return {_canon_line(n) for n in out if n}
 
 
-def _clock_artifact(rl: str, q: str | None) -> bool:
+def _clock_artifact(rl: str, r: dict) -> bool:
     """True when a row's stamped line is nothing but the question's
     CLOCK minutes — '7:00 PM' matched the ':' line context and
     stamped line='00' on BOTH sides of a moneyline market, and the
     unlined pick then failed the line-presence comparison against a
     phantom (live census 2026-08-29, the WNBA example: 'Washington
     Mystics' refused against sides mystics/sparks). Authentication
-    mirrors the named-tennis bridge's clock quarantine exactly: the
-    line must be the question's SOLE parsed line AND verbatim-equal
-    to a strict clock parse's minutes. A real bet line fails both
-    ways; a global time-strip is NOT an option — the bridge lane
-    depends on the clock stamping (its quarantine authenticates the
-    same artifact instead of erasing it)."""
+    mirrors the named-tennis bridge's clock quarantine: the line must
+    be the question's SOLE parsed line AND verbatim-equal to a strict
+    clock parse's minutes. A global time-strip is NOT an option — the
+    bridge lane depends on the clock stamping (its quarantine
+    authenticates the same artifact instead of erasing it).
+
+    Fleet round 37 (major): the question-only check had a
+    coincidence hole — a REAL line stamped from the SIDE DESCRIPTION
+    ('Alabama -30') collided with a ':30' kickoff clock in the
+    question, authenticated as an artifact, and the erased real line
+    both refused the correct lined pick AND let an unlined moneyline
+    pick wrongly match the spread side (a money-direction wrong-
+    market copy). A line the SIDE ITSELF states is real whatever the
+    clock says: the row's signed magnitude and its side_norm tokens
+    both veto the artifact."""
+    q = r.get("question")
     if not rl or not q:
         return False
     m = re.search(r"\b\d{1,2}:(\d{2})\b", q)
-    return bool(m and m.group(1) == rl and _lines_of(q) == {rl})
+    if not (m and m.group(1) == rl and _lines_of(q) == {rl}):
+        return False
+    mag = (r.get("signed") or "").lstrip("+-")
+    if mag and _canon_line(mag) == rl:
+        return False               # the side states this line, signed
+    sn = r.get("side_norm") or ""
+    if rl in _lines_of(sn) or re.search(
+            r"(?:^|\s)" + re.escape(rl) + r"(?:\s|$)", sn):
+        return False               # the side states this line, plain
+    return True
 
 
 def signed_line(text: str | None) -> str:
@@ -1851,7 +1870,7 @@ def match_side(rows: list[dict], outcome: str | None,
                 if not rs or rs != his_signed_yn:
                     return False
             rl = (r.get("line") or "").strip()
-            if rl and _clock_artifact(rl, r.get("question")):
+            if rl and _clock_artifact(rl, r):
                 rl = ""            # a clock is not a line (census
                                    # 2026-08-29); see _clock_artifact
             if bool(rl) != bool(his_lines):
@@ -1912,7 +1931,7 @@ def match_side(rows: list[dict], outcome: str | None,
             # so a team listed at two handicaps returns nothing rather
             # than a coin flip.
             rl = (r.get("line") or "").strip()
-            if rl and _clock_artifact(rl, r.get("question")):
+            if rl and _clock_artifact(rl, r):
                 rl = ""            # a clock is not a line (census
                                    # 2026-08-29); see _clock_artifact
             if not rl:

@@ -798,8 +798,18 @@ class S1Emitter:
             elif e["blocks"].get(blk) not in (None, bh):
                 # SAME-height re-mine (fleet round 10): a new hash for
                 # a known block number is the same reorg evidence — the
-                # earned timestamps from this height up are void, and
-                # resolution re-earns them against the new hash.
+                # earned timestamps from this height up are void.
+                # Round 37 (major): purge-and-RE-EARN here was the
+                # exact arbitration round 32 declared unsound for the
+                # sibling channel — an A→B→A flap re-flipped this
+                # entry's belief back to the orphaned hash, the buffer
+                # had literally observed BOTH hashes at the height,
+                # and a lagging replica re-verified the orphaned side
+                # into an armed ingest. Two hashes at one height are
+                # contested WHICHEVER entry delivered them: the height
+                # is marked, both sides abstain at finalize, the
+                # poller carries.
+                self._mark_contested(blk)
                 self._purge_ts_cache(blk)
                 # THE ORPHANED VERSION'S LOGS ARE VOID TOO (fleet round
                 # 11, CRITICAL): voiding only the timestamps left the

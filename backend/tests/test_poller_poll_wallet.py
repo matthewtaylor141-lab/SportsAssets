@@ -412,3 +412,56 @@ def test_empty_page_for_a_fresh_whale_is_a_normal_poll(monkeypatch):
     import asyncio as aio
     assert aio.run(p.poll_wallet({"id": 7, "address": "0xw",
                                   "username": "w"})) == 0
+
+
+def test_stale_only_page_with_a_newer_known_fill_fails_the_cycle(monkeypatch):
+    """fleet r37 (major): the round-36 probe fires only on an EMPTY
+    page — a frozen index serving stale already-ingested rows while
+    omitting fresh fills was still a silent successful poll behind a
+    green heartbeat. A fill this poller venue-stamped can only leave
+    the most-recent page by being pushed DOWN by newer fills, so the
+    newest known poll-stamped fill sitting beyond the margin above
+    the page's newest row is a provable index regression."""
+    import time as _t
+
+    import sportsassets.ingestion.poller as pl
+
+    now = _t.time()
+
+    class _P:
+        async def fetch(self, sql, *a, timeout=None):
+            # every served key is already known — nothing attempted
+            return [{"dedupe_key": k} for k in a[0]]
+
+        async def fetchval(self, sql, *a, timeout=None):
+            return now - 600            # known fill 10 min ago
+
+    async def fake_get_pool():
+        return _P()
+
+    monkeypatch.setattr(pl, "get_pool", fake_get_pool)
+
+    stale_ts = int(now - 7200)          # page newest: 2h old
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [{"transactionHash": "0x" + "ab" * 32,
+                     "asset": "1234", "side": "BUY", "size": "10",
+                     "price": "0.5", "timestamp": stale_ts,
+                     "proxyWallet": "0xw"}]
+
+    async def fake_polite_get(http, path, params=None):
+        return _R()
+
+    monkeypatch.setattr("sportsassets.ratelimit.polite_get",
+                        fake_polite_get)
+    p = pl.Poller.__new__(pl.Poller)
+    p._http = None
+    import asyncio as aio
+    import pytest as pt
+    with pt.raises(ValueError, match="frozen index"):
+        aio.run(p.poll_wallet({"id": 7, "address": "0xw",
+                               "username": "w"}))

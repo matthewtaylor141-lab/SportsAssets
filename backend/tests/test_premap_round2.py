@@ -639,15 +639,21 @@ class TestClockArtifactIsNotALine:
 
     Q = "Mystics vs Sparks — 7:00 PM"
 
+    @staticmethod
+    def _row(q, side="mystics", signed=""):
+        return {"question": q, "side_norm": side, "signed": signed}
+
     def test_the_artifact_authenticates_strictly(self):
-        assert premap._clock_artifact("00", self.Q)
-        assert not premap._clock_artifact("30", self.Q), "verbatim"
+        assert premap._clock_artifact("00", self._row(self.Q))
+        assert not premap._clock_artifact("30", self._row(self.Q)), \
+            "verbatim"
         assert not premap._clock_artifact(
-            "00", "Mystics vs Sparks - 7:00 PM"), \
+            "00", self._row("Mystics vs Sparks - 7:00 PM")), \
             "an ascii dash reads as a minus and adds a hit - not sole"
         assert not premap._clock_artifact(
-            "00", "Total: 8.5 — 7:00 PM"), "not the sole line"
-        assert not premap._clock_artifact("8.5", "Total: 8.5"), \
+            "00", self._row("Total: 8.5 — 7:00 PM")), "not the sole line"
+        assert not premap._clock_artifact(
+            "8.5", self._row("Total: 8.5")), \
             "a real bet line is never an artifact"
         assert premap._lines_of(self.Q) == {"00"}, \
             "the stamp itself is untouched - the bridge depends on it"
@@ -667,3 +673,49 @@ class TestClockArtifactIsNotALine:
                                 "wnba-wsh-la-2026-08-28")
         assert hit is not None and hit["side_norm"] == "mystics", \
             "the phantom clock line no longer refuses the token match"
+
+
+class TestRealLineNeverAuthenticatesAsClock:
+    """Fleet round 37 (major): a REAL line stamped from the side
+    description ('Alabama -30') collided with a ':30' kickoff clock
+    in the question, authenticated as an artifact, and the erased
+    line both refused the correct lined pick and let an unlined
+    moneyline pick wrongly match the spread side — a money-direction
+    wrong-market copy. A line the side itself states is real
+    whatever the clock says."""
+
+    Q = "Will Alabama cover against Vanderbilt? Kickoff 7:30 PM ET"
+
+    def _rows(self):
+        return [
+            {"identifier": "asc-ncaaf-ala-van-2026-08-29",
+             "side_norm": "alabama 30", "line": "30",
+             "signed": "-30", "question": self.Q, "intent": "BUY_LONG"},
+            {"identifier": "asc-ncaaf-ala-van-2026-08-29",
+             "side_norm": "vanderbilt 30", "line": "30",
+             "signed": "+30", "question": self.Q, "intent": "BUY_LONG"},
+        ]
+
+    def test_signed_magnitude_vetoes_the_artifact(self):
+        assert not premap._clock_artifact("30", self._rows()[0])
+
+    def test_the_correct_lined_pick_resolves(self):
+        hit = premap.match_side(
+            self._rows(), "Alabama -30", "Alabama -30",
+            "ncaaf-ala-van-2026-08-29-spread-home-30")
+        assert hit is not None and hit["signed"] == "-30", \
+            "the real line survives the clock coincidence"
+
+    def test_the_unlined_moneyline_pick_refuses_the_spread(self):
+        hit = premap.match_side(
+            self._rows(), "Alabama", "Alabama vs Vanderbilt",
+            "ncaaf-ala-van-2026-08-29")
+        assert hit is None, \
+            "an unlined pick must never buy a lined side — the " \
+            "money-direction wrong-market copy"
+
+    def test_side_norm_token_vetoes_without_a_sign(self):
+        r = {"identifier": "x", "side_norm": "over 30", "line": "30",
+             "signed": "", "question": "Game total? Tips 9:30 PM",
+             "intent": "BUY_LONG"}
+        assert not premap._clock_artifact("30", r)

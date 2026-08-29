@@ -21,6 +21,12 @@ from .pipeline import TradeEvent, ingest_trade_result
 
 log = logging.getLogger(__name__)
 
+# A most-recent page whose newest row sits this far behind a fill this
+# poller itself venue-stamped is a frozen index, not a quiet wallet
+# (fleet round 37). Generous vs feed jitter; a real regression is
+# hours, not minutes.
+STALE_INDEX_S = 1800
+
 
 def parse_data_api_trade(raw: dict[str, Any], whale_id: int, username: str | None) -> TradeEvent:
     """Map a data-api trade payload onto our TradeEvent."""
@@ -240,6 +246,35 @@ class Poller:
             # a mixed outcome stays per-row (round 15).
             raise ValueError(
                 f"all {attempted} attempted rows failed inside ingest")
+        if not attempted and events:
+            # round 37 (major): the round-36 cold-index probe fires
+            # only on an EMPTY page — a frozen index serving stale,
+            # already-ingested rows while omitting fresh fills was
+            # still a silent successful poll (attempted=0), the same
+            # dead carrier behind the same green heartbeat, and two
+            # reconciler walks of the same frozen feed even counted
+            # as clean coverage. The check is the index's own math: a
+            # fill THIS poller venue-stamped can only leave the
+            # most-recent page by being pushed down by NEWER fills,
+            # so the wallet's newest known poll-stamped fill sitting
+            # beyond a lag margin ABOVE the served page's newest row
+            # is a provable index regression, never an empty hour.
+            page_newest = max((ev.ts_epoch or 0 for ev in events),
+                              default=0)
+            try:
+                known_newest = await pool.fetchval(
+                    "SELECT extract(epoch from max(ts)) FROM trades "
+                    "WHERE whale_id = $1 AND source = 'poll' "
+                    "AND venue_seen_at IS NOT NULL", whale["id"])
+            except Exception:  # noqa: BLE001 — probe is best-effort;
+                known_newest = None       # next cycle re-checks
+            if (isinstance(known_newest, (int, float)) and page_newest
+                    and known_newest - page_newest > STALE_INDEX_S):
+                raise ValueError(
+                    "venue index regressed: newest served row is "
+                    f"{round(known_newest - page_newest)}s older than "
+                    "a fill this poller already venue-stamped — a "
+                    "frozen index, not a quiet wallet")
         return new
 
     async def _priority_loop(self) -> None:

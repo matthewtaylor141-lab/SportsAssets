@@ -1537,12 +1537,18 @@ def test_same_height_remine_drops_the_orphaned_logs(st, monkeypatch):
     assert e["lix_seen"] == {s1._lix_key(remined)}, \
         "lix_seen rebuilds from survivors (r15: keyed by block+hash)"
     assert "recs" not in e and "recs_n" not in e, "decode invalidated"
-    # the full armed path emits exactly ONE row — the canonical copy
+    # r37: the buffer has now seen TWO hashes at this height — a
+    # proven contested height abstains outright (a lagging replica
+    # must not arbitrate which side was real); the poller carries.
+    # The r11 law this pin exists for still holds one level down:
+    # the orphaned log is gone, so no path could decode the phantom.
     for entry in st.pending.values():
         entry["last_seen"] = time.time() - s1.DEBOUNCE_S - 1
     done = asyncio.run(st._finalize_tx(_Pool(), TX, e, time.time()))
-    assert done is True and len(calls) == 1, \
-        "one fill, one row — the phantom never even decodes"
+    assert done is True and calls == [], \
+        "a proven two-hash height abstains — the phantom AND the " \
+        "canonical twin; the poller carries whatever was real"
+    assert st.deltas.get("s1.abstain.contested") == 1
 
 
 def test_midawait_remine_never_writes_back_the_orphaned_ts(st, monkeypatch):
@@ -1882,13 +1888,17 @@ def test_bundle_retry_after_remine_never_reemits_an_asset(
         "timestamp": hex(TS0 + 3)}}))
     done = asyncio.run(st._finalize_tx(pool, TX, e, time.time()))
     assert done is True
-    assets = [c.asset for c in calls]
-    assert len(calls) == 2 and len(set(assets)) == 2, \
-        "each asset ingests EXACTLY once across the retry — the " \
-        "re-mine-shifted key must never produce a second row"
-    assert st.deltas.get("s1.abstain.same_asset_entry", 0) >= 1, \
-        "the re-emission attempt is refused under its own honest " \
-        "reason (r14: mislabeling it emit_dup lied about the gauge)"
+    # r37 evolution: the mid-retry re-mine put TWO hashes at one
+    # height through this entry — a proven contested height, and pass
+    # 2 abstains outright rather than letting one replica arbitrate.
+    # The r13 law this pin exists for holds a fortiori: the first
+    # market ingested exactly once on pass 1, and NOTHING re-emits —
+    # the second market defers to the poller with the height.
+    assert len(calls) == 1, \
+        "the pass-1 row stands alone; the re-mined height never " \
+        "produces a second row of the same asset"
+    assert st.deltas.get("s1.abstain.contested") == 1, \
+        "pass 2 abstains the contested height under its honest reason"
 
 
 def test_second_distinct_same_asset_fill_defers_by_design():
@@ -2662,3 +2672,27 @@ def test_flush_adopts_a_sibling_processes_floor(st):
     assert "GREATEST" in s1.SQL_WRITE and \
         "- 'contested' - 'contested_floor'" in s1.SQL_WRITE, \
         "the disk fold is server-side, never a payload overwrite"
+
+
+# ── fleet round 37 pins ─────────────────────────────────────────────
+def test_own_entry_flap_marks_the_height_contested(st):
+    """fleet r37 (major): an A→B→A flap delivered two hashes at one
+    height THROUGH ONE ENTRY — the sibling scan is gated sib_tx !=
+    tx, the same-height re-mine branch did purge-and-RE-EARN with no
+    contested mark, and a lagging replica re-verified the re-flipped
+    orphaned belief into an armed ingest. Two hashes at one height
+    are contested whichever entry delivered them."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    st.observe(lst, MAKER_EV)                     # (BLK, 77…) — A
+    st.observe(lst, dict(MAKER_EV, blockHash="0x" + "88" * 32,
+                         logIndex="0x9"))         # re-mine — B
+    assert BLK in st.contested, \
+        "the second hash at the height marks it, sibling or not"
+    st.observe(lst, dict(MAKER_EV, blockHash="0x" + "77" * 32,
+                         logIndex="0xa"))         # the flap back — A
+    e = st.pending[TX]
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, e, time.time()))
+    assert done is True
+    assert st.deltas.get("s1.abstain.contested") == 1, \
+        "no single replica arbitrates a proven two-hash height"
