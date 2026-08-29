@@ -2036,6 +2036,20 @@ async def api_desk_feed(venue: str = Query("polymarket"),
             if ct and (g["close_time"] is None or ct < g["close_time"]):
                 g["close_time"] = ct
         cards = [g for g in games.values() if g["outcomes"]]
+        # MATCHUP TITLES (owner report 2026-08-29, with screenshot): the
+        # card inherited ONE side's market title — "New York Y wins" —
+        # which reads as a proposition, not a game. The sides ARE the
+        # teams, so a card with two distinct sides titles itself as the
+        # matchup the venue app would show. Cards with one readable
+        # side (or none) keep the market title rather than guessing.
+        for g in cards:
+            labels: list[str] = []
+            for o in g["outcomes"]:
+                lb = (o.get("label") or "").strip()
+                if lb and lb not in labels:
+                    labels.append(lb)
+            if len(labels) >= 2:
+                g["title"] = f"{labels[0]} vs {labels[1]}"
         counts: dict[str, int] = {}
         for g in cards:
             counts[g["league"]] = counts.get(g["league"], 0) + 1
@@ -2177,6 +2191,18 @@ async def api_desk_game(venue: str = Query(...),
                 title = (m.get("title") or title).replace(" Winner?", "")
         korder = ["Moneyline", "Spreads", "Totals", "Set Winners",
                   "Game Props", "Exact Score", "More"]
+        # MATCHUP TITLE (owner report 2026-08-29): a game page headed
+        # "New York Y wins" reads as a proposition. When the Moneyline
+        # group carries two distinct sides, the page titles itself as
+        # the matchup, same as the feed cards.
+        ml = groups.get("Moneyline") or []
+        side_labels: list[str] = []
+        for r in ml:
+            lb = (r.get("label") or "").strip()
+            if lb and lb not in side_labels:
+                side_labels.append(lb)
+        if len(side_labels) >= 2:
+            title = f"{side_labels[0]} vs {side_labels[1]}"
         return {"id": id, "venue": "kalshi", "title": title,
                 "groups": [{"name": k, "markets": groups[k]}
                            for k in korder if k in groups]

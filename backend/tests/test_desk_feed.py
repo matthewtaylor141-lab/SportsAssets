@@ -185,7 +185,11 @@ async def test_kalshi_cards_group_sides_and_sum_volume(monkeypatch):
                 if c["id"] == "KXMLBGAME-26AUG22NYYBOS")
     assert set(game) == CARD_KEYS
     assert game["league"] == "mlb"
-    assert game["title"] == "NYY at BOS"          # ' Winner?' stripped
+    # MATCHUP TITLE (owner report 2026-08-29, with screenshot): the
+    # card used to inherit ONE side's market title ("New York Y wins"),
+    # which reads as a proposition. Two distinct sides now title the
+    # card as the matchup the venue app would show.
+    assert game["title"] == "Yankees vs Red Sox"
     assert game["volume_usd"] == 15.0             # (1000+500) cents
     assert game["close_time"] == "2026-08-22T22:00:00Z"   # min
     assert [o["id"] for o in game["outcomes"]] == [

@@ -135,9 +135,12 @@ const fmtClose = (iso: string | null | undefined): string | null => {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return null
   const sameDay = d.toDateString() === new Date().toDateString()
+  // Owner report 2026-08-29: a bare "Sep 1" told the team nothing —
+  // game cards need the day AND the start time to be operable.
   return sameDay
-    ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-    : d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+    ? `Today · ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+    : `${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} · ${
+        d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
 }
 
 // desk-games card → feed card (fallback path only; volume/close stay
