@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 import httpx
 
@@ -32,6 +33,11 @@ OVERLAP_K = 3
 # is void. Same-second bundles (equal ts) and small re-indexing jitter
 # pass; a genuinely misplaced row does not.
 ORDER_TOL_S = 120
+# A served row this far past the walk's own wallclock is feed
+# corruption, never a trade (fleet r40): it inflated cov->newest and,
+# tracking wallclock across two walks, forged the round-39 distinct-
+# newest testimony. Generous vs real venue clock skew.
+FUTURE_SKEW_S = 300
 
 # Border-witness page size (round 21): rows a clean walk verifies PAST
 # the depth cap so the cap-tail rows have ordered successors below
@@ -53,6 +59,7 @@ def _row_ident(raw: dict) -> tuple:
 
 async def reconcile_once(depth: int = 500) -> dict:
     cfg = settings()
+    walk_now = time.time()          # future-row corruption bound (r40)
     pool = await get_pool()
     run_id = await pool.fetchval(
         "INSERT INTO reconciliation_runs DEFAULT VALUES RETURNING id"
@@ -257,6 +264,21 @@ async def reconcile_once(depth: int = 500) -> dict:
                             dirty += 1
                             continue
                         ts_r = float(ev.ts_epoch or 0.0)
+                        if ts_r > walk_now + FUTURE_SKEW_S:
+                            # fleet r40 (major): a FUTURE-dated row is
+                            # feed corruption, full stop — no venue
+                            # clock runs hours ahead. As the HEAD row
+                            # it had no predecessor, so the ordering
+                            # check below could never fire, it kept
+                            # dirty=0, and its bare-max ts inflated
+                            # cov->newest above every fill; tracking
+                            # wallclock across two walks it even
+                            # produced two DISTINCT newest values and
+                            # defeated the round-39 rule. A dirty
+                            # walk can never testify, whatever its
+                            # head claims.
+                            dirty += 1
+                            continue
                         if ord_prev is not None and \
                                 ts_r > ord_prev + ORDER_TOL_S:
                             # the feed served a row NEWER than its

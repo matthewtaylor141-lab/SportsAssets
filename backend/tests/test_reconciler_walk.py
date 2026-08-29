@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +28,9 @@ import pytest
 import sportsassets.ingestion.reconciler as rec
 
 WALLET = "0x" + "ab" * 20
-TOP_TS = 2_000_000_000            # newest row's venue timestamp
+# newest row's venue timestamp — near wallclock, because a row past
+# the walk's own clock is feed corruption and dirties the walk (r40)
+TOP_TS = int(time.time()) - 3600
 STEP = 10                         # seconds between adjacent fills
 
 
@@ -230,3 +233,23 @@ def test_total_loss_run_heartbeats_error_not_ok(monkeypatch):
     monkeypatch.setattr(rec, "heartbeat", fake_hb)
     asyncio.run(rec.reconcile_once(depth=500))
     assert beats[-1][1] == "ok" and beats[-1][2]["failed"] == 0
+
+
+def test_future_dated_head_row_dirties_the_walk(monkeypatch):
+    """fleet r40 (major): a valid future-dated HEAD row (no
+    predecessor, so ORDER_TOL_S could never fire) kept the walk
+    dirty=0 while its bare-max ts inflated cov->newest above every
+    fill — and tracking wallclock across two hourly walks it forged
+    the round-39 distinct-newest testimony. A future row is feed
+    corruption: the walk dirties, and a dirty walk never testifies."""
+    rows = _feed()
+    future = dict(rows[0])
+    future["timestamp"] = int(time.time()) + 7200
+    future["transactionHash"] = "0x" + "fd" * 32
+    pool, _calls = _wire(monkeypatch, [future] + rows)
+    asyncio.run(rec.reconcile_once(depth=500))
+    cov = _cov(pool)
+    assert cov["dirty"] >= 1, \
+        "a future-dated row is corruption, not testimony"
+    assert cov["newest"] <= time.time() + rec.FUTURE_SKEW_S, \
+        "the forged head never reaches the newest testimony"
