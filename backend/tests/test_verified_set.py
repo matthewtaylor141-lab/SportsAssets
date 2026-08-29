@@ -100,3 +100,98 @@ def test_neither_gate_carries_a_second_hard_coded_roster():
     assert '_whale_set("LIVE_VERIFIED_WHALES")' in src
     assert '_whale_set("LIVE_PREMAP_WHALES")' in src
     assert '"homerunhazard,0x076daa87"' not in src
+
+
+# ── DB roster override (owner order 2026-08-29: "update the variables") ─
+# A stale Render env LIVE_VERIFIED_WHALES silently overrode the owner's
+# reinstate order for two days (homerunhazard: 724 rejections, $0
+# deployed on a +2.57%-at-95% whale). The stored roster now beats the
+# env; these pins hold the override's semantics.
+
+import asyncio
+import json as _json
+import time as _time
+
+
+class _RosterPool:
+    def __init__(self, stored=None, boom=False):
+        self.stored = stored
+        self.boom = boom
+
+    async def fetchval(self, sql, *a, timeout=None):
+        if self.boom:
+            raise RuntimeError("db blip")
+        return self.stored
+
+
+def _fresh_roster_state():
+    le._roster_override = None
+    le._roster_read_at = 0.0
+
+
+def test_db_roster_beats_the_env(monkeypatch):
+    _fresh_roster_state()
+    monkeypatch.setenv("LIVE_VERIFIED_WHALES", "rn1")  # the stale env
+    asyncio.run(le.refresh_whale_overrides(
+        _RosterPool(stored=_json.dumps(
+            ["rn1", "homerunhazard", "swisstony"]))))
+    got = le._whale_set("LIVE_VERIFIED_WHALES")
+    assert got == {"rn1", "homerunhazard", "swisstony"}, \
+        "the owner's stored roster must beat the env"
+    _fresh_roster_state()
+
+
+def test_no_stored_roster_falls_to_env_then_default(monkeypatch):
+    _fresh_roster_state()
+    asyncio.run(le.refresh_whale_overrides(_RosterPool(stored=None)))
+    monkeypatch.setenv("LIVE_VERIFIED_WHALES", "rn1")
+    assert le._whale_set("LIVE_VERIFIED_WHALES") == {"rn1"}
+    monkeypatch.delenv("LIVE_VERIFIED_WHALES")
+    assert le._whale_set("LIVE_VERIFIED_WHALES") == set(
+        le.VERIFIED_PROFITABLE_DEFAULT.split(","))
+    _fresh_roster_state()
+
+
+def test_comma_string_and_case_are_normalized():
+    _fresh_roster_state()
+    asyncio.run(le.refresh_whale_overrides(
+        _RosterPool(stored=_json.dumps("RN1, HomeRunHazard"))))
+    assert le._whale_set("LIVE_VERIFIED_WHALES") == {"rn1", "homerunhazard"}
+    _fresh_roster_state()
+
+
+def test_read_failure_keeps_the_last_adopted_roster():
+    _fresh_roster_state()
+    asyncio.run(le.refresh_whale_overrides(
+        _RosterPool(stored=_json.dumps(["rn1"]))))
+    assert le._whale_set("LIVE_VERIFIED_WHALES") == {"rn1"}
+    le._roster_read_at = 0.0            # force a re-read attempt
+    asyncio.run(le.refresh_whale_overrides(_RosterPool(boom=True)))
+    assert le._whale_set("LIVE_VERIFIED_WHALES") == {"rn1"}, \
+        "a DB blip is not a roster decision"
+    _fresh_roster_state()
+
+
+def test_ttl_skips_the_read_inside_the_window():
+    _fresh_roster_state()
+    asyncio.run(le.refresh_whale_overrides(
+        _RosterPool(stored=_json.dumps(["rn1"]))))
+    # a different stored value inside the TTL window must NOT be adopted
+    asyncio.run(le.refresh_whale_overrides(
+        _RosterPool(stored=_json.dumps(["swisstony"]))))
+    assert le._whale_set("LIVE_VERIFIED_WHALES") == {"rn1"}
+    le._roster_read_at = _time.time() - le._ROSTER_TTL_S - 1
+    asyncio.run(le.refresh_whale_overrides(
+        _RosterPool(stored=_json.dumps(["swisstony"]))))
+    assert le._whale_set("LIVE_VERIFIED_WHALES") == {"swisstony"}
+    _fresh_roster_state()
+
+
+def test_other_env_sets_are_untouched_by_the_override(monkeypatch):
+    _fresh_roster_state()
+    asyncio.run(le.refresh_whale_overrides(
+        _RosterPool(stored=_json.dumps(["rn1"]))))
+    monkeypatch.setenv("LIVE_PREMAP_WHALES", "homerunhazard")
+    assert le._whale_set("LIVE_PREMAP_WHALES") == {"homerunhazard"}, \
+        "the DB override applies to LIVE_VERIFIED_WHALES only"
+    _fresh_roster_state()

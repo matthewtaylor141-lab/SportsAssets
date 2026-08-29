@@ -35,6 +35,10 @@ on:
         description: "Owner-override arm for the S1 chain emitter (on/off; empty = leave alone). Arms without the cert clock; sticky trips keep full authority. Owner order 2026-08-29: 'get it live now'."
         required: false
         default: ""
+      verified_whales:
+        description: "Set the DB verified-whales roster (comma list, beats the env; 'clear' removes the override; empty = leave alone). Owner order 2026-08-29: 'update the variables'."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -67,6 +71,7 @@ jobs:
           PREMAP_LIVE_INPUT: ${{ inputs.premap_live }}
           SIDE_ECHO_RESET_INPUT: ${{ inputs.side_echo_reset }}
           S1_ARM_OVERRIDE_INPUT: ${{ inputs.s1_arm_override }}
+          VERIFIED_WHALES_INPUT: ${{ inputs.verified_whales }}
         run: |
           BASE="${OVERRIDE:-$DEFAULT_BASE}"
           echo "API base: $BASE"
@@ -313,6 +318,31 @@ jobs:
               | head -c 400 || echo "  LEVER call failed"
             echo ""
           fi
+          # ── VERIFIED-WHALES ROSTER LEVER (owner order 2026-08-29,
+          # "update the variables"): stores the roster in the DB where
+          # it beats a stale env. 'clear' removes the override.
+          if [ -n "$VERIFIED_WHALES_INPUT" ]; then
+            echo "  LEVER verified-whales -> $VERIFIED_WHALES_INPUT"
+            if [ "$VERIFIED_WHALES_INPUT" = "clear" ]; then
+              BODY='{"clear": true}'
+            else
+              BODY="{\"whales\": \"$VERIFIED_WHALES_INPUT\"}"
+            fi
+            curl -sS --max-time 30 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+              -H "Content-Type: application/json" -d "$BODY" \
+              "$BASE/api/admin/verified-whales" \
+              | head -c 400 || echo "  LEVER call failed"
+            echo ""
+          fi
+          # ── GATES ECHO (2026-08-29 audit): print the EFFECTIVE gate
+          # values so a stale env can never hide from a probe again.
+          curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/gates.json "$BASE/api/admin/gates" || true
+          jq -r '"  GATES verified(\(.verified_source)): \(.verified_effective | join(","))",
+                 "  GATES env_set=\(.verified_env_set) stored=\(.verified_stored | tostring | .[0:160])",
+                 "  GATES allow_short_env=\(.allow_short_env // "unset")  short_proof=\(.short_side_proof | tostring | .[0:200])",
+                 "  GATES exitable: \(.exitable | join(","))"' \
+             /tmp/gates.json 2>/dev/null || true
 
           # ── the thesis verification (owner order 2026-08-24: verified,
           # not guessed): per whale, his TRUE edge on the full detected
@@ -733,7 +763,7 @@ jobs:
           jq -r '[.[]? | select(.service | test("whale_exit"))] as $w
                  | if ($w | length) == 0
                    then "  WHALEEXIT no heartbeat row — worker never completed a cycle"
-                   else ($w[] | "  WHALEEXIT \(.status) beat=\(.beat_at) \(.detail | tostring | .[0:220])")
+                   else ($w[] | "  WHALEEXIT \(.status) beat=\(.beat_at) \(.detail | tostring | .[0:1600])")
                    end' /tmp/hb_we.json 2>/dev/null \
             || echo "  WHALEEXIT unreadable"
           jq -r '.detail.kalshi_crypto // {} |

@@ -821,6 +821,12 @@ async def mirror_exit(payload: dict) -> str:
     # Kept to whales we have ACTUALLY ROSTERED rather than opened to any
     # string: verified, cut, or carrying a clip entry. A username that
     # was never on the roster still refuses.
+    # roster override refresh BEFORE the roster checks (owner order
+    # 2026-08-29): the DB-stored set must be what judges this exit
+    try:
+        await refresh_whale_overrides(await get_pool())
+    except Exception:  # noqa: BLE001 — env/default still stand
+        pass
     if username not in exitable_whales():
         return _exit_done("mx_whale_not_verified", whale=username)
     if username not in _whale_set("LIVE_VERIFIED_WHALES"):
@@ -1442,7 +1448,50 @@ VERIFIED_PROFITABLE_DEFAULT = (
 # Reinstate", on the venue-ledger basis below at COPY_CUT_WHALES).
 
 
+# ── DB-backed roster override (owner order 2026-08-29: "update the
+# variables") ────────────────────────────────────────────────────────
+# The stale Render env LIVE_VERIFIED_WHALES silently overrode the
+# owner's 2026-08-27 reinstate order for two days: homerunhazard
+# (+2.57% at 95%) took 724 straight rejections with $0 deployed while
+# the code default said he may spend. Roster decisions are the OWNER's
+# and must be updatable without a deploy or console access, so the
+# ingestion_state key 'live_verified_whales' now beats the env when
+# set (admin endpoint POST /api/admin/verified-whales). Refreshed with
+# a short TTL at the top of both money paths; a transient read failure
+# keeps the last adopted value — a DB blip is not a roster decision.
+_ROSTER_DB_KEY = "live_verified_whales"
+_ROSTER_TTL_S = 30.0
+_roster_override: set[str] | None = None    # None = no stored override
+_roster_read_at = 0.0
+
+
+async def refresh_whale_overrides(pool) -> None:
+    global _roster_override, _roster_read_at
+    now = time.time()
+    if now - _roster_read_at < _ROSTER_TTL_S:
+        return
+    try:
+        raw = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            _ROSTER_DB_KEY)
+        _roster_read_at = now
+        if raw is None:
+            _roster_override = None
+            return
+        val = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(val, str):
+            val = [w for w in val.split(",")]
+        if isinstance(val, list):
+            _roster_override = {str(w).strip().lower()
+                                for w in val if str(w).strip()}
+        # any other shape: keep last known — never guess a roster
+    except Exception:  # noqa: BLE001 — keep last known
+        pass
+
+
 def _whale_set(env_name: str) -> set[str]:
+    if env_name == "LIVE_VERIFIED_WHALES" and _roster_override is not None:
+        return set(_roster_override)
     raw = os.getenv(env_name, VERIFIED_PROFITABLE_DEFAULT)
     return {w.strip() for w in raw.lower().split(",") if w.strip()}
 
@@ -4217,6 +4266,12 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     venue = active_venue()
     if venue is None:
         return
+    # roster override refresh (owner order 2026-08-29): the DB-stored
+    # verified set must beat a stale env before ANY entry gate below
+    try:
+        await refresh_whale_overrides(await get_pool())
+    except Exception:  # noqa: BLE001 — env/default still stand
+        pass
     username = (payload.get("whale_username") or "").lower()
     if payload.get("side") != "BUY" or username not in cfg.source_whales():
         return

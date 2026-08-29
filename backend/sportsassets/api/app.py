@@ -6364,6 +6364,88 @@ async def api_premap_live_set(action: str) -> dict:
     return {"ok": True, "premap_live": action == "on"}
 
 
+@app.post("/api/admin/verified-whales",
+          dependencies=[Depends(require_admin)])
+async def api_set_verified_whales(body: dict) -> dict:
+    """Owner roster control (owner order 2026-08-29, "update the
+    variables"): store the verified-whales set in ingestion_state,
+    where it BEATS the LIVE_VERIFIED_WHALES env — a stale Render env
+    silently overrode the owner's reinstate order for two days.
+    body: {"whales": "a,b,c"} or {"whales": [..]} to set;
+    {"clear": true} removes the override (env/default resume)."""
+    from .. import live_executor as _le
+
+    pool = await get_pool()
+    if body.get("clear"):
+        await pool.execute("DELETE FROM ingestion_state WHERE key=$1",
+                           _le._ROSTER_DB_KEY)
+        _le._roster_read_at = 0.0   # next money-path call re-reads
+        return {"ok": True, "cleared": True}
+    raw = body.get("whales")
+    if isinstance(raw, str):
+        whales = [w.strip().lower() for w in raw.split(",") if w.strip()]
+    elif isinstance(raw, list):
+        whales = [str(w).strip().lower() for w in raw if str(w).strip()]
+    else:
+        raise HTTPException(status_code=422,
+                            detail="whales must be a list or comma string")
+    if not whales:
+        raise HTTPException(status_code=422,
+                            detail="refusing an empty roster — use clear")
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        _le._ROSTER_DB_KEY, json.dumps(whales))
+    _le._roster_read_at = 0.0
+    return {"ok": True, "verified_whales": whales}
+
+
+@app.get("/api/admin/gates", dependencies=[Depends(require_admin)])
+async def api_gates() -> dict:
+    """Every whale/side gate the money paths consult, echoed so a probe
+    can READ the live state instead of inferring it (2026-08-29 audit:
+    the stale-env roster block was invisible for two days because no
+    probe line printed the effective set)."""
+    from .. import live_executor as _le
+
+    pool = await get_pool()
+    try:
+        await _le.refresh_whale_overrides(pool)
+    except Exception:  # noqa: BLE001
+        pass
+    stored = None
+    try:
+        raw = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            _le._ROSTER_DB_KEY)
+        stored = (json.loads(raw) if isinstance(raw, str) else raw)
+    except Exception:  # noqa: BLE001
+        stored = "unreadable"
+    proof = None
+    try:
+        raw = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            _le.SHORT_PROOF_KEY)
+        proof = (json.loads(raw) if isinstance(raw, str) else raw)
+    except Exception:  # noqa: BLE001
+        proof = "unreadable"
+    return {
+        "verified_effective": sorted(_le._whale_set("LIVE_VERIFIED_WHALES")),
+        "verified_source": ("db" if _le._roster_override is not None
+                            else "env" if os.getenv("LIVE_VERIFIED_WHALES")
+                            else "default"),
+        "verified_stored": stored,
+        "verified_env_set": os.getenv("LIVE_VERIFIED_WHALES") is not None,
+        "hold_whales": sorted(_le._whale_set("LIVE_HOLD_WHALES")
+                              if os.getenv("LIVE_HOLD_WHALES") else set()),
+        "premap_whales_env_set": os.getenv("LIVE_PREMAP_WHALES") is not None,
+        "allow_short_env": os.getenv("LIVE_ALLOW_SHORT"),
+        "short_side_proof": proof,
+        "cut_whales": sorted(_le.COPY_CUT_WHALES),
+        "exitable": sorted(_le.exitable_whales()),
+    }
+
+
 @app.post("/api/admin/s1/arm-override/{action}",
           dependencies=[Depends(require_admin)])
 async def api_s1_arm_override(action: str) -> dict:
