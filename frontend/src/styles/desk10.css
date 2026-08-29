@@ -1324,3 +1324,27 @@
 @media (prefers-reduced-motion: reduce) {
   .dxp-tape i, .dxp-toast { animation: none; }
 }
+
+/* ── feed findability (owner order 2026-08-29) ─────────────────────── */
+.mf-filter {
+  display: flex; align-items: center; gap: 8px;
+  margin: 2px 0 10px; padding: 9px 13px;
+  background: var(--v-card); border: 1px solid var(--v-line);
+  border-radius: 12px;
+}
+.mf-filter input {
+  flex: 1; min-width: 0; border: 0; outline: 0; background: transparent;
+  color: var(--v-ink); font-size: 13.5px;
+}
+.mf-filter input::placeholder { color: var(--v-mut); }
+.mf-filter .clr {
+  border: 0; background: none; color: var(--v-mut); cursor: pointer;
+  font-size: 13px; padding: 0 2px;
+}
+.mf-sec { display: contents; }
+.mf-sec-h {
+  margin: 6px 0 0; font-size: 10.5px; font-weight: 800;
+  letter-spacing: 0.14em; color: var(--v-mut);
+  display: flex; align-items: baseline; gap: 4px;
+}
+.mf-sec-h small { font-weight: 600; letter-spacing: 0.04em; }

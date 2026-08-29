@@ -8,7 +8,7 @@
 // surface: outcome buttons hand a Pick UP to TradeDesk's choose() and
 // card taps hand the card up to the market page — no money logic here.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { deskApi } from '../lib/desk'
 import {
   Sparkline, fetchHistory,
@@ -200,6 +200,7 @@ export function MarketFeed({ venue, league, onLeague, pick, choose, onOpen, spar
   const [counts, setCounts] = useState<Record<string, number>>(
     () => feedCache.get(cacheKey)?.counts ?? {})
   const [err, setErr] = useState('')
+  const [flt, setFlt] = useState('')
 
   useEffect(() => {
     let dead = false
@@ -367,6 +368,44 @@ export function MarketFeed({ venue, league, onLeague, pick, choose, onOpen, spar
     )
   }
 
+  // ── Findability (owner order 2026-08-29: "easy to use — not hard to
+  // find what a team member is looking for") ────────────────────────
+  // Games sort by start time and group under day headers, and a filter
+  // box narrows the loaded feed INSTANTLY on team/league/title — no
+  // server round-trip, complementing the header's deep search.
+  const dayLabel = (iso: string | null): string => {
+    if (!iso) return 'NO START TIME LISTED'
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return 'NO START TIME LISTED'
+    const today = new Date(); const tom = new Date(Date.now() + 86400e3)
+    if (d.toDateString() === today.toDateString()) return 'TODAY'
+    if (d.toDateString() === tom.toDateString()) return 'TOMORROW'
+    return d.toLocaleDateString([], {
+      weekday: 'long', month: 'short', day: 'numeric' }).toUpperCase()
+  }
+  const sections = useMemo(() => {
+    if (!cards) return null
+    const needle = flt.trim().toLowerCase()
+    const list = !needle ? cards : cards.filter((c) =>
+      c.title.toLowerCase().includes(needle)
+      || c.league.toLowerCase().includes(needle)
+      || c.outcomes.some((o) => (o.label || '').toLowerCase().includes(needle)))
+    const sorted = [...list].sort((a, b) => {
+      const ta = a.close_time ? Date.parse(a.close_time) : Infinity
+      const tb = b.close_time ? Date.parse(b.close_time) : Infinity
+      if (ta !== tb) return ta - tb
+      return (b.volume_usd ?? 0) - (a.volume_usd ?? 0)
+    })
+    const out: { label: string; items: FeedCard[] }[] = []
+    for (const c of sorted) {
+      const lbl = dayLabel(c.close_time)
+      const last = out[out.length - 1]
+      if (last && last.label === lbl) last.items.push(c)
+      else out.push({ label: lbl, items: [c] })
+    }
+    return out
+  }, [cards, flt])
+
   return (
     <div className="mf">
       <div className="mf-chips" role="tablist" aria-label="Categories">
@@ -383,13 +422,37 @@ export function MarketFeed({ venue, league, onLeague, pick, choose, onOpen, spar
           )
         })}
       </div>
+      {cards !== null && cards.length > 6 && (
+        <div className="mf-filter">
+          <input
+            value={flt}
+            onChange={(e) => setFlt(e.target.value)}
+            placeholder="Filter games — team, league…"
+            aria-label="Filter loaded games"
+          />
+          {flt && <button className="clr" onClick={() => setFlt('')}
+            aria-label="Clear filter">✕</button>}
+        </div>
+      )}
       {cards === null ? (
         <div className="mf-feed" aria-label="Loading markets">
           <div className="tr-skel mf-skel" /><div className="tr-skel mf-skel" />
           <div className="tr-skel mf-skel" /><div className="tr-skel mf-skel" />
         </div>
       ) : (
-        <div className="mf-feed">{cards.map(card)}</div>
+        <div className="mf-feed">
+          {sections!.map((s) => (
+            <section key={s.label} className="mf-sec">
+              <h4 className="mf-sec-h">{s.label}
+                <small> · {s.items.length} game{s.items.length === 1 ? '' : 's'}</small>
+              </h4>
+              {s.items.map(card)}
+            </section>
+          ))}
+          {sections!.length === 0 && (
+            <p className="vd-empty">No games match — clear the filter.</p>
+          )}
+        </div>
       )}
       {err && <p className="vd-empty">{err}</p>}
     </div>

@@ -2081,9 +2081,25 @@ async def api_desk_feed(venue: str = Query("polymarket"),
             m0 = ev["markets"][0]
             outs = [{"label": m0["label"], "id": m0["us_slug"],
                      "price": m0["price"]}]
+        # MATCHUP TITLES, same law as the Kalshi cards (owner report
+        # 2026-08-29: 'New York to win' reads as a proposition, not a
+        # game). A title that already names the matchup ('X vs. Y',
+        # 'X at Y') passes through; a one-sided title with two
+        # readable sides is rebuilt from them.
+        title = ev["title"] or ev["slug"]
+        tl = f" {title.lower()} "
+        if (" vs" not in tl and " at " not in tl and " @ " not in tl):
+            labs: list[str] = []
+            for o in outs:
+                lb = (o["label"] or "").strip()
+                if lb and lb.lower() not in ("yes", "no") \
+                        and lb not in labs:
+                    labs.append(lb)
+            if len(labs) >= 2:
+                title = f"{labs[0]} vs {labs[1]}"
         cards.append({
             "id": ev["slug"], "venue": "polymarket", "league": lg,
-            "title": ev["title"],
+            "title": title,
             "volume_usd": ev.get("volume_usd"),
             "close_time": ev.get("close_time"),
             "outcomes": outs})
