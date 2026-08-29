@@ -95,6 +95,7 @@ HEAD_POLL_MIN_S = 5.0
 TS_CACHE_CAP = 1024                 # block ts is per-BLOCK, not per-tx
 COUNTED_CAP = 8192                  # burn-in marks survive entry pop
 CONTESTED_CAP = 4096                # proven two-hash heights (r32)
+BLOCKS_PER_TX_CAP = 8               # heights one entry may record (r33)
 RECON_VENUE_LAG_S = 600.0           # data-api indexing lag margin
 RECON_TS_MARGIN_S = 300.0           # venue ts vs block ts skew margin
 FLUSH_EVERY_S = 60.0
@@ -524,13 +525,27 @@ class S1Emitter:
         whole tx abstains, the poller carries whatever was real\")
         extends across sibling entries: every tx buffered at a
         contested height abstains at finalize, unconditionally.
-        Bounded: oldest heights are dropped past the cap — an entry
-        at a dropped height re-marks on fresh evidence or defers
-        through the normal strict re-earn."""
-        if blk > 0:
-            self.contested[blk] = time.time()
-            while len(self.contested) > CONTESTED_CAP:
-                self.contested.pop(min(self.contested), None)
+        Bounded — and eviction APPLIES the verdict before forgetting
+        it (fleet round 33, major): dropping the oldest mark while an
+        entry still pended at that height downgraded a PROVEN
+        contested height back to re-earnable, and a stale replica
+        then emitted the orphaned side — the fleet seeded 4096+ marks
+        off one fat entry to force exactly that eviction. A height's
+        contested verdict is final for everything buffered there, so
+        the entries die with the mark: popped and counted under
+        s1.abstain.contested, the poller carrying whatever was real.
+        A flood now costs the attacker mass VISIBLE deferral, never
+        an emission."""
+        if blk <= 0:
+            return
+        self.contested[blk] = time.time()
+        while len(self.contested) > CONTESTED_CAP:
+            old = min(self.contested)
+            self.contested.pop(old, None)
+            for otx in [t for t, oe in self.pending.items()
+                        if old in (oe.get("blocks") or {})]:
+                self.pending.pop(otx, None)
+                self.bump("s1.abstain.contested")
 
     def _purge_ts_cache(self, from_blk: int) -> None:
         """Reorg evidence ANYWHERE voids EVERY earned timestamp.
@@ -711,6 +726,18 @@ class S1Emitter:
                 # replica re-verified the orphaned block and emitted
                 # it. Reorg evidence is recorded the moment it is
                 # seen; no later dedupe may swallow it.
+                # …BUT NOT AN UNBOUNDED NUMBER OF THEM (fleet round
+                # 33, major): the verdict seals at the SECOND height
+                # (multi-height abstains at finalize), yet the dict
+                # kept growing — one fat tx served frames at
+                # thousands of heights and became the amplifier that
+                # flooded the contested registry into evicting a
+                # live mark. The purge above already banked this
+                # frame's evidence value; past the cap the frame
+                # itself is dropped, visibly.
+                if len(e["blocks"]) >= BLOCKS_PER_TX_CAP:
+                    self.bump("s1.frames_capped")
+                    return
                 e["blocks"][blk] = bh
             elif e["blocks"].get(blk) not in (None, bh):
                 # SAME-height re-mine (fleet round 10): a new hash for

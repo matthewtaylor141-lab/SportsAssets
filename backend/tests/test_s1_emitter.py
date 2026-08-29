@@ -2533,3 +2533,44 @@ def test_contested_registry_is_bounded(st):
     assert len(st.contested) == s1.CONTESTED_CAP
     assert 1000 not in st.contested, "oldest heights fall off first"
     assert (1000 + s1.CONTESTED_CAP + 49) in st.contested
+
+
+# ── fleet round 33 pins ─────────────────────────────────────────────
+def test_contested_eviction_applies_the_verdict_first(st):
+    """fleet r33 (major): flooding the registry past CONTESTED_CAP
+    evicted a still-live contested mark, downgrading a PROVEN
+    two-hash height back to re-earnable — a stale replica then
+    emitted the orphaned side. Eviction now applies the verdict
+    before forgetting it: entries still buffered at the evicted
+    height die with the mark, counted, and the poller carries."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    st.observe(lst, MAKER_EV)                     # entry at BLK
+    assert TX in st.pending
+    st._mark_contested(BLK)                       # proven contested
+    for i in range(s1.CONTESTED_CAP):             # flood higher marks
+        st._mark_contested(BLK + 1 + i)
+    assert BLK not in st.contested, "the flood evicted the mark"
+    assert TX not in st.pending, \
+        "the verdict was applied before the mark was forgotten"
+    assert st.deltas.get("s1.abstain.contested") == 1, \
+        "the abstention is visible, not silent"
+
+
+def test_fat_entry_cannot_amplify_past_the_blocks_cap(st):
+    """fleet r33 (major): one tx served frames at thousands of
+    heights — the verdict seals at the SECOND height, but the blocks
+    dict kept growing and became the flood amplifier. Past the cap
+    the frame's evidence value (the purge) still banks; the frame
+    itself is dropped, visibly."""
+    lst = _Listener(roster={})
+    st.observe(lst, MAKER_EV)
+    e = st.pending[TX]
+    for i in range(s1.BLOCKS_PER_TX_CAP + 10):
+        st.observe(lst, dict(MAKER_EV, blockNumber=hex(BLK + 1 + i),
+                             blockHash="0x" + "9a" * 32,
+                             logIndex=hex(16 + i)))
+    assert len(e["blocks"]) == s1.BLOCKS_PER_TX_CAP, \
+        "the verdict needs two heights, never thousands"
+    assert st.deltas.get("s1.frames_capped") == 11
+    assert len(e["blocks"]) > 1, "the round-12 verdict stays sealed"
