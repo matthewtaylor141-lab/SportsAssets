@@ -2078,6 +2078,18 @@ def side_intent(side: dict, sides: list[dict]) -> str | None:
     mine = str(side.get("identifier") or "").lower()
     if mine and idents.count(mine) == 1:
         return "ORDER_INTENT_BUY_LONG"
+    # NO COMPLEMENT DEDUCTION (adversarial review 2026-08-29). A
+    # tempting widening — "exactly two sides, the sibling is marked, so
+    # this side is the other intent" — was written and then KILLED by
+    # its own review before it ever ran: (1) it feeds the live premap
+    # lane (the only class trading under quarantine) with intents the
+    # venue never stated on the side being bought; (2) the side echo
+    # re-derives intent through THIS function, so a systematically
+    # wrong deduction certifies itself ok and the 691/0 streak that
+    # justified the premap resume says nothing about it; (3) the
+    # manual desk lanes pass a deduced BUY_SHORT to submit_fok with no
+    # LIVE_ALLOW_SHORT gate. Explicit markers on the side itself, or
+    # a unique identifier, or refuse — nothing else.
     return None
 
 

@@ -787,15 +787,26 @@ def _spread_exact(fd: dict, outcome: str | None,
             if stripped and SequenceMatcher(
                     None, stripped, on).ratio() >= MATCH_FLOOR:
                 named.append(s)
+        # THE INTENT STAMP (2026-08-29): this resolver's mappings ride
+        # mapping_src="exact" straight past the quarantine, then died
+        # at the executor's no-side-intent refusal — every one —
+        # because the winning side was returned without the intent
+        # that buys it. Stamped from the venue's own side markers
+        # (order_intent_for, judged against the market's full lookup —
+        # never a skeleton here). A side whose intent the venue never
+        # named carries intent None and the executor refuses it,
+        # exactly as it refused this whole class before the stamp.
         if len(named) == 1:
             return {"market_slug": named[0]["identifier"], "title": q,
                     "outcome": named[0]["description"],
+                    "intent": order_intent_for(m, named[0]),
                     "matched_by": "spread_exact", "score": 1.0}
         if not named and yes_side is not None:
             # The question IS his statement (team + signed line both
             # corroborated above); 'Yes' is its affirmative side.
             return {"market_slug": yes_side["identifier"], "title": q,
                     "outcome": q_team.strip() or outcome,
+                    "intent": order_intent_for(m, yes_side),
                     "matched_by": "spread_exact_yes", "score": 1.0}
         return None
     return None
@@ -862,8 +873,14 @@ def resolve_derivative_exact(global_slug: str,
     other_word = "under" if slug_word == "over" else "over"
     if other_word in side_words:
         return None
+    # THE INTENT STAMP (2026-08-29): same as _spread_exact — an exact
+    # totals mapping without its intent stamp was refused wholesale at
+    # the executor's no-side-intent guard. The guard stays; the stamp
+    # is what was missing. Unnameable sides carry None and refuse
+    # downstream, unchanged.
     return {"market_slug": best["identifier"], "title": title,
             "outcome": best["description"],
+            "intent": order_intent_for(m, best),
             "matched_by": "derivative_exact", "score": best_score}
 
 
@@ -1007,25 +1024,54 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
                    market_title: str | None, event_title: str | None,
                    outcome: str | None) -> dict | None:
     """Map a global-CLOB trade to a US market. Returns
-    {"market_slug", "title", "outcome", "matched_by", "score"} or None.
+    {"market_slug", "title", "outcome", "intent", "matched_by", "score"}
+    or None.
 
     Order of attempts (cheapest/most exact first):
       1. same market slug on the US venue
       2. markets list filtered by the same event slug
       3. full-text search on the event/market title
     Every hit must still pass the outcome-similarity floor.
+
+    THE INTENT STAMP (2026-08-29). The live executor refuses any
+    mapping whose `intent` is empty — correctly, because on
+    shared-identifier families intent is the only side selector. This
+    resolver picked a UNIQUE side and then dropped it on the floor:
+    none of its return sites stamped `intent`, so every mapping it
+    produced was refused downstream as "no side intent" — the largest
+    single class in the live reject stream. The stamp comes from
+    order_intent_for (the venue's own side markers, identical to the
+    exact resolver's rule), and ONLY from a verified market shape — a
+    search skeleton whose sides may simply be omitted never gets a
+    contract stamp. Candidate SELECTION is unchanged: a winner whose
+    intent cannot be named still returns, with intent None, and the
+    executor's refuse-on-unknown guard — untouched — rejects it
+    exactly as it rejected this entire class before the stamp.
     """
     client = _get_client()
     diag: list[str] = []
 
     # 1) direct slug parity
+    _parity_seed: list[dict] = []
     if market_slug:
         try:
             m = (client.markets.retrieve_by_slug(market_slug) or {}).get("market") or {}
             score = _outcome_score(m, outcome)
-            if m.get("slug") and score >= MATCH_FLOOR and not m.get("closed"):
+            _p_sides = [s for s in (m.get("marketSides") or [])
+                        if isinstance(s, dict)]
+            if m.get("slug") and score >= MATCH_FLOOR and not m.get("closed") \
+                    and not _p_sides:
                 return {"market_slug": m["slug"], "title": m.get("title"),
-                        "outcome": m.get("outcome"), "matched_by": "slug", "score": score}
+                        "outcome": m.get("outcome"),
+                        "intent": order_intent_for(m, None),
+                        "matched_by": "slug", "score": score}
+            if m.get("slug") and not m.get("closed") and _p_sides:
+                # A parent that CARRIES sides is not a position — ordering
+                # it sideless hands side selection to the venue (incident
+                # 2026-08-23). It goes through the side-selection loop
+                # below with the same uniqueness rule as every candidate.
+                _parity_seed.append(m)
+                diag.append("slug:parent-with-sides")
         except Exception as exc:  # noqa: BLE001 — 404 is expected; fall through
             log.debug("pmus slug lookup miss (%s): %s", market_slug, exc)
             diag.append(f"slug:{type(exc).__name__}")
@@ -1042,7 +1088,14 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
             # one of the first 700 copy attempts. Drop positive
             # mismatches; markets without an eventSlug field stay (their
             # zero scores no longer block the search below).
-            candidates = [m for m in got
+            # UNVERIFIED SHAPE, same as the search lane (adversarial
+            # review 2026-08-29): this endpoint is already documented
+            # above as returning junk default pages, and an abbreviated
+            # row that OMITS marketSides is indistinguishable from a
+            # sideless contract — stamping BUY_LONG on it would make a
+            # two-sided PARENT orderable. Rows keep the mark; a winner
+            # that needs a contract stamp gets one full lookup below.
+            candidates = [{**m, "_unverified_shape": True} for m in got
                           if (m.get("eventSlug") or m.get("event_slug"))
                           in (None, event_slug)]
             diag.append(f"event:{len(got)}/{len(candidates)}")
@@ -1063,8 +1116,8 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
 
     src_lines = _lines(market_title)
 
-    def _best(cands: list[dict]) -> tuple[dict | None, float]:
-        top, top_score = None, 0.0
+    def _best(cands: list[dict]) -> tuple[dict | None, float, str | None]:
+        top, top_score, top_intent = None, 0.0, None
         for m in cands:
             if m.get("closed"):
                 continue
@@ -1081,9 +1134,24 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
             # incident 2026-08-23 — a coin flip with real money). The
             # parent may never win; only a uniquely-matched side may.
             if m.get("slug") and not sides:
+                # THE STAMP NEEDS A VERIFIED SHAPE. Search returns
+                # SKELETONS — a two-sided market whose marketSides the
+                # search response simply omits would look like a
+                # sideless contract here, and stamping BUY_LONG on it
+                # would make a PARENT orderable (the venue then picks
+                # the side — incident 2026-08-23). Candidates whose
+                # shape was never confirmed by a full lookup keep
+                # intent None: selection is unchanged, and the
+                # executor's no-side-intent guard refuses them exactly
+                # as it refused every fuzzy mapping before the stamp
+                # existed. order_intent_for itself judges against the
+                # UNFILTERED side list, so a market whose sides all
+                # lack descriptions also stays None here.
+                _c_int = (None if m.get("_unverified_shape")
+                          else order_intent_for(m, None))
                 sc = _outcome_score(m, outcome) + line_adj
                 if sc > top_score:
-                    top, top_score = m, min(sc, 1.0)
+                    top, top_score, top_intent = m, min(sc, 1.0), _c_int
             if sides:
                 # marketSides (schema named by the 2026-08-04 trails):
                 # each side is its OWN orderable market — description
@@ -1103,17 +1171,46 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
                         s_2nd = ssc
                 if (s_top is not None and s_bsc >= MATCH_FLOOR
                         and s_2nd < MATCH_FLOOR and s_bsc > top_score):
+                    # Candidate SELECTION is deliberately unchanged: a
+                    # winning side whose intent the venue never named
+                    # (shared identifier, no marker) still wins and is
+                    # returned with intent None — the executor refuses
+                    # it, same as before the stamp existed. Skipping it
+                    # here would silently promote a LOWER-scored match
+                    # into a live order, which is a substitution this
+                    # resolver must never make.
                     top = {"slug": s_top["identifier"],
                            "title": m.get("question"),
                            "outcome": s_top["description"],
                            "closed": False}
                     top_score = s_bsc
-        return top, top_score
+                    top_intent = order_intent_for(m, s_top)
+        return top, top_score, top_intent
 
-    best, best_score = _best(candidates)
+    # LATE VERIFICATION for a winner without a stamp: one full lookup.
+    # A contract candidate whose shape was never confirmed carries
+    # intent None out of _best; if the FULL market really has no sides,
+    # the stamp is earned here from the venue's own expansion. A full
+    # market that turns out to carry sides stays None — the winner was
+    # a parent (or an unnameable side) and the executor's guard refuses
+    # it, unchanged. Unreadable lookups also stay None: fail closed.
+    def _late_stamp(slug: str | None) -> str | None:
+        if not slug:
+            return None
+        try:
+            fm = (client.markets.retrieve_by_slug(slug) or {}).get(
+                "market") or {}
+        except Exception:  # noqa: BLE001 — unverifiable: no stamp
+            return None
+        if not fm.get("slug") or fm.get("closed"):
+            return None
+        return order_intent_for(fm, None)
+
+    best, best_score, best_intent = _best(_parity_seed + candidates)
     if best is not None and best_score >= MATCH_FLOOR:
         return {"market_slug": best["slug"], "title": best.get("title"),
                 "outcome": best.get("outcome"),
+                "intent": best_intent or _late_stamp(best.get("slug")),
                 "matched_by": "event", "score": best_score}
 
     # 3) title search → events with nested markets. Queries are tried
@@ -1159,24 +1256,31 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
         if best_ev is not None:
             hydrated = 0
             for m in (best_ev.get("markets") or [])[:40]:
+                # A search market that skipped or failed hydration has
+                # an UNVERIFIED shape: absent marketSides may mean
+                # "sideless contract" or may mean "the search response
+                # omits sides". The mark keeps _best from stamping a
+                # contract intent on it — see the stamp note there.
                 if m.get("outcome") or m.get("team"):
-                    candidates.append(m)
+                    candidates.append({**m, "_unverified_shape": True})
                     continue
                 slug = m.get("slug")
                 if not slug:
                     continue
                 try:
                     full = (client.markets.retrieve_by_slug(slug) or {})                         .get("market") or {}
-                    candidates.append(full or m)
+                    candidates.append(full
+                                      or {**m, "_unverified_shape": True})
                     hydrated += 1
                 except Exception:  # noqa: BLE001 — score the skeleton instead
-                    candidates.append(m)
+                    candidates.append({**m, "_unverified_shape": True})
             diag.append(f"hydrated:{hydrated}/{len(candidates)}")
 
-    best2, best2_score = _best(candidates)
+    best2, best2_score, best2_intent = _best(candidates)
     if best2 is not None and best2_score >= MATCH_FLOOR:
         return {"market_slug": best2["slug"], "title": best2.get("title"),
                 "outcome": best2.get("outcome"),
+                "intent": best2_intent or _late_stamp(best2.get("slug")),
                 "matched_by": "search", "score": best2_score}
     diag.append(f"best_outcome_score:{round(max(best_score, best2_score), 2)}")
     if candidates:
