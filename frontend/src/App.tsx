@@ -10,7 +10,6 @@ import { Analytics } from './pages/Analytics'
 import { Engine } from './pages/Engine'
 import { System } from './pages/System'
 import { TrackRecord } from './pages/TrackRecord'
-import { TradeDesk } from './pages/TradeDesk'
 
 // Voice cockpit (owner deliverable 2026-08-21): lazy so the Claude/TTS/canvas
 // stack never weighs down the main record pages.
@@ -30,6 +29,14 @@ const Accounts = lazy(() =>
 // Mission Control (owner order 2026-08-29): the copy pipeline as live
 // theater — full-screen room, lazy like the other cockpits.
 const Mission = lazy(() => import('./pages/Mission'))
+// Desk (perf pass 2026-08-29): 2,300 lines of venue portal rode in the
+// MAIN bundle and taxed every page's first paint — now its own cached
+// chunk, loaded only when the desk opens.
+const TradeDesk = lazy(() =>
+  import('./pages/TradeDesk').then((m: Record<string, unknown>) => ({
+    default: (m.default ?? m.TradeDesk) as ComponentType,
+  })),
+)
 
 /* The site IS the AI trader now. The whale-hub pages remain in the repo
  * (and in git history) but are off the router: this product has one story
@@ -223,7 +230,7 @@ export default function App() {
           <Route path="/accounts" element={<Suspense fallback={null}><Accounts /></Suspense>} />
           <Route path="/system" element={<System />} />
           <Route path="/engine" element={<Engine />} />
-          <Route path="/desk" element={<TradeDesk />} />
+          <Route path="/desk" element={<Suspense fallback={null}><TradeDesk /></Suspense>} />
           <Route path="/admin" element={<Admin />} />
           <Route path="/reports" element={<Suspense fallback={null}><Reports /></Suspense>} />
           {/* MERIDIAN is the product name (owner order 2026-08-28);

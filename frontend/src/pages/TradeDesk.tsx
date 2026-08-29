@@ -27,6 +27,34 @@ import '../styles/desk10.css'
 // (coPlacingRef, watchCoRow, protective-limit modal), blotter + cancel,
 // toasts/haptics. Only the navigation/layout around them changed.
 
+// ── Perf pass 2026-08-29 ("desk is laggy"): the page-level 1s clock
+// and the 100ms execution ticker each re-rendered ALL 2,300 lines of
+// this shell — feed cards, sparks, blotter, book — on every tick, 10x
+// a second while an order was in flight. Both clocks now live in leaf
+// components that re-render only themselves; the shell's own state no
+// longer carries time.
+function AgeText({ at, render }: {
+  at: number | null
+  render: (s: number | null) => string
+}) {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const t = window.setInterval(() => tick((c) => c + 1), 1000)
+    return () => window.clearInterval(t)
+  }, [])
+  const s = at == null ? null : Math.max(0, Math.round((Date.now() - at) / 1000))
+  return <>{render(s)}</>
+}
+
+function ExecClock({ t0 }: { t0: number }) {
+  const [now, setNow] = useState(() => performance.now())
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(performance.now()), 100)
+    return () => window.clearInterval(t)
+  }, [])
+  return <b>{(Math.max(0, now - t0) / 1000).toFixed(2)}s</b>
+}
+
 export type Venue = 'polymarket' | 'kalshi'
 
 export interface Outcome { label: string; asset?: string; ticker?: string; us_slug?: string; price: number | null; no_price?: number | null }
@@ -477,10 +505,19 @@ export function TradeDesk() {
     const id = pick.venue === 'polymarket' ? pick.asset : pick.ticker
     if (!id) return
     let dead = false
+    let lastBook = ''
     const load = () =>
       deskApi<{ bids: number[][]; asks: number[][] }>(
         `/api/admin/book?venue=${pick.venue}&id=${encodeURIComponent(id)}`,
-      ).then((d) => { if (!dead) setDepth(d) }).catch(() => {})
+      ).then((d) => {
+        if (dead) return
+        // perf 2026-08-29: an unchanged book must not re-render the
+        // whole shell every 5s while a ticket is open
+        const sig = JSON.stringify(d)
+        if (sig === lastBook) return
+        lastBook = sig
+        setDepth(d)
+      }).catch(() => {})
     load()
     const t = setInterval(load, 5000)
     return () => { dead = true; clearInterval(t) }
@@ -961,23 +998,9 @@ export function TradeDesk() {
   }
 
   // ── Presentation pulses (v7 portal skin — no money-path changes) ──
-  // 1s clock re-render drives the "synced Ns ago" age in the portal
-  // strip; a 100ms ticker runs ONLY while an order is in flight and
-  // feeds the live execution clock in the timeline.
-  const [, setClockTick] = useState(0)
-  useEffect(() => {
-    if (!authed) return
-    const t = window.setInterval(() => setClockTick((c) => c + 1), 1000)
-    return () => window.clearInterval(t)
-  }, [authed])
-
-  const [execNow, setExecNow] = useState(0)
-  useEffect(() => {
-    if (!(busy || coBusy || limBusy)) return
-    setExecNow(performance.now())
-    const t = window.setInterval(() => setExecNow(performance.now()), 100)
-    return () => window.clearInterval(t)
-  }, [busy, coBusy, limBusy])
+  // Perf pass 2026-08-29: the 1s "synced ago" clock and the 100ms
+  // execution ticker moved into the AgeText / ExecClock leaf
+  // components — the shell no longer re-renders on time.
 
   // Result toasts + a 30ms haptic tap, observed from run/coRun phase
   // transitions — the placing/polling callbacks stay untouched.
@@ -1048,7 +1071,6 @@ export function TradeDesk() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [limRun?.phase])
 
-  const acctAgeS = acctAt == null ? null : Math.max(0, Math.round((Date.now() - acctAt) / 1000))
   // Bottom-sheet dismissal (mobile scrim tap / drag-down). Locked while
   // any order is in flight — same visibility rule the CTA already uses.
   const sheetOpen = !!pick || side === 'sell'
@@ -1105,7 +1127,7 @@ export function TradeDesk() {
           </div>
           <div className="dx-run-clock">
             <span>live execution clock</span>
-            <b>{(Math.max(0, (execNow || performance.now()) - r.t0) / 1000).toFixed(2)}s</b>
+            <ExecClock t0={r.t0} />
           </div>
         </>
       )}
@@ -1181,7 +1203,7 @@ export function TradeDesk() {
           </div>
           <div className="dx-run-clock">
             <span>live execution clock</span>
-            <b>{(Math.max(0, (execNow || performance.now()) - limRun.t0) / 1000).toFixed(2)}s</b>
+            <ExecClock t0={limRun.t0} />
           </div>
         </>
       )}
@@ -1806,7 +1828,6 @@ export function TradeDesk() {
   ].sort((a, b) =>
     (b.at ? new Date(b.at).getTime() : 0) - (a.at ? new Date(a.at).getTime() : 0))
   const ooCount = ooRows.length
-  const ooAgeS = ooAt == null ? null : Math.max(0, Math.round((Date.now() - ooAt) / 1000))
 
   // ── v10 venue chrome derived values ──────────────────────────────
   const pmPortfolio = acct
@@ -1854,8 +1875,10 @@ export function TradeDesk() {
           </span>
         )}
         <span className="dxp-sync">
-          {acctDown ? 'retrying' : acctAgeS == null ? 'syncing…'
-            : acctAgeS < 3 ? 'synced now' : `synced ${acctAgeS}s`}
+          {acctDown ? 'retrying' : (
+            <AgeText at={acctAt} render={(s) => s == null ? 'syncing…'
+              : s < 3 ? 'synced now' : `synced ${s}s`} />
+          )}
         </span>
         <div className="dxp-modes" role="group" aria-label="Venue">
           {(['polymarket', 'kalshi'] as Venue[]).map((v) => (
@@ -2087,8 +2110,8 @@ export function TradeDesk() {
               <span className="pulse-dot" aria-hidden="true" />
               <span>Working orders on the venue books — reconciled live</span>
               <span className="v9-oo-age">
-                {ooAgeS == null ? 'syncing…'
-                  : ooAgeS < 3 ? 'checked just now' : `checked ${ooAgeS}s ago`}
+                <AgeText at={ooAt} render={(s) => s == null ? 'syncing…'
+                  : s < 3 ? 'checked just now' : `checked ${s}s ago`} />
               </span>
             </div>
             {ooNote && <p className="dk-gate-err">{ooNote}</p>}
