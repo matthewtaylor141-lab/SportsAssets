@@ -2191,3 +2191,42 @@ def test_exec_owner_under_agg_s1_key_is_forbidden_not_legit(st):
     st._match_wallet(TX, MAKER, g, [own, ag], [], [],
                      sv.ORPHAN_FINAL_S + 10, time.time(), 0, [bad])
     assert st.deltas.get("s1_forbidden_emission") == 1
+
+
+class TestRound45CutoverArtifact:
+    """Round 45 gate audit (executed): fills whose WS events went to
+    the dying process read 'uncovered unexplained' after warm-up — a
+    GATING bump that reset the 7-day cert window on every deploy.
+    Restart blindness is not coverage evidence: the boot seeds a
+    durable writer-handoff gap from the OLD writer's last testimony,
+    the probe classifies cutover rows into the NON-GATING ws_gap arm,
+    and every gate keeps its reset. Every reset also writes its
+    triggering keys into the window_resets ring — the forensic the
+    audit lacked."""
+
+    def test_boot_seeds_the_writer_handoff_gap(self):
+        import inspect
+
+        src = inspect.getsource(sv.ShadowV2._flush)
+        assert '"kind": "writer_handoff"' in src, \
+            "the cutover is recorded as what it is"
+        assert 'stored.get("last_observe_at")' in src, \
+            "seeded from the old writer's own last testimony"
+
+    def test_flush_persists_the_reset_ledger(self):
+        import inspect
+
+        src = inspect.getsource(sv.ShadowV2._flush)
+        assert '"window_resets": resets' in src
+        assert "resets[-8:]" in src, "a bounded ring, pure evidence"
+        assert '"last_observe_at": self.last_observe_at' in src
+
+    def test_handoff_gap_classifies_as_ws_gap_not_unexplained(self):
+        st = sv.ShadowV2()
+        st.gaps.append({"from": 1000.0, "to": 2000.0,
+                        "kind": "writer_handoff"})
+        gap = next((gp for gp in st.gaps
+                    if gp["from"] - 2 <= 1500 <= gp["to"] + 2), None)
+        assert gap is not None and gap["kind"] != "quiet_or_outage", \
+            "the probe's existing arm routes handoff rows to " \
+            "poll_uncovered_ws_gap — non-gating by design"

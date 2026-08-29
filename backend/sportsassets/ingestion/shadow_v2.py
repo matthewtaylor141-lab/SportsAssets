@@ -1357,6 +1357,29 @@ class ShadowV2:
                 snap["boots"] = snap.get("boots", 0) + 1
                 self.deltas["boots"] = self.deltas.get("boots", 0) + 1
                 self.booted = True
+                # ROUND 45 (gate audit, executed): seen_tx and the gap
+                # ledger are process memory — fills whose WS events
+                # went to the DYING process read 'uncovered
+                # unexplained' after warm-up, a GATING bump, and the
+                # 7-day cert window reset on every deploy (observed
+                # live at 03:05Z and 06:29Z; ~3.5 bumps/boot in the
+                # cumulative counters). That is restart blindness,
+                # not coverage evidence. The cutover is now recorded
+                # as what it is: a durable writer-handoff gap seeded
+                # from the OLD writer's own last testimony, so the
+                # reverse probe classifies those rows into the
+                # existing NON-GATING ws_gap arm. Every gate keeps
+                # its reset; only the mislabeled evidence is fixed.
+                try:
+                    prev_obs = float(stored.get("last_observe_at")
+                                     or stored_epoch or 0)
+                except (TypeError, ValueError):
+                    prev_obs = stored_epoch
+                if prev_obs > 1e9:
+                    self.gaps.append({
+                        "from": prev_obs - 2,
+                        "to": self.boot_at + 30,
+                        "kind": "writer_handoff"})
             for k, v in snap.items():
                 counters[k] = counters.get(k, 0) + v
             window_start = stored.get("window_start")
@@ -1405,6 +1428,26 @@ class ShadowV2:
             # residuals remain counted and rendered as diagnostics.
             gating_hit = (any(snap.get(k) for k in GATING)
                           or snap.get("sim_ven_residual_dup"))
+            # ROUND 45: the reset-reason ledger. Tonight's audit
+            # needed process-elimination plus git forensics to name a
+            # PROBABLE culprit because the flush never recorded WHICH
+            # key reset the window. Every reset now writes its
+            # triggering keys and deltas into a small ring — zero
+            # change to gating semantics, pure evidence.
+            prev_resets = stored.get("window_resets")
+            resets = list(prev_resets) if isinstance(prev_resets, list) else []
+            _reset_keys = {k: snap.get(k) for k in
+                           (*GATING, "sim_ven_residual_dup")
+                           if snap.get(k)}
+            _health_keys = {k: snap.get(k) for k in HEALTH
+                            if snap.get(k)}
+            if (window_start is not None and gating_hit) or _health_keys:
+                resets.append({
+                    "at": round(nowf),
+                    "window": bool(window_start is not None and gating_hit),
+                    "health": bool(_health_keys),
+                    "keys": {**_reset_keys, **_health_keys}})
+                resets = resets[-8:]
             if window_start is None or gating_hit:
                 window_start = nowf
                 at_window = {k: counters.get(k, 0) for k in VOLUME_KEYS}
@@ -1480,6 +1523,8 @@ class ShadowV2:
                 "poll_lag_p50_s": round(median(x[1] for x in self.lags), 2) if self.lags else None,
                 "examples": list(self.examples),
                 "gaps": [dict(g) for g in self.gaps][-8:],
+                "last_observe_at": self.last_observe_at,
+                "window_resets": resets,
             }
             # arm the ack BEFORE the write so a cancellation or timeout
             # that lands after the server committed is reconciled by
