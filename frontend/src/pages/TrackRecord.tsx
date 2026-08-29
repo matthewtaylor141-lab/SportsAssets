@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react'
-import { Quote } from '../components/Quote'
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import { Lamp } from '../components/Lamp'
 import { BrandLockup, BrandMark } from '../components/Brand'
 import { HexField } from '../components/HexField'
 import { HoloTerrain } from '../components/HoloTerrain'
+import { Odometer } from '../components/Odometer'
+import { DayStories, buildSlides } from '../components/DayStories'
 import { useLiveFeed } from '../lib/sse'
 import { EmptyState } from '../components/EmptyState'
 import { PnlCalendar } from '../components/PnlCalendar'
@@ -12,6 +13,10 @@ import { fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
 import { ALL_TIME_SINCE, CopiesRecord, CopiesTrade, CopiesWhaleSport,
   useCopiesRecord } from '../lib/record'
 import '../styles/record9.css'
+
+// three.js rides in ONLY when someone flips the terrain to 3D — the
+// main bundle stays exactly as heavy as before the feature existed.
+const Terrain3D = lazy(() => import('../components/Terrain3D'))
 
 /* THE public record — the whale copy portfolio and nothing else (owner
  * order 2026-08-22: "the performance data must exclusively show the
@@ -243,10 +248,46 @@ const CAT_COLORS = ['var(--cat1)', 'var(--cat2)', 'var(--cat3)', 'var(--cat4)', 
 
 /** G2: a whale that traded in the last 10 minutes breathes in its
  * categorical color — the operator sees who is awake at a glance. */
+/** Rarity is EARNED (owner order 2026-08-29): tiers bind to verified
+ * ROI on a real settled sample, never to styling whim — prismatic is
+ * 25%+ on 20+ settlements, gold 10%+ on 10+, silver any positive ROI.
+ * The tier chip repeats the number it was earned by. */
+function rarity(w: { roi: number | null; settled: number }):
+    { cls: string; chip: string; label: string } | null {
+  if (w.roi == null) return null
+  if (w.roi >= 0.25 && w.settled >= 20)
+    return { cls: 'r-prism', chip: 'prism', label: 'PRISMATIC' }
+  if (w.roi >= 0.10 && w.settled >= 10)
+    return { cls: 'r-gold', chip: 'gold', label: 'GOLD' }
+  if (w.roi > 0) return { cls: '', chip: 'silver', label: 'SILVER' }
+  return null
+}
+
 function WhalesCard({ c }: { c: CopiesRecord }) {
+  const { live } = useLiveFeed()
+  // Gyro shine (mobile): one deviceorientation listener tilts every
+  // card from the phone's attitude, so the foil moves as the hand
+  // does. Android fires this freely; iOS gates it behind a permission
+  // prompt we choose not to nag for — there the pointer path still
+  // works. Desktop keeps per-card pointer tilt untouched.
+  useEffect(() => {
+    if (!window.matchMedia?.('(pointer: coarse)').matches) return
+    const on = (e: DeviceOrientationEvent) => {
+      if (e.beta == null || e.gamma == null) return
+      const rx = Math.max(-8, Math.min(8, (e.beta - 45) * -0.22))
+      const ry = Math.max(-9, Math.min(9, e.gamma * 0.28))
+      document.querySelectorAll<HTMLElement>('.v13-wcard.v14-holo').forEach((el) => {
+        el.style.setProperty('--rx', `${rx.toFixed(2)}deg`)
+        el.style.setProperty('--ry', `${ry.toFixed(2)}deg`)
+        el.style.setProperty('--mx', `${(50 + ry * 4).toFixed(1)}%`)
+        el.style.setProperty('--my', `${(45 + rx * 4).toFixed(1)}%`)
+      })
+    }
+    window.addEventListener('deviceorientation', on)
+    return () => window.removeEventListener('deviceorientation', on)
+  }, [])
   if (!c.by_whale.length) return null
   const maxAbs = Math.max(...c.by_whale.map((w) => Math.abs(w.pnl)), 0.01)
-  const { live } = useLiveFeed()
   const awake = new Set(
     live.filter((t) => t.ts && Date.now() - new Date(t.ts).getTime() < 600_000)
         .map((t) => (t.whale_username || '').toLowerCase()))
@@ -259,8 +300,10 @@ function WhalesCard({ c }: { c: CopiesRecord }) {
         </span>
       </div>
       <div className="v13-whales">
-        {c.by_whale.map((w, i) => (
-          <div key={w.whale} className="v13-wcard v14-holo"
+        {c.by_whale.map((w, i) => {
+          const tier = rarity(w)
+          return (
+          <div key={w.whale} className={`v13-wcard v14-holo ${tier?.cls || ''}`}
             style={{ ['--wc' as string]: CAT_COLORS[i % CAT_COLORS.length] }}
             onPointerMove={(e) => {
               const el = e.currentTarget
@@ -278,6 +321,12 @@ function WhalesCard({ c }: { c: CopiesRecord }) {
               el.style.setProperty('--ry', '0deg')
             }}>
             <span className="v14-rank" aria-label={`rank ${i + 1}`}>#{i + 1}</span>
+            {tier && (
+              <span className={`v14-tier ${tier.chip}`}
+                title={`${tier.label} — earned by verified ROI on settled stake`}>
+                {tier.label}
+              </span>
+            )}
             {awake.has(w.whale.toLowerCase()) && (
               <span className="v13-wlamp">
                 <Lamp mode="breathe" color={CAT_COLORS[i % CAT_COLORS.length]} label="LIVE" />
@@ -301,7 +350,8 @@ function WhalesCard({ c }: { c: CopiesRecord }) {
                 style={{ width: `${(Math.abs(w.pnl) / maxAbs) * 100}%` }} />
             </div>
           </div>
-        ))}
+          )
+        })}
       </div>
       <div className="tr-foot muted">
         Every settled copy order attributed to its source whale, uncapped,
@@ -334,6 +384,17 @@ export function TrackRecord() {
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<SortKey>('time')
   const [limit, setLimit] = useState(60)
+  // Terrain dimension (owner order 2026-08-29): 3D lazy-loads three.js
+  // on first flip; the preference sticks.
+  const [terrain3d, setTerrain3d] = useState(() => {
+    try { return localStorage.getItem('sa_terrain3d') === '1' } catch { return false }
+  })
+  const flipTerrain = () => {
+    const next = !terrain3d
+    try { localStorage.setItem('sa_terrain3d', next ? '1' : '0') } catch { /* pref */ }
+    setTerrain3d(next)
+  }
+  const [storiesOpen, setStoriesOpen] = useState(false)
 
   const t = data?.total
   const heroPnl = t?.pnl ?? 0
@@ -418,8 +479,18 @@ export function TrackRecord() {
 
   const openCount = data.open?.count ?? 0
 
+  const slides = storiesOpen
+    ? buildSlides(
+        chrono.map((d) => ({ day: d.day, pnl: d.pnl, settled: d.settled,
+          wins: d.wins })),
+        trades, kpis?.streak ?? 0)
+    : null
+
   return (
     <div className="page tr-page">
+      {slides && (
+        <DayStories slides={slides} onClose={() => setStoriesOpen(false)} />
+      )}
       <div className="tr-hero nd-reticle">
         <HexField height={300} />
         <span className="nd-watermark"><BrandMark size={340} /></span>
@@ -432,13 +503,19 @@ export function TrackRecord() {
               </div>
             </div>
           </div>
-          <div className={`tr-live${sync !== 'ok' ? ` tr-live-${sync}` : ''}`}>
-            <span className="tr-pulse" />
-            {sync === 'ok'
-              ? <>SYNCED{age !== null && <> · {fmtAge(age)} AGO</>}</>
-              : sync === 'lag'
-                ? <>SYNC LAG · {fmtAge(age!)}</>
-                : <>STALE · {fmtAge(age!)}</>}
+          <div className="tr-hero-side">
+            <div className={`tr-live${sync !== 'ok' ? ` tr-live-${sync}` : ''}`}>
+              <span className="tr-pulse" />
+              {sync === 'ok'
+                ? <>SYNCED{age !== null && <> · {fmtAge(age)} AGO</>}</>
+                : sync === 'lag'
+                  ? <>SYNC LAG · {fmtAge(age!)}</>
+                  : <>STALE · {fmtAge(age!)}</>}
+            </div>
+            <button className="tr-story-btn" onClick={() => setStoriesOpen(true)}
+              title="The last settled day as tap-through slides">
+              ▶ DAILY RECAP
+            </button>
           </div>
         </div>
 
@@ -462,8 +539,11 @@ export function TrackRecord() {
           <div className="tr-stat tr-stat-main">
             <span className="tr-sheen" aria-hidden />
             <div className="tr-stat-label">NET P&amp;L · COPY PORTFOLIO</div>
-            <div className={`tr-stat-value tr-grad v9-money ${t.pnl >= 0 ? 'pos' : 'neg'}`}>
-              <Quote value={heroPnl} render={fmtSignedUsd} />
+            {/* Gradient-clipped text cannot paint the odometer's
+                transformed digit rails (they fall outside the clip),
+                so the rolling hero wears a solid glow instead. */}
+            <div className={`tr-stat-value v9-money odo-hero ${t.pnl >= 0 ? 'pos' : 'neg'}`}>
+              <Odometer value={heroPnl} render={fmtSignedUsd} countUp />
             </div>
             <div className="tr-stat-foot muted">
               {t.wins}W – {t.losses}L
@@ -486,7 +566,9 @@ export function TrackRecord() {
           <div className="tr-stat">
             <span className="tr-sheen" aria-hidden />
             <div className="tr-stat-label">CAPITAL DEPLOYED · LIVE</div>
-            <div className="tr-stat-value">{fmtUsd(heroOpen, 2)}</div>
+            <div className="tr-stat-value">
+              <Odometer value={heroOpen} render={(v) => fmtUsd(v, 2)} countUp />
+            </div>
             <div className="tr-stat-foot muted">
               {openCount} open cop{openCount === 1 ? 'y' : 'ies'} on the table
               {' '}· {fmtUsd(t.staked, 0)} staked &amp; settled since {windowStart.slice(5)}
@@ -563,11 +645,24 @@ export function TrackRecord() {
 
       <div className="card nd-reticle v14-terrain-card">
         <div className="card-title">P&amp;L TERRAIN · THE DAILY LEDGER IN RELIEF
+          <button className={`tr-chipbtn tr-3d${terrain3d ? ' on' : ''}`}
+            onClick={flipTerrain}
+            title={terrain3d
+              ? 'Back to the etched relief'
+              : 'Orbitable WebGL — drag to spin, scroll to zoom'}>
+            {terrain3d ? '2D' : '3D'}
+          </button>
           <span style={{ marginLeft: 'auto', fontSize: 10 }} className="muted mono">
-            green rises · red sinks · live scan
+            {terrain3d ? 'drag orbits · wheel zooms' : 'green rises · red sinks · live scan'}
           </span>
         </div>
-        <HoloTerrain days={chrono.map((d) => ({ date: d.day, pnl: d.pnl }))} />
+        {terrain3d ? (
+          <Suspense fallback={<div className="tr-skel" style={{ height: 300 }} />}>
+            <Terrain3D days={chrono.map((d) => ({ date: d.day, pnl: d.pnl }))} />
+          </Suspense>
+        ) : (
+          <HoloTerrain days={chrono.map((d) => ({ date: d.day, pnl: d.pnl }))} />
+        )}
       </div>
 
       <LiveToday />

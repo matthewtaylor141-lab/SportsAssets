@@ -1,5 +1,6 @@
 import { Suspense, lazy, useEffect, useRef, useState, type ComponentType } from 'react'
 import { NavLink, Route, Routes, useLocation } from 'react-router-dom'
+import { BootSequence } from './components/BootSequence'
 import { Brand } from './components/Brand'
 import { CommandPalette } from './components/CommandPalette'
 import { PulseLine } from './components/PulseLine'
@@ -26,6 +27,9 @@ const Accounts = lazy(() =>
     default: (m.default ?? m.Accounts) as ComponentType,
   })),
 )
+// Mission Control (owner order 2026-08-29): the copy pipeline as live
+// theater — full-screen room, lazy like the other cockpits.
+const Mission = lazy(() => import('./pages/Mission'))
 
 /* The site IS the AI trader now. The whale-hub pages remain in the repo
  * (and in git history) but are off the router: this product has one story
@@ -34,6 +38,7 @@ const Accounts = lazy(() =>
 
 const TABS = [
   { to: '/', label: 'Performance' },
+  { to: '/mission', label: 'Mission' },
   { to: '/analytics', label: 'Analytics' },
   { to: '/reports', label: 'Reports' },
   { to: '/accounts', label: 'Accounts' },
@@ -57,6 +62,7 @@ const MOBILE_TABS = [
   { to: '/meridian', label: 'Meridian' },
 ]
 const MORE_TABS = [
+  { to: '/mission', label: 'Mission Control' },
   { to: '/analytics', label: 'Analytics' },
   { to: '/reports', label: 'Reports' },
   { to: '/system', label: 'System' },
@@ -183,9 +189,11 @@ export default function App() {
   // it owns its full viewport too: no site chrome may frame the venue.
   const cockpit = pathname === '/jarvis' || pathname === '/meridian'
     || pathname === '/desk' || pathname.startsWith('/wall')
+    || pathname === '/mission'
   const navRef = useRef<HTMLElement | null>(null)
   return (
     <div className="app">
+      <BootSequence />
       {!cockpit && (
         <div className="nd-aurora" aria-hidden><i /><i /><i /></div>
       )}
@@ -223,6 +231,7 @@ export default function App() {
           <Route path="/meridian" element={<Suspense fallback={null}><Jarvis /></Suspense>} />
           <Route path="/jarvis" element={<Suspense fallback={null}><Jarvis /></Suspense>} />
           <Route path="/wall/*" element={<Suspense fallback={null}><Wall /></Suspense>} />
+          <Route path="/mission" element={<Suspense fallback={null}><Mission /></Suspense>} />
         </Routes>
         {!cockpit && (
         <p className="notice">

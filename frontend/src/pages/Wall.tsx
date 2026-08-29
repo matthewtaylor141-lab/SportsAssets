@@ -8,6 +8,7 @@ import {
   type BreakdownDay, type DailyBreakdown, type TodayLive, type WallFeedCard,
   type WallScreen, type WallState,
 } from '../lib/wall'
+import { Odometer } from '../components/Odometer'
 import '../styles/wall.css'
 
 // TV wall (owner order 2026-08-23): two always-on boards for the office
@@ -717,7 +718,9 @@ function PolymarketBook({ acct, copies, live }: {
       <div className="wall-hero">
         <div className="wall-big">
           <div className="wall-biglabel">{bigLabel}</div>
-          <div className="wall-bignum">{money(bigVal)}</div>
+          <div className="wall-bignum">
+            {bigVal == null ? '\u2014' : <Odometer value={bigVal} render={money} countUp />}
+          </div>
         </div>
         <div className="wall-tiles">
           <div className="wall-tile">
@@ -778,6 +781,16 @@ function WallBoard({ venue }: { venue: WallVenue }) {
   const shift = usePixelShift()
   const now = useClock(1000)
   const isK = venue === 'kalshi'
+  // CRT scanlines (owner order 2026-08-29): pure overlay theater for
+  // the TV — a tap on the brand toggles it, per-screen, persisted.
+  const [crt, setCrt] = useState(() => {
+    try { return localStorage.getItem('sa_wall_crt') === '1' } catch { return false }
+  })
+  const flipCrt = () => {
+    const next = !crt
+    try { localStorage.setItem('sa_wall_crt', next ? '1' : '0') } catch { /* pref */ }
+    setCrt(next)
+  }
 
   const acct = useWallPoll<DeskAccounts>(
     () => wallApi('/api/desk/accounts'), 15_000, true, 'acct')
@@ -872,17 +885,21 @@ function WallBoard({ venue }: { venue: WallVenue }) {
     : state.data
 
   return (
-    <div className={`wall${presenting ? ' presenting' : ''}`} style={shift}>
+    <div className={`wall${presenting ? ' presenting' : ''}${crt ? ' crt-on' : ''}`}
+      style={shift}>
       <div className="wall-scan" aria-hidden />
       <div className="wall-top">
-        <div className="wall-brand">
+        <div className="wall-brand" onClick={flipCrt}
+          title="Tap: CRT scanlines on/off" style={{ cursor: 'pointer' }}>
           <WallOrb presenting={presenting} />
           BETTORTOKEN <b>· {isK ? 'KALSHI' : 'POLYMARKET'}</b>
         </div>
         {live.data && (
           <div className="wall-today num">
             <i>TODAY</i>
-            <b className={pnlCls(live.data.pnl)}>{signed(live.data.pnl)}</b>
+            <b className={pnlCls(live.data.pnl)}>
+              <Odometer value={live.data.pnl} render={signed} />
+            </b>
             <span>{live.data.wins}W–{live.data.settled - live.data.wins}L</span>
           </div>
         )}

@@ -5,6 +5,7 @@ import {
   DESK_RELOCK_EVENT, deskApi, deskAuthed, deskUnlock,
   type DeskAccounts, type KPosition, type PMPosition,
 } from '../lib/desk'
+import { Odometer } from '../components/Odometer'
 import '../styles/desk2.css'
 import '../styles/accounts9.css'
 
@@ -92,7 +93,10 @@ function CapitalRing({ value, kalshiPart }: {
           )}
         </svg>
         <div className="ac9-ring-c">
-          <div className="ac9-ring-v v9-money mono">{money(value)}</div>
+          <div className="ac9-ring-v v9-money mono">
+            {value == null ? '—'
+              : <Odometer value={value} render={money} countUp />}
+          </div>
           <div className="ac9-ring-l">total value</div>
         </div>
       </div>
@@ -297,13 +301,16 @@ export function Accounts() {
             <div className="ac-tile">
               <div className="ac-tile-l">Trading capital</div>
               <div className="ac-tile-v mono">
-                {money(data.totals.trading_capital ?? data.totals.cash)}
+                {(data.totals.trading_capital ?? data.totals.cash) == null ? '—'
+                  : <Odometer value={(data.totals.trading_capital ?? data.totals.cash)!}
+                      render={money} countUp />}
               </div>
             </div>
             <div className="ac-tile">
               <div className="ac-tile-l">Unrealized P&L</div>
               <div className={`ac-tile-v mono ${pnlCls(data.totals.unrealized)}`}>
-                {signed(data.totals.unrealized)}
+                {data.totals.unrealized == null ? '—'
+                  : <Odometer value={data.totals.unrealized} render={signed} />}
               </div>
             </div>
           </div>

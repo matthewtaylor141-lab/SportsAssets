@@ -1,0 +1,218 @@
+/* ── MISSION CONTROL (owner order 2026-08-29) ─────────────────────────
+   Full-screen cockpit. Dark room, cyan/amber instrumentation, every
+   motion driven by a real ledger event. Reduced-motion collapses the
+   sweep and entrance animations to static state. */
+
+.mc-room {
+  position: fixed; inset: 0; z-index: 40;
+  background:
+    radial-gradient(1200px 700px at 70% -10%, rgba(0, 102, 255, 0.10), transparent 60%),
+    radial-gradient(900px 600px at 10% 110%, rgba(69, 196, 255, 0.06), transparent 55%),
+    var(--bg0);
+  color: var(--ink0);
+  display: flex; flex-direction: column;
+  overflow: hidden auto;
+  font-family: var(--font-data, 'Chakra Petch', monospace);
+}
+.mc-scan {
+  position: fixed; inset: 0; pointer-events: none; z-index: 1; opacity: 0.5;
+  background: repeating-linear-gradient(0deg,
+    transparent 0 3px, rgba(255, 255, 255, 0.012) 3px 4px);
+}
+
+.mc-head {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 18px calc(10px + env(safe-area-inset-top) * 0);
+  border-bottom: 1px solid rgba(69, 196, 255, 0.14);
+  background: rgba(5, 6, 7, 0.75); backdrop-filter: blur(10px);
+  position: sticky; top: 0; z-index: 5;
+}
+.mc-title {
+  font: 700 13px 'Chakra Petch', var(--font-data);
+  letter-spacing: 0.34em; color: var(--cyan);
+}
+.mc-live {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 10px; letter-spacing: 0.14em; color: var(--pos);
+}
+.mc-spacer { flex: 1; }
+.mc-sound {
+  font: 600 10px 'Chakra Petch', var(--font-data); letter-spacing: 0.1em;
+  color: var(--ink1); background: var(--bg2);
+  border: 1px solid var(--bg3); border-radius: 999px;
+  padding: 7px 13px; cursor: pointer; transition: all 160ms ease;
+}
+.mc-sound.on { color: var(--pos); border-color: rgba(52, 209, 123, 0.5);
+  box-shadow: 0 0 18px rgba(52, 209, 123, 0.18); }
+.mc-exit {
+  color: var(--ink1); text-decoration: none; font-size: 18px;
+  width: 36px; height: 36px; display: grid; place-items: center;
+  border-radius: 10px; border: 1px solid var(--bg3); background: var(--bg1);
+}
+.mc-exit:hover { color: var(--ink0); border-color: var(--cyan); }
+
+.mc-grid {
+  position: relative; z-index: 2;
+  display: grid; gap: 14px; padding: 16px 18px 26px;
+  grid-template-columns: minmax(340px, 1fr) minmax(320px, 1.1fr);
+  grid-template-areas: 'radar stream' 'funnel funnel' 'gauges gauges';
+  max-width: 1280px; margin: 0 auto; width: 100%;
+}
+.mc-radar-card { grid-area: radar; }
+.mc-stream-card { grid-area: stream; }
+.mc-funnel-card { grid-area: funnel; }
+.mc-gauges { grid-area: gauges; }
+@media (max-width: 860px) {
+  .mc-grid { grid-template-columns: 1fr;
+    grid-template-areas: 'radar' 'stream' 'funnel' 'gauges'; }
+}
+
+.mc-radar-card, .mc-stream-card, .mc-funnel-card, .mc-gauge {
+  background: linear-gradient(180deg, rgba(16, 19, 20, 0.9), rgba(10, 12, 13, 0.95));
+  border: 1px solid rgba(69, 196, 255, 0.12);
+  border-radius: 16px; padding: 14px 16px; position: relative;
+  overflow: hidden;
+}
+.mc-card-t {
+  font: 700 11px 'Chakra Petch', var(--font-data);
+  letter-spacing: 0.18em; color: var(--ink1); margin-bottom: 10px;
+}
+
+/* ── radar ── */
+.mc-radar {
+  position: relative; width: 100%; aspect-ratio: 1;
+  max-width: 380px; margin: 0 auto;
+}
+.mc-radar-rings i {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 1px solid rgba(69, 196, 255, 0.16);
+}
+.mc-radar-rings i:nth-child(2) { inset: 16.6%; opacity: 0.8; }
+.mc-radar-rings i:nth-child(3) { inset: 33.3%; opacity: 0.6; }
+.mc-sweep {
+  position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(from 0deg,
+    rgba(69, 196, 255, 0.26), transparent 14%);
+  animation: mc-sweep 4.5s linear infinite;
+  mask: radial-gradient(circle, black 99%, transparent 100%);
+}
+@keyframes mc-sweep { to { transform: rotate(360deg); } }
+
+.mc-blip {
+  position: absolute; transform: translate(-50%, -50%);
+  width: 7px; height: 7px; border-radius: 50%;
+  background: rgba(69, 196, 255, 0.55);
+  box-shadow: 0 0 8px rgba(69, 196, 255, 0.4);
+}
+.mc-blip b {
+  position: absolute; left: 10px; top: -5px;
+  font: 600 8.5px 'Chakra Petch', monospace; letter-spacing: 0.06em;
+  color: var(--ink2v); white-space: nowrap; opacity: 0;
+  transition: opacity 200ms ease;
+}
+.mc-blip.hot { background: var(--pos); box-shadow: 0 0 16px var(--pos); }
+.mc-blip.hot::after {
+  content: ''; position: absolute; inset: -9px; border-radius: 50%;
+  border: 1.5px solid var(--pos); opacity: 0;
+  animation: mc-flare 1.6s ease-out infinite;
+}
+.mc-blip.hot b, .mc-radar:hover .mc-blip b { opacity: 1; color: var(--ink1); }
+@keyframes mc-flare {
+  from { transform: scale(0.4); opacity: 0.9; }
+  to { transform: scale(1.6); opacity: 0; }
+}
+
+.mc-lat { display: flex; gap: 26px; margin-top: 12px; flex-wrap: wrap; }
+.mc-lat-k { display: block; font-size: 9.5px; letter-spacing: 0.18em;
+  color: var(--ink2v); }
+.mc-lat-v { font: 700 30px 'Chakra Petch', var(--font-data); }
+.mc-lat-v.pos { color: var(--pos); text-shadow: 0 0 22px rgba(52, 209, 123, 0.35); }
+.mc-lat-v.neg { color: var(--amber); }
+.mc-lat-s { display: block; font-size: 9.5px; }
+
+/* ── detection stream ── */
+.mc-stream { display: flex; flex-direction: column; gap: 6px; }
+.mc-det {
+  display: grid; grid-template-columns: 92px 1fr auto auto;
+  gap: 10px; align-items: baseline;
+  padding: 7px 10px; border-radius: 10px;
+  background: rgba(16, 19, 20, 0.6);
+  border: 1px solid transparent;
+  font-size: 12px;
+}
+.mc-det.fresh {
+  animation: mc-in 480ms var(--ease-enter, cubic-bezier(0.16, 1, 0.3, 1));
+  border-color: rgba(69, 196, 255, 0.35);
+  box-shadow: 0 0 24px rgba(69, 196, 255, 0.12);
+}
+@keyframes mc-in {
+  from { transform: translateY(-10px) scale(0.98); opacity: 0;
+    filter: brightness(2); }
+}
+.mc-det-who { font-weight: 700; color: var(--cyan);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-det-mkt { color: var(--ink1); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.mc-det-num { color: var(--ink0); }
+.mc-det-lat { color: var(--ink2v); min-width: 48px; text-align: right; }
+.mc-det-lat.pos { color: var(--pos); }
+
+/* ── funnel ── */
+.mc-lanes {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  font: 700 9.5px 'Chakra Petch', monospace; letter-spacing: 0.2em;
+  color: var(--ink2v); margin-bottom: 8px; text-align: center;
+}
+.mc-ord {
+  display: grid; grid-template-columns: 110px 1fr 190px 90px;
+  gap: 10px; align-items: center; padding: 8px 10px;
+  border-radius: 10px; background: rgba(16, 19, 20, 0.6);
+  margin-bottom: 6px; font-size: 12px;
+}
+.mc-ord.dead { opacity: 0.55; }
+.mc-ord-who { font-weight: 700; color: var(--amber); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.mc-ord-mkt { color: var(--ink1); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.mc-ord-track { display: flex; align-items: center; gap: 4px; }
+.mc-ord-track i {
+  flex: 1; height: 4px; border-radius: 2px; background: var(--bg3);
+  transition: background 400ms ease, box-shadow 400ms ease;
+}
+.mc-ord-track i.on { background: var(--cyan);
+  box-shadow: 0 0 10px rgba(69, 196, 255, 0.5); }
+.mc-ord-track i.x { background: var(--neg); }
+.mc-ord-st { font: 700 10px 'Chakra Petch', monospace;
+  letter-spacing: 0.1em; text-align: right; color: var(--ink1); }
+.mc-ord-st.pos { color: var(--pos); }
+.mc-ord-st.neg { color: var(--neg); }
+.mc-idle { font-size: 12.5px; padding: 8px 2px; }
+@media (max-width: 640px) {
+  .mc-ord { grid-template-columns: 90px 1fr 84px; }
+  .mc-ord-track { display: none; }
+}
+
+/* ── gauges ── */
+.mc-gauges { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+@media (max-width: 720px) { .mc-gauges { grid-template-columns: 1fr; } }
+.mc-gauge { text-align: center; padding: 18px 14px 14px; }
+.mc-gauge-k { display: block; font-size: 9.5px; letter-spacing: 0.22em;
+  color: var(--ink2v); margin-bottom: 6px; }
+.mc-gauge-v { font: 700 34px 'Chakra Petch', var(--font-data); }
+.mc-gauge-v.pos { color: var(--pos); }
+.mc-gauge-v.neg { color: var(--neg); }
+.mc-gauge-s { display: block; font-size: 10px; margin-top: 4px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-sweep { animation: none; opacity: 0.25; }
+  .mc-det.fresh { animation: none; }
+  .mc-blip.hot::after { animation: none; }
+}
+
+@media (max-width: 640px) {
+  .mc-head { flex-wrap: wrap; row-gap: 8px; }
+  .mc-title { letter-spacing: 0.18em; }
+  .mc-live { order: 5; width: 100%; }
+  .mc-spacer { display: none; }
+  .mc-sound { margin-left: auto; }
+}
