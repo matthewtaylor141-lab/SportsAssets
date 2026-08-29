@@ -93,10 +93,13 @@ class _Pool:
         return self.stored
 
     async def execute(self, sql, *a, timeout=None):
-        if "trips_cleared" in sql:            # SQL_TRIP's tombstone WHERE
+        self.writes.append(a)
+
+    async def fetchrow(self, sql, *a, timeout=None):
+        if "prev.admit" in sql:               # SQL_TRIP (r29 shape)
             self.trip_writes.append(a)
-        else:
-            self.writes.append(a)
+            return {"had": False, "wrote": True}
+        return None
 
 
 @pytest.fixture(autouse=True)
@@ -733,7 +736,7 @@ def test_trip_is_durable_the_moment_it_fires(st):
     assert "trips_cleared" in s1.SQL_TRIP, "tombstone-guarded"
 
     class _DownPool(_Pool):
-        async def execute(self, sql, *a, timeout=None):
+        async def fetchrow(self, sql, *a, timeout=None):
             raise RuntimeError("db down")
 
     st2 = S1Emitter()
@@ -743,8 +746,9 @@ def test_trip_is_durable_the_moment_it_fires(st):
         "an unpersisted trip is retried at every flush until durable"
 
     class _RefusePool(_Pool):
-        async def execute(self, sql, *a, timeout=None):
-            return "INSERT 0 0"          # the tombstone WHERE won
+        async def fetchrow(self, sql, *a, timeout=None):
+            # the tombstone admit won: the row answered, wrote nothing
+            return {"had": False, "wrote": False}
 
     st3 = S1Emitter()
     st3._trip("key_selfcheck")
@@ -819,6 +823,10 @@ class _SweepPool(_Pool):
         return self.stored
 
     async def fetchrow(self, sql, *a, timeout=None):
+        if "prev.admit" in sql:
+            # SQL_TRIP (r29 shape): a fresh transition that lands
+            self.trip_writes.append(a)
+            return {"had": False, "wrote": True}
         if "FROM trades WHERE id" in sql:
             # SQL_RECHECK (r15): the verdict's last look at the row —
             # False by default so judgment paths behave as before
@@ -831,8 +839,6 @@ class _SweepPool(_Pool):
     async def execute(self, sql, *a, timeout=None):
         if sql.lstrip().startswith("UPDATE trades"):
             self.marked.append(a[0])
-        elif "trips_cleared" in sql:
-            self.trip_writes.append(a)
         else:
             self.writes.append(a)
 
@@ -970,10 +976,11 @@ def test_trip_persist_failure_defers_the_stamp(st):
     _arm(st)
 
     class _TripDownPool(_SweepPool):
-        async def execute(self, sql, *a, timeout=None):
-            if "trips_cleared" in sql:
+        async def fetchrow(self, sql, *a, timeout=None):
+            if "prev.admit" in sql:
                 raise RuntimeError("db blip")
-            await _SweepPool.execute(self, sql, *a, timeout=timeout)
+            return await _SweepPool.fetchrow(self, sql, *a,
+                                             timeout=timeout)
 
     pool = _TripDownPool([_srow(3, False)])
     asyncio.run(st._corroboration_sweep(pool))
@@ -1379,11 +1386,12 @@ def test_sweep_never_stamps_on_a_refused_persist(st):
     _arm(st)
 
     class _AlwaysRefusedPool(_SweepPool):
-        async def execute(self, sql, *a, timeout=None):
-            if "trips_cleared" in sql:
+        async def fetchrow(self, sql, *a, timeout=None):
+            if "prev.admit" in sql:
                 self.trip_writes.append(a)
-                return "INSERT 0 0"
-            await _SweepPool.execute(self, sql, *a, timeout=timeout)
+                return {"had": False, "wrote": False}
+            return await _SweepPool.fetchrow(self, sql, *a,
+                                             timeout=timeout)
 
     st.trips["uncorroborated:3"] = float(TS0)   # judged earlier at T1
     pool = _AlwaysRefusedPool([_srow(3, False)])
@@ -1395,12 +1403,13 @@ def test_sweep_never_stamps_on_a_refused_persist(st):
         "the retry carries a FRESH timestamp past the tombstone"
 
     class _ThenLandsPool(_SweepPool):
-        async def execute(self, sql, *a, timeout=None):
-            if "trips_cleared" in sql:
+        async def fetchrow(self, sql, *a, timeout=None):
+            if "prev.admit" in sql:
                 self.trip_writes.append(a)
-                return "INSERT 0 0" if len(self.trip_writes) == 1 \
-                    else "INSERT 0 1"
-            await _SweepPool.execute(self, sql, *a, timeout=timeout)
+                return {"had": False,
+                        "wrote": len(self.trip_writes) > 1}
+            return await _SweepPool.fetchrow(self, sql, *a,
+                                             timeout=timeout)
 
     st2 = S1Emitter()
     st2._state_loaded = True
@@ -1679,12 +1688,13 @@ def test_refused_refresh_reads_the_tombstone_clock(st):
             return await _SweepPool.fetchval(self, sql, *a,
                                              timeout=timeout)
 
-        async def execute(self, sql, *a, timeout=None):
-            if "trips_cleared" in sql:
+        async def fetchrow(self, sql, *a, timeout=None):
+            if "prev.admit" in sql:
                 self.trip_writes.append(a)
-                return ("INSERT 0 0" if len(self.trip_writes) == 1
-                        else "INSERT 0 1")
-            await _SweepPool.execute(self, sql, *a, timeout=timeout)
+                return {"had": False,
+                        "wrote": len(self.trip_writes) > 1}
+            return await _SweepPool.fetchrow(self, sql, *a,
+                                             timeout=timeout)
 
     pool = _SkewPool([_srow(3, False)])
     asyncio.run(st._corroboration_sweep(pool))
@@ -2001,7 +2011,7 @@ def test_judged_stamp_lost_to_a_venue_stamp_self_clears(st):
             self.cleared: list[str] = []
 
         async def fetchrow(self, sql, *a, timeout=None):
-            if "trips_cleared" in sql and \
+            if "trips_cleared" in sql and "prev.admit" not in sql and \
                     sql.lstrip().startswith("WITH prev"):
                 # SQL_CLEAR (round 26 shape): reports whether THIS
                 # call transitioned the reason out
@@ -2054,7 +2064,7 @@ def test_orphaned_uncorroborated_trip_heals_on_the_next_sweep(st):
             self.recheck_ok = True
 
         async def fetchrow(self, sql, *a, timeout=None):
-            if "trips_cleared" in sql and \
+            if "trips_cleared" in sql and "prev.admit" not in sql and \
                     sql.lstrip().startswith("WITH prev"):
                 # SQL_CLEAR (round 26 shape): reports whether THIS
                 # call transitioned the reason out
@@ -2262,7 +2272,7 @@ def test_redundant_clear_never_bumps_the_release_counter(st):
 
     class _AdoptedPool(_SweepPool):
         async def fetchrow(self, sql, *a, timeout=None):
-            if "trips_cleared" in sql and \
+            if "trips_cleared" in sql and "prev.admit" not in sql and \
                     sql.lstrip().startswith("WITH prev"):
                 # another process already released this reason: the
                 # UPDATE matched but removed nothing
@@ -2279,6 +2289,44 @@ def test_redundant_clear_never_bumps_the_release_counter(st):
     assert st.deltas.get("s1.trip_self_cleared") is None, \
         "but a transition another process made is never re-counted"
     assert "removed" in s1.SQL_CLEAR, "the statement carries the signal"
+
+
+# ── fleet round 29 pins ─────────────────────────────────────────────
+def test_trip_firing_counts_only_this_process_transition(st):
+    """fleet r29 (minor): the s1.trip.* firing bump lived in _trip,
+    guarded only by the in-process trips dict — every process
+    re-judging or adopting the SAME standing verdict counted one
+    firing each, and the server-side delta merge made the inflation
+    durable (the round-8/round-26 count-only-what-THIS-process-
+    transitioned law, violated on the firing side). The bump now
+    rides the persist, gated on SQL_TRIP's own transition signal."""
+    pool = _Pool()
+    st._trip("key_selfcheck")
+    assert st.deltas.get("s1.trip.key_selfcheck") is None, \
+        "the in-memory trip alone never counts — the statement decides"
+    ok = asyncio.run(st._persist_trip(pool, "key_selfcheck"))
+    assert ok == "landed"
+    assert st.deltas.get("s1.trip.key_selfcheck") == 1, \
+        "a landed FIRST recording of the reason is the one firing"
+
+    class _AdoptedPool(_Pool):
+        async def fetchrow(self, sql, *a, timeout=None):
+            if "prev.admit" in sql:
+                # the reason already stands on disk — a sibling
+                # process landed it; the union merges, transitions
+                # nothing
+                return {"had": True, "wrote": True}
+            return None
+
+    st2 = S1Emitter()
+    st2._trip("key_selfcheck")
+    ok = asyncio.run(st2._persist_trip(_AdoptedPool(), "key_selfcheck"))
+    assert ok == "landed"
+    assert st2.deltas.get("s1.trip.key_selfcheck") is None, \
+        "a firing another process already counted is never re-counted"
+    assert "prev.had AS had" in s1.SQL_TRIP and \
+        "prev.admit AS wrote" in s1.SQL_TRIP, \
+        "the statement carries the transition signal"
 
 
 def test_cert_metrics_answer_when_without_moving_the_bar(st):

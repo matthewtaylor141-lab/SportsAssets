@@ -85,9 +85,18 @@ def test_every_state_statement_prepares_and_executes():
             assert doc["armed"] is True
 
             # ── SQL_TRIP: union, disarm, tombstone refusal ─────────
-            await c.execute(s1.SQL_TRIP, K, "uncorroborated:1", 1000.0)
-            await c.execute(s1.SQL_TRIP, K, "uncorroborated:2", 2000.0)
-            await c.execute(s1.SQL_TRIP, K, "uncorroborated:1", 9999.0)
+            r = await c.fetchrow(s1.SQL_TRIP, K, "uncorroborated:1",
+                                 1000.0)
+            assert bool(r["wrote"]) and not bool(r["had"]), \
+                "round 29: a first recording reports the transition"
+            r = await c.fetchrow(s1.SQL_TRIP, K, "uncorroborated:2",
+                                 2000.0)
+            assert bool(r["wrote"]) and not bool(r["had"])
+            r = await c.fetchrow(s1.SQL_TRIP, K, "uncorroborated:1",
+                                 9999.0)
+            assert bool(r["wrote"]) and bool(r["had"]), \
+                "round 29: a re-trip of a standing reason reports " \
+                "had=true — the caller must not re-count the firing"
             doc = json.loads(await c.fetchval(s1.SQL_READ, K))
             assert doc["trips"] == {"uncorroborated:1": 1000.0,
                                     "uncorroborated:2": 2000.0}, \
@@ -127,13 +136,34 @@ def test_every_state_statement_prepares_and_executes():
                                                  "key_selfcheck"}, \
                 "tombstones are a DICT — every clear is remembered"
             # tombstone refuses the stale re-persist, admits a new trip
-            await c.execute(s1.SQL_TRIP, K, "uncorroborated:1", 1000.0)
+            r = await c.fetchrow(s1.SQL_TRIP, K, "uncorroborated:1",
+                                 1000.0)
+            assert not bool(r["wrote"]), "the tombstone refusal is " \
+                "visible in the transition signal (round 29 shape)"
             doc = json.loads(await c.fetchval(s1.SQL_READ, K))
             assert "uncorroborated:1" not in doc["trips"]
-            await c.execute(s1.SQL_TRIP, K, "uncorroborated:1",
-                            9e12)      # newer than any tombstone
+            r = await c.fetchrow(s1.SQL_TRIP, K, "uncorroborated:1",
+                                 9e12)      # newer than any tombstone
+            assert bool(r["wrote"]) and not bool(r["had"])
             doc = json.loads(await c.fetchval(s1.SQL_READ, K))
             assert "uncorroborated:1" in doc["trips"]
+
+            # ── SQL_TRIP_INIT: the missing-row birth (round 29) ────
+            K2 = "s1_pin_" + uuid.uuid4().hex[:8]
+            r = await c.fetchrow(s1.SQL_TRIP, K2, "x", 1.0)
+            assert r is None, "no state row: the union defers"
+            r = await c.fetchrow(s1.SQL_TRIP_INIT, K2, "x", 1.0)
+            assert r is not None and bool(r["wrote"]), \
+                "the row is born tripped and disarmed"
+            r = await c.fetchrow(s1.SQL_TRIP_INIT, K2, "x", 1.0)
+            assert r is None, \
+                "a lost insert race returns no row — the caller " \
+                "retries the union"
+            r = await c.fetchrow(s1.SQL_TRIP, K2, "x", 1.0)
+            assert bool(r["wrote"]) and bool(r["had"]), \
+                "the retried union sees the winner's recording"
+            d2 = json.loads(await c.fetchval(s1.SQL_READ, K2))
+            assert d2["trips"] == {"x": 1.0} and d2["armed"] is False
 
             # ── the SWEEP family binds and runs ────────────────────
             wid = await c.fetchval(
@@ -238,12 +268,12 @@ def test_every_state_statement_prepares_and_executes():
             doc = json.loads(await c.fetchval(s1.SQL_READ, K))
             assert doc["trips"].get("stuck:1") == 6.0, \
                 "garbage tombstone values are ignored, never fatal"
-            # round 10: the tombstone refusal is visible in the command
-            # tag — 'INSERT 0 0' — which _persist_trip reads as
-            # 'refused' instead of falsely reporting a landed trip
+            # round 10/29: the tombstone refusal is visible in the
+            # transition signal — wrote=false — which _persist_trip
+            # reads as 'refused' instead of falsely reporting landed
             await c.fetchrow(s1.SQL_CLEAR, K, "stuck:1")
-            tag = await c.execute(s1.SQL_TRIP, K, "stuck:1", 6.0)
-            assert tag == "INSERT 0 0", tag
+            r = await c.fetchrow(s1.SQL_TRIP, K, "stuck:1", 6.0)
+            assert not bool(r["wrote"]), dict(r)
             # round 10: an ARRAY trips field must not 500 the clear —
             # the operator's only release path heals it to an object
             await c.execute(
@@ -372,16 +402,17 @@ def test_round11_dirty_coverage_and_the_tombstone_clock():
             db_now = await c.fetchval(s1.SQL_NOW)
             assert isinstance(db_now, float) and db_now > 1e9
             K = s1.STATE_KEY
-            await c.execute(s1.SQL_TRIP, K, "uncorroborated:9", 1000.0)
+            await c.fetchrow(s1.SQL_TRIP_INIT, K, "uncorroborated:9",
+                             1000.0)
             await c.fetchrow(s1.SQL_CLEAR, K, "uncorroborated:9")
-            tag = await c.execute(s1.SQL_TRIP, K, "uncorroborated:9",
-                                  1000.0)
-            assert tag == "INSERT 0 0", \
+            r = await c.fetchrow(s1.SQL_TRIP, K, "uncorroborated:9",
+                                 1000.0)
+            assert not bool(r["wrote"]), \
                 "the stale re-persist is refused by the tombstone"
             fresh = float(await c.fetchval(s1.SQL_NOW))
-            tag = await c.execute(s1.SQL_TRIP, K, "uncorroborated:9",
-                                  fresh)
-            assert tag != "INSERT 0 0", \
+            r = await c.fetchrow(s1.SQL_TRIP, K, "uncorroborated:9",
+                                 fresh)
+            assert bool(r["wrote"]), \
                 "a refresh read from the tombstone's own clock LANDS " \
                 "— the round-11 skew cycle terminates on first retry"
         finally:

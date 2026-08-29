@@ -406,3 +406,35 @@ class TestAnEmptyReadIsNotAFullFlatten:
         src = inspect.getsource(we._cycle)
         assert src.index("guard_empty(prev, now") < \
             src.index("_save(pool, uname.lower(), now)")
+
+
+class TestBeatHonesty:
+    """Fleet round 29 (minor): 100% positions-fetch loss wore a green
+    durable heartbeat — every fetch failure is swallowed per-whale
+    into stats['fetch_failed'], and the beat carried db.py's default
+    status='ok' unconditionally. The status now comes from the cycle's
+    own evidence."""
+
+    def test_total_fetch_loss_beats_error(self):
+        assert we._beat_status(
+            {"attempted": 4, "fetch_failed": 4}) == "error"
+
+    def test_partial_loss_stays_ok_with_counts_visible(self):
+        assert we._beat_status(
+            {"attempted": 4, "fetch_failed": 3}) == "ok"
+
+    def test_nothing_attempted_is_ok_not_vacuously_dead(self):
+        """An empty roster intersection attempts nothing — that is a
+        configuration state, not a fetch outage."""
+        assert we._beat_status(
+            {"attempted": 0, "fetch_failed": 0}) == "ok"
+
+    def test_the_loop_uses_the_judgment_and_the_counters_always_exist(self):
+        import inspect
+
+        src = inspect.getsource(we.main)
+        assert "_beat_status(stats)" in src, \
+            "the beat's status comes from the cycle's evidence"
+        csrc = inspect.getsource(we._cycle)
+        assert '"attempted": 0, "fetch_failed": 0' in csrc, \
+            "both counters are unconditionally present in stats"

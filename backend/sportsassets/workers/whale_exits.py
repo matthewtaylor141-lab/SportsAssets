@@ -535,7 +535,11 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
              # than assumed. sib_rows == 0 means the field is not there
              # and the fallback below contributes nothing — which is a
              # finding, not a failure.
-             "sib_rows": 0, "sib_pairs": 0, "pos_rows": 0}
+             "sib_rows": 0, "sib_pairs": 0, "pos_rows": 0,
+             # attempted/fetch_failed are always present (fleet r29):
+             # the heartbeat's status is judged from them, and an
+             # absent key must never read as zero-by-luck.
+             "attempted": 0, "fetch_failed": 0}
     all_sibs: dict[str, str] = {}
     wanted = {w.lower() for w in COPY_WHALES}
     rows = await pool.fetch(
@@ -545,6 +549,7 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
         if uname.lower() not in wanted:
             continue
         partial = False
+        stats["attempted"] += 1
         try:
             now, sibs, seen = await _fetch_positions(http, r["address"])
         except EmptyPositions as exc:
@@ -858,6 +863,19 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
     return stats
 
 
+def _beat_status(stats: dict) -> str:
+    """Fleet round 29 (minor): the beat carried db.py's default
+    status='ok' unconditionally — a cycle in which EVERY roster
+    whale's positions fetch failed (the per-whale except swallows
+    each into fetch_failed) wore a green durable row, and the exit
+    detector could be 100% blind for hours while every dashboard
+    read "ok". Total fetch loss is an error beat; partial loss stays
+    ok with the counts visible in detail."""
+    attempted = stats.get("attempted") or 0
+    failed = stats.get("fetch_failed") or 0
+    return "error" if attempted and failed == attempted else "ok"
+
+
 async def main() -> None:
     if not ENABLED:
         log.warning("whale-exit detector disabled by env")
@@ -869,7 +887,9 @@ async def main() -> None:
             try:
                 pool = await get_pool()
                 stats = await _cycle(http, pool)
-                await heartbeat("whale_exits", detail=stats)
+                await heartbeat("whale_exits",
+                                status=_beat_status(stats),
+                                detail=stats)
             except Exception:  # noqa: BLE001 — never kill the loop
                 log.exception("whale-exit cycle failed")
             await asyncio.sleep(INTERVAL_S)

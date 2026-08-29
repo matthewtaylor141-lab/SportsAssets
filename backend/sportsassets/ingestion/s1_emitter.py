@@ -332,11 +332,37 @@ ON CONFLICT (key) DO UPDATE SET value = (
 # field is treated as empty; and when the legacy 'tripped' scalar
 # names THIS reason it is stripped in the same statement, completing
 # the scalar's migration into the dict.
+# Round 29 (minor): the statement now carries a TRANSITION signal,
+# exactly as SQL_CLEAR has since round 26 — 'had' reports whether the
+# reason already stood (in the trips dict OR as the legacy scalar)
+# before this write, under the same row lock as the write itself.
+# The s1.trip.* firing counter used to bump in _trip, guarded only by
+# the in-process trips dict: every process adopting or re-judging the
+# SAME standing verdict re-counted one firing, and the server-side
+# delta merge made the inflation durable (N bumps for one trip across
+# N processes — the round-8 count-only-what-THIS-process-transitioned
+# law, violated on the firing side). The bump now lives on the
+# persist, gated on had=false. 'wrote' distinguishes a landed union
+# from a tombstone refusal in the same row. A missing state row
+# returns 0 rows; _persist_trip then creates it via SQL_TRIP_INIT
+# (ON CONFLICT DO NOTHING) and retries the union on an insert race —
+# the standard upsert loop, chosen over an INSERT..ON CONFLICT CTE
+# because locking (prev FOR UPDATE) and upserting one row in a single
+# statement has undefined ordering between the CTEs.
 SQL_TRIP = """
-INSERT INTO ingestion_state (key, value)
-VALUES ($1, jsonb_build_object(
-    'trips', jsonb_build_object($2::text, $3::float8), 'armed', false))
-ON CONFLICT (key) DO UPDATE SET value = (
+WITH prev AS (
+  SELECT COALESCE(
+           (CASE WHEN jsonb_typeof(value->'trips') = 'object'
+                 THEN value->'trips' ? $2::text ELSE false END)
+           OR value->>'tripped' = $2::text, false) AS had,
+         (jsonb_typeof(value) <> 'object'
+          OR (CASE WHEN jsonb_typeof(
+                     value->'trips_cleared'->$2) = 'number'
+                   THEN (value->'trips_cleared'->>$2)::float8
+                   ELSE -1 END) < $3::float8) AS admit
+  FROM ingestion_state WHERE key = $1 FOR UPDATE
+)
+UPDATE ingestion_state SET value = CASE WHEN prev.admit THEN (
   SELECT CASE WHEN nv.v->>'tripped' = $2::text
               THEN nv.v #- '{tripped}' ELSE nv.v END
   FROM (SELECT CASE
@@ -352,11 +378,19 @@ ON CONFLICT (key) DO UPDATE SET value = (
                         THEN ingestion_state.value->'trips'
                         ELSE '{}'::jsonb END),
             '{armed}', 'false'::jsonb) END AS v) nv)
-WHERE jsonb_typeof(ingestion_state.value) <> 'object'
-   OR (CASE WHEN jsonb_typeof(
-              ingestion_state.value->'trips_cleared'->$2) = 'number'
-            THEN (ingestion_state.value->'trips_cleared'->>$2)::float8
-            ELSE -1 END) < $3::float8
+  ELSE ingestion_state.value END
+FROM prev WHERE ingestion_state.key = $1
+RETURNING prev.had AS had, prev.admit AS wrote
+"""
+# First-ever write for the state key: the row is born already tripped
+# and disarmed. DO NOTHING on conflict — the caller retries the union
+# above, which then sees whatever the race winner wrote.
+SQL_TRIP_INIT = """
+INSERT INTO ingestion_state (key, value)
+VALUES ($1, jsonb_build_object(
+    'trips', jsonb_build_object($2::text, $3::float8), 'armed', false))
+ON CONFLICT (key) DO NOTHING
+RETURNING true AS wrote
 """
 # The operator clear: atomic removal of exactly one reason plus a
 # PER-REASON tombstone (round 6: the single trip_cleared_* slot forgot
@@ -873,7 +907,10 @@ class S1Emitter:
             return                    # idempotent: a re-judged row must
                                       # not double-bump (round 6)
         self.trips[reason] = self._now_db()   # tombstone clock (r12)
-        self.bump("s1.trip." + reason.split(":")[0])
+        # round 29: the s1.trip.* firing bump moved to _persist_trip,
+        # gated on the statement's transition signal — the in-process
+        # guard above could not see a sibling process's standing trip,
+        # so every process counted the same firing once each.
         log.error("S1 STICKY TRIP: %s — manual clear of THIS reason "
                   "required", reason)
 
@@ -924,15 +961,31 @@ class S1Emitter:
         if not isinstance(at, (int, float)):
             at = self._now_db()
         try:
-            tag = await pool.execute(SQL_TRIP, STATE_KEY, reason,
-                                     float(at), timeout=6)
+            row = await pool.fetchrow(SQL_TRIP, STATE_KEY, reason,
+                                      float(at), timeout=6)
+            if row is None:
+                # no state row yet: create it born-tripped; on an
+                # insert race the union retry sees the winner's doc
+                row = await pool.fetchrow(SQL_TRIP_INIT, STATE_KEY,
+                                          reason, float(at), timeout=6)
+                if row is None:
+                    row = await pool.fetchrow(SQL_TRIP, STATE_KEY,
+                                              reason, float(at),
+                                              timeout=6)
         except Exception:  # noqa: BLE001
             self.bump("s1.errors")
             self._unpersisted.add(reason)
             return "error"
         self._unpersisted.discard(reason)
-        if isinstance(tag, str) and tag.split()[-1] == "0":
-            return "refused"           # 0 rows: the tombstone won
+        if row is None or not row.get("wrote"):
+            return "refused"           # no write: the tombstone won
+        if not row.get("had"):
+            # round 29: the firing counter counts only the transition
+            # THIS write made durable — a reason already standing on
+            # disk (another process's trip, an adopted copy, a legacy
+            # scalar migration) is one firing, already counted by the
+            # process that landed it.
+            self.bump("s1.trip." + reason.split(":")[0])
         return "landed"
 
     # ── finalize one tx ─────────────────────────────────────────────
