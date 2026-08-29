@@ -824,7 +824,7 @@ class _SweepPool(_Pool):
             # fixture leaves it unlearned (None) so stamps stay pinned
             # to the frozen app clock unless a test overrides this
             return None
-        if "count(DISTINCT whale_id)" in sql:      # r42 burst census
+        if "count(DISTINCT t.whale_id)" in sql:      # r42 burst census
             return getattr(self, "suspect_wallets", 0)
         if "AS live" in sql:                       # r42 index-live
             return getattr(self, "index_live", True)
@@ -2828,3 +2828,88 @@ def test_key_divergent_twin_is_an_immediate_named_trip(st):
     assert st.deltas.get("s1.key_divergent") == 1
     assert getattr(pool, "suspected", []) == [], \
         "a twin skips the suspect lifecycle entirely"
+
+
+# ── fleet round 43 pins ─────────────────────────────────────────────
+def test_burst_census_is_contemporaneous_and_roster_gated():
+    """r43 (major x2): zombie suspects on banned/departed whales —
+    whose rows the sweep can never re-judge — armed the bypass
+    FOREVER, converting the next single-wallet suspect into an
+    instant false sticky trip. The census now joins the live roster
+    and bounds suspect age to the burst window."""
+    assert "JOIN whales w" in s1.SQL_SUSPECT_WALLETS
+    assert "w.active AND NOT w.banned" in s1.SQL_SUSPECT_WALLETS
+    assert "s1_suspect_at > now() - make_interval" in \
+        s1.SQL_SUSPECT_WALLETS
+    assert s1.SUSPECT_BURST_WINDOW_S <= 12 * 3600, \
+        "burst evidence is contemporaneous, never debris"
+
+
+def test_hold_recheck_floor_is_explicit_not_inherited(st):
+    """r43 (major): the r42 indexing-time floor rode $1/$4 and the
+    hold recheck inherited newest >= suspect_at — a phantom whose
+    wallet went quiet after qualification could never re-cover and
+    the promised alarm was silenced forever. The floor is an explicit
+    $6 now; the hold recheck passes the fill's own ts."""
+    assert ">= $6" in s1.SQL_RECON_SINCE
+    assert "extract(epoch from ($1" not in s1.SQL_RECON_SINCE
+    import inspect
+
+    src = inspect.getsource(s1.S1Emitter._sweep_wallet)
+    assert "det_epoch + RECON_VENUE_LAG_S" in src, \
+        "the primary call carries the detection+lag floor"
+    assert "ts_epoch, ts_epoch, timeout=6" in src, \
+        "the hold recheck demands only fill-inside-span"
+
+
+def test_key_twin_requires_identical_economics(st):
+    """r43 (major): the twin test fired on the design's OWN r13/r14
+    same-tx same-asset second leg (S1 emits leg 1, the poller carries
+    leg 2 at a different price/size — BOTH correct). The R2 class is
+    an IDENTICAL fill under a ts-shifted key, so the twin must match
+    size and price exactly."""
+    assert "v.size = s.size" in s1.SQL_KEY_TWIN
+    assert "v.price = s.price" in s1.SQL_KEY_TWIN
+
+
+def test_key_divergent_heals_when_the_venue_stamps(st):
+    """r43 (major): the trip premise ('venue_seen_at can never stamp
+    across a key mismatch') was falsified executed — the straggling
+    identical-key venue row lands later and stamps the s1 row. The
+    healer now releases key_divergent exactly like uncorroborated."""
+    _arm(st)
+    st.trips["key_divergent:3"] = float(TS0)
+    st.armed = False
+
+    class _HealPool2(_SweepPool):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.cleared: list[str] = []
+            self.recheck_ok = True
+
+        async def fetchrow(self, sql, *a, timeout=None):
+            if "trips_cleared" in sql and "prev.admit" not in sql and \
+                    sql.lstrip().startswith("WITH prev"):
+                self.cleared.append(a[1])
+                return {"removed": True, "trips": {}, "cleared": {}}
+            return await _SweepPool.fetchrow(self, sql, *a,
+                                             timeout=timeout)
+
+    pool = _HealPool2([], wallets=[])
+    asyncio.run(st._corroboration_sweep(pool))
+    assert pool.cleared == ["key_divergent:3"], \
+        "a venue-stamped row refutes the key-divergent trip too"
+    assert st.trips == {}
+
+
+def test_key_divergent_counter_counts_stamp_winners_only(st):
+    """r43 (minor): the kd counter bumped per judgment PASS — a
+    transient stamp error re-judged the row and durably double-
+    counted one twin. It now counts stamp winners, the round-8 law."""
+    _arm(st)
+    pool = _SweepPool([_srow(3, False, suspect_at=None)])
+    pool.key_twin = {"id": 99, "dedupe_key": "other"}
+    asyncio.run(st._corroboration_sweep(pool))
+    assert st.deltas.get("s1.key_divergent") == 1
+    assert st.deltas.get("s1.uncorroborated") is None, \
+        "a kd row never double-counts as plain uncorroborated"

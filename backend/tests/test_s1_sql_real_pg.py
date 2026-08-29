@@ -210,7 +210,8 @@ def test_every_state_statement_prepares_and_executes():
             det = rows[0]["detected_at"]
             fill_epoch = rows[0]["ts"].timestamp()
             args = (det, "0xw", fill_epoch - s1.RECON_TS_MARGIN_S,
-                    float(s1.RECON_VENUE_LAG_S), fill_epoch)
+                    float(s1.RECON_VENUE_LAG_S), fill_epoch,
+                    fill_epoch + s1.RECON_VENUE_LAG_S)
             row = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
             assert int(row["n"]) == 0, "no run recorded -> defer"
             # round 8: complete=true with no reached-timestamp is a
@@ -458,7 +459,8 @@ def test_round11_dirty_coverage_and_the_tombstone_clock():
                                  wid, "salt"))[0]
             args = (row["detected_at"], "0xw",
                     row["ts"].timestamp() - s1.RECON_TS_MARGIN_S,
-                    float(s1.RECON_VENUE_LAG_S), row["ts"].timestamp())
+                    float(s1.RECON_VENUE_LAG_S), row["ts"].timestamp(),
+                    row["ts"].timestamp() + s1.RECON_VENUE_LAG_S)
 
             def cov(dirty, seat=700):
                 # seats clear detection + RECON_VENUE_LAG_S (round 42:

@@ -105,6 +105,8 @@ SUSPECT_HOLD_S = 3 * 3600.0         # r42: >= 3 further hourly walks
 SUSPECT_BURST_WALLETS = 3           # r42: a feed degradation is per-
                                     # wallet; a wrong decode is
                                     # wallet-agnostic
+SUSPECT_BURST_WINDOW_S = 6 * 3600.0  # r43: burst evidence must be
+                                     # contemporaneous, never debris
 FLUSH_EVERY_S = 60.0
 CERT_EVERY_S = 60.0
 CERT_WINDOW_S = 7 * 86400.0
@@ -216,22 +218,40 @@ SELECT EXISTS (
     AND detected_at > $2::timestamptz + make_interval(secs => $3)
     AND ts > $4::timestamptz) AS live
 """
-SQL_SUSPECT_WALLETS = ("SELECT count(DISTINCT whale_id) FROM trades "
-                       "WHERE source = 's1' AND s1_checked_at IS NULL "
-                       "AND venue_seen_at IS NULL "
-                       "AND s1_suspect_at IS NOT NULL")
+# r43 (major x2): the census was unpruned and roster-blind — three
+# zombie suspects on banned/departed whales (whose rows SQL_SWEEP_
+# WALLETS can never re-judge) armed the bypass FOREVER, converting
+# the next single-wallet suspect into an instant false sticky trip.
+# The burst premise is a CONTEMPORANEOUS wallet-agnostic decode bug:
+# the census now counts only live-roster wallets with suspects
+# younger than the window.
+SQL_SUSPECT_WALLETS = (
+    "SELECT count(DISTINCT t.whale_id) FROM trades t "
+    "JOIN whales w ON w.id = t.whale_id "
+    "WHERE t.source = 's1' AND t.s1_checked_at IS NULL "
+    "AND t.venue_seen_at IS NULL AND t.s1_suspect_at IS NOT NULL "
+    "AND t.s1_suspect_at > now() - make_interval(secs => $1) "
+    "AND w.active AND NOT w.banned")
 # R2 (round 42, prove-first): the venue's OWN row for the identical
 # (whale, tx, asset) under a DIFFERENT dedupe key is not venue
 # silence — it is a C6 key-fidelity failure and a C4-class duplicate
 # already sitting in the table the executor reads. Immediate sticky,
 # correctly named; venue_seen_at can never stamp across a key
 # mismatch, so no hold and no healer applies.
+# r43 (major): the twin test fired on the design's OWN same-tx
+# same-asset second leg (r13/r14: S1 emits leg 1, the poller carries
+# leg 2 — different price/size, hence a different key, and BOTH
+# correct). The R2 class this alarm exists for is an IDENTICAL fill
+# whose key shifted on ts drift alone — so the twin must match the
+# row's economics exactly; a different-priced or different-sized
+# sibling is a second fill, not a duplicate.
 SQL_KEY_TWIN = (
     "SELECT v.id, v.dedupe_key FROM trades v "
     "JOIN trades s ON s.id = $1 "
     "WHERE v.id <> s.id AND v.whale_id = s.whale_id "
     "AND v.source = 'poll' AND lower(v.tx_hash) = lower(s.tx_hash) "
-    "AND v.asset = s.asset AND v.dedupe_key <> s.dedupe_key LIMIT 1")
+    "AND v.asset = s.asset AND v.size = s.size "
+    "AND v.price = s.price AND v.dedupe_key <> s.dedupe_key LIMIT 1")
 # The verdict is conditional on the backstop having actually had its
 # chance AT THIS FILL (fleet rounds 5+6). Round 5 required the wallet
 # present as a success key and absent as a failure key; round 6 proved
@@ -349,9 +369,7 @@ SELECT count(DISTINCT q.nv) AS n FROM (
     AND (CASE WHEN jsonb_typeof(
                 details->'per_wallet'->('cov:' || $2)->'newest') = 'number'
               THEN (details->'per_wallet'->('cov:' || $2)->>'newest')::float8
-              ELSE '-Infinity'::float8 END)
-        >= extract(epoch from ($1::timestamptz
-                               + make_interval(secs => $4)))::float8
+              ELSE '-Infinity'::float8 END) >= $6
     AND (CASE
           WHEN NOT (COALESCE(details->'per_wallet'->('cov:' || $2),
                              '{}'::jsonb) ? 'dirty') THEN true
@@ -1762,10 +1780,15 @@ class S1Emitter:
             ts_epoch = (ts.timestamp() if hasattr(ts, "timestamp")
                         else float(ts or 0))
             try:
+                det = r["detected_at"]
+                det_epoch = (det.timestamp()
+                             if hasattr(det, "timestamp")
+                             else float(det or 0))
                 ran = await pool.fetchrow(
                     SQL_RECON_SINCE, r["detected_at"], address,
                     ts_epoch - RECON_TS_MARGIN_S,
-                    float(RECON_VENUE_LAG_S), ts_epoch, timeout=6)
+                    float(RECON_VENUE_LAG_S), ts_epoch,
+                    det_epoch + RECON_VENUE_LAG_S, timeout=6)
             except Exception:  # noqa: BLE001
                 self.bump("s1.errors")
                 return
@@ -1833,10 +1856,19 @@ class S1Emitter:
                     # the suspicion was recorded (the venue lag was
                     # already paid against detected_at)
                     try:
+                        # r43 (major): the r42 indexing-time floor
+                        # rode $1/$4 and this call inherited
+                        # newest >= suspect_at — a phantom whose
+                        # wallet went quiet AFTER qualification could
+                        # never re-cover and the promised alarm was
+                        # silenced forever. The floor is explicit
+                        # now: this recheck asks only for one clean
+                        # covering run RECORDED after the suspicion
+                        # that still spans the fill.
                         ran2 = await pool.fetchrow(
                             SQL_RECON_SINCE, sa, address,
                             ts_epoch - RECON_TS_MARGIN_S, 0.0,
-                            ts_epoch, timeout=6)
+                            ts_epoch, ts_epoch, timeout=6)
                     except Exception:  # noqa: BLE001
                         self.bump("s1.errors")
                         return
@@ -1907,8 +1939,6 @@ class S1Emitter:
         for r in judged:
             reason = (("key_divergent:%s" if r.get("_key_divergent")
                        else "uncorroborated:%s") % r["id"])
-            if r.get("_key_divergent"):
-                self.bump("s1.key_divergent")
             self._trip(reason)
             out = await self._persist_trip(pool, reason)
             if out == "refused":
@@ -2001,7 +2031,15 @@ class S1Emitter:
         self.bump("s1.confirmed",
                   len([i for i in confirmed_ids if i in won]))
         self.bump("s1.uncorroborated",
-                  len([r for r in ok_judged if r["id"] in judged_won]))
+                  len([r for r in ok_judged if r["id"] in judged_won
+                       and not r.get("_key_divergent")]))
+        # r43 (minor): the kd counter bumped per judgment PASS — one
+        # transient stamp error re-judged the row and durably double-
+        # counted one twin. Stamp winners are the transition, exactly
+        # like s1.uncorroborated one line up (the round-8 law).
+        self.bump("s1.key_divergent",
+                  len([r for r in ok_judged if r["id"] in judged_won
+                       and r.get("_key_divergent")]))
 
     async def _heal_corroborated_trips(self, pool: Any) -> None:
         """Release any 'uncorroborated:<id>' trip whose row the venue
@@ -2015,7 +2053,14 @@ class S1Emitter:
         windows, foreign trips adopted from other processes — heals
         the moment the evidence says the alarm's premise is false."""
         for reason in [k for k in self.trips
-                       if k.startswith("uncorroborated:")]:
+                       if k.startswith(("uncorroborated:",
+                                        "key_divergent:"))]:
+            # r43: key_divergent heals too — its premise ("venue_seen_
+            # at can never stamp across a key mismatch") was falsified
+            # executed: the straggling IDENTICAL-key venue row lands
+            # later and stamps the s1 row through the pipeline
+            # conflict branch, refuting the trip. venue_seen_at is
+            # the shared release evidence for both reasons.
             try:
                 rid = int(reason.split(":", 1)[1])
             except (TypeError, ValueError):
@@ -2053,7 +2098,8 @@ class S1Emitter:
         # per sweep — a failed probe never ARMS the bypass, it defers
         try:
             self._suspect_wallets = int(await pool.fetchval(
-                SQL_SUSPECT_WALLETS, timeout=6) or 0)
+                SQL_SUSPECT_WALLETS, float(SUSPECT_BURST_WINDOW_S),
+                timeout=6) or 0)
         except Exception:  # noqa: BLE001
             self._suspect_wallets = 0
         # per-sweep rotation salt (round 7): every wallet and row gets
