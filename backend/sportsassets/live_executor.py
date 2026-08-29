@@ -2266,17 +2266,33 @@ def _tol_overrides() -> dict[str, float]:
     return out
 
 
+# CODE-DEFAULT TOLERANCE REFUSALS (revenue audit 2026-08-29): whales
+# whose TOLA marginal cohort — the fills that exist ONLY because of the
+# tolerance — has graded materially negative. 0x076daa87: n=15 settled
+# 13, staked $904.01, roi -0.7498, pnl -$653.17 (probe 19:44Z), twice
+# corroborated (FVM filled -0.3462 vs missed -0.0551 — we fill his
+# WORST trades; EDGE at_his negative at his own prices). A code default
+# rather than an env note so it deploys with the decision attached; an
+# EXPLICIT env override for the same whale still wins — re-enabling is
+# an operator decision the code must not overrule.
+_TOL_ZERO_DEFAULT = frozenset({"0x076daa87"})
+
+
 def tol_cents_for(whale_username: str | None) -> float:
     """Capture tolerance in cents for this whale, clamped to the ceiling.
 
-    Precedence: explicit per-whale override, then RN1's own long-standing
-    env var (kept so an operator's existing PMUS_RN1_TOL_CENTS keeps
-    meaning what it meant), then the global default.
+    Precedence: explicit per-whale override, then the code-default
+    refusal set (audit-graded negative marginal cohorts), then RN1's own
+    long-standing env var (kept so an operator's existing
+    PMUS_RN1_TOL_CENTS keeps meaning what it meant), then the global
+    default.
     """
     name = (whale_username or "").lower()
     over = _tol_overrides()
     if name in over:
         cents = over[name]
+    elif name in _TOL_ZERO_DEFAULT:
+        cents = 0.0
     elif name == "rn1":
         cents = RN1_TOL_CENTS
     else:
@@ -2293,13 +2309,23 @@ def copy_limit_price(whale_username: str | None, his_price: float,
     and that stays true under Option A. The tolerance exists to capture
     a signal the market is moving with; paying over a days-old entry
     price is adverse selection wearing the same clothes.
+
+    RELATIVE CAP (revenue audit 2026-08-29, tightening only): absolute
+    cents are a huge fraction of a longshot's price — +3c on a 10c book
+    is +30% of stake, the exact drag shape PROOF2WORST keeps printing
+    (rn1 his=0.10 ours=0.13). Whatever cents the maps grant is bounded
+    at 15% of his price, floored at one venue tick so a granted
+    tolerance is never rounded to nothing. No change above ~20c;
+    strictly tighter below.
     """
     import math
 
     limit = math.floor(round(his_price * 100, 6)) / 100.0
     cents = tol_cents_for(whale_username) if fresh else 0.0
     if cents > 0:
-        limit = min(0.99, round(limit + cents / 100.0, 2))
+        rel_cap = max(0.01, math.floor(15.0 * his_price) / 100.0)
+        extra = min(cents / 100.0, rel_cap)
+        limit = min(0.99, round(limit + extra, 2))
     return limit
 
 

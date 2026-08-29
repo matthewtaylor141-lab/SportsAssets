@@ -315,3 +315,57 @@ class TestProbeAuthorization:
         monkeypatch.setattr(le, "LIVE_MAX_CLIP_USD", 500.0)
         assert le.per_fill_usd("0x076daa87") == 250.00, \
             "raising the ceiling alone must not raise the clip"
+
+
+class TestRelativeToleranceCap:
+    """Revenue audit 2026-08-29, tightening only: whatever cents the
+    maps grant is bounded at 15% of his price (one-tick floor). +3c on
+    a 10c book was +30% of stake — the PROOF2WORST drag shape."""
+
+    def test_no_change_on_normal_books(self):
+        from sportsassets.live_executor import (copy_limit_price,
+                                                tol_cents_for)
+
+        c = tol_cents_for("swisstony") / 100.0
+        assert copy_limit_price("swisstony", 0.474) == round(0.47 + c, 2)
+
+    def test_longshots_are_capped(self, monkeypatch):
+        from sportsassets import live_executor as le
+
+        monkeypatch.setenv("PMUS_COPY_TOL_BY_WHALE", "hot:3")
+        # 10c book: 15% cap = 1c < 3c granted
+        assert le.copy_limit_price("hot", 0.10) == 0.11
+        # 20c book: cap = 3c = grant — exact boundary
+        assert le.copy_limit_price("hot", 0.20) == 0.23
+
+    def test_the_tick_floor_keeps_a_grant_alive(self, monkeypatch):
+        from sportsassets import live_executor as le
+
+        monkeypatch.setenv("PMUS_COPY_TOL_BY_WHALE", "hot:3")
+        # 3c book: 15% would be 0.45c; the floor keeps one whole tick
+        assert le.copy_limit_price("hot", 0.03) == 0.04
+
+
+class TestCodeDefaultToleranceRefusals:
+    """0x076daa87's marginal (tolerance-bought) cohort graded
+    -74.98% ROI (-$653.17 on $904 staked, probe 2026-08-29 19:44Z) —
+    the code now refuses tolerance on him by default. An explicit env
+    override still wins: re-enabling is an operator decision."""
+
+    def test_0x076daa87_pays_no_tolerance_by_default(self):
+        from sportsassets.live_executor import (copy_limit_price,
+                                                tol_cents_for)
+
+        assert tol_cents_for("0x076daa87") == 0.0
+        assert copy_limit_price("0x076daa87", 0.474) == 0.47
+
+    def test_an_explicit_env_override_still_wins(self, monkeypatch):
+        from sportsassets import live_executor as le
+
+        monkeypatch.setenv("PMUS_COPY_TOL_BY_WHALE", "0x076daa87:1")
+        assert le.tol_cents_for("0x076daa87") == 1.0
+
+    def test_other_whales_keep_the_global_default(self):
+        from sportsassets.live_executor import tol_cents_for
+
+        assert tol_cents_for("homerunhazard") > 0
