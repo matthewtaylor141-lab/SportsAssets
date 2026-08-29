@@ -1470,23 +1470,39 @@ async def refresh_whale_overrides(pool) -> None:
     now = time.time()
     if now - _roster_read_at < _ROSTER_TTL_S:
         return
-    try:
-        raw = await pool.fetchval(
-            "SELECT value FROM ingestion_state WHERE key=$1",
-            _ROSTER_DB_KEY)
-        _roster_read_at = now
-        if raw is None:
-            _roster_override = None
+    # Two attempts per refresh (fleet round 49: a fresh worker whose
+    # FIRST read hit a dead pooled connection fell to the env/default
+    # roster in total silence — 'keep last adopted' is vacuous before
+    # anything was adopted, and one retry usually lands on a healthy
+    # connection). Still-failing reads are LOGGED, loudest when nothing
+    # was ever adopted, so a fallback can never hide again.
+    for attempt in (1, 2):
+        try:
+            raw = await pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1",
+                _ROSTER_DB_KEY)
+            _roster_read_at = now
+            if raw is None:
+                _roster_override = None
+                return
+            val = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(val, str):
+                val = [w for w in val.split(",")]
+            if isinstance(val, list):
+                _roster_override = {str(w).strip().lower()
+                                    for w in val if str(w).strip()}
+            # any other shape: keep last known — never guess a roster
             return
-        val = json.loads(raw) if isinstance(raw, str) else raw
-        if isinstance(val, str):
-            val = [w for w in val.split(",")]
-        if isinstance(val, list):
-            _roster_override = {str(w).strip().lower()
-                                for w in val if str(w).strip()}
-        # any other shape: keep last known — never guess a roster
-    except Exception:  # noqa: BLE001 — keep last known
-        pass
+        except Exception:  # noqa: BLE001 — retry once, then keep last
+            if attempt == 2:
+                if _roster_override is None and _roster_read_at == 0.0:
+                    log.error(
+                        "roster override UNREAD at boot — money paths "
+                        "are running on the ENV/DEFAULT roster until a "
+                        "read succeeds")
+                else:
+                    log.warning("roster override read failed; keeping "
+                                "the last adopted set")
 
 
 def _whale_set(env_name: str) -> set[str]:
@@ -4004,12 +4020,21 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                 sole_leg = False
                 my_sh = 0.0
                 try:
+                    # CURRENT EXPOSURE ONLY (fleet round 49, HIGH): the
+                    # first cut matched any ever-filled row, so one
+                    # terminal cashed_out/settled row disarmed this
+                    # tripwire on that market for the life of the
+                    # ledger — every re-entered market ran uncovered.
+                    # A leg confounds the net only while it still HOLDS
+                    # something; terminal rows hold nothing.
                     other = await pool.fetchval(
                         "SELECT 1 FROM live_orders "
                         "WHERE lower(us_market_slug) = lower($1) "
                         "AND id <> $2 "
+                        "AND status IN ('submitting', 'open', 'filled') "
                         "AND (coalesce(filled_shares, 0) > 0 "
-                        "     OR coalesce(filled_usd, 0) > 0) "
+                        "     OR coalesce(filled_usd, 0) > 0 "
+                        "     OR status = 'submitting') "
                         "LIMIT 1", us_slug, row_id)
                     mine = await pool.fetchval(
                         "SELECT filled_shares::float8 FROM live_orders "
@@ -4018,7 +4043,16 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                     sole_leg = other is None and my_sh > 0
                 except Exception:  # noqa: BLE001 — unknown attribution
                     sole_leg = False        # is not attribution
-                if sole_leg and abs(net) <= my_sh * 1.05 + 1:
+                # TWO-SIDED BOUND (fleet round 49): |net| must MATCH our
+                # fill, not merely not exceed it. The one-sided form let
+                # any off-book leg smaller than ~2x our fill flip or
+                # shrink the net inside the bound — a hidden 150-sh
+                # short against our 100-sh long read net=-50 as
+                # "POSITION SIDE WRONG" and re-armed the total
+                # quarantine falsely. A net that deviates from our own
+                # fill in EITHER direction is evidence of legs we
+                # cannot see, and abstention is the only honest read.
+                if sole_leg and abs(abs(net) - my_sh) <= my_sh * 0.05 + 1:
                     want_long = intent == "ORDER_INTENT_BUY_LONG"
                     got_long = net > 0
                     if want_long != got_long:

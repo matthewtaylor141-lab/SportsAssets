@@ -195,3 +195,22 @@ def test_other_env_sets_are_untouched_by_the_override(monkeypatch):
     assert le._whale_set("LIVE_PREMAP_WHALES") == {"homerunhazard"}, \
         "the DB override applies to LIVE_VERIFIED_WHALES only"
     _fresh_roster_state()
+
+
+def test_boot_read_failure_falls_to_env_and_screams(monkeypatch, caplog):
+    """Fleet round 49: a fresh worker whose first roster read failed
+    fell to the env/default in total silence while GATES (a different
+    process) reported 'db'. The fallback itself is unavoidable — a
+    roster we cannot read is not a roster — but it must be LOGGED at
+    error level and retried, and the TTL must stay unset so the very
+    next event retries the read."""
+    import logging
+
+    _fresh_roster_state()
+    with caplog.at_level(logging.ERROR, logger="sportsassets.live_executor"):
+        asyncio.run(le.refresh_whale_overrides(_RosterPool(boom=True)))
+    assert le._roster_override is None
+    assert le._roster_read_at == 0.0, "failure must not start the TTL"
+    assert any("UNREAD at boot" in r.message for r in caplog.records), \
+        "the boot fallback must be visible in the logs"
+    _fresh_roster_state()

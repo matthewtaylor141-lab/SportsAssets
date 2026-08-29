@@ -506,6 +506,21 @@ class TestOwnerOverrideArm:
         asyncio.run(st._check_cert(pool2, later))
         assert st.armed is True
 
+    def test_db_off_beats_the_env_on(self, st, monkeypatch):
+        """Fleet round 49 (HIGH): `bool(db) or env` meant the admin OFF
+        endpoint replied ok:true while the env kept the emitter armed
+        forever. The DB value now rules in BOTH directions when
+        present; the env only seeds boot / no-row state."""
+        now = time.time()
+        monkeypatch.setenv("S1_ARM_OVERRIDE", "on")
+        st.arm_override = True          # env-seeded boot state
+        pool = _Pool(stored=json.dumps({"window_start": now - 60}))
+        pool.override_stored = json.dumps(False)     # owner said OFF
+        asyncio.run(st._check_cert(pool, now))
+        assert st.arm_override is False, "the DB off must win"
+        assert st.armed is False, \
+            "window young + override off = certified regime disarms"
+
     def test_switch_off_returns_to_the_certified_regime(self, st):
         now = time.time()
         pool = _Pool(stored=json.dumps({"window_start": now - 60}))

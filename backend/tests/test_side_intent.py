@@ -390,6 +390,44 @@ class TestNetSignIsOnlyEvidenceWhenAttributable:
         assert "POSITION SIDE WRONG" in st["last_detail"]
         assert any("side_echo_tripped" in sql for sql, _ in pool.executes)
 
+    def test_a_terminal_row_does_not_silence_the_check(self, monkeypatch):
+        """Fleet round 49 (HIGH): the first cut matched any ever-filled
+        row, so one cashed_out/settled row disarmed the tripwire on
+        that market for the life of the ledger. Current-exposure
+        statuses only: a terminal row holds nothing and must not count
+        as a leg — the sole-leg wrong-sign trip still fires."""
+        class _TerminalPool(_EchoPool):
+            async def fetchval(self, sql, *a, timeout=None):
+                s = " ".join(sql.split())
+                if s.startswith("SELECT 1 FROM live_orders"):
+                    assert "status IN ('submitting', 'open', 'filled')" \
+                        in s, "the other-leg probe must key on CURRENT exposure"
+                    return None       # the cashed_out row no longer matches
+                if s.startswith("SELECT filled_shares"):
+                    return 50.0
+                return None
+
+        pool = self._run(monkeypatch, "ORDER_INTENT_BUY_LONG", -50.0,
+                         pool=_TerminalPool())
+        st = _echo_state(pool, "side_echo_last")
+        assert st["mismatch"] == 1, \
+            "a re-entered market must still be covered by the tripwire"
+
+    def test_partial_hidden_leg_abstains_instead_of_false_tripping(
+            self, monkeypatch):
+        """Fleet round 49: the one-sided bound let a hidden 150-share
+        off-book short against our 100-share long read net=-50 as
+        POSITION SIDE WRONG — a false total-quarantine trip. |net| must
+        MATCH our fill; a material deviation in EITHER direction is
+        evidence of legs we cannot see, and abstains."""
+        pool = self._run(monkeypatch, "ORDER_INTENT_BUY_LONG", -50.0,
+                         pool=_EchoPool(my_shares=100.0))
+        st = _echo_state(pool, "side_echo_last")
+        assert st["mismatch"] == 0
+        assert "abstained" in st["last_detail"]
+        assert not any("side_echo_tripped" in sql
+                       for sql, _ in pool.executes)
+
     def test_sign_agreement_under_confound_is_not_certification(
             self, monkeypatch):
         # net agreeing with our intent by luck (two legs cancelling)

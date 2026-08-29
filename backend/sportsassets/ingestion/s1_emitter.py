@@ -1257,18 +1257,20 @@ class S1Emitter:
             return
         green, reason = self._judge_cert(doc, now)
         self.cert_green, self.cert_reason = green, reason
-        # Owner-override switch, read fresh each sweep. Env keeps the
-        # boot value ON regardless of DB (an operator who set the env
-        # made the same decision); a read failure keeps the last known
-        # state — transient blips must not flap a live arm.
+        # Owner-override switch, read fresh each sweep. THE DB VALUE IS
+        # AUTHORITATIVE IN BOTH DIRECTIONS when present (fleet round
+        # 49, HIGH: `bool(ovv) or env` meant the admin OFF endpoint
+        # replied ok:true while the env kept the emitter armed forever
+        # — an owner kill switch that silently loses is worse than no
+        # switch). The env seeds the boot value and is the fallback
+        # ONLY while no DB row exists; a read failure keeps the last
+        # known state — transient blips must not flap a live arm.
         try:
             ov = await pool.fetchval(SQL_READ, "s1_arm_override",
                                      timeout=6)
             if ov is not None:
                 ovv = json.loads(ov) if isinstance(ov, str) else ov
-                self.arm_override = bool(ovv) or (
-                    os.getenv("S1_ARM_OVERRIDE", "").lower()
-                    in ("on", "1", "true"))
+                self.arm_override = bool(ovv)
         except Exception:  # noqa: BLE001 — keep last known
             self.bump("s1.errors")
         pend = getattr(self, "_pending_arm_at", None)
