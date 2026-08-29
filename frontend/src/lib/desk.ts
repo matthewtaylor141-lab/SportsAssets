@@ -1,4 +1,4 @@
-import { api } from './api'
+import { API_BASE, api } from './api'
 
 // Desk session (owner order 2026-08-22): the team unlocks the desk with
 // the shared desk password — POST /api/desk/unlock mints a 12h token —
@@ -120,4 +120,30 @@ export function deskApi<T>(path: string, init?: RequestInit): Promise<T> {
     if (/HTTP 401/.test((e as { message?: string })?.message || '')) deskRelock()
     throw e
   })
+}
+
+
+/** Download a desk-authenticated file (branded PDF reports): fetch
+ * with the session headers, hand the blob to the browser. */
+export async function deskDownload(path: string, filename: string): Promise<void> {
+  const dtok = deskToken()
+  const atok = deskAdminToken()
+  if (!dtok && !atok) {
+    deskRelock()
+    throw new Error('desk session expired')
+  }
+  const headers: Record<string, string> = {}
+  if (dtok) headers['X-Desk-Token'] = dtok
+  if (atok) headers['X-Admin-Token'] = atok
+  const r = await fetch(`${API_BASE}${path}`, { headers })
+  if (!r.ok) throw new Error(`HTTP ${r.status}`)
+  const blob = await r.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 4000)
 }

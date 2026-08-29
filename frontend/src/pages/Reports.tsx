@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import {
+import { deskDownload,
   DESK_RELOCK_EVENT, deskAdminToken, deskApi, deskAuthed, deskToken,
   deskUnlock,
 } from '../lib/desk'
@@ -197,6 +197,20 @@ export default function Reports() {
           ))}
         </div>
         <div className="rpt-dl">
+          <button className="rpt-pdf" onClick={() => {
+            const d = new Date().toISOString().slice(0, 10)
+            deskDownload(`/api/admin/reports/master.pdf?period=${period}`,
+              `bettor-token-master-report-${d}.pdf`).catch(() => {})
+          }}>
+            ⬇ MASTER REPORT · PDF
+          </button>
+          <button className="rpt-pdf rpt-pdf-k" onClick={() => {
+            const d = new Date().toISOString().slice(0, 10)
+            deskDownload('/api/admin/reports/kalshi-manual.pdf',
+              `bettor-token-kalshi-manual-${d}.pdf`).catch(() => {})
+          }}>
+            ⬇ KALSHI MANUAL · PDF
+          </button>
           <a role="button" tabIndex={0} onClick={() => download('report')}
             onKeyDown={(e) => e.key === 'Enter' && download('report')}>
             ⬇ Report CSV

@@ -3,6 +3,7 @@ import { Quote } from '../components/Quote'
 import { Lamp } from '../components/Lamp'
 import { BrandLockup, BrandMark } from '../components/Brand'
 import { HexField } from '../components/HexField'
+import { HoloTerrain } from '../components/HoloTerrain'
 import { useLiveFeed } from '../lib/sse'
 import { EmptyState } from '../components/EmptyState'
 import { PnlCalendar } from '../components/PnlCalendar'
@@ -259,8 +260,24 @@ function WhalesCard({ c }: { c: CopiesRecord }) {
       </div>
       <div className="v13-whales">
         {c.by_whale.map((w, i) => (
-          <div key={w.whale} className="v13-wcard"
-            style={{ ['--wc' as string]: CAT_COLORS[i % CAT_COLORS.length] }}>
+          <div key={w.whale} className="v13-wcard v14-holo"
+            style={{ ['--wc' as string]: CAT_COLORS[i % CAT_COLORS.length] }}
+            onPointerMove={(e) => {
+              const el = e.currentTarget
+              const r = el.getBoundingClientRect()
+              const px = (e.clientX - r.left) / r.width
+              const py = (e.clientY - r.top) / r.height
+              el.style.setProperty('--rx', `${((0.5 - py) * 10).toFixed(2)}deg`)
+              el.style.setProperty('--ry', `${((px - 0.5) * 12).toFixed(2)}deg`)
+              el.style.setProperty('--mx', `${(px * 100).toFixed(1)}%`)
+              el.style.setProperty('--my', `${(py * 100).toFixed(1)}%`)
+            }}
+            onPointerLeave={(e) => {
+              const el = e.currentTarget
+              el.style.setProperty('--rx', '0deg')
+              el.style.setProperty('--ry', '0deg')
+            }}>
+            <span className="v14-rank" aria-label={`rank ${i + 1}`}>#{i + 1}</span>
             {awake.has(w.whale.toLowerCase()) && (
               <span className="v13-wlamp">
                 <Lamp mode="breathe" color={CAT_COLORS[i % CAT_COLORS.length]} label="LIVE" />
@@ -542,6 +559,15 @@ export function TrackRecord() {
         )}
 
         <EquityCurve daily={chrono.map((d) => ({ date: d.day, pnl: d.pnl }))} />
+      </div>
+
+      <div className="card nd-reticle v14-terrain-card">
+        <div className="card-title">P&amp;L TERRAIN · THE DAILY LEDGER IN RELIEF
+          <span style={{ marginLeft: 'auto', fontSize: 10 }} className="muted mono">
+            green rises · red sinks · live scan
+          </span>
+        </div>
+        <HoloTerrain days={chrono.map((d) => ({ date: d.day, pnl: d.pnl }))} />
       </div>
 
       <LiveToday />

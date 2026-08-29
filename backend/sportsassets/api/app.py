@@ -15,7 +15,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import roster as roster_svc
@@ -7632,6 +7632,61 @@ async def api_copy_reports(period: str = Query("monthly"),
                      f"attachment; filename=copy-report-{period}.csv"})
     rep["filters"] = {"whale": whale, "since": since, "until": until}
     return rep
+
+
+@app.get("/api/admin/reports/master.pdf", dependencies=[Depends(require_desk)])
+async def api_master_report_pdf(period: str = Query("monthly"),
+                                since: str | None = Query(None),
+                                until: str | None = Query(None)) -> Response:
+    """The master whale-performance report as a branded PDF (owner
+    order 2026-08-28: downloadable directly on the app). Same ledger,
+    same aggregation as the JSON report — print is a view, never a
+    second source of numbers."""
+    from . import copy_reports as cr
+    from .report_pdf import master_report_pdf
+
+    if period not in cr.PERIODS:
+        raise HTTPException(400, f"period must be one of {cr.PERIODS}")
+    pool = await get_pool()
+    raw = await cr.fetch_ledger(pool)
+    rows = cr.ledger_rows(raw, since=_parse_day(since, "") if since else "",
+                          until=_parse_day(until, "") if until else "")
+    rep = cr.report(rows, period=period)
+    label = (f"window {since or 'epoch start'} → {until or 'today'}"
+             f" · period {period}")
+    pdf = await asyncio.to_thread(master_report_pdf, rep, rows, label)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return Response(content=pdf, media_type="application/pdf", headers={
+        "Content-Disposition":
+            f"attachment; filename=bettor-token-master-report-{stamp}.pdf"})
+
+
+@app.get("/api/admin/reports/kalshi-manual.pdf",
+         dependencies=[Depends(require_desk)])
+async def api_kalshi_manual_pdf() -> Response:
+    """The desk team's manual Kalshi tickets as a branded PDF."""
+    from .report_pdf import kalshi_manual_pdf
+
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT lo.placed_at, lo.us_market_slug, lo.asset, lo.side,
+               lo.limit_price, lo.fill_price, lo.filled_shares,
+               lo.filled_usd, lo.status, lo.pnl,
+               m.title AS market_title
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.whale_username = 'manual' AND lo.venue LIKE 'kalshi%'
+        ORDER BY lo.placed_at DESC
+        LIMIT 500
+        """)
+    pdf = await asyncio.to_thread(
+        kalshi_manual_pdf, [dict(r) for r in rows])
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return Response(content=pdf, media_type="application/pdf", headers={
+        "Content-Disposition":
+            f"attachment; filename=bettor-token-kalshi-manual-{stamp}.pdf"})
 
 
 @app.get("/api/admin/copy-ledger", dependencies=[Depends(require_desk)])

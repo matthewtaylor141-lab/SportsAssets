@@ -2613,3 +2613,101 @@ table.data td { border-bottom-color: rgba(122, 162, 255, 0.07); }
   .tr-hero::after { animation: none; }
   .v13-wcard:hover, .cal-cell:hover { transform: none; }
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   V14 — HOLO (owner: further, more extreme; gamified; 3d/holographic
+   charts; downloadable reports). Display register moves to Chakra
+   Petch (squared, technical — the hex brand's own geometry); whale
+   cards become holographic collectibles; the P&L terrain renders the
+   ledger in isometric relief; a perspective grid floor runs under
+   the hero chart. Money stays tabular mono. Data stays honest.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── display register: Chakra Petch ── */
+h1, .card > .card-title:first-child, .tr-ledger-head .card-title,
+.v13-wname, .tr-name, .nd-palette input {
+  font-family: 'Chakra Petch', 'Space Grotesk', 'Inter', sans-serif !important;
+}
+h1 { letter-spacing: 0.1em; }
+.card > .card-title:first-child, .tr-ledger-head .card-title {
+  font-size: 15.5px; letter-spacing: 0.07em;
+}
+
+/* ── the perspective floor under the hero chart ── */
+.tr-curve::before {
+  content: ''; position: absolute; left: -8%; right: -8%; bottom: -2px;
+  height: 68%; pointer-events: none; z-index: 0;
+  background:
+    repeating-linear-gradient(90deg, rgba(0, 102, 255, 0.13) 0 1px, transparent 1px 64px),
+    repeating-linear-gradient(0deg, rgba(0, 102, 255, 0.10) 0 1px, transparent 1px 34px);
+  transform: perspective(420px) rotateX(58deg);
+  transform-origin: 50% 100%;
+  mask-image: linear-gradient(180deg, transparent, black 40%);
+  animation: v14-floor 14s linear infinite;
+}
+@keyframes v14-floor { to { background-position: 64px 0, 0 34px; } }
+.tr-curve svg { position: relative; z-index: 1; }
+
+/* ── the terrain card ── */
+.v14-terrain-card { overflow: hidden; }
+.nd-terrain { display: block; width: 100%; }
+
+/* ── holographic whale cards: tilt + foil + rank ── */
+.v13-whales { perspective: 900px; }
+.v14-holo {
+  transform: rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 220ms ease, box-shadow 220ms ease;
+  transform-style: preserve-3d;
+  will-change: transform;
+}
+.v14-holo::before {
+  content: ''; position: absolute; inset: 0; border-radius: 18px;
+  pointer-events: none; opacity: 0;
+  background:
+    radial-gradient(300px 220px at var(--mx, 50%) var(--my, 40%),
+      rgba(255, 255, 255, 0.16), transparent 55%),
+    conic-gradient(from 0deg at var(--mx, 50%) var(--my, 40%),
+      rgba(0, 102, 255, 0.16), rgba(77, 148, 255, 0.05),
+      rgba(163, 230, 53, 0.08), rgba(244, 114, 182, 0.08),
+      rgba(0, 102, 255, 0.16));
+  mix-blend-mode: screen;
+  transition: opacity 220ms ease;
+}
+.v14-holo:hover::before { opacity: 1; }
+.v14-holo:hover {
+  border-color: color-mix(in srgb, var(--wc, #0066ff) 55%, transparent);
+  box-shadow: 0 18px 48px rgba(1, 5, 18, 0.6),
+              0 0 34px color-mix(in srgb, var(--wc, #0066ff) 32%, transparent);
+}
+.v14-rank {
+  position: absolute; top: -9px; left: 14px;
+  font: 700 10.5px 'Chakra Petch', monospace; letter-spacing: 0.08em;
+  color: #04070f; padding: 3px 9px; border-radius: 999px;
+  background: linear-gradient(120deg, var(--wc, #0066ff), #8ab8ff);
+  box-shadow: 0 4px 14px rgba(0, 102, 255, 0.4);
+}
+
+/* ── report download pills ── */
+.rpt-pdf {
+  font: 600 11px 'Chakra Petch', var(--font-data); letter-spacing: 0.08em;
+  color: #fff; cursor: pointer; border: none; border-radius: 999px;
+  padding: 9px 16px;
+  background: linear-gradient(120deg, #0066ff, #3385ff 60%, #0059dd);
+  box-shadow: 0 8px 26px rgba(0, 102, 255, 0.35),
+              inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  transition: transform 160ms var(--ease-enter), box-shadow 160ms ease;
+}
+.rpt-pdf:hover { transform: translateY(-1px);
+  box-shadow: 0 12px 34px rgba(0, 102, 255, 0.5),
+              inset 0 1px 0 rgba(255, 255, 255, 0.3); }
+.rpt-pdf-k { background: linear-gradient(120deg, #0d9488, #21c9a8 60%, #0a7d70);
+  box-shadow: 0 8px 26px rgba(33, 201, 168, 0.3),
+              inset 0 1px 0 rgba(255, 255, 255, 0.25); }
+.rpt-pdf-k:hover { box-shadow: 0 12px 34px rgba(33, 201, 168, 0.45),
+              inset 0 1px 0 rgba(255, 255, 255, 0.3); }
+
+@media (prefers-reduced-motion: reduce) {
+  .tr-curve::before { animation: none; }
+  .v14-holo, .v14-holo:hover { transform: none; }
+}
