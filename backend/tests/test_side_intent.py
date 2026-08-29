@@ -257,10 +257,17 @@ class TestEchoIndependence:
 
 
 class _EchoPool:
-    """Records every ingestion_state write the echo makes."""
+    """Records every ingestion_state write the echo makes.
 
-    def __init__(self):
+    Attribution defaults (2026-08-28 incident fix): the order under
+    echo filled 50 shares and is the market's ONLY leg — the state in
+    which the position-sign check is allowed to speak. Tests set
+    other_leg/my_shares to model a confounded market."""
+
+    def __init__(self, other_leg=None, my_shares=50.0):
         self.executes = []
+        self.other_leg = other_leg
+        self.my_shares = my_shares
 
     async def fetchrow(self, sql, *a):
         if "FROM us_premap" in sql:
@@ -268,6 +275,11 @@ class _EchoPool:
         return None
 
     async def fetchval(self, sql, *a):
+        s = " ".join(sql.split())
+        if s.startswith("SELECT 1 FROM live_orders"):
+            return self.other_leg
+        if s.startswith("SELECT filled_shares"):
+            return self.my_shares
         return None
 
     async def execute(self, sql, *a):
@@ -288,7 +300,7 @@ class TestPositionSideVerification:
     END-TO-END proof that BUY_SHORT bought the short side is the sign
     of the position we end up holding."""
 
-    def _run(self, monkeypatch, intent, net):
+    def _run(self, monkeypatch, intent, net, pool=None):
         from sportsassets import live_executor as le
 
         slug = "aec-atp-martop-migdam-2026-08-24"
@@ -303,7 +315,7 @@ class TestPositionSideVerification:
                  "line": "", "kind": "side", "question": "q",
                  "intent": "ORDER_INTENT_BUY_LONG"}])
         monkeypatch.setattr(pmus, "resolve_market_exact", lambda c, o: None)
-        pool = _EchoPool()
+        pool = pool if pool is not None else _EchoPool()
         asyncio.run(le._side_echo_verify(
             pool, 101, slug, "Miguel Damas",
             "Marko Topo vs. Miguel Damas", intent=intent))
@@ -322,6 +334,72 @@ class TestPositionSideVerification:
     def test_unreadable_position_is_never_a_verdict(self, monkeypatch):
         pool = self._run(monkeypatch, "ORDER_INTENT_BUY_SHORT", None)
         assert _echo_state(pool, "side_echo_last")["mismatch"] == 0
+
+
+class TestNetSignIsOnlyEvidenceWhenAttributable:
+    """The 2026-08-28 11:08Z halt, pinned. position_side returns the
+    MARKET's net, and net sign is this order's side only when this
+    order is the market's only leg. On joeste-amamon the account had
+    sold 2,901 shares nine minutes earlier (whale-exit cash-out) and
+    carried a 1,586-share short leg; a correct BUY_LONG then read
+    net=-2869, the circuit tripped on our own exit's aftermath, and
+    every Polymarket copy was refused for a day. Absence of valid
+    evidence must read as abstention, never as a wrong-side verdict —
+    and a genuinely wrong sole-leg fill must still trip."""
+
+    _run = TestPositionSideVerification._run
+
+    def test_the_incident_replayed_does_not_trip(self, monkeypatch):
+        # our order filled ~32 shares; the venue net was -2869 —
+        # aftermath of a 2,901-share exit sell, not this order's side.
+        pool = self._run(monkeypatch, "ORDER_INTENT_BUY_LONG", -2869.0,
+                         pool=_EchoPool(my_shares=32.0))
+        st = _echo_state(pool, "side_echo_last")
+        assert st["mismatch"] == 0
+        assert "abstained" in st["last_detail"]
+        # and the un-overridable circuit was never written
+        assert not any("side_echo_tripped" in sql
+                       for sql, _ in pool.executes)
+
+    def test_another_filled_leg_silences_the_sign_check(self, monkeypatch):
+        # a short leg (or manual/exit row) on the same market: net
+        # blends both legs, so sign says nothing about THIS order.
+        pool = self._run(monkeypatch, "ORDER_INTENT_BUY_LONG", -50.0,
+                         pool=_EchoPool(other_leg=1))
+        assert _echo_state(pool, "side_echo_last")["mismatch"] == 0
+
+    def test_unknown_attribution_fails_toward_abstention(self, monkeypatch):
+        # DB unreadable for the leg query -> we cannot prove sole-leg,
+        # so no verdict — the echo's other checks still run.
+        class _Boom(_EchoPool):
+            async def fetchval(self, sql, *a):
+                if "live_orders" in sql:
+                    raise RuntimeError("db down")
+                return None
+
+        pool = self._run(monkeypatch, "ORDER_INTENT_BUY_LONG", -50.0,
+                         pool=_Boom())
+        assert _echo_state(pool, "side_echo_last")["mismatch"] == 0
+
+    def test_a_sole_leg_wrong_sign_still_trips(self, monkeypatch):
+        # the guard must not weaken the true-positive path: only leg,
+        # net within our own fill, wrong sign -> mismatch as before.
+        pool = self._run(monkeypatch, "ORDER_INTENT_BUY_LONG", -50.0)
+        st = _echo_state(pool, "side_echo_last")
+        assert st["mismatch"] == 1
+        assert "POSITION SIDE WRONG" in st["last_detail"]
+        assert any("side_echo_tripped" in sql for sql, _ in pool.executes)
+
+    def test_sign_agreement_under_confound_is_not_certification(
+            self, monkeypatch):
+        # net agreeing with our intent by luck (two legs cancelling)
+        # must not be what certifies: the board check may still say ok,
+        # but the verdict must never rest on the confounded sign.
+        pool = self._run(monkeypatch, "ORDER_INTENT_BUY_SHORT", -30.0,
+                         pool=_EchoPool(other_leg=1))
+        st = _echo_state(pool, "side_echo_last")
+        assert st["mismatch"] == 0
+        assert "position sign agrees" not in (st["last_detail"] or "")
 
 
 class TestAuditFindingsInMyOwnFix:

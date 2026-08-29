@@ -27,6 +27,10 @@ on:
         description: "Flip the premap-live resume lever (on/off; empty = leave alone). Owner-authorized resume path 2026-08-24."
         required: false
         default: ""
+      side_echo_reset:
+        description: "Type 'confirm' to clear the side-echo circuit AND lift the mapping quarantine (the full resume after an admin-reviewed trip; empty = leave alone). Owner-authorized 2026-08-29."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -57,6 +61,7 @@ jobs:
           # trips the 21,000-char expression cap — run #1026 failed to
           # parse exactly that way.
           PREMAP_LIVE_INPUT: ${{ inputs.premap_live }}
+          SIDE_ECHO_RESET_INPUT: ${{ inputs.side_echo_reset }}
         run: |
           BASE="${OVERRIDE:-$DEFAULT_BASE}"
           echo "API base: $BASE"
@@ -270,6 +275,25 @@ jobs:
             echo "  LEVER premap-live -> $PREMAP_LIVE_INPUT"
             curl -sS --max-time 30 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
               "$BASE/api/admin/premap-live/$PREMAP_LIVE_INPUT" \
+              | head -c 400 || echo "  LEVER call failed"
+            echo ""
+          fi
+          # ── SIDE-ECHO RESET LEVER (owner-authorized 2026-08-29, after
+          # the 2026-08-28 trip was reviewed and found to be a net-
+          # position confound of our own whale-exit sell): clears the
+          # un-overridable circuit and lifts the quarantine the trip
+          # re-armed. Requires the literal input 'confirm' — this is
+          # the human-eyes step the circuit's design demands, done as a
+          # fully audited dispatch, never an ambient default.
+          if [ "$SIDE_ECHO_RESET_INPUT" = "confirm" ]; then
+            echo "  LEVER side-echo-reset -> confirm"
+            curl -sS --max-time 30 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+              "$BASE/api/admin/side-echo-reset" \
+              | head -c 400 || echo "  LEVER call failed"
+            echo ""
+            echo "  LEVER quarantine -> off"
+            curl -sS --max-time 30 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+              "$BASE/api/admin/quarantine/off" \
               | head -c 400 || echo "  LEVER call failed"
             echo ""
           fi

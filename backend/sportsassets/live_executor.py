@@ -3928,27 +3928,71 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
     # intent, so the only end-to-end proof that BUY_SHORT bought the
     # short side is the resulting position's sign. Runs on real fills
     # only (a shadow row holds nothing).
+    #
+    # ATTRIBUTION GATE (incident 2026-08-28 11:08Z): position_side
+    # returns the MARKET's net, and net sign is this order's side only
+    # when this order is the market's only leg. On
+    # aec-itfwo-joeste-amamon-2026-08-28 the account had sold 2,901
+    # shares nine minutes earlier (whale-exit cash-out) and carried a
+    # separate 1,586-share short leg, so a correct BUY_LONG fill read
+    # net=-2869, tripped the circuit as "POSITION SIDE WRONG", and
+    # halted all copying for a day on evidence that was the aftermath
+    # of our own exit — the market settled flat. The sole mismatch in
+    # 451 verdicts, and it was a confound. Sign evidence now requires:
+    # (a) no OTHER filled live_orders leg on this market — exits,
+    # shorts, manual desk sells all write rows — and (b) |net| no
+    # larger than this order's own filled shares (a net the venue
+    # attributes mostly to shares we did not just buy proves other
+    # legs, including venue-app trades our DB never saw). When
+    # attribution fails the check abstains: no verdict either way, no
+    # short proof recorded — absence of valid evidence is not
+    # evidence. A genuine wrong-side fill on a clean market still
+    # trips exactly as before.
     if not shadow and intent:
         try:
             net = await asyncio.to_thread(pmus_mod.position_side, us_slug)
             if net is not None and net != 0:
-                want_long = intent == "ORDER_INTENT_BUY_LONG"
-                got_long = net > 0
-                if want_long != got_long:
-                    verdict = "mismatch"
-                    detail = (f"POSITION SIDE WRONG: sent {intent} but "
-                              f"hold netPosition={net}")
-                elif verdict == "unverified":
-                    verdict, detail = "ok", f"position sign agrees ({net})"
-                # THE SHORT CLASS EARNS ITS OWN PROOF HERE. This is the
-                # only place the venue's position sign is read against
-                # the intent we sent, so it is the only place a short
-                # can be certified. Recorded on real fills only — a
-                # shadow row holds nothing to check.
-                if is_short_intent(intent):
-                    await _record_short_proof(
-                        pool, ok=(verdict != "mismatch"), net=net,
-                        slug=us_slug)
+                sole_leg = False
+                my_sh = 0.0
+                try:
+                    other = await pool.fetchval(
+                        "SELECT 1 FROM live_orders "
+                        "WHERE lower(us_market_slug) = lower($1) "
+                        "AND id <> $2 "
+                        "AND (coalesce(filled_shares, 0) > 0 "
+                        "     OR coalesce(filled_usd, 0) > 0) "
+                        "LIMIT 1", us_slug, row_id)
+                    mine = await pool.fetchval(
+                        "SELECT filled_shares::float8 FROM live_orders "
+                        "WHERE id = $1", row_id)
+                    my_sh = float(mine or 0)
+                    sole_leg = other is None and my_sh > 0
+                except Exception:  # noqa: BLE001 — unknown attribution
+                    sole_leg = False        # is not attribution
+                if sole_leg and abs(net) <= my_sh * 1.05 + 1:
+                    want_long = intent == "ORDER_INTENT_BUY_LONG"
+                    got_long = net > 0
+                    if want_long != got_long:
+                        verdict = "mismatch"
+                        detail = (f"POSITION SIDE WRONG: sent {intent} "
+                                  f"but hold netPosition={net}")
+                    elif verdict == "unverified":
+                        verdict, detail = "ok", f"position sign agrees ({net})"
+                    # THE SHORT CLASS EARNS ITS OWN PROOF HERE. This is
+                    # the only place the venue's position sign is read
+                    # against the intent we sent, so it is the only
+                    # place a short can be certified. Recorded on real
+                    # fills only — a shadow row holds nothing to check.
+                    if is_short_intent(intent):
+                        await _record_short_proof(
+                            pool, ok=(verdict != "mismatch"), net=net,
+                            slug=us_slug)
+                else:
+                    detail = (f"{detail} | position-sign check "
+                              f"abstained: net={net} not attributable "
+                              f"to this order alone (other legs on "
+                              f"market, or |net| > our "
+                              f"{my_sh:g} filled shares)")[:300]
         except Exception as exc:  # noqa: BLE001 — never raises
             detail = f"{detail} | position check failed: {exc}"[:200]
 
