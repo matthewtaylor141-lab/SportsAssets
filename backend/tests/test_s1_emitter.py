@@ -2574,3 +2574,68 @@ def test_fat_entry_cannot_amplify_past_the_blocks_cap(st):
         "the verdict needs two heights, never thousands"
     assert st.deltas.get("s1.frames_capped") == 11
     assert len(e["blocks"]) > 1, "the round-12 verdict stays sealed"
+
+
+# ── fleet round 34 pins ─────────────────────────────────────────────
+def test_evicted_verdict_becomes_the_floor(st, monkeypatch):
+    """fleet r34 (major): PENDING_CAP overflow discarded the buffered
+    entries BEFORE the round-33 eviction pop could apply the verdict,
+    and a lone redelivery of the orphaned frame — no mark, no
+    sibling, stale replica — armed-ingested. Forgetting a mark now
+    WIDENS abstention: eviction raises a permanent floor and
+    everything at or below it abstains at finalize, buffered now or
+    redelivered later."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    st._mark_contested(BLK)                       # proven contested
+    for i in range(s1.CONTESTED_CAP):             # flood evicts BLK
+        st._mark_contested(BLK + 1 + i)
+    assert BLK not in st.contested
+    assert st.contested_floor >= BLK, \
+        "eviction never forgets — it widens"
+    # the redelivered lone frame builds a fresh entry at BLK
+    calls = _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    e = st.pending[TX]
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, e, time.time()))
+    assert done is True and calls == [], \
+        "below the floor is forgotten contested ground — abstain"
+    assert st.deltas.get("s1.abstain.contested_floor") == 1
+
+
+def test_contested_state_survives_a_restart(st):
+    """fleet r34: the registry was in-memory only — a boot between
+    the conflict and the redelivery forgot the proof. The flush
+    carries marks + floor; _load_state adopts them before anything
+    can finalize; marks past the flush cap raise the PERSISTED floor
+    (over-abstain, never forget)."""
+    now = time.time()
+    st._state_loaded = True
+    st._mark_contested(BLK)
+    st.contested_floor = 7
+    pool = _Pool(stored=json.dumps({"counters": {}}))
+    asyncio.run(st._flush(pool, now))
+    written = json.loads(pool.writes[-1][1])
+    assert written["contested"] == {str(BLK): st.contested[BLK]}
+    assert written["contested_floor"] == 7
+
+    st2 = S1Emitter()
+    pool2 = _Pool(stored=json.dumps({
+        "counters": {}, "contested": {str(BLK): now, "junk": now},
+        "contested_floor": 12345}))
+    asyncio.run(st2._load_state(pool2, now))
+    assert BLK in st2.contested and st2.contested_floor == 12345, \
+        "adopted before anything can finalize"
+
+    # spill: marks beyond the flush cap raise the persisted floor
+    st3 = S1Emitter()
+    st3._state_loaded = True
+    for i in range(s1.CONTESTED_FLUSH_CAP + 10):
+        st3._mark_contested(1000 + i)
+    pool3 = _Pool(stored=json.dumps({"counters": {}}))
+    asyncio.run(st3._flush(pool3, now))
+    w3 = json.loads(pool3.writes[-1][1])
+    assert len(w3["contested"]) == s1.CONTESTED_FLUSH_CAP
+    assert w3["contested_floor"] == 1009, \
+        "what the flush cannot carry raises the persisted floor"

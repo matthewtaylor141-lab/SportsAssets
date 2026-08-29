@@ -95,6 +95,7 @@ HEAD_POLL_MIN_S = 5.0
 TS_CACHE_CAP = 1024                 # block ts is per-BLOCK, not per-tx
 COUNTED_CAP = 8192                  # burn-in marks survive entry pop
 CONTESTED_CAP = 4096                # proven two-hash heights (r32)
+CONTESTED_FLUSH_CAP = 512           # marks one flush doc carries (r34)
 BLOCKS_PER_TX_CAP = 8               # heights one entry may record (r33)
 RECON_VENUE_LAG_S = 600.0           # data-api indexing lag margin
 RECON_TS_MARGIN_S = 300.0           # venue ts vs block ts skew margin
@@ -489,6 +490,15 @@ class S1Emitter:
         # finalize redelivery double-counted would_emit)
         self.counted_marks: OrderedDict[tuple, bool] = OrderedDict()
         self.contested: dict[int, float] = {}  # proven two-hash heights
+        # Heights at or below this floor abstain unconditionally
+        # (fleet round 34): an evicted mark FORGOT a proven verdict —
+        # PENDING_CAP overflow discarded the buffered entries before
+        # the round-33 eviction pop could apply it, and a lone
+        # redelivery re-earned the orphaned side off a stale replica.
+        # Forgetting a specific height now WIDENS abstention instead
+        # of narrowing it: eviction raises the floor to the evicted
+        # height, permanently.
+        self.contested_floor: int = 0
         self._unpersisted: set[str] = set()  # trips awaiting SQL_TRIP
         # DB clock anchor, learned from SQL_NOW (fleet round 12,
         # minor): trip timestamps are compared against tombstones
@@ -542,6 +552,15 @@ class S1Emitter:
         while len(self.contested) > CONTESTED_CAP:
             old = min(self.contested)
             self.contested.pop(old, None)
+            # Round 34 (major): the pop below is a no-op when
+            # PENDING_CAP overflow already discarded the buffered
+            # entries — a lone REDELIVERY of the orphaned frame then
+            # found no mark, no sibling, and a stale replica, and the
+            # armed path emitted. Eviction must never forget a proven
+            # verdict: the floor rises to the evicted height and the
+            # finalize gate abstains everything at or below it,
+            # buffered now or redelivered later.
+            self.contested_floor = max(self.contested_floor, old)
             for otx in [t for t, oe in self.pending.items()
                         if old in (oe.get("blocks") or {})]:
                 self.pending.pop(otx, None)
@@ -922,6 +941,27 @@ class S1Emitter:
                     aa, (int, float)) else now)
             c = doc.get("counters")
             self.counters = c if isinstance(c, dict) else {}
+            # round 34: contested verdicts and the eviction floor are
+            # adopted before anything can finalize — a restart must
+            # not downgrade a proven two-hash height to re-earnable
+            cf = doc.get("contested_floor")
+            if isinstance(cf, (int, float)) and cf > self.contested_floor:
+                self.contested_floor = int(cf)
+            cm = doc.get("contested")
+            if isinstance(cm, dict):
+                for k, v in cm.items():
+                    try:
+                        h = int(k)
+                    except (TypeError, ValueError):
+                        continue
+                    if h > 0:
+                        self.contested[h] = (v if isinstance(
+                            v, (int, float)) else 0.0)
+                while len(self.contested) > CONTESTED_CAP:
+                    old = min(self.contested)
+                    self.contested.pop(old, None)
+                    self.contested_floor = max(self.contested_floor,
+                                               old)
         except Exception:  # noqa: BLE001 — a corrupt row must not wedge
             # the loop; fail-closed with nothing adopted (round 3)
             self.bump("s1.state_corrupt")
@@ -1154,6 +1194,16 @@ class S1Emitter:
             # abstains, canonical side included; the poller carries
             # whatever was real.
             self.bump("s1.abstain.contested")
+            return True
+        if self.contested_floor and any(
+                b <= self.contested_floor for b in e.get("blocks", {})):
+            # BELOW THE FLOOR IS FORGOTTEN CONTESTED GROUND (fleet
+            # round 34, major): a mark evicted from the bounded
+            # registry can no longer prove its height clean, and the
+            # one executed counterexample was an armed orphaned-chain
+            # ingest off a redelivered frame. Everything at or below
+            # the floor abstains; the poller carries.
+            self.bump("s1.abstain.contested_floor")
             return True
         # DECODE FIRST — it is pure and free (round 6): the buffer is
         # overwhelmingly foreign txs (the WS subscribes by exchange
@@ -1800,12 +1850,29 @@ class S1Emitter:
         # counters ship as DELTAS — the server adds them under the row
         # lock, so concurrent flushes compose instead of clobbering,
         # and the payload structurally cannot name trip state (r6)
+        # CONTESTED VERDICTS SURVIVE A RESTART (fleet round 34): the
+        # registry was in-memory only, so a boot between the conflict
+        # and the orphaned frame's redelivery forgot the proof — the
+        # same forgetting the eviction floor closes. The flush carries
+        # the most recent marks plus the floor; marks the flush cap
+        # cannot carry raise the PERSISTED floor instead (the adopted
+        # state over-abstains rather than forgets). Residual window:
+        # a crash before the first flush after a conflict — the
+        # corroboration sweep remains the backstop there.
+        marks = sorted(self.contested.items())
+        floor_out = self.contested_floor
+        if len(marks) > CONTESTED_FLUSH_CAP:
+            floor_out = max([floor_out]
+                            + [h for h, _ in marks[:-CONTESTED_FLUSH_CAP]])
+            marks = marks[-CONTESTED_FLUSH_CAP:]
         payload = {"counters": snap, "armed": armed_out,
                    "armed_at": (self.armed_at if self.armed
                                 else (self._pending_arm_at or 0.0)),
                    "unjudged_backlog": self.unjudged_backlog,
                    "cert_green": self.cert_green,
                    "cert_reason": self.cert_reason,
+                   "contested": {str(h): t for h, t in marks},
+                   "contested_floor": floor_out,
                    "decoder_fp": DECODER_FP,
                    "updated_at_epoch": now}
         try:
