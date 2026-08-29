@@ -624,3 +624,46 @@ class TestLineCanonicalization:
             "mlb-col-atl-2026-08-28-spread-home-1pt5")
         assert hit is not None and hit["identifier"] == "x-atl", \
             "a numerically identical line must never refuse the row"
+
+
+class TestClockArtifactIsNotALine:
+    """Live census 2026-08-29: '7:00 PM' in a venue question stamped
+    line='00' on BOTH sides of a moneyline market via the colon
+    branch — an unlined pick then failed the line-presence comparison
+    against the phantom and every side refused as no_side_match (the
+    WNBA example: 'Washington Mystics' vs sides mystics/sparks). A
+    global time-strip is not an option — the named-tennis bridge
+    AUTHENTICATES the clock stamp — so the matcher clears a line only
+    when it is provably the question's clock artifact: the sole
+    parsed line, verbatim-equal to the strict clock parse's minutes."""
+
+    Q = "Mystics vs Sparks — 7:00 PM"
+
+    def test_the_artifact_authenticates_strictly(self):
+        assert premap._clock_artifact("00", self.Q)
+        assert not premap._clock_artifact("30", self.Q), "verbatim"
+        assert not premap._clock_artifact(
+            "00", "Mystics vs Sparks - 7:00 PM"), \
+            "an ascii dash reads as a minus and adds a hit - not sole"
+        assert not premap._clock_artifact(
+            "00", "Total: 8.5 — 7:00 PM"), "not the sole line"
+        assert not premap._clock_artifact("8.5", "Total: 8.5"), \
+            "a real bet line is never an artifact"
+        assert premap._lines_of(self.Q) == {"00"}, \
+            "the stamp itself is untouched - the bridge depends on it"
+
+    def test_the_wnba_example_resolves(self):
+        line = next(iter(premap._lines_of(self.Q)))
+        rows = [
+            {"identifier": "aec-wnba-wsh-la-2026-08-28",
+             "side_norm": "mystics", "line": line, "question": self.Q,
+             "signed": "", "intent": "BUY_LONG"},
+            {"identifier": "aec-wnba-wsh-la-2026-08-28",
+             "side_norm": "sparks", "line": line, "question": self.Q,
+             "signed": "", "intent": "BUY_LONG"},
+        ]
+        hit = premap.match_side(rows, "Washington Mystics",
+                                "Mystics vs Sparks",
+                                "wnba-wsh-la-2026-08-28")
+        assert hit is not None and hit["side_norm"] == "mystics", \
+            "the phantom clock line no longer refuses the token match"

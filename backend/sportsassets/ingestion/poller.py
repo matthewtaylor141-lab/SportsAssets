@@ -146,6 +146,28 @@ class Poller:
             raise ValueError(
                 f"venue served {bad} rows, none usable")
         if not events:
+            # round 36 (major): a 200-[] page slipped past both
+            # round-23 guards (non-list; all-junk needs a truthy
+            # page) and returned 0 as a SUCCESSFUL poll — failure
+            # counter reset, heartbeat 'ok', the Path-B-degraded
+            # alert structurally unreachable while the primary
+            # carrier (and the source of every venue_seen_at stamp
+            # S1's corroboration leans on) was dead. The request is
+            # not cursor-windowed — it asks for the wallet's most
+            # recent 100 trades — so a whale with ANY known fill can
+            # never legitimately serve an empty page: that is the
+            # round-25 cold-index shape the backfill already refuses.
+            # Known fills + empty page fails the cycle, visibly.
+            if not page:
+                pool = await get_pool()
+                has_any = await pool.fetchval(
+                    "SELECT 1 FROM trades WHERE whale_id = $1 LIMIT 1",
+                    whale["id"])
+                if has_any:
+                    raise ValueError(
+                        "venue served an empty /trades page for a "
+                        "whale with known fills — a cold venue "
+                        "index, not an empty history")
             return 0
         # BATCH PRE-DEDUPE (audit 2026-08-21): nearly every returned row
         # is already ingested, and the old path paid a sport SELECT plus

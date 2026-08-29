@@ -330,3 +330,85 @@ def test_total_ingest_loss_fails_the_cycle(fake_env, monkeypatch):
         {"id": 1, "address": "0xw", "username": "w"}))
     loop.close()
     assert new == 1, "a mixed outcome stays per-row — never the cycle"
+
+
+def _empty_page_pool(has_fills):
+    class _P:
+        def __init__(self):
+            self.probes = []
+
+        async def fetchval(self, sql, *a, timeout=None):
+            self.probes.append(a)
+            return 1 if has_fills else None
+    return _P()
+
+
+def test_empty_page_for_a_whale_with_known_fills_fails_the_cycle(monkeypatch):
+    """fleet r36 (major): a 200-[] page slipped past the round-23
+    guards (non-list; all-junk needs a truthy page) and returned 0 as
+    a SUCCESSFUL poll — the failure counter reset, the heartbeat
+    stayed 'ok', and the Path-B-degraded alert was structurally
+    unreachable while the primary carrier was dead. The request asks
+    for the wallet's most recent 100 trades, so a whale with ANY
+    known fill can never legitimately serve [] — the round-25
+    cold-index shape the backfill already refuses."""
+    import sportsassets.ingestion.poller as pl
+
+    pool = _empty_page_pool(has_fills=True)
+
+    async def fake_get_pool():
+        return pool
+
+    monkeypatch.setattr(pl, "get_pool", fake_get_pool)
+    p = pl.Poller.__new__(pl.Poller)
+    p._http = None
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return []
+
+    async def fake_polite_get(http, path, params=None):
+        return _R()
+
+    import sportsassets.ratelimit as rl
+    monkeypatch.setattr(rl, "polite_get", fake_polite_get)
+    import asyncio as aio
+    import pytest as pt
+    with pt.raises(ValueError, match="cold venue index"):
+        aio.run(p.poll_wallet({"id": 7, "address": "0xw",
+                               "username": "w"}))
+    assert pool.probes, "the known-fills probe ran"
+
+
+def test_empty_page_for_a_fresh_whale_is_a_normal_poll(monkeypatch):
+    """A whale with no fills yet (fresh cohort wallet) legitimately
+    serves an empty page — that stays a successful 0, never a raise."""
+    import sportsassets.ingestion.poller as pl
+
+    pool = _empty_page_pool(has_fills=False)
+
+    async def fake_get_pool():
+        return pool
+
+    monkeypatch.setattr(pl, "get_pool", fake_get_pool)
+    p = pl.Poller.__new__(pl.Poller)
+    p._http = None
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return []
+
+    async def fake_polite_get(http, path, params=None):
+        return _R()
+
+    import sportsassets.ratelimit as rl
+    monkeypatch.setattr(rl, "polite_get", fake_polite_get)
+    import asyncio as aio
+    assert aio.run(p.poll_wallet({"id": 7, "address": "0xw",
+                                  "username": "w"})) == 0

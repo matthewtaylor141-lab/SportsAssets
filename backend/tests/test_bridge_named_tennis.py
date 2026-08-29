@@ -85,14 +85,21 @@ class TestAttestedRecovery:
                       "Hiromasa Koyama", WT, WS, WE)
         assert w == "ok"
 
-    def test_the_poisoned_pair_still_refuses_in_match_side(self):
-        """The grounding's A1 anchor: TODAY's matcher refuses the
-        attested pair at _lined_ok — pinned so the lane's reason for
-        existing stays measured."""
-        assert pm.match_side([K, C], "Hiromasa Koyama", WT,
-                             "itf-koyama-castelnuovo-2026-08-27") \
-            is None
-        assert pm._lines_of(Q) == {"30"}
+    def test_the_clock_poisoned_pair_now_resolves_directly(self):
+        """The grounding's A1 anchor, evolved (census 2026-08-29):
+        match_side used to refuse this attested pair at _lined_ok on
+        the phantom clock line — the lane's original reason for
+        existing. _clock_artifact now clears a line that is provably
+        the question's clock (sole parsed line, verbatim minutes), so
+        the exact-name branch resolves the pair DIRECTLY; the
+        uniqueness guard still refuses when a prop sibling shares the
+        name, and the bridge remains the recovery for every shape the
+        matcher still refuses. The clock stamp itself is untouched —
+        the bridge's quarantine authenticates it."""
+        hit = pm.match_side([K, C], "Hiromasa Koyama", WT,
+                            "itf-koyama-castelnuovo-2026-08-27")
+        assert hit is K, "the phantom clock no longer refuses"
+        assert pm._lines_of(Q) == {"30"}, "the stamp survives"
 
 
 class TestTwinGate:

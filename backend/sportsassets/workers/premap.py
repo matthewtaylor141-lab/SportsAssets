@@ -113,6 +113,25 @@ def _lines_of(text: str | None) -> set[str]:
     return {_canon_line(n) for n in out if n}
 
 
+def _clock_artifact(rl: str, q: str | None) -> bool:
+    """True when a row's stamped line is nothing but the question's
+    CLOCK minutes — '7:00 PM' matched the ':' line context and
+    stamped line='00' on BOTH sides of a moneyline market, and the
+    unlined pick then failed the line-presence comparison against a
+    phantom (live census 2026-08-29, the WNBA example: 'Washington
+    Mystics' refused against sides mystics/sparks). Authentication
+    mirrors the named-tennis bridge's clock quarantine exactly: the
+    line must be the question's SOLE parsed line AND verbatim-equal
+    to a strict clock parse's minutes. A real bet line fails both
+    ways; a global time-strip is NOT an option — the bridge lane
+    depends on the clock stamping (its quarantine authenticates the
+    same artifact instead of erasing it)."""
+    if not rl or not q:
+        return False
+    m = re.search(r"\b\d{1,2}:(\d{2})\b", q)
+    return bool(m and m.group(1) == rl and _lines_of(q) == {rl})
+
+
 def signed_line(text: str | None) -> str:
     """The SIGNED handicap a description carries ('-3.5', '+3.5'), or ''.
 
@@ -1832,6 +1851,9 @@ def match_side(rows: list[dict], outcome: str | None,
                 if not rs or rs != his_signed_yn:
                     return False
             rl = (r.get("line") or "").strip()
+            if rl and _clock_artifact(rl, r.get("question")):
+                rl = ""            # a clock is not a line (census
+                                   # 2026-08-29); see _clock_artifact
             if bool(rl) != bool(his_lines):
                 return False
             return not rl or rl in his_lines
@@ -1890,6 +1912,9 @@ def match_side(rows: list[dict], outcome: str | None,
             # so a team listed at two handicaps returns nothing rather
             # than a coin flip.
             rl = (r.get("line") or "").strip()
+            if rl and _clock_artifact(rl, r.get("question")):
+                rl = ""            # a clock is not a line (census
+                                   # 2026-08-29); see _clock_artifact
             if not rl:
                 return not his_lines
             return rl in his_lines
