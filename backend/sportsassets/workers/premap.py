@@ -86,6 +86,19 @@ _LINE_CTX = re.compile(
     re.I)
 
 
+def _canon_line(n: str) -> str:
+    """One spelling per line value. The venue writes '1.50' where the
+    whale's slug says 1pt5 -> '1.5'; every comparison in this module is
+    string equality, so numerically identical lines failed line_ok and
+    the row was refused as no_side_match (live census 2026-08-29: the
+    printed candidates carried line '1.50' against his_lines ['1.5']).
+    Trailing zeros after the point (and a then-bare point) are dropped;
+    whole numbers pass through untouched."""
+    if "." in n:
+        n = n.rstrip("0").rstrip(".")
+    return n
+
+
 def _lines_of(text: str | None) -> set[str]:
     """Every line a text states — half-point lines anywhere, plus WHOLE
     numbers when they sit in a handicap or total context.
@@ -97,7 +110,7 @@ def _lines_of(text: str | None) -> set[str]:
     t = text or ""
     out = {n for n in re.findall(r"\d+\.\d+", t)}
     out |= {m.group(1) for m in _LINE_CTX.finditer(t)}
-    return {n for n in out if n}
+    return {_canon_line(n) for n in out if n}
 
 
 def signed_line(text: str | None) -> str:
@@ -107,11 +120,13 @@ def signed_line(text: str | None) -> str:
     normalize to 'chiefs  3 5' — a whale taking +3.5 (getting points)
     matched the venue's -3.5 side (giving points), the exact opposite
     bet, on every spread. The sign must be read BEFORE normalization
-    and compared on its own (leak-hunt round 3, 2026-08-24)."""
+    and compared on its own (leak-hunt round 3, 2026-08-24). The
+    magnitude is canonicalized like every line ('-1.50' -> '-1.5') so
+    a trailing zero can never fail the sign-agreement equality."""
     m = re.search(r"([+-])\s*(\d+(?:\.\d+)?)", str(text or ""))
     if not m:
         return ""
-    return f"{m.group(1)}{m.group(2)}"
+    return f"{m.group(1)}{_canon_line(m.group(2))}"
 
 
 def date_of(slug: str | None) -> str:
@@ -384,7 +399,8 @@ def slug_lines(global_slug: str | None) -> set[str]:
         if m:
             out.add(f"{int(m.group(2))}.{m.group(3)}" if m.group(3)
                     else str(int(m.group(2))))
-    return out
+    # one spelling per value on BOTH sides of every comparison
+    return {_canon_line(n) for n in out}
 
 
 def _title_sign_is_his(his_title: str | None, outcome: str | None) -> bool:
@@ -2588,6 +2604,20 @@ async def resolve_explain(pool, market_title: str | None,
         out["detail"] = (f"outcome {outcome!r} matched none of "
                          f"{[(r.get('side_norm'), r.get('line') or '-') for r in kept][:6]}"
                          f" his_lines={_hl[:4]}")
+        # NUMBER-LABELED SIDES (census 2026-08-29): candidates printed
+        # as ('1 50','1.50') carry no team name at all, so a named
+        # pick can never match by side_norm. Before designing a
+        # resolution (sign-vs-question inversion risk), the census
+        # prints the full anatomy of ONE such row set: question,
+        # signed, intent, identifier — ground truth first.
+        if kept and all((r.get("side_norm") or "").replace(" ", "")
+                        .replace(".", "").isdigit() for r in kept[:2]):
+            anatomy = "; ".join(
+                f"id=…{(r.get('identifier') or '')[-32:]}"
+                f" q={(r.get('question') or '')[:60]!r}"
+                f" sg={r.get('signed')!r} it={r.get('intent')}"
+                for r in kept[:3])
+            out["detail"] += f" ANATOMY[{anatomy}]"
         # PHASE-0 BRIDGE PROBE (2026-08-26): read-only. Mirrors exactly
         # the composition resolve would run (match_side first, bridge
         # only on refusal) so the census can MEASURE what the bridge

@@ -588,3 +588,39 @@ class TestQuestionLineSurvivesDates:
         hit = match_side(rows, 'Over', 'TEX vs MIL total 6.5',
                          'mlb-tex-mil-2026-08-28-total-6pt5')
         assert hit is not None and hit['side_norm'] == 'over'
+
+
+class TestLineCanonicalization:
+    """Live census 2026-08-29: the venue writes '1.50' where the
+    whale's slug decodes to '1.5' — every line comparison in the
+    matcher is string equality, so numerically identical lines failed
+    line_ok/_lined_ok and the row refused as no_side_match. One
+    spelling per value, on both sides."""
+
+    def test_lines_of_drops_trailing_zeros(self):
+        assert premap._lines_of("Spread -1.50") == {"1.5"}
+        assert premap._lines_of("Over 2.50") == {"2.5"}
+        assert premap._lines_of("O/U 47") == {"47"}
+        assert premap._lines_of("total 3.0") == {"3"}
+
+    def test_signed_line_canonicalizes_the_magnitude(self):
+        assert premap.signed_line("Braves -1.50") == "-1.5"
+        assert premap.signed_line("Rockies +1.5") == "+1.5"
+
+    def test_venue_trailing_zero_matches_the_whale_line(self):
+        rows = [
+            {"identifier": "x-atl", "side_norm": "atlanta braves",
+             "line": next(iter(premap._lines_of("-1.50"))),
+             "signed": premap.signed_line("Atlanta Braves -1.50"),
+             "intent": "BUY_LONG"},
+            {"identifier": "x-col", "side_norm": "colorado rockies",
+             "line": next(iter(premap._lines_of("+1.50"))),
+             "signed": premap.signed_line("Colorado Rockies +1.50"),
+             "intent": "BUY_LONG"},
+        ]
+        hit = premap.match_side(
+            rows, "Atlanta Braves",
+            "Spread: Atlanta Braves (-1.5)",
+            "mlb-col-atl-2026-08-28-spread-home-1pt5")
+        assert hit is not None and hit["identifier"] == "x-atl", \
+            "a numerically identical line must never refuse the row"
