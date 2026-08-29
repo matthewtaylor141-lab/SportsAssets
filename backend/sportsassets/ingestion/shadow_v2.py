@@ -1236,6 +1236,19 @@ class ShadowV2:
                 self.bump("poll_uncovered_chainrow")   # legacy topic / v3 partial
             else:
                 ts = int(row["ts_epoch"])
+                if ts <= self.boot_at + 30:
+                    # ROUND 46 (executed): the fill predates this
+                    # process's WS subscription — its event can only
+                    # have gone to the DYING writer, whose seen_tx
+                    # died with it. Restart blindness is not coverage
+                    # evidence (the r45 conviction); the class is
+                    # counted VISIBLY under its own name, never as
+                    # the GATING unexplained arm. Honest residual: a
+                    # feed that reliably drops exactly boot-
+                    # straddling fills never resets the window — the
+                    # preboot counter itself is the watch on that.
+                    self.bump("poll_uncovered_preboot")
+                    continue
                 gap = next((gp for gp in self.gaps
                             if gp["from"] - 2 <= ts <= gp["to"] + 2), None)
                 if gap:
@@ -1357,29 +1370,19 @@ class ShadowV2:
                 snap["boots"] = snap.get("boots", 0) + 1
                 self.deltas["boots"] = self.deltas.get("boots", 0) + 1
                 self.booted = True
-                # ROUND 45 (gate audit, executed): seen_tx and the gap
-                # ledger are process memory — fills whose WS events
-                # went to the DYING process read 'uncovered
-                # unexplained' after warm-up, a GATING bump, and the
-                # 7-day cert window reset on every deploy (observed
-                # live at 03:05Z and 06:29Z; ~3.5 bumps/boot in the
-                # cumulative counters). That is restart blindness,
-                # not coverage evidence. The cutover is now recorded
-                # as what it is: a durable writer-handoff gap seeded
-                # from the OLD writer's own last testimony, so the
-                # reverse probe classifies those rows into the
-                # existing NON-GATING ws_gap arm. Every gate keeps
-                # its reset; only the mislabeled evidence is fixed.
-                try:
-                    prev_obs = float(stored.get("last_observe_at")
-                                     or stored_epoch or 0)
-                except (TypeError, ValueError):
-                    prev_obs = stored_epoch
-                if prev_obs > 1e9:
-                    self.gaps.append({
-                        "from": prev_obs - 2,
-                        "to": self.boot_at + 30,
-                        "kind": "writer_handoff"})
+                # ROUND 45→46: the first cutover fix seeded a
+                # writer-handoff gap span from the old writer's
+                # last_observe_at — and the fleet executed it broken
+                # for the DOMINANT deploy shape: under overlap the
+                # writer_conflict early-return deferred seeding to
+                # takeover, inverting the span (from > to, matches
+                # nothing), and no trade-ts span can cover the
+                # venue-lag/reconciler detection tail below it. The
+                # robust boundary is boot-anchored and lives in the
+                # reverse probe's classification (poll_uncovered_
+                # preboot): a fill that EXISTED before this process
+                # subscribed cannot indict this process's coverage.
+                # No span, no arithmetic, no pruning window.
             for k, v in snap.items():
                 counters[k] = counters.get(k, 0) + v
             window_start = stored.get("window_start")

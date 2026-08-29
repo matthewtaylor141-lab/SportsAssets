@@ -2204,14 +2204,23 @@ class TestRound45CutoverArtifact:
     triggering keys into the window_resets ring — the forensic the
     audit lacked."""
 
-    def test_boot_seeds_the_writer_handoff_gap(self):
+    def test_preboot_fills_never_reach_the_gating_arm(self):
+        """r46 (major, executed by the fleet): the r45 span seeding
+        was inverted under overlapping deploys (writer_conflict's
+        early return deferred it to takeover, from > to) and no
+        trade-ts span covers the venue-lag detection tail. The
+        boundary is boot-anchored now: a fill that existed before
+        this process subscribed classifies poll_uncovered_preboot —
+        visible, named, never the GATING unexplained arm."""
         import inspect
 
-        src = inspect.getsource(sv.ShadowV2._flush)
-        assert '"kind": "writer_handoff"' in src, \
-            "the cutover is recorded as what it is"
-        assert 'stored.get("last_observe_at")' in src, \
-            "seeded from the old writer's own last testimony"
+        src = inspect.getsource(sv.ShadowV2._reverse_probe)
+        assert "poll_uncovered_preboot" in src
+        assert "ts <= self.boot_at + 30" in src, \
+            "the boundary is the process's own subscription epoch"
+        fsrc = inspect.getsource(sv.ShadowV2._flush)
+        assert '"kind": "writer_handoff"' not in fsrc, \
+            "the fragile span seeding is gone"
 
     def test_flush_persists_the_reset_ledger(self):
         import inspect
@@ -2221,12 +2230,10 @@ class TestRound45CutoverArtifact:
         assert "resets[-8:]" in src, "a bounded ring, pure evidence"
         assert '"last_observe_at": self.last_observe_at' in src
 
-    def test_handoff_gap_classifies_as_ws_gap_not_unexplained(self):
-        st = sv.ShadowV2()
-        st.gaps.append({"from": 1000.0, "to": 2000.0,
-                        "kind": "writer_handoff"})
-        gap = next((gp for gp in st.gaps
-                    if gp["from"] - 2 <= 1500 <= gp["to"] + 2), None)
-        assert gap is not None and gap["kind"] != "quiet_or_outage", \
-            "the probe's existing arm routes handoff rows to " \
-            "poll_uncovered_ws_gap — non-gating by design"
+    def test_preboot_is_not_gating_and_postboot_is_untouched(self):
+        assert "poll_uncovered_preboot" not in sv.GATING, \
+            "restart blindness is counted, never certification " \
+            "evidence"
+        assert "poll_uncovered_unexplained" in sv.GATING, \
+            "a post-boot uncovered fill still resets — nothing " \
+            "outside the boot shadow is acquitted"
