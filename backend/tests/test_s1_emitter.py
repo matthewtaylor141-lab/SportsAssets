@@ -2400,9 +2400,12 @@ def test_sibling_frame_hash_conflict_voids_the_earned_timestamp(st):
     assert e.get("reorg_gen", 0) > gen0, \
         "the write-back guard must see a new generation"
     assert st.deltas.get("s1.sibling_hash_conflict") == 1
-    # the conflicting frame's own entry proceeds against ITS hash —
-    # the canonical side re-earns and emits; deferral, not death
+    # the conflicting frame's own entry records ITS hash — but round
+    # 32 proved a single replica must not arbitrate a proven two-hash
+    # height, so the height is contested and BOTH sides abstain at
+    # finalize; the poller carries whatever was real
     assert st.pending["0x" + "e3" * 32]["blocks"][BLK] == "0x" + "99" * 32
+    assert BLK in st.contested, "the conflict marks the height"
 
 
 # ── fleet round 31 pins ─────────────────────────────────────────────
@@ -2438,3 +2441,95 @@ def test_reorg_evidence_above_voids_the_lower_earned_timestamp(st):
     assert (BLK, "0x" + "77" * 32) not in st._ts_cache
     assert e.get("reorg_gen", 0) > gen0, \
         "an in-flight write-back below the evidence height dies too"
+
+
+# ── fleet round 32 pins ─────────────────────────────────────────────
+def test_blockless_removed_notice_still_purges(st):
+    """fleet r32 (major): the removed channel popped the named tx as
+    reorg evidence unconditionally but called the purge only `if
+    rblk:` — a notice with an ABSENT or null blockNumber skipped the
+    purge entirely and a sibling's old-chain timestamp armed-ingested
+    an orphaned fill. The round-31 purge is height-agnostic, so the
+    height's parseability cannot gate whether evidence counts."""
+    lst = _Listener(roster={})
+    h = "0xabc"
+    other_tx = "0x" + "ee" * 32
+
+    for bad_bn in ("ABSENT", None):
+        st._ts_cache[(99, h)] = 1
+        st.pending[other_tx] = {"logs": [], "blocks": {99: h},
+                                "ts": {99: 1}, "evicted": False}
+        ev = dict(MAKER_EV, removed=True)
+        if bad_bn == "ABSENT":
+            ev.pop("blockNumber", None)
+        else:
+            ev["blockNumber"] = bad_bn
+        st.observe(lst, ev)
+        assert st._ts_cache == {}, bad_bn
+        assert st.pending[other_tx]["ts"] == {}, \
+            "a removed notice is reorg evidence whatever its height " \
+            "field parses to"
+
+
+def test_contested_height_abstains_every_side(st, monkeypatch):
+    """fleet r32 (major): purge-and-re-earn arbitrated a PROVEN
+    two-hash height by whichever replica answered first — a stale one
+    re-verified the orphaned side and armed S1 ingested it next to
+    the canonical twin. Round 12's law extends across entries: every
+    tx buffered at a contested height abstains, canonical side
+    included; the poller carries whatever was real."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    _observe_all(st, lst, [MAKER_EV])
+    e = st.pending[TX]
+    st._mark_contested(BLK)
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, e, time.time()))
+    assert done is True and calls == [], \
+        "a proven two-hash height is never decided by one replica"
+    assert st.deltas.get("s1.abstain.contested") == 1
+    assert st.deltas.get("s1.emitted") is None
+
+
+def test_parent_hash_conflict_is_reorg_evidence(st):
+    """fleet r32 (major): a SUCCESSFUL resolution's response body can
+    carry the only delivered reorg proof — parentHash contradicting a
+    sibling's recorded hash at blk-1 — and it was discarded unread.
+    The resolver now marks the height contested and voids every
+    earned timestamp; its own resolution still returns (the caller's
+    generation guard refuses the stale write-back)."""
+    sib_tx = "0x" + "aa" * 32
+    st.pending[sib_tx] = {"logs": [],
+                          "blocks": {BLK - 1: "0x" + "77" * 32},
+                          "ts": {BLK - 1: float(TS0)}, "evicted": False}
+    st._client = _FakeClient(_Resp(200, {"result": {
+        "timestamp": hex(TS0 + 2), "hash": "0x" + "99" * 32,
+        "parentHash": "0x" + "88" * 32}}))
+    ts = asyncio.run(st._resolve_block(BLK, "0x" + "99" * 32))
+    assert ts == TS0 + 2, "the strict earn itself still resolves"
+    assert st.deltas.get("s1.parent_hash_conflict") == 1
+    assert (BLK - 1) in st.contested
+    assert st.pending[sib_tx]["ts"] == {}, \
+        "the contradicted sibling's earned ts is void"
+    # agreement is not evidence: a parentHash matching the recorded
+    # hash marks nothing
+    st2_tx = "0x" + "ab" * 32
+    st.contested.clear()
+    st.deltas.pop("s1.parent_hash_conflict", None)
+    st.pending[st2_tx] = {"logs": [],
+                          "blocks": {BLK - 1: "0x" + "88" * 32},
+                          "ts": {}, "evicted": False}
+    st.pending.pop(sib_tx)
+    ts = asyncio.run(st._resolve_block(BLK, "0x" + "99" * 32))
+    assert ts == TS0 + 2
+    assert st.deltas.get("s1.parent_hash_conflict") is None
+    assert st.contested == {}
+
+
+def test_contested_registry_is_bounded(st):
+    for i in range(s1.CONTESTED_CAP + 50):
+        st._mark_contested(1000 + i)
+    assert len(st.contested) == s1.CONTESTED_CAP
+    assert 1000 not in st.contested, "oldest heights fall off first"
+    assert (1000 + s1.CONTESTED_CAP + 49) in st.contested

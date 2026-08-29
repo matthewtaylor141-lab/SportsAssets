@@ -94,6 +94,7 @@ HEAD_QUIET_S = 6.0
 HEAD_POLL_MIN_S = 5.0
 TS_CACHE_CAP = 1024                 # block ts is per-BLOCK, not per-tx
 COUNTED_CAP = 8192                  # burn-in marks survive entry pop
+CONTESTED_CAP = 4096                # proven two-hash heights (r32)
 RECON_VENUE_LAG_S = 600.0           # data-api indexing lag margin
 RECON_TS_MARGIN_S = 300.0           # venue ts vs block ts skew margin
 FLUSH_EVERY_S = 60.0
@@ -486,6 +487,7 @@ class S1Emitter:
         # entry (round 6: the per-entry set died at pop, so a post-
         # finalize redelivery double-counted would_emit)
         self.counted_marks: OrderedDict[tuple, bool] = OrderedDict()
+        self.contested: dict[int, float] = {}  # proven two-hash heights
         self._unpersisted: set[str] = set()  # trips awaiting SQL_TRIP
         # DB clock anchor, learned from SQL_NOW (fleet round 12,
         # minor): trip timestamps are compared against tombstones
@@ -508,6 +510,27 @@ class S1Emitter:
     def bump(self, key: str, n: int = 1) -> None:
         if n:
             self.deltas[key] = self.deltas.get(key, 0) + n
+
+    def _mark_contested(self, blk: int) -> None:
+        """Record a height the buffer has PROVEN contested — two
+        different hashes seen for one height (a sibling-frame
+        conflict, or a resolver response whose parentHash contradicts
+        a recorded hash). Fleet round 32 (major): the round-30/31
+        recovery was purge-and-RE-EARN, which arbitrates the conflict
+        by whichever replica answers first — an eventually-consistent
+        provider re-verified the ORPHANED side and the armed path
+        ingested it next to the canonical twin. Round 12's law
+        (\"a second hash at one height IS the reorg verdict; the
+        whole tx abstains, the poller carries whatever was real\")
+        extends across sibling entries: every tx buffered at a
+        contested height abstains at finalize, unconditionally.
+        Bounded: oldest heights are dropped past the cap — an entry
+        at a dropped height re-marks on fresh evidence or defers
+        through the normal strict re-earn."""
+        if blk > 0:
+            self.contested[blk] = time.time()
+            while len(self.contested) > CONTESTED_CAP:
+                self.contested.pop(min(self.contested), None)
 
     def _purge_ts_cache(self, from_blk: int) -> None:
         """Reorg evidence ANYWHERE voids EVERY earned timestamp.
@@ -594,13 +617,20 @@ class S1Emitter:
                 # a removed notice rewrites the chain suffix — every
                 # cached block timestamp at or above it is now suspect
                 # (fleet round 7: a sibling tx borrowing a stale
-                # (blk, oldhash) entry skipped the reorg check)
+                # (blk, oldhash) entry skipped the reorg check).
+                # Round 32 (major): the purge was gated `if rblk:` —
+                # a notice with an ABSENT or null blockNumber (parsed
+                # to 0) popped the named tx as reorg evidence on the
+                # line above yet skipped the purge entirely, and a
+                # sibling's old-chain timestamp armed-ingested an
+                # orphaned fill. The round-31 purge is height-
+                # agnostic, so the height's parseability cannot gate
+                # whether evidence counts: ANY removed notice purges.
                 try:
                     rblk = int(str(log_entry.get("blockNumber", "0x0")), 16)
                 except (TypeError, ValueError):
                     rblk = 0
-                if rblk:
-                    self._purge_ts_cache(rblk)
+                self._purge_ts_cache(rblk)
                 return
             tx = str(log_entry.get("transactionHash", "")).lower()
             if not tx:
@@ -637,6 +667,15 @@ class S1Emitter:
                 sh = sib.get("blocks", {}).get(blk)
                 if sib_tx != tx and sh is not None and sh != bh:
                     self.bump("s1.sibling_hash_conflict")
+                    # Round 32 (major): purge-and-RE-EARN arbitrated
+                    # a PROVEN two-hash height by whichever replica
+                    # answered first — a stale one re-verified the
+                    # orphaned side and the armed path ingested it.
+                    # Round 12's law extends across entries: a height
+                    # the buffer proves contested is never decided by
+                    # a single RPC response. Both sides abstain at
+                    # finalize; the poller carries whatever was real.
+                    self._mark_contested(blk)
                     self._purge_ts_cache(blk)
                     break
             e = self.pending.get(tx)
@@ -746,6 +785,31 @@ class S1Emitter:
             got_hash = str(result.get("hash", "")).lower()
             if want_hash and got_hash and got_hash != want_hash:
                 return "reorged"
+            # PARENT-HASH EVIDENCE (fleet round 32, major): a
+            # SUCCESSFUL resolution's response body can carry the
+            # ONLY delivered proof of a reorg — parentHash naming a
+            # different hash for blk-1 than a sibling entry (or the
+            # cache) has recorded. It was discarded, no purge channel
+            # ever fired, and the sibling's old-chain fill armed-
+            # ingested. The proof is a two-hash height: mark it
+            # contested (both sides abstain; the poller carries) and
+            # void every earned timestamp. This resolution's own ts
+            # is still returned — the caller's generation guard
+            # refuses the write-back after our purge, so it re-earns
+            # on a later pass if its height stays uncontested.
+            ph = str(result.get("parentHash", "")).lower()
+            if ph and blk > 1:
+                prev = blk - 1
+                recorded = {k[1] for k in self._ts_cache
+                            if k[0] == prev}
+                for e2 in self.pending.values():
+                    h2 = (e2.get("blocks") or {}).get(prev)
+                    if h2:
+                        recorded.add(h2)
+                if any(h != ph for h in recorded):
+                    self.bump("s1.parent_hash_conflict")
+                    self._mark_contested(prev)
+                    self._purge_ts_cache(prev)
             return int(str(raw), 16)
         except Exception:  # noqa: BLE001
             self.bump("s1.rpc_errors")
@@ -1051,6 +1115,18 @@ class S1Emitter:
             # real.
             self.bump("s1.abstain.reorged")
             self._purge_ts_cache(min(e["blocks"]))
+            return True
+        if any(b in self.contested for b in e.get("blocks", {})):
+            # A CONTESTED HEIGHT NEVER EMITS (fleet round 32, major):
+            # the buffer has proven two hashes at this height — the
+            # round-12 verdict, seen across sibling entries — and a
+            # single replica's answer must not arbitrate which side
+            # was real (an eventually-consistent provider re-verified
+            # the ORPHANED side and the armed path ingested it, next
+            # to the canonical twin). Every tx buffered at the height
+            # abstains, canonical side included; the poller carries
+            # whatever was real.
+            self.bump("s1.abstain.contested")
             return True
         # DECODE FIRST — it is pure and free (round 6): the buffer is
         # overwhelmingly foreign txs (the WS subscribes by exchange
