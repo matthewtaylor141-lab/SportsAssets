@@ -74,6 +74,7 @@ async def reconcile_once(depth: int = 500) -> dict:
             # actually reached) at or before the fill's own time.
             complete = False
             oldest_ts: float | None = None
+            newest_ts: float | None = None    # upper bound (r38)
             # FEED ORDERING (fleet round 21, major): oldest was a bare
             # min() over usable rows — an inference sound only under
             # an UNCHECKED newest-first premise. One genuinely valid
@@ -271,6 +272,20 @@ async def reconcile_once(depth: int = 500) -> dict:
                             # the 1e9 floor (2001) rejects sentinel
                             # timestamps a degraded venue might emit
                             oldest_ts = float(ev.ts_epoch)
+                        if (testify and ev.ts_epoch and ev.ts_epoch > 1e9
+                                and (newest_ts is None
+                                     or ev.ts_epoch > newest_ts)):
+                            # fleet round 38 (major): coverage claimed
+                            # only a LOWER bound — a frozen index's
+                            # walk spanned far below a fill it could
+                            # never have served, counted as clean
+                            # coverage twice (byte-identical geometry
+                            # defeats the round-20 decorrelation), and
+                            # the sweep STICKY-tripped a correct
+                            # emission. The walk now testifies to the
+                            # NEWEST row it served; SQL_RECON_SINCE
+                            # requires the fill to sit INSIDE the span
+                            newest_ts = float(ev.ts_epoch)
                         # per-row containment around the INGEST (fleet
                         # round 15): a gate-passing row can still fail
                         # inside ingest (constraint, overflow, datetime
@@ -321,7 +336,7 @@ async def reconcile_once(depth: int = 500) -> dict:
                     offset += max(1, len(page) - len(witness))
                 per_wallet["cov:" + whale["address"]] = {
                     "complete": complete, "oldest": oldest_ts,
-                    "dirty": dirty}
+                    "newest": newest_ts, "dirty": dirty}
             except Exception as exc:  # noqa: BLE001 — one wallet must
                 # never abort the whole run: this sweep is the sole
                 # backstop for the S1 corroboration stamp, and a single

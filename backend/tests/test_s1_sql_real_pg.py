@@ -209,7 +209,7 @@ def test_every_state_statement_prepares_and_executes():
             det = rows[0]["detected_at"]
             fill_epoch = rows[0]["ts"].timestamp()
             args = (det, "0xw", fill_epoch - s1.RECON_TS_MARGIN_S,
-                    float(s1.RECON_VENUE_LAG_S))
+                    float(s1.RECON_VENUE_LAG_S), fill_epoch)
             row = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
             assert int(row["n"]) == 0, "no run recorded -> defer"
             # round 8: complete=true with no reached-timestamp is a
@@ -229,7 +229,7 @@ def test_every_state_statement_prepares_and_executes():
             await c.execute(
                 "UPDATE reconciliation_runs SET details = $1::jsonb",
                 json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
-                    "complete": False,
+                    "complete": False, "newest": fill_epoch + 20,
                     "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
             # round 20: coverage takes TWO independent clean runs
             ran = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
@@ -244,6 +244,32 @@ def test_every_state_statement_prepares_and_executes():
                 "TWO span-covering runs started after the lag margin " \
                 "MUST cover — this exact call could never execute " \
                 "before the round-7 cast"
+            # round 38: a frozen-index walk spans BELOW the fill but
+            # its newest served row never reached it — no cover; and a
+            # pre-round-38 run with no 'newest' key defers fail-closed
+            await c.execute(
+                "UPDATE reconciliation_runs SET details = $1::jsonb",
+                json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
+                    "complete": False, "newest": fill_epoch - 7200,
+                    "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
+            rn = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
+            assert int(rn["n"]) == 0, \
+                "round 38: a walk whose newest row never reached the " \
+                "fill provably never served it — a frozen index must " \
+                "not testify as coverage"
+            await c.execute(
+                "UPDATE reconciliation_runs SET details = $1::jsonb",
+                json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
+                    "complete": False,
+                    "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
+            rn = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
+            assert int(rn["n"]) == 0, \
+                "round 38: no 'newest' testimony defers, fail-closed"
+            await c.execute(
+                "UPDATE reconciliation_runs SET details = $1::jsonb",
+                json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
+                    "complete": False, "newest": fill_epoch + 20,
+                    "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
             # the failed: key still blocks
             await c.execute("UPDATE reconciliation_runs SET details = "
                             "details || '{\"per_wallet\": {\"0xw\": 0, "
@@ -375,10 +401,11 @@ def test_round11_dirty_coverage_and_the_tombstone_clock():
                                  wid, "salt"))[0]
             args = (row["detected_at"], "0xw",
                     row["ts"].timestamp() - s1.RECON_TS_MARGIN_S,
-                    float(s1.RECON_VENUE_LAG_S))
+                    float(s1.RECON_VENUE_LAG_S), row["ts"].timestamp())
 
             def cov(dirty):
                 d = {"complete": True,
+                     "newest": row["ts"].timestamp() + 30,   # r38 span
                      "oldest": row["ts"].timestamp()
                      - s1.RECON_TS_MARGIN_S - 3600}
                 if dirty is not ...:

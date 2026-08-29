@@ -127,6 +127,13 @@ def test_clean_deep_feed_fetches_a_border_page_and_stays_clean(
     # the border page's rows (585+) must NOT deepen the testimony
     assert cov["oldest"] == float(TOP_TS - 584 * STEP), \
         "span testimony comes only from rows with verified successors"
+    # fleet r38 (major): coverage claimed only a lower bound — a
+    # frozen index's walk "covered" a fill it never served and the
+    # sweep sticky-tripped a CORRECT emission. The walk now testifies
+    # to the newest row it served; SQL_RECON_SINCE requires the fill
+    # INSIDE the span (executed semantics: test_s1_sql_real_pg).
+    assert cov["newest"] == float(TOP_TS), \
+        "the walk testifies to its upper bound too"
 
 
 def test_interior_late_indexed_old_row_dirties_the_walk(monkeypatch):

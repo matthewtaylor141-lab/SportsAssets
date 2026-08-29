@@ -238,6 +238,16 @@ SQL_MARK_JUDGED = (
 # between hourly walks, so the masking coincidence must recur with
 # fresh, decorrelated geometry — and the failure direction is pure
 # deferral (a true alarm arrives one run later; it still arrives).
+# Round 38 (major): coverage tested only the LOWER bound — a frozen
+# venue index's walk spanned far below a fill it could never have
+# served, its byte-identical geometry defeated the round-20 two-run
+# decorrelation, and the sweep STICKY-tripped a CORRECT emission
+# ('the venue's feed never showed this fill' — because the frozen
+# feed showed nothing new at all). A covering run must now testify
+# that its NEWEST served row reached the fill's own timestamp — the
+# fill sits INSIDE the walked span, both bounds. Fail-closed on
+# missing 'newest' (pre-round-38 runs defer; deferral is the honest
+# cost, a false sticky trip is not).
 SQL_RECON_SINCE = """
 SELECT count(*) AS n FROM (
   SELECT 1 FROM reconciliation_runs
@@ -249,6 +259,10 @@ SELECT count(*) AS n FROM (
                 details->'per_wallet'->('cov:' || $2)->'oldest') = 'number'
               THEN (details->'per_wallet'->('cov:' || $2)->>'oldest')::float8
               ELSE 'Infinity'::float8 END) <= $3
+    AND (CASE WHEN jsonb_typeof(
+                details->'per_wallet'->('cov:' || $2)->'newest') = 'number'
+              THEN (details->'per_wallet'->('cov:' || $2)->>'newest')::float8
+              ELSE '-Infinity'::float8 END) >= $5
     AND (CASE
           WHEN NOT (COALESCE(details->'per_wallet'->('cov:' || $2),
                              '{}'::jsonb) ? 'dirty') THEN true
@@ -1626,7 +1640,7 @@ class S1Emitter:
                 ran = await pool.fetchrow(
                     SQL_RECON_SINCE, r["detected_at"], address,
                     ts_epoch - RECON_TS_MARGIN_S,
-                    float(RECON_VENUE_LAG_S), timeout=6)
+                    float(RECON_VENUE_LAG_S), ts_epoch, timeout=6)
             except Exception:  # noqa: BLE001
                 self.bump("s1.errors")
                 return
