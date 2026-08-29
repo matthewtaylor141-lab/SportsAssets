@@ -52,45 +52,39 @@ const asOfMs = (v: string | number): number | null => {
 type RideWhale = { whale: string; count: number; stake: number }
 type RidePayload = { open?: { by_whale?: RideWhale[] } }
 
-/** v9 capital ring: an inline SVG donut over totals.value. Gold =
- * committed_usd when the payload provides a committed split. When it
- * does not, the ring falls back to the VENUE split (Polymarket vs
- * Kalshi) — both parts computed from the payload's own venue figures,
- * drawn only when they reconcile to the total (v9 review: a
+/** v9 capital ring: an inline SVG donut over totals.value. Committed
+ * capital is folded into the total and never broken out (owner
+ * directive 2026-08-29). The ring encodes the VENUE split (Polymarket
+ * vs Kalshi) — both parts computed from the payload's own venue
+ * figures, drawn only when they reconcile to the total (v9 review: a
  * one-segment gray ring encoded nothing and repeated the number). */
-function CapitalRing({ value, committed, kalshiPart }: {
+function CapitalRing({ value, kalshiPart }: {
   value: number | null | undefined
-  committed: number | null | undefined
   kalshiPart: number | null | undefined
 }) {
   const R = 48
   const C = 2 * Math.PI * R
-  const split = value != null && value > 0 && committed != null && committed > 0
-  // Venue fallback: only when both parts are real and sum inside the
+  // Venue split: only when both parts are real and sum inside the
   // total (never invented — a mismatch renders the neutral ring).
-  const vsplit = !split && value != null && value > 0
+  const vsplit = value != null && value > 0
     && kalshiPart != null && kalshiPart > 0 && kalshiPart <= value * 1.001
   const pmPart = vsplit ? Math.max(0, Math.round((value! - kalshiPart!) * 100) / 100) : null
   // Drawing clamp only — the legend always shows the raw dollars.
-  const frac = split ? Math.min(1, Math.max(0, committed! / value!))
-    : vsplit ? Math.min(1, Math.max(0, kalshiPart! / value!)) : 0
-  const rest = split ? Math.round((value! - committed!) * 100) / 100 : null
-  const label = split
-    ? `Total value ${money(value)}: committed capital ${money(committed)}, account ${money(rest)}`
-    : vsplit
-      ? `Total value ${money(value)}: Kalshi ${money(kalshiPart)}, Polymarket ${money(pmPart)}`
-      : `Total value ${money(value)}`
+  const frac = vsplit ? Math.min(1, Math.max(0, kalshiPart! / value!)) : 0
+  const label = vsplit
+    ? `Total value ${money(value)}: Kalshi ${money(kalshiPart)}, Polymarket ${money(pmPart)}`
+    : `Total value ${money(value)}`
   return (
     <>
       <div className="ac9-ring" role="img" aria-label={label}>
         <svg width="120" height="120" viewBox="0 0 120 120" aria-hidden="true">
           <circle
-            className={`ac9-arc-base${split || vsplit ? ' live' : ''}`}
+            className={`ac9-arc-base${vsplit ? ' live' : ''}`}
             cx="60" cy="60" r={R} fill="none" strokeWidth="13"
           />
-          {(split || vsplit) && (
+          {vsplit && (
             <circle
-              className={split ? 'ac9-arc-gold' : 'ac9-arc-teal'}
+              className="ac9-arc-teal"
               cx="60" cy="60" r={R} fill="none"
               strokeWidth="13" strokeDasharray={`${frac * C} ${C}`}
               transform="rotate(-90 60 60)"
@@ -103,18 +97,7 @@ function CapitalRing({ value, committed, kalshiPart }: {
         </div>
       </div>
       <div className="ac9-legend">
-        {split ? (
-          <>
-            <div>
-              <i className="ac9-sw gold" /> Committed capital
-              <b className="mono">{money(committed)}</b>
-            </div>
-            <div>
-              <i className="ac9-sw cyan" /> Account
-              <b className="mono">{money(rest)}</b>
-            </div>
-          </>
-        ) : vsplit ? (
+        {vsplit ? (
           <>
             <div>
               <i className="ac9-sw teal" /> Kalshi
@@ -303,7 +286,6 @@ export function Accounts() {
           <div className="ac9-ringcard">
             <CapitalRing
               value={data.totals.value}
-              committed={data.totals.committed_usd}
               kalshiPart={data.kalshi?.balance_usd != null
                 ? Math.round(((data.kalshi.balance_usd || 0)
                     + data.kalshi.positions.reduce((s, p) =>
@@ -317,9 +299,6 @@ export function Accounts() {
               <div className="ac-tile-v mono">
                 {money(data.totals.trading_capital ?? data.totals.cash)}
               </div>
-              {(data.totals.committed_usd ?? 0) > 0 && (
-                <div className="ac-tile-note">incl. committed capital</div>
-              )}
             </div>
             <div className="ac-tile">
               <div className="ac-tile-l">Unrealized P&L</div>
@@ -390,12 +369,7 @@ export function Accounts() {
             </div>
             <div className="ac-hero">
               <div className="ac-hero-num mono">{money(pm?.trading_capital ?? pm?.cash)}</div>
-              <div className="ac-hero-l">
-                TRADING CAPITAL
-                {(pm?.committed_usd ?? 0) > 0 && (
-                  <span className="ac-hero-note">incl. committed capital</span>
-                )}
-              </div>
+              <div className="ac-hero-l">TRADING CAPITAL</div>
             </div>
             <div className="ac-stats">
               <div className="ac-stat"><span>Open value</span><b>{money(pm?.open_value)}</b></div>
@@ -410,7 +384,6 @@ export function Accounts() {
                 <summary>details</summary>
                 <div className="ac-stats">
                   <div className="ac-stat"><span>Live cash</span><b>{money(pm?.cash)}</b></div>
-                  <div className="ac-stat"><span>Committed</span><b>{money(pm?.committed_usd)}</b></div>
                   <div className="ac-stat"><span>Buying power</span><b>{money(pm?.buying_power)}</b></div>
                   <div className="ac-stat"><span>Account value</span><b>{money(pm?.account_value)}</b></div>
                 </div>
