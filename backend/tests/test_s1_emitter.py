@@ -1319,12 +1319,17 @@ def test_armed_path_refuses_a_borrowed_timestamp(st, monkeypatch):
     assert st2.deltas.get("s1.would_emit") == 1
 
 
-def test_removed_notice_purges_the_cache_suffix(st):
+def test_removed_notice_purges_every_earned_timestamp(st):
     """fleet r7: a reorg at block B rewrites the whole suffix — every
     cached timestamp at or above B is dropped the moment any reorg
     signal arrives. r8: INCLUDING copies already resolved into pending
     entries, or a retry pass would emit the orphaned block without
-    ever re-verifying it."""
+    ever re-verifying it. r31 (major): evidence AT height B only
+    proves the fork is AT OR BELOW B — the lower-height survivors
+    this pin used to assert were exactly the armed orphaned-chain
+    emission the fleet executed, so the purge now voids EVERYTHING
+    and re-resolution re-earns each height against its recorded hash
+    (the strict resolver refuses what the live chain rewrote)."""
     lst = _Listener(roster={})
     h = "0xabc"
     st._ts_cache[(99, h)] = 1
@@ -1335,9 +1340,11 @@ def test_removed_notice_purges_the_cache_suffix(st):
                             "ts": {99: 1, 101: 3}, "evicted": False}
     st.observe(lst, dict(MAKER_EV, removed=True,
                          blockNumber=hex(100)))
-    assert set(st._ts_cache) == {(99, h)}
-    assert st.pending[other_tx]["ts"] == {99: 1}, \
-        "the entry-local copy is purged with the shared cache"
+    assert st._ts_cache == {}, \
+        "r31: nothing below the evidence height is provably safe"
+    assert st.pending[other_tx]["ts"] == {}, \
+        "the entry-local copies are purged with the shared cache"
+    assert st.pending[other_tx].get("reorg_gen", 0) >= 1
 
 
 def test_removed_entry_mid_finalize_never_emits(st, monkeypatch):
@@ -2396,3 +2403,38 @@ def test_sibling_frame_hash_conflict_voids_the_earned_timestamp(st):
     # the conflicting frame's own entry proceeds against ITS hash —
     # the canonical side re-earns and emits; deferral, not death
     assert st.pending["0x" + "e3" * 32]["blocks"][BLK] == "0x" + "99" * 32
+
+
+# ── fleet round 31 pins ─────────────────────────────────────────────
+def test_reorg_evidence_above_voids_the_lower_earned_timestamp(st):
+    """fleet r31 (major, executed by the fleet through the REAL run
+    loop): a sibling hash conflict at height C purged only >= C, so a
+    pending fill strictly earned at B < C sailed through every
+    post-await self-comparison into an ARMED ingest of a fill that
+    exists only on the orphaned chain — the fork point is never
+    delivered, so evidence at C makes every lower height suspect too.
+    All reorg-evidence channels now void every earned timestamp; the
+    strict resolver re-earns each height and refuses whatever the
+    live chain rewrote."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    st.observe(lst, MAKER_EV)                 # fill at BLK, hash 77…
+    e = st.pending[TX]
+    e["ts"][BLK] = TS0
+    e.setdefault("ts_src", {})[BLK] = "0x" + "77" * 32
+    st._ts_cache[(BLK, "0x" + "77" * 32)] = TS0
+    gen0 = e.get("reorg_gen", 0)
+    # a sibling pair at C = BLK+1 delivers a hash conflict ABOVE the
+    # earned height: old-chain frame, then new-chain frame
+    st.observe(lst, dict(MAKER_EV, transactionHash="0x" + "d1" * 32,
+                         blockNumber=hex(BLK + 1),
+                         blockHash="0x" + "aa" * 32, logIndex="0x5"))
+    st.observe(lst, dict(MAKER_EV, transactionHash="0x" + "d2" * 32,
+                         blockNumber=hex(BLK + 1),
+                         blockHash="0x" + "bb" * 32, logIndex="0x6"))
+    assert st.deltas.get("s1.sibling_hash_conflict") == 1
+    assert e["ts"] == {}, \
+        "the fork may sit at or below B — the earned ts must re-earn"
+    assert (BLK, "0x" + "77" * 32) not in st._ts_cache
+    assert e.get("reorg_gen", 0) > gen0, \
+        "an in-flight write-back below the evidence height dies too"

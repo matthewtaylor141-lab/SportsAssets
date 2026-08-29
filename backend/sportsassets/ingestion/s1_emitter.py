@@ -510,19 +510,30 @@ class S1Emitter:
             self.deltas[key] = self.deltas.get(key, 0) + n
 
     def _purge_ts_cache(self, from_blk: int) -> None:
-        """A reorg at block B rewrites the whole suffix — drop every
-        cached timestamp at or above it (fleet round 7), INCLUDING the
-        copies already resolved into pending entries (fleet round 8: an
-        entry-local ts survived the purge and a retry pass emitted the
-        orphaned block with zero re-verification; dropping it forces
-        re-resolution against the buffered hash, which the strict
-        resolver then refuses as reorged)."""
-        for k in [k for k in self._ts_cache if k[0] >= from_blk]:
-            self._ts_cache.pop(k, None)
+        """Reorg evidence ANYWHERE voids EVERY earned timestamp.
+
+        Fleet round 7 dropped the suffix at or above the evidence
+        height; round 8 extended that to the copies already resolved
+        into pending entries. Fleet round 31 (major) killed the
+        remaining assumption: evidence AT height C only proves the
+        fork point is AT OR BELOW C — a sibling entry whose fill sat
+        at B < C kept its strictly-earned old-chain timestamp, passed
+        every post-await self-comparison, and the armed path ingested
+        a fill existing only on the orphaned chain (executed repro,
+        both the conflict-at-C+1 shape and the discarded-parentHash
+        shape). The fork point is never delivered, so nothing below
+        the evidence height is provably safe: every cached timestamp
+        and every entry-local copy is dropped, and re-resolution
+        re-earns each height against the recorded hash — the strict
+        resolver refuses whatever the live chain has rewritten and
+        re-confirms what it has not. Pure deferral, RPC-bounded by
+        the existing token bucket. `from_blk` remains the evidence
+        height for the caller's log/counter context only."""
+        self._ts_cache.clear()
         for e in self.pending.values():
-            for blk in [b for b in e.get("ts", {}) if b >= from_blk]:
-                e["ts"].pop(blk, None)
-                e.get("ts_src", {}).pop(blk, None)
+            had = bool(e.get("ts"))
+            e["ts"] = {}
+            e["ts_src"] = {}
             # REORG GENERATION (fleet round 11): the resolution loop's
             # post-await write-back guard compares the earned-against
             # hash to the entry's current one — but a NEW-height
@@ -530,11 +541,17 @@ class S1Emitter:
             # WITHOUT changing this entry's buffered hash at the old
             # height, so the hash compare alone would let the write-
             # back silently restore a voided, pre-reorg-earned ts.
-            # Any purge that touches (or could touch) this entry's
-            # suffix advances its generation; a write-back is valid
-            # only when the generation it captured before the await
-            # is still current.
-            if any(b >= from_blk for b in e.get("blocks", {})):
+            # Any purge advances the generation of every entry that
+            # holds (or could be mid-earning) a timestamp; a write-
+            # back is valid only when the generation it captured
+            # before the await is still current. Round 31: gating the
+            # bump on blocks >= from_blk left a lower-height entry's
+            # in-flight write-back valid across the purge, so the
+            # bump is now unconditional for entries with any buffered
+            # block — the write-back race does not care where the
+            # evidence height sat, and `had` alone cannot see a ts
+            # still awaited.
+            if had or e.get("blocks"):
                 e["reorg_gen"] = e.get("reorg_gen", 0) + 1
 
     def _mark_counted(self, tx: str, wallet: str, asset: str) -> bool:
