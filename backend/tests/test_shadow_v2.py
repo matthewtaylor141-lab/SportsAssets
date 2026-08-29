@@ -2216,8 +2216,9 @@ class TestRound45CutoverArtifact:
 
         src = inspect.getsource(sv.ShadowV2._reverse_probe)
         assert "poll_uncovered_preboot" in src
-        assert "ts <= self.boot_at + 30" in src, \
-            "the boundary is the process's own subscription epoch"
+        assert "ts <= self.boot_at + 300" in src, \
+            "the boundary is the process's own subscription epoch " \
+            "plus the codebase's 300s venue-skew budget (r47)"
         fsrc = inspect.getsource(sv.ShadowV2._flush)
         assert '"kind": "writer_handoff"' not in fsrc, \
             "the fragile span seeding is gone"
@@ -2237,3 +2238,32 @@ class TestRound45CutoverArtifact:
         assert "poll_uncovered_unexplained" in sv.GATING, \
             "a post-boot uncovered fill still resets — nothing " \
             "outside the boot shadow is acquitted"
+
+
+class TestRound47AcquittalHorizons:
+    """r47 (major, executed): a reconciler late-ingest of a fill
+    whose CHAIN row proves WS coverage classified unexplained —
+    SQL_REVERSE's 20-min detected_at bound hid the acquitting row
+    and the seen_tx LRU hid the delivery mark — resetting a 6.9-day
+    window and auto-disarming an armed emitter. Acquittal evidence
+    must not expire faster than the accusations it answers."""
+
+    def test_chain_acquittal_is_unbounded_by_detection_age(self):
+        import inspect
+
+        src = inspect.getsource(sv.ShadowV2._reverse_probe)
+        assert "source = 'chain' LIMIT 1" in src, \
+            "the table is asked directly — a chain row acquits " \
+            "whenever it was detected"
+
+    def test_horizon_and_grace_arms(self):
+        import inspect
+
+        src = inspect.getsource(sv.ShadowV2._reverse_probe)
+        assert "poll_uncovered_horizon" in src, \
+            "absence of a mark beyond our own LRU horizon proves " \
+            "nothing — visible, named, non-gating"
+        assert "ts <= self.boot_at + 300" in src, \
+            "the boot grace is the codebase's own 300s skew budget"
+        assert "poll_uncovered_horizon" not in sv.GATING
+        assert "poll_uncovered_preboot" not in sv.GATING

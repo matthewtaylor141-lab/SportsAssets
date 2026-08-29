@@ -2956,3 +2956,34 @@ def test_kd_race_lost_self_clear_releases_its_own_reason(st):
     assert pool.cleared == ["key_divergent:3"], \
         "the race-lost release names the reason that actually tripped"
     assert st.trips == {}, "released in-memory in the SAME sweep"
+
+
+# ── fleet round 47 pins ─────────────────────────────────────────────
+def test_multi_height_verdict_is_durable_contested_ground(st, monkeypatch):
+    """r47 (major): the two-height reorg verdict died with the run
+    loop's pop — a redelivered orphaned frame re-buffered freely and
+    a stale replica re-earned it into an armed orphaned ingest. Both
+    heights are contested the moment the second is seen (the
+    round-15 law), durable via the r34 floor, exactly like the
+    same-height/sibling/removed channels."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    _arm(st)
+    calls = _capture_ingest(monkeypatch)
+    st.observe(lst, MAKER_EV)                       # height BLK
+    st.observe(lst, dict(MAKER_EV, blockNumber=hex(BLK + 2),
+                         blockHash="0x" + "88" * 32, logIndex="0x9"))
+    assert BLK in st.contested and (BLK + 2) in st.contested, \
+        "the verdict is recorded at evidence time"
+    e = st.pending[TX]
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, e, time.time()))
+    assert done is True and calls == []
+    st.pending.pop(TX, None)                        # the run-loop pop
+    # the lagging shard redelivers the orphaned frame — fresh entry,
+    # but its height is contested ground
+    _observe_all(st, lst, [MAKER_EV])
+    e2 = st.pending[TX]
+    done = asyncio.run(st._finalize_tx(_Pool(), TX, e2, time.time()))
+    assert done is True and calls == [], \
+        "the redelivered orphan abstains — no replica arbitrates"
+    assert st.deltas.get("s1.abstain.contested", 0) >= 1

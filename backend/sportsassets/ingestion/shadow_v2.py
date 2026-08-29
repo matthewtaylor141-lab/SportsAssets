@@ -1236,7 +1236,24 @@ class ShadowV2:
                 self.bump("poll_uncovered_chainrow")   # legacy topic / v3 partial
             else:
                 ts = int(row["ts_epoch"])
-                if ts <= self.boot_at + 30:
+                # r47 (major, executed): the chainrow acquittal was
+                # blind past SQL_REVERSE's 20-minute detected_at
+                # horizon — a reconciler late-ingest of a fill whose
+                # chain row PROVES WS coverage classified unexplained
+                # and reset a 6.9-day window. The acquittal now asks
+                # the table directly, unbounded: a chain row for this
+                # tx is proof of coverage whenever it was detected.
+                try:
+                    chain_any = await pool.fetchval(
+                        "SELECT 1 FROM trades WHERE lower(tx_hash) = "
+                        "lower($1) AND source = 'chain' LIMIT 1",
+                        row["tx"], timeout=5.0)
+                except Exception:  # noqa: BLE001 — cannot acquit:
+                    chain_any = None   # fall through, arms below
+                if chain_any:
+                    self.bump("poll_uncovered_chainrow")
+                    continue
+                if ts <= self.boot_at + 300:
                     # ROUND 46 (executed): the fill predates this
                     # process's WS subscription — its event can only
                     # have gone to the DYING writer, whose seen_tx
@@ -1247,8 +1264,23 @@ class ShadowV2:
                     # feed that reliably drops exactly boot-
                     # straddling fills never resets the window — the
                     # preboot counter itself is the watch on that.
+                    # r47: the grace is the codebase's own venue-skew
+                    # budget (300s, FUTURE_SKEW_S/RECON_TS_MARGIN_S)
+                    # — the 30s form let ordinary ahead-skew push a
+                    # genuinely pre-boot fill into the GATING arm.
                     self.bump("poll_uncovered_preboot")
                     continue
+                if self.seen_tx:
+                    oldest_seen = next(iter(self.seen_tx.values()))
+                    if ts < oldest_seen:
+                        # r47: our WS testimony provably does not
+                        # reach this fill's era — seen_tx is an LRU
+                        # whose oldest mark is our observation
+                        # horizon, and absence of a mark beyond it
+                        # proves nothing. Visible, named, non-gating;
+                        # a fill INSIDE the horizon still gates.
+                        self.bump("poll_uncovered_horizon")
+                        continue
                 gap = next((gp for gp in self.gaps
                             if gp["from"] - 2 <= ts <= gp["to"] + 2), None)
                 if gap:

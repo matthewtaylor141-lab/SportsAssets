@@ -927,6 +927,10 @@ class S1Emitter:
                 # verified each height against a different chain).
                 e["ts"] = {}
                 e["ts_src"] = {}
+                # r47: the two-height verdict is durable at EVIDENCE
+                # time (the round-15 law) — both heights contested
+                for _b in list(e["blocks"]) + [blk]:
+                    self._mark_contested(_b)
                 self._purge_ts_cache(min(list(e["blocks"]) + [blk]))
                 # RECORD THE SECOND HEIGHT NOW (fleet round 15,
                 # CRITICAL): the lix dup check below returned early
@@ -1381,8 +1385,15 @@ class S1Emitter:
             # do not describe one chain). A second height in the
             # buffer IS the reorg verdict: the whole tx abstains here,
             # unconditionally, and the poller carries whatever was
-            # real.
+            # real. Round 47 (major): the verdict used to die with
+            # the pop — a redelivered orphaned frame re-buffered
+            # freely and a stale replica re-earned it into an armed
+            # orphaned ingest. Every buffered height is contested
+            # ground now, durable via the r34 floor, exactly like the
+            # same-height/sibling/removed channels.
             self.bump("s1.abstain.reorged")
+            for _b in list(e.get("blocks", {})):
+                self._mark_contested(_b)
             self._purge_ts_cache(min(e["blocks"]))
             return True
         if any(b in self.contested for b in e.get("blocks", {})):
