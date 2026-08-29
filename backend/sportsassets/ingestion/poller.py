@@ -262,9 +262,17 @@ class Poller:
             page_newest = max((ev.ts_epoch or 0 for ev in events),
                               default=0)
             try:
+                # ::float8 (fleet round 39, major): extract(epoch)
+                # returns NUMERIC on real PG, asyncpg decodes Decimal,
+                # and the isinstance((int,float)) guard below was
+                # structurally False — the round-37 alarm was dead on
+                # arrival, provable only against real Postgres (the
+                # unit fake returned a Python float). Every other
+                # epoch query in the tree casts; this one now does.
                 known_newest = await pool.fetchval(
-                    "SELECT extract(epoch from max(ts)) FROM trades "
-                    "WHERE whale_id = $1 AND source = 'poll' "
+                    "SELECT extract(epoch from max(ts))::float8 "
+                    "FROM trades WHERE whale_id = $1 "
+                    "AND source = 'poll' "
                     "AND venue_seen_at IS NOT NULL", whale["id"])
             except Exception:  # noqa: BLE001 — probe is best-effort;
                 known_newest = None       # next cycle re-checks

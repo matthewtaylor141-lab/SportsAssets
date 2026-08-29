@@ -240,10 +240,22 @@ def test_every_state_statement_prepares_and_executes():
                 "finished_at, missed, details FROM reconciliation_runs "
                 "LIMIT 1")
             ran = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
+            assert int(ran["n"]) == 1, \
+                "round 39: byte-identical geometry is ONE testimony " \
+                "however many rows carry it — a frozen (or poisoned) " \
+                "feed cannot decorrelate itself"
+            await c.execute(
+                "UPDATE reconciliation_runs SET details = $1::jsonb "
+                "WHERE id = (SELECT max(id) FROM reconciliation_runs)",
+                json.dumps({"per_wallet": {"0xw": 0, "cov:0xw": {
+                    "complete": False, "newest": fill_epoch + 60,
+                    "oldest": fill_epoch - s1.RECON_TS_MARGIN_S - 50}}}))
+            ran = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
             assert int(ran["n"]) == 2, \
-                "TWO span-covering runs started after the lag margin " \
-                "MUST cover — this exact call could never execute " \
-                "before the round-7 cast"
+                "TWO span-covering runs with DIFFERING newest " \
+                "testimony (the feed re-seated between walks) cover " \
+                "— this exact call could never execute before the " \
+                "round-7 cast"
             # round 38: a frozen-index walk spans BELOW the fill but
             # its newest served row never reached it — no cover; and a
             # pre-round-38 run with no 'newest' key defers fail-closed
@@ -403,9 +415,9 @@ def test_round11_dirty_coverage_and_the_tombstone_clock():
                     row["ts"].timestamp() - s1.RECON_TS_MARGIN_S,
                     float(s1.RECON_VENUE_LAG_S), row["ts"].timestamp())
 
-            def cov(dirty):
+            def cov(dirty, seat=30):
                 d = {"complete": True,
-                     "newest": row["ts"].timestamp() + 30,   # r38 span
+                     "newest": row["ts"].timestamp() + seat,  # r38 span
                      "oldest": row["ts"].timestamp()
                      - s1.RECON_TS_MARGIN_S - 3600}
                 if dirty is not ...:
@@ -436,12 +448,14 @@ def test_round11_dirty_coverage_and_the_tombstone_clock():
                 "INSERT INTO reconciliation_runs (started_at, "
                 "finished_at, missed, details) VALUES "
                 "(now() - interval '1 hour', now() - interval "
-                "'50 minutes', 0, $1::jsonb)", cov(0))
+                "'50 minutes', 0, $1::jsonb)", cov(0, seat=90))
             rn = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
             assert int(rn["n"]) == 2, \
-                "two clean (dirty=0) spanning walks cover"
+                "two clean (dirty=0) spanning walks with different " \
+                "newest testimony cover"
             await c.execute(
-                "UPDATE reconciliation_runs SET details = $1::jsonb",
+                "UPDATE reconciliation_runs SET details = $1::jsonb "
+                "WHERE id = (SELECT min(id) FROM reconciliation_runs)",
                 cov(...))
             rn = await c.fetchrow(s1.SQL_RECON_SINCE, *args)
             assert int(rn["n"]) == 2, \

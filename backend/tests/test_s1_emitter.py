@@ -2158,8 +2158,11 @@ def test_uncorroborated_needs_two_independent_covering_runs():
     trusted: the verdict requires TWO distinct clean covering runs,
     whose feed geometry decorrelates between hourly walks. Failure
     direction is pure deferral. Executed: test_s1_sql_real_pg."""
-    assert "LIMIT 2" in s1.SQL_RECON_SINCE
-    assert "count(*)" in s1.SQL_RECON_SINCE
+    # r39: the decorrelation premise is explicit in the statement —
+    # coverage counts DISTINCT newest testimony, so a frozen or
+    # poisoned feed serving byte-identical geometry twice defers
+    assert "LIMIT 8" in s1.SQL_RECON_SINCE
+    assert "count(DISTINCT q.nv)" in s1.SQL_RECON_SINCE
     import inspect
     src = inspect.getsource(s1)
     assert 'int(ran["n"] or 0) < 2' in src, \
@@ -2696,3 +2699,36 @@ def test_own_entry_flap_marks_the_height_contested(st):
     assert done is True
     assert st.deltas.get("s1.abstain.contested") == 1, \
         "no single replica arbitrates a proven two-hash height"
+
+
+# ── fleet round 39 pins ─────────────────────────────────────────────
+def test_removed_tx_replay_never_rebuffers(st):
+    """fleet r39 (CRITICAL): the removed-notice pop forgot the
+    verdict — a lagging WS backend redelivered the orphaned frame
+    after the pop, it re-buffered into a fresh entry with no mark and
+    no sibling, and a stale replica re-earned it into an armed
+    key-divergent ingest. A removed notice is a PROVEN orphan verdict
+    for the tx it names: the redelivered frame refuses to re-buffer,
+    and the parseable height is contested ground (durable via the
+    round-34 floor)."""
+    lst = _Listener(roster={MAKER: {"id": 7, "username": "mk"}})
+    _wire(st, lst)
+    st.observe(lst, MAKER_EV)
+    assert TX in st.pending
+    st.observe(lst, dict(MAKER_EV, removed=True))
+    assert TX not in st.pending
+    assert BLK in st.contested, \
+        "the removed height is contested ground, durably"
+    # the lagging shard replays the orphaned frame
+    st.observe(lst, MAKER_EV)
+    assert TX not in st.pending, "a proven orphan never re-buffers"
+    assert st.deltas.get("s1.abstain.removed_replay") == 1
+    assert len(st.removed_txs) == 1
+
+
+def test_removed_tx_registry_is_bounded(st):
+    lst = _Listener(roster={})
+    for i in range(s1.REMOVED_TX_CAP + 10):
+        st.observe(lst, dict(MAKER_EV, removed=True,
+                             transactionHash="0x%064x" % i))
+    assert len(st.removed_txs) == s1.REMOVED_TX_CAP

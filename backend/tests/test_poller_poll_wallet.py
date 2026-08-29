@@ -465,3 +465,18 @@ def test_stale_only_page_with_a_newer_known_fill_fails_the_cycle(monkeypatch):
     with pt.raises(ValueError, match="frozen index"):
         aio.run(p.poll_wallet({"id": 7, "address": "0xw",
                                "username": "w"}))
+
+
+def test_stale_index_probe_casts_epoch_to_float8():
+    """fleet r39 (major): extract(epoch) returns NUMERIC on real PG
+    and asyncpg decodes Decimal — the round-37 isinstance guard was
+    structurally False and the frozen-index raise unreachable, dead
+    on arrival while its unit pin passed on a float-returning fake.
+    The query now casts like every other epoch read in the tree."""
+    import inspect
+
+    import sportsassets.ingestion.poller as pl
+
+    src = inspect.getsource(pl.Poller.poll_wallet)
+    assert "extract(epoch from max(ts))::float8" in src, \
+        "the cast is what makes the guard reachable on real PG"

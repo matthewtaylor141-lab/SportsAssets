@@ -97,6 +97,7 @@ COUNTED_CAP = 8192                  # burn-in marks survive entry pop
 CONTESTED_CAP = 4096                # proven two-hash heights (r32)
 CONTESTED_FLUSH_CAP = 512           # marks one flush doc carries (r34)
 BLOCKS_PER_TX_CAP = 8               # heights one entry may record (r33)
+REMOVED_TX_CAP = 8192               # proven-orphan tx marks (r39)
 RECON_VENUE_LAG_S = 600.0           # data-api indexing lag margin
 RECON_TS_MARGIN_S = 300.0           # venue ts vs block ts skew margin
 FLUSH_EVERY_S = 60.0
@@ -241,16 +242,27 @@ SQL_MARK_JUDGED = (
 # Round 38 (major): coverage tested only the LOWER bound — a frozen
 # venue index's walk spanned far below a fill it could never have
 # served, its byte-identical geometry defeated the round-20 two-run
-# decorrelation, and the sweep STICKY-tripped a CORRECT emission
-# ('the venue's feed never showed this fill' — because the frozen
-# feed showed nothing new at all). A covering run must now testify
-# that its NEWEST served row reached the fill's own timestamp — the
-# fill sits INSIDE the walked span, both bounds. Fail-closed on
-# missing 'newest' (pre-round-38 runs defer; deferral is the honest
-# cost, a false sticky trip is not).
+# decorrelation, and the sweep STICKY-tripped a CORRECT emission.
+# A covering run must testify that its NEWEST served row reached the
+# fill's own timestamp — the fill sits INSIDE the walked span, both
+# bounds. Fail-closed on missing 'newest' (pre-round-38 runs defer).
+# Round 39 (major x3): newest is a TRADE timestamp on served rows —
+# it cannot prove the fill was served. One future-dated head row
+# (valid, no ascending adjacency → dirty=0) inflated newest above
+# every fill for hours; a same-second bundle sibling satisfied the
+# equality edge for a leg the walk never saw; ordinary publication
+# lag put newest above an unserved in-flight fill. All three defeat
+# the two-run rule the same way the round-38 shape did: a
+# frozen/poisoned index serves BYTE-IDENTICAL geometry to both
+# walks. The round-20 decorrelation premise is now explicit in the
+# statement: coverage requires at least two covering runs whose
+# newest testimony DIFFERS — a live feed re-seats between hourly
+# walks; a feed that cannot show two different heads cannot testify
+# that it would have shown this fill. Deferral is the honest cost.
 SQL_RECON_SINCE = """
-SELECT count(*) AS n FROM (
-  SELECT 1 FROM reconciliation_runs
+SELECT count(DISTINCT q.nv) AS n FROM (
+  SELECT (details->'per_wallet'->('cov:' || $2)->>'newest')::float8 AS nv
+  FROM reconciliation_runs
   WHERE started_at > $1::timestamptz + make_interval(secs => $4)
     AND finished_at IS NOT NULL
     AND details->'per_wallet' ? $2
@@ -270,7 +282,7 @@ SELECT count(*) AS n FROM (
                 details->'per_wallet'->('cov:' || $2)->'dirty') = 'number'
           THEN (details->'per_wallet'->('cov:' || $2)->>'dirty')::float8 = 0
           ELSE false END)
-  LIMIT 2
+  LIMIT 8
 ) q
 """
 # The verdict's LAST look at the row (fleet round 15, major): the
@@ -541,6 +553,7 @@ class S1Emitter:
         # finalize redelivery double-counted would_emit)
         self.counted_marks: OrderedDict[tuple, bool] = OrderedDict()
         self.contested: dict[int, float] = {}  # proven two-hash heights
+        self.removed_txs: OrderedDict[str, float] = OrderedDict()
         # Heights at or below this floor abstain unconditionally
         # (fleet round 34): an evicted mark FORGOT a proven verdict —
         # PENDING_CAP overflow discarded the buffered entries before
@@ -699,6 +712,28 @@ class S1Emitter:
                 tx0 = str(log_entry.get("transactionHash", "")).lower()
                 if tx0 and self.pending.pop(tx0, None) is not None:
                     self.bump("s1.abstain.reorged")
+                # ROUND 39 (CRITICAL): the pop FORGOT the verdict — a
+                # lagging WS backend redelivered the orphaned frame
+                # after the pop, it re-buffered into a fresh entry
+                # with no mark and no sibling, and a stale replica
+                # re-earned it into an armed key-divergent ingest of
+                # a fill existing only on the orphaned chain. A
+                # removed notice is a PROVEN orphan verdict for the
+                # tx it names: the tx is remembered (bounded, oldest
+                # out first) and a redelivered frame refuses to
+                # re-buffer; a deep-reorg re-add defers to the poller
+                # ("when in doubt, don't emit"). The height, when it
+                # parses, is contested ground too — durable via the
+                # round-34 floor persistence, covering sibling
+                # entries and post-restart redelivery. Residual,
+                # stated honestly: a BLOCKLESS removed notice followed
+                # by a restart forgets the tx mark and marks no
+                # height; the corroboration sweep backstops there.
+                if tx0:
+                    self.removed_txs[tx0] = time.time()
+                    self.removed_txs.move_to_end(tx0)
+                    while len(self.removed_txs) > REMOVED_TX_CAP:
+                        self.removed_txs.popitem(last=False)
                 # a removed notice rewrites the chain suffix — every
                 # cached block timestamp at or above it is now suspect
                 # (fleet round 7: a sibling tx borrowing a stale
@@ -715,10 +750,19 @@ class S1Emitter:
                     rblk = int(str(log_entry.get("blockNumber", "0x0")), 16)
                 except (TypeError, ValueError):
                     rblk = 0
+                if rblk:
+                    self._mark_contested(rblk)
                 self._purge_ts_cache(rblk)
                 return
             tx = str(log_entry.get("transactionHash", "")).lower()
             if not tx:
+                return
+            if tx in self.removed_txs:
+                # round 39 (CRITICAL): a frame for a tx the venue has
+                # REMOVED is a replay of a proven orphan — it must
+                # never re-buffer toward emission. The poller carries
+                # whatever a deep re-org later made real.
+                self.bump("s1.abstain.removed_replay")
                 return
             blk = int(str(log_entry.get("blockNumber", "0x0")), 16)
             bh = str(log_entry.get("blockHash", "")).lower()
