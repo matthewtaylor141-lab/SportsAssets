@@ -2468,8 +2468,21 @@ jobs:
                         f"usdc_in={my_usdc_in} usdc_out={my_usdc_out} "
                         f"receipt_ids={len(tids)}")
                   for i, ws in enumerate(my_events):
+                      # WORD1 PREMISE VERDICT (decoder panel 2026-08-30:
+                      # the mint identity makes column-sum cross-foots
+                      # vacuous — the only wallet-scoped disambiguator
+                      # is word1==his token id, and THAT premise must
+                      # be positively verified across many receipts
+                      # before any decoder prices from it)
+                      w1_is_T = (len(ws) > 1 and my_ids
+                                 and ws[1] in my_ids)
+                      px = (round(ws[2] / ws[3], 4)
+                            if len(ws) > 3 and ws[3] else None)
+                      w3_is_S = (len(ws) > 3
+                                 and ws[3] in (my_sh_in, my_sh_out))
                       print(f"    MYFILL-EVENT {i}: words="
-                            f"{[hex(x) for x in ws]}")
+                            f"{[hex(x) for x in ws]} w1==T:{w1_is_T} "
+                            f"w3==S:{w3_is_S} implied_px={px}")
                   # cross-foot: do the fill events' amount words sum to
                   # the wallet's standard legs? Exact agreement is the
                   # license for a per-fill bundle decoder; anything
