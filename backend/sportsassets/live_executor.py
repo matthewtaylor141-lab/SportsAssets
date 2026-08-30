@@ -2114,7 +2114,18 @@ PER_FILL_BY_WHALE = {"rn1": 250.00,
                      "homerunhazard": 250.00,
                      _W2C33: 0.00,
                      "kch123": 150.00,
-                     "ferrarichampions2026": 250.00,
+                     # PROBE-SIZED (owner order 2026-08-30, on the
+                     # statistical audit): ferrari's copy capture is
+                     # -2.14x his edge at ZERO measured delay — price
+                     # displacement, not latency (TRUEEDGE paper_actual
+                     # -$21,758 vs cf_total +$10,150; his fast-detected
+                     # subset's edge at our executable prices is
+                     # negative outright). $100 keeps the cohort data
+                     # flowing at ~40% of the bleed while resting-order
+                     # mode is built; re-decide on its data. His
+                     # detection, S1 certification, and exit mirroring
+                     # are untouched.
+                     "ferrarichampions2026": 100.00,
                      "0x076daa87": 250.00}
 # HARD CEILING on the resolved clip, applied AFTER every override and
 # multiplier. The owner authorized $100 per clip; a spread's x1.5 would

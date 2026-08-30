@@ -34,7 +34,11 @@ def test_verified_profitable_whales_clip_at_the_probe_size():
     scale still follows real fills, the ceiling still caps."""
     assert per_fill_usd("0x076daa87") == 250.00
     assert per_fill_usd("RN1") == 250.00
-    assert per_fill_usd("ferrarichampions2026") == 250.00
+    # ferrari PROBE-SIZED to $100 (owner order 2026-08-30): his copy
+    # capture is -2.14x his edge at zero measured delay — displacement,
+    # not latency — so the clip probes while resting-order mode is
+    # built. Everyone else keeps the standard $250.
+    assert per_fill_usd("ferrarichampions2026") == 100.00
     assert per_fill_usd("HomeRunHazard") == 250.00
     assert per_fill_usd("swisstony") == 250.00
 
@@ -289,7 +293,13 @@ class TestProbeAuthorization:
 
     def test_verified_whales_clip_at_one_hundred(self):
         assert per_fill_usd("0x076daa87") == 250.00
-        assert per_fill_usd("ferrarichampions2026") == 250.00
+        # ferrari probe-sized (owner order 2026-08-30); the spread
+        # multiplier scales the PROBE base, not the old one: x1.5 on
+        # $100 is $150, still under the $250 ceiling.
+        assert per_fill_usd("ferrarichampions2026") == 100.00
+        assert per_fill_usd(
+            "ferrarichampions2026",
+            "asc-epl-mun-lee-2026-09-13-neg-1pt5") == 150.00
 
     def test_the_spread_multiplier_cannot_exceed_the_ceiling(self):
         # x1.5 would be $375 — the ceiling clamps it to the authorized

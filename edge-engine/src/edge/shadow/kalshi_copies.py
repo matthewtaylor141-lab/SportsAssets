@@ -135,7 +135,13 @@ _W2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
 # and homerunhazard +$2.32M / +$869k 30d. 0x2c33 stays cut.
 PER_COPY_USD = {"rn1": 250.00, "swisstony": 250.00,
                 _W2C33: 0.00, "homerunhazard": 250.00,
-                "ferrarichampions2026": 250.00,
+                # ferrari PROBE-SIZED to $100 (owner order 2026-08-30,
+                # venue parity with the PMUS leg — a whale sized
+                # differently on two venues is a roster decision
+                # nobody made): his copy capture is -2.14x his edge at
+                # zero delay, displacement not latency; probe while
+                # resting-order mode is built.
+                "ferrarichampions2026": 100.00,
                 "0x076daa87": 250.00,
                 # kch123 pre-sized for his (out-of-season) NBA/NFL/NHL
                 # cells, matching the PMUS leg (owner go 2026-08-20).
