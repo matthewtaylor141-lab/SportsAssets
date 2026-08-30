@@ -51,15 +51,23 @@ class TestTheArithmetic:
         assert int(14 * 0.25 + 0.5) == 4
 
     def test_production_uses_the_half_up_form(self):
+        # The QUANTITY changed shape on 2026-08-30 — it is now sized to
+        # a target (ours - orig*(1-closed_frac)) rather than to a slice
+        # of ours, because the trade lane's fraction became cumulative
+        # and a cumulative fraction times a shrinking base compounds.
+        # The half-up rounding this class exists to protect is the same
+        # property either way, so the pin follows the line rather than
+        # the arithmetic.
         src = inspect.getsource(le.mirror_exit)
-        assert "int(ours * closed_frac + 0.5)" in src
-        assert "qty = int(ours * closed_frac)\n" not in src
+        assert "qty = int(ours - _target_hold + 0.5)" in src
+        assert "qty = int(ours - _target_hold)\n" not in src
+        assert "qty = round(" not in src, "round() is banker's"
 
 
 class TestTheReason:
     def _zero_branch(self) -> str:
         src = inspect.getsource(le.mirror_exit)
-        head = src.index("qty = int(ours * closed_frac + 0.5)")
+        head = src.index("qty = int(ours - _target_hold + 0.5)")
         block = src[head:]
         return block[:block.index("# FULL EXIT")]
 

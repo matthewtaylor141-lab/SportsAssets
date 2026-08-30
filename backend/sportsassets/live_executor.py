@@ -990,6 +990,44 @@ async def mirror_exit(payload: dict) -> str:
         if bought <= 0:
             return _exit_done("mx_no_ledger_position", asset=asset)
         closed_frac = min(sold / bought, 1.0)
+    # A STOCK, NOT A FLOW — ON THE LANE THAT CARRIES THE VOLUME.
+    #
+    # classify_exit hands over `qty / open_sh`: this single complement
+    # buy over what he still held AT THAT MOMENT. The denominator
+    # shrinks in lockstep with the whale, so a man who trims 5% of
+    # what is left, forty-five times, reads exactly 0.05 on every
+    # observation and is refused by MIN_EXIT_FRAC forty-five times
+    # while walking out of the entire position. The fraction never
+    # ratchets because his remaining shrinks with his trims. Only a
+    # constant-ABSOLUTE-size trimmer ever crosses the floor.
+    #
+    # Measured 2026-08-30: mx_below_floor was 94 of the 191 exits that
+    # found a filled position of ours — 49%, the largest single
+    # refusal — while exits_sold stayed 0. This is the same flow-vs-
+    # stock defect already fixed for the position lane (lines 426-450),
+    # left unfixed on the trade lane, which carries 98% of the volume
+    # (mx_reached_position_lookup 1572 vs the position lane's 23).
+    #
+    # `bought` above is his GROSS entry on the leg he held ($1 is the
+    # sibling by this point), and classify_exit supplies what he held
+    # before this trade and what this trade retired. So the honest
+    # question — how far out of this position is he IN TOTAL — is:
+    #
+    #     cum = 1 - (his_open_shares - his_exit_shares) / bought
+    #
+    # The position lane keeps its own supplied flow: it is pre-filtered
+    # at MIN_SHRINK and pinned by EXIT_PENDING_REASONS, so it already
+    # ratchets. Only the trade lane is rewritten, and only when
+    # classify_exit actually supplied both terms.
+    _flow_frac = closed_frac
+    _hos = payload.get("his_open_shares")
+    _hes = payload.get("his_exit_shares")
+    if _hos is not None and _hes is not None and bought > 0:
+        try:
+            _remaining = max(0.0, float(_hos) - float(_hes))
+            closed_frac = max(0.0, min(1.0 - _remaining / bought, 1.0))
+        except (TypeError, ValueError, ZeroDivisionError):
+            closed_frac = _flow_frac   # fail back to the old reading
     # PROPORTIONAL, BOTH LEGS (owner order 2026-08-25: "copy buys and
     # 'sells' in the correct proportional relationship").
     #
@@ -1036,7 +1074,27 @@ async def mirror_exit(payload: dict) -> str:
         # int(x + 0.5), not round(x): round() is banker's, so round(10.5)
         # is 10 and round(11.5) is 12. A sizing rule that depends on the
         # parity of the share count is not a rule.
-        qty = int(ours * closed_frac + 0.5)
+        # SIZED TO A TARGET, NOT TO A SLICE.
+        #
+        # `ours * closed_frac` is right for a per-cycle FLOW and wrong
+        # for the cumulative fraction computed above: `ours` shrinks
+        # every time we sell, so applying a growing cumulative fraction
+        # to a shrinking base compounds and walks us out faster than
+        # the whale. A whale 20% then 40% out would take 20% of 100,
+        # then 40% of 80 — leaving 48 where he holds 60.
+        #
+        # So state the target instead: he is `closed_frac` out of what
+        # he bought, therefore we should still hold that same fraction
+        # of what WE bought, and today's sale is the difference. This
+        # is self-correcting — an observation we missed, refused or
+        # under-filled is made up by the next one rather than lost, and
+        # once we are at or below the target the delta goes to zero and
+        # the rounds-to-zero branch below pins it instead of selling.
+        _orig = int(row["qty"] or 0)
+        _target_hold = _orig * (1.0 - closed_frac)
+        qty = int(ours - _target_hold + 0.5)
+        if qty > ours:
+            qty = ours          # never sell more than the venue holds
         if closed_frac >= FULL_EXIT_FRAC:
             qty = ours          # he is out; so are we, to the share
         if qty <= 0:
@@ -4490,7 +4548,29 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     payload.get("whale_username"),
                     _exit["exit_via_asset"],
                     _exit["closed_frac"] * 100, _exit["asset"])
-        await mirror_exit({**payload, **_exit, "side": "SELL"})
+        # THE REASON WAS BEING THROWN AWAY ON THE LANE THAT CARRIES 98%
+        # OF THE EXITS. mirror_exit's whole reason-code contract exists
+        # so a refusal can be re-offered (execute_copy:106), and
+        # whale_exits:814 is its only reader — but that is the POSITION
+        # lane, which ran 23 attempts against this lane's 1,572.
+        #
+        # Counted, not retried, and the distinction is deliberate. This
+        # lane is TRADE-driven: the next trim from the same whale calls
+        # it again, and since the fraction above is now cumulative that
+        # retry arrives with a LARGER number rather than the same one.
+        # The ratchet the position lane gets from pinning, this lane
+        # gets from the whale's own next trade.
+        #
+        # What that does NOT cover is a refusal on liquidity —
+        # mx_no_bid_for_partial, mx_venue_unfilled — where the whale may
+        # never trade this market again. Those need a real retry record.
+        # Counting them here is what makes that gap measurable instead
+        # of invisible, which is how it survived until now.
+        _mx = await mirror_exit({**payload, **_exit, "side": "SELL"})
+        if _mx and _mx in EXIT_PENDING_REASONS and _mx != "mx_SOLD":
+            _exit_stop("tradelane_dropped_" + str(_mx),
+                       whale=payload.get("whale_username"),
+                       asset=_exit.get("asset"))
         return
     # OVERSPEND BREAKER (2026-08-25). Tripped by the post-fill detector
     # the first time the venue charges more than we authorized. Placed

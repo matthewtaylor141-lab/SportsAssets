@@ -1047,31 +1047,19 @@ jobs:
           jq -r '.whales // {} | to_entries[] | "  MERGEVERDICT \(.key): \(.value.verdict)"' \
             /tmp/mergepnl.json 2>/dev/null || true
 
-          # WHOLEBOOK — how big is rn1's book, really?
+          # WHOLEBOOK — REMOVED 2026-08-30, having done its job.
           #
-          # The owner's instruction is to trade rn1 and only rn1. The
-          # 95% gate refuses him for edge-truncated-replay: the hourly
-          # publish replays the WHOLE book and stops at max_fills, so
-          # his statistic is a prefix rather than a sample and the gate
-          # will not fund a prefix. Raising the cap is the fix, and the
-          # cap has to be set from a measurement, not from a guess.
-          #
-          # `since` omitted is the whole book; `whales=rn1` keeps this
-          # to one replay instead of seven. fills_total is only counted
-          # on the truncated path, so a complete book costs nothing
-          # extra and answers the question by saying truncated=false.
-          WBCODE=$(curl -sS --max-time 540 -w '%{http_code}' \
-               -H "X-Admin-Token: $ADMIN_TOKEN" -o /tmp/wholebook.json \
-               "$BASE/api/admin/whale-merge-pnl?whales=rn1" \
-               2>/dev/null || echo "000")
-          echo "  WHOLEBOOKHTTP code=$WBCODE bytes=$(wc -c < /tmp/wholebook.json 2>/dev/null || echo 0)"
-          jq -r '.whales // {} | to_entries[]
-                 | "  WHOLEBOOK \(.key): fills=\(.value.fills_read // 0)"
-                 + "/\(.value.fills_total // "complete") "
-                 + "lots=\(.value.edge_lots // 0) games=\(.value.edge_clusters // 0) "
-                 + "roi=\(.value.edge_roi // "n/a") ci95=\(.value.edge_ci95 | tostring) "
-                 + (if .value.truncated then "*** TRUNCATED ***" else "complete" end)' \
-            /tmp/wholebook.json 2>/dev/null || echo "  WHOLEBOOK unavailable"
+          # It existed to measure rn1's whole book so the fill cap could
+          # be set from a number instead of a guess. It answered:
+          # 806,085 fills against a 600,000 cap, the cap was raised to
+          # 2,000,000, and the gate now reads him complete. Keeping it
+          # cost more than it returned — with truncation lifted the read
+          # walks all 806k fills every probe, and on run 1408 that
+          # pushed this step past `timeout-minutes: 20` and CANCELLED
+          # it, losing the whole tail of the diagnostic. The EDGEGATE
+          # line already carries fills_read/fills_total from the
+          # published payload for free, which is the number that
+          # mattered.
           # WHALEEDGE — is this whale PROVABLY profitable, per dollar?
           #
           # The absolute totals flatter enormous turnover. rn1 makes
@@ -2056,6 +2044,85 @@ jobs:
               2>/dev/null | head -60 || true
             sleep 1
           done
+
+      - name: BID GROUND TRUTH (what does this venue actually publish?)
+        if: always()
+        run: |
+          pip install --quiet polymarket-us 2>/dev/null || pip install polymarket-us
+          echo "###########################################################"
+          echo "#   BIDGT: slug_bid returns None on every shared-id market #"
+          echo "###########################################################"
+          # WHY THIS EXISTS. pmus.slug_bid looks for a MARKET-level
+          # bestBid/best_bid/bid and, failing that, mirrors the OTHER
+          # side's price through $1. On this venue both sides of a market
+          # share one identifier, so that fallback finds no "other" side
+          # and the function returns None unconditionally. Every partial
+          # exit is gated on it: mx_no_bid_for_partial refused 51 exits.
+          #
+          # The fix is NOT obvious and must not be guessed. Selecting a
+          # side by identifier picks a coin-flip leg on exactly this
+          # family, and a wrong leg sets an IOC sell FLOOR at the
+          # complement's price — up to a ~75% giveaway on our own
+          # position. So before touching a selling path: print what the
+          # venue really returns, at market level and per side, and
+          # whether markets.bbo exists and in what shape.
+          python - <<'PY'
+          import json
+          from polymarket_us import PolymarketUS
+
+          pub = PolymarketUS()
+          resp = pub.events.list({"limit": 6, "offset": 0, "active": True})
+          evs = list((resp.get("events") if isinstance(resp, dict)
+                      else resp) or [])
+          shown = 0
+          for ev in evs:
+              ev_slug = ev.get("slug") or ev.get("eventSlug")
+              try:
+                  mresp = pub.markets.list({"eventSlug": [ev_slug],
+                                            "active": True})
+              except Exception as e:
+                  print(f"BIDGT markets.list ERR {type(e).__name__}")
+                  continue
+              ms = list((mresp.get("markets") if isinstance(mresp, dict)
+                         else mresp) or [])
+              for m in ms:
+                  if shown >= 3:
+                      break
+                  slug = m.get("slug") or m.get("identifier")
+                  mk = sorted(m.keys())
+                  print(f"BIDGT market slug={slug!r}")
+                  print(f"BIDGT   market-level keys={mk}")
+                  for k in ("bestBid", "best_bid", "bid", "bestAsk",
+                            "price", "lastPrice"):
+                      if k in m:
+                          print(f"BIDGT   market.{k} = {m.get(k)!r}")
+                  sides = [s for s in (m.get("marketSides") or [])
+                           if isinstance(s, dict)]
+                  print(f"BIDGT   {len(sides)} side(s)")
+                  for s in sides:
+                      print(f"BIDGT   side keys={sorted(s.keys())}")
+                      print("BIDGT   side identifier="
+                            f"{s.get('identifier')!r} long={s.get('long')!r}"
+                            f" price={s.get('price')!r}"
+                            f" bestBid={s.get('bestBid')!r}"
+                            f" bestAsk={s.get('bestAsk')!r}")
+                  # Does a real book endpoint exist, and what shape?
+                  for meth in ("bbo", "orderbook", "book"):
+                      fn = getattr(pub.markets, meth, None)
+                      if fn is None:
+                          continue
+                      try:
+                          b = fn(slug)
+                          print(f"BIDGT   markets.{meth}({slug!r}) -> "
+                                f"{json.dumps(b, default=str)[:400]}")
+                      except Exception as e:
+                          print(f"BIDGT   markets.{meth} ERR "
+                                f"{type(e).__name__}: {str(e)[:160]}")
+                  shown += 1
+              if shown >= 3:
+                  break
+          print(f"BIDGT done ({shown} markets inspected)")
+          PY
 
       - name: Premap ground truth (the sweep's exact reads, via public SDK)
         if: always()

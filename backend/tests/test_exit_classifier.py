@@ -142,9 +142,21 @@ class TestItIsWiredWhereThePoolAlreadyExists:
         assert src.index("classify_exit(") < src.index("pmus.submit_fok")
 
     def test_a_classified_exit_never_falls_through_to_the_buy(self):
+        # Pinned to the PROPERTY, not to a character distance. This used
+        # to assert a "return" within 200 chars of the call, which broke
+        # the moment a census line was added between them — a pin that
+        # fails on an unrelated edit teaches people to edit the pin.
+        #
+        # What must be true: between mirroring the exit and returning,
+        # nothing sizes or places a BUY. Otherwise a complement buy
+        # doubles our exposure to the leg he is abandoning, which is the
+        # exact defect classify_exit was written to stop.
         src = inspect.getsource(le.maybe_execute)
         i = src.index("await mirror_exit(")
-        assert "return" in src[i:i + 200]
+        tail = src[i:]
+        ret = tail.index("return")
+        assert ret < tail.index("volume_normalized_clip")
+        assert ret < tail.index("INSERT INTO live_orders")
 
 
 class TestTheMoneyGates:
