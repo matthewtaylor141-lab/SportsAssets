@@ -31,3 +31,10 @@ dist/
 
 # Adversarial-fleet scratch reproductions (regenerated per round)
 backend/fleet*_repros/
+
+# Isolated worktrees for the adversarial review agents. Each is a FULL
+# nested checkout of this repo (~8MB) created by `git worktree add` and
+# removed when its round ends, so committing one would vendor the repo
+# into itself — and it can be locked and in use while a round is still
+# running. Tooling scratch, never project state.
+.claude/worktrees/
