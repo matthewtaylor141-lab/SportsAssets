@@ -346,6 +346,20 @@ def _exit_stop(reason: str, **ctx) -> None:
     return None
 
 
+# Why the 95% gate refused, counted per reason. Same stance as the
+# exit census: a diagnostic that cannot alter an order, so a reader can
+# see at a glance that counting is all it does. Every refusal lands in
+# exactly one bucket, so "why is nothing trading" is answerable from a
+# probe line instead of a database session.
+_GATE_CENSUS: dict[str, int] = {}
+
+
+def _gate_census(reason: str) -> None:
+    """Record why the edge gate refused a whale."""
+    key = reason.split(":", 1)[0]
+    _GATE_CENSUS[key] = _GATE_CENSUS.get(key, 0) + 1
+
+
 def _exit_done(reason: str, **ctx) -> str:
     """Record why the exit path stopped, and RETURN THE REASON.
 
@@ -4498,6 +4512,34 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     str(_osh)[:200])
         return
     if await _is_paused(pool):
+        return
+    # ── THE 95% GATE (owner requirement 2026-08-30) ─────────────────
+    #
+    # "at least 95% statistically proven profitable... always ensure
+    # mathematical and statistical profit." Until this line existed the
+    # bar was a report: on 2026-08-30, five of the six graded books
+    # were funded with real money while their intervals contained zero.
+    #
+    # PLACEMENT IS LOAD-BEARING. classify_exit (:4468) and mirror_exit
+    # (:4479) are ABOVE this line, so a refused whale can still be
+    # SOLD — at this venue an exit arrives labelled BUY, and a guard
+    # placed any higher would silently kill exit detection for every
+    # whale it refuses. Sizing (:4642), the live_orders INSERT (:4758)
+    # and both submit sites are BELOW, so this dominates every dollar.
+    #
+    # Fails closed on every path, including a database it cannot read.
+    # That means a dead analytics worker stops copy buying entirely —
+    # which is the correct direction, and is visible on the probe's
+    # EDGEGATE line rather than silent.
+    from . import edge_gate
+    try:
+        await edge_gate.refresh(pool)
+    except Exception:  # noqa: BLE001 — verdict() refuses on a stale read
+        pass
+    _eg_ok, _eg_why = edge_gate.verdict(username)
+    if not _eg_ok:
+        _gate_census(_eg_why)
+        log.info("LIVE refused: %s not funded (%s)", username, _eg_why)
         return
     # Cell-level copy policy (owner directive 2026-08-06): each source
     # whale is copied ONLY in its statistically proven sport x market-type

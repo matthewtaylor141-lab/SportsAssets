@@ -6538,6 +6538,7 @@ async def api_gates() -> dict:
     can READ the live state instead of inferring it (2026-08-29 audit:
     the stale-env roster block was invisible for two days because no
     probe line printed the effective set)."""
+    from .. import edge_gate as _eg
     from .. import live_executor as _le
 
     pool = await get_pool()
@@ -6545,6 +6546,20 @@ async def api_gates() -> dict:
         await _le.refresh_whale_overrides(pool)
     except Exception:  # noqa: BLE001
         pass
+    # THE 95% GATE, REFRESHED HERE RATHER THAN READ FROM MEMORY.
+    #
+    # The API and the workers are separate services (render.yaml), so
+    # this process's module cache is never touched by the worker that
+    # actually spends. Reporting our own stale cache would show the
+    # owner a verdict no money path ever used — an instrument reading
+    # something other than its subject. Refresh, then reconstruct the
+    # same decision from the same pure function the worker calls.
+    edge = None
+    try:
+        await _eg.refresh(pool)
+        edge = _eg.snapshot()
+    except Exception as exc:  # noqa: BLE001
+        edge = {"err": f"unreadable: {type(exc).__name__}"}
     stored = None
     try:
         raw = await pool.fetchval(
@@ -6579,6 +6594,7 @@ async def api_gates() -> dict:
         # question 2026-08-29 "I don't want to limit the flow" exposed
         # that the config caps I kept quoting govern only the dormant
         # 'full' mode — the answer must be READABLE, not inferred).
+        "edge_gate": edge,
         "sizing": {
             "copy_mode": _le.COPY_MODE,
             "per_fill_by_whale": dict(_le.PER_FILL_BY_WHALE),

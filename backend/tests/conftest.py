@@ -21,6 +21,52 @@ def _lift_emergency_halt(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _edge_gate_seeded(monkeypatch):
+    """The 95% gate has a proven verdict for the fixture whales.
+
+    Same stance as the halt above. The gate fails CLOSED when it cannot
+    read a published benchmark, which is right for money and useless
+    here: no test publishes `whale_edge_benchmark`, so every one of the
+    39 tests downstream of it would refuse at the gate and pass while
+    proving nothing about the sizing, mapping and first-fill logic they
+    exist to check.
+
+    Seeding the module cache is exactly the state a SUCCESSFUL read
+    produces — not a bypass, and there is no bypass to reach for: the
+    gate reads no environment variable by design.
+
+    test_edge_gate.py pins the production behaviour — every fail-closed
+    path, the interval rule, and the placement below the exit path —
+    against these same functions with the cache unseeded.
+    """
+    import time
+
+    from sportsassets import edge_gate
+
+    monkeypatch.setitem(
+        edge_gate._cache, "per_whale",
+        {"rn1": {"edge_ci95": [0.0028, 0.046], "edge_roi": 0.0244},
+         "swisstony": {"edge_ci95": [0.005, 0.04], "edge_roi": 0.02},
+         "homerunhazard": {"edge_ci95": [0.004, 0.05], "edge_roi": 0.026},
+         "kch123": {"edge_ci95": [0.004, 0.05], "edge_roi": 0.026},
+         "ferrarichampions2026": {"edge_ci95": [0.003, 0.05],
+                                  "edge_roi": 0.02},
+         "0x076daa87": {"edge_ci95": [0.003, 0.05], "edge_roi": 0.02},
+         "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465":
+             {"edge_ci95": [0.003, 0.05], "edge_roi": 0.02}})
+    import datetime as _dt
+    monkeypatch.setitem(edge_gate._cache, "measured_at",
+                        _dt.datetime.now(_dt.timezone.utc).isoformat())
+    monkeypatch.setitem(edge_gate._cache, "read_at", time.monotonic())
+    monkeypatch.setitem(edge_gate._cache, "err", None)
+    # refresh() would re-read the (absent) row and clear nothing; make
+    # it a no-op so the seeded cache survives the money path calling it.
+    async def _noop(_pool):
+        return None
+    monkeypatch.setattr(edge_gate, "refresh", _noop)
+
+
+@pytest.fixture(autouse=True)
 def _permissive_ask(monkeypatch):
     """The pre-trade ask check needs a readable book.
 

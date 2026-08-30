@@ -1037,6 +1037,19 @@ jobs:
           # formula fired at 13.8% against a nominal 5%. deff is how
           # much wider the honest interval is; clusters is how many
           # independent games are really behind the lot count.
+          # THE 95% GATE, AS THE MONEY PATH SEES IT. Reconstructed by
+          # the endpoint from the same pure decide() the worker calls,
+          # after refreshing its own cache — the API and the workers are
+          # separate services, so a cached read here would show a
+          # verdict nobody spent against.
+          jq -r '.edge_gate as $g
+                 | "  EDGEGATE measured=\($g.measured_at // "n/a") "
+                 + "read_age=\($g.read_age_s // "n/a")s err=\($g.err // "none")",
+                 (($g.whales // {}) | to_entries[]
+                  | "  EDGEGATE \(if .value.funded then "FUND  " else "REFUSE" end)"
+                  + " \(.key): \(.value.reason) ci95=\(.value.ci95 | tostring)"
+                  + " games=\(.value.clusters // "n/a")")' \
+            /tmp/gates.json 2>/dev/null || echo "  EDGEGATE unavailable"
           jq -r '(.per_whale // {}) | to_entries[]?
                  | "  WHALECLUS \(.key): lots=\(.value.edge_lots // 0) "
                  + "events=\(.value.edge_clusters // 0) "
