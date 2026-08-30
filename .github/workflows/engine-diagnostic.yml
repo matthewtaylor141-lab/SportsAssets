@@ -1288,27 +1288,55 @@ jobs:
           # reason as above; the blobs carry every row.
 
           echo ""
-          echo "# EXPORT BLOBS (gzip+base64, one line each — the log pipeline"
-          echo "# caps at ~5k lines, so row-per-line tables get clipped) #"
+          echo "# EXPORT — ARTIFACT FIRST (2026-08-30)                       #"
+          echo "#                                                            #"
+          echo "# The gzip+base64 lines below are CORRUPT and always were.   #"
+          echo "# The Actions log pipeline masks every occurrence of a       #"
+          echo "# registered secret as '***'. A short secret value matches   #"
+          echo "# random base64 every few KB, so the masker rewrites the     #"
+          echo "# payload itself: measured on run 1393, PXRAWBLOB carried    #"
+          echo "# 1,485 masked runs in 5.7MB and EVERY blob — PXBLOB,        #"
+          echo "# RRBLOB, WHROSTER, WDBLOB — failed gzip decompression. The  #"
+          echo "# masker even rewrote a segment of a public logo URL, which  #"
+          echo "# is how short the matching secret must be.                  #"
+          echo "#                                                            #"
+          echo "# Artifacts are NOT masked and carry no line cap, so         #"
+          echo "# /tmp/export is the real egress from here on. The echoes    #"
+          echo "# stay for one run as a fallback, then come out.             #"
+          mkdir -p /tmp/export
+          _keep() {   # _keep <artifact-name> <file>
+            [ -s "$2" ] || return 0
+            cp "$2" "/tmp/export/$1" 2>/dev/null || return 0
+            echo "  EXPORT $1 bytes=$(wc -c < "$2") sha=$(sha256sum "$2" | cut -c1-16)"
+          }
           if [ -s /tmp/px.json ]; then
+            _keep px.json /tmp/px.json
             echo "PXBLOB $(gzip -c /tmp/px.json | base64 -w0)"
           fi
           if [ -s /tmp/tr.json ]; then
+            _keep tr.json /tmp/tr.json
             echo "TRBLOB $(jq -c '{sold_markets, summary}' /tmp/tr.json | gzip -c | base64 -w0)"
           fi
           jq -c '.detail.kalshi_export // empty' /tmp/status.json 2>/dev/null > /tmp/kx.json || true
           if [ -s /tmp/kx.json ]; then
+            _keep kx.json /tmp/kx.json
             echo "KXBLOB $(gzip -c /tmp/kx.json | base64 -w0)"
           fi
           jq -c '.detail.kalshi_export_raw // empty' /tmp/status.json 2>/dev/null > /tmp/kxraw.json || true
           if [ -s /tmp/kxraw.json ]; then
+            _keep kxraw.json /tmp/kxraw.json
             echo "KXRAWBLOB $(gzip -c /tmp/kxraw.json | base64 -w0)"
           fi
           # PM raw activities (verbatim venue rows) for the weekly report
           curl -sS --max-time 280 -o /tmp/pxraw.json \
             "$BASE/api/venue-export-raw?since=2026-08-10" || true
           if [ -s /tmp/pxraw.json ] && jq -e '.rows' /tmp/pxraw.json >/dev/null 2>&1; then
-            echo "PXRAWBLOB $(gzip -c /tmp/pxraw.json | base64 -w0)"
+            # ARTIFACT ONLY — no fallback echo. This blob was 5.7MB of
+            # base64 carrying 1,485 masked runs: not merely unusable but
+            # actively harmful, since a single 5.7MB line crowds the log
+            # budget that the readable diagnostics share.
+            _keep pxraw.json /tmp/pxraw.json
+            echo "  PXRAW rows=$(jq -r '.rows | length' /tmp/pxraw.json 2>/dev/null || echo '?')"
           else
             echo "PXRAWBLOB FAILED $(head -c 120 /tmp/pxraw.json 2>/dev/null)"
           fi
@@ -1317,6 +1345,7 @@ jobs:
           curl -sS --max-time 30 -o /tmp/rr.json \
             "$BASE/api/report/range?from=2026-08-10&to=2026-08-17" || true
           if [ -s /tmp/rr.json ]; then
+            _keep rr.json /tmp/rr.json
             echo "RRBLOB $(gzip -c /tmp/rr.json | base64 -w0)"
           fi
           # Whale week performance from the platform's own tracker (the
@@ -1324,7 +1353,10 @@ jobs:
           # so the DB replay is the only complete 7-day source).
           curl -sS --max-time 30 -o /tmp/whales.json "$BASE/api/whales" || true
           if [ -s /tmp/whales.json ]; then
-            echo "WHROSTER $(jq -c '[.[] | {id, username, address, active}]' /tmp/whales.json 2>/dev/null | gzip -c | base64 -w0)"
+            jq -c '[.[] | {id, username, address, active}]' /tmp/whales.json \
+              > /tmp/whroster.json 2>/dev/null || true
+            _keep whroster.json /tmp/whroster.json
+            echo "WHROSTER $(cat /tmp/whroster.json 2>/dev/null | gzip -c | base64 -w0)"
             echo '[]' > /tmp/wdays.json
             for id in $(jq -r '.[].id' /tmp/whales.json 2>/dev/null | head -8); do
               for d in 2026-08-10 2026-08-11 2026-08-12 2026-08-13 2026-08-14 2026-08-15 2026-08-16; do
@@ -1340,6 +1372,7 @@ jobs:
                   && mv /tmp/wdays2.json /tmp/wdays.json
               done
             done
+            _keep wdays.json /tmp/wdays.json
             echo "WDBLOB $(gzip -c /tmp/wdays.json | base64 -w0)"
             # Retry lane for the heavy histories that time out at 20s
             # (swisstony full ledger replay; RN1 busiest days).
@@ -1364,6 +1397,7 @@ jobs:
                 && mv /tmp/wr2.json /tmp/wretry.json
               rm -f /tmp/wd.json
             done
+            _keep wretry.json /tmp/wretry.json
             echo "WRETRYBLOB $(gzip -c /tmp/wretry.json | base64 -w0)"
           fi
 
@@ -1790,8 +1824,14 @@ jobs:
           crawl rn1        0x2005d16a84ceefa912d4e380cd32e7ff827875ea
           crawl swisstony  0x204f72f35326db932158cba6adff0b9a1da95e14
           crawl w2c33      0x2c335066fe58fe9237c3d3dc7b275c2a034a0563
+          # Artifact egress (2026-08-30): these whale crawls are the
+          # largest blobs in the run and the masker corrupts them like
+          # every other. /tmp/export is uploaded by the artifact step.
+          mkdir -p /tmp/export
           for w in rn1 swisstony w2c33; do
             if [ -s /tmp/w_$w.json ] && jq -e 'length' /tmp/w_$w.json >/dev/null 2>&1; then
+              cp /tmp/w_$w.json /tmp/export/w_$w.json 2>/dev/null || true
+              echo "  EXPORT w_$w.json bytes=$(wc -c < /tmp/w_$w.json) rows=$(jq -r 'length' /tmp/w_$w.json 2>/dev/null || echo '?')"
               echo "WBLOB_$w $(gzip -c /tmp/w_$w.json | base64 -w0)"
             else
               echo "WBLOB_$w FAILED"
@@ -2870,6 +2910,23 @@ jobs:
             echo "BTCCENSUS pct_over=$PY pct_under=$PN"
           fi
           echo "BTCCENSUS window_earliest=$EARLIEST window_latest=$LATEST"
+
+      # THE REAL EGRESS (2026-08-30). Every gzip+base64 export blob this
+      # workflow has ever printed was corrupt: the Actions log masker
+      # rewrites registered-secret occurrences to '***', a short secret
+      # matches random base64 every few KB, and all four blobs sampled
+      # from run 1393 failed gzip decompression. Artifact contents are
+      # not masked and carry no line cap, so this is the channel the
+      # analysis actually reads. if: always() because a probe step that
+      # fails mid-run is exactly when the captured data matters most.
+      - name: Upload export artifacts (unmasked — the log blobs are not)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-export
+          path: /tmp/export
+          if-no-files-found: warn
+          retention-days: 14
 
   btc-calibration:
     if: github.event_name == 'workflow_dispatch'
