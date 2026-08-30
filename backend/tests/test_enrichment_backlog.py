@@ -102,3 +102,12 @@ def test_noslug_partial_index_migration_exists():
            / "migrations" / "039_trades_noslug_idx.sql").read_text()
     assert "trades_noslug_idx" in mig
     assert "WHERE COALESCE(market_slug, event_slug, '') = ''" in mig
+
+
+def test_noslug_drain_is_counted_per_mechanism():
+    """Audit 2026-08-30: the census drain (3,795 rows) could only be
+    called mechanism-CONSISTENT because catalog joins and sibling
+    repairs shared no counters. Both mechanisms now report."""
+    body = SRC[SRC.index("async def backfill_unenriched"):]
+    assert "noslug_joined" in body
+    assert "noslug_sibling_repaired" in body

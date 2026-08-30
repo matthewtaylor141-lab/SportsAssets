@@ -485,8 +485,11 @@ async def backfill_unenriched(limit: int = 200) -> int:
         # stayed broken forever and re-rejected on every retry sweep.
         # Strictly additive: the max-id row above keeps its
         # unconditional refresh; this touches only siblings that STILL
-        # have no slug, so no mapped row is ever rewritten.
-        await pool.execute(
+        # have no slug, so no mapped row is ever rewritten. Counted
+        # per-mechanism (audit 2026-08-30: the census drain was only
+        # mechanism-consistent, not mechanism-confirmed, because no
+        # counter separated catalog joins from sibling repairs).
+        _sres = await pool.execute(
             """
             UPDATE trades SET condition_id=$2, outcome=$3, outcome_index=$4, market_title=$5,
                               market_slug=$6, event_slug=$7, sport=$8, enriched_at=now()
@@ -501,5 +504,11 @@ async def backfill_unenriched(limit: int = 200) -> int:
             meta["event_slug"],
             meta["sport"],
         )
+        try:
+            enrich_stats["noslug_sibling_repaired"] = (
+                enrich_stats.get("noslug_sibling_repaired", 0)
+                + int(str(_sres or "0").split()[-1]))
+        except Exception:  # noqa: BLE001 — counter only
+            pass
         fixed += 1
     return fixed

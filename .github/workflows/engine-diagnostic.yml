@@ -960,6 +960,22 @@ jobs:
             /tmp/unmapped.json 2>/dev/null || true
           jq -r '.examples // {} | to_entries[] | "  UNMAPEG \(.key): his=\(.value.his_slug) outcome=\(.value.his_outcome) keys=\(.value.keys) premap_rows=\(.value.premap_rows) | \(.value.detail)"' \
             /tmp/unmapped.json 2>/dev/null | head -8 || true
+          # NAMED-LANE ATTESTATION FEED (2026-08-30): the atp/wta
+          # whitelist is gated on venue question shapes attested from
+          # accumulated audit records — which existed server-side and
+          # were never echoed into any log. These lines are that
+          # evidence stream; the audits are truncated per-line so the
+          # probe's oversize filter keeps them.
+          jq -r '.named_ml // {} | "  NAMEDML would_resolve=\(.would_resolve // 0) attested_family=\(.attested_family // 0) sub_gates=\(.sub_gates // {} | tostring | .[0:200])"' \
+            /tmp/unmapped.json 2>/dev/null || true
+          jq -r '.named_ml.reasons // {} | to_entries[] | "  NAMEDML-RSN \(.key): \(.value)"' \
+            /tmp/unmapped.json 2>/dev/null | head -12 || true
+          jq -r '.named_ml.lg_pairs // {} | to_entries[] | "  NAMEDML-LG \(.key): \(.value)"' \
+            /tmp/unmapped.json 2>/dev/null | head -16 || true
+          jq -r '(.named_ml.audits // [])[] | "  NAMEDML-AUD \(tostring | .[0:400])"' \
+            /tmp/unmapped.json 2>/dev/null | head -40 || true
+          jq -r '.bridge.venue_wordings // {} | to_entries[] | .key as $k | .value[] | "  NAMEDML-Q [\($k)] \(tostring | .[0:300])"' \
+            /tmp/unmapped.json 2>/dev/null | head -30 || true
 
           # MERGEPNL — the whale numbers with their exits included.
           #
@@ -1237,13 +1253,18 @@ jobs:
           # carry at all (unwinnable by code)?
           jq -r '.winnable // {} | "  WINNABLE listed_mapper_fail=\(.listed_mapper_fail // "?") (7d \(.listed_mapper_fail_7d // "?"))  venue_unlisted=\(.venue_unlisted // "?") (7d \(.venue_unlisted_7d // "?"))  undiagnosed=\(.undiagnosed // "?")"' \
              /tmp/unm.json 2>/dev/null || true
+          # exact404 split (2026-08-30): how many venue_unlisted rows
+          # carry an exact-lane 404 trail — candidate-grammar misses
+          # masquerading as venue gaps. Beside, never replacing.
+          jq -r '.winnable // {} | "  WINNABLE-X404 exact404=\(.exact404 // "?") (7d \(.exact404_7d // "?"))  of_unlisted=\(.exact404_unlisted // "?") (7d \(.exact404_unlisted_7d // "?"))"' \
+             /tmp/unm.json 2>/dev/null || true
           jq -r '.no_slug // {} | "  NOSLUG rows=\(.rows // "?")  catalog_has_token=\(.catalog_has_token // "?")  token_unknown=\(.token_unknown // "?")"' \
              /tmp/unm.json 2>/dev/null || echo "  (endpoint not deployed yet)"
           jq -r '.by_reason // [] | .[] | "  RSN \(.reason): \(.n)"' \
              /tmp/unm.json 2>/dev/null | head -5 || true
           jq -r '.by_market_type // [] | .[] | "  TYP \(.market_type): \(.n)"' \
              /tmp/unm.json 2>/dev/null | head -8 || true
-          jq -r '.by_league // [] | .[] | "  LGE \(.league): \(.n) (7d \(.n_7d))  \(.market_types // {} | to_entries[0:3] | map("\(.key):\(.value)") | join(" "))"' \
+          jq -r '.by_league // [] | .[] | "  LGE \(.league): \(.n) (7d \(.n_7d))  listed=\(.listed // "?") 0ev=\(.unlisted_0ev // "?") x404=\(.exact404 // "?")  \(.market_types // {} | to_entries[0:3] | map("\(.key):\(.value)") | join(" "))"' \
              /tmp/unm.json 2>/dev/null | head -20 || true
 
           echo ""
@@ -2262,6 +2283,120 @@ jobs:
                       mark = "WATCHED" if em in WATCHED else "unwatched"
                       print(f"    log {em} [{mark}] t0={t0} "
                             f"owners={' '.join(owners)}")
+          PYEOF
+
+      - name: SPORTS-CHAIN receipts (why swisstony/hrh chain lane is silent)
+        if: always()
+        env:
+          DEFAULT_BASE: https://sportsassets-api.onrender.com
+          OVERRIDE: ${{ github.event.inputs.api_base }}
+        run: |
+          echo "###########################################################"
+          echo "#  SPORTS-CHAIN: poll-only sports whales, receipt truth    #"
+          echo "###########################################################"
+          # Audit 2026-08-30: swisstony 0/10 recent rows on chain (was
+          # 96k chain buys), homerunhazard 1/10 — their edge decays at
+          # poll latency ($17.8k and $13.6k lat_cost in TRUEEDGE). The
+          # A2 lane watches the v3 exchanges and topic d543adfd, so the
+          # outage is one of: (a) his wallet never appears in the v3
+          # fill event's owner topics (proxy/EOA mismatch), (b) his
+          # fills are BUNDLES decode_fill_v3_receipt refuses
+          # (len(token_ids)!=1), (c) a different unwatched emitter.
+          # This prints, per recent poll-detected fill: every log's
+          # emitter (watched?), topic0, owner topics, and the count of
+          # distinct 1155 token ids — the three hypotheses answered by
+          # receipts, not theory.
+          BASE="${OVERRIDE:-$DEFAULT_BASE}"
+          python3 - "$BASE" <<'PYEOF'
+          import json, sys, urllib.request
+
+          base = sys.argv[1]
+          TARGETS = ("swisstony", "homerunhazard", "rn1")
+          WATCHED = {"0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+                     "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+                     "0xe2222d279d744050d28e00520010520000310f59",
+                     "0xe111180000d2663c0091e4f400237545b87b996b"}
+          FILL_V3 = ("0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262"
+                     "980ba90b1a89f2ea84d8ee")
+          T_SINGLE = ("0xc3d58168c5ae7397731d063d5bbf3d657854427343"
+                      "f4c083240f7aacaa2d0f62")
+          T_BATCH = ("0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d0"
+                     "7e595d983b8c0526c8f7fb")
+          RPCS = ["https://polygon-rpc.com", "https://1rpc.io/matic",
+                  "https://polygon-bor-rpc.publicnode.com"]
+          UA = {"user-agent": "curl/8.5.0", "accept": "application/json"}
+
+          def get(url):
+              req = urllib.request.Request(url, headers=UA)
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)
+
+          def rpc(method, params):
+              body = json.dumps({"jsonrpc": "2.0", "id": 1,
+                                 "method": method,
+                                 "params": params}).encode()
+              for u in RPCS:
+                  try:
+                      req = urllib.request.Request(
+                          u, data=body,
+                          headers={"content-type": "application/json",
+                                   **UA})
+                      with urllib.request.urlopen(req, timeout=25) as r:
+                          out = json.load(r)
+                      if out.get("result") is not None:
+                          return out["result"]
+                  except Exception as exc:
+                      print(f"    (rpc {u} failed: {exc})")
+              return None
+
+          try:
+              rows = get(f"{base}/api/feed?limit=400")
+          except Exception as exc:
+              print(f"  SPORTS-CHAIN feed fetch failed: {exc}")
+              rows = []
+          if isinstance(rows, dict):
+              rows = rows.get("rows") or rows.get("trades") or []
+          per: dict[str, list] = {t: [] for t in TARGETS}
+          for row in rows:
+              u = str(row.get("whale_username") or "").lower()
+              if u in per and len(per[u]) < 3 \
+                      and str(row.get("tx_hash") or "").startswith("0x"):
+                  # poll-detected rows are the ones chain MISSED
+                  if str(row.get("source") or "") != "chain":
+                      per[u].append(row)
+          for u, picked in per.items():
+              if not picked:
+                  print(f"  SPORTS-CHAIN {u}: no recent poll rows with "
+                        f"a tx hash in the feed window")
+              for row in picked:
+                  tx = row["tx_hash"]
+                  print(f"  SPORTS-CHAIN {u} tx {tx} "
+                        f"({row.get('side')} ${row.get('notional')} "
+                        f"src={row.get('source')})")
+                  rec = rpc("eth_getTransactionReceipt", [tx])
+                  if not rec:
+                      print("    (no receipt from any RPC)")
+                      continue
+                  tids = set()
+                  v3_owner_hit = False
+                  n_batch = 0
+                  for lg in rec.get("logs", []):
+                      em = (lg.get("address") or "").lower()
+                      tps = lg.get("topics") or []
+                      t0 = str(tps[0]).lower() if tps else ""
+                      data = str(lg.get("data", "0x"))[2:]
+                      if t0 == T_SINGLE and len(data) >= 128:
+                          tids.add(int(data[0:64], 16))
+                      if t0 == T_BATCH:
+                          n_batch += 1
+                      mark = ("WATCHED" if em in WATCHED
+                              else "unwatched")
+                      owners = [("0x" + t[-40:]) for t in tps[1:4]]
+                      print(f"    log {em} [{mark}] t0={t0[:12]} "
+                            f"owners={' '.join(owners)}")
+                  print(f"    RECEIPT-VERDICT distinct_1155_ids="
+                        f"{len(tids)} batch_logs={n_batch} "
+                        f"(bundle-refusal fires when ids != 1)")
           PYEOF
 
       - name: New exchange ABI (name the event behind topic d543adfd)
