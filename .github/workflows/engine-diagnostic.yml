@@ -2349,13 +2349,27 @@ jobs:
                       print(f"    (rpc {u} failed: {exc})")
               return None
 
-          try:
-              rows = get(f"{base}/api/feed?limit=400")
-          except Exception as exc:
-              print(f"  SPORTS-CHAIN feed fetch failed: {exc}")
-              rows = []
-          if isinstance(rows, dict):
-              rows = rows.get("rows") or rows.get("trades") or []
+          # the feed endpoint caps limit at 200 (le=200; the first run
+          # of this step got a 422 asking for 400) — paginate instead
+          rows = []
+          before = None
+          for _page in range(3):
+              url = f"{base}/api/feed?limit=200"
+              if before is not None:
+                  url += f"&before_id={before}"
+              try:
+                  page = get(url)
+              except Exception as exc:
+                  print(f"  SPORTS-CHAIN feed fetch failed: {exc}")
+                  break
+              if isinstance(page, dict):
+                  page = page.get("rows") or page.get("trades") or []
+              if not page:
+                  break
+              rows.extend(page)
+              before = page[-1].get("id")
+              if before is None:
+                  break
           per: dict[str, list] = {t: [] for t in TARGETS}
           for row in rows:
               u = str(row.get("whale_username") or "").lower()
