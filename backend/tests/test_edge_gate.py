@@ -94,11 +94,52 @@ class TestItFailsClosed:
             assert not ok and why == expect, g
 
     def test_a_truncated_replay_refuses_however_good_it_looks(self):
-        # merge_pnl caps at 600,000 fills; swisstony's book is past it,
-        # so his statistic is the EARLIEST trades, not a sample of them.
+        # merge_pnl caps at 600,000 fills per whale, so a flagged book's
+        # statistic is the EARLIEST trades, not a sample of them.
         t = dict(PROVEN, truncated=True)
         ok, why = eg.decide({"w": t}, "w", **FRESH)
         assert not ok and why == "edge-truncated-replay"
+
+    def test_a_clean_row_in_a_truncated_PAYLOAD_refuses(self):
+        # THE RUN-1403 CASE, and the reason this rule exists.
+        #
+        # That publish flagged three whales and left three unflagged —
+        # and the unflagged rows were wrong too: the API's live replay
+        # of the same books, minutes apart, put 0x076daa87 at
+        # [-7.51,+21.09] where the payload claimed [+2.49,+19.99].
+        # Row-by-row reading would have funded him — the poll-bound
+        # whale whose filled cohort runs -28% ROI — off that row.
+        #
+        # So a neighbour's truncation condemns a clean row. Whatever
+        # cut the replay short did not confine itself to the books it
+        # labelled.
+        payload = {"clean": PROVEN, "cut": dict(PROVEN, truncated=True)}
+        ok, why = eg.decide(payload, "clean", **FRESH)
+        assert not ok and why == "edge-publish-truncated"
+
+    def test_the_flagged_whale_keeps_its_own_reason(self):
+        # Both rules are live and the diagnosis stays specific: the
+        # whale that was actually cut is named as cut, not blamed on a
+        # neighbour. Reversing these two checks would make
+        # edge-truncated-replay unreachable dead code.
+        payload = {"clean": PROVEN, "cut": dict(PROVEN, truncated=True)}
+        ok, why = eg.decide(payload, "cut", **FRESH)
+        assert not ok and why == "edge-truncated-replay"
+
+    def test_a_clean_payload_still_funds(self):
+        # The tightening must not be a blanket refusal — it self-heals
+        # on the next clean publish, and this is what "clean" means.
+        payload = {"a": PROVEN, "b": dict(CROSSES), "c": dict(LOSING)}
+        ok, why = eg.decide(payload, "a", **FRESH)
+        assert ok and why == "edge-proven-at-95"
+
+    def test_a_junk_row_beside_a_good_one_is_not_read_as_truncated(self):
+        # A row that is not a dict, or carries no flag, is not evidence
+        # OF truncation either — `truncated` absent means unflagged,
+        # and a non-dict row is unreadable, not cut.
+        payload = {"a": PROVEN, "junk": "not-a-dict", "bare": {}}
+        ok, why = eg.decide(payload, "a", **FRESH)
+        assert ok and why == "edge-proven-at-95"
 
     def test_empty_state_refuses(self):
         ok, why = eg.decide({}, "rn1", **FRESH)
