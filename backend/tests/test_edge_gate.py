@@ -94,7 +94,7 @@ class TestItFailsClosed:
             assert not ok and why == expect, g
 
     def test_a_truncated_replay_refuses_however_good_it_looks(self):
-        # merge_pnl caps at 600,000 fills per whale and walks ORDER BY
+        # merge_pnl caps fills per whale and walks ORDER BY
         # condition_id, so a flagged book is a prefix of that whale's
         # MARKETS rather than a sample of them. (Not "his earliest
         # trades" — that is what this comment claimed until 2026-08-30,

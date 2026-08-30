@@ -146,7 +146,7 @@ async def publish_whale_benchmark() -> None:
                     "edge_deff": g.get("edge_deff"),
                     "edge_se": g.get("edge_se"),
                     # A CAPPED REPLAY MUST NOT READ AS A COMPLETE ONE.
-                    # max_fills is 600,000 and this replay is WHOLE-BOOK
+                    # max_fills is 2,000,000 and this replay is WHOLE-BOOK
                     # (since=None), so a whale whose career is past the
                     # cap publishes a prefix of his MARKETS — the walk
                     # is ORDER BY condition_id — rather than a sample.

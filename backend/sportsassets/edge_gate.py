@@ -109,10 +109,12 @@ def decide(per_whale: dict | None, whale: str, *,
     g = per_whale.get(whale) or per_whale.get(whale.lower())
     if not isinstance(g, dict):
         return False, "edge-missing-whale"
-    # A CAPPED REPLAY IS NOT A SAMPLE. merge_pnl stops at 600,000 fills
-    # per whale and walks ORDER BY condition_id, so a flagged book is a
-    # prefix of that whale's MARKETS in condition_id order — not, as
-    # this comment said until 2026-08-30, his earliest trades.
+    # A CAPPED REPLAY IS NOT A SAMPLE. merge_pnl stops at 2,000,000
+    # fills per whale (raised from 600,000 on 2026-08-30, when the cap
+    # itself turned out to be what refused rn1) and walks ORDER BY
+    # condition_id, so a flagged book is a prefix of that whale's
+    # MARKETS in condition_id order — not, as this comment said until
+    # 2026-08-30, his earliest trades.
     #
     # The milder reading is that condition_id is a hash, so the markets
     # kept are arbitrary with respect to profitability and the prefix

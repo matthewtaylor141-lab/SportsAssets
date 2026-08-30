@@ -464,7 +464,7 @@ async def replay_stream(fills, payouts=None, events=None) -> dict:
 
 async def whale_merge_pnl(pool: Any, whales: list[str],
                           since: str | None = None,
-                          max_fills: int = 600000) -> dict:
+                          max_fills: int = 2000000) -> dict:
     """Run the replay for each whale off the trades ledger.
 
     BOUNDED. The first probe of this endpoint came back "unavailable":
@@ -472,6 +472,25 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
     the existing indexes do not serve. Migration 029 adds
     (whale_id, condition_id, ts, id); this cap is the belt to that
     braces, so a whale with an unexpected ledger cannot hang the probe.
+
+    600,000 → 2,000,000 (2026-08-30), because the belt had become the
+    thing stopping the money. MEASURED, not guessed: rn1's whole book
+    is 806,085 fills, so the old cap graded 74% of him and the 95% gate
+    refuses a partial replay — it was refusing the one whale the owner
+    asked to trade, while funding two whose books happened to fit.
+    swisstony and ferrarichampions2026 sat exactly on 600,000 too.
+
+    The cost is bounded and small. The probe timed a single whale's
+    600,000-fill whole-book replay at ~23s (~26k fills/s), so 2,000,000
+    is ~77s worst case per whale on an HOURLY job, and the real total
+    across the roster is nearer 5M rows than 14M. Peak memory does not
+    move with this number at all since the walk became a true stream
+    (ab16d74) — it holds one 5,000-row batch plus per-condition state.
+
+    The cap stays because a cap that never binds is still the thing
+    that stops one unexpected ledger from hanging the job, and
+    `truncated` plus `fills_total` below now say exactly how far any
+    book is from fitting.
 
     The cap is REPORTED, never silent — a truncated replay that reads
     as a complete one is a wrong P&L presented as a right one.

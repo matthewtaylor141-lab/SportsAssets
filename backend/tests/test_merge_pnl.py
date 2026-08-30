@@ -340,6 +340,23 @@ class TestTruncationIsReportedNotSilent:
         assert out["w"]["truncated"] is False
         assert "verdict_note" not in out["w"]
 
+    def test_the_cap_clears_the_biggest_measured_book(self):
+        # MEASURED, not assumed: probe run 1405 read rn1's whole book at
+        # 806,085 fills. At the old 600,000 the gate refused him for
+        # edge-truncated-replay — the cap was the thing stopping the one
+        # whale the owner asked to trade, while funding two whose books
+        # happened to fit. A cap below a rostered book is a silent money
+        # gate, so it gets a test rather than a comment.
+        import inspect
+
+        from sportsassets.analytics import merge_pnl as m
+
+        sig = inspect.signature(m.whale_merge_pnl)
+        cap = sig.parameters["max_fills"].default
+        assert cap >= 2 * 806085, (
+            "rn1's book was 806,085 fills on 2026-08-30 and grows; keep "
+            "headroom or the 95% gate refuses him on truncation alone")
+
     def test_it_says_how_much_book_it_stopped_short_of(self):
         # `truncated: true` alone cannot tell "two fills over the cap"
         # from "half the book missing", so there is no number to size
