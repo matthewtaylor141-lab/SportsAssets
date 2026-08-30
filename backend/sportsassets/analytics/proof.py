@@ -84,7 +84,7 @@ def roi_with_ci(rows: list[dict]) -> dict:
     nothing cannot inform a return on dollars deployed, and leaving it
     in inflates n while contributing no information.
     """
-    pairs: list[tuple[float, float]] = []
+    pairs: list[tuple[float, float, str]] = []
     dropped = 0
     for r in rows:
         try:
@@ -96,10 +96,10 @@ def roi_with_ci(rows: list[dict]) -> dict:
         if s <= 0:
             dropped += 1
             continue
-        pairs.append((s, p))
+        pairs.append((s, p, str(r.get("event_key") or "")))
     n = len(pairs)
-    tot_s = sum(s for s, _ in pairs)
-    tot_p = sum(p for _, p in pairs)
+    tot_s = sum(s for s, _, _ in pairs)
+    tot_p = sum(p for _, p, _ in pairs)
     out: dict[str, Any] = {
         "n": n, "dropped_rows": dropped,
         "staked": round(tot_s, 2), "pnl": round(tot_p, 2),
@@ -115,15 +115,56 @@ def roi_with_ci(rows: list[dict]) -> dict:
                     "verdict": "INSUFFICIENT — one settled copy cannot "
                                "carry an interval"})
         return out
-    ss = sum((p - r * s) ** 2 for s, p in pairs)
-    se = math.sqrt(n / (n - 1) * ss) / tot_s
+    ss = sum((p - r * s) ** 2 for s, p, _ in pairs)
+    se_iid = math.sqrt(n / (n - 1) * ss) / tot_s
+
+    # ── OUR COPIES CLUSTER TOO (2026-08-30) ─────────────────────────
+    #
+    # The whale statistic was corrected for this in merge_pnl; the same
+    # error lived here, on the number that decides whether WE are
+    # proven. When we copy three legs of one game we hold three rows
+    # driven by one result, and counting them as three independent
+    # settled copies makes this interval too narrow — the direction
+    # that declares us proven early. Measured on zero-edge simulated
+    # books, the iid form rejected the null 13.8% of the time against a
+    # nominal 5%.
+    #
+    # Identical algebra to merge_pnl._lot_interval: sum the residual
+    # WITHIN a game before squaring it. With one copy per game this is
+    # exactly the old number (G == n), so it is a strict generalisation
+    # and test_proof_clustering pins that. Rows without an event_key
+    # each form their own cluster, so an unjoined row degrades to the
+    # old treatment rather than being silently merged with strangers.
+    clus: dict[str, list[float]] = {}
+    for i, (s, p, k) in enumerate(pairs):
+        kk = k or f"\x00{i}"          # unkeyed rows stay singletons
+        c = clus.get(kk)
+        if c is None:
+            clus[kk] = [s, p]
+        else:
+            c[0] += s
+            c[1] += p
+    g = len(clus)
+    if g >= 2:
+        acc = 0.0
+        for s_g, p_g in clus.values():
+            e = p_g - r * s_g
+            acc += e * e
+        se = math.sqrt(max(0.0, g / (g - 1) * acc)) / tot_s
+    else:
+        se = se_iid
     lo, hi = r - Z95 * se, r + Z95 * se
     out["se"] = round(se, 6)
     out["ci95"] = [round(lo, 6), round(hi, 6)]
+    out["clusters"] = g
+    out["deff"] = round(se / se_iid, 4) if se_iid > 0 else None
     # Per-DOLLAR dispersion, which is what a projection needs. Derived
-    # from the same residuals so it cannot disagree with the interval.
-    sigma = se * tot_s / math.sqrt(n)
-    out["sigma_per_dollar"] = round(sigma * n / tot_s, 6) if tot_s else None
+    # from the CLUSTERED residuals so the sample-size projection cannot
+    # disagree with the interval it is projecting toward — sizing off
+    # the iid sigma would promise a proof date the interval can never
+    # reach. Scaled by G, not n: the effective sample is games.
+    sigma = se * tot_s / math.sqrt(g)
+    out["sigma_per_dollar"] = round(sigma * g / tot_s, 6) if tot_s else None
     return out
 
 
@@ -180,8 +221,21 @@ def assess(rows: list[dict], target_edge: float | None = None) -> dict:
             need = required_n(sigma, target_edge)
             out["n_needed_at_target"] = need
             out["n_still_needed"] = max(0, (need or 0) - out["n"])
-        if out["roi"]:
+        # NO SAMPLE SIZE PROVES PROFIT FROM A NEGATIVE ESTIMATE.
+        # required_n takes abs(), so feeding it a negative observed ROI
+        # returns the n needed to prove a LOSS of that size — a
+        # different claim entirely, and one that reads as "almost
+        # there" on a dashboard. Say which it is.
+        if out["roi"] and out["roi"] > 0:
             out["n_needed_at_observed"] = required_n(sigma, out["roi"])
+            out["observed_provable"] = True
+        elif out["roi"] is not None and out["roi"] <= 0:
+            out["n_needed_at_observed"] = None
+            out["observed_provable"] = False
+            out["observed_note"] = (
+                f"the point estimate is {out['roi']:+.2%}; no sample "
+                f"size demonstrates profit from a non-positive estimate "
+                f"— the estimate has to turn positive first")
     return out
 
 
@@ -194,8 +248,19 @@ async def cohort_assess(pool: Any, since: str = COHORT_START,
     q = """
         SELECT lo.whale_username,
                COALESCE(lo.filled_usd, lo.requested_usd)::float8 AS stake,
-               lo.pnl::float8 AS pnl
+               lo.pnl::float8 AS pnl,
+               -- THE GAME THIS COPY BELONGS TO. Three copies of one
+               -- whale's three legs on one match are ONE result, not
+               -- three, and counting them as three made this interval
+               -- too narrow in the direction that declares us proven.
+               -- LEFT JOIN on purpose: a row we cannot place into a
+               -- game keeps its own cluster (see roi_with_ci) rather
+               -- than being merged with unrelated copies.
+               COALESCE(NULLIF(m.event_slug, ''),
+                        NULLIF(lo.us_market_slug, '')) AS event_key
           FROM live_orders lo
+          LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+          LEFT JOIN markets m ON m.condition_id = mt.condition_id
          WHERE lo.placed_at >= $1
            AND lo.pnl IS NOT NULL
            -- TERMINAL ROWS ONLY (2026-08-26).
