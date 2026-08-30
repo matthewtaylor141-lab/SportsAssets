@@ -4303,6 +4303,40 @@ def _spawn_echo(pool, row_id: int, us_slug: str, outcome: str | None,
     t.add_done_callback(_ECHO_TASKS.discard)
 
 
+async def _dh_sibling_guard(pool, src_slug: str) -> bool:
+    """True = the derivative-exact mapping for this feed slug must be
+    DISCARDED (the row falls through exactly as an unresolved one).
+
+    DOUBLEHEADER GUARD (mapper-fail diagnosis 2026-08-30): on a
+    doubleheader day the venue keys its markets with a dh suffix per
+    game, and an exact candidate built WITHOUT one is game-agnostic —
+    it can land on the wrong game of the pair. If the premap table
+    knows ANY dh-keyed sibling for this matchup (either team order,
+    either derivative family), the exact lane refuses. An unreadable
+    table also refuses: this guard only ever REMOVES a mapping, so
+    failing closed costs a copy, never buys a wrong one."""
+    from . import pmus
+
+    try:
+        fd = pmus._feed_derivative(src_slug)
+        pats: list[str] = []
+        if fd:
+            bt = fd["base"].split("-")
+            if len(bt) >= 4:
+                dt = "-".join(bt[3:])
+                for fam in ("tsc", "asc"):
+                    for x, y in ((bt[1], bt[2]), (bt[2], bt[1])):
+                        pats.append(f"{fam}-{bt[0]}-{x}-{y}-{dt}-dh%")
+        if not pats:
+            return False
+        return bool(await pool.fetchval(
+            "SELECT 1 FROM us_premap WHERE "
+            "identifier LIKE ANY($1::text[]) OR "
+            "market_slug LIKE ANY($1::text[]) LIMIT 1", pats))
+    except Exception:  # noqa: BLE001 — unverifiable: fail closed
+        return True
+
+
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
     """Called on every fresh detection (after the paper trade). All guards
     re-checked here; failure of any guard is a silent no-op or logged skip."""
@@ -4849,6 +4883,10 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                         timeout=_EXACT_BOX_S)
                 except asyncio.TimeoutError:
                     _ex_diag.append("timeout")
+                    mapping = None
+                if mapping is not None and await _dh_sibling_guard(
+                        pool, src_slug):
+                    _ex_diag.append("dh-siblings")
                     mapping = None
             # HIS OWN SLUG IS THE STRONGEST CANDIDATE THERE IS, AND
             # ONLY THE FUZZY RESOLVER EVER TRIED IT (2026-08-26).

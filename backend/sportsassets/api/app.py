@@ -5969,7 +5969,34 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
                    AND lo.error NOT LIKE '%sides:[%'
                    AND lo.error !~ ':[1-9][0-9]*ev'
                    AND lo.placed_at > now() - interval '7 days')::int
-                   AS n_0ev_7d
+                   AS n_0ev_7d,
+               -- EXACT-LANE 404s (funnel truthing 2026-08-30): a row
+               -- whose EXACT candidates all 404'd but whose search
+               -- also saw nothing has been counted venue_unlisted —
+               -- yet a candidate-grammar miss and a real venue gap
+               -- look identical there. These counters split that out
+               -- so the winnable estimate stops absorbing grammar
+               -- bugs. Measurement only; the buckets above are
+               -- byte-unchanged. (No trailing bracket in the regex:
+               -- the compacted diag joins counts by comma, so x404 is
+               -- not always last.)
+               count(*) FILTER
+                   (WHERE lo.error ~ 'exact\\[[^\\]]*x404')::int
+                   AS n_exact404,
+               count(*) FILTER (WHERE lo.error ~ 'exact\\[[^\\]]*x404'
+                   AND lo.error LIKE '%0ev%'
+                   AND lo.error NOT LIKE '%sides:[%'
+                   AND lo.error !~ ':[1-9][0-9]*ev')::int
+                   AS n_exact404_unlisted,
+               count(*) FILTER (WHERE lo.error ~ 'exact\\[[^\\]]*x404'
+                   AND lo.placed_at > now() - interval '7 days')::int
+                   AS n_exact404_7d,
+               count(*) FILTER (WHERE lo.error ~ 'exact\\[[^\\]]*x404'
+                   AND lo.error LIKE '%0ev%'
+                   AND lo.error NOT LIKE '%sides:[%'
+                   AND lo.error !~ ':[1-9][0-9]*ev'
+                   AND lo.placed_at > now() - interval '7 days')::int
+                   AS n_exact404_unlisted_7d
         FROM live_orders lo
         LEFT JOIN trades t ON t.id = lo.trade_id
         WHERE lo.status = 'rejected' {where_days}
@@ -5999,7 +6026,12 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
     by_type: dict[str, int] = {}
     winnable = {"listed_mapper_fail": 0, "venue_unlisted": 0,
                 "undiagnosed": 0, "listed_mapper_fail_7d": 0,
-                "venue_unlisted_7d": 0}
+                "venue_unlisted_7d": 0,
+                # beside — never replacing — the five above: how many
+                # 'venue_unlisted' rows carry an exact-lane 404 trail
+                # (candidate-grammar misses masquerading as gaps)
+                "exact404": 0, "exact404_unlisted": 0,
+                "exact404_7d": 0, "exact404_unlisted_7d": 0}
     total = 0
     total_7d = 0
     for r in rows:
@@ -6007,21 +6039,31 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
         total += n
         total_7d += r["n_7d"]
         by_reason[r["reason"]] = by_reason.get(r["reason"], 0) + n
+        by_whale[r["whale"]] = by_whale.get(r["whale"], 0) + n
+        slug = r["slug"] or ""
+        league = league_of(slug) if slug else "(no slug)"
+        mtype = market_type_of(slug) if slug else "unknown"
+        lg = by_league.setdefault(league, {"n": 0, "n_7d": 0, "types": {},
+                                           "listed": 0, "unlisted_0ev": 0,
+                                           "exact404": 0})
+        lg["n"] += n
+        lg["n_7d"] += r["n_7d"]
+        lg["types"][mtype] = lg["types"].get(mtype, 0) + n
+        by_type[mtype] = by_type.get(mtype, 0) + n
         if r["reason"] == "unmapped":
             winnable["listed_mapper_fail"] += r["n_listed"]
             winnable["venue_unlisted"] += r["n_0ev"]
             winnable["undiagnosed"] += n - r["n_listed"] - r["n_0ev"]
             winnable["listed_mapper_fail_7d"] += r["n_listed_7d"]
             winnable["venue_unlisted_7d"] += r["n_0ev_7d"]
-        by_whale[r["whale"]] = by_whale.get(r["whale"], 0) + n
-        slug = r["slug"] or ""
-        league = league_of(slug) if slug else "(no slug)"
-        mtype = market_type_of(slug) if slug else "unknown"
-        lg = by_league.setdefault(league, {"n": 0, "n_7d": 0, "types": {}})
-        lg["n"] += n
-        lg["n_7d"] += r["n_7d"]
-        lg["types"][mtype] = lg["types"].get(mtype, 0) + n
-        by_type[mtype] = by_type.get(mtype, 0) + n
+            winnable["exact404"] += r["n_exact404"]
+            winnable["exact404_unlisted"] += r["n_exact404_unlisted"]
+            winnable["exact404_7d"] += r["n_exact404_7d"]
+            winnable["exact404_unlisted_7d"] += \
+                r["n_exact404_unlisted_7d"]
+            lg["listed"] += r["n_listed"]
+            lg["unlisted_0ev"] += r["n_0ev"]
+            lg["exact404"] += r["n_exact404"]
     leagues = sorted(by_league.items(), key=lambda kv: -kv[1]["n"])[:30]
     return {
         "totals": {"rows": total, "recent_7d": total_7d},
@@ -6040,6 +6082,9 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
                      for k, v in sorted(by_whale.items(),
                                         key=lambda kv: -kv[1])],
         "by_league": [{"league": k, "n": v["n"], "n_7d": v["n_7d"],
+                       "listed": v["listed"],
+                       "unlisted_0ev": v["unlisted_0ev"],
+                       "exact404": v["exact404"],
                        "market_types": dict(sorted(v["types"].items(),
                                                    key=lambda kv: -kv[1]))}
                       for k, v in leagues],

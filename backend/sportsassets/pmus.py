@@ -618,6 +618,21 @@ def _feed_derivative(global_slug: str) -> dict | None:
             return {"base": base, "kind": "total",
                     "line": mt.group(1), "side": suffix[0][0],
                     "team": None}
+    # totals, word form: 'total-8pt5' (mapper-fail diagnosis
+    # 2026-08-30: the feed emits BOTH grammars, and this one fell into
+    # the spread parser below, which absorbed 'total' as a TEAM token
+    # and died at _spread_exact's unknown-qualifier refusal — while
+    # the venue listed the tsc- market the whole time; MLB+soccer
+    # totals were the two largest winnable classes in the funnel).
+    # Exactly two tokens and a BARE line: a decorated line token
+    # ('o8pt5', 'pos-2pt5', 'total-1pt5x') is another grammar and
+    # falls through unchanged, and a 3-token form ('team-total-2pt5'
+    # team totals, 'total-games-22pt5' game-count props) never
+    # matches — those are different markets, not this one.
+    if (len(suffix) == 2 and suffix[0] in ("total", "totals")
+            and re.fullmatch(r"\d+(?:pt\d)?", suffix[1])):
+        return {"base": base, "kind": "total", "line": suffix[1],
+                "side": None, "team": None}
     # spreads: [team]? (pos|neg)? line — the feed's own side encoding
     team = None
     toks = list(suffix)
@@ -841,13 +856,52 @@ def resolve_derivative_exact(global_slug: str,
     if fd["kind"] != "total":
         return None
     client = _get_client()
-    slug = f"tsc-{fd['base']}-{fd['line']}"
-    slug_word = "over" if fd["side"] == "o" else "under"
-    try:
-        m = (client.markets.retrieve_by_slug(slug) or {}).get(
-            "market") or {}
-    except Exception:  # noqa: BLE001 — 404 is an answer
+    # THE SIDE WORD, THREE WAYS (mapper-fail diagnosis 2026-08-30).
+    # The old line was a binary default — anything that wasn't 'o'
+    # became 'under' — which was only safe while the single-token
+    # grammar guaranteed side was 'o' or 'u'. The word-form grammar
+    # ('total-8pt5') carries NO side token: there the whale's OUTCOME
+    # must name it, exactly once, and any number the outcome states
+    # must equal the slug's own line ('Over 2.5' on total-1pt5 is a
+    # contradiction, not a match — it would otherwise clear the
+    # outcome floor on the word alone). Every other side value
+    # refuses; None never falls into a default.
+    if fd["side"] == "o":
+        slug_word = "over"
+    elif fd["side"] == "u":
+        slug_word = "under"
+    elif fd["side"] is None:
+        _ow = set(re.findall(r"[a-z]+", _norm(outcome or "")))
+        _named = {w for w in ("over", "under") if w in _ow}
+        if len(_named) != 1:
+            return None
+        slug_word = next(iter(_named))
+        _lv = _line_value(fd["line"])
+        _nums = re.findall(r"\d+(?:\.\d+)?", outcome or "")
+        if _nums and any(float(n) != _lv for n in _nums):
+            return None
+    else:
         return None
+    # Team order in the venue slug is not guaranteed to match the
+    # feed's. The swapped-order candidate is tried ONLY when the
+    # primary is unlisted (404/empty) — a primary that EXISTS but
+    # fails corroboration must refuse outright, never fall to a
+    # second guess. a/b come from the base whose pre-date token count
+    # was already validated == 3 above.
+    _bt = fd["base"].split("-")
+    _cands = [f"tsc-{fd['base']}-{fd['line']}"]
+    if len(_bt) >= 4:
+        _swapped = "-".join([_bt[0], _bt[2], _bt[1]] + _bt[3:])
+        _cands.append(f"tsc-{_swapped}-{fd['line']}")
+    m = {}
+    for _slug in _cands:
+        try:
+            m = (client.markets.retrieve_by_slug(_slug) or {}).get(
+                "market") or {}
+        except Exception:  # noqa: BLE001 — 404 is an answer
+            m = {}
+        if m.get("slug"):
+            break
     if not m.get("slug") or m.get("closed"):
         return None
     title = m.get("question") or m.get("title") or ""
