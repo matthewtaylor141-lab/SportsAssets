@@ -2378,10 +2378,27 @@ jobs:
                   # poll-detected rows are the ones chain MISSED
                   if str(row.get("source") or "") != "chain":
                       per[u].append(row)
+          # roster wallets from the engine itself: the receipt verdicts
+          # below are WALLET-FILTERED, which is what the A2/S1 bundle
+          # refusal actually tests (receipt-wide id counts proved
+          # nothing — a normal CTF match mints both complements)
+          wallets: dict[str, str] = {}
+          try:
+              for w in get(f"{base}/api/whales") or []:
+                  un = str(w.get("username") or "").lower()
+                  if un in TARGETS and w.get("address"):
+                      wallets[un] = str(w["address"]).lower()
+          except Exception as exc:
+              print(f"  SPORTS-CHAIN whales fetch failed: {exc}")
+          print(f"  SPORTS-CHAIN wallets: "
+                + " ".join(f"{k}={v}" for k, v in wallets.items()))
+          USDC = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"
           for u, picked in per.items():
               if not picked:
                   print(f"  SPORTS-CHAIN {u}: no recent poll rows with "
                         f"a tx hash in the feed window")
+              w_addr = wallets.get(u, "")
+              w_topic = w_addr[2:].lower() if w_addr else None
               for row in picked:
                   tx = row["tx_hash"]
                   print(f"  SPORTS-CHAIN {u} tx {tx} "
@@ -2392,25 +2409,78 @@ jobs:
                       print("    (no receipt from any RPC)")
                       continue
                   tids = set()
-                  v3_owner_hit = False
+                  my_ids: set[int] = set()
+                  my_sh_in = my_sh_out = 0
+                  my_usdc_in = my_usdc_out = 0
+                  my_batch = 0
+                  my_events = []
                   n_batch = 0
                   for lg in rec.get("logs", []):
                       em = (lg.get("address") or "").lower()
-                      tps = lg.get("topics") or []
-                      t0 = str(tps[0]).lower() if tps else ""
+                      tps = [str(t).lower() for t in
+                             (lg.get("topics") or [])]
+                      t0 = tps[0] if tps else ""
                       data = str(lg.get("data", "0x"))[2:]
+                      addrs = [("0x" + t[-40:]) for t in tps[1:4]]
+                      mine = bool(w_addr and w_addr in addrs)
                       if t0 == T_SINGLE and len(data) >= 128:
-                          tids.add(int(data[0:64], 16))
-                      if t0 == T_BATCH:
+                          tid = int(data[0:64], 16)
+                          val = int(data[64:128], 16)
+                          tids.add(tid)
+                          if mine:
+                              my_ids.add(tid)
+                              if len(addrs) >= 3 \
+                                      and addrs[2] == w_addr:
+                                  my_sh_in += val
+                              elif len(addrs) >= 2 \
+                                      and addrs[1] == w_addr:
+                                  my_sh_out += val
+                      elif t0 == T_BATCH and mine:
+                          my_batch += 1
+                          # ids[]/vals[] arrays: two offsets then two
+                          # length-prefixed arrays of uint256
+                          try:
+                              o1 = int(data[0:64], 16) * 2
+                              n1 = int(data[o1:o1 + 64], 16)
+                              for i in range(min(n1, 32)):
+                                  s = o1 + 64 + i * 64
+                                  my_ids.add(int(data[s:s + 64], 16))
+                          except Exception:
+                              pass
+                      elif t0 == T_BATCH:
                           n_batch += 1
-                      mark = ("WATCHED" if em in WATCHED
-                              else "unwatched")
-                      owners = [("0x" + t[-40:]) for t in tps[1:4]]
-                      print(f"    log {em} [{mark}] t0={t0[:12]} "
-                            f"owners={' '.join(owners)}")
-                  print(f"    RECEIPT-VERDICT distinct_1155_ids="
-                        f"{len(tids)} batch_logs={n_batch} "
-                        f"(bundle-refusal fires when ids != 1)")
+                      elif em == USDC and t0.startswith("0xddf252ad") \
+                              and len(tps) >= 3 and len(data) >= 64:
+                          amt = int(data[0:64], 16)
+                          if addrs and addrs[-1] == w_addr:
+                              my_usdc_in += amt
+                          elif addrs and addrs[0] == w_addr:
+                              my_usdc_out += amt
+                      elif t0 == FILL_V3 and mine:
+                          words = [int(data[i:i + 64], 16)
+                                   for i in range(0, min(len(data),
+                                                         64 * 6), 64)]
+                          my_events.append(words)
+                  print(f"    RECEIPT-VERDICT wallet={w_addr[:12]} "
+                        f"my_ids={sorted(my_ids)[:4]} "
+                        f"n_my_ids={len(my_ids)} my_batch={my_batch} "
+                        f"sh_in={my_sh_in} sh_out={my_sh_out} "
+                        f"usdc_in={my_usdc_in} usdc_out={my_usdc_out} "
+                        f"receipt_ids={len(tids)}")
+                  for i, ws in enumerate(my_events):
+                      print(f"    MYFILL-EVENT {i}: words="
+                            f"{[hex(x) for x in ws]}")
+                  # cross-foot: do the fill events' amount words sum to
+                  # the wallet's standard legs? Exact agreement is the
+                  # license for a per-fill bundle decoder; anything
+                  # else keeps the refusal.
+                  for wi in range(6):
+                      s = sum(ws[wi] for ws in my_events
+                              if len(ws) > wi)
+                      if s and s in (my_sh_in, my_sh_out,
+                                     my_usdc_in, my_usdc_out):
+                          print(f"    CROSSFOOT word{wi} sum={s} == "
+                                f"a wallet leg total — attributable")
           PYEOF
 
       - name: New exchange ABI (name the event behind topic d543adfd)

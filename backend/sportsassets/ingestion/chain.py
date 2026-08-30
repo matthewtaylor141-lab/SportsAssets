@@ -343,6 +343,7 @@ class ChainListener:
                 "events_seen": self.events_seen,
                 "decoded": self.decoded,
                 "ingested": self.ingested,
+                "v3_refused": getattr(self, "v3_refused", 0),
                 "detect_lag_s": self.last_lag_s,
                 "roster": len(self._roster),
                 "shadow": _shadow_beat(),
@@ -451,6 +452,14 @@ class ChainListener:
         for wallet in matched:
             fill = decode_fill_v3_receipt(logs, wallet)
             if fill is None:
+                # COUNTED (audit 2026-08-30): receipts show the venue
+                # batches several fills — including several of ONE
+                # wallet's — into one settlement tx, so this refusal
+                # is where hrh's (and swisstony's) chain lane dies and
+                # their edge decays at poll latency. The counter rides
+                # the beat so the coming bundle decoder has a
+                # before/after number instead of a story.
+                self.v3_refused = getattr(self, "v3_refused", 0) + 1
                 log.info("v3 fill undecodable for %s in %s (bundle?)",
                          wallet[:10], tx[:14])
                 claim_registry.finish(tx, wallet, "receipt", "refused")
