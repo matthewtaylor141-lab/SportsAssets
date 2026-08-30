@@ -7333,6 +7333,14 @@ async def api_premap_status() -> dict:
                   "err": f"{type(exc).__name__}: {str(exc)[:120]}"}
     extras: dict = {"coverage": coverage, "sleeve": sleeve}
     for key, out in (("premap_last", "last_sweep"),
+                     # THE FAST LANE HAS ITS OWN BUDGET AND ITS OWN
+                     # TRUNCATION, and only the full sweep was ever
+                     # published. A capped board is markets that can
+                     # NEVER be premapped, and premap is the only lane
+                     # allowed to trade under the quarantine — so a
+                     # silent page-budget ceiling is a silent ceiling on
+                     # how much of a proven whale we can copy at all.
+                     ("premap_last_fast", "last_sweep_fast"),
                      ("workers_boot", "workers_boot"),
                      ("side_echo_last", "side_echo"),
                      ("side_echo_shadow", "side_echo_shadow"),

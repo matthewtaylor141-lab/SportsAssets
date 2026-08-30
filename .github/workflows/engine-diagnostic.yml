@@ -423,6 +423,23 @@ jobs:
           curl -sS --max-time 30 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/premap.json "$BASE/api/admin/premap-status" || true
           jq -r '"  PREMAP rows=\(.rows // 0)  events=\(.events // 0)  fresh=\(.fresh // "never")  last=\(.last_sweep // "none")"' /tmp/premap.json 2>/dev/null || true
+          # SWEEP COVERAGE, PER LANE. The page loop exits either because
+          # the board was exhausted or because the budget ran out, and
+          # the summary read the same either way. A truncated board is
+          # markets that can never be premapped and therefore never
+          # copied — a hard ceiling on how much of a PROVEN whale we can
+          # trade. Print pages_walked/max_pages so the ceiling is
+          # visible before it has to be inferred from the miss funnel.
+          jq -r '(["full", .last_sweep], ["fast", .last_sweep_fast])[]
+                 | . as [$lane, $s]
+                 | if $s == null then "  PREMAPSWEEP \($lane): no state"
+                   else "  PREMAPSWEEP \($lane): events=\($s.events // 0) "
+                      + "rows=\($s.rows // 0) "
+                      + "pages=\($s.pages_walked // "?")/\($s.max_pages // "?") "
+                      + "window=\($s.window_h | tostring) "
+                      + (if $s.truncated then "*** TRUNCATED — part of the board was never read ***"
+                         else "complete" end)
+                   end' /tmp/premap.json 2>/dev/null || true
           jq -r '"  WORKERS boot=\(.workers_boot // "none")  side_echo=\(.side_echo // "none")  TRIPPED=\(.side_echo_tripped // false)"' /tmp/premap.json 2>/dev/null || true
           # SLEEVE-OFF (owner order 2026-08-24: "only copies flow") —
           # the underdog worker's heartbeat states whether the sleeve is
