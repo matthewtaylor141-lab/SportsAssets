@@ -1783,8 +1783,17 @@ def test_absorption_excludes_cross_asset_legs(st):
                      sv.ORPHAN_FINAL_S + 10, time.time(), 0)
     assert st.deltas.get("exec_covered_by_chain_agg_row") == 2, \
         "only the tie's OWN asset legs are proven by the aggregate"
-    assert st.deltas.get("orphan_chain_mismatch") == 1, \
-        "the cross-asset leg must fall through to the orphan ladder"
+    # DELIBERATE PIN FLIP (decoder-panel round-2 mandate, 2026-08-30):
+    # the cross-asset leftover still falls through the ladder, but to
+    # the NON-GATING arm — a leg on an asset NO chain row carries is
+    # not evidence the decode was wrong (wrong decodes are same-asset
+    # by construction), and letting it fire orphan_chain_mismatch
+    # would re-arm the total quarantine off the selector's own mint
+    # sibling legs. Same-asset mismatches keep the gating alarm; see
+    # test_chain_v3_selector.test_shadow_mismatch_arm_is_asset_scoped.
+    assert st.deltas.get("orphan_chain_mismatch") is None
+    assert st.deltas.get("orphan_excess_exec") == 1, \
+        "the cross-asset leg must fall through to the NON-gating arm"
 
 
 # ── fleet5 K1: tombstone merge books TRANSFORMED mint keys ──────────

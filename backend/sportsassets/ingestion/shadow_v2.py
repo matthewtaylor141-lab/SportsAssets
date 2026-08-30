@@ -909,7 +909,20 @@ class ShadowV2:
                     log.info("SHADOW-V2 ORPHAN tx=%s wallet=%s no rows", tx[:14], wallet[:12])
                 elif self._chain_exact(c, chain_rows):
                     self.bump("orphan_chain_exact")
-                elif chain_rows and not poll_rows:
+                elif chain_rows and not poll_rows and any(
+                        r["asset"] == c["asset"] for r in chain_rows):
+                    # ASSET-SCOPED (decoder-panel round-2 mandate,
+                    # 2026-08-30): the wrong-decode alarm fires on a
+                    # SAME-asset key mismatch — a wrong selector price/
+                    # side/size on the decoded asset still gates here.
+                    # A leftover exec on an asset NO chain row carries
+                    # (a mint sibling leg, a cross-market view) is not
+                    # evidence the decode was wrong; it falls through
+                    # to orphan_excess_exec, which was already its
+                    # judgment whenever a poll row coexisted. Without
+                    # this scope, the selector's first correct decode
+                    # of a mint-shaped receipt would re-arm the total
+                    # quarantine off its own sibling leg.
                     self.bump("orphan_chain_mismatch")
                     self.note_example("orphan_chain_mismatch", tx=tx[:14],
                                       wallet=wallet[:12], side=c["side"], asset=c["asset"][:12])

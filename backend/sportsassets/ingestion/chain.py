@@ -97,6 +97,14 @@ ORDER_FILLED_V2_TOPIC = (
 # the standard legs — sub-second detection, no reverse-engineering.
 FILL_V3_TOPIC = "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee"
 TRANSFER_SINGLE_TOPIC = "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62"
+TRANSFER_BATCH_TOPIC = "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb"
+_V3_MAX_BATCH = 1024
+
+
+class _Malformed(Exception):
+    """A wallet-touching 1155 leg or wallet-topic fill event that cannot
+    be fully read: the receipt is unpriceable, refuse."""
+
 ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 V3_EXCHANGES_DEFAULT = ("0xe2222d279d744050d28e00520010520000310f59,"
                         "0xe111180000d2663c0091e4f400237545b87b996b")
@@ -108,8 +116,8 @@ def v3_owner_candidates(log_entry: dict[str, Any]) -> set[str]:
     return {_topic_addr(t) for t in topics[1:4] if t}
 
 
-def decode_fill_v3_receipt(logs: list[dict[str, Any]],
-                           wallet: str) -> DecodedFill | None:
+def _decode_v3_legacy(logs: list[dict[str, Any]],
+                      wallet: str) -> DecodedFill | None:
     """Reconstruct one wallet's fill from a receipt's STANDARD events.
 
     BUY: the wallet received CTF tokens (TransferSingle to=wallet) and
@@ -180,6 +188,156 @@ def decode_fill_v3_receipt(logs: list[dict[str, Any]],
         tx_hash=tx_hash,
         block_number=block_number,
     )
+
+
+
+def _decode_batch_arrays(data: str) -> list[tuple[int, int]]:
+    """ABI-decode (uint256[] ids, uint256[] values) from TransferBatch
+    data, bounds-checked; raises _Malformed on any violation."""
+    try:
+        if len(data) < 2 * 64:
+            raise _Malformed
+        off_ids, off_vals = int(data[0:64], 16), int(data[64:128], 16)
+
+        def arr(off_bytes: int) -> list[int]:
+            if off_bytes <= 0 or off_bytes % 32:
+                raise _Malformed
+            p = off_bytes * 2
+            if p + 64 > len(data):
+                raise _Malformed
+            n = int(data[p:p + 64], 16)
+            if n > _V3_MAX_BATCH:
+                raise _Malformed
+            if p + 64 + n * 64 > len(data):
+                raise _Malformed
+            return [int(data[p + 64 + i * 64: p + 128 + i * 64], 16)
+                    for i in range(n)]
+
+        ids, vals = arr(off_ids), arr(off_vals)
+        if len(ids) != len(vals):
+            raise _Malformed
+        return list(zip(ids, vals))
+    except _Malformed:
+        raise
+    except Exception as exc:  # noqa: BLE001 — any parse slip is malformed
+        raise _Malformed from exc
+
+
+def _wallet_1155_legs(logs, wallet):
+    """Wallet-scoped ERC-1155 flows: TransferSingle AND TransferBatch.
+    Returns (my_ids, sh_in, sh_out, tx_hash, block_number)."""
+    my_ids: set[int] = set()
+    sh_in = sh_out = 0
+    tx_hash = ""
+    block_number = 0
+    for lg in logs:
+        tps = lg.get("topics") or []
+        if not tps:
+            continue
+        t0 = str(tps[0]).lower()
+        if t0 not in (TRANSFER_SINGLE_TOPIC, TRANSFER_BATCH_TOPIC):
+            continue
+        if len(tps) < 4:
+            if any(wallet == _topic_addr(str(t)) for t in tps[1:]):
+                raise _Malformed
+            continue
+        frm, to = _topic_addr(str(tps[2])), _topic_addr(str(tps[3]))
+        if wallet not in (frm, to):
+            continue
+        data = str(lg.get("data", "0x"))[2:]
+        if t0 == TRANSFER_SINGLE_TOPIC:
+            if len(data) < 2 * 64:
+                raise _Malformed
+            pairs = [(int(data[0:64], 16), int(data[64:128], 16))]
+        else:
+            pairs = _decode_batch_arrays(data)
+        for tid, val in pairs:
+            my_ids.add(tid)          # ids count even at val 0 (probe parity)
+            if val == 0:
+                continue
+            if to == wallet:
+                sh_in += val
+            else:
+                sh_out += val
+        tx_hash = str(lg.get("transactionHash", tx_hash)).lower() or tx_hash
+        try:
+            block_number = int(str(lg.get("blockNumber", "0x0")), 16) \
+                or block_number
+        except ValueError:
+            pass
+    return my_ids, sh_in, sh_out, tx_hash, block_number
+
+
+def _decode_v3_selected(logs, wallet):
+    """Production-verified single-event selector (probes 2026-08-30)."""
+    try:
+        my_ids, sh_in, sh_out, tx_hash, blk = _wallet_1155_legs(logs, wallet)
+    except _Malformed:
+        return None, "malformed_1155"
+    if not my_ids or (sh_in == 0 and sh_out == 0):
+        return None, "no_shares"
+    if len(my_ids) > 1:
+        return None, "multi_token"
+    if sh_in and sh_out:
+        return None, "mixed_direction"
+    token = next(iter(my_ids))
+    side = "BUY" if sh_in else "SELL"
+    shares = sh_in or sh_out
+    candidates: list[tuple[int, int, int]] = []
+    for lg in logs:
+        tps = lg.get("topics") or []
+        if not tps or str(tps[0]).lower() != FILL_V3_TOPIC:
+            continue
+        if wallet not in {_topic_addr(str(t)) for t in tps[1:4] if t}:
+            continue
+        data = str(lg.get("data", "0x"))[2:]
+        if len(data) < 4 * 64:
+            return None, "malformed_fill"
+        candidates.append((int(data[64:128], 16),
+                           int(data[128:192], 16),
+                           int(data[192:256], 16)))
+        tx_hash = str(lg.get("transactionHash", tx_hash)).lower() or tx_hash
+        try:
+            blk = int(str(lg.get("blockNumber", "0x0")), 16) or blk
+        except ValueError:
+            pass
+    if not candidates:
+        return None, "no_fill_events"
+    if not any(w1 == token for w1, _w2, _w3 in candidates):
+        return None, "no_token_match"
+    passes = [(w1, w2, w3) for w1, w2, w3 in candidates
+              if w1 == token and w2 > 0 and w3 > 0 and w3 == shares]
+    if not passes:
+        return None, "no_share_match"
+    if len(passes) > 1:
+        return None, "multi_pass"
+    _w1, w2, w3 = passes[0]
+    price = round(w2 / w3, 6)
+    if not (0 < price < 1):
+        return None, "px_oob"
+    return DecodedFill(
+        wallet=wallet, token_id=str(token), side=side,
+        size=round(shares / USDC_DECIMALS, 6), price=price,
+        tx_hash=tx_hash, block_number=blk), "selected"
+
+
+def decode_fill_v3_receipt_ex(logs, wallet):
+    """(fill, reason). Legacy lane first; selector only on legacy refusal."""
+    wallet = wallet.lower()
+    try:
+        fill = _decode_v3_legacy(logs, wallet)
+        if fill is not None:
+            return fill, "legacy"
+        return _decode_v3_selected(logs, wallet)
+    except Exception:  # noqa: BLE001 — fail closed, never crash the WS loop
+        return None, "error"
+
+
+def decode_fill_v3_receipt(logs: list[dict[str, Any]],
+                           wallet: str) -> DecodedFill | None:
+    """Two lanes: the legacy direct-USDC-leg decode, then the
+    production-verified single-event selector."""
+    return decode_fill_v3_receipt_ex(logs, wallet)[0]
 
 
 def decode_order_filled_v2(log_entry: dict[str, Any],
@@ -344,6 +502,11 @@ class ChainListener:
                 "decoded": self.decoded,
                 "ingested": self.ingested,
                 "v3_refused": getattr(self, "v3_refused", 0),
+                "v3_no_token_match": (getattr(self, "v3_ref", None) or {}).get("no_token_match", 0),
+                "v3_multi_pass": (getattr(self, "v3_ref", None) or {}).get("multi_pass", 0),
+                "v3_px_oob": (getattr(self, "v3_ref", None) or {}).get("px_oob", 0),
+                "v3_ref": dict(getattr(self, "v3_ref", None) or {}),
+                "v3_selected": getattr(self, "v3_selected", 0),
                 "detect_lag_s": self.last_lag_s,
                 "roster": len(self._roster),
                 "shadow": _shadow_beat(),
@@ -450,7 +613,7 @@ class ChainListener:
             return
         logs = receipt.get("logs") or []
         for wallet in matched:
-            fill = decode_fill_v3_receipt(logs, wallet)
+            fill, why = decode_fill_v3_receipt_ex(logs, wallet)
             if fill is None:
                 # COUNTED (audit 2026-08-30): receipts show the venue
                 # batches several fills — including several of ONE
@@ -460,10 +623,16 @@ class ChainListener:
                 # the beat so the coming bundle decoder has a
                 # before/after number instead of a story.
                 self.v3_refused = getattr(self, "v3_refused", 0) + 1
-                log.info("v3 fill undecodable for %s in %s (bundle?)",
-                         wallet[:10], tx[:14])
+                ref = getattr(self, "v3_ref", None)
+                if ref is None:
+                    ref = self.v3_ref = {}
+                ref[why] = ref.get(why, 0) + 1
+                log.info("v3 fill undecodable for %s in %s (%s)",
+                         wallet[:10], tx[:14], why)
                 claim_registry.finish(tx, wallet, "receipt", "refused")
                 continue
+            if why == "selected":
+                self.v3_selected = getattr(self, "v3_selected", 0) + 1
             reg = claim_registry.get(tx, wallet)
             if reg is not None and reg["owner"] == "emitter":
                 # ordering inversion inside one process: the emitter got
