@@ -2870,8 +2870,16 @@ def _main_impl() -> None:
     # loaded same-or-better, exact-twin mapping only). Candidates come
     # from the platform's crypto-copy feed; every fill grades under
     # ledger category 'kalshi_crypto'. Armed independently of every
-    # other leg (the silent-disarm class); EDGE_KCRYPTO=0 kills it.
-    if os.environ.get("EDGE_KCRYPTO", "1") != "0" and kalshi_c is not None             and kalshi_c.has_credentials():
+    # other leg (the silent-disarm class). DISARMED BY DEFAULT since
+    # 2026-08-30: these two whales are excluded from COPY_WHALES and so
+    # are never graded, meaning the owner's 95%-proven bar can never be
+    # satisfied for them. Arming is now explicit (EDGE_KCRYPTO=1).
+    #
+    # The two arming checks also disagreed: this one armed on anything
+    # != "0" while kalshi_crypto.sweep halted on anything != "1", so
+    # EDGE_KCRYPTO=2 started the loop and then halted every pass. Both
+    # now test == "1" against the same default.
+    if os.environ.get("EDGE_KCRYPTO", "0") == "1" and kalshi_c is not None             and kalshi_c.has_credentials():
         def _kcrypto_loop() -> None:
             import requests
 

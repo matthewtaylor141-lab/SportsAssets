@@ -41,7 +41,10 @@ profitably"):
 6. LEG BREAKER. Realized losses over any rolling 24h at or beyond
    $300 pause the leg by itself (env EDGE_KCRYPTO_HALT_USD). Global
    stops (kill switch / watchdog) bind through live_blocked. Master
-   arm: EDGE_KCRYPTO (default on), poll EDGE_KCRYPTO_POLL_S (2.5s).
+   arm: EDGE_KCRYPTO — DEFAULT OFF since 2026-08-30, because this
+   leg's whales are never graded and so can never meet the owner's
+   95%-proven bar; set EDGE_KCRYPTO=1 to arm. Poll
+   EDGE_KCRYPTO_POLL_S (2.5s).
 
 Grading: every fill is ledger category "kalshi_crypto" with the
 source whale in the decision, so the funnel and the per-whale
@@ -397,8 +400,25 @@ def sweep(client, ledger, risk, candidates: list[dict]) -> None:
     count; every order is idempotent by trade id."""
     from edge.shadow.kalshi_guard import live_blocked
 
-    if os.environ.get("EDGE_KCRYPTO", "1") != "1":
-        funnel["halted"] = "EDGE_KCRYPTO=0"
+    # DISARMED BY DEFAULT (owner requirement 2026-08-30: "I need you to
+    # always ensure mathematical and statistical profit... at least 95%
+    # statistically proven profitable").
+    #
+    # This leg copies WHALES = ("0xf705fa04", "jnstrtprdctnmrkts") at up
+    # to $250 an order. Both are deliberately EXCLUDED from COPY_WHALES
+    # (api/copies_record.py), so workers/analytics.py never grades them
+    # and no edge_ci95 for them can exist — their edge is not merely
+    # unproven, it is structurally unmeasurable by the bar the owner
+    # set. An adversarial review found this was the one money path that
+    # bypassed the gate entirely, while defaulting to ARMED.
+    #
+    # Production at 2026-08-30T13:41Z: "seen 4979 placed 0 filled 0
+    # deployed $0.0" — armed but never spent, so disarming costs
+    # nothing today. Re-arming is EDGE_KCRYPTO=1, one env var, and the
+    # real fix is to bring these two whales under the same 95% gate
+    # rather than to keep the leg dark.
+    if os.environ.get("EDGE_KCRYPTO", "0") != "1":
+        funnel["halted"] = "not armed — whales ungraded, see EDGE_KCRYPTO"
         return
     blocked = live_blocked(ledger, scope="manual")
     if blocked:

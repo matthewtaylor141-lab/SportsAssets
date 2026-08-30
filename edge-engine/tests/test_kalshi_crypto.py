@@ -173,6 +173,14 @@ class _Risk:
 
 @pytest.fixture(autouse=True)
 def _fresh_state(monkeypatch):
+    # ARM THE LEG FOR THESE TESTS. Since 2026-08-30 the sweep is
+    # DISARMED unless EDGE_KCRYPTO=1, because its two whales are
+    # excluded from COPY_WHALES and therefore can never satisfy the
+    # owner's 95%-proven bar. Everything below tests the sweep's own
+    # math and refusals, which only run once it is armed; the default
+    # itself is pinned separately in test_kcrypto_disarmed.py so that
+    # arming here cannot quietly re-arm production.
+    monkeypatch.setenv("EDGE_KCRYPTO", "1")
     kc.funnel.update(seen=0, placed=0, filled=0, contracts=0,
                      deployed_usd=0.0, fees_usd=0.0, refused={},
                      by_whale={}, last_error=None, halted=False)
