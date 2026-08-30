@@ -1029,6 +1029,20 @@ jobs:
           jq -r '.whales // {} | to_entries[]
                  | "  WHALEEDGE \(.key): \(.value.edge_verdict // "n/a")"' \
             /tmp/mergepnl.json 2>/dev/null || echo "  WHALEEDGE unavailable"
+          # CLUSTERING (2026-08-30). A whale betting the moneyline, the
+          # spread and the total of one game holds three lots driven by
+          # ONE result. Grading them as three independent observations
+          # made the interval too narrow in the direction that FUNDS
+          # people: measured on zero-edge simulated books the iid
+          # formula fired at 13.8% against a nominal 5%. deff is how
+          # much wider the honest interval is; clusters is how many
+          # independent games are really behind the lot count.
+          jq -r '(.per_whale // {}) | to_entries[]?
+                 | "  WHALECLUS \(.key): lots=\(.value.edge_lots // 0) "
+                 + "events=\(.value.edge_clusters // 0) "
+                 + "deff=\(.value.edge_deff // "n/a") "
+                 + "se=\(.value.edge_se // "n/a")"' \
+            /tmp/mergepnl.json 2>/dev/null || true
           # EXITVALUE — the owner's thesis as one number per whale.
           #
           # Every whale figure this desk has published grades at

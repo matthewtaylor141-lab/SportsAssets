@@ -73,12 +73,57 @@ def _lot_interval(o: dict) -> dict:
     base = {"edge_lots": n, "edge_deployed": round(ts, 2)}
     if n < 2 or ts <= 0:
         return {**base, "edge_roi": (round(tp / ts, 6) if ts > 0 else None),
-                "edge_se": None, "edge_ci95": None,
+                "edge_se": None, "edge_ci95": None, "edge_clusters": 0,
+                "edge_deff": None,
                 "edge_verdict": "INSUFFICIENT — fewer than two closed "
                                 "lots on this book"}
     r = tp / ts
     ss = (o["lot_pp"] - 2.0 * r * o["lot_ps"] + r * r * o["lot_ss"])
-    se = math.sqrt(max(0.0, n / (n - 1) * ss)) / ts
+    se_iid = math.sqrt(max(0.0, n / (n - 1) * ss)) / ts
+
+    # ── THE LOT IS NOT THE UNIT OF INDEPENDENCE (2026-08-30) ────────
+    #
+    # A whale who backs the moneyline, the spread and the total on one
+    # game holds three lots driven by ONE random variable. Treating
+    # them as three independent observations divides the variance by
+    # about the number of legs, and the interval comes out too narrow
+    # in exactly the direction that funds people.
+    #
+    # Measured on simulated books with four correlated legs per game
+    # and a TRUE EDGE OF ZERO: the iid formula rejected the null 13.8%
+    # of the time against a nominal 5%. Our "95%" gate was really
+    # firing at about 86% before any multiplicity correction at all.
+    #
+    # The fix is the same algebra with the residual summed WITHIN a
+    # cluster before it is squared:
+    #
+    #   E_g = sum_{i in g} (p_i - R*s_i) = P_g - R*S_g
+    #   SE  = sqrt( G/(G-1) * sum_g E_g^2 ) / sum(s)
+    #
+    # so only the per-cluster totals are needed, not the lots. When
+    # every cluster holds exactly one lot this returns the iid result
+    # EXACTLY (G == n, E_i == p_i - R*s_i) — it is a strict
+    # generalisation, and test_edge_clustering pins that identity.
+    #
+    # The cluster key is the whale's EVENT where the caller can supply
+    # the mapping, and the condition otherwise. Condition-level
+    # clustering alone still absorbs a market that closes in several
+    # pieces; only the event mapping absorbs cross-market correlation
+    # within one game, which is the larger effect.
+    clus = o.get("clus") or {}
+    g = len(clus)
+    if g >= 2:
+        acc = 0.0
+        for s_g, p_g in clus.values():
+            e = p_g - r * s_g
+            acc += e * e
+        se = math.sqrt(max(0.0, g / (g - 1) * acc)) / ts
+    else:
+        se = se_iid
+    # How much the correlation actually cost us, published so the
+    # design effect is visible rather than assumed. >1 means the old
+    # interval was too narrow by this factor, squared.
+    deff = round(se / se_iid, 4) if se_iid > 0 else None
     lo, hi = r - _Z95 * se, r + _Z95 * se
     if lo > 0:
         v = (f"PROFITABLE at 95% — {r:+.2%} on dollar deployed, "
@@ -92,10 +137,12 @@ def _lot_interval(o: dict) -> dict:
              f"{n:,} closed lots")
     return {**base, "edge_roi": round(r, 6), "edge_se": round(se, 6),
             "edge_ci95": [round(lo, 6), round(hi, 6)],
+            "edge_clusters": g, "edge_deff": deff,
             "edge_verdict": v}
 
 
-def _replay_stepper(payouts: dict[str, list[float]] | None = None):
+def _replay_stepper(payouts: dict[str, list[float]] | None = None,
+                    events: dict[str, str] | None = None):
     """Classify one whale's fills. Pure — no database, so it is testable.
 
     `fills` must be ordered (condition_id, ts, id) and carry:
@@ -137,6 +184,10 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None):
     """
     per_cond: dict[str, list[list[float]]] = {}
     pay = payouts or {}
+    # condition -> event. Absent, each condition is its own
+    # cluster, which is strictly better than per-lot and
+    # strictly worse than per-game. Supply it where you can.
+    ev = events or {}
     out = {
         "n_fills": 0, "n_entries": 0, "n_merges": 0, "n_sells": 0,
         "entry_notional": 0.0, "merge_shares": 0.0,
@@ -157,7 +208,7 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None):
         #   sum((p - R*s)^2) = sum(p^2) - 2R*sum(p*s) + R^2*sum(s^2)
         #
         # so five running sums carry the whole interval.
-        "lots": 0, "lot_s": 0.0, "lot_p": 0.0,
+        "lots": 0, "lot_s": 0.0, "lot_p": 0.0, "clus": {},
         "lot_ss": 0.0, "lot_pp": 0.0, "lot_ps": 0.0,
         # counterfactual, populated only when `payouts` is supplied
         # Positions that ended at RESOLUTION rather than at a fill.
@@ -178,8 +229,14 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None):
         except (TypeError, ValueError):
             return None
 
-    def _lot(stake: float, pnl: float) -> None:
-        """One CLOSED lot: what he had at risk, and what it returned."""
+    def _lot(stake: float, pnl: float, cid: str = "") -> None:
+        """One CLOSED lot: what he had at risk, and what it returned.
+
+        `cid` names the lot's CLUSTER — the whale's event where the
+        caller supplied an event map, else the condition. Lots sharing
+        a key are one observation for variance purposes; see the note
+        in _lot_interval.
+        """
         if stake <= 0:
             return
         out["lots"] += 1
@@ -188,6 +245,16 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None):
         out["lot_ss"] += stake * stake
         out["lot_pp"] += pnl * pnl
         out["lot_ps"] += pnl * stake
+        # Per-cluster running totals. Bounded by the number of distinct
+        # events, not lots — a 123,638-lot book is tens of thousands of
+        # keys, which is why this is a dict and the lots still are not.
+        k = ev.get(cid, cid) if cid else ""
+        c = out["clus"].get(k)
+        if c is None:
+            out["clus"][k] = [stake, pnl]
+        else:
+            c[0] += stake
+            c[1] += pnl
 
     def _grade(cid: str, leg: int, q: float, exit_px: float,
                avg: float) -> None:
@@ -222,7 +289,7 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None):
             if q > DUST:
                 avg = cost[idx] / bal[idx] if bal[idx] > DUST else 0.0
                 out["realized_sell_pnl"] += q * (price - avg)
-                _lot(q * avg, q * (price - avg))
+                _lot(q * avg, q * (price - avg), cid)
                 _grade(cid, idx, q, price, avg)
                 bal[idx] -= q
                 cost[idx] -= q * avg
@@ -235,7 +302,7 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None):
                          if bal[other] > DUST else 0.0)
             pnl = m * (1.0 - avg_other - price)
             out["realized_merge_pnl"] += pnl
-            _lot(m * avg_other, pnl)
+            _lot(m * avg_other, pnl, cid)
             # The held leg's effective exit price is (1 - price paid for
             # the complement): the pair returns $1, so buying the other
             # side at `price` is selling this one at 1 - price.
@@ -299,7 +366,7 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None):
                 # settled: stake is what it cost, return is the payout
                 out["settled_lots"] += 1
                 out["settled_shares"] += q
-                _lot(cost[leg], q * po - cost[leg])
+                _lot(cost[leg], q * po - cost[leg], cid)
         for st in per_cond.values():
             out["open_shares"] += st[0][0] + st[0][1]
             out["open_cost"] += st[1][0] + st[1][1]
@@ -358,18 +425,19 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None):
 
 
 
-def replay(fills, payouts: dict[str, list[float]] | None = None) -> dict:
+def replay(fills, payouts: dict[str, list[float]] | None = None,
+           events: dict[str, str] | None = None) -> dict:
     """Classify one whale's fills. Pure — no database, so it is testable.
 
     See _replay_stepper for the arithmetic and the counterfactual.
     """
-    step, finish = _replay_stepper(payouts)
+    step, finish = _replay_stepper(payouts, events)
     for f in fills:
         step(f)
     return finish()
 
 
-async def replay_stream(fills, payouts=None) -> dict:
+async def replay_stream(fills, payouts=None, events=None) -> dict:
     """replay() over an ASYNC iterable, holding ONE ROW at a time.
 
     replay() takes a list because a test hands it one. Production must
@@ -388,7 +456,7 @@ async def replay_stream(fills, payouts=None) -> dict:
     replay is how they drift, and this arithmetic is what the entire
     roster is graded on.
     """
-    step, finish = _replay_stepper(payouts)
+    step, finish = _replay_stepper(payouts, events)
     async for f in fills:
         step(f)
     return finish()
@@ -483,6 +551,32 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
             payouts = {}
             cf_error = f"payout lookup failed: {type(exc).__name__}"
 
+        # THE CLUSTER MAP: condition -> event (the game).
+        #
+        # Without it every condition is its own cluster, which absorbs a
+        # market closing in several pieces but NOT the moneyline, the
+        # spread and the total of one game moving together — and that
+        # cross-market correlation is the larger effect by far. Note
+        # this deliberately does NOT filter on resolved: a lot can close
+        # by merge long before the market settles, and it still belongs
+        # to its game.
+        #
+        # Fail-open to condition-level clustering, never to per-lot: a
+        # missing map must make the interval WIDER-or-equal, never
+        # narrower, so a lookup failure cannot manufacture confidence.
+        events: dict[str, str] = {}
+        try:
+            erows = await pool.fetch(
+                "SELECT m.condition_id, m.event_slug FROM markets m "
+                " WHERE COALESCE(m.event_slug, '') <> '' "
+                f"   AND m.condition_id IN ({_sub})"
+                + ("" if since_d is None else " AND t.ts >= $2"),
+                *( (w.lower(),) if since_d is None else (w.lower(), since_d) ))
+            for er in erows:
+                events[str(er["condition_id"])] = str(er["event_slug"])
+        except Exception:  # noqa: BLE001
+            events = {}
+
         # ACTUALLY STREAMED THIS TIME.
         #
         # The previous version used a server-side cursor and then
@@ -533,7 +627,7 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
                                 _seen.add(str(r["condition_id"]))
                             yield r
 
-        out = await replay_stream(_rows(), payouts)
+        out = await replay_stream(_rows(), payouts, events)
         n_read = _n[0]
         conds = _seen
         # The error belongs to THIS WHALE'S result, not to a sibling key

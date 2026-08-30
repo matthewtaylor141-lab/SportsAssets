@@ -817,8 +817,11 @@ class TestItActuallyStreamsThisTime:
         this arithmetic is what the entire roster is graded on."""
         import inspect
 
+        # The arity grew on 2026-08-30 when the event map arrived for
+        # cluster-robust variance; the property being pinned is
+        # unchanged — one stepper, called identically by both forms.
         for fn in (mp.replay, mp.replay_stream):
-            assert "_replay_stepper(payouts)" in inspect.getsource(fn)
+            assert "_replay_stepper(payouts, events)" in inspect.getsource(fn)
 
     def test_the_streaming_form_agrees_with_the_pure_one(self):
         import asyncio
