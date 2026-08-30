@@ -2969,10 +2969,43 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     want = PREFIX_FOR_TYPE.get(market_type_of(global_slug or ""))
     if not want:
         return None
-    rows = [r for r in rows if _prefix_of(r.get("identifier")) in want]
-    if not rows:
+    # `kept` beside `rows`, not instead of it: the named lane's
+    # blockers (multi_event_pool, event_slug_missing, nonlatin_in_pool,
+    # event_scan_ambiguous) must scan EVERYTHING the keys fetched,
+    # exactly as the Phase-0 probe has measured it since 2026-08-27 —
+    # judging pool-wide ambiguity against a filtered pool makes a
+    # dropped sibling look unique, which is the wrong-side incident's
+    # shape all over again.
+    kept = [r for r in rows if _prefix_of(r.get("identifier")) in want]
+    if not kept:
         return None
-    hit = match_side(rows, outcome, market_title, global_slug)
+    hit = match_side(kept, outcome, market_title, global_slug)
+    matched_by = "premap"
+    if hit is None and os.getenv("PREMAP_NAMED_LANE",
+                                 "").strip().lower() == "on":
+        # NAMED-TENNIS LANE, Phase 1 wiring (mapper-fail diagnosis
+        # 2026-08-30; the lane itself is the Phase-0 bridge that has
+        # been measured read-only since 2026-08-27). Consulted ONLY
+        # after match_side returns None — no existing mapping may
+        # change source or side — and DARK by default: the env switch
+        # is the owner's flip, so enabling is a config change and
+        # rollback needs no deploy. The gate to flipping it is the
+        # accumulated named_ml audit (app.py records 40/run) reading
+        # zero-mismatch over both attested families. A bridge failure
+        # of any kind falls through to the legacy resolvers exactly as
+        # a premap miss does today, and a bridge hit still passes the
+        # same no-intent refusal below — matched_by is distinct so
+        # fills are attributable and the lane can be killed
+        # independently of classic premap.
+        try:
+            nhit, _nwhy = named_ml_bridge_explain(
+                kept, rows, outcome, market_title, global_slug,
+                event_title)
+        except Exception:  # noqa: BLE001 — fail closed to legacy
+            nhit = None
+        if nhit is not None:
+            hit = nhit
+            matched_by = "premap_named"
     if hit is None:
         return None
     # AMBIGUOUS SIDE = REFUSE (venue ground truth 2026-08-24): on the
@@ -2990,7 +3023,7 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
             "title": hit.get("question") or hit.get("event_title"),
             "outcome": hit.get("side_norm"),
             "intent": intent,
-            "matched_by": "premap", "score": 1.0}
+            "matched_by": matched_by, "score": 1.0}
 
 
 async def fast_refresh() -> dict:

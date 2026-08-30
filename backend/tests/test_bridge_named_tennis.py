@@ -429,10 +429,101 @@ class TestPartition:
                                  WT, WS, WE)[1] == "not_yes_no"
 
 
-class TestPhaseZeroBoundary:
-    def test_resolve_never_touches_the_named_lane(self):
-        assert "named_ml" not in inspect.getsource(pm.resolve)
+class TestPhaseOneWiring:
+    """Phase 1 (2026-08-30): resolve() consults the bridge — DARK by
+    default behind PREMAP_NAMED_LANE, only after match_side returns
+    None, with the pre-filter pool as rows_all, and a bridge hit still
+    passes the same no-intent refusal. This class deliberately
+    replaces the Phase-0 pin `test_resolve_never_touches_the_named
+    _lane` — the flip is the feature, made on the mapper-fail
+    diagnosis's adversarially verified lane, not by accident."""
 
+    class _P:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def fetch(self, *_a):
+            return self.rows
+
+    def _resolve(self, rows, outcome="Hiromasa Koyama"):
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                pm.resolve(self._P(rows), WT, WE, outcome, WS))
+        finally:
+            loop.close()
+
+    def test_dark_by_default(self, monkeypatch):
+        monkeypatch.delenv("PREMAP_NAMED_LANE", raising=False)
+        monkeypatch.setattr(pm, "match_side", lambda *a, **k: None)
+        called = []
+        monkeypatch.setattr(pm, "named_ml_bridge_explain",
+                            lambda *a, **k: called.append(1))
+        assert self._resolve([K, C]) is None
+        assert not called, "the lane must stay dark without the switch"
+
+    def test_switch_on_recovers_the_attested_pair(self, monkeypatch):
+        # the REAL bridge runs; only match_side is forced to miss so
+        # the wiring (not matcher policy) is what this test pins
+        monkeypatch.setenv("PREMAP_NAMED_LANE", "on")
+        monkeypatch.setattr(pm, "match_side", lambda *a, **k: None)
+        r = self._resolve([K, C])
+        assert r is not None
+        assert r["matched_by"] == "premap_named"
+        assert r["market_slug"] == K["identifier"]
+        assert r["intent"] == "ORDER_INTENT_BUY_LONG"
+
+    def test_match_side_hit_never_consults_the_bridge(self, monkeypatch):
+        monkeypatch.setenv("PREMAP_NAMED_LANE", "on")
+
+        def _boom(*_a, **_k):
+            raise AssertionError("bridge consulted despite a hit")
+
+        monkeypatch.setattr(pm, "named_ml_bridge_explain", _boom)
+        monkeypatch.setattr(pm, "match_side", lambda *a, **k: K)
+        r = self._resolve([K, C])
+        assert r is not None and r["matched_by"] == "premap"
+
+    def test_rows_all_is_the_prefilter_pool(self, monkeypatch):
+        monkeypatch.setenv("PREMAP_NAMED_LANE", "on")
+        monkeypatch.setattr(pm, "match_side", lambda *a, **k: None)
+        stray = vrow("over", "ORDER_INTENT_BUY_LONG",
+                     ident="tsc-itfme-hirkoy-lucacas-2026-08-27-2pt5")
+        seen = {}
+
+        def _spy(rows_kept, rows_all, *a, **k):
+            seen["kept"] = list(rows_kept)
+            seen["all"] = list(rows_all)
+            return None, "spied"
+
+        monkeypatch.setattr(pm, "named_ml_bridge_explain", _spy)
+        assert self._resolve([K, C, stray]) is None
+        assert stray in seen["all"], \
+            "pool-wide blockers must see what the prefix filter drops"
+        assert stray not in seen["kept"]
+
+    def test_bridge_hit_without_intent_still_refuses(self, monkeypatch):
+        monkeypatch.setenv("PREMAP_NAMED_LANE", "on")
+        monkeypatch.setattr(pm, "match_side", lambda *a, **k: None)
+        bare = vrow("hiromasa koyama", None)
+        monkeypatch.setattr(pm, "named_ml_bridge_explain",
+                            lambda *a, **k: (bare, "ok"))
+        assert self._resolve([K, C]) is None
+
+    def test_bridge_exception_falls_through_closed(self, monkeypatch):
+        monkeypatch.setenv("PREMAP_NAMED_LANE", "on")
+        monkeypatch.setattr(pm, "match_side", lambda *a, **k: None)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("bridge broke")
+
+        monkeypatch.setattr(pm, "named_ml_bridge_explain", _boom)
+        assert self._resolve([K, C]) is None
+
+
+class TestPhaseZeroBoundary:
     def test_match_side_and_row_builder_are_untouched(self):
         """The stamp fix is FORBIDDEN until match_side's containment
         tiers are hardened — the tournament executed a wrong-person

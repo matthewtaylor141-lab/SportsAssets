@@ -192,7 +192,10 @@ class TestEveryMatcherGotTheSameArgument:
         import inspect
 
         src = inspect.getsource(premap.resolve)
-        assert "match_side(rows, outcome, market_title, global_slug)" in src
+        # (the pool variable was renamed `kept` when the Phase-1 named
+        # lane split the filtered pool from the fetched one, 2026-08-30
+        # — the pin's subject is the SLUG argument, which is unchanged)
+        assert "match_side(kept, outcome, market_title, global_slug)" in src
 
     def test_resolve_explain_passes_the_slug(self):
         import inspect
