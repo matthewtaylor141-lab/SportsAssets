@@ -17,11 +17,15 @@ const CAT_LABEL: Record<string, string> = {
   ferrarichampions2026: 'ferrariChampions2026 copies',
   '0x076daa87': '0x076daa87 copies',
   manual: 'Manual desk',
-  underdog: 'Underdog $1 test', arb: 'Arbitrage', software: 'Software',
+  underdog: 'Underdog $1 test', arb: 'Arbitrage',
+  // Was `software: 'Software'` until 2026-08-30 — this card rendered a
+  // pure measurement-error term under the name of a retired strategy,
+  // which is how "software is still firing" reached the owner twice.
+  residual: 'Residual (not a strategy)',
 }
 const CAT_ORDER = ['rn1', 'swisstony', 'kch123', 'homerunhazard', WHALE_0X2C33,
   'ferrarichampions2026', '0x076daa87',
-  'manual', 'underdog', 'arb', 'software']
+  'manual', 'underdog', 'arb', 'residual']
 
 interface CatTotal { pnl: number; settled: number; wins: number; losses: number }
 interface RangeReport {

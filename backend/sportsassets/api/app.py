@@ -6131,10 +6131,15 @@ _bg_tasks: set = set()
 async def _category_breakdown(from_day: str, to_day: str) -> dict:
     """Per-ET-day results by category over a date range (owner reports
     2026-08-06/07): each live sleeve (RN1, swisstony, kch123,
-    HomeRunHazard, manual) from the order-level audit table; software
-    and arbitrage from the venue-account record split by the engine
-    mirror's band tag; unattributed folded into software (owner rule).
-    The site's ±$100 single-trade display cap applies throughout."""
+    HomeRunHazard, manual) from the order-level audit table; arbitrage
+    from the venue-account record split by the engine mirror's band tag;
+    everything left over lands in `residual`. The site's ±$100
+    single-trade display cap applies throughout.
+
+    `residual` is the derived remainder and is NOT a strategy — see the
+    comment above its computation. It was called `software` until
+    2026-08-30, which twice sent the owner the false signal that a
+    retired engine was still trading."""
     from datetime import datetime as _dt
 
     from .track_record import (AUDIT_SINCE, PNL_DISPLAY_CAP, RECORD_TZ,
@@ -6235,28 +6240,21 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
         c["wins"] += 1 if pnl > 0 else 0
         c["losses"] += 1 if pnl < 0 else 0
 
-    # Software = account minus everything attributed, per day. Wins and
-    # losses for the derived remainder come from the record's non-copy,
-    # non-arb settled rows (counts are additive even though dollars are
-    # derived).
-    sw_counts: dict[str, dict] = {}
-    for r in rec.get("trades") or []:
-        if r.get("sleeve") == "copy" or not r.get("settled") \
-                or r.get("market_slug") in arb_slugs:
-            continue
-        ts = r.get("settled_ts") or r.get("entry_ts")
-        if not ts:
-            continue
-        day = max(_dt.fromtimestamp(ts, RECORD_TZ).strftime("%Y-%m-%d"),
-                  first_day)
-        if not _in_range(day):
-            continue
-        sc = sw_counts.setdefault(day, {"settled": 0, "wins": 0,
-                                        "losses": 0})
-        pnl = float(r.get("pnl") or 0)
-        sc["settled"] += 1
-        sc["wins"] += 1 if pnl > 0 else 0
-        sc["losses"] += 1 if pnl < 0 else 0
+    # THE COUNTS WERE ALWAYS ZERO, AND THAT WAS THE TELL (2026-08-30).
+    #
+    # A sw_counts loop used to attach settled/wins/losses to the derived
+    # remainder from the record's non-copy rows. It could never count
+    # anything: copy_slugs (track_record.py) marks every us_market_slug a
+    # COPY_WHALES order has EVER touched as sleeve='copy', with no date
+    # bound, so `sleeve == "copy"` skipped essentially the whole account
+    # and every day published settled=0.
+    #
+    # The probe printed the result verbatim — `unattr=4970.76/0set` — and
+    # nothing alarmed on it for thirteen days: $5,001.11 of P&L filed
+    # under a strategy class the owner switched OFF on 2026-08-17, with
+    # zero trades behind it. Counting dollars against a bucket that
+    # cannot hold a trade is not attribution, so the loop is gone and the
+    # counts below are HARD zero with an explicit residual marker.
 
     # EXTERNAL (owner) settlements — positive attribution BEFORE the
     # remainder is derived (owner report 2026-08-22: personal trades
@@ -6307,15 +6305,35 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
     except Exception:  # noqa: BLE001 — attribution stays merged
         pass
 
+    # THE KEY IS THE LIE, NOT THE LABEL (2026-08-30).
+    #
+    # The CSV/PDF label was already corrected on 2026-08-22 after the
+    # first "software is still firing" scare — and the scare came back,
+    # because the label was never what most readers see. The probe
+    # (engine-diagnostic.yml), Wall.tsx, wall.ts and ReportsCard.tsx all
+    # read the JSON KEY, and ReportsCard rendered it as "Software" on
+    # screen. So the key changes here.
+    #
+    # `residual` is what this line actually is: the difference between
+    # the venue account calendar and everything we could attribute. It
+    # is a MEASUREMENT ERROR TERM, and it is dominated by a dating
+    # mismatch — copies bucket on live_orders.settled_at (the day our
+    # sweep DISCOVERED a resolution, because engine.py falls through to
+    # now() for archive-settled rows) while the account anchors on the
+    # venue's own resolution/entry day. Same trade, two calendars.
+    #
+    # It stays a derived remainder on purpose: an unexplained difference
+    # must be shown, never smoothed away or spread across the sleeves.
+    # What changes is that it can no longer wear a strategy's name, and
+    # `residual: True` lets any consumer refuse to plot it as earnings.
     for day, acct_pnl in acct_by_day.items():
         attributed = sum(c["pnl"] for c in (days.get(day) or {}).values())
-        c = _cat(day, "software")
+        c = _cat(day, "residual")
         c["pnl"] = round(acct_pnl - attributed, 2)
-        counts = sw_counts.get(day) or {"settled": 0, "wins": 0,
-                                        "losses": 0}
-        c["settled"] += counts["settled"]
-        c["wins"] += counts["wins"]
-        c["losses"] += counts["losses"]
+        c["settled"] = 0
+        c["wins"] = 0
+        c["losses"] = 0
+        c["residual"] = True
 
     totals: dict[str, dict] = {}
     for day, d in days.items():
@@ -6325,6 +6343,8 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
             t["pnl"] = round(t["pnl"] + c["pnl"], 4)
             for k in ("settled", "wins", "losses"):
                 t[k] += c[k]
+            if c.get("residual"):
+                t["residual"] = True   # the marker survives aggregation
     net = round(sum(t["pnl"] for t in totals.values()), 2)
     out_days = []
     for k in sorted(days):
@@ -6334,16 +6354,23 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
             "days": out_days,
             "totals": totals, "net_pnl": net,
             "reconciled": True,
-            "note": ("reconciled by construction: each day's categories "
-                     "sum exactly to the account calendar; copies/manual "
+            "cross_foots_by_construction": True,
+            "note": ("each day's categories sum to the account calendar "
+                     "BY CONSTRUCTION, because 'residual' is defined as "
+                     "account minus attributed — so 'reconciled' here is "
+                     "an identity, NOT an independent check, and it "
+                     "cannot detect a wrong input. copies/manual come "
                      "from the order-level audit table, arb from the "
                      "engine mirror's band tag, external is venue "
                      "settlements on markets no platform ledger touched "
-                     "(owner activity). The 'software' key is the derived "
-                     "remainder (identity method, owner ops PDF v1.1) — "
-                     "since the software wind-down completed it holds "
-                     "fees, open-stake mark moves, and trades past the "
-                     "±$100 display cap, NOT software trading")}
+                     "(owner activity). 'residual' is a MEASUREMENT "
+                     "ERROR TERM, never a strategy: it holds fees, "
+                     "open-stake mark moves, trades past the ±$100 "
+                     "display cap, and — dominantly — a dating mismatch, "
+                     "since copies bucket on the day our sweep "
+                     "DISCOVERED a resolution while the account anchors "
+                     "on the venue's own day. It carries settled=0 and "
+                     "residual=true; do not plot it as earnings")}
 
 
 @app.get("/api/admin/order-audit", dependencies=[Depends(require_admin)])
@@ -7638,7 +7665,7 @@ _CAT_ORDER = ["rn1", "swisstony", "kch123", "homerunhazard",
               # from report.csv/pdf — the exports skip categories the
               # label map doesn't know.
               "ferrarichampions2026", "0x076daa87",
-              "manual", "underdog", "arb", "external", "software"]
+              "manual", "underdog", "arb", "external", "residual"]
 _CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
               "kch123": "kch123 copies", "homerunhazard": "HomeRunHazard copies",
               # Display label is the truncated address — the owner names
@@ -7648,11 +7675,13 @@ _CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
               "0x076daa87": "0x076daa87 copies",
               "manual": "Manual desk", "underdog": "Underdog $1 test",
               "arb": "Arbitrage", "external": "External (owner)",
-              # Renamed 2026-08-22 (owner scare x2): the derived remainder
-              # is NOT software trading — software is OFF with a ~$5 tail.
-              # It holds fees, open-stake marks, and >$100-cap trades the
-              # display cap excludes from the sleeve rows.
-              "software": "Unattributed (fees · marks · capped trades)"}
+              # Relabelled 2026-08-22 after the owner scare, and the
+              # scare STILL came back — because the label only ever
+              # reached CSV/PDF while the probe and every React surface
+              # read the JSON key, which still said "software". The key
+              # itself was renamed to `residual` on 2026-08-30.
+              "residual": "Residual (dating gap · fees · marks · "
+                          "capped trades — not a strategy)"}
 
 
 @app.get("/api/report.csv")

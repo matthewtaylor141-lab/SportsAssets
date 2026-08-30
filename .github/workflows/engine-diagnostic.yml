@@ -269,8 +269,26 @@ jobs:
           # HomeRunHazard read as "copies did nothing" while the remainder
           # -- which is fees + marks + >cap trades, NOT software -- looked
           # like a software loss. Twice now that misread reached the owner.)
-          jq -r '.days[]? | . as $d | ([$d.rn1, $d.swisstony, $d.kch123, $d.homerunhazard, $d["0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"], $d.ferrarichampions2026, $d["0x076daa87"]] | map(select(. != null)) | {p: (map(.pnl) | add // 0), w: (map(.wins) | add // 0), l: (map(.losses) | add // 0)}) as $c | "  BRK \($d.date)  acct=\($d.account // "?")  copies=\($c.p)/\($c.w)-\($c.l)  ud=\($d.underdog.pnl // 0)  man=\($d.manual.pnl // 0)  ext=\($d.external.pnl // 0)  arb=\($d.arb.pnl // 0)/\($d.arb.wins // 0)-\($d.arb.losses // 0)  unattr=\($d.software.pnl // 0)/\($d.software.settled // 0)set"' /tmp/db.json 2>/dev/null || true
+          jq -r '.days[]? | . as $d | ([$d.rn1, $d.swisstony, $d.kch123, $d.homerunhazard, $d["0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"], $d.ferrarichampions2026, $d["0x076daa87"]] | map(select(. != null)) | {p: (map(.pnl) | add // 0), w: (map(.wins) | add // 0), l: (map(.losses) | add // 0)}) as $c | "  BRK \($d.date)  acct=\($d.account // "?")  copies=\($c.p)/\($c.w)-\($c.l)  ud=\($d.underdog.pnl // 0)  man=\($d.manual.pnl // 0)  ext=\($d.external.pnl // 0)  arb=\($d.arb.pnl // 0)/\($d.arb.wins // 0)-\($d.arb.losses // 0)  resid=\($d.residual.pnl // 0)"' /tmp/db.json 2>/dev/null || true
           jq -r '.totals | to_entries[]? | "  BRKTOT \(.key)  pnl=\(.value.pnl)  \(.value.wins)-\(.value.losses) of \(.value.settled)"' /tmp/db.json 2>/dev/null || true
+
+          # PHANTOM DETECTOR (2026-08-30). The defect that hid for
+          # thirteen days was P&L filed under a category with no trades
+          # behind it -- `unattr=4970.76/0set` was ON THIS LINE the whole
+          # time and read as an ordinary number. `residual` is EXEMPT by
+          # construction (it is an error term and always carries
+          # settled=0); ANY OTHER category doing it is a real alarm.
+          jq -r '.days[]? | . as $d | ($d | to_entries[]
+                   | select(.value | type == "object")
+                   | select(.key != "residual")
+                   | select((.value.settled // 0) == 0
+                            and ((.value.pnl // 0) | fabs) > 0.005)
+                   | "  BRK-PHANTOM \($d.date) \(.key) pnl=\(.value.pnl) settled=0 — dollars in a category with no trades")' \
+             /tmp/db.json 2>/dev/null || true
+          jq -r 'if (.reconciled // false) and (.cross_foots_by_construction // false)
+                 then "  BRK-TIEOUT cross-foots BY CONSTRUCTION (residual = acct - attributed) — an identity, NOT an independent check"
+                 else "  BRK-TIEOUT unexpected shape — the residual identity may have changed" end' \
+             /tmp/db.json 2>/dev/null || true
 
           # ── unattributed residual, row by row (owner order 2026-08-23:
           # "every cent of it") — TODAY's day-detail: the anchor rows vs

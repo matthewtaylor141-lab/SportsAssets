@@ -283,7 +283,7 @@ export interface DailyBreakdown {
 }
 
 /** Category keys that are NOT part of the copies column. */
-const NON_COPY_CATS = new Set(['manual', 'underdog', 'arb', 'external', 'software'])
+const NON_COPY_CATS = new Set(['manual', 'underdog', 'arb', 'external', 'residual'])
 
 /** The category cells of one breakdown day (metadata keys stripped). */
 export function dayCategories(d: BreakdownDay): [string, BreakdownCat][] {

@@ -223,7 +223,7 @@ interface ReportRow { copies: number; manual: number; arb: number; external: num
 function reportRow(d: BreakdownDay): ReportRow {
   const r: ReportRow = { copies: 0, manual: 0, arb: 0, external: 0, unatt: 0 }
   for (const [cat, c] of dayCategories(d)) {
-    if (cat === 'software') r.unatt += c.pnl
+    if (cat === 'residual') r.unatt += c.pnl
     else if (cat === 'manual') r.manual += c.pnl
     else if (cat === 'arb') r.arb += c.pnl
     else if (cat === 'external') r.external += c.pnl
