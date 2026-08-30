@@ -62,3 +62,43 @@ def test_backlog_probe_is_bounded():
     """The visibility count must never scan the whole trades table."""
     body = SRC[SRC.index("async def backfill_unenriched"):]
     assert "LIMIT 1000) t" in body
+
+
+def test_noslug_catalog_join_is_zero_network_and_slugless_only():
+    """Mapper-fail diagnosis 2026-08-30: 3,447 rejected slugless rows
+    had tokens our own catalog already knew — the answer was local and
+    nothing joined it back. The join must touch ONLY rows that still
+    have no slug (a mapped row can never be rewritten) and must be
+    observable in the heartbeat."""
+    body = SRC[SRC.index("async def backfill_unenriched"):]
+    join = body[: body.index("now = _t.time()")]
+    assert "FROM market_tokens mt" in join
+    assert "JOIN markets m ON m.condition_id = mt.condition_id" in join
+    assert "COALESCE(t.market_slug, t.event_slug, '') = ''" in join
+    assert "noslug_joined" in join, "the drain must ride the heartbeat"
+    assert "gamma" not in join.lower(), "the catalog join is zero-network"
+
+
+def test_noslug_join_failure_never_blocks_enrichment():
+    body = SRC[SRC.index("async def backfill_unenriched"):]
+    join = body[: body.index("now = _t.time()")]
+    assert "except Exception" in join
+    assert "log.exception" in join
+
+
+def test_gamma_success_repairs_slugless_siblings_only():
+    """The selector groups by asset and repaired max(id) — every other
+    slugless row of the same token stayed broken forever. The sibling
+    UPDATE is additive (the max-id row keeps its unconditional
+    refresh) and touches only rows that STILL have no slug."""
+    body = SRC[SRC.index("async def backfill_unenriched"):]
+    assert "WHERE id=$1" in body, "the original per-id refresh survives"
+    assert ("WHERE asset=$1 AND COALESCE(market_slug, event_slug, '')=''"
+            in body)
+
+
+def test_noslug_partial_index_migration_exists():
+    mig = (pathlib.Path(__file__).resolve().parents[1]
+           / "migrations" / "039_trades_noslug_idx.sql").read_text()
+    assert "trades_noslug_idx" in mig
+    assert "WHERE COALESCE(market_slug, event_slug, '') = ''" in mig

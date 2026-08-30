@@ -378,6 +378,34 @@ async def backfill_unenriched(limit: int = 200) -> int:
     import time as _t
 
     pool = await get_pool()
+    # NOSLUG CATALOG JOIN (mapper-fail diagnosis 2026-08-30). The
+    # unmapped census counted 22,331 rejected rows whose trade has NO
+    # slug — and for 3,447 of them market_tokens ALREADY knows the
+    # token: the answer was in our own catalog and nothing joined it
+    # back. Zero network, one UPDATE, empty-slug predicate only — a
+    # mapped row can never be rewritten (039 adds the partial index so
+    # this stays cheap after the backlog drains). Resolution itself is
+    # untouched: repaired rows go through the same premap -> exact ->
+    # fuzzy path as any other on their next signal.
+    try:
+        _res = await pool.execute(
+            """
+            UPDATE trades t
+               SET condition_id = mt.condition_id,
+                   outcome = COALESCE(t.outcome, mt.outcome),
+                   outcome_index = COALESCE(t.outcome_index,
+                                            mt.outcome_index),
+                   market_title = m.title, market_slug = m.slug,
+                   event_slug = m.event_slug, sport = m.sport,
+                   enriched_at = now()
+              FROM market_tokens mt
+              JOIN markets m ON m.condition_id = mt.condition_id
+             WHERE mt.token_id = t.asset
+               AND COALESCE(t.market_slug, t.event_slug, '') = ''
+            """)
+        enrich_stats["noslug_joined"] = int(str(_res or "0").split()[-1])
+    except Exception:  # noqa: BLE001 — repair lane never blocks enrichment
+        log.exception("noslug catalog join failed; continuing")
     now = _t.time()
     for k in [k for k, (_, ts) in _enrich_fails.items()
               if now - ts > ENRICH_AMNESTY_S]:
@@ -444,6 +472,27 @@ async def backfill_unenriched(limit: int = 200) -> int:
             WHERE id=$1
             """,
             row["id"],
+            meta["condition_id"],
+            meta["outcome"],
+            meta["outcome_index"],
+            meta["title"],
+            meta["slug"],
+            meta["event_slug"],
+            meta["sport"],
+        )
+        # SIBLING REPAIR (2026-08-30): the selector groups by asset and
+        # repairs max(id) — every OTHER slugless row of the same token
+        # stayed broken forever and re-rejected on every retry sweep.
+        # Strictly additive: the max-id row above keeps its
+        # unconditional refresh; this touches only siblings that STILL
+        # have no slug, so no mapped row is ever rewritten.
+        await pool.execute(
+            """
+            UPDATE trades SET condition_id=$2, outcome=$3, outcome_index=$4, market_title=$5,
+                              market_slug=$6, event_slug=$7, sport=$8, enriched_at=now()
+            WHERE asset=$1 AND COALESCE(market_slug, event_slug, '')=''
+            """,
+            str(row["asset"]),
             meta["condition_id"],
             meta["outcome"],
             meta["outcome_index"],
