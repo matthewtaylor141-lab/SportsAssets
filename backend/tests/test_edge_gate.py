@@ -94,52 +94,33 @@ class TestItFailsClosed:
             assert not ok and why == expect, g
 
     def test_a_truncated_replay_refuses_however_good_it_looks(self):
-        # merge_pnl caps at 600,000 fills per whale, so a flagged book's
-        # statistic is the EARLIEST trades, not a sample of them.
+        # merge_pnl caps at 600,000 fills per whale and walks ORDER BY
+        # condition_id, so a flagged book is a prefix of that whale's
+        # MARKETS rather than a sample of them. (Not "his earliest
+        # trades" — that is what this comment claimed until 2026-08-30,
+        # and the ORDER BY says otherwise.)
         t = dict(PROVEN, truncated=True)
         ok, why = eg.decide({"w": t}, "w", **FRESH)
         assert not ok and why == "edge-truncated-replay"
 
-    def test_a_clean_row_in_a_truncated_PAYLOAD_refuses(self):
-        # THE RUN-1403 CASE, and the reason this rule exists.
+    def test_truncation_is_judged_PER_WHALE_not_per_payload(self):
+        # I briefly shipped the opposite — any flagged whale refused
+        # every whale — on the claim that run 1403's unflagged rows
+        # were wrong too. They were not. That compared the worker's
+        # WHOLE-BOOK publish against the probe's ?since=2026-08-01
+        # read; the difference was the window, and every published
+        # interval was NARROWER, which is what more data does.
         #
-        # That publish flagged three whales and left three unflagged —
-        # and the unflagged rows were wrong too: the API's live replay
-        # of the same books, minutes apart, put 0x076daa87 at
-        # [-7.51,+21.09] where the payload claimed [+2.49,+19.99].
-        # Row-by-row reading would have funded him — the poll-bound
-        # whale whose filled cohort runs -28% ROI — off that row.
-        #
-        # So a neighbour's truncation condemns a clean row. Whatever
-        # cut the replay short did not confine itself to the books it
-        # labelled.
+        # The replay budget is per whale (merge_pnl:589, inside the
+        # whale loop), so one cut book cannot touch another's numbers.
+        # And swisstony is past the cap persistently, so a payload-wide
+        # rule would have blocked the roster forever.
         payload = {"clean": PROVEN, "cut": dict(PROVEN, truncated=True)}
         ok, why = eg.decide(payload, "clean", **FRESH)
-        assert not ok and why == "edge-publish-truncated"
-
-    def test_the_flagged_whale_keeps_its_own_reason(self):
-        # Both rules are live and the diagnosis stays specific: the
-        # whale that was actually cut is named as cut, not blamed on a
-        # neighbour. Reversing these two checks would make
-        # edge-truncated-replay unreachable dead code.
-        payload = {"clean": PROVEN, "cut": dict(PROVEN, truncated=True)}
+        assert ok and why == "edge-proven-at-95", (
+            "a neighbour's truncation must not condemn a complete book")
         ok, why = eg.decide(payload, "cut", **FRESH)
         assert not ok and why == "edge-truncated-replay"
-
-    def test_a_clean_payload_still_funds(self):
-        # The tightening must not be a blanket refusal — it self-heals
-        # on the next clean publish, and this is what "clean" means.
-        payload = {"a": PROVEN, "b": dict(CROSSES), "c": dict(LOSING)}
-        ok, why = eg.decide(payload, "a", **FRESH)
-        assert ok and why == "edge-proven-at-95"
-
-    def test_a_junk_row_beside_a_good_one_is_not_read_as_truncated(self):
-        # A row that is not a dict, or carries no flag, is not evidence
-        # OF truncation either — `truncated` absent means unflagged,
-        # and a non-dict row is unreadable, not cut.
-        payload = {"a": PROVEN, "junk": "not-a-dict", "bare": {}}
-        ok, why = eg.decide(payload, "a", **FRESH)
-        assert ok and why == "edge-proven-at-95"
 
     def test_empty_state_refuses(self):
         ok, why = eg.decide({}, "rn1", **FRESH)

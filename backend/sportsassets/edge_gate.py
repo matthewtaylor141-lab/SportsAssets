@@ -23,10 +23,9 @@ funds him first. The honest reading is that his edge cannot be told
 from zero, and the gate declines him.
 
 IT FAILS CLOSED, ON EVERY PATH. Unreadable state, stale statistic,
-stale cache, missing whale, absent interval, a truncated replay, or a
-truncated replay anywhere ELSE in the same publish — each returns
-REFUSE with its own named reason. A gate that fails open is worse than
-no gate, because it reads as safety while providing none.
+stale cache, missing whale, absent interval, truncated replay — each
+returns REFUSE with its own named reason. A gate that fails open is
+worse than no gate, because it reads as safety while providing none.
 
 IT DOES NOT TOUCH EXITS, EVER. At this venue whales close by buying
 the complement, so an exit arrives labelled BUY and is classified well
@@ -111,36 +110,35 @@ def decide(per_whale: dict | None, whale: str, *,
     if not isinstance(g, dict):
         return False, "edge-missing-whale"
     # A CAPPED REPLAY IS NOT A SAMPLE. merge_pnl stops at 600,000 fills
-    # per whale, so a flagged book's statistic is an ordered prefix of
-    # one history — systematically the earliest trades, not a draw from
-    # it. Refuse rather than infer.
+    # per whale and walks ORDER BY condition_id, so a flagged book is a
+    # prefix of that whale's MARKETS in condition_id order — not, as
+    # this comment said until 2026-08-30, his earliest trades.
+    #
+    # The milder reading is that condition_id is a hash, so the markets
+    # kept are arbitrary with respect to profitability and the prefix
+    # is nearly a cluster sample. That may well be true. It is an
+    # inference about how the venue mints ids, and a gate that funds on
+    # it is betting real money on my reading of a hash function. Refuse
+    # instead, and raise the cap when a book outgrows it — `fills_total`
+    # on the payload says by how much.
     if g.get("truncated"):
         return False, "edge-truncated-replay"
-    # AND A PUBLISH THAT TRUNCATED ANYWHERE IS NOT EVIDENCE ANYWHERE.
+    # A NEIGHBOUR'S TRUNCATION IS NOT THIS WHALE'S PROBLEM. For one
+    # afternoon this refused every whale whenever any whale in the
+    # payload was flagged. The stated reason was that the unflagged
+    # rows in run 1403 were wrong too — and they were not. That
+    # comparison put the worker's WHOLE-BOOK publish beside the probe's
+    # `?since=2026-08-01` read and called the difference a fault. It is
+    # a window. merge_pnl's own window_warning says so. Every published
+    # interval was NARROWER than its windowed counterpart, which is
+    # what more data does, not what a corrupt read does.
     #
-    # Measured on run 1403 (2026-08-30T18:59Z). The published payload
-    # and the API's own live replay of the same books, read minutes
-    # apart, disagreed on every whale — and not subtly:
-    #
-    #   rn1     live +2.29% [+0.14,+4.44]   published [+4.79,+7.84]
-    #   0x076   live +6.79% [-7.51,+21.09]  published [+2.49,+19.99]
-    #   hrh     live +2.53% [-0.07,+5.12]   published [+0.63,+3.74]
-    #
-    # The publish flagged rn1, swisstony and ferrari as truncated. The
-    # numbers for the whales it did NOT flag were wrong too, which is
-    # the point: whatever cut that replay short did not politely
-    # confine itself to the books it labelled. Reading that payload
-    # row-by-row would have funded 0x076daa87 — the poll-bound whale
-    # whose filled cohort runs -28% ROI — on an unflagged row, while
-    # refusing the one book the live read calls proven.
-    #
-    # So truncation is evidence about the RUN, not only about the row
-    # that carries the flag. If any whale in the payload is truncated,
-    # no whale in it is evidence. Strictly a tightening, and it
-    # self-heals on the next clean publish an hour later.
-    if any(isinstance(v, dict) and v.get("truncated")
-           for v in per_whale.values()):
-        return False, "edge-publish-truncated"
+    # The replay budget is per whale (merge_pnl:589, inside the whale
+    # loop), so there is no mechanism by which one book being cut short
+    # touches another's numbers. A payload-wide refusal would also
+    # never lift: swisstony's book is past the cap persistently, so it
+    # would have blocked the roster forever on a reason that was not
+    # real.
     ci = g.get("edge_ci95")
     if not isinstance(ci, (list, tuple)) or len(ci) != 2:
         return False, "edge-no-interval"
@@ -216,5 +214,15 @@ def snapshot() -> dict:
             "ci95": g.get("edge_ci95"), "roi": g.get("edge_roi"),
             "clusters": g.get("edge_clusters"), "deff": g.get("edge_deff"),
             "truncated": bool(g.get("truncated")),
+            # THE WHOLE-BOOK FILL COUNTS, carried so the probe can read
+            # them WITHOUT re-running the replay. The probe's own
+            # merge-pnl call passes ?since=2026-08-01; the publish is
+            # whole-book. Reading one as the other is how a window got
+            # mistaken for a corrupt payload on 2026-08-30. These two
+            # fields make the gate's actual input legible on its own
+            # terms, and fills_total is the distance from a refused
+            # whale to a fundable one.
+            "fills_read": g.get("fills_read"),
+            "fills_total": g.get("fills_total"),
         }
     return out

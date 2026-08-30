@@ -6022,6 +6022,17 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
         """, *args)
     by_reason: dict[str, int] = {}
     by_whale: dict[str, int] = {}
+    # THE WINNABLE SPLIT, PER WHALE (owner order 2026-08-30: "we need to
+    # be mapping and trading a larger percentage of his trades").
+    #
+    # The roster-wide split says ~50/50 listed_mapper_fail vs
+    # venue_unlisted, but a roster average cannot answer the question
+    # that was asked, which is about ONE whale. A whale trading US
+    # majors and a whale trading world soccer have completely different
+    # ceilings, and only the listed half is ours to win. Same rows,
+    # same query — this was already grouped by whale and only ever
+    # summed to a flat count.
+    by_whale_win: dict[str, dict] = {}
     by_league: dict[str, dict] = {}
     by_type: dict[str, int] = {}
     winnable = {"listed_mapper_fail": 0, "venue_unlisted": 0,
@@ -6040,6 +6051,12 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
         total_7d += r["n_7d"]
         by_reason[r["reason"]] = by_reason.get(r["reason"], 0) + n
         by_whale[r["whale"]] = by_whale.get(r["whale"], 0) + n
+        wh = by_whale_win.setdefault(
+            r["whale"], {"n": 0, "n_7d": 0, "listed_mapper_fail": 0,
+                         "venue_unlisted": 0, "undiagnosed": 0,
+                         "listed_mapper_fail_7d": 0, "exact404": 0})
+        wh["n"] += n
+        wh["n_7d"] += r["n_7d"]
         slug = r["slug"] or ""
         league = league_of(slug) if slug else "(no slug)"
         mtype = market_type_of(slug) if slug else "unknown"
@@ -6064,6 +6081,15 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
             lg["listed"] += r["n_listed"]
             lg["unlisted_0ev"] += r["n_0ev"]
             lg["exact404"] += r["n_exact404"]
+            # Same buckets, same guard (`reason == "unmapped"` only —
+            # a no-stack or one-per-game refusal is a policy decision,
+            # not a mapping miss, and counting it as winnable would
+            # overstate the ceiling).
+            wh["listed_mapper_fail"] += r["n_listed"]
+            wh["venue_unlisted"] += r["n_0ev"]
+            wh["undiagnosed"] += n - r["n_listed"] - r["n_0ev"]
+            wh["listed_mapper_fail_7d"] += r["n_listed_7d"]
+            wh["exact404"] += r["n_exact404"]
     leagues = sorted(by_league.items(), key=lambda kv: -kv[1]["n"])[:30]
     return {
         "totals": {"rows": total, "recent_7d": total_7d},
@@ -6081,6 +6107,15 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
         "by_whale": [{"whale": k, "n": v}
                      for k, v in sorted(by_whale.items(),
                                         key=lambda kv: -kv[1])],
+        "by_whale_winnable": [
+            {"whale": k, "n": v["n"], "n_7d": v["n_7d"],
+             "listed_mapper_fail": v["listed_mapper_fail"],
+             "listed_mapper_fail_7d": v["listed_mapper_fail_7d"],
+             "venue_unlisted": v["venue_unlisted"],
+             "undiagnosed": v["undiagnosed"],
+             "exact404": v["exact404"]}
+            for k, v in sorted(by_whale_win.items(),
+                               key=lambda kv: -kv[1]["listed_mapper_fail"])],
         "by_league": [{"league": k, "n": v["n"], "n_7d": v["n_7d"],
                        "listed": v["listed"],
                        "unlisted_0ev": v["unlisted_0ev"],

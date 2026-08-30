@@ -430,7 +430,13 @@ jobs:
           # copied — a hard ceiling on how much of a PROVEN whale we can
           # trade. Print pages_walked/max_pages so the ceiling is
           # visible before it has to be inferred from the miss funnel.
-          jq -r '(["full", .last_sweep], ["fast", .last_sweep_fast])[]
+          # `(A, B)[]` iterates INSIDE each array, so this yielded the
+          # strings "full"/"fast" as separate outputs and destructuring
+          # them died on "Cannot index string with number" — into
+          # 2>/dev/null, so the line printed nothing at all for two
+          # days while reading as "no sweep state". Wrap once, iterate
+          # once.
+          jq -r '[["full", .last_sweep], ["fast", .last_sweep_fast]] | .[]
                  | . as [$lane, $s]
                  | if $s == null then "  PREMAPSWEEP \($lane): no state"
                    else "  PREMAPSWEEP \($lane): events=\($s.events // 0) "
@@ -1018,19 +1024,54 @@ jobs:
           # see a merge. Three instruments agreed there were no exits
           # because all three read the same trade-feed definition of a
           # sale, and three whales were cut on it.
+          #
+          # THIS READ IS WINDOWED — since=2026-08-01, one month — and
+          # the line below says so on every row. The 95% gate reads the
+          # worker's WHOLE-BOOK publish instead (EDGEGATE, further
+          # down). On 2026-08-30 I set these two side by side, took the
+          # window for the book, and called a month-vs-career
+          # difference a corrupt payload. They answer different
+          # questions and the labels now say which.
+          MERGEWINDOW=2026-08-01
           MERGECODE=$(curl -sS --max-time 120 -w '%{http_code}' \
                -H "X-Admin-Token: $ADMIN_TOKEN" -o /tmp/mergepnl.json \
-               "$BASE/api/admin/whale-merge-pnl?since=2026-08-01" \
+               "$BASE/api/admin/whale-merge-pnl?since=$MERGEWINDOW" \
                2>/dev/null || echo "000")
-          echo "  MERGEHTTP code=$MERGECODE bytes=$(wc -c < /tmp/mergepnl.json 2>/dev/null || echo 0)"
+          echo "  MERGEHTTP code=$MERGECODE since=$MERGEWINDOW (WINDOWED — not the whole book) bytes=$(wc -c < /tmp/mergepnl.json 2>/dev/null || echo 0)"
           if ! jq -e . /tmp/mergepnl.json >/dev/null 2>&1; then
             echo "  MERGEBODY $(head -c 300 /tmp/mergepnl.json 2>/dev/null | tr '\n' ' ')"
           fi
-          jq -r '.whales // {} | to_entries[]
-                 | "  MERGEPNL \(.key): merges=\(.value.n_merges) shares=\(.value.merge_shares) realised=$\(.value.realized_merge_pnl) sells=$\(.value.realized_sell_pnl) entries=$\(.value.entry_notional) roi=\(.value.roi_on_entries // "n/a") open=\(.value.open_shares)sh/$\(.value.open_cost) cashflow=$\(.value.net_cashflow) fills=\(.value.fills_read // 0)\(if .value.truncated then " TRUNCATED" else "" end)"' \
+          jq -r --arg win "$MERGEWINDOW" '.whales // {} | to_entries[]
+                 | "  MERGEPNL[since \($win)] \(.key): merges=\(.value.n_merges) shares=\(.value.merge_shares) realised=$\(.value.realized_merge_pnl) sells=$\(.value.realized_sell_pnl) entries=$\(.value.entry_notional) roi=\(.value.roi_on_entries // "n/a") open=\(.value.open_shares)sh/$\(.value.open_cost) cashflow=$\(.value.net_cashflow) fills=\(.value.fills_read // 0)\(if .value.truncated then " TRUNCATED" else "" end)"' \
             /tmp/mergepnl.json 2>/dev/null || echo "  MERGEPNL unavailable"
           jq -r '.whales // {} | to_entries[] | "  MERGEVERDICT \(.key): \(.value.verdict)"' \
             /tmp/mergepnl.json 2>/dev/null || true
+
+          # WHOLEBOOK — how big is rn1's book, really?
+          #
+          # The owner's instruction is to trade rn1 and only rn1. The
+          # 95% gate refuses him for edge-truncated-replay: the hourly
+          # publish replays the WHOLE book and stops at max_fills, so
+          # his statistic is a prefix rather than a sample and the gate
+          # will not fund a prefix. Raising the cap is the fix, and the
+          # cap has to be set from a measurement, not from a guess.
+          #
+          # `since` omitted is the whole book; `whales=rn1` keeps this
+          # to one replay instead of seven. fills_total is only counted
+          # on the truncated path, so a complete book costs nothing
+          # extra and answers the question by saying truncated=false.
+          WBCODE=$(curl -sS --max-time 540 -w '%{http_code}' \
+               -H "X-Admin-Token: $ADMIN_TOKEN" -o /tmp/wholebook.json \
+               "$BASE/api/admin/whale-merge-pnl?whales=rn1" \
+               2>/dev/null || echo "000")
+          echo "  WHOLEBOOKHTTP code=$WBCODE bytes=$(wc -c < /tmp/wholebook.json 2>/dev/null || echo 0)"
+          jq -r '.whales // {} | to_entries[]
+                 | "  WHOLEBOOK \(.key): fills=\(.value.fills_read // 0)"
+                 + "/\(.value.fills_total // "complete") "
+                 + "lots=\(.value.edge_lots // 0) games=\(.value.edge_clusters // 0) "
+                 + "roi=\(.value.edge_roi // "n/a") ci95=\(.value.edge_ci95 | tostring) "
+                 + (if .value.truncated then "*** TRUNCATED ***" else "complete" end)' \
+            /tmp/wholebook.json 2>/dev/null || echo "  WHOLEBOOK unavailable"
           # WHALEEDGE — is this whale PROVABLY profitable, per dollar?
           #
           # The absolute totals flatter enormous turnover. rn1 makes
@@ -1065,7 +1106,9 @@ jobs:
                  (($g.whales // {}) | to_entries[]
                   | "  EDGEGATE \(if .value.funded then "FUND  " else "REFUSE" end)"
                   + " \(.key): \(.value.reason) ci95=\(.value.ci95 | tostring)"
-                  + " games=\(.value.clusters // "n/a")")' \
+                  + " games=\(.value.clusters // "n/a")"
+                  + " fills=\(.value.fills_read // "n/a")"
+                  + "/\(.value.fills_total // "?")")' \
             /tmp/gates.json 2>/dev/null || echo "  EDGEGATE unavailable"
           jq -r '(.per_whale // {}) | to_entries[]?
                  | "  WHALECLUS \(.key): lots=\(.value.edge_lots // 0) "
@@ -1320,6 +1363,18 @@ jobs:
           # masquerading as venue gaps. Beside, never replacing.
           jq -r '.winnable // {} | "  WINNABLE-X404 exact404=\(.exact404 // "?") (7d \(.exact404_7d // "?"))  of_unlisted=\(.exact404_unlisted // "?") (7d \(.exact404_unlisted_7d // "?"))"' \
              /tmp/unm.json 2>/dev/null || true
+          # PER-WHALE WINNABLE SPLIT (owner order 2026-08-30: "we need
+          # to be mapping and trading a larger percentage of his
+          # trades"). The roster-wide 50/50 cannot answer a question
+          # about ONE whale — only the listed_mapper_fail half is ours
+          # to win, and its size differs completely between a whale on
+          # US majors and one on world soccer.
+          jq -r '.by_whale_winnable // [] | .[]
+                 | "  WINWHALE \(.whale): missed=\(.n) (7d \(.n_7d)) "
+                 + "OURS=\(.listed_mapper_fail) (7d \(.listed_mapper_fail_7d)) "
+                 + "venue_gap=\(.venue_unlisted) undiag=\(.undiagnosed) "
+                 + "x404=\(.exact404)"' \
+             /tmp/unm.json 2>/dev/null | head -12 || true
           jq -r '.no_slug // {} | "  NOSLUG rows=\(.rows // "?")  catalog_has_token=\(.catalog_has_token // "?")  token_unknown=\(.token_unknown // "?")"' \
              /tmp/unm.json 2>/dev/null || echo "  (endpoint not deployed yet)"
           jq -r '.by_reason // [] | .[] | "  RSN \(.reason): \(.n)"' \

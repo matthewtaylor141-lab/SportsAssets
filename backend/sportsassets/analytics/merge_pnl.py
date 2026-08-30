@@ -475,6 +475,23 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
 
     The cap is REPORTED, never silent — a truncated replay that reads
     as a complete one is a wrong P&L presented as a right one.
+
+    WHAT A CAPPED READ ACTUALLY KEEPS. The walk is
+    `ORDER BY condition_id, ts, id`, because the stepper needs every
+    fill of a market together and in time order. So a capped read does
+    NOT keep the earliest trades, which is what three comments and a
+    test in this repo used to say. It keeps a PREFIX OF MARKETS in
+    condition_id order — complete histories for each, except the one
+    market straddling the cut.
+
+    That is a milder distortion than a time prefix (condition_id is a
+    hash, so market order is arbitrary with respect to profitability),
+    and it is still not a sample anyone should bet on: the ordering's
+    independence from outcome is an inference about how the venue
+    mints ids, not a measurement. The 95% gate refuses a truncated
+    book outright rather than rest on that inference, so the way to
+    fund a whale whose book outgrows the cap is to raise the cap, and
+    `fills_total` below is the number that says by how much.
     """
     # asyncpg infers the parameter type from the CAST, so `$2::date`
     # expects a datetime.date and rejects a str with an opaque 500 —
@@ -651,8 +668,43 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
                 "whole book.")
         out["truncated"] = n_read >= max_fills
         if out["truncated"]:
+            # SAY WHAT WE STOPPED SHORT OF. A bare `truncated: true`
+            # reports that the cap bound without reporting by how much,
+            # so there is no number to size the cap from and no way to
+            # tell "two fills over" from "half the book missing". The
+            # 95% gate refuses a truncated book outright, which makes
+            # this the number that says how far we are from being able
+            # to fund that whale at all.
+            #
+            # Counted only on the truncated path. The count is a second
+            # pass over the same rows and the whole-book variant of
+            # this query has 502'd an endpoint before (d9e4bd0), so
+            # healthy books never pay for it.
+            try:
+                if since_d is None:
+                    total = await pool.fetchval(
+                        "SELECT count(*) FROM trades t JOIN whales wh "
+                        "    ON wh.id = t.whale_id "
+                        " WHERE lower(wh.username) = $1 "
+                        "   AND t.condition_id IS NOT NULL "
+                        "   AND t.outcome_index IS NOT NULL", w.lower())
+                else:
+                    total = await pool.fetchval(
+                        "SELECT count(*) FROM trades t JOIN whales wh "
+                        "    ON wh.id = t.whale_id "
+                        " WHERE lower(wh.username) = $1 "
+                        "   AND t.ts >= $2 "
+                        "   AND t.condition_id IS NOT NULL "
+                        "   AND t.outcome_index IS NOT NULL",
+                        w.lower(), since_d)
+                out["fills_total"] = int(total) if total is not None else None
+            except Exception:  # noqa: BLE001 — the grade still stands
+                out["fills_total"] = None
+            _tot = out.get("fills_total")
+            _short = (f" of {_tot} — {_tot - n_read} fills unread"
+                      if isinstance(_tot, int) else "")
             out["verdict_note"] = (
-                f"TRUNCATED at {max_fills} fills — this is a partial "
-                f"replay and the totals are floors, not totals")
+                f"TRUNCATED at {max_fills} fills{_short} — this is a "
+                f"partial replay and the totals are floors, not totals")
         res[w] = out
     return res

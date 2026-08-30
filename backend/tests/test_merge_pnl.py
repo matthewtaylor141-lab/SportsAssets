@@ -32,11 +32,15 @@ class _FakePool:
     shape of test that keeps passing while production breaks.
     """
 
-    def __init__(self, rows, payouts=None):
+    def __init__(self, rows, payouts=None, total=None):
         self._rows = list(rows)
         self._payouts = list(payouts or [])
         self.bound = None
         self.batches = 0
+        # What `SELECT count(*)` answers on the truncated path. None
+        # means "no count was asked for" once a test has run.
+        self._total = total
+        self.counted = 0
 
     # --- cursor protocol -------------------------------------------
     class _Cursor:
@@ -84,6 +88,11 @@ class _FakePool:
     # --- the payout lookup -----------------------------------------
     async def fetch(self, _sql, *_a):
         return self._payouts
+
+    # --- the how-much-did-we-miss count ----------------------------
+    async def fetchval(self, _sql, *_a):
+        self.counted += 1
+        return self._total
 
 
 
@@ -330,6 +339,61 @@ class TestTruncationIsReportedNotSilent:
                                           max_fills=100))
         assert out["w"]["truncated"] is False
         assert "verdict_note" not in out["w"]
+
+    def test_it_says_how_much_book_it_stopped_short_of(self):
+        # `truncated: true` alone cannot tell "two fills over the cap"
+        # from "half the book missing", so there is no number to size
+        # the cap from — and the 95% gate refuses a truncated book
+        # outright, which makes this the distance to funding that
+        # whale at all.
+        import asyncio
+
+        from sportsassets.analytics.merge_pnl import whale_merge_pnl
+
+        pool = _FakePool([{"condition_id": "c", "outcome_index": 0,
+                           "side": "BUY", "size": 1, "price": 0.5}] * 3,
+                         total=911)
+        out = asyncio.run(whale_merge_pnl(pool, ["w"], "2026-08-01",
+                                          max_fills=3))
+        assert out["w"]["fills_total"] == 911
+        assert "of 911" in out["w"]["verdict_note"]
+        assert "908 fills unread" in out["w"]["verdict_note"]
+
+    def test_a_healthy_book_never_pays_for_the_count(self):
+        # The whole-book variant of this query 502'd an endpoint once
+        # (d9e4bd0). It runs on the truncated path only.
+        import asyncio
+
+        from sportsassets.analytics.merge_pnl import whale_merge_pnl
+
+        pool = _FakePool([{"condition_id": "c", "outcome_index": 0,
+                           "side": "BUY", "size": 1, "price": 0.5}],
+                         total=911)
+        out = asyncio.run(whale_merge_pnl(pool, ["w"], "2026-08-01",
+                                          max_fills=100))
+        assert pool.counted == 0
+        assert "fills_total" not in out["w"]
+
+    def test_a_failed_count_still_grades_the_whale(self):
+        # The count is instrumentation. It must never be able to take
+        # down the number it annotates.
+        import asyncio
+
+        from sportsassets.analytics.merge_pnl import whale_merge_pnl
+
+        pool = _FakePool([{"condition_id": "c", "outcome_index": 0,
+                           "side": "BUY", "size": 1, "price": 0.5}] * 3)
+
+        async def _boom(_sql, *_a):
+            raise RuntimeError("count failed")
+
+        pool.fetchval = _boom
+        out = asyncio.run(whale_merge_pnl(pool, ["w"], "2026-08-01",
+                                          max_fills=3))
+        assert out["w"]["truncated"] is True
+        assert out["w"]["fills_total"] is None
+        assert "floors, not totals" in out["w"]["verdict_note"]
+        assert out["w"]["fills_read"] == 3
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -770,6 +834,43 @@ class TestThePreWindowPositionWasBookedAsAnEntry:
         src = inspect.getsource(an.publish_whale_benchmark)
         assert "whale_merge_pnl(pool, list(COPY_WHALES), None)" in src
         assert "2026-08-01" not in src
+
+    def test_the_publish_carries_the_fields_the_gate_and_probe_read(self):
+        # A field computed and then dropped at the publish is invisible
+        # downstream — that is how 124,952 "lots" reached the roster
+        # instrument with no clue that far fewer independent games sat
+        # behind them. fills_total is the newest one and the reason the
+        # cap can be sized from measurement instead of guessed at.
+        import inspect
+
+        from sportsassets.workers import analytics as an
+
+        src = inspect.getsource(an.publish_whale_benchmark)
+        for field in ("edge_roi", "edge_ci95", "edge_clusters", "edge_deff",
+                      "edge_se", "truncated", "fills_read", "fills_total"):
+            assert f'"{field}": g.get("{field}")' in src, field
+
+    def test_the_gate_snapshot_reports_the_fill_counts(self):
+        # The probe reads the WHOLE-BOOK counts off this snapshot rather
+        # than re-running the replay. Its own merge-pnl call is
+        # ?since=2026-08-01, and on 2026-08-30 I read that window as the
+        # book and called a month-vs-career gap a corrupt payload.
+        from sportsassets import edge_gate as eg
+
+        eg._cache["per_whale"] = {
+            "w": {"edge_ci95": [0.01, 0.02], "edge_roi": 0.015,
+                  "truncated": True, "fills_read": 600000,
+                  "fills_total": 911111}}
+        eg._cache["measured_at"] = None
+        eg._cache["read_at"] = 0.0
+        eg._cache["err"] = None
+        try:
+            snap = eg.snapshot()["whales"]["w"]
+        finally:
+            eg._cache["per_whale"] = None
+        assert snap["fills_read"] == 600000
+        assert snap["fills_total"] == 911111
+        assert snap["truncated"] is True
 
 
 class TestItActuallyStreamsThisTime:

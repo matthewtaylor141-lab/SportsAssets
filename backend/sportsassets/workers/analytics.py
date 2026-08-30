@@ -146,12 +146,21 @@ async def publish_whale_benchmark() -> None:
                     "edge_deff": g.get("edge_deff"),
                     "edge_se": g.get("edge_se"),
                     # A CAPPED REPLAY MUST NOT READ AS A COMPLETE ONE.
-                    # max_fills is 600,000 and swisstony's book is past
-                    # it TODAY, so his statistic is an ordered prefix,
-                    # not a sample. Any gate reading this must be able
-                    # to refuse on it rather than trust a partial book.
+                    # max_fills is 600,000 and this replay is WHOLE-BOOK
+                    # (since=None), so a whale whose career is past the
+                    # cap publishes a prefix of his MARKETS — the walk
+                    # is ORDER BY condition_id — rather than a sample.
+                    # Any gate reading this must be able to refuse on it
+                    # rather than trust a partial book.
                     "truncated": g.get("truncated"),
                     "fills_read": g.get("fills_read"),
+                    # AND HOW MUCH BOOK WAS LEFT. fills_read on a capped
+                    # replay is just max_fills again; it cannot say
+                    # whether we missed two fills or half a career. This
+                    # is the distance between a whale the gate refuses
+                    # and one it could fund, so it is the number that
+                    # sets the cap.
+                    "fills_total": g.get("fills_total"),
                     "exit_value": g.get("exit_value")}
                 for w, g in graded.items()},
             "measured_at": _dt.datetime.now(
