@@ -137,6 +137,21 @@ async def publish_whale_benchmark() -> None:
                 w: {"edge_roi": g.get("edge_roi"),
                     "edge_ci95": g.get("edge_ci95"),
                     "edge_lots": g.get("edge_lots"),
+                    # HOW MANY INDEPENDENT GAMES ARE REALLY BEHIND THE
+                    # LOT COUNT, and how much wider the honest interval
+                    # is for it (2026-08-30). Computed by merge_pnl and
+                    # dropped here, so nothing downstream could see that
+                    # 124,952 "lots" is a far smaller number of results.
+                    "edge_clusters": g.get("edge_clusters"),
+                    "edge_deff": g.get("edge_deff"),
+                    "edge_se": g.get("edge_se"),
+                    # A CAPPED REPLAY MUST NOT READ AS A COMPLETE ONE.
+                    # max_fills is 600,000 and swisstony's book is past
+                    # it TODAY, so his statistic is an ordered prefix,
+                    # not a sample. Any gate reading this must be able
+                    # to refuse on it rather than trust a partial book.
+                    "truncated": g.get("truncated"),
+                    "fills_read": g.get("fills_read"),
                     "exit_value": g.get("exit_value")}
                 for w, g in graded.items()},
             "measured_at": _dt.datetime.now(
