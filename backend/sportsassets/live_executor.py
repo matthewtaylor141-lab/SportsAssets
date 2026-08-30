@@ -1640,6 +1640,10 @@ QUARANTINE_RESUME_SRC = frozenset({"premap", "exact"})
 # Where the fuzzy class's certification streak accumulates. Its own key
 # on purpose: see the state_key note in _side_echo_verify.
 FUZZY_CERT_KEY = "side_echo_fuzzy"
+# The per-team Yes/No lane certifies under ITS OWN counter, for the
+# same reason fuzzy does: a new class must never dilute the streak
+# that justified an old resume (2026-08-26 rule).
+YESNO_CERT_KEY = "side_echo_yesno"
 # TWO DETECTORS, ONE ECONOMIC EXIT (2026-08-26, adversarial round 4).
 #
 # classify_exit sees the whale's exit as a complement BUY in the trade
@@ -3880,8 +3884,21 @@ async def _independent_check(us_slug: str, outcome: str | None,
     # replay — it agrees with itself by construction and certifies
     # nothing. Only a mapping from a DIFFERENT resolver can be checked
     # this way; anything else is honestly unverified.
+    # "yesno_exact" (2026-08-30): the independent matcher maps picks
+    # onto NAMED-side instruments and, by the pinned 2026-08-24
+    # literal rule, structurally refuses team->Yes; on a league that
+    # ALSO lists an aec- sibling it would return a different-FAMILY
+    # identifier for the SAME proposition, and the identifier-equality
+    # compare would report a false mismatch — which, live, re-arms the
+    # total quarantine off a correct order. The class keeps three real
+    # verifiers: the position-sign check on every real fill, the
+    # premap-refetch echo (yes/no markets yield 2 rows, so
+    # _side_echo_verify's len==1 subject branch cannot false-trip;
+    # match_side abstains as 'no unique live match', never mismatch),
+    # and its own shadow counter.
     if mapping_src in ("exact", "desk_exact", "desk_exact_side",
-                       "derivative_exact", "spread_exact"):
+                       "derivative_exact", "spread_exact",
+                       "yesno_exact"):
         return ("unverified",
                 "cross-check would replay the resolver that produced "
                 f"this mapping (src={mapping_src})")
@@ -4329,6 +4346,37 @@ async def _dh_sibling_guard(pool, src_slug: str) -> bool:
                         pats.append(f"{fam}-{bt[0]}-{x}-{y}-{dt}-dh%")
         if not pats:
             return False
+        return bool(await pool.fetchval(
+            "SELECT 1 FROM us_premap WHERE "
+            "identifier LIKE ANY($1::text[]) OR "
+            "market_slug LIKE ANY($1::text[]) LIMIT 1", pats))
+    except Exception:  # noqa: BLE001 — unverifiable: fail closed
+        return True
+
+
+async def _dh_sibling_guard_ml(pool, src_slug: str) -> bool:
+    """Doubleheader guard for MONEYLINE-typed slugs (the yes/no
+    lane): _feed_derivative returns None for them (suffixless and
+    team-code suffixes both), so _dh_sibling_guard is structurally
+    inert here. Parses date + 3-token head DIRECTLY from the slug.
+    True = discard the mapping; an unparseable slug or unreadable
+    table is also True — this guard only ever REMOVES a mapping, so
+    failing closed costs a copy, never buys a wrong one."""
+    import re as _re
+
+    try:
+        s = (src_slug or "").lower()
+        m = _re.search(r"\d{4}-\d{2}-\d{2}", s)
+        if not m:
+            return True
+        head = [t for t in s[:m.start()].strip("-").split("-") if t]
+        if len(head) != 3:
+            return True
+        lg, x1, x2 = head
+        dt = m.group(0)
+        pats = [f"{fam}-{lg}-{x}-{y}-{dt}-dh%"
+                for fam in ("atc", "aec", "asc", "tsc")
+                for x, y in ((x1, x2), (x2, x1))]
         return bool(await pool.fetchval(
             "SELECT 1 FROM us_premap WHERE "
             "identifier LIKE ANY($1::text[]) OR "
@@ -4936,6 +4984,28 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 except asyncio.TimeoutError:
                     _ex_diag.append("timeout")
                     mapping = None
+            # PER-TEAM YES/NO EXACT LANE (round-4 final, 2026-08-30):
+            # runs only when every prior exact attempt refused;
+            # moneyline-typed slugs only; wholly corroborated or
+            # nothing. A timeout falls through to fuzzy, never rejects.
+            if mapping is None and mtype == "moneyline":
+                try:
+                    mapping = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            pmus.resolve_team_yesno_exact, src_slug,
+                            ctx.get("outcome"),
+                            ctx.get("market_title"),
+                            ctx.get("event_title"), _ex_diag),
+                        timeout=_EXACT_BOX_S)
+                except asyncio.TimeoutError:
+                    _ex_diag.append("yn:timeout")
+                    mapping = None
+                if mapping is not None and await _dh_sibling_guard_ml(
+                        pool, src_slug):
+                    _ex_diag.append("yn:dh-siblings")
+                    mapping = None
+                if mapping is not None:
+                    mapping_src = "yesno_exact"
             if mapping_src is None:
                 mapping_src = "exact" if mapping is not None else None
             if mapping is None:
@@ -5164,6 +5234,20 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                                 his_slug=src_slug,
                                 intent=mapping.get("intent"),
                                 mapping_src=mapping_src)
+                elif mapping_src == "yesno_exact":
+                    # Refused-but-recorded and shadow-certified under
+                    # its OWN counter — never the streak that
+                    # justified the premap/exact resume. Going live is
+                    # a later one-token reviewed change (adding
+                    # "yesno_exact" to QUARANTINE_RESUME_SRC) made on
+                    # that counter plus the audit rows.
+                    _spawn_echo(pool, row_id, mapping["market_slug"],
+                                ctx.get("outcome"),
+                                ctx.get("market_title"), shadow=True,
+                                his_slug=src_slug,
+                                intent=mapping.get("intent"),
+                                mapping_src=mapping_src,
+                                state_key=YESNO_CERT_KEY)
                 elif mapping_src == "fuzzy":
                     # CERTIFY THE CLASS THE OWNER ACTUALLY WANTS BACK
                     # (2026-08-26).

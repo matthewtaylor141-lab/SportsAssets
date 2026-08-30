@@ -81,11 +81,22 @@ class TestTheStreaksDoNotContaminateEachOther:
     def test_the_admitted_classes_still_use_the_ORIGINAL_key(self):
         """691/0 justified a decision. Diluting that counter with a
         different question makes the number that was relied on
-        unreadable afterwards."""
+        unreadable afterwards. (The slice ends at the FIRST elif —
+        the yes/no lane's arm sits between this one and fuzzy since
+        2026-08-30 and rightly carries its OWN key, which is this
+        pin's spirit, not a violation of it.)"""
         src = inspect.getsource(le.maybe_execute)
         block = src[src.index("if mapping_src in QUARANTINE_RESUME_SRC:"):]
-        block = block[:block.index('elif mapping_src == "fuzzy":')]
+        block = block[:block.index("elif mapping_src ==")]
         assert "state_key" not in block
+
+    def test_the_yesno_lane_has_its_own_key_too(self):
+        assert le.YESNO_CERT_KEY == "side_echo_yesno"
+        assert le.YESNO_CERT_KEY != le.FUZZY_CERT_KEY
+        src = inspect.getsource(le.maybe_execute)
+        block = src[src.index('elif mapping_src == "yesno_exact":'):]
+        block = block[:block.index('elif mapping_src == "fuzzy":')]
+        assert "state_key=YESNO_CERT_KEY" in block
 
     def test_the_default_key_is_unchanged_for_every_old_caller(self):
         src = inspect.getsource(le._side_echo_verify)

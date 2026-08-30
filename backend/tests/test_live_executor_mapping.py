@@ -121,17 +121,29 @@ def test_exact_grammar_maps_first_and_fuzzy_never_runs(monkeypatch):
 def test_exact_miss_still_falls_through_to_fuzzy(monkeypatch):
     pool = _MapPool()
     _wire(monkeypatch, pool)
-    calls = {"exact": 0, "fuzzy": 0}
+    calls = {"exact": 0, "yesno": 0, "fuzzy": 0}
+    order = []
 
     def fake_exact(slugs, outcome, diag_out=None):
         calls["exact"] += 1
+        order.append("exact")
+        return None
+
+    def fake_yesno(*a, **k):
+        # the unstubbed lane would refuse this fixture PRE-NETWORK at
+        # yn:anchor-thin (1-raw-token anchor); the stub pins call
+        # ORDER and stays immune to fixture drift
+        calls["yesno"] += 1
+        order.append("yesno")
         return None
 
     def fake_fuzzy(*a, **k):
         calls["fuzzy"] += 1
+        order.append("fuzzy")
         return None
 
     monkeypatch.setattr(pmus, "resolve_market_exact", fake_exact)
+    monkeypatch.setattr(pmus, "resolve_team_yesno_exact", fake_yesno)
     monkeypatch.setattr(pmus, "resolve_market", fake_fuzzy)
 
     asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
@@ -139,8 +151,10 @@ def test_exact_miss_still_falls_through_to_fuzzy(monkeypatch):
     # candidate grammar first, then his own slug verbatim. The second
     # exists because a direct identity match was previously reachable
     # only through resolve_market, which labels everything `fuzzy` and
-    # therefore had it refused by the quarantine.
-    assert calls == {"exact": 2, "fuzzy": 1}
+    # therefore had it refused by the quarantine. The yes/no lane
+    # (2026-08-30) runs after BOTH exact attempts and before fuzzy.
+    assert calls == {"exact": 2, "yesno": 1, "fuzzy": 1}
+    assert order == ["exact", "exact", "yesno", "fuzzy"]
     assert any("status='rejected'" in sql for sql, _ in pool.updates), \
         "a double miss must still record the unmapped rejection"
 

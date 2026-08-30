@@ -94,3 +94,9 @@ class TestTheQuarantineNowAdmitsIt:
 
     def test_fuzzy_still_is_not(self):
         assert "fuzzy" not in le.QUARANTINE_RESUME_SRC
+
+    def test_yesno_lane_is_not_either(self):
+        """The per-team Yes/No lane (2026-08-30) certifies under its
+        own shadow counter; going live is a later one-token reviewed
+        change made on that counter plus the audit rows."""
+        assert "yesno_exact" not in le.QUARANTINE_RESUME_SRC

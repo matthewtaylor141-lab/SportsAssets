@@ -938,6 +938,578 @@ def resolve_derivative_exact(global_slug: str,
             "matched_by": "derivative_exact", "score": best_score}
 
 
+# ── Per-team Yes/No exact lane (LANE B, round-4 final 2026-08-30) ──
+# Soccer "More Markets" per-team contracts (atc-…-<code>, Yes/No
+# sides) and literal Yes/No picks on the whale's own dated win-titles.
+# EXACT path only. Every whale-side check runs BEFORE _get_client() —
+# text-only refusals are network-free, exactly like _spread_exact's
+# his_lines guard. Round-2 amendments, each a round-1 attack-fleet
+# kill closed BY CONSTRUCTION:
+#   * his slug's post-date side token is CARRIED and must EQUAL the
+#     derived team code (yn:suffix-side) — validated-then-discarded
+#     is how round 1 died;
+#   * a literal Yes/No pick with NO side token refuses outright
+#     (yn:suffix-missing), and its validated title subject passes the
+#     bridge's symmetric mine/theirs code veto against that token
+#     (premap gate 10) plus its code_too_short rule;
+#   * a venue question naming an opponent must be WITNESSED by a
+#     whale-side name (yn:opp-unwitnessed / yn:opp); the code-prefix
+#     hit is an ADDITIONAL conjunct, never the sole check — a prefix
+#     hit leaves the slot's tail uninterpreted, which the doctrine
+#     forbids;
+#   * dateless question shapes are GONE (round-1 P0/P2 deleted):
+#     every accepted question carries a date clause equal to his
+#     slug's own date;
+#   * a plain (non-matchup) whale title that does not name his pick
+#     is contradictory metadata and refuses (yn:title-shear) —
+#     outcome never silently outvotes his own title.
+# ROUND-3 amendments (converged attack-panel mandate, 2026-08-30,
+# all refusal-adding, all pre-network where placed):
+#   * outcome is fold-checked BEFORE the pick is derived
+#     (yn:outcome-folds) — it was the only text channel this lane
+#     never fold-checked; the named lane already treats the same
+#     gate as mandatory;
+#   * the literal branch fold-checks his_title BEFORE
+#     _bridge_title_subject consumes it (yn:title-folds) — W4 never
+#     re-screens it there (raw_titles is [event_title]);
+#   * EVIDENCE FLOOR: every name slot that carries corroboration
+#     weight — the team-pick anchor, the validated literal title
+#     subject, the question subject, the opponent slot, and both
+#     sides consumed from a vs-shaped whale title — must have >= 2
+#     raw tokens (yn:anchor-thin / yn:subj-thin / yn:opp-thin /
+#     yn:witness-thin), mirroring premap's his_event_side_thin (the
+#     executed 'Rapid vs Union' wrong-game kill) and
+#     _NAMED_NAME_FLOOR. Single-token identity is insufficient
+#     identity; single-name clubs become honest refusals the funnel
+#     counts.
+#   * ROUND-4 (dissent, terminal): the twin-fixture floor (yn:twin)
+#     — premap's executed round-2.4 sides_single_distinctive kill.
+#     With A1 collapsing the grammar to the one measured P4
+#     template, a same-league same-day twin pair whose BOTH clubs
+#     render furniture+one-surname (identically keyed across
+#     DIFFERENT real fixtures) was the last wrong-game vector; the
+#     raw-token floor cleared it, the distinctive floor closes it.
+
+_YN_SCOPE_EXTRA = frozenset({
+    "halftime", "corners", "corner", "cards", "card", "booking",
+    "bookings", "lead", "leading", "leads", "race", "handicap",
+    "spread", "goal", "goals", "score", "scores", "scorer", "points",
+    "margin", "shots", "fouls", "offside", "offsides", "regulation",
+    "stoppage", "trophy", "promotion", "relegation", "group", "final",
+    "semifinal", "quarterfinal", "round", "stage", "cup", "title",
+    "outright"})
+# Checked ALONGSIDE the bridge scope list, never instead of it: the
+# bridge's strict template never needed "halftime"/"corners"/
+# "leading"; this lane's open league slot does. Additions are
+# refusal-widening only and carry GENERIC_CLUB_TOKENS-grade review.
+
+_YN_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+# ROUND-4 AMENDMENT A1 (dissent, verbatim): _YN_Q_PATTERNS := (P4,)
+# — P1 and P3 DELETED. P4 is THE ONE MEASURED TEMPLATE (the
+# 2026-08-26 production census wording, mirroring premap's own
+# strict bridge template: 'against' only, a league slot present,
+# year MANDATORY, fully anchored). Consequence, and the reason the
+# dissent required it: every accepted question now carries an
+# opponent slot AND a league slot — nothing un-witnessable (a
+# dateless or opponentless shape) can be accepted, so the only
+# residual wrong-game vector left is the twin fixture, closed by
+# the yn:twin floor below. A title-less row (whose ONLY prior shape
+# was the now-deleted P1) refuses at yn:shape.
+_YN_Q_PATTERNS = (
+    re.compile(r"^will (?:the )?(?P<subj>[a-z ]+?) win"
+               r" against (?P<opp>[a-z ]+?)"
+               r" in the (?P<lg>[a-z ]+?) match"
+               r" scheduled for (?P<mon>[a-z]+) (?P<day>\d{1,2})"
+               r" (?P<yr>\d{4})$"),
+)
+
+
+def _yn_slot_bad(norm_text: str) -> bool:
+    """Scope screen for ANY free name slot: the bridge's reviewed
+    tokens + stems + single-letter rule + adjacent-run joins
+    (premap._has_scope_token), PLUS this lane's extra list with its
+    own 2-4-token adjacent joins, PLUS the bridge's 5-token name cap.
+    True = refuse. Empty is bad: a slot with no content corroborates
+    nothing."""
+    from .workers import premap as _pm
+
+    if not norm_text or _pm._has_scope_token(norm_text):
+        return True
+    toks = norm_text.split()
+    if len(toks) > _pm._BRIDGE_NAME_TOKEN_CAP:
+        return True
+    if any(t in _YN_SCOPE_EXTRA for t in toks):
+        return True
+    for n in (2, 3, 4):
+        for i in range(len(toks) - n + 1):
+            if "".join(toks[i:i + n]) in _YN_SCOPE_EXTRA:
+                return True
+    return False
+
+
+def _yn_name_match(a: str, b: str) -> bool:
+    """Do two NORMALIZED names name the same team? Token-SET equality
+    (raw sets, or distinctive sets after removing only the pinned ten
+    GENERIC_CLUB_TOKENS) AND a SequenceMatcher ratio >= MATCH_FLOOR on
+    the corresponding joined forms — CONJUNCTIVE. No containment, no
+    shared-token boost (the two _outcome_score leniencies this file
+    already documents as leaks). 'will X NOT win' leaves 'not' in the
+    subject set and refuses at ratio 0.875 — the reason ratio alone is
+    insufficient; near-twins ('al nasr'/'al nassr') break set equality
+    — the reason a floor alone is insufficient."""
+    from .workers import premap as _pm
+
+    ta, tb = a.split(), b.split()
+    if not ta or not tb:
+        return False
+    if frozenset(ta) == frozenset(tb):
+        return SequenceMatcher(None, a, b).ratio() >= MATCH_FLOOR
+    da = [t for t in ta if t not in _pm.GENERIC_CLUB_TOKENS]
+    db = [t for t in tb if t not in _pm.GENERIC_CLUB_TOKENS]
+    if da and db and frozenset(da) == frozenset(db):
+        return SequenceMatcher(None, " ".join(da),
+                               " ".join(db)).ratio() >= MATCH_FLOOR
+    return False
+
+
+def _yn_thin(norm_name: str) -> bool:
+    """ROUND-3 EVIDENCE FLOOR. A name slot that carries corroboration
+    weight must have >= 2 RAW tokens (before generic-token removal) —
+    the mirror of premap's his_event_side_thin, whose executed
+    round-2.3 kill was both feeds rendering 'Rapid vs Union': string
+    identity is not game identity when a side carries one bare token,
+    and terse prefixes corroborate the wrong fixture's codes by
+    construction. Distinctive-set matching makes a 1-raw-token slot
+    ('america') able to match a 2-token anchor ('cf america'), so the
+    floor is on RAW tokens and is checked per slot, not inherited
+    from the anchor. True = refuse."""
+    return len(norm_name.split()) < 2
+
+
+def _yn_date_ok(gd: dict, slug_date: str) -> bool:
+    """The question's date clause must equal HIS slug's date exactly.
+    ISO form: string equality. Month form: _BRIDGE_MONTHS lookup; the
+    year defaults to the slug's own year only where the grammar
+    allows omission (P4's grammar makes it mandatory)."""
+    from .workers import premap as _pm
+
+    iso = gd.get("iso")
+    if iso:
+        return iso.replace(" ", "-") == slug_date
+    mo = _pm._BRIDGE_MONTHS.get(gd.get("mon") or "")
+    day = gd.get("day")
+    if mo is None or not day:
+        return False
+    want = (int(slug_date[0:4]), int(slug_date[5:7]),
+            int(slug_date[8:10]))
+    yr = gd.get("yr")
+    return (int(yr) if yr else want[0], mo, int(day)) == want
+
+
+def resolve_team_yesno_exact(global_slug: str, outcome: str | None,
+                             his_title: str | None = None,
+                             event_title: str | None = None,
+                             diag_out: list | None = None) -> dict | None:
+    """Per-team Yes/No mapping, wholly corroborated or nothing.
+
+    Two sub-cases, split on his pick: a TEAM-NAME pick maps to the
+    Yes side of his own team's dated contract; a LITERAL Yes/No pick
+    maps to that literal side of the contract his slug's own side
+    token names, and carries meaning only after _bridge_title_subject
+    validates his own dated win-title (the 2026-08-24 rule: a bare
+    Yes/No is a POSITION on a statement, never a name). Wrong-market /
+    wrong-line / wrong-side are impossible by construction: the
+    candidate key is built from HIS OWN slug (league, both team codes,
+    date, his pick's code — the opponent's contract is never
+    enumerated), the venue's question must fullmatch a closed dated
+    template whose every free slot is scope-screened, floored, and
+    witnessed, and the side is chosen by literal Yes/No equality with
+    intent from the venue's own side markers or refusal. diag_out
+    collects yn:* codes (same <24 cap as resolve_market_exact — a
+    list parameter, never a function attribute)."""
+    def _note(code: str) -> None:
+        if diag_out is not None and len(diag_out) < 24:
+            diag_out.append(code)
+
+    from .workers import premap as _pm
+
+    # W1 — his slug: <lg>-<a>-<b>-<date>[-<t>], t in {a, b} or absent.
+    # ANY other post-date token ('-fh', '-agg', '-dh2', two tokens)
+    # refuses: an unverified token is never dropped (the base_teams
+    # doctrine). t is CARRIED, never discarded.
+    s = (global_slug or "").lower()
+    m = _YN_ISO_DATE.search(s)
+    if not m:
+        _note("yn:slug")
+        return None
+    date = m.group(0)
+    head = [t for t in s[:m.start()].strip("-").split("-") if t]
+    tail = [t for t in s[m.end():].strip("-").split("-") if t]
+    if len(head) != 3:
+        _note("yn:slug-shape")
+        return None
+    lg, a, b = head
+    if a == b:
+        _note("yn:slug-degenerate")
+        return None
+    if len(tail) > 1 or (tail and tail[0] not in (a, b)):
+        _note("yn:suffix")
+        return None
+    t_side = tail[0] if tail else None
+
+    # W2 — his pick. ROUND-3 AMENDMENT (yn:outcome-folds): outcome is
+    # a free whale-side name slot and was the only text channel this
+    # lane never fold-checked. Pre-network by position.
+    if _pm._folds_away(outcome):
+        _note("yn:outcome-folds")
+        return None
+    pick = _norm(outcome)
+    if not pick:
+        _note("yn:outcome")
+        return None
+    literal = pick in ("yes", "no")
+
+    # W3 — anchor. Literal: the bridge's own whale-side gates,
+    # wholesale. Team-pick: the pick itself, screened.
+    code = other_code = None
+    if literal:
+        # ROUND-2 AMENDMENT (explicit decision): a literal pick on a
+        # SUFFIXLESS slug is incoherent — nothing whale-side names the
+        # contract's team. Refuse.
+        if t_side is None:
+            _note("yn:suffix-missing")
+            return None
+        # ROUND-3 AMENDMENT (yn:title-folds): the literal branch
+        # consumes his_title through _bridge_title_subject and W4
+        # never re-screens it here (raw_titles is [event_title]), so
+        # a fold-erased qualifier would leave the clean dated
+        # template for the subject parse. Pre-network.
+        if _pm._folds_away(his_title):
+            _note("yn:title-folds")
+            return None
+        anchor, why = _pm._bridge_title_subject(his_title, s)
+        if anchor is None:
+            _note(f"yn:title-{why}")
+            return None
+        code = t_side
+        other_code = b if code == a else a
+        if len(code) < 3:
+            # borrowed verbatim from the bridge (code_too_short) and
+            # applied lane-wide below too.
+            _note("yn:code-short")
+            return None
+        # ROUND-2 AMENDMENT: the bridge's symmetric mine/theirs veto
+        # (premap gate 10): his title's team must prefix-hit HIS
+        # slug's side token under either collapsed form and must NOT
+        # also hit the opponent's. Both or neither is a collision;
+        # collisions refuse.
+        mine = _pm._code_prefix_hit(anchor, code)
+        theirs = _pm._code_prefix_hit(anchor, other_code)
+        if not mine or theirs:
+            _note("yn:title-code")
+            return None
+        if _yn_slot_bad(anchor):
+            _note("yn:anchor-scope")
+            return None
+        # ROUND-3 AMENDMENT (evidence floor on the validated title
+        # subject — a corroboration-weight name slot): >= 2 raw
+        # tokens or refuse.
+        if _yn_thin(anchor):
+            _note("yn:anchor-thin")
+            return None
+        raw_titles = [event_title]     # market_title WAS the win
+        # title — fully consumed and validated by
+        # _bridge_title_subject above; only the event title remains
+        # to be screened and to witness the opponent.
+    else:
+        anchor = pick
+        if any(ch.isdigit() for ch in anchor):
+            # mirror of the bridge's subject_has_digit — 'Schalke 04'
+            # refuses in the safe direction.
+            _note("yn:anchor-digit")
+            return None
+        if _yn_slot_bad(anchor):
+            # 'Draw' dies here ('draw' is a bridge scope token); so
+            # does any B/women/reserve/single-letter pick.
+            _note("yn:anchor-scope")
+            return None
+        # ROUND-3 AMENDMENT (yn:anchor-thin): the team-pick anchor
+        # carries corroboration weight everywhere below; a
+        # single-raw-token pick ('América', 'Arsenal') is
+        # insufficient identity and refuses pre-network.
+        if _yn_thin(anchor):
+            _note("yn:anchor-thin")
+            return None
+        raw_titles = [his_title, event_title]
+
+    # W4 — whale-side title screens + opponent WITNESS extraction.
+    # RAW-normalized scans, never through _clean_title (which deletes
+    # parenthesised qualifiers: '(Aggregate)' must refuse here).
+    other_name = None
+    for raw in raw_titles:
+        if not raw:
+            continue
+        if _pm._folds_away(raw):
+            _note("yn:title-folds")
+            return None
+        stripped = re.sub(r"\s*-\s*more markets\s*$", "", str(raw),
+                          flags=re.I)
+        if _signed_lines(_YN_ISO_DATE.sub(" ", stripped)):
+            # a signed line in his title on a moneyline-typed slug is
+            # contradictory metadata (ISO dates scrubbed first: the
+            # '-08' in '2026-08-29' is a date, not a handicap).
+            _note("yn:title-line")
+            return None
+        tn = " ".join(_norm(stripped).split())
+        if not tn:
+            continue
+        sides = [" ".join(x.split())
+                 for x in re.split(r"\s+vs\s+", tn) if x.strip()]
+        if not sides or len(sides) > 2:
+            _note("yn:title-side")
+            return None
+        if any(_yn_slot_bad(x) for x in sides):
+            # '(Aggregate)', '- To Advance', halftime/corners
+            # qualifiers, single-letter fragments — refuse.
+            _note("yn:title-scope")
+            return None
+        if len(sides) == 2:
+            # ROUND-3 AMENDMENT (yn:witness-thin): both sides of a
+            # vs-shaped whale title are consumed for corroboration —
+            # one corroborates the anchor, the other becomes the
+            # opponent witness. A single-raw-token side ('Rapid vs
+            # Union', the executed premap round-2.3 kill) is
+            # insufficient identity; refuse BEFORE either side is
+            # consumed.
+            if any(_yn_thin(x) for x in sides):
+                _note("yn:witness-thin")
+                return None
+            # ROUND-4 AMENDMENT A2 (dissent) — TWIN-FIXTURE FLOOR,
+            # premap's own EXECUTED round-2.4 kill folded onto this
+            # lane (sides_single_distinctive): when BOTH sides of the
+            # whale's vs-shaped title reduce to a SINGLE distinctive
+            # token (the reviewed-ten GENERIC_CLUB_TOKENS furniture
+            # stripped, one surname left), no readable witness
+            # separates same-named fixtures. UECL is saturated with
+            # Rapid/Union/Sparta/Slavia/Dinamo twins that key
+            # IDENTICALLY (same league, same date, same 3-letter
+            # codes): 'FC Rapid' (Wien) takes FC Rapid Bucuresti's
+            # atc-…-rap key, 'FC Dinamo' (Zagreb) takes Kyiv's. The
+            # round-3 raw floor above ('>= 2 RAW tokens') clears
+            # furniture — 'FC Rapid' is two raw tokens — while
+            # carrying zero identity; only the DISTINCTIVE floor
+            # closes it. A 2-distinctive opponent ('Union Berlin')
+            # pins the fixture (two teams play once a day), so
+            # premap's rule — and this one — is 'ALL sides
+            # single-distinctive', not 'any'; single-surname clubs
+            # become honest refusals until a market_slug city/country
+            # witness is attested. Pre-network.
+            if all(len(_pm._distinctive(x)) < 2 for x in sides):
+                _note("yn:twin")
+                return None
+            hit = [x for x in sides if _yn_name_match(x, anchor)]
+            if len(hit) != 1:
+                # zero: his own title doesn't name his pick; two: a
+                # derby rendering. Both refuse.
+                _note("yn:title-side")
+                return None
+            o = next(x for x in sides if x is not hit[0])
+            if other_name is not None and \
+                    not _yn_name_match(o, other_name):
+                _note("yn:title-conflict")
+                return None
+            other_name = o
+        elif not _yn_name_match(sides[0], anchor):
+            # ROUND-2 AMENDMENT: a plain single-name whale title that
+            # names some OTHER team is a metadata shear — refuse,
+            # never let outcome outvote his own title. (No evidence
+            # floor HERE by the panel's own enumeration: a plain
+            # single-name side is a veto-only consistency check —
+            # nothing downstream consumes it as a witness, so it
+            # carries no corroboration weight.)
+            _note("yn:title-shear")
+            return None
+
+    # W5 — team code (team-pick branch) + ROUND-2 SUFFIX BINDING.
+    if not literal:
+        hits = [c for c in (a, b) if _pm._code_prefix_hit(anchor, c)]
+        if not hits:
+            _note("yn:code-none")
+            return None
+        if len(hits) != 1:
+            _note("yn:code-amb")      # derby double-hit: refuse
+            return None
+        code = hits[0]
+        other_code = b if code == a else a
+        if len(code) < 3:
+            _note("yn:code-short")
+            return None
+        # THE ROUND-1 KILL, CLOSED: his slug's own side token was
+        # validated then DISCARDED, and outcome silently outvoted it.
+        # The two whale-side side statements must AGREE or refuse —
+        # the agreeing case ('…-hou' + pick 'Houston Dynamo') is now
+        # text-to-text corroboration, not coincidence.
+        if t_side is not None and t_side != code:
+            _note("yn:suffix-side")
+            return None
+
+    # W6 — whale-side witness self-consistency.
+    if other_name is not None:
+        if _yn_name_match(other_name, anchor):
+            _note("yn:derby-title")
+            return None
+        if not _pm._code_prefix_hit(other_name, other_code):
+            # his own title's other side must corroborate the other
+            # base code — his metadata must agree with itself.
+            _note("yn:opp-title-code")
+            return None
+
+    # W7 — candidates: HIS pick's contract ONLY, both team orders.
+    # The swapped order is tried ONLY when the primary is unlisted
+    # (404/empty); a candidate that EXISTS but fails ANY check below
+    # refuses OUTRIGHT and never falls to the next guess (the shipped
+    # totals-lane discipline, verbatim). The opponent's contract is
+    # never enumerated; segment keys ('…-ame-fh') are unreachable by
+    # construction (exactly one post-team token, from his own base).
+    cands = [f"atc-{lg}-{a}-{b}-{date}-{code}",
+             f"atc-{lg}-{b}-{a}-{date}-{code}"]
+    ev_ok = {f"atc-{lg}-{a}-{b}-{date}", f"atc-{lg}-{b}-{a}-{date}",
+             f"{lg}-{a}-{b}-{date}", f"{lg}-{b}-{a}-{date}"}
+    client = _get_client()
+    for cand in dict.fromkeys(cands):
+        try:
+            mkt = (client.markets.retrieve_by_slug(cand) or {}).get(
+                "market") or {}
+        except Exception:  # noqa: BLE001 — 404 is an answer
+            _note("yn:404")
+            continue
+        if not mkt.get("slug"):
+            _note("yn:404")
+            continue
+        if str(mkt["slug"]).lower() != cand:
+            _note("yn:slug-echo")     # alias/redirect: unverified
+            return None
+        if mkt.get("closed"):
+            _note("yn:closed")
+            return None
+        ev = mkt.get("eventSlug") or mkt.get("event_slug")
+        if ev is not None and str(ev).lower() not in ev_ok:
+            _note("yn:evslug")        # positive mismatch fails closed
+            return None
+        q = mkt.get("question") or mkt.get("title") or ""
+        if not q:
+            _note("yn:noq")
+            return None
+        if len(q) >= 290:
+            _note("yn:trunc")
+            return None
+        if _pm._folds_away(q):
+            _note("yn:folds")         # blind refuses
+            return None
+        ql = f" {str(q).lower()} "
+        if re.search(r"\bvs\b", ql) or " - " in ql or " @ " in ql:
+            _note("yn:matchup")       # raw — _norm erases separators
+            return None
+        q_scan = _YN_ISO_DATE.sub(" ", str(q))
+        if _signed_lines(q_scan):
+            _note("yn:signed")        # a handicap contract: REFUSED,
+            return None               # never stripped
+        if re.search(r"\d+\.\d+", q_scan):
+            _note("yn:decimal")
+            return None
+        n = " ".join(_norm(q).split())
+        gm = None
+        for pat in _YN_Q_PATTERNS:
+            gm = pat.fullmatch(n)
+            if gm:
+                break
+        if gm is None:
+            _note("yn:shape")
+            return None
+        gd = gm.groupdict()
+        if not _yn_date_ok(gd, date):
+            _note("yn:qdate")
+            return None
+        subj = " ".join((gd.get("subj") or "").split())
+        opp = " ".join((gd.get("opp") or "").split()) or None
+        lgq = " ".join((gd.get("lg") or "").split()) or None
+        if _yn_slot_bad(subj) or (opp is not None and
+                                  _yn_slot_bad(opp)) \
+                or (lgq is not None and _yn_slot_bad(lgq)):
+            _note("yn:scope")
+            return None
+        # ROUND-3 AMENDMENT (yn:subj-thin): the question subject is a
+        # corroboration-weight slot — the distinctive-set path lets a
+        # 1-raw-token subject ('america') match a 2-token anchor
+        # ('cf america'), so the floor is checked on the slot itself.
+        # (The league slot is deliberately NOT floored: it is only
+        # scope-screened and corroborates nothing.)
+        if _yn_thin(subj):
+            _note("yn:subj-thin")
+            return None
+        if not _yn_name_match(subj, anchor):
+            _note("yn:subj")
+            return None
+        if other_name is not None and _yn_name_match(subj, other_name):
+            _note("yn:derby")
+            return None
+        if opp is not None:
+            # ROUND-3 AMENDMENT (yn:opp-thin): the opponent slot is a
+            # corroboration-weight slot; floor it BEFORE any matching
+            # consumes it.
+            if _yn_thin(opp):
+                _note("yn:opp-thin")
+                return None
+            # ROUND-2 AMENDMENT: the opponent slot must be WITNESSED
+            # by a whale-side name. All four checks CONJUNCTIVE; the
+            # code-prefix hit is additional, never the sole one.
+            if _yn_name_match(opp, anchor):
+                _note("yn:opp-self")          # mirror trap
+                return None
+            if other_name is None:
+                _note("yn:opp-unwitnessed")   # no witness = refuse
+                return None
+            if not _yn_name_match(opp, other_name):
+                _note("yn:opp")
+                return None
+            if not _pm._code_prefix_hit(opp, other_code):
+                _note("yn:opp-code")
+                return None
+        sides = [x for x in (mkt.get("marketSides") or [])
+                 if isinstance(x, dict)]
+        if len(sides) != 2 or any(
+                not (x.get("identifier") and x.get("description"))
+                for x in sides):
+            _note("yn:sides")
+            return None
+        descs = [_norm(x["description"]) for x in sides]
+        if sorted(descs) != ["no", "yes"]:
+            # named-side markets stay with the existing resolvers —
+            # this lane exists only for the shape they refuse, so it
+            # can never outbid them.
+            _note("yn:sides")
+            return None
+        # Side selection: literal pick -> the side whose description
+        # LITERALLY equals it (the 2026-08-24 rule — no similarity,
+        # no default, no venue ordering); team-pick -> the Yes side
+        # ONLY (his pick IS the question's corroborated subject; its
+        # affirmative is his bet; a yes/no pick can never reach this
+        # branch — it routed literal above).
+        want = pick if literal else "yes"
+        side = sides[descs.index(want)]
+        intent = order_intent_for(mkt, side)
+        if intent is None:
+            _note("yn:noint")
+            return None
+        _note("yn:ok")
+        return {"market_slug": side["identifier"], "title": q,
+                "outcome": side["description"], "intent": intent,
+                "matched_by": ("team_yesno_pick_exact" if literal
+                               else "team_yesno_exact"),
+                "score": 1.0}
+    return None
+
 
 def order_intent_for(market: dict, side: dict | None) -> str | None:
     """The ORDER INTENT that buys this side of this market, or None when
