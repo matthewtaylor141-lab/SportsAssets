@@ -857,6 +857,21 @@ jobs:
                    end' \
             /tmp/hb_we.json 2>/dev/null || echo "  COPYQUEUE unreadable"
 
+          # WHALERATE — the owner's question, answered as a FLOW.
+          # Every other counter here is a stock (a standing backlog) or
+          # an all-time total or a live_orders row count the sweep
+          # inflates by retrying. new_assets is the true rate of new
+          # positions, and dated_playable is the subset the sweep's own
+          # date window admits — the number of copy orders a perfect
+          # mapper would place per day.
+          curl -sS --max-time 60 -o /tmp/wrate.json \
+            -H "X-Admin-Token: $ADMIN_TOKEN" \
+            "$BASE/api/admin/whale-rate?whale=rn1&days=14" || true
+          jq -r '.summary // {} | "  WHALERATE rn1 days=\(.days_counted // "?")  med_trades=\(.median_trades // "?")  med_distinct=\(.median_distinct_assets // "?")  med_new=\(.median_new_assets // "?")  med_playable=\(.median_dated_playable // "?")  adds_per_asset=\(.adds_per_asset // "?")"' \
+             /tmp/wrate.json 2>/dev/null || echo "  WHALERATE unavailable"
+          jq -r '.by_day // [] | .[] | "  WRDAY \(.day) trades=\(.trades) distinct=\(.distinct_assets) new=\(.new_assets) playable=\(.dated_playable) notional=$\(.notional)"' \
+             /tmp/wrate.json 2>/dev/null | head -15 || true
+
           # SWEEPQUEUE — is the per-pass cap rationing, or starving?
           #
           # `candidates` used to be counted AFTER the cap sliced the

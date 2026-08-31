@@ -6641,6 +6641,128 @@ async def api_premap_live_set(action: str) -> dict:
     return {"ok": True, "premap_live": action == "on"}
 
 
+@app.get("/api/admin/whale-rate", dependencies=[Depends(require_admin)])
+async def api_whale_rate(whale: str = "rn1", days: int = 14) -> dict:
+    """How much copyable flow one whale actually produces per day.
+
+    Owner question 2026-08-31: "How many different copy orders should we
+    be getting on a daily basis from RN1? How many cash outs should we
+    have based on how many trades we are copying?"
+
+    Nothing answered that. Every existing counter is either all-time
+    (TRUEEDGE detected), a live_orders ROW count that the sweep inflates
+    by retrying the same trade for days (WINWHALE missed), or an instant
+    snapshot of a standing backlog (SWEEPMIX pool). None is a daily
+    ARRIVAL RATE, and dividing a stock by a window to get one is the
+    error that has already cost this session two wrong readings today.
+
+    So this measures the flow directly, per UTC day:
+
+      trades          every BUY row of his we recorded
+      distinct_assets distinct outcome tokens he bought that day
+      new_assets      tokens whose FIRST-EVER buy by him is that day —
+                      the true new-position rate, and the only one of
+                      these that maps 1:1 to "a copy order we should
+                      have placed"
+      dated_playable  new_assets whose slug date is within the sweep's
+                      own window (yesterday..tomorrow), i.e. the ones
+                      the candidate query would actually admit
+
+    THE EXIT SIDE IS AN IDENTITY, NOT A SEPARATE MEASUREMENT. At this
+    venue a whale exits by BUYING the complementary leg, so in steady
+    state every position he opens is eventually closed exactly once,
+    and cash-outs per day equal ENTRIES per day, lagged by his holding
+    period — plus one extra event per partial trim. That is why this
+    endpoint reports the entry rate and the holding period rather than
+    guessing an exit count: the exit rate is derived, and the honest
+    error bar comes from the trim multiplier, which is reported beside
+    it as adds_per_asset.
+
+    Read-only."""
+    pool = await get_pool()
+    d = max(1, min(int(days), 60))
+    w = (whale or "").strip().lower()
+    rows = await pool.fetch(
+        # RAW string: the slug regex carries backslash-d, which a plain
+        # literal reads as an unknown escape (a warning now, an error
+        # later) while SQL still needs the backslash.
+        r"""
+        WITH firsts AS (
+            SELECT t.asset, min(t.ts) AS first_ts
+            FROM trades t JOIN whales wh ON wh.id = t.whale_id
+            WHERE lower(wh.username) = $1 AND t.side = 'BUY'
+            GROUP BY t.asset
+        )
+        SELECT date_trunc('day', t.ts)::date AS day,
+               count(*)::int AS trades,
+               count(DISTINCT t.asset)::int AS distinct_assets,
+               count(DISTINCT t.asset) FILTER (
+                   WHERE f.first_ts >= date_trunc('day', t.ts)
+                     AND f.first_ts <  date_trunc('day', t.ts)
+                                       + interval '1 day')::int
+                   AS new_assets,
+               count(DISTINCT t.asset) FILTER (
+                   WHERE f.first_ts >= date_trunc('day', t.ts)
+                     AND f.first_ts <  date_trunc('day', t.ts)
+                                       + interval '1 day'
+                     AND substring(COALESCE(t.market_slug, t.event_slug, '')
+                                   from '\d{4}-\d{2}-\d{2}') IS NOT NULL
+                     AND substring(COALESCE(t.market_slug, t.event_slug, '')
+                                   from '\d{4}-\d{2}-\d{2}')::date
+                         BETWEEN date_trunc('day', t.ts)::date - 1
+                             AND date_trunc('day', t.ts)::date + 1)::int
+                   AS dated_playable,
+               sum(t.notional)::float8 AS notional
+        FROM trades t
+        JOIN whales wh ON wh.id = t.whale_id
+        JOIN firsts f ON f.asset = t.asset
+        WHERE lower(wh.username) = $1
+          AND t.side = 'BUY'
+          AND t.ts > now() - make_interval(days => $2)
+        GROUP BY 1 ORDER BY 1 DESC
+        """, w, d)
+    out = [{"day": r["day"].isoformat(), "trades": r["trades"],
+            "distinct_assets": r["distinct_assets"],
+            "new_assets": r["new_assets"],
+            "dated_playable": r["dated_playable"],
+            "notional": round(r["notional"] or 0.0, 2)} for r in rows]
+    # Medians, not means: this flow is bursty (a slate night is many
+    # times a Tuesday) and a mean over a fortnight would describe no
+    # actual day. Whole days only — today is still accumulating and
+    # would drag every average down.
+    body = out[1:] if len(out) > 1 else out
+
+    def _med(key):
+        vals = sorted(x[key] for x in body)
+        if not vals:
+            return None
+        n = len(vals)
+        return (vals[n // 2] if n % 2
+                else round((vals[n // 2 - 1] + vals[n // 2]) / 2, 1))
+
+    summary = {"days_counted": len(body),
+               "median_trades": _med("trades"),
+               "median_distinct_assets": _med("distinct_assets"),
+               "median_new_assets": _med("new_assets"),
+               "median_dated_playable": _med("dated_playable")}
+    # How many buys he puts into one position. Every buy beyond the
+    # first is an ADD, and on the exit side a partial trim is an extra
+    # cash-out event — so this is the multiplier between "positions
+    # opened" and "exit events expected".
+    if summary["median_new_assets"]:
+        summary["adds_per_asset"] = round(
+            (summary["median_trades"] or 0)
+            / summary["median_new_assets"], 2)
+    return {"whale": w, "days": d, "by_day": out, "summary": summary,
+            "reading": (
+                "median_dated_playable is the number of copy orders a "
+                "perfect mapper would place per day for this whale. "
+                "Cash-outs per day equal that same number in steady "
+                "state (every position closes exactly once), multiplied "
+                "by the partial-trim factor and lagged by his holding "
+                "period.")}
+
+
 @app.get("/api/admin/short-shadow", dependencies=[Depends(require_admin)])
 async def api_short_shadow(limit: int = 6) -> dict:
     """Count the evidence the BUY_SHORT ban was built to produce.
