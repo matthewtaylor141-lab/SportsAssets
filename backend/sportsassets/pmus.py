@@ -1648,7 +1648,8 @@ def resolve_market_exact(candidate_slugs: list[str],
 
 def resolve_market(market_slug: str | None, event_slug: str | None,
                    market_title: str | None, event_title: str | None,
-                   outcome: str | None) -> dict | None:
+                   outcome: str | None,
+                   diag_out: list[str] | None = None) -> dict | None:
     """Map a global-CLOB trade to a US market. Returns
     {"market_slug", "title", "outcome", "intent", "matched_by", "score"}
     or None.
@@ -1927,6 +1928,22 @@ def resolve_market(market_slug: str | None, event_slug: str | None,
             diag.insert(1, "ident:" + str(ident)[:110])
     # The trail rides the exception-free path out via last_resolve_diag so
     # the caller can store WHY in the audit row without a signature break.
+    # A PARAMETER FIRST, THE ATTRIBUTE ONLY FOR COMPATIBILITY
+    # (2026-08-31). resolve_market_exact was given diag_out because
+    # "an attribute hands one row's reason to another row" — and the
+    # sentence that reasoning is written in names THIS function as the
+    # hazard, then leaves it on the attribute. The live executor reads
+    # last_diag AFTER an await (live_executor.py, the unmapped branch),
+    # so a sibling copy finishing in that window overwrites the trail
+    # and the row is audited with another row's reason. Every unmapped
+    # bucket downstream — listed_mapper_fail, venue_unlisted and the
+    # undiagnosed shapes — is attributed from this string.
+    #
+    # The attribute write stays: it is what the existing callers and
+    # tests read, and removing it would be a silent behaviour change
+    # for them. It is now the fallback, not the channel.
+    if diag_out is not None:
+        diag_out.extend(diag)
     resolve_market.last_diag = "; ".join(diag)[:280]
     return None
 

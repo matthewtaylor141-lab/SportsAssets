@@ -5141,15 +5141,22 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     mapping_src = "yesno_exact"
             if mapping_src is None:
                 mapping_src = "exact" if mapping is not None else None
+            # OUR OWN LIST, NOT THE SHARED ATTRIBUTE (2026-08-31).
+            # last_diag is read below, AFTER this await — a sibling
+            # copy finishing in that window would hand this row its
+            # reason, and every unmapped bucket is attributed from it.
+            _fz_diag: list[str] = []
             if mapping is None:
                 mapping = await asyncio.to_thread(
                     pmus.resolve_market, ctx.get("market_slug"), ctx.get("event_slug"),
                     ctx.get("market_title"), ctx.get("event_title"), ctx.get("outcome"),
+                    _fz_diag,
                 )
                 if mapping is not None:
                     mapping_src = "fuzzy"
             if mapping is None:
-                diag = getattr(pmus.resolve_market, "last_diag", "") or ""
+                diag = ("; ".join(_fz_diag)[:280] if _fz_diag
+                        else getattr(pmus.resolve_market, "last_diag", "") or "")
                 # THE EXACT ATTEMPT, FIRST AND BUDGETED. Every unmapped
                 # diagnostic anyone has read describes the FUZZY
                 # attempt, because that is the only one that recorded

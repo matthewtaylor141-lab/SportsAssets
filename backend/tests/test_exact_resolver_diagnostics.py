@@ -50,6 +50,20 @@ class _Client:
         return {"market": v}
 
 
+def _unmapped_block(src: str) -> str:
+    """The rejection block: where the exact trail and the fuzzy trail
+    are combined into the row's `error`.
+
+    These tests used to slice from the literal
+    `diag = getattr(pmus.resolve_market` — which pinned an anchor, not
+    a property, and broke the day the fuzzy trail moved off the shared
+    attribute onto a per-call list. The block is bounded by things that
+    describe what it IS: it starts where the exact summary is built and
+    ends at the log line."""
+    i = src.index('_ex = ""')
+    return src[i:src.index("log.info", i)]
+
+
 def _run(table, cands, outcome, monkeypatch):
     monkeypatch.setattr(pmus, "_get_client", lambda: _Client(table))
     diag: list[str] = []
@@ -128,6 +142,71 @@ class TestTheDiagnosticCannotLie:
         src = inspect.getsource(pmus.resolve_market_exact)
         assert "resolve_market_exact.last_diag" not in src
 
+    def test_the_fuzzy_lane_has_the_same_escape_hatch(self):
+        """The reasoning above NAMES resolve_market as the hazard —
+        'resolve_market's last_diag is a function attribute' — and then
+        only resolve_market_exact was given the parameter. The fuzzy
+        lane is the one whose trail every unmapped bucket is attributed
+        from, so it needs the channel more, not less."""
+        sig = inspect.signature(pmus.resolve_market)
+        assert "diag_out" in sig.parameters, (
+            "resolve_market still has no per-call diagnostic channel")
+        assert sig.parameters["diag_out"].default is None, (
+            "diag_out must be optional — every existing caller passes "
+            "five positional args")
+
+    def test_the_fuzzy_trail_goes_to_the_callers_own_list(
+            self, monkeypatch):
+        """Two callers, two lists, no crosstalk."""
+        monkeypatch.setattr(pmus, "_get_client",
+                            lambda: _Client({}))
+        d1: list[str] = []
+        assert pmus.resolve_market(None, "e", "A vs. B", None, "A",
+                                   d1) is None
+        assert d1, "the caller's list came back empty"
+        # A second call must not be able to reach into the first list.
+        d2: list[str] = []
+        assert pmus.resolve_market(None, "e2", "C vs. D", None, "C",
+                                   d2) is None
+        before = list(d1)
+        assert pmus.resolve_market(None, "e3", "E vs. F", None, "E",
+                                   d2) is None
+        assert d1 == before, "a later call mutated an earlier caller's list"
+
+    def test_the_attribute_still_works_for_callers_that_pass_nothing(
+            self, monkeypatch):
+        """The attribute write is the compatibility fallback, not dead
+        code — removing it would silently change every existing caller
+        and test that reads it."""
+        monkeypatch.setattr(pmus, "_get_client", lambda: _Client({}))
+        pmus.resolve_market.last_diag = "stale"
+        assert pmus.resolve_market(None, "e", "A vs. B", None, "A") is None
+        assert pmus.resolve_market.last_diag != "stale"
+
+    def test_the_executor_reads_its_own_list_not_the_attribute(self):
+        """The race is not in the resolver, it is at the READ: the
+        executor took last_diag AFTER an await, so a sibling copy
+        finishing in that window handed this row its reason. Passing
+        the list is only half a fix if the read still prefers the
+        attribute."""
+        src = inspect.getsource(le)
+        i = src.index("pmus.resolve_market, ctx.get(\"market_slug\")")
+        window = src[i:i + 900]
+        assert "_fz_diag," in window, (
+            "the executor calls resolve_market without passing its own "
+            "diagnostic list")
+        # The ASSIGNMENT, not the surrounding window. Checking the
+        # window only proved the list was PASSED — the first version of
+        # this test passed with the read reverted to the attribute,
+        # because the call site sits inside the same window.
+        j = window.index("diag = ", window.index("if mapping is None"))
+        stmt = window[j:j + 200]
+        assert "_fz_diag" in stmt, (
+            "the executor still reads the shared attribute; passing the "
+            "list is only half the fix, the RACE IS AT THE READ")
+        assert stmt.index("_fz_diag") < stmt.index("last_diag"), (
+            "the attribute must be the fallback, not the preference")
+
     def test_two_concurrent_callers_get_their_own_reasons(
             self, monkeypatch):
         monkeypatch.setattr(pmus, "_get_client",
@@ -157,27 +236,21 @@ class TestTheDiagnosticCannotLie:
 
 class TestItReachesTheRejectedRow:
     def test_the_exact_summary_is_written_to_the_row(self):
-        src = inspect.getsource(le.maybe_execute)
-        block = src[src.index('diag = getattr(pmus.resolve_market'):]
-        block = block[:block.index("log.info")]
+        block = _unmapped_block(inspect.getsource(le.maybe_execute))
         assert "_ex_diag" in block
         assert "unmapped: " in block
 
     def test_it_is_COUNTED_not_listed(self):
         """4,919 rows a week is a distribution question. '6x404'
         aggregates where six separate lines do not."""
-        src = inspect.getsource(le.maybe_execute)
-        block = src[src.index('diag = getattr(pmus.resolve_market'):]
-        block = block[:block.index("log.info")]
+        block = _unmapped_block(inspect.getsource(le.maybe_execute))
         assert 'f"{v}x{k}"' in block
 
     def test_the_first_candidate_survives_verbatim(self):
         """So the generated grammar can be read back at a glance --
         'aec-atp-harwen-stetra-2026-08-24 6x404' says the abbreviation
         is fine and the DATE or the league code is not."""
-        src = inspect.getsource(le.maybe_execute)
-        block = src[src.index('diag = getattr(pmus.resolve_market'):]
-        block = block[:block.index("log.info")]
+        block = _unmapped_block(inspect.getsource(le.maybe_execute))
         assert "_ex_cands[0]" in block
 
     def test_a_candidate_list_that_never_ran_is_distinguishable(self):
@@ -198,9 +271,7 @@ class TestItReachesTheRejectedRow:
 
     def test_the_fuzzy_diagnostic_is_still_kept(self):
         """The exact reason is additional evidence, not a replacement."""
-        src = inspect.getsource(le.maybe_execute)
-        block = src[src.index('diag = getattr(pmus.resolve_market'):]
-        block = block[:block.index("log.info")]
+        block = _unmapped_block(inspect.getsource(le.maybe_execute))
         assert "+ diag" in block
 
 
