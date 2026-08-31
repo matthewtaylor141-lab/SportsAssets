@@ -2090,16 +2090,41 @@ jobs:
           # side; if not, it does not.
           python - <<'PY'
           import json
+          from datetime import datetime as _dt, timedelta as _td
+          from datetime import timezone as _tz
           from polymarket_us import PolymarketUS
 
+          # THE FILTER I USED IN ROUND 2 IS ONE THIS REPO ALREADY
+          # DOCUMENTS AS BROKEN, which is why it returned
+          # "0 live of 4800 scanned" and I briefly read that as an auth
+          # problem. workers/premap.py:2266 has it in writing:
+          #
+          #   "the venue IGNORES the eventSlug filter on markets.list
+          #    (every queried event got back the same generic page), and
+          #    a bare {active: True} events.list leads with a stale
+          #    historical catalog (2025 games on page 1)."
+          #
+          # So 4,800 "markets" was the same stale 2025 page over and
+          # over — every one expired, every one with a null book. The
+          # sweep solved this on 2026-08-21 and I did not reuse its
+          # solution: bound the window by START TIME and read each
+          # event's markets INLINE off the event row, no per-event call.
           pub = PolymarketUS()
+          _now = _dt.now(_tz.utc)
+
+          def _iso(d):
+              return d.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+          window = {"active": True, "closed": False,
+                    "startTimeMin": _iso(_now - _td(hours=6)),
+                    "startTimeMax": _iso(_now + _td(hours=72))}
           shown, scanned = 0, 0
-          for off in range(0, 240, 20):
+          for off in range(0, 200, 25):
               if shown >= 3:
                   break
               try:
-                  resp = pub.events.list({"limit": 20, "offset": off,
-                                          "active": True})
+                  resp = pub.events.list({**window, "limit": 25,
+                                          "offset": off})
               except Exception as e:
                   print(f"BIDGT events.list ERR {type(e).__name__}")
                   break
@@ -2110,18 +2135,14 @@ jobs:
               for ev in evs:
                   if shown >= 3:
                       break
-                  ev_slug = ev.get("slug") or ev.get("eventSlug")
-                  try:
-                      mresp = pub.markets.list({"eventSlug": [ev_slug],
-                                                "active": True})
-                  except Exception:
-                      continue
-                  ms = list((mresp.get("markets")
-                             if isinstance(mresp, dict) else mresp) or [])
-                  for m in ms:
+                  for m in (ev.get("markets") or []):
                       if shown >= 3:
                           break
+                      if not isinstance(m, dict):
+                          continue
                       slug = m.get("slug") or m.get("identifier")
+                      if not slug:
+                          continue
                       scanned += 1
                       try:
                           bbo = pub.markets.bbo(slug)
@@ -2130,7 +2151,7 @@ jobs:
                       md = (bbo or {}).get("marketData") or {}
                       bb, ba = md.get("bestBid"), md.get("bestAsk")
                       if bb is None and ba is None:
-                          continue      # expired/empty — cannot answer
+                          continue
                       print(f"BIDGT LIVE slug={slug!r} state={md.get('state')!r}")
                       print(f"BIDGT   bestBid={json.dumps(bb, default=str)}"
                             f" bestAsk={json.dumps(ba, default=str)}")
@@ -2140,11 +2161,11 @@ jobs:
                             f"{json.dumps(m.get('outcomes'), default=str)[:140]}"
                             " outcomePrices="
                             f"{json.dumps(m.get('outcomePrices'), default=str)[:140]}")
-                      for s in (m.get("marketSides") or []):
-                          if isinstance(s, dict):
-                              print(f"BIDGT   side long={s.get('long')!r}"
-                                    f" price={s.get('price')!r}"
-                                    f" tradable={s.get('tradable')!r}")
+                      for sd in (m.get("marketSides") or []):
+                          if isinstance(sd, dict):
+                              print(f"BIDGT   side long={sd.get('long')!r}"
+                                    f" price={sd.get('price')!r}"
+                                    f" tradable={sd.get('tradable')!r}")
                       try:
                           bkd = ((pub.markets.book(slug) or {})
                                  .get("marketData") or {})
@@ -2157,13 +2178,13 @@ jobs:
                       try:
                           _b = float((bb or {}).get("value"))
                           _a = float((ba or {}).get("value"))
-                          _lp = next(float(s.get("price"))
-                                     for s in (m.get("marketSides") or [])
-                                     if isinstance(s, dict) and s.get("long"))
-                          _in = _b <= _lp <= _a
+                          _lp = next(float(sd.get("price"))
+                                     for sd in (m.get("marketSides") or [])
+                                     if isinstance(sd, dict) and sd.get("long"))
                           print(f"BIDGT   ATTRIB long_price={_lp} vs "
                                 f"[{_b},{_a}] -> "
-                                + ("bbo IS the long side" if _in
+                                + ("bbo IS the long side"
+                                   if _b <= _lp <= _a
                                    else "bbo is NOT the long side"))
                       except Exception as e:
                           print(f"BIDGT   ATTRIB undecidable ({type(e).__name__})")
