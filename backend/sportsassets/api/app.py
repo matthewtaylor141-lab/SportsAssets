@@ -6532,7 +6532,8 @@ async def api_premap_live_set(action: str) -> dict:
 
 
 @app.get("/api/admin/bid-truth", dependencies=[Depends(require_admin)])
-async def api_bid_truth(limit: int = 4, slug: str = "") -> dict:
+async def api_bid_truth(limit: int = 4, slug: str = "",
+                        whale: str = "") -> dict:
     """WHICH LEG DOES THE VENUE'S BID BELONG TO — on a slug WE HOLD.
 
     This is the last thing standing between rn1's exits and going live.
@@ -6578,20 +6579,40 @@ async def api_bid_truth(limit: int = 4, slug: str = "") -> dict:
         rows = [{"us_market_slug": slug, "intent": None, "qty": None,
                  "entry": None, "whale": None}]
     else:
+        # NEWEST POSITIONS FIRST, and the ordering is the whole point.
+        #
+        # The first version did DISTINCT ON (us_market_slug) ... ORDER BY
+        # us_market_slug, placed_at DESC and then LIMIT. DISTINCT ON
+        # forces the sort to lead with the slug, so the LIMIT took the
+        # alphabetically-first slugs — which on a 2026-08 book means
+        # aec-atp-benbon..., aec-atp-carcan... from the 11th and 25th.
+        # Both had already settled: state=MARKET_STATE_EXPIRED, empty
+        # book, ATTRIB=undecidable. rn1's only sampled row was one of
+        # them, so the reading that mattered came back blank for a
+        # reason that had nothing to do with the venue.
+        #
+        # A settled market cannot answer "what bid would we sell into",
+        # so rank by recency in an outer query and let the caller ask
+        # for open ones.
         rows = [dict(r) for r in await pool.fetch(
             f"""
-            SELECT DISTINCT ON (lo.us_market_slug)
-                   lo.us_market_slug,
-                   {ORDER_INTENT_SQL} AS intent,
-                   lo.filled_shares::float8 AS qty,
-                   lo.fill_price::float8   AS entry,
-                   lower(COALESCE(lo.whale_username, '')) AS whale
-              FROM live_orders lo
-             WHERE lo.status = 'filled'
-               AND lo.us_market_slug IS NOT NULL
-             ORDER BY lo.us_market_slug, lo.placed_at DESC
+            SELECT * FROM (
+                SELECT DISTINCT ON (lo.us_market_slug)
+                       lo.us_market_slug,
+                       {ORDER_INTENT_SQL} AS intent,
+                       lo.filled_shares::float8 AS qty,
+                       lo.fill_price::float8   AS entry,
+                       lower(COALESCE(lo.whale_username, '')) AS whale,
+                       lo.placed_at
+                  FROM live_orders lo
+                 WHERE lo.status = 'filled'
+                   AND lo.us_market_slug IS NOT NULL
+                   AND ($2 = '' OR lower(COALESCE(lo.whale_username,'')) = $2)
+                 ORDER BY lo.us_market_slug, lo.placed_at DESC
+            ) s
+             ORDER BY s.placed_at DESC
              LIMIT $1
-            """, max(1, min(int(limit or 4), 12)))]
+            """, max(1, min(int(limit or 4), 12)), (whale or "").lower())]
 
     out: list[dict] = []
     for r in rows:

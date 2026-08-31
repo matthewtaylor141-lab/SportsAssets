@@ -1070,7 +1070,7 @@ jobs:
           # refused. Read-only endpoint; it places nothing.
           BTCODE=$(curl -sS --max-time 90 -w '%{http_code}' \
                -H "X-Admin-Token: $ADMIN_TOKEN" -o /tmp/bidtruth.json \
-               "$BASE/api/admin/bid-truth?limit=4" 2>/dev/null || echo "000")
+               "$BASE/api/admin/bid-truth?limit=6&whale=rn1" 2>/dev/null || echo "000")
           echo "  BIDTRUTHHTTP code=$BTCODE"
           jq -r '.rows[]? |
                  "  BIDTRUTH \(.slug): intent=\(.our_intent // "?") long?=\(.our_side_is_long // "?") qty=\(.our_qty // 0) whale=\(.whale // "?")",
@@ -1080,6 +1080,22 @@ jobs:
                  "    bids=\(.bids | tostring | .[0:140]) offers=\(.offers | tostring | .[0:140])",
                  "    ATTRIB=\(.attrib)"' \
              /tmp/bidtruth.json 2>/dev/null || echo "  BIDTRUTH unavailable (endpoint not deployed yet)"
+          # rn1 is the only whale we trade, so ask for HIS positions first.
+          # But he may hold nothing open right now, and a blank answer
+          # would read as "the venue said nothing" rather than "we asked
+          # about a settled book" — which is exactly how the first
+          # reading came back undecidable. So take a roster-wide sample
+          # beside it; ferrari's open aec- market is what settled the
+          # attribution the first time.
+          curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/bidtruth_any.json \
+               "$BASE/api/admin/bid-truth?limit=6" 2>/dev/null || true
+          jq -r '.rows[]? | select(.state == "MARKET_STATE_OPEN") |
+                 "  BIDTRUTH-OPEN \(.slug): intent=\(.our_intent // "?") long?=\(.our_side_is_long // "?") whale=\(.whale // "?")",
+                 "    slug_bid_today=\(.slug_bid_today | tostring) bestBid=\(.bestBid | tostring) bestAsk=\(.bestAsk | tostring)",
+                 "    sides=\(.sides | tostring | .[0:200])",
+                 "    ATTRIB=\(.attrib)"' \
+             /tmp/bidtruth_any.json 2>/dev/null || true
 
           # WHOLEBOOK — REMOVED 2026-08-30, having done its job.
           #
