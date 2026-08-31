@@ -86,7 +86,10 @@ def bench(monkeypatch):
         n = state["held"] if n is None else n
         return {"ok": True, "filled_shares": n, "fill_price": 0.58}
 
-    def _submit_fok(slug, limit, qty, is_sell, tif):
+    # intent since 2026-08-31: the exit passes the recorded BUY
+    # intent so the PRICED leg and the SOLD side come from one
+    # source instead of two independent derivations.
+    def _submit_fok(slug, limit, qty, is_sell, tif, intent=None):
         state["fok_calls"].append((slug, limit, qty, is_sell, tif))
         n = state["fok_fills"]
         n = qty if n is None else n

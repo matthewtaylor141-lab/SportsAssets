@@ -1232,9 +1232,21 @@ async def mirror_exit(payload: dict) -> str:
                 pmus.close_position, us_slug,
                 slippage_bips=EXIT_SLIPPAGE_BIPS)
         else:
+            # ONE FACT, ONE SOURCE (2026-08-31). The limit above is
+            # priced for a specific leg. submit_fok derives the SELL
+            # side itself via _exit_intent, and with intent=None that
+            # falls back to the venue's position sign — a second,
+            # independent derivation of the same fact. Two derivations
+            # can disagree, and disagreeing here means pricing one leg
+            # and selling the other. Passing the recorded BUY intent
+            # makes both read the same thing; when it is absent both
+            # fall back to the position sign, which is still one shared
+            # source.
             result = await asyncio.to_thread(
                 pmus.submit_fok, us_slug, limit, qty, True,
-                "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+                "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+                _oi if _oi in ("ORDER_INTENT_BUY_LONG",
+                               "ORDER_INTENT_BUY_SHORT") else None)
     except asyncio.CancelledError:
         # THE SALE MAY ALREADY HAVE HAPPENED. asyncio.to_thread cannot
         # be cancelled — the thread runs to completion — so a

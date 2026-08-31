@@ -396,3 +396,21 @@ def test_mirror_exit_falls_back_to_the_venue_when_intent_is_missing():
     assert "_pm_long_leg" in src[:i], (
         "mirror_exit gives up when intent is absent instead of asking "
         "the account which side it holds")
+
+
+def test_the_price_and_the_order_side_come_from_one_source():
+    """The limit is priced for a specific leg. submit_fok derives the
+    SELL side itself, and with intent=None that is a SECOND, independent
+    derivation (the venue's position sign) of the same fact. Two
+    derivations can disagree, and disagreeing here means pricing one leg
+    and selling the other."""
+    import inspect
+
+    from sportsassets import live_executor as le
+
+    src = inspect.getsource(le.mirror_exit)
+    i = src.index("pmus.submit_fok")
+    call = src[i:i + 300]
+    assert "_oi" in call, (
+        "mirror_exit prices one leg and then lets submit_fok work the "
+        "side out separately")
