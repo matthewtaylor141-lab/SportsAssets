@@ -13,6 +13,7 @@ docstring, which is the same mistake in prose form.
 """
 
 import ast
+import builtins
 import inspect
 
 from sportsassets.api import app as app_mod
@@ -87,6 +88,66 @@ class TestItCannotTrade:
         i = whole.index('@app.get("/api/admin/bid-truth"')
         head = whole[i:i + 220]
         assert "require_admin" in head
+
+
+class TestItActuallyRuns:
+    """The gap that let a NameError reach production.
+
+    Every other test in this file asserts what the endpoint must NOT do.
+    None of them asserted that it RUNS, so `ORDER_INTENT_SQL` — which
+    app.py imports locally in each caller and not at module level — was
+    referenced without an import, raised only when the route was hit, and
+    the first deploy answered BIDTRUTHHTTP code=500.
+
+    A prohibition-only test suite is a suite that cannot fail on the most
+    common way a new endpoint breaks.
+    """
+
+    def test_every_name_it_references_is_actually_bound(self):
+        # Walk the function's own Load-context names and confirm each one
+        # resolves: a local binding (assignment, import, arg, or
+        # comprehension target) or a module global. An unbound one is a
+        # NameError waiting for the first request.
+        node = _node()
+        bound = {a.arg for a in node.args.args}
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                bound.add(n.id)
+            elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                for al in n.names:
+                    bound.add((al.asname or al.name).split(".")[0])
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                bound.add(n.name)
+        used = {n.id for n in ast.walk(node)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        unbound = {u for u in used
+                   if u not in bound
+                   and not hasattr(app_mod, u)
+                   and not hasattr(builtins, u)}
+        assert not unbound, (
+            f"unbound at runtime -> NameError on first request: {unbound}")
+
+    def test_the_intent_sql_is_imported_not_assumed(self):
+        # The specific one that shipped broken. app.py has no top-level
+        # ORDER_INTENT_SQL; 5636, 7156 and 7310 each import it locally.
+        #
+        # Compared by AST position, not by str.index — the first textual
+        # occurrence IS the import statement, so a naive index() check
+        # measures the import against itself and always fails. (It did.)
+        assert not hasattr(app_mod, "ORDER_INTENT_SQL"), \
+            "if this becomes a module global, this test is obsolete"
+        node = _node()
+        imports = [n.lineno for n in ast.walk(node)
+                   if isinstance(n, ast.ImportFrom)
+                   and any(a.name == "ORDER_INTENT_SQL" for a in n.names)]
+        assert imports, "ORDER_INTENT_SQL is used but never imported here"
+        uses = [n.lineno for n in ast.walk(node)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and "ORDER_INTENT_SQL" in n.value]
+        uses += [n.lineno for n in ast.walk(node)
+                 if isinstance(n, ast.Name) and n.id == "ORDER_INTENT_SQL"]
+        assert uses, "expected the SQL to reference it"
+        assert min(imports) < max(uses), "referenced before it is imported"
 
 
 class TestItAnswersTheQuestionItWasBuiltFor:

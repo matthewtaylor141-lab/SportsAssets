@@ -6564,6 +6564,14 @@ async def api_bid_truth(limit: int = 4, slug: str = "") -> dict:
     than inferred.
     """
     from .. import pmus
+    # LOCAL IMPORT, matching app.py:5636 / 7156 / 7310. This module does
+    # not import ORDER_INTENT_SQL at top level — every caller pulls it in
+    # itself — and referencing it without doing so is a NameError raised
+    # only when the route is hit. That is exactly what shipped: the first
+    # deploy answered BIDTRUTHHTTP code=500. The read-only tests could
+    # not catch it because they assert what this function must NOT do and
+    # never assert that it RUNS.
+    from ..live_executor import ORDER_INTENT_SQL
 
     pool = await get_pool()
     if slug:
