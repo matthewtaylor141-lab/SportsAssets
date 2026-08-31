@@ -582,6 +582,37 @@ def _quote_px(m: dict, *keys: str) -> float | None:
     return None
 
 
+def _bbo_quotes(client, us_slug: str) -> tuple[float | None, float | None]:
+    """(bestBid, bestAsk) from the venue's BBO feed.
+
+    THIS IS THE SOURCE THE ATTRIBUTION WAS PROVEN AGAINST (run
+    33395797987): `markets.bbo(slug)["marketData"]`, a SEPARATE call
+    from retrieve_by_slug. The five-market check that established
+    `long.price == bestAsk` read these fields and no others, so this is
+    the only feed whose side is known. Pricing off a same-named field
+    on a different object would be assuming the two agree.
+
+    Both quotes come from ONE call so bid and ask are the same
+    snapshot; mixing two reads could straddle a move and invert the
+    spread. `book` is tried second because the endpoint that measured
+    this accepted either."""
+    for meth in ("bbo", "book"):
+        fn = getattr(getattr(client, "markets", None), meth, None)
+        if fn is None:
+            continue
+        try:
+            d = (fn(us_slug) or {}).get("marketData") or {}
+        except Exception:  # noqa: BLE001 — try the next feed
+            continue
+        if not isinstance(d, dict):
+            continue
+        b = _quote_px(d, "bestBid", "best_bid", "bid")
+        a = _quote_px(d, "bestAsk", "best_ask", "ask")
+        if b is not None or a is not None:
+            return b, a
+    return None, None
+
+
 def slug_bid(us_slug: str, long_leg: bool | None = None) -> float | None:
     """Live best BID for one orderable US slug (desk cash-out, owner
     directive 2026-08-22). None when the venue has no readable bid —
@@ -614,19 +645,26 @@ def slug_bid(us_slug: str, long_leg: bool | None = None) -> float | None:
     dollar. Both are refused here rather than one being tolerated.)
     """
     client = _get_client()
+    best_bid, best_ask = _bbo_quotes(client, us_slug)
     try:
         m = (client.markets.retrieve_by_slug(us_slug) or {}).get(
             "market") or {}
     except Exception:  # noqa: BLE001 — 404s are an answer
+        m = {}
+    if not m and best_bid is None and best_ask is None:
         return None
-    md = m.get("marketData") if isinstance(m.get("marketData"), dict) else {}
-    bbo = m.get("bbo") if isinstance(m.get("bbo"), dict) else {}
-    best_bid = (_quote_px(m, "bestBid", "best_bid", "bid")
-                or _quote_px(md, "bestBid", "best_bid", "bid")
-                or _quote_px(bbo, "bestBid", "best_bid", "bid"))
-    best_ask = (_quote_px(m, "bestAsk", "best_ask", "ask")
-                or _quote_px(md, "bestAsk", "best_ask", "ask")
-                or _quote_px(bbo, "bestAsk", "best_ask", "ask"))
+    # THE MARKET RECORD NAMES THESE DIFFERENTLY. The record carries
+    # `bestBidQuote`/`bestAskQuote` — the unmapped funnel's own `keys:`
+    # diagnostics list them by that name — so the original
+    # ("bestBid", "best_bid", "bid") loop was reading fields that are
+    # not on this object at all. Only a fallback: the side attribution
+    # was proven against the BBO feed above, not against these.
+    if best_bid is None:
+        best_bid = _quote_px(m, "bestBidQuote", "bestBid", "best_bid",
+                             "bid")
+    if best_ask is None:
+        best_ask = _quote_px(m, "bestAskQuote", "bestAsk", "best_ask",
+                             "ask")
 
     sides = [s for s in (m.get("marketSides") or []) if isinstance(s, dict)]
     other = next((s for s in sides

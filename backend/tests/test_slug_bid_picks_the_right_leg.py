@@ -45,12 +45,18 @@ LIVE = {
 
 
 def _market(slug, bid, ask, long_px, short_px, shared=True):
-    """The venue's real payload shape: quotes as {"value": ...} and,
-    on this family, ONE identifier across both sides."""
+    """The retrieve_by_slug record, in the shape it ACTUALLY has.
+
+    It does NOT carry `bestBid`/`bestAsk`. The unmapped funnel's own
+    `keys:` diagnostics list `bestBidQuote`/`bestAskQuote`, and an
+    earlier version of these fixtures invented the bbo field names on
+    this object — so every test passed while slug_bid read fields that
+    were never there.
+    """
     return {
         "slug": slug,
-        "bestBid": {"value": f"{bid:.4f}", "currency": "USD"},
-        "bestAsk": {"value": f"{ask:.4f}", "currency": "USD"},
+        "bestBidQuote": {"value": f"{bid:.4f}", "currency": "USD"},
+        "bestAskQuote": {"value": f"{ask:.4f}", "currency": "USD"},
         "marketSides": [
             {"long": True, "price": f"{long_px}",
              "identifier": slug, "tradable": True},
@@ -61,10 +67,17 @@ def _market(slug, bid, ask, long_px, short_px, shared=True):
     }
 
 
-def _client(market):
+def _client(market, bbo=None):
+    """`bbo` is a SEPARATE call from retrieve_by_slug — the one the
+    side attribution was actually proven against."""
     class _M:
         def retrieve_by_slug(self, _s):
             return {"market": market}
+
+        def bbo(self, _s):
+            if bbo is None:
+                raise RuntimeError("no bbo feed")
+            return {"marketData": bbo}
 
     class _C:
         markets = _M()
@@ -72,8 +85,14 @@ def _client(market):
     return _C()
 
 
-def _install(monkeypatch, market):
-    monkeypatch.setattr(pmus, "_get_client", lambda: _client(market))
+def _bbo(bid, ask):
+    return {"bestBid": {"value": f"{bid:.4f}", "currency": "USD"},
+            "bestAsk": {"value": f"{ask:.4f}", "currency": "USD"}}
+
+
+def _install(monkeypatch, market, bbo=None):
+    monkeypatch.setattr(pmus, "_get_client",
+                        lambda: _client(market, bbo))
 
 
 # ------------------------------------------------ the shape is what it is
@@ -148,7 +167,7 @@ def test_a_missing_ask_refuses_rather_than_falling_back_to_the_bid(
     """Fail closed: no ask means no short price, not the long price."""
     slug = "aec-wta-liltag-tamkor-2026-08-30"
     m = _market(slug, 0.78, 0.79, 0.79, 0.22)
-    m.pop("bestAsk")
+    m.pop("bestAskQuote")
     _install(monkeypatch, m)
     assert pmus.slug_bid(slug, False) is None
 
@@ -171,7 +190,7 @@ def test_an_unreadable_market_is_still_none(monkeypatch):
 def test_prices_outside_the_unit_interval_are_refused(monkeypatch, bad):
     slug = "aec-wta-liltag-tamkor-2026-08-30"
     m = _market(slug, 0.78, 0.79, 0.79, 0.22)
-    m["bestBid"] = {"value": str(bad)}
+    m["bestBidQuote"] = {"value": str(bad)}
     _install(monkeypatch, m)
     assert pmus.slug_bid(slug, True) is None
 
@@ -191,25 +210,68 @@ def test_a_bare_float_quote_still_works(monkeypatch):
     trade one shape for the other."""
     slug = "plain-market"
     m = _market(slug, 0.61, 0.62, 0.62, 0.39)
-    m["bestBid"] = 0.61
-    m["bestAsk"] = 0.62
+    m["bestBidQuote"] = 0.61
+    m["bestAskQuote"] = 0.62
     _install(monkeypatch, m)
     assert pmus.slug_bid(slug, True) == pytest.approx(0.61)
     assert pmus.slug_bid(slug, False) == pytest.approx(0.38)
 
 
-def test_a_nested_marketData_quote_is_read(monkeypatch):
-    slug = "nested-market"
-    m = {"slug": slug,
-         "marketData": {"bestBid": {"value": "0.44"},
-                        "bestAsk": {"value": "0.46"}},
-         "marketSides": [{"long": True, "price": "0.46",
-                          "identifier": slug},
-                         {"long": False, "price": "0.56",
-                          "identifier": slug}]}
-    _install(monkeypatch, m)
-    assert pmus.slug_bid(slug, True) == pytest.approx(0.44)
-    assert pmus.slug_bid(slug, False) == pytest.approx(0.54)
+def test_the_bbo_feed_is_preferred_over_the_market_record():
+    """The BBO feed is the ONLY source whose side is known — the
+    five-market attribution was measured on it. If the record and the
+    feed disagree, the feed wins, because the record's side was never
+    established."""
+    slug = "aec-wta-liltag-tamkor-2026-08-30"
+
+    class _M:
+        def retrieve_by_slug(self, _s):
+            return {"market": _market(slug, 0.10, 0.11, 0.11, 0.90)}
+
+        def bbo(self, _s):
+            return {"marketData": _bbo(0.78, 0.79)}
+
+    class _C:
+        markets = _M()
+
+    import pytest as _pt
+    orig = pmus._get_client
+    pmus._get_client = lambda: _C()
+    try:
+        assert pmus.slug_bid(slug, True) == _pt.approx(0.78)
+        assert pmus.slug_bid(slug, False) == _pt.approx(0.21)
+    finally:
+        pmus._get_client = orig
+
+
+def test_the_market_record_is_the_fallback_when_the_feed_is_absent(
+        monkeypatch):
+    """bbo raising must not lose the quote entirely — but the field
+    names on the record are bestBidQuote/bestAskQuote, which is what
+    the original implementation never looked for."""
+    slug = "aec-wta-liltag-tamkor-2026-08-30"
+    _install(monkeypatch, _market(slug, 0.78, 0.79, 0.79, 0.22),
+             bbo=None)
+    assert pmus.slug_bid(slug, True) == pytest.approx(0.78)
+    assert pmus.slug_bid(slug, False) == pytest.approx(0.21)
+
+
+def test_the_record_does_not_carry_the_bbo_field_names():
+    """The bug this whole block exists for. An earlier fixture invented
+    `bestBid` on the record; every test passed while slug_bid read a
+    field that is not on that object."""
+    m = _market("s", 0.5, 0.6, 0.6, 0.5)
+    assert "bestBid" not in m and "bestAsk" not in m
+    assert "bestBidQuote" in m and "bestAskQuote" in m
+
+
+def test_both_quotes_come_from_one_snapshot(monkeypatch):
+    """Bid and ask must not be read from two separate calls — a move
+    between them can invert the spread."""
+    import inspect
+    src = inspect.getsource(pmus._bbo_quotes)
+    assert src.count("fn(us_slug)") == 1, (
+        "bid and ask are fetched separately; they can straddle a move")
 
 
 # ------------------------------- the distinct-identifier path is unchanged
@@ -229,7 +291,7 @@ def test_the_sibling_mirror_still_answers_when_no_bid_is_published(
     """The pre-existing fallback: a resting YES bid IS a NO ask."""
     slug = "distinct-market"
     m = _market(slug, 0.30, 0.31, 0.31, 0.70, shared=False)
-    m.pop("bestBid")
+    m.pop("bestBidQuote")
     _install(monkeypatch, m)
     assert pmus.slug_bid(slug) == pytest.approx(0.30)
 
