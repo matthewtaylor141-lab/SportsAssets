@@ -27,6 +27,8 @@ floor nineteen times the asset's value — it simply never fills, which
 is survivable. The reverse, a long priced off the short book, sells a
 95c asset with a 5c floor. Neither is allowed to happen by accident.
 """
+import asyncio
+
 import pytest
 
 from sportsassets import pmus
@@ -262,14 +264,73 @@ def test_the_exit_path_actually_supplies_the_leg():
     assert 'row["intent"]' in head
 
 
-def test_the_desk_path_asserts_long_rather_than_leaving_it_unknown():
-    """The desk guard returns on `held < 1` and a short reads negative,
-    so reaching the bid means long — provable, so it is stated."""
+def test_the_desk_path_READS_the_leg_and_never_assumes_long():
+    """The bug this test exists for was mine, and it shipped.
+
+    I passed `slug_bid(us_slug, True)` on the desk path arguing that a
+    short reads negative through _pm_held, so a positive `held` proves
+    long. _pm_held returns abs(netPosition) — the magnitude — so
+    `held >= 1` is equally true of a short.
+
+    That is the GIVEAWAY direction. With the long book at 0.05/0.06 the
+    short leg is worth 0.94, and a bestBid floor sells it for 0.05."""
     import inspect
 
     from sportsassets import live_executor as le
 
-    src = inspect.getsource(le)
-    assert "pmus.slug_bid, us_slug, True" in src, (
-        "the desk cash-out leaves the leg unknown, so it will refuse "
-        "on every shared-identifier market")
+    # The public entry point is a thin try/except wrapper; the
+    # body lives in _execute_manual_sell.
+    src = inspect.getsource(le._execute_manual_sell)
+    assert "pmus.slug_bid, us_slug, True" not in src, (
+        "the desk path hardcodes long — a held SHORT would be priced "
+        "off the long bid")
+    assert "_pm_long_leg" in src, "the desk path never reads the side"
+    i, j = src.index("_pm_long_leg"), src.index("pmus.slug_bid")
+    assert i < j, "the side must be read before the bid is priced"
+
+
+def test_pm_held_still_returns_a_magnitude():
+    """The premise of the bug above. If _pm_held ever became signed,
+    the reasoning changes and these call sites need re-reading."""
+    import inspect
+
+    from sportsassets import live_executor as le
+
+    src = inspect.getsource(le._pm_held)
+    assert "abs(_amt(p.get(\"netPosition\")))" in src
+
+
+def test_pm_long_leg_reads_the_sign(monkeypatch):
+    from sportsassets import live_executor as le
+    from sportsassets.api import pmus_account
+
+    for net, want in ((25, True), (-25, False), (0, None)):
+        monkeypatch.setattr(pmus_account, "_fetch_all_positions_sync",
+                            lambda n=net: {"s": {"netPosition": n}})
+        assert asyncio.run(le._pm_long_leg("s")) is want
+
+
+def test_pm_long_leg_is_none_when_the_venue_is_unreadable(monkeypatch):
+    """Unreadable must not read as long."""
+    from sportsassets import live_executor as le
+    from sportsassets.api import pmus_account
+
+    def _boom():
+        raise RuntimeError("venue 503")
+
+    monkeypatch.setattr(pmus_account, "_fetch_all_positions_sync", _boom)
+    assert asyncio.run(le._pm_long_leg("s")) is None
+
+
+def test_mirror_exit_falls_back_to_the_venue_when_intent_is_missing():
+    """Otherwise the fix silently reproduces `no_bid` on exactly the
+    rows whose recorded history is thinnest."""
+    import inspect
+
+    from sportsassets import live_executor as le
+
+    src = inspect.getsource(le.mirror_exit)
+    i = src.index("pmus.slug_bid")
+    assert "_pm_long_leg" in src[:i], (
+        "mirror_exit gives up when intent is absent instead of asking "
+        "the account which side it holds")

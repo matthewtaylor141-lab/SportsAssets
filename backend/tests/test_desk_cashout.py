@@ -43,16 +43,23 @@ class _Pool:
 
 
 def _wire(monkeypatch, pool, held=(30, 0.40), bid=0.55,
-          venue="polymarket-us", fok=None):
+          venue="polymarket-us", fok=None, long_leg=True):
     async def fake_pool():
         return pool
 
     async def fake_held(_slug):
         return held
 
+    # The desk READS which leg it holds (2026-08-31): _pm_held returns
+    # a magnitude, so it cannot say. Stubbed here because the real one
+    # calls the venue.
+    async def fake_leg(_slug):
+        return long_leg
+
     monkeypatch.setattr(live_executor, "get_pool", fake_pool)
     monkeypatch.setattr(live_executor, "active_venue", lambda: venue)
     monkeypatch.setattr(live_executor, "_pm_held", fake_held)
+    monkeypatch.setattr(live_executor, "_pm_long_leg", fake_leg)
     monkeypatch.setattr(pmus, "slug_bid",
                         lambda _slug, long_leg=None: bid)
     monkeypatch.setattr(
@@ -149,3 +156,28 @@ def test_manual_order_kalshi_branch_reads_the_queue():
     assert 'venue: str = Query("polymarket")' in src
     # Terminal set for queue rows must include cancelled (desk cancel).
     assert '"cancelled"' in src
+
+
+def test_sell_refuses_when_the_held_leg_is_unreadable(monkeypatch):
+    """Both sides of these markets share one identifier, so an
+    unreadable side means the sell would be priced off a coin flip.
+    On a cheap long book the short leg is worth ~0.94 and the long bid
+    is ~0.05 — the wrong guess sells it for a nickel."""
+    _wire(monkeypatch, _Pool(), long_leg=None)
+    r = asyncio.run(live_executor.execute_manual_sell("atc-mlb-x"))
+    assert not r["ok"]
+    assert "which side" in r["error"]
+
+
+def test_a_held_short_is_priced_off_the_short_book(monkeypatch):
+    """The leg reaches slug_bid rather than being assumed."""
+    seen = {}
+
+    def _bid(slug, long_leg=None):
+        seen["leg"] = long_leg
+        return 0.55
+
+    _wire(monkeypatch, _Pool(), long_leg=False)
+    monkeypatch.setattr(pmus, "slug_bid", _bid)
+    asyncio.run(live_executor.execute_manual_sell("atc-mlb-x"))
+    assert seen["leg"] is False, "the desk sold a short as if it were long"

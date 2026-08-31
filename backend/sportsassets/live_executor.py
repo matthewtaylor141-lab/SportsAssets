@@ -1181,6 +1181,15 @@ async def mirror_exit(payload: dict) -> str:
                 _long_leg = True
             elif _oi == "ORDER_INTENT_BUY_SHORT":
                 _long_leg = False
+            else:
+                # No recorded intent (an older row, or a raw payload
+                # that never carried one). The ACCOUNT still knows
+                # which side it holds, and the sign of netPosition is
+                # the same fact — _exit_intent already falls back this
+                # way. Without this the fix would silently reproduce
+                # `no_bid` on exactly the rows whose history is
+                # thinnest.
+                _long_leg = await _pm_long_leg(us_slug)
             bid = await asyncio.to_thread(pmus.slug_bid, us_slug,
                                           _long_leg)
             if bid is None or not (0 < bid < 1):
@@ -3859,6 +3868,39 @@ async def _pm_held(us_slug: str) -> tuple[int, float | None]:
     return int(qty), (round(cost / qty, 4) if cost > 0 else None)
 
 
+async def _pm_long_leg(us_slug: str) -> bool | None:
+    """True if we are LONG this slug, False if SHORT, None unreadable.
+
+    WHY THIS EXISTS SEPARATELY FROM _pm_held (2026-08-31). _pm_held
+    takes abs(netPosition) — deliberately, because the MAGNITUDE is
+    what can be closed in either direction. That makes `held >= 1`
+    say nothing whatsoever about the side, and slug_bid now needs the
+    side: on this venue's two-sided markets both legs share ONE
+    identifier, so nothing else can select one.
+
+    I shipped `slug_bid(us_slug, True)` on the desk path reasoning
+    that a short reads negative so a positive held must be long. It
+    does not — the abs() above erases exactly that. Pricing a SHORT
+    off the long bid is the giveaway direction, not the safe one: with
+    the long book at 0.05/0.06 the short leg is worth 0.94, and a
+    bestBid floor would sell it for 0.05.
+
+    None on anything unreadable, and the caller refuses rather than
+    assuming a side."""
+    from .api.pmus_account import _amt, _fetch_all_positions_sync
+
+    try:
+        positions = await asyncio.wait_for(
+            asyncio.to_thread(_fetch_all_positions_sync), timeout=30)
+    except Exception:  # noqa: BLE001 — unreadable is not "long"
+        return None
+    p = (positions or {}).get(us_slug) or {}
+    net = _amt(p.get("netPosition"))
+    if not net:
+        return None
+    return net > 0
+
+
 async def execute_manual_sell(us_slug: str, qty: int | None = None,
                               min_price: float | None = None) -> dict:
     """Platform-side cash-out of a held Polymarket US position (owner
@@ -3898,10 +3940,14 @@ async def _execute_manual_sell(us_slug: str, qty: int | None,
         return {"ok": False,
                 "error": f"qty {qty} exceeds held {held} — selling more "
                          "than the position is refused"}
-    # The desk's leg is PROVABLE here rather than assumed: a short
-    # reads negative through _pm_held, and the guard above already
-    # returned on `held < 1`. So reaching this line means long.
-    bid = await asyncio.to_thread(pmus.slug_bid, us_slug, True)
+    # READ the leg; do not infer it from `held`. _pm_held returns the
+    # MAGNITUDE, so `held >= 1` is true of a short too.
+    _leg = await _pm_long_leg(us_slug)
+    if _leg is None:
+        return {"ok": False,
+                "error": "cannot read which side of this market is held "
+                         "— refusing rather than pricing the wrong leg"}
+    bid = await asyncio.to_thread(pmus.slug_bid, us_slug, _leg)
     if bid is None or not (0 < bid < 1):
         return {"ok": False, "error": "no live bid for this market"}
     limit = sell_limit_price(bid, min_price)
