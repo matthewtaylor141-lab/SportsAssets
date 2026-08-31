@@ -631,8 +631,8 @@ jobs:
                  | [$all[] | select((.error) | test("ask=unreadable"))] as $u
                  | [$all[] | select((.error) | test("SHADOW err="))] as $e
                  | if ($all | length) == 0
-                   then "  SHORTSHADOW n=0 — no shorts refused since the shadow shipped"
-                   else "  SHORTSHADOW n=\($all | length) quoted=\($rs | length) unreadable=\($u | length) errored=\($e | length) near1=\([$rs[] | select(. > 0.85 and . < 1.18)] | length) complement=\([$rs[] | select(. > 1.5 or . < 0.6)] | length)"
+                   then "  SHORTSHADOW-3D n=0 in the last 3 days (this read is ?days=3 — NOT all time; the all-time count is the SHORTSHADOW line below)"
+                   else "  SHORTSHADOW-3D n=\($all | length) quoted=\($rs | length) unreadable=\($u | length) errored=\($e | length) near1=\([$rs[] | select(. > 0.85 and . < 1.18)] | length) complement=\([$rs[] | select(. > 1.5 or . < 0.6)] | length)"
                    end' /tmp/mapa.json 2>/dev/null || true
 
           # ── venue-truth restatement status (owner emergency 2026-08-23:
