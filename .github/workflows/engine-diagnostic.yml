@@ -1426,6 +1426,18 @@ jobs:
           # coverage fix is read off the strings, not guessed.
           jq -r '.undiag_shapes // [] | .[] | "  USHAPE \(.n) (7d \(.n_7d)): \(.shape)"' \
              /tmp/unm.json 2>/dev/null | head -12 || true
+          # WHAT 'no_us_market' ACTUALLY CONTAINS (2026-08-31). That
+          # bucket is the ELSE branch of the reason CASE — every
+          # rejection string that is not one of the four named
+          # prefixes, plus NULLs. 23,888 rows have been read as a
+          # venue-coverage number; these lines name the members.
+          jq -r '.other_shapes // [] | .[] | "  OSHAPE \(.n) (7d \(.n_7d)): \(.shape)"' \
+             /tmp/unm.json 2>/dev/null | head -12 || true
+          # WHALE x LEAGUE, ranked by 7d. The per-whale and per-league
+          # splits were reported side by side with no join, so "rn1 is
+          # the tennis book" was an inference off matching totals.
+          jq -r '.by_whale_league // [] | .[] | "  WL \(.whale) x \(.league): n=\(.n) (7d \(.n_7d)) listed=\(.listed) 0ev=\(.unlisted_0ev) x404=\(.x404)"' \
+             /tmp/unm.json 2>/dev/null | head -16 || true
           jq -r '.no_slug // {} | "  NOSLUG rows=\(.rows // "?")  catalog_has_token=\(.catalog_has_token // "?")  token_unknown=\(.token_unknown // "?")"' \
              /tmp/unm.json 2>/dev/null || echo "  (endpoint not deployed yet)"
           jq -r '.by_reason // [] | .[] | "  RSN \(.reason): \(.n)"' \

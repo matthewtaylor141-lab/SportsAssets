@@ -6061,6 +6061,29 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
           {where_days}
         GROUP BY 1 ORDER BY 2 DESC LIMIT 12
         """, *args)
+    # WHAT IS ACTUALLY IN 'no_us_market' (2026-08-31). That bucket is
+    # the ELSE branch of the reason CASE, so it does not mean "the
+    # venue has no market" — it swallows every rejection string this
+    # codebase writes that is not one of the four named prefixes, and
+    # NULL errors with it. It is 23,888 rows and it has been quoted as
+    # a venue-coverage number. Naming its members is the difference
+    # between a finding and a label.
+    other_shapes = await pool.fetch(
+        f"""
+        SELECT left(COALESCE(lo.error, '(null)'), 60) AS shape,
+               count(*)::int AS n,
+               count(*) FILTER
+                   (WHERE lo.placed_at > now() - interval '7 days')::int
+                   AS n_7d
+        FROM live_orders lo
+        WHERE lo.status = 'rejected'
+          AND COALESCE(lo.error, '') NOT LIKE 'no-stack%'
+          AND COALESCE(lo.error, '') NOT LIKE 'never-add%'
+          AND COALESCE(lo.error, '') NOT LIKE 'one position per game%'
+          AND COALESCE(lo.error, '') NOT LIKE 'unmapped%'
+          {where_days}
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+        """, *args)
     by_reason: dict[str, int] = {}
     by_whale: dict[str, int] = {}
     # THE WINNABLE SPLIT, PER WHALE (owner order 2026-08-30: "we need to
@@ -6074,6 +6097,14 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
     # same query — this was already grouped by whale and only ever
     # summed to a flat count.
     by_whale_win: dict[str, dict] = {}
+    # WHALE x LEAGUE (2026-08-31). The roster is one book, and the
+    # per-whale split and the per-league split are reported side by
+    # side with no join between them. Run 33395797987 put rn1's 7d
+    # misses at 14,503 and tennis's at 14,008 — close enough that the
+    # obvious reading is "rn1 IS the tennis book", and a coincidence of
+    # totals is not evidence of that. The rows are already grouped by
+    # whale AND slug, so the cross costs one dict and no query.
+    by_wl: dict[tuple[str, str], dict] = {}
     by_league: dict[str, dict] = {}
     by_type: dict[str, int] = {}
     winnable = {"listed_mapper_fail": 0, "venue_unlisted": 0,
@@ -6113,6 +6144,15 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
         lg["n_7d"] += r["n_7d"]
         lg["types"][mtype] = lg["types"].get(mtype, 0) + n
         by_type[mtype] = by_type.get(mtype, 0) + n
+        wl = by_wl.setdefault((r["whale"], league),
+                              {"n": 0, "n_7d": 0, "listed": 0,
+                               "unlisted_0ev": 0, "x404": 0})
+        wl["n"] += n
+        wl["n_7d"] += r["n_7d"]
+        if r["reason"] == "unmapped":
+            wl["listed"] += r["n_listed"]
+            wl["unlisted_0ev"] += r["n_0ev"]
+            wl["x404"] += r["n_exact404"]
         if r["reason"] == "unmapped":
             winnable["listed_mapper_fail"] += r["n_listed"]
             winnable["venue_unlisted"] += r["n_0ev"]
@@ -6145,6 +6185,15 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
             wh["undiag_other"] += (
                 n - r["n_listed"] - r["n_0ev"] - r["n_later_ev"])
     leagues = sorted(by_league.items(), key=lambda kv: -kv[1]["n"])[:30]
+    # Ranked by RECENT volume, not lifetime: the cross exists to say
+    # which book is losing which league right now, and a lifetime sort
+    # puts frozen history at the top of a live question.
+    by_whale_league = [
+        {"whale": k[0], "league": k[1], "n": v["n"], "n_7d": v["n_7d"],
+         "listed": v["listed"], "unlisted_0ev": v["unlisted_0ev"],
+         "x404": v["x404"]}
+        for k, v in sorted(by_wl.items(),
+                           key=lambda kv: (-kv[1]["n_7d"], -kv[1]["n"]))[:40]]
     return {
         "totals": {"rows": total, "recent_7d": total_7d},
         "winnable": winnable,
@@ -6154,6 +6203,9 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
                     - noslug["catalog_has_token"]},
         "undiag_shapes": [{"shape": r["shape"], "n": r["n"],
                            "n_7d": r["n_7d"]} for r in undiag_shapes],
+        "other_shapes": [{"shape": r["shape"], "n": r["n"],
+                          "n_7d": r["n_7d"]} for r in other_shapes],
+        "by_whale_league": by_whale_league,
         "by_reason": [{"reason": k, "n": v}
                       for k, v in sorted(by_reason.items(),
                                          key=lambda kv: -kv[1])],

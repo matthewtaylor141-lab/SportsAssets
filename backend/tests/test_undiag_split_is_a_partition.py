@@ -34,15 +34,21 @@ class _Rec(dict):
 class _Pool:
     """Serves the three reads api_copy_unmapped makes, in order."""
 
-    def __init__(self, rows, shapes=()):
+    def __init__(self, rows, shapes=(), others=()):
         self.rows = rows
         self.shapes = list(shapes)
+        self.others = list(others)
         self.queries = []
 
     async def fetch(self, sql, *a):
         self.queries.append(sql)
-        # Dispatch on the shape query's own SELECT, never on a word
-        # that also appears in the main query's comments.
+        # Dispatch on each query's own SELECT, never on a word that
+        # also appears in another query's comments. The two shape
+        # queries differ by their COALESCE: the undiagnosed sample
+        # reads lo.error directly (those rows always have one), the
+        # catch-all sample must survive a NULL.
+        if "left(COALESCE(lo.error" in sql:
+            return self.others
         if "left(lo.error" in sql:
             return self.shapes
         return self.rows
@@ -62,8 +68,8 @@ def _row(**kw):
     return _Rec(base)
 
 
-def _call(rows, shapes=()):
-    pool = _Pool(rows, shapes)
+def _call(rows, shapes=(), others=()):
+    pool = _Pool(rows, shapes, others)
 
     async def _get_pool():
         return pool
@@ -204,6 +210,106 @@ def test_shape_query_is_capped():
         app_mod.get_pool = orig
     q = [q for q in pool.queries if "left(lo.error" in q][0]
     assert "LIMIT" in q.upper()
+
+
+# -------------------------------------------------- the catch-all bucket
+
+def test_other_shapes_are_surfaced():
+    """'no_us_market' is the ELSE branch of the reason CASE, so it does
+    not mean the venue has no market — it holds every rejection string
+    that is not one of the four named prefixes. 23,888 rows were being
+    read as a venue-coverage number."""
+    out = _call([_row(n=1)],
+                others=[_Rec(shape="no bid on the book", n=900, n_7d=90)])
+    assert out["other_shapes"] == [
+        {"shape": "no bid on the book", "n": 900, "n_7d": 90}]
+
+
+def test_the_catch_all_sample_survives_a_null_error():
+    """A NULL error falls into the ELSE branch too, so it is a member
+    of the bucket being described. Without COALESCE the row is invisible
+    in exactly the sample built to find invisible rows."""
+    pool = _Pool([_row(n=1)])
+
+    async def _get_pool():
+        return pool
+
+    orig = app_mod.get_pool
+    app_mod.get_pool = _get_pool
+    try:
+        asyncio.run(app_mod.api_copy_unmapped(days=0))
+    finally:
+        app_mod.get_pool = orig
+    q = [q for q in pool.queries if "left(COALESCE(lo.error" in q][0]
+    assert "'(null)'" in q, "a NULL error would vanish from the sample"
+    # ...and the WHERE clause must not drop NULLs either: in SQL,
+    # `NULL NOT LIKE 'x%'` is NULL, not true, so an unguarded filter
+    # silently excludes every NULL row.
+    assert q.count("COALESCE(lo.error, '') NOT LIKE") == 4, (
+        "each prefix exclusion needs its own COALESCE or NULL errors "
+        "are filtered out by three-valued logic")
+
+
+def test_the_catch_all_sample_excludes_the_four_named_reasons():
+    """If it re-included them it would describe the whole funnel and
+    say nothing about the bucket."""
+    pool = _Pool([_row(n=1)])
+
+    async def _get_pool():
+        return pool
+
+    orig = app_mod.get_pool
+    app_mod.get_pool = _get_pool
+    try:
+        asyncio.run(app_mod.api_copy_unmapped(days=0))
+    finally:
+        app_mod.get_pool = orig
+    q = [q for q in pool.queries if "left(COALESCE(lo.error" in q][0]
+    for prefix in ("no-stack%", "never-add%", "one position per game%",
+                   "unmapped%"):
+        assert prefix in q, f"{prefix} is not excluded"
+    assert "LIMIT" in q.upper()
+
+
+# ------------------------------------------------------ whale x league
+
+def test_whale_league_cross_exists_and_splits_by_both():
+    """The per-whale and per-league splits were reported side by side
+    with no join, so 'rn1 is the tennis book' was an inference off two
+    totals that happened to be close."""
+    out = _call([
+        _row(whale="rn1", slug="atp-a-b-2026-08-31", n=100, n_7d=90),
+        _row(whale="rn1", slug="mlb-nyy-bos-2026-08-31", n=40, n_7d=5),
+        _row(whale="hrh", slug="atp-c-d-2026-08-31", n=7, n_7d=7),
+    ])
+    cross = {(x["whale"], x["league"]): x for x in out["by_whale_league"]}
+    assert len(cross) == 3, "the cross collapsed two dimensions into one"
+    assert cross[("rn1", "atp")]["n"] == 100
+    assert cross[("rn1", "mlb")]["n"] == 40
+    assert cross[("hrh", "atp")]["n"] == 7
+
+
+def test_whale_league_cross_is_ranked_by_recent_not_lifetime():
+    """A lifetime sort puts frozen history at the top of a live
+    question — which is the mistake the undiagnosed residual already
+    caused once today."""
+    out = _call([
+        _row(whale="rn1", slug="atp-a-b-2026-08-31", n=99999, n_7d=1),
+        _row(whale="rn1", slug="itf-c-d-2026-08-31", n=10, n_7d=500),
+    ])
+    first = out["by_whale_league"][0]
+    assert first["league"] == "itf", (
+        "ranked by lifetime volume, so a dead league outranks a live one")
+
+
+def test_whale_league_attribution_respects_the_reason_guard():
+    """Same guard as every other winnable counter: a policy refusal is
+    not a mapping miss."""
+    out = _call([_row(whale="rn1", slug="atp-a-b-2026-08-31",
+                      reason="one_per_game", n=50, n_listed=50)])
+    row = out["by_whale_league"][0]
+    assert row["n"] == 50, "the row should still be COUNTED"
+    assert row["listed"] == 0, "but never attributed as winnable"
 
 
 # ------------------------------------------------------------- read-only
