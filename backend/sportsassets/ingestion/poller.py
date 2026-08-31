@@ -72,6 +72,18 @@ def priority_whales(whales: list[dict]) -> list[dict]:
             in (COPY_WHALES | CRYPTO_WHALES)]
 
 
+# Polls that came back with a FULL page, per whale. See poll_wallet:
+# /trades takes limit=100 and no cursor, so a full page means the
+# venue may hold older trades this poll could not see. Counting a
+# suspicion, not a loss.
+_PAGE_FULL: dict[str, int] = {}
+
+
+def page_full_counts() -> dict:
+    """Per-whale count of full-page polls, for the heartbeat."""
+    return dict(_PAGE_FULL)
+
+
 class Poller:
     def __init__(self) -> None:
         cfg = settings()
@@ -141,6 +153,33 @@ class Poller:
                 bad += 1
                 continue
             events.append(ev)
+        # A FULL PAGE MEANS WE MAY HAVE MISSED THE ONES BEHIND IT
+        # (2026-08-31). /trades is fetched with limit=100 and NO cursor:
+        # one page, newest first, never followed. So a whale who makes
+        # more than 100 trades between two polls of his wallet loses the
+        # overflow permanently — the next poll starts from the newest
+        # again and the older ones have fallen off the end.
+        #
+        # Sized before writing this, so it is not an alarm dressed as a
+        # finding: at poll_interval_seconds=5.0 the page holds 5s of
+        # flow, and overflow needs 20 trades/second. rn1 — the busiest
+        # book on the roster at a median 11,514 trades/day — averages
+        # 0.13/s. Headroom is roughly 150x and this has probably never
+        # fired.
+        #
+        # It is counted anyway because the failure is SILENT and
+        # unrecoverable: nothing anywhere would show a gap, the trades
+        # simply never exist, and every edge interval we publish would
+        # then rest on a denominator missing its busiest minutes. A
+        # full page is not proof of loss — exactly 100 could be exactly
+        # 100 — so this counts a SUSPICION, and the name says so.
+        if len(page) >= 100:
+            _PAGE_FULL[whale.get("username") or "?"] = (
+                _PAGE_FULL.get(whale.get("username") or "?", 0) + 1)
+            log.warning(
+                "POLLER page full (%d) for %s — the venue may hold "
+                "older trades this poll did not see; limit=100 has no "
+                "cursor", len(page), whale.get("username"))
         if page and bad == len(page):
             # the round-23 shape one level down: a LIST page whose
             # every element is unusable (nulls, junk dicts) is the
