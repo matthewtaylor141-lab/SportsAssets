@@ -1411,7 +1411,20 @@ jobs:
                  | "  WINWHALE \(.whale): missed=\(.n) (7d \(.n_7d)) "
                  + "OURS=\(.listed_mapper_fail) (7d \(.listed_mapper_fail_7d)) "
                  + "venue_gap=\(.venue_unlisted) undiag=\(.undiagnosed) "
+                 + "(later_ev=\(.later_ev // "?") other=\(.undiag_other // "?")) "
                  + "x404=\(.exact404)"' \
+             /tmp/unm.json 2>/dev/null | head -12 || true
+          # UNDIAGNOSED SPLIT (2026-08-31): 'undiagnosed' is a residual,
+          # and with a one-book roster it is the largest unattributed
+          # number in the funnel. later_ev = the search DID find events
+          # and we still failed to map it — ours to win, previously
+          # invisible. undiag_other = what is genuinely unexplained.
+          # The two must sum to undiagnosed.
+          jq -r '.winnable // {} | "  UNDIAG later_ev=\(.later_ev // "?") (7d \(.later_ev_7d // "?"))  other=\(.undiag_other // "?")  [sum must equal undiagnosed=\(.undiagnosed // "?")]"' \
+             /tmp/unm.json 2>/dev/null || true
+          # ...and what the unexplained half actually SAYS, so the next
+          # coverage fix is read off the strings, not guessed.
+          jq -r '.undiag_shapes // [] | .[] | "  USHAPE \(.n) (7d \(.n_7d)): \(.shape)"' \
              /tmp/unm.json 2>/dev/null | head -12 || true
           jq -r '.no_slug // {} | "  NOSLUG rows=\(.rows // "?")  catalog_has_token=\(.catalog_has_token // "?")  token_unknown=\(.token_unknown // "?")"' \
              /tmp/unm.json 2>/dev/null || echo "  (endpoint not deployed yet)"

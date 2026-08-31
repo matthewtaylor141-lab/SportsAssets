@@ -5996,7 +5996,27 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
                    AND lo.error NOT LIKE '%sides:[%'
                    AND lo.error !~ ':[1-9][0-9]*ev'
                    AND lo.placed_at > now() - interval '7 days')::int
-                   AS n_exact404_unlisted_7d
+                   AS n_exact404_unlisted_7d,
+               -- UNDIAGNOSED SHAPE SPLIT (2026-08-31). 'undiagnosed'
+               -- is a RESIDUAL — what is left after listed and 0ev —
+               -- and with the roster cut to one book it is the largest
+               -- unattributed number in the funnel (rn1: 23,005). The
+               -- comment above already concedes one shape inside it is
+               -- OURS: a diag whose LATER query found events (':<n>ev'
+               -- with no sides seen) is a mapper failure, not a venue
+               -- gap. It was described and then never counted, so all
+               -- of it read as unknown. Counting it says how much of
+               -- the residual is winnable. Beside the buckets above,
+               -- never inside them: the five winnable counters stay
+               -- byte-unchanged and this does not re-attribute a
+               -- single row.
+               count(*) FILTER (WHERE lo.error ~ ':[1-9][0-9]*ev'
+                   AND lo.error NOT LIKE '%sides:[%')::int
+                   AS n_later_ev,
+               count(*) FILTER (WHERE lo.error ~ ':[1-9][0-9]*ev'
+                   AND lo.error NOT LIKE '%sides:[%'
+                   AND lo.placed_at > now() - interval '7 days')::int
+                   AS n_later_ev_7d
         FROM live_orders lo
         LEFT JOIN trades t ON t.id = lo.trade_id
         WHERE lo.status = 'rejected' {where_days}
@@ -6020,6 +6040,27 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
           AND COALESCE(t.market_slug, t.event_slug, '') = ''
           {where_days}
         """, *args)
+    # WHAT THE UNEXPLAINED REMAINDER ACTUALLY SAYS. The counters above
+    # can size undiag_other; nothing can say what it IS. These are the
+    # distinct diag SHAPES (the mapper's leading text, before the
+    # per-market detail), so the next coverage fix gets chosen from the
+    # strings themselves rather than guessed at. Read-only, capped,
+    # and outside every attribution bucket.
+    undiag_shapes = await pool.fetch(
+        f"""
+        SELECT left(lo.error, 80) AS shape, count(*)::int AS n,
+               count(*) FILTER
+                   (WHERE lo.placed_at > now() - interval '7 days')::int
+                   AS n_7d
+        FROM live_orders lo
+        WHERE lo.status = 'rejected'
+          AND lo.error LIKE 'unmapped%'
+          AND lo.error NOT LIKE '%sides:[%'
+          AND lo.error NOT LIKE '%0ev%'
+          AND lo.error !~ ':[1-9][0-9]*ev'
+          {where_days}
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+        """, *args)
     by_reason: dict[str, int] = {}
     by_whale: dict[str, int] = {}
     # THE WINNABLE SPLIT, PER WHALE (owner order 2026-08-30: "we need to
@@ -6042,7 +6083,10 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
                 # 'venue_unlisted' rows carry an exact-lane 404 trail
                 # (candidate-grammar misses masquerading as gaps)
                 "exact404": 0, "exact404_unlisted": 0,
-                "exact404_7d": 0, "exact404_unlisted_7d": 0}
+                "exact404_7d": 0, "exact404_unlisted_7d": 0,
+                # the winnable slice OF the undiagnosed residual, and
+                # what is still genuinely unexplained after it
+                "later_ev": 0, "later_ev_7d": 0, "undiag_other": 0}
     total = 0
     total_7d = 0
     for r in rows:
@@ -6054,7 +6098,9 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
         wh = by_whale_win.setdefault(
             r["whale"], {"n": 0, "n_7d": 0, "listed_mapper_fail": 0,
                          "venue_unlisted": 0, "undiagnosed": 0,
-                         "listed_mapper_fail_7d": 0, "exact404": 0})
+                         "listed_mapper_fail_7d": 0, "exact404": 0,
+                         "later_ev": 0, "later_ev_7d": 0,
+                         "undiag_other": 0})
         wh["n"] += n
         wh["n_7d"] += r["n_7d"]
         slug = r["slug"] or ""
@@ -6078,6 +6124,10 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
             winnable["exact404_7d"] += r["n_exact404_7d"]
             winnable["exact404_unlisted_7d"] += \
                 r["n_exact404_unlisted_7d"]
+            winnable["later_ev"] += r["n_later_ev"]
+            winnable["later_ev_7d"] += r["n_later_ev_7d"]
+            winnable["undiag_other"] += (
+                n - r["n_listed"] - r["n_0ev"] - r["n_later_ev"])
             lg["listed"] += r["n_listed"]
             lg["unlisted_0ev"] += r["n_0ev"]
             lg["exact404"] += r["n_exact404"]
@@ -6090,6 +6140,10 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
             wh["undiagnosed"] += n - r["n_listed"] - r["n_0ev"]
             wh["listed_mapper_fail_7d"] += r["n_listed_7d"]
             wh["exact404"] += r["n_exact404"]
+            wh["later_ev"] += r["n_later_ev"]
+            wh["later_ev_7d"] += r["n_later_ev_7d"]
+            wh["undiag_other"] += (
+                n - r["n_listed"] - r["n_0ev"] - r["n_later_ev"])
     leagues = sorted(by_league.items(), key=lambda kv: -kv[1]["n"])[:30]
     return {
         "totals": {"rows": total, "recent_7d": total_7d},
@@ -6098,6 +6152,8 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
                     "catalog_has_token": noslug["catalog_has_token"],
                     "token_unknown": noslug["rows"]
                     - noslug["catalog_has_token"]},
+        "undiag_shapes": [{"shape": r["shape"], "n": r["n"],
+                           "n_7d": r["n_7d"]} for r in undiag_shapes],
         "by_reason": [{"reason": k, "n": v}
                       for k, v in sorted(by_reason.items(),
                                          key=lambda kv: -kv[1])],
@@ -6113,6 +6169,8 @@ async def api_copy_unmapped(days: int | None = None) -> dict:
              "listed_mapper_fail_7d": v["listed_mapper_fail_7d"],
              "venue_unlisted": v["venue_unlisted"],
              "undiagnosed": v["undiagnosed"],
+             "later_ev": v["later_ev"], "later_ev_7d": v["later_ev_7d"],
+             "undiag_other": v["undiag_other"],
              "exact404": v["exact404"]}
             for k, v in sorted(by_whale_win.items(),
                                key=lambda kv: -kv[1]["listed_mapper_fail"])],
