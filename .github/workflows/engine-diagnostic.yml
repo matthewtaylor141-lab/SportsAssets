@@ -872,6 +872,29 @@ jobs:
           jq -r '.by_day // [] | .[] | "  WRDAY \(.day) trades=\(.trades) distinct=\(.distinct_assets) new=\(.new_assets) playable=\(.dated_playable) notional=$\(.notional)"' \
              /tmp/wrate.json 2>/dev/null | head -15 || true
 
+          # COPYCENSUS — the pre-INSERT funnel, which has never existed.
+          #
+          # Every other funnel number here is computed FROM live_orders,
+          # so it can only see the funnel from the INSERT onward.
+          # maybe_execute has 22 returns BEFORE that INSERT and exactly
+          # one of them recorded anything (the edge gate, into
+          # _GATE_CENSUS, which nothing read). rn1 puts up a median
+          # 1,061 playable new positions a day and we place 54 — these
+          # lines are the only thing that can say where the other ~1,007
+          # are refused. Counted per reason AND per whale, because a
+          # roster-wide total cannot answer a question about one book.
+          jq -r '[.[]? | select(.service == "copy_sweep")] as $c
+                 | if ($c | length) == 0 then "  COPYCENSUS no heartbeat"
+                   elif (($c[0].detail.copy_census? // null) | type) != "object"
+                   then "  COPYCENSUS absent — worker predates the census"
+                   elif (($c[0].detail.copy_census | length) == 0)
+                   then "  COPYCENSUS empty — no copy refused since this worker booted"
+                   else ($c[0].detail.copy_census | to_entries
+                         | sort_by(-.value)[]
+                         | "  COPYCENSUS \(.key): \(.value)")
+                   end' /tmp/hb_we.json 2>/dev/null | head -30 \
+            || echo "  COPYCENSUS unreadable"
+
           # SWEEPQUEUE — is the per-pass cap rationing, or starving?
           #
           # `candidates` used to be counted AFTER the cap sliced the

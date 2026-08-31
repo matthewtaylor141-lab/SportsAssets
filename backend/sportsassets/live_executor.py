@@ -360,6 +360,49 @@ def _gate_census(reason: str) -> None:
     _GATE_CENSUS[key] = _GATE_CENSUS.get(key, 0) + 1
 
 
+# WHERE THE COPIES ACTUALLY GO (2026-08-31).
+#
+# Measured this session: rn1 puts up a median 1,061 playable new
+# positions a day and we place 54. The other ~1,007 are invisible,
+# because every funnel counter in this system reads live_orders — and
+# maybe_execute has TWENTY-TWO returns BEFORE the first
+# `INSERT INTO live_orders`. Exactly one of them (the 95% edge gate)
+# recorded anything, into _GATE_CENSUS, which nothing ever read.
+#
+# So "why are we only copying 5% of him" has never had an answerable
+# form. A rejected row can be counted; a copy refused before the row
+# exists leaves nothing behind at all, and the pre-mapping stock
+# counters people reach for instead (8,865 / 8,048 / 23,005) are
+# live_orders rows too — the same blind spot wearing a different name.
+#
+# Same stance as _exit_census and _gate_census: in-memory, per reason
+# and per whale, incapable of altering an order. A reader can see at a
+# glance that counting is all it does.
+_COPY_CENSUS: dict[str, int] = {}
+_COPY_CENSUS_MAX = 400
+
+
+def _copy_stop(reason: str, whale: str | None = None) -> None:
+    """Count a copy refused BEFORE any live_orders row exists.
+
+    Returns None so a bare `return` becomes `return _copy_stop(...)`
+    without changing control flow. The bound is there because the key
+    space includes the whale: an unbounded dict keyed on external data
+    is a slow leak, and this process runs for days.
+    """
+    w = (whale or "?").lower()[:40]
+    key = f"{reason}|{w}"
+    if key not in _COPY_CENSUS and len(_COPY_CENSUS) >= _COPY_CENSUS_MAX:
+        key = f"{reason}|(overflow)"
+    _COPY_CENSUS[key] = _COPY_CENSUS.get(key, 0) + 1
+    return None
+
+
+def copy_census_snapshot() -> dict:
+    """The census as a plain dict, newest counts, for the heartbeat."""
+    return dict(sorted(_COPY_CENSUS.items(), key=lambda kv: -kv[1]))
+
+
 def _exit_done(reason: str, **ctx) -> str:
     """Record why the exit path stopped, and RETURN THE REASON.
 
@@ -4545,7 +4588,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     """Called on every fresh detection (after the paper trade). All guards
     re-checked here; failure of any guard is a silent no-op or logged skip."""
     if COPY_MODE == "off":
-        return
+        return _copy_stop("mode_off")
     cfg = settings()
     # MASTER KILL SWITCH, AT THE COMMON GATE (leak-hunt round 3,
     # 2026-08-24): copy_probe_enabled was checked only in execute_copy,
@@ -4554,16 +4597,16 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     # an operator disabled copying. Every copy crosses this function;
     # the switch belongs here.
     if not cfg.copy_probe_enabled:
-        return
+        return _copy_stop("probe_disabled")
     # EMERGENCY HALT rides the same common gate as the master kill, for
     # the same reason: the reclaim path reaches maybe_execute directly.
     # Fail-closed by default — see COPY_HALT_REASON.
     if copy_halted():
         log.warning("LIVE refused: %s", COPY_HALT_REASON)
-        return
+        return _copy_stop("halted")
     venue = active_venue()
     if venue is None:
-        return
+        return _copy_stop("no_venue")
     # roster override refresh (owner order 2026-08-29): the DB-stored
     # verified set must beat a stale env before ANY entry gate below
     try:
@@ -4572,17 +4615,17 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         pass
     username = (payload.get("whale_username") or "").lower()
     if payload.get("side") != "BUY" or username not in cfg.source_whales():
-        return
+        return _copy_stop("not_buy_or_off_roster", username)
     # TRUEEDGE CUT (owner order 2026-08-24): a whale whose full detected
     # book is negative at his OWN prices is not copyable at any speed.
     # First of three independent blocks (this gate, the 0.00 clip, the
     # premap-live allowlist) — any one of them alone stops the dollars.
     if username in COPY_CUT_WHALES:
-        return
+        return _copy_stop("whale_cut", username)
     his_notional = float(payload.get("notional") or 0)
     his_price = float(payload.get("price") or 0)
     if his_notional <= 0 or not (0 < his_price < 1):
-        return
+        return _copy_stop("bad_price_or_notional", username)
 
     pool = await get_pool()
     # THE COMPLEMENT-BUY EXIT (2026-08-25, owner-confirmed against
@@ -4644,7 +4687,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             _exit_stop("tradelane_dropped_" + str(_mx),
                        whale=payload.get("whale_username"),
                        asset=_exit.get("asset"))
-        return
+        return _copy_stop("was_an_exit_pending", username)
     # OVERSPEND BREAKER (2026-08-25). Tripped by the post-fill detector
     # the first time the venue charges more than we authorized. Placed
     # at the first point `pool` exists, still ahead of sizing, pricing
@@ -4663,9 +4706,9 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     if _osh:
         log.warning("LIVE refused: overspend breaker tripped (%s)",
                     str(_osh)[:200])
-        return
+        return _copy_stop("exit_handled", username)
     if await _is_paused(pool):
-        return
+        return _copy_stop("sleeve_paused", username)
     # ── THE 95% GATE (owner requirement 2026-08-30) ─────────────────
     #
     # "at least 95% statistically proven profitable... always ensure
@@ -4693,7 +4736,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     if not _eg_ok:
         _gate_census(_eg_why)
         log.info("LIVE refused: %s not funded (%s)", username, _eg_why)
-        return
+        return _copy_stop("edge_gate", username)
     # Cell-level copy policy (owner directive 2026-08-06): each source
     # whale is copied ONLY in its statistically proven sport x market-type
     # x entry-band cells, derived from fill-level forensic data. Fails
@@ -4711,7 +4754,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     if not copy_allowed(username, payload.get("market_slug")
                         or payload.get("event_slug") or "",
                         price=payload.get("price")):
-        return
+        return _copy_stop("cell_gate", username)
     # Venue split (owner directive 2026-08-07: both venues firing near
     # evenly, when pricing makes sense): Kalshi holds FIRST CLAIM on a
     # deterministic half of fresh flow in the sports it lists. The
@@ -4735,7 +4778,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             and sport_of(payload.get("market_slug")
                          or payload.get("event_slug") or "")
             in KALSHI_FIRST_SPORTS):
-        return
+        return _copy_stop("deferred_to_kalshi", username)
     # Capital turnover (owner, 2026-08-04): fresh detections on games more
     # than ~a day out are DEFERRED — no audit row is written, so the 6h
     # sweep re-candidates them once the game is inside the window. A small
@@ -4750,7 +4793,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         try:
             y, mo, d = map(int, mdate.group(0).split("-"))
             if date(y, mo, d) > date.today() + timedelta(days=1):
-                return
+                return _copy_stop("game_too_far_out", username)
         except ValueError:
             pass
     # ONE copy per proposition, no matter how many times the source adds
@@ -4777,7 +4820,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         except Exception:  # noqa: BLE001
             taken = None
     if taken:
-        return
+        return _copy_stop("already_taken", username)
     # The rolling-loss breaker gates every copy BEFORE any row is
     # written: realized copy P&L (settled + cashed out, copies only)
     # over the last 24h at or past -$1500 pauses the sleeve. The
@@ -4797,7 +4840,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             "LOSS BREAKER: copy sleeve realized %.2f in 24h "
             "(threshold -%.0f) — copying paused until the window "
             "rolls off", lost_24h, PMUS_LOSS_BREAKER_USD)
-        return
+        return _copy_stop("loss_breaker", username)
     day_room, total_room = await _caps_room(pool)
     if COPY_MODE == "penny_trial":
         # In penny_trial the TRIAL knobs are the authority, not the config
@@ -4817,7 +4860,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     if day_room <= 0 or total_room <= 1:
         log.warning("live caps exhausted (day room %.2f, total room %.2f) — skipping",
                     day_room, total_room)
-        return
+        return _copy_stop("no_budget_room", username)
 
     if COPY_MODE == "penny_trial":
         import math
@@ -4833,7 +4876,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         limit = copy_limit_price(payload.get("whale_username"), his_price,
                                  fresh=reaction is not None)
         if limit <= 0:
-            return
+            return _copy_stop("no_limit_price", username)
         per = await volume_normalized_clip(
             pool, payload.get("whale_username"),
             payload.get("market_slug") or payload.get("event_slug") or "")
@@ -4924,14 +4967,14 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             per = _sized
         shares = float(int(per / limit))
         if shares < 1:
-            return
+            return _copy_stop("under_one_share", username)
         usd = round(shares * limit, 2)
         # Dust floor: at a mirror ratio his small probes size to a few
         # dollars, where spread and fees eat the edge.
         if usd < COPY_MIN_CLIP_USD:
-            return
+            return _copy_stop("below_min_clip", username)
         if usd > day_room:
-            return
+            return _copy_stop("over_day_room", username)
     else:
         limit, usd, shares = plan_order(
             his_price, his_notional, cfg.live_copy_ratio,
@@ -4945,7 +4988,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         # actually commits to. Tightening only — it can never enlarge
         # an order.
         if usd < COPY_MIN_CLIP_USD or shares <= 0:
-            return
+            return _copy_stop("below_min_clip_final", username)
 
     try:
         row_id = await pool.fetchval(

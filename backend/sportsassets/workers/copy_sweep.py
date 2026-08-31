@@ -336,7 +336,8 @@ async def sweep_once() -> dict:
     # cap either way, which makes it the first number to look at before
     # touching any timeout.
     from ..live_executor import (_COPY_CONCURRENCY, _QUEUE_STATS,
-                                 exit_census, exit_census_lines)
+                                 exit_census, exit_census_lines,
+                                 copy_census_snapshot)
 
     # EXIT CENSUS rides this heartbeat for the same reason queue wait
     # does: every worker loop — poller, copy_sweep, whale_exits — runs
@@ -361,6 +362,16 @@ async def sweep_once() -> dict:
             # codebase has shipped that confusion before.
             "reaped_exiting": _reaped_exiting,
             "exit_census": _cen["counts"],
+            # WHERE THE COPIES GO BEFORE ANY ROW EXISTS (2026-08-31).
+            # maybe_execute has 22 returns ahead of its first
+            # INSERT INTO live_orders, and until now exactly one of
+            # them recorded anything — into _GATE_CENSUS, which
+            # nothing read. Every funnel number this system quotes is
+            # computed FROM live_orders, so a copy refused before the
+            # row exists has been invisible by construction. rn1 puts
+            # up 1,061 playable positions a day and we place 54; this
+            # is the only counter that can say where the rest went.
+            "copy_census": copy_census_snapshot(),
             "exit_recent": exit_census_lines(),
             "copy_queue": {
                 "n": _n, "concurrency": _COPY_CONCURRENCY,
