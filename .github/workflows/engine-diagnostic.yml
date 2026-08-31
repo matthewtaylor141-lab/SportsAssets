@@ -49,7 +49,17 @@ jobs:
     # 10 -> 20 (2026-08-18): the weekly-report blob endpoints grew to
     # ~7.5 min combined and were pushing the probe step past the job
     # timeout, cancelling it mid-log four runs in a row.
-    timeout-minutes: 20
+    #
+    # 20 -> 32 (2026-08-31): it happened again, on runs 1408 and 1409,
+    # cancelling "Probe the live engine" at 20:07 both times. Removing
+    # the whole-book read I had added bought back only seconds, so the
+    # step is simply at budget on its own — the endpoints it walks have
+    # kept growing. A cancelled probe still prints its early lines,
+    # which is why this hid: BRK and EXITCENSUS survive and the TAIL
+    # dies, so the log looks healthy exactly where it is read most.
+    # Give it real headroom rather than trimming instrumentation that
+    # is doing its job.
+    timeout-minutes: 32
     steps:
       # The journal publisher (ops/publish_journal.py) runs from the
       # repo — without a checkout the probe job has no files at all
@@ -2052,76 +2062,113 @@ jobs:
           echo "###########################################################"
           echo "#   BIDGT: slug_bid returns None on every shared-id market #"
           echo "###########################################################"
-          # WHY THIS EXISTS. pmus.slug_bid looks for a MARKET-level
-          # bestBid/best_bid/bid and, failing that, mirrors the OTHER
-          # side's price through $1. On this venue both sides of a market
-          # share one identifier, so that fallback finds no "other" side
-          # and the function returns None unconditionally. Every partial
-          # exit is gated on it: mx_no_bid_for_partial refused 51 exits.
+          # ROUND 1 (run 1409) answered the SCHEMA and left the money
+          # question open, so round 2 asks the money question directly.
           #
-          # The fix is NOT obvious and must not be guessed. Selecting a
-          # side by identifier picks a coin-flip leg on exactly this
-          # family, and a wrong leg sets an IOC sell FLOOR at the
-          # complement's price — up to a ~75% giveaway on our own
-          # position. So before touching a selling path: print what the
-          # venue really returns, at market level and per side, and
-          # whether markets.bbo exists and in what shape.
+          # SETTLED by round 1: side objects carry NO bid — their keys
+          # are identifier, long, price, team, tradable plus
+          # housekeeping, nothing else. Both sides share ONE identifier,
+          # so slug_bid's `next(s for s in sides if s.identifier !=
+          # us_slug)` fallback is dead on arrival and the function
+          # returns None on the whole family. markets.bbo and
+          # markets.book DO exist, with bestBid/bestAsk nested as
+          # {"value": ...} under marketData.
+          #
+          # STILL OPEN, and the reason no fix has shipped: bbo is keyed
+          # by marketSlug with NO side dimension. On a two-sided market
+          # sharing one identifier, is bestBid the bid for the LONG side
+          # or the short one? Guess wrong and mirror_exit sets an IOC
+          # sell FLOOR at the complement's price — accepting roughly 75%
+          # below fair value on our own position. That is a worse
+          # failure than the refusals it would fix.
+          #
+          # Round 1 could not answer it because every market it sampled
+          # was MARKET_STATE_EXPIRED with null bids. So walk until we
+          # find LIVE books, and print the attribution as a STATEMENT
+          # rather than leaving three raw numbers to be interpreted
+          # later: if bid <= long_price <= ask, bbo describes the long
+          # side; if not, it does not.
           python - <<'PY'
           import json
           from polymarket_us import PolymarketUS
 
           pub = PolymarketUS()
-          resp = pub.events.list({"limit": 6, "offset": 0, "active": True})
-          evs = list((resp.get("events") if isinstance(resp, dict)
-                      else resp) or [])
-          shown = 0
-          for ev in evs:
-              ev_slug = ev.get("slug") or ev.get("eventSlug")
-              try:
-                  mresp = pub.markets.list({"eventSlug": [ev_slug],
-                                            "active": True})
-              except Exception as e:
-                  print(f"BIDGT markets.list ERR {type(e).__name__}")
-                  continue
-              ms = list((mresp.get("markets") if isinstance(mresp, dict)
-                         else mresp) or [])
-              for m in ms:
-                  if shown >= 3:
-                      break
-                  slug = m.get("slug") or m.get("identifier")
-                  mk = sorted(m.keys())
-                  print(f"BIDGT market slug={slug!r}")
-                  print(f"BIDGT   market-level keys={mk}")
-                  for k in ("bestBid", "best_bid", "bid", "bestAsk",
-                            "price", "lastPrice"):
-                      if k in m:
-                          print(f"BIDGT   market.{k} = {m.get(k)!r}")
-                  sides = [s for s in (m.get("marketSides") or [])
-                           if isinstance(s, dict)]
-                  print(f"BIDGT   {len(sides)} side(s)")
-                  for s in sides:
-                      print(f"BIDGT   side keys={sorted(s.keys())}")
-                      print("BIDGT   side identifier="
-                            f"{s.get('identifier')!r} long={s.get('long')!r}"
-                            f" price={s.get('price')!r}"
-                            f" bestBid={s.get('bestBid')!r}"
-                            f" bestAsk={s.get('bestAsk')!r}")
-                  # Does a real book endpoint exist, and what shape?
-                  for meth in ("bbo", "orderbook", "book"):
-                      fn = getattr(pub.markets, meth, None)
-                      if fn is None:
-                          continue
-                      try:
-                          b = fn(slug)
-                          print(f"BIDGT   markets.{meth}({slug!r}) -> "
-                                f"{json.dumps(b, default=str)[:400]}")
-                      except Exception as e:
-                          print(f"BIDGT   markets.{meth} ERR "
-                                f"{type(e).__name__}: {str(e)[:160]}")
-                  shown += 1
+          shown, scanned = 0, 0
+          for off in range(0, 240, 20):
               if shown >= 3:
                   break
-          print(f"BIDGT done ({shown} markets inspected)")
+              try:
+                  resp = pub.events.list({"limit": 20, "offset": off,
+                                          "active": True})
+              except Exception as e:
+                  print(f"BIDGT events.list ERR {type(e).__name__}")
+                  break
+              evs = list((resp.get("events") if isinstance(resp, dict)
+                          else resp) or [])
+              if not evs:
+                  break
+              for ev in evs:
+                  if shown >= 3:
+                      break
+                  ev_slug = ev.get("slug") or ev.get("eventSlug")
+                  try:
+                      mresp = pub.markets.list({"eventSlug": [ev_slug],
+                                                "active": True})
+                  except Exception:
+                      continue
+                  ms = list((mresp.get("markets")
+                             if isinstance(mresp, dict) else mresp) or [])
+                  for m in ms:
+                      if shown >= 3:
+                          break
+                      slug = m.get("slug") or m.get("identifier")
+                      scanned += 1
+                      try:
+                          bbo = pub.markets.bbo(slug)
+                      except Exception:
+                          continue
+                      md = (bbo or {}).get("marketData") or {}
+                      bb, ba = md.get("bestBid"), md.get("bestAsk")
+                      if bb is None and ba is None:
+                          continue      # expired/empty — cannot answer
+                      print(f"BIDGT LIVE slug={slug!r} state={md.get('state')!r}")
+                      print(f"BIDGT   bestBid={json.dumps(bb, default=str)}"
+                            f" bestAsk={json.dumps(ba, default=str)}")
+                      print(f"BIDGT   bidDepth={md.get('bidDepth')!r}"
+                            f" askDepth={md.get('askDepth')!r}")
+                      print("BIDGT   outcomes="
+                            f"{json.dumps(m.get('outcomes'), default=str)[:140]}"
+                            " outcomePrices="
+                            f"{json.dumps(m.get('outcomePrices'), default=str)[:140]}")
+                      for s in (m.get("marketSides") or []):
+                          if isinstance(s, dict):
+                              print(f"BIDGT   side long={s.get('long')!r}"
+                                    f" price={s.get('price')!r}"
+                                    f" tradable={s.get('tradable')!r}")
+                      try:
+                          bkd = ((pub.markets.book(slug) or {})
+                                 .get("marketData") or {})
+                          print("BIDGT   book bids[:2]="
+                                f"{json.dumps((bkd.get('bids') or [])[:2], default=str)}")
+                          print("BIDGT   book offers[:2]="
+                                f"{json.dumps((bkd.get('offers') or [])[:2], default=str)}")
+                      except Exception as e:
+                          print(f"BIDGT   book ERR {type(e).__name__}")
+                      try:
+                          _b = float((bb or {}).get("value"))
+                          _a = float((ba or {}).get("value"))
+                          _lp = next(float(s.get("price"))
+                                     for s in (m.get("marketSides") or [])
+                                     if isinstance(s, dict) and s.get("long"))
+                          _in = _b <= _lp <= _a
+                          print(f"BIDGT   ATTRIB long_price={_lp} vs "
+                                f"[{_b},{_a}] -> "
+                                + ("bbo IS the long side" if _in
+                                   else "bbo is NOT the long side"))
+                      except Exception as e:
+                          print(f"BIDGT   ATTRIB undecidable ({type(e).__name__})")
+                      shown += 1
+          print(f"BIDGT done ({shown} live of {scanned} scanned)")
           PY
 
       - name: Premap ground truth (the sweep's exact reads, via public SDK)
