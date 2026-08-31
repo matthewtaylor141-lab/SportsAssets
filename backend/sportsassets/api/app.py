@@ -6641,6 +6641,114 @@ async def api_premap_live_set(action: str) -> dict:
     return {"ok": True, "premap_live": action == "on"}
 
 
+@app.get("/api/admin/short-shadow", dependencies=[Depends(require_admin)])
+async def api_short_shadow(limit: int = 6) -> dict:
+    """Count the evidence the BUY_SHORT ban was built to produce.
+
+    The ban shipped 2026-08-24 after six of six BUY_SHORT fills landed
+    on the opposite side at the complement price. It was deliberately
+    written to be TEMPORARY, and live_executor says how it ends:
+
+        "That converts every refusal into evidence. By morning the
+         question 'would the ask guard alone have caught these?' is
+         answered by counting rows, not arguing — if the shadow asks
+         sit near his price, the ask guard (1.08) and the side band
+         (0.15) are the real fix and the ban is redundant; if they sit
+         at the complement, the ban stays and we know why."
+
+    Seven mornings have passed and nothing ever counted the rows. Each
+    refusal records ` | SHADOW ask=A his=H ratio=R gap=G` — the
+    intent-aware ask for the leg we WOULD have bought, beside the price
+    the whale paid. This parses them.
+
+    HOW TO READ IT. ratio ~= 1.0 means the venue quoted OUR side at his
+    price, so the fill would have been correct and the ask guard alone
+    would have sufficed. A ratio at the complement — (1-p)/p, far from
+    1 in either direction — means the venue really was handing us the
+    other leg, and the ban is load-bearing.
+
+    THIS ENDPOINT CANNOT LIFT ANYTHING. It is a read. Reopening a money
+    gate on a class that was 6-for-6 wrong is the owner's call, and the
+    point of counting is to put a number in front of that call instead
+    of an argument."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        # RAW string: the regexes carry backslash-dot, and in a plain
+        # literal Python reads that as an unknown escape (a warning
+        # today, an error later) while SQL still needs the backslash.
+        r"""
+        WITH s AS (
+            SELECT lo.placed_at,
+                   NULLIF(substring(lo.error from 'ratio=([0-9]+\.[0-9]+)'),
+                          '')::float8 AS ratio,
+                   NULLIF(substring(lo.error from 'gap=([0-9]+\.[0-9]+)'),
+                          '')::float8 AS gap,
+                   lo.error
+            FROM live_orders lo
+            WHERE lo.status = 'rejected'
+              AND lo.error LIKE 'short-branch-refused%'
+        )
+        SELECT count(*)::int AS n,
+               count(*) FILTER (
+                   WHERE placed_at > now() - interval '7 days')::int
+                   AS n_7d,
+               count(ratio)::int AS n_scored,
+               count(*) FILTER (WHERE error LIKE '%ask=unreadable%')::int
+                   AS n_unreadable,
+               count(*) FILTER (WHERE error LIKE '%SHADOW err=%')::int
+                   AS n_errored,
+               -- the verdict buckets: our side at his price, or the
+               -- complement
+               count(*) FILTER (WHERE ratio >= 0.9 AND ratio <= 1.1)::int
+                   AS near_his,
+               count(*) FILTER (WHERE ratio < 0.9)::int AS below,
+               count(*) FILTER (WHERE ratio > 1.1)::int AS above,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY ratio)::float8
+                   AS ratio_p50,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY gap)::float8
+                   AS gap_p50
+        FROM s
+        """)
+    samples = await pool.fetch(
+        """
+        SELECT left(lo.error, 220) AS error, lo.placed_at
+        FROM live_orders lo
+        WHERE lo.status = 'rejected'
+          AND lo.error LIKE 'short-branch-refused%'
+          AND lo.error LIKE '%ratio=%'
+        ORDER BY lo.placed_at DESC
+        LIMIT $1
+        """, max(1, min(int(limit), 20)))
+    out = {k: row[k] for k in row.keys()} if row else {}
+    out["samples"] = [{"error": r["error"],
+                       "at": r["placed_at"].isoformat()
+                       if r["placed_at"] else None}
+                      for r in samples]
+    # Say what the numbers mean, in the endpoint, so the reading is not
+    # reinvented (differently) by whoever looks next.
+    n_scored = out.get("n_scored") or 0
+    if n_scored == 0:
+        out["reading"] = ("NO SCORED EVIDENCE — no refusal carries a "
+                          "parseable shadow ask, so this cannot answer "
+                          "the question either way")
+    else:
+        frac = (out.get("near_his") or 0) / n_scored
+        out["near_his_frac"] = round(frac, 4)
+        out["reading"] = (
+            "shadow ask sits at OUR side's price on "
+            f"{frac:.1%} of scored refusals — the ask guard would have "
+            "seen what the ban is stopping"
+            if frac >= 0.9 else
+            "shadow ask sits AWAY from his price on "
+            f"{1 - frac:.1%} of scored refusals — consistent with the "
+            "venue handing us the other leg; the ban is load-bearing"
+            if frac <= 0.1 else
+            f"MIXED: {frac:.1%} near his price. Neither reading is "
+            "clean, and a money gate should not be reopened on a "
+            "mixed result")
+    return out
+
+
 @app.get("/api/admin/bid-truth", dependencies=[Depends(require_admin)])
 async def api_bid_truth(limit: int = 4, slug: str = "",
                         whale: str = "") -> dict:

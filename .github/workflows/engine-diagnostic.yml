@@ -1439,6 +1439,23 @@ jobs:
           # the tennis book" was an inference off matching totals.
           jq -r '.by_whale_league // [] | .[] | "  WL \(.whale) x \(.league): n=\(.n) (7d \(.n_7d)) listed=\(.listed) 0ev=\(.unlisted_0ev) x404=\(.x404)"' \
              /tmp/unm.json 2>/dev/null | head -16 || true
+          # SHORTSHADOW — the evidence the BUY_SHORT ban was built to
+          # produce. It shipped 2026-08-24 as an explicitly temporary
+          # measure whose exit condition is "count the rows", and seven
+          # days later nothing had counted them. rn1's whole open book
+          # is BUY_SHORT, so this class is not a corner case for the
+          # current roster — it is the roster.
+          curl -sS --max-time 60 -o /tmp/shsh.json \
+            -H "X-Admin-Token: $ADMIN_TOKEN" \
+            "$BASE/api/admin/short-shadow?limit=6" || true
+          jq -r '"  SHORTSHADOW n=\(.n // "?") (7d \(.n_7d // "?"))  scored=\(.n_scored // "?")  unreadable=\(.n_unreadable // "?") errored=\(.n_errored // "?")"' \
+             /tmp/shsh.json 2>/dev/null || echo "  SHORTSHADOW unavailable"
+          jq -r '"  SHORTSHADOW near_his=\(.near_his // "?") below=\(.below // "?") above=\(.above // "?")  ratio_p50=\(.ratio_p50 // "?")  gap_p50=\(.gap_p50 // "?")"' \
+             /tmp/shsh.json 2>/dev/null || true
+          jq -r '"  SHORTSHADOW READING: \(.reading // "?")"' \
+             /tmp/shsh.json 2>/dev/null || true
+          jq -r '.samples // [] | .[] | "  SHORTSAMPLE \(.at): \(.error)"' \
+             /tmp/shsh.json 2>/dev/null | head -6 || true
           jq -r '.no_slug // {} | "  NOSLUG rows=\(.rows // "?")  catalog_has_token=\(.catalog_has_token // "?")  token_unknown=\(.token_unknown // "?")"' \
              /tmp/unm.json 2>/dev/null || echo "  (endpoint not deployed yet)"
           jq -r '.by_reason // [] | .[] | "  RSN \(.reason): \(.n)"' \
