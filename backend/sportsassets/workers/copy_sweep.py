@@ -23,6 +23,7 @@ Mechanics and why they're safe:
 """
 
 import asyncio
+import datetime as _dt
 import logging
 import os
 
@@ -191,8 +192,53 @@ async def sweep_once() -> dict:
         return m.group(0) if m else "0000-00-00"
 
     rows = sorted(rows, key=_game_date)
+    # WHAT THE QUEUE IS MADE OF, BEFORE THE CAP TAKES A SLICE OF IT
+    # (2026-08-31). Two separate things hid the backlog:
+    #
+    #   * `candidates` was computed AFTER the truncation below, so it
+    #     could never exceed MAX_ROWS_PER_SWEEP. However deep the pool
+    #     got, the heartbeat reported a bounded, healthy-looking 150.
+    #     `deferred_to_next_pass` was the honest number, and nothing
+    #     has ever printed it.
+    #
+    #   * the sort is ASCENDING on a date string that falls back to
+    #     "0000-00-00" when the slug carries no date, and the WHERE
+    #     clause bounds the date only from ABOVE (<= tomorrow). So
+    #     undated rows sort first, then the OLDEST games — including
+    #     ones already played — while the comment above says "nearest
+    #     game first ... settle soonest". Rejected rows are
+    #     deliberately retryable and never stop being candidates, so a
+    #     row that cannot map can hold a slot on every pass forever.
+    #
+    # Whether that starves today's flow is a question about numbers,
+    # so this counts it instead of arguing it.
+    _total_candidates = len(rows)
+    _today = _dt.date.today()
+    _tomorrow = _today + _dt.timedelta(days=1)
+
+    def _bucket(seq):
+        u = past = cur = fut = 0
+        for _r in seq:
+            d = _game_date(_r)
+            try:
+                gd = _dt.date.fromisoformat(d) if d != "0000-00-00" else None
+            except ValueError:
+                gd = None
+            if gd is None:
+                u += 1
+            elif gd < _today:
+                past += 1
+            elif gd <= _tomorrow:
+                cur += 1
+            else:
+                fut += 1
+        return {"undated": u, "past": past, "today_tomorrow": cur,
+                "future": fut}
+
+    _pool_mix = _bucket(rows)
     deferred = max(0, len(rows) - MAX_ROWS_PER_SWEEP)
     rows = rows[:MAX_ROWS_PER_SWEEP]
+    _head_mix = _bucket(rows)
     attempted = 0
     for r in rows:
         payload = {
@@ -255,8 +301,14 @@ async def sweep_once() -> dict:
     _cen = exit_census()
 
     _n = _QUEUE_STATS["n"] or 0
-    return {"candidates": len(rows), "attempted": attempted,
+    return {"candidates": _total_candidates, "attempted": attempted,
+            "processed": len(rows),
             "deferred_to_next_pass": deferred,
+            # The pool's composition beside the slice the cap let
+            # through. If the head is undated/past while the pool holds
+            # today's games, the cap is not rationing — it is starving
+            # the flow that still has edge.
+            "pool_mix": _pool_mix, "head_mix": _head_mix,
             # Always present, never conditionally added: an absent key
             # and a zero key look identical to a reader, and this
             # codebase has shipped that confusion before.

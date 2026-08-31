@@ -857,6 +857,30 @@ jobs:
                    end' \
             /tmp/hb_we.json 2>/dev/null || echo "  COPYQUEUE unreadable"
 
+          # SWEEPQUEUE — is the per-pass cap rationing, or starving?
+          #
+          # `candidates` used to be counted AFTER the cap sliced the
+          # list, so it could never exceed COPY_SWEEP_MAX_ROWS and the
+          # backlog was invisible by construction.
+          # `deferred_to_next_pass` was the honest number and nothing
+          # ever printed it. Both are here now, with the composition of
+          # the pool beside the composition of the slice actually
+          # attempted. The sort is ascending on a date that defaults to
+          # "0000-00-00", so if head is undated/past while the pool
+          # holds today's games, the cap is starving the flow that has
+          # edge rather than rationing it.
+          jq -r '[.[]? | select(.service == "copy_sweep")] as $c
+                 | if ($c | length) == 0 then "  SWEEPQUEUE no heartbeat"
+                   else ($c[0].detail // {}) as $d
+                     | "  SWEEPQUEUE candidates=\($d.candidates // "?") processed=\($d.processed // "?") attempted=\($d.attempted // "?") deferred=\($d.deferred_to_next_pass // "?")"
+                   end' /tmp/hb_we.json 2>/dev/null || echo "  SWEEPQUEUE unreadable"
+          jq -r '[.[]? | select(.service == "copy_sweep")] as $c
+                 | if ($c | length) == 0 then empty
+                   else ($c[0].detail // {}) as $d
+                     | "  SWEEPMIX pool=\($d.pool_mix // {} | tostring)",
+                       "  SWEEPMIX head=\($d.head_mix // {} | tostring)"
+                   end' /tmp/hb_we.json 2>/dev/null || true
+
           # EXITCENSUS — why the exit path did or did not act.
           #
           # "mirror_exit has never placed an order" is not a finding,
