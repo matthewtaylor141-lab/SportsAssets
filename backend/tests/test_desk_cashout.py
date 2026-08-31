@@ -53,7 +53,8 @@ def _wire(monkeypatch, pool, held=(30, 0.40), bid=0.55,
     monkeypatch.setattr(live_executor, "get_pool", fake_pool)
     monkeypatch.setattr(live_executor, "active_venue", lambda: venue)
     monkeypatch.setattr(live_executor, "_pm_held", fake_held)
-    monkeypatch.setattr(pmus, "slug_bid", lambda _slug: bid)
+    monkeypatch.setattr(pmus, "slug_bid",
+                        lambda _slug, long_leg=None: bid)
     monkeypatch.setattr(
         pmus, "submit_fok",
         fok or (lambda slug, limit, qty, sell, tif: {

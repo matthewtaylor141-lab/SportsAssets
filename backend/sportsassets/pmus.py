@@ -558,38 +558,108 @@ def slug_complement(us_slug: str) -> str | None:
     return str(other["identifier"])
 
 
-def slug_bid(us_slug: str) -> float | None:
+def _quote_px(m: dict, *keys: str) -> float | None:
+    """One venue quote as a float, whatever shape it arrives in.
+
+    The venue publishes these as `{"value": "0.7800", "currency": "USD"}`,
+    not as bare numbers. `float(dict)` raises TypeError, so a loop that
+    swallowed the exception and moved on read the market as HAVING NO
+    BID while the bid sat right there in the payload. That is the first
+    of the two reasons slug_bid returned None on every shared-identifier
+    market."""
+    for k in keys:
+        v = m.get(k)
+        if isinstance(v, dict):
+            v = v.get("value")
+        if v is None:
+            continue
+        try:
+            px = float(v)
+        except (TypeError, ValueError):
+            continue
+        if 0 < px < 1:
+            return px
+    return None
+
+
+def slug_bid(us_slug: str, long_leg: bool | None = None) -> float | None:
     """Live best BID for one orderable US slug (desk cash-out, owner
-    directive 2026-08-22). Explicit bid fields first; on a two-sided
-    market with no bid field the sibling side's quoted price mirrors
-    through $1 (a resting YES bid IS a NO ask). None when the venue has
-    no readable bid — the caller refuses, never guesses."""
+    directive 2026-08-22). None when the venue has no readable bid —
+    the caller refuses, never guesses.
+
+    WHICH LEG ARE WE SELLING (2026-08-31, run 33395797987). On this
+    venue's tennis family BOTH sides carry the SAME identifier, so
+    `identifier != us_slug` matched neither and the sibling fallback
+    returned None on every one of them. That is why the exit funnel
+    read `no_bid 42` and `exits_sold: 0`.
+
+    The quote shape was settled by that run, five live markets, exact
+    to the cent on all five:
+
+        long.price  == bestAsk        (5/5)
+        short.price == 1 - bestBid    (5/5)
+
+    So BOTH `side.price` fields are ASKS, and the book resolves:
+
+        sell a LONG  leg -> bestBid
+        sell a SHORT leg -> 1 - bestAsk
+
+    `long_leg` is that side, and on a shared-identifier market it is
+    NOT optional: the slug alone cannot say which leg we hold. Passing
+    None there returns None rather than a guess. Getting it backwards
+    is not a small error — on aec-wta-emmnav-loiboi the long bid is
+    0.95 and the short leg is worth 0.05, so a short priced off bestBid
+    is a sell floor nineteen times the asset's value. (That direction
+    merely fails to fill; the reverse hands the book ~90c on the
+    dollar. Both are refused here rather than one being tolerated.)
+    """
     client = _get_client()
     try:
         m = (client.markets.retrieve_by_slug(us_slug) or {}).get(
             "market") or {}
     except Exception:  # noqa: BLE001 — 404s are an answer
         return None
-    for k in ("bestBid", "best_bid", "bid"):
-        try:
-            v = m.get(k)
-            if v is not None:
-                px = float(v)
-                if 0 < px < 1:
-                    return px
-        except (TypeError, ValueError):
-            continue
+    md = m.get("marketData") if isinstance(m.get("marketData"), dict) else {}
+    bbo = m.get("bbo") if isinstance(m.get("bbo"), dict) else {}
+    best_bid = (_quote_px(m, "bestBid", "best_bid", "bid")
+                or _quote_px(md, "bestBid", "best_bid", "bid")
+                or _quote_px(bbo, "bestBid", "best_bid", "bid"))
+    best_ask = (_quote_px(m, "bestAsk", "best_ask", "ask")
+                or _quote_px(md, "bestAsk", "best_ask", "ask")
+                or _quote_px(bbo, "bestAsk", "best_ask", "ask"))
+
     sides = [s for s in (m.get("marketSides") or []) if isinstance(s, dict)]
-    if len(sides) == 2:
-        other = next((s for s in sides
-                      if s.get("identifier") != us_slug), None)
-        if other is not None:
-            try:
-                px = float(other.get("price"))
-                if 0 < px < 1:
-                    return round(1 - px, 4)
-            except (TypeError, ValueError):
-                pass
+    other = next((s for s in sides
+                  if s.get("identifier") and s.get("identifier") != us_slug),
+                 None)
+    # A market whose two sides share one identifier: the slug cannot
+    # select a leg, so the caller must have.
+    shared = len(sides) == 2 and other is None
+
+    if long_leg is False:
+        # The short leg's bid is the complement of the LONG leg's ask.
+        if best_ask is not None:
+            return round(1 - best_ask, 4)
+        return None
+    if long_leg is True:
+        return best_bid
+
+    # Side unknown. Unchanged behaviour, and on a shared-identifier
+    # market that means refusing: this branch used to reach `bestBid`
+    # only because the dict shape made it unreadable, and now that it
+    # parses, returning it here would start pricing short legs off the
+    # long book on exactly the markets that were broken.
+    if shared:
+        return None
+    if best_bid is not None:
+        return best_bid
+    if other is not None:
+        try:
+            px = float(other.get("price"))
+            if 0 < px < 1:
+                return round(1 - px, 4)
+        except (TypeError, ValueError):
+            pass
     return None
 
 

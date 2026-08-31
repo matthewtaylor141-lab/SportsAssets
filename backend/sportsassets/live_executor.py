@@ -1171,10 +1171,22 @@ async def mirror_exit(payload: dict) -> str:
                         "of flattening the market", us_slug, held, ours)
         limit = None
         if not _flatten:
-            bid = await asyncio.to_thread(pmus.slug_bid, us_slug)
+            # WHICH LEG WE HOLD, from the intent recorded at entry.
+            # On the tennis family both sides share one identifier, so
+            # the slug cannot select a leg and slug_bid refuses without
+            # this — which is the whole of `no_bid` in the exit census.
+            _long_leg = None
+            _oi = row["intent"]
+            if _oi == "ORDER_INTENT_BUY_LONG":
+                _long_leg = True
+            elif _oi == "ORDER_INTENT_BUY_SHORT":
+                _long_leg = False
+            bid = await asyncio.to_thread(pmus.slug_bid, us_slug,
+                                          _long_leg)
             if bid is None or not (0 < bid < 1):
-                log.warning("MIRROR-EXIT no bid for %s — exit deferred "
-                            "rather than sold blind", us_slug)
+                log.warning("MIRROR-EXIT no bid for %s leg=%s — "
+                            "exit deferred rather than sold blind",
+                            us_slug, _long_leg)
                 await _release_exit_claim(pool, row["id"])
                 return _exit_done("mx_no_bid_for_partial", slug=us_slug,
                                   full=bool(_full))
@@ -3886,7 +3898,10 @@ async def _execute_manual_sell(us_slug: str, qty: int | None,
         return {"ok": False,
                 "error": f"qty {qty} exceeds held {held} — selling more "
                          "than the position is refused"}
-    bid = await asyncio.to_thread(pmus.slug_bid, us_slug)
+    # The desk's leg is PROVABLE here rather than assumed: a short
+    # reads negative through _pm_held, and the guard above already
+    # returned on `held < 1`. So reaching this line means long.
+    bid = await asyncio.to_thread(pmus.slug_bid, us_slug, True)
     if bid is None or not (0 < bid < 1):
         return {"ok": False, "error": "no live bid for this market"}
     limit = sell_limit_price(bid, min_price)

@@ -95,7 +95,7 @@ def bench(monkeypatch):
     fake_pmus = types.SimpleNamespace(
         close_position=_close_position,
         submit_fok=_submit_fok,
-        slug_bid=lambda slug: state["bid"])
+        slug_bid=lambda slug, long_leg=None: state["bid"])
 
     async def _held(_slug):
         return state["held"], 0.40
