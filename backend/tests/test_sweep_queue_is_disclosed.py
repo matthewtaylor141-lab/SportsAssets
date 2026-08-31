@@ -137,9 +137,28 @@ class TestTheBucketingItself:
         assert got["undated"] == 1
 
 
-class TestTheOrderingIsStillTheDocumentedOne:
-    def test_the_sort_is_unchanged_by_this_commit(self):
-        """This change MEASURES the ordering; it does not alter it.
-        Reprioritising the money path belongs behind evidence, and the
-        evidence is what this emits."""
-        assert "rows = sorted(rows, key=_game_date)" in _src()
+class TestTheOrderingChangedONLYAfterTheEvidenceArrived:
+    """This class used to assert the sort was UNCHANGED.
+
+    That was right while the ordering was a suspicion: reprioritising
+    the money path belongs behind evidence, not behind a reading of a
+    comment. The evidence then arrived on run 33426256819 —
+
+        pool={past:10293, today_tomorrow:645}
+        head={past:150,  today_tomorrow:0}
+
+    — 150 of 150 slots on finished games, every two minutes, with the
+    645 live candidates never reached. The guard has done its job and
+    is replaced by what it was guarding for, rather than deleted as
+    though it had never applied.
+    """
+
+    def test_the_sort_now_ranks_live_games_first(self):
+        assert "rows = sorted(rows, key=sweep_sort_key)" in _src()
+
+    def test_the_key_is_module_level_so_tests_can_drive_it(self):
+        """It was nested, and the tests written for it rebuilt their
+        own copy — which passed against a deliberately broken
+        production sort."""
+        from sportsassets.workers import copy_sweep as m
+        assert callable(getattr(m, "sweep_sort_key", None))

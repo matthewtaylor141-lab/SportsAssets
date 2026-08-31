@@ -24,6 +24,7 @@ Mechanics and why they're safe:
 
 import asyncio
 import datetime as _dt
+import re as _re
 import logging
 import os
 
@@ -63,6 +64,40 @@ PRICE_CEILING = 0.99     # mirrors the per-fill ceiling; cheap pre-filter
 MAX_ROWS_PER_SWEEP = int(os.environ.get("COPY_SWEEP_MAX_ROWS", "150"))
 ROW_TIMEOUT_S = 60.0
 
+
+
+def _game_date(r) -> str:
+    """The slug's game date, or "0000-00-00" when it carries none."""
+    m = _re.search(r"\d{4}-\d{2}-\d{2}",
+                   (r["market_slug"] or r["event_slug"] or ""))
+    return m.group(0) if m else "0000-00-00"
+
+
+def sweep_sort_key(r) -> tuple:
+    """Live games first, then undated, then already-played.
+
+    MODULE LEVEL SO IT CAN BE TESTED (2026-08-31). This was nested
+    inside sweep_once, and the tests written for it rebuilt their own
+    copy of the logic — so they agreed with themselves and passed
+    cleanly against a deliberately broken production sort. A key that
+    decides which trades get attempted is not something to verify by
+    re-implementing it in the test.
+
+    THREE RANKS, NOT TWO. An undated row carries "0000-00-00", which is
+    lexically below every real date, so a two-rank key floats undated
+    rows above tonight's games — trading one starvation for another.
+    Today's pool holds no undated rows, which is exactly why this is
+    worth getting right now rather than after it appears.
+
+    The date bound in the query already drops games older than
+    yesterday; this orders whatever survives so a played game can never
+    outrank one still to come, which is what the sweep's own comment
+    has always claimed it does.
+    """
+    d = _game_date(r)
+    if d == "0000-00-00":
+        return (1, d)
+    return (2, d) if d < _dt.date.today().isoformat() else (0, d)
 
 async def sweep_once() -> dict:
     pool = await get_pool()
@@ -121,11 +156,29 @@ async def sweep_once() -> dict:
           -- are candidates NOW; farther games are DEFERRED, not skipped —
           -- each 6h sweep re-evaluates, so they place once inside the
           -- window. Undated slugs pass (can't defer what can't be dated).
+          -- ...AND NOT ALREADY PLAYED (2026-08-31, run 33426256819).
+          -- This bound existed only from ABOVE, so a game whose date
+          -- has passed stayed a candidate for the whole 7-day trade
+          -- window, and rejected rows are deliberately retryable and
+          -- never stop being candidates. Measured on the first pass
+          -- where the queue was observable:
+          --     candidates=10938 processed=150 deferred=10788
+          --     pool={past:10293, today_tomorrow:645}
+          --     head={past:150,  today_tomorrow:0}
+          -- Not "mostly past" — every slot, every two minutes, spent
+          -- on finished games while the 645 candidates for today and
+          -- tomorrow were never reached once.
+          --
+          -- current_date - 1, not current_date: the slug's date is the
+          -- LOCAL game date and this compares in UTC, so a late game
+          -- reads a day behind and can still be live after midnight
+          -- UTC. One day of slack keeps a small tail of stale rows and
+          -- cannot drop a game that is still playable.
           AND (substring(COALESCE(t.market_slug, t.event_slug, '')
                          from '\d{4}-\d{2}-\d{2}') IS NULL
-               OR substring(COALESCE(t.market_slug, t.event_slug, '')
-                            from '\d{4}-\d{2}-\d{2}')::date
-                  <= current_date + 1)
+               OR (substring(COALESCE(t.market_slug, t.event_slug, '')
+                             from '\d{4}-\d{2}-\d{2}')::date
+                   BETWEEN current_date - 1 AND current_date + 1))
           -- An asset is off the table once an order was actually PLACED
           -- for it (filled/unfilled/submitting/error). Mapping rejections
           -- are retryable: a mapper fix must be able to revisit the same
@@ -185,13 +238,7 @@ async def sweep_once() -> dict:
     )
     # Nearest game first: the day's copy budget goes to positions that
     # settle (and free their capital) soonest.
-    def _game_date(r):
-        import re as _re
-        m = _re.search(r"\d{4}-\d{2}-\d{2}",
-                       (r["market_slug"] or r["event_slug"] or ""))
-        return m.group(0) if m else "0000-00-00"
-
-    rows = sorted(rows, key=_game_date)
+    rows = sorted(rows, key=sweep_sort_key)
     # WHAT THE QUEUE IS MADE OF, BEFORE THE CAP TAKES A SLICE OF IT
     # (2026-08-31). Two separate things hid the backlog:
     #
