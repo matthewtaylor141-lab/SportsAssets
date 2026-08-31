@@ -1057,6 +1057,30 @@ jobs:
           jq -r '.whales // {} | to_entries[] | "  MERGEVERDICT \(.key): \(.value.verdict)"' \
             /tmp/mergepnl.json 2>/dev/null || true
 
+          # BIDTRUTH — the venue's bid, on a slug WE HOLD, through the
+          # SAME authenticated client mirror_exit prices sales with.
+          #
+          # The public SDK could not settle this: it reaches only expired
+          # markets with null books, and the live ones it did find were
+          # stsc-, not our aec-/atc- sports slugs. bbo carries no side
+          # dimension, so if its bestBid is the LONG leg and we hold the
+          # SHORT one, pricing our sale off it sets an IOC floor at the
+          # complement's price — a ~75% giveaway on our own position.
+          # That is why slug_bid is still unfixed and 42 exits stand
+          # refused. Read-only endpoint; it places nothing.
+          BTCODE=$(curl -sS --max-time 90 -w '%{http_code}' \
+               -H "X-Admin-Token: $ADMIN_TOKEN" -o /tmp/bidtruth.json \
+               "$BASE/api/admin/bid-truth?limit=4" 2>/dev/null || echo "000")
+          echo "  BIDTRUTHHTTP code=$BTCODE"
+          jq -r '.rows[]? |
+                 "  BIDTRUTH \(.slug): intent=\(.our_intent // "?") long?=\(.our_side_is_long // "?") qty=\(.our_qty // 0) whale=\(.whale // "?")",
+                 "    slug_bid_today=\(.slug_bid_today | tostring)  state=\(.state // "?")",
+                 "    bestBid=\(.bestBid | tostring) bestAsk=\(.bestAsk | tostring) bidDepth=\(.bidDepth // "?")",
+                 "    sides=\(.sides | tostring | .[0:220])",
+                 "    bids=\(.bids | tostring | .[0:140]) offers=\(.offers | tostring | .[0:140])",
+                 "    ATTRIB=\(.attrib)"' \
+             /tmp/bidtruth.json 2>/dev/null || echo "  BIDTRUTH unavailable (endpoint not deployed yet)"
+
           # WHOLEBOOK — REMOVED 2026-08-30, having done its job.
           #
           # It existed to measure rn1's whole book so the fill cap could

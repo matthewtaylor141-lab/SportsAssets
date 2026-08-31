@@ -6531,6 +6531,124 @@ async def api_premap_live_set(action: str) -> dict:
     return {"ok": True, "premap_live": action == "on"}
 
 
+@app.get("/api/admin/bid-truth", dependencies=[Depends(require_admin)])
+async def api_bid_truth(limit: int = 4, slug: str = "") -> dict:
+    """WHICH LEG DOES THE VENUE'S BID BELONG TO — on a slug WE HOLD.
+
+    This is the last thing standing between rn1's exits and going live.
+
+    mirror_exit prices every partial sale off pmus.slug_bid, and slug_bid
+    is structurally broken here: it looks for a MARKET-level bestBid and
+    then mirrors the OTHER side's price through $1 — but both sides of a
+    market on this venue share ONE identifier, so `next(s for s in sides
+    if s.identifier != us_slug)` finds nothing and the function returns
+    None on the whole family. Measured: mx_no_bid_for_partial refused 42
+    exits in the last census, and exits_sold has never left 0.
+
+    The fix is one line, and the wrong version of it loses money. bbo is
+    keyed by marketSlug with NO side dimension, so if its bestBid belongs
+    to the LONG leg and we hold the SHORT one, pricing our sale off it
+    sets an IOC floor at the complement's price — accepting roughly 75%
+    below fair value on our own position. That is worse than the refusals
+    it would fix, which is why the refusals have been left alone.
+
+    The runner's public SDK could not settle it: it sees only expired
+    markets with null books, and the two live families it did reach
+    (stsc-) are not the aec-/atc- sports slugs we trade. So ask the
+    question where it actually matters — through the SAME authenticated
+    client mirror_exit uses, on slugs THIS ACCOUNT HOLDS, with our own
+    recorded intent beside the venue's answer.
+
+    READ-ONLY. It places nothing and changes nothing; it prints what the
+    venue says next to what we believe, so the rule can be READ rather
+    than inferred.
+    """
+    from .. import pmus
+
+    pool = await get_pool()
+    if slug:
+        rows = [{"us_market_slug": slug, "intent": None, "qty": None,
+                 "entry": None, "whale": None}]
+    else:
+        rows = [dict(r) for r in await pool.fetch(
+            f"""
+            SELECT DISTINCT ON (lo.us_market_slug)
+                   lo.us_market_slug,
+                   {ORDER_INTENT_SQL} AS intent,
+                   lo.filled_shares::float8 AS qty,
+                   lo.fill_price::float8   AS entry,
+                   lower(COALESCE(lo.whale_username, '')) AS whale
+              FROM live_orders lo
+             WHERE lo.status = 'filled'
+               AND lo.us_market_slug IS NOT NULL
+             ORDER BY lo.us_market_slug, lo.placed_at DESC
+             LIMIT $1
+            """, max(1, min(int(limit or 4), 12)))]
+
+    out: list[dict] = []
+    for r in rows:
+        us = r["us_market_slug"]
+        item: dict = {"slug": us, "our_intent": r.get("intent"),
+                      "our_qty": r.get("qty"), "our_entry": r.get("entry"),
+                      "whale": r.get("whale")}
+        # What the CURRENT (broken) pricing function answers. If this is
+        # None while the book below has a bid, that is the defect, stated
+        # as a measurement rather than an argument.
+        try:
+            item["slug_bid_today"] = await asyncio.to_thread(
+                pmus.slug_bid, us)
+        except Exception as exc:  # noqa: BLE001
+            item["slug_bid_today"] = f"error:{type(exc).__name__}"
+        client = pmus._get_client()
+        try:
+            m = (client.markets.retrieve_by_slug(us) or {}).get(
+                "market") or {}
+            item["sides"] = [
+                {"long": s.get("long"), "price": s.get("price"),
+                 "identifier": s.get("identifier"),
+                 "tradable": s.get("tradable")}
+                for s in (m.get("marketSides") or []) if isinstance(s, dict)]
+            item["outcomes"] = m.get("outcomes")
+            item["outcomePrices"] = m.get("outcomePrices")
+        except Exception as exc:  # noqa: BLE001
+            item["market_error"] = f"{type(exc).__name__}"
+        for meth in ("bbo", "book"):
+            fn = getattr(client.markets, meth, None)
+            if fn is None:
+                item[meth] = "no such method"
+                continue
+            try:
+                d = (fn(us) or {}).get("marketData") or {}
+                if meth == "bbo":
+                    item["bestBid"] = d.get("bestBid")
+                    item["bestAsk"] = d.get("bestAsk")
+                    item["bidDepth"] = d.get("bidDepth")
+                    item["state"] = d.get("state")
+                else:
+                    item["bids"] = (d.get("bids") or [])[:2]
+                    item["offers"] = (d.get("offers") or [])[:2]
+            except Exception as exc:  # noqa: BLE001
+                item[f"{meth}_error"] = f"{type(exc).__name__}"
+        # THE ATTRIBUTION, STATED. If the long side's own quoted price
+        # sits inside [bestBid, bestAsk], bbo describes the long leg —
+        # and a position whose intent is SHORT must NOT be priced off it
+        # directly.
+        try:
+            b = float((item.get("bestBid") or {}).get("value"))
+            a = float((item.get("bestAsk") or {}).get("value"))
+            lp = next(float(s["price"]) for s in item.get("sides", [])
+                      if s.get("long") and s.get("price") is not None)
+            item["attrib"] = ("bbo-is-the-long-side" if b <= lp <= a
+                              else "bbo-is-NOT-the-long-side")
+            item["our_side_is_long"] = (
+                None if not item.get("our_intent")
+                else "LONG" in str(item["our_intent"]).upper())
+        except Exception:  # noqa: BLE001
+            item["attrib"] = "undecidable"
+        out.append(item)
+    return {"note": "read-only; places nothing", "rows": out}
+
+
 @app.post("/api/admin/verified-whales",
           dependencies=[Depends(require_admin)])
 async def api_set_verified_whales(body: dict) -> dict:
