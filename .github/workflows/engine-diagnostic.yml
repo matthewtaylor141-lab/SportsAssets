@@ -1075,6 +1075,7 @@ jobs:
           jq -r '.rows[]? |
                  "  BIDTRUTH \(.slug): intent=\(.our_intent // "?") long?=\(.our_side_is_long // "?") qty=\(.our_qty // 0) whale=\(.whale // "?")",
                  "    slug_bid_today=\(.slug_bid_today | tostring)  state=\(.state // "?")",
+                 "    bid_if_long=\(.bid_if_long | tostring) bid_if_short=\(.bid_if_short | tostring)",
                  "    bestBid=\(.bestBid | tostring) bestAsk=\(.bestAsk | tostring) bidDepth=\(.bidDepth // "?")",
                  "    sides=\(.sides | tostring | .[0:220])",
                  "    bids=\(.bids | tostring | .[0:140]) offers=\(.offers | tostring | .[0:140])",

@@ -6734,8 +6734,26 @@ async def api_bid_truth(limit: int = 4, slug: str = "",
         # None while the book below has a bid, that is the defect, stated
         # as a measurement rather than an argument.
         try:
+            # PASS THE LEG (2026-08-31). This called slug_bid with the
+            # slug alone, so on the shared-identifier family it always
+            # returned None — correctly, since the slug cannot select a
+            # side. That made the one instrument pointed at this
+            # question incapable of answering it: `slug_bid_today=null`
+            # on every row whether the resolver was broken or working.
+            # The row's own recorded intent names the leg, and it is
+            # already read and displayed two lines below.
+            _oi = str(r.get("intent") or "").upper()
+            _leg = (True if "BUY_LONG" in _oi
+                    else False if "BUY_SHORT" in _oi else None)
             item["slug_bid_today"] = await asyncio.to_thread(
-                pmus.slug_bid, us)
+                pmus.slug_bid, us, _leg)
+            # Both legs beside it: the whole hazard is picking the
+            # wrong one, and two numbers make a swap visible where one
+            # cannot. Read-only.
+            item["bid_if_long"] = await asyncio.to_thread(
+                pmus.slug_bid, us, True)
+            item["bid_if_short"] = await asyncio.to_thread(
+                pmus.slug_bid, us, False)
         except Exception as exc:  # noqa: BLE001
             item["slug_bid_today"] = f"error:{type(exc).__name__}"
         client = pmus._get_client()

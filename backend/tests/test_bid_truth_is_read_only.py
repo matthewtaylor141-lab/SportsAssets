@@ -170,3 +170,33 @@ class TestItAnswersTheQuestionItWasBuiltFor:
         # slug_bid returning None beside a book that HAS a bid is the
         # defect stated as a measurement rather than an argument.
         assert "slug_bid_today" in _src()
+
+
+class TestItCanActuallyAnswerItsOwnQuestion:
+    """The endpoint exists to say whether slug_bid prices these rows.
+
+    It called `slug_bid(us)` with the slug alone, so on the
+    shared-identifier family it always returned None — correctly, since
+    a slug cannot select a side. The consequence is that the one
+    instrument aimed at this question read `slug_bid_today=null` on
+    every row whether the resolver was broken or working. Run
+    33404785410 shows exactly that: six rn1 rows, all null, on a build
+    where the resolver had already been fixed.
+    """
+
+    def test_it_passes_the_leg_it_already_knows(self):
+        src = _code_only()
+        i = src.index("pmus.slug_bid")
+        call = src[i:i + 80]
+        assert "_leg" in call, (
+            "slug_bid is still called with the slug alone, so it must "
+            "refuse on every shared-identifier row")
+
+    def test_the_leg_comes_from_the_rows_recorded_intent(self):
+        src = _code_only()
+        assert "BUY_LONG" in src and "BUY_SHORT" in src
+
+    def test_both_legs_are_reported_side_by_side(self):
+        """One number cannot show a swap; two can."""
+        src = _code_only()
+        assert "bid_if_long" in src and "bid_if_short" in src
