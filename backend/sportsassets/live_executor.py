@@ -4714,14 +4714,34 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     # token AND he demonstrably holds it. Everything else falls through
     # to the entry path untouched.
     #
-    # SCOPED TO exitable_whales(), AND THAT SCOPE IS THE POINT. It is
-    # the same set mirror_exit itself honours, so every whale we could
-    # sell for is classified and no whale we could not does a single
-    # extra query — which is what makes running this ABOVE the entry
-    # roster free. An exit always arrives labelled BUY, so a non-BUY
-    # payload can never be one and is not worth a lookup either.
+    # SCOPED TO THE UNION OF BOTH ROSTERS, AND THE UNION IS LOAD-BEARING.
+    #
+    # This first shipped scoped to exitable_whales() alone, which made
+    # the new code classify LESS than the old code in one case, and
+    # adversarial review caught it before it did damage. Before the
+    # reorder, classify_exit ran for every whale that passed the entry
+    # roster; a whale in source_whales() but NOT exitable — which is
+    # what an AI_TRADER_SOURCE env addition on Render produces, the
+    # documented no-deploy way to arm a whale — would have had his
+    # complement buy skipped entirely and copied as a fresh ENTRY on the
+    # leg he was LEAVING. That is the doubling classify_exit exists to
+    # stop: "Every exit he made cost us twice." Silent, and multiplied
+    # by the copy_sweep reclaim lane's seven-day replay.
+    #
+    # The union is a strict superset of BOTH the old scope and the
+    # intended new one, so no whale can lose classification he had. It
+    # costs nobody a query he was not already paying for: source whales
+    # were classified before, and exitable-but-unrostered whales are the
+    # whole point of the reorder. A source-only whale routed into
+    # mirror_exit is still refused there by mx_whale_not_verified
+    # (:887-888) and still returns was_an_exit_pending, which suppresses
+    # the wrong-leg entry exactly as it does today.
+    #
+    # An exit always arrives labelled BUY, so a non-BUY payload can
+    # never be one and is not worth a lookup either.
     _exit = None
-    if payload.get("side") == "BUY" and username in exitable_whales():
+    if payload.get("side") == "BUY" and username in (
+            exitable_whales() | cfg.source_whales()):
         _exit = await classify_exit(
             pool, str(payload.get("asset") or ""),
             (payload.get("whale_username") or "").lower(),

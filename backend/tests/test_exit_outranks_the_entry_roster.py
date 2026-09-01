@@ -49,7 +49,11 @@ def _pos(needle: str) -> int:
 def test_exit_classification_precedes_the_source_roster_gate():
     """THE BUG. cfg.source_whales() is an ENTRY roster; running it first
     means a de-rostered whale's exits are never even looked for."""
-    assert _pos("_exit = await classify_exit") < _pos("cfg.source_whales()"), (
+    # Anchored on the REFUSAL, not the bare symbol: cfg.source_whales()
+    # also appears in the classification scope above, so matching the
+    # symbol would compare the wrong occurrence and pass vacuously.
+    assert _pos("_exit = await classify_exit") < _pos(
+        'return _copy_stop("not_buy_or_off_roster"'), (
         "the entry roster gate runs before exit classification — every "
         "position held from a de-rostered whale is stranded")
 
@@ -57,7 +61,8 @@ def test_exit_classification_precedes_the_source_roster_gate():
 def test_exit_classification_precedes_the_cut_gate():
     """0x2c33 is cut AND asserted exitable (test_cut_whale_exit). Both
     can only be true if the cut gate is below classification."""
-    assert _pos("_exit = await classify_exit") < _pos("COPY_CUT_WHALES"), (
+    assert _pos("_exit = await classify_exit") < _pos(
+        'return _copy_stop("whale_cut"'), (
         "the cut gate runs before exit classification — a cut whale's "
         "positions can never be sold, contradicting exitable_whales()")
 
@@ -66,8 +71,8 @@ def test_mirror_exit_precedes_both_entry_gates():
     """Classifying is not enough; the SALE has to happen before the
     guards too, or the exit is detected and then discarded."""
     m = _pos("await mirror_exit(")
-    assert m < _pos("cfg.source_whales()")
-    assert m < _pos("COPY_CUT_WHALES")
+    assert m < _pos('return _copy_stop("not_buy_or_off_roster"')
+    assert m < _pos('return _copy_stop("whale_cut"')
 
 
 def test_the_entry_gates_still_exist():
@@ -89,16 +94,50 @@ def test_the_global_kill_switches_stay_above_everything():
 
 # ------------------------------------------------------- the scoping
 
-def test_classification_is_scoped_to_the_whales_we_could_sell_for():
-    """Running classify_exit above the roster is only free if it is
-    bounded by the same set mirror_exit honours. Unbounded, every BUY
-    from every tracked whale would pay for the lookup."""
+def test_classification_is_scoped_to_the_union_of_both_rosters():
+    """The scope must be a SUPERSET of what ran before the reorder.
+
+    This shipped scoped to exitable_whales() alone, and that made the
+    new code classify LESS than the old code for a whale who is on the
+    entry roster but not exitable. Adversarial review caught it; the
+    union is what makes the reorder purely additive."""
     src = _src()
-    assert "username in exitable_whales()" in src, (
-        "classification must be scoped to exitable_whales() — the exact "
-        "set mirror_exit acts on")
-    assert _pos("username in exitable_whales()") < _pos(
+    assert "exitable_whales() | cfg.source_whales()" in src, (
+        "scope must be the UNION — exitable_whales() alone silently "
+        "drops classification for entry-roster whales who are not "
+        "exitable, and their exits then get copied as fresh entries on "
+        "the leg they are leaving")
+    assert _pos("exitable_whales() | cfg.source_whales()") < _pos(
         "_exit = await classify_exit")
+
+
+def test_no_rostered_whale_can_lose_exit_classification():
+    """THE INVARIANT THE SCOPING DEPENDS ON, pinned as a property rather
+    than as two names.
+
+    Every whale we would place an ENTRY for must be inside the
+    classification scope. Otherwise his complement-buy exit is read as
+    an entry and our exposure to the outcome he is leaving goes to 2x
+    instead of to zero. The two sets happen to be identical today, but
+    they are hand-maintained in different files and one of them
+    (AI_TRADER_SOURCE) can be changed on Render with no deploy."""
+    from sportsassets.config import settings
+
+    scope = le.exitable_whales() | settings().source_whales()
+    orphans = settings().source_whales() - scope
+    assert not orphans, (
+        f"{sorted(orphans)} can be copied but not classified — their "
+        f"exits would be copied as entries on the leg they are leaving")
+
+
+def test_the_scope_is_a_superset_of_the_pre_reorder_scope():
+    """Before the reorder, classify_exit ran for everything that passed
+    the entry roster. The reorder must never subtract from that."""
+    from sportsassets.config import settings
+
+    pre = settings().source_whales() - set(le.COPY_CUT_WHALES)
+    scope = le.exitable_whales() | settings().source_whales()
+    assert pre <= scope
 
 
 def test_only_a_BUY_is_ever_classified():
