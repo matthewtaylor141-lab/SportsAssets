@@ -967,14 +967,43 @@ async def mirror_exit(payload: dict) -> str:
             return _exit_done("mx_exit_ledger_unreadable", trade=_xtid)
         if _seen is not None:
             return _exit_done("mx_exit_already_mirrored", trade=_xtid)
-    row = await pool.fetchrow(
-        "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
+    # WHAT WE ORIGINALLY BOUGHT, not what is left of it. filled_shares is
+    # rewritten to the remainder by every partial exit below, so it cannot
+    # be the base of a cumulative target (see migration 040). COALESCE so
+    # a row never yet exited reads exactly as before.
+    #
+    # THE COLUMN MAY NOT EXIST YET, AND EXITS MUST NOT WAIT FOR IT.
+    # Migrations run at API boot only, best-effort ("serving anyway"), and
+    # the WORKER that runs this function never runs them at all -- its
+    # entrypoint is `python -m sportsassets.workers.all`. So new code can
+    # reach production ahead of its own column, and a bare reference would
+    # raise on EVERY exit until a healthy API boot happened to land. That
+    # is a worse failure than the compounding it fixes. Fall back to the
+    # legacy projection instead, which is exactly today's behaviour, and
+    # say so loudly once per call rather than failing the sale.
+    _sel_tail = (
         "       fill_price::float8 AS entry, "
         f"      {ORDER_INTENT_SQL} AS intent "
         "FROM live_orders "
         "WHERE asset = $1 AND lower(COALESCE(whale_username,'')) = $2 "
         "  AND status = 'filled' AND us_market_slug IS NOT NULL "
-        "ORDER BY placed_at DESC LIMIT 1", asset, username)
+        "ORDER BY placed_at DESC LIMIT 1")
+    try:
+        row = await pool.fetchrow(
+            "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
+            "       COALESCE(orig_shares, filled_shares)::float8 AS orig_qty, "
+            + _sel_tail, asset, username)
+    except Exception as exc:  # noqa: BLE001 — missing column only
+        if "orig_shares" not in str(exc):
+            raise
+        log.warning("MIRROR-EXIT: orig_shares column absent (migration "
+                    "040 not applied yet) — sizing off filled_shares, "
+                    "which is today's behaviour; repeated trims may "
+                    "over-exit until the migration lands")
+        row = await pool.fetchrow(
+            "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
+            "       filled_shares::float8 AS orig_qty, "
+            + _sel_tail, asset, username)
     if row is None or (row["qty"] or 0) <= 0:
         # WE NEVER COPIED HIS ENTRY. At a 0.55% fill rate this is the
         # expected majority outcome and it is NOT an exit-path defect:
@@ -1133,7 +1162,21 @@ async def mirror_exit(payload: dict) -> str:
         # under-filled is made up by the next one rather than lost, and
         # once we are at or below the target the delta goes to zero and
         # the rounds-to-zero branch below pins it instead of selling.
-        _orig = int(row["qty"] or 0)
+        # THE BASE IS WHAT WE BOUGHT, NOT WHAT IS LEFT (2026-09-01).
+        #
+        # This read `row["qty"]`, which is filled_shares -- the column
+        # the partial-exit UPDATE below rewrites to the remainder. So
+        # the second trim measured the cumulative fraction against an
+        # already-shrunken base and compounded, which is the precise
+        # defect the target form above was written to prevent. Driven
+        # end to end, a whale going 20% then 40% out of a 1,000-share
+        # book left us holding 96 of our 200 where 120 is correct.
+        #
+        # test_exit_fraction_is_a_stock passed throughout, because it
+        # handed the second trim a FRESH Row(qty=200) instead of the 160
+        # mirror_exit had just written. A test that rebuilds the state
+        # under test cannot see a bug in how that state is kept.
+        _orig = int(_row_get(row, "orig_qty") or row["qty"] or 0)
         _target_hold = _orig * (1.0 - closed_frac)
         qty = int(ours - _target_hold + 0.5)
         if qty > ours:
@@ -1367,10 +1410,18 @@ async def mirror_exit(payload: dict) -> str:
     # we still hold something the row stays live and carries it.
     remaining = max(0, int(row["qty"]) - int(booked))
     if remaining > 0:
+        # CAPTURE THE ORIGINAL ON THE WAY PAST. This UPDATE is the only
+        # thing that destroys it, and right here row["qty"] still holds
+        # the pre-sale count -- so the base for every later trim is
+        # written once, from the last moment it is true, and COALESCE
+        # keeps it fixed on every subsequent partial. Doing it here
+        # rather than on the INSERT paths means a new insert site cannot
+        # forget it and silently reintroduce the compounding.
         await pool.execute(
             "UPDATE live_orders SET status='filled', "
-            "filled_shares=$2, pnl=COALESCE(pnl,0)+$3 WHERE id=$1",
-            row["id"], remaining, pnl or 0)
+            "filled_shares=$2, orig_shares=COALESCE(orig_shares, $4), "
+            "pnl=COALESCE(pnl,0)+$3 WHERE id=$1",
+            row["id"], remaining, pnl or 0, float(row["qty"] or 0))
     else:
         # ACCUMULATE, DO NOT ASSIGN (2026-08-25, adversarial review).
         #
@@ -1658,6 +1709,23 @@ def _whale_set(env_name: str) -> set[str]:
         return set(_roster_override)
     raw = os.getenv(env_name, VERIFIED_PROFITABLE_DEFAULT)
     return {w.strip() for w in raw.lower().split(",") if w.strip()}
+
+
+def _row_get(row, key, default=None):
+    """Read a column that may be absent from this row's projection.
+
+    Production's mirror_exit SELECT always projects orig_qty, on both the
+    migrated and the fallback branch. This exists so a row reaching the
+    sizing arithmetic from anywhere else degrades to the legacy base
+    instead of raising: an exception there does not mis-size a sale, it
+    CANCELS one, and a cancelled exit is the failure this whole change is
+    meant to prevent. asyncpg Records and dicts both index by key but
+    neither is guaranteed to carry a column nobody selected.
+    """
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
 
 
 def overspend_ratio(requested_usd: float, filled_shares: float,
