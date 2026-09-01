@@ -816,8 +816,32 @@ class ChainListener:
                 # a throttled eth_blockNumber (429, 2026-08-11 afternoon)
                 # used to throw here and kill every reconnect before the
                 # subscribe, exactly like the rejected backfill before it.
+                # DO NOT SPEND RPC CALLS WHILE BEING RATE-LIMITED
+                # (2026-09-01). The 429 lands on the SUBSCRIBE, so this
+                # catch-up still ran on every 120s retry: one
+                # eth_blockNumber plus N eth_getLogs, ~30 times an hour,
+                # against a provider that is actively throttling us.
+                # That is our own quota being spent on work whose only
+                # consumer is a connection we are about to be refused.
+                #
+                # Measured: the block has held for ~28 hours and across
+                # a UTC midnight (streak 35 -> 96), so it is not a daily
+                # quota rolling over — and every call we make while
+                # blocked can only make recovery slower.
+                #
+                # Skipping is already known-safe and the comment above
+                # says why: "The poller + reconciler own gap coverage; a
+                # skipped backfill costs nothing but duplicate-suppressed
+                # rows." One successful subscribe clears the flag, and
+                # the very next cycle backfills the whole accumulated
+                # gap in one pass.
+                _skip_catchup = getattr(self, "_last_throttled", False)
                 try:
-                    cursor = await self._load_cursor()
+                    cursor = None if _skip_catchup else await self._load_cursor()
+                    if _skip_catchup:
+                        log.info("catch-up skipped — endpoint is "
+                                 "throttling us; not spending calls on a "
+                                 "backfill until a subscribe succeeds")
                     if cursor is not None:
                         tip = await self._current_block()
                         if tip > cursor:
@@ -860,6 +884,12 @@ class ChainListener:
                     log.info("Path A subscribed to OrderFilled on %s", self._addresses)
                     await heartbeat("chain_listener", "ok", self._beat_detail())
                     self._fail_streak = 0
+                    # Subscribe succeeded, so we are no longer being
+                    # refused: allow the catch-up again. The NEXT cycle
+                    # backfills the whole accumulated gap in one pass,
+                    # which is why skipping it while blocked loses
+                    # nothing.
+                    self._last_throttled = False
                     roster_refreshed = time.time()
                     while True:
                         raw = await asyncio.wait_for(ws.recv(), timeout=60)
@@ -886,6 +916,9 @@ class ChainListener:
                 # calls per hour that keep the throttle pinned. Reset on
                 # every successful subscribe.
                 self._fail_streak = getattr(self, "_fail_streak", 0) + 1
+                # Remembered so the NEXT cycle can skip the catch-up
+                # rather than spend calls we are being refused for.
+                self._last_throttled = "429" in str(exc)
                 delay = min(2 * (2 ** min(self._fail_streak - 1, 6)), 120)
                 # ROTATE BEFORE SLEEPING, once this endpoint has failed
                 # twice. Not on the first failure — a single blip is not

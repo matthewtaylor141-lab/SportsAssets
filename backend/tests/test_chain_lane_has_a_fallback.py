@@ -97,3 +97,53 @@ class TestTheHeartbeatNamesTheCause:
         rotation that reset it to a tight retry would re-create the
         self-inflicted throttle it was written to stop."""
         assert "min(2 * (2 ** min(self._fail_streak - 1, 6)), 120)" in _run_src()
+
+
+class TestWeStopSpendingCallsWhileBlocked:
+    """The 429 lands on the SUBSCRIBE, and the catch-up runs BEFORE it.
+
+    So while blocked, every 120s retry still spent one eth_blockNumber
+    plus N eth_getLogs — about 30 rounds an hour of our own quota, on
+    work whose only consumer is a connection we are about to be refused.
+    Measured 2026-09-01: the block held ~28 hours and across a UTC
+    midnight (fail streak 35 -> 96), so it is not a daily quota rolling
+    over, and every call made while blocked can only slow recovery.
+
+    Skipping is already known-safe, and the pre-existing comment says
+    why: "The poller + reconciler own gap coverage; a skipped backfill
+    costs nothing but duplicate-suppressed rows."
+    """
+
+    def test_the_catch_up_is_skipped_while_throttled(self):
+        assert "_skip_catchup" in _run_src()
+        assert 'getattr(self, "_last_throttled", False)' in _run_src()
+
+    def test_the_flag_is_set_only_on_a_429(self):
+        """A dead host is not a throttle. Skipping the catch-up on
+        every failure would silently stop gap recovery for reasons that
+        have nothing to do with quota."""
+        assert 'self._last_throttled = "429" in str(exc)' in _run_src()
+
+    def test_a_successful_subscribe_clears_it(self):
+        """Without this the listener never backfills again after its
+        first 429 — a permanent gap-recovery outage produced by the fix
+        for a temporary one."""
+        src = _run_src()
+        assert "self._last_throttled = False" in src
+        i = src.index("self._fail_streak = 0")
+        assert "self._last_throttled = False" in src[i:i + 400], \
+            "the flag is cleared somewhere other than the success path"
+
+    def test_the_cursor_is_not_even_loaded_when_skipping(self):
+        """Loading the cursor is a DB read, but the tip check and
+        backfill that follow it are the RPC spend; short-circuiting at
+        the cursor keeps the whole block off the wire."""
+        assert "None if _skip_catchup else await self._load_cursor()" \
+            in _run_src()
+
+    def test_skipping_is_visible_in_the_log(self):
+        """A silent skip looks identical to a listener that has quietly
+        stopped recovering gaps."""
+        src = _run_src()
+        i = src.index("_skip_catchup")
+        assert "catch-up skipped" in src[i:i + 900]
