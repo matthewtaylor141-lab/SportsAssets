@@ -368,50 +368,75 @@ def sport_of(slug: str) -> str:
     return SPORT_OF.get(lg, "soccer")
 
 
-def copy_allowed(whale: str, slug: str, price: float | None = None) -> bool:
-    """May `whale`'s position in `slug` be copied at his `price`?
-    Cell-level gate; fails closed on anything unrecognized."""
+def copy_verdict(whale: str, slug: str,
+                 price: float | None = None) -> str | None:
+    """None if this copy is allowed, else WHICH clause refused it.
+
+    WHY THE REASON EXISTS (2026-08-31). The pre-INSERT census landed
+    and reported `cell_gate|rn1: 198` — the largest genuine block on
+    the roster's only whale, since his other 530 refusals are exits
+    being correctly classified. But "the cell gate refused it" names a
+    FUNCTION, not a cause: this gate has six independent ways to say
+    no, and rn1 is in UNRESTRICTED, so four of them cannot be why.
+    Reading the constants said "almost certainly props" — and almost
+    certainly is not a measurement, which is the whole standard here.
+
+    Same bodies, same order, same returns as before; only the value
+    changes from False to a name. copy_allowed is now defined in terms
+    of this, so the two cannot drift.
+    """
     w = (whale or "").strip().lower()
     if not w:
-        return False
+        return "no_whale"
     if w in PAUSED:
-        return False
+        return "whale_paused"
     if sport_of(slug) in HALTED_SPORTS:
-        return False
+        return "sport_halted"
     if market_type_of(slug) in BLOCKED_TYPES:
-        return False
+        return "market_type_blocked"
     if sport_of(slug) in ("soccer", "esports"):
         # esports rode the soccer bucket until 2026-08-21; keeping the
         # floor on it preserves the exact pre-split behavior for the
         # UNRESTRICTED whales that copy it.
         try:
             if price is None or float(price) < SOCCER_PRICE_FLOOR:
-                return False
+                return "soccer_price_floor"
         except (TypeError, ValueError):
-            return False
+            return "soccer_price_unreadable"
     if w in UNRESTRICTED:
-        return True
+        return None
     cells = CELLS.get(w)
     if not cells:
-        return False
+        return "no_cells_for_whale"
     sport = sport_of(slug)
     if not sport:
-        return False
+        return "sport_unknown"
     if (sport, market_type_of(slug)) not in cells:
-        return False
+        return "cell_not_allowed"
     band = ENTRY_BAND.get(w)
     if band is not None:
         # A banded whale with no readable price is REFUSED — the band is
         # the protection, and an absent price must not disable it.
         if price is None:
-            return False
+            return "band_needs_price"
         try:
             px = float(price)
         except (TypeError, ValueError):
-            return False
+            return "band_price_unreadable"
         if not (band[0] <= px <= band[1]):
-            return False
-    return True
+            return "outside_entry_band"
+    return None
+
+
+def copy_allowed(whale: str, slug: str, price: float | None = None) -> bool:
+    """May `whale`'s position in `slug` be copied at his `price`?
+    Cell-level gate; fails closed on anything unrecognized.
+
+    Defined in terms of copy_verdict so the boolean and the reason can
+    never disagree — a reason that drifts from the decision it explains
+    is worse than no reason, because it is believed.
+    """
+    return copy_verdict(whale, slug, price) is None
 
 
 def kalshi_min_ask(whale: str, slug: str) -> float:

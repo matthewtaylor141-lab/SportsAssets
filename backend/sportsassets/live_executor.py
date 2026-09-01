@@ -4746,15 +4746,34 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     # trades row afterwards), and gating on the raw payload fed the
     # fail-closed parser an empty string, silently dropping every fresh
     # copy for ~3h on 2026-08-06 evening.
-    from .copy_sports import copy_allowed
+    from .copy_sports import copy_allowed, copy_verdict
     ctx = await _market_context(pool, payload)
     for k, v in ctx.items():
         if v and not payload.get(k):
             payload[k] = v
-    if not copy_allowed(username, payload.get("market_slug")
-                        or payload.get("event_slug") or "",
-                        price=payload.get("price")):
-        return _copy_stop("cell_gate", username)
+    # NAME THE CLAUSE, NOT THE FUNCTION (2026-08-31). The first
+    # pre-INSERT census reported `cell_gate|rn1: 198` — the largest
+    # genuine block on the roster's only whale, since his other 530
+    # refusals are exits being correctly classified as exits. And it
+    # was not actionable: this gate has six independent ways to say no
+    # and rn1 is in UNRESTRICTED, which rules four of them out.
+    # Reading the constants suggested props; suggested is not measured.
+    #
+    # copy_allowed REMAINS THE DECISION. The first version of this
+    # asked copy_verdict instead, which moved the decision onto a new
+    # seam and broke eleven test stubs across three files that patch
+    # copy_allowed to bypass this gate. That blast radius was the
+    # signal: only the REASON was needed, not a new decider. So the
+    # verdict is consulted ONLY on the refusal path, where it cannot
+    # change an outcome — the property worth having anyway.
+    _slug = payload.get("market_slug") or payload.get("event_slug") or ""
+    if not copy_allowed(username, _slug, price=payload.get("price")):
+        # `or "unnamed"`: a stub can force the boolean False while the
+        # verdict still says allowed. Recording "cell_gate_None" would
+        # be a bucket named after a bug in the diagnostic.
+        _cv = copy_verdict(username, _slug, payload.get("price")) \
+            or "unnamed"
+        return _copy_stop("cell_gate_" + _cv, username)
     # Venue split (owner directive 2026-08-07: both venues firing near
     # evenly, when pricing makes sense): Kalshi holds FIRST CLAIM on a
     # deterministic half of fresh flow in the sports it lists. The
