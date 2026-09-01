@@ -5317,6 +5317,142 @@ async def admin_proof(since: str = "", target: float = 0.0) -> dict:
     return out
 
 
+# Copy latency buckets, in seconds. The first boundary is 5s because
+# that is the reaction time TRUEEDGE-FAST counterfactuals against; the
+# last is 300s because the Data-API poller's own publication lag sits
+# at 130-281s, so anything past 300s is definitionally poller-only.
+_LAT_BUCKETS: tuple[tuple[str, float, float], ...] = (
+    ("0-5s", 0.0, 5.0),
+    ("5-30s", 5.0, 30.0),
+    ("30-120s", 30.0, 120.0),
+    ("120-300s", 120.0, 300.0),
+    ("300s+", 300.0, float("inf")),
+)
+
+
+@app.get("/api/admin/latency-cohort", dependencies=[Depends(require_admin)])
+async def admin_latency_cohort(since: str = "", whale: str = "") -> dict:
+    """Does copying LATER earn less? Measured, not assumed.
+
+    Latency has been the standing explanation for the gap between the
+    whales' edge and ours, and it has never been measured on OUR OWN
+    SETTLED MONEY. What existed was TRUEEDGE-FAST, a counterfactual
+    that re-prices paper copies at a reaction time we did not have.
+    A counterfactual cannot settle this: it grades the same book twice
+    and the difference it reports is arithmetic, not evidence.
+
+    The chain lane going down on 2026-08-31 created the experiment.
+    Before it, rn1's fills decoded on-chain at roughly -0.65s; after,
+    every fill arrives through the Data-API poller at ~310s. Same
+    whale, same roster, same gates, same clip — only the delay moved.
+    So the settled book now contains both arms, and this endpoint
+    reports the ratio-estimator interval for each.
+
+    IT IS BUILT TO REFUSE A CAUSAL READING. The lane is almost
+    perfectly collinear with the calendar: chain rows are Aug 24-30,
+    poller rows Aug 31 onward. Anything that changed over those same
+    days — his edge decaying, a different slate, a softer book — lands
+    entirely in one arm. So every bucket reports the distinct UTC days
+    it draws from, and `confounded` is true whenever the two lanes do
+    not share days. Read the days first. If they do not overlap, this
+    is a description of two time periods, not a measurement of latency.
+    """
+    from ..analytics.proof import COHORT_START, roi_with_ci
+
+    pool = await get_pool()
+    start = since or COHORT_START
+    since_ts = datetime.fromisoformat(str(start))
+    args: list[Any] = [since_ts]
+    q = """
+        SELECT COALESCE(lo.filled_usd, lo.requested_usd)::float8 AS stake,
+               lo.pnl::float8 AS pnl,
+               lower(COALESCE(lo.whale_username, '?')) AS whale,
+               COALESCE(NULLIF(m.event_slug, ''),
+                        NULLIF(lo.us_market_slug, '')) AS event_key,
+               COALESCE(t.source, 'unknown') AS lane,
+               to_char(t.ts, 'YYYY-MM-DD') AS day,
+               -- DETECTION lag is the venue's + our decode's; COPY lag
+               -- is what actually priced the fill, because it is the
+               -- interval between HIS trade and OURS. Bucketing is on
+               -- the copy lag for that reason; detection is reported
+               -- beside it so a slow gate is distinguishable from a
+               -- slow lane.
+               extract(epoch FROM (t.detected_at - t.ts))::float8 AS det_lag,
+               extract(epoch FROM (lo.placed_at - t.ts))::float8 AS copy_lag
+          FROM live_orders lo
+          JOIN trades t ON t.id = lo.trade_id
+          LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+          LEFT JOIN markets m ON m.condition_id = mt.condition_id
+         WHERE lo.placed_at >= $1
+           AND lo.pnl IS NOT NULL
+           AND lo.status IN ('settled', 'cashed_out')
+           AND COALESCE(lo.whale_username, '') NOT IN ('manual', 'underdog')
+           AND COALESCE(lo.filled_usd, lo.requested_usd) > 0
+    """
+    if whale:
+        args.append(whale.lower())
+        q += "           AND lower(COALESCE(lo.whale_username,'')) = $2\n"
+    rows = [dict(r) for r in await pool.fetch(q, *args)]
+
+    def _summary(sel: list[dict]) -> dict:
+        out = roi_with_ci(sel)
+        days = sorted({str(r["day"]) for r in sel if r.get("day")})
+        out["days"] = days
+        lags = sorted(float(r["copy_lag"]) for r in sel
+                      if r.get("copy_lag") is not None)
+        out["copy_lag_p50"] = (round(lags[len(lags) // 2], 2)
+                               if lags else None)
+        return out
+
+    by_bucket: dict[str, dict] = {}
+    for name, lo_s, hi_s in _LAT_BUCKETS:
+        sel = [r for r in rows
+               if r.get("copy_lag") is not None
+               and lo_s <= float(r["copy_lag"]) < hi_s]
+        by_bucket[name] = _summary(sel)
+
+    by_lane: dict[str, dict] = {}
+    for lane in sorted({str(r["lane"]) for r in rows}):
+        by_lane[lane] = _summary([r for r in rows
+                                  if str(r["lane"]) == lane])
+
+    # THE CONFOUND, COMPUTED — not left to the reader's memory. If the
+    # two lanes never traded on the same day, no amount of sample size
+    # separates "we were slower" from "that week was worse".
+    lane_days = {k: set(v.get("days") or []) for k, v in by_lane.items()
+                 if k in ("chain", "poll")}
+    shared = (set.intersection(*lane_days.values())
+              if len(lane_days) == 2 else set())
+    confounded = len(lane_days) == 2 and not shared
+    if len(lane_days) < 2:
+        reading = ("SINGLE LANE — only one detection lane has settled "
+                   "copies in this cohort, so there is nothing to "
+                   "compare yet")
+    elif confounded:
+        reading = ("CONFOUNDED — the two lanes share no trading day, so "
+                   "this is a comparison of two time periods that "
+                   "happen to differ in latency, not a measurement of "
+                   "latency. It cannot support a causal claim.")
+    else:
+        reading = (f"OVERLAPPING — the lanes share {len(shared)} day(s), "
+                   f"so a like-for-like comparison is possible on those "
+                   f"days; check that each arm carries enough clusters "
+                   f"before reading the intervals")
+    return {
+        "cohort_start": start,
+        "whale": whale.lower() or "(all copied whales)",
+        "n_settled": len(rows),
+        "by_copy_lag": by_bucket,
+        "by_detection_lane": by_lane,
+        "shared_days": sorted(shared),
+        "confounded": confounded,
+        "reading": reading,
+        "caveat": ("stake and pnl are the same terminal-rows-only "
+                   "definition the proof cohort uses; a bucket with "
+                   "fewer than 2 clusters gets no interval"),
+    }
+
+
 @app.get("/api/admin/exit-census", dependencies=[Depends(require_admin)])
 async def admin_exit_census() -> dict:
     """WHY the exit path did or did not act, attributed.

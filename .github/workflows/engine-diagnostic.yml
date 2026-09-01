@@ -1027,6 +1027,34 @@ jobs:
             /tmp/proof.json 2>/dev/null || true
           jq -r '"  PROOF cohort_start=\(.cohort_start // "n/a")"' \
             /tmp/proof.json 2>/dev/null || true
+          # LATCOHORT — does copying LATER actually earn less, on our
+          # own settled money? Latency has been the standing
+          # explanation for the gap between the whales' returns and
+          # ours and it has never been measured here; TRUEEDGE-FAST
+          # re-prices paper copies at a reaction time we did not have,
+          # which grades one book twice rather than comparing two.
+          #
+          # The chain lane's 429 on 2026-08-31 built the arms by
+          # accident: same whale, roster, gates and clip, detected at
+          # -0.65s before and ~310s after. READ THE `reading` LINE
+          # FIRST. The lane is collinear with the calendar, so a
+          # CONFOUNDED verdict means this is two weeks being compared,
+          # not two latencies, and it cannot carry a causal claim.
+          LATCODE=$(curl -sS --max-time 90 -w '%{http_code}' \
+               -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/latcohort.json "$BASE/api/admin/latency-cohort?whale=rn1" \
+               2>/dev/null || echo "000")
+          echo "  LATHTTP code=$LATCODE bytes=$(wc -c < /tmp/latcohort.json 2>/dev/null || echo 0)"
+          jq -r '"  LATCOHORT n=\(.n_settled // 0) confounded=\(.confounded) shared_days=\(.shared_days | tostring)"' \
+            /tmp/latcohort.json 2>/dev/null || echo "  LATCOHORT unavailable"
+          jq -r '"  LATREADING \(.reading // "n/a")"' \
+            /tmp/latcohort.json 2>/dev/null || true
+          jq -r '.by_copy_lag // {} | to_entries[] | select(.value.n > 0)
+                 | "  LATBUCKET \(.key) n=\(.value.n) clusters=\(.value.clusters // "n/a") staked=$\(.value.staked) pnl=$\(.value.pnl) roi=\(.value.roi // "n/a") ci95=\(.value.ci95 | tostring) p50=\(.value.copy_lag_p50)s days=\(.value.days | length)"' \
+            /tmp/latcohort.json 2>/dev/null || true
+          jq -r '.by_detection_lane // {} | to_entries[] | select(.value.n > 0)
+                 | "  LATLANE \(.key) n=\(.value.n) roi=\(.value.roi // "n/a") ci95=\(.value.ci95 | tostring) days=\(.value.days | tostring)"' \
+            /tmp/latcohort.json 2>/dev/null || true
           # PROOF-2 — the decomposed thesis meter (owner order
           # 2026-08-28): sleeve edge = mix-weighted whale edge (their
           # books) - outcome-free capture drag (our fills vs theirs,
