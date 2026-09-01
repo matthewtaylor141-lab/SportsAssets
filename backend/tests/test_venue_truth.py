@@ -13,6 +13,38 @@ from sportsassets.api.venue_truth import (
 )
 
 
+import datetime as _dt
+
+
+def _in_win(hour: int) -> str:
+    """A timestamp inside venue_truth's ROLLING window.
+
+    Most fixtures here are pinned to 2026-08-18 deliberately: those
+    tests pass an explicit since_day and assert on the day bucket, so a
+    fixed date is exactly right for them.
+
+    The two TestSnapshotAssembly cases are different — they exercise
+    snapshot(), which derives its own window as _WINDOW_DAYS = 13 days
+    back from TODAY. On 2026-08-31 that window opened exactly ON
+    2026-08-18 and the rows counted; at 2026-09-01 it opened on the
+    19th and they dropped out. Both tests went green-to-red at a UTC
+    midnight with no code change, reporting settled=0 instead of 2
+    and 1.
+
+    Not flakiness — a date bomb, which would have failed every run from
+    here on and grown easier to misread as "something we just broke"
+    the further it drifted from the boundary. I misread it twice
+    myself, first as load and then as a timing race, before checking
+    the arithmetic.
+
+    Two days back, not zero: _et_day means a UTC "today" can still be
+    yesterday in ET, and a fixture sitting on the edge is how this
+    started.
+    """
+    d = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=2)
+    return d.strftime("%Y-%m-%dT{:02d}:00:00Z".format(hour))
+
+
 def _kx_fill(ticker, side, action, count, px, fee=0.0, tid=None,
              when="2026-08-18T14:00:00Z"):
     return {
@@ -184,13 +216,15 @@ class TestSnapshotAssembly:
                             {"ts": 0.0, "payload": None, "building": False})
 
         async def fake_kx():
-            return ({"fills": [_kx_fill("KXT-A", "yes", "buy", 100, 0.40)],
-                     "settlements": [_kx_settle("KXT-A", "yes", 100.0)]},
+            return ({"fills": [_kx_fill("KXT-A", "yes", "buy", 100, 0.40,
+                                        when=_in_win(14))],
+                     "settlements": [_kx_settle("KXT-A", "yes", 100.0,
+                                                when=_in_win(20))]},
                     None)
 
         async def fake_acts(since_day, timeout=240):
-            return [_pm_trade("mlb-a", 100, 0.40),
-                    _pm_resolution("mlb-a", 60.0, 40.0)]
+            return [_pm_trade("mlb-a", 100, 0.40, when=_in_win(15)),
+                    _pm_resolution("mlb-a", 60.0, 40.0, when=_in_win(21))]
 
         from sportsassets.api import pmus_account
         monkeypatch.setattr(vt, "_kalshi_raw_from_heartbeat", fake_kx)
@@ -231,8 +265,8 @@ class TestSnapshotAssembly:
             return None, "no kalshi_export_raw in engine heartbeat"
 
         async def fake_acts(since_day, timeout=240):
-            return [_pm_trade("mlb-a", 100, 0.40),
-                    _pm_resolution("mlb-a", 60.0, 40.0)]
+            return [_pm_trade("mlb-a", 100, 0.40, when=_in_win(15)),
+                    _pm_resolution("mlb-a", 60.0, 40.0, when=_in_win(21))]
 
         from sportsassets.api import pmus_account
         monkeypatch.setattr(vt, "_kalshi_raw_from_heartbeat", fake_kx)
