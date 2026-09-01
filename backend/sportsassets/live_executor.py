@@ -4682,14 +4682,6 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     except Exception:  # noqa: BLE001 — env/default still stand
         pass
     username = (payload.get("whale_username") or "").lower()
-    if payload.get("side") != "BUY" or username not in cfg.source_whales():
-        return _copy_stop("not_buy_or_off_roster", username)
-    # TRUEEDGE CUT (owner order 2026-08-24): a whale whose full detected
-    # book is negative at his OWN prices is not copyable at any speed.
-    # First of three independent blocks (this gate, the 0.00 clip, the
-    # premap-live allowlist) — any one of them alone stops the dollars.
-    if username in COPY_CUT_WHALES:
-        return _copy_stop("whale_cut", username)
     his_notional = float(payload.get("notional") or 0)
     his_price = float(payload.get("price") or 0)
     if his_notional <= 0 or not (0 < his_price < 1):
@@ -4721,11 +4713,20 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     # classify_exit refuses unless the market has exactly ONE sibling
     # token AND he demonstrably holds it. Everything else falls through
     # to the entry path untouched.
-    _exit = await classify_exit(
-        pool, str(payload.get("asset") or ""),
-        (payload.get("whale_username") or "").lower(),
-        payload.get("size") or 0,
-        payload.get("id"))
+    #
+    # SCOPED TO exitable_whales(), AND THAT SCOPE IS THE POINT. It is
+    # the same set mirror_exit itself honours, so every whale we could
+    # sell for is classified and no whale we could not does a single
+    # extra query — which is what makes running this ABOVE the entry
+    # roster free. An exit always arrives labelled BUY, so a non-BUY
+    # payload can never be one and is not worth a lookup either.
+    _exit = None
+    if payload.get("side") == "BUY" and username in exitable_whales():
+        _exit = await classify_exit(
+            pool, str(payload.get("asset") or ""),
+            (payload.get("whale_username") or "").lower(),
+            payload.get("size") or 0,
+            payload.get("id"))
     if _exit:
         log.warning("EXIT-CLASSIFIED %s bought %s to close %.1f%% of %s "
                     "— mirroring the exit, not the entry",
@@ -4756,6 +4757,42 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                        whale=payload.get("whale_username"),
                        asset=_exit.get("asset"))
         return _copy_stop("was_an_exit_pending", username)
+    # ── THE ENTRY ROSTER, BELOW THE EXIT (2026-09-01) ───────────────
+    #
+    # These two gates used to sit ~100 lines ABOVE classify_exit, which
+    # broke the invariant the 95% gate below states in words:
+    #
+    #   "a guard placed any higher would silently kill exit detection
+    #    for every whale it refuses"
+    #
+    # At this venue an exit arrives labelled BUY, so a whale refused by
+    # an ENTRY roster was never even classified — and every position we
+    # already held from him was stranded to resolution. exitable_whales()
+    # is deliberately WIDER than the verified set for exactly that
+    # reason (see its docstring, and test_cut_whale_exit), and
+    # mirror_exit honours the wide set — but the detector that feeds it,
+    # the lane carrying 1,572 attempts against the position lane's 23,
+    # never reached it. 0x2c33 is in that state today by construction:
+    # asserted exitable, with his exit detection dead.
+    #
+    # It is not only the cut list. cfg.source_whales() reads
+    # AI_TRADER_SOURCE, which has NO DB override — POST
+    # /api/admin/verified-whales writes live_verified_whales and cannot
+    # touch it — so a stale Render env would kill a whale's exit
+    # detection with no admin lever, which is the same failure mode that
+    # cost homerunhazard 724 rejections at $0 deployed in August.
+    #
+    # Moving them below costs nothing: classification above is scoped to
+    # exitable_whales(), the exact set mirror_exit would act on, so no
+    # whale we would never sell for does any extra database work.
+    if payload.get("side") != "BUY" or username not in cfg.source_whales():
+        return _copy_stop("not_buy_or_off_roster", username)
+    # TRUEEDGE CUT (owner order 2026-08-24): a whale whose full detected
+    # book is negative at his OWN prices is not copyable at any speed.
+    # First of three independent blocks (this gate, the 0.00 clip, the
+    # premap-live allowlist) — any one of them alone stops the dollars.
+    if username in COPY_CUT_WHALES:
+        return _copy_stop("whale_cut", username)
     # OVERSPEND BREAKER (2026-08-25). Tripped by the post-fill detector
     # the first time the venue charges more than we authorized. Placed
     # at the first point `pool` exists, still ahead of sizing, pricing
