@@ -6712,7 +6712,34 @@ async def api_whale_rate(whale: str = "rn1", days: int = 14) -> dict:
                          BETWEEN date_trunc('day', t.ts)::date - 1
                              AND date_trunc('day', t.ts)::date + 1)::int
                    AS dated_playable,
-               sum(t.notional)::float8 AS notional
+               sum(t.notional)::float8 AS notional,
+               -- WHICH LANE SAW IT (2026-09-01). trades.source is
+               -- CHECK'd to ('chain','poll'), so decode coverage is a
+               -- column, not an inference.
+               --
+               -- This is the whole edge question. TRUEEDGE on rn1's
+               -- book reads actual -$2,122 against TRUEEDGE-FAST
+               -- (the same trades at reaction <= 5s) at +$9,148, and
+               -- lat_cost $27,444 exceeds his entire counterfactual
+               -- edge of $25,719. The chain lane lands a fill in 1-3s;
+               -- the Data-API poller lands it in 130-212s, which is the
+               -- venue's own publication lag and cannot be polled away.
+               -- Our lat_med is 130s, so most fills are arriving by
+               -- poller — and this counts exactly how many.
+               count(*) FILTER (WHERE t.source = 'chain')::int AS n_chain,
+               count(*) FILTER (WHERE t.source = 'poll')::int AS n_poll,
+               -- Detection lag straight off the ledger: how long after
+               -- the fill did our pipeline first see it. Median, not
+               -- mean — one stalled row would otherwise define the day.
+               percentile_cont(0.5) WITHIN GROUP (
+                   ORDER BY extract(epoch FROM (t.detected_at - t.ts))
+               )::float8 AS lag_p50,
+               percentile_cont(0.5) WITHIN GROUP (
+                   ORDER BY extract(epoch FROM (t.detected_at - t.ts))
+               ) FILTER (WHERE t.source = 'chain')::float8 AS lag_p50_chain,
+               percentile_cont(0.5) WITHIN GROUP (
+                   ORDER BY extract(epoch FROM (t.detected_at - t.ts))
+               ) FILTER (WHERE t.source = 'poll')::float8 AS lag_p50_poll
         FROM trades t
         JOIN whales wh ON wh.id = t.whale_id
         JOIN firsts f ON f.asset = t.asset
@@ -6721,11 +6748,20 @@ async def api_whale_rate(whale: str = "rn1", days: int = 14) -> dict:
           AND t.ts > now() - make_interval(days => $2)
         GROUP BY 1 ORDER BY 1 DESC
         """, w, d)
+    def _r2(v):
+        return round(v, 2) if v is not None else None
+
     out = [{"day": r["day"].isoformat(), "trades": r["trades"],
             "distinct_assets": r["distinct_assets"],
             "new_assets": r["new_assets"],
             "dated_playable": r["dated_playable"],
-            "notional": round(r["notional"] or 0.0, 2)} for r in rows]
+            "notional": round(r["notional"] or 0.0, 2),
+            "n_chain": r["n_chain"], "n_poll": r["n_poll"],
+            "chain_frac": (round(r["n_chain"] / r["trades"], 4)
+                           if r["trades"] else None),
+            "lag_p50": _r2(r["lag_p50"]),
+            "lag_p50_chain": _r2(r["lag_p50_chain"]),
+            "lag_p50_poll": _r2(r["lag_p50_poll"])} for r in rows]
     # Medians, not means: this flow is bursty (a slate night is many
     # times a Tuesday) and a mean over a fortnight would describe no
     # actual day. Whole days only — today is still accumulating and
@@ -6733,7 +6769,13 @@ async def api_whale_rate(whale: str = "rn1", days: int = 14) -> dict:
     body = out[1:] if len(out) > 1 else out
 
     def _med(key):
-        vals = sorted(x[key] for x in body)
+        # DROP NULLS, DO NOT SORT THEM (2026-09-01). The per-lane lag
+        # columns are NULL on a day where that lane never fired, and
+        # sorting None against a float raises. Dropping is also the
+        # right statistic: a day the chain lane was silent carries no
+        # chain latency to average, and coercing it to 0 would report
+        # the silence as instant decode.
+        vals = sorted(x[key] for x in body if x[key] is not None)
         if not vals:
             return None
         n = len(vals)
@@ -6745,6 +6787,19 @@ async def api_whale_rate(whale: str = "rn1", days: int = 14) -> dict:
                "median_distinct_assets": _med("distinct_assets"),
                "median_new_assets": _med("new_assets"),
                "median_dated_playable": _med("dated_playable")}
+    # DECODE COVERAGE, over the whole window rather than a median of
+    # daily fractions — a quiet day and a slate night should not weigh
+    # the same when the question is "what share of his fills do we see
+    # fast".
+    _tc = sum(x["n_chain"] or 0 for x in body)
+    _tp = sum(x["n_poll"] or 0 for x in body)
+    if _tc + _tp:
+        summary["chain_frac"] = round(_tc / (_tc + _tp), 4)
+        summary["n_chain"] = _tc
+        summary["n_poll"] = _tp
+    summary["median_lag_p50"] = _med("lag_p50")
+    summary["median_lag_p50_chain"] = _med("lag_p50_chain")
+    summary["median_lag_p50_poll"] = _med("lag_p50_poll")
     # How many buys he puts into one position. Every buy beyond the
     # first is an ADD, and on the exit side a partial trim is an extra
     # cash-out event — so this is the multiplier between "positions

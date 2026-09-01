@@ -869,7 +869,17 @@ jobs:
             "$BASE/api/admin/whale-rate?whale=rn1&days=14" || true
           jq -r '.summary // {} | "  WHALERATE rn1 days=\(.days_counted // "?")  med_trades=\(.median_trades // "?")  med_distinct=\(.median_distinct_assets // "?")  med_new=\(.median_new_assets // "?")  med_playable=\(.median_dated_playable // "?")  adds_per_asset=\(.adds_per_asset // "?")"' \
              /tmp/wrate.json 2>/dev/null || echo "  WHALERATE unavailable"
-          jq -r '.by_day // [] | .[] | "  WRDAY \(.day) trades=\(.trades) distinct=\(.distinct_assets) new=\(.new_assets) playable=\(.dated_playable) notional=$\(.notional)"' \
+          # DECODE COVERAGE — the edge question, not a volume question.
+          # TRUEEDGE on rn1 reads actual -$2,122 against TRUEEDGE-FAST
+          # (same trades, reaction <= 5s) at +$9,148, and lat_cost
+          # $27,444 exceeds his whole counterfactual edge of $25,719.
+          # The chain lane lands a fill in 1-3s; the poller lands it in
+          # 130-212s, which is the VENUE's publication lag and cannot be
+          # polled away. chain_frac is therefore the single number that
+          # sizes how much of that gap is reachable.
+          jq -r '.summary // {} | "  WHALELANE rn1 chain_frac=\(.chain_frac // "?")  n_chain=\(.n_chain // "?") n_poll=\(.n_poll // "?")  lag_p50=\(.median_lag_p50 // "?")s  chain=\(.median_lag_p50_chain // "?")s poll=\(.median_lag_p50_poll // "?")s"' \
+             /tmp/wrate.json 2>/dev/null || true
+          jq -r '.by_day // [] | .[] | "  WRDAY \(.day) trades=\(.trades) distinct=\(.distinct_assets) new=\(.new_assets) playable=\(.dated_playable) chain=\(.n_chain)/\(.trades) lag=\(.lag_p50)s notional=$\(.notional)"' \
              /tmp/wrate.json 2>/dev/null | head -15 || true
 
           # COPYCENSUS — the pre-INSERT funnel, which has never existed.

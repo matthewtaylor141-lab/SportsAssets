@@ -32,6 +32,8 @@ import asyncio
 import datetime as dt
 import inspect
 
+import pytest
+
 from sportsassets.api import app as app_mod
 
 
@@ -65,10 +67,70 @@ class _Pool:
         self.queries.append((sql, a))
 
 
-def _row(day, trades, distinct, new, playable, notional=0.0):
+def _row(day, trades, distinct, new, playable, notional=0.0,
+         n_chain=0, n_poll=None, lag=None, lag_chain=None, lag_poll=None):
     return {"day": day, "trades": trades, "distinct_assets": distinct,
             "new_assets": new, "dated_playable": playable,
-            "notional": notional}
+            "notional": notional,
+            "n_chain": n_chain,
+            "n_poll": trades - n_chain if n_poll is None else n_poll,
+            "lag_p50": lag, "lag_p50_chain": lag_chain,
+            "lag_p50_poll": lag_poll}
+
+
+class TestDecodeCoverageIsMeasuredNotInferred:
+    """The edge question, not the volume question.
+
+    TRUEEDGE on rn1's book reads actual -$2,122 against TRUEEDGE-FAST
+    (the same trades at reaction <= 5s) at +$9,148, and lat_cost
+    $27,444 exceeds his entire counterfactual edge of $25,719. The
+    chain lane lands a fill in 1-3s; the Data-API poller lands it in
+    130-212s, which is the VENUE's publication lag and cannot be polled
+    away. trades.source is CHECK'd to ('chain','poll'), so which lane
+    saw a fill is a COLUMN — there is nothing here to infer.
+    """
+
+    def test_the_fraction_is_over_fills_not_a_mean_of_daily_fractions(self):
+        """A quiet Tuesday and a slate night must not weigh the same
+        when the question is 'what share of his fills do we see fast'."""
+        out, _ = _call([
+            _row(D, 0, 0, 0, 0),
+            _row(D - dt.timedelta(1), 1000, 10, 10, 10, n_chain=0),
+            _row(D - dt.timedelta(2), 10, 10, 10, 10, n_chain=10),
+        ])
+        # mean of daily fractions would be 0.50; the honest answer is
+        # 10 chain fills out of 1010.
+        assert out["summary"]["chain_frac"] == pytest.approx(0.0099, abs=1e-4)
+
+    def test_both_lane_counts_are_reported(self):
+        out, _ = _call([_row(D, 0, 0, 0, 0),
+                        _row(D - dt.timedelta(1), 100, 10, 10, 10,
+                             n_chain=30)])
+        assert out["summary"]["n_chain"] == 30
+        assert out["summary"]["n_poll"] == 70
+
+    def test_a_silent_chain_lane_reads_zero_not_missing(self):
+        """Zero coverage is the finding, and a null would be read as
+        'not measured' rather than 'never fired'."""
+        out, _ = _call([_row(D, 0, 0, 0, 0),
+                        _row(D - dt.timedelta(1), 500, 10, 10, 10,
+                             n_chain=0)])
+        assert out["summary"]["chain_frac"] == 0.0
+
+    def test_per_lane_lag_is_carried(self):
+        """One median hides the whole point: the lanes differ by two
+        orders of magnitude, so a blended figure describes neither."""
+        out, _ = _call([_row(D, 0, 0, 0, 0),
+                        _row(D - dt.timedelta(1), 100, 10, 10, 10,
+                             n_chain=10, lag=120.0, lag_chain=2.0,
+                             lag_poll=140.0)])
+        s = out["summary"]
+        assert s["median_lag_p50_chain"] == 2.0
+        assert s["median_lag_p50_poll"] == 140.0
+
+    def test_no_division_by_zero_on_a_silent_day(self):
+        out, _ = _call([_row(D, 0, 0, 0, 0)])
+        assert out["by_day"][0]["chain_frac"] is None
 
 
 def _call(rows, whale="rn1", days=14):
