@@ -1,0 +1,91 @@
+# ROSTER CONTROL — who may spend real money.
+#
+# The verified-whales set is the last gate before a copy becomes an
+# order, and until now the only ways to change it were a Render env var
+# (which silently overrode the owner's reinstate order for two days in
+# August, costing homerunhazard 724 straight rejections at $0 deployed)
+# or a raw curl with the admin token in shell history.
+#
+# This makes it an auditable, repeatable operator action: every run is a
+# dated record of a roster decision, it can be run from a phone, and it
+# ECHOES THE EFFECTIVE SET BACK from /api/admin/gates afterwards rather
+# than assuming the write landed. A roster change nobody can verify is
+# how the stale-env block stayed invisible.
+name: set-roster
+
+on:
+  workflow_dispatch:
+    inputs:
+      whales:
+        description: 'Comma-separated roster, e.g. "rn1,homerunhazard". This REPLACES the set.'
+        required: true
+        type: string
+      confirm:
+        description: 'Type SET to confirm this is a real money-gate change'
+        required: true
+        type: string
+
+jobs:
+  set-roster:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set the verified-whale roster and read it back
+        env:
+          DEFAULT_BASE: https://sportsassets-api.onrender.com
+          BASE_OVERRIDE: ${{ vars.API_BASE }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          WHALES: ${{ inputs.whales }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -uo pipefail
+          BASE="${BASE_OVERRIDE:-$DEFAULT_BASE}"
+
+          # FAIL CLOSED ON A MISTYPED CONFIRM. A workflow_dispatch is two
+          # taps on a phone; the money gate should cost one more.
+          if [ "$CONFIRM" != "SET" ]; then
+            echo "REFUSED: confirm must be exactly SET (got '$CONFIRM')."
+            echo "Nothing was changed."
+            exit 1
+          fi
+          if [ -z "${WHALES// /}" ]; then
+            echo "REFUSED: empty roster. The endpoint takes {clear:true}"
+            echo "to fall back to the env/code default; this workflow"
+            echo "will not send an empty set."
+            exit 1
+          fi
+
+          echo "=== ROSTER BEFORE ==="
+          curl -sS --max-time 45 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               "$BASE/api/admin/gates" 2>/dev/null \
+            | jq -r '"  effective: \(.verified_effective | tostring)  source=\(.verified_source // "?")  env_set=\(.verified_env_set)"' \
+            || echo "  (gates unreadable — proceeding, the write is idempotent)"
+
+          echo "=== SETTING ROSTER TO: $WHALES ==="
+          CODE=$(curl -sS --max-time 45 -w '%{http_code}' -o /tmp/set.json \
+               -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -H 'Content-Type: application/json' \
+               -d "$(jq -nc --arg w "$WHALES" '{whales:$w}')" \
+               "$BASE/api/admin/verified-whales" 2>/dev/null || echo "000")
+          echo "  HTTP $CODE"
+          cat /tmp/set.json 2>/dev/null | head -c 600; echo
+
+          if [ "$CODE" != "200" ]; then
+            echo "ROSTER WRITE FAILED — the roster is UNCHANGED."
+            exit 1
+          fi
+
+          # READ IT BACK FROM THE MONEY PATH'S OWN VIEW. The write
+          # returning 200 says the row was stored; only /gates says what
+          # the executor will actually consult, and those differ whenever
+          # a cached override has not expired yet (30s TTL).
+          echo "=== ROSTER AFTER (from the gates the executor reads) ==="
+          sleep 35
+          curl -sS --max-time 45 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               "$BASE/api/admin/gates" 2>/dev/null > /tmp/gates.json || true
+          jq -r '"  effective: \(.verified_effective | tostring)  source=\(.verified_source // "?")"' /tmp/gates.json 2>/dev/null || true
+          jq -r '"  clips: \(.sizing.per_fill_by_whale // {} | to_entries | map("\(.key)=\(.value)") | join(" "))  max_clip=\(.sizing.max_clip_usd // "?")"' /tmp/gates.json 2>/dev/null || true
+          jq -r '"  exitable: \(.exitable | tostring)"' /tmp/gates.json 2>/dev/null || true
+          jq -r '"  cut: \(.cut_whales | tostring)  hold: \(.hold_whales | tostring)"' /tmp/gates.json 2>/dev/null || true
+          echo
+          echo "A whale is only live if he appears in verified(db) AND"
+          echo "carries a non-zero clip. A 0.00 clip is itself a block."
