@@ -459,7 +459,27 @@ class BlockTimestampCache:
 class ChainListener:
     def __init__(self) -> None:
         cfg = settings()
-        self._ws_url = cfg.polygon_ws_url
+        # ENDPOINT ROTATION (2026-09-01). POLYGON_WS_URL was a single
+        # endpoint with no failover, and on 2026-08-31 the provider
+        # started answering the subscribe with HTTP 429. Path A stayed
+        # down for a full day: rn1's on-chain decode coverage went from
+        # 81-86% at -0.65s detection lag to ZERO at 333s, because the
+        # Data-API poller is the only thing left and 281s is the
+        # VENUE's publication lag, not something we can poll away.
+        #
+        # That is the difference TRUEEDGE-FAST measures: the same book
+        # at reaction <= 5s grades +$9,148 against actual -$2,121. A
+        # throttled endpoint therefore does not degrade us a little, it
+        # removes the edge — and with one URL there was nothing to fail
+        # over TO.
+        #
+        # Comma-separated, first entry is the primary, rotation happens
+        # only after a failure. A list of one behaves exactly as before.
+        self._ws_urls = [u.strip() for u in
+                         str(cfg.polygon_ws_url or "").split(",")
+                         if u.strip()]
+        self._ws_idx = 0
+        self._ws_url = self._ws_urls[0] if self._ws_urls else ""
         self._http_url = cfg.polygon_http_url
         self._addresses = [
             cfg.ctf_exchange_address.lower(),
@@ -820,6 +840,7 @@ class ChainListener:
                     except Exception:  # noqa: BLE001
                         pass
 
+                self._ws_url = self._ws_urls[self._ws_idx % len(self._ws_urls)]
                 async with websockets.connect(self._ws_url, ping_interval=15, ping_timeout=10) as ws:
                     await ws.send(
                         json.dumps(
@@ -866,10 +887,30 @@ class ChainListener:
                 # every successful subscribe.
                 self._fail_streak = getattr(self, "_fail_streak", 0) + 1
                 delay = min(2 * (2 ** min(self._fail_streak - 1, 6)), 120)
+                # ROTATE BEFORE SLEEPING, once this endpoint has failed
+                # twice. Not on the first failure — a single blip is not
+                # a reason to leave a healthy primary — and not never,
+                # which is what cost a day of edge on 2026-08-31. With
+                # one URL configured the modulo makes this a no-op, so
+                # nothing changes for a single-endpoint deployment.
+                if len(self._ws_urls) > 1 and self._fail_streak >= 2:
+                    self._ws_idx += 1
+                    log.warning("rotating Polygon WS endpoint to #%d of %d "
+                                "after %d consecutive failures",
+                                (self._ws_idx % len(self._ws_urls)) + 1,
+                                len(self._ws_urls), self._fail_streak)
                 log.warning("chain listener error: %s — reconnecting in %ss",
                             exc, delay)
                 await heartbeat("chain_listener", "down",
                                 {"error": str(exc)[:300],
                                  "fail_streak": self._fail_streak,
-                                 "retry_in_s": delay})
+                                 "retry_in_s": delay,
+                                 # Named so a reader knows whether the
+                                 # provider is throttling us or the
+                                 # endpoint is simply gone — the two
+                                 # need different actions from a human.
+                                 "throttled": "429" in str(exc),
+                                 "endpoint_index": self._ws_idx
+                                 % max(1, len(self._ws_urls)),
+                                 "endpoints_configured": len(self._ws_urls)})
                 await asyncio.sleep(delay)

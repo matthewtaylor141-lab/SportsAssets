@@ -879,6 +879,31 @@ jobs:
           # sizes how much of that gap is reachable.
           jq -r '.summary // {} | "  WHALELANE rn1 chain_frac=\(.chain_frac // "?")  n_chain=\(.n_chain // "?") n_poll=\(.n_poll // "?")  lag_p50=\(.median_lag_p50 // "?")s  chain=\(.median_lag_p50_chain // "?")s poll=\(.median_lag_p50_poll // "?")s"' \
              /tmp/wrate.json 2>/dev/null || true
+          # LANE ALARM — the failure this exists for ran a full DAY
+          # unseen (2026-08-31 -> 2026-09-01). Coverage went 86% -> 0%,
+          # detection lag -0.65s -> 333s, `chain_listener: down` sat in
+          # a heartbeat, and nothing said a word. The number was
+          # discoverable the whole time; no line ASKED it.
+          #
+          # Thresholds are read off the measured regime, not guessed:
+          # six consecutive healthy days ran 81-86%, so anything under
+          # half of that is a collapse and not a quiet night. Today's
+          # own bucket is used, because a 12-day average stays green
+          # for a week after the lane dies — which is exactly how this
+          # one hid.
+          jq -r '(.by_day // [])[0] as $d
+                 | if $d == null then "  LANEALARM no day rows"
+                   elif ($d.trades // 0) < 200
+                   then "  LANEALARM today thin (\($d.trades) trades) — not judged"
+                   elif (($d.n_chain // 0) / ($d.trades // 1)) < 0.40
+                   then "  LANEALARM *** CHAIN LANE DOWN *** \($d.day): chain=\($d.n_chain)/\($d.trades) lag=\($d.lag_p50)s — Path A is not decoding; every fill is arriving on the poller at the VENUE publication lag, which is the edge-destroying regime (TRUEEDGE-FAST +$9,148 vs actual -$2,121). Check POLYGON_WS_URL quota/429."
+                   else "  LANEALARM ok \($d.day): chain=\($d.n_chain)/\($d.trades) lag=\($d.lag_p50)s"
+                   end' /tmp/wrate.json 2>/dev/null || echo "  LANEALARM unreadable"
+          # ...and the listener's own words, so the CAUSE is beside the
+          # symptom rather than a database session away.
+          jq -r '.[]? | select(.service == "chain_listener")
+                 | "  CHAINHB \(.status) \(.detail.error // "") throttled=\(.detail.throttled // "?") endpoint=\(.detail.endpoint_index // "?")/\(.detail.endpoints_configured // "?") streak=\(.detail.fail_streak // "?")"' \
+             /tmp/hb_we.json 2>/dev/null || true
           jq -r '.by_day // [] | .[] | "  WRDAY \(.day) trades=\(.trades) distinct=\(.distinct_assets) new=\(.new_assets) playable=\(.dated_playable) chain=\(.n_chain)/\(.trades) lag=\(.lag_p50)s notional=$\(.notional)"' \
              /tmp/wrate.json 2>/dev/null | head -15 || true
 
