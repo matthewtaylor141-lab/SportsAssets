@@ -425,8 +425,20 @@ jobs:
           # Option A as harmless. Printed separately, never summed.
           curl -sS --max-time 45 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/tol.json "$BASE/api/admin/copy-tolerance" || true
-          jq -r '.rows[]? | "  TOLA \(.whale) \(.cohort)  n=\(.n) settled=\(.settled)  staked=$\(.staked) roi=\(.roi)  cents_over=\(.cents_over)  pnl=$\(.pnl)"' \
+          jq -r '.rows[]? | "  TOLA \(.whale) \(.cohort)  n=\(.n) settled=\(.settled)  staked=$\(.staked) roi=\(.roi)  ci95=\(.ci95 | tostring) clusters=\(.clusters // "n/a")  cents_over=\(.cents_over)  pnl=$\(.pnl)"' \
             /tmp/tol.json 2>/dev/null || echo "  TOLA unavailable"
+          jq -r '.rows[]? | "  TOLAVERDICT \(.whale) \(.cohort): \(.verdict)"' \
+            /tmp/tol.json 2>/dev/null || true
+          # TOLACMP IS THE LINE THAT DECIDES ANYTHING. Two cohort ROIs
+          # side by side invite the conclusion their intervals refuse:
+          # on 2026-09-01 rn1 read marginal -0.01% on 335 settled
+          # against parity +16.75% on 64, and that gap was about to
+          # move 83% of his capital. Overlap is the CONSERVATIVE test,
+          # so SEPARATED here is trustworthy and OVERLAPPING means the
+          # difference is not established yet -- not that it is small.
+          jq -r '.by_whale // {} | to_entries[]
+                 | "  TOLACMP \(.key) marginal=\(.value.marginal_roi // "n/a")\(.value.marginal_ci95 | tostring)/\(.value.marginal_settled // 0) vs parity=\(.value.parity_roi // "n/a")\(.value.parity_ci95 | tostring)/\(.value.parity_settled // 0) — \(.value.reading)"' \
+            /tmp/tol.json 2>/dev/null || true
 
           # ── premap coverage (owner order 2026-08-24: copy-time mapping
           # becomes a lookup; this line watches the table fill)

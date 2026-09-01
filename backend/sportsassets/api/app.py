@@ -7703,6 +7703,11 @@ async def api_venue_pnl() -> dict:
     return doc
 
 
+def _pct_pair(ci: list) -> str:
+    """A 95% interval as percentages, for a verdict a human reads."""
+    return f"[{ci[0]:+.2%}, {ci[1]:+.2%}]"
+
+
 @app.get("/api/admin/copy-tolerance", dependencies=[Depends(require_admin)])
 async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
     """Did Option A pay for itself? Graded on the MARGINAL cohort only.
@@ -7731,6 +7736,7 @@ async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
     """
     from datetime import datetime as _dt
 
+    from ..analytics.proof import roi_with_ci
     from ..live_executor import (ORDER_INTENT_SQL, cost_per_share,
                                  tolerance_cohort)
 
@@ -7750,15 +7756,23 @@ async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
     # the day Option A shipped.
     rows = await pool.fetch(
         f"""
-        SELECT lower(COALESCE(whale_username, '?')) AS whale,
-               his_price::float8 AS his, fill_price::float8 AS fp,
-               filled_usd::float8 AS staked, pnl::float8 AS pnl,
-               status, {ORDER_INTENT_SQL} AS intent
-        FROM live_orders
-        WHERE placed_at >= $1
-          AND status IN ('filled', 'settled', 'cashed_out')
-          AND filled_usd > 0 AND his_price > 0 AND fill_price > 0
-          AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+        SELECT lower(COALESCE(lo.whale_username, '?')) AS whale,
+               lo.his_price::float8 AS his, lo.fill_price::float8 AS fp,
+               lo.filled_usd::float8 AS staked, lo.pnl::float8 AS pnl,
+               lo.status, {ORDER_INTENT_SQL} AS intent,
+               -- THE GAME THIS COPY BELONGS TO, for the cluster-robust
+               -- interval below. Same LEFT JOIN and same COALESCE the
+               -- proof cohort uses, so the two instruments cannot
+               -- disagree about what one independent result is.
+               COALESCE(NULLIF(m.event_slug, ''),
+                        NULLIF(lo.us_market_slug, '')) AS event_key
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.placed_at >= $1
+          AND lo.status IN ('filled', 'settled', 'cashed_out')
+          AND lo.filled_usd > 0 AND lo.his_price > 0 AND lo.fill_price > 0
+          AND COALESCE(lo.whale_username, '') NOT IN ('manual', 'underdog')
         """, since_d)
     agg: dict[tuple, dict] = {}
     for r in rows:
@@ -7766,7 +7780,7 @@ async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
         d = agg.setdefault((r["whale"], cohort), {
             "whale": r["whale"], "cohort": cohort, "n": 0, "settled": 0,
             "staked": 0.0, "pnl": 0.0, "settled_staked": 0.0,
-            "cents_sum": 0.0})
+            "cents_sum": 0.0, "_rows": []})
         d["n"] += 1
         d["staked"] += float(r["staked"])
         d["cents_sum"] += (cost_per_share(float(r["fp"]), r["intent"])
@@ -7775,10 +7789,25 @@ async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
             d["settled"] += 1
             d["pnl"] += float(r["pnl"] or 0)
             d["settled_staked"] += float(r["staked"])
+            # AN UNKEYED ROW STAYS A SINGLETON, IT DOES NOT ABORT. The
+            # SELECT always provides event_key, so this cannot be None
+            # in production -- but a row that somehow arrives without
+            # one must degrade to its own cluster (roi_with_ci's
+            # documented behaviour) rather than raise. An interval that
+            # throws when a join misses is an interval nobody can rely
+            # on at the moment they need it.
+            try:
+                _ek = r["event_key"]
+            except (KeyError, IndexError):
+                _ek = None
+            d["_rows"].append({"stake": float(r["staked"]),
+                               "pnl": float(r["pnl"] or 0),
+                               "event_key": _ek})
     out = []
     for d in sorted(agg.values(), key=lambda x: (x["whale"], x["cohort"])):
         ss = d.pop("settled_staked")
         cs = d.pop("cents_sum")
+        settled_rows = d.pop("_rows")
         # ROI ON SETTLED DOLLARS ONLY. Dividing realised P&L by dollars
         # that include still-open positions understates every cohort,
         # and it understates the SMALLER one more -- which here is the
@@ -7786,17 +7815,86 @@ async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
         d["roi"] = round(d["pnl"] / ss, 4) if ss > 0 else None
         d["settled_staked"] = round(ss, 2)
         d["cents_over"] = round(cs / d["n"], 3) if d["n"] else None
+        # ── THE INTERVAL THIS ENDPOINT WAS MISSING (2026-09-01) ─────
+        #
+        # It reported a bare ROI per cohort and nothing else, and a
+        # bare ROI cannot decide anything. rn1 read marginal -0.01% on
+        # 335 settled against parity +16.75% on 64, and that gap was
+        # about to be used to move 83% of his capital between cohorts.
+        # On 64 settled copies +16.75% may be noise; without an
+        # interval there is no way to say, and "the bigger number wins"
+        # is how a coin flip gets shipped as a strategy.
+        #
+        # Clustered on the whale's EVENT for the same reason the proof
+        # cohort is: three legs of one match settle on one result, and
+        # counting them as three independent copies narrows the
+        # interval in the direction that declares a cohort proven.
+        ci = roi_with_ci(settled_rows)
+        d["ci95"] = ci.get("ci95")
+        d["clusters"] = ci.get("clusters")
+        lo_hi = ci.get("ci95")
+        if not lo_hi:
+            d["verdict"] = ("NO INTERVAL — fewer than two settled "
+                            "copies in this cohort")
+        elif lo_hi[0] > 0:
+            d["verdict"] = f"EARNS at 95% — interval {_pct_pair(lo_hi)}"
+        elif lo_hi[1] < 0:
+            d["verdict"] = f"LOSES at 95% — interval {_pct_pair(lo_hi)}"
+        else:
+            d["verdict"] = (f"NOT DEMONSTRATED — interval "
+                            f"{_pct_pair(lo_hi)} contains zero")
         for k in ("staked", "pnl"):
             d[k] = round(d[k], 2)
         out.append(d)
+
+    # ── THE COMPARISON IS THE DECISION, SO STATE IT ─────────────────
+    #
+    # The question this endpoint exists to answer is not "what is each
+    # cohort's ROI" but "is one better than the other, by enough to
+    # move money". Two intervals that overlap do not establish a
+    # difference, and reading two point estimates side by side invites
+    # exactly the conclusion the intervals refuse. Overlap is the
+    # CONSERVATIVE test -- non-overlapping intervals imply a real
+    # difference, the converse does not hold -- so a SEPARATED verdict
+    # here is trustworthy and an OVERLAPPING one is genuinely "not yet".
+    cmp_out: dict[str, dict] = {}
+    for whale in sorted({d["whale"] for d in out}):
+        marg = next((d for d in out if d["whale"] == whale
+                     and d["cohort"] == "marginal"), None)
+        par = next((d for d in out if d["whale"] == whale
+                    and d["cohort"] == "parity"), None)
+        if not marg or not par or not marg.get("ci95") or not par.get("ci95"):
+            cmp_out[whale] = {"reading": ("INCOMPARABLE — one cohort has "
+                                          "no interval yet")}
+            continue
+        m, p = marg["ci95"], par["ci95"]
+        separated = m[1] < p[0] or p[1] < m[0]
+        cmp_out[whale] = {
+            "marginal_roi": marg["roi"], "marginal_ci95": m,
+            "marginal_settled": marg["settled"],
+            "parity_roi": par["roi"], "parity_ci95": p,
+            "parity_settled": par["settled"],
+            "separated": separated,
+            "reading": (
+                f"SEPARATED — the intervals do not overlap, so the "
+                f"cohorts differ; {'parity' if p[0] > m[1] else 'marginal'}"
+                f" is the better one"
+                if separated else
+                "OVERLAPPING — the intervals overlap, so the difference "
+                "between these cohorts is NOT established. The point "
+                "estimates may differ a lot and still be one book. Do "
+                "not move capital between cohorts on this."),
+        }
     return {
-        "since": since_day, "rows": out,
+        "since": since_day, "rows": out, "by_whale": cmp_out,
         "note": ("marginal = filled ABOVE his price, i.e. only because "
                  "of the tolerance -- the only cohort that grades "
                  "Option A. parity = at or below, which same-or-better "
                  "would also have filled. Never summed together. roi is "
                  "on SETTLED dollars; a cohort with settled=0 has no "
-                 "verdict yet, however large its n."),
+                 "verdict yet, however large its n. Intervals are "
+                 "cluster-robust on the whale's event; read `by_whale` "
+                 "before treating a cohort gap as real."),
     }
 
 
