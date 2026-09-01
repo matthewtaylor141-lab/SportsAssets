@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -7832,6 +7833,13 @@ async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
         ci = roi_with_ci(settled_rows)
         d["ci95"] = ci.get("ci95")
         d["clusters"] = ci.get("clusters")
+        # THE STANDARD ERROR TRAVELS WITH THE ROW. The comparison below
+        # projects how much more data a cohort gap needs, and that
+        # projection is built from se -- without it every comparison
+        # silently took the "no standard error" branch and reported
+        # "no sample size separates them" for gaps that were merely
+        # noisy. Carried explicitly rather than recomputed.
+        d["se"] = ci.get("se")
         lo_hi = ci.get("ci95")
         if not lo_hi:
             d["verdict"] = ("NO INTERVAL — fewer than two settled "
@@ -7869,12 +7877,65 @@ async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
             continue
         m, p = marg["ci95"], par["ci95"]
         separated = m[1] < p[0] or p[1] < m[0]
+        # ── HOW MANY MORE COPIES UNTIL THIS RESOLVES ────────────────
+        #
+        # "OVERLAPPING" is honest and it is also unactionable on its
+        # own: it says the difference is not established without saying
+        # whether it is one week away or unreachable. rn1 has $32k of
+        # settled stake sitting in a cohort returning approximately
+        # nothing, and "wait for more data" is a decision to never
+        # decide unless someone can say how much more.
+        #
+        # The projection is deliberately crude and states its
+        # assumption. Standard errors shrink as 1/sqrt(n), so scaling
+        # BOTH cohorts by k scales the difference's SE by 1/sqrt(k).
+        # Separation needs 1.96 * SE_diff / sqrt(k) < |roi_m - roi_p|,
+        # so k > (1.96 * SE_diff / d)^2. That holds the observed point
+        # estimates and dispersion fixed, which is exactly what will
+        # NOT happen -- rn1's parity estimate has already walked
+        # +16.75% -> +11.23% -> +10.36% across three reads today. So
+        # this is a scale, not a date: "about 4x the current sample"
+        # is a decision input; "November 3rd" would be a fiction.
+        #
+        # An unreachable k is the most useful answer it can give. If
+        # the gap needs fifty times the book we will ever settle, the
+        # honest move is to stop waiting on this comparison and change
+        # something else.
+        _need: dict = {}
+        _d = abs((marg["roi"] or 0) - (par["roi"] or 0))
+        _se_m, _se_p = marg.get("se"), par.get("se")
+        if separated:
+            _need = {"reading": "already separated — nothing to wait for"}
+        elif _d <= 0 or not _se_m or not _se_p:
+            _need = {"reading": ("the point estimates are identical or a "
+                                 "cohort has no standard error — no "
+                                 "sample size separates them")}
+        else:
+            _se_diff = math.sqrt(_se_m ** 2 + _se_p ** 2)
+            _k = (1.645 * _se_diff / _d) ** 2
+            _need = {
+                "scale_factor": round(_k, 1),
+                "marginal_settled_needed": int(math.ceil(_k * marg["settled"])),
+                "parity_settled_needed": int(math.ceil(_k * par["settled"])),
+                "assumes": ("the observed point estimates and dispersion "
+                            "hold; they have not so far, so read this as "
+                            "a SCALE, not a date"),
+                "reading": (
+                    f"about {_k:.1f}x the current settled sample in each "
+                    f"cohort before a {_d:.2%} gap could clear the noise"
+                    if _k < 50 else
+                    f"about {_k:.0f}x the current sample — this comparison "
+                    f"is not going to resolve by waiting; the gap is too "
+                    f"small relative to the dispersion to be worth "
+                    f"measuring further"),
+            }
         cmp_out[whale] = {
             "marginal_roi": marg["roi"], "marginal_ci95": m,
             "marginal_settled": marg["settled"],
             "parity_roi": par["roi"], "parity_ci95": p,
             "parity_settled": par["settled"],
             "separated": separated,
+            "to_resolve": _need,
             "reading": (
                 f"SEPARATED — the intervals do not overlap, so the "
                 f"cohorts differ; {'parity' if p[0] > m[1] else 'marginal'}"

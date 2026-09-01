@@ -439,6 +439,15 @@ jobs:
           jq -r '.by_whale // {} | to_entries[]
                  | "  TOLACMP \(.key) marginal=\(.value.marginal_roi // "n/a")\(.value.marginal_ci95 | tostring)/\(.value.marginal_settled // 0) vs parity=\(.value.parity_roi // "n/a")\(.value.parity_ci95 | tostring)/\(.value.parity_settled // 0) — \(.value.reading)"' \
             /tmp/tol.json 2>/dev/null || true
+          # TOLARESOLVE — how much more data an OVERLAPPING comparison
+          # needs before it can decide anything. "Not established" is
+          # honest and unactionable on its own; a scale factor turns it
+          # into either "wait" or "stop waiting and change something
+          # else". Read as a SCALE, never a date: rn1's parity estimate
+          # walked +16.75% -> +11.23% -> +10.36% in one afternoon.
+          jq -r '.by_whale // {} | to_entries[] | select(.value.to_resolve.scale_factor)
+                 | "  TOLARESOLVE \(.key) needs ~\(.value.to_resolve.scale_factor)x — marginal \(.value.marginal_settled)→\(.value.to_resolve.marginal_settled_needed), parity \(.value.parity_settled)→\(.value.to_resolve.parity_settled_needed) settled: \(.value.to_resolve.reading)"' \
+            /tmp/tol.json 2>/dev/null || true
 
           # ── premap coverage (owner order 2026-08-24: copy-time mapping
           # becomes a lookup; this line watches the table fill)

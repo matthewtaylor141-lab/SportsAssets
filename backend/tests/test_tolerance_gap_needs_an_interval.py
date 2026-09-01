@@ -233,3 +233,79 @@ def test_the_endpoint_cannot_write():
     src = ast.unparse(_node()).lower()
     for verb in ("insert ", "update ", "delete ", "execute("):
         assert verb not in src, f"copy-tolerance must not {verb.strip()}"
+
+
+# ------------------------------------------- how long until it resolves
+
+def _varied(marg_pnls, par_pnls):
+    """Cohorts with real within-cohort variance.
+
+    A fixture where every row in a cohort carries the SAME pnl has zero
+    residuals, hence zero standard error and a zero-width interval, and
+    every comparison reads as separated. That is a degenerate fixture,
+    not a result — dispersion is the whole subject here."""
+    rows = [_r(his=0.5, fp=0.52, staked=100.0, pnl=p, event_key=f"m{i}")
+            for i, p in enumerate(marg_pnls)]
+    rows += [_r(his=0.5, fp=0.50, staked=100.0, pnl=p, event_key=f"p{i}")
+             for i, p in enumerate(par_pnls)]
+    return rows
+
+
+def test_an_overlapping_comparison_says_how_much_more_data_it_needs():
+    """OVERLAPPING is honest and unactionable on its own. It says the
+    difference is not established without saying whether that is one
+    week away or unreachable — and "wait for more data" is a decision to
+    never decide unless someone can say how much more."""
+    out, _ = _call(_varied([30.0, -25.0, 20.0, -15.0, 10.0, -20.0],
+                           [40.0, -15.0, 35.0, -10.0, 30.0, -8.0]))
+    c = out["by_whale"]["rn1"]
+    assert c["separated"] is False
+    assert "scale_factor" in c["to_resolve"]
+    assert c["to_resolve"]["marginal_settled_needed"] > c["marginal_settled"]
+    assert c["to_resolve"]["parity_settled_needed"] > c["parity_settled"]
+
+
+def test_a_separated_comparison_has_nothing_to_wait_for():
+    out, _ = _call(_two_cohorts(-20.0, 20.0))
+    c = out["by_whale"]["rn1"]
+    assert c["separated"] is True
+    assert "nothing to wait for" in c["to_resolve"]["reading"]
+
+
+def test_identical_point_estimates_are_named_unresolvable():
+    """No sample size separates two cohorts that agree. Reporting a
+    finite number here would promise a proof date that cannot arrive."""
+    rows = [_r(his=0.5, fp=0.52, staked=100.0, pnl=5.0, event_key=f"m{i}")
+            for i in range(6)]
+    rows += [_r(his=0.5, fp=0.50, staked=100.0, pnl=5.0, event_key=f"p{i}")
+             for i in range(6)]
+    out, _ = _call(rows)
+    t = out["by_whale"]["rn1"]["to_resolve"]
+    assert "scale_factor" not in t
+    assert "no sample size separates" in t["reading"]
+
+
+def test_a_hopeless_gap_says_stop_waiting_rather_than_quoting_a_number():
+    """The most useful answer this can give. If the gap needs fifty
+    times the book we will ever settle, the honest move is to stop
+    waiting on the comparison and change something else."""
+    pnls_a = [90.0, -85.0, 80.0, -75.0, 70.0, -65.0]
+    pnls_b = [-88.0, 84.0, -78.0, 74.0, -68.0, 66.0]
+    rows = [_r(his=0.5, fp=0.52, staked=100.0, pnl=p, event_key=f"m{i}")
+            for i, p in enumerate(pnls_a)]
+    rows += [_r(his=0.5, fp=0.50, staked=100.0, pnl=p, event_key=f"p{i}")
+             for i, p in enumerate(pnls_b)]
+    out, _ = _call(rows)
+    t = out["by_whale"]["rn1"]["to_resolve"]
+    if t.get("scale_factor", 0) >= 50:
+        assert "not going to resolve by waiting" in t["reading"]
+
+
+def test_the_projection_states_that_it_is_a_scale_not_a_date():
+    """rn1's parity estimate walked +16.75% -> +11.23% -> +10.36% in one
+    afternoon. A projection that held those fixed and printed a calendar
+    date would be a fiction."""
+    out, _ = _call(_varied([30.0, -25.0, 20.0, -15.0, 10.0, -20.0],
+                           [40.0, -15.0, 35.0, -10.0, 30.0, -8.0]))
+    t = out["by_whale"]["rn1"]["to_resolve"]
+    assert "SCALE, not a date" in t["assumes"]
