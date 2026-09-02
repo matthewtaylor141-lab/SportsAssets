@@ -2097,6 +2097,18 @@ jobs:
           # $1.50, anything above it is the engine entering a market it
           # already held.
           curl -sS --max-time 120 -o /tmp/acct.json "$BASE/api/pmus-account" || true
+          # EPOCHCHECK — the front end is zeroed to one display epoch
+          # (owner order 2026-09-02, September 1st). Every performance
+          # and account view must floor on it; the first day served by
+          # each record proves it from outside.
+          jq -r '"  EPOCHCHECK copies-record: epoch=\(.epoch // "n/a") since=\(.since // "n/a") rebaselined=\(.rebaselined // "n/a") first_day=\((.daily // .days // []) | if type=="array" then (map(.day // .date) | sort | .[0] // "none") else (keys | sort | .[0] // "none") end)"' \
+            /tmp/cop.json 2>/dev/null || echo "  EPOCHCHECK copies-record unavailable"
+          jq -r '"  EPOCHCHECK pmus-account: display_epoch=\(.display_epoch // "n/a") realized=\(.realized_pnl // "n/a") lifetime=\(.realized_pnl_lifetime // "n/a") settled=\(.settled_count // "n/a")/\(.settled_count_lifetime // "n/a") daily_first=\((.system_daily // []) | map(.day) | sort | .[0] // "none")"' \
+            /tmp/acct.json 2>/dev/null || echo "  EPOCHCHECK pmus-account unavailable"
+          jq -r '"  EPOCHCHECK live-status: orders=\(.orders // "n/a") fills=\(.fills // "n/a") deployed=\(.deployed // "n/a") realized=\(.realized_pnl // "n/a") recent_oldest=\((.recent // []) | map(.placed_at) | sort | .[0] // "none")"' \
+            /tmp/live.json 2>/dev/null || echo "  EPOCHCHECK live-status unavailable"
+          jq -r '"  EPOCHCHECK daily-breakdown: first_day=\((.days // {}) | if type=="object" then (keys | sort | .[0] // "none") else (map(.day) | sort | .[0] // "none") end)"' \
+            /tmp/db.json 2>/dev/null || echo "  EPOCHCHECK daily-breakdown unavailable"
           jq -r '"boundary: cost <= $\(.system_max_cost)  (SIZE only — says nothing about who placed it)",
                  "",
                  (.system, .manual | "[\(if .cohort == "manual" then "OVER $5 — investigate" else "within $5" end)]  \(.positions) positions, $\(.staked) staked",
