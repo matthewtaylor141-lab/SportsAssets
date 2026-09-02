@@ -318,7 +318,7 @@ async def ledger_net(pool, us_slug: str) -> int:
     for r in rows:
         sh = float(r["sh"] or 0.0)
         net += sh if str(r["intent"]) != "ORDER_INTENT_BUY_SHORT" else -sh
-    return int(net) if net >= 0 else -int(-net)
+    return round(net, 4)               # fractional fills kept; the plan compares within a share
 
 
 async def account_positions(pmus) -> dict[str, float] | None:
@@ -476,7 +476,6 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
         ledger = await ledger_net(pool, slug)
     except Exception:  # noqa: BLE001
         ledger = 0
-    venue_int = None if venue is None else (int(venue) if venue >= 0 else -int(-venue))
     # NO SCALE OR NO MARK IS NO PLAN (review round one): a missing ratio
     # or an unreadable book must not read as "target zero, flatten" or
     # as an uncapped target. Nothing is planned; the row says why.
@@ -495,7 +494,7 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
     tgt = mi.target_shares(ratio, net, mark, allow_short=allow_short)
     reducing = int(tgt["target"]) <= int(ledger)
     his_px = his_level(fills, la, oa, reducing)
-    p = mi.plan(int(tgt["target"]), int(ledger), venue_int,
+    p = mi.plan(int(tgt["target"]), float(ledger), venue,
                 mi.Book(bid=bid, ask=ask), his_px, mark)
     row.update(target=int(tgt["target"]), target_raw=tgt["raw"], capped=bool(tgt["capped"]),
                ledger_net=int(ledger), venue_net=venue, bid=bid, ask=ask, mark=mark,

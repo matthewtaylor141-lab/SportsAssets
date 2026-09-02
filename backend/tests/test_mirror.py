@@ -126,3 +126,14 @@ def test_the_ratio_reports_the_dollar_weighted_anchor_beside_the_median():
     assert out["anchor_usd_weighted"] == 1000.0 and out["ratio_weighted"] == 0.05
     few = mi.mirror_ratio([10.0] * 3)
     assert few["ratio"] is None and few["ratio_weighted"] is None and "why" in few
+
+
+def test_venue_and_ledger_agree_within_one_share():
+    from sportsassets.analytics import mirror as mi
+    book = mi.Book(bid=0.30, ask=0.32)
+    # 322.51 shares by the ledger against -323 at the venue is a rounding edge, not a freeze
+    assert not mi.plan(0, -322.51, -323.0, book, 0.3, 0.31).reason.startswith("frozen")
+    assert not mi.plan(400, 322.51, 323.0, book, 0.3, 0.31).reason.startswith("frozen")
+    # more than a share apart is a real disagreement
+    assert mi.plan(400, 322.0, 324.0, book, 0.3, 0.31).reason.startswith("frozen")
+    assert mi.VENUE_LEDGER_TOL_SHARES == 1.0

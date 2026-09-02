@@ -64,6 +64,8 @@ MARKET_NET_CAP_USD = 250.0
 MIN_MOVE_USD = 5.0
 # Hysteresis: skip moves smaller than this fraction of the target.
 MIN_MOVE_FRAC = 0.02
+# Venue and ledger agree when they are within this many shares.
+VENUE_LEDGER_TOL_SHARES = 1.0
 
 
 @dataclass
@@ -203,7 +205,7 @@ class Plan:
     detail: dict = field(default_factory=dict)
 
 
-def plan(target: int, ledger: int, venue: int | None, book: Book,
+def plan(target: int, ledger: float, venue: float | None, book: Book,
          his_last_px: float | None, mark: float | None) -> Plan:
     """The one order we WOULD place to move from what we hold toward the
     target. Fail closed on any disagreement between ledger and venue.
@@ -222,7 +224,11 @@ def plan(target: int, ledger: int, venue: int | None, book: Book,
     """
     if venue is None:
         return Plan(None, 0, None, "venue unreadable")
-    if int(venue) != int(ledger):
+    # WITHIN ONE SHARE IS AGREEMENT (shadow hours 2-3, 2026-09-02): the
+    # ledger holds fractional fills (322.51 shares) and the venue reports
+    # whole ones (-323); comparing truncated integers froze 176 readings
+    # on a rounding edge. A real disagreement is more than a share.
+    if abs(float(venue) - float(ledger)) > VENUE_LEDGER_TOL_SHARES:
         return Plan(None, 0, None, "frozen: venue and ledger disagree",
                     detail={"venue": venue, "ledger": ledger})
     delta = int(target) - int(ledger)
@@ -264,4 +270,4 @@ def plan(target: int, ledger: int, venue: int | None, book: Book,
 
 __all__ = ["Fill", "Book", "Plan", "net_positions", "his_net", "opening_burst",
            "mirror_ratio", "target_shares", "plan", "BURST_S", "MARKET_NET_CAP_USD",
-           "MIN_MOVE_USD", "MIN_MOVE_FRAC", "MIN_MARKETS"]
+           "MIN_MOVE_USD", "MIN_MOVE_FRAC", "MIN_MARKETS", "VENUE_LEDGER_TOL_SHARES"]

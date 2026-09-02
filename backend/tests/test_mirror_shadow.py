@@ -788,3 +788,11 @@ def test_a_frozen_market_is_counted_whatever_else_its_reason_says(monkeypatch):
               ledger_rows=[{"sh": 100.0, "intent": "ORDER_INTENT_BUY_LONG"}])
     row = _run(ms.shadow_market(p, _Pmus(), "rn1", CID, RATIO, {}, positions={SLUG: 40.0}))
     assert "frozen" in row["reason"] and not row["reason"].startswith("frozen")
+
+
+def test_a_fractional_ledger_against_a_whole_venue_position_is_not_frozen(monkeypatch):
+    _nosleep(monkeypatch)
+    p = _Pool(fills=HIS, ledger_rows=[{"sh": 322.51, "intent": "ORDER_INTENT_BUY_SHORT"}])
+    row = _run(ms.shadow_market(p, _Pmus(), "rn1", CID, RATIO, {}, positions={SLUG: -323.0}))
+    assert row["ledger_net"] == -322 and row["venue_net"] == -323.0
+    assert "frozen" not in row["reason"]
