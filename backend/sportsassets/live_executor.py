@@ -6591,6 +6591,369 @@ async def _rest_after_ioc(pool, row_id: int, us_slug: str,
         async with _REST_LOCK:
             _REST_RESERVED_USD = max(0.0, _REST_RESERVED_USD - est)
 
+
+# ── MIRROR P1, STEP 1: THE GATES THIS LANE SHARES WITH THE MIRROR BOOK ──
+#
+# Position mirroring (owner order 2026-09-02, "maximum effort and
+# certainty") holds ONE standing book per market instead of one row per
+# fill, and its admission must read the same levers this lane reads: the
+# rolling-loss breaker, the sleeve's day/total room, the four mapping
+# gates, the game-date rule. Copying those clauses into a worker would
+# hand the mirror a second, drifting copy of each money rule -- the exact
+# failure the verified-set unification (test_verified_set: two lists, one
+# decision, 2,897 rejections) was built against. So the clauses are
+# factored out of maybe_execute HERE and maybe_execute is reduced to
+# call-site substitutions; the mirror reads the same functions.
+#
+# This lane's behaviour is unchanged to the byte: same queries, same
+# refusal texts, same log lines. Where this lane's stance on an
+# unreadable read differs from the mirror's (the loss breaker fails open
+# here and closed there), the helper returns the READING and the caller
+# decides -- a helper never picks a stance for a lane it does not know.
+
+
+async def _loss_breaker_tripped(pool) -> bool | None:
+    """The 24h rolling-loss breaker: True when realized copy P&L
+    (settled + cashed out, copies only) over the last 24 hours is at or
+    past -PMUS_LOSS_BREAKER_USD, False when it is not, None when the
+    ledger could not be read.
+
+    None is deliberately not a verdict. maybe_execute keeps the stance
+    it has carried since 2026-08-12 -- an unreadable ledger must not be
+    the thing that blocks copies, because caps and the venue guards
+    still bound every order -- while the mirror refuses increases on
+    None: a book that cannot see its losses does not grow. The query
+    answers from Postgres so a deploy cannot amnesia it. Logs the
+    breaker line when tripped, exactly as the inline check did.
+    """
+    try:
+        lost_24h = float(await pool.fetchval(
+            "SELECT COALESCE(sum(pnl), 0) FROM live_orders "
+            "WHERE settled_at > now() - interval '24 hours' "
+            "AND status IN ('settled', 'cashed_out') "
+            "AND COALESCE(whale_username, '') NOT IN "
+            "('manual', 'underdog')") or 0)
+    except Exception:  # noqa: BLE001 — unreadable is a reading, not a
+        return None    # verdict; each lane applies its own stance
+    if lost_24h <= -PMUS_LOSS_BREAKER_USD:
+        log.warning(
+            "LOSS BREAKER: copy sleeve realized %.2f in 24h "
+            "(threshold -%.0f) — copying paused until the window "
+            "rolls off", lost_24h, PMUS_LOSS_BREAKER_USD)
+        return True
+    return False
+
+
+async def _copy_day_room(pool, cfg) -> tuple[float, float]:
+    """(day_room, total_room) for the copy sleeve, as maybe_execute has
+    sized against it: _caps_room's config-cap rooms, then in penny_trial
+    the TRIAL knobs as the authority (owner 2026-08-05: per-trade limits
+    only; day and lifetime ceilings are env knobs, default unlimited),
+    then the PROBE DAY CAP on top (owner authorization 2026-08-24
+    evening: the resume is a bounded proof, so the day's copy spend is
+    bounded too -- an unimagined defect costs this much, not an
+    open-ended amount; raise it deliberately once real fills verify).
+
+    Deriving spend from the config-cap rooms keeps _caps_room's single
+    query. An unreadable ledger RAISES, as _caps_room does: this lane has
+    always let that propagate rather than size against a guess, and the
+    mirror treats a raise here as no room (no_budget_room).
+    """
+    day_room, total_room = await _caps_room(pool)
+    if COPY_MODE == "penny_trial":
+        day_spent = cfg.live_max_daily_usd - day_room
+        total_spent = cfg.live_max_total_usd - total_room
+        day_room = PENNY_TRIAL_DAILY_USD - day_spent
+        total_room = PENNY_TRIAL_TOTAL_USD - total_spent
+        if PROBE_DAY_USD > 0:
+            day_room = min(day_room, PROBE_DAY_USD - day_spent)
+    return day_room, total_room
+
+
+def _game_too_far_out(slug: str | None) -> bool:
+    """Capital turnover (owner, 2026-08-04): a game more than ~a day out
+    is deferred -- a small bankroll compounds by settling, not by holding
+    Thursday's ticket since Monday. True when the slug carries a
+    YYYY-MM-DD date later than tomorrow. An undated or unparseable slug
+    is NOT far out (the other gates judge it), exactly as the inline
+    rule read it since 2026-08-04.
+    """
+    import re as _re
+    from datetime import date, timedelta
+
+    mdate = _re.search(r"\d{4}-\d{2}-\d{2}", slug or "")
+    if mdate:
+        try:
+            y, mo, d = map(int, mdate.group(0).split("-"))
+            if date(y, mo, d) > date.today() + timedelta(days=1):
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+# The refusal texts _mapping_admitted can return start with exactly one
+# of these. maybe_execute keys its follow-up on them -- the side-echo
+# warning on the first, the shadow-certification echo on the second --
+# and gate_edge parses the same texts off the row, so they are part of
+# the contract, not decoration.
+_MAPPING_REFUSAL_SIDE_ECHO = "side-echo tripped:"
+_MAPPING_REFUSAL_QUARANTINE = ("premap-live:", "quarantined:")
+
+
+async def _mapping_admitted(pool, username: str | None,
+                            mapping_src: str | None,
+                            q_slug: str | None) -> tuple[bool, str | None]:
+    """The four admission gates a resolved mapping must clear before a
+    dollar rides it, in the order maybe_execute has run them since the
+    2026-08-23/24 leak hunts: the side-echo circuit, the verified set,
+    the profitability hold, the mapping quarantine with its premap-live
+    resume lane. Returns (True, None) or (False, refusal text). The text
+    is what maybe_execute writes onto the row and what gate_edge parses,
+    so every one is byte-identical to the inline version it replaces and
+    starts with one of the prefixes declared above.
+
+    Every read fails safe: an unreadable side-echo state is tripped, an
+    unreadable quarantine switch stays on, an unreadable premap-live
+    switch refuses. Nothing here writes; the caller records the refusal.
+    """
+    username = (username or "").lower()
+    q_slug = str(q_slug or "").lower()
+    # SIDE-ECHO CIRCUIT (leak-hunt find 2026-08-24): the echo's
+    # auto-requarantine writes the DB switches, but the env overrides
+    # (LIVE_PREMAP=on / LIVE_MAPPING_QUARANTINE=off) short-circuit
+    # BEFORE those DB reads — env-armed operation would sail past a
+    # confirmed wrong-side mismatch. This circuit deliberately has NO
+    # env override: tripped means every copy mapping refuses until an
+    # admin explicitly resets it (POST /api/admin/side-echo-reset).
+    # Unreadable state fails safe.
+    try:
+        _tv = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            "side_echo_tripped")
+        _tripped = (bool(json.loads(_tv) if isinstance(_tv, str)
+                         else _tv) if _tv is not None else False)
+    except Exception:  # noqa: BLE001 — fail safe: refuse
+        _tripped = True
+    if _tripped:
+        return False, ("side-echo tripped: confirmed wrong-side evidence — "
+                       "copying halted pending admin review "
+                       f"(slug={q_slug[:120]})")
+    # PROFITABILITY HOLD (leak-hunt find 2026-08-24): swisstony's
+    # exclusion previously lived only in the premap-live allowlist,
+    # which is consulted ONLY while the quarantine is armed — lifting
+    # the quarantine (a mapping-fidelity action) would silently re-arm
+    # his $300 clip with no profitability decision made. The hold is
+    # its own gate, independent of quarantine state: LIVE_HOLD_WHALES
+    # refuses with an audit reason until a whale's paper cohort at the
+    # new sub-second detection certifies positive. It defaulted to
+    # swisstony until 2026-08-24 evening, when TRUEEDGE-FAST graded him
+    # positive on detections inside 5s and the owner order lifted it;
+    # the default is now EMPTY, and the env re-arms a hold on any whale
+    # without a deploy. A held row keeps its mapping — fidelity samples
+    # continue.
+    # VERIFIED-ONLY, INDEPENDENT OF QUARANTINE (leak-hunt round 2): the
+    # allowlist below lived INSIDE the `if _q_on` branch, so lifting
+    # the quarantine — a mapping-fidelity action — silently dropped the
+    # profitability allowlist with it and opened the lane to every
+    # non-cut whale. Only whales the TRUEEDGE table verified profitable
+    # may spend, whatever the quarantine says. LIVE_VERIFIED_WHALES
+    # widens it deliberately; empty disables the gate for a full
+    # resume. The verified set is exactly TRUEEDGE cf_total > 0:
+    # homerunhazard (+26,076), 0x076 (+6,189), swisstony (+11,895).
+    # swisstony is verified but HELD below, pending his paper cohort at
+    # the new sub-second detection — the two gates answer different
+    # questions and must stay separate.
+    _verified = _whale_set("LIVE_VERIFIED_WHALES")
+    if _verified and username not in _verified:
+        return False, ("not verified-profitable: only whales certified by "
+                       "the TRUEEDGE counterfactual may spend "
+                       f"(slug={q_slug[:100]})")
+    # HOLD LIFTED for swisstony (owner order 2026-08-24 evening: "make
+    # sure we are profitable copying SwissTony"). The hold's stated
+    # condition was his paper cohort grading positive at the NEW
+    # detection latency. Measured, on detections inside 5 seconds
+    # (TRUEEDGE-FAST):
+    #   cf_total    +8,874.90   his edge on the fast book
+    #   paper_actual +6,864.52  what OUR fill achieves — POSITIVE
+    #   lat_cost     1,983.71   vs 15,063 blended
+    # The -604.88 that held him was an artifact of averaging in months
+    # of minutes-late polling; at chain speed we capture 77% of his
+    # edge. He now trades under the 15s staleness cap, so a signal we
+    # did NOT catch fast is still refused — the condition that makes
+    # him profitable is enforced, not hoped for. LIVE_HOLD_WHALES
+    # re-arms a hold without a deploy.
+    _held = {w.strip() for w in
+             os.getenv("LIVE_HOLD_WHALES", "")
+             .lower().split(",") if w.strip()}
+    if username in _held:
+        return False, ("hold: pending paper certification at the new "
+                       "detection latency (TRUEEDGE 2026-08-24) "
+                       f"(slug={q_slug[:120]})")
+    # MAPPING QUARANTINE (owner emergency 2026-08-23): the venue ledger
+    # proved a large share of two-outcome copies were held on the WRONG
+    # SIDE while the old settlement sweep graded them by the whale's
+    # result. Until each path is re-verified against venue truth, only
+    # the deterministic US slug-grammar paths may place money: fuzzy-
+    # resolved mappings and the aec- (tennis side-slug) class are
+    # refused, with the mapping kept on the row for the postmortem.
+    # LIVE_MAPPING_QUARANTINE=off lifts.
+    # Resume is a DB switch (POST /api/admin/quarantine/off) so the
+    # owner's go is one admin call; the env var stays as a hard
+    # override in either direction. Default is ON — an unreadable state
+    # key must fail safe, not fail open.
+    _q_env = os.getenv("LIVE_MAPPING_QUARANTINE", "")
+    if _q_env == "off":
+        _q_on = False
+    elif _q_env == "on":
+        _q_on = True
+    else:
+        _q_on = True
+        try:
+            _q_val = await pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1",
+                "mapping_quarantine")
+            if _q_val is not None:
+                _q_on = bool(json.loads(_q_val)
+                             if isinstance(_q_val, str) else _q_val)
+        except Exception:  # noqa: BLE001 — fail safe: stay on
+            _q_on = True
+    # 2026-08-24 05:00 ET: the venue-certified restatement shows EVERY
+    # sleeve August-negative at our fills (RN1 -8.6k at 39% wins; the
+    # restated ledger now matches the account day-by-day). While the
+    # switch is ON, ALL copy mappings refuse — not just the fuzzy/aec
+    # classes — pending the owner's morning review. Same switch lifts
+    # it.
+    # RESUME LEVER (owner order 2026-08-24): while the total quarantine
+    # holds, ONLY premap-resolved mappings may trade, and only once the
+    # owner flips premap_live (DB switch via POST /api/admin/premap-
+    # live/on; env LIVE_PREMAP overrides both ways). Everything else
+    # stays refused-but-recorded.
+    # PREMAP-LIVE ALLOWLIST (owner order 2026-08-24): the resume lane
+    # admits ONLY the whales the TRUEEDGE table verified profitable at
+    # their own prices AND at our measured latency. swisstony joins via
+    # env (no code change) the moment his paper cohort at the new
+    # sub-second detection grades positive; everyone else stays
+    # refused-but-recorded.
+    _allowed = _whale_set("LIVE_PREMAP_WHALES")
+    _premap_ok = False
+    if _q_on and mapping_src in QUARANTINE_RESUME_SRC \
+            and username in _allowed:
+        _pl_env = os.getenv("LIVE_PREMAP", "")
+        if _pl_env == "on":
+            _premap_ok = True
+        elif _pl_env != "off":
+            try:
+                _pl = await pool.fetchval(
+                    "SELECT value FROM ingestion_state WHERE key=$1",
+                    "premap_live")
+                _premap_ok = (bool(json.loads(_pl)
+                              if isinstance(_pl, str) else _pl)
+                              if _pl is not None else False)
+            except Exception:  # noqa: BLE001 — fail safe: refuse
+                _premap_ok = False
+    if _q_on and not _premap_ok:
+        if mapping_src in QUARANTINE_RESUME_SRC \
+                and username not in _allowed:
+            return False, ("premap-live: whale not in the "
+                           "verified-profitable set (TRUEEDGE "
+                           "2026-08-24) "
+                           f"(src={mapping_src}, "
+                           f"slug={q_slug[:120]})")
+        return False, ("quarantined: mapping class unverified "
+                       "after wrong-side incident 2026-08-23 "
+                       f"(src={mapping_src}, "
+                       f"slug={q_slug[:120]})")
+    return True, None
+
+
+async def _protected_order_ids(pool) -> set[str] | None:
+    """Order ids no reaper may cancel or adopt: the desk's (order_id of
+    manual rows -- the exclusion _reap_stale_resting_bids has carried
+    since re-review 2026-09-01, when an account-wide sweep cancelled the
+    owner's app bids) plus every mirror order's (mirror_orders, migration
+    047: a table the reapers never read is a table they cannot cancel or
+    adopt from, and this set is the belt for the one pass that asks the
+    VENUE instead of the ledger).
+
+    None when EITHER read fails. Without the exclusion list a sweep
+    cannot tell a desk order or a mirror rest from an orphaned bid, so it
+    must cancel neither -- the reaper's existing stance, kept; a missing
+    mirror_orders table (047 not yet applied) reads as None for the same
+    reason. Not yet wired (P1 step 8); the reaper's inline query is
+    byte-identical to the first read here so the swap is a substitution.
+    """
+    try:
+        manual = {str(r["order_id"]) for r in await pool.fetch(
+            "SELECT order_id FROM live_orders WHERE order_id IS NOT "
+            "NULL AND COALESCE(whale_username,'') = 'manual'")}
+        mirror = {str(r["order_id"]) for r in await pool.fetch(
+            "SELECT order_id FROM mirror_orders WHERE order_id IS NOT NULL")}
+    except Exception:  # noqa: BLE001 — unreadable: protect nothing by
+        return None    # guessing; the caller sweeps nothing this pass
+    return manual | mirror
+
+
+def mirror_allowlist() -> set[str]:
+    """The whales the mirror may hold: env PMUS_MIRROR_WHALES intersected
+    with the shadow's MIRROR_WHALES (workers.mirror_shadow.mirror_whales,
+    default rn1). The env default is EMPTY -- nobody -- which is why
+    this does not go through _whale_set: that helper's unset default is
+    the verified roster, and a deploy that sets PMUS_MIRROR=on without
+    naming a whale must change nothing for the per-fill lane.
+    Environment only; the DB narrows the mirror's INCREASES inside the
+    reconciler, never who is handed off.
+    """
+    raw = os.environ.get("PMUS_MIRROR_WHALES", "")
+    ours = {w.strip().lower() for w in raw.split(",") if w.strip()}
+    if not ours:
+        return set()
+    # imported here, not at module top: the shadow worker imports this
+    # module's constants inside its own functions for the same reason
+    from .workers import mirror_shadow as _ms
+    return ours & set(_ms.mirror_whales())
+
+
+def mirror_mode(username: str | None) -> bool:
+    """WHOLE-WHALE hand-off (P1 §3): True when this whale is mirrored,
+    so the per-fill lane must not copy his entries on ANY market -- a
+    per-market rule would race on the market the mirror is about to
+    open and leave two regimes exiting one whale. Reads the ENVIRONMENT
+    ONLY: PMUS_MIRROR in ('on', 'exits') and the whale in
+    mirror_allowlist(). Nothing here can be unreadable, so nothing here
+    can fail open. Whether the mirror INCREASES is the reconciler's
+    question (its DB switch); whether the per-fill lane stands aside is
+    answered from the deploy, here. Not yet consulted by maybe_execute
+    (P1 step 7 inserts the gate below the exit dispatch).
+    """
+    mode = os.environ.get("PMUS_MIRROR", "off").strip().lower()
+    if mode not in ("on", "exits"):
+        return False
+    w = (username or "").strip().lower()
+    return bool(w) and w in mirror_allowlist()
+
+
+async def _mirror_owns_asset(pool, asset: str | None) -> bool:
+    """True when an OPEN mirror book (mirror_books.state <> 'closed')
+    holds this token on either side -- the long token it buys or the
+    other outcome. mirror_exit's position lane asks this before it
+    declares mx_no_position_of_ours (P1 step 7), so a book is never sold
+    by the per-fill exit path whatever any switch says. Unreadable is
+    False by design: the caller then falls to mx_no_position_of_ours,
+    a settled reason that sells nothing either -- both answers are "not
+    yours to sell" -- and the mirror confirms its own vanishes from the
+    same raw snapshot. Not yet wired.
+    """
+    try:
+        return bool(await pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM mirror_books "
+            "WHERE state <> 'closed' "
+            "AND (long_asset = $1 OR other_asset = $1))",
+            str(asset or "")))
+    except Exception:  # noqa: BLE001 — unreadable: not ours to sell
+        return False
+
+
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
     """Called on every fresh detection (after the paper trade). All guards
     re-checked here; failure of any guard is a silent no-op or logged skip."""
@@ -6866,19 +7229,11 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     # than ~a day out are DEFERRED — no audit row is written, so the 6h
     # sweep re-candidates them once the game is inside the window. A small
     # bankroll compounds by settling, not by holding Thursday's ticket
-    # since Monday.
-    import re as _re
-    from datetime import date, timedelta
-
+    # since Monday. The calendar rule lives in _game_too_far_out (mirror
+    # P1, step 1) so a mirror book's admission reads the same window.
     mslug = payload.get("market_slug") or payload.get("event_slug") or ""
-    mdate = _re.search(r"\d{4}-\d{2}-\d{2}", mslug)
-    if mdate:
-        try:
-            y, mo, d = map(int, mdate.group(0).split("-"))
-            if date(y, mo, d) > date.today() + timedelta(days=1):
-                return _copy_stop("game_too_far_out", username)
-        except ValueError:
-            pass
+    if _game_too_far_out(mslug):
+        return _copy_stop("game_too_far_out", username)
     # ONE copy per proposition, no matter how many times the source adds
     # (owner: "cardinals moneyline 10x -> copied once"). In-flight and
     # filled rows retire the asset; rejected/unfilled ones stay retryable
@@ -6933,38 +7288,21 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     # written: realized copy P&L (settled + cashed out, copies only)
     # over the last 24h at or past -$1500 pauses the sleeve. The
     # query answers from Postgres so a deploy cannot amnesia it.
-    try:
-        lost_24h = float(await pool.fetchval(
-            "SELECT COALESCE(sum(pnl), 0) FROM live_orders "
-            "WHERE settled_at > now() - interval '24 hours' "
-            "AND status IN ('settled', 'cashed_out') "
-            "AND COALESCE(whale_username, '') NOT IN "
-            "('manual', 'underdog')") or 0)
-    except Exception:  # noqa: BLE001 — an unreadable ledger must not
-        lost_24h = 0.0  # be the thing that blocks copies; caps below
-        # and the venue guards still bound every order.
-    if lost_24h <= -PMUS_LOSS_BREAKER_USD:
-        log.warning(
-            "LOSS BREAKER: copy sleeve realized %.2f in 24h "
-            "(threshold -%.0f) — copying paused until the window "
-            "rolls off", lost_24h, PMUS_LOSS_BREAKER_USD)
+    # The reading is _loss_breaker_tripped (mirror P1, step 1), which
+    # answers None for an unreadable ledger. THIS lane keeps its stance:
+    # an unreadable ledger must not be the thing that blocks copies --
+    # it reads as 0.0 realized, judged against the same threshold; caps
+    # below and the venue guards still bound every order. The mirror
+    # refuses on None instead; the helper decides for neither.
+    _lb = await _loss_breaker_tripped(pool)
+    if _lb is None:
+        _lb = 0.0 <= -PMUS_LOSS_BREAKER_USD
+    if _lb:
         return _copy_stop("loss_breaker", username)
-    day_room, total_room = await _caps_room(pool)
-    if COPY_MODE == "penny_trial":
-        # In penny_trial the TRIAL knobs are the authority, not the config
-        # caps (owner 2026-08-05: per-trade limits only; day and lifetime
-        # ceilings are env knobs, default unlimited). Deriving spend from
-        # the config-cap rooms keeps _caps_room's single query.
-        day_spent = cfg.live_max_daily_usd - day_room
-        total_spent = cfg.live_max_total_usd - total_room
-        day_room = PENNY_TRIAL_DAILY_USD - day_spent
-        total_room = PENNY_TRIAL_TOTAL_USD - total_spent
-        # PROBE DAY CAP (owner authorization 2026-08-24 evening): the
-        # resume is a bounded proof, so the day's copy spend is bounded
-        # too — an unimagined defect costs this much, not an open-ended
-        # amount. Raise it deliberately once real fills verify.
-        if PROBE_DAY_USD > 0:
-            day_room = min(day_room, PROBE_DAY_USD - day_spent)
+    # Day and total room with the penny_trial knobs and the probe day
+    # cap applied, from _copy_day_room (mirror P1, step 1): a mirror
+    # increase consumes the same sleeve room this lane does.
+    day_room, total_room = await _copy_day_room(pool, cfg)
     if day_room <= 0 or total_room <= 1:
         log.warning("live caps exhausted (day room %.2f, total room %.2f) — skipping",
                     day_room, total_room)
@@ -7452,175 +7790,47 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 "UPDATE live_orders SET us_market_slug=$2 WHERE id=$1",
                 row_id, mapping["market_slug"],
             )
-            # SIDE-ECHO CIRCUIT (leak-hunt find 2026-08-24): the echo's
-            # auto-requarantine writes the DB switches, but the env
-            # overrides (LIVE_PREMAP=on / LIVE_MAPPING_QUARANTINE=off)
-            # short-circuit BEFORE those DB reads — env-armed operation
-            # would sail past a confirmed wrong-side mismatch. This
-            # circuit deliberately has NO env override: tripped means
-            # every copy mapping refuses until an admin explicitly
-            # resets it (POST /api/admin/side-echo-reset). Unreadable
-            # state fails safe.
+            # THE MAPPING GATE, FACTORED (mirror P1 step 1, owner order
+            # 2026-09-02): the four admission gates that stood inline here
+            # since the 2026-08-23/24 leak hunts live in _mapping_admitted
+            # now, in their original order and with their refusal texts
+            # byte-identical, so a mirror book's admission reads the same
+            # gates this lane does. What it decides, in order:
+            #   1. the side-echo circuit (ingestion_state side_echo_tripped;
+            #      unreadable is tripped; NO env override);
+            #   2. _whale_set("LIVE_VERIFIED_WHALES") -- only whales the
+            #      TRUEEDGE counterfactual certified may spend, whatever the
+            #      quarantine says; an empty set disables the gate;
+            #   3. LIVE_HOLD_WHALES -- the profitability hold, independent
+            #      of quarantine state;
+            #   4. the mapping quarantine (env LIVE_MAPPING_QUARANTINE, else
+            #      ingestion_state mapping_quarantine; unreadable stays ON):
+            #      while it holds, only a mapping_src in QUARANTINE_RESUME_SRC
+            #      for a username in _allowed -- the resume lane's
+            #      _whale_set("LIVE_PREMAP_WHALES") -- with premap_live on
+            #      (env LIVE_PREMAP overrides both ways; an unreadable
+            #      switch is _premap_ok = False, fail safe: refuse) may
+            #      trade. `_q_on and not _premap_ok` refuses with the text
+            #      that names the real class, f"(src={mapping_src}, slug=...)".
+            # A refused row keeps its mapping (fidelity samples continue)
+            # and the refusal text is written here, on the row, as before.
+            # Which gate refused decides the follow-up, by the text's
+            # declared prefix: the circuit logs; the quarantine spawns the
+            # shadow echo; the verified and hold gates record and stop.
             _q_slug0 = str(mapping.get("market_slug") or "").lower()
-            try:
-                _tv = await pool.fetchval(
-                    "SELECT value FROM ingestion_state WHERE key=$1",
-                    "side_echo_tripped")
-                _tripped = (bool(json.loads(_tv) if isinstance(_tv, str)
-                                 else _tv) if _tv is not None else False)
-            except Exception:  # noqa: BLE001 — fail safe: refuse
-                _tripped = True
-            if _tripped:
+            _q_slug = _q_slug0
+            _adm_ok, _q_reason = await _mapping_admitted(
+                pool, username, mapping_src, _q_slug0)
+            if not _adm_ok:
                 await pool.execute(
                     "UPDATE live_orders SET status='rejected', error=$2 "
-                    "WHERE id=$1", row_id,
-                    "side-echo tripped: confirmed wrong-side evidence — "
-                    "copying halted pending admin review "
-                    f"(slug={_q_slug0[:120]})")
-                log.warning("LIVE (US) refused: side-echo circuit "
-                            "tripped (%s)", _q_slug0)
-                return
-            # PROFITABILITY HOLD (leak-hunt find 2026-08-24): swisstony's
-            # exclusion previously lived only in the premap-live
-            # allowlist, which is consulted ONLY while the quarantine is
-            # armed — lifting the quarantine (a mapping-fidelity action)
-            # would silently re-arm his $300 clip with no profitability
-            # decision made. The hold is its own gate, independent of
-            # quarantine state: LIVE_HOLD_WHALES refuses with an audit
-            # reason until a whale's paper cohort at the new sub-second
-            # detection certifies positive. It defaulted to swisstony
-            # until 2026-08-24 evening, when TRUEEDGE-FAST graded him
-            # positive on detections inside 5s and the owner order
-            # lifted it; the default is now EMPTY, and the env re-arms a
-            # hold on any whale without a deploy. A held row keeps its
-            # mapping — fidelity samples continue.
-            # VERIFIED-ONLY, INDEPENDENT OF QUARANTINE (leak-hunt round
-            # 2): the allowlist below lived INSIDE the `if _q_on` branch,
-            # so lifting the quarantine — a mapping-fidelity action —
-            # silently dropped the profitability allowlist with it and
-            # opened the lane to every non-cut whale. Only whales the
-            # TRUEEDGE table verified profitable may spend, whatever the
-            # quarantine says. LIVE_VERIFIED_WHALES widens it
-            # deliberately; empty disables the gate for a full resume.
-            # The verified set is exactly TRUEEDGE cf_total > 0:
-            # homerunhazard (+26,076), 0x076 (+6,189), swisstony
-            # (+11,895). swisstony is verified but HELD below, pending
-            # his paper cohort at the new sub-second detection — the two
-            # gates answer different questions and must stay separate.
-            _verified = _whale_set("LIVE_VERIFIED_WHALES")
-            if _verified and username not in _verified:
-                await pool.execute(
-                    "UPDATE live_orders SET status='rejected', error=$2 "
-                    "WHERE id=$1", row_id,
-                    "not verified-profitable: only whales certified by "
-                    "the TRUEEDGE counterfactual may spend "
-                    f"(slug={_q_slug0[:100]})")
-                return
-            # HOLD LIFTED for swisstony (owner order 2026-08-24
-            # evening: "make sure we are profitable copying SwissTony").
-            # The hold's stated condition was his paper cohort grading
-            # positive at the NEW detection latency. Measured, on
-            # detections inside 5 seconds (TRUEEDGE-FAST):
-            #   cf_total    +8,874.90   his edge on the fast book
-            #   paper_actual +6,864.52  what OUR fill achieves — POSITIVE
-            #   lat_cost     1,983.71   vs 15,063 blended
-            # The -604.88 that held him was an artifact of averaging in
-            # months of minutes-late polling; at chain speed we capture
-            # 77% of his edge. He now trades under the 15s staleness cap,
-            # so a signal we did NOT catch fast is still refused — the
-            # condition that makes him profitable is enforced, not hoped
-            # for. LIVE_HOLD_WHALES re-arms a hold without a deploy.
-            _held = {w.strip() for w in
-                     os.getenv("LIVE_HOLD_WHALES", "")
-                     .lower().split(",") if w.strip()}
-            if username in _held:
-                await pool.execute(
-                    "UPDATE live_orders SET status='rejected', error=$2 "
-                    "WHERE id=$1", row_id,
-                    "hold: pending paper certification at the new "
-                    "detection latency (TRUEEDGE 2026-08-24) "
-                    f"(slug={_q_slug0[:120]})")
-                return
-            # MAPPING QUARANTINE (owner emergency 2026-08-23): the venue
-            # ledger proved a large share of two-outcome copies were held
-            # on the WRONG SIDE while the old settlement sweep graded them
-            # by the whale's result. Until each path is re-verified against
-            # venue truth, only the deterministic US slug-grammar paths may
-            # place money: fuzzy-resolved mappings and the aec- (tennis
-            # side-slug) class are refused, with the mapping kept on the
-            # row for the postmortem. LIVE_MAPPING_QUARANTINE=off lifts.
-            _q_slug = str(mapping.get("market_slug") or "").lower()
-            # Resume is a DB switch (POST /api/admin/quarantine/off) so
-            # the owner's go is one admin call; the env var stays as a
-            # hard override in either direction. Default is ON — an
-            # unreadable state key must fail safe, not fail open.
-            _q_env = os.getenv("LIVE_MAPPING_QUARANTINE", "")
-            if _q_env == "off":
-                _q_on = False
-            elif _q_env == "on":
-                _q_on = True
-            else:
-                _q_on = True
-                try:
-                    _q_val = await pool.fetchval(
-                        "SELECT value FROM ingestion_state WHERE key=$1",
-                        "mapping_quarantine")
-                    if _q_val is not None:
-                        _q_on = bool(json.loads(_q_val)
-                                     if isinstance(_q_val, str) else _q_val)
-                except Exception:  # noqa: BLE001 — fail safe: stay on
-                    _q_on = True
-            # 2026-08-24 05:00 ET: the venue-certified restatement shows
-            # EVERY sleeve August-negative at our fills (RN1 -8.6k at
-            # 39% wins; the restated ledger now matches the account
-            # day-by-day). While the switch is ON, ALL copy mappings
-            # refuse — not just the fuzzy/aec classes — pending the
-            # owner's morning review. Same switch lifts it.
-            # RESUME LEVER (owner order 2026-08-24): while the total
-            # quarantine holds, ONLY premap-resolved mappings may trade,
-            # and only once the owner flips premap_live (DB switch via
-            # POST /api/admin/premap-live/on; env LIVE_PREMAP overrides
-            # both ways). Everything else stays refused-but-recorded.
-            # PREMAP-LIVE ALLOWLIST (owner order 2026-08-24): the resume
-            # lane admits ONLY the whales the TRUEEDGE table verified
-            # profitable at their own prices AND at our measured latency.
-            # swisstony joins via env (no code change) the moment his
-            # paper cohort at the new sub-second detection grades
-            # positive; everyone else stays refused-but-recorded.
-            _allowed = _whale_set("LIVE_PREMAP_WHALES")
-            _premap_ok = False
-            if _q_on and mapping_src in QUARANTINE_RESUME_SRC \
-                    and username in _allowed:
-                _pl_env = os.getenv("LIVE_PREMAP", "")
-                if _pl_env == "on":
-                    _premap_ok = True
-                elif _pl_env != "off":
-                    try:
-                        _pl = await pool.fetchval(
-                            "SELECT value FROM ingestion_state WHERE key=$1",
-                            "premap_live")
-                        _premap_ok = (bool(json.loads(_pl)
-                                      if isinstance(_pl, str) else _pl)
-                                      if _pl is not None else False)
-                    except Exception:  # noqa: BLE001 — fail safe: refuse
-                        _premap_ok = False
-            if _q_on and not _premap_ok:
-                if mapping_src in QUARANTINE_RESUME_SRC \
-                        and username not in _allowed:
-                    _q_reason = ("premap-live: whale not in the "
-                                 "verified-profitable set (TRUEEDGE "
-                                 "2026-08-24) "
-                                 f"(src={mapping_src}, "
-                                 f"slug={_q_slug[:120]})")
-                else:
-                    _q_reason = ("quarantined: mapping class unverified "
-                                 "after wrong-side incident 2026-08-23 "
-                                 f"(src={mapping_src}, "
-                                 f"slug={_q_slug[:120]})")
-                await pool.execute(
-                    "UPDATE live_orders SET status='rejected', error=$2 "
-                    "WHERE id=$1",
-                    row_id, _q_reason)
+                    "WHERE id=$1", row_id, _q_reason)
+                if _q_reason.startswith(_MAPPING_REFUSAL_SIDE_ECHO):
+                    log.warning("LIVE (US) refused: side-echo circuit "
+                                "tripped (%s)", _q_slug0)
+                    return
+                if not _q_reason.startswith(_MAPPING_REFUSAL_QUARANTINE):
+                    return
                 # SHADOW CERTIFICATION: a refused PREMAP resolution is
                 # free evidence — re-derive it from live venue data and
                 # record the verdict. This is the streak the resume

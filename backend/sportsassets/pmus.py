@@ -2068,10 +2068,58 @@ def _exit_intent(us_market_slug: str, opened_with: str | None) -> str:
     return "ORDER_INTENT_SELL_LONG"
 
 
+def _post_only_refusal(exc: BaseException, prev_order: dict) -> dict | None:
+    """The venue's refusal of a post-only order as a result dict, or
+    None when the raise is anything else and must propagate.
+
+    A post-only order that would cross comes back from orders.create
+    as an HTTP 4xx, not as a rejected execution, so the mirror lane
+    (owner order 2026-09-02, phase P1) needs the adapter to tell "the
+    venue said no" apart from "the response was lost". Only the SDK's
+    APIStatusError carrying a 4xx status is the former: the venue read
+    the order and refused it, and nothing rests. A 5xx, a timeout, a
+    dropped connection, or an SDK that cannot even be imported says
+    nothing about whether the order stands, and the caller's
+    lost-order search is the only safe reading of that (the rest
+    lane's round-four finding in live_executor: the RESPONSE is lost,
+    not necessarily the order), so every one of those returns None
+    here and is re-raised by the caller. Any 4xx counts as a refusal,
+    not only the crossing text, because the mirror treats every
+    refusal as "no order, retry next tick" and never as a fill; the
+    status code and the venue's message ride in raw for the reader
+    that needs the distinction (a 429 backs off)."""
+    try:
+        from polymarket_us import APIStatusError
+    except ImportError:
+        return None
+    if not isinstance(exc, APIStatusError):
+        return None
+    try:
+        code = int(exc.status_code)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if not 400 <= code < 500:
+        return None
+    body = getattr(exc, "body", None)
+    if body is not None and not isinstance(body, (dict, list, str, int,
+                                                  float, bool)):
+        body = str(body)[:500]
+    return {"ok": False, "order_id": None,
+            "status": "post_only_rejected",
+            "fill_price": None, "filled_shares": 0.0,
+            "raw": {"preview": prev_order,
+                    "status_code": code,
+                    "error": str(getattr(exc, "message", None)
+                                 or exc)[:500],
+                    "body": body}}
+
+
 def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
                sell: bool = False,
                tif: str = "TIME_IN_FORCE_FILL_OR_KILL",
-               intent: str | None = None) -> dict:
+               intent: str | None = None,
+               post_only: bool = False,
+               good_till: str | None = None) -> dict:
     """Preview then place a limit order. Returns the same normalized
     shape the global executor uses:
     {ok, order_id, status, fill_price, filled_shares, raw}.
@@ -2087,7 +2135,22 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
     2026-08-21: a copy takes the book's available size at his price or
     better, up to the clip, instead of all-or-nothing). The preview
     guard stays valid: an IOC can only cost LESS than the full-quantity
-    preview it was checked against."""
+    preview it was checked against.
+
+    post_only=True (mirror lane, owner order 2026-09-02, phase P1) sets
+    the venue's participateDontInitiate flag, so a rest that would
+    cross is refused by the venue instead of taking: the mirror's
+    thesis is "at his price or better, never through the book". Only
+    under that flag is a 4xx from orders.create read as the venue's
+    refusal and returned as status 'post_only_rejected' (nothing
+    rests, nothing filled). Every other raise, and every raise when
+    the flag is off, propagates unchanged: a lost response is not a
+    refusal (see _post_only_refusal). good_till (an ISO time) switches
+    the order to TIME_IN_FORCE_GOOD_TILL_DATE with that goodTillTime,
+    so a rest a dead worker cannot cancel expires on its own. With
+    both omitted the params are byte-identical to before; the fixture
+    in tests/test_pmus_post_only.py pins that for every existing
+    caller's shape."""
     client = _get_client()
     # THE SIDE SELECTOR (venue ground truth 2026-08-24): on market
     # families whose two sides share one identifier — every aec- match
@@ -2150,6 +2213,17 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
         "tif": tif,
         "synchronousExecution": True,
     }
+    # Both additions are gated on the caller naming them, so every
+    # caller that does not sends exactly the dict above (the mirror
+    # lane is the only caller of either; owner order 2026-09-02). They
+    # are set BEFORE the preview so the venue costs the order it will
+    # actually receive, flag and expiry included.
+    if good_till is not None:
+        params["tif"] = "TIME_IN_FORCE_GOOD_TILL_DATE"
+        params["goodTillTime"] = good_till
+    if post_only:
+        # The venue's post-only flag (polymarket_us CreateOrderParams).
+        params["participateDontInitiate"] = True
 
     # The venue's own cost calculation must agree with ours before we commit.
     # prev_order must exist on every path: the sell branch skips the preview,
@@ -2185,7 +2259,19 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
                             "expected_cost": expected_cost,
                             "venue_cost": prev_cost}}
 
-    resp = client.orders.create(params)
+    if post_only:
+        # Only the post-only caller reads a 4xx as the venue's refusal;
+        # for every other caller a raise here means what it always
+        # meant, and their own lost-response handling stays in charge.
+        try:
+            resp = client.orders.create(params)
+        except Exception as exc:  # noqa: BLE001 — a 4xx is a refusal, the rest re-raise
+            refusal = _post_only_refusal(exc, prev_order)
+            if refusal is None:
+                raise
+            return refusal
+    else:
+        resp = client.orders.create(params)
     order_id = (resp or {}).get("id")
     executions = (resp or {}).get("executions") or []
     filled, notional = 0.0, 0.0
