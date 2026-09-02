@@ -293,6 +293,16 @@ async def cohort_assess(pool: Any, since: str = COHORT_START,
            -- 'cashed_out' mirror_exit closed it out entirely
            -- 'filled'    still open, partial exits included -- OUT
            AND lo.status IN ('settled', 'cashed_out')
+           -- NOT THE MIRROR BOOK (position mirroring P1, owner order
+           -- 2026-09-02 "go for it, let's get this working"; the panel
+           -- review's predicate audit). A book is one standing row per
+           -- market with an open-time his_price and a lifetime of buys
+           -- and sells folded onto it -- not a per-fill copy. roster_auto
+           -- reads this cohort to set a whale's PER-FILL clip, so the
+           -- book stays out of it or the clip is decided on a blend of
+           -- two regimes. Its own line: the status line above is pinned
+           -- by name. NULL lanes (every row before 041) keep today's path.
+           AND COALESCE(lo.lane,'') <> 'mirror'
            AND COALESCE(lo.whale_username, '') NOT IN ('manual', 'underdog')
            AND COALESCE(lo.filled_usd, lo.requested_usd) > 0
     """

@@ -877,7 +877,18 @@ async def _copy_exit_sweep(pool) -> dict:
         f"{le.ORDER_INTENT_SQL} AS intent "
         "FROM live_orders "
         "WHERE status = 'filled' AND us_market_slug IS NOT NULL "
-        "AND whale_username NOT IN ('underdog', 'manual')")
+        "AND whale_username NOT IN ('underdog', 'manual')"
+        # NEVER A MIRROR BOOK (position mirroring P1, owner order
+        # 2026-09-02 "go for it, let's get this working"; the panel
+        # review's predicate audit). A book is ONE standing 'filled'
+        # row per market that the reconciler alone buys onto and sells
+        # from. This sweep selects every non-underdog, non-manual
+        # 'filled' row and take-profit-sells it whole, so without this
+        # clause SA_COPY_EXIT=1 would claim the book 'exiting' and
+        # market the entire position on our own +20% rule while the
+        # whale still holds his. COALESCE keeps every row placed before
+        # migration 041 (lane NULL) on exactly today's path.
+        " AND COALESCE(lane,'') <> 'mirror'")
     cfg = settings()
     for r in rows:
         stats["copyexit_open"] += 1

@@ -172,6 +172,13 @@ async def cohort_fidelity(pool: Any, since: str) -> dict:
            AND fill_price IS NOT NULL
            AND COALESCE(filled_shares, 0) > 0
            AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+           -- NOT THE MIRROR BOOK (position mirroring P1, owner order
+           -- 2026-09-02 "go for it, let's get this working"; the panel
+           -- review's predicate audit). This scores our fill against
+           -- HIS fill, and a book's his_price is an open-time level, not
+           -- the price of the fills folded onto its one standing row.
+           -- NULL lanes (every row before 041) keep today's path.
+           AND COALESCE(lane,'') <> 'mirror'
         """, ts)
     rows = [dict(r) for r in rows]
     per: dict[str, dict] = {}

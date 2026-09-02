@@ -2360,6 +2360,13 @@ async def api_fill_vs_miss(days: int = Query(7, ge=1, le=30)) -> dict:
           -- and that number decides the price-tolerance rule.
           AND lo.status IN ('filled', 'settled', 'unfilled',
                             'cashed_out')
+          -- NOT THE MIRROR BOOK (position mirroring P1, owner order
+          -- 2026-09-02 "go for it, let's get this working"; the panel
+          -- review's predicate audit). The book is one standing row per
+          -- market whose his_price is an open-time level, and a grade of
+          -- fill against miss is a per-fill instrument that cannot score
+          -- it. NULL lanes (every row before 041) keep today's path.
+          AND COALESCE(lo.lane,'') <> 'mirror'
         """, days)
     return {"days": days, "whales": grade_rows(rows)}
 
@@ -3833,8 +3840,15 @@ async def _live_status_uncached() -> dict:
                COALESCE(sum(filled_usd) FILTER
                    (WHERE placed_at > now() - interval '24 hours'), 0)::float8 AS deployed_24h,
                COALESCE(sum(pnl) FILTER (WHERE status = 'settled'), 0)::float8 AS realized_pnl,
+               -- SLIPPAGE ON PER-FILL ROWS ONLY. The mirror book's
+               -- his_price is an open-time level, not the price of the
+               -- fills folded onto its one standing row (position
+               -- mirroring P1, owner order 2026-09-02 "go for it, let's
+               -- get this working"; the panel review's predicate audit).
+               -- NULL lanes (every row before 041) keep today's path.
                percentile_cont(0.5) WITHIN GROUP (ORDER BY (fill_price - his_price) * 100)
-                   FILTER (WHERE fill_price IS NOT NULL) AS live_slippage_p50
+                   FILTER (WHERE fill_price IS NOT NULL
+                           AND COALESCE(lane,'') <> 'mirror') AS live_slippage_p50
         FROM live_orders
         WHERE placed_at >= $1::timestamptz
         """, display_epoch_start()
@@ -8196,7 +8210,16 @@ async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
         # populations, possibly opposite signs, never blended. Read
         # defensively: rows written before migration 041 have no lane.
         _lane = r["lane"] if "lane" in r.keys() else None
-        cohort = ("rest" if _lane == "rest"
+        # THE MIRROR BOOK IS ITS OWN COHORT, like rest (position
+        # mirroring P1, owner order 2026-09-02 "go for it, let's get
+        # this working"; the panel review's predicate audit). A book's
+        # his_price is an open-time level and its fill_price the
+        # lifetime average of the buys folded onto one row, so
+        # tolerance_cohort would file it as parity or marginal on a
+        # comparison that means nothing for a book. Named, never
+        # blended. A NULL lane still reads exactly as before.
+        cohort = ("mirror" if _lane == "mirror"
+                  else "rest" if _lane == "rest"
                   else tolerance_cohort(r["his"], r["fp"], r["intent"]))
         d = agg.setdefault((r["whale"], cohort), {
             "whale": r["whale"], "cohort": cohort, "n": 0, "settled": 0,

@@ -164,6 +164,16 @@ async def cohort_impact(pool: Any, since: str, whale: str | None = None,
 
     def _q(with_lane: bool) -> str:
         lane = "lo.lane AS lane," if with_lane else "NULL::text AS lane,"
+        # NOT THE MIRROR BOOK (position mirroring P1, owner order
+        # 2026-09-02 "go for it, let's get this working"; the panel
+        # review's predicate audit). The ladder scores each fill against
+        # HIS fill; a book's his_price is an open-time level under a
+        # lifetime of buys and sells, and it would land in exactly the
+        # buckets whose verdict sets the IOC impact cap. Guarded only
+        # when the column exists: without it no row can carry
+        # lane='mirror', and naming it would break the retry below.
+        guard = ("           AND COALESCE(lo.lane,'') <> 'mirror'\n"
+                 if with_lane else "")
         q = f"""
         SELECT lower(COALESCE(lo.whale_username, '?')) AS whale,
                lo.his_price::float8 AS his_price,
@@ -182,7 +192,7 @@ async def cohort_impact(pool: Any, since: str, whale: str | None = None,
            AND lo.status IN ('settled', 'cashed_out')
            AND COALESCE(lo.whale_username, '') NOT IN ('manual', 'underdog')
            AND COALESCE(lo.filled_usd, lo.requested_usd) > 0
-        """
+{guard}        """
         if whale:
             q += "           AND lower(COALESCE(lo.whale_username,'')) = $2\n"
         return q

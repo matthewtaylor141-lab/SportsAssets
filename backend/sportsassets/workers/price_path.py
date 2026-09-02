@@ -80,6 +80,14 @@ async def _due_samples(pool, now_ts: float) -> list[dict]:
            AND lower(COALESCE(lo.whale_username,'')) = ANY($2::text[])
            AND {ORDER_INTENT_SQL} IN ('ORDER_INTENT_BUY_LONG',
                                       'ORDER_INTENT_BUY_SHORT')
+           -- NOT THE MIRROR BOOK (position mirroring P1, owner order
+           -- 2026-09-02 "go for it, let's get this working"; the panel
+           -- review's predicate audit). The curve is the ask after HIS
+           -- fill, read at offsets from the attempt row's placed_at; a
+           -- book's row is placed once at open and buys for its whole
+           -- life, so its offsets would measure nothing. NULL lanes
+           -- (every row before 041) keep today's path.
+           AND COALESCE(lo.lane,'') <> 'mirror'
          GROUP BY lo.id, lo.us_market_slug, lo.placed_at, lo.raw
         """, float(LOOKBACK_S), whales)
     due: list[dict] = []

@@ -695,6 +695,16 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
                     ours = await pool.fetch(
                         "SELECT DISTINCT asset FROM live_orders "
                         "WHERE status = 'filled' "
+                        # A MIRROR BOOK CONFIRMS ITS OWN VANISHES
+                        # (position mirroring P1, owner order 2026-09-02
+                        # "go for it, let's get this working"; the panel
+                        # review's predicate audit). The book's flatten
+                        # trigger reads the raw snapshot this cycle
+                        # writes, so an asset held only by a book is not
+                        # "ours" here: one _confirm_gone read saved, and
+                        # the vanish never turns into a per-fill exit
+                        # against the book. NULL lanes keep today's path.
+                        "AND COALESCE(lane,'') <> 'mirror' "
                         "AND asset = ANY($1::text[])", live_gone)
                     held_here = {str(x["asset"]) for x in ours}
                     for a in live_gone:
