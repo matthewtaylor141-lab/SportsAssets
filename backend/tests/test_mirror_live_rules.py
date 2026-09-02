@@ -1720,3 +1720,39 @@ def test_a_negative_raw_target_never_yields_a_short_plan(ledger):
     p = mi.plan(t["target"], ledger, ledger, mi.Book(bid=0.49, ask=0.51), 0.5, 0.5)
     assert p.side in (None, r.SELL) and p.qty <= ledger
     assert (p.side == r.SELL) == (ledger > 0) and p.qty == ledger
+
+
+# ---------------------------------------------------------------- addendum §11
+# three fail-closed nits from the rules module's final review (owner
+# order 2026-09-02 "go for it, let's get this working")
+
+
+def test_a_side_whose_eq_raises_is_not_a_side():
+    class Boom:
+        def __eq__(self, other):
+            raise RuntimeError("eq")
+
+        __hash__ = object.__hash__
+
+    # a marketable book, so only the side guard can refuse
+    assert r.at_or_through(r.BUY, 0.46, 0.47, 0.47) is True
+    for bad in (Boom(), None, 1, b"BUY", ["BUY"]):
+        assert r.at_or_through(bad, 0.46, 0.47, 0.47) is False
+
+
+def test_a_census_item_whose_str_raises_is_an_unreadable_census():
+    class Boom:
+        def __str__(self):
+            raise RuntimeError("str")
+
+    ok, failures = r.p2_verdict(_p2_numbers(census_missing=[Boom()]))
+    assert ok is False and failures == ["unreadable:census_missing"]
+    # and a readable census still names what is missing
+    assert r.p2_verdict(_p2_numbers(census_missing=["b", "a"])) == (False, ["census_missing:a,b"])
+
+
+def test_an_env_name_that_is_not_a_string_reads_as_absent(monkeypatch):
+    monkeypatch.setenv("MIRROR_TEST_FLOAT", "0.5")
+    assert r._env_float("MIRROR_TEST_FLOAT") == 0.5
+    for bad in (None, 1, b"MIRROR_TEST_FLOAT", ["MIRROR_TEST_FLOAT"]):
+        assert r._env_float(bad) is None

@@ -124,7 +124,12 @@ def _size(v: Any) -> float | None:
 def _env_float(name: str) -> float | None:
     """The environment value as a finite float, or None when it is
     absent, blank, unparseable or non-finite. The environment holds
-    strings, so this is the one place a string is parsed."""
+    strings, so this is the one place a string is parsed. A name that
+    is not a string is not a variable (os.environ raises on it), so it
+    reads as absent rather than propagating (rules review addendum
+    §11, owner order 2026-09-02 "go for it, let's get this working")."""
+    if not isinstance(name, str):
+        return None
     raw = os.environ.get(name)
     if raw is None or not str(raw).strip():
         return None
@@ -759,6 +764,12 @@ def at_or_through(side: str, bid: float | None, ask: float | None,
     w = _num(wire)
     if w is None or not (0.01 <= w <= 0.99):
         return False
+    # a side that is not a string is not a side; comparing it could
+    # run a foreign __eq__ that raises, and a take must never fire or
+    # crash on that (rules review addendum §11, owner order 2026-09-02
+    # "go for it, let's get this working")
+    if not isinstance(side, str):
+        return False
     if side == BUY:
         a = _num(ask)
         return a is not None and 0.01 <= a <= 0.99 and a <= w + 1e-9
@@ -1335,7 +1346,14 @@ def p2_verdict(numbers: dict) -> tuple[bool, list[str]]:
     if not isinstance(missing, (list, tuple, set)):
         failures.append("unreadable:census_missing")
     elif missing:
-        failures.append("census_missing:" + ",".join(sorted(str(m) for m in missing)))
+        # an item whose __str__ raises is a census nobody can read:
+        # refuse by name rather than let the verdict crash (rules
+        # review addendum §11, owner order 2026-09-02 "go for it,
+        # let's get this working")
+        try:
+            failures.append("census_missing:" + ",".join(sorted(str(m) for m in missing)))
+        except Exception:
+            failures.append("unreadable:census_missing")
     overflow = n.get("why_overflow")
     if not isinstance(overflow, bool):
         failures.append("unreadable:why_overflow")
