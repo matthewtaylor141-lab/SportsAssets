@@ -5608,6 +5608,20 @@ async def admin_impact_edge(whale: str = "rn1", flow_per_day: float = 0.0) -> di
                                whale or None, flow_per_day or None)
 
 
+@app.get("/api/admin/lane-exec", dependencies=[Depends(require_admin)])
+async def admin_lane_exec(whale: str = "", days: int = 7) -> dict:
+    """Execution by DETECTION lane. See analytics/lane_exec.py.
+
+    The chain lane sees rn1 in about a second; what happens after
+    detection had never been measured: seconds until the order left
+    (t_send, stamped at the IOC call), fill rate, venue round trip,
+    and what the fills return, per lane.
+    """
+    from ..analytics.lane_exec import cohort_lane_exec
+
+    return await cohort_lane_exec(await get_pool(), days, whale or None)
+
+
 @app.get("/api/admin/size-edge", dependencies=[Depends(require_admin)])
 async def admin_size_edge(whale: str = "", days: int = 30) -> dict:
     """His edge by the dollars he staked. See analytics/size_edge.py.

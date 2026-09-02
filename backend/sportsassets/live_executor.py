@@ -7637,10 +7637,18 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # inside the venue call, the thread completes the fill, and
             # nothing wrote its id -- the row sat 'submitting' with no
             # id and the fill was attributed by cent, or not at all.
+            # TIME TO VENUE, MEASURED (2026-09-02). placed_at is stamped
+            # at the INSERT, before mapping and three venue round trips;
+            # reaction_s at the semaphore. Neither says when the order
+            # actually left. These two stamps ride the row's raw so the
+            # lane census can put the seconds where they went.
+            _timing = {"t_send": time.time(),
+                       "t_detect": payload.get("detected_at")}
             result = await _ioc_guarded(
                 pool, row_id, pmus.submit_fok,
                 mapping["market_slug"], _wire, int(shares), False,
                 "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL", _intent)
+            _timing["t_reply"] = time.time()
             _lane = "ioc"
             # ── REST LANE, ONLY AFTER THE IOC MISSED ─────────────────
             # A fill above means the existing path worked and this does
@@ -7781,7 +7789,10 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
              else "filled" if result["ok"] and filled > 0
              else "unfilled"),
             result.get("order_id"), filled, fill_price, spent,
-            json.dumps(result.get("raw"), default=str),
+            # the send/reply stamps ride beside the venue receipt (see
+            # the IOC call site); absent on any path that never sent
+            json.dumps({**(result.get("raw") or {}),
+                        **(locals().get("_timing") or {})}, default=str),
             (f"OVERSPEND: asked ${usd:.2f}, filled ${spent:.2f}"
              if overspent else
              (result.get("raw") or {}).get("why")
