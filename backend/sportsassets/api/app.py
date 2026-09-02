@@ -5812,6 +5812,17 @@ async def admin_exit_census() -> dict:
     reached = int(counts.get("mx_reached_position_lookup") or 0)
     sold = int(counts.get("mx_SOLD") or 0)
     no_pos = int(counts.get("mx_no_position_of_ours") or 0)
+    # HIS VANISH ON A MARKET THE MIRROR BOOK HOLDS (mirror P1 step 7,
+    # spec 3.2; owner order 2026-09-02). The book's standing row is kept
+    # out of mirror_exit's lookup by lane, so the per-fill exit path
+    # finds no row of its own there and names it distinctly rather than
+    # as "we never copied his entry" -- which keeps the coverage line
+    # above honest. For the verdict it is the same class as no_pos:
+    # nothing to sell on THIS path, the reconciler unwinds the book from
+    # the same snapshot. Its own line, so the two are never read as one
+    # number; zero, and the verdict below is what it was, whenever no
+    # book exists.
+    mirror_owned = int(counts.get("mx_mirror_owns_market") or 0)
     # A rest bid can fill inside its own window while the whale is already
     # exiting the same market; mirror_exit now WAITS for the row to leave
     # 'submitting' and files the leftover as in-flight (pending), not as
@@ -5876,6 +5887,7 @@ async def admin_exit_census() -> dict:
             # STANDING count here means rest bids are filling inside
             # the whale's own hold time or a named row is not clearing.
             "held_pending_entry_in_flight": in_flight,
+            "stopped_because_the_mirror_book_holds_the_market": mirror_owned,
             "post_position_refusals": {
                 k: int(counts.get(k) or 0) for k in defect_keys
                 if counts.get(k)},
@@ -5886,11 +5898,12 @@ async def admin_exit_census() -> dict:
                 "exits reach the path and are HELD because the entry is "
                 "still in flight (rest bid open or a named venue "
                 "position) — they retry; read held_pending_entry_in_flight"
-                if sold == 0 and in_flight > 0 and no_pos + in_flight >= reached else
+                if sold == 0 and in_flight > 0
+                and no_pos + mirror_owned + in_flight >= reached else
                 "exits reach the path and stop only because we hold "
                 "nothing to sell — this is a FILL RATE constraint, not "
                 "an exit defect"
-                if sold == 0 and no_pos >= reached else
+                if sold == 0 and no_pos + mirror_owned >= reached else
                 "exits are being placed"
                 if sold > 0 else
                 "exits reach the path, we hold a position, and they "

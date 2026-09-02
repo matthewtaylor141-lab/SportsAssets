@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import time
 
@@ -990,12 +991,25 @@ async def mirror_exit(payload: dict) -> str:
     # is a worse failure than the compounding it fixes. Fall back to the
     # legacy projection instead, which is exactly today's behaviour, and
     # say so loudly once per call rather than failing the sale.
+    #
+    # A MIRROR BOOK IS NEVER SOLD BY THIS PATH (mirror P1, step 7; owner
+    # order 2026-09-02, "go for it, let's get this working"). A book's
+    # standing row is 'filled' for its whale on its asset from the day it
+    # opens, so without this clause a classified exit -- or the position
+    # lane's snapshot diff -- would claim it 'exiting', sell it whole and
+    # close_position the market the mirror is still reconciling toward
+    # his net. The panel review's predicate audit (spec 1d) makes the
+    # exclusion structural: it holds whatever any switch says, because
+    # the book unwinds itself from the same raw snapshot. COALESCE, so a
+    # row placed before migration 041 (lane NULL: every row that exists
+    # today) keeps today's path byte for byte.
     _sel_tail = (
         "       fill_price::float8 AS entry, "
         f"      {ORDER_INTENT_SQL} AS intent "
         "FROM live_orders "
         "WHERE asset = $1 AND lower(COALESCE(whale_username,'')) = $2 "
         "  AND status = 'filled' AND us_market_slug IS NOT NULL "
+        "  AND COALESCE(lane,'') <> 'mirror' "
         "ORDER BY placed_at DESC LIMIT 1")
     row = await _position_row(pool, asset, username, _sel_tail)
     if row is None:
@@ -1048,6 +1062,21 @@ async def mirror_exit(payload: dict) -> str:
         # there is nothing to sell. Counting it separately is what
         # stops "mirror_exit never fired" from being read as a broken
         # exit path when it is actually a coverage number.
+        #
+        # THE BOOK'S TOKEN IS THE MIRROR'S TO UNWIND (mirror P1, step 7,
+        # spec 3.2(b); owner order 2026-09-02). The lane guard above
+        # keeps a book's standing row out of this lookup, so his vanish
+        # on a booked market lands here with no row. Its own name keeps
+        # the census's coverage line (mx_no_position_of_ours: we never
+        # copied his entry) clean of markets we DO hold, through the
+        # book. Both are settled reasons, neither sells anything: the
+        # exit worker counts exits_no_action and advances its snapshot,
+        # which is right, because the mirror reads that same snapshot
+        # and his vanish is ITS flatten trigger. An unreadable
+        # mirror_books answers False and falls to today's reason.
+        if await _mirror_owns_asset(pool, asset):
+            return _exit_done("mx_mirror_owns_market", whale=username,
+                              asset=asset)
         return _exit_done("mx_no_position_of_ours", whale=username,
                           asset=asset)
     # THE OTHER LANE MAY ALREADY HAVE MIRRORED THIS EXIT.
@@ -3784,6 +3813,22 @@ async def _adopt_lost_bid(pool, pmus, r, age_s: float) -> str | None:
     # the book before it placed, persisted on the row; none of them can
     # be our order, however well one matches.
     pre_ids = _pre_ids_of(_row_get(r, "pre_ids"))
+    # ORDERS THAT ARE SOMEBODY ELSE'S BY NAME (P1 step 8, owner order
+    # 2026-09-02 "go for it, let's get this working"; the panel review's
+    # reaper-isolation ruling): the desk's ids and every mirror order's
+    # (mirror_orders, migration 047). A mirror rest carries his cent and
+    # the book's whole quantity on a market a stranded copy row may
+    # share, so neither the open-book fingerprint nor the trade log's
+    # order size can tell it from our orphan; the id can, and it is
+    # excluded from both searches below. Unreadable is unreadable: a
+    # row we cannot attribute is left for the next pass, never adopted
+    # or booked on a guess -- the same outcome as an unreadable venue.
+    protected = await _protected_order_ids(pool)
+    if protected is None:
+        log.warning("reaper: protected order ids unreadable while "
+                    "reconciling row %s — leaving it for the next pass",
+                    r["id"])
+        return "unreadable"
     if not revisit:
         # THE OPEN BOOK, ONLY FOR A FRESH ROW AND ONLY INSIDE THE ROW'S
         # OWN WINDOW (round eight): a named row revisited 40 hours on
@@ -3794,7 +3839,7 @@ async def _adopt_lost_bid(pool, pmus, r, age_s: float) -> str | None:
         found, readable = await _find_lost_rest_bid(
             pmus, slug, shares, cents,
             window=(placed_ts - _ORPHAN_SKEW_S, placed_ts + _ORPHAN_MATCH_S),
-            exclude=pre_ids)
+            exclude=pre_ids | protected)
         if not readable:
             log.warning("reaper: venue unreadable while looking for row %s's "
                         "bid — leaving it for the next pass", r["id"])
@@ -3849,7 +3894,9 @@ async def _adopt_lost_bid(pool, pmus, r, age_s: float) -> str | None:
             "AND us_market_slug = $1 AND id <> $2", slug, r["id"])}
     except Exception:  # noqa: BLE001 — cannot exclude: cannot attribute
         return "unreadable"
-    known |= pre_ids
+    # ...and the snapshot's ids and the protected set (above): a fill the
+    # venue names for a mirror order is the mirror's, whatever its size.
+    known |= pre_ids | protected
     in_window = [f for f in fills or []
                  if lo_ts <= float(f.get("ts") or 0.0) <= hi_ts]
     ours = [f for f in in_window
@@ -4194,20 +4241,31 @@ async def _reap_stale_resting_bids(pool=None) -> int:
         log.warning("resting-bid reaper: open_orders unreadable (%s)",
                     type(exc).__name__)
         return 0
-    # THE DESK'S RESTING ORDERS ARE THE OWNER'S. Collect their ids from
-    # the ledger so a manual GTC is never swept, whatever its age.
-    manual_ids: set[str] = set()
+    # THE DESK'S RESTING ORDERS ARE THE OWNER'S, AND THE MIRROR'S ARE
+    # THE MIRROR'S. Collect both id sets from the ledger so a manual GTC
+    # is never swept, whatever its age -- and neither is a mirror rest
+    # (P1 step 8, owner order 2026-09-02 "go for it, let's get this
+    # working"; the panel review's reaper-isolation ruling). A mirror
+    # order lives in mirror_orders, a table the scope query below never
+    # reads, and it rests at HIS cent for the book's whole quantity on a
+    # market a stranded copy row may share: exactly the fingerprint this
+    # pass matches on. The id set is the belt for the one reaper that
+    # asks the VENUE instead of the ledger.
+    protected_ids: set[str] = set()
     if pool is not None:
-        try:
-            manual_ids = {str(r["order_id"]) for r in await pool.fetch(
-                "SELECT order_id FROM live_orders WHERE order_id IS NOT "
-                "NULL AND COALESCE(whale_username,'') = 'manual'")}
-        except Exception:  # noqa: BLE001 — unreadable: sweep nothing
-            # Without the exclusion list we cannot tell a desk order
-            # from an orphaned bid, so we cancel neither.
+        protected = await _protected_order_ids(pool)
+        if protected is None:
+            # Without the exclusion list we cannot tell a desk order or
+            # a mirror rest from an orphaned bid, so we cancel neither:
+            # the stance this pass has always taken. The log text is
+            # kept verbatim (it names the read that used to be the only
+            # one); a mirror_orders table that migration 047 has not yet
+            # created reads the same way, and the pass sweeps nothing
+            # until it has.
             log.warning("resting-bid reaper: manual ids unreadable — "
                         "skipping this pass")
             return 0
+        protected_ids = protected
     # ONLY ROWS THAT CAN OWN AN ORDER THE LEDGER NEVER SAW. The owner
     # rests bids directly in the venue app on this shared account, and
     # those have no ledger row at all -- an account-wide sweep cancelled
@@ -4257,8 +4315,8 @@ async def _reap_stale_resting_bids(pool=None) -> int:
     for o in orders:
         if o.get("side") != "BUY" or not o.get("order_id"):
             continue
-        if str(o.get("order_id")) in manual_ids:
-            continue
+        if str(o.get("order_id")) in protected_ids:
+            continue          # the desk's, or the mirror's: not ours to touch
         slug = str(o.get("us_market_slug") or "").lower()
         if slug not in scope:
             continue
@@ -5969,6 +6027,14 @@ async def _merge_add_leg(pool, leg_id: int, standing_id: int, shares: float,
                    raw = COALESCE(raw, '{}'::jsonb) || jsonb_build_object(
                          'adds', COALESCE(raw->'adds', '[]'::jsonb) || $7::jsonb)
              WHERE id = $2 AND status = 'filled'
+               -- A MERGE NEVER TARGETS A MIRROR BOOK (mirror P1, step 7;
+               -- owner order 2026-09-02): a book's standing row is
+               -- 'filled' for its whole life and is fed only by the
+               -- mirror's own booking. Folding a per-fill leg into it
+               -- would hand the book shares the reconciler never placed.
+               -- The row reads as gone and the caller keeps the leg as
+               -- its own fill, exactly as when the row is gone for good.
+               AND COALESCE(lane,'') <> 'mirror'
                AND EXISTS (SELECT 1 FROM leg)
                AND NOT (COALESCE(raw->'adds', '[]'::jsonb)
                         @> jsonb_build_array(jsonb_build_object('row_id', $1::bigint)))
@@ -5994,6 +6060,404 @@ async def _merge_add_leg(pool, leg_id: int, standing_id: int, shares: float,
                  leg_id, standing_id, _row_get(row, "shares"),
                  _row_get(row, "px"), float(_row_get(row, "usd") or 0))
     return row is not None
+
+
+# ---------------------------------------------------------------------------
+# MIRROR LEDGER PRIMITIVES (P1 step 5; owner order 2026-09-02, "go for it,
+# let's get this working"). A mirror BOOK is one standing live_orders row,
+# lane='mirror', 'filled' from the moment it opens (migration 047's
+# header says why: settlement, the record, the caps, the referees and
+# 045's asset claim all read it as the copy position it is, with no new
+# status and no index change). These four functions are the ONLY writers
+# of that row. Each is guarded on status='filled' AND lane='mirror', so
+# no switch, no reaper and no exit path can be talked into moving a
+# per-fill row through them, and none of them can write 'exiting',
+# 'merged' or 'submitting' -- the three states that hand a row to
+# mirror_exit, the add-leg merge and the reapers. The BUY is the
+# standing-half arithmetic of _merge_add_leg above as a standalone
+# statement, idempotent on (order_id, seq) the way the merge is
+# idempotent on the leg; the SELL is mirror_exit's partial statement
+# with the lane guard, used for EVERY sale including the one that takes
+# the row to zero -- a flat book on a live market stays 'filled' at 0
+# shares (the claim holds; his re-lean re-buys onto the same row).
+# Nothing here reads a switch: the reconciler decides, the ledger books.
+
+MIRROR_LANE = "mirror"
+MIRROR_VENUE = "polymarket-us"
+# P1 is long-only (the P1 panel synthesis, section 1). realized_pnl and
+# fill_cash both branch on this constant, so a book of any other intent
+# would be mis-booked on every sale; the open refuses it by name.
+MIRROR_INTENT = "ORDER_INTENT_BUY_LONG"
+# The one error text a mirror row ever carries, written on the terminal
+# 'cancelled' row of a never-filled book. It must never match a named-row
+# LIKE pattern (test_mirror_live_ledger pins it against every one).
+MIRROR_NO_FILL_CLOSE_TEXT = "mirror book: closed with no fill"
+
+
+def _names_constraint(exc: BaseException, constraint: str) -> bool:
+    """True when `exc` is the database refusing on the named unique
+    index. asyncpg carries the name on constraint_name and in the
+    message; maybe_execute has always read the message (the 045 catch),
+    and the test fakes carry only the message, so both are read."""
+    if str(getattr(exc, "constraint_name", "") or "") == constraint:
+        return True
+    return constraint in str(exc)
+
+
+_MIRROR_BOOK_INSERT_SQL = """
+INSERT INTO mirror_books (whale, condition_id, us_market_slug, game_key,
+                          long_asset, other_asset, intent, map_source,
+                          ratio, anchor_usd, his_level, target, episode,
+                          state)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+        -- the episode is counted from this market's earlier books, in
+        -- the same statement, so a flat-and-reopen numbers itself
+        COALESCE((SELECT max(b.episode) FROM mirror_books b
+                   WHERE b.whale = $1 AND b.us_market_slug = $3), 0) + 1,
+        'live')
+RETURNING id, episode
+"""
+
+# Every 007 NOT NULL is named (asset, side, his_price, limit_price,
+# requested_usd, requested_shares, status); venue (008) and lane (041)
+# are set explicitly; trade_id is NULL by construction (joins on trades
+# drop the row); fill_price/pnl/error are NULL. raw.preview.intent is
+# what ORDER_INTENT_SQL reads, so every side-aware consumer names the
+# row BUY_LONG. status 'filled' at INSERT is what makes 045's
+# one_fill_per_asset index the claim.
+_MIRROR_ROW_INSERT_SQL = """
+INSERT INTO live_orders (trade_id, whale_username, asset, condition_id,
+                         us_market_slug, venue, lane, side, his_price,
+                         limit_price, requested_usd, requested_shares,
+                         status, filled_shares, filled_usd, orig_shares,
+                         fill_price, pnl, error, raw)
+VALUES (NULL, $1, $2, $3, $4, 'polymarket-us', 'mirror', 'BUY', $5, $5,
+        0, $6, 'filled', 0, 0, 0, NULL, NULL, NULL, $7::jsonb)
+RETURNING id
+"""
+
+_MIRROR_BOOK_BACKFILL_SQL = (
+    "UPDATE mirror_books SET standing_row_id = $2, updated_at = now() "
+    "WHERE id = $1 AND standing_row_id IS NULL")
+
+
+async def _open_mirror_book(pool, whale: str, cid: str, slug: str,
+                            long_asset: str, other_asset: str | None,
+                            ratio: float | None, anchor_usd: float | None,
+                            his_level: float, target: int,
+                            map_source: str | None, game_key: str | None,
+                            intent: str = MIRROR_INTENT) -> dict:
+    """Open a book: ONE transaction that inserts the mirror_books row,
+    then the standing live_orders row (P1 spec section 1b), then
+    back-fills standing_row_id. Returns {ok, book_id, standing_row_id,
+    refusal}; on any refusal nothing is written.
+
+    THE INSERT IS THE CLAIM. 045's live_orders_one_fill_per_asset refuses
+    the standing row while any copy row holds the asset -> 'asset_claimed'
+    and the book row is rolled back with it; 047's
+    mirror_books_one_open_per_market refuses a second open book on the
+    market -> 'book_exists'. Anything else that raises -- an unreadable
+    pool, a NOT NULL, a crash between the two INSERTs -- is
+    'open_failed:<ExcName>' with the transaction rolled back: a half
+    book (a mirror_books row with no standing row, or the reverse) is
+    exactly the shape the reconciler cannot reason about, so it must not
+    exist. Unusable inputs are refused before the pool is touched.
+    """
+    out = {"ok": False, "book_id": None, "standing_row_id": None,
+           "refusal": None}
+    if intent != MIRROR_INTENT:
+        # P2's door (the _short_gate) stays shut in the ledger too
+        out["refusal"] = "short_side_refused"
+        return out
+    try:
+        w = str(whale or "").strip().lower()
+        c, s, la = str(cid or "").strip(), str(slug or "").strip(), str(long_asset or "").strip()
+        if not (w and c and s and la):
+            raise ValueError("a book needs a whale, a condition, a slug and a long asset")
+        lvl = float(his_level)
+        if not (0.0 < lvl < 1.0):
+            raise ValueError("his level must be a price inside (0, 1)")
+        tgt = int(target)
+        if tgt < 0:
+            raise ValueError("target shares cannot be negative")
+        r = float(ratio) if ratio is not None else None
+        anchor = float(anchor_usd) if anchor_usd is not None else None
+        # a NaN ratio would reach json.dumps as the bare token NaN and be
+        # refused by the jsonb cast (step-5 review): refused here, by name
+        for name, v in (("ratio", r), ("anchor", anchor)):
+            if v is not None and not math.isfinite(v):
+                raise ValueError(f"{name} is not a number")
+        oa = str(other_asset).strip() if other_asset else None
+        src = str(map_source) if map_source else None
+        gk = str(game_key) if game_key else None
+    except (TypeError, ValueError) as exc:
+        out["refusal"] = f"open_failed:{type(exc).__name__}"
+        log.warning("mirror book refused before open (%s %s): %s", whale, slug, exc)
+        return out
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                book = await conn.fetchrow(
+                    _MIRROR_BOOK_INSERT_SQL, w, c, s, gk, la, oa, intent, src,
+                    r, anchor, lvl, tgt)
+                book_id, episode = int(book["id"]), int(book["episode"])
+                raw = {"lane": MIRROR_LANE,
+                       "preview": {"intent": intent},
+                       "mirror": {"book_id": book_id, "episode": episode,
+                                  "ratio": r, "opened_at": time.time()},
+                       "adds": []}
+                row_id = int(await conn.fetchval(
+                    _MIRROR_ROW_INSERT_SQL, w, la, c, s, lvl, tgt,
+                    json.dumps(raw)))
+                await conn.execute(_MIRROR_BOOK_BACKFILL_SQL, book_id, row_id)
+    except Exception as exc:  # noqa: BLE001 — every failure is named; the
+        # transaction context has already rolled the writes back
+        if _names_constraint(exc, "live_orders_one_fill_per_asset"):
+            out["refusal"] = "asset_claimed"
+        elif _names_constraint(exc, "mirror_books_one_open_per_market"):
+            out["refusal"] = "book_exists"
+        else:
+            out["refusal"] = f"open_failed:{type(exc).__name__}"
+        log.warning("mirror book not opened (%s %s): %s — %s", w, s,
+                    out["refusal"], exc)
+        return out
+    out.update(ok=True, book_id=book_id, standing_row_id=row_id)
+    log.info("mirror book %s opened for %s on %s: standing row %s "
+             "(episode %s, target %s @ %s, ratio %s)",
+             book_id, w, s, row_id, episode, tgt, lvl, r)
+    return out
+
+
+# The standing-half arithmetic of _merge_add_leg, verbatim (parameters
+# renumbered): the fill price becomes the SHARE-weighted average of what
+# the row held and what this fill bought -- a flat row (0 shares, whatever
+# fill_price it last carried) restarts at the fill's price, so a
+# flat-then-rebuy episode never inherits the old cost -- shares, cost and
+# requested cost add, orig_shares grows so a later partial sale's
+# fraction is of everything ever bought. Everything is computed IN SQL
+# against the row's current columns: a sale that landed between the
+# reconciler's read and this write is not clobbered.
+#
+# IDEMPOTENT ON (order_id, seq): raw.adds lists every fill booked, and a
+# fill already listed is a no-op returning no row -- a reply lost between
+# the venue read and the write is re-booked exactly once. The `usd` and
+# `ts` keys are what _caps_room's leg clause sums on rows older than 24 h,
+# so the daily cap sees every mirror dollar on its own clock.
+_MIRROR_BUY_SQL = """
+UPDATE live_orders
+   SET fill_price = CASE
+           WHEN filled_shares + $2::float8 > 0 AND $3::float8 IS NOT NULL
+           THEN (COALESCE(fill_price, 0)::float8 * filled_shares::float8
+                 + $3::float8 * $2::float8)
+                / (filled_shares::float8 + $2::float8)
+           ELSE fill_price END,
+       filled_shares = filled_shares + $2::float8,
+       filled_usd = COALESCE(filled_usd, 0) + $4::float8,
+       requested_usd = COALESCE(requested_usd, 0) + $5::float8,
+       orig_shares = COALESCE(orig_shares, filled_shares::float8) + $2::float8,
+       raw = COALESCE(raw, '{}'::jsonb) || jsonb_build_object(
+             'adds', COALESCE(raw->'adds', '[]'::jsonb) || $6::jsonb)
+ WHERE id = $1 AND status = 'filled' AND lane = 'mirror'
+   AND NOT (COALESCE(raw->'adds', '[]'::jsonb)
+            @> jsonb_build_array(jsonb_build_object('order_id', $7::text,
+                                                    'seq', $8::int)))
+ RETURNING filled_shares::float8 AS filled_shares,
+           fill_price::float8 AS fill_price, filled_usd::float8 AS filled_usd
+"""
+
+
+def _mirror_qty_px(shares, price) -> tuple[float, float] | None:
+    """(shares, price) as floats when they describe a fill that can be
+    booked -- a positive finite quantity at a price inside (0, 1) -- else
+    None. A fill with no price or no quantity is not booked: the ledger
+    then disagrees with the venue and the reconciler freezes the book
+    by name (venue_ledger_disagree), which is the fail-closed outcome;
+    a guessed price would be a wrong average on every later sale."""
+    import math
+
+    try:
+        q, px = float(shares), float(price)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(q) or not (q > 0.0) or not (0.0 < px < 1.0):
+        return None
+    return q, px
+
+
+async def _book_mirror_buy(pool, standing_row_id: int, order_id: str, seq: int,
+                           shares: float, price: float | None, usd: float,
+                           wire_usd: float, his_price: float | None,
+                           maker: bool):
+    """Book a BUY fill of `shares` @ `price` onto the standing row: the
+    RETURNING row (filled_shares, fill_price, filled_usd, all float8) or
+    None when nothing was written -- the (order_id, seq) is already on
+    raw.adds, the row is not a live mirror row, or the inputs describe no
+    bookable fill. `usd` is fill_cash(shares, price, BUY_LONG) -- the
+    cash the fill cost; `wire_usd` is shares x the wire price, added to
+    requested_usd so the live-status ratio reads ~1; `maker` records
+    whether the fill came off a rest (the P2 gate's maker_share).
+    """
+    qp = _mirror_qty_px(shares, price)
+    if qp is None or not order_id:
+        return None
+    q, px = qp
+    try:
+        sid, sq = int(standing_row_id), int(seq)
+        cash, wire_cash = float(usd), float(wire_usd)
+        his = float(his_price) if his_price is not None else None
+    except (TypeError, ValueError):
+        return None
+    if sq < 0 or not (cash >= 0.0) or not (wire_cash >= 0.0):
+        return None
+    # a NaN his level would reach json.dumps as the bare token NaN and be
+    # refused by the jsonb cast on every tick (step-5 review): an
+    # unreadable level is recorded as none, never as a cast error
+    if his is not None and not math.isfinite(his):
+        his = None
+    if not (math.isfinite(cash) and math.isfinite(wire_cash)):
+        return None
+    add = {"order_id": str(order_id), "seq": sq, "ts": time.time(),
+           "shares": q, "price": px, "usd": cash, "his_price": his,
+           "lane": MIRROR_LANE, "maker": bool(maker)}
+    row = await pool.fetchrow(_MIRROR_BUY_SQL, sid, q, px, cash, wire_cash,
+                              json.dumps([add]), str(order_id), sq)
+    if row is not None:
+        log.info("mirror row %s booked BUY %s @ %s ($%.2f, order %s seq %s): "
+                 "now %s shares @ %s", sid, q, px, cash, order_id, sq,
+                 _row_get(row, "filled_shares"), _row_get(row, "fill_price"))
+    return row
+
+
+# mirror_exit's partial statement (its fragments are pinned against
+# mirror_exit's source) with the lane guard and a RETURNING so the caller
+# knows whether the row moved. GREATEST(.., 0) is the belt against a
+# negative ledger; orig_shares is captured from the current column on the
+# way past, exactly as the exit does, so a later fraction is of
+# everything ever bought.
+_MIRROR_SELL_SQL = (
+    "UPDATE live_orders SET status='filled', "
+    "orig_shares=COALESCE(orig_shares, filled_shares::float8), "
+    "filled_shares=GREATEST(filled_shares - $2::float8, 0), "
+    "pnl=COALESCE(pnl,0)+$3 WHERE id=$1 AND status='filled' AND lane='mirror' "
+    "RETURNING filled_shares::float8 AS filled_shares, pnl::float8 AS pnl")
+
+_MIRROR_SELL_READ_SQL = (
+    "SELECT fill_price::float8 AS fill_price, filled_shares::float8 AS filled_shares "
+    "FROM live_orders WHERE id = $1 AND status = 'filled' AND lane = 'mirror' "
+    "/* mirror-sell */")
+
+
+async def _book_mirror_sell(pool, standing_row_id: int, shares: float,
+                            price: float | None, ledger_net: float) -> dict:
+    """Book a SELL fill of `shares` @ `price` against the standing row.
+    Returns {booked, pnl, overfill, written, refusal}.
+
+    booked = min(shares, ledger_net, the row's own shares): the venue
+    can report a sale past what the ledger held (on a signed-net venue
+    that is a SHORT we never meant to hold), and the ledger books only
+    what it had and flags `overfill` -- the reconciler freezes the book
+    and trips mirror_live off with the receipt; the primitive never
+    writes a negative ledger. pnl is realized_pnl(row.fill_price, price,
+    booked, BUY_LONG), accumulated onto the row like every exit leg.
+
+    NEVER 'cashed_out' HERE: a book sold to zero on a live market stays
+    'filled' at 0 shares, holding the asset claim, so his re-lean re-buys
+    onto the same row and settlement never grades a position we still
+    trade (mirror_exit's "a position is never retired while shares
+    remain", widened to "never retired while the market is live"; the
+    episode close below is the only path off 'filled').
+
+    A row with shares but no fill_price is a ledger that cannot price
+    its own entry: refused 'no_entry_price', nothing written, rather
+    than booking a $0 pnl the record would then carry as truth.
+    """
+    out = {"booked": 0.0, "pnl": None, "overfill": False, "written": False,
+           "refusal": None}
+    qp = _mirror_qty_px(shares, price)
+    if qp is None:
+        out["refusal"] = "bad_fill"
+        return out
+    q, px = qp
+    try:
+        sid = int(standing_row_id)
+        net = float(ledger_net)
+    except (TypeError, ValueError):
+        out["refusal"] = "bad_fill"
+        return out
+    net = net if net > 0.0 else 0.0
+    row = await pool.fetchrow(_MIRROR_SELL_READ_SQL, sid)
+    if row is None:
+        out["refusal"] = "row_not_live"
+        return out
+    held = float(_row_get(row, "filled_shares") or 0.0)
+    ceiling = min(net, held if held > 0.0 else 0.0)
+    out["overfill"] = q > ceiling + 1e-9
+    booked = min(q, ceiling)
+    if booked <= 0.0:
+        out["refusal"] = "nothing_to_book"
+        return out
+    entry = _row_get(row, "fill_price")
+    pnl = realized_pnl(entry, px, booked, MIRROR_INTENT)
+    if pnl is None:
+        out["refusal"] = "no_entry_price"
+        log.error("mirror row %s: SELL %s @ %s cannot be priced (fill_price %r); "
+                  "nothing booked", sid, q, px, entry)
+        return out
+    r = await pool.fetchrow(_MIRROR_SELL_SQL, sid, float(booked), pnl)
+    if r is None:
+        out["refusal"] = "row_not_live"
+        return out
+    out.update(booked=float(booked), pnl=pnl, written=True)
+    log.info("mirror row %s booked SELL %s @ %s (entry %s, pnl %+.4f%s): now %s shares",
+             sid, booked, px, entry, pnl,
+             ", OVERFILL: venue sold %s" % q if out["overfill"] else "",
+             _row_get(r, "filled_shares"))
+    return out
+
+
+# The episode close, the ONLY path off 'filled' for a mirror row: the
+# le mirror_exit 'cashed_out' shape with $2 = 0 (every sale's pnl is
+# already accumulated on the row), or 'cancelled' with the one mirror
+# error text when the book never bought -- the asset claim is freed and a
+# never-filled book never waits on a venue verdict that will not come.
+# Both are guarded on the row being flat: a row that still holds shares
+# is settled by _settle_pmus_from_venue when its market resolves, never
+# closed by us (a position is never retired while shares remain).
+_MIRROR_CLOSE_CASHED_OUT_SQL = (
+    "UPDATE live_orders SET status='cashed_out', "
+    "pnl=COALESCE(pnl,0)+$2, settled_at=now() "
+    "WHERE id=$1 AND lane='mirror' AND status='filled' AND filled_shares = 0 "
+    "RETURNING id")
+_MIRROR_CLOSE_CANCELLED_SQL = (
+    "UPDATE live_orders SET status='cancelled', error=$2 "
+    "WHERE id=$1 AND lane='mirror' AND status='filled' AND filled_shares = 0 "
+    "RETURNING id")
+
+
+async def _close_mirror_episode(pool, standing_row_id: int,
+                                gross_buy_usd: float) -> str | None:
+    """Close the episode's standing row: 'cashed_out' when the book ever
+    bought (gross_buy_usd > 0), 'cancelled' when it never did (== 0),
+    None when nothing was written -- the row is not a live, FLAT mirror
+    row, or gross_buy_usd is unreadable or negative (a figure the book
+    cannot vouch for closes nothing)."""
+    try:
+        sid, gross = int(standing_row_id), float(gross_buy_usd)
+    except (TypeError, ValueError):
+        return None
+    if not (gross >= 0.0):
+        return None
+    if gross > 0.0:
+        r = await pool.fetchrow(_MIRROR_CLOSE_CASHED_OUT_SQL, sid, 0.0)
+        verdict = "cashed_out"
+    else:
+        r = await pool.fetchrow(_MIRROR_CLOSE_CANCELLED_SQL, sid,
+                                MIRROR_NO_FILL_CLOSE_TEXT)
+        verdict = "cancelled"
+    if r is None:
+        return None
+    log.info("mirror row %s closed %s (gross buys $%.2f)", sid, verdict, gross)
+    return verdict
 
 
 async def _tx_hash_of(pool, trade_id) -> str:
@@ -6121,9 +6585,15 @@ async def _merge_named_add_leg(pool, r) -> bool | None:
     # is never promoted beside a live standing row, whether or not it
     # carries figures -- a figure-less promotion beside an 'exiting' row
     # would refuse the exit's write-back just the same.
+    # A MIRROR BOOK READS AS GONE (mirror P1, step 7; owner order
+    # 2026-09-02): a merge can never target a book's standing row, so a
+    # named leg that names one takes the promotion path below, which
+    # the one-fill-per-asset index refuses for as long as the book's
+    # claim stands and admits once the book has closed -- the shares
+    # are real and then become the copy position they are.
     standing = await pool.fetchrow(
         "SELECT status, settled_at FROM live_orders WHERE id = $1 "
-        "/* named-standing */", standing_id)
+        "AND COALESCE(lane,'') <> 'mirror' /* named-standing */", standing_id)
     st = _row_get(standing, "status") if standing is not None else None
     has_figures = float(_row_get(leg, "filled_shares") or 0) > 0
     if st == "filled":
@@ -6385,10 +6855,26 @@ async def _rest_cycle(pool, pmus, row_id: int, us_slug: str, wire: float,
         # row 'submitting' with NO id, which is exactly the signature
         # the venue reaper time-matches and the ledger reaper blind-
         # marks -- never 'unfilled'.
-        found, _ = await _find_lost_rest_bid(
-            pmus, us_slug, shares, {float(f"{float(wire):.2f}")},
-            window=(time.time() - _LOST_BID_AGE_S, time.time() + 5.0),
-            exclude=pre_ids)
+        # AND NEVER A PROTECTED ID (P1 step 8, owner order 2026-09-02 "go
+        # for it, let's get this working"; the panel review's reaper-
+        # isolation ruling): the desk's tickets and the mirror's rests
+        # are excluded by name beside the pre-placement snapshot. A
+        # mirror rest at his cent for the book's whole quantity is the
+        # one collision the fingerprint cannot see, and the snapshot
+        # only catches it when it predates ours. An unreadable set is
+        # "not found": the row is held 'submitting' with no id for the
+        # reapers -- the path below, unchanged.
+        protected = await _protected_order_ids(pool)
+        if protected is None:
+            log.warning("rest lane: protected order ids unreadable after "
+                        "a lost placement response on %s — not searching "
+                        "the book (row %s)", us_slug, row_id)
+            found = None
+        else:
+            found, _ = await _find_lost_rest_bid(
+                pmus, us_slug, shares, {float(f"{float(wire):.2f}")},
+                window=(time.time() - _LOST_BID_AGE_S, time.time() + 5.0),
+                exclude=pre_ids | protected)
         if found is None:
             _copy_stop("rest_place_error", whale)
             log.warning("rest lane: place raised %s for row %s and no "
@@ -6923,14 +7409,52 @@ def mirror_mode(username: str | None) -> bool:
     mirror_allowlist(). Nothing here can be unreadable, so nothing here
     can fail open. Whether the mirror INCREASES is the reconciler's
     question (its DB switch); whether the per-fill lane stands aside is
-    answered from the deploy, here. Not yet consulted by maybe_execute
-    (P1 step 7 inserts the gate below the exit dispatch).
+    answered from the deploy, here. Consulted by maybe_execute exactly
+    once, directly below the exit dispatch (P1 step 7).
     """
     mode = os.environ.get("PMUS_MIRROR", "off").strip().lower()
     if mode not in ("on", "exits"):
         return False
     w = (username or "").strip().lower()
     return bool(w) and w in mirror_allowlist()
+
+
+def _mirror_notify(condition_id: str | None) -> None:
+    """Wake the mirror reconciler for this market, when the worker is
+    there to wake. maybe_execute's hand-off gate calls this for a
+    mirrored whale's fill (P1 step 7, spec 3.1) because his fill is the
+    reconciler's TRIGGER and his PRICE (addendum 1: never its position),
+    so the worker should read the market now rather than on its next
+    poll. A courtesy, never a condition. The import is lazy because
+    workers.mirror_live is step 9's module and this gate ships first;
+    and nothing here may raise, because the refusal that follows this
+    call is the money decision -- a wake that cannot be delivered must
+    not become an exception that execute_copy logs and the sweep
+    retries every pass. Missing module: the reconciler polls. A module
+    that will not import, or a wake that raises: named in the log, and
+    the reconciler polls.
+    """
+    try:
+        from .workers import mirror_live as _ml
+    except ModuleNotFoundError as exc:
+        # ABSENCE IS NOT BREAKAGE (step 7b review): only the worker module
+        # itself being missing is the quiet case; a dependency it cannot
+        # import raises the same class with another name and is a bad
+        # deploy, named below like any other import failure.
+        if exc.name == "sportsassets.workers.mirror_live":
+            return None
+        log.warning("mirror worker would not import; wake for %s dropped",
+                    condition_id, exc_info=True)
+        return None
+    except Exception:  # noqa: BLE001 — a broken worker module is its own defect, never a copy's
+        log.warning("mirror worker would not import; wake for %s dropped",
+                    condition_id, exc_info=True)
+        return None
+    try:
+        _ml.notify(condition_id)
+    except Exception:  # noqa: BLE001 — a lost wake is a late tick, never a copy
+        log.warning("mirror wake failed for %s", condition_id, exc_info=True)
+    return None
 
 
 async def _mirror_owns_asset(pool, asset: str | None) -> bool:
@@ -6942,7 +7466,8 @@ async def _mirror_owns_asset(pool, asset: str | None) -> bool:
     False by design: the caller then falls to mx_no_position_of_ours,
     a settled reason that sells nothing either -- both answers are "not
     yours to sell" -- and the mirror confirms its own vanishes from the
-    same raw snapshot. Not yet wired.
+    same raw snapshot. Consulted by mirror_exit just before
+    mx_no_position_of_ours (P1 step 7).
     """
     try:
         return bool(await pool.fetchval(
@@ -7079,6 +7604,30 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                        whale=payload.get("whale_username"),
                        asset=_exit.get("asset"))
         return _copy_stop("was_an_exit_pending", username)
+    # ── THE MIRROR HAND-OFF (mirror P1 step 7, spec 3.1) ─────────────
+    #
+    # Owner order 2026-09-02, "go for it, let's get this working": a
+    # whale in mirror mode is held as ONE standing book per market by
+    # the reconciler (workers.mirror_live), so this lane must not copy
+    # his entries on ANY market. Whole-whale, not per-market: the panel
+    # review weighed the per-market rule and refused it, because it
+    # races on the market the mirror is about to open and leaves two
+    # regimes exiting one whale. The predicate reads the deploy only
+    # (mirror_mode: PMUS_MIRROR and the allowlist), so nothing here can
+    # fail open on a read.
+    #
+    # BELOW the exit dispatch: his pre-mirror per-fill rows (lane NULL,
+    # 'ioc', 'rest') are still classified and sold by classify_exit ->
+    # mirror_exit exactly as before, and a book's own token is answered
+    # there by name (mx_mirror_owns_market). ABOVE every entry gate, the
+    # sizing, the INSERT and both submit sites, so no per-fill dollar
+    # leaves for a mirrored whale from either caller -- the fresh path
+    # (execute_copy) or copy_sweep's reclaim call with reaction None.
+    # The wake is a courtesy to the reconciler, never a condition of
+    # the refusal: with the worker absent it is a no-op.
+    if mirror_mode(username):
+        _mirror_notify(payload.get("condition_id"))
+        return _copy_stop("mirror_mode", username)
     # ── THE ENTRY ROSTER, BELOW THE EXIT (2026-09-01) ───────────────
     #
     # These two gates used to sit ~100 lines ABOVE classify_exit, which
@@ -7259,12 +7808,19 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         # referee judges rows placed within 48 hours, so a holder older
         # than that must retire the asset here exactly as before -- else
         # the candidate would run as a fresh copy with no add declared.
+        # A MIRROR BOOK IS NEVER HIS ADD HOLDER (mirror P1, step 7; owner
+        # order 2026-09-02): the book's standing row is 'filled' for its
+        # whale on the asset, and after a switch-off his fresh BUY would
+        # read as an add to it and be merged into the book. The asset
+        # stays taken here (the first belt; the never-add referee below
+        # is the second).
         holder = await pool.fetchrow(
             "SELECT status, lower(COALESCE(whale_username, '')) AS whale, "
             "       (placed_at > now() - interval '48 hours') AS recent "
             "FROM live_orders WHERE asset = $1 "
             "AND status IN ('submitting','filled','settled') "
             "AND COALESCE(whale_username, '') NOT IN ('manual','underdog') "
+            "AND COALESCE(lane,'') <> 'mirror' "
             "ORDER BY (status = 'submitting') DESC LIMIT 1 /* add-holder */",
             str(payload["asset"]))
         if (holder is not None and _row_get(holder, "status") == "filled"
@@ -7917,12 +8473,21 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # holds the SAME outcome token, and a row in flight on it
             # (a leg not yet merged) outranks the standing one so a
             # second leg waits its turn.
+            # A MIRROR BOOK OUTLIVES THE WINDOW (mirror P1, step 7; owner
+            # order 2026-09-02): the book's standing row is placed once,
+            # at open, and holds the market for days. Judged on the 48 h
+            # clock alone a three-day-old book would let the other
+            # outcome through and, with the lane read below, a leg onto
+            # the book itself. The panel review's predicate audit (spec
+            # 1d) widens the window for that lane only; every other row
+            # keeps the clock it has.
             prior = await pool.fetchrow(
                 "SELECT id, status, lower(COALESCE(whale_username, '')) AS whale, "
                 "       asset, filled_shares::float8 AS filled_shares, "
                 "       fill_price::float8 AS fill_price, "
                 "       filled_usd::float8 AS filled_usd, "
                 "       (raw->'adds')::text AS adds, "
+                "       lane, "
                 "       (SELECT t.tx_hash FROM trades t WHERE t.id = live_orders.trade_id) "
                 "           AS tx_hash /* prior-copy */ "
                 "FROM live_orders "
@@ -7933,7 +8498,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 "          OR error LIKE 'ORPHAN FILL RECORDED%' "
                 "          OR error LIKE 'venue has no record of order%'))) "
                 "AND COALESCE(whale_username, '') <> 'underdog' "
-                "AND placed_at > now() - interval '48 hours' "
+                "AND (placed_at > now() - interval '48 hours' OR lane = 'mirror') "
                 "ORDER BY (asset = $3) DESC, (status = 'submitting') DESC, "
                 "         placed_at DESC LIMIT 1",
                 row_id, mapping["market_slug"], str(payload["asset"]))
@@ -7952,9 +8517,21 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 _tid = str(payload.get("id") or "")
                 _same_leg = (str(_row_get(prior, "asset") or "")
                              == str(payload["asset"]))
+                # THE BOOK TAKES NO LEGS (mirror P1, step 7; owner order
+                # 2026-09-02). A mirror book's standing row is HIS
+                # 'filled' row on the asset, so once the whale leaves
+                # the mirror allowlist his fresh BUY there would qualify
+                # as an add and be merged into the book -- shares the
+                # reconciler never placed, on a row it alone keeps. The
+                # lane is read with the row (fail closed: a prior row on
+                # that lane is never an add) and the refusal names the
+                # book, so the census tells a held market from a
+                # duplicate.
+                _mirror_prior = (_row_get(prior, "lane") or "") == "mirror"
                 _his_row = (ADDS_ENABLED and reaction is not None and _same_leg
                             and _row_get(prior, "status") == "filled"
-                            and _row_get(prior, "whale") == username)
+                            and _row_get(prior, "whale") == username
+                            and not _mirror_prior)
                 # ONE WHALE FILL IS ONE LEG, WHATEVER ITS TRADE ID
                 # (review round one): ingestion documents key-divergent
                 # twins of one fill -- a reorg-shifted timestamp, a
@@ -7999,6 +8576,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     await pool.execute(
                         "UPDATE live_orders SET status='rejected', error=$2 "
                         "WHERE id=$1", row_id,
+                        "never-add: this market is held by the mirror book"
+                        if _mirror_prior else
                         "never-add: this market was already copied"
                         + (" (adds off)" if not ADDS_ENABLED else
                            " (add refused: not a fresh detection)"
@@ -8024,6 +8603,12 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # not) are the same bet against itself. The first market a
             # whale entered on a game is copied; every later market on
             # that game — any type, any side, any whale — is refused.
+            # A MIRROR BOOK HOLDS ITS GAME FOR ITS WHOLE LIFE (mirror P1,
+            # step 7; owner order 2026-09-02): the standing row is placed
+            # once, at open, so on the 48 h clock alone a three-day-old
+            # book would free the game for a second side. The read below
+            # widens the window for that lane only (spec 1d); every other
+            # row keeps the clock it has.
             gk = _us_game_key(mapping["market_slug"])
             # an ADD holds this game by definition: the gate refuses a
             # second SIDE of one game, not a second leg of one side
@@ -8036,7 +8621,7 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     "WHERE status IN ('filled', 'submitting') "
                     "AND id <> $1 AND us_market_slug IS NOT NULL "
                     "AND COALESCE(whale_username, '') <> 'underdog' "
-                    "AND placed_at > now() - interval '48 hours'",
+                    "AND (placed_at > now() - interval '48 hours' OR lane = 'mirror')",
                     row_id)
                 if any(_us_game_key(r["us_market_slug"]) == gk
                        for r in held):

@@ -566,13 +566,15 @@ class TestProtectedOrderIds:
         assert asyncio.run(le._protected_order_ids(
             _FetchPool(manual=["m1"], boom={"mirror"}))) is None
 
-    def test_the_manual_query_is_the_reapers_verbatim(self):
+    def test_the_manual_query_is_the_reapers_and_the_reaper_reads_through_the_helper(self):
         p = _FetchPool()
         asyncio.run(le._protected_order_ids(p))
         assert p.sql[0] == self.MANUAL_SQL
+        # P1 step 8 wired the reaper to the helper: the manual query lives
+        # in ONE place, and the reaper skips its pass when the set is None
         reaper = _src(le._reap_stale_resting_bids)
-        assert '"SELECT order_id FROM live_orders WHERE order_id IS NOT "' in reaper
-        assert '"NULL AND COALESCE(whale_username,\'\') = \'manual\'"' in reaper
+        assert "await _protected_order_ids(pool)" in reaper
+        assert "SELECT order_id FROM live_orders WHERE order_id IS NOT" not in reaper
         assert p.sql[1] == "SELECT order_id FROM mirror_orders WHERE order_id IS NOT NULL"
 
 

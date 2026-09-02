@@ -119,7 +119,21 @@ async def sweep_once() -> dict:
     # there permanently, and this sweep is itself the canceller (the
     # 60s wait_for below), so it is the right place to clean up after.
     _reaped_exiting = await _reap_stale_exiting(pool)
-    whales = sorted(settings().source_whales())
+    # THE MIRROR HAND-OFF'S BELT (mirror P1 step 7, spec 3.1; owner
+    # order 2026-09-02, "go for it, let's get this working"). A whale in
+    # mirror mode is refused by maybe_execute's own gate on every row
+    # this pass hands it, so selecting his candidates here would only
+    # spend the pass's bounded slots (MAX_ROWS_PER_SWEEP, a second per
+    # row) on refusals and ration the other whales' reclaim. He is
+    # subtracted from the roster the query reads, never from the roster
+    # itself: the gate, not this list, is what stops the dollar. With
+    # PMUS_MIRROR unset mirror_mode is False for everyone and the list
+    # is what it always was. Imported at the pass like the reapers
+    # above, so the belt reads the same predicate the gate reads at the
+    # moment it runs.
+    from ..live_executor import mirror_mode
+    _roster = settings().source_whales()
+    whales = sorted(_roster - {w for w in _roster if mirror_mode(w)})
     rows = await pool.fetch(
         r"""
         SELECT DISTINCT ON (t.asset)

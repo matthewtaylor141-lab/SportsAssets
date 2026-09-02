@@ -271,7 +271,10 @@ def test_the_asset_referee_only_yields_to_his_own_filled_row():
     j = src.index("/* prior-copy */")
     q = src[j:j + 1200]
     assert "ORDER BY (asset = $3) DESC, (status = 'submitting') DESC" in q
-    assert "AND placed_at > now() - interval '48 hours'" in q
+    # one clock with the add-holder referee for per-fill rows; a mirror
+    # book outlives 48 hours and keeps its claim for its whole life
+    # (position mirroring P1, owner order 2026-09-02)
+    assert "AND (placed_at > now() - interval '48 hours' OR lane = 'mirror')" in q
 
 
 def test_an_add_leg_never_rests():

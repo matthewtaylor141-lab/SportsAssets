@@ -396,6 +396,8 @@ def test_a_venue_reaper_adopt_that_fails_for_any_reason_still_records_the_fill(m
         async def fetch(self, sql, *a):
             if "whale_username,'') = 'manual'" in sql:
                 return []
+            if "FROM mirror_orders" in sql:           # P1 step 8: no mirror orders
+                return []
             return [_Row(id=11, us_market_slug=SLUG, placed_ts=placed,
                          his_price=0.48, requested_shares=100.0,
                          intent="ORDER_INTENT_BUY_LONG")]
@@ -559,6 +561,8 @@ def test_the_snapshot_travels_with_the_row_and_the_reapers_honour_it(monkeypatch
     class _P(_Pool):
         async def fetch(self, sql, *a):
             if "whale_username,'') = 'manual'" in sql:
+                return []
+            if "FROM mirror_orders" in sql:           # P1 step 8: no mirror orders
                 return []
             return [_Row(id=11, us_market_slug=SLUG, placed_ts=placed,
                          his_price=0.48, requested_shares=100.0,
