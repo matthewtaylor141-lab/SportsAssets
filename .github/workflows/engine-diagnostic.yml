@@ -1185,7 +1185,12 @@ jobs:
                -o /tmp/mirror.json "$BASE/api/admin/mirror-shadow?hours=24" 2>/dev/null || true
           jq -r '"  MIRROR rows=\(.rows // 0) markets=\(.markets // 0) mapped=\(.mapped_markets // 0) would_orders=\(.would_orders // 0) resolved=\(.would_resolved // 0) would_fill=\(.would_fill // 0) fill_rate=\(.would_fill_rate // "n/a") drift_p90=\(.drift_p90 // "n/a") drift_over_5pct=\(.drift_over_5pct // 0) stale_snap=\(.stale_snapshot_rows // 0) frozen=\(.frozen_rows // 0) \(.error // "")"' \
             /tmp/mirror.json 2>/dev/null || echo "  MIRROR unavailable"
-          jq -r '.ratios // {} | to_entries[] | "  MIRRORRATIO \(.key): ratio=\(.value.ratio // "n/a") anchor_usd=\(.value.anchor_usd // "n/a") markets=\(.value.n // 0) \(.value.why // "")"' \
+          jq -r '.ratios // {} | to_entries[] | "  MIRRORRATIO \(.key): ratio=\(.value.ratio // "n/a") anchor_usd=\(.value.anchor_usd // "n/a") weighted: ratio=\(.value.ratio_weighted // "n/a") anchor_usd=\(.value.anchor_usd_weighted // "n/a") markets=\(.value.n // 0) \(.value.why // "")"' \
+            /tmp/mirror.json 2>/dev/null || true
+          # MIRRORFROZEN — what the ledger holds on a slug the shadow froze
+          # (venue != ledger): each live_orders row by status/lane/whale/
+          # intent/shares, so the disagreement is read, not guessed.
+          jq -r '.frozen_detail // [] | .[] | "  MIRRORFROZEN \(.slug) venue=\(.venue_net // "n/a") ledger=\(.ledger_net // "n/a") \(.error // "") | " + ((.rows // []) | map("#\(.id):\(.status)/\(.lane // "-")/\(.whale // "-")/\(.intent // "-")/\(.sh // 0)") | join(" "))' \
             /tmp/mirror.json 2>/dev/null || true
           jq -r '.latest // [] | sort_by(.at) | reverse | .[:12][] | "  MIRRORMKT \(.whale) \(.us_market_slug // .condition_id[:16]) his_net=\(.his_net // "n/a") snap=\(.snap_long // "n/a")/\(.snap_other // "n/a") target=\(.target // "n/a") ledger=\(.ledger_net // "n/a") venue=\(.venue_net // "n/a") bbo=\(.bid // "n/a")/\(.ask // "n/a") would=\(.would_side // "-") \(.would_qty // 0)@\(.would_px // "n/a") fill=\(if .would_fill == null then "n/a" else .would_fill end) | \(.reason // "")"' \
             /tmp/mirror.json 2>/dev/null || true

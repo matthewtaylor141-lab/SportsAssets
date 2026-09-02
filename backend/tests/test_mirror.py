@@ -114,3 +114,15 @@ def test_the_rn1_book_under_the_mirror():
     assert mi.target_shares(r, net, 0.545)["target"] == 0
     s = mi.target_shares(r, net, 0.545, allow_short=True)["target"]
     assert s < 0 and abs(s) <= int(250.0 / (1 - 0.545))
+
+
+def test_the_ratio_reports_the_dollar_weighted_anchor_beside_the_median():
+    from sportsassets.analytics import mirror as mi
+    # nine $10 markets and one $1,000 market: the median says $10, the
+    # dollars say $1,000 -- half of his opening money sits in bursts >= $1,000
+    bursts = [10.0] * 9 + [1000.0] + [10.0] * 2
+    out = mi.mirror_ratio(bursts, clip_usd=50.0)
+    assert out["anchor_usd"] == 10.0 and out["ratio"] == 1.0          # 50/10 clamps to 1.0
+    assert out["anchor_usd_weighted"] == 1000.0 and out["ratio_weighted"] == 0.05
+    few = mi.mirror_ratio([10.0] * 3)
+    assert few["ratio"] is None and few["ratio_weighted"] is None and "why" in few

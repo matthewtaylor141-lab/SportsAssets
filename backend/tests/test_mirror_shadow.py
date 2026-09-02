@@ -354,46 +354,60 @@ def test_no_ratio_and_no_mark_plan_nothing_and_never_flatten(monkeypatch):
     assert row3["mark"] is None and row3["would_side"] is None
 
 
-def test_a_plan_is_judged_against_the_next_reading_of_its_market(monkeypatch):
+def test_a_plan_is_judged_as_a_resting_order_over_its_life(monkeypatch):
+    """A plan fills if the opposite side REACHES its price at any reading
+    inside JUDGE_TTL_S, and did not fill if it ages past that life while
+    the market is still read. Unobserved stays NULL."""
     _nosleep(monkeypatch)
 
     class _P(_Pool):
-        def __init__(self, prev):
+        def __init__(self, counts=None):
             super().__init__(fills=HIS)
-            self.prev = prev
-            self.updates = []
-
-        async def fetchrow(self, sql, *a):
-            if "/* prev-plan */" in sql:
-                return self.prev
-            return None
+            self.counts = counts or {}
 
         async def execute(self, sql, *a):
-            if "UPDATE mirror_shadow SET would_fill" in sql:
-                self.updates.append(a)
             await super().execute(sql, *a)
+            for tag, n in self.counts.items():
+                if tag in sql:
+                    return f"UPDATE {n}"
+            return "UPDATE 0"
 
-    # previous tick would have BOUGHT at 0.30; this tick the ask came down to 0.30
-    p = _P({"id": 9, "would_side": "BUY_LONG", "would_px": 0.30})
-    _run(ms._write(p, {"whale": "rn1", "condition_id": CID, "bid": 0.29, "ask": 0.30,
-                       "detail": {}}))
-    assert p.updates == [(9, True)]
-    # a sell at 0.55: the bid only reached 0.54 -> not filled
-    p2 = _P({"id": 10, "would_side": "SELL_LONG", "would_px": 0.55})
-    _run(ms._write(p2, {"whale": "rn1", "condition_id": CID, "bid": 0.54, "ask": 0.56,
-                        "detail": {}}))
-    assert p2.updates == [(10, False)]
-    # an unreadable book judges nothing
-    p3 = _P({"id": 11, "would_side": "BUY_LONG", "would_px": 0.30})
-    _run(ms._write(p3, {"whale": "rn1", "condition_id": CID, "bid": None, "ask": None,
-                        "detail": {}}))
-    assert p3.updates == []
-    # and the report's fill rate is over RESOLVED plans only
+    p = _P(counts={"/* judge-buy */": 2, "/* judge-expire */": 1})
+    res, fil = _run(ms._write(p, {"whale": "rn1", "condition_id": CID, "bid": 0.29, "ask": 0.30,
+                                  "detail": {}}))
+    assert (res, fil) == (3, 2)
+    buy = [w for w in p.writes if "/* judge-buy */" in w[0]][0]
+    sell = [w for w in p.writes if "/* judge-sell */" in w[0]][0]
+    exp = [w for w in p.writes if "/* judge-expire */" in w[0]][0]
+    # a BUY resting at px fills when the ask has come DOWN to px ...
+    assert "would_side = 'BUY_LONG'" in buy[0] and "would_px >= $3" in buy[0]
+    assert buy[1] == ("rn1", CID, 0.30, ms.JUDGE_TTL_S)
+    # ... a SELL when the bid has come UP to px ...
+    assert "would_side = 'SELL_LONG'" in sell[0] and "would_px <= $3" in sell[0]
+    assert sell[1] == ("rn1", CID, 0.29, ms.JUDGE_TTL_S)
+    # ... and only inside the order's life; past it, still read, it did not fill
+    assert "interval '1 second')" in buy[0] and "would_fill = false" in exp[0]
+    assert "at < now() - ($3::float8 * interval '1 second')" in exp[0]
+    assert exp[1] == ("rn1", CID, ms.JUDGE_TTL_S)
+    # a level that merely moved away is never counted: no 'bid < px' / 'ask > px' clause
+    assert "would_px > $3" not in buy[0] and "would_px < $3" not in sell[0]
+    # the side that has to reach us is unread -> that side is not judged
+    p2 = _P()
+    _run(ms._write(p2, {"whale": "rn1", "condition_id": CID, "bid": None, "ask": 0.30, "detail": {}}))
+    assert not [w for w in p2.writes if "/* judge-sell */" in w[0]]
+    assert [w for w in p2.writes if "/* judge-buy */" in w[0]]
+    # an unreadable book judges nothing at all
+    p3 = _P()
+    assert _run(ms._write(p3, {"whale": "rn1", "condition_id": CID, "bid": None, "ask": None,
+                               "detail": {}})) == (0, 0)
+    assert not [w for w in p3.writes if "/* judge-" in w[0]]
+    # the report's fill rate is over RESOLVED plans only
     rows = [{"us_market_slug": "s", "would_side": "BUY_LONG", "would_fill": True},
             {"us_market_slug": "s", "would_side": "BUY_LONG", "would_fill": None},
             {"us_market_slug": "s", "would_side": "SELL_LONG", "would_fill": False}]
     out = mr.summarize(rows, rows, {})
     assert out["would_orders"] == 3 and out["would_resolved"] == 2 and out["would_fill_rate"] == 0.5
+    assert ms.JUDGE_TTL_S == 600.0
 
 
 def test_the_ledger_counts_every_sleeve_and_the_windows_are_hours_not_truncated_ints():
@@ -462,50 +476,31 @@ def test_migration_046_and_the_endpoint_exist():
 
 # ---------------------------------------------------------- review round two
 
-def test_a_stale_previous_plan_is_not_judged_and_a_pulled_quote_is_not_a_fill(monkeypatch):
+def test_the_census_counts_judged_plans_and_an_unmapped_market_is_not_reread_every_tick(monkeypatch):
     _nosleep(monkeypatch)
-    seen = []
+    monkeypatch.setenv("MIRROR_WHALES", "rn1")
+    ms._ratio_cache.update(at=0.0, by_whale={})
+    ms._backoff_until = 0.0
+    ms._unmapped_until.clear()
 
     class _P(_Pool):
-        async def fetchrow(self, sql, *a):
-            if "/* prev-plan */" in sql:
-                seen.append((" ".join(sql.split()), a))
-            return None
-
-    p = _P(fills=HIS)
-    assert _run(ms._write(p, {"whale": "rn1", "condition_id": CID, "bid": 0.29, "ask": 0.30,
-                              "detail": {}})) is None
-    sql, args = seen[0]
-    # only a plan written inside three ticks is judged against this book
-    assert "AND at >= now() - ($3::float8 * interval '1 second')" in sql
-    assert args[2] == ms.JUDGE_MAX_AGE_S == 3.0 * ms.POLL_S
-
-    class _P2(_Pool):
-        def __init__(self):
-            super().__init__(fills=HIS)
-            self.updates = []
-
-        async def fetchrow(self, sql, *a):
-            if "/* prev-plan */" in sql:
-                return {"id": 5, "would_side": "BUY_LONG", "would_px": 0.30}
-            return None
-
         async def execute(self, sql, *a):
-            if "UPDATE mirror_shadow SET would_fill" in sql:
-                self.updates.append(a)
             await super().execute(sql, *a)
+            return "UPDATE 1" if "/* judge-" in sql else None
 
-    # BUY resting at 0.30; the bid was pulled to 0.29 and the ask stayed
-    # 0.32: the level moved away, nobody came to our price -> NOT a fill
-    p2 = _P2()
-    assert _run(ms._write(p2, {"whale": "rn1", "condition_id": CID, "bid": 0.29, "ask": 0.32,
-                               "detail": {}})) is False
-    assert p2.updates == [(5, False)]
-    # the side that has to reach us is unread -> nothing judged
-    p3 = _P2()
-    assert _run(ms._write(p3, {"whale": "rn1", "condition_id": CID, "bid": 0.29, "ask": None,
-                               "detail": {}})) is None
-    assert p3.updates == []
+    p = _P(fills=HIS, whales_ratio_fills=_ratio_fills())
+    stats = _run(ms.tick_once(p, _Pmus(bid=0.30, ask=0.32), now_ts=5000.0))
+    # three judge statements, each reporting one row: buy + sell + expire
+    assert stats["resolved"] == 3 and stats["resolved_filled"] == 2
+    # an unmapped market is remembered and skipped on the next tick, without a slot
+    p2 = _Pool(fills=HIS, mapped=False, whales_ratio_fills=_ratio_fills())
+    s1 = _run(ms.tick_once(p2, _Pmus(), now_ts=6000.0))
+    assert s1["unmapped"] == 1 and s1["markets"] == 1
+    s2 = _run(ms.tick_once(p2, _Pmus(), now_ts=6000.0 + 10))
+    assert s2["markets"] == 0 and s2["skipped_unmapped"] == 1 and s2["rows"] == 0
+    s3 = _run(ms.tick_once(p2, _Pmus(), now_ts=6000.0 + ms.UNMAPPED_TTL_S + 1))
+    assert s3["markets"] == 1 and s3["unmapped"] == 1
+    ms._unmapped_until.clear()
 
 
 def test_ledger_net_signs_shorts_and_the_ledger_map_reads_a_short_row(monkeypatch):
@@ -745,3 +740,28 @@ def test_a_positions_walk_that_hits_the_page_cap_is_unreadable_not_partial(monke
     # exactly at the cap with eof on the last page is a complete read
     pm2 = _Pmus(pages=[{"A": {"netPosition": 1}}, {"B": {"netPosition": 2}}])
     assert _run(ms.account_positions(pm2)) == {"a": 1.0, "b": 2.0}
+
+
+def test_the_report_names_what_the_ledger_holds_on_a_frozen_slug():
+    class _P:
+        def __init__(self):
+            self.sql = []
+
+        async def fetch(self, sql, *a):
+            self.sql.append((" ".join(sql.split()), a))
+            return [{"id": 7, "status": "filled", "lane": "ioc", "whale_username": "rn1",
+                     "sh": 604.0, "intent": "ORDER_INTENT_BUY_SHORT", "placed_at": "t"},
+                    {"id": 3, "status": "settled", "lane": None, "whale_username": "manual",
+                     "sh": 3458.0, "intent": None, "placed_at": "t0"}]
+
+    latest = [{"us_market_slug": SLUG, "reason": "frozen: venue and ledger disagree",
+               "venue_net": 3458.0, "ledger_net": -604},
+              {"us_market_slug": "other", "reason": "on target"}]
+    p = _P()
+    out = _run(mr.frozen_detail(p, latest))
+    assert len(out) == 1 and out[0]["slug"] == SLUG and out[0]["venue_net"] == 3458.0
+    assert out[0]["rows"][0] == {"id": 7, "status": "filled", "lane": "ioc", "whale": "rn1",
+                                 "sh": 604.0, "intent": "BUY_SHORT", "placed_at": "t"}
+    assert out[0]["rows"][1]["intent"] is None and out[0]["rows"][1]["whale"] == "manual"
+    assert "WHERE us_market_slug = $1" in p.sql[0][0] and p.sql[0][1] == (SLUG,)
+    assert _run(mr.frozen_detail(p, [{"us_market_slug": "x", "reason": "on target"}])) == []

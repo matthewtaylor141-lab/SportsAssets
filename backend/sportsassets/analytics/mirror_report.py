@@ -116,7 +116,55 @@ async def mirror_shadow_report(pool: Any, hours: float = 24.0,
     out = summarize(list(latest.values()), all_rows, ratios)
     out["hours"] = float(hours)
     out["whale"] = whale.lower() if whale else None
+    out["frozen_detail"] = await frozen_detail(pool, list(latest.values()))
     return out
 
 
-__all__ = ["summarize", "mirror_shadow_report"]
+async def frozen_detail(pool: Any, latest: list[dict], limit: int = 5) -> list[dict]:
+    """For each market the shadow froze (venue and ledger disagree), the
+    live_orders rows on its slug, so the disagreement can be read for
+    what it is: a sleeve the ledger read does not count, a row in a
+    status it does not count, or a position the venue holds that no row
+    explains (first shadow hour: Shelton v Hurkacz read ledger -604
+    against venue +3,458). Best-effort; empty when the ledger is
+    unreadable."""
+    frozen = [r for r in latest
+              if str(r.get("reason") or "").startswith("frozen") and r.get("us_market_slug")]
+    if not frozen:
+        return []
+    try:
+        from ..live_executor import ORDER_INTENT_SQL
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[dict] = []
+    for r in frozen[:limit]:
+        slug = str(r["us_market_slug"])
+        try:
+            rows = await pool.fetch(
+                f"""
+                SELECT id, status, lane, whale_username, filled_shares::float8 AS sh,
+                       {ORDER_INTENT_SQL} AS intent, placed_at
+                  FROM live_orders
+                 WHERE us_market_slug = $1
+                   AND status IN ('filled', 'exiting', 'settled', 'cashed_out', 'merged',
+                                  'submitting', 'open')
+                 ORDER BY placed_at DESC LIMIT 12
+                """, slug)
+        except Exception as exc:  # noqa: BLE001
+            out.append({"slug": slug, "venue_net": r.get("venue_net"),
+                        "ledger_net": r.get("ledger_net"), "error": type(exc).__name__})
+            continue
+        out.append({"slug": slug, "venue_net": r.get("venue_net"),
+                    "ledger_net": r.get("ledger_net"),
+                    "rows": [{"id": x["id"], "status": x["status"], "lane": x["lane"],
+                              "whale": x["whale_username"], "sh": x["sh"],
+                              "intent": (str(x["intent"]).replace("ORDER_INTENT_", "")
+                                         if x["intent"] else None),
+                              "placed_at": (x["placed_at"].isoformat()
+                                            if hasattr(x["placed_at"], "isoformat")
+                                            else x["placed_at"])}
+                             for x in rows]})
+    return out
+
+
+__all__ = ["summarize", "mirror_shadow_report", "frozen_detail"]

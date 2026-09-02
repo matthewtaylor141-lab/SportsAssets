@@ -62,8 +62,16 @@ MISS_STREAK_ABANDON = 3
 BACKOFF_S = 60.0
 # a raw positions read older than this is not a reading of his book now
 SNAP_MAX_AGE_S = float(os.environ.get("MIRROR_SNAP_MAX_AGE_S", "300"))
-# a previous plan older than this is not judged against this tick's book
-JUDGE_MAX_AGE_S = 3.0 * POLL_S
+# a plan is a resting order with this life: it fills if the book reaches
+# its price inside it, and did not fill if it ages past it while the
+# market is still read (the live lane's rest TTL, review of the first
+# shadow hour)
+JUDGE_TTL_S = float(os.environ.get("MIRROR_JUDGE_TTL_S", "600"))
+# a market that mapped to no venue market is not re-read every tick: the
+# per-tick cap goes to markets that can produce a plan (81% of RN1's
+# markets read unmapped in the first hour and took every slot)
+UNMAPPED_TTL_S = 900.0
+_unmapped_until: dict[tuple[str, str], float] = {}
 _STATE_RATIO = "mirror_ratio"
 _STATE_SWITCH = "mirror_shadow"
 _SNAP_RAW_KEY = "whale_positions_raw:%s"
@@ -503,57 +511,69 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
     return row
 
 
-async def _resolve_previous(pool, row: dict) -> None:
-    """WOULD IT HAVE FILLED? The order the previous tick would have
-    rested is judged against THIS tick's book (review round one): a buy
-    resting at px filled only if the ask has come down to px; a sell at
-    px only if the bid has come up to px. The opposite side has to REACH
-    our price. "The book moved past our level" is not counted: market
-    makers reprice by cancel-and-replace, so a level that vanished was
-    as likely pulled as taken, and counting it would flatter the rate
-    that gates P1. Written onto the previous row; a market with no later
-    reading of the side we need stays unresolved (NULL), never counted
-    either way. ONLY A RECENT PLAN IS JUDGED (review round two): a plan
-    older than JUDGE_MAX_AGE_S -- a market that fell out of the per-tick
-    cap or the lookback and came back hours later, after the game moved
-    -- is one thirty-second observation, not a day's; it stays NULL.
-    Returns the verdict (True / False) or None when nothing was judged.
-    Best-effort."""
+def _rowcount(status) -> int:
+    """asyncpg returns the command tag ('UPDATE 3'); a fake pool may
+    return None."""
+    try:
+        return int(str(status).split()[-1])
+    except (TypeError, ValueError, IndexError, AttributeError):
+        return 0
+
+
+async def _resolve_previous(pool, row: dict) -> tuple[int, int]:
+    """WOULD IT HAVE FILLED? Every plan this market still has open is
+    judged against THIS tick's book. A plan is a resting order with a
+    life of JUDGE_TTL_S (the live lane's rest TTL): it FILLED if, at any
+    reading inside that life, the opposite side of the book REACHED our
+    price (buy: the ask came down to it; sell: the bid came up to it);
+    it did NOT fill if it aged past its life while the market was still
+    being read without that happening. "The book moved past our level"
+    is never a fill: market makers reprice by cancel-and-replace, so a
+    level that vanished was as likely pulled as taken, and counting it
+    would flatter the rate that gates P1. A plan on a market we stopped
+    reading stays NULL -- unobserved is not unfilled. (Review round one
+    judged one plan against one next reading, thirty seconds apart, and
+    read 15% on the first hour of the shadow; a resting order lives
+    minutes, not one tick, so this is the question P1 actually asks.)
+    Returns (resolved, filled) counts for the census. Best-effort."""
     bid, ask = row.get("bid"), row.get("ask")
-    if bid is None and ask is None:
-        return None
+    whale, cid = row.get("whale"), row.get("condition_id")
+    resolved = filled = 0
     try:
-        prev = await pool.fetchrow(
-            "SELECT id, would_side, would_px FROM mirror_shadow "
-            "WHERE whale = $1 AND condition_id = $2 AND would_side IS NOT NULL "
-            "AND would_px IS NOT NULL AND would_fill IS NULL "
-            "AND at >= now() - ($3::float8 * interval '1 second') "
-            "ORDER BY at DESC LIMIT 1 /* prev-plan */",
-            row.get("whale"), row.get("condition_id"), float(JUDGE_MAX_AGE_S))
+        if ask is not None and 0.0 < float(ask) < 1.0:
+            n = _rowcount(await pool.execute(
+                "UPDATE mirror_shadow SET would_fill = true "
+                "WHERE whale = $1 AND condition_id = $2 AND would_fill IS NULL "
+                "AND would_side = 'BUY_LONG' AND would_px IS NOT NULL AND would_px >= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-buy */",
+                whale, cid, float(ask), float(JUDGE_TTL_S)))
+            resolved += n
+            filled += n
+        if bid is not None and 0.0 < float(bid) < 1.0:
+            n = _rowcount(await pool.execute(
+                "UPDATE mirror_shadow SET would_fill = true "
+                "WHERE whale = $1 AND condition_id = $2 AND would_fill IS NULL "
+                "AND would_side = 'SELL_LONG' AND would_px IS NOT NULL AND would_px <= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-sell */",
+                whale, cid, float(bid), float(JUDGE_TTL_S)))
+            resolved += n
+            filled += n
+        if bid is not None or ask is not None:
+            # still being read, and the plan outlived a resting order
+            resolved += _rowcount(await pool.execute(
+                "UPDATE mirror_shadow SET would_fill = false "
+                "WHERE whale = $1 AND condition_id = $2 AND would_fill IS NULL "
+                "AND would_side IS NOT NULL AND would_px IS NOT NULL "
+                "AND at < now() - ($3::float8 * interval '1 second') /* judge-expire */",
+                whale, cid, float(JUDGE_TTL_S)))
     except Exception:  # noqa: BLE001 — table absent until 046
-        return None
-    if prev is None:
-        return None
-    px = float(prev["would_px"])
-    if str(prev["would_side"]) == "BUY_LONG":
-        if ask is None:
-            return None                 # the side that has to reach us is unread
-        filled = float(ask) <= px
-    else:
-        if bid is None:
-            return None
-        filled = float(bid) >= px
-    try:
-        await pool.execute("UPDATE mirror_shadow SET would_fill = $2 WHERE id = $1",
-                           prev["id"], bool(filled))
-    except Exception:  # noqa: BLE001
-        return None
-    return bool(filled)
+        return resolved, filled
+    return resolved, filled
 
 
-async def _write(pool, row: dict) -> bool | None:
-    """Judge the previous plan for this market, then land the row.
-    Returns the previous plan's verdict (see _resolve_previous)."""
+async def _write(pool, row: dict) -> tuple[int, int]:
+    """Judge this market's open plans against the row's book, then land
+    the row. Returns (resolved, filled) from _resolve_previous."""
     verdict = await _resolve_previous(pool, row)
     await pool.execute(
         """
@@ -588,8 +608,8 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
     stats: dict[str, Any] = {"status": "ok", "whales": 0, "markets": 0, "rows": 0,
                              "unmapped": 0, "would_orders": 0, "marketable_now": 0,
                              "resolved": 0, "resolved_filled": 0,
-                             "frozen": 0, "skipped_markets": 0, "stale_snapshots": 0,
-                             "skipped_backoff": False, "ratio": {}}
+                             "frozen": 0, "skipped_markets": 0, "skipped_unmapped": 0,
+                             "stale_snapshots": 0, "skipped_backoff": False, "ratio": {}}
     if now_ts < _backoff_until:
         stats["skipped_backoff"] = True
         return stats
@@ -627,6 +647,9 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
                 stats["skipped_markets"] += len(conds) - i
                 stats["capped_tick"] = True
                 break
+            if _unmapped_until.get((w, cid), 0.0) > now_ts:
+                stats["skipped_unmapped"] += 1
+                continue
             reads += 1
             stats["markets"] += 1
             try:
@@ -637,6 +660,7 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
                 continue
             if str(row.get("reason") or "").startswith("unmapped"):
                 stats["unmapped"] += 1
+                _unmapped_until[(w, cid)] = now_ts + UNMAPPED_TTL_S
             if row.get("would_side"):
                 stats["would_orders"] += 1
                 if (row.get("detail") or {}).get("marketable_now"):
@@ -654,12 +678,10 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
             else:
                 misses = 0
             try:
-                verdict = await _write(pool, row)
+                n_res, n_fill = await _write(pool, row)
                 stats["rows"] += 1
-                if verdict is not None:
-                    stats["resolved"] += 1
-                    if verdict:
-                        stats["resolved_filled"] += 1
+                stats["resolved"] += n_res
+                stats["resolved_filled"] += n_fill
             except Exception as exc:  # noqa: BLE001 — table absent until 046
                 # A ROW THAT CANNOT LAND STOPS THE TICK: no venue budget
                 # is spent on readings nobody can read back.

@@ -133,13 +133,30 @@ def mirror_ratio(bursts: Iterable[float], clip_usd: float = MEASURE_CLIP_USD) ->
     nothing (fail closed on an unknown scale)."""
     xs = sorted(float(b) for b in bursts if b and float(b) > 0)
     out: dict[str, Any] = {"n": len(xs), "anchor_usd": None, "ratio": None,
-                           "clip_usd": float(clip_usd)}
+                           "clip_usd": float(clip_usd), "anchor_usd_weighted": None,
+                           "ratio_weighted": None}
     if len(xs) < MIN_MARKETS:
         out["why"] = f"fewer than {MIN_MARKETS} markets with an opening burst"
         return out
     anchor = statistics.median(xs)
     out["anchor_usd"] = round(anchor, 2)
     out["ratio"] = round(min(RATIO_MAX, max(RATIO_MIN, float(clip_usd) / anchor)), 6)
+    # THE DOLLAR-WEIGHTED ANCHOR, reported beside the median (first shadow
+    # hour, 2026-09-02): RN1 opened 19,742 markets in 30 days with a
+    # median burst of $25.60, so the median-anchored ratio clamps to 1.0
+    # and the $250 cap does all the sizing on the markets that carry his
+    # money. This is the burst size at which half of his opening dollars
+    # sit in LARGER bursts -- where the money is, not where the count is.
+    total = sum(xs)
+    acc = 0.0
+    weighted = xs[-1]
+    for b in reversed(xs):
+        acc += b
+        if acc >= total / 2.0:
+            weighted = b
+            break
+    out["anchor_usd_weighted"] = round(weighted, 2)
+    out["ratio_weighted"] = round(min(RATIO_MAX, max(RATIO_MIN, float(clip_usd) / weighted)), 6)
     return out
 
 
