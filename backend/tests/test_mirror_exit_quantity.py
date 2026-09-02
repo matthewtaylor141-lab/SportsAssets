@@ -274,7 +274,11 @@ class TestAPartiallyFilledFullExitKeepsItsShares:
         assert status == "filled", \
             "70 shares orphaned at the venue: ungraded, unsellable, " \
             "and blocking re-entry"
-        assert args[1] == 70
+        # the write is RELATIVE (adds review 2026-09-02): the row's
+        # current shares less the 130 booked, computed in SQL
+        assert args[1] == 130
+        sql = [q for q, a in pool.updates if "UPDATE live_orders SET status=" in q][-1]
+        assert "filled_shares=GREATEST(filled_shares - $2::float8, 0)" in sql
 
     @pytest.mark.asyncio
     async def test_it_comes_back_as_PENDING_so_the_residual_retries(
@@ -313,7 +317,7 @@ class TestAPartiallyFilledFullExitKeepsItsShares:
         await _exit(pool, closed_frac=0.5)
         status, args = _status(pool)
         assert status == "filled"
-        assert args[1] == 180
+        assert args[1] == 20            # booked; the remainder is computed in SQL
 
 
 class TestTheGatesStillRefuse:

@@ -249,7 +249,11 @@ async def sweep_once() -> dict:
                                      ('rejected', 'unfilled', 'error')
                                  OR lo2.error LIKE 'venue holds a POSITION%'
                                  OR lo2.error LIKE 'ORPHAN FILL RECORDED%'
-                                 OR lo2.error LIKE 'venue has no record of order%'))
+                                 OR lo2.error LIKE 'venue has no record of order%'
+                                 -- an add leg merged into its standing
+                                 -- row (migration 045) is money spent,
+                                 -- not a retryable miss
+                                 OR lo2.status = 'merged'))
         ORDER BY t.asset, t.ts DESC
         """,
         whales, PRICE_CEILING,

@@ -100,4 +100,8 @@ def test_the_executor_stamps_send_and_reply_around_the_ioc():
     assert '_timing = {"t_send": time.time()' in src[i - 300:i]
     assert '_timing["t_reply"] = time.time()' in src[i:i + 400]
     j = src.index('**(locals().get("_timing") or {})')
-    assert "raw=$7::jsonb" in src[j - 1600:j]
+    # the stamps are folded into the receipt, which is what the fill
+    # UPDATE writes as raw (and what an add leg's merge writes on it)
+    assert "_receipt = json.dumps(" in src[j - 200:j]
+    k = src.index("raw=$7::jsonb", j)
+    assert "_receipt," in src[k:k + 1400]

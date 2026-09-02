@@ -44,7 +44,9 @@ function stageOf(evt: OrderEvt): number {
   switch (evt.status) {
     case 'submitting': return 1
     case 'open': return 2
-    case 'filled': case 'settled': case 'cashed_out': return 3
+    // 'merged': an add leg that filled and was booked onto its standing
+    // row (adds, 2026-09-02) -- a fill, not a row still in flight
+    case 'filled': case 'settled': case 'cashed_out': case 'merged': return 3
     default: return evt.status === 'rejected' || evt.status === 'error'
       || evt.status === 'unfilled' || evt.status === 'cancelled' ? -1 : 1
   }
@@ -103,7 +105,7 @@ export default function Mission() {
       const prev = lastOrder.current.get(evt.id)
       if (prev === evt.status) continue
       lastOrder.current.set(evt.id, evt.status)
-      if (evt.status === 'filled') fillPing()
+      if (evt.status === 'filled' || evt.status === 'merged') fillPing()
       if (evt.status === 'rejected' || evt.status === 'error') knock()
     }
     setOrders((cur) => {

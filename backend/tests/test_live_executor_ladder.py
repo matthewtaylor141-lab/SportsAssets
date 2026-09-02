@@ -51,6 +51,14 @@ class _LadderPool:
         return None
 
     async def fetchrow(self, sql, *a):
+        if "/* prior-copy */" in sql:
+            # the never-add referee reads the market's prior row (adds,
+            # 2026-09-02): another whale's row on a different token,
+            # which is never an add
+            return ({"id": 5, "status": "filled", "whale": "someone-else",
+                     "asset": "999", "filled_shares": 10.0, "fill_price": 0.5,
+                     "filled_usd": 5.0, "adds": None}
+                    if getattr(self, "prior_market", None) == a[1] else None)
         return {"day": 0.0, "total": 0.0}
 
     async def fetch(self, sql, *a):

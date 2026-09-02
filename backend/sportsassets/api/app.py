@@ -3823,7 +3823,9 @@ async def _live_status_uncached() -> dict:
     agg = await pool.fetchrow(
         """
         SELECT count(*)::int AS orders,
-               count(*) FILTER (WHERE status IN ('filled', 'settled'))::int AS fills,
+               -- 'merged': an add leg that filled and was booked onto its
+               -- standing row (migration 045) -- a fill, counted here
+               count(*) FILTER (WHERE status IN ('filled', 'settled', 'merged'))::int AS fills,
                count(*) FILTER (WHERE status = 'unfilled')::int AS unfilled,
                count(*) FILTER (WHERE status = 'rejected')::int AS unmapped,
                count(*) FILTER (WHERE status = 'error')::int AS errors,
@@ -3863,7 +3865,9 @@ async def _live_status_uncached() -> dict:
     by_whale = await pool.fetch(
         """
         SELECT COALESCE(whale_username, '?') AS whale,
-               count(*) FILTER (WHERE status IN ('filled', 'settled'))::int AS fills,
+               -- 'merged': an add leg that filled and was booked onto its
+               -- standing row (migration 045) -- a fill, counted here
+               count(*) FILTER (WHERE status IN ('filled', 'settled', 'merged'))::int AS fills,
                COALESCE(sum(filled_usd), 0)::float8 AS deployed,
                count(*) FILTER (WHERE status = 'settled')::int AS settled,
                COALESCE(sum(pnl) FILTER (WHERE status = 'settled'), 0)::float8 AS pnl
@@ -6947,6 +6951,7 @@ async def api_admin_order_audit(
     the public site only."""
     from_day = _parse_day(from_, DISPLAY_EPOCH)
     to_day = _parse_day(to, _today_et())
+    from .track_record import PNL_DISPLAY_CAP as _pnl_cap
     from .track_record import pnl_cap_exempt_patterns
 
     pool = await get_pool()
@@ -6962,19 +6967,19 @@ async def api_admin_order_audit(
                COALESCE(sum(pnl), 0)::float8 AS pnl,
                COALESCE(sum(filled_usd), 0)::float8 AS filled_usd,
                COALESCE(sum(pnl) FILTER (
-                   WHERE abs(pnl) > 100
+                   WHERE abs(pnl) > $2::float8
                      AND NOT lower(COALESCE(us_market_slug, ''))
                              LIKE ANY($1::text[])), 0)::float8
                    AS over_cap_pnl,
                count(*) FILTER (
-                   WHERE abs(COALESCE(pnl, 0)) > 100
+                   WHERE abs(COALESCE(pnl, 0)) > $2::float8
                      AND NOT lower(COALESCE(us_market_slug, ''))
                              LIKE ANY($1::text[]))::int
                    AS over_cap_n
         FROM live_orders
         WHERE status = 'settled' AND settled_at IS NOT NULL
         GROUP BY 1, 2, 3
-        """, pnl_cap_exempt_patterns())
+        """, pnl_cap_exempt_patterns(), float(_pnl_cap))
     days: dict[str, list] = {}
     totals: dict[str, dict] = {}
     for r in rows:

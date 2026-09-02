@@ -1169,12 +1169,33 @@ async def mirror_exit(payload: dict) -> str:
     # wait above parks that slot for up to REST_BID_TTL_S plus grace.
     # Bounded, cannot deadlock (the entry it waits on holds a different
     # slot), and visible in the QUEUE probe line's wait statistics.
+    # THE CLAIM IS THE AUTHORITATIVE READ (adds review round two): the
+    # row was read several round trips ago, and an add leg can merge
+    # onto it in between (the merge requires 'filled', which this claim
+    # ends). Sizing, the base and the terminal-branch decision all use
+    # the figures the claim itself returns, never the stale read.
     claimed = await pool.fetchval(
         "UPDATE live_orders SET status='exiting' "
         "WHERE id=$1 AND status='filled' RETURNING id", row["id"])
     if claimed is None:
         log.info("MIRROR-EXIT %s already claimed by another task", us_slug)
         return _exit_done("mx_already_claimed", slug=us_slug)
+    try:
+        # the row is 'exiting' now and a merge needs 'filled', so this
+        # read cannot be overtaken; the figures it returns are final
+        _post = await pool.fetchrow(
+            "SELECT filled_shares::float8 AS qty, "
+            "       COALESCE(orig_shares, filled_shares)::float8 AS orig_qty "
+            "FROM live_orders WHERE id = $1 /* post-claim */", row["id"])
+        _q, _o = _row_get(_post, "qty"), _row_get(_post, "orig_qty")
+        if isinstance(_q, (int, float)) and float(_q) > 0:
+            _fresh = dict(row)
+            _fresh["qty"] = float(_q)
+            _fresh["orig_qty"] = (float(_o) if isinstance(_o, (int, float))
+                                  and float(_o) > 0 else float(_q))
+            row = _fresh
+    except Exception:  # noqa: BLE001 — an unreadable refresh keeps the read
+        pass
     try:
         held, _avg = await _pm_held(us_slug)
         ours = min(int(row["qty"]), held)
@@ -1468,11 +1489,18 @@ async def mirror_exit(payload: dict) -> str:
         # keeps it fixed on every subsequent partial. Doing it here
         # rather than on the INSERT paths means a new insert site cannot
         # forget it and silently reintroduce the compounding.
+        # RELATIVE, NOT ABSOLUTE (adds review, 2026-09-02): the remainder
+        # is the row's CURRENT shares less what this sale booked. An add
+        # leg merged between the read above and this write grew the row;
+        # writing the stale read's remainder would erase those shares
+        # from the ledger while the venue still held them. orig_shares
+        # is captured from the current column for the same reason.
         await pool.execute(
             "UPDATE live_orders SET status='filled', "
-            "filled_shares=$2, orig_shares=COALESCE(orig_shares, $4), "
+            "orig_shares=COALESCE(orig_shares, filled_shares::float8), "
+            "filled_shares=GREATEST(filled_shares - $2::float8, 0), "
             "pnl=COALESCE(pnl,0)+$3 WHERE id=$1",
-            row["id"], remaining, pnl or 0, float(row["qty"] or 0))
+            row["id"], float(booked), pnl or 0)
     else:
         # ACCUMULATE, DO NOT ASSIGN (2026-08-25, adversarial review).
         #
@@ -2141,6 +2169,18 @@ COPY_RATIO_MAX = float(os.environ.get("LIVE_COPY_RATIO_MAX", "1.0"))
 # the trades he actually commits to — and it is a tightening, so it
 # needs no further authority.
 COPY_MIN_CLIP_USD = float(os.environ.get("LIVE_MIN_CLIP_USD", "10"))
+# ADDS (owner order 2026-09-02, from the gate-edge read: the trades
+# never-add refused returned +9.6% [-3.8%, +23.1%] at his price on 818
+# games -- his adds are at least as good as his firsts). A fresh BUY of
+# HIS on a market where a 'filled' row of his already stands is copied
+# as an ADD: sized by the same rules, placed the same way, and on a fill
+# MERGED into the standing row (shares, cost, average price), because
+# the ledger holds one live row per asset and every exit, settlement and
+# record reads that one row. The add's own row records the leg as
+# 'add-merged'. Fresh detections only (a sweep reclaim is hours old);
+# at most LIVE_MAX_ADDS legs on one row; never across whales.
+ADDS_ENABLED = os.environ.get("LIVE_ADDS", "on").lower() in ("1", "on", "true", "yes")
+MAX_ADDS_PER_MARKET = int(os.environ.get("LIVE_MAX_ADDS", "3"))
 
 
 def plan_order(
@@ -2192,7 +2232,20 @@ async def _caps_room(pool) -> tuple[float, float]:
     row = await pool.fetchrow(
         """
         SELECT COALESCE(sum(filled_usd) FILTER (WHERE placed_at > now() - interval '24 hours'), 0)
-                   ::float8 AS day,
+                   ::float8
+               -- ADD LEGS SPEND ON THEIR OWN CLOCK (adds review,
+               -- 2026-09-02): a leg's dollars are booked onto its
+               -- standing row, whose placed_at may be older than the day
+               -- window; the legs merged inside the window onto rows
+               -- outside it are added from the rows' own leg list, so
+               -- the daily cap sees every dollar spent today.
+               + COALESCE((SELECT sum((a->>'usd')::float8)
+                             FROM live_orders lo2,
+                                  jsonb_array_elements(COALESCE(lo2.raw->'adds', '[]'::jsonb)) a
+                            WHERE COALESCE(lo2.whale_username, '') NOT IN ('manual', 'underdog')
+                              AND lo2.placed_at <= now() - interval '24 hours'
+                              AND (a->>'ts')::float8 > extract(epoch FROM now() - interval '24 hours')),
+                          0)::float8 AS day,
                COALESCE(sum(filled_usd), 0)::float8 AS total
         FROM live_orders
         WHERE COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
@@ -3280,8 +3333,20 @@ async def volume_normalized_clip(pool, whale_username: str | None,
         # 'cashed_out' STAY in the sum — money deployed today is still
         # deployed after it resolves; 'submitting' is excluded so a
         # stranded in-flight row can never permanently shrink the clip.
+        # ADD LEGS ON THEIR OWN CLOCK (adds review round two): a leg's
+        # dollars sit on its standing row; legs merged inside the window
+        # onto rows placed before it are added from the rows' leg list,
+        # as _caps_room does.
         spent = float(await pool.fetchval(
-            "SELECT COALESCE(sum(filled_usd), 0) FROM live_orders "
+            "SELECT COALESCE(sum(filled_usd), 0)::float8 "
+            "+ COALESCE((SELECT sum((a->>'usd')::float8) FROM live_orders lo2, "
+            "            jsonb_array_elements(COALESCE(lo2.raw->'adds', '[]'::jsonb)) a "
+            "            WHERE lower(COALESCE(lo2.whale_username, '')) = $1 "
+            "              AND lo2.status IN ('filled', 'settled', 'cashed_out') "
+            "              AND lo2.placed_at <= now() - interval '24 hours' "
+            "              AND (a->>'ts')::float8 > extract(epoch FROM now() - interval '24 hours')), "
+            "          0)::float8 "
+            "FROM live_orders "
             "WHERE lower(COALESCE(whale_username, '')) = $1 "
             "AND status IN ('filled', 'settled', 'cashed_out') "
             "AND placed_at > now() - interval '24 hours'", w) or 0)
@@ -3516,6 +3581,7 @@ async def _reap_stale_submitting(pool) -> None:
             "       limit_price::float8 AS limit_price, "
             "       COALESCE(whale_username, '') AS whale_username, "
             "       (raw->'pre_ids')::text AS pre_ids, "
+            "       (raw->>'add_of')::text AS add_of, "
             "       EXTRACT(EPOCH FROM (now() - placed_at))::float8 AS age_s, "
             f"       {ORDER_INTENT_SQL} AS intent "
             "FROM live_orders WHERE (status = 'submitting' "
@@ -3535,6 +3601,30 @@ async def _reap_stale_submitting(pool) -> None:
             try:
                 await _reap_one_submitting_row(pool, pmus, r)
             except Exception as exc:  # noqa: BLE001
+                if (_row_get(r, "add_of")
+                        and "live_orders_one_fill_per_asset" in str(exc)):
+                    # AN ADD LEG THAT DIED MID-FLIGHT (adds, 2026-09-02):
+                    # the venue filled it, and it cannot be booked
+                    # 'filled' beside the standing row it was meant to
+                    # merge into. It is NAMED -- the same named state an
+                    # orphan fill gets -- so it leaves the in-flight
+                    # claim, the ledger says what the venue holds, the
+                    # sweep and never-add refuse to re-buy while it
+                    # stands, and the reaper revisits it: once the
+                    # standing row settles or exits, the claim frees and
+                    # the leg is promoted to a position of its own.
+                    await pool.execute(
+                        "UPDATE live_orders SET status='error', error=$2 "
+                        "WHERE id=$1 AND status='submitting'", _row_get(r, "id"),
+                        f"ORPHAN FILL RECORDED on a row that cannot re-enter "
+                        f"'filled' (add leg of row #{_row_get(r, 'add_of')} "
+                        f"died mid-flight; the standing row holds this "
+                        f"asset's claim) — reconcile against the venue "
+                        f"account")
+                    log.error("reaper: add leg row %s of row %s filled but "
+                              "could not merge — NAMED as an orphan fill",
+                              _row_get(r, "id"), _row_get(r, "add_of"))
+                    continue
                 log.warning("reaper: row %s skipped this pass (%s: %s)",
                             _row_get(r, "id"), type(exc).__name__,
                             str(exc)[:120])
@@ -3596,6 +3686,24 @@ async def _reap_one_submitting_row(pool, pmus, r) -> None:
     if _row_get(r, "status") == "error":
         err = str(_row_get(r, "error") or "")
         if err.startswith("ORPHAN FILL RECORDED"):
+            # A NAMED ADD LEG MERGES FIRST (adds review, 2026-09-02): a
+            # leg that could not merge when it filled -- its standing
+            # row was mid-exit, or the process died -- is booked onto
+            # that row now that it is 'filled' again, by the same one
+            # statement the executor uses. Only when the standing row is
+            # gone for good does the leg fall through to promotion.
+            if _row_get(r, "add_of"):
+                try:
+                    # True: merged. None: standing row live but not
+                    # 'filled' -- wait, never promote beside it. False:
+                    # standing row gone -- promote below.
+                    if await _merge_named_add_leg(pool, r) is not False:
+                        return
+                except Exception as exc:  # noqa: BLE001 — try again next pass
+                    log.warning("reaper: named add leg %s not merged this "
+                                "pass (%s: %s)", r["id"], type(exc).__name__,
+                                str(exc)[:120])
+                    return
             # AN ORPHAN FILL WHOSE CLAIM MAY HAVE FREED: promote it to
             # 'filled' so it is graded and exited like any copy. Refused
             # by the index while another row still holds the asset.
@@ -3617,7 +3725,8 @@ async def _reap_one_submitting_row(pool, pmus, r) -> None:
             # trade log is read for fills of exactly that order. Until
             # one of them speaks the row stays named and un-buyable.
             res = await _reconcile_row_by_id(pool, pmus, r["id"], oid, slug,
-                                             r["intent"], age)
+                                             r["intent"], age,
+                                             add_of=_row_get(r, "add_of"))
             if res in ("no_record", "no_record_yet"):
                 await _book_from_log_by_oid(pool, pmus, r, oid, age)
             return
@@ -3645,7 +3754,8 @@ async def _reap_one_submitting_row(pool, pmus, r) -> None:
             "WHERE id = $1 AND status = 'submitting'", r["id"])
         return
     res = await _reconcile_row_by_id(pool, pmus, r["id"], oid, slug,
-                                     r["intent"], age)
+                                     r["intent"], age,
+                                     add_of=_row_get(r, "add_of"))
     if res == "no_record":
         # The venue handed out this id and now has no record of it: its
         # trade log is the other record (round eleven).
@@ -3771,7 +3881,8 @@ async def _adopt_lost_bid(pool, pmus, r, age_s: float) -> str | None:
                 return "unreadable"
             keep = True          # another row holds the asset claim
         res = await _reconcile_row_by_id(pool, pmus, r["id"], oid, slug,
-                                         intent, age_s, keep_status=keep)
+                                         intent, age_s, keep_status=keep,
+                                         add_of=_row_get(r, "add_of"))
         if res in ("filled", "unfilled"):
             await _stamp_lost_fill_lane(pool, r["id"], ours, his, intent)
             log.warning("reaper: row %s reconciled from the venue ORDER "
@@ -3793,14 +3904,24 @@ async def _adopt_lost_bid(pool, pmus, r, age_s: float) -> str | None:
         px = float(ours[0]["price"])
         fill_intent = intent or "ORDER_INTENT_BUY_LONG"
         spent = fill_cash(qty, px, fill_intent)
-        await pool.execute(
-            "UPDATE live_orders SET status='filled', filled_shares=$2, "
-            "fill_price=$3, filled_usd=$4, error=$5 "
-            "WHERE id=$1 AND status IN ('submitting', 'error')",
-            r["id"], qty, px, spent,
-            f"reconciled from the venue trade log: lost order of our exact "
-            f"size filled while unattended ({len(ours)} fill(s) inside the "
-            f"row's window)")
+        _text = (f"reconciled from the venue trade log: lost order of our exact "
+                 f"size filled while unattended ({len(ours)} fill(s) inside the "
+                 f"row's window)")
+        # AN ADD LEG IS MERGED, NEVER BOOKED BESIDE ITS ROW (adds review
+        # round two): the third reaper booking site. Same rule as
+        # _book_from_log_by_oid -- merge onto the standing row, or record
+        # the figures under the orphan name; never a bare 'filled'.
+        _booked = None
+        if _row_get(r, "add_of"):
+            # the log named no order id here (that branch returned above)
+            _booked = await _book_add_leg_if_any(
+                pool, r["id"], qty, px, spent, None, _text)
+        if _booked is None:
+            await pool.execute(
+                "UPDATE live_orders SET status='filled', filled_shares=$2, "
+                "fill_price=$3, filled_usd=$4, error=$5 "
+                "WHERE id=$1 AND status IN ('submitting', 'error')",
+                r["id"], qty, px, spent, _text)
         await _stamp_lost_fill_lane(pool, r["id"], ours, his, intent)
         log.warning("reaper: BOOKED lost fill of %s @ %s on row %s from the "
                     "venue trade log", qty, px, r["id"])
@@ -3854,7 +3975,8 @@ async def _adopt_lost_bid(pool, pmus, r, age_s: float) -> str | None:
 
 async def _reconcile_row_by_id(pool, pmus, row_id, oid: str, slug: str,
                                intent: str | None, age_s: float,
-                               keep_status: bool = False) -> str:
+                               keep_status: bool = False,
+                               add_of=None) -> str:
     """cancel -> read until terminal -> write what happened.
 
     Shared by the ledger reaper (a 'submitting' row with an id) and the
@@ -3933,12 +4055,24 @@ async def _reconcile_row_by_id(pool, pmus, row_id, oid: str, slug: str,
                 "(another row holds this asset's claim) — reconcile against "
                 "the venue account", oid)
         else:
-            await pool.execute(
-                "UPDATE live_orders SET status='filled', "
-                "filled_shares=$2, fill_price=$3, filled_usd=$4, "
-                "error=$5 WHERE id=$1 AND status IN ('submitting', 'error')",
-                row_id, filled, float(px) if px else None, spent,
-                "reconciled by reaper: resting order filled while unattended")
+            # AN ADD LEG IS MERGED, NEVER BOOKED BESIDE ITS ROW (adds
+            # review, 2026-09-02): a leg reconciled here died before its
+            # merge. Its fill goes onto the standing row by the same one
+            # statement the executor uses; if that row is not 'filled'
+            # right now, the figures are recorded on the leg under the
+            # orphan name and the next pass merges or promotes it.
+            _booked = None
+            if add_of:
+                _booked = await _book_add_leg_if_any(
+                    pool, row_id, filled, float(px) if px else None, spent, oid,
+                    "reconciled by reaper: add leg filled while unattended")
+            if _booked is None:
+                await pool.execute(
+                    "UPDATE live_orders SET status='filled', "
+                    "filled_shares=$2, fill_price=$3, filled_usd=$4, "
+                    "error=$5 WHERE id=$1 AND status IN ('submitting', 'error')",
+                    row_id, filled, float(px) if px else None, spent,
+                    "reconciled by reaper: resting order filled while unattended")
         try:
             # THE VENUE NAMES THE LANE (round ten): an IOC/FOK record is
             # an IOC fill whatever the row's lane says; a resting order
@@ -4002,6 +4136,16 @@ async def _book_from_log_by_oid(pool, pmus, r, oid: str, age_s: float) -> bool:
     spent = fill_cash(qty, px, intent or "ORDER_INTENT_BUY_LONG")
     text = (f"reconciled from the venue trade log: order {oid} has no record "
             f"at the order endpoint but {len(ours)} fill(s) in the log")
+    # AN ADD LEG IS MERGED, NEVER BOOKED BESIDE ITS ROW (adds review,
+    # 2026-09-02); see _book_add_leg_if_any.
+    if _row_get(r, "add_of"):
+        _booked = await _book_add_leg_if_any(pool, r["id"], qty, px, spent,
+                                             oid, text)
+        if _booked is not None:
+            await _stamp_lost_fill_lane(pool, r["id"], ours,
+                                        float(_row_get(r, "his_price") or 0.0),
+                                        intent)
+            return True
     try:
         await pool.execute(
             "UPDATE live_orders SET status='filled', filled_shares=$2, "
@@ -4277,8 +4421,21 @@ async def _reap_stale_exiting(pool) -> int:
             log.warning("stale-exiting %s: venue unreadable, left alone",
                         slug)
             continue
+        # SHARES OTHER ROWS EXPLAIN ARE NOT THIS ROW'S (adds review round
+        # two): a named add leg on the same market holds venue shares of
+        # its own, so an account still holding after this row's sale is
+        # not proof the sale never landed. Only the unexplained remainder
+        # decides. Unreadable -> treat as nothing explained (as before).
         try:
-            if held < 1:
+            _explained = float(await pool.fetchval(
+                "SELECT COALESCE(sum(filled_shares), 0)::float8 FROM live_orders "
+                "WHERE us_market_slug = $1 AND id <> $2 "
+                "AND (status = 'filled' OR (status = 'error' "
+                "     AND error LIKE 'ORPHAN FILL RECORDED%'))", slug, r["id"]) or 0.0)
+        except Exception:  # noqa: BLE001
+            _explained = 0.0
+        try:
+            if held - _explained < 1:
                 await pool.execute(
                     "UPDATE live_orders SET status='cashed_out', "
                     "settled_at=now(), error=$2 WHERE id=$1 "
@@ -5623,10 +5780,16 @@ async def _rest_lane_spent(pool) -> float:
     own budget does not get to spend.
     """
     try:
+        # IOC ADD LEGS MERGED ONTO A REST-FILLED ROW ARE NOT REST MONEY
+        # (adds review, 2026-09-02): their dollars are subtracted from
+        # the row's total by the row's own leg list.
         v = await pool.fetchval(
-            "SELECT COALESCE(SUM(filled_usd), 0)::float8 FROM live_orders "
-            "WHERE lane = 'rest' AND filled_usd > 0")
-        return float(v or 0.0)
+            "SELECT COALESCE(SUM(filled_usd), 0)::float8 "
+            "- COALESCE((SELECT SUM((a->>'usd')::float8) FROM live_orders lo2, "
+            "            jsonb_array_elements(COALESCE(lo2.raw->'adds', '[]'::jsonb)) a "
+            "            WHERE lo2.lane = 'rest' AND lo2.filled_usd > 0), 0)::float8 "
+            "FROM live_orders WHERE lane = 'rest' AND filled_usd > 0")
+        return max(0.0, float(v or 0.0))
     except Exception as exc:  # noqa: BLE001 — a missing column is one
         # of the expected shapes here (migration 041 not yet applied):
         # fail CLOSED, do not rest.
@@ -5736,6 +5899,262 @@ _DESK_SLEEVES = frozenset({MANUAL_WHALE})
 _LEG_LONG, _LEG_SHORT = "ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"
 _CENT_TOL = 0.0051
 _IOC_TIFS = frozenset({"IMMEDIATE_OR_CANCEL", "FILL_OR_KILL"})
+
+
+def _adds_of(v) -> list[dict]:
+    """raw->'adds' as the executor reads it: JSON text from asyncpg, a
+    list when decoded, None when the row has none."""
+    if v is None:
+        return []
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            return []
+    return [a for a in v if isinstance(a, dict)] if isinstance(v, list) else []
+
+
+async def _merge_add_leg(pool, leg_id: int, standing_id: int, shares: float,
+                         price: float | None, usd: float, requested_usd: float,
+                         order_id: str | None, trade_id: str, receipt: dict,
+                         leg_no: int, tx_hash: str | None = None,
+                         his_price: float | None = None) -> bool:
+    """Book an add leg's fill ONTO its standing row and retire the leg
+    row as 'merged' -- one statement, so both rows change or neither.
+
+    The standing row's fill price becomes the share-weighted average of
+    what it held and what the leg bought (weighted by SHARES, never by
+    cash: on a short the cash is 1-price per share, and a cost-space
+    average would invert every consumer that reads fill_price as the
+    contract price); its shares, cost and requested cost add; its
+    orig_shares grows by the leg so a later partial exit's fraction is
+    of everything ever bought. Every figure is computed IN SQL against
+    the row's current columns -- a partial exit that landed between the
+    executor's read and this write is not clobbered.
+
+    Returns False, having changed nothing, when the standing row is no
+    longer 'filled': the caller then records the leg as its own fill.
+    """
+    px = float(price) if price is not None else None
+    leg = {"trade_id": trade_id, "row_id": leg_id, "shares": float(shares),
+           "price": px, "usd": float(usd), "order_id": order_id,
+           "ts": time.time(),
+           # the fill's identity (twin refusal) and HIS price on this
+           # leg, so fidelity can score the leg against its own trade
+           "tx_hash": (str(tx_hash).lower() if tx_hash else None),
+           "his_price": (float(his_price) if his_price is not None else None)}
+    row = await pool.fetchrow(
+        """
+        WITH leg AS (
+            -- IDEMPOTENT ON THE LEG (review round two): a merge whose
+            -- reply was lost, or two reaper passes on one named leg,
+            -- must not book it twice. The leg is locked and must still
+            -- be unmerged, and the standing row must not already list
+            -- it; otherwise both halves are no-ops and no row returns.
+            SELECT id FROM live_orders
+             WHERE id = $1 AND status IN ('submitting', 'error')
+             FOR UPDATE
+        ), s AS (
+            UPDATE live_orders
+               SET fill_price = CASE
+                       WHEN filled_shares + $3::float8 > 0 AND $4::float8 IS NOT NULL
+                       THEN (COALESCE(fill_price, 0)::float8 * filled_shares::float8
+                             + $4::float8 * $3::float8)
+                            / (filled_shares::float8 + $3::float8)
+                       ELSE fill_price END,
+                   filled_shares = filled_shares + $3::float8,
+                   filled_usd = COALESCE(filled_usd, 0) + $5::float8,
+                   requested_usd = COALESCE(requested_usd, 0) + $6::float8,
+                   orig_shares = COALESCE(orig_shares, filled_shares::float8) + $3::float8,
+                   raw = COALESCE(raw, '{}'::jsonb) || jsonb_build_object(
+                         'adds', COALESCE(raw->'adds', '[]'::jsonb) || $7::jsonb)
+             WHERE id = $2 AND status = 'filled'
+               AND EXISTS (SELECT 1 FROM leg)
+               AND NOT (COALESCE(raw->'adds', '[]'::jsonb)
+                        @> jsonb_build_array(jsonb_build_object('row_id', $1::bigint)))
+             RETURNING id, filled_shares, fill_price, filled_usd
+        )
+        UPDATE live_orders l
+           SET status = 'merged', order_id = $8,
+               filled_shares = 0, fill_price = NULL, filled_usd = 0,
+               raw = $9::jsonb, error = $10
+          FROM s
+         WHERE l.id = $1 AND l.status IN ('submitting', 'error')
+         RETURNING s.filled_shares::float8 AS shares, s.fill_price::float8 AS px,
+                   s.filled_usd::float8 AS usd
+        """,
+        int(leg_id), int(standing_id), float(shares), px, float(usd),
+        float(requested_usd), json.dumps([leg]), order_id,
+        json.dumps({**(receipt or {}), "add_leg": leg,
+                    "add_of": int(standing_id)}, default=str),
+        f"add-merged: +{float(shares):g} @ {px} (${float(usd):.2f}) into "
+        f"row #{standing_id} — leg {leg_no} of {MAX_ADDS_PER_MARKET}")
+    if row is not None:
+        log.info("add leg %s merged into row %s: now %s shares @ %s ($%.2f)",
+                 leg_id, standing_id, _row_get(row, "shares"),
+                 _row_get(row, "px"), float(_row_get(row, "usd") or 0))
+    return row is not None
+
+
+async def _tx_hash_of(pool, trade_id) -> str:
+    """The transaction hash of one trades row, lower-cased; '' when the
+    row or the hash cannot be read (an add candidate with no readable
+    identity is refused, fail closed)."""
+    try:
+        v = await pool.fetchval(
+            "SELECT tx_hash FROM trades WHERE id = $1 /* add-tx */",
+            int(trade_id))
+    except (TypeError, ValueError):
+        return ""
+    except Exception:  # noqa: BLE001 — unreadable identity is no identity
+        return ""
+    return str(v or "").lower()
+
+
+def _json_obj(v) -> dict:
+    """A jsonb column as asyncpg hands it back: text, a dict, or None."""
+    if isinstance(v, dict):
+        return v
+    if isinstance(v, str):
+        try:
+            d = json.loads(v)
+            return d if isinstance(d, dict) else {}
+        except ValueError:
+            return {}
+    return {}
+
+
+# The standing-row states under which an add leg must NOT be booked as a
+# position of its own: 'filled'/'settled' hold the one-fill-per-asset
+# claim; 'exiting' is mirror_exit's claim, which writes the row back to
+# 'filled' after the sale -- a second 'filled' row on the asset would
+# refuse that write and wedge the exit for good; 'submitting' is a row in
+# flight that may still fill.
+_ADD_STANDING_LIVE = frozenset({"filled", "settled", "exiting", "submitting"})
+
+
+async def _record_add_leg_orphan(pool, row_id: int, standing_id, filled: float,
+                                 px: float | None, spent: float,
+                                 order_id: str | None, text: str) -> None:
+    """Record an add leg's fill ON THE LEG under the orphan name: the
+    figures, the order, status 'error' (so it leaves the in-flight claim
+    and the sweep, the reclaim and never-add refuse to re-buy while it
+    stands). The reaper revisits named rows: it merges the leg once the
+    standing row is 'filled' again, or promotes it once that row is gone."""
+    await pool.execute(
+        "UPDATE live_orders SET status='error', order_id=COALESCE($6, order_id), "
+        "filled_shares=$2, fill_price=$3, filled_usd=$4, error=$5 "
+        "WHERE id=$1 AND status IN ('submitting', 'error')",
+        row_id, float(filled), px, float(spent),
+        f"ORPHAN FILL RECORDED on a row that cannot re-enter 'filled' "
+        f"(add leg of row #{standing_id}; the standing row holds this "
+        f"asset's claim) — {text}", order_id)
+    log.error("ADD LEG NAMED: row %s filled %s @ %s ($%.2f) but could not "
+              "merge into row %s — recorded under the orphan name for the "
+              "reaper", row_id, filled, px, float(spent), standing_id)
+
+
+async def _book_add_leg_if_any(pool, row_id: int, filled: float,
+                               px: float | None, spent: float,
+                               order_id: str | None, text: str) -> bool | None:
+    """The reaper's booking for a row that names a standing row on its
+    raw ('add_of'): an add leg that filled and died before its merge.
+
+    Returns None when the row is not an add leg (the caller books it as
+    it always did); True when the fill was merged onto the standing row
+    by the executor's own one statement; False when the standing row is
+    not 'filled' right now and the figures were recorded on the leg under
+    the orphan name for a later pass. Never books a second position on
+    the asset beside its standing row.
+    """
+    leg = await pool.fetchrow(
+        "SELECT (raw->>'add_of')::text AS add_of, trade_id, "
+        "       requested_usd::float8 AS requested_usd, "
+        "       his_price::float8 AS his_price, raw::text AS raw "
+        "FROM live_orders WHERE id = $1 /* add-leg */", row_id)
+    add_of = _row_get(leg, "add_of") if leg is not None else None
+    if not add_of:
+        return None
+    try:
+        standing_id = int(add_of)
+    except (TypeError, ValueError):
+        return None
+    standing = await pool.fetchrow(
+        "SELECT status, (raw->'adds')::text AS adds FROM live_orders "
+        "WHERE id = $1 /* add-standing */", standing_id)
+    if standing is not None and _row_get(standing, "status") == "filled":
+        tx = await _tx_hash_of(pool, _row_get(leg, "trade_id")) or None
+        merged = await _merge_add_leg(
+            pool, row_id, standing_id, float(filled), px, float(spent),
+            float(_row_get(leg, "requested_usd") or 0.0), order_id,
+            str(_row_get(leg, "trade_id") or ""), _json_obj(_row_get(leg, "raw")),
+            len(_adds_of(_row_get(standing, "adds"))) + 1, tx_hash=tx,
+            his_price=_row_get(leg, "his_price"))
+        if merged:
+            log.warning("reaper: add leg %s merged into row %s (%s)",
+                        row_id, standing_id, text)
+            return True
+    await _record_add_leg_orphan(pool, row_id, standing_id, filled, px, spent,
+                                 order_id, text)
+    return False
+
+
+async def _merge_named_add_leg(pool, r) -> bool | None:
+    """A named add leg on the reaper's revisit. True: merged onto its
+    standing row (now 'filled' again). None: the standing row is still
+    live but not 'filled' (mid-exit, in flight, settled) -- wait, do not
+    promote. False: the standing row is gone, or the leg carries no
+    figures -- the caller's promotion path applies."""
+    leg = await pool.fetchrow(
+        "SELECT id, order_id, (raw->>'add_of')::text AS add_of, "
+        "       filled_shares::float8 AS filled_shares, "
+        "       fill_price::float8 AS fill_price, filled_usd::float8 AS filled_usd "
+        "FROM live_orders WHERE id = $1 AND status = 'error' "
+        "AND error LIKE 'ORPHAN FILL RECORDED%' /* named-leg */", r["id"])
+    if leg is None:
+        return False
+    try:
+        standing_id = int(_row_get(leg, "add_of"))
+    except (TypeError, ValueError):
+        return False
+    # THE STANDING ROW'S STATE DECIDES FIRST (review round two): a leg
+    # is never promoted beside a live standing row, whether or not it
+    # carries figures -- a figure-less promotion beside an 'exiting' row
+    # would refuse the exit's write-back just the same.
+    standing = await pool.fetchrow(
+        "SELECT status, settled_at FROM live_orders WHERE id = $1 "
+        "/* named-standing */", standing_id)
+    st = _row_get(standing, "status") if standing is not None else None
+    has_figures = float(_row_get(leg, "filled_shares") or 0) > 0
+    if st == "filled":
+        if not has_figures:
+            return None          # nothing to merge; wait for the figures
+        booked = await _book_add_leg_if_any(
+            pool, r["id"], float(_row_get(leg, "filled_shares") or 0),
+            _row_get(leg, "fill_price"), float(_row_get(leg, "filled_usd") or 0),
+            _row_get(leg, "order_id"),
+            "merged by reaper: named add leg booked onto its standing row")
+        return True if booked else None
+    if st == "settled":
+        # THE MARKET RESOLVED BEFORE THE MERGE (review round two): the
+        # standing row never returns to 'filled', and the venue's
+        # realized P&L for the slug -- which already nets this leg's
+        # cost -- is allocated to the standing row. The leg is retired
+        # settled at zero so it neither waits forever nor counts twice.
+        await pool.execute(
+            "UPDATE live_orders SET status='settled', pnl=0, "
+            "settled_at=COALESCE($2, now()), error=$3 "
+            "WHERE id=$1 AND status='error' "
+            "AND error LIKE 'ORPHAN FILL RECORDED%'",
+            r["id"], _row_get(standing, "settled_at"),
+            f"add leg retired: standing row #{standing_id} settled before the "
+            f"merge; the slug's realized P&L is on that row")
+        log.warning("reaper: named add leg %s retired settled beside row %s",
+                    r["id"], standing_id)
+        return True
+    if st in _ADD_STANDING_LIVE:
+        return None
+    return False
 
 
 def _pre_ids_of(v) -> set[str]:
@@ -6472,6 +6891,31 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         "AND COALESCE(whale_username, '') NOT IN ('manual','underdog') "
         "LIMIT 1",
         str(payload["asset"]))
+    if taken and ADDS_ENABLED and reaction is not None:
+        # AN ADD CANDIDATE (owner order 2026-09-02): his fresh buy on an
+        # outcome HIS filled row already holds goes on to the never-add
+        # referee, which decides with the whole row (legs taken, trade
+        # already merged, same asset) and merges the fill into that
+        # row. Every other holder of the asset -- another whale's row,
+        # a row in flight (the ORDER BY puts it first, so a leg in
+        # flight refuses a second one here), a settled one -- retires
+        # the asset as before; so does a sweep re-offer (reaction None).
+        # ONE CLOCK WITH THE NEVER-ADD REFEREE (review round two): that
+        # referee judges rows placed within 48 hours, so a holder older
+        # than that must retire the asset here exactly as before -- else
+        # the candidate would run as a fresh copy with no add declared.
+        holder = await pool.fetchrow(
+            "SELECT status, lower(COALESCE(whale_username, '')) AS whale, "
+            "       (placed_at > now() - interval '48 hours') AS recent "
+            "FROM live_orders WHERE asset = $1 "
+            "AND status IN ('submitting','filled','settled') "
+            "AND COALESCE(whale_username, '') NOT IN ('manual','underdog') "
+            "ORDER BY (status = 'submitting') DESC LIMIT 1 /* add-holder */",
+            str(payload["asset"]))
+        if (holder is not None and _row_get(holder, "status") == "filled"
+                and _row_get(holder, "whale") == username
+                and bool(_row_get(holder, "recent"))):
+            taken = False
     if not taken:
         # Cross-venue: a position the engine already copied on Kalshi is
         # just as taken (one copy per position ACROSS venues). Guarded so
@@ -6689,10 +7133,12 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             payload.get("condition_id"), his_price, reaction, limit, usd, shares, venue,
         )
     except Exception as exc:  # noqa: BLE001
-        # The one-fill-per-asset index catching a concurrent duplicate is
-        # the guard WORKING, not an error.
-        if "live_orders_one_fill_per_asset" in str(exc):
-            return
+        # The one-fill-per-asset / one-in-flight-per-asset indexes
+        # (migrations 011, 045) catching a concurrent duplicate is the
+        # guard WORKING, not an error.
+        if ("live_orders_one_fill_per_asset" in str(exc)
+                or "live_orders_one_inflight_per_asset" in str(exc)):
+            return _copy_stop("already_taken", username)
         raise
     if row_id is None:
         return  # duplicate detection — never double-order one source trade
@@ -7255,8 +7701,21 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # row another claim kept out of 'filled' -- vetoes like a
             # fill, so the fast lane does not depend on the positions
             # snapshot to see them.
-            prior = await pool.fetchval(
-                "SELECT 1 FROM live_orders "
+            # THE ROW ON HIS ASSET COMES FIRST (adds, 2026-09-02): the
+            # market may hold a row on the other outcome or an older
+            # leg's retired row; an add is judged against the row that
+            # holds the SAME outcome token, and a row in flight on it
+            # (a leg not yet merged) outranks the standing one so a
+            # second leg waits its turn.
+            prior = await pool.fetchrow(
+                "SELECT id, status, lower(COALESCE(whale_username, '')) AS whale, "
+                "       asset, filled_shares::float8 AS filled_shares, "
+                "       fill_price::float8 AS fill_price, "
+                "       filled_usd::float8 AS filled_usd, "
+                "       (raw->'adds')::text AS adds, "
+                "       (SELECT t.tx_hash FROM trades t WHERE t.id = live_orders.trade_id) "
+                "           AS tx_hash /* prior-copy */ "
+                "FROM live_orders "
                 "WHERE us_market_slug = $2 AND id <> $1 "
                 "AND (status IN ('filled', 'submitting') "
                 "     OR (status = 'error' AND "
@@ -7264,14 +7723,89 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                 "          OR error LIKE 'ORPHAN FILL RECORDED%' "
                 "          OR error LIKE 'venue has no record of order%'))) "
                 "AND COALESCE(whale_username, '') <> 'underdog' "
-                "AND placed_at > now() - interval '48 hours' LIMIT 1",
-                row_id, mapping["market_slug"])
-            if prior:
-                await pool.execute(
-                    "UPDATE live_orders SET status='rejected', error=$2 "
-                    "WHERE id=$1", row_id,
-                    "never-add: this market was already copied")
-                return
+                "AND placed_at > now() - interval '48 hours' "
+                "ORDER BY (asset = $3) DESC, (status = 'submitting') DESC, "
+                "         placed_at DESC LIMIT 1",
+                row_id, mapping["market_slug"], str(payload["asset"]))
+            add_of = None
+            if prior is not None:
+                # AN ADD, NOT A DUPLICATE (owner order 2026-09-02). His
+                # fresh BUY on the SAME OUTCOME TOKEN where HIS filled
+                # row stands is copied as an add and merged into that
+                # row on fill. Everything else that used to be never-add
+                # still is: another whale's row, the other outcome of
+                # the market (his hedge or reversal is not an add to
+                # OUR side), a row still in flight or named, a sweep
+                # reclaim (reaction None: hours old), a trade already
+                # merged, or a row that has taken its legs.
+                _adds = _adds_of(_row_get(prior, "adds"))
+                _tid = str(payload.get("id") or "")
+                _same_leg = (str(_row_get(prior, "asset") or "")
+                             == str(payload["asset"]))
+                _his_row = (ADDS_ENABLED and reaction is not None and _same_leg
+                            and _row_get(prior, "status") == "filled"
+                            and _row_get(prior, "whale") == username)
+                # ONE WHALE FILL IS ONE LEG, WHATEVER ITS TRADE ID
+                # (review round one): ingestion documents key-divergent
+                # twins of one fill -- a reorg-shifted timestamp, a
+                # rounding variant of the price -- that land as a second
+                # trades row. Before adds the asset claim made a twin
+                # harmless; now it would be a second buy of one fill.
+                # The transaction hash is the fill's identity: a
+                # candidate sharing it with the standing row's trade or
+                # any merged leg is the same fill and is refused; so is
+                # one whose hash cannot be read (fail closed).
+                _twin, _cand_tx = False, str(payload.get("tx_hash") or "").lower()
+                if _his_row:
+                    if not _cand_tx and _tid:
+                        _cand_tx = await _tx_hash_of(pool, _tid)
+                    _seen_tx = {str(_row_get(prior, "tx_hash") or "").lower()}
+                    _seen_tx |= {str(a.get("tx_hash") or "").lower() for a in _adds}
+                    _seen_tx.discard("")
+                    _twin = (not _cand_tx) or (_cand_tx in _seen_tx)
+                if (_his_row and not _twin
+                        and float(_row_get(prior, "filled_shares") or 0) > 0
+                        and len(_adds) < MAX_ADDS_PER_MARKET
+                        and _tid not in {str(a.get("trade_id")) for a in _adds}):
+                    add_of = {"id": _row_get(prior, "id"),
+                              "filled_shares": float(_row_get(prior, "filled_shares") or 0),
+                              "fill_price": float(_row_get(prior, "fill_price") or 0),
+                              "filled_usd": float(_row_get(prior, "filled_usd") or 0),
+                              "adds": _adds, "trade_id": _tid,
+                              "tx_hash": _cand_tx, "his_price": his_price}
+                    _copy_stop("add_leg", username)
+                    # THE LEG NAMES ITS STANDING ROW ON ITS OWN RAW, before
+                    # any order: a leg killed mid-flight is recognisable to
+                    # the reaper as an add that could not merge.
+                    await pool.execute(
+                        "UPDATE live_orders SET raw = COALESCE(raw, '{}'::jsonb) "
+                        "|| $2::jsonb WHERE id=$1",
+                        row_id, json.dumps({"add_of": add_of["id"]}))
+                    log.info("ADD %s: fresh buy on %s where row %s stands "
+                             "(%s legs so far) — copying as an add",
+                             username, mapping["market_slug"], add_of["id"],
+                             len(_adds))
+                else:
+                    await pool.execute(
+                        "UPDATE live_orders SET status='rejected', error=$2 "
+                        "WHERE id=$1", row_id,
+                        "never-add: this market was already copied"
+                        + (" (adds off)" if not ADDS_ENABLED else
+                           " (add refused: not a fresh detection)"
+                           if reaction is None else
+                           " (add refused: his buy is the other outcome of "
+                           "a market we hold)" if not _same_leg else
+                           " (add refused: row not filled or another whale's)"
+                           if _row_get(prior, "status") != "filled"
+                           or _row_get(prior, "whale") != username else
+                           " (add refused: same transaction as a leg we hold "
+                           "— a twin detection of one fill)" if _twin else
+                           f" (add refused: {len(_adds)} legs already)"
+                           if len(_adds) >= MAX_ADDS_PER_MARKET else
+                           " (add refused: this trade already merged)"
+                           if _tid in {str(a.get("trade_id")) for a in _adds}
+                           else " (add refused: standing row holds no shares)"))
+                    return
             # ONE POSITION PER GAME (owner audit order 2026-08-11
             # evening, superseding the ladder-only rule from the same
             # afternoon): a game is ONE bet. Ladder rungs are the same
@@ -7281,7 +7815,9 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # whale entered on a game is copied; every later market on
             # that game — any type, any side, any whale — is refused.
             gk = _us_game_key(mapping["market_slug"])
-            if gk is not None:
+            # an ADD holds this game by definition: the gate refuses a
+            # second SIDE of one game, not a second leg of one side
+            if gk is not None and add_of is None:
                 # 'underdog' rows excluded: the $2 sleeve buying a
                 # game's dog at T-5 must not consume that game's ONE
                 # copy slot (owner 2026-08-12 independence order).
@@ -7353,8 +7889,10 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # their own tickets but shared no ledger, so two sleeves could
             # build one $20 position. The venue account is the referee —
             # an outcome the account already holds is never added to.
-            if await asyncio.to_thread(pmus.account_holds,
-                                       mapping["market_slug"]):
+            # an ADD's premise is that the account holds this market;
+            # no-stack guards a FRESH copy landing on an existing hold
+            if add_of is None and await asyncio.to_thread(
+                    pmus.account_holds, mapping["market_slug"]):
                 # SLEEVE CARVE-OUT (owner 2026-08-12: the $2 underdog
                 # sleeve is "completely independent"): it buys EVERY
                 # MLB/tennis dog at T-5, so post-start the account
@@ -7664,7 +8202,12 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # for a few seconds and see whether it comes back. See
             # REST_BID_ENABLED for why this cannot touch any fill the
             # IOC would have produced.
-            if not (result.get("ok") and
+            # AN ADD LEG NEVER RESTS: a leg left 'submitting' under a
+            # GTC beside its standing row would be booked 'filled' by
+            # the reaper into the one-fill-per-asset index. An add is
+            # the IOC or nothing.
+            if locals().get("add_of") is None and not (
+                    result.get("ok") and
                     float(result.get("filled_shares") or 0) > 0):
                 _r = await _rest_after_ioc(
                     pool, row_id, mapping["market_slug"], his_price,
@@ -7778,34 +8321,112 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                     log.error("COPY SLEEVE HALTED by overspend breaker")
                 except Exception:  # noqa: BLE001 — never lose the fill
                     log.exception("could not persist the overspend halt")
-        await pool.execute(
-            """
-            UPDATE live_orders
-            SET status=$2, order_id=$3, filled_shares=$4, fill_price=$5,
-                filled_usd=$6, raw=$7::jsonb, error=$8
-            WHERE id=$1
-            """,
-            row_id,
-            # UNKNOWN STAYS 'submitting'. A rest attempt whose venue
-            # state could not be established keeps the row open under
-            # ITS order id: never-add refuses to stack a second bid on
-            # the market, the sweep cannot re-qualify the trade, and
-            # _reap_stale_submitting reconciles it against the venue.
-            # Writing 'unfilled' here would erase all three protections.
-            ("submitting" if result.get("status") == "rest_unknown"
-             else "filled" if result["ok"] and filled > 0
-             else "unfilled"),
-            result.get("order_id"), filled, fill_price, spent,
-            # the send/reply stamps ride beside the venue receipt (see
-            # the IOC call site); absent on any path that never sent
-            json.dumps({**(result.get("raw") or {}),
-                        **(locals().get("_timing") or {})}, default=str),
-            (f"OVERSPEND: asked ${usd:.2f}, filled ${spent:.2f}"
-             if overspent else
-             (result.get("raw") or {}).get("why")
-             if result.get("status") == "rest_unknown" else
-             None if result["ok"] else str(result.get("raw"))[:300]),
-        )
+        _receipt = json.dumps({**(result.get("raw") or {}),
+                               **(locals().get("_timing") or {})}, default=str)
+        # THE ADD IS MERGED INTO THE STANDING ROW (owner order
+        # 2026-09-02), in ONE statement with the leg's own retirement:
+        # shares and cost add, the fill price becomes the share-weighted
+        # average, orig_shares grows so a later partial exit's fraction
+        # is of everything ever bought, and the leg is listed on the
+        # standing row's raw so the ledger can show it and a replayed
+        # trade is refused. The leg's row becomes 'merged' -- the venue
+        # receipt stays on it, its money columns are zeroed so no cap,
+        # budget or ledger counts the leg twice. A standing row that
+        # left 'filled' while the leg was in flight (he exited; it
+        # settled) merges nothing: the leg is then recorded as a fill
+        # of its own below and stands as its own position.
+        _add = locals().get("add_of")
+        _merged = False
+        _named = False
+        if _add and filled > 0 and result.get("ok"):
+            # TWO TRIES, THEN THE ORPHAN NAME, NEVER A SECOND POSITION
+            # (adds review, 2026-09-02). A merge that misses because the
+            # standing row is mid-exit ('exiting'), in flight, or settled
+            # -- or that raised on a transient fault while the row is
+            # still 'filled' -- must not fall through to a 'filled' row
+            # of the leg's own: the one-fill index would then refuse the
+            # exit's write-back and wedge the standing row for good. The
+            # leg is recorded under the orphan name instead, with its
+            # figures and receipt, and the reaper merges it once the
+            # standing row is 'filled' again (or promotes it once that
+            # row is gone). Only a standing row already out of every
+            # live state lets the leg stand alone.
+            for _try in (1, 2):
+                try:
+                    _merged = await _merge_add_leg(
+                        pool, row_id, _add["id"], filled, fill_price, spent,
+                        usd, result.get("order_id"), _add["trade_id"],
+                        json.loads(_receipt), len(_add["adds"]) + 1,
+                        tx_hash=_add.get("tx_hash"),
+                        his_price=_add.get("his_price"))
+                except Exception:  # noqa: BLE001 — the fill is paid for: say so loudly
+                    log.exception("ADD MERGE FAILED (try %s) for row %s into %s",
+                                  _try, row_id, _add["id"])
+                if _merged:
+                    break
+                try:
+                    _st = await pool.fetchval(
+                        "SELECT status FROM live_orders WHERE id = $1 "
+                        "/* add-standing */", _add["id"])
+                except Exception:  # noqa: BLE001 — unreadable: treat as live
+                    _st = "filled"
+                if _st != "filled":
+                    break
+                await asyncio.sleep(0.2)
+            if _merged:
+                log.warning("ADD MERGED %s: +%s @ %s ($%.2f) into row %s "
+                            "(leg %s of %s)", username, filled, fill_price,
+                            spent, _add["id"], len(_add["adds"]) + 1,
+                            MAX_ADDS_PER_MARKET)
+            elif _st in _ADD_STANDING_LIVE:
+                try:
+                    await pool.execute(
+                        "UPDATE live_orders SET raw = $2::jsonb WHERE id=$1",
+                        row_id, json.dumps({**json.loads(_receipt),
+                                            "add_of": _add["id"]}, default=str))
+                    await _record_add_leg_orphan(
+                        pool, row_id, _add["id"], filled, fill_price, spent,
+                        result.get("order_id"),
+                        f"standing row was '{_st}' when the leg filled")
+                    _named = True
+                except Exception:  # noqa: BLE001 — fall back to the fill record
+                    log.exception("ADD LEG could not be named on row %s",
+                                  row_id)
+            else:
+                log.error("ADD LEG STANDS ALONE: row %s could not merge "
+                          "into %s (standing row is '%s'); recorded as its "
+                          "own fill", row_id, _add["id"], _st)
+        if not _merged and not _named:
+            await pool.execute(
+                """
+                UPDATE live_orders
+                SET status=$2, order_id=$3, filled_shares=$4, fill_price=$5,
+                    filled_usd=$6, raw=$7::jsonb, error=$8
+                WHERE id=$1
+                """,
+                row_id,
+                # UNKNOWN STAYS 'submitting'. A rest attempt whose venue
+                # state could not be established keeps the row open under
+                # ITS order id: never-add refuses to stack a second bid on
+                # the market, the sweep cannot re-qualify the trade, and
+                # _reap_stale_submitting reconciles it against the venue.
+                # Writing 'unfilled' here would erase all three protections.
+                ("submitting" if result.get("status") == "rest_unknown"
+                 else "filled" if result["ok"] and filled > 0
+                 else "unfilled"),
+                result.get("order_id"), filled, fill_price, spent,
+                # the send/reply stamps ride beside the venue receipt (see
+                # the IOC call site); absent on any path that never sent
+                _receipt,
+                (f"OVERSPEND: asked ${usd:.2f}, filled ${spent:.2f}"
+                 if overspent else
+                 (result.get("raw") or {}).get("why")
+                 if result.get("status") == "rest_unknown" else
+                 f"add-unmerged: standing row #{_add['id']} left 'filled' "
+                 f"while this leg was in flight; the leg stands alone"
+                 if _add and result["ok"] and filled > 0 else
+                 None if result["ok"] else str(result.get("raw"))[:300]),
+            )
         log.info("LIVE order [%s] %s: %s %.2f shares @ %.3f (his %.3f)",
                  venue, "FILLED" if result["ok"] and filled > 0 else "unfilled",
                  payload.get("whale_username"), filled, fill_price or limit, his_price)

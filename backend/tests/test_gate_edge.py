@@ -66,7 +66,8 @@ def test_the_cohort_reads_refused_and_taken_buys_and_splits_them():
     pool = _Pool()
     out = asyncio.run(ge.cohort_gate_edge(pool, 30, "RN1"))
     sql, args = pool.calls[0]
-    assert "lo.status IN ('rejected', 'filled', 'settled', 'cashed_out', 'exiting')" in sql
+    # 'merged' (an add leg booked onto its standing row) is a taken trade
+    assert "lo.status IN ('rejected', 'filled', 'settled', 'cashed_out', 'exiting', 'merged')" in sql
     assert "COALESCE(m.resolved, false) = true" in sql and args == (30, "rn1")
     assert out["n_refused_scored"] == 1 and out["taken_at_his_price"]["taken"] == 1
     assert out["unresolvable_payout"] == 1 and out["whale"] == "rn1"

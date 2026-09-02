@@ -179,9 +179,13 @@ def test_the_partial_update_persists_the_original():
     import inspect
 
     src = inspect.getsource(le.mirror_exit)
-    assert "orig_shares=COALESCE(orig_shares, $4)" in src, (
+    # captured from the row's CURRENT column in the same statement (adds
+    # review 2026-09-02: relative write, so a leg merged mid-exit is
+    # neither erased nor left out of the base)
+    assert "orig_shares=COALESCE(orig_shares, filled_shares::float8)" in src, (
         "the partial-exit UPDATE is the only place the original still "
         "exists; if it does not capture it there, it is gone")
+    assert "filled_shares=GREATEST(filled_shares - $2::float8, 0)" in src
 
 
 def test_the_sizing_base_is_orig_qty():

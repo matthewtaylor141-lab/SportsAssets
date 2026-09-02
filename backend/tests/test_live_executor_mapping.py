@@ -23,6 +23,8 @@ class _MapPool:
         return None
 
     async def fetchrow(self, sql, *a):
+        if "/* prior-copy */" in sql or "/* add-holder */" in sql:
+            return None          # no prior row on the market: a fresh copy
         return {"day": 0.0, "total": 0.0}
 
     async def fetch(self, sql, *a):

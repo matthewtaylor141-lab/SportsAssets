@@ -61,8 +61,12 @@ def summarize(rows: list[dict]) -> dict:
                            "min_proof_clusters": MIN_PROOF_CLUSTERS}
     for lane, rs in sorted(lanes.items()):
         st = [str(r.get("status") or "") for r in rs]
+        # a 'merged' row is an add leg that FILLED and was booked onto
+        # its standing row (migration 045): its own money columns are
+        # zeroed there, so it is counted by status, not by filled_usd
         filled = sum(1 for r, s in zip(rs, st)
-                     if s in FILLED and (_num(r.get("filled_usd")) or 0) > 0)
+                     if s == "merged"
+                     or (s in FILLED and (_num(r.get("filled_usd")) or 0) > 0))
         counts = {
             "attempts": len(rs), "filled": filled,
             "unfilled": st.count("unfilled"), "rejected": st.count("rejected"),

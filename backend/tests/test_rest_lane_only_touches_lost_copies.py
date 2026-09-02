@@ -200,7 +200,9 @@ def test_the_lane_is_gated_on_an_empty_ioc_in_the_caller():
     i = src.index("_rest_after_ioc(")
     guard = src[max(0, i - 400):i]
     assert 'float(result.get("filled_shares") or 0) > 0' in guard
-    assert "if not (" in guard
+    # an add leg never rests (2026-09-02), so the miss-guard is joined
+    # to the add check; the miss condition itself is unchanged
+    assert 'if locals().get("add_of") is None and not (' in guard
 
 
 def test_the_rest_call_comes_after_the_ioc_submit_not_before():
@@ -527,7 +529,8 @@ def test_no_venue_record_after_the_rest_is_unknown_not_unfilled(monkeypatch, sto
 
 def test_a_reconciled_fill_keeps_its_side_from_the_venue_when_raw_is_gone():
     assert 'intent or st.get("intent")' in inspect.getsource(le._reconcile_row_by_id)
-    assert 'r["intent"], age)' in inspect.getsource(le._reap_one_submitting_row)
+    # (the reaper also passes the row's add_of so an add leg merges, 2026-09-02)
+    assert 'r["intent"], age,' in inspect.getsource(le._reap_one_submitting_row)
 
 
 def test_the_gates_endpoint_reports_the_rest_lane_budget():
@@ -935,7 +938,8 @@ def test_the_named_state_is_sticky_everywhere_the_sweep_could_erase_it():
     assert "interval '{_NAMED_HORIZON}'" in reaper
     never_add = inspect.getsource(le.maybe_execute)
     j = never_add.index("never-add: this market was already copied")
-    assert "LIKE 'venue holds a POSITION%'" in never_add[j - 900:j]
+    k = never_add.rfind("await pool.fetchrow", 0, j)      # the prior-copy query
+    assert "LIKE 'venue holds a POSITION%'" in never_add[k:j]
     inflight = inspect.getsource(le._entry_in_flight)
     assert "'venue holds a POSITION%'" in inflight and "{_NAMED_HORIZON}" in inflight
 

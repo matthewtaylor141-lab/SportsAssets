@@ -150,7 +150,10 @@ async def cohort_gate_edge(pool: Any, days: int = 30, whale: str | None = None) 
           JOIN markets m ON m.condition_id = t.condition_id
          WHERE lo.placed_at >= now() - make_interval(days => $1)
            AND lo.side = 'BUY'
-           AND lo.status IN ('rejected', 'filled', 'settled', 'cashed_out', 'exiting')
+           -- 'merged': an add leg that FILLED and was booked onto its
+           -- standing row (migration 045) -- a taken trade, scored at
+           -- his price like any other fill, never a refusal
+           AND lo.status IN ('rejected', 'filled', 'settled', 'cashed_out', 'exiting', 'merged')
            AND COALESCE(lo.whale_username, '') NOT IN ('manual', 'underdog')
            AND COALESCE(m.resolved, false) = true
            AND m.resolved_prices IS NOT NULL

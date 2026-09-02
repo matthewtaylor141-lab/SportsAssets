@@ -209,7 +209,7 @@ class TestTheWiring:
     def _guard_block(self) -> str:
         src = inspect.getsource(le.maybe_execute)
         i = src.index('gk = _us_game_key(mapping["market_slug"])')
-        return src[i:i + 4000]
+        return src[i:i + 4400]
 
     def test_the_guard_consults_the_pair_context(self):
         blk = self._guard_block()

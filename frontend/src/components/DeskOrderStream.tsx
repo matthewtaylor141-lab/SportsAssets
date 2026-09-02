@@ -34,6 +34,8 @@ export type OrderEvt = {
 const TOAST_STATUSES = new Set([
   'filled', 'unfilled', 'rejected', 'error', 'cashed_out', 'open',
   'cancelled', 'settled',
+  // an add leg that filled and was booked onto its standing row (2026-09-02)
+  'merged',
 ])
 const TOAST_TTL_MS = 6500
 const MAX_TOASTS = 4
@@ -91,13 +93,19 @@ const n = (v: number | string | null | undefined): number | null => {
 export function evtHeadline(e: OrderEvt): { title: string; body: string; tone: 'ok' | 'bad' | 'dim' } {
   const who = e.whale ? e.whale.toUpperCase() : 'MANUAL'
   const px = n(e.fill_price)
-  const usd = n(e.filled_usd) ?? n(e.requested_usd)
+  // a merged add leg's money lives on its standing row (its own
+  // filled_usd is zeroed), so the leg's asked amount is what it spent
+  const usd = e.status === 'merged'
+    ? (n(e.requested_usd) ?? n(e.filled_usd))
+    : (n(e.filled_usd) ?? n(e.requested_usd))
   const cents = px != null ? `${Math.round(px * 100)}¢` : ''
   const amt = usd != null ? `$${usd.toFixed(2)}` : ''
   const mkt = (e.slug || '').slice(0, 44)
   switch (e.status) {
     case 'filled':
       return { title: 'Order filled', body: `${who} · ${amt}${cents ? ` @ ${cents}` : ''} · ${mkt}`, tone: 'ok' }
+    case 'merged':
+      return { title: 'Add leg merged', body: `${who} · ${amt} · ${e.error || 'booked onto the standing row'} · ${mkt}`, tone: 'ok' }
     case 'open':
       return { title: 'Order resting on the book', body: `${who} · ${amt}${cents ? ` @ ${cents}` : ''} · ${mkt}`, tone: 'ok' }
     case 'cashed_out': {
@@ -131,7 +139,9 @@ export function evtHeadline(e: OrderEvt): { title: string; body: string; tone: '
 export function tapeLine(e: OrderEvt): string {
   const who = e.whale ? e.whale.toUpperCase() : 'MANUAL'
   const px = n(e.fill_price)
-  const usd = n(e.filled_usd) ?? n(e.requested_usd)
+  const usd = e.status === 'merged'
+    ? (n(e.requested_usd) ?? n(e.filled_usd))
+    : (n(e.filled_usd) ?? n(e.requested_usd))
   const bits = [
     e.whale ? 'AI' : 'DESK', who, e.status,
     usd != null ? `$${usd.toFixed(0)}` : '',

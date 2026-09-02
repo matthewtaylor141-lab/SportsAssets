@@ -92,7 +92,14 @@ AUDIT_SINCE = "2026-08-01"
 # anomaly, not the strategy. Applied by default to every served record
 # (and to the daily-breakdown copy query); excluded rows are disclosed in
 # `excluded_over_pnl`, never silently dropped.
-PNL_DISPLAY_CAP = 100.0
+#
+# RAISED TO $500 (adds, 2026-09-02): the $100 figure was set at $3-5
+# clips. At the $50 measuring clip a single winning row at his price of
+# 0.30 already realizes +$117, and with up to three add legs merged
+# onto a standing row (migration 045) one row legitimately stakes $200.
+# A cap that hides the biggest positions hides exactly the rows the
+# add decision must be judged on. Still disclosed, never silent.
+PNL_DISPLAY_CAP = float(os.environ.get("PNL_DISPLAY_CAP", "500"))
 
 # OWNER OVERRIDE (2026-09-01): trades counted IN FULL despite the cap.
 # The owner placed a manual Polymarket ticket on the same market as the
