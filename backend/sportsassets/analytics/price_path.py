@@ -31,6 +31,7 @@ import math
 from typing import Any
 
 from .proof import Z95
+from .proof import MIN_PROOF_CLUSTERS
 
 OFFSETS_S: tuple[int, ...] = (0, 30, 60, 120, 281, 600)
 
@@ -113,6 +114,13 @@ def path_curve(samples: list[dict]) -> dict:
             v = "REVERTS at 95% — the impact is coming back to him"
         else:
             v = "NOT DEMONSTRATED — contains zero"
+        # THE SAME FLOOR AS EVERY OTHER VERDICT (2026-09-02, first live
+        # read): 19 rows on a handful of games printed "RISES at 95%"
+        # while the proof, impact and screen verdicts all hold at 30
+        # games. A curve on fewer games leans; it does not decide.
+        if g < MIN_PROOF_CLUSTERS and v.startswith(("RISES", "REVERTS")):
+            v = (f"PROVISIONAL (games<{MIN_PROOF_CLUSTERS}) — leans "
+                 f"{v.split(' at 95%')[0]}")
         out["by_t"][t] = {"n": n, "clusters": g, "deff": deff,
                           "mean_cents": round(mean, 3),
                           "ci95_cents": [round(lo, 3), round(hi, 3)],
@@ -120,7 +128,8 @@ def path_curve(samples: list[dict]) -> dict:
     # THE READING. Name the first offset whose (clustered) interval
     # leaves zero, and which way. The fill rule follows from the
     # direction: rises -> take the ask now (IOC), reverts -> rest at his
-    # price, neither -> the lever is not the order type.
+    # price, neither -> the lever is not the order type. A provisional
+    # lean is reported as a lean, never as the rule.
     for t in OFFSETS_S[1:]:
         b = out["by_t"][t]
         if b.get("verdict", "").startswith("RISES"):
@@ -132,6 +141,14 @@ def path_curve(samples: list[dict]) -> dict:
             out["reading"] = (f"REVERTS by t={t}s: a bid resting at his "
                               f"price captures the reversion; an IOC at "
                               f"the ask pays impact that comes back")
+            return out
+    for t in OFFSETS_S[1:]:
+        b = out["by_t"][t]
+        if b.get("verdict", "").startswith("PROVISIONAL"):
+            out["reading"] = (f"PROVISIONAL: the curve leans "
+                              f"{b['verdict'].split('leans ')[-1]} by t={t}s "
+                              f"on {b.get('clusters')} games — under the "
+                              f"{MIN_PROOF_CLUSTERS}-game floor, not a rule")
             return out
     out["reading"] = ("no offset leaves zero yet — the order type is not "
                       "the lever on this sample; see n per offset")

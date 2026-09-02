@@ -67,13 +67,25 @@ def _curve(rows, key=None):
 
 
 def test_the_interval_is_over_games_and_names_the_direction():
-    rows = [(i, 0.50, 0.50 + 0.02 + 0.002 * (i % 3)) for i in range(12)]
+    rows = [(i, 0.50, 0.50 + 0.02 + 0.002 * (i % 3)) for i in range(36)]
     out = _curve(rows, key=lambda i: f"g{i}")
     b = out["by_t"][30]
-    assert b["n"] == 12 and b["clusters"] == 12
+    assert b["n"] == 36 and b["clusters"] == 36
     assert b["ci95_cents"][0] > 0
     assert b["verdict"].startswith("RISES")
     assert "RISES by t=30s" in out["reading"]
+
+
+def test_under_thirty_games_a_direction_is_a_lean_not_a_rule():
+    """First live read (2026-09-02): 19 rows on a handful of games printed
+    'RISES at 95%' while every other verdict holds at 30 games."""
+    rows = [(i, 0.50, 0.50 + 0.02 + 0.002 * (i % 3)) for i in range(12)]
+    out = _curve(rows, key=lambda i: f"g{i}")
+    b = out["by_t"][30]
+    assert b["ci95_cents"][0] > 0                  # the interval does leave zero
+    assert b["verdict"].startswith("PROVISIONAL (games<30) — leans RISES")
+    assert out["reading"].startswith("PROVISIONAL: the curve leans RISES")
+    assert "not a rule" in out["reading"]
 
 
 def test_three_legs_of_one_match_are_one_game():
@@ -106,7 +118,7 @@ def test_unkeyed_rows_are_their_own_clusters():
 
 
 def test_a_reverting_curve_says_rest_at_his_price():
-    rows = [(i, 0.50, 0.50 - 0.02 - 0.002 * (i % 3)) for i in range(12)]
+    rows = [(i, 0.50, 0.50 - 0.02 - 0.002 * (i % 3)) for i in range(36)]
     out = _curve(rows, key=lambda i: f"g{i}")
     assert out["by_t"][30]["verdict"].startswith("REVERTS")
     assert "resting at his price" in out["reading"]
