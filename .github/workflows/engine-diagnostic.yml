@@ -2119,8 +2119,13 @@ jobs:
             /tmp/acct.json 2>/dev/null || echo "  EPOCHCHECK pmus-account unavailable"
           jq -r '"  EPOCHCHECK live-status: orders=\(.orders // "n/a") fills=\(.fills // "n/a") deployed=\(.deployed // "n/a") realized=\(.realized_pnl // "n/a") recent_oldest=\((.recent // []) | map(.placed_at) | sort | .[0] // "none")"' \
             /tmp/live.json 2>/dev/null || echo "  EPOCHCHECK live-status unavailable"
-          jq -r '"  EPOCHCHECK daily-breakdown: first_day=\((.days // {}) | if type=="object" then (keys | sort | .[0] // "none") else (map(.day) | sort | .[0] // "none") end)"' \
+          jq -r '"  EPOCHCHECK daily-breakdown: from=\(.from // "n/a") first_day=\((.days // {}) | if type=="object" then (keys | sort | .[0] // "none") else (map(.day // .date) | sort | .[0] // "none") end) n_days=\((.days // {}) | length)"' \
             /tmp/db.json 2>/dev/null || echo "  EPOCHCHECK daily-breakdown unavailable"
+          # the raw head of each payload, so a wrong jq path is visible
+          # as a shape and never mistaken for a missing floor
+          echo "  EPOCHCHECK live-status keys: $(jq -c 'keys' /tmp/live.json 2>/dev/null | head -c 300)"
+          echo "  EPOCHCHECK daily-breakdown head: $(head -c 300 /tmp/db.json 2>/dev/null)"
+          echo "  EPOCHCHECK copies-record kalshi: $(jq -c '{kalshi_included, floored: (.venues.kalshi.floored_to // null), first_day: ((.daily // []) | map(.day) | sort | .[0])}' /tmp/cop.json 2>/dev/null)"
           jq -r '"boundary: cost <= $\(.system_max_cost)  (SIZE only — says nothing about who placed it)",
                  "",
                  (.system, .manual | "[\(if .cohort == "manual" then "OVER $5 — investigate" else "within $5" end)]  \(.positions) positions, $\(.staked) staked",

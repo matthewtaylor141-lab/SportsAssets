@@ -270,7 +270,11 @@ async def build(since_day: str) -> dict:
     # ledger and arrive via its heartbeat export. Merge is additive and
     # fail-open: no export -> Polymarket-only record, flagged.
     pm_total = dict(out["total"])
-    kexp = await _kalshi_copies_export(pool)
+    # FLOORED ON THE SAME DAY AS THE POLYMARKET SIDE (owner order
+    # 2026-09-02; found by the probe's EPOCHCHECK: the record said
+    # since=2026-09-01 and served a first day of 2026-08-05, because the
+    # engine's Kalshi block carries its own lifetime window).
+    kexp = floor_export(await _kalshi_copies_export(pool), since_day)
     out["venues"] = {"polymarket": pm_total,
                      "kalshi": (kexp or {}).get("total")}
     out["kalshi_included"] = bool(kexp)
@@ -295,6 +299,30 @@ async def build(since_day: str) -> dict:
                                               "losses"))
     out["since"] = since_day
     out["generated_at"] = datetime.now(RECORD_TZ).isoformat()
+    return out
+
+
+def floor_export(kexp: dict | None, since_day: str) -> dict | None:
+    """The engine's Kalshi block, cut to the display window. Daily rows
+    before since_day are dropped and the total is rebuilt from what
+    remains; the per-whale split is lifetime in the block and has no
+    per-day form, so it is dropped whenever a day was cut rather than
+    served as if it were windowed. Open positions are current state and
+    pass through. Pure; tested."""
+    if not isinstance(kexp, dict):
+        return kexp
+    daily = [d for d in (kexp.get("daily") or []) if isinstance(d, dict)]
+    kept = [d for d in daily if str(d.get("day") or "") >= since_day]
+    cut = len(kept) < len(daily)
+    out = dict(kexp)
+    out["daily"] = kept
+    if cut:
+        total = {"settled": 0, "wins": 0, "losses": 0, "pnl": 0.0, "staked": 0.0}
+        for d in kept:
+            total = merge_totals(total, d)
+        out["total"] = total
+        out["by_whale"] = {}
+        out["floored_to"] = since_day
     return out
 
 
