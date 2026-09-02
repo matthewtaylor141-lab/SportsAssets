@@ -27,6 +27,9 @@ from .proof import MIN_PROOF_CLUSTERS, roi_with_ci
 
 FILLED = ("filled", "settled", "cashed_out", "exiting")
 OPEN = ("submitting",)
+# A send more than this long after his trade is a sweep reclaim of an
+# old row, not the lane's own time to venue.
+MAX_SEND_LAG_S = 3600.0
 
 
 def _pct(vals: list[float], q: float) -> float | None:
@@ -71,10 +74,23 @@ def summarize(rows: list[dict]) -> dict:
         send, rtt = [], []
         for r in rs:
             ts, t_send, t_reply = _num(r.get("his_ts")), _num(r.get("t_send")), _num(r.get("t_reply"))
-            if ts is not None and t_send is not None:
+            # A sweep reclaim re-sends a row hours after his trade under
+            # the row's ORIGINAL reaction stamp; that is not the lane's
+            # time to venue and is left out of the send percentiles.
+            if ts is not None and t_send is not None and 0 <= t_send - ts <= MAX_SEND_LAG_S:
                 send.append(t_send - ts)
             if t_send is not None and t_reply is not None:
                 rtt.append(t_reply - t_send)
+        # WHY THE LANE REFUSES (first live read, 2026-09-02: 24,225 of
+        # 25,287 chain-lane detections in a week ended 'rejected' before
+        # any order). The row's error text names the gate; the top
+        # reasons are the lane's real fill-rate story.
+        reasons: dict[str, int] = {}
+        for r, s_ in zip(rs, st):
+            if s_ == "rejected":
+                k = str(r.get("err") or "").strip()[:48] or "(no reason)"
+                reasons[k] = reasons.get(k, 0) + 1
+        top_reasons = sorted(reasons.items(), key=lambda kv: -kv[1])[:10]
         lat = {
             "reaction_s": {"p50": _pct(reaction, 0.5), "p90": _pct(reaction, 0.9),
                            "n": sum(1 for x in reaction if x is not None)},
@@ -99,7 +115,9 @@ def summarize(rows: list[dict]) -> dict:
             roi["verdict"] = "NEGATIVE at 95%"
         else:
             roi["verdict"] = "NOT DEMONSTRATED — contains zero"
-        out["lanes"][lane] = {**counts, "latency": lat, "settled": roi}
+        out["lanes"][lane] = {**counts, "latency": lat, "settled": roi,
+                              "rejected_reasons": [{"reason": k, "n": n}
+                                                   for k, n in top_reasons]}
     # THE READING: the fast lane's fill rate and where its seconds go.
     fast = out["lanes"].get("chain")
     if fast and fast["attempts"]:
@@ -126,6 +144,7 @@ async def cohort_lane_exec(pool: Any, days: int = 7, whale: str | None = None) -
                (lo.raw->>'t_reply')::float8 AS t_reply,
                COALESCE(lo.filled_usd, lo.requested_usd)::float8 AS stake,
                lo.pnl::float8 AS pnl,
+               left(lo.error, 48) AS err,
                (lo.status IN ('settled', 'cashed_out')) AS settled,
                COALESCE(NULLIF(m.event_slug, ''), NULLIF(lo.us_market_slug, '')) AS event_key
           FROM live_orders lo

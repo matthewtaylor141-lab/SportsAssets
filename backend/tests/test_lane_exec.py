@@ -40,6 +40,21 @@ def test_each_lane_counts_its_own_attempts_fills_and_seconds():
     assert out["reading"].startswith("chain lane: 3 attempts, fill rate 33%")
 
 
+def test_refusals_are_named_and_a_reclaim_send_is_not_a_lane_latency():
+    rows = [_r(status="rejected", filled_usd=0) | {"err": "one position per game"},
+            _r(status="rejected", filled_usd=0) | {"err": "one position per game"},
+            _r(status="rejected", filled_usd=0) | {"err": "unmapped: no US market"},
+            _r(t_send=1001.0, t_reply=1001.2),
+            _r(t_send=1000.0 + 90_000.0, t_reply=1000.0 + 90_000.3)]   # sweep reclaim
+    out = lx.summarize(rows)
+    c = out["lanes"]["chain"]
+    assert c["rejected"] == 3
+    assert c["rejected_reasons"][0] == {"reason": "one position per game", "n": 2}
+    assert c["rejected_reasons"][1] == {"reason": "unmapped: no US market", "n": 1}
+    assert c["latency"]["send_s"]["n"] == 1 and c["latency"]["send_s"]["p50"] == 1.0
+    assert c["latency"]["venue_rtt_s"]["n"] == 2
+
+
 def test_a_fill_needs_dollars_not_just_a_status():
     out = lx.summarize([_r(status="filled", filled_usd=0)])
     assert out["lanes"]["chain"]["filled"] == 0

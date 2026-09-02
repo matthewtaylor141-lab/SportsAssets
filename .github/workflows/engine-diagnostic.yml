@@ -1171,6 +1171,11 @@ jobs:
           jq -r '.lanes // {} | to_entries[] | "  LANEEXEC \(.key): attempts=\(.value.attempts) filled=\(.value.filled) unfilled=\(.value.unfilled) rejected=\(.value.rejected) error=\(.value.error) open=\(.value.open) fill_rate=\(.value.fill_rate // "n/a") reaction_p50=\(.value.latency.reaction_s.p50 // "n/a")s send_p50=\(.value.latency.send_s.p50 // "n/a")s send_p90=\(.value.latency.send_s.p90 // "n/a")s rtt_p50=\(.value.latency.venue_rtt_s.p50 // "n/a")s stamped=\(.value.latency.send_s.n) settled=\(.value.settled.n // 0)/\(.value.settled.clusters // "n/a") roi=\(.value.settled.roi // "n/a") ci95=\(.value.settled.ci95 | tostring) — \(.value.settled.verdict)"' \
             /tmp/laneexec.json 2>/dev/null || echo "  LANEEXEC unavailable"
           jq -r '"  LANEREAD \(.reading // .error // "n/a")"' /tmp/laneexec.json 2>/dev/null || true
+          # LANEWHY — the gates behind the fast lane's refusals: the row's
+          # error text names the gate that ended a detection 'rejected'
+          # before any order. This is the lane's real fill-rate story.
+          jq -r '.lanes // {} | to_entries[] | .key as $l | (.value.rejected_reasons // [])[] | "  LANEWHY \($l): \(.n)  \(.reason)"' \
+            /tmp/laneexec.json 2>/dev/null || true
           # MARKSPROBE — whether the public CLOB honours startTs/endTs for
           # the marks worker (unverified against the docs; the worker
           # falls back to interval+fidelity with a client-side window).
