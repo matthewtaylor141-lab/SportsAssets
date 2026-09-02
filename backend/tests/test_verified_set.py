@@ -93,13 +93,27 @@ def test_no_cut_whale_is_ever_in_the_verified_default():
     assert not (verified & {w.lower() for w in le.COPY_CUT_WHALES})
 
 
+def _code(fn) -> str:
+    """Source with comment lines stripped. Both gates run in
+    _mapping_admitted (mirror P1 step 1); maybe_execute calls it and
+    keeps a prose summary that repeats both _whale_set calls, so a pin
+    read off raw source would outlive the code it names."""
+    return "\n".join(ln for ln in inspect.getsource(fn).splitlines()
+                     if not ln.lstrip().startswith("#"))
+
+
 def test_neither_gate_carries_a_second_hard_coded_roster():
     """The drift was two literals for one decision. Pin that the gates
-    read the shared helper rather than re-listing whales inline."""
-    src = inspect.getsource(le.maybe_execute)
-    assert '_whale_set("LIVE_VERIFIED_WHALES")' in src
-    assert '_whale_set("LIVE_PREMAP_WHALES")' in src
-    assert '"homerunhazard,0x076daa87"' not in src
+    read the shared helper rather than re-listing whales inline -- in
+    the CODE of the function that runs them, and that the copy lane
+    still runs them there."""
+    gate = _code(le._mapping_admitted)
+    assert '_whale_set("LIVE_VERIFIED_WHALES")' in gate
+    assert '_whale_set("LIVE_PREMAP_WHALES")' in gate
+    assert "await _mapping_admitted(" in _code(le.maybe_execute), \
+        "the copy lane must run its gates through the shared helper"
+    for fn in (le._mapping_admitted, le.maybe_execute):
+        assert '"homerunhazard,0x076daa87"' not in inspect.getsource(fn)
 
 
 # ── DB roster override (owner order 2026-08-29: "update the variables") ─

@@ -13,17 +13,19 @@ What is pinned and why:
     a state no reader enumerates
   * that nothing in live_orders changes shape: no ALTER TABLE, and 045
     (the split asset claim and live_orders_status_check) byte-identical
-    to git HEAD -- a mirror standing row is refused by 045's index like
-    any other copy position, and nothing rebuilds it
+    to its committed form, by a pinned sha256 rather than a comparison
+    to HEAD that goes quiet the moment an edit is committed -- a mirror
+    standing row is refused by 045's index like any other copy
+    position, and nothing rebuilds it
   * that every column the P1 spec's ledger model (section 1) and
     reconciler tick (section 2) read or write on mirror_books and
     mirror_orders exists in the DDL, parsed the way
     test_mirror_shadow pins 046 against its INSERT
-  * that migrate.py's sorted glob puts 047 last, after 046
+  * that migrate.py's sorted glob puts 047 directly after 046
 """
+import hashlib
 import pathlib
 import re
-import subprocess
 
 import pytest
 
@@ -105,10 +107,13 @@ def _check_list(defn: str) -> list[str]:
 
 # ---------------------------------------------------------------- shape
 
-def test_047_exists_and_sorts_last_after_046():
+def test_047_exists_and_sorts_directly_after_046():
     assert SQL_047.exists()
     files = [p.name for p in sorted(MIG_DIR.glob("*.sql"))]
-    assert files[-2:] == ["046_mirror_shadow.sql", "047_mirror_live.sql"], files[-3:]
+    # the ORDER is the contract (046's shadow tables before 047's live
+    # ones); "047 is last" would be broken by the very next migration
+    i = files.index("046_mirror_shadow.sql")
+    assert files[i + 1] == "047_mirror_live.sql", files[i:i + 3]
     # migrate.py applies the sorted glob, one file per transaction; a
     # second file with the 047 prefix would race it for the version key
     assert sum(1 for f in files if f.startswith("047_")) == 1
@@ -195,22 +200,22 @@ def test_state_checks_name_every_state_the_indexes_and_the_spec_use():
 
 # ------------------------------------------------------ 045 untouched
 
-def _git_head_045() -> bytes | None:
-    repo = SQL_045.resolve().parents[2]
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(repo), "show", "HEAD:backend/migrations/045_add_legs.sql"],
-            capture_output=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return out.stdout if out.returncode == 0 else None
+# sha256 of backend/migrations/045_add_legs.sql as committed. The file
+# was added in cc00e71 ("Adds: his fresh buy on a leg we hold is copied
+# and merged, not refused") and has not changed since; the digest is
+# identical at 1f9bb0a (mirror P0, the last commit before 047) and was
+# computed with
+#     git show 1f9bb0a:backend/migrations/045_add_legs.sql | sha256sum
+# A comparison against HEAD passes the moment an edit is committed; a
+# pinned digest keeps failing until somebody re-pins it on purpose.
+SHA256_045_AT_1f9bb0a = "98a608d990aef5695bd9d0d384ff4d7cad91bda8c62eb7bcfdc6b5b5e755b0bd"
 
 
-def test_045_is_byte_identical_to_git_head():
-    head = _git_head_045()
-    if head is None:
-        pytest.skip("not a git checkout: 045 cannot be compared to HEAD here")
-    assert SQL_045.read_bytes() == head, "045_add_legs.sql differs from HEAD; nothing rebuilds the asset claim"
+def test_045_is_byte_identical_to_its_committed_form():
+    got = hashlib.sha256(SQL_045.read_bytes()).hexdigest()
+    assert got == SHA256_045_AT_1f9bb0a, (
+        "045_add_legs.sql differs from the bytes committed in 1f9bb0a "
+        "(sha256 now %s); nothing rebuilds the asset claim" % got)
 
 
 def test_045_claim_indexes_and_status_check_stand_as_committed():
