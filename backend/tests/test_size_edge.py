@@ -50,6 +50,17 @@ def test_under_thirty_games_the_small_bucket_is_provisional():
     assert out["reading"].startswith("NOT DEMONSTRATED")
 
 
+def test_a_flat_small_bucket_past_the_floor_is_named_flat():
+    """First live read: rn1 +0.04% [-3.8%, +3.9%] on 4,903 games is a
+    tight band around nothing, not an open question."""
+    rows = [_row(10, 0.5, 1.0 if i % 2 else 0.0, f"g{i}") for i in range(200)]
+    out = se.score(rows)
+    b = out["buckets"]["<$10"]
+    assert b["clusters"] == 200 and b["ci95"][0] < 0 < b["ci95"][1]
+    assert out["reading"].startswith("SMALL PROBES ARE FLAT")
+    assert "costs nothing proven" in out["reading"]
+
+
 def test_a_losing_small_bucket_says_the_floor_is_right():
     rows = [_row(10, 0.5, 0.0 if i % 5 else 1.0, f"g{i}") for i in range(40)]
     out = se.score(rows)

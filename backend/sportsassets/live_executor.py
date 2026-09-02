@@ -2674,7 +2674,14 @@ COPY_TOL_MAX_CENTS = float(os.environ.get("PMUS_COPY_TOL_MAX_CENTS", "3"))
 # BUDGET IS A HARD CAP ON REALISED FILLS, not attempts. Once the lane
 # has filled its authorisation it disables itself and says so in the
 # census; an owner decision re-opens it, never a retry.
-REST_BID_ENABLED = os.environ.get("PMUS_REST_BID", "on").lower() in (
+# OFF BY THE CURVE (2026-09-02, 11:26Z probe, past the thirty-game floor):
+# the ask RISES after his fill, +1.6c at 30s [+0.08c, +3.2c] and +1.7c at
+# 60s [+0.27c, +3.1c], flat again by two minutes. A bid resting at his
+# price inside that window fills when the market turns against him --
+# adverse selection at 95%. The lane stays built and measured; it
+# spends only when the owner sets PMUS_REST_BID=on, and the curve is
+# re-read on every probe (PATHCURVE/PATHREAD) so a reversal is seen.
+REST_BID_ENABLED = os.environ.get("PMUS_REST_BID", "off").lower() in (
     "1", "on", "true", "yes")
 REST_BID_TTL_S = max(0.5, min(15.0, float(
     os.environ.get("PMUS_REST_BID_TTL_S", "5"))))

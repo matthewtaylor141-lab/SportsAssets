@@ -757,3 +757,13 @@ def test_only_a_fresh_detection_clears_the_price_path():
     src = inspect.getsource(le.maybe_execute)
     i = src.index("DELETE FROM price_path WHERE row_id = $1")
     assert "if reaction is not None:" in src[i - 400:i]
+
+
+def test_the_rest_lane_is_off_unless_the_owner_turns_it_on():
+    """2026-09-02: the price curve past the thirty-game floor says the
+    ask RISES after his fill; a bid resting at his price is adversely
+    selected. The lane stays built and measured, off by default."""
+    import inspect
+
+    src = inspect.getsource(le)
+    assert 'os.environ.get("PMUS_REST_BID", "off")' in src

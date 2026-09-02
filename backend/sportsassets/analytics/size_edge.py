@@ -116,6 +116,14 @@ def score(rows: list[dict]) -> dict:
         out["reading"] = (
             f"SMALL PROBES LOSE: his buys under $10 return {small['roi']:+.2%} "
             f"[{ci[0]:+.2%}, {ci[1]:+.2%}] on {g} games — the floor is right")
+    elif ci and g >= MIN_PROOF_CLUSTERS:
+        # Past the floor and the interval still straddles zero: on
+        # thousands of games that is a tight band around nothing, not
+        # an open question (first live read: rn1 +0.04% on 4,903 games).
+        out["reading"] = (
+            f"SMALL PROBES ARE FLAT: his buys under $10 return "
+            f"{small['roi']:+.2%} [{ci[0]:+.2%}, {ci[1]:+.2%}] on {g} games — "
+            f"no proven edge below the floor; the floor costs nothing proven")
     else:
         out["reading"] = (
             f"NOT DEMONSTRATED: {small.get('n', 0)} buys under $10 on {g} games "
