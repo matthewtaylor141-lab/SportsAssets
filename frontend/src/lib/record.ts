@@ -298,7 +298,12 @@ export function useCopiesRecord(refreshMs = 30_000, since?: string) {
   )
 }
 
-export const SINCE = '2026-08-01'
+// ONE DISPLAY EPOCH (owner order 2026-09-02: "zero out our frontend
+// completely — only show performance and account data starting September
+// 1st"). The server owns the epoch (DISPLAY_EPOCH); the client asks for
+// its default window and never pins an earlier day. History stays
+// reachable through the explicit ALL-TIME toggle only.
+export const SINCE = '2026-09-01'
 // No stake cap (owner directive 2026-08-11: "include the excluded bucket").
 // The $100 cap dated from the $1-$5 ticket era, when a larger position could
 // only be an execution incident; at $50/$100 copy clips, legitimate positions

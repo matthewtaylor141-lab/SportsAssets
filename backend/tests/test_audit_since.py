@@ -32,7 +32,9 @@ def test_the_audit_floor_predates_the_display_epoch():
 def test_the_display_epoch_is_still_the_rebaselined_day():
     """The owner's re-baseline stands — this fix must not quietly undo
     it by widening the DISPLAY window."""
-    assert RECORD_EPOCH == "2026-08-24"
+    # 2026-09-02: the owner zeroed the front end again — one display
+    # epoch for every performance and account view, September 1st.
+    assert RECORD_EPOCH == "2026-09-01"
     assert DEFAULT_SINCE == RECORD_EPOCH
 
 

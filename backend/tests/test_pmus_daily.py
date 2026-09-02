@@ -7,9 +7,21 @@ that way is approximate in a direction nobody can see.
 """
 
 import time
+
+import pytest
 from datetime import datetime, timezone
 
 from sportsassets.api.pmus_account import _act_ts, _daily
+
+
+@pytest.fixture(autouse=True)
+def _whole_history(monkeypatch):
+    """These fixtures are August settlements; the display epoch (owner
+    order 2026-09-02, September 1st) would floor them all away. The
+    aggregation is tested over the whole history here; the floor itself
+    is pinned by test_the_display_epoch_floors_the_card."""
+    from sportsassets.api import track_record as _tr
+    monkeypatch.setattr(_tr, "DISPLAY_EPOCH", "2020-01-01")
 
 
 def _row(realized, cost=1.0, ago_s=3600, settled=True, dated=True):

@@ -78,7 +78,11 @@ def _daily(rows: list[dict], days: int = 7) -> list[dict]:
     # Deferred import: track_record imports this module at its top level.
     from .track_record import RECORD_TZ
 
-    cutoff = time.time() - days * 86_400
+    # FLOORED ON THE DISPLAY EPOCH (owner order 2026-09-02): a rolling
+    # seven days must never reach behind the day the record restarted.
+    from .track_record import display_epoch_ts
+
+    cutoff = max(time.time() - days * 86_400, display_epoch_ts())
     buckets: dict[str, list[dict]] = {}
     for r in rows:
         if not r.get("settled"):
@@ -208,10 +212,23 @@ def normalize(balances_resp: dict, positions: dict[str, dict],
         r["settled"] = False
     for r in settled_rows:
         r["settled"] = True
-    every = open_rows + settled_rows
+    # THE DISPLAY EPOCH (owner order 2026-09-02): the card's realized
+    # figure and both scorecards count settlements from the epoch on;
+    # open positions are current state and always count. The lifetime
+    # figure is kept beside it, labelled, never as the headline.
+    from .track_record import DISPLAY_EPOCH, display_epoch_ts
+
+    _epoch = display_epoch_ts()
+    # An undated settlement (no resolution activity carried a time) is
+    # kept: hiding a real settlement is the worse error, and _daily
+    # already files it under "undated" rather than a day.
+    settled_since = [r for r in settled_rows
+                     if not r.get("settled_at") or float(r["settled_at"]) >= _epoch]
+    every = open_rows + settled_since
     system = [r for r in every if r["cost"] <= system_max_cost]
     manual = [r for r in every if r["cost"] > system_max_cost]
-    realized_total = sum(r["realized"] for r in settled_rows)
+    realized_total = sum(r["realized"] for r in settled_since)
+    realized_lifetime = sum(r["realized"] for r in settled_rows)
 
     trades = []
     for act in activities or []:
@@ -246,9 +263,12 @@ def normalize(balances_resp: dict, positions: dict[str, dict],
         "open_value": round(asset_notional, 2),
         "unsettled_funds": round(_amt(bal.get("unsettledFunds")), 2),
         "realized_pnl": round(realized_total, 2),
+        "realized_pnl_lifetime": round(realized_lifetime, 2),
+        "display_epoch": DISPLAY_EPOCH,
         "open_positions": open_rows[:50],
         "open_count": len(open_rows),
-        "settled_count": len(settled_rows),
+        "settled_count": len(settled_since),
+        "settled_count_lifetime": len(settled_rows),
         "recent_trades": trades[:25],
         "trade_count_recent": len(trades),
         # The question that matters: is the SYSTEM making money, separately

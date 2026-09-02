@@ -70,7 +70,10 @@ export function fmtLatency(s: number): string {
 }
 
 /** localStorage key for the epoch/all-time display choice. */
-const WINDOW_KEY = 'sa_tr_alltime'
+// v3 key (owner order 2026-09-02): the front end was zeroed to the
+// September 1st epoch, so a browser that had toggled ALL-TIME before
+// starts on the fresh record again rather than carrying old history in.
+const WINDOW_KEY = 'sa_tr_alltime_v3'
 
 
 /** Scrolling ticker of the latest settled copy results. */

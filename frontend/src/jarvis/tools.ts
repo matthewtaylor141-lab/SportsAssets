@@ -73,7 +73,7 @@ export const JARVIS_TOOLS: ToolSchema[] = [
   {
     name: 'get_track_record_summary',
     description:
-      'The headline account track record since Aug 1 (the venue account itself, not telemetry): totals, ROI, win rate, ' +
+      'The headline account track record since the display epoch (September 1st, 2026 — the venue account itself, not telemetry): totals, ROI, win rate, ' +
       'whole-account tie-out, copy-sleeve cohort, and the last 7 daily rows.',
     input_schema: none,
   },
@@ -492,7 +492,7 @@ async function getToday(): Promise<string> {
 
 async function getTrackRecordSummary(): Promise<string> {
   try {
-    const d = await api<Dict>('/api/track-record?since=2026-08-01')
+    const d = await api<Dict>('/api/track-record')   // server display epoch (2026-09-01)
     const daily = (d.daily as Dict[]) || []
     return pack({
       since: d.since,

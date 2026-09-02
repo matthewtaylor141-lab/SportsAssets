@@ -3639,30 +3639,33 @@ async def engine_summary() -> dict:
                COALESCE(sum(size_usd) FILTER (WHERE settled), 0)::float8 AS settled_staked,
                COALESCE(sum(pnl) FILTER (WHERE settled), 0)::float8 AS pnl,
                min(ts) AS first_ts
-        FROM engine_fills
-        """
+        FROM engine_fills WHERE ts >= $1::timestamptz
+        """, display_epoch_start()
     )
     by_venue = await pool.fetch(
         """
         SELECT venue, count(*)::int AS fills,
                COALESCE(sum(size_usd) FILTER (WHERE settled), 0)::float8 AS settled_staked,
                COALESCE(sum(pnl) FILTER (WHERE settled), 0)::float8 AS pnl
-        FROM engine_fills GROUP BY venue ORDER BY venue
-        """
+        FROM engine_fills WHERE ts >= $1::timestamptz
+        GROUP BY venue ORDER BY venue
+        """, display_epoch_start()
     )
     by_league = await pool.fetch(
         """
         SELECT league, count(*)::int AS fills,
                COALESCE(sum(pnl) FILTER (WHERE settled), 0)::float8 AS pnl
-        FROM engine_fills GROUP BY league ORDER BY pnl DESC NULLS LAST LIMIT 20
-        """
+        FROM engine_fills WHERE ts >= $1::timestamptz
+        GROUP BY league ORDER BY pnl DESC NULLS LAST LIMIT 20
+        """, display_epoch_start()
     )
     daily = await pool.fetch(
         """
         SELECT settled_at::date AS date, sum(pnl)::float8 AS pnl, count(*)::int AS settled
         FROM engine_fills WHERE settled AND settled_at IS NOT NULL
+          AND ts >= $1::timestamptz
         GROUP BY 1 ORDER BY 1
-        """
+        """, display_epoch_start()
     )
     d = dict(totals)
     d["roi"] = d["pnl"] / d["settled_staked"] if d["settled_staked"] else None
@@ -3678,11 +3681,11 @@ async def engine_summary() -> dict:
 @app.get("/api/engine/fills")
 async def engine_fills(limit: int = Query(100, le=500), venue: str | None = None) -> list[dict]:
     pool = await get_pool()
-    args: list = []
-    where = ""
+    args: list = [display_epoch_start()]
+    where = "WHERE ef.ts >= $1::timestamptz"
     if venue:
         args.append(venue)
-        where = "WHERE ef.venue = $1"
+        where += " AND ef.venue = $2"
     args.append(limit)
     rows = await pool.fetch(
         f"""
@@ -3831,7 +3834,8 @@ async def _live_status_uncached() -> dict:
                percentile_cont(0.5) WITHIN GROUP (ORDER BY (fill_price - his_price) * 100)
                    FILTER (WHERE fill_price IS NOT NULL) AS live_slippage_p50
         FROM live_orders
-        """
+        WHERE placed_at >= $1::timestamptz
+        """, display_epoch_start()
     )
     recent = await pool.fetch(
         """
@@ -3847,8 +3851,9 @@ async def _live_status_uncached() -> dict:
         LEFT JOIN trades t ON t.id = lo.trade_id
         LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
         LEFT JOIN markets m ON m.condition_id = COALESCE(mt.condition_id, lo.condition_id)
+        WHERE lo.placed_at >= $1::timestamptz
         ORDER BY lo.placed_at DESC LIMIT 25
-        """
+        """, display_epoch_start()
     )
     d = dict(agg)
     if d.get("live_slippage_p50") is not None:
@@ -3862,8 +3867,9 @@ async def _live_status_uncached() -> dict:
                COALESCE(sum(filled_usd), 0)::float8 AS deployed,
                count(*) FILTER (WHERE status = 'settled')::int AS settled,
                COALESCE(sum(pnl) FILTER (WHERE status = 'settled'), 0)::float8 AS pnl
-        FROM live_orders GROUP BY 1 ORDER BY deployed DESC
-        """
+        FROM live_orders WHERE placed_at >= $1::timestamptz
+        GROUP BY 1 ORDER BY deployed DESC
+        """, display_epoch_start()
     )
     # Sizing audit (owner question 2026-08-21: why is the average settled
     # copy ~$30 against $225 clip caps?): per-whale 24h requested-vs-
@@ -6925,7 +6931,7 @@ async def api_admin_order_audit(
     management truth: every settled live order, no exclusions, split by
     ET day x sleeve x venue. Admin-token gated — the cap stays on for
     the public site only."""
-    from_day = _parse_day(from_, "2026-08-01")
+    from_day = _parse_day(from_, DISPLAY_EPOCH)
     to_day = _parse_day(to, _today_et())
     from .track_record import pnl_cap_exempt_patterns
 
@@ -6979,7 +6985,7 @@ async def api_admin_order_audit(
 @app.get("/api/daily-breakdown")
 async def api_daily_breakdown() -> dict:
     """Month-to-date category breakdown (kept for existing consumers)."""
-    return await _category_breakdown("2026-08-01", _today_et())
+    return await _category_breakdown(DISPLAY_EPOCH, _today_et())
 
 
 @app.post("/api/admin/quarantine/{action}",
@@ -8936,10 +8942,11 @@ async def api_today_live() -> dict:
         LEFT JOIN markets m ON m.condition_id = mt.condition_id
         WHERE lo.status IN ('settled', 'cashed_out')
           AND lo.settled_at IS NOT NULL
+          AND lo.settled_at >= $2::timestamptz
           AND lower(COALESCE(lo.whale_username, '')) = ANY($1::text[])
         ORDER BY lo.settled_at DESC
         LIMIT 8
-        """, list(COPY_WHALES))
+        """, list(COPY_WHALES), display_epoch_start())
     return {
         "pnl": round(float(day["pnl"]), 2),
         "settled": day["settled"],
@@ -8964,7 +8971,7 @@ async def api_report_range(
     """Category P&L over any date range (owner directive 2026-08-07:
     daily / weekly / monthly / custom downloadable reports)."""
     return await _category_breakdown(
-        _parse_day(from_, "2026-08-01"), _parse_day(to, _today_et()))
+        _parse_day(from_, DISPLAY_EPOCH), _parse_day(to, _today_et()))
 
 
 _WHALE_0X2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
@@ -9004,7 +9011,7 @@ async def api_report_csv(
     import io as _io
 
     data = await _category_breakdown(
-        _parse_day(from_, "2026-08-01"), _parse_day(to, _today_et()))
+        _parse_day(from_, DISPLAY_EPOCH), _parse_day(to, _today_et()))
     buf = _io.StringIO()
     w = csv.writer(buf)
     w.writerow(["date", "category", "pnl", "settled", "wins", "losses"])
@@ -9038,7 +9045,7 @@ async def api_report_pdf(
     from .reports import build_category_report
 
     data = await _category_breakdown(
-        _parse_day(from_, "2026-08-01"), _parse_day(to, _today_et()))
+        _parse_day(from_, DISPLAY_EPOCH), _parse_day(to, _today_et()))
     pdf, name = build_category_report(data)
     return Response(pdf, media_type="application/pdf",
                     headers={"Content-Disposition":
@@ -9130,7 +9137,9 @@ async def api_venue_export_raw(since: str | None = Query(None)) -> dict:
 # re-baseline that moves the served window without touching history —
 # ?since= keeps every earlier day reachable, and the audit surfaces
 # (order-audit, breakdown-day-detail) never adopt it.
-COPIES_EPOCH = os.environ.get("COPIES_EPOCH", "2026-08-28")
+from .track_record import DISPLAY_EPOCH, display_epoch_start  # noqa: E402
+
+COPIES_EPOCH = os.environ.get("COPIES_EPOCH", DISPLAY_EPOCH)
 
 
 @app.get("/api/copies-record")
@@ -9181,7 +9190,7 @@ async def api_copy_reports(period: str = Query("monthly"),
         raise HTTPException(400, f"period must be one of {cr.PERIODS}")
     pool = await get_pool()
     raw = await cr.fetch_ledger(pool)
-    rows = cr.ledger_rows(raw, since=_parse_day(since, "") if since else "",
+    rows = cr.ledger_rows(raw, since=_parse_day(since, DISPLAY_EPOCH),
                           until=_parse_day(until, "") if until else "")
     if whale:
         rows = [r for r in rows
@@ -9214,7 +9223,7 @@ async def api_master_report_pdf(period: str = Query("monthly"),
         raise HTTPException(400, f"period must be one of {cr.PERIODS}")
     pool = await get_pool()
     raw = await cr.fetch_ledger(pool)
-    rows = cr.ledger_rows(raw, since=_parse_day(since, "") if since else "",
+    rows = cr.ledger_rows(raw, since=_parse_day(since, DISPLAY_EPOCH),
                           until=_parse_day(until, "") if until else "")
     rep = cr.report(rows, period=period)
     label = (f"window {since or 'epoch start'} → {until or 'today'}"
@@ -9268,7 +9277,7 @@ async def api_copy_ledger(whale: str | None = Query(None),
 
     pool = await get_pool()
     raw = await cr.fetch_ledger(pool)
-    rows = cr.ledger_rows(raw, since=_parse_day(since, "") if since else "",
+    rows = cr.ledger_rows(raw, since=_parse_day(since, DISPLAY_EPOCH),
                           until=_parse_day(until, "") if until else "")
     if whale:
         rows = [r for r in rows
@@ -9445,9 +9454,9 @@ async def ai_trader_report(days: int = Query(7, le=90)) -> dict:
                percentile_cont(0.5) WITHIN GROUP (ORDER BY slippage_cents)
                    FILTER (WHERE fill_vwap IS NOT NULL) AS slippage_p50,
                min(placed_at) AS first_trade
-        FROM ai_trades WHERE placed_at > now() - make_interval(days => $1)
+        FROM ai_trades WHERE placed_at > greatest(now() - make_interval(days => $1), $2::timestamptz)
         """,
-        days,
+        days, display_epoch_start(),
     )
     daily = await pool.fetch(
         """
@@ -9455,10 +9464,10 @@ async def ai_trader_report(days: int = Query(7, le=90)) -> dict:
                sum(counterfactual_pnl)::float8 AS counterfactual,
                count(*)::int AS trades, COALESCE(sum(filled_notional), 0)::float8 AS volume
         FROM ai_trades
-        WHERE status = 'settled' AND settled_at > now() - make_interval(days => $1)
+        WHERE status = 'settled' AND settled_at > greatest(now() - make_interval(days => $1), $2::timestamptz)
         GROUP BY 1 ORDER BY 1
         """,
-        days,
+        days, display_epoch_start(),
     )
     recent = await pool.fetch(
         """

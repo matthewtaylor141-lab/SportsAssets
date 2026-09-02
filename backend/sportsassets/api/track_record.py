@@ -52,8 +52,29 @@ _refresh_health: dict[str, Any] = {"error": None, "error_at": 0.0,
 # fifteen days. The record is served FROM this date and labelled with
 # it, so a reader can never mistake a fresh start for a lifetime
 # result. Pass ?since=2026-08-01 to see the prior period in full.
-RECORD_EPOCH = "2026-08-24"
+# ONE DISPLAY EPOCH (owner order 2026-09-02: "zero out our frontend
+# completely and only show performance data and account data starting
+# yesterday, September 1st -- I don't want old information clouding our
+# judgement"). Every frontend performance and account view floors on
+# this day (ET): the account record, the copies record, the daily
+# breakdown and reports, today's tape, live status, the engine summary,
+# the AI-trader window, the venue-account card and the management
+# ledgers. History stays in the database and stays reachable at
+# ?since=; the audit surfaces (AUDIT_SINCE) never move.
+DISPLAY_EPOCH = os.environ.get("DISPLAY_EPOCH", "2026-09-01")
+RECORD_EPOCH = DISPLAY_EPOCH
 DEFAULT_SINCE = os.environ.get("TRACK_RECORD_SINCE", RECORD_EPOCH)
+
+
+def display_epoch_start():
+    """The display epoch as an aware datetime at ET midnight, for SQL
+    floors on timestamptz columns."""
+    from datetime import datetime
+    return datetime.strptime(DISPLAY_EPOCH, "%Y-%m-%d").replace(tzinfo=RECORD_TZ)
+
+
+def display_epoch_ts() -> float:
+    return display_epoch_start().timestamp()
 
 # The floor the RECONCILIATION reads, as opposed to the display epoch
 # above. Moving the display window must never move what the audit

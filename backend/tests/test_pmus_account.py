@@ -5,6 +5,30 @@ import pytest
 from sportsassets.api.pmus_account import normalize
 
 
+@pytest.fixture(autouse=True)
+def _whole_history(monkeypatch):
+    """These fixtures are August settlements; the display epoch (owner
+    order 2026-09-02, September 1st) would floor them all away. The
+    aggregation is tested over the whole history here; the floor itself
+    is pinned by test_the_display_epoch_floors_the_card."""
+    from sportsassets.api import track_record as _tr
+    monkeypatch.setattr(_tr, "DISPLAY_EPOCH", "2020-01-01")
+
+
+def test_the_display_epoch_floors_the_card(monkeypatch):
+    import time as _t
+
+    from sportsassets.api import track_record as _tr
+    from sportsassets.api.pmus_account import _daily
+
+    monkeypatch.setattr(_tr, "DISPLAY_EPOCH", "2999-01-01")
+    rows = [{"settled": True, "settled_at": _t.time() - 60, "realized": 5.0,
+             "cost": 1.0}]
+    assert _daily(rows, days=7) == []
+    monkeypatch.setattr(_tr, "DISPLAY_EPOCH", "2020-01-01")
+    assert len(_daily(rows, days=7)) == 1
+
+
 def test_normalize_full_account():
     balances = {"balances": [{
         "currentBalance": 412.35, "buyingPower": 400.0,
