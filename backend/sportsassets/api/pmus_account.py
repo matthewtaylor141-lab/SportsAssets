@@ -206,7 +206,7 @@ def normalize(balances_resp: dict, positions: dict[str, dict],
         row = next((r for r in open_rows + settled_rows
                     if r["market_slug"] == slug), None)
         realized = _amt(after.get("realized")) or _amt(before.get("realized"))
-        when = _act_ts(act)
+        when = _any_ts(act)             # nested under positionResolution
         if row is None:
             settled_rows.append({
                 "market_slug": slug,

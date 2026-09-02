@@ -271,7 +271,14 @@ def build(positions: dict[str, dict], activities: list[dict],
         after = res.get("afterPosition") or {}
         before = res.get("beforePosition") or {}
         resolutions[slug] = {
-            "ts": _act_ts(act),
+            # _any_ts, NOT _act_ts: the resolution's time is nested under
+            # positionResolution, and the top-level reader returned 0 here
+            # long after the archive writer was fixed (2026-08-25). A zero
+            # made settled_ts fall through to entry_ts, so the day P&L
+            # filed every long on the day it was BOUGHT and the day recon
+            # ran a $458 residual on money that tied to the cent
+            # (2026-09-02).
+            "ts": _any_ts(act),
             "realized": _amt(after.get("realized")) or _amt(before.get("realized")),
             "cost": _amt(before.get("cost")),
             "title": (after.get("marketMetadata") or {}).get("title")
