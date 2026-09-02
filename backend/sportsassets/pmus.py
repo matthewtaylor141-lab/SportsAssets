@@ -2343,6 +2343,116 @@ def open_orders(slugs: list[str] | None = None) -> list[dict]:
             if isinstance(o, dict)]
 
 
+def trade_side(t: dict) -> str:
+    """The side of one venue trade row. The top-level `side` is ALWAYS
+    None in the venue feed (raw-feed audit 2026-08-19, 6,747 trades,
+    api/track_record.py); the definitive side lives on the nested
+    execution order. Empty when the row names none."""
+    side = str(t.get("side") or "").upper()
+    if not side:
+        for k in ("aggressorExecution", "passiveExecution"):
+            o = ((t.get(k) or {}).get("order") or {})
+            if o.get("side"):
+                side = str(o["side"]).upper()
+                break
+    return side
+
+
+def trade_order(t: dict) -> dict:
+    """The ORDER a venue trade row belongs to: the nested execution
+    record's order object (the same one trade_side reads the side
+    from). Empty when the row names none."""
+    for k in ("aggressorExecution", "passiveExecution"):
+        o = ((t.get(k) or {}).get("order") or {})
+        if isinstance(o, dict) and o:
+            return o
+    return {}
+
+
+def _opt_float(v) -> float | None:
+    """A number the venue may or may not have sent: None stays None
+    (unknown is not zero), an Amount or scalar becomes a float."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, dict):
+        v = v.get("value")
+        if v is None or v == "":
+            return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def recent_trades(us_market_slug: str, since_ts: float,
+                  max_pages: int = 3) -> list[dict]:
+    """The account's own FILLS on one market since `since_ts`, from the
+    venue's activity log (the open-orders listing cannot show an order
+    that already filled). Newest first, bounded paging; RAISES when the
+    venue cannot be read OR the pages ran out before reaching since_ts
+    -- unreadable and truncated are not "no fills". Each row: {qty,
+    price, side, ts, realized_pnl, order_id, order_qty, order_price,
+    order_tif, aggressor}, parsed with the scalar-tolerant reader the
+    rest of the codebase uses: the venue's Trade.qty is a bare string
+    while price and realizedPnl are Amounts (round eight: _amount_value
+    on a string raised on exactly the rows that mattered). The order_*
+    fields come from the nested execution order (round nine) and are
+    None when the venue did not name it -- unknown, never zero.
+    """
+    from .api.pmus_account import _amt, _any_ts
+
+    client = _get_client()
+    out: list[dict] = []
+    cursor = ""
+    want = (us_market_slug or "").lower()
+    reached = False
+    for _ in range(max_pages):
+        resp = client.portfolio.activities(
+            {"limit": 100, "sortOrder": "SORT_ORDER_DESCENDING",
+             "types": ["ACTIVITY_TYPE_TRADE"],
+             "marketSlug": us_market_slug,
+             **({"cursor": cursor} if cursor else {})}) or {}
+        acts = resp.get("activities") or []
+        oldest = None
+        for act in acts:
+            if act.get("type") != "ACTIVITY_TYPE_TRADE":
+                continue
+            t = act.get("trade") or {}
+            ts = float(_any_ts(act) or 0.0)
+            if ts:
+                oldest = ts if oldest is None else min(oldest, ts)
+            if str(t.get("marketSlug") or "").lower() != want:
+                continue
+            if ts and ts < since_ts:
+                continue
+            o = trade_order(t)
+            agg = t.get("isAggressor")
+            out.append({
+                "qty": _amt(t.get("qty")),
+                "price": _amt(t.get("price")),
+                "side": trade_side(t),
+                "ts": ts,
+                "realized_pnl": _amt(t.get("realizedPnl")),
+                "order_id": (str(o.get("id")) if o.get("id") else None),
+                "order_qty": _opt_float(o.get("quantity")),
+                "order_price": _opt_float(o.get("price")),
+                "order_tif": (str(o.get("tif")).replace("TIME_IN_FORCE_", "")
+                              if o.get("tif") else None),
+                "aggressor": (bool(agg) if isinstance(agg, bool) else None),
+            })
+        cursor = resp.get("nextCursor") or ""
+        if resp.get("eof") or not cursor:
+            reached = True
+            break
+        if oldest is not None and oldest < since_ts:
+            reached = True
+            break
+    if not reached:
+        raise RuntimeError(f"trade log truncated after {max_pages} pages "
+                           f"before reaching {int(since_ts)}")
+    return out
+
+
 def order_status(order_id: str) -> dict | None:
     """One order by id, normalized; None if the venue has no record."""
     client = _get_client()

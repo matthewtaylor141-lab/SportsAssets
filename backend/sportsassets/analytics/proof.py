@@ -75,6 +75,17 @@ Z80 = 0.8416212336
 # the open.
 COHORT_START = "2026-08-25T14:00:00+00:00"
 
+# THE FLOOR UNDER A PROJECTION (round three, 2026-09-01). required_n
+# squares sigma, and sigma from g clusters carries a relative error of
+# about 1/sqrt(2(g-1)) -- 32% at g=6, 13% at g=30 -- so a proof horizon
+# sized on six games is noise squared. The interval itself uses the
+# normal z where a t on five degrees of freedom is 2.57, so a "95%"
+# verdict on six games has ~88% coverage. At thirty games the t/z gap
+# is under 5% and the projection's own error is smaller than the
+# horizon it reports. Below this: no n_needed, no days, and the verdict
+# is marked PROVISIONAL rather than EARNS or LOSES.
+MIN_PROOF_CLUSTERS = 30
+
 
 def roi_with_ci(rows: list[dict]) -> dict:
     """ROI on dollar deployed, with a real confidence interval.

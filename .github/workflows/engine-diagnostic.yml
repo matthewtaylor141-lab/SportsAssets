@@ -348,7 +348,13 @@ jobs:
           fi
           # ── VERIFIED-WHALES ROSTER LEVER (owner order 2026-08-29,
           # "update the variables"): stores the roster in the DB where
-          # it beats a stale env. 'clear' removes the override.
+          # it beats a stale env. 'clear' removes the stored roster AND
+          # the rules' memory and stored clips (roster_state,
+          # live_clip_overrides), so env/default resumes — until the
+          # hourly roster_auto pass writes again (ROSTER_AUTO=off on
+          # sportsassets-workers stops it). A set-roster write is
+          # honoured by the rules: listed whales enter MEASURING at $50
+          # unless already PROMOTED; unlisted held whales are CUT.
           if [ -n "$VERIFIED_WHALES_INPUT" ]; then
             echo "  LEVER verified-whales -> $VERIFIED_WHALES_INPUT"
             if [ "$VERIFIED_WHALES_INPUT" = "clear" ]; then
@@ -371,7 +377,27 @@ jobs:
                  "  GATES allow_short_env=\(.allow_short_env // "unset")  short_proof=\(.short_side_proof | tostring | .[0:200])",
                  "  GATES exitable: \(.exitable | join(","))",
                  "  GATES sizing: mode=\(.sizing.copy_mode // "?") max_clip=\(.sizing.max_clip_usd // "?") probe_day=\(.sizing.probe_day_usd // "?") trial_day=\(.sizing.trial_daily_usd // "?") trial_total=\(.sizing.trial_total_usd // "?")",
-                 "  GATES clips: \(.sizing.per_fill_by_whale // {} | to_entries | map("\(.key)=\(.value)") | join(" "))"' \
+                 "  GATES clips_hardcoded(fallback only — see clips_effective): \(.sizing.per_fill_by_whale // {} | to_entries | map("\(.key)=\(.value)") | join(" "))"' \
+             /tmp/gates.json 2>/dev/null || true
+          # REST LANE BUDGET — so the owner can see when the $2,500 is gone
+          # without reading a ledger. spent counts realised fills only.
+          jq -r '.rest_lane // {} | "  GATES rest_lane: enabled=\(.enabled) ttl=\(.ttl_s)s spent=$\(.spent_usd // "?") / cap=$\(.budget_usd) remaining=$\(.remaining_usd // "?") fills=\(.fills // "?")\(if .note then "  (" + .note + ")" else "" end)"' \
+             /tmp/gates.json 2>/dev/null || true
+          # NAMED ROWS — shares the account holds that no ledger row
+          # explains, or an orphan fill recorded on a row another row's
+          # claim kept out of 'filled'. These are the rows a HUMAN
+          # reconciles; the reaper revisits them for 48h and the exit
+          # path treats them as in flight. Anything here is an action.
+          jq -r '.rest_lane.named // {} | "  GATES named_rows: \(.count // "?") stale_past_revisit=\(.stale // "?")\(if (.rows // []) | length > 0 then " — " + ((.rows // []) | map("#\(.id) \(.slug) \(.whale) fs=\(.filled_shares // 0) \(.error | .[0:90])") | join(" | ")) else "" end)"' \
+             /tmp/gates.json 2>/dev/null || true
+          # THE ROSTER BY EVIDENCE (owner order 2026-09-01 evening): what
+          # the rules decided last pass, the stored clips, and the clip
+          # that ACTUALLY binds each whale after the rules are applied.
+          jq -r '"  GATES clips_effective: \(.sizing.per_fill_effective // {} | to_entries | map("\(.key)=\(.value)") | join(" "))  stored=\(.sizing.clip_overrides // {} | tostring | .[0:200])"' \
+             /tmp/gates.json 2>/dev/null || true
+          jq -r '.roster_auto // {} | "  ROSTERAUTO last=\(((.last // {}).at // 0) | if . > 0 then (. | floor | todate) else "never" end) err=\((.last // {}).error // .error // "none") enabled_on_api=\(.enabled_here // "?") state=\(.state // {} | tostring | .[0:220])  (rewrites verified(db)+clips hourly; off switch ROSTER_AUTO=off on sportsassets-workers)"' \
+             /tmp/gates.json 2>/dev/null || echo "  ROSTERAUTO unavailable"
+          jq -r '(.roster_auto.last.decisions // [])[] | "  ROSTERAUTO \(.whale): \(.from_state)->\(.to_state) clip=\(.clip_usd) n=\(.n) roi=\(.roi) ci=[\(.ci_lo),\(.ci_hi)] games=\(.clusters) funded=\(.funded)\(if .changed then " CHANGED" else "" end) — \(.reason | .[0:110])"' \
              /tmp/gates.json 2>/dev/null || true
 
           # ── the thesis verification (owner order 2026-08-24: verified,
@@ -1076,6 +1102,61 @@ jobs:
           jq -r '.by_detection_lane // {} | to_entries[] | select(.value.n > 0)
                  | "  LATLANE \(.key) n=\(.value.n) roi=\(.value.roi // "n/a") ci95=\(.value.ci95 | tostring) days=\(.value.days | tostring)"' \
             /tmp/latcohort.json 2>/dev/null || true
+          # WHALESCREEN — Phase 3 (owner plan 2026-09-01). Every whale
+          # the analytics worker publishes, ranked on what OUR copies of
+          # him earn, never on his edge. Three numbers read from where
+          # they are already published: his_edge (the gate's own
+          # interval), price_diff (his price minus our cost, per dollar;
+          # positive = we fill cheaper), realized (our settled copies,
+          # cluster-robust). The gap between his_edge and realized is
+          # fill SELECTION, not price. UNMEASURED is an instruction to
+          # trade him at a measurement clip, not a verdict.
+          WSCODE=$(curl -sS --max-time 90 -w '%{http_code}' \
+               -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/wscreen.json "$BASE/api/admin/whale-screen" \
+               2>/dev/null || echo "000")
+          echo "  WSHTTP code=$WSCODE bytes=$(wc -c < /tmp/wscreen.json 2>/dev/null || echo 0)"
+          jq -r '.rows[]? | "  WHALESCREEN \(.whale)  his=\(.his_edge_roi // "n/a")\(.his_edge_ci95 | tostring) fills=\(.his_fills_total // "?")  diff=\(.price_diff_per_dollar // "n/a")  realized=\(.realized_roi // "n/a")\(.realized_ci95 | tostring)/\(.realized_settled)  need=\(.n_still_needed // "n/a")  — \(.verdict)"' \
+            /tmp/wscreen.json 2>/dev/null || echo "  WHALESCREEN unavailable"
+          jq -r 'select(.errors | length > 0) | "  WSERR \(.errors | tostring)"' \
+            /tmp/wscreen.json 2>/dev/null || true
+          # IMPACT — edge conditioned on what capturing it cost. Proof is
+          # a function of edge SQUARED, not volume; if the low-impact
+          # slice earns at 95% that is the fill rule, and `need`/`days`
+          # say what proving it costs at ~50 settled/day.
+          curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/impact.json "$BASE/api/admin/impact-edge?whale=rn1&flow_per_day=50" 2>/dev/null || true
+          jq -r '.buckets // {} | to_entries[] | select(.value.n > 0)
+                 | "  IMPACT \(.key)  n=\(.value.n) roi=\(.value.roi // "n/a") ci95=\(.value.ci95 | tostring) p50=\(.value.impact_p50_cents)c need=\(.value.n_still_needed // "n/a") days=\(.value.days_to_proof_at_flow // "n/a") — \(.value.verdict)"' \
+            /tmp/impact.json 2>/dev/null || echo "  IMPACT unavailable"
+          jq -r '"  IMPACTREAD \(.reading // "n/a")  settled=\(.n_settled // 0)"' /tmp/impact.json 2>/dev/null || true
+          # PATHCURVE — mean ask change t seconds after his fill. RISES:
+          # take the ask now. REVERTS: rest at his price. Flat: the order
+          # type is not the lever. Sampled by the price_path worker.
+          curl -sS --max-time 90 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/path.json "$BASE/api/admin/price-path?whale=rn1" 2>/dev/null || true
+          jq -r '.by_t // {} | to_entries[] | "  PATHCURVE t=\(.key)s n=\(.value.n) mean=\(.value.mean_cents // "n/a")c ci95=\(.value.ci95_cents | tostring) — \(.value.verdict)"' \
+            /tmp/path.json 2>/dev/null || echo "  PATHCURVE unavailable"
+          jq -r '"  PATHREAD \(.reading // "n/a")  rows=\(.n_rows // 0)"' /tmp/path.json 2>/dev/null || true
+          # DECOMP — his edge split into SELECTION and TIMING (owner
+          # question 2026-09-01): every resolved buy scored at his fill,
+          # 5/10/60 min later, and just before game start. If pre_game
+          # clears zero at 95% on 30+ games there is a learnable WHAT
+          # under the WHEN; if it collapses while at_fill holds, the
+          # edge is timing and history cannot teach it.
+          curl -sS --max-time 150 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/decomp.json "$BASE/api/admin/edge-decomposition?days=30" 2>/dev/null || true
+          jq -r '.whales // {} | to_entries[] | .key as $w | (.value.legs // {}) | to_entries[] | "  DECOMP \($w) \(.key): n=\(.value.n) games=\(.value.clusters // "n/a") roi=\(.value.roi // "n/a") ci95=\(.value.ci95 | tostring) — \(.value.verdict)"' \
+            /tmp/decomp.json 2>/dev/null || echo "  DECOMP unavailable"
+          jq -r '.whales // {} | to_entries[] | "  DECOMPREAD \(.key): timing_share=\(.value.timing_share // "n/a") coverage=\(.value.coverage | tostring | .[0:170]) — \(.value.reading // .value.error // "n/a")"' \
+            /tmp/decomp.json 2>/dev/null || true
+          # MARKSPROBE — whether the public CLOB honours startTs/endTs for
+          # the marks worker (unverified against the docs; the worker
+          # falls back to interval+fidelity with a client-side window).
+          curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/marks.json "$BASE/api/admin/edge-marks-probe" 2>/dev/null || true
+          jq -r '"  MARKSPROBE honoured=\(.honoured // "n/a") points_in_window=\(.points_in_window // "n/a") span_s=\(.span_s // "n/a") skipped_tokens=\(.skipped_tokens // "n/a") \(.error // "")"' \
+            /tmp/marks.json 2>/dev/null || echo "  MARKSPROBE unavailable"
           # PROOF-2 — the decomposed thesis meter (owner order
           # 2026-08-28): sleeve edge = mix-weighted whale edge (their
           # books) - outcome-free capture drag (our fills vs theirs,

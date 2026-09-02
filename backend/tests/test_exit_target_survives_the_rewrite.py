@@ -163,10 +163,16 @@ def test_a_row_predating_the_column_reads_as_before():
 def test_the_select_reads_orig_shares_not_just_filled_shares():
     import inspect
 
-    src = inspect.getsource(le.mirror_exit)
+    # The lookup lives in _position_row (round three: one helper for
+    # both the first lookup and the post-wait re-query, so the
+    # migration-040 fallback cannot be present on one and absent on the
+    # other), and mirror_exit must actually call it.
+    src = inspect.getsource(le._position_row)
     assert "COALESCE(orig_shares, filled_shares)" in src, (
-        "mirror_exit must project the preserved original, or the target "
-        "silently goes back to compounding")
+        "the position lookup must project the preserved original, or "
+        "the target silently goes back to compounding")
+    assert "await _position_row(pool, asset, username, _sel_tail)" in \
+        inspect.getsource(le.mirror_exit)
 
 
 def test_the_partial_update_persists_the_original():

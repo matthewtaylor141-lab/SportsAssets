@@ -5454,6 +5454,206 @@ async def admin_latency_cohort(since: str = "", whale: str = "") -> dict:
     }
 
 
+@app.get("/api/admin/whale-screen", dependencies=[Depends(require_admin)])
+async def admin_whale_screen() -> dict:
+    """Which whales does the arithmetic actually work for?
+
+    Phase 3 of the owner's plan (2026-09-01): rank every whale the
+    analytics worker publishes by whether COPYING him can carry a
+    positive margin, not by his raw edge. The candidate census only
+    ever ranked raw edge, and raw edge is his, not ours.
+
+    THREE NUMBERS PER WHALE, READ FROM WHERE THEY ARE ALREADY PUBLISHED,
+    NEVER RECOMPUTED HERE:
+
+      his_edge      edge_gate.snapshot()  -- whole-book, merge-inclusive,
+                    the exact interval the money gate funds on
+      price_diff    price_fidelity        -- his price minus our cost per
+                    share, per dollar; positive means we filled CHEAPER.
+                    Today this is a CREDIT on every traded whale.
+      realized      proof.cohort_assess   -- what our settled copies of
+                    him actually returned, cluster-robust interval
+
+    The gap between his_edge and realized is NOT price_diff -- the
+    audit settled that: our entry prices beat his. The gap is WHICH of
+    his trades we get filled on. So net_ci95 (edge shifted by the price
+    differential) is reported as what copying could earn at his fill
+    selection, and realized is what it does earn at ours. A whale whose
+    realized interval excludes zero above is CAPTURING; one with no
+    settled copies is UNMEASURED and the only way to learn his number is
+    to trade him at a measurement clip -- there is no shortcut through
+    his own book.
+
+    Ranked by realized point estimate where measured, then by his_edge
+    lower bound where not. A candidate cannot outrank a measured whale
+    on a number we have not measured.
+    """
+    from .. import edge_gate
+    from ..analytics.price_fidelity import cohort_fidelity
+    from ..analytics.proof import (COHORT_START, MIN_PROOF_CLUSTERS,
+                                   cohort_assess, required_n)
+
+    pool = await get_pool()
+    snap = edge_gate.snapshot() or {}
+    whales_pub = snap.get("whales") or {}
+    try:
+        fid = (await cohort_fidelity(pool, COHORT_START)).get("by_whale") or {}
+    except Exception as exc:  # noqa: BLE001 — optional column
+        fid, fid_err = {}, type(exc).__name__
+    else:
+        fid_err = None
+    try:
+        realized = (await cohort_assess(pool, COHORT_START)).get("by_whale") or {}
+    except Exception as exc:  # noqa: BLE001 — optional column
+        realized, real_err = {}, type(exc).__name__
+    else:
+        real_err = None
+
+    rows = []
+    for w in sorted(set(whales_pub) | set(fid) | set(realized)):
+        g = whales_pub.get(w) or {}
+        f = fid.get(w) or {}
+        r = realized.get(w) or {}
+        his_ci = g.get("ci95")
+        dep = float(f.get("deployed") or 0)
+        diff = (round(float(f.get("dollar_edge_vs_his_price") or 0) / dep, 6)
+                if dep > 0 else None)
+        net_ci = ([round(his_ci[0] + diff, 6), round(his_ci[1] + diff, 6)]
+                  if isinstance(his_ci, (list, tuple)) and len(his_ci) == 2
+                  and diff is not None else None)
+        r_ci = r.get("ci95")
+        n_settled = int(r.get("n") or 0)
+        games = int(r.get("clusters") or 0)
+        if n_settled == 0:
+            verdict = ("UNMEASURED — no settled copies; his book cannot "
+                       "tell us what OUR fills of him return. Trade him at "
+                       "a measurement clip to learn it.")
+        elif not r_ci:
+            verdict = "INSUFFICIENT — fewer than two settled copies"
+        elif r_ci[0] > 0:
+            verdict = f"CAPTURING at 95% — realized {_pct_pair(r_ci)}"
+        elif r_ci[1] < 0:
+            verdict = f"LOSING at 95% — realized {_pct_pair(r_ci)}"
+        else:
+            verdict = (f"NOT DEMONSTRATED — realized {_pct_pair(r_ci)} "
+                       f"contains zero")
+        # BELOW THE FLOOR: provisional, and no horizon. See
+        # proof.MIN_PROOF_CLUSTERS -- a projection sized on a handful
+        # of games is noise squared, and the interval is not yet 95%.
+        provisional = bool(r_ci) and games < MIN_PROOF_CLUSTERS
+        if provisional:
+            verdict = f"PROVISIONAL (games<{MIN_PROOF_CLUSTERS}) — {verdict}"
+        need = None
+        if (not provisional and r.get("sigma_per_dollar")
+                and r.get("roi") and r["roi"] > 0):
+            need = required_n(r["sigma_per_dollar"], r["roi"])
+        rows.append({
+            "whale": w,
+            "his_edge_ci95": his_ci, "his_edge_roi": g.get("roi"),
+            "his_fills_total": g.get("fills_total"),
+            "funded": g.get("funded"), "gate_reason": g.get("reason"),
+            "price_diff_per_dollar": diff,
+            "price_diff_basis": ("his price minus our cost per share, on "
+                                 "all filled copies, open and closed; "
+                                 "positive = we fill cheaper"),
+            "net_edge_ci95_at_his_selection": net_ci,
+            "realized_roi": r.get("roi"), "realized_ci95": r_ci,
+            "realized_settled": n_settled,
+            "realized_clusters": r.get("clusters"),
+            "n_needed_at_observed": need,
+            "n_still_needed": (max(0, need - n_settled) if need else None),
+            "verdict": verdict,
+        })
+
+    def _rank(x):
+        # Measured whales first, by the realized LOWER BOUND and then
+        # the point estimate; the unmeasured after them by his own lower
+        # bound. A number we have not measured never outranks one we
+        # have -- and (round three) a point estimate on three copies
+        # never outranks a bound on eight hundred: capital follows what
+        # is demonstrated, not what is loudest.
+        if x["realized_settled"] > 0 and x["realized_roi"] is not None:
+            ci = x.get("realized_ci95")
+            lo = float(ci[0]) if ci else float("-inf")
+            return (0, -lo, -x["realized_roi"])
+        lo = (x["his_edge_ci95"] or [float("-inf")])[0]
+        return (1, -float(lo), 0.0)
+
+    rows.sort(key=_rank)
+    return {
+        "cohort_start": COHORT_START,
+        "gate_measured_at": snap.get("measured_at"),
+        "gate_read_age_s": snap.get("read_age_s"),
+        "errors": {k: v for k, v in (("fidelity", fid_err),
+                                     ("realized", real_err)) if v},
+        "rows": rows,
+        "reading": ("his_edge is what HE earns; realized is what OUR "
+                    "copies of him earn; the difference is fill "
+                    "selection, not price. Rank on realized. UNMEASURED "
+                    "is not a verdict, it is an instruction."),
+    }
+
+
+@app.get("/api/admin/impact-edge", dependencies=[Depends(require_admin)])
+async def admin_impact_edge(whale: str = "rn1", flow_per_day: float = 0.0) -> dict:
+    """Edge conditioned on what capturing it cost. See analytics/impact.py.
+
+    Proof needs n ~ (1.645*sigma/mu)^2 -- edge squared, not volume. If
+    the low-impact slice earns at 95%, that is the fill rule, and this
+    reports how many more settled copies prove it at the given flow.
+    """
+    from ..analytics.impact import cohort_impact
+    from ..analytics.proof import COHORT_START
+    return await cohort_impact(await get_pool(), COHORT_START,
+                               whale or None, flow_per_day or None)
+
+
+@app.get("/api/admin/edge-decomposition", dependencies=[Depends(require_admin)])
+async def admin_edge_decomposition(whale: str = "", days: int = 30) -> dict:
+    """His edge split into SELECTION and TIMING. See analytics/decompose.py.
+
+    Every resolved BUY of his scored at his fill, 5/10/60 minutes later,
+    and just before game start. If the pre-game leg clears zero at 95%
+    on 30+ games there is a learnable WHAT under the WHEN.
+    """
+    from ..analytics.decompose import WHALES, cohort_decompose
+
+    pool = await get_pool()
+    names = [whale.lower()] if whale else list(WHALES)
+    out: dict = {"days": days, "whales": {}}
+    for w in names:
+        try:
+            out["whales"][w] = await cohort_decompose(pool, w, days)
+        except Exception as exc:  # noqa: BLE001 — table absent until 044
+            out["whales"][w] = {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+    return out
+
+
+@app.get("/api/admin/edge-marks-probe", dependencies=[Depends(require_admin)])
+async def admin_edge_marks_probe() -> dict:
+    """Does the public CLOB honour startTs/endTs for the marks worker?
+    One read on the newest markable buy; read-only."""
+    from ..workers import edge_marks as _em
+    return await _em.probe(await get_pool())
+
+
+@app.get("/api/admin/price-path", dependencies=[Depends(require_admin)])
+async def admin_price_path(whale: str = "rn1", since: str = "") -> dict:
+    """Mean ask change t seconds after his fill. See analytics/price_path.py.
+
+    RISES -> take the post-impact ask now. REVERTS -> rest at his price.
+    Neither -> the order type is not the lever.
+    """
+    from ..analytics.price_path import cohort_path
+    from ..analytics.proof import COHORT_START
+    try:
+        return await cohort_path(await get_pool(), since or COHORT_START,
+                                 whale or None)
+    except Exception as exc:  # noqa: BLE001 — table absent until 042
+        return {"error": f"{type(exc).__name__}: {str(exc)[:160]}",
+                "by_t": {}, "n_rows": 0}
+
+
 @app.get("/api/admin/exit-census", dependencies=[Depends(require_admin)])
 async def admin_exit_census() -> dict:
     """WHY the exit path did or did not act, attributed.
@@ -5525,6 +5725,12 @@ async def admin_exit_census() -> dict:
     reached = int(counts.get("mx_reached_position_lookup") or 0)
     sold = int(counts.get("mx_SOLD") or 0)
     no_pos = int(counts.get("mx_no_position_of_ours") or 0)
+    # A rest bid can fill inside its own window while the whale is already
+    # exiting the same market; mirror_exit now WAITS for the row to leave
+    # 'submitting' and files the leftover as in-flight (pending), not as
+    # "no position". Named here so the verdict can point at it.
+    in_flight = (int(counts.get("mx_entry_in_flight") or 0)
+                 + int(counts.get("mx_inflight_unreadable") or 0))
     # Refusals that happen AFTER we confirmed a position of ours is the
     # only bucket that can be an exit-path defect. Everything before it
     # is coverage or a genuine non-exit.
@@ -5577,6 +5783,12 @@ async def admin_exit_census() -> dict:
             "exits_reaching_the_position_lookup": reached,
             "orders_actually_sold": sold,
             "stopped_because_we_never_copied_his_entry": no_pos,
+            # Pending, not refused: the entry row was still 'submitting'
+            # (or named as an unexplained venue position) when the exit
+            # arrived, so whale_exits keeps the exit and retries it. A
+            # STANDING count here means rest bids are filling inside
+            # the whale's own hold time or a named row is not clearing.
+            "held_pending_entry_in_flight": in_flight,
             "post_position_refusals": {
                 k: int(counts.get(k) or 0) for k in defect_keys
                 if counts.get(k)},
@@ -5584,6 +5796,10 @@ async def admin_exit_census() -> dict:
                 "no exit signal has reached mirror_exit at all — look "
                 "upstream at whale_exits and classify_exit"
                 if reached == 0 else
+                "exits reach the path and are HELD because the entry is "
+                "still in flight (rest bid open or a named venue "
+                "position) — they retry; read held_pending_entry_in_flight"
+                if sold == 0 and in_flight > 0 and no_pos + in_flight >= reached else
                 "exits reach the path and stop only because we hold "
                 "nothing to sell — this is a FILL RATE constraint, not "
                 "an exit defect"
@@ -6425,7 +6641,7 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
     from datetime import datetime as _dt
 
     from .track_record import (AUDIT_SINCE, PNL_DISPLAY_CAP, RECORD_TZ,
-                               track_record)
+                               pnl_cap_exempt_patterns, track_record)
 
     pool = await get_pool()
     copies = await pool.fetch(
@@ -6441,9 +6657,12 @@ async def _category_breakdown(from_day: str, to_day: str) -> dict:
         WHERE status = 'settled' AND settled_at IS NOT NULL
           -- Owner directive 2026-08-06: a single order swinging the P&L
           -- past the display cap is an anomaly, not the record.
-          AND abs(COALESCE(pnl, 0)) <= $1
+          -- Owner override 2026-09-01: named trades count in full
+          -- (track_record.PNL_CAP_EXEMPT_KEYS).
+          AND (abs(COALESCE(pnl, 0)) <= $1
+               OR lower(COALESCE(us_market_slug, '')) LIKE ANY($2::text[]))
         GROUP BY 1, 2
-        """, PNL_DISPLAY_CAP)
+        """, PNL_DISPLAY_CAP, pnl_cap_exempt_patterns())
     arb_rows = await pool.fetch(
         "SELECT DISTINCT outcome_id FROM engine_fills "
         "WHERE band IN ('arb', 'arb_crypto')")
@@ -6671,6 +6890,8 @@ async def api_admin_order_audit(
     the public site only."""
     from_day = _parse_day(from_, "2026-08-01")
     to_day = _parse_day(to, _today_et())
+    from .track_record import pnl_cap_exempt_patterns
+
     pool = await get_pool()
     rows = await pool.fetch(
         """
@@ -6683,14 +6904,20 @@ async def api_admin_order_audit(
                count(*) FILTER (WHERE pnl < 0)::int AS losses,
                COALESCE(sum(pnl), 0)::float8 AS pnl,
                COALESCE(sum(filled_usd), 0)::float8 AS filled_usd,
-               COALESCE(sum(pnl) FILTER (WHERE abs(pnl) > 100), 0)::float8
+               COALESCE(sum(pnl) FILTER (
+                   WHERE abs(pnl) > 100
+                     AND NOT lower(COALESCE(us_market_slug, ''))
+                             LIKE ANY($1::text[])), 0)::float8
                    AS over_cap_pnl,
-               count(*) FILTER (WHERE abs(COALESCE(pnl, 0)) > 100)::int
+               count(*) FILTER (
+                   WHERE abs(COALESCE(pnl, 0)) > 100
+                     AND NOT lower(COALESCE(us_market_slug, ''))
+                             LIKE ANY($1::text[]))::int
                    AS over_cap_n
         FROM live_orders
         WHERE status = 'settled' AND settled_at IS NOT NULL
         GROUP BY 1, 2, 3
-        """)
+        """, pnl_cap_exempt_patterns())
     days: dict[str, list] = {}
     totals: dict[str, dict] = {}
     for r in rows:
@@ -7241,10 +7468,21 @@ async def api_set_verified_whales(body: dict) -> dict:
 
     pool = await get_pool()
     if body.get("clear"):
-        await pool.execute("DELETE FROM ingestion_state WHERE key=$1",
-                           _le._ROSTER_DB_KEY)
+        # CLEAR MEANS BACK TO THE ENV/CODE DEFAULT, ALL OF IT: the stored
+        # roster, the rules' memory and the stored clips. Leaving the
+        # last two in place let the hourly pass rewrite the roster within
+        # the hour and kept stored zero clips blocking whales the env
+        # roster named (round four).
+        for key in (_le._ROSTER_DB_KEY, _le._CLIPS_DB_KEY, "roster_state",
+                    "roster_auto_last"):
+            await pool.execute("DELETE FROM ingestion_state WHERE key=$1", key)
         _le._roster_read_at = 0.0   # next money-path call re-reads
-        return {"ok": True, "cleared": True}
+        _le._clip_override = None
+        return {"ok": True, "cleared": True,
+                "note": ("stored roster, roster_state, live_clip_overrides "
+                         "and roster_auto_last removed; env/code default "
+                         "resumes until the next hourly pass writes again "
+                         "(ROSTER_AUTO=off on sportsassets-workers stops it)")}
     raw = body.get("whales")
     if isinstance(raw, str):
         whales = [w.strip().lower() for w in raw.split(",") if w.strip()]
@@ -7261,7 +7499,85 @@ async def api_set_verified_whales(body: dict) -> dict:
         "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
         _le._ROSTER_DB_KEY, json.dumps(whales))
     _le._roster_read_at = 0.0
-    return {"ok": True, "verified_whales": whales}
+    # THE OWNER'S WORD OUTRANKS THE RULES (2026-09-01 evening): tell the
+    # roster-by-evidence machine what he decided, so its next pass
+    # honours it -- a whale he adds enters measuring, a whale he removes
+    # is cut and stays cut -- instead of silently rewriting it an hour
+    # later from the same numbers that produced the state he overrode.
+    rules = None
+    try:
+        from ..workers import roster_auto as _ra
+        rules = await _ra.owner_set(pool, whales)
+    except Exception as exc:  # noqa: BLE001 — the roster write stands
+        rules = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    return {"ok": True, "verified_whales": whales, "rules": rules}
+
+
+async def _roster_auto_status(pool) -> dict:
+    try:
+        from ..workers import roster_auto as _ra
+        return await _ra.status(pool)
+    except Exception as exc:  # noqa: BLE001 — the gates page must render
+        return {"error": f"unreadable: {type(exc).__name__}"}
+
+
+async def _rest_lane_gate(pool, _le) -> dict:
+    """Budget consumed vs cap, so the owner can see when $2,500 is gone
+    -- and every row the reapers have NAMED rather than resolved: shares
+    the account holds that no ledger row explains, or an orphan fill
+    recorded on a row another row's claim kept out of 'filled'. Those
+    are the rows a human reconciles; a state nobody can see is a state
+    nobody reconciles (round eight)."""
+    spent = await _le._rest_lane_spent(pool)
+    named: dict = {"count": None, "rows": []}
+    try:
+        rows = await pool.fetch(
+            "SELECT id, us_market_slug, lower(COALESCE(whale_username,'')) AS whale, "
+            "       placed_at, filled_shares::float8 AS filled_shares, "
+            "       left(error, 160) AS error "
+            "FROM live_orders WHERE status = 'error' AND "
+            "(error LIKE 'venue holds a POSITION%' OR "
+            " error LIKE 'ORPHAN FILL RECORDED%' OR "
+            " error LIKE 'venue has no record of order%') "
+            "ORDER BY placed_at DESC LIMIT 20")
+        # PAST THE REVISIT HORIZON (round nine): the reaper re-asks a
+        # named row for _NAMED_HORIZON and then stops; the exit path
+        # stops treating it as in flight at the same moment. A named row
+        # older than that is nobody's any more -- it is counted here so
+        # the probe line shows it, not merely the fresh ones.
+        stale = int(await pool.fetchval(
+            "SELECT count(*) FROM live_orders WHERE status = 'error' AND "
+            "(error LIKE 'venue holds a POSITION%' OR "
+            " error LIKE 'ORPHAN FILL RECORDED%' OR "
+            " error LIKE 'venue has no record of order%') AND "
+            f"placed_at <= now() - interval '{_le._NAMED_HORIZON}'") or 0)
+        named = {"count": len(rows), "stale": stale,
+                 "revisit_horizon": _le._NAMED_HORIZON,
+                 "rows": [{"id": r["id"], "slug": r["us_market_slug"],
+                           "whale": r["whale"],
+                           "placed_at": (r["placed_at"].isoformat()
+                                         if r["placed_at"] else None),
+                           "filled_shares": r["filled_shares"],
+                           "error": r["error"]} for r in rows]}
+    except Exception as exc:  # noqa: BLE001
+        named = {"count": None, "rows": [], "error": type(exc).__name__}
+    fills = None
+    try:
+        fills = int(await pool.fetchval(
+            "SELECT count(*) FROM live_orders WHERE lane='rest' "
+            "AND filled_usd > 0") or 0)
+    except Exception:  # noqa: BLE001 — column absent until 041
+        fills = None
+    inf = spent == float("inf")
+    return {"enabled": _le.REST_BID_ENABLED, "ttl_s": _le.REST_BID_TTL_S,
+            "budget_usd": _le.REST_BID_BUDGET_USD,
+            "spent_usd": None if inf else round(spent, 2),
+            "remaining_usd": (None if inf else
+                              round(max(0.0, _le.REST_BID_BUDGET_USD - spent), 2)),
+            "fills": fills,
+            "named": named,
+            "note": ("spent unreadable — lane treats budget as exhausted"
+                     if inf else None)}
 
 
 @app.get("/api/admin/gates", dependencies=[Depends(require_admin)])
@@ -7327,9 +7643,19 @@ async def api_gates() -> dict:
         # that the config caps I kept quoting govern only the dormant
         # 'full' mode — the answer must be READABLE, not inferred).
         "edge_gate": edge,
+        "rest_lane": await _rest_lane_gate(pool, _le),
+        # THE RULES' LAST PASS, read from the database the worker wrote
+        # (separate service: this process's roster_auto module has never
+        # run a pass and its in-memory snapshot would read as "never").
+        "roster_auto": await _roster_auto_status(pool),
         "sizing": {
             "copy_mode": _le.COPY_MODE,
             "per_fill_by_whale": dict(_le.PER_FILL_BY_WHALE),
+            # WHAT ACTUALLY BINDS: the stored clips the rules wrote, and
+            # the effective per-whale clip after they are applied.
+            "clip_overrides": dict(_le._clip_override or {}),
+            "per_fill_effective": {w: _le.per_fill_usd(w)
+                                   for w in sorted(_le.exitable_whales())},
             "max_clip_usd": _le.LIVE_MAX_CLIP_USD,
             "probe_day_usd": _le.PROBE_DAY_USD,   # 0 = no day cap
             # inf (the shipped default: no cap) is not valid JSON —
@@ -7755,12 +8081,12 @@ async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
     # definition cannot leave this endpoint grading a population the
     # code no longer produces. Row volume is bounded: the window opens
     # the day Option A shipped.
-    rows = await pool.fetch(
-        f"""
+    _tol_sql = f"""
         SELECT lower(COALESCE(lo.whale_username, '?')) AS whale,
                lo.his_price::float8 AS his, lo.fill_price::float8 AS fp,
                lo.filled_usd::float8 AS staked, lo.pnl::float8 AS pnl,
                lo.status, {ORDER_INTENT_SQL} AS intent,
+               lo.lane AS lane,
                -- THE GAME THIS COPY BELONGS TO, for the cluster-robust
                -- interval below. Same LEFT JOIN and same COALESCE the
                -- proof cohort uses, so the two instruments cannot
@@ -7774,10 +8100,30 @@ async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
           AND lo.status IN ('filled', 'settled', 'cashed_out')
           AND lo.filled_usd > 0 AND lo.his_price > 0 AND lo.fill_price > 0
           AND COALESCE(lo.whale_username, '') NOT IN ('manual', 'underdog')
-        """, since_d)
+        """
+    # THE LANE COLUMN MAY NOT EXIST YET. Migrations run at API boot,
+    # best-effort, and this endpoint would 500 until the next healthy
+    # boot on a bare reference. Retry without the projection and let
+    # the defensive r.keys() read below file every row as before.
+    try:
+        rows = await pool.fetch(_tol_sql, since_d)
+    except Exception as exc:  # noqa: BLE001 — missing column only
+        if "lane" not in str(exc):
+            raise
+        rows = await pool.fetch(_tol_sql.replace("lo.lane AS lane,", ""),
+                                since_d)
     agg: dict[tuple, dict] = {}
     for r in rows:
-        cohort = tolerance_cohort(r["his"], r["fp"], r["intent"])
+        # THE REST LANE IS ITS OWN COHORT. A rest fill lands at his
+        # exact price, so tolerance_cohort would file it under parity
+        # -- and it is not parity. Parity is "the ask was already at or
+        # below his price when the IOC arrived"; rest is "the IOC
+        # missed and the ask came back within the window". Different
+        # populations, possibly opposite signs, never blended. Read
+        # defensively: rows written before migration 041 have no lane.
+        _lane = r["lane"] if "lane" in r.keys() else None
+        cohort = ("rest" if _lane == "rest"
+                  else tolerance_cohort(r["his"], r["fp"], r["intent"]))
         d = agg.setdefault((r["whale"], cohort), {
             "whale": r["whale"], "cohort": cohort, "n": 0, "settled": 0,
             "staked": 0.0, "pnl": 0.0, "settled_staked": 0.0,
@@ -8060,12 +8406,16 @@ async def api_edge_decay(since_day: str = "2026-08-01") -> dict:
                filled_usd::float8 AS stake, pnl::float8 AS pnl,
                reaction_s::float8 AS rs,
                {ORDER_INTENT_SQL} AS intent,
-               abs(COALESCE(pnl, 0)) > 100 AS over_cap
+               (abs(COALESCE(pnl, 0)) > 100
+                AND NOT lower(COALESCE(us_market_slug, ''))
+                        LIKE ANY($2::text[])) AS over_cap
         FROM live_orders
         WHERE status = 'settled'
           AND filled_usd > 0 AND his_price > 0
           AND placed_at >= $1
-        """, since_d)
+        """, since_d, __import__("sportsassets.api.track_record",
+                                 fromlist=["pnl_cap_exempt_patterns"])
+        .pnl_cap_exempt_patterns())
     out: dict[str, dict] = {}
     for r in rows:
         w = out.setdefault(r["whale"], {
@@ -8332,7 +8682,13 @@ async def api_breakdown_day_detail(day: str) -> dict:
     named per-trade deltas instead of one opaque number."""
     from datetime import datetime as _dt
 
-    from .track_record import PNL_DISPLAY_CAP, RECORD_TZ, track_record
+    # AUDIT_SINCE was named below but never imported here (ruff F821,
+    # found by the 2026-09-02 codebase audit): every call of this
+    # endpoint raised NameError at the track_record line, so the day
+    # detail never rendered. The comment below explains why the audit
+    # anchor, not the display anchor, is the right one.
+    from .track_record import (AUDIT_SINCE, PNL_DISPLAY_CAP, RECORD_TZ,
+                               track_record)
 
     pool = await get_pool()
     # AUDIT SINCE, NOT DISPLAY SINCE (2026-08-25). track_record(None)
@@ -8377,20 +8733,24 @@ async def api_breakdown_day_detail(day: str) -> dict:
 
     # Side B — attributed copies: the exact live_orders query the
     # breakdown runs (same whale tuple, same ±cap filter), per row.
+    from .track_record import pnl_cap_exempt_patterns
+
     lo_rows = await pool.fetch(
         """
         SELECT lower(COALESCE(lo.whale_username, '?')) AS whale,
                lower(COALESCE(lo.us_market_slug, '')) AS slug,
                COALESCE(m.title, lo.us_market_slug, lo.asset) AS title,
                lo.pnl::float8 AS pnl,
-               abs(COALESCE(lo.pnl, 0)) > $2 AS over_cap
+               (abs(COALESCE(lo.pnl, 0)) > $2
+                AND NOT lower(COALESCE(lo.us_market_slug, ''))
+                        LIKE ANY($3::text[])) AS over_cap
         FROM live_orders lo
         LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
         LEFT JOIN markets m ON m.condition_id = mt.condition_id
         WHERE lo.status = 'settled' AND lo.settled_at IS NOT NULL
           AND to_char(lo.settled_at AT TIME ZONE 'America/New_York',
                       'YYYY-MM-DD') = $1
-        """, day, PNL_DISPLAY_CAP)
+        """, day, PNL_DISPLAY_CAP, pnl_cap_exempt_patterns())
     sleeves = ("rn1", "swisstony", "kch123", "homerunhazard", "manual",
                "underdog", "ferrarichampions2026", "0x076daa87",
                "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563"

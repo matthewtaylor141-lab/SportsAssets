@@ -17,9 +17,9 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
-from . import (analytics, chain_listener, copy_sweep, dispatcher,
-               metadata_refresher, poller, premap, reconciler, roster,
-               underdog, whale_exits)
+from . import (analytics, chain_listener, copy_sweep, dispatcher, edge_marks,
+               metadata_refresher, poller, premap, price_path, reconciler,
+               roster, roster_auto, underdog, whale_exits)
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +42,20 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # trade listener can see that, so this diffs holdings and feeds
     # mirror_exit the fraction it measured.
     ("whale_exits", whale_exits.main),
+    # MEASUREMENT ONLY: samples the ask after every attempted copy so the
+    # post-fill price curve -- the thing that decides the fill rule --
+    # exists as data instead of an argument. Never places or cancels.
+    ("price_path", price_path.main),
+    # THE ROSTER BY EVIDENCE (owner order 2026-09-01, evening): whales
+    # enter, are promoted and are demoted by two numbers -- the edge
+    # gate's verdict on HIS book and the proof cohort's interval on OUR
+    # copies of him. Hourly; fails closed; every decision is written to
+    # roster_decisions with the numbers that made it.
+    ("roster_auto", roster_auto.main),
+    # MEASUREMENT ONLY: marks every whale buy at the prices that split
+    # his edge into selection and timing (owner question 2026-09-01).
+    # Public CLOB reads, paced; never touches an order.
+    ("edge_marks", edge_marks.main),
 ]
 
 

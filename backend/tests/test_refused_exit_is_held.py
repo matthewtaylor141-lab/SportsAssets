@@ -333,10 +333,15 @@ class TestTheAllowlistIsOwnedByTheProducer:
         # (mx_exception_pending, 2026-08-26). A pending reason nothing
         # can produce is a dead allowlist entry that reads like
         # coverage.
+        #
+        # _exit_done ONLY (round three, 2026-09-01). _exit_stop's
+        # contract is to return None, so a reason it "produces" never
+        # leaves mirror_exit and can never be pending: mx_entry_in_flight
+        # was added to the allowlist and returned through _exit_stop,
+        # and this test -- matching either helper -- called it produced.
         src = (inspect.getsource(le.mirror_exit)
                + inspect.getsource(le.execute_copy))
-        real = set(re.findall(r'_exit_(?:stop|done)\(\s*"(mx_[a-z_]+)"',
-                              src))
+        real = set(re.findall(r'_exit_done\(\s*"(mx_[a-z_]+)"', src))
         unknown = le.EXIT_PENDING_REASONS - real
         assert not unknown, f"pending reasons that cannot occur: {unknown}"
 

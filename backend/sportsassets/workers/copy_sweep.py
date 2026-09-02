@@ -105,8 +105,15 @@ async def sweep_once() -> dict:
     # one-fill-per-asset claim forever and silently retire the asset
     # from copying (audit 2026-08-21) — reap them every pass.
     from ..live_executor import (_reap_stale_exiting,
-                                 _reap_stale_submitting)
+                                 _reap_stale_resting_bids,
+    _reap_stale_submitting)
     await _reap_stale_submitting(pool)
+    # VENUE-SIDE NET for the rest lane: a resting bid the ledger never
+    # saw is still cancelled. Cheap (one list call), best-effort.
+    try:
+        await _reap_stale_resting_bids(pool)
+    except Exception:  # noqa: BLE001 — the sweep must not die on it
+        pass
     # 'exiting' had no reaper at all. A cancellation between
     # mirror_exit's atomic claim and its terminal UPDATE strands the row
     # there permanently, and this sweep is itself the canceller (the
@@ -203,9 +210,17 @@ async def sweep_once() -> dict:
           -- untouched.
           AND NOT EXISTS (SELECT 1 FROM live_orders lo
                           WHERE lo.asset = t.asset
-                            AND lo.status IN ('submitting','filled',
-                                              'settled','cashed_out',
-                                              'exiting')
+                            AND (lo.status IN ('submitting','filled',
+                                               'settled','cashed_out',
+                                               'exiting')
+                                 -- A NAMED row (round seven) stands for
+                                 -- shares the account holds that the
+                                 -- ledger cannot name: it blocks like a
+                                 -- fill until the reaper resolves it.
+                                 OR (lo.status = 'error' AND
+                                     (lo.error LIKE 'venue holds a POSITION%'
+                                      OR lo.error LIKE 'ORPHAN FILL RECORDED%'
+                                      OR lo.error LIKE 'venue has no record of order%')))
                             -- Manual-desk rows are invisible to the
                             -- autonomous paths (owner 2026-08-07).
                             AND COALESCE(lo.whale_username, '') <> 'manual')
@@ -230,8 +245,11 @@ async def sweep_once() -> dict:
           -- PLACED (submitting/filled/settled) block.
           AND NOT EXISTS (SELECT 1 FROM live_orders lo2
                           WHERE lo2.trade_id = t.id
-                            AND lo2.status NOT IN
-                                ('rejected', 'unfilled', 'error'))
+                            AND (lo2.status NOT IN
+                                     ('rejected', 'unfilled', 'error')
+                                 OR lo2.error LIKE 'venue holds a POSITION%'
+                                 OR lo2.error LIKE 'ORPHAN FILL RECORDED%'
+                                 OR lo2.error LIKE 'venue has no record of order%'))
         ORDER BY t.asset, t.ts DESC
         """,
         whales, PRICE_CEILING,

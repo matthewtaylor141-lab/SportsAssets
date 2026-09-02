@@ -73,6 +73,28 @@ AUDIT_SINCE = "2026-08-01"
 # `excluded_over_pnl`, never silently dropped.
 PNL_DISPLAY_CAP = 100.0
 
+# OWNER OVERRIDE (2026-09-01): trades counted IN FULL despite the cap.
+# The owner placed a manual Polymarket ticket on the same market as the
+# 0x076daa87 copy of atp-matbel-zsopir (2026-08-30); the venue settled
+# both legs onto the copy row (+$966 on a $93.72 stake) and the $100
+# single-trade cap moved the whole thing to residual, so the whale's
+# P&L never saw it. For THIS trade the owner wants the manual leg
+# counted in the whale's P&L. Matched as a substring of the market slug
+# so a family prefix cannot miss it; every surface that applies the cap
+# -- in Python or in SQL -- consults this same list.
+PNL_CAP_EXEMPT_KEYS: tuple[str, ...] = ("atp-matbel-zsopir-2026-08-30",)
+
+
+def pnl_cap_exempt(slug: str | None) -> bool:
+    s = (slug or "").lower()
+    return any(k in s for k in PNL_CAP_EXEMPT_KEYS)
+
+
+def pnl_cap_exempt_patterns() -> list[str]:
+    """The same set as SQL LIKE patterns, for the queries that cap in
+    the database: `... OR lower(us_market_slug) LIKE ANY($n::text[])`."""
+    return [f"%{k}%" for k in PNL_CAP_EXEMPT_KEYS]
+
 # All human-facing DAY bucketing happens in the owner's timezone. Bucketing
 # in UTC put every settlement after 8pm Eastern on the NEXT day's calendar
 # box (Wednesday wore Tuesday night's -$16 two days running, owner report
@@ -323,8 +345,9 @@ def build(positions: dict[str, dict], activities: list[dict],
         if realized > 0:
             d["wins"] += 1
 
-    def _pnl_capped(settled: bool, realized: float, unreal: float) -> bool:
-        if max_abs_pnl is None:
+    def _pnl_capped(slug: str, settled: bool, realized: float,
+                    unreal: float) -> bool:
+        if max_abs_pnl is None or pnl_cap_exempt(slug):
             return False
         return abs(realized if settled else unreal) > max_abs_pnl
 
@@ -336,7 +359,7 @@ def build(positions: dict[str, dict], activities: list[dict],
             return manual
         # The P&L cap outranks the remaining splits: a $100+ single-trade
         # swing is out of the record no matter whose row it is.
-        if _pnl_capped(settled, realized, unreal):
+        if _pnl_capped(slug, settled, realized, unreal):
             return over_pnl
         if attributed is not None and slug not in attributed:
             return unattributed
@@ -408,7 +431,7 @@ def build(positions: dict[str, dict], activities: list[dict],
         sleeve = _sleeve_of(slug)
         cohort = "record"
         if sleeve == "copy" and not is_manual \
-                and not _pnl_capped(settled, realized, unreal):
+                and not _pnl_capped(slug, settled, realized, unreal):
             _tally_copy(stake_now, settled, realized)
         else:
             bucket = (manual if is_manual
@@ -475,7 +498,7 @@ def build(positions: dict[str, dict], activities: list[dict],
         sleeve = _sleeve_of(slug)
         cohort = "record"
         if sleeve == "copy" and not is_manual \
-                and not _pnl_capped(True, res["realized"], 0.0):
+                and not _pnl_capped(slug, True, res["realized"], 0.0):
             _tally_copy(cost, True, res["realized"])
         else:
             bucket = (manual if is_manual
@@ -532,7 +555,7 @@ def build(positions: dict[str, dict], activities: list[dict],
         sleeve = _sleeve_of(slug)
         cohort = "record"
         if sleeve == "copy" and not is_manual \
-                and not _pnl_capped(True, realized, 0.0):
+                and not _pnl_capped(slug, True, realized, 0.0):
             _tally_copy(cost, True, realized)
         else:
             bucket = (manual if is_manual

@@ -443,6 +443,15 @@ def _exit_done(reason: str, **ctx) -> str:
 # retry loop, and an exception may have left an order in flight, where
 # re-pinning would risk selling twice.
 EXIT_PENDING_REASONS: frozenset[str] = frozenset({
+    # A rest bid can fill inside its own window while the whale is
+    # already exiting the same market; the row is still 'submitting'
+    # when mirror_exit looks, so "no position" was being recorded and
+    # the exit dropped forever (re-review 2026-09-01). Pending, so the
+    # position lane pins the asset and re-offers it.
+    "mx_entry_in_flight",
+    # The in-flight lookup itself failed (round four): an entry may be
+    # in flight and we cannot tell. Pending, never "no position".
+    "mx_inflight_unreadable",
     # Kill switch or breaker. Clears by operator action.
     "mx_halted",
     "mx_paused",
@@ -988,22 +997,51 @@ async def mirror_exit(payload: dict) -> str:
         "WHERE asset = $1 AND lower(COALESCE(whale_username,'')) = $2 "
         "  AND status = 'filled' AND us_market_slug IS NOT NULL "
         "ORDER BY placed_at DESC LIMIT 1")
-    try:
-        row = await pool.fetchrow(
-            "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
-            "       COALESCE(orig_shares, filled_shares)::float8 AS orig_qty, "
-            + _sel_tail, asset, username)
-    except Exception as exc:  # noqa: BLE001 — missing column only
-        if "orig_shares" not in str(exc):
-            raise
-        log.warning("MIRROR-EXIT: orig_shares column absent (migration "
-                    "040 not applied yet) — sizing off filled_shares, "
-                    "which is today's behaviour; repeated trims may "
-                    "over-exit until the migration lands")
-        row = await pool.fetchrow(
-            "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
-            "       filled_shares::float8 AS orig_qty, "
-            + _sel_tail, asset, username)
+    row = await _position_row(pool, asset, username, _sel_tail)
+    if row is None:
+        # AN ENTRY STILL IN FLIGHT IS NOT "NO POSITION". The rest lane
+        # holds a row at 'submitting' for up to REST_BID_TTL_S plus a
+        # few reads, and a rest_unknown row stays 'submitting' until the
+        # reaper reconciles it minutes later. A whale who exits inside
+        # either window would have had his exit filed as
+        # mx_no_position_of_ours -- which is NOT a pending reason -- and
+        # the position ridden to resolution against him. A young row is
+        # given its window to settle and looked up again; an old one, or
+        # one that never becomes a fill, is answered "in flight" THROUGH
+        # _exit_done so the reason reaches the position lane and the
+        # asset is pinned for the next cycle. (Round three: the first
+        # version returned it through _exit_stop, whose contract is to
+        # return None, so nothing was ever pinned and the wait bought
+        # nothing. The behavioural test in
+        # test_in_flight_entry_is_pending.py drives this path.)
+        _inflight, _age, _readable = await _entry_in_flight(pool, asset, username)
+        if not _readable:
+            # Its own reason (the census wants every path named
+            # distinctly): pending, like in-flight, because an entry MAY
+            # be in flight and the lookup could not say.
+            return _exit_done("mx_inflight_unreadable", asset=asset,
+                              whale=username)
+        if _inflight:
+            _window = REST_BID_TTL_S + _INFLIGHT_GRACE_S
+            if _age is not None and _age <= _window:
+                _deadline = time.monotonic() + _window
+                while True:
+                    await asyncio.sleep(_INFLIGHT_POLL_S)
+                    try:
+                        _st = await pool.fetchval(
+                            "SELECT status FROM live_orders WHERE id = $1",
+                            _inflight)
+                    except Exception:  # noqa: BLE001 — keep waiting
+                        _st = "submitting"
+                    if _st != "submitting" or time.monotonic() >= _deadline:
+                        break
+                try:
+                    row = await _position_row(pool, asset, username, _sel_tail)
+                except Exception:  # noqa: BLE001 — a DB error is not "no position"
+                    row = None
+            if row is None:
+                return _exit_done("mx_entry_in_flight", asset=asset,
+                                  whale=username)
     if row is None or (row["qty"] or 0) <= 0:
         # WE NEVER COPIED HIS ENTRY. At a 0.55% fill rate this is the
         # expected majority outcome and it is NOT an exit-path defect:
@@ -1122,9 +1160,15 @@ async def mirror_exit(payload: dict) -> str:
 
     us_slug = row["us_market_slug"]
     # ATOMIC CLAIM. Five complement fills inside one second spawn five
-    # execute_copy tasks, and mirror_exit runs outside _COPY_SEM — so
-    # without this every one of them reads the same 'filled' row and
-    # every one issues a sell. Exactly one caller gets a row back here.
+    # execute_copy tasks, and the position lane reaches mirror_exit
+    # outside _COPY_SEM (execute_copy returns before the semaphore on a
+    # SELL) — so without this every one of them reads the same 'filled'
+    # row and every one issues a sell. Exactly one caller gets a row
+    # back here. The TRADE lane is different: classify_exit calls this
+    # from inside maybe_execute, under a semaphore slot, so its in-flight
+    # wait above parks that slot for up to REST_BID_TTL_S plus grace.
+    # Bounded, cannot deadlock (the entry it waits on holds a different
+    # slot), and visible in the QUEUE probe line's wait statistics.
     claimed = await pool.fetchval(
         "UPDATE live_orders SET status='exiting' "
         "WHERE id=$1 AND status='filled' RETURNING id", row["id"])
@@ -1310,7 +1354,14 @@ async def mirror_exit(payload: dict) -> str:
         #
         # _exit_stop, not _exit_done: it returns None and nothing
         # branches on it, so this cannot alter the re-raise below.
-        _exit_stop("mx_aborted_before_venue", slug=us_slug, qty=qty)
+        #
+        # locals().get, because `qty` is assigned INSIDE the try: an
+        # abort in _pm_held or the sizing arithmetic reached this line
+        # with qty unbound, and the UnboundLocalError raised here
+        # replaced the CancelledError being re-raised (found by the
+        # in-flight behavioural test, 2026-09-01).
+        _exit_stop("mx_aborted_before_venue", slug=us_slug,
+                   qty=locals().get("qty"))
         raise
     try:
         if _flatten:
@@ -1662,13 +1713,61 @@ _ROSTER_DB_KEY = "live_verified_whales"
 _ROSTER_TTL_S = 30.0
 _roster_override: set[str] | None = None    # None = no stored override
 _roster_read_at = 0.0
+# THE RULES' CLIPS (owner order 2026-09-01: roster decisions are made by
+# the data). workers/roster_auto.py writes {whale: usd} here every pass;
+# per_fill_usd reads it ahead of the hardcoded PER_FILL_BY_WHALE, so a
+# measuring whale trades at the measurement clip, a promoted one at the
+# full clip, and a demoted one at 0. Refreshed with the roster, on the
+# same TTL, by the same call at the top of both money paths.
+_CLIPS_DB_KEY = "live_clip_overrides"
+_clip_override: dict[str, float] | None = None   # None = no stored clips
 
 
 async def refresh_whale_overrides(pool) -> None:
-    global _roster_override, _roster_read_at
+    """Adopt the stored roster and the stored clips, on one TTL."""
     now = time.time()
     if now - _roster_read_at < _ROSTER_TTL_S:
         return
+    await _refresh_roster(pool, now)
+    await _refresh_clips(pool)
+
+
+async def _refresh_clips(pool) -> None:
+    """{whale: usd} from ingestion_state, or keep the last adopted map.
+
+    A stored cell that cannot be read as a number is dropped from the
+    map for this pass, not zeroed and not guessed: the whale then falls
+    to the hardcoded clip, which is what he traded at before the rules
+    existed. A read failure keeps the last adopted map, as the roster
+    does -- a DB blip is not a sizing decision."""
+    global _clip_override
+    for attempt in (1, 2):
+        try:
+            raw = await pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1",
+                _CLIPS_DB_KEY)
+            if raw is None:
+                _clip_override = None
+                return
+            val = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(val, dict):
+                out: dict[str, float] = {}
+                for w, v in val.items():
+                    try:
+                        out[str(w).strip().lower()] = max(0.0, float(v))
+                    except (TypeError, ValueError):
+                        continue
+                _clip_override = out
+            # any other shape: keep last known — never guess a clip
+            return
+        except Exception:  # noqa: BLE001 — retry once, then keep last
+            if attempt == 2:
+                log.warning("clip override read failed; keeping the last "
+                            "adopted clips")
+
+
+async def _refresh_roster(pool, now: float) -> None:
+    global _roster_override, _roster_read_at
     # Two attempts per refresh (fleet round 49: a fresh worker whose
     # FIRST read hit a dead pooled connection fell to the env/default
     # roster in total silence — 'keep last adopted' is vacuous before
@@ -1726,6 +1825,82 @@ def _row_get(row, key, default=None):
         return row[key]
     except (KeyError, IndexError, TypeError):
         return default
+
+
+# The in-flight wait in mirror_exit: how often the row is re-read while
+# an entry settles, and how much longer than the rest window to allow
+# for the cancel and the terminal reads. Module constants so a test can
+# drive the wait in milliseconds instead of reading the source.
+_INFLIGHT_POLL_S = 1.0
+_INFLIGHT_GRACE_S = 5.0
+# How far back a 'submitting' row can be and still be an entry in
+# flight rather than an abandoned row. A rest_unknown row stays
+# 'submitting' until the ledger reaper reconciles it at ten minutes, so
+# a row inside the horizon may yet become a fill; its whale's exit is
+# pinned in that window, not dropped (round three: a 60-second horizon
+# made a ten-minute rest_unknown row invisible after its first minute;
+# round six: the reaper runs once per sweep pass, which can take ten
+# minutes itself, so fifteen was not past its worst case). A row the
+# reaper marked "venue holds a POSITION ... no ledger row explains"
+# counts as in flight too: the account holds shares the ledger cannot
+# yet name, and the exit must wait for the reconcile, not be dropped.
+_INFLIGHT_HORIZON = "30 minutes"
+# How long a row NAMED "venue holds a POSITION ..." stays in flight for
+# the exit path and is revisited by the ledger reaper. Long, because it
+# describes shares the account holds that the ledger cannot yet name:
+# dropping the exit on those would be the round-six defect with a delay.
+_NAMED_HORIZON = "48 hours"
+
+
+async def _position_row(pool, asset: str, username: str, sel_tail: str):
+    """Our newest 'filled' row on this asset for this whale, projecting
+    orig_qty with the migration-040 fallback: the workers never run
+    migrations, so this code can reach production ahead of its own
+    column, and a bare reference would raise on EVERY exit until a
+    healthy API boot happened to land. One helper, both lookups."""
+    try:
+        return await pool.fetchrow(
+            "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
+            "       COALESCE(orig_shares, filled_shares)::float8 AS orig_qty, "
+            + sel_tail, asset, username)
+    except Exception as exc:  # noqa: BLE001 — missing column only
+        if "orig_shares" not in str(exc):
+            raise
+        log.warning("MIRROR-EXIT: orig_shares column absent (migration "
+                    "040 not applied yet) — sizing off filled_shares, "
+                    "which is today's behaviour; repeated trims may "
+                    "over-exit until the migration lands")
+        return await pool.fetchrow(
+            "SELECT id, us_market_slug, filled_shares::float8 AS qty, "
+            "       filled_shares::float8 AS orig_qty, "
+            + sel_tail, asset, username)
+
+
+async def _entry_in_flight(pool, asset: str, username: str):
+    """(id, age_s, readable) of a same-asset row still 'submitting'
+    inside the horizon. readable=False means the lookup itself failed:
+    the caller then PENDS the exit (an entry may be in flight and we
+    cannot tell) rather than filing it as "no position" -- round four:
+    a DB blip here used to drop the exit."""
+    try:
+        r = await pool.fetchrow(
+            "SELECT id, EXTRACT(EPOCH FROM (now() - placed_at))::float8 "
+            "AS age_s FROM live_orders WHERE asset = $1 AND "
+            "lower(COALESCE(whale_username,'')) = $2 AND us_market_slug IS "
+            "NOT NULL AND ((status = 'submitting' AND "
+            f"placed_at > now() - interval '{_INFLIGHT_HORIZON}') "
+            "OR (status = 'error' AND (error LIKE 'venue holds a POSITION%' "
+            "OR error LIKE 'venue has no record of order%') "
+            f"AND placed_at > now() - interval '{_NAMED_HORIZON}')) "
+            "ORDER BY placed_at DESC LIMIT 1", asset, username)
+    except Exception:  # noqa: BLE001
+        return None, None, False
+    if not r:
+        return None, None, True
+    try:
+        return r["id"], float(_row_get(r, "age_s") or 0.0), True
+    except (TypeError, ValueError):
+        return r["id"], None, True
 
 
 def overspend_ratio(requested_usd: float, filled_shares: float,
@@ -1911,11 +2086,14 @@ def exitable_whales() -> set[str]:
     exact whale and asset.
 
     Still bounded to whales we have ACTUALLY ROSTERED -- verified, cut,
-    or carrying a clip entry -- so a username that was never on the
-    roster is refused.
+    or carrying a clip entry, hardcoded or stored by the rules -- so a
+    username that was never on the roster is refused. The stored map
+    matters for a DEMOTED whale: the rules take him off the entry roster
+    and write his clip as 0, and that 0 is what keeps his exits
+    mirroring here after he has left every other set.
     """
     return (_whale_set("LIVE_VERIFIED_WHALES") | set(COPY_CUT_WHALES)
-            | set(PER_FILL_BY_WHALE))
+            | set(PER_FILL_BY_WHALE) | set(_clip_override or {}))
 ASK_TOLERANCE = 1.0 + float(os.getenv("LIVE_ASK_TOLERANCE_PCT", "0.08"))
 OVERSPEND_TOLERANCE = 1.01  # a cent of rounding on a whole-unit fill
 OVERSPEND_HALT_RATIO = max(
@@ -2476,6 +2654,32 @@ COPY_TOL_CENTS = float(os.environ.get("PMUS_COPY_TOL_CENTS", "1"))
 # only -- it can never raise a tolerance, only refuse one.
 COPY_TOL_MAX_CENTS = float(os.environ.get("PMUS_COPY_TOL_MAX_CENTS", "3"))
 
+# ── THE REST LANE (owner order 2026-09-01: "full throttle, all approved")
+#
+# Every copy today is an IOC at his price plus a small tolerance. When
+# the ask sits above that at the instant we arrive -- which is most of
+# the time, because his own buy is what moved it -- the copy is lost
+# outright. This lane acts ONLY on those lost copies: after the IOC
+# comes back empty, rest a bid at his EXACT price (no tolerance) for a
+# few seconds, then cancel. A fill here is a copy we would otherwise not
+# have, at a price that pays zero over what he paid.
+#
+# Whether those fills are GOOD is precisely the open question -- the
+# ask coming back to his price is also what "the market moved against
+# him" looks like -- so they are stamped lane='rest' and graded as their
+# own cohort with their own interval. Nothing about the IOC path
+# changes: this runs only after it has already failed, so no fill we
+# get today can be delayed, repriced or lost by it.
+#
+# BUDGET IS A HARD CAP ON REALISED FILLS, not attempts. Once the lane
+# has filled its authorisation it disables itself and says so in the
+# census; an owner decision re-opens it, never a retry.
+REST_BID_ENABLED = os.environ.get("PMUS_REST_BID", "on").lower() in (
+    "1", "on", "true", "yes")
+REST_BID_TTL_S = max(0.5, min(15.0, float(
+    os.environ.get("PMUS_REST_BID_TTL_S", "5"))))
+REST_BID_BUDGET_USD = float(os.environ.get("PMUS_REST_BID_BUDGET_USD", "2500"))
+
 
 def _tol_overrides() -> dict[str, float]:
     """Per-whale tolerance from PMUS_COPY_TOL_BY_WHALE ("rn1:3,x:0").
@@ -2769,6 +2973,27 @@ def wire_limit(limit: float, intent: str | None) -> float:
     return math.ceil(round((1.0 - limit) * 100, 6)) / 100.0
 
 
+def rest_tick(wire: float, intent: str | None) -> float:
+    """The price the adapter will actually SEND for a rest bid, on the
+    venue's cent tick, rounded so it can never pay above him.
+
+    Round five (2026-09-01): the adapter formats every price to two
+    decimals (pmus._amount), so the venue lists 0.47 for a wire of
+    0.474 -- and the lost-bid fingerprint compared against 0.474, which
+    matched nothing for any long-leg whale price off an exact cent
+    (most of them: ingestion rounds to six). One number, used for the
+    placement AND the fingerprint. Floored for a long (the contract is
+    his outcome; 'his price or better' means at or below him); for a
+    short wire_limit has already ceiled the sell limit, which is the
+    same direction -- pay no more than intended.
+    """
+    import math
+
+    if _use_short_math(intent):
+        return round(float(wire), 2)
+    return math.floor(round(float(wire) * 100.0, 6)) / 100.0
+
+
 def fill_cash(filled_shares: float, fill_price: float | None,
               intent: str | None) -> float:
     """What a fill actually COST us, in dollars.
@@ -2858,14 +3083,21 @@ def per_fill_usd(whale_username: str | None,
     market-type multiplier (spreads x1.5 everywhere, owner go
     2026-08-20). A 0.00 cell stays a block."""
     w = (whale_username or "").lower()
-    base = None
+    sport_cell = None
     if slug:
         from .copy_sports import sport_of
 
-        ov = PER_FILL_BY_WHALE_SPORT.get((w, sport_of(slug)))
-        if ov is not None:
-            base = ov
-    if base is None:
+        sport_cell = PER_FILL_BY_WHALE_SPORT.get((w, sport_of(slug)))
+    stored = (_clip_override or {}).get(w)
+    if stored is not None:
+        # THE RULES' CLIP (roster_auto -> ingestion_state) replaces the
+        # hardcoded whale clip and the default. A hand-measured (whale,
+        # sport) cell can only TIGHTEN it: a 0.00 cell stays a block,
+        # and a demoted whale's 0 stays 0 whatever the cell says.
+        base = stored if sport_cell is None else min(stored, sport_cell)
+    elif sport_cell is not None:
+        base = sport_cell
+    else:
         base = PER_FILL_BY_WHALE.get(w, PENNY_TRIAL_PER_FILL_USD)
     if slug and base > 0:
         from .copy_sports import market_type_of
@@ -3245,20 +3477,743 @@ def _us_slug_candidates(global_slug: str, outcome: str) -> list[str]:
 
 
 async def _reap_stale_submitting(pool) -> None:
-    """Terminal-ize 'submitting' rows whose process died mid-order
-    (audit 2026-08-21). A phantom submitting row is load-bearing in two
+    """Terminal-ize 'submitting' rows whose process died mid-order.
+
+    (audit 2026-08-21) A phantom submitting row is load-bearing in two
     bad ways: copy rows hold the one-fill-per-asset claim forever (the
     asset can never be copied again), and manual rows would wedge the
     migration-023 in-flight index. Ten minutes is far past any real
-    submit (mapping + preview + IOC is tens of seconds); if the orphaned
-    venue order did fill, the money is at the venue either way and the
-    row's error text says exactly what to reconcile."""
+    submit (mapping + preview + IOC is tens of seconds).
+
+    RECONCILE, DO NOT BLIND-MARK (2026-09-01, rest lane review). A row
+    that carries an order_id names a venue order that may be RESTING --
+    the rest lane persists its GTC id the instant the venue returns it
+    for exactly this moment. Marking such a row 'error' would let the
+    sweep re-qualify the trade and stack a second bid on a market where
+    the first is still live, and would leave any fill in the window in
+    no ledger row at all. So: cancel, read the terminal state, and write
+    what actually happened. The blind 'error' path survives only for
+    rows with NO order_id, where there is nothing to ask the venue.
+    """
+    # NEVER RAISES. This is pre-flight housekeeping on the manual desk
+    # and a tick in the sweep; a reaper that throws takes a real order
+    # down with it (the desk tests caught exactly that when this grew
+    # a fetch). A pass that cannot run is skipped and logged; the rows
+    # keep their claim and the next pass tries again.
+    try:
+        from . import pmus
+
+        rows = await pool.fetch(
+            "SELECT id, order_id, us_market_slug, requested_shares, status, "
+            "       error, his_price::float8 AS his_price, "
+            "       limit_price::float8 AS limit_price, "
+            "       COALESCE(whale_username, '') AS whale_username, "
+            "       (raw->'pre_ids')::text AS pre_ids, "
+            "       EXTRACT(EPOCH FROM (now() - placed_at))::float8 AS age_s, "
+            f"       {ORDER_INTENT_SQL} AS intent "
+            "FROM live_orders WHERE (status = 'submitting' "
+            "AND placed_at < now() - interval '10 minutes') "
+            # NAMED ROWS ARE REVISITED (round seven): a row named "venue
+            # holds a POSITION" is re-asked every pass -- a fill of ours
+            # may appear in the trade log, or the position may clear --
+            # until the naming horizon, and is never left to evaporate.
+            "OR (status = 'error' AND (error LIKE 'venue holds a POSITION%' "
+            "OR error LIKE 'ORPHAN FILL RECORDED%' "
+            "OR error LIKE 'venue has no record of order%') "
+            f"AND placed_at > now() - interval '{_NAMED_HORIZON}')")
+        for r in rows:
+            # ONE ROW'S FAILURE IS ONE ROW'S (round eight): a write that
+            # raises -- the one-fill-per-asset index on a 'filled'
+            # UPDATE -- used to abandon every later row in the pass.
+            try:
+                await _reap_one_submitting_row(pool, pmus, r)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("reaper: row %s skipped this pass (%s: %s)",
+                            _row_get(r, "id"), type(exc).__name__,
+                            str(exc)[:120])
+    except Exception as exc:  # noqa: BLE001 — housekeeping only
+        log.warning("stale-submitting reaper skipped this pass (%s: %s)",
+                    type(exc).__name__, str(exc)[:120])
+
+
+async def _reap_one_submitting_row(pool, pmus, r) -> None:
+    oid = r["order_id"]
+    slug = r["us_market_slug"]
+    age = float(_row_get(r, "age_s") or 0.0)
+    if str(_row_get(r, "whale_username") or "") in _DESK_SLEEVES:
+        # THE DESK'S TICKET IS THE OWNER'S (round nine, reproduced): a
+        # manual limit row killed between the venue accepting its GTC
+        # and the 'open' write was fingerprint-matched to the owner's
+        # own resting ticket, adopted, and CANCELLED by the copy lane's
+        # cancel-and-read. A desk row is handed to the desk: the id it
+        # carries -- or the one its own fingerprint finds on the book --
+        # is written with status 'open', which sync_open_manual_orders
+        # reconciles at the owner's pace. Nothing here cancels it. A
+        # desk row with no id and no bid on its book is blind-marked as
+        # before this branch, never named and never reconciled from the
+        # trade log, so a desk row can never carry a copy-lane fill.
+        if _row_get(r, "status") != "submitting":
+            return
+        if not oid and slug:
+            try:
+                his = float(_row_get(r, "his_price") or 0.0)
+                shares = float(_row_get(r, "requested_shares") or 0.0)
+            except (TypeError, ValueError):
+                his, shares = 0.0, 0.0
+            if 0.0 < his < 1.0 and shares >= 1:
+                placed_ts = time.time() - age
+                found, readable = await _find_lost_rest_bid(
+                    pmus, slug, shares,
+                    _fingerprint_cents(his, _row_get(r, "intent")),
+                    window=(placed_ts - _ORPHAN_SKEW_S,
+                            placed_ts + _ORPHAN_MATCH_S))
+                if not readable:
+                    return
+                if found is not None:
+                    oid = str(found.get("order_id"))
+        if oid:
+            await pool.execute(
+                "UPDATE live_orders SET status='open', order_id=$2, "
+                "error=NULL WHERE id=$1 AND status='submitting'",
+                r["id"], str(oid))
+            log.warning("reaper: desk row %s handed to the desk as 'open' "
+                        "with order %s (never cancelled here)", r["id"], oid)
+            return
+        await pool.execute(
+            "UPDATE live_orders SET status = 'error', "
+            "error = 'stale submitting row reaped — process died "
+            "mid-order; venue holds no matching bid; reconcile "
+            "against the venue account' "
+            "WHERE id = $1 AND status = 'submitting'", r["id"])
+        return
+    if _row_get(r, "status") == "error":
+        err = str(_row_get(r, "error") or "")
+        if err.startswith("ORPHAN FILL RECORDED"):
+            # AN ORPHAN FILL WHOSE CLAIM MAY HAVE FREED: promote it to
+            # 'filled' so it is graded and exited like any copy. Refused
+            # by the index while another row still holds the asset.
+            try:
+                await pool.execute(
+                    "UPDATE live_orders SET status='filled', error=$2 "
+                    "WHERE id=$1 AND status='error' "
+                    "AND error LIKE 'ORPHAN FILL RECORDED%'", r["id"],
+                    "reconciled by reaper: orphan fill promoted once the "
+                    "asset claim freed")
+                log.warning("reaper: promoted ORPHAN FILL on row %s to "
+                            "'filled'", r["id"])
+            except Exception:  # noqa: BLE001 — claim still held elsewhere
+                pass
+            return
+        if err.startswith("venue has no record of order") and oid and slug:
+            # A NAMED NO-RECORD ROW IS RE-ASKED (round eleven): the order
+            # endpoint may answer now; failing that, the venue's own
+            # trade log is read for fills of exactly that order. Until
+            # one of them speaks the row stays named and un-buyable.
+            res = await _reconcile_row_by_id(pool, pmus, r["id"], oid, slug,
+                                             r["intent"], age)
+            if res in ("no_record", "no_record_yet"):
+                await _book_from_log_by_oid(pool, pmus, r, oid, age)
+            return
+        if slug:
+            await _adopt_lost_bid(pool, pmus, r, age)
+        return
+    if not oid and slug:
+        # NO ID, BUT A MARKET (round five). A row killed -- or whose
+        # placement response was lost -- between the venue accepting
+        # the GTC and the persist has exactly this shape, and the bid
+        # may be live or FILLED. Ask the venue for our fingerprint
+        # before giving up on it: found -> adopt and reconcile like any
+        # other id; unreadable -> leave for the next pass; nothing there
+        # -> the blind mark, which is now a statement about the book and
+        # the trade log, not a guess.
+        oid = await _adopt_lost_bid(pool, pmus, r, age)
+        if oid in ("unreadable", "booked", "position"):
+            return
+    if not oid or not slug:
+        await pool.execute(
+            "UPDATE live_orders SET status = 'error', "
+            "error = 'stale submitting row reaped — process died "
+            "mid-order; venue holds no matching bid; reconcile "
+            "against the venue account' "
+            "WHERE id = $1 AND status = 'submitting'", r["id"])
+        return
+    res = await _reconcile_row_by_id(pool, pmus, r["id"], oid, slug,
+                                     r["intent"], age)
+    if res == "no_record":
+        # The venue handed out this id and now has no record of it: its
+        # trade log is the other record (round eleven).
+        await _book_from_log_by_oid(pool, pmus, r, oid, age)
+
+
+async def _adopt_lost_bid(pool, pmus, r, age_s: float) -> str | None:
+    """For a 'submitting' row with no order id: find our bid on the
+    book by fingerprint and write its id onto the row; failing that,
+    ask the ACCOUNT. Returns the id, None when the venue holds nothing
+    (blind-mark), "booked" / "position" when the account answered and
+    the row was written here, or "unreadable" (leave it)."""
+    slug = r["us_market_slug"]
+    try:
+        his = float(_row_get(r, "his_price") or 0.0)
+        shares = float(_row_get(r, "requested_shares") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 < his < 1.0) or shares < 1:
+        return None
+    intent = _row_get(r, "intent")
+    placed_ts = time.time() - age_s
+    cents = _fingerprint_cents(his, intent)
+    revisit = _row_get(r, "status") == "error"
+    # ORDERS THAT PREDATE OURS (round ten): the rest lane's snapshot of
+    # the book before it placed, persisted on the row; none of them can
+    # be our order, however well one matches.
+    pre_ids = _pre_ids_of(_row_get(r, "pre_ids"))
+    if not revisit:
+        # THE OPEN BOOK, ONLY FOR A FRESH ROW AND ONLY INSIDE THE ROW'S
+        # OWN WINDOW (round eight): a named row revisited 40 hours on
+        # adopted -- and then cancelled and booked -- the owner's fresh
+        # app bid at the whale's cent. A rest bid of ours cannot still
+        # be resting hours later (the venue reaper cancels at TTL+60 s),
+        # so the revisit asks only the trade log and the account.
+        found, readable = await _find_lost_rest_bid(
+            pmus, slug, shares, cents,
+            window=(placed_ts - _ORPHAN_SKEW_S, placed_ts + _ORPHAN_MATCH_S),
+            exclude=pre_ids)
+        if not readable:
+            log.warning("reaper: venue unreadable while looking for row %s's "
+                        "bid — leaving it for the next pass", r["id"])
+            return "unreadable"
+        if found is not None:
+            oid = str(found.get("order_id"))
+            await pool.execute(
+                "UPDATE live_orders SET order_id=$2, status='submitting', "
+                "error=NULL WHERE id=$1 AND order_id IS NULL", r["id"], oid)
+            log.warning("reaper: ADOPTED lost bid %s onto row %s (%s)", oid,
+                        r["id"], slug)
+            return oid
+    # NOTHING OPEN. A lost GTC that FILLED is not on the open book
+    # (round six): the open-orders listing is exactly that, and a bid
+    # resting at his price is the one most likely to fill. Ask the
+    # venue's own TRADE LOG for our fingerprint -- BUY fills at our cent
+    # on this market inside the row's window -- and book exactly those.
+    # NEVER the account position (round seven): the account is shared
+    # with the owner, and a position of "our size" was his in every
+    # reproduction that mattered; booking it would have sold his shares
+    # on the whale's exit. A position the trade log cannot attribute to
+    # us is NAMED in a text the sweep cannot reclaim and the exit path
+    # treats as in flight, and this row is revisited every pass.
+    try:
+        fills = await asyncio.to_thread(pmus.recent_trades, slug,
+                                        placed_ts - _ORPHAN_SKEW_S)
+    except Exception as exc:  # noqa: BLE001 — unreadable: leave the row
+        log.error("reaper: trade log unreadable while reconciling row %s "
+                  "(%s: %s) — leaving it for the next pass", r["id"],
+                  type(exc).__name__, str(exc)[:120])
+        return "unreadable"
+    # OURS BY ORDER, NOT BY CENT (round nine, the blocker). Price, side
+    # and time alone booked the OWNER's buy at the whale's cent inside
+    # our window as our copy, and mirror_exit then sold his shares. The
+    # venue's execution record names the ORDER each fill belongs to;
+    # a fill is ours only when that order is exactly our size, on our
+    # leg's side, at a cent this row authorised (the rest cent or the
+    # IOC cent), inside the row's window, and unknown to every other
+    # ledger row. A fill whose order the venue did not name is UNKNOWN,
+    # never ours. The row is then written from the venue's ORDER
+    # record by id -- the definitive quantity and average price, which
+    # also books an IOC that filled below its limit. The window is
+    # bounded on BOTH ends: a lost order not on the open book was
+    # filled or cancelled within minutes of placement, so a fill hours
+    # later is the owner's (round eight, reproduced).
+    lo_ts = placed_ts - _ORPHAN_SKEW_S
+    hi_ts = placed_ts + _LOST_FILL_WINDOW_S
+    limit_px = _row_get(r, "limit_price")
+    try:
+        known = {str(x["order_id"]) for x in await pool.fetch(
+            "SELECT order_id FROM live_orders WHERE order_id IS NOT NULL "
+            "AND us_market_slug = $1 AND id <> $2", slug, r["id"])}
+    except Exception:  # noqa: BLE001 — cannot exclude: cannot attribute
+        return "unreadable"
+    known |= pre_ids
+    in_window = [f for f in fills or []
+                 if lo_ts <= float(f.get("ts") or 0.0) <= hi_ts]
+    ours = [f for f in in_window
+            if _lost_fill_is_ours(f, his, intent, shares, lo_ts, hi_ts,
+                                  limit_px)
+            and str(f.get("order_id") or "") not in known]
+    if in_window and any(f.get("order_qty") is None for f in in_window):
+        log.error("reaper: %d fill(s) on %s inside row %s's window carry "
+                  "no execution order in the venue feed — a fill with no "
+                  "order is UNKNOWN and is never booked as ours",
+                  sum(1 for f in in_window if f.get("order_qty") is None),
+                  slug, r["id"])
+    ids = {str(f["order_id"]) for f in ours if f.get("order_id")}
+    if len(ids) > 1:
+        log.error("reaper: %d distinct orders of row %s's exact size at "
+                  "its cent on %s inside its window — cannot attribute; "
+                  "naming the row", len(ids), r["id"], slug)
+        ours = []
+    if len(ids) == 1:
+        oid = next(iter(ids))
+        keep = False
+        try:
+            await pool.execute(
+                "UPDATE live_orders SET order_id=$2, status='submitting', "
+                "error=NULL WHERE id=$1 AND order_id IS NULL", r["id"], oid)
+        except Exception as exc:  # noqa: BLE001
+            if "unique" not in type(exc).__name__.lower() and \
+                    "unique" not in str(exc).lower():
+                return "unreadable"
+            keep = True          # another row holds the asset claim
+        res = await _reconcile_row_by_id(pool, pmus, r["id"], oid, slug,
+                                         intent, age_s, keep_status=keep)
+        if res in ("filled", "unfilled"):
+            await _stamp_lost_fill_lane(pool, r["id"], ours, his, intent)
+            log.warning("reaper: row %s reconciled from the venue ORDER "
+                        "record %s named by its own trade log (%s)",
+                        r["id"], oid, res)
+            return "booked"
+        if res == "left":
+            # STILL LIVE IS STILL LIVE (round ten): the venue says the
+            # order named by its own log is not terminal yet. The row
+            # now carries the id, so the next pass reconciles it by id
+            # and books whatever it ends as; booking today's partial sum
+            # here would terminalise the row under a live order.
+            return "unreadable"
+        # 'no_record': the venue showed the fill in its log but would
+        # not name the order it belongs to. Book what the log itself
+        # shows, below.
+    qty = sum(float(f.get("qty") or 0.0) for f in ours)
+    if 0.0 < qty <= float(int(shares)) + 1e-6:
+        px = float(ours[0]["price"])
+        fill_intent = intent or "ORDER_INTENT_BUY_LONG"
+        spent = fill_cash(qty, px, fill_intent)
+        await pool.execute(
+            "UPDATE live_orders SET status='filled', filled_shares=$2, "
+            "fill_price=$3, filled_usd=$4, error=$5 "
+            "WHERE id=$1 AND status IN ('submitting', 'error')",
+            r["id"], qty, px, spent,
+            f"reconciled from the venue trade log: lost order of our exact "
+            f"size filled while unattended ({len(ours)} fill(s) inside the "
+            f"row's window)")
+        await _stamp_lost_fill_lane(pool, r["id"], ours, his, intent)
+        log.warning("reaper: BOOKED lost fill of %s @ %s on row %s from the "
+                    "venue trade log", qty, px, r["id"])
+        return "booked"
+    if str(_row_get(r, "whale_username") or "") in _DESK_SLEEVES:
+        return None          # the desk's position is the owner's, by design
+    # No fill of ours in the log. Is there a position the ledger cannot
+    # explain at all? Only then is the row named; a clean account is a
+    # clean blind mark.
+    try:
+        held, _avg = await _pm_held(slug)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("reaper: account unreadable while reconciling row %s "
+                    "(%s) — leaving it for the next pass", r["id"],
+                    type(exc).__name__)
+        return "unreadable"
+    if not held or held <= 0:
+        if _row_get(r, "status") == "error":
+            # A named row whose position has cleared without a fill of
+            # ours: resolved, and the exit path stops waiting on it.
+            await pool.execute(
+                "UPDATE live_orders SET status='unfilled', error=$2 "
+                "WHERE id=$1 AND status='error'", r["id"],
+                "reconciled by reaper: the position this row was named for "
+                "has cleared; no fill of ours in the venue trade log")
+            return "booked"
+        return None
+    try:
+        explained = float(await pool.fetchval(
+            "SELECT COALESCE(SUM(filled_shares), 0) FROM live_orders "
+            "WHERE us_market_slug = $1 AND id <> $2 "
+            "AND status IN ('filled', 'exiting')", slug, r["id"]) or 0.0)
+    except Exception:  # noqa: BLE001
+        return "unreadable"
+    if float(held) - explained <= 1e-6:
+        return None          # every share on the account is somebody's row
     await pool.execute(
-        "UPDATE live_orders SET status = 'error', "
-        "error = 'stale submitting row reaped — process died mid-order; "
-        "reconcile against the venue account' "
-        "WHERE status = 'submitting' "
-        "AND placed_at < now() - interval '10 minutes'")
+        "UPDATE live_orders SET status='error', error=$2 "
+        "WHERE id=$1 AND status IN ('submitting', 'error')", r["id"],
+        f"venue holds a POSITION on this market that no ledger row explains "
+        f"(held {held}, explained {int(explained)}, ours would be "
+        f"{int(shares)}; no fill at our cent in the trade log) — reconcile "
+        f"against the venue account")
+    if _row_get(r, "status") != "error":
+        log.error("reaper: venue holds a POSITION of %s on %s that no ledger "
+                  "row explains (row %s would be %s) — named; the sweep "
+                  "cannot reclaim it and the exit path treats it as in "
+                  "flight", held, slug, r["id"], int(shares))
+    return "position"
+
+
+async def _reconcile_row_by_id(pool, pmus, row_id, oid: str, slug: str,
+                               intent: str | None, age_s: float,
+                               keep_status: bool = False) -> str:
+    """cancel -> read until terminal -> write what happened.
+
+    Shared by the ledger reaper (a 'submitting' row with an id) and the
+    venue reaper (an orphan it just matched to a row). Returns 'filled',
+    'unfilled', 'left' or 'no_record'. With keep_status the fill fields
+    are written but the row's status is left as it is (the row cannot
+    re-enter 'filled' because another row holds the asset claim); the
+    error text says so, so the fill is recorded and never silent."""
+    try:
+        await asyncio.to_thread(pmus.cancel_order, oid, slug)
+    except Exception:  # noqa: BLE001 — read anyway
+        pass
+    st = None
+    for _i in range(3):
+        try:
+            st = await asyncio.to_thread(pmus.order_status, oid)
+        except Exception:  # noqa: BLE001
+            st = None
+        if _rest_terminal(st):
+            break
+        await asyncio.sleep(0.3)
+    if not _rest_terminal(st):
+        if st is None and age_s >= _NO_RECORD_GIVE_UP_S:
+            # THE VENUE HAS NAMED NO SUCH ORDER FOR AN HOUR. Every read
+            # came back empty (pmus.order_status's "no record" shape) or
+            # raised. An order the venue cannot name is not resting on
+            # its book; what it may have DONE is unknowable from here,
+            # so the row is marked for reconciliation against the
+            # account -- loudly, and only after a bound, so a row cannot
+            # hold its market's one-per-asset claim forever on a venue
+            # that will never answer. Inside the bound it is left alone.
+            # The text is a NAMED state (round eleven): the sweep, the
+            # reclaim and never-add refuse to re-buy while it stands, the
+            # exit path treats it as in flight, and the reaper revisits
+            # it -- the venue's trade log may still name the fill.
+            await pool.execute(
+                "UPDATE live_orders SET status='error', error=$2 "
+                "WHERE id=$1 AND status IN ('submitting', 'error')", row_id,
+                f"venue has no record of order {oid} after "
+                f"{int(age_s)}s — reconcile against the venue account")
+            log.error("reaper: venue has NO RECORD of order %s on row %s "
+                      "after %ss — named; reconcile the account",
+                      oid, row_id, int(age_s))
+            return "no_record"
+        if st is None:
+            # NO RECORD IS NOT "STILL LIVE" (round eleven, reproduced):
+            # every read came back empty or raised, so nothing says the
+            # order is resting. Reported apart from 'left' so a caller
+            # holding the venue's own trade log can book from it instead
+            # of waiting an hour for a record that never comes.
+            log.warning("reaper: venue has no record of order %s on row %s "
+                        "yet (%ss); leaving it for the next pass",
+                        oid, row_id, int(age_s))
+            return "no_record_yet"
+        # Still not terminal after a cancel and three reads: leave it
+        # for the next pass rather than guess. The row keeps its claim
+        # and never-add keeps refusing to stack on it.
+        log.warning("reaper: order %s on row %s still non-terminal; "
+                    "leaving 'submitting' for the next pass", oid, row_id)
+        return "left"
+    filled = float(st.get("filled_shares") or 0)
+    if filled > 0:
+        px = st.get("avg_px") or st.get("price")
+        # THE SIDE. The row's intent comes from its raw, which the rest
+        # cycle persists with the id; if that raw is absent (killed
+        # between create and persist), the venue's own order record
+        # names it. Never sideless.
+        _int = intent or st.get("intent")
+        spent = fill_cash(filled, float(px) if px else None, _int)
+        if keep_status:
+            await pool.execute(
+                "UPDATE live_orders SET order_id=$6, filled_shares=$2, "
+                "fill_price=$3, filled_usd=$4, error=$5 WHERE id=$1",
+                row_id, filled, float(px) if px else None, spent,
+                "ORPHAN FILL RECORDED on a row that cannot re-enter 'filled' "
+                "(another row holds this asset's claim) — reconcile against "
+                "the venue account", oid)
+        else:
+            await pool.execute(
+                "UPDATE live_orders SET status='filled', "
+                "filled_shares=$2, fill_price=$3, filled_usd=$4, "
+                "error=$5 WHERE id=$1 AND status IN ('submitting', 'error')",
+                row_id, filled, float(px) if px else None, spent,
+                "reconciled by reaper: resting order filled while unattended")
+        try:
+            # THE VENUE NAMES THE LANE (round ten): an IOC/FOK record is
+            # an IOC fill whatever the row's lane says; a resting order
+            # is a rest fill only where no lane was stamped.
+            tif = str(st.get("tif") or "").upper()
+            lane = "ioc" if tif in _IOC_TIFS else None
+            await pool.execute(
+                "UPDATE live_orders SET lane=COALESCE($2, lane, 'rest') "
+                "WHERE id=$1", row_id, lane)
+        except Exception:  # noqa: BLE001 — stamp is best-effort
+            pass
+        log.warning("reaper: reconciled UNATTENDED FILL %s shares on "
+                    "row %s (order %s)%s", filled, row_id, oid,
+                    " — status kept, asset claim held elsewhere"
+                    if keep_status else "")
+        return "filled"
+    if keep_status:
+        await pool.execute(
+            "UPDATE live_orders SET order_id=$2, error='reconciled by "
+            "reaper: orphan cancelled unfilled (asset claim held by another "
+            "row)' WHERE id=$1", row_id, oid)
+        return "unfilled"
+    await pool.execute(
+        "UPDATE live_orders SET status='unfilled', "
+        "error='reconciled by reaper: resting order cancelled "
+        "unfilled' WHERE id=$1 AND status IN ('submitting', 'error')", row_id)
+    return "unfilled"
+
+
+async def _book_from_log_by_oid(pool, pmus, r, oid: str, age_s: float) -> bool:
+    """The venue's ORDER endpoint has no record of an id the venue itself
+    handed out (or its own trade log named); the TRADE LOG is its other
+    record. Book the BUY fills of exactly that order inside the row's
+    window -- attribution by order id, never by price -- and nothing
+    else. Returns True when a fill was written. (Round eleven,
+    reproduced: a log-named fill whose order the endpoint could not
+    name ended in an unprotected 'error' row, unbooked and re-buyable.)
+    """
+    slug = r["us_market_slug"]
+    placed_ts = time.time() - age_s
+    lo_ts, hi_ts = placed_ts - _ORPHAN_SKEW_S, placed_ts + _LOST_FILL_WINDOW_S
+    try:
+        fills = await asyncio.to_thread(pmus.recent_trades, slug, lo_ts)
+    except Exception as exc:  # noqa: BLE001 — unreadable is not "no fill"
+        log.warning("reaper: trade log unreadable for row %s (%s)", r["id"],
+                    type(exc).__name__)
+        return False
+    ours = [f for f in fills or []
+            if str(f.get("order_id") or "") == str(oid)
+            and "BUY" in str(f.get("side") or "").upper()
+            and lo_ts <= float(f.get("ts") or 0.0) <= hi_ts]
+    qty = sum(float(f.get("qty") or 0.0) for f in ours)
+    try:
+        shares = float(_row_get(r, "requested_shares") or 0.0)
+    except (TypeError, ValueError):
+        shares = 0.0
+    if not (0.0 < qty <= float(int(shares)) + 1e-6):
+        return False
+    px = float(ours[0]["price"])
+    intent = _row_get(r, "intent")
+    spent = fill_cash(qty, px, intent or "ORDER_INTENT_BUY_LONG")
+    text = (f"reconciled from the venue trade log: order {oid} has no record "
+            f"at the order endpoint but {len(ours)} fill(s) in the log")
+    try:
+        await pool.execute(
+            "UPDATE live_orders SET status='filled', filled_shares=$2, "
+            "fill_price=$3, filled_usd=$4, error=$5 "
+            "WHERE id=$1 AND status IN ('submitting', 'error')",
+            r["id"], qty, px, spent, text)
+    except Exception as exc:  # noqa: BLE001
+        if "unique" not in type(exc).__name__.lower() and \
+                "unique" not in str(exc).lower():
+            return False
+        # another row holds the asset claim: record the fill, keep status
+        await pool.execute(
+            "UPDATE live_orders SET filled_shares=$2, fill_price=$3, "
+            "filled_usd=$4, error=$5 WHERE id=$1", r["id"], qty, px, spent,
+            "ORPHAN FILL RECORDED on a row that cannot re-enter 'filled' "
+            "(another row holds this asset's claim) — " + text)
+    try:
+        his = float(_row_get(r, "his_price") or 0.0)
+    except (TypeError, ValueError):
+        his = 0.0
+    await _stamp_lost_fill_lane(pool, r["id"], ours, his, intent)
+    log.warning("reaper: BOOKED %s @ %s on row %s from the venue trade log "
+                "for order %s (no record at the order endpoint)",
+                qty, px, r["id"], oid)
+    return True
+
+
+async def _reap_stale_resting_bids(pool=None) -> int:
+    """Cancel any resting BUY on the venue older than the rest window.
+
+    THE NET UNDER THE NET. The ledger reaper above finds a bid through
+    the row that names it. This one asks the VENUE, so a bid the ledger
+    never saw -- placed in the millisecond before the process was
+    killed, before the id could be persisted -- is still found and
+    cancelled. Only BUY-side, only older than REST_BID_TTL_S plus a
+    minute of margin: the manual desk's resting orders are the owner's
+    and are not touched, which is what the whale_username filter on
+    sync_open_manual_orders already protects on the ledger side.
+    Returns the number cancelled; never raises.
+    """
+    from . import pmus
+
+    try:
+        orders = await asyncio.to_thread(pmus.open_orders)
+    except Exception as exc:  # noqa: BLE001 — a blind reaper is a no-op
+        log.warning("resting-bid reaper: open_orders unreadable (%s)",
+                    type(exc).__name__)
+        return 0
+    # THE DESK'S RESTING ORDERS ARE THE OWNER'S. Collect their ids from
+    # the ledger so a manual GTC is never swept, whatever its age.
+    manual_ids: set[str] = set()
+    if pool is not None:
+        try:
+            manual_ids = {str(r["order_id"]) for r in await pool.fetch(
+                "SELECT order_id FROM live_orders WHERE order_id IS NOT "
+                "NULL AND COALESCE(whale_username,'') = 'manual'")}
+        except Exception:  # noqa: BLE001 — unreadable: sweep nothing
+            # Without the exclusion list we cannot tell a desk order
+            # from an orphaned bid, so we cancel neither.
+            log.warning("resting-bid reaper: manual ids unreadable — "
+                        "skipping this pass")
+            return 0
+    # ONLY ROWS THAT CAN OWN AN ORDER THE LEDGER NEVER SAW. The owner
+    # rests bids directly in the venue app on this shared account, and
+    # those have no ledger row at all -- an account-wide sweep cancelled
+    # them (re-review 2026-09-01, reproduced). Round two narrowed the
+    # sweep to markets with ANY copy row in the last hour; round three
+    # reproduced the remaining hole: a 59-minute-old FILLED copy row on
+    # S put the owner's two-minute-old app bid on S in scope, and the
+    # sweep cancelled it. A row that reached a terminal status has no
+    # unpersisted order behind it -- an IOC never rests, and a rest
+    # outcome was cancelled or filled and written -- so scope is exactly
+    # the orphan's signature: a 'submitting' row with NO order_id (killed
+    # between orders.create and the persist), or the ledger reaper's own
+    # blind mark of that same row ten minutes on. And the bid is matched
+    # to its row IN TIME below, not by market alone: it was created
+    # within seconds of the row, never before it.
+    try:
+        scope: dict[str, list[dict]] = {}
+        if pool is not None:
+            for r in await pool.fetch(
+                    "SELECT id, us_market_slug, "
+                    "       EXTRACT(EPOCH FROM placed_at)::float8 AS placed_ts, "
+                    "       his_price::float8 AS his_price, "
+                    "       requested_shares::float8 AS requested_shares, "
+                    "       (raw->'pre_ids')::text AS pre_ids, "
+                    f"       {ORDER_INTENT_SQL} AS intent "
+                    "FROM live_orders WHERE us_market_slug IS NOT NULL "
+                    "AND COALESCE(whale_username,'') NOT IN ('manual','underdog') "
+                    "AND order_id IS NULL "
+                    "AND (status = 'submitting' OR (status = 'error' AND "
+                    "     error LIKE 'stale submitting row reaped%')) "
+                    "AND placed_at > now() - interval '60 minutes'"):
+                scope.setdefault(str(r["us_market_slug"]).lower(), []).append(
+                    {"id": _row_get(r, "id"), "placed_ts": float(r["placed_ts"]),
+                     "intent": _row_get(r, "intent"),
+                     "his_price": _row_get(r, "his_price"),
+                     "shares": _row_get(r, "requested_shares"),
+                     "pre_ids": _pre_ids_of(_row_get(r, "pre_ids"))})
+    except Exception:  # noqa: BLE001 — unreadable: sweep nothing
+        log.warning("resting-bid reaper: copy rows unreadable — "
+                    "skipping this pass")
+        return 0
+    if not scope:
+        return 0
+    cutoff_s = REST_BID_TTL_S + 60.0
+    n = 0
+    now = time.time()
+    for o in orders:
+        if o.get("side") != "BUY" or not o.get("order_id"):
+            continue
+        if str(o.get("order_id")) in manual_ids:
+            continue
+        slug = str(o.get("us_market_slug") or "").lower()
+        if slug not in scope:
+            continue
+        created_ts = _order_created_ts(o.get("created_at"))
+        if created_ts is None:
+            # AN UNKNOWN AGE IS NOT AN OLD ONE. Treating it as old put
+            # the fail-open default on the cancel side: a shape surprise
+            # in createTime would have cancelled the lane's own bids two
+            # seconds into their window. Skip and say so.
+            log.warning("resting-bid reaper: order %s has no parseable "
+                        "age — leaving it", o.get("order_id"))
+            continue
+        age = now - created_ts
+        if age < cutoff_s:
+            continue
+        # THE BID MUST BELONG TO THE ROW IN TIME. The row is INSERTed
+        # and slug-stamped seconds before placement (mapping, preview,
+        # IOC, then the GTC), so an orphan's createTime falls inside a
+        # short window AFTER its row's placed_at. A bid created before
+        # the row, or long after it, is somebody else's -- the owner's.
+        owner_row = next(
+            (row for row in scope[slug]
+             if row["placed_ts"] - _ORPHAN_SKEW_S <= created_ts
+             <= row["placed_ts"] + _ORPHAN_MATCH_S
+             # an order the row saw on the book BEFORE it placed is not
+             # the row's (round ten: the lane's snapshot, persisted)
+             and str(o.get("order_id")) not in row.get("pre_ids", ())), None)
+        if owner_row is None:
+            continue
+        # TIME IS NOT ENOUGH; THE BID MUST CARRY OUR FINGERPRINT (round
+        # six, reproduced: the owner's 500 @0.61 rested 20 s before a
+        # stranded row on the same market was cancelled AND booked as
+        # our 100 @0.474 rest fill -- and mirror_exit would then have
+        # sold his position out from under him). Our own orphan always
+        # carries the cent the adapter sent for the row's whale price
+        # and the row's whole share count; anything else is not ours,
+        # and is neither cancelled nor adopted.
+        try:
+            his = float(owner_row.get("his_price") or 0.0)
+            want = float(owner_row.get("shares") or 0.0)
+        except (TypeError, ValueError):
+            his, want = 0.0, 0.0
+        if not (0.0 < his < 1.0) or want < 1:
+            continue
+        cents = _fingerprint_cents(his, owner_row.get("intent") or o.get("intent"))
+        if not _bid_matches(o, cents, want):
+            log.warning("resting-bid reaper: BUY %s on %s is inside row %s's "
+                        "time window but is not our bid (price %s qty %s vs "
+                        "ours %s x %s) — leaving it", o.get("order_id"), slug,
+                        owner_row.get("id"), o.get("price"), o.get("quantity"),
+                        sorted(cents), int(want))
+            continue
+        try:
+            c = await asyncio.to_thread(pmus.cancel_order, o["order_id"],
+                                        o.get("us_market_slug") or "")
+            if c.get("ok"):
+                n += 1
+                log.warning("resting-bid reaper: cancelled unattended BUY "
+                            "%s on %s (age %ss)", o["order_id"],
+                            o.get("us_market_slug"),
+                            round(age, 1) if age is not None else "?")
+        except Exception:  # noqa: BLE001
+            pass
+        # ADOPT, THEN RECONCILE (round five). Cancelling and walking
+        # away wrote nothing: a bid that had already filled 40 of 100
+        # shares left a position on the account with no ledger row --
+        # never graded, never exited, never charged to the budget. The
+        # matched row takes the order id and is reconciled the same way
+        # a persisted id is: cancel, read the terminal state, write
+        # filled or unfilled. Best-effort; the cancel above stands.
+        if owner_row.get("id") is None or pool is None:
+            continue
+        keep_status = False
+        try:
+            await pool.execute(
+                "UPDATE live_orders SET order_id=$2, status='submitting', "
+                "error=NULL WHERE id=$1 AND order_id IS NULL",
+                owner_row["id"], str(o["order_id"]))
+        except Exception as exc:  # noqa: BLE001
+            # THE ASSET CLAIM IS HELD BY ANOTHER ROW (round six): the
+            # blind mark released it and a later copy took it, so this
+            # row cannot re-enter 'submitting' (migration 011's
+            # one-fill-per-asset index). The fill is still recorded on
+            # the row as it stands -- never silent -- with the status
+            # left alone.
+            if "unique" not in type(exc).__name__.lower() and \
+                    "unique" not in str(exc).lower():
+                # ANY failure to adopt still records the fill (round
+                # nine): the bid above is already cancelled, so walking
+                # away here left a partial fill on it in no row at all.
+                log.warning("resting-bid reaper: adopt of %s onto row %s "
+                            "failed (%s) — recording the outcome with the "
+                            "row's status kept", o["order_id"],
+                            owner_row["id"], type(exc).__name__)
+            keep_status = True
+        try:
+            await _reconcile_row_by_id(
+                pool, pmus, owner_row["id"], str(o["order_id"]),
+                o.get("us_market_slug") or "",
+                owner_row.get("intent") or o.get("intent"),
+                now - owner_row["placed_ts"], keep_status=keep_status)
+        except Exception as exc:  # noqa: BLE001 — the cancel stands
+            log.warning("resting-bid reaper: reconcile of %s onto row "
+                        "%s failed (%s)", o["order_id"], owner_row["id"],
+                        type(exc).__name__)
+    return n
 
 
 async def _reap_stale_exiting(pool) -> int:
@@ -4652,6 +5607,564 @@ async def _dh_sibling_guard_ml(pool, src_slug: str) -> bool:
         return True
 
 
+async def _rest_lane_spent(pool) -> float:
+    """Realised dollars the rest lane has filled so far, from the ledger.
+
+    Counts FILLS, never attempts: a resting bid that cancelled unfilled
+    cost nothing and must not consume the authorisation. Unreadable
+    means the cap is treated as reached -- a lane that cannot verify its
+    own budget does not get to spend.
+    """
+    try:
+        v = await pool.fetchval(
+            "SELECT COALESCE(SUM(filled_usd), 0)::float8 FROM live_orders "
+            "WHERE lane = 'rest' AND filled_usd > 0")
+        return float(v or 0.0)
+    except Exception as exc:  # noqa: BLE001 — a missing column is one
+        # of the expected shapes here (migration 041 not yet applied):
+        # fail CLOSED, do not rest.
+        log.warning("rest lane: budget unreadable (%s) — treating as "
+                    "exhausted", type(exc).__name__)
+        return float("inf")
+
+
+# THE BUDGET RACE, CLOSED. The cap is read from the ledger and the fill
+# is stamped ~6s later; with four semaphore slots plus the sweep calling
+# maybe_execute outside the semaphore, five attempts could pass the
+# check together and land five clips over. The lock serialises
+# check->reserve, and the reservation is held until the attempt's
+# outcome is known, so the cap can be exceeded by at most one clip --
+# the one that was already in flight when the last dollar was read.
+_REST_LOCK = asyncio.Lock()
+_REST_RESERVED_USD = 0.0
+# Terminal means the venue will not change the order again. Anything
+# in the open set, plus the transient it passes through on the way
+# out, is still "unknown" and must not be recorded as a result.
+_REST_NONTERMINAL = frozenset(_MANUAL_OPEN_STATES | {"pending_cancel"})
+
+
+def _rest_terminal(st: dict | None) -> bool:
+    return bool(st) and (str(st.get("state") or "").lower()
+                         not in _REST_NONTERMINAL)
+
+
+# The ledger reaper's bound on a 'submitting' row whose order the venue
+# has no record of: left alone inside it, marked for reconciliation at
+# it. An hour is far past any venue-side consistency lag and far short
+# of "forever", which is what an unbounded claim on a market amounts to.
+_NO_RECORD_GIVE_UP_S = 3600.0
+# The venue reaper's time match: an orphaned GTC is created within this
+# many seconds AFTER its row's placed_at (mapping + preview + IOC + GTC,
+# "tens of seconds" per the ledger reaper's own bound). A resting BUY on
+# a scoped market outside this window is not ours.
+_ORPHAN_MATCH_S = 120.0
+
+
+def _order_created_ts(created) -> float | None:
+    """Epoch seconds of a venue order's createTime, or None when the
+    shape is not one we can read. Never guesses: an unreadable age is
+    skipped by the caller, not treated as old."""
+    try:
+        if isinstance(created, bool):
+            return None
+        if isinstance(created, (int, float)):
+            return created / 1000.0 if created > 1e11 else float(created)
+        if isinstance(created, str) and created:
+            from datetime import datetime as _dt
+            return _dt.fromisoformat(
+                created.replace("Z", "+00:00")).timestamp()
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+# A lost placement response: how recently the bid must have been created
+# to be ours, and how far the venue's clock may lag the database's for
+# the venue reaper's time match (the SIGKILL orphan is placed only ~3-10 s
+# after its row's placed_at, so a clock a few seconds behind used to
+# fail the match).
+_LOST_BID_AGE_S = 90.0
+_ORPHAN_SKEW_S = 30.0
+# How long after placement a fill at our cent can still be OURS when the
+# placement response was lost: the bid rests until the venue reaper's
+# cutoff (TTL + 60 s) on the next sweep pass, which is minutes, never
+# hours. Anything later at our cent on this shared account is the
+# owner's (round eight).
+_LOST_FILL_WINDOW_S = 20 * 60.0
+
+
+def _fingerprint_cents(his_price: float, intent: str | None) -> set[float]:
+    """The cent(s) our rest bid would carry for this whale price. With
+    no recorded intent (a row killed before its raw was written) both
+    legs' cents are acceptable; the side is then taken from the venue's
+    own order record."""
+    if intent in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
+        legs = (intent,)
+    else:
+        legs = ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT")
+    return {float(f"{rest_tick(wire_limit(his_price, i), i):.2f}") for i in legs}
+
+
+def _bid_matches(o: dict, cents: set[float], shares: float) -> bool:
+    """OUR fingerprint on a venue order: BUY, one of our cents, our
+    whole quantity. The owner's own bid matching all three on the same
+    market inside the time window is not a realistic collision."""
+    if o.get("side") != "BUY" or not o.get("order_id"):
+        return False
+    try:
+        px = float(o.get("price") or 0.0)
+        qty = float(o.get("quantity") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if abs(qty - float(int(shares))) > 1e-6:
+        return False
+    return any(abs(px - c) <= 1e-6 for c in cents)
+
+
+# THE DESK, AND ONLY THE DESK (round ten): the manual sleeve is the one
+# that rests GTC tickets and the one sync_open_manual_orders owns from
+# 'open'. The underdog sleeve places FOKs like a copy and is reconciled
+# like one -- routing it here blind-marked its lost fills.
+_DESK_SLEEVES = frozenset({MANUAL_WHALE})
+_LEG_LONG, _LEG_SHORT = "ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"
+_CENT_TOL = 0.0051
+_IOC_TIFS = frozenset({"IMMEDIATE_OR_CANCEL", "FILL_OR_KILL"})
+
+
+def _pre_ids_of(v) -> set[str]:
+    """raw->'pre_ids' as the reapers read it: a JSON text from asyncpg,
+    a list when a codec decoded it, None when the row has none."""
+    if v is None:
+        return set()
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            return set()
+    if isinstance(v, (list, tuple, set)):
+        return {str(x) for x in v if x}
+    return set()
+
+
+def _leg_cents(his_price: float, limit_price: float | None,
+               leg: str) -> tuple[float, float]:
+    """The (lo, hi) cent band a row's OWN orders could carry on one leg:
+    the rest cent (his price on the tick) and the IOC cent (his price
+    plus the authorised slippage, the row's limit_price). One cent when
+    the row carries no limit."""
+    a = float(f"{rest_tick(wire_limit(his_price, leg), leg):.2f}")
+    try:
+        lp = float(limit_price) if limit_price is not None else 0.0
+    except (TypeError, ValueError):
+        lp = 0.0
+    b = float(f"{wire_limit(lp, leg):.2f}") if 0.0 < lp < 1.0 else a
+    return (min(a, b), max(a, b))
+
+
+def _lost_fill_is_ours(f: dict, his_price: float, intent: str | None,
+                       shares: float, lo_ts: float, hi_ts: float,
+                       limit_price: float | None = None) -> bool:
+    """One venue trade row is OURS only when the venue's own execution
+    record names an order of exactly our size, on our leg's side (the
+    venue books a short as a SELL), whose price sits in a cent band this
+    row authorised, with no realized P&L (an opening fill), inside the
+    row's window. A fill whose order the venue did not name is unknown,
+    never ours: the account is shared with the owner. A row with no
+    recorded leg is read as the long leg only."""
+    try:
+        ts = float(f.get("ts") or 0.0)
+        if not (lo_ts <= ts <= hi_ts):
+            return False
+        if abs(float(f.get("realized_pnl") or 0.0)) > 1e-9:
+            return False
+        oq = f.get("order_qty")
+        if oq is None or abs(float(oq) - float(int(shares))) > 1e-6:
+            return False
+        px = f.get("order_price")
+        px = float(px) if px is not None else float(f.get("price") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    side = str(f.get("side") or "").upper()
+    legs = (intent,) if intent in (_LEG_LONG, _LEG_SHORT) else (_LEG_LONG,)
+    for leg in legs:
+        lo, hi = _leg_cents(his_price, limit_price, leg)
+        if not (lo - _CENT_TOL <= px <= hi + _CENT_TOL):
+            continue
+        if ("BUY" if leg == _LEG_LONG else "SELL") in side:
+            return True
+    return False
+
+
+async def _stamp_lost_fill_lane(pool, row_id, ours: list[dict],
+                                his_price: float, intent: str | None) -> None:
+    """A reconciled lost fill is a REST fill when its order sat on the
+    rest cent and an IOC fill otherwise, so the impact buckets read it
+    where it belongs. Best-effort."""
+    try:
+        f = ours[0] if ours else {}
+        px = f.get("order_price")
+        px = float(px) if px is not None else float(f.get("price") or 0.0)
+        lane = ("rest" if any(abs(px - c) <= 1e-6
+                              for c in _fingerprint_cents(his_price, intent))
+                else "ioc")
+        await pool.execute("UPDATE live_orders SET lane=$2 WHERE id=$1",
+                           row_id, lane)
+    except Exception:  # noqa: BLE001 — the stamp is best-effort
+        pass
+
+
+async def _ioc_guarded(pool, row_id, fn, *args):
+    """Run the IOC so that OUR OWN cancellation cannot lose its result.
+    The venue call runs in a shielded task; if this coroutine is
+    cancelled while it is in flight (the sweep's per-row timeout, a
+    shutdown), the task is left to finish and its order id is written
+    onto the row for the ledger reaper to reconcile by id."""
+    fut = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        asyncio.ensure_future(_record_orphan_ioc(pool, row_id, fut))
+        raise
+
+
+async def _record_orphan_ioc(pool, row_id, fut) -> None:
+    try:
+        result = await asyncio.wait_for(fut, timeout=120.0)
+    except BaseException as exc:  # noqa: BLE001 — includes cancellation
+        log.error("IOC on row %s was cancelled mid-call and its result "
+                  "could not be read (%s) — the row stays 'submitting' "
+                  "with no id for the reapers", row_id, type(exc).__name__)
+        return
+    oid = result.get("order_id") if isinstance(result, dict) else None
+    if not oid:
+        return          # refused or unanswered: the blind mark is right
+    try:
+        await pool.execute(
+            "UPDATE live_orders SET order_id=$2 WHERE id=$1 "
+            "AND status='submitting' AND order_id IS NULL", row_id, str(oid))
+        log.error("IOC on row %s was cancelled mid-call; its order %s "
+                  "(filled %s) is persisted for the reaper to reconcile",
+                  row_id, oid, result.get("filled_shares"))
+    except Exception as exc:  # noqa: BLE001
+        log.error("IOC on row %s was cancelled mid-call and its order %s "
+                  "could not be persisted (%s)", row_id, oid,
+                  type(exc).__name__)
+        return
+    # AN IOC IS AN IOC (round ten): the reaper's by-id reconcile stamps a
+    # lane only where none is set, and 'rest' would charge this fill to
+    # the rest-lane budget. Best-effort; the column is migration 041's.
+    try:
+        await pool.execute("UPDATE live_orders SET lane='ioc' WHERE id=$1",
+                           row_id)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _find_lost_rest_bid(pmus, us_slug: str, shares: float,
+                              cents: set[float],
+                              window: tuple[float, float] | None = None,
+                              exclude: set[str] | None = None,
+                              ) -> tuple[dict | None, bool]:
+    """After a placement whose response was lost: the venue's open orders
+    on this market, looking for OUR fingerprint (see _bid_matches)
+    created inside `window` (epoch seconds; default: the last
+    _LOST_BID_AGE_S). Returns (order, readable): readable=False means the
+    venue could not be listed, which is not "nothing there". Anything
+    else on the book is not ours. The window has BOTH bounds (round
+    eight): a bid created before the row, or hours after it, is the
+    owner's however well it matches."""
+    try:
+        orders = await asyncio.to_thread(pmus.open_orders, [us_slug])
+    except Exception:  # noqa: BLE001 — unreadable is not "not found"
+        return None, False
+    now = time.time()
+    lo, hi = window if window else (now - _LOST_BID_AGE_S, now + 5.0)
+    for o in orders or []:
+        if str(o.get("us_market_slug") or "").lower() != us_slug.lower():
+            continue
+        if exclude and str(o.get("order_id")) in exclude:
+            continue          # it was on the book before we placed
+        if not _bid_matches(o, cents, shares):
+            continue
+        ts = _order_created_ts(o.get("created_at"))
+        if ts is None or not (lo <= ts <= hi):
+            continue
+        return o, True
+    return None, True
+
+
+async def _rest_cycle(pool, pmus, row_id: int, us_slug: str, wire: float,
+                      shares: float, intent: str | None, whale: str,
+                      his_price: float) -> dict | None:
+    """place -> persist id -> wait -> cancel -> read until terminal.
+
+    Runs under asyncio.shield from the caller, so a wait_for timeout or
+    task cancellation in the copy path cannot interrupt it between
+    placement and cancel. It still cannot survive process death, which
+    is why the order id is persisted on the row the instant the venue
+    returns it: a row left 'submitting' with an order_id is reconciled
+    by _reap_stale_submitting, and a bid the ledger never saw at all is
+    swept by the venue-side reaper. Belt, braces, and a third thing.
+    """
+    # WHAT WAS ON THE BOOK BEFORE WE PLACED (round nine): an order id
+    # that existed before our GTC went out can never be our GTC, however
+    # well it matches our fingerprint -- the owner resting exactly our
+    # size at exactly our cent is the one collision the fingerprint
+    # cannot see. UNREADABLE MEANS NO REST (round eleven, reproduced): a
+    # book we could not read plus a placement whose response is lost --
+    # one venue fault -- adopted, cancelled and BOOKED the owner's own
+    # bid, because the only exclusion we had was the one we could not
+    # take. A lane that cannot see the book does not place on it.
+    pre_ids: set[str] = set()
+    snapshot_ok = False
+    for _attempt in (1, 2):
+        try:
+            pre_ids = {str(o.get("order_id"))
+                       for o in (await asyncio.to_thread(pmus.open_orders, [us_slug])) or []
+                       if o.get("order_id")}
+            snapshot_ok = True
+            break
+        except Exception:  # noqa: BLE001
+            pre_ids = set()
+    if not snapshot_ok:
+        _copy_stop("rest_book_unreadable", whale)
+        log.warning("rest lane: open book unreadable before placing on %s "
+                    "— not resting (row %s)", us_slug, row_id)
+        return None
+    # THE SNAPSHOT TRAVELS WITH THE ROW BEFORE THE ORDER GOES OUT: a
+    # process killed inside the placement hang is exactly the case that
+    # loses the response, and the reapers must still know what was on
+    # the book before ours. Best-effort; raw is jsonb (migration 007).
+    try:
+        await pool.execute(
+            "UPDATE live_orders SET raw = COALESCE(raw, '{}'::jsonb) || "
+            "$2::jsonb WHERE id=$1", row_id,
+            json.dumps({"pre_ids": sorted(pre_ids)}))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("rest lane: could not persist the book snapshot on row "
+                    "%s (%s)", row_id, type(exc).__name__)
+    try:
+        placed = await asyncio.to_thread(
+            pmus.submit_fok, us_slug, wire, int(shares), False,
+            "TIME_IN_FORCE_GOOD_TILL_CANCEL", intent)
+    except Exception as exc:  # noqa: BLE001 — the RESPONSE is lost, not the order
+        # THE RESPONSE WAS LOST, NOT NECESSARILY THE ORDER (round four,
+        # reproduced through the real adapter: orders.create accepts
+        # the GTC, then the HTTP read times out). The first version
+        # returned None here -- "nothing happened" -- and the row was
+        # written 'unfilled' under the IOC's id, so a clip-sized GTC
+        # rested on the live book with no ledger row naming it and
+        # outside BOTH reapers' scope. Two nets now: look for our own
+        # fingerprint on the book and adopt it; failing that, hold the
+        # row 'submitting' with NO id, which is exactly the signature
+        # the venue reaper time-matches and the ledger reaper blind-
+        # marks -- never 'unfilled'.
+        found, _ = await _find_lost_rest_bid(
+            pmus, us_slug, shares, {float(f"{float(wire):.2f}")},
+            window=(time.time() - _LOST_BID_AGE_S, time.time() + 5.0),
+            exclude=pre_ids)
+        if found is None:
+            _copy_stop("rest_place_error", whale)
+            log.warning("rest lane: place raised %s for row %s and no "
+                        "matching bid is on the book — holding the row "
+                        "'submitting' with no id for the reapers",
+                        type(exc).__name__, row_id)
+            return {"ok": False, "order_id": None, "status": "rest_unknown",
+                    "fill_price": None, "filled_shares": 0.0,
+                    # THE SNAPSHOT TRAVELS WITH THE ROW (round ten): the
+                    # reapers read raw->'pre_ids' so an order that was on
+                    # the book before ours is never adopted by them either.
+                    "raw": {"lane": "rest", "wire": wire,
+                            "ttl_s": REST_BID_TTL_S, "final": None,
+                            "pre_ids": sorted(pre_ids),
+                            "cancel_ok": False, "preview": {"intent": intent},
+                            "why": (f"rest lane: placement raised "
+                                    f"{type(exc).__name__} on {us_slug}; no "
+                                    f"matching bid found on the book — row "
+                                    f"held 'submitting' with no id so the "
+                                    f"reapers can reconcile whatever the "
+                                    f"venue holds")}}
+        log.warning("rest lane: place raised %s for row %s but the venue "
+                    "holds our bid %s — adopting it", type(exc).__name__,
+                    row_id, found.get("order_id"))
+        placed = {"ok": False, "order_id": found.get("order_id"),
+                  "status": "new",
+                  "filled_shares": float(found.get("filled_shares") or 0.0),
+                  "fill_price": found.get("avg_px"),
+                  "raw": {"recovered_after": type(exc).__name__,
+                          "preview": {"intent": intent}, "response": {}}}
+    # GATE ON THE VENUE'S ORDER ID, NOT ON submit_fok's `ok`. That
+    # adapter defines ok as "filled > 0" (pmus.py, pinned by
+    # test_submit_fok_killed_not_ok). A GTC the venue ACCEPTS AND RESTS
+    # -- the normal outcome of every rest attempt, since the IOC just
+    # missed -- comes back ok=False with a real id. The first version
+    # tested ok and returned here, BEFORE the cancel: every successful
+    # placement read as a refusal and left a clip-sized bid on the book
+    # with no owner. Found by adversarial review, reproduced through
+    # the real adapter, never reached production.
+    oid = placed.get("order_id")
+    if not oid:
+        _copy_stop("rest_place_refused", whale)
+        return None
+    # PERSIST THE ID BEFORE ANYTHING CAN GO WRONG. This is the line
+    # that makes the bid un-orphanable: whatever happens next -- a
+    # SIGKILL mid-sleep, a cancel that fails twice -- the row now names
+    # the order, never-add sees a 'submitting' row and refuses to stack
+    # a second bid on the market, and the reaper can reconcile it
+    # against the venue instead of blind-marking it 'error'.
+    try:
+        # THE RECEIPT TRAVELS WITH THE ID. A row reconciled by the reaper
+        # after process death has only what was persisted here; without
+        # the placement's raw, ORDER_INTENT_SQL cannot name its side and
+        # a reconciled short becomes sideless. Same statement, no extra
+        # round trip.
+        await pool.execute(
+            "UPDATE live_orders SET order_id=$2, "
+            "raw=COALESCE(raw, '{}'::jsonb) || $3::jsonb WHERE id=$1",
+            row_id, oid,
+            json.dumps({**(placed.get("raw") or {}), "lane": "rest"},
+                       default=str))
+    except Exception as exc:  # noqa: BLE001 — never skip the cancel
+        log.error("REST LANE: could not persist order %s on row %s (%s)"
+                  " — the venue-side reaper is the only net now",
+                  oid, row_id, type(exc).__name__)
+    filled = float(placed.get("filled_shares") or 0)
+    avg = placed.get("fill_price")
+    cancel_ok = False
+    # A FULL FILL AT PLACEMENT NEEDS NO WINDOW AND NO CANCEL. Cancelling
+    # a done order is a venue error at best; at worst the refusal was
+    # read as "unknown" and the lane's target outcome was recorded as
+    # nothing (re-review 2026-09-01). Skip straight to the read.
+    _done_at_placement = filled >= shares
+    try:
+        if not _done_at_placement:
+            await asyncio.sleep(REST_BID_TTL_S)
+    finally:
+        # CANCEL FIRST, THEN READ. Reading first opens a window where a
+        # fill lands between the read and the cancel and is never
+        # recorded. Cancelling first means the final read sees the
+        # terminal state. Two attempts; a failure after both is not
+        # swallowed -- it turns the outcome UNKNOWN below.
+        for _attempt in ((1, 2) if not _done_at_placement else ()):
+            try:
+                c = await asyncio.to_thread(pmus.cancel_order, oid, us_slug)
+                cancel_ok = bool(c.get("ok"))
+            except Exception:  # noqa: BLE001
+                cancel_ok = False
+            if cancel_ok:
+                break
+        if _done_at_placement:
+            cancel_ok = True          # nothing to cancel; not a failure
+        if not cancel_ok:
+            log.error("REST LANE: cancel FAILED twice for order %s on %s "
+                      "— leaving the row 'submitting' for the reaper",
+                      oid, us_slug)
+    # READ UNTIL TERMINAL, BOUNDED. A cancel is acknowledged before it
+    # is applied; the first read after it can still show the order
+    # open. Three reads over ~1s is enough for a cancel to land; if it
+    # has not, the outcome is unknown and is recorded as such.
+    st = None
+    for _i in range(3):
+        try:
+            st = await asyncio.to_thread(pmus.order_status, oid)
+        except Exception:  # noqa: BLE001
+            st = None
+        if _rest_terminal(st):
+            break
+        await asyncio.sleep(0.3)
+    if st:
+        filled = max(filled, float(st.get("filled_shares") or 0))
+        avg = st.get("avg_px") or avg
+    # THE RECEIPT STAYS AT THE TOP LEVEL. ORDER_INTENT_SQL reads the
+    # row's side from raw -> response.executions[0].order.intent (or
+    # preview.intent); nesting the placement under a key would make a
+    # rest fill sideless to mirror_exit, the short restate, the grader
+    # and price_fidelity. Lane metadata is added beside it, not around.
+    raw = {**(placed.get("raw") or {}), "lane": "rest",
+           "ttl_s": REST_BID_TTL_S, "wire": wire, "final": st,
+           "cancel_ok": cancel_ok}
+    # THE TERMINAL READ IS AUTHORITATIVE. It runs AFTER both cancel
+    # attempts, so a terminal state is the venue's last word whatever
+    # the cancel said: a bid that filled in full gets its cancel refused
+    # (the order is done) and the first version turned that refusal
+    # into "unknown" with filled_shares 0 -- on the lane's target
+    # outcome. Cancel failure matters only while the read is still
+    # open; cancel_ok stays in raw for the audit trail.
+    if not _rest_terminal(st):
+        # UNKNOWN IS A STATE, NOT A NONE. Returning None here would
+        # record the row 'unfilled' with the IOC's id and let the sweep
+        # re-attempt it inside two minutes -- a second bid stacked on an
+        # order that may still be live. The caller keeps the row
+        # 'submitting' with THIS order id instead, which is exactly the
+        # shape the reaper reconciles and never-add refuses to stack on.
+        _copy_stop("rest_unknown", whale)
+        raw["why"] = (f"rest lane: fill unknown for order {oid} on "
+                      f"{us_slug} — reconcile against the venue")
+        return {"ok": False, "order_id": oid, "status": "rest_unknown",
+                "fill_price": None, "filled_shares": 0.0, "raw": raw}
+    if filled <= 0:
+        _copy_stop("rest_unfilled", whale)
+        return None
+    _copy_stop("rest_filled", whale)
+    # CONTRACT PRICE ON THE FALLBACK, NOT THE OUTCOME PRICE. fill_cash
+    # and cost_per_share expect what went on the wire; his_price is in
+    # outcome space, and on a BUY_SHORT that mis-denomination is the
+    # 3.5x phantom overspend that halts the whole sleeve.
+    return {"ok": True, "order_id": oid, "status": "rest_filled",
+            "fill_price": float(avg) if avg else float(wire),
+            "filled_shares": filled, "raw": raw}
+
+
+async def _rest_after_ioc(pool, row_id: int, us_slug: str,
+                          his_price: float, shares: float,
+                          intent: str | None, whale: str,
+                          reaction: float | None) -> dict | None:
+    """Rest a bid at HIS price for REST_BID_TTL_S after an IOC missed.
+
+    Returns a submit_fok-shaped result on a fill, a "rest_unknown"
+    result when the venue's final state could not be established (the
+    caller keeps the row 'submitting' for the reaper), or None when
+    nothing happened and the IOC outcome should be recorded as before.
+    """
+    from . import pmus
+
+    global _REST_RESERVED_USD
+    if not REST_BID_ENABLED:
+        return None
+    # FRESH DETECTIONS ONLY. The sweep/reclaim path calls maybe_execute
+    # with reaction=None and re-offers every 'unfilled' row every two
+    # minutes at a price that is hours old -- resting there would fill
+    # the cohort with stale-price fills the experiment cannot separate
+    # from its target population. That path is also the one wrapped in
+    # a 60s wait_for, i.e. the live canceller. Both problems, one gate.
+    if reaction is None:
+        _copy_stop("rest_skipped_reclaim", whale)
+        return None
+    if shares < 1 or not (0 < his_price < 1):
+        return None
+    # THE PRICE ON THE WIRE, ON THE TICK, NEVER ABOVE HIM (see rest_tick).
+    wire = rest_tick(wire_limit(his_price, intent), intent)
+    est = float(shares) * float(wire)
+    async with _REST_LOCK:
+        spent = await _rest_lane_spent(pool)
+        if spent + _REST_RESERVED_USD + est > REST_BID_BUDGET_USD:
+            _copy_stop("rest_budget_exhausted", whale)
+            return None
+        _REST_RESERVED_USD += est
+    try:
+        # SHIELDED. A wait_for timeout or task cancellation in the copy
+        # path raises in THIS frame but the cycle runs to completion --
+        # placement, cancel and terminal read all happen. If we were
+        # cancelled the caller's fill UPDATE will not run; the row is
+        # left 'submitting' with its order_id persisted, which is the
+        # reaper's job to finish.
+        return await asyncio.shield(_rest_cycle(
+            pool, pmus, row_id, us_slug, wire, shares, intent, whale,
+            his_price))
+    finally:
+        async with _REST_LOCK:
+            _REST_RESERVED_USD = max(0.0, _REST_RESERVED_USD - est)
+
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
     """Called on every fresh detection (after the paper trade). All guards
     re-checked here; failure of any guard is a silent no-op or logged skip."""
@@ -5142,8 +6655,27 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
                                      requested_shares, status, venue)
             VALUES ($1,$2,$3,$4,'BUY',$5,$6,$7,$8,$9,'submitting',$10)
             ON CONFLICT (trade_id) DO UPDATE
-              SET status='submitting', error=NULL
+              -- placed_at=now(): THE CLOCK RESTARTS WITH THE ATTEMPT (round
+              -- nine) -- every window keyed off placed_at read a reclaimed
+              -- row as hours old and a real fill on the re-attempt fell
+              -- outside all of them.
+              SET status='submitting', error=NULL, order_id=NULL,
+                  placed_at=now()
               WHERE live_orders.status IN ('rejected', 'unfilled', 'error')
+                -- A BLIND-MARKED ORPHAN ROW STAYS IN THE VENUE REAPER'S
+                -- SCOPE (round five): reclaiming it inside the reaper's
+                -- 60-minute window would let the IOC's outcome rewrite it
+                -- 'unfilled' under the IOC's id, and a still-live GTC on
+                -- that market would leave both reapers' scope for good.
+                AND NOT (COALESCE(live_orders.error, '') LIKE 'stale submitting row reaped%'
+                         AND live_orders.placed_at > now() - interval '60 minutes')
+                -- A NAMED ROW IS NEVER RECLAIMED (round seven): it stands for
+                -- shares the account holds that the ledger cannot name, or an
+                -- orphan fill recorded on a row another row's claim kept out
+                -- of 'filled'. Reclaiming it erased the record and the exit.
+                AND NOT (COALESCE(live_orders.error, '') LIKE 'venue holds a POSITION%')
+                AND NOT (COALESCE(live_orders.error, '') LIKE 'ORPHAN FILL RECORDED%')
+                AND NOT (COALESCE(live_orders.error, '') LIKE 'venue has no record of order%')
             RETURNING id
             """,
             payload.get("id"), payload.get("whale_username"), str(payload["asset"]),
@@ -5157,6 +6689,19 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         raise
     if row_id is None:
         return  # duplicate detection — never double-order one source trade
+    # THE CURVE BELONGS TO HIS FILL (rounds ten and eleven): a row
+    # re-detected fresh (reaction known) starts a new curve, so the
+    # first attempt's samples are cleared. A SWEEP reclaim (reaction
+    # None, every two minutes on a missed IOC) is not a new fill of his
+    # and must not wipe the only curve anchored to it -- the price-path
+    # experiment is about the minutes after HIS trade, not after ours.
+    # Best-effort; the table is migration 042's and may be absent.
+    if reaction is not None:
+        try:
+            await pool.execute("DELETE FROM price_path WHERE row_id = $1",
+                               row_id)
+        except Exception:  # noqa: BLE001
+            pass
 
     # STALENESS GATE (owner order 2026-08-24): a late signal is a decayed
     # edge — the copier refuses rather than chases.
@@ -5698,10 +7243,19 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # the restarted sleeve is "completely independent" — its
             # rows must not veto copies; copy-vs-copy never-add is
             # unchanged).
+            # A NAMED row (round eight) -- shares the account holds that
+            # no ledger row explains, or an orphan fill recorded on a
+            # row another claim kept out of 'filled' -- vetoes like a
+            # fill, so the fast lane does not depend on the positions
+            # snapshot to see them.
             prior = await pool.fetchval(
                 "SELECT 1 FROM live_orders "
                 "WHERE us_market_slug = $2 AND id <> $1 "
-                "AND status IN ('filled', 'submitting') "
+                "AND (status IN ('filled', 'submitting') "
+                "     OR (status = 'error' AND "
+                "         (error LIKE 'venue holds a POSITION%' "
+                "          OR error LIKE 'ORPHAN FILL RECORDED%' "
+                "          OR error LIKE 'venue has no record of order%'))) "
                 "AND COALESCE(whale_username, '') <> 'underdog' "
                 "AND placed_at > now() - interval '48 hours' LIMIT 1",
                 row_id, mapping["market_slug"])
@@ -6078,10 +7632,31 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             # a short they are complements, and sending the raw one
             # authorised up to 3.5x the money we meant to commit.
             _wire = wire_limit(limit, _intent)
-            result = await asyncio.to_thread(
-                pmus.submit_fok, mapping["market_slug"], _wire,
-                int(shares), False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
-                _intent)
+            # THE IOC'S RESULT SURVIVES OUR OWN CANCELLATION (round
+            # nine): the sweep's per-row timeout cancels this coroutine
+            # inside the venue call, the thread completes the fill, and
+            # nothing wrote its id -- the row sat 'submitting' with no
+            # id and the fill was attributed by cent, or not at all.
+            result = await _ioc_guarded(
+                pool, row_id, pmus.submit_fok,
+                mapping["market_slug"], _wire, int(shares), False,
+                "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL", _intent)
+            _lane = "ioc"
+            # ── REST LANE, ONLY AFTER THE IOC MISSED ─────────────────
+            # A fill above means the existing path worked and this does
+            # nothing. An empty IOC means the ask was above his price
+            # plus tolerance when we arrived; rest at his exact price
+            # for a few seconds and see whether it comes back. See
+            # REST_BID_ENABLED for why this cannot touch any fill the
+            # IOC would have produced.
+            if not (result.get("ok") and
+                    float(result.get("filled_shares") or 0) > 0):
+                _r = await _rest_after_ioc(
+                    pool, row_id, mapping["market_slug"], his_price,
+                    shares, _intent, username, reaction)
+                if _r is not None:
+                    result = _r
+                    _lane = "rest"
         else:
             # GLOBAL-CLOB LEG FAIL-CLOSED (leak-hunt find 2026-08-24):
             # active_venue() silently falls back to the global CLOB when
@@ -6196,16 +7771,51 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
             WHERE id=$1
             """,
             row_id,
-            "filled" if result["ok"] and filled > 0 else "unfilled",
+            # UNKNOWN STAYS 'submitting'. A rest attempt whose venue
+            # state could not be established keeps the row open under
+            # ITS order id: never-add refuses to stack a second bid on
+            # the market, the sweep cannot re-qualify the trade, and
+            # _reap_stale_submitting reconciles it against the venue.
+            # Writing 'unfilled' here would erase all three protections.
+            ("submitting" if result.get("status") == "rest_unknown"
+             else "filled" if result["ok"] and filled > 0
+             else "unfilled"),
             result.get("order_id"), filled, fill_price, spent,
             json.dumps(result.get("raw"), default=str),
             (f"OVERSPEND: asked ${usd:.2f}, filled ${spent:.2f}"
              if overspent else
+             (result.get("raw") or {}).get("why")
+             if result.get("status") == "rest_unknown" else
              None if result["ok"] else str(result.get("raw"))[:300]),
         )
         log.info("LIVE order [%s] %s: %s %.2f shares @ %.3f (his %.3f)",
                  venue, "FILLED" if result["ok"] and filled > 0 else "unfilled",
                  payload.get("whale_username"), filled, fill_price or limit, his_price)
+        # LANE STAMP, SEPARATE AND BEST-EFFORT. Deliberately not in the
+        # UPDATE above: that statement is the fill record, and a
+        # database that has not yet applied migration 041 would fail
+        # it on the missing column -- turning a real, paid-for fill into
+        # an 'error' row. The stamp can be lost; the fill cannot.
+        try:
+            await pool.execute(
+                "UPDATE live_orders SET lane=$2 WHERE id=$1",
+                row_id, locals().get("_lane", "ioc"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("lane stamp skipped for row %s (%s) — migration "
+                        "041 not applied yet?", row_id, type(exc).__name__)
+        # t=0 OF THE PRICE PATH. The pre-trade quote this path already
+        # read is the true post-impact baseline the sampler's curve
+        # differences against; the sampler itself can only see the row
+        # seconds later, and a late baseline biases every delta toward
+        # flat. Measurement only, after the money is done, best-effort.
+        try:
+            if locals().get("_ask") is not None:
+                await pool.execute(
+                    "INSERT INTO price_path (row_id, t_s, ask) VALUES ($1, 0, $2) "
+                    "ON CONFLICT (row_id, t_s) DO NOTHING",
+                    row_id, float(_ask))
+        except Exception:  # noqa: BLE001 — table absent until 042
+            pass
         if _echo_args and result["ok"] and filled > 0:
             # Hand the probation lock to the echo (see
             # _echo_then_release_short) and stop owning it here, so the

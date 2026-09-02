@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       whales:
-        description: 'Comma-separated roster, e.g. "rn1,homerunhazard". This REPLACES the set.'
+        description: 'Comma-separated roster, e.g. "rn1,homerunhazard". REPLACES the set: listed whales enter MEASURING at $50 (a PROMOTED whale keeps $250); every whale you leave off is CUT (clip 0, exits still mirrored) and the hourly rules will not re-admit him until you list him again.'
         required: true
         type: string
       confirm:
@@ -83,9 +83,17 @@ jobs:
           curl -sS --max-time 45 -H "X-Admin-Token: $ADMIN_TOKEN" \
                "$BASE/api/admin/gates" 2>/dev/null > /tmp/gates.json || true
           jq -r '"  effective: \(.verified_effective | tostring)  source=\(.verified_source // "?")"' /tmp/gates.json 2>/dev/null || true
-          jq -r '"  clips: \(.sizing.per_fill_by_whale // {} | to_entries | map("\(.key)=\(.value)") | join(" "))  max_clip=\(.sizing.max_clip_usd // "?")"' /tmp/gates.json 2>/dev/null || true
+          # THE CLIP THAT BINDS is the rules' stored clip, applied by
+          # per_fill_usd; per_fill_by_whale is the hardcoded fallback.
+          jq -r '"  clips_effective: \(.sizing.per_fill_effective // {} | to_entries | map("\(.key)=\(.value)") | join(" "))  stored=\(.sizing.clip_overrides // {} | tostring | .[0:200])  max_clip=\(.sizing.max_clip_usd // "?")"' /tmp/gates.json 2>/dev/null || true
+          jq -r '.roster_auto // {} | "  rules: state=\(.state // {} | tostring | .[0:200])  last_pass=\(((.last // {}).at // 0) | if . > 0 then (. | floor | todate) else "never" end)"' /tmp/gates.json 2>/dev/null || true
           jq -r '"  exitable: \(.exitable | tostring)"' /tmp/gates.json 2>/dev/null || true
           jq -r '"  cut: \(.cut_whales | tostring)  hold: \(.hold_whales | tostring)"' /tmp/gates.json 2>/dev/null || true
           echo
-          echo "A whale is only live if he appears in verified(db) AND"
-          echo "carries a non-zero clip. A 0.00 clip is itself a block."
+          echo "A whale is only live if he appears in verified(db) AND his"
+          echo "clips_effective entry is non-zero. Listed whales enter"
+          echo "MEASURING at \$50 unless already PROMOTED (\$250); every whale"
+          echo "you left off is CUT (clip 0, exits still mirrored) and the"
+          echo "hourly rules will not re-admit him. The rules rewrite"
+          echo "verified(db) and the clips every hour from the data; the"
+          echo "off switch is ROSTER_AUTO=off on sportsassets-workers."
