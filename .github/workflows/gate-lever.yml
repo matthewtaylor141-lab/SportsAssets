@@ -1,0 +1,66 @@
+# Gate levers as auditable operator actions (owner order 2026-09-02:
+# "make all 4 of these changes now"). Each run POSTs one admin lever to
+# the live API from the runner with the repository's ADMIN_TOKEN, prints
+# the state before and after, and leaves a run in the Actions log -- no
+# raw curl with the token in anyone's shell history.
+#
+#   side-echo-reset : clear the wrong-side circuit. The tripwire stays
+#                     armed: the next confirmed wrong-side fill re-trips
+#                     it AND re-arms the mapping quarantine.
+#   quarantine-off  : resume the quarantined mapping classes.
+#   quarantine-on   : re-arm them.
+name: gate-lever
+
+on:
+  workflow_dispatch:
+    inputs:
+      lever:
+        description: 'Which lever to pull'
+        required: true
+        type: choice
+        options:
+          - side-echo-reset
+          - quarantine-off
+          - quarantine-on
+      confirm:
+        description: 'Type LIFT to confirm (anything else is a dry run that only prints state)'
+        required: true
+        default: ''
+
+jobs:
+  lever:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull the lever
+        env:
+          BASE: https://sportsassets-api.onrender.com
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          LEVER: ${{ inputs.lever }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -u
+          echo "lever=$LEVER confirm=$CONFIRM"
+          state() {
+            curl -sS --max-time 45 -H "X-Admin-Token: $ADMIN_TOKEN" \
+                 "$BASE/api/admin/quarantine" 2>/dev/null \
+              | jq -c '.' 2>/dev/null || echo "(quarantine state unavailable)"
+            curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
+                 "$BASE/api/admin/premap-status" 2>/dev/null \
+              | jq -c '{side_echo_tripped: .side_echo_tripped, side_echo: .side_echo}' 2>/dev/null \
+              || echo "(side-echo state unavailable)"
+          }
+          echo "== before =="; state
+          if [ "$CONFIRM" != "LIFT" ]; then
+            echo "dry run: confirm was not LIFT; nothing changed"; exit 0
+          fi
+          case "$LEVER" in
+            side-echo-reset) URL="$BASE/api/admin/side-echo-reset" ;;
+            quarantine-off)  URL="$BASE/api/admin/quarantine/off" ;;
+            quarantine-on)   URL="$BASE/api/admin/quarantine/on" ;;
+            *) echo "unknown lever $LEVER"; exit 1 ;;
+          esac
+          CODE=$(curl -sS --max-time 45 -w '%{http_code}' -o /tmp/lever.json \
+                 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" "$URL" 2>/dev/null || echo 000)
+          echo "POST $URL -> HTTP $CODE"; cat /tmp/lever.json 2>/dev/null; echo
+          if [ "$CODE" != "200" ]; then echo "lever refused (HTTP $CODE)"; exit 1; fi
+          echo "== after =="; state
