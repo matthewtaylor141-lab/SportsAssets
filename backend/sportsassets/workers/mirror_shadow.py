@@ -321,6 +321,7 @@ async def account_positions(pmus) -> dict[str, float] | None:
         client = pmus._get_client()
         out: dict[str, float] = {}
         cursor = ""
+        complete = False
         for _ in range(POSITIONS_PAGES_MAX):
             # every page is one venue read through the PROCESS-WIDE
             # measurement pacer (review round two): this worker and
@@ -335,7 +336,15 @@ async def account_positions(pmus) -> dict[str, float] | None:
                     continue
             cursor = resp.get("nextCursor") or ""
             if resp.get("eof") or not cursor:
+                complete = True
                 break
+        if not complete:
+            # A WALK THAT HIT THE PAGE CAP IS NOT A READING OF THE ACCOUNT
+            # (P1 design review): a slug on a page we never fetched would
+            # read as "not held", which is a venue/ledger disagreement
+            # invented by us -- or worse, a position the plan trades
+            # against. Truncated is unreadable.
+            raise RuntimeError(f"positions walk truncated at {POSITIONS_PAGES_MAX} pages")
         return out
 
     try:

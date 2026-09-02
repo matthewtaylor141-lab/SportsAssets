@@ -732,3 +732,16 @@ def test_a_token_absent_from_a_fresh_complete_read_is_zero_and_from_a_partial_re
     sizes, age, partial = _run(ms.snapshot_sizes(p2, "rn1"))
     assert sizes == {M: 1.0} and age is not None and age < 60 and partial is False
     assert _run(ms.snapshot_sizes(_Pool(), "rn1")) == ({}, None, True)
+
+
+def test_a_positions_walk_that_hits_the_page_cap_is_unreadable_not_partial(monkeypatch):
+    _nosleep(monkeypatch)
+    monkeypatch.setattr(ms, "POSITIONS_PAGES_MAX", 2)
+    # three pages, cap two: the third page's slug would read as "not held"
+    pm = _Pmus(pages=[{"A": {"netPosition": 1}}, {"B": {"netPosition": 2}},
+                      {"C": {"netPosition": 3}}])
+    assert _run(ms.account_positions(pm)) is None
+    assert pm.portfolio.calls == 2, "no read past the cap"
+    # exactly at the cap with eof on the last page is a complete read
+    pm2 = _Pmus(pages=[{"A": {"netPosition": 1}}, {"B": {"netPosition": 2}}])
+    assert _run(ms.account_positions(pm2)) == {"a": 1.0, "b": 2.0}
