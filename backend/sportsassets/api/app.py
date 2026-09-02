@@ -5608,6 +5608,29 @@ async def admin_impact_edge(whale: str = "rn1", flow_per_day: float = 0.0) -> di
                                whale or None, flow_per_day or None)
 
 
+@app.get("/api/admin/size-edge", dependencies=[Depends(require_admin)])
+async def admin_size_edge(whale: str = "", days: int = 30) -> dict:
+    """His edge by the dollars he staked. See analytics/size_edge.py.
+
+    The $10 dust floor refuses every proportional copy of a probe he
+    placed under $10 (the largest refusal on the first day of the $50
+    measuring clips). Whether those probes carry his edge is a number
+    on his own resolved book; this reads it, and the floor moves only
+    when the number says so.
+    """
+    from ..analytics.size_edge import WHALES, cohort_size_edge
+
+    pool = await get_pool()
+    names = [whale.lower()] if whale else list(WHALES)
+    out: dict = {"days": days, "whales": {}}
+    for w in names:
+        try:
+            out["whales"][w] = await cohort_size_edge(pool, w, days)
+        except Exception as exc:  # noqa: BLE001 — one whale never hides the rest
+            out["whales"][w] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+    return out
+
+
 @app.get("/api/admin/edge-decomposition", dependencies=[Depends(require_admin)])
 async def admin_edge_decomposition(whale: str = "", days: int = 30) -> dict:
     """His edge split into SELECTION and TIMING. See analytics/decompose.py.

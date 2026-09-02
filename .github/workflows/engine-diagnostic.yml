@@ -1150,6 +1150,18 @@ jobs:
             /tmp/decomp.json 2>/dev/null || echo "  DECOMP unavailable"
           jq -r '.whales // {} | to_entries[] | "  DECOMPREAD \(.key): timing_share=\(.value.timing_share // "n/a") coverage=\(.value.coverage | tostring | .[0:170]) — \(.value.reading // .value.error // "n/a")"' \
             /tmp/decomp.json 2>/dev/null || true
+          # SIZEEDGE — his edge by the dollars HE staked. The $10 dust
+          # floor refuses every proportional copy of a probe under $10
+          # (the largest refusal on the first day of $50 measuring
+          # clips). If the <$10 bucket clears zero at 95% on 30+ games
+          # the floor is discarding proven edge; if it loses, the floor
+          # is right. The floor moves only when this says so.
+          curl -sS --max-time 150 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/sizeedge.json "$BASE/api/admin/size-edge?days=30" 2>/dev/null || true
+          jq -r '.whales // {} | to_entries[] | .key as $w | (.value.buckets // {}) | to_entries[] | "  SIZEEDGE \($w) \(.key): n=\(.value.n) games=\(.value.clusters // "n/a") stake_share=\(.value.stake_share // "n/a") roi=\(.value.roi // "n/a") ci95=\(.value.ci95 | tostring) — \(.value.verdict)"' \
+            /tmp/sizeedge.json 2>/dev/null || echo "  SIZEEDGE unavailable"
+          jq -r '.whales // {} | to_entries[] | "  SIZEREAD \(.key): all=\(.value.all.roi // "n/a") \(.value.all.ci95 | tostring)/\(.value.all.clusters // "n/a") — \(.value.reading // .value.error // "n/a")"' \
+            /tmp/sizeedge.json 2>/dev/null || true
           # MARKSPROBE — whether the public CLOB honours startTs/endTs for
           # the marks worker (unverified against the docs; the worker
           # falls back to interval+fidelity with a client-side window).
