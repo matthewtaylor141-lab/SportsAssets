@@ -765,3 +765,26 @@ def test_the_report_names_what_the_ledger_holds_on_a_frozen_slug():
     assert out[0]["rows"][1]["intent"] is None and out[0]["rows"][1]["whale"] == "manual"
     assert "WHERE us_market_slug = $1" in p.sql[0][0] and p.sql[0][1] == (SLUG,)
     assert _run(mr.frozen_detail(p, [{"us_market_slug": "x", "reason": "on target"}])) == []
+
+
+def test_a_frozen_market_is_counted_whatever_else_its_reason_says(monkeypatch):
+    # the target's why comes first in the reason text; "frozen" may follow it
+    rows = [{"us_market_slug": "s1", "reason": "short side not admitted; frozen: venue and ledger disagree",
+             "his_long": 1.0, "snap_long": 1.0, "detail": "{}"},
+            {"us_market_slug": "s2", "reason": "frozen: venue and ledger disagree", "detail": "{}"},
+            {"us_market_slug": "s3", "reason": "on target", "detail": "{}"}]
+    out = mr.summarize(rows, rows, {})
+    assert out["frozen_rows"] == 2
+
+    class _P:
+        async def fetch(self, sql, *a):
+            return []
+
+    det = _run(mr.frozen_detail(_P(), rows))
+    assert [d["slug"] for d in det] == ["s1", "s2"]
+    # and the worker's census agrees
+    _nosleep(monkeypatch)
+    p = _Pool(fills=HIS + [_fill(N, "BUY", 20000, 0.46, 3300)],
+              ledger_rows=[{"sh": 100.0, "intent": "ORDER_INTENT_BUY_LONG"}])
+    row = _run(ms.shadow_market(p, _Pmus(), "rn1", CID, RATIO, {}, positions={SLUG: 40.0}))
+    assert "frozen" in row["reason"] and not row["reason"].startswith("frozen")

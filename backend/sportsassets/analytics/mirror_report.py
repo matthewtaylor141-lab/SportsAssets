@@ -20,7 +20,11 @@ def summarize(latest: list[dict], all_rows: list[dict], ratios: dict) -> dict:
     # with no later reading is unresolved and counted on neither side
     resolved = [r for r in orders if r.get("would_fill") is not None]
     fills = [r for r in resolved if r.get("would_fill")]
-    frozen = [r for r in mapped if str(r.get("reason") or "").startswith("frozen")]
+    # a market can be BOTH "short side not admitted" and frozen: the
+    # reason carries the target's why first (first shadow hours: Shelton
+    # v Hurkacz read "short side not admitted; frozen: venue and ledger
+    # disagree" and was counted in neither list)
+    frozen = [r for r in mapped if "frozen" in str(r.get("reason") or "")]
     # drift = |fills-derived - venue-read| over the larger of the two, so
     # "fills say he holds, the venue says he is out" (snap 0, his > 0)
     # counts as full drift instead of being dropped (review round two)
@@ -129,7 +133,7 @@ async def frozen_detail(pool: Any, latest: list[dict], limit: int = 5) -> list[d
     against venue +3,458). Best-effort; empty when the ledger is
     unreadable."""
     frozen = [r for r in latest
-              if str(r.get("reason") or "").startswith("frozen") and r.get("us_market_slug")]
+              if "frozen" in str(r.get("reason") or "") and r.get("us_market_slug")]
     if not frozen:
         return []
     try:

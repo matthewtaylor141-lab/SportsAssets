@@ -665,7 +665,7 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
                 stats["would_orders"] += 1
                 if (row.get("detail") or {}).get("marketable_now"):
                     stats["marketable_now"] += 1
-            if str(row.get("reason") or "").startswith("frozen"):
+            if "frozen" in str(row.get("reason") or ""):
                 stats["frozen"] += 1
             if row.get("us_market_slug") and row.get("bid") is None and row.get("ask") is None:
                 misses += 1
