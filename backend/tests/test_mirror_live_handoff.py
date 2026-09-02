@@ -185,7 +185,10 @@ class TestTheGateStandsWhereTheSpecPutsIt:
 class TestTheWakeHelperCannotRaiseOrTrade:
     def test_it_imports_the_worker_lazily_and_swallows_its_absence(self):
         body = _body(le._mirror_notify)
-        assert "from .workers import mirror_live" in body
+        # by FULL NAME, lazily: the from-import form raised a plain
+        # ImportError for a genuinely absent submodule (final review)
+        assert "importlib.import_module('sportsassets.workers.mirror_live')" in body
+        assert "from .workers import" not in body
         # ModuleNotFoundError (an ImportError) for the worker's own name is
         # the quiet absence; any other import failure is named in the log
         assert "except ModuleNotFoundError" in body
@@ -213,7 +216,7 @@ class TestTheWakeHelperCannotRaiseOrTrade:
         tree = ast.parse(textwrap.dedent(inspect.getsource(le._mirror_notify)))
         called = [ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)]
         assert called.count("_ml.notify") == 1, called
-        assert set(called) <= {"_ml.notify", "log.warning"}, called
+        assert set(called) <= {"_ml.notify", "log.warning", "importlib.import_module"}, called
 
 
 # ───────────────────────────── 2. the wake helper ─────────────────────────────
@@ -265,10 +268,11 @@ class TestTheWakeHelperBehaviour:
         del mod.notify
         assert le._mirror_notify("0xc") is None
 
-    def test_a_package_attribute_alone_is_honoured(self, monkeypatch):
-        """The import form's real resolution order: a fake left on the
-        package attribute is what the gate calls, whatever sys.modules
-        says -- so the absent tests above have to clear both."""
+    def test_a_none_entry_in_sys_modules_is_absence_whatever_the_package_says(self, monkeypatch):
+        """The gate imports by FULL NAME (final review of the chain): a
+        None entry in sys.modules is Python's own absence marker and
+        wins over a fake left on the package attribute, so absence can
+        never be talked out of by a stale attribute."""
         import sportsassets.workers as _wpkg
         calls: list = []
         mod = types.ModuleType(MIRROR_LIVE)
@@ -276,7 +280,22 @@ class TestTheWakeHelperBehaviour:
         monkeypatch.setattr(_wpkg, "mirror_live", mod, raising=False)
         monkeypatch.setitem(sys.modules, MIRROR_LIVE, None)
         assert le._mirror_notify("0xc") is None
-        assert calls == ["0xc"]
+        assert calls == []
+
+    def test_real_absence_is_quiet(self, monkeypatch, caplog):
+        """No file, no package attribute, no sys.modules entry -- the
+        state of this tree before step 9 lands: no log line at all. The
+        from-import form used to raise a plain ImportError here and log
+        a traceback on every fill of a mirrored whale."""
+        import importlib.util
+        import sportsassets.workers as _wpkg
+        assert importlib.util.find_spec(MIRROR_LIVE) is None, "step 9 has landed; retarget"
+        monkeypatch.delitem(sys.modules, MIRROR_LIVE, raising=False)
+        monkeypatch.delattr(_wpkg, "mirror_live", raising=False)
+        with caplog.at_level(logging.WARNING, logger="sportsassets.live_executor"):
+            assert le._mirror_notify("0xc") is None
+            assert le._mirror_notify(None) is None
+        assert caplog.records == []
 
     def test_a_missing_dependency_inside_the_worker_is_named(self, monkeypatch, tmp_path, caplog):
         """ModuleNotFoundError for ANOTHER name is a bad deploy of the

@@ -537,8 +537,10 @@ class _FetchPool:
     async def fetch(self, sql, *a):
         self.sql.append(sql)
         if "mirror_orders" in sql:
-            if "mirror" in self.boom:
+            if "mirror" in self.boom:               # 047 not applied
                 raise RuntimeError('relation "mirror_orders" does not exist')
+            if "mirror_db" in self.boom:            # a read that FAILED
+                raise RuntimeError("db blip")
             return [{"order_id": o} for o in self.mirror]
         assert "live_orders" in sql, sql
         if "manual" in self.boom:
@@ -560,11 +562,23 @@ class TestProtectedOrderIds:
         assert asyncio.run(le._protected_order_ids(
             _FetchPool(mirror=["x9"], boom={"manual"}))) is None
 
-    def test_none_when_the_mirror_table_is_absent(self):
-        """Migration 047 not applied: the reaper must sweep nothing, not
-        sweep with half a list."""
+    def test_an_absent_mirror_table_is_an_empty_mirror_set(self):
+        """Migration 047 not applied: a table that does not exist holds
+        no order, so the set is exactly the manual set and every reaper
+        runs today's pass (final review of the chain, 2026-09-02)."""
         assert asyncio.run(le._protected_order_ids(
-            _FetchPool(manual=["m1"], boom={"mirror"}))) is None
+            _FetchPool(manual=["m1"], boom={"mirror"}))) == {"m1"}
+        assert le._relation_missing(RuntimeError('relation "mirror_orders" does not exist'),
+                                    "mirror_orders")
+        assert le._relation_missing(type("UndefinedTableError", (Exception,), {})("x"),
+                                    "mirror_orders")
+        assert not le._relation_missing(RuntimeError("db blip"), "mirror_orders")
+
+    def test_none_when_the_mirror_read_fails(self):
+        """A read that FAILED is not a table that is absent: half a list
+        protects nothing, so the reapers skip their pass."""
+        assert asyncio.run(le._protected_order_ids(
+            _FetchPool(manual=["m1"], boom={"mirror_db"}))) is None
 
     def test_the_manual_query_is_the_reapers_and_the_reaper_reads_through_the_helper(self):
         p = _FetchPool()

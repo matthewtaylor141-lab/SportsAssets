@@ -53,11 +53,12 @@ class _LedgerPool:
 
     def __init__(self, scope=(), manual=(), mirror=(), known=(),
                  explained=0.0, manual_raises=False, mirror_raises=False,
-                 scope_raises=False, adopt_raises=None):
+                 scope_raises=False, adopt_raises=None, mirror_absent=False):
         self.scope = list(scope)          # [(row_id, slug, placed_ts, pre_ids)]
         self.manual, self.mirror, self.known = list(manual), list(mirror), list(known)
         self.explained = explained
         self.manual_raises, self.mirror_raises = manual_raises, mirror_raises
+        self.mirror_absent = mirror_absent
         self.scope_raises = scope_raises
         self.adopt_raises = adopt_raises
         self.queries: list[tuple] = []
@@ -65,8 +66,10 @@ class _LedgerPool:
     async def fetch(self, sql, *a):
         self.queries.append(("fetch", sql, a))
         if "mirror_orders" in sql:
-            if self.mirror_raises:
+            if self.mirror_absent:                 # 047 not applied
                 raise RuntimeError('relation "mirror_orders" does not exist')
+            if self.mirror_raises:                 # a read that FAILED
+                raise RuntimeError("db blip")
             return [_Row(order_id=o) for o in self.mirror]
         if "whale_username,'') = 'manual'" in sql:
             if self.manual_raises:
@@ -210,15 +213,12 @@ class TestTheVenueReaper:
         assert any(r.getMessage() == "resting-bid reaper: manual ids unreadable "
                    "— skipping this pass" for r in caplog.records)
 
-    def test_a_047_absent_ledger_behaves_exactly_as_an_unreadable_manual_set(
+    def test_a_failed_mirror_read_behaves_exactly_as_an_unreadable_manual_set(
             self, monkeypatch, no_sleep, caplog):
-        """mirror_orders does not exist (migration 047 unapplied): the
-        helper reads None, and the pass is BYTE-IDENTICAL to the pass an
-        unreadable manual read has always produced -- the same venue
-        calls, the same (absent) writes, the same log text. Not today's
-        SWEEP: on an unmigrated ledger the net-under-the-net is off
-        until 047 runs, by the helper's own contract (a list that might
-        be half a list protects nothing)."""
+        """The mirror_orders read FAILS (a db blip, not an absent table):
+        the helper reads None, and the pass is BYTE-IDENTICAL to the pass
+        an unreadable manual read has always produced -- the same venue
+        calls, the same (absent) writes, the same log text."""
         caplog.set_level(logging.WARNING, logger=le.log.name)
         pmus_a, pool_a = _collision(oid="orphan", manual_raises=True)
         n_a = _venue_pass(pmus_a, pool_a, monkeypatch)
@@ -231,6 +231,22 @@ class TestTheVenueReaper:
         assert n_b == 0 and pmus_b.calls == [("open_orders",)]
         assert lines_a == lines_b == ["resting-bid reaper: manual ids unreadable "
                                       "— skipping this pass"]
+
+    def test_a_047_absent_ledger_runs_todays_pass(self, monkeypatch, no_sleep, caplog):
+        """mirror_orders does not EXIST (migration 047 unapplied; start.sh
+        serves on when migrate fails): a table that does not exist holds
+        no order, so the mirror set is empty and the pass is TODAY'S --
+        the orphan is cancelled, adopted and reconciled exactly as with
+        047 applied and no mirror rows (final review of the chain: reading
+        absence as unreadable had switched off all three nets)."""
+        caplog.set_level(logging.WARNING, logger=le.log.name)
+        pmus_a, pool_a = _collision(oid="orphan", manual=["desk"], mirror=[])
+        n_a = _venue_pass(pmus_a, pool_a, monkeypatch)
+        pmus_b, pool_b = _collision(oid="orphan", manual=["desk"], mirror_absent=True)
+        n_b = _venue_pass(pmus_b, pool_b, monkeypatch)
+        assert n_a == n_b == 1
+        assert pmus_a.calls == pmus_b.calls and pool_a.executes() == pool_b.executes()
+        assert not [r for r in caplog.records if "skipping this pass" in r.getMessage()]
 
     def test_with_no_mirror_rows_the_pass_is_todays_pass(self, monkeypatch, no_sleep):
         """Every switch off, 047 applied, no mirror order anywhere: the

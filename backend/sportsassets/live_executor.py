@@ -3688,11 +3688,19 @@ async def _reap_one_submitting_row(pool, pmus, r) -> None:
                 his, shares = 0.0, 0.0
             if 0.0 < his < 1.0 and shares >= 1:
                 placed_ts = time.time() - age
+                # never a mirror order (P1 step 8, final review): the
+                # desk's fingerprint search excludes the protected set
+                # like the other two callers; an unreadable set leaves
+                # the row exactly as an unreadable book does
+                protected = await _protected_order_ids(pool)
+                if protected is None:
+                    return
                 found, readable = await _find_lost_rest_bid(
                     pmus, slug, shares,
                     _fingerprint_cents(his, _row_get(r, "intent")),
                     window=(placed_ts - _ORPHAN_SKEW_S,
-                            placed_ts + _ORPHAN_MATCH_S))
+                            placed_ts + _ORPHAN_MATCH_S),
+                    exclude=protected)
                 if not readable:
                     return
                 if found is not None:
@@ -6273,7 +6281,6 @@ def _mirror_qty_px(shares, price) -> tuple[float, float] | None:
     then disagrees with the venue and the reconciler freezes the book
     by name (venue_ledger_disagree), which is the fail-closed outcome;
     a guessed price would be a wrong average on every later sale."""
-    import math
 
     try:
         q, px = float(shares), float(price)
@@ -7362,22 +7369,42 @@ async def _protected_order_ids(pool) -> set[str] | None:
     adopt from, and this set is the belt for the one pass that asks the
     VENUE instead of the ledger).
 
-    None when EITHER read fails. Without the exclusion list a sweep
-    cannot tell a desk order or a mirror rest from an orphaned bid, so it
-    must cancel neither -- the reaper's existing stance, kept; a missing
-    mirror_orders table (047 not yet applied) reads as None for the same
-    reason. Not yet wired (P1 step 8); the reaper's inline query is
-    byte-identical to the first read here so the swap is a substitution.
+    None when a read FAILS. Without the exclusion list a sweep cannot
+    tell a desk order or a mirror rest from an orphaned bid, so it must
+    cancel neither -- the reaper's existing stance, kept. A mirror_orders
+    table that does not EXIST (047 not yet applied; start.sh serves on
+    even when migrate fails) is not a failed read: a table that does not
+    exist holds no order, so the mirror set is empty and every reaper
+    runs exactly today's pass (final review of the chain, 2026-09-02:
+    reading absence as None had turned off all three nets -- the venue
+    reaper, the lost-bid adopter and the rest lane's own lost-response
+    search -- on a production state the migration runner permits).
+    Wired in P1 step 8; the reaper's former inline query is byte-identical
+    to the first read here.
     """
     try:
         manual = {str(r["order_id"]) for r in await pool.fetch(
             "SELECT order_id FROM live_orders WHERE order_id IS NOT "
             "NULL AND COALESCE(whale_username,'') = 'manual'")}
+    except Exception:  # noqa: BLE001 — unreadable: protect nothing by
+        # cancelling nothing (the callers skip their pass)
+        return None
+    try:
         mirror = {str(r["order_id"]) for r in await pool.fetch(
             "SELECT order_id FROM mirror_orders WHERE order_id IS NOT NULL")}
-    except Exception:  # noqa: BLE001 — unreadable: protect nothing by
-        return None    # guessing; the caller sweeps nothing this pass
+    except Exception as exc:  # noqa: BLE001
+        if _relation_missing(exc, "mirror_orders"):
+            return manual
+        return None
     return manual | mirror
+
+
+def _relation_missing(exc: BaseException, relation: str) -> bool:
+    """asyncpg's UndefinedTableError, or any driver's text for it."""
+    if type(exc).__name__ == "UndefinedTableError":
+        return True
+    msg = str(exc)
+    return relation in msg and "does not exist" in msg
 
 
 def mirror_allowlist() -> set[str]:
@@ -7435,12 +7462,18 @@ def _mirror_notify(condition_id: str | None) -> None:
     the reconciler polls.
     """
     try:
-        from .workers import mirror_live as _ml
+        # by FULL NAME (final review of the chain, 2026-09-02): the
+        # from-import form raised a plain ImportError for a genuinely
+        # absent submodule, so "step 9 has not landed" logged a traceback
+        # on every fill of a mirrored whale; import_module raises
+        # ModuleNotFoundError carrying the worker's own name for that case
+        import importlib
+        _ml = importlib.import_module("sportsassets.workers.mirror_live")
     except ModuleNotFoundError as exc:
-        # ABSENCE IS NOT BREAKAGE (step 7b review): only the worker module
-        # itself being missing is the quiet case; a dependency it cannot
-        # import raises the same class with another name and is a bad
-        # deploy, named below like any other import failure.
+        # ABSENCE IS NOT BREAKAGE: only the worker module itself being
+        # missing is the quiet case; a dependency it cannot import raises
+        # the same class with another name and is a bad deploy, named
+        # below like any other import failure.
         if exc.name == "sportsassets.workers.mirror_live":
             return None
         log.warning("mirror worker would not import; wake for %s dropped",
