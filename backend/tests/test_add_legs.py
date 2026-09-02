@@ -608,6 +608,45 @@ def test_the_stale_exit_reaper_subtracts_shares_other_rows_explain():
     assert "if held - _explained < 1:" in src
 
 
+def test_the_adds_census_names_the_lever_and_its_refusals():
+    from sportsassets.analytics import lane_exec
+
+    class _P:
+        def __init__(self):
+            self.calls = []
+
+        async def fetchrow(self, sql, *a):
+            self.calls.append((" ".join(sql.split()), a))
+            return {"merged": 3, "named": 1, "standalone": 0, "legs_usd": 91.5, "refused": 7}
+
+        async def fetch(self, sql, *a):
+            self.calls.append((" ".join(sql.split()), a))
+            return [{"why": "(add refused: 3 legs already)", "n": 4},
+                    {"why": "(add refused: his buy is the other outcome of a market we hold)", "n": 3}]
+
+    p = _P()
+    out = asyncio.run(lane_exec.adds_census(p, 7, "RN1"))
+    assert out["merged"] == 3 and out["named"] == 1 and out["legs_usd"] == 91.5
+    assert out["refused"] == 7 and out["refusals"]["(add refused: 3 legs already)"] == 4
+    assert all(a == (7, "rn1") for _, a in p.calls)
+    assert "status = 'merged'" in p.calls[0][0] and "add-unmerged%" in p.calls[0][0]
+
+    class _Broken:
+        async def fetchrow(self, sql, *a):
+            raise RuntimeError("no such column")
+
+        async def fetch(self, sql, *a):
+            return []
+
+    out2 = asyncio.run(lane_exec.adds_census(_Broken(), 7))
+    assert out2["unavailable"] is True and out2["merged"] == 0
+    # and the lane summary breaks merged legs out beside filled
+    rows = [{"lane": "chain", "status": "merged", "filled_usd": 0.0, "reaction_s": 1.0,
+             "det_lag": 0.2, "his_ts": 1000.0, "t_send": None, "t_reply": None,
+             "stake": 30.0, "pnl": None, "event_key": "g1", "settled": False}]
+    assert lane_exec.summarize(rows)["lanes"]["chain"]["merged"] == 1
+
+
 def test_the_volume_governor_counts_legs_on_their_own_clock():
     src = inspect.getsource(live_executor.volume_normalized_clip)
     assert "jsonb_array_elements(COALESCE(lo2.raw->'adds', '[]'::jsonb)) a" in src

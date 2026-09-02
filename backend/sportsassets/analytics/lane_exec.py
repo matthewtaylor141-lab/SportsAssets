@@ -71,6 +71,9 @@ def summarize(rows: list[dict]) -> dict:
             "attempts": len(rs), "filled": filled,
             "unfilled": st.count("unfilled"), "rejected": st.count("rejected"),
             "error": st.count("error"), "open": sum(1 for s in st if s in OPEN),
+            # add legs merged onto a standing row, broken out so the
+            # probe shows the adds lever firing (a subset of `filled`)
+            "merged": st.count("merged"),
         }
         counts["fill_rate"] = round(filled / len(rs), 4) if rs else None
         reaction = [_num(r.get("reaction_s")) for r in rs]
@@ -167,7 +170,51 @@ async def cohort_lane_exec(pool: Any, days: int = 7, whale: str | None = None) -
     out = summarize(rows)
     out["days"] = int(days)
     out["whale"] = whale.lower() if whale else None
+    out["adds"] = await adds_census(pool, days, whale)
     return out
 
 
-__all__ = ["summarize", "cohort_lane_exec"]
+async def adds_census(pool: Any, days: int = 7, whale: str | None = None) -> dict:
+    """The never-add -> adds lever, counted (2026-09-02): legs merged
+    onto standing rows, legs named for the reaper, legs that stood
+    alone, the dollars the merged legs spent, and the reasons his other
+    re-buys were still refused. Best-effort: an unreadable census is an
+    empty one, never an error on the probe."""
+    args: list[Any] = [int(days)]
+    wfilt = ""
+    if whale:
+        args.append(whale.lower())
+        wfilt = "AND lower(COALESCE(whale_username, '')) = $2"
+    try:
+        row = await pool.fetchrow(
+            f"""
+            SELECT count(*) FILTER (WHERE status = 'merged')::int AS merged,
+                   count(*) FILTER (WHERE status = 'error'
+                                    AND error LIKE 'ORPHAN FILL RECORDED%add leg of row%')::int AS named,
+                   count(*) FILTER (WHERE error LIKE 'add-unmerged%')::int AS standalone,
+                   COALESCE(sum((raw->'add_leg'->>'usd')::float8)
+                            FILTER (WHERE status = 'merged'), 0)::float8 AS legs_usd,
+                   count(*) FILTER (WHERE error LIKE 'never-add:%(add refused%')::int AS refused
+              FROM live_orders
+             WHERE placed_at >= now() - make_interval(days => $1) {wfilt}
+            """, *args)
+        why = await pool.fetch(
+            f"""
+            SELECT substring(error from '\\(add refused: [^)]*\\)') AS why, count(*)::int AS n
+              FROM live_orders
+             WHERE placed_at >= now() - make_interval(days => $1) {wfilt}
+               AND error LIKE 'never-add:%(add refused%'
+             GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+            """, *args)
+    except Exception:  # noqa: BLE001 — a census that cannot be read is empty
+        return {"merged": 0, "named": 0, "standalone": 0, "legs_usd": 0.0,
+                "refused": 0, "refusals": {}, "unavailable": True}
+    return {"merged": int(row["merged"] or 0) if row else 0,
+            "named": int(row["named"] or 0) if row else 0,
+            "standalone": int(row["standalone"] or 0) if row else 0,
+            "legs_usd": round(float(row["legs_usd"] or 0.0), 2) if row else 0.0,
+            "refused": int(row["refused"] or 0) if row else 0,
+            "refusals": {str(r["why"] or "?"): int(r["n"] or 0) for r in why}}
+
+
+__all__ = ["summarize", "cohort_lane_exec", "adds_census"]

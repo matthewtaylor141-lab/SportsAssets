@@ -1168,9 +1168,15 @@ jobs:
           # round trip, fill rate, and the settled return of each lane.
           curl -sS --max-time 120 -H "X-Admin-Token: $ADMIN_TOKEN" \
                -o /tmp/laneexec.json "$BASE/api/admin/lane-exec?days=7" 2>/dev/null || true
-          jq -r '.lanes // {} | to_entries[] | "  LANEEXEC \(.key): attempts=\(.value.attempts) filled=\(.value.filled) unfilled=\(.value.unfilled) rejected=\(.value.rejected) error=\(.value.error) open=\(.value.open) fill_rate=\(.value.fill_rate // "n/a") reaction_p50=\(.value.latency.reaction_s.p50 // "n/a")s send_p50=\(.value.latency.send_s.p50 // "n/a")s send_p90=\(.value.latency.send_s.p90 // "n/a")s rtt_p50=\(.value.latency.venue_rtt_s.p50 // "n/a")s stamped=\(.value.latency.send_s.n) settled=\(.value.settled.n // 0)/\(.value.settled.clusters // "n/a") roi=\(.value.settled.roi // "n/a") ci95=\(.value.settled.ci95 | tostring) — \(.value.settled.verdict)"' \
+          jq -r '.lanes // {} | to_entries[] | "  LANEEXEC \(.key): attempts=\(.value.attempts) filled=\(.value.filled) merged=\(.value.merged // 0) unfilled=\(.value.unfilled) rejected=\(.value.rejected) error=\(.value.error) open=\(.value.open) fill_rate=\(.value.fill_rate // "n/a") reaction_p50=\(.value.latency.reaction_s.p50 // "n/a")s send_p50=\(.value.latency.send_s.p50 // "n/a")s send_p90=\(.value.latency.send_s.p90 // "n/a")s rtt_p50=\(.value.latency.venue_rtt_s.p50 // "n/a")s stamped=\(.value.latency.send_s.n) settled=\(.value.settled.n // 0)/\(.value.settled.clusters // "n/a") roi=\(.value.settled.roi // "n/a") ci95=\(.value.settled.ci95 | tostring) — \(.value.settled.verdict)"' \
             /tmp/laneexec.json 2>/dev/null || echo "  LANEEXEC unavailable"
           jq -r '"  LANEREAD \(.reading // .error // "n/a")"' /tmp/laneexec.json 2>/dev/null || true
+          # ADDS — the never-add -> adds lever (2026-09-02): legs merged
+          # onto standing rows, legs named for the reaper, and why the
+          # rest of his re-buys were still refused, in the window.
+          jq -r '.adds // {} | "  ADDS merged=\(.merged // 0) named=\(.named // 0) standalone=\(.standalone // 0) legs_usd=\(.legs_usd // 0) refused=\(.refused // 0)"' \
+            /tmp/laneexec.json 2>/dev/null || echo "  ADDS unavailable"
+          jq -r '.adds.refusals // {} | to_entries[] | "  ADDSWHY \(.value)  \(.key)"' /tmp/laneexec.json 2>/dev/null || true
           # LANEWHY — the gates behind the fast lane's refusals: the row's
           # error text names the gate that ended a detection 'rejected'
           # before any order. This is the lane's real fill-rate story.
