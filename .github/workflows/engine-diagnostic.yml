@@ -1176,6 +1176,18 @@ jobs:
           # before any order. This is the lane's real fill-rate story.
           jq -r '.lanes // {} | to_entries[] | .key as $l | (.value.rejected_reasons // [])[] | "  LANEWHY \($l): \(.n)  \(.reason)"' \
             /tmp/laneexec.json 2>/dev/null || true
+          # GATEEDGE — what each refusal gate costs or saves (owner order
+          # 2026-09-02): every refused trade scored at HIS price to
+          # resolution, per gate, beside the taken trades on the same
+          # basis. EARN at 95% on 30+ games = a lever; LOSE = the gate
+          # is preserving his edge.
+          curl -sS --max-time 150 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/gateedge.json "$BASE/api/admin/gate-edge?days=30" 2>/dev/null || true
+          jq -r '.gates // {} | to_entries[] | "  GATEEDGE \(.key): refused=\(.value.refused) share=\(.value.share_of_refusals // "n/a") scored=\(.value.n) games=\(.value.clusters // "n/a") roi=\(.value.roi // "n/a") ci95=\(.value.ci95 | tostring) — \(.value.lever)"' \
+            /tmp/gateedge.json 2>/dev/null || echo "  GATEEDGE unavailable"
+          jq -r '"  GATEBASE taken at his price: n=\(.taken_at_his_price.n // 0) games=\(.taken_at_his_price.clusters // "n/a") roi=\(.taken_at_his_price.roi // "n/a") ci95=\(.taken_at_his_price.ci95 | tostring) — \(.taken_at_his_price.verdict)  (refused scored=\(.n_refused_scored // 0), unresolvable=\(.unresolvable_payout // 0))"' \
+            /tmp/gateedge.json 2>/dev/null || true
+          jq -r '"  GATEREAD \(.reading // .error // "n/a")"' /tmp/gateedge.json 2>/dev/null || true
           # MARKSPROBE — whether the public CLOB honours startTs/endTs for
           # the marks worker (unverified against the docs; the worker
           # falls back to interval+fidelity with a client-side window).

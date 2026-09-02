@@ -5614,6 +5614,20 @@ async def admin_impact_edge(whale: str = "rn1", flow_per_day: float = 0.0) -> di
                                whale or None, flow_per_day or None)
 
 
+@app.get("/api/admin/gate-edge", dependencies=[Depends(require_admin)])
+async def admin_gate_edge(whale: str = "", days: int = 30) -> dict:
+    """What each refusal gate costs or saves. See analytics/gate_edge.py.
+
+    Every refused trade scored at HIS price to resolution, per gate,
+    beside the taken trades on the same basis. A gate whose refused
+    trades earn at 95% on 30+ games is a lever; one whose refused
+    trades lose is preserving his edge.
+    """
+    from ..analytics.gate_edge import cohort_gate_edge
+
+    return await cohort_gate_edge(await get_pool(), days, whale or None)
+
+
 @app.get("/api/admin/lane-exec", dependencies=[Depends(require_admin)])
 async def admin_lane_exec(whale: str = "", days: int = 7) -> dict:
     """Execution by DETECTION lane. See analytics/lane_exec.py.
