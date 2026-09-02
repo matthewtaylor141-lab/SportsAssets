@@ -734,7 +734,12 @@ export function TrackRecord() {
                           {fmtLatency(r.latency_s)}
                         </span>
                       )}
-                      {r.status === 'cashed_out' && <span className="tr-tag">CASHED OUT</span>}
+                      {r.status === 'cashed_out' && <span className="tr-tag">SOLD · CASHED OUT</span>}
+                      {r.status === 'partial_cashout' && (
+                        <span className="tr-tag" title="Realized on the sold part; the remainder is still open">
+                          PARTIAL CASH-OUT · REMAINDER OPEN
+                        </span>
+                      )}
                       <span className={`tr-chip ${st}`}>
                         {won ? '✓ WON' : '✕ LOST'}
                       </span>

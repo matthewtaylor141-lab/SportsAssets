@@ -29,6 +29,40 @@ def test_the_display_epoch_floors_the_card(monkeypatch):
     assert len(_daily(rows, days=7)) == 1
 
 
+def _sell(slug, ts_iso, qty="10", price="0.62", rp="1.80", nested=True):
+    t = {"createTime": ts_iso, "marketSlug": slug, "qty": qty,
+         "price": {"value": price, "currency": "USD"},
+         "realizedPnl": {"value": rp, "currency": "USD"},
+         "marketMetadata": {"title": "Match " + slug}}
+    if nested:
+        t["aggressorExecution"] = {"order": {"side": "TRADE_SIDE_SELL"}}
+    else:
+        t["side"] = "SIDE_SELL"
+    return {"type": "ACTIVITY_TYPE_TRADE", "trade": t}
+
+
+def test_a_position_we_sold_is_settled_on_the_day_of_the_sale():
+    """Owner report 2026-09-02: sells did not show on the ledger and the
+    P&L was wrong. Only resolution activities were read as settlements;
+    a position closed by the exit path never resolves."""
+    balances = {"balances": [{"currentBalance": {"value": "100"}, "assetNotional": {"value": "0"}}]}
+    positions = {"aec-x-y": {"netPosition": "0", "realized": {"value": "1.80"},
+                             "cost": {"value": "5.0"}, "cashValue": {"value": "0"},
+                             "marketMetadata": {"title": "Match aec-x-y"}}}
+    acts = [_sell("aec-x-y", "2026-09-02T13:00:00Z"),
+            _sell("gone-from-positions", "2026-09-02T12:00:00Z", rp="-0.40", nested=False)]
+    out = normalize(balances, positions, acts)
+    by = {r["market_slug"]: r for r in out["system"]["positions_rows"]} if "positions_rows" in out["system"] else {}
+    # both sales are settled, dated, and counted in the scorecards
+    assert out["settled_count"] == 2
+    assert out["realized_pnl"] == 1.4
+    sys_ = out["system"]
+    assert sys_["settled"] == 2 and sys_["wins"] == 1 and sys_["losses"] == 1
+    assert out["recent_trades"][0]["side"] == "SELL"
+    assert out["system_daily"] and out["system_daily"][0]["day"] == "2026-09-02"
+    assert not by  # (the card does not expose per-row lists beyond the scorecards)
+
+
 def test_normalize_full_account():
     balances = {"balances": [{
         "currentBalance": 412.35, "buyingPower": 400.0,

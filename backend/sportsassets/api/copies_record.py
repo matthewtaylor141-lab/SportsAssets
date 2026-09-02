@@ -186,6 +186,33 @@ def trades_list(rows: list[dict], limit: int = 400) -> list[dict]:
     return out
 
 
+def partials_list(rows: list[dict]) -> list[dict]:
+    """Ledger lines for rows still open on a remainder after a partial
+    cash-out: the realized leg so far, the shares left. status
+    'partial_cashout' so the front end tags them; never counted in the
+    settled totals. Pure; tested."""
+    out = []
+    for r in rows:
+        if (r.get("whale") or "") not in COPY_WHALES:
+            continue
+        pnl = float(r.get("pnl") or 0)
+        if abs(pnl) < 0.005:
+            continue
+        lat = r.get("latency_s")
+        out.append({"day": None,
+                    "whale": DISPLAY.get(r["whale"], r["whale"]),
+                    "slug": r.get("us_market_slug"),
+                    "stake": round(float(r.get("filled_usd") or 0), 2),
+                    "pnl": round(pnl, 2),
+                    "status": "partial_cashout",
+                    "remaining_shares": float(r.get("remaining_shares") or 0),
+                    "orig_shares": float(r.get("orig_shares") or 0),
+                    "venue": r.get("venue"),
+                    "latency_s": (round(float(lat), 2)
+                                  if isinstance(lat, (int, float)) else None)})
+    return out
+
+
 def today_stats(rows: list[dict], today: str) -> dict:
     """Today's copy scoreline (ET), uncapped. Pure; tested."""
     t = {"pnl": 0.0, "settled": 0, "wins": 0, "losses": 0}
@@ -261,6 +288,35 @@ async def build(since_day: str) -> dict:
              for r in open_rows),
             key=lambda w: -w["stake"])}
     out["trades"] = trades_list(windowed)
+    # PARTIAL CASH-OUTS ARE MONEY TOO (owner report 2026-09-02: "the
+    # front end does not show sell orders (sold) on the ledger so the
+    # P&L is incredibly wrong"). A whale who trims is mirrored by a
+    # partial sale; the row stays 'filled' on the remainder with the
+    # realized leg accumulated on pnl, and the ledger only lists
+    # settled/cashed-out rows -- so the realized money was invisible
+    # until the market resolved. They are listed here as their own
+    # lines and summed separately; the settled totals are untouched
+    # (the row's final pnl carries the same dollars once it settles).
+    try:
+        partial_rows = await pool.fetch(
+            """
+            SELECT lower(COALESCE(lo.whale_username, '')) AS whale,
+                   lo.pnl::float8 AS pnl, lo.filled_usd::float8 AS filled_usd,
+                   lo.filled_shares::float8 AS remaining_shares,
+                   COALESCE(lo.orig_shares, lo.filled_shares)::float8 AS orig_shares,
+                   lo.us_market_slug, lo.venue, lo.reaction_s::float8 AS latency_s
+            FROM live_orders lo
+            WHERE lo.status = 'filled' AND COALESCE(lo.pnl, 0) <> 0
+              AND lower(COALESCE(lo.whale_username, '')) = ANY($1::text[])
+            ORDER BY lo.placed_at DESC
+            """, list(COPY_WHALES))
+    except Exception:  # noqa: BLE001 — orig_shares is migration 040's
+        partial_rows = []
+    partials = partials_list([dict(r) for r in partial_rows])
+    out["partials"] = {"count": len(partials),
+                       "realized": round(sum(p["pnl"] for p in partials), 2),
+                       "rows": partials}
+    out["trades"] = partials + out["trades"]
     out["today"] = today_stats(
         windowed, datetime.now(RECORD_TZ).strftime("%Y-%m-%d"))
     # KALSHI COPY SLEEVE MERGE (owner order 2026-08-22: "include volume

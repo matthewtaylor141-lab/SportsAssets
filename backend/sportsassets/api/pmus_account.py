@@ -29,6 +29,21 @@ def _amt(a: Any) -> float:
         return 0.0
 
 
+def _trade_side(t: dict) -> str:
+    """The side of a venue trade row: the top-level field when present,
+    else the nested execution order's (the feed leaves the top level
+    empty; same rule as pmus.trade_side, kept local to avoid the import
+    cycle)."""
+    s = str(t.get("side") or "").upper()
+    if s:
+        return s
+    for k in ("aggressorExecution", "passiveExecution"):
+        o = ((t.get(k) or {}).get("order") or {})
+        if o.get("side"):
+            return str(o["side"]).upper()
+    return ""
+
+
 # The engine trades $1 tickets; the owner trades in tens-to-hundreds. Any
 # performance number that mixes them is meaningless — a single $200 manual
 # position swamps a hundred $1 system fills. Split on position cost.
@@ -208,6 +223,47 @@ def normalize(balances_resp: dict, positions: dict[str, dict],
                 open_rows.remove(row)
                 settled_rows.append(row)
 
+    # A POSITION WE SOLD IS SETTLED TOO (owner report 2026-09-02: "the
+    # front end does not show sell orders (sold) on the ledger so the
+    # P&L is incredibly wrong"). Only resolution activities were read as
+    # settlements, so an exit -- the copy engine mirroring the whale out
+    # -- never dated a row, and a market the venue stopped listing after
+    # the sale vanished from the card entirely. The venue's own trade log
+    # carries the sale: a SELL trade with realized P&L closes (or trims)
+    # the position on the day it happened.
+    sells: dict[str, dict] = {}
+    for act in activities or []:
+        t = act.get("trade") or {}
+        if act.get("type") != "ACTIVITY_TYPE_TRADE" or not t:
+            continue
+        if "SELL" not in _trade_side(t):
+            continue
+        slug = t.get("marketSlug")
+        if not slug:
+            continue
+        s = sells.setdefault(slug, {"realized": 0.0, "qty": 0.0, "last": 0.0,
+                                    "title": (t.get("marketMetadata") or {}).get("title")})
+        s["realized"] += _amt(t.get("realizedPnl"))
+        s["qty"] += _amt(t.get("qty"))
+        s["last"] = max(s["last"], _act_ts(act) or _act_ts(t))
+    for slug, s in sells.items():
+        row = next((r for r in open_rows + settled_rows
+                    if r["market_slug"] == slug), None)
+        if row is None:
+            settled_rows.append({
+                "market_slug": slug, "title": s["title"] or slug,
+                "outcome": None, "qty": 0.0, "cost": 0.0, "value": 0.0,
+                "realized": round(s["realized"], 4),
+                "settled_at": s["last"], "sold": True})
+            continue
+        row["sold"] = True
+        if row in settled_rows and not row.get("settled_at"):
+            row["settled_at"] = s["last"]
+        if row in open_rows and (row.get("qty") or 0) <= 0:
+            row["settled_at"] = s["last"]
+            open_rows.remove(row)
+            settled_rows.append(row)
+
     for r in open_rows:
         r["settled"] = False
     for r in settled_rows:
@@ -243,6 +299,9 @@ def normalize(balances_resp: dict, positions: dict[str, dict],
             "qty": _amt(t.get("qty")),
             "price": _amt(t.get("price")),
             "realized_pnl": _amt(t.get("realizedPnl")),
+            # BUY / SELL, so a sale reads as a sale on the ledger
+            "side": ("SELL" if "SELL" in _trade_side(t)
+                     else "BUY" if "BUY" in _trade_side(t) else ""),
         })
 
     if asset_notional <= 0 and open_rows:

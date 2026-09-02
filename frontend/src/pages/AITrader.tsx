@@ -88,7 +88,7 @@ interface PmusAccount {
   open_count?: number
   settled_count?: number
   open_positions?: { title: string; outcome: string | null; qty: number; cost: number; value: number }[]
-  recent_trades?: { time: string | null; title: string; qty: number; price: number; realized_pnl: number }[]
+  recent_trades?: { time: string | null; title: string; qty: number; price: number; realized_pnl: number; side?: string }[]
 }
 
 /** The REAL Polymarket US account, straight from the venue's portfolio API. */
@@ -180,12 +180,13 @@ function PmusAccountCard() {
           <div className="scroll-x">
             <table className="data">
               <thead>
-                <tr><th>When</th><th>Market</th><th className="num">Qty</th><th className="num">Price</th><th className="num">P&L</th></tr>
+                <tr><th>When</th><th>Side</th><th>Market</th><th className="num">Qty</th><th className="num">Price</th><th className="num">P&L</th></tr>
               </thead>
               <tbody>
                 {acct.recent_trades!.map((t, i) => (
                   <tr key={i}>
                     <td>{t.time ? new Date(t.time).toLocaleString() : '—'}</td>
+                    <td className={t.side === 'SELL' ? 'neg' : 'pos'}>{t.side === 'SELL' ? 'SELL' : t.side === 'BUY' ? 'BUY' : '—'}</td>
                     <td>{t.title}</td>
                     <td className="num">{t.qty}</td>
                     <td className="num">{(t.price * 100).toFixed(0)}¢</td>
