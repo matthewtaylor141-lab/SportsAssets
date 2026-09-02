@@ -36,6 +36,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any
 
 import httpx
@@ -67,6 +68,9 @@ ENABLED = os.environ.get("WHALE_EXIT_ENABLED", "1") != "0"
 MAX_EXITS_PER_CYCLE = int(os.environ.get("WHALE_EXIT_MAX_PER_CYCLE", "10"))
 
 _KEY = "whale_positions:%s"
+# the unpinned read beside it (position mirroring, 2026-09-02):
+# {"at": epoch, "partial": bool, "sizes": {token: shares}}
+_RAW_KEY = "whale_positions_raw:%s"
 # Page size and hard ceiling for the positions read. positions_sync.py
 # uses 100/2000 against the same endpoint; matched here so the two
 # cannot disagree about what "his whole book" means.
@@ -777,6 +781,21 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
             if (before - after) / before < MIN_SHRINK:
                 to_save[asset] = before
         await _save(pool, uname.lower(), to_save)
+        # THE RAW READ, BESIDE THE PINNED BASELINE (position mirroring,
+        # 2026-09-02): the baseline above deliberately pins deferred and
+        # sub-floor shrinks, which is right for exit detection and wrong
+        # as a reading of what he holds NOW. The mirror shadow measures
+        # its fill-derived position against this unpinned read, stamped
+        # so a stale one is excluded rather than trusted. Best-effort.
+        try:
+            await pool.execute(
+                "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+                "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+                _RAW_KEY % uname.lower(),
+                json.dumps({"at": time.time(), "partial": bool(partial),
+                            "sizes": now}))
+        except Exception:  # noqa: BLE001 — a measurement copy, never the cycle
+            log.debug("whale-exit: raw snapshot write failed for %s", uname)
         # A REFUSED EXIT WAS ERASED FOREVER (2026-08-26, adversarial
         # round 3).
         #

@@ -190,6 +190,9 @@ def sampler(monkeypatch):
 
     monkeypatch.setattr(w, "exitable_whales", lambda: {"rn1"})
     monkeypatch.setattr(w, "_sleep", _sleep)
+    # the process-wide measurement gate (venue_pace) never sleeps here;
+    # `slept` records this worker's own pacing only
+    monkeypatch.setattr(w, "pace", lambda s=w.READ_PACING_S: 0.0)
     monkeypatch.setattr(w, "_backoff_until", 0.0)
     return slept
 

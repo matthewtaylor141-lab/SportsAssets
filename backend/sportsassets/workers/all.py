@@ -18,8 +18,8 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from . import (analytics, chain_listener, copy_sweep, dispatcher, edge_marks,
-               metadata_refresher, poller, premap, price_path, reconciler,
-               roster, roster_auto, underdog, whale_exits)
+               metadata_refresher, mirror_shadow, poller, premap, price_path,
+               reconciler, roster, roster_auto, underdog, whale_exits)
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +56,12 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # his edge into selection and timing (owner question 2026-09-01).
     # Public CLOB reads, paced; never touches an order.
     ("edge_marks", edge_marks.main),
+    # POSITION MIRRORING, PHASE P0 (owner order 2026-09-02): reads each
+    # mirrored whale's net position per market from his fills, computes
+    # the target we would hold and the one order we would place, and
+    # writes it to mirror_shadow. NO ORDERS. Thirty games of shadow gate
+    # phase P1 (long-only live) by the numbers.
+    ("mirror_shadow", mirror_shadow.main),
 ]
 
 

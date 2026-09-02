@@ -37,6 +37,7 @@ import time
 from ..analytics.price_path import OFFSETS_S
 from ..db import get_pool
 from ..live_executor import ORDER_INTENT_SQL, exitable_whales
+from ..venue_pace import pace
 
 log = logging.getLogger(__name__)
 
@@ -95,10 +96,20 @@ async def _due_samples(pool, now_ts: float) -> list[dict]:
     return due
 
 
+def _paced_ask(pmus, slug: str, intent: str | None) -> float | None:
+    """One ask read behind the PROCESS-WIDE measurement pacer
+    (position-mirroring review round two): this worker and the mirror
+    shadow each paced their own reads at 0.35 s, and two such streams
+    overlapping summed to ~5.7 req/s on the copy path's client -- above
+    the rate the venue refused. One gate bounds the sum."""
+    pace(READ_PACING_S)
+    return pmus.side_ask(slug, intent)
+
+
 async def _take(pool, pmus, d: dict) -> bool:
     """Read one ask and persist it. False on a venue miss (row skipped)."""
     try:
-        ask = await asyncio.to_thread(pmus.side_ask, d["slug"], d["intent"])
+        ask = await asyncio.to_thread(_paced_ask, pmus, d["slug"], d["intent"])
     except Exception as exc:  # noqa: BLE001 — skip this offset only
         log.debug("price_path: ask unreadable for %s t=%s (%s)",
                   d["slug"], d["t_s"], type(exc).__name__)

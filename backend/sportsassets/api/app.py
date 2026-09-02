@@ -5646,6 +5646,18 @@ async def admin_lane_exec(whale: str = "", days: int = 7) -> dict:
     return await cohort_lane_exec(await get_pool(), days, whale or None)
 
 
+@app.get("/api/admin/mirror-shadow", dependencies=[Depends(require_admin)])
+async def admin_mirror_shadow(whale: str = "", hours: float = 24.0) -> dict:
+    """Position mirroring, phase P0 (owner order 2026-09-02): what the
+    shadow worker read and would have done, per whale and market, with
+    the counts that gate P1 -- would-fill rate at the book, fill-derived
+    vs snapshot drift, mapped share. No orders are placed by this phase.
+    See analytics/mirror.py and workers/mirror_shadow.py."""
+    from ..analytics.mirror_report import mirror_shadow_report
+
+    return await mirror_shadow_report(await get_pool(), hours, whale or None)
+
+
 @app.get("/api/admin/size-edge", dependencies=[Depends(require_admin)])
 async def admin_size_edge(whale: str = "", days: int = 30) -> dict:
     """His edge by the dollars he staked. See analytics/size_edge.py.
