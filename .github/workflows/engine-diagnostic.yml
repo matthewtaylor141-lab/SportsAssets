@@ -179,8 +179,11 @@ jobs:
           # background build; the summary line is what the probe grades.
           echo "VENUE-TRUTH (uncapped, from venue ledgers):"
           curl -sS --max-time 30 -o /tmp/vt.json "$BASE/api/venue-truth" || true
-          jq -r 'if .building then "  building (first request since boot)"
+          jq -r 'if .building then (if (.attempts // 0) > 0 then "  building (retry after \(.attempts) failed attempt(s))" else "  building (first request since boot)" end)
+                 elif .built_at == null then "  not built: last attempt failed  attempts=\(.attempts // 0)  next_attempt_s=\(.next_attempt_s // "?")  (reason on VT-STATE)"
                  else "  since \(.since)  settled \(.total.settled) (\(.total.wins)W-\(.total.losses)L)  realized $\(.total.realized)  cost $\(.total.settled_cost)  partial=\(.partial)  age_s=\(.age_s)" end' \
+             /tmp/vt.json 2>/dev/null || true
+          jq -r 'select(.error != null or (.attempts // 0) > 0 or .pm_coverage != null) | "  VT-STATE:" + (if .error then " error stage=\(.error.stage) type=\(.error.type) detail=\(.error.detail)" else "" end) + (if .attempts != null then " attempts=\(.attempts)" else "" end) + (if .next_attempt_s != null then " next_attempt_s=\(.next_attempt_s)" else "" end) + (if .pm_coverage then " pm_coverage rows_capped=\(.pm_coverage.rows_capped) oldest=\(.pm_coverage.oldest) coverage_days=\(.pm_coverage.coverage_days) of \(.pm_coverage.window_days // "?") rows=\(.pm_coverage.rows) persist_from=\(.pm_coverage.persist_from)" + (if .pm_coverage.error then " crawl_error stage=\(.pm_coverage.error.stage) type=\(.pm_coverage.error.type)" else "" end) else "" end) + (if .history_error then " history_error=\(.history_error)" else "" end) + (if .history_note then " history_note=\(.history_note)" else "" end)' \
              /tmp/vt.json 2>/dev/null || true
           jq -r '.polymarket_us // {} | if .error then "  PM: ERROR \(.error)" else "  PM: settled \(.settled // "?") realized $\(.realized // "?") open \(.open // "?") ($\(.open_cost // "?"))" end' \
              /tmp/vt.json 2>/dev/null || true
