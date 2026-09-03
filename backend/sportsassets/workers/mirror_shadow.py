@@ -35,6 +35,25 @@ on rows that cannot land. Every abandon backs off BACKOFF_S.
 
 Kill: MIRROR_SHADOW=off (env) or ingestion_state 'mirror_shadow' =
 "off" (DB switch, no deploy).
+
+THE CENSUS COLUMNS (to-a-tee Phase 0, owner order 2026-09-02 "I want
+us to match everything ... mirror the whales to a tee"): every gate the
+later phases read was unreadable from the row as written -- an unmapped
+market carried only its two token ids, a mapped one carried no family,
+no mapping class, no snapshot state, and his short side (55% of his
+mapped markets) was refused before it was measured. So the row now
+carries, INSIDE THE JSONB DETAIL and never as a new 046 column, what
+those gates need: the unmapped market's slug/title/sport/family/why/
+dollars; the mapped market's family, per-side flag, snapshot state,
+ledger facts (is our position on the slug a legacy per-fill row, and
+what mapping class the ledger row itself carries); a PARALLEL short
+reading (target_short and its plan, computed with allow_short=True and
+judged on the SELL side against the bid over the same TTL); and, when a
+plan is touched, how long it waited and what sat at the best bid/ask.
+The live-compared target (the value P1 names shadow_live_disagree on)
+is byte-identical to before: the short reading is beside it, never in
+it, because a shadow whose target went negative while the long-only
+book flattened would refuse P2 on that counter by construction.
 """
 from __future__ import annotations
 
@@ -42,6 +61,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -180,7 +200,9 @@ async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:
                extract(epoch FROM t.ts)::float8 AS ts,
                COALESCE(t.market_title, m.title) AS market_title, t.event_slug,
                m.event_title, COALESCE(t.market_slug, m.slug) AS market_slug,
-               t.outcome, t.outcome_index
+               t.outcome, t.outcome_index,
+               COALESCE(NULLIF(m.sport, 'unclassified'), NULLIF(t.sport, 'unclassified'),
+                        'unclassified') AS sport
           FROM trades t JOIN whales w ON w.id = t.whale_id
           LEFT JOIN markets m ON m.condition_id = t.condition_id
          WHERE lower(w.username) = $1 AND t.condition_id = $2
@@ -408,6 +430,259 @@ def his_level(fills: list[dict], long_asset: str | None, other_asset: str | None
     return best[1] if best else None
 
 
+# ------------------------------------------------- census helpers (Phase 0)
+
+def notional_in_window(fills: list[dict], hours: float, now_ts: float | None = None) -> float:
+    """Dollars of his BUYS on the market inside the last `hours`: the
+    unmapped row's dollar weight, so the coverage gate can be read by
+    his money and not by a count of $25 markets (coverage review: 86.8%
+    of his stake sits in lots of $250 and over)."""
+    now_ts = time.time() if now_ts is None else float(now_ts)
+    lo = now_ts - float(hours) * 3600.0
+    total = 0.0
+    for f in fills:
+        if str(f.get("side") or "").upper() != "BUY":
+            continue
+        try:
+            ts = float(f.get("ts") or 0.0)
+            n = float(f.get("size") or 0.0) * float(f.get("price") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if ts >= lo and n > 0:
+            total += n
+    return round(total, 2)
+
+
+def fills_since(fills: list[dict], age_s: float | None, now_ts: float | None = None) -> int | None:
+    """How many of his fills landed AFTER the positions snapshot was
+    taken. Fills-derived and snapshot-derived positions disagree for two
+    different reasons -- an ingest miss and plain lag -- and only this
+    count separates them (a book built at 1,098 sh/min lags thousands
+    of shares inside a 300 s snapshot age). None without a snapshot."""
+    if age_s is None:
+        return None
+    now_ts = time.time() if now_ts is None else float(now_ts)
+    cut = now_ts - float(age_s)
+    n = 0
+    for f in fills:
+        try:
+            if float(f.get("ts") or 0.0) > cut:
+                n += 1
+        except (TypeError, ValueError):
+            continue
+    return n
+
+
+def outcome_null_count(fills: list[dict]) -> int:
+    """His fills on the market whose outcome is still NULL (chain rows
+    are inserted with outcome NULL and enriched later; the premap side
+    match refuses an empty outcome, so this is a named mapping miss and
+    not a venue gap)."""
+    return sum(1 for f in fills if not str(f.get("outcome") or "").strip())
+
+
+def _first_context(fills: list[dict]) -> dict:
+    """The market context the mapper reads: the first fill that carries
+    a title, else the first fill."""
+    ctx = next((f for f in fills if f.get("market_title")), fills[0] if fills else {})
+    slug = str(ctx.get("market_slug") or "")
+    sport = str(ctx.get("sport") or "").strip()
+    if not sport or sport == "unclassified":
+        try:
+            from ..copy_sports import sport_of
+            sport = sport_of(slug) or "unclassified"
+        except Exception:  # noqa: BLE001
+            sport = "unclassified"
+    return {"his_slug": slug or None, "title": ctx.get("market_title"),
+            "event_title": ctx.get("event_title"), "event_slug": ctx.get("event_slug"),
+            "outcome": ctx.get("outcome"), "sport": sport}
+
+
+def _family_of(slug: str | None) -> str:
+    try:
+        from ..copy_sports import market_type_of
+        return market_type_of(slug or "")
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+async def explain_unmapped(pool, ctx: dict) -> str:
+    """WHY premap said no, as the resolver's own step name (the same
+    read-only resolve_explain the copy lane's unmapped census uses), or
+    a named failure -- never a guess."""
+    try:
+        from . import premap as _premap
+    except Exception:  # noqa: BLE001
+        return "explain_unavailable"
+    try:
+        ex = await _premap.resolve_explain(pool, ctx.get("title"), ctx.get("event_title"),
+                                           ctx.get("outcome"), ctx.get("his_slug"))
+    except Exception as exc:  # noqa: BLE001 — one market's why, named
+        return f"explain_raised:{type(exc).__name__}"
+    return str((ex or {}).get("step") or "unknown")
+
+
+# THE LIVE ROWS ARE NEVER TRUNCATED (Phase 0 review of the instruments,
+# major 1; owner order 2026-09-02 "mirror the whales to a tee"): the copy
+# lane inserts one live_orders row per whale trade and the quarantine
+# UPDATEs each to 'rejected', so on a slug where a per-fill row FILLED
+# on one token and he then traded the other token twenty-odd times, the
+# twenty newest rows are all rejected and a plain newest-20 read drops
+# the filled row -- ledger_legacy read a confident False where P1's own
+# referee (an EXISTS over filled/submitting/exiting, no LIMIT) reads
+# True, and the plan was counted in the non-legacy rate it must not
+# enter. So the filled/exiting rows are read whole, and the newest-20
+# cap applies only to the rest (the rows the mapping class is read
+# from). A slug's live rows are bounded by the lane's own caps, so the
+# whole read is small; the newest-20 keeps the class read bounded.
+_SQL_LEDGER_FACTS = """
+SELECT status, lane, error, whale_username
+  FROM live_orders
+ WHERE us_market_slug = $1
+   AND (status IN ('filled', 'exiting')
+        OR id IN (SELECT id FROM live_orders
+                   WHERE us_market_slug = $1
+                     AND status IN ('filled', 'exiting', 'settled', 'cashed_out', 'merged',
+                                    'submitting', 'open', 'rejected')
+                   ORDER BY placed_at DESC LIMIT 20))
+ ORDER BY placed_at DESC /* ledger-facts */
+"""
+
+
+async def ledger_rows(pool, us_slug: str) -> list[dict] | None:
+    """Every live_orders row on the venue slug that could explain what
+    the ledger holds or where its mapping came from: ALL of its
+    filled/exiting rows and the newest twenty of every status (see
+    _SQL_LEDGER_FACTS for why the live rows sit outside the cap); None
+    when the read failed (unreadable is named, never 'no rows')."""
+    try:
+        rows = await pool.fetch(_SQL_LEDGER_FACTS, us_slug)
+    except Exception:  # noqa: BLE001
+        return None
+    return [dict(r) for r in rows]
+
+
+# the mapping class a refused row records in its error text ('(src=fuzzy,
+# slug=...)'); compiled once with the module (Phase 0 review, minor 5)
+_SRC_RE = re.compile(r"\(src=([a-z_]+),")
+
+
+def ledger_facts(rows: list[dict] | None) -> dict:
+    """Two readings off the slug's ledger rows. `legacy`: a NON-mirror
+    row is live on the slug (filled/exiting), so any plan the shadow
+    makes there is against a per-fill position P1 refuses by name
+    (legacy_row) -- those plans must not count toward the would-fill
+    rate P1 is gated on. `map_class`: the mapping class the copy lane's
+    own row carries, which is the only class a ledger-sourced mirror map
+    can claim; a refused row names it in its error text ('(src=fuzzy,
+    slug=...)'), a traded row never recorded it. Fail closed: None rows
+    read as unreadable on both counts."""
+    if rows is None:
+        return {"legacy": None, "map_class": "unreadable"}
+    legacy = False
+    traded_lane = None
+    src = None
+    for r in rows:
+        status = str(r.get("status") or "")
+        lane = str(r.get("lane") or "") or "-"
+        if status in ("filled", "exiting") and lane != "mirror":
+            legacy = True
+        if status in ("filled", "exiting", "settled", "cashed_out", "merged") and traded_lane is None:
+            traded_lane = lane
+        if src is None:
+            m = _SRC_RE.search(str(r.get("error") or ""))
+            if m:
+                src = m.group(1)
+    if src:
+        cls = f"refused:{src}"
+    elif traded_lane is not None:
+        cls = f"traded:{traded_lane}"
+    elif rows:
+        cls = "unrecorded"
+    else:
+        cls = "no_rows"
+    return {"legacy": legacy, "map_class": cls}
+
+
+def _book_depth(client, slug: str) -> dict | None:
+    """The best level of each side of the venue book -- price and
+    resting size -- from one `markets.book` read; None when unreadable.
+    The BBO feed the plan is judged on carries prices only, so the size
+    that sat ahead of a resting order at the touch (the queue, the one
+    residual the shadow's touch rate cannot see) is read here, once per
+    touch, never per tick."""
+    try:
+        raw = client.markets.book(slug) or {}
+    except Exception:  # noqa: BLE001
+        return None
+    body = raw if isinstance(raw, dict) else {}
+    for key in ("marketData", "book"):
+        if isinstance(body.get(key), dict):
+            body = body[key]
+
+    def _levels(items) -> list[tuple[float, float]]:
+        out: list[tuple[float, float]] = []
+        for lvl in items or []:
+            try:
+                px = lvl.get("px")
+                p = float(px.get("value") if isinstance(px, dict) else px)
+                q = float(lvl.get("qty") or 0.0)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if 0.0 < p < 1.0 and q > 0:
+                out.append((p, q))
+        return out
+
+    bids = _levels(body.get("bids"))
+    asks = _levels(body.get("offers") or body.get("asks"))
+    if not bids and not asks:
+        return None
+    out: dict[str, Any] = {}
+    if bids:
+        p, q = max(bids)
+        out.update(bid=p, bid_qty=q)
+    if asks:
+        p, q = min(asks)
+        out.update(ask=p, ask_qty=q)
+    return out
+
+
+def _paced_depth(pmus, slug: str) -> dict | None:
+    """One paced book-depth read (the same process-wide gate every venue
+    read here goes through)."""
+    pace(READ_PACING_S)
+    try:
+        client = pmus._get_client()
+    except Exception:  # noqa: BLE001
+        return None
+    return _book_depth(client, slug)
+
+
+def short_reading(ratio: float, net: float, mark: float, ledger: float,
+                  venue: float | None, book: "mi.Book", fills: list[dict],
+                  long_asset: str | None, other_asset: str | None) -> dict:
+    """THE PARALLEL SHORT READING. The same arithmetic as the live-
+    compared plan with allow_short=True: a negative net becomes a
+    negative target capped at the short leg's mark, and the plan from
+    the ledger toward it is a SELL of the long token at his equivalent
+    (one minus the price he paid for the other token) or better -- the
+    shape the executor's BUY_SHORT wire already sends (373 sign-verified
+    fills, 0 mismatch). Written beside the long-only target, never in
+    its place, so P1's shadow_live_disagree keeps comparing like with
+    like while P2's gate (would_fill_short over 30 markets) is measured."""
+    tgt = mi.target_shares(ratio, net, mark, allow_short=True)
+    reducing = int(tgt["target"]) <= int(ledger)
+    his_px = his_level(fills, long_asset, other_asset, reducing)
+    p = mi.plan(int(tgt["target"]), float(ledger), venue, book, his_px, mark)
+    return {"target_short": int(tgt["target"]), "target_raw_short": tgt["raw"],
+            "capped_short": bool(tgt["capped"]), "his_px_short": his_px,
+            "would_side_short": p.side, "would_qty_short": int(p.qty),
+            "would_px_short": p.price, "would_fill_short": None,
+            "reason_short": p.reason,
+            "marketable_now_short": (bool(p.would_fill) if p.side and p.price is not None
+                                     else None)}
+
+
 # ---------------------------------------------------------------- tick
 
 async def shadow_market(pool, pmus, whale: str, condition_id: str,
@@ -434,12 +709,45 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
                    other_asset=assets[1] if len(assets) > 1 else None,
                    his_long=None, his_other=None, his_net=None,
                    reason="unmapped: no US market for his tokens")
+        # WHAT THE UNMAPPED MARKET IS (Phase 0): the row used to carry two
+        # token ids and nothing else, so 81% of his markets were one
+        # number with no family, no dollars and no reason. Each is now
+        # named -- slug, title, sport, family, the resolver's own step,
+        # his dollars in the window, and the NULL-outcome fills that
+        # make a premap miss ours rather than the venue's.
+        ctx = _first_context(fills)
+        row["detail"].update(
+            his_slug=ctx["his_slug"], title=ctx["title"], event_title=ctx["event_title"],
+            event_slug=ctx["event_slug"], sport=ctx["sport"],
+            family=_family_of(ctx["his_slug"]),
+            explain=await explain_unmapped(pool, ctx),
+            notional_6h=notional_in_window(fills, LOOKBACK_H),
+            gross_sh=round(sum(pos.values()), 4),
+            outcome_null=outcome_null_count(fills))
         return row
     la, oa, slug = m["long_asset"], m["other_asset"], m["us_slug"]
     his_long = float(pos.get(la, 0.0)) if la else 0.0
     his_other = float(pos.get(oa, 0.0)) if oa else 0.0
     net = mi.his_net(his_long, his_other)
     fresh_snap = snap_age_s is not None and snap_age_s <= SNAP_MAX_AGE_S
+    # THE MAPPED MARKET'S CENSUS (Phase 0): family (the P1 family gate
+    # reads it), per-side as a bool on every row, the snapshot state in
+    # one word, fills that landed after the snapshot, and the ledger's
+    # own facts -- whether the position on the slug is a legacy per-fill
+    # row and what mapping class that row carries, because a
+    # ledger-sourced map is refused at P1 admission under the quarantine
+    # and the share P1 can actually admit was not a number anywhere.
+    lf = ledger_facts(await ledger_rows(pool, slug))
+    row["detail"].update(
+        family=_family_of(slug), per_side=bool(m.get("per_side")),
+        map_class=(lf["map_class"] if m["source"] == "ledger" else m["source"]),
+        ledger_legacy=lf["legacy"],
+        snap_state=("none" if snap_age_s is None else
+                    "stale" if not fresh_snap else
+                    "fresh_partial" if snap_partial else "fresh_complete"),
+        fills_since_snap=fills_since(fills, snap_age_s),
+        his_paired_sh=round(min(his_long, his_other), 4),
+        his_sport=_first_context(fills)["sport"])
 
     def _snap_of(asset: str | None) -> float | None:
         if not asset or not fresh_snap:
@@ -471,6 +779,11 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
         mark = round((float(bid) + float(ask)) / 2.0, 4)
     elif ask is not None and 0.0 < ask < 1.0:
         mark = float(ask)
+    if mark is not None:
+        # his GROSS dollars at the mark -- long leg at the mark, other leg
+        # at one minus it -- the denominator the coverage gate is read
+        # against (a net mirror can never hold the paired part)
+        row["detail"]["his_gross_usd"] = round(his_long * mark + his_other * (1.0 - mark), 2)
     venue = None if positions is None else float(positions.get(slug.lower(), 0.0))
     try:
         ledger = await ledger_net(pool, slug)
@@ -507,6 +820,9 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
     row["detail"].update(p.detail)
     if p.side and p.price is not None:
         row["detail"]["marketable_now"] = bool(p.would_fill)
+    # the parallel short reading, beside the target and never in it
+    row["detail"].update(short_reading(ratio, net, mark, ledger, venue,
+                                       mi.Book(bid=bid, ask=ask), fills, la, oa))
     return row
 
 
@@ -519,7 +835,8 @@ def _rowcount(status) -> int:
         return 0
 
 
-async def _resolve_previous(pool, row: dict) -> tuple[int, int]:
+async def _resolve_previous(pool, row: dict, census: dict | None = None,
+                            pmus=None) -> tuple[int, int]:
     """WOULD IT HAVE FILLED? Every plan this market still has open is
     judged against THIS tick's book. A plan is a resting order with a
     life of JUDGE_TTL_S (the live lane's rest TTL): it FILLED if, at any
@@ -534,14 +851,31 @@ async def _resolve_previous(pool, row: dict) -> tuple[int, int]:
     judged one plan against one next reading, thirty seconds apart, and
     read 15% on the first hour of the shadow; a resting order lives
     minutes, not one tick, so this is the question P1 actually asks.)
-    Returns (resolved, filled) counts for the census. Best-effort."""
+    Returns (resolved, filled) counts for the census. Best-effort.
+
+    THE TOUCH IS RECORDED (Phase 0): a judged plan also learns how long
+    it waited (touched_s, from its own `at`) and the touching side's
+    price, inside its JSONB detail -- a 046 column would change the
+    table the report select is pinned to. The PARALLEL SHORT reading in
+    the detail is judged by the same rule on its own side: its SELL of
+    the long token fills when the bid comes UP to its price, its BUY
+    when the ask comes down, and it expires past the same TTL. Those
+    counts go to the short census keys, never into the long-only rate
+    P1 is gated on. When something was touched this tick and a venue
+    handle is given, ONE paced book read records the size resting at the
+    best bid and ask (the queue the touch rate cannot see) on the rows
+    just touched; an unreadable book records null, never a guess."""
     bid, ask = row.get("bid"), row.get("ask")
     whale, cid = row.get("whale"), row.get("condition_id")
     resolved = filled = 0
+    resolved_s = filled_s = 0
+    touch_ctx = ("COALESCE(detail, '{}'::jsonb) || jsonb_build_object("
+                 "'touched_s', round(extract(epoch FROM (now() - at)))::int, "
+                 "'touch_px', $3::float8)")
     try:
         if ask is not None and 0.0 < float(ask) < 1.0:
             n = _rowcount(await pool.execute(
-                "UPDATE mirror_shadow SET would_fill = true "
+                "UPDATE mirror_shadow SET would_fill = true, detail = " + touch_ctx + " "
                 "WHERE whale = $1 AND condition_id = $2 AND would_fill IS NULL "
                 "AND would_side = 'BUY_LONG' AND would_px IS NOT NULL AND would_px >= $3 "
                 "AND at >= now() - ($4::float8 * interval '1 second') /* judge-buy */",
@@ -550,7 +884,7 @@ async def _resolve_previous(pool, row: dict) -> tuple[int, int]:
             filled += n
         if bid is not None and 0.0 < float(bid) < 1.0:
             n = _rowcount(await pool.execute(
-                "UPDATE mirror_shadow SET would_fill = true "
+                "UPDATE mirror_shadow SET would_fill = true, detail = " + touch_ctx + " "
                 "WHERE whale = $1 AND condition_id = $2 AND would_fill IS NULL "
                 "AND would_side = 'SELL_LONG' AND would_px IS NOT NULL AND would_px <= $3 "
                 "AND at >= now() - ($4::float8 * interval '1 second') /* judge-sell */",
@@ -560,20 +894,79 @@ async def _resolve_previous(pool, row: dict) -> tuple[int, int]:
         if bid is not None or ask is not None:
             # still being read, and the plan outlived a resting order
             resolved += _rowcount(await pool.execute(
-                "UPDATE mirror_shadow SET would_fill = false "
+                "UPDATE mirror_shadow SET would_fill = false, detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('expired_s', round(extract(epoch FROM (now() - at)))::int) "
                 "WHERE whale = $1 AND condition_id = $2 AND would_fill IS NULL "
                 "AND would_side IS NOT NULL AND would_px IS NOT NULL "
                 "AND at < now() - ($3::float8 * interval '1 second') /* judge-expire */",
                 whale, cid, float(JUDGE_TTL_S)))
+        # the parallel short reading, judged on ITS side of the book
+        short_ctx = ("COALESCE(detail, '{}'::jsonb) || jsonb_build_object("
+                     "'would_fill_short', true, "
+                     "'touched_s_short', round(extract(epoch FROM (now() - at)))::int, "
+                     "'touch_px_short', $3::float8)")
+        if bid is not None and 0.0 < float(bid) < 1.0:
+            n = _rowcount(await pool.execute(
+                "UPDATE mirror_shadow SET detail = " + short_ctx + " "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail->>'would_fill_short' IS NULL "
+                "AND detail->>'would_side_short' = 'SELL_LONG' "
+                "AND (detail->>'would_px_short')::float8 <= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-short-sell */",
+                whale, cid, float(bid), float(JUDGE_TTL_S)))
+            resolved_s += n
+            filled_s += n
+        if ask is not None and 0.0 < float(ask) < 1.0:
+            n = _rowcount(await pool.execute(
+                "UPDATE mirror_shadow SET detail = " + short_ctx + " "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail->>'would_fill_short' IS NULL "
+                "AND detail->>'would_side_short' = 'BUY_LONG' "
+                "AND (detail->>'would_px_short')::float8 >= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-short-buy */",
+                whale, cid, float(ask), float(JUDGE_TTL_S)))
+            resolved_s += n
+            filled_s += n
+        if bid is not None or ask is not None:
+            resolved_s += _rowcount(await pool.execute(
+                "UPDATE mirror_shadow SET detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('would_fill_short', false, "
+                "'expired_s_short', round(extract(epoch FROM (now() - at)))::int) "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail->>'would_fill_short' IS NULL "
+                "AND detail->>'would_side_short' IS NOT NULL "
+                "AND detail->>'would_px_short' IS NOT NULL "
+                "AND at < now() - ($3::float8 * interval '1 second') /* judge-short-expire */",
+                whale, cid, float(JUDGE_TTL_S)))
+        if filled + filled_s > 0:
+            depth = None
+            if pmus is not None and row.get("us_market_slug"):
+                try:
+                    depth = await asyncio.to_thread(_paced_depth, pmus, str(row["us_market_slug"]))
+                except Exception:  # noqa: BLE001 — unreadable depth is null
+                    depth = None
+                if census is not None:
+                    census["touch_depth_reads"] = census.get("touch_depth_reads", 0) + 1
+            await pool.execute(
+                "UPDATE mirror_shadow SET detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('touch_depth', $3::jsonb) "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND (detail ? 'touched_s' OR detail ? 'touched_s_short') "
+                "AND NOT (detail ? 'touch_depth') /* judge-depth */",
+                whale, cid, json.dumps(depth))
     except Exception:  # noqa: BLE001 — table absent until 046
-        return resolved, filled
+        pass
+    if census is not None:
+        census["resolved_short"] = census.get("resolved_short", 0) + resolved_s
+        census["resolved_filled_short"] = census.get("resolved_filled_short", 0) + filled_s
     return resolved, filled
 
 
-async def _write(pool, row: dict) -> tuple[int, int]:
+async def _write(pool, row: dict, census: dict | None = None, pmus=None) -> tuple[int, int]:
     """Judge this market's open plans against the row's book, then land
-    the row. Returns (resolved, filled) from _resolve_previous."""
-    verdict = await _resolve_previous(pool, row)
+    the row. Returns (resolved, filled) from _resolve_previous; the short
+    reading's counts land in `census` when given."""
+    verdict = await _resolve_previous(pool, row, census, pmus)
     await pool.execute(
         """
         INSERT INTO mirror_shadow (whale, condition_id, us_market_slug, long_asset,
@@ -607,6 +1000,9 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
     stats: dict[str, Any] = {"status": "ok", "whales": 0, "markets": 0, "rows": 0,
                              "unmapped": 0, "would_orders": 0, "marketable_now": 0,
                              "resolved": 0, "resolved_filled": 0,
+                             # the parallel short reading's census (Phase 0)
+                             "would_orders_short": 0, "resolved_short": 0,
+                             "resolved_filled_short": 0, "touch_depth_reads": 0,
                              "frozen": 0, "skipped_markets": 0, "skipped_unmapped": 0,
                              "stale_snapshots": 0, "skipped_backoff": False, "ratio": {}}
     if now_ts < _backoff_until:
@@ -664,6 +1060,8 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
                 stats["would_orders"] += 1
                 if (row.get("detail") or {}).get("marketable_now"):
                     stats["marketable_now"] += 1
+            if (row.get("detail") or {}).get("would_side_short"):
+                stats["would_orders_short"] += 1
             if "frozen" in str(row.get("reason") or ""):
                 stats["frozen"] += 1
             if row.get("us_market_slug") and row.get("bid") is None and row.get("ask") is None:
@@ -677,7 +1075,7 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
             else:
                 misses = 0
             try:
-                n_res, n_fill = await _write(pool, row)
+                n_res, n_fill = await _write(pool, row, stats, pmus)
                 stats["rows"] += 1
                 stats["resolved"] += n_res
                 stats["resolved_filled"] += n_fill

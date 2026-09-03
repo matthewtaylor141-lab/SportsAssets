@@ -796,3 +796,402 @@ def test_a_fractional_ledger_against_a_whole_venue_position_is_not_frozen(monkey
     row = _run(ms.shadow_market(p, _Pmus(), "rn1", CID, RATIO, {}, positions={SLUG: -323.0}))
     assert row["ledger_net"] == -322 and row["venue_net"] == -323.0
     assert "frozen" not in row["reason"]
+
+
+# ------------------------------------------ to-a-tee Phase 0: the instruments
+# (owner order 2026-09-02 "mirror the whales to a tee"). Additive only:
+# every fake, fixture and test above is unchanged and still pinned.
+
+class _FactsPool(_Pool):
+    """The base fake plus the slug's ledger rows (ledger_rows) and a
+    switch that makes that read fail, so 'unreadable' is testable."""
+
+    def __init__(self, *a, facts=None, facts_raise=False, **kw):
+        super().__init__(*a, **kw)
+        self.facts = facts or []
+        self.facts_raise = facts_raise
+
+    async def fetch(self, sql, *a):
+        s = " ".join(sql.split())
+        if "/* ledger-facts */" in s:
+            self.queries.append((s, a))
+            if self.facts_raise:
+                raise RuntimeError("ledger unreadable")
+            return list(self.facts)
+        return await super().fetch(sql, *a)
+
+
+def test_an_unmapped_row_names_the_market_in_its_detail(monkeypatch):
+    _nosleep(monkeypatch)
+    monkeypatch.setattr(ms.time, "time", lambda: 5000.0)
+    from sportsassets.workers import premap
+    calls = []
+
+    async def _explain(pool, market_title, event_title, outcome, global_slug):
+        calls.append((market_title, event_title, outcome, global_slug))
+        return {"step": "no_key_intersection", "detail": "x", "keys": 5, "rows": 0}
+
+    monkeypatch.setattr(premap, "resolve_explain", _explain)
+    fills = [dict(f, event_title="US Open 2026", sport="tennis") for f in HIS]
+    fills[-1] = dict(fills[-1], outcome=None)           # one chain row not yet enriched
+    p = _Pool(fills=fills, mapped=False)
+    row = _run(ms.shadow_market(p, _Pmus(), "rn1", CID, RATIO, {}, positions={}))
+    assert row["reason"].startswith("unmapped") and row.get("us_market_slug") is None
+    d = row["detail"]
+    assert d["his_slug"] == "atp-nakashi-michels-2026-09-02"
+    assert d["title"] == "US Open ATP: Brandon Nakashima vs Alex Michelsen"
+    assert d["event_title"] == "US Open 2026" and d["event_slug"] == "atp-nakashi-michels-2026-09-02"
+    assert d["sport"] == "tennis" and d["family"] == "moneyline"
+    assert d["explain"] == "no_key_intersection"
+    assert calls == [("US Open ATP: Brandon Nakashima vs Alex Michelsen", "US Open 2026",
+                      "Alex Michelsen", "atp-nakashi-michels-2026-09-02")]
+    # his BUY dollars inside the lookback (the clock is pinned at 5000, so
+    # every fixture fill is inside it), his gross shares, the NULL outcomes
+    assert d["notional_6h"] == ms.notional_in_window(fills, ms.LOOKBACK_H, 5000.0) == 3534.88
+    assert d["gross_sh"] == round(sum(ms.mi.net_positions(fills).values()), 4)
+    assert d["outcome_null"] == 1
+    # a resolver that raises is named, never guessed; sport falls back to the slug
+    async def _boom(*a):
+        raise RuntimeError("premap down")
+
+    monkeypatch.setattr(premap, "resolve_explain", _boom)
+    row2 = _run(ms.shadow_market(_Pool(fills=HIS, mapped=False), _Pmus(), "rn1", CID, RATIO, {},
+                                 positions={}))
+    assert row2["detail"]["explain"] == "explain_raised:RuntimeError"
+    assert row2["detail"]["sport"] == "tennis"          # from the slug's league
+    # the window arithmetic is pure
+    assert ms.notional_in_window(HIS, 6.0, 1900.0 + 6 * 3600 + 1) == 0.0     # all older than 6 h
+    assert ms.notional_in_window(HIS, 6.0, 1000.0 + 6 * 3600 + 1) == 2673.08  # the first fill aged out
+    assert ms.notional_in_window(HIS, 6.0, 1900.0) == 3534.88
+    assert ms.fills_since(HIS, 3500.0, 5000.0) == 1 and ms.fills_since(HIS, None) is None
+    assert ms.outcome_null_count([{"outcome": ""}, {"outcome": "A"}, {}]) == 2
+
+
+def test_a_mapped_row_carries_family_per_side_snapshot_state_and_ledger_facts(monkeypatch):
+    _nosleep(monkeypatch)
+    monkeypatch.setattr(ms.time, "time", lambda: 5000.0)
+    facts = [{"status": "filled", "lane": "ioc", "error": None, "whale_username": "rn1"}]
+    p = _FactsPool(fills=HIS, ledger_rows=[{"sh": 147.0, "intent": "ORDER_INTENT_BUY_LONG"}],
+                   facts=facts)
+    row = _run(ms.shadow_market(p, _Pmus(bid=0.30, ask=0.32), "rn1", CID, RATIO,
+                                {M: 10654.5, N: 367.42}, positions={SLUG: 147.0},
+                                snap_age_s=3500.0, snap_partial=True))
+    d = row["detail"]
+    assert d["map"] == "ledger" and d["family"] == "moneyline" and d["per_side"] is False
+    # the ledger row on the slug is a per-fill (non-mirror) position: legacy,
+    # and its class is what the row itself records
+    assert d["ledger_legacy"] is True and d["map_class"] == "traded:ioc"
+    assert p.queries[-1][1] == (SLUG,) or any(q[1] == (SLUG,) for q in p.queries if "/* ledger-facts */" in q[0])
+    # snapshot: fresh (3500 s is stale) -> no: SNAP_MAX_AGE_S is 300, so this one is stale
+    assert d["snap_state"] == "stale" and d["snap_stale"] is True
+    assert d["fills_since_snap"] == 1                   # his fill at ts 1900 landed after 5000-3500
+    # his gross dollars at the mark and the paired part a net mirror cannot hold
+    assert d["his_gross_usd"] == round(10654.5 * 0.31 + 367.42 * (1 - 0.31), 2)
+    assert d["his_paired_sh"] == 367.42 and d["his_sport"] == "tennis"
+    # the three other snapshot states, by name
+    row_fp = _run(ms.shadow_market(p, _Pmus(), "rn1", CID, RATIO, {M: 1.0}, positions={SLUG: 147.0},
+                                   snap_age_s=40.0, snap_partial=True))
+    assert row_fp["detail"]["snap_state"] == "fresh_partial" and row_fp["detail"]["snap_partial"] is True
+    row_fc = _run(ms.shadow_market(p, _Pmus(), "rn1", CID, RATIO, {M: 1.0}, positions={SLUG: 147.0},
+                                   snap_age_s=40.0, snap_partial=False))
+    assert row_fc["detail"]["snap_state"] == "fresh_complete"
+    assert "snap_partial" not in row_fc["detail"]          # the existing pin still holds
+    row_none = _run(ms.shadow_market(p, _Pmus(), "rn1", CID, RATIO, {}, positions={SLUG: 147.0}))
+    assert row_none["detail"]["snap_state"] == "none" and row_none["detail"]["fills_since_snap"] is None
+    # an unreadable ledger read is named on both counts, never guessed
+    p2 = _FactsPool(fills=HIS, facts_raise=True)
+    row2 = _run(ms.shadow_market(p2, _Pmus(), "rn1", CID, RATIO, {}, positions={}))
+    assert row2["detail"]["ledger_legacy"] is None and row2["detail"]["map_class"] == "unreadable"
+    # a premap-sourced map carries its source as its class
+    from sportsassets.workers import premap
+
+    async def _long(pool, market_title, event_title, outcome, global_slug):
+        return {"market_slug": SLUG, "intent": "ORDER_INTENT_BUY_LONG"} if outcome == "Alex Michelsen" else None
+
+    monkeypatch.setattr(premap, "resolve", _long)
+    row3 = _run(ms.shadow_market(_FactsPool(fills=HIS, mapped=False), _Pmus(), "rn1", CID, RATIO, {},
+                                 positions={}))
+    assert row3["detail"]["map"] == "premap" and row3["detail"]["map_class"] == "premap"
+    assert row3["detail"]["ledger_legacy"] is False       # no rows on the slug
+    # the census keys ride on the early returns too (no ratio, no mark)
+    row4 = _run(ms.shadow_market(p, _Pmus(raise_bbo=True), "rn1", CID, RATIO, {}, positions={SLUG: 147.0}))
+    assert row4["reason"].startswith("no mark") and row4["detail"]["family"] == "moneyline"
+    assert row4["detail"]["ledger_legacy"] is True and "his_gross_usd" not in row4["detail"]
+
+
+def test_ledger_facts_read_the_row_class_and_the_legacy_flag(monkeypatch):
+    assert ms.ledger_facts(None) == {"legacy": None, "map_class": "unreadable"}
+    assert ms.ledger_facts([]) == {"legacy": False, "map_class": "no_rows"}
+    refused = {"status": "rejected", "lane": None, "whale_username": "rn1",
+               "error": ("quarantined: mapping class unverified after wrong-side incident "
+                         "2026-08-23 (src=fuzzy, slug=aec-atp-x-y-2026-09-02)")}
+    assert ms.ledger_facts([refused]) == {"legacy": False, "map_class": "refused:fuzzy"}
+    # the mirror's own book is not a legacy row
+    assert ms.ledger_facts([{"status": "filled", "lane": "mirror", "error": None}]) == \
+        {"legacy": False, "map_class": "traded:mirror"}
+    # a per-fill row that traded is legacy; a recorded class beats 'traded'
+    assert ms.ledger_facts([{"status": "filled", "lane": "ioc", "error": None}, refused]) == \
+        {"legacy": True, "map_class": "refused:fuzzy"}
+    assert ms.ledger_facts([{"status": "exiting", "lane": None, "error": None}]) == \
+        {"legacy": True, "map_class": "traded:-"}
+    assert ms.ledger_facts([{"status": "submitting", "lane": "ioc", "error": "x"}]) == \
+        {"legacy": False, "map_class": "unrecorded"}
+    # the read itself: by slug, every status that could explain a holding, newest first
+    _nosleep(monkeypatch)
+    p = _FactsPool(facts=[{"status": "filled", "lane": "ioc", "error": None}])
+    assert _run(ms.ledger_rows(p, SLUG)) == [{"status": "filled", "lane": "ioc", "error": None}]
+    q = [s for s, a in p.queries if "/* ledger-facts */" in s][0]
+    assert "WHERE us_market_slug = $1" in q and "ORDER BY placed_at DESC" in q
+    assert "'filled', 'exiting', 'settled', 'cashed_out', 'merged', 'submitting', 'open', 'rejected'" in q
+    assert _run(ms.ledger_rows(_FactsPool(facts_raise=True), SLUG)) is None
+
+
+def test_the_parallel_short_reading_leaves_the_live_compared_target_byte_identical(monkeypatch):
+    _nosleep(monkeypatch)
+    # his net is NEGATIVE: 20,000 Nakashima at 0.46 against 10,654 Michelsen
+    fills = HIS + [_fill(N, "BUY", 20000, 0.46, 3300)]
+    p = _Pool(fills=fills)
+    row = _run(ms.shadow_market(p, _Pmus(bid=0.53, ask=0.55), "rn1", CID, RATIO, {}, positions={}))
+    net = row["his_net"]
+    assert net < 0
+    # THE LIVE-COMPARED COLUMNS ARE EXACTLY THE LONG-ONLY READING
+    tgt_long = ms.mi.target_shares(RATIO, net, row["mark"])
+    assert row["target"] == tgt_long["target"] == 0 and row["target_raw"] == tgt_long["raw"]
+    assert row["would_side"] is None and row["would_px"] is None and row["would_fill"] is None
+    assert row["reason"] == "short side not admitted; on target"
+    # ... and the short reading sits beside them, in the detail only
+    d = row["detail"]
+    tgt_s = ms.mi.target_shares(RATIO, net, row["mark"], allow_short=True)
+    assert d["target_short"] == tgt_s["target"] < 0 and d["capped_short"] == tgt_s["capped"]
+    assert d["target_raw_short"] == tgt_s["raw"]
+    assert d["would_side_short"] == "SELL_LONG" and d["would_qty_short"] == -tgt_s["target"]
+    # his equivalent is one minus what he paid for the other token (0.54);
+    # the ask is 0.55, so the sell rests at 0.55 -- judged against the bid
+    assert d["his_px_short"] == 0.54 and d["would_px_short"] == 0.55
+    assert d["would_fill_short"] is None and d["reason_short"] == "reduce toward target"
+    assert d["marketable_now_short"] is False               # bid 0.53 < 0.55
+    # on his LONG side the two readings agree
+    row2 = _run(ms.shadow_market(_Pool(fills=HIS), _Pmus(bid=0.30, ask=0.32), "rn1", CID, RATIO, {},
+                                 positions={}))
+    d2 = row2["detail"]
+    assert d2["target_short"] == row2["target"] == 596
+    assert d2["would_side_short"] == row2["would_side"] == "BUY_LONG"
+    assert d2["would_px_short"] == row2["would_px"] == 0.30 and d2["would_qty_short"] == row2["would_qty"]
+    # the source pins: the target is computed with the caller's allow_short
+    # (never forced), and the INSERT knows nothing of the short reading
+    src = inspect.getsource(ms.shadow_market)
+    assert "mi.target_shares(ratio, net, mark, allow_short=allow_short)" in src
+    assert "_short" not in inspect.getsource(ms._write)
+    assert "allow_short=True" not in inspect.getsource(ms.tick_once)
+
+
+def test_the_judge_records_the_touch_and_judges_the_short_reading_on_its_own_side(monkeypatch):
+    _nosleep(monkeypatch)
+
+    class _P(_Pool):
+        def __init__(self, counts=None):
+            super().__init__(fills=HIS)
+            self.counts = counts or {}
+
+        async def execute(self, sql, *a):
+            await super().execute(sql, *a)
+            for tag, n in self.counts.items():
+                if tag in sql:
+                    return f"UPDATE {n}"
+            return "UPDATE 0"
+
+    base = {"whale": "rn1", "condition_id": CID, "us_market_slug": SLUG, "detail": {}}
+    p = _P(counts={"/* judge-buy */": 1, "/* judge-short-sell */": 2, "/* judge-short-expire */": 1})
+    census: dict = {}
+    pm = _Pmus(bid=0.29, ask=0.30)
+    res, fil = _run(ms._write(p, dict(base, bid=0.29, ask=0.30), census, pm))
+    # the long reading's counts are what they were; the short reading's are separate
+    assert (res, fil) == (1, 1)
+    assert census["resolved_short"] == 3 and census["resolved_filled_short"] == 2
+    buy = [w for w in p.writes if "/* judge-buy */" in w[0]][0]
+    assert ("jsonb_build_object('touched_s', round(extract(epoch FROM (now() - at)))::int, "
+            "'touch_px', $3::float8)") in buy[0]
+    assert buy[1] == ("rn1", CID, 0.30, ms.JUDGE_TTL_S)        # the argument tuple is unchanged
+    exp = [w for w in p.writes if "/* judge-expire */" in w[0]][0]
+    assert "'expired_s'" in exp[0] and exp[1] == ("rn1", CID, ms.JUDGE_TTL_S)
+    # the short SELL fills when the bid comes UP to its price ...
+    ss = [w for w in p.writes if "/* judge-short-sell */" in w[0]][0]
+    assert "detail->>'would_side_short' = 'SELL_LONG'" in ss[0]
+    assert "(detail->>'would_px_short')::float8 <= $3" in ss[0] and "'would_fill_short', true" in ss[0]
+    assert "detail->>'would_fill_short' IS NULL" in ss[0]
+    assert ss[1] == ("rn1", CID, 0.29, ms.JUDGE_TTL_S)
+    # ... its BUY (a short reduce) when the ask comes down ...
+    sb = [w for w in p.writes if "/* judge-short-buy */" in w[0]][0]
+    assert "detail->>'would_side_short' = 'BUY_LONG'" in sb[0]
+    assert "(detail->>'would_px_short')::float8 >= $3" in sb[0]
+    assert sb[1] == ("rn1", CID, 0.30, ms.JUDGE_TTL_S)
+    # ... and it expires past the same TTL
+    se = [w for w in p.writes if "/* judge-short-expire */" in w[0]][0]
+    assert "'would_fill_short', false" in se[0]
+    assert "at < now() - ($3::float8 * interval '1 second')" in se[0]
+    assert se[1] == ("rn1", CID, ms.JUDGE_TTL_S)
+    # the short judge never writes the live-compared column
+    for w in (ss, sb, se):
+        assert "would_fill =" not in w[0] and "SET would_fill" not in w[0]
+    # something was touched this tick: ONE paced depth read, stamped on the
+    # touched rows that carry no depth yet; the fake client has no book, so
+    # the reading is null -- named, never guessed
+    dep = [w for w in p.writes if "/* judge-depth */" in w[0]]
+    assert len(dep) == 1 and dep[0][1][:2] == ("rn1", CID)
+    assert "NOT (detail ? 'touch_depth')" in dep[0][0]
+    assert "(detail ? 'touched_s' OR detail ? 'touched_s_short')" in dep[0][0]
+    assert json.loads(dep[0][1][2]) is None
+    assert census["touch_depth_reads"] == 1
+    # nothing touched: no depth read, no depth statement
+    p2 = _P(counts={"/* judge-expire */": 1})
+    census2: dict = {}
+    _run(ms._write(p2, dict(base, bid=0.29, ask=0.30), census2, pm))
+    assert not [w for w in p2.writes if "/* judge-depth */" in w[0]]
+    assert census2.get("touch_depth_reads", 0) == 0
+    # an unreadable book judges nothing on either side; a one-sided book
+    # judges only the side that can reach us
+    p3 = _P()
+    _run(ms._write(p3, dict(base, bid=None, ask=None), {}, pm))
+    assert not [w for w in p3.writes if "/* judge-" in w[0]]
+    p4 = _P()
+    _run(ms._write(p4, dict(base, bid=None, ask=0.30), {}, pm))
+    assert [w for w in p4.writes if "/* judge-short-buy */" in w[0]]
+    assert not [w for w in p4.writes if "/* judge-short-sell */" in w[0]]
+    # without a venue handle the judge still runs; no depth is read
+    p5 = _P(counts={"/* judge-sell */": 1})
+    assert _run(ms._write(p5, dict(base, bid=0.29, ask=0.30))) == (1, 1)
+    assert json.loads([w for w in p5.writes if "/* judge-depth */" in w[0]][0][1][2]) is None
+
+
+def test_book_depth_reads_the_best_level_of_each_side_and_fails_closed(monkeypatch):
+    class _Markets:
+        def __init__(self, raw, raise_=False):
+            self.raw, self.raise_, self.calls = raw, raise_, []
+
+        def book(self, slug):
+            self.calls.append(slug)
+            if self.raise_:
+                raise RuntimeError("429")
+            return self.raw
+
+    class _C:
+        def __init__(self, raw, raise_=False):
+            self.markets = _Markets(raw, raise_)
+
+    raw = {"marketData": {"bids": [{"px": {"value": "0.30"}, "qty": "120"},
+                                   {"px": {"value": "0.29"}, "qty": "500"}],
+                          "offers": [{"px": {"value": "0.33"}, "qty": "40"},
+                                     {"px": {"value": "0.32"}, "qty": "75"}]}}
+    assert ms._book_depth(_C(raw), SLUG) == {"bid": 0.30, "bid_qty": 120.0, "ask": 0.32, "ask_qty": 75.0}
+    assert ms._book_depth(_C({"book": {"asks": [{"px": 0.4, "qty": 3}]}}), SLUG) == {"ask": 0.4, "ask_qty": 3.0}
+    assert ms._book_depth(_C({"marketData": {}}), SLUG) is None
+    assert ms._book_depth(_C({"marketData": {"bids": [{"px": {"value": "bad"}, "qty": 1}]}}), SLUG) is None
+    assert ms._book_depth(_C(None, raise_=True), SLUG) is None
+    # the paced read goes through the one measurement gate, and a client
+    # without a book surface reads None
+    slept = _nosleep(monkeypatch)
+    assert ms._paced_depth(_Pmus(), SLUG) is None and ms.READ_PACING_S in slept
+    assert "pace(READ_PACING_S)" in inspect.getsource(ms._paced_depth)
+
+
+def test_tick_once_carries_the_short_census_beside_the_long_one(monkeypatch):
+    _nosleep(monkeypatch)
+    monkeypatch.setenv("MIRROR_WHALES", "rn1")
+    ms._ratio_cache.update(at=0.0, by_whale={})
+    ms._backoff_until = 0.0
+    ms._unmapped_until.clear()
+
+    class _P(_Pool):
+        async def execute(self, sql, *a):
+            await super().execute(sql, *a)
+            return "UPDATE 1" if "/* judge-" in sql else None
+
+    p = _P(fills=HIS, whales_ratio_fills=_ratio_fills())
+    stats = _run(ms.tick_once(p, _Pmus(bid=0.30, ask=0.32), now_ts=5000.0))
+    # the long census is what it was ...
+    assert stats["resolved"] == 3 and stats["resolved_filled"] == 2 and stats["would_orders"] == 1
+    # ... and the short reading's rides beside it
+    assert stats["would_orders_short"] == 1
+    assert stats["resolved_short"] == 3 and stats["resolved_filled_short"] == 2
+    assert stats["touch_depth_reads"] == 1
+    ms._unmapped_until.clear()
+
+
+# ------------------------------------------ Phase 0 review of the instruments
+# (owner order 2026-09-02 "mirror the whales to a tee"): the ledger-facts read
+# and the module-level pattern. Additive only.
+
+def _sqlite_live_orders(rows):
+    """A live_orders table in memory with the columns the ledger-facts read
+    touches, so the read's own SQL can be executed rather than pattern-
+    matched: the review's failure is a truncation, and only running the
+    query shows which rows survive it."""
+    import sqlite3
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE live_orders (id INTEGER PRIMARY KEY, us_market_slug TEXT, status TEXT, "
+                "lane TEXT, error TEXT, whale_username TEXT, placed_at REAL)")
+    con.executemany("INSERT INTO live_orders (id, us_market_slug, status, lane, error, whale_username, placed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+    return con
+
+
+def _run_sqlite(con, sql, slug):
+    # asyncpg's $1 is sqlite's ?1 (the same parameter, bound wherever it appears)
+    cur = con.execute(sql.replace("$1", "?1"), (slug,))
+    cols = [c[0] for c in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def test_the_live_rows_never_fall_off_the_ledger_facts_read():
+    # a per-fill ioc row FILLED on this slug, then twenty-one newer rows the
+    # quarantine rejected as he traded the other token: the review's case
+    quarantined = ("quarantined: mapping class unverified after wrong-side incident "
+                   "2026-08-23 (src=fuzzy, slug=" + SLUG + ")")
+    rows = [(1, SLUG, "filled", "ioc", None, "rn1", 1000.0)]
+    rows += [(i, SLUG, "rejected", None, quarantined, "rn1", 1000.0 + i) for i in range(2, 23)]
+    rows += [(99, "aec-other-slug-2026-09-02", "filled", "ioc", None, "rn1", 5000.0)]
+    con = _sqlite_live_orders(rows)
+    got = _run_sqlite(con, ms._SQL_LEDGER_FACTS, SLUG)
+    # the filled row is read whole, the rejected rows under the newest-20 cap
+    assert len(got) == 21 and got[-1]["status"] == "filled" and got[-1]["lane"] == "ioc"
+    assert sum(1 for r in got if r["status"] == "rejected") == 20
+    assert all(r["whale_username"] == "rn1" for r in got)
+    facts = ms.ledger_facts(got)
+    assert facts["legacy"] is True and facts["map_class"] == "refused:fuzzy"
+    # the shape the review named: a plain newest-20 read drops the filled row
+    # and reads a confident False -- the pin above is what stops that
+    naive = _run_sqlite(con, """
+        SELECT status, lane, error, whale_username FROM live_orders
+         WHERE us_market_slug = $1
+           AND status IN ('filled', 'exiting', 'settled', 'cashed_out', 'merged',
+                          'submitting', 'open', 'rejected')
+         ORDER BY placed_at DESC LIMIT 20""", SLUG)
+    assert ms.ledger_facts(naive)["legacy"] is False
+    # an exiting row outside the cap is live too; a slug with no live row
+    # under thirty rejected rows still reads False, and the class comes from
+    # the newest rows the cap keeps
+    con2 = _sqlite_live_orders(
+        [(1, SLUG, "exiting", None, None, "rn1", 1.0)]
+        + [(i, SLUG, "rejected", None, quarantined, "rn1", float(i)) for i in range(2, 32)])
+    assert ms.ledger_facts(_run_sqlite(con2, ms._SQL_LEDGER_FACTS, SLUG)) == \
+        {"legacy": True, "map_class": "refused:fuzzy"}
+    con3 = _sqlite_live_orders(
+        [(i, SLUG, "rejected", None, quarantined, "rn1", float(i)) for i in range(1, 31)])
+    got3 = _run_sqlite(con3, ms._SQL_LEDGER_FACTS, SLUG)
+    assert len(got3) == 20 and ms.ledger_facts(got3) == {"legacy": False, "map_class": "refused:fuzzy"}
+    # the worker's read is that SQL verbatim, and the existing pins on it hold
+    p = _FactsPool(facts=[{"status": "filled", "lane": "ioc", "error": None}])
+    assert _run(ms.ledger_rows(p, SLUG)) == [{"status": "filled", "lane": "ioc", "error": None}]
+    q = [s for s, a in p.queries if "/* ledger-facts */" in s][0]
+    assert q == " ".join(ms._SQL_LEDGER_FACTS.split())
+    assert "status IN ('filled', 'exiting') OR id IN (SELECT id FROM live_orders" in q
+    assert q.count("LIMIT") == 1 and q.endswith("ORDER BY placed_at DESC /* ledger-facts */")
+
+
+def test_the_src_pattern_is_compiled_with_the_module():
+    import re as _re
+    assert isinstance(ms._SRC_RE, _re.Pattern) and ms._SRC_RE.pattern == r"\(src=([a-z_]+),"
+    src = inspect.getsource(ms.ledger_facts)
+    assert "global " not in src and "import re" not in src and "_SRC_RE is None" not in src
+    head = pathlib.Path(ms.__file__).read_text().split("\ndef ", 1)[0]
+    assert "\nimport re\n" in head and "_SRC_RE = re.compile(" in pathlib.Path(ms.__file__).read_text()

@@ -1200,6 +1200,33 @@ jobs:
                  | if ($w | length) == 0 then "  MIRRORHB no heartbeat row — worker never completed a tick"
                    else ($w[] | "  MIRRORHB \(.status) beat=\(.beat_at) \(.detail | tostring | .[0:600])") end' \
             /tmp/hb_ms.json 2>/dev/null || echo "  MIRRORHB unreadable"
+          # MIRROR-P0-LINES-BEGIN — the to-a-tee Phase 0 census (owner order
+          # 2026-09-02 "mirror the whales to a tee"): the numbers every later
+          # gate reads, from the same /tmp/mirror.json. Each line runs only on
+          # a non-empty payload and carries an echo fallback, so an empty,
+          # absent or unparseable endpoint prints its tag as unavailable (a
+          # silent instrument is indistinguishable from a healthy quiet one).
+          [ -s /tmp/mirror.json ] && jq -r '"  MIRRORUNMAP markets=\(.unmapped.markets // 0) usd6h=\(.unmapped.usd // 0) named=\(.unmapped.named // 0) outcome_null=\(.unmapped.outcome_null_markets // 0) | fam: " + ((.unmapped.by_family // {}) | to_entries | map("\(.key)=\(.value.markets // 0)/$\(.value.usd // 0)") | join(" ")) + " | why: " + ((.unmapped.by_explain // {}) | to_entries | map("\(.key)=\(.value.markets // 0)/$\(.value.usd // 0)") | join(" "))' \
+            /tmp/mirror.json 2>/dev/null || echo "  MIRRORUNMAP unavailable"
+          [ -s /tmp/mirror.json ] && jq -r '.latest // [] | map(select(.us_market_slug == null)) | sort_by(.detail.notional_6h // 0) | reverse | .[:12][] | "  MIRRORUNMAPMKT \(.whale // "-") \(.detail.his_slug // (.condition_id // "-")[:16]) sport=\(.detail.sport // "-") fam=\(.detail.family // "-") why=\(.detail.explain // "-") usd6h=\(.detail.notional_6h // 0) gross_sh=\(.detail.gross_sh // 0) outcome_null=\(.detail.outcome_null // 0) | \(.detail.title // "-")"' \
+            /tmp/mirror.json 2>/dev/null || echo "  MIRRORUNMAPMKT unavailable"
+          [ -s /tmp/mirror.json ] && jq -r '.mapped_by_source // {} | "  MIRRORSRC mapped=\(.markets // 0) admissible=\(.admissible // 0)/$\(.admissible_usd // 0) share=\(.admissible_share // "n/a") admits=\(.admissible_src // [] | join(",")) | " + ((.by_source // {}) | to_entries | map("\(.key)=\(.value.markets // 0)/$\(.value.usd // 0)") | join(" ")) + " | ledger: " + ((.ledger_classes // {}) | to_entries | map("\(.key)=\(.value)") | join(" "))' \
+            /tmp/mirror.json 2>/dev/null || echo "  MIRRORSRC unavailable"
+          [ -s /tmp/mirror.json ] && jq -r '"  MIRRORFAM " + ((.family // {}) | to_entries | map("\(.key)=\(.value.markets // 0) neg=\(.value.neg // 0) pos=\(.value.pos // 0) per_side=\(.value.per_side // 0) $\(.value.usd // 0)") | join(" | "))' \
+            /tmp/mirror.json 2>/dev/null || echo "  MIRRORFAM unavailable"
+          [ -s /tmp/mirror.json ] && jq -r '.sign // {} | "  MIRRORSIGN neg_markets=\(.neg_markets // 0) pos_markets=\(.pos_markets // 0) flat=\(.flat_markets // 0) neg_share_markets=\(.neg_share_markets // "n/a") neg_sh=\(.neg_sh // 0) pos_sh=\(.pos_sh // 0) neg_share_sh=\(.neg_share_sh // "n/a") neg_usd=\(.neg_usd // 0) pos_usd=\(.pos_usd // 0) neg_share_usd=\(.neg_share_usd // "n/a") unmarked=\(.unmarked_markets // 0)"' \
+            /tmp/mirror.json 2>/dev/null || echo "  MIRRORSIGN unavailable"
+          [ -s /tmp/mirror.json ] && jq -r '"  MIRRORFILL nonlegacy: \(.would_fill_nonlegacy.fills // 0)/\(.would_fill_nonlegacy.resolved // 0) rate=\(.would_fill_nonlegacy.rate // "n/a") ci95=\(.would_fill_nonlegacy.ci95 // "n/a" | tostring) markets=\(.would_fill_nonlegacy.clusters // 0) unknown=\(.would_fill_nonlegacy.legacy_unknown // 0) | legacy: \(.would_fill_legacy.fills // 0)/\(.would_fill_legacy.resolved // 0) rate=\(.would_fill_legacy.rate // "n/a") ci95=\(.would_fill_legacy.ci95 // "n/a" | tostring) markets=\(.would_fill_legacy.clusters // 0)"' \
+            /tmp/mirror.json 2>/dev/null || echo "  MIRRORFILL unavailable"
+          [ -s /tmp/mirror.json ] && jq -r '.short // {} | "  MIRRORSHORT orders=\(.orders // 0) resolved=\(.resolved // 0) fills=\(.fills // 0) would_fill_short=\(.rate // "n/a") ci95=\(.ci95 // "n/a" | tostring) markets=\(.clusters // 0) | nonlegacy: \(.nonlegacy.fills // 0)/\(.nonlegacy.resolved // 0) rate=\(.nonlegacy.rate // "n/a") ci95=\(.nonlegacy.ci95 // "n/a" | tostring) markets=\(.nonlegacy.clusters // 0) | neg_target_markets=\(.neg_target_markets // 0) latest_neg=\(.latest_neg_target // 0)"' \
+            /tmp/mirror.json 2>/dev/null || echo "  MIRRORSHORT unavailable"
+          [ -s /tmp/mirror.json ] && jq -r '.snapshot // {} | "  MIRRORSNAP markets=\(.markets // 0) fresh_complete=\(.fresh_complete // 0) share=\(.fresh_complete_share // "n/a") fresh_partial=\(.fresh_partial // 0) stale=\(.stale // 0) none=\(.none // 0) token_na=\(.token_na_markets // 0) age_p50=\(.age_p50_s // "n/a")s age_max=\(.age_max_s // "n/a")s fills_since_snap_p50=\(.fills_since_snap_p50 // "n/a")"' \
+            /tmp/mirror.json 2>/dev/null || echo "  MIRRORSNAP unavailable"
+          [ -s /tmp/mirror.json ] && jq -r '"  MIRRORWOULD long: lots=\(.would_pnl.lots // 0) markets=\(.would_pnl.markets // 0) staked=\(.would_pnl.staked // 0) pnl=\(.would_pnl.pnl // 0) roi=\(.would_pnl.roi // "n/a") ci95=\(.would_pnl.ci95 // "n/a" | tostring) games=\(.would_pnl.clusters // 0) dropped_legacy=\(.would_pnl.dropped_legacy // 0) \(.would_pnl.error // "") | short: lots=\(.would_pnl_short.lots // 0) pnl=\(.would_pnl_short.pnl // 0) roi=\(.would_pnl_short.roi // "n/a") ci95=\(.would_pnl_short.ci95 // "n/a" | tostring) games=\(.would_pnl_short.clusters // 0)"' \
+            /tmp/mirror.json 2>/dev/null || echo "  MIRRORWOULD unavailable"
+          [ -s /tmp/mirror.json ] && jq -r '"  MIRRORDEAD markets=\(.dead_band.markets // 0) usd=\(.dead_band.usd // 0) | touch: n=\(.touch.n // 0) touched_s_p50=\(.touch.touched_s_p50 // "n/a") p90=\(.touch.touched_s_p90 // "n/a") depth_reads=\(.touch.depth_n // 0)"' \
+            /tmp/mirror.json 2>/dev/null || echo "  MIRRORDEAD unavailable"
+          # MIRROR-P0-LINES-END
           # LANEWHY — the gates behind the fast lane's refusals: the row's
           # error text names the gate that ended a detection 'rejected'
           # before any order. This is the lane's real fill-rate story.
@@ -3833,4 +3860,471 @@ jobs:
                       break
           except Exception as e:
               print(f"  contrast ERR {type(e).__name__}: {str(e)[:100]}")
+          PY
+
+  mirror-cover:
+    # OWN JOB, like side-truth and for the same reason: the probe step is
+    # at its budget and GitHub truncates the log after it, and this one
+    # asks the venue a question the container cannot (the network policy
+    # blocks the venue; the runner has open internet) and must print in
+    # full.
+    #
+    # MIRRORCOVER (to-a-tee Phase 0, owner order 2026-09-02 "I want us to
+    # match everything ... mirror the whales to a tee"): where RN1's
+    # dollars sit against the US board. The shadow reads 81% of his
+    # markets as "unmapped" with no split between "the venue does not
+    # list it" and "we did not map it", and by count, not by his money.
+    # This classes every market of his last 24 h by testing EVERY
+    # candidate slug the mapping grammar would try (the coverage review's
+    # amendment: three of nine would misclass ITF men): the board index
+    # first (events.list, the sweep's own rung, no per-slug reads), then
+    # one direct read per candidate, then a title search -- and claims
+    # "not listed on us" only when every candidate is a 404, the search
+    # finds nothing and no index key hit. Dollars are his own fills'
+    # usdcSize from the data-api (24 h, independent of our ingest) with
+    # our ingest's figure printed beside them, and his GROSS shares
+    # (long + other) at the shadow's mark with the paired share, because
+    # a net mirror can never hold the paired part. Every venue read is
+    # paced at the sweep's own 0.35 s gap; the direct reads run under a
+    # wall-clock budget, his biggest markets first, and whatever the
+    # budget leaves is printed as undiagnosed -- never as not listed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - name: MIRRORCOVER - RN1's last 24 h against the US board
+        if: always()
+        env:
+          DEFAULT_BASE: https://sportsassets-api.onrender.com
+          OVERRIDE: ${{ github.event.inputs.api_base }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          RN1_ADDRESS: "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
+        run: |
+          pip install --quiet polymarket-us 2>/dev/null || pip install polymarket-us
+          BASE="${OVERRIDE:-$DEFAULT_BASE}"
+          echo "###########################################################"
+          echo "#   MIRRORCOVER: where RN1's dollars sit vs the US board   #"
+          echo "###########################################################"
+          curl -sS --max-time 240 -H "X-Admin-Token: $ADMIN_TOKEN" \
+               -o /tmp/cover.json "$BASE/api/admin/mirror-cover?whale=rn1&hours=24" 2>/dev/null || true
+          echo "MIRRORCOVER-SRC endpoint bytes=$(wc -c </tmp/cover.json 2>/dev/null || echo 0) markets=$(jq -r '.markets // 0' /tmp/cover.json 2>/dev/null || echo 0) map_calls=$(jq -r '.map_calls // 0' /tmp/cover.json 2>/dev/null || echo 0) null_condition=$(jq -r '.null_condition_fills // "n/a"' /tmp/cover.json 2>/dev/null || echo "n/a")"
+          # His own fills from the data-api (usdcSize per fill, 24 h): the
+          # dollar denominator that does not depend on our ingest. Same
+          # crawl as the weekly report's, bounded to the window.
+          D="https://data-api.polymarket.com/activity"
+          CUT=$(date -u -d '24 hours ago' +%s)
+          echo "[" > /tmp/w_rn1_24h.json
+          off=0; n=0; first=1
+          while [ $n -lt 40 ]; do
+            rows=$(curl -sS --max-time 25 "$D?user=$RN1_ADDRESS&limit=500&offset=$off" 2>/dev/null)
+            cnt=$(echo "$rows" | jq 'if type == "array" then length else 0 end' 2>/dev/null || echo 0)
+            if [ -z "$cnt" ] || [ "$cnt" = "0" ] || [ "$cnt" = "null" ]; then break; fi
+            if [ $first -eq 1 ]; then first=0; else echo "," >> /tmp/w_rn1_24h.json; fi
+            echo "$rows" | jq -c '.[]' | paste -sd, - >> /tmp/w_rn1_24h.json
+            oldest=$(echo "$rows" | jq '[.[].timestamp] | min' 2>/dev/null || echo 0)
+            n=$((n+1)); off=$((off+cnt))
+            if [ "$oldest" != "null" ] && [ "$oldest" -lt "$CUT" ]; then break; fi
+            sleep 0.4
+          done
+          echo "]" >> /tmp/w_rn1_24h.json
+          echo "MIRRORCOVER-SRC data-api pages=$n rows=$off"
+          python - <<'PY'
+          # MIRRORCOVER-RUNNER
+          import datetime as dt
+          import json
+          import os
+          import re
+          import time
+
+          PACE = float(os.environ.get("MIRRORCOVER_PACE_S", "0.35"))
+          BUDGET_S = float(os.environ.get("MIRRORCOVER_BUDGET_S", "480"))
+          INDEX_PAGES = int(os.environ.get("MIRRORCOVER_INDEX_PAGES", "40"))
+          COVER = os.environ.get("MIRRORCOVER_JSON", "/tmp/cover.json")
+          ACTS = os.environ.get("MIRRORCOVER_ACTS", "/tmp/w_rn1_24h.json")
+          ADMISSIBLE = {"premap", "exact"}
+          STOP = {"will", "win", "the", "match", "game", "against", "and", "for",
+                  "with", "2025", "2026", "over", "under", "total", "spread"}
+          DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+          KINDS = {"atc", "aec", "asc", "tsc", "astatc", "cpc"}
+          SPORT = {"mlb": "baseball", "nfl": "football", "cfb": "football", "ncaaf": "football",
+                   "nba": "basketball", "wnba": "basketball", "ncaab": "basketball", "nhl": "hockey",
+                   "atp": "tennis", "wta": "tennis", "itf": "tennis", "itfwo": "tennis",
+                   "itfme": "tennis", "chal": "tennis", "atpchal": "tennis"}
+
+          def load(path):
+              try:
+                  with open(path) as f:
+                      txt = f.read().strip()
+                  return json.loads(txt) if txt else None
+              except Exception as e:
+                  print(f"MIRRORCOVER-SRC {path}: {type(e).__name__}")
+                  return None
+
+          def date_of(slug):
+              m = DATE_RE.search(str(slug or ""))
+              return m.group(0) if m else ""
+
+          def league_of(slug):
+              parts = [p for p in str(slug or "").lower().split("-") if p]
+              if not parts:
+                  return ""
+              return parts[1] if parts[0] in KINDS and len(parts) > 1 else parts[0]
+
+          def sport_of(slug):
+              lg = league_of(slug)
+              return SPORT.get(lg, "soccer") if lg else "unclassified"
+
+          def family_of(slug):
+              parts = [p for p in str(slug or "").lower().split("-") if p]
+              if not parts:
+                  return "unknown"
+              k = parts[0]
+              if k in ("atc", "aec"):
+                  return "moneyline"
+              if k == "asc":
+                  return "spread"
+              if k == "tsc":
+                  return "total"
+              d = date_of(slug)
+              if not d:
+                  return "unknown"
+              tail = str(slug).lower().split(d, 1)[1].strip("-")
+              if not tail or (len(tail.split("-")) == 1 and not re.search(r"\d", tail)):
+                  return "moneyline"
+              if re.search(r"(^|-)(o|u)\d", tail) or "total" in tail:
+                  return "total"
+              if tail.startswith("es-") or "exact" in tail:
+                  return "exact_score"
+              return "other"
+
+          def tokens(*texts):
+              out = set()
+              for t in texts:
+                  for w in re.findall(r"[a-z0-9]+", str(t or "").lower()):
+                      if len(w) >= 4 and w not in STOP:
+                          out.add(w)
+              return out
+
+          def mark_of(m):
+              # the long side's price when the venue row carries one; None
+              # (never a guess) otherwise
+              for s in (m or {}).get("marketSides") or []:
+                  if isinstance(s, dict) and s.get("long") is True:
+                      p = s.get("price")
+                      if isinstance(p, dict):
+                          p = p.get("value")
+                      try:
+                          p = float(p)
+                      except (TypeError, ValueError):
+                          return None
+                      return p if 0.0 < p < 1.0 else None
+              return None
+
+          loaded = load(COVER)
+          cover = loaded if isinstance(loaded, dict) else {}
+          acts = load(ACTS)
+          acts = acts if isinstance(acts, list) else []
+          cut = time.time() - 24 * 3600
+          usd_api, slug_api, ev_api, title_api = {}, {}, {}, {}
+          null_api = 0
+          for a in acts:
+              if not isinstance(a, dict):
+                  continue
+              try:
+                  ts = float(a.get("timestamp") or 0)
+                  u = float(a.get("usdcSize") or 0)
+              except (TypeError, ValueError):
+                  continue
+              if ts < cut or str(a.get("type") or "TRADE").upper() != "TRADE":
+                  continue
+              if str(a.get("side") or "").upper() != "BUY":
+                  continue
+              cid = str(a.get("conditionId") or "")
+              if not cid:
+                  null_api += 1
+                  continue
+              usd_api[cid] = usd_api.get(cid, 0.0) + u
+              slug_api.setdefault(cid, str(a.get("slug") or ""))
+              ev_api.setdefault(cid, str(a.get("eventSlug") or ""))
+              title_api.setdefault(cid, a.get("title"))
+          conds = list(cover.get("conditions") or [])
+          # "empty" is an endpoint that answered with nothing; "absent" is
+          # one that never answered (or answered unparseably)
+          endpoint = "ok" if conds else ("empty" if loaded is not None else "absent")
+          if not conds and usd_api:
+              # no endpoint: his own fills carry the slug and event slug,
+              # and the runner has only that much of the grammar
+              for cid, u in usd_api.items():
+                  sl, ev = slug_api.get(cid) or "", ev_api.get(cid) or ""
+                  cands = [s for s in (sl, f"aec-{ev}" if ev else "", f"atc-{ev}" if ev else "") if s]
+                  conds.append({"condition_id": cid, "his_slug": sl, "event_slug": ev,
+                                "title": title_api.get(cid), "event_title": None,
+                                "sport": sport_of(sl), "family": family_of(sl),
+                                "date": date_of(sl) or None, "usd24h": None, "n_fills": None,
+                                "gross_sh": None, "paired_sh": None, "candidates": cands,
+                                "shadow": None, "map": None, "explain": "endpoint_absent"})
+          print(f"MIRRORCOVER-SRC endpoint={endpoint} conditions={len(conds)} "
+                f"data_api_markets={len(usd_api)} data_api_usd={round(sum(usd_api.values()), 2)} "
+                f"data_api_null_condition={null_api}")
+
+          try:
+              from polymarket_us import PolymarketUS
+              pub = PolymarketUS()
+          except Exception as e:
+              print(f"MIRRORCOVER-SRC sdk {type(e).__name__}: {str(e)[:80]}")
+              pub = None
+
+          # ---- step B: the board index from events.list, the sweep's rung
+          index, events = {}, []
+          pages = 0
+          t0 = time.time()
+          if pub is not None:
+              now = dt.datetime.now(dt.timezone.utc)
+              iso = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+              window = {"active": True, "closed": False,
+                        "startTimeMin": iso(now - dt.timedelta(hours=24)),
+                        "startTimeMax": iso(now + dt.timedelta(hours=96))}
+              for k in range(INDEX_PAGES):
+                  time.sleep(PACE)
+                  try:
+                      r = pub.events.list({"limit": 100, "offset": k * 100, **window}) or {}
+                  except Exception as e:
+                      print(f"MIRRORCOVER-SRC index page {k} {type(e).__name__}: {str(e)[:80]}")
+                      break
+                  evs = r.get("events") if isinstance(r, dict) else r
+                  evs = list(evs or [])
+                  pages += 1
+                  for ev in evs:
+                      if not isinstance(ev, dict):
+                          continue
+                      ev_slug = str(ev.get("slug") or ev.get("eventSlug") or "")
+                      mslugs = []
+                      for m in ev.get("markets") or []:
+                          if not isinstance(m, dict):
+                              continue
+                          sl = str(m.get("slug") or "").lower()
+                          if not sl:
+                              continue
+                          mslugs.append(sl)
+                          index[sl] = {"closed": bool(m.get("closed")), "event_slug": ev_slug,
+                                       "event_title": ev.get("title"), "date": date_of(sl),
+                                       "mark": mark_of(m)}
+                      events.append((tokens(ev.get("title")), ev_slug, mslugs,
+                                     {date_of(s) for s in mslugs}))
+                  if len(evs) < 100:
+                      break
+          print(f"MIRRORCOVER-SRC index pages={pages} markets={len(index)} events={len(events)} "
+                f"window=-24h..+96h")
+
+          def title_hit(c, his_date):
+              his = tokens(c.get("title"), c.get("event_title"))
+              if len(his) < 2:
+                  return None
+              for toks, ev_slug, mslugs, dates in events:
+                  if len(his & toks) >= 2 and (not his_date or his_date in dates):
+                      return ev_slug, mslugs
+              return None
+
+          def retrieve(slug):
+              time.sleep(PACE)
+              try:
+                  m = (pub.markets.retrieve_by_slug(slug) or {}).get("market") or {}
+              except Exception as e:
+                  name = type(e).__name__
+                  return ("404" if "NotFound" in name or "404" in str(e) else f"err:{name}"), None
+              if not m.get("slug"):
+                  return "404", None
+              return ("closed" if m.get("closed") else "open"), m
+
+          def search(q):
+              # two parameter sets are two readings of the venue's search,
+              # and "not listed" is claimed only when BOTH answer nothing:
+              # a zero from the first is carried, never returned, so the
+              # active-status variant is always asked before the zero
+              # stands (Phase 0 review, minor 4: it used to return on the
+              # first answer whatever its count, so the second variant
+              # was reached only when the first call raised). None means
+              # neither variant answered at all.
+              n_last, evs_last = None, []
+              for params in ({"query": q[:80], "limit": 5},
+                             {"query": q[:80], "limit": 5, "status": "active"}):
+                  time.sleep(PACE)
+                  try:
+                      r = pub.search.query(params) or {}
+                  except Exception:
+                      continue
+                  evs = (r.get("events") if isinstance(r, dict) else r) or []
+                  n_last, evs_last = len(evs), [e for e in evs if isinstance(e, dict)]
+                  if n_last:
+                      return n_last, evs_last
+              return n_last, evs_last
+
+          # ---- step C: classify, his biggest markets first
+          def usd_of(c):
+              cid = str(c.get("condition_id") or "")
+              if cid in usd_api:
+                  return usd_api[cid]
+              try:
+                  return float(c.get("usd24h") or 0.0)
+              except (TypeError, ValueError):
+                  return 0.0
+
+          totals, cells, whys = {}, {}, {}
+          gross_usd = 0.0
+          marked = 0
+          paired2 = 0.0
+          gross_sh = 0.0
+          direct_reads = search_reads = 0
+          budget_hit = False
+          for c in sorted(conds, key=lambda c: -usd_of(c)):
+              cid = str(c.get("condition_id") or "")
+              usd = usd_of(c)
+              usd_db = c.get("usd24h")
+              cands = [str(s).lower() for s in (c.get("candidates") or []) if s]
+              his_slug = str(c.get("his_slug") or "-")
+              his_date = c.get("date") or date_of(his_slug)
+              sport = c.get("sport") or sport_of(his_slug)
+              fam = c.get("family") or family_of(his_slug)
+              m = c.get("map") or None
+              sh = c.get("shadow") or {}
+              why = c.get("explain") or sh.get("explain") or "-"
+              hit, venue_date, us, mark = "-", "-", "-", None
+              if not cid:
+                  cls = "null_condition"
+              elif m:
+                  src = str(m.get("source") or "unknown")
+                  if src == "ledger":
+                      cls = f"mapped_ledger:{m.get('map_class') or 'unrecorded'}"
+                  else:
+                      cls = f"mapped_{src}"
+                  us = str(m.get("us_slug") or "-")
+                  venue_date = date_of(us) or "-"
+                  hit = "map"
+                  mark = sh.get("mark")
+              elif not his_date:
+                  cls = "undated"
+              elif pub is None:
+                  cls = "undiagnosed:no_sdk"
+              else:
+                  found = next(((s, index[s]) for s in cands if s in index), None)
+                  if found:
+                      us, ix = found
+                      venue_date, hit, mark = ix["date"] or "-", "slug", ix["mark"]
+                      cls = "listed_closed" if ix["closed"] else f"listed_on_us_but_unmapped:{why}"
+                  else:
+                      th = title_hit(c, his_date)
+                      if th:
+                          ev_slug, mslugs = th
+                          us = mslugs[0] if mslugs else ev_slug
+                          hit = f"title:{ev_slug}"
+                          venue_date = date_of(us) or "-"
+                          cls = f"listed_on_us_but_unmapped:{why}"
+                      elif time.time() - t0 > BUDGET_S:
+                          cls, budget_hit = "undiagnosed:budget", True
+                      elif not cands:
+                          cls = "undiagnosed:no_candidates"
+                      else:
+                          errs, st = 0, None
+                          for s in cands:
+                              st, mk = retrieve(s)
+                              direct_reads += 1
+                              if st in ("open", "closed"):
+                                  us, hit, venue_date, mark = s, "direct", date_of(s) or "-", mark_of(mk)
+                                  cls = ("listed_closed" if st == "closed"
+                                         else f"listed_on_us_but_unmapped:{why}")
+                                  break
+                              if st != "404":
+                                  errs += 1
+                          else:
+                              q = c.get("title") or c.get("event_title") or his_slug
+                              n_ev, evs = search(str(q))
+                              search_reads += 1
+                              if errs:
+                                  cls = f"undiagnosed:direct_errors_{errs}"
+                              elif n_ev is None:
+                                  cls = "undiagnosed:search_error"
+                              elif n_ev == 0:
+                                  cls, hit = "not_listed_on_us", "search:0ev"
+                              else:
+                                  ms = {str(mm.get("slug") or "").lower(): mm
+                                        for ev in evs for mm in (ev.get("markets") or [])
+                                        if isinstance(mm, dict)}
+                                  c2 = next((s for s in cands if s in ms), None)
+                                  if c2:
+                                      us, hit, venue_date = c2, "search", date_of(c2) or "-"
+                                      cls = ("listed_closed" if ms[c2].get("closed")
+                                             else f"listed_on_us_but_unmapped:{why}")
+                                  else:
+                                      cls, hit = f"undiagnosed:search_{n_ev}ev", f"search:{n_ev}ev"
+              # gross dollars at the mark need the long/other split the
+              # shadow has only on a mapped row; unmarked stays n/a
+              g_usd = None
+              hl, ho = sh.get("his_long"), sh.get("his_other")
+              try:
+                  if mark is not None and hl is not None and ho is not None:
+                      g_usd = float(hl) * float(mark) + float(ho) * (1.0 - float(mark))
+              except (TypeError, ValueError):
+                  g_usd = None
+              if g_usd is not None:
+                  gross_usd += g_usd
+                  marked += 1
+              try:
+                  gs = float(c.get("gross_sh") or 0.0)
+                  ps = float(c.get("paired_sh") or 0.0)
+              except (TypeError, ValueError):
+                  gs, ps = 0.0, 0.0
+              gross_sh += gs
+              paired2 += 2.0 * ps
+              paired = round(2.0 * ps / gs, 3) if gs > 0 else None
+              print(f"MIRRORCOVER {cls} rn1 {cid[:10] or '-'} his={his_slug} us={us} sport={sport} "
+                    f"family={fam} usd24h={usd:.2f} usd_db={usd_db if usd_db is not None else 'n/a'} "
+                    f"fills={c.get('n_fills') if c.get('n_fills') is not None else 'n/a'} "
+                    f"gross={round(g_usd, 2) if g_usd is not None else 'n/a'} "
+                    f"paired={paired if paired is not None else 'n/a'} why={why} hit={hit} "
+                    f"dates={his_date or '-'}/{venue_date} cands={len(cands)}")
+              head = cls.split(":", 1)[0]
+              t = totals.setdefault(head, [0, 0.0])
+              t[0] += 1
+              t[1] += usd
+              cell = cells.setdefault(f"{sport}|{fam}", {})
+              cc = cell.setdefault(head, [0, 0.0])
+              cc[0] += 1
+              cc[1] += usd
+              if head == "listed_on_us_but_unmapped":
+                  w = whys.setdefault(why, [0, 0.0])
+                  w[0] += 1
+                  w[1] += usd
+
+          def tot(*keys):
+              n, u = 0, 0.0
+              for k in keys:
+                  v = totals.get(k)
+                  if v:
+                      n += v[0]
+                      u += v[1]
+              return f"{n}/${u:.2f}"
+
+          markets = len(conds)
+          usd_all = sum(usd_of(c) for c in conds)
+          und = totals.get("undiagnosed", [0, 0.0])
+          mapped_keys = [k for k in totals if k.startswith("mapped_")]
+          print(f"MIRRORCOVER-TOTAL markets={markets} usd={usd_all:.2f} "
+                f"mapped={tot(*mapped_keys)} admissible={tot('mapped_premap', 'mapped_exact')} "
+                f"mapped_ledger={tot('mapped_ledger')} "
+                f"listed_unmapped={tot('listed_on_us_but_unmapped')} "
+                f"not_listed={tot('not_listed_on_us')} listed_closed={tot('listed_closed')} "
+                f"undated={tot('undated')} undiagnosed={tot('undiagnosed')} "
+                f"undiagnosed_share={(und[1] / usd_all) if usd_all > 0 else 'n/a'} "
+                f"null_condition={cover.get('null_condition_fills', 'n/a')} "
+                f"gross_usd={gross_usd:.2f} marked={marked} "
+                f"paired_share={(round(paired2 / gross_sh, 4) if gross_sh > 0 else 'n/a')} "
+                f"endpoint={endpoint} budget_hit={budget_hit} direct_reads={direct_reads} "
+                f"search_reads={search_reads} elapsed={time.time() - t0:.0f}s")
+          for key in sorted(cells):
+              cell = cells[key]
+              parts = " ".join(f"{k}={v[0]}/${v[1]:.2f}" for k, v in sorted(cell.items()))
+              n = sum(v[0] for v in cell.values())
+              u = sum(v[1] for v in cell.values())
+              print(f"MIRRORCOVER-CELL {key} markets={n} usd={u:.2f} {parts}")
+          for w, v in sorted(whys.items(), key=lambda kv: -kv[1][1]):
+              print(f"MIRRORCOVER-WHY {w}: markets={v[0]} usd={v[1]:.2f}")
           PY

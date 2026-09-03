@@ -5672,6 +5672,21 @@ async def admin_mirror_shadow(whale: str = "", hours: float = 24.0) -> dict:
     return await mirror_shadow_report(await get_pool(), hours, whale or None)
 
 
+@app.get("/api/admin/mirror-cover", dependencies=[Depends(require_admin)])
+async def admin_mirror_cover(whale: str = "rn1", hours: float = 24.0,
+                             map_max: int = 150) -> dict:
+    """Coverage census for the MIRRORCOVER runner job (to-a-tee Phase 0,
+    owner order 2026-09-02 "mirror the whales to a tee"): his markets in
+    the window with every candidate slug the mapping grammar would try,
+    his dollars, the shadow's current class and the current mapping
+    source. Read-only, Postgres only; the venue listing test runs on the
+    runner, which can reach the venue. See analytics/mirror_report.py."""
+    from ..analytics.mirror_report import mirror_cover_report
+
+    return await mirror_cover_report(await get_pool(), (whale or "rn1").lower(), hours,
+                                     max(0, min(int(map_max), 600)))
+
+
 @app.get("/api/admin/size-edge", dependencies=[Depends(require_admin)])
 async def admin_size_edge(whale: str = "", days: int = 30) -> dict:
     """His edge by the dollars he staked. See analytics/size_edge.py.
