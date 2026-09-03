@@ -1168,7 +1168,22 @@ _hydrate_err: dict = {"err": None, "at": 0.0, "chunks": 0}
 # retires the v2 snapshot on deploy and forces one filtered re-hydrate
 # from the full-fidelity table, the same road as v1 -> v2 (second
 # adversarial review, 2026-09-02); test_archive_types pins the suffix.
-_SNAP_KEY = "track_record_slim_archive_v3"
+#
+# v3 -> v2 ROLLBACK (2026-09-03 03:40Z, production): the v3 re-hydrate
+# read 531,313 rows where the v2 snapshot held 302,901 (the v2 grind
+# had been cut short by the partial-promotion bug fixed above), and the
+# API process could not carry them: two probes in a row showed the
+# heavy endpoints (proof, merge, latency, whale-side, the daily
+# breakdown, the site's own today-live) answering 502 with RSS between
+# 1.25 and 1.75 GB, the band the 317,681-row incident died in. Pointing
+# the key back at the v2 row (still in ingestion_state; nothing deleted
+# it) restores the smaller archive on the next boot. The dating fix
+# still applies to every resolution archived from here on; the rows
+# persisted without a time stay undatable until the archive can hold
+# the full table in a compact form (a memory-safe archive is the
+# follow-up, reviewed before it ships). Bumping to v3 again without
+# that work re-creates the 502s.
+_SNAP_KEY = "track_record_slim_archive_v2"
 _snap_state: dict = {"at": 0.0}
 _SNAP_REFRESH_S = 6 * 3600.0
 _SNAP_MAX_AGE_S = 24 * 3600.0   # window union covers ~2 days; stay well under

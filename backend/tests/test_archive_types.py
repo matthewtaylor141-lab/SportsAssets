@@ -106,13 +106,17 @@ class TestTheSnapshotIsVersionedWithTheFilter:
     execution never arrives.
     """
 
-    def test_the_key_is_v3(self):
-        # v2 retired the pre-filter snapshots; v3 (2026-09-02) retires the
-        # snapshots whose slim rows carry no resolution time, so the
-        # settlement-dating fix reaches the rows already on the page.
-        assert tr._SNAP_KEY.endswith("_v3"), (
-            "bumping the key is what retires snapshots written before "
-            "the slim shape carried a resolution's time")
+    def test_the_key_is_v2(self):
+        # v2 retired the pre-filter snapshots. v3 (2026-09-02) retired the
+        # snapshots whose slim rows carry no resolution time, and was
+        # ROLLED BACK on 2026-09-03: the full re-hydrate (531,313 rows vs
+        # the v2 snapshot's 302,901) put the API process in the memory
+        # band where its heavy endpoints answer 502. The key returns to
+        # v3 only with a memory-safe archive (see the comment above
+        # _SNAP_KEY).
+        assert tr._SNAP_KEY.endswith("_v2"), (
+            "the v3 re-hydrate does not fit the API process; see the "
+            "rollback note above _SNAP_KEY before bumping again")
 
     def test_the_key_carries_a_version_at_all(self):
         import re
