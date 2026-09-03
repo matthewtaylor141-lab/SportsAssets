@@ -312,3 +312,87 @@ def test_ascending_reindex_batch_dirties_the_walk(monkeypatch):
     cov = _cov(pool)
     assert cov["dirty"] >= 1, \
         "a ramp climbing in tolerance-sized steps is still inversion"
+
+
+# ------------------------------------- the walk's statements, pinned
+#
+# To-a-tee Phase 8 (owner order 2026-09-02) added a taker census to
+# this walk behind a fail-closed switch. The rule for that unit was
+# that the walk's OWN requests and statements never change: this is
+# the golden recorded on the unmodified reconciler on the fixture
+# above (5 statements, 7 requests), pinned so any later edit to the
+# walk's cycle length or its writes fails here by name.
+
+MUTANT_PROBE_SQL = (
+    "SELECT 1 FROM trades WHERE lower(tx_hash) = lower($1) AND asset = $2 "
+    "AND source = 'poll' AND abs(extract(epoch from ts)::float8 - $3) > $4 LIMIT 1")
+
+
+class _StatementPool(_FakePool):
+    """The walk fixture's pool, recording every statement with args."""
+
+    def __init__(self):
+        super().__init__()
+        self.stmts: list[tuple] = []
+
+    async def fetchval(self, sql, *a, timeout=None):
+        self.stmts.append(("fetchval", sql, list(a)))
+        return await super().fetchval(sql, *a, timeout=timeout)
+
+    async def fetch(self, sql, *a, timeout=None):
+        self.stmts.append(("fetch", sql, list(a)))
+        return await super().fetch(sql, *a, timeout=timeout)
+
+    async def execute(self, sql, *a, timeout=None):
+        self.stmts.append(("execute", sql, list(a)))
+        return await super().execute(sql, *a, timeout=timeout)
+
+
+def test_the_walks_statements_and_requests_are_the_recorded_golden(monkeypatch):
+    pool = _StatementPool()
+    calls: list[dict] = []
+    beats: list[tuple] = []
+    feed = _feed()
+
+    async def fake_get(http, path, params=None):
+        calls.append((path, dict(params)))
+        return _Resp(feed[params["offset"]:params["offset"] + 100])
+
+    async def fake_pool():
+        return pool
+
+    async def fake_hb(name, status, detail=None):
+        beats.append((name, status, detail))
+
+    async def fake_sport(cond):
+        return None
+
+    async def fake_ingest(ev, notify=True):
+        return (1, False)
+
+    monkeypatch.setattr(rec, "polite_get", fake_get)
+    monkeypatch.setattr(rec, "get_pool", fake_pool)
+    monkeypatch.setattr(rec, "heartbeat", fake_hb)
+    monkeypatch.setattr(rec, "_sport_for_condition", fake_sport)
+    monkeypatch.setattr(rec, "ingest_trade_result", fake_ingest)
+    monkeypatch.setattr(
+        rec, "settings",
+        lambda: SimpleNamespace(data_api_base="http://feed.test"))
+    out = asyncio.run(rec.reconcile_once(depth=500))
+    cov = {"complete": False, "oldest": float(TOP_TS - 584 * STEP),
+           "newest": float(TOP_TS), "dirty": 0}
+    assert out == {"run_id": 1, "missed": 0,
+                   "per_wallet": {"cov:" + WALLET: cov, WALLET: 0}}
+    assert pool.stmts == [
+        ("fetchval", "INSERT INTO reconciliation_runs DEFAULT VALUES RETURNING id", []),
+        ("fetch", "SELECT id, address, username FROM whales WHERE active AND NOT banned", []),
+        ("fetchval", MUTANT_PROBE_SQL,
+         ["0x" + format(1, "064x"), "10000", float(TOP_TS), 120.0]),
+        ("execute",
+         "UPDATE reconciliation_runs SET finished_at=now(), missed=$2, details=$3::jsonb WHERE id=$1",
+         [1, 0, json.dumps({"per_wallet": {"cov:" + WALLET: cov, WALLET: 0}})]),
+    ]
+    assert beats == [("reconciler", "ok", {"missed": 0, "failed": 0})]
+    assert calls == [("/trades", {"user": WALLET, "limit": 100, "offset": o,
+                                  "takerOnly": "false"})
+                     for o in (0, 97, 194, 291, 388, 485, 582)]

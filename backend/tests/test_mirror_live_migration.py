@@ -391,3 +391,155 @@ def test_the_worker_refuses_by_name_when_047_is_unapplied():
     src = pathlib.Path(ml.__file__).read_text()
     assert "tables_absent" in src
     assert "mirror_books" in src
+
+
+# ------------------------------------------------ 049 (to-a-tee Phase 4/8)
+#
+# 049 is the program register's number for trades.taker (program.md
+# rule 3: 048 is reserved for Phase 0b's markets.rules_text /
+# resolution_kind, 049 for the Phase 4/8 columns; the taker unit's
+# three reviews carried the mismatch as a minor until this rename).
+# It is an ALTER: 047 stays CREATE-only (the pin above), and 049 adds
+# nullable measurement columns only — trades.taker for the taker
+# census (Phase 8) and the three mirror_orders columns the per-fill
+# fidelity join needs (Phase 4 (vii)). migrate.py applies the sorted
+# glob, so the 048 gap is harmless until Phase 0b fills it. Every 047
+# pin above is unchanged; these are additive. The register (program.md
+# :429) says 049 will also carry Phase 4's commission / wire-tick /
+# mirror_books columns, so the pins below are "contains these four,
+# and every statement is an ALTER ... ADD COLUMN IF NOT EXISTS nullable
+# with no DEFAULT" — never "exactly four" (the taker unit's fourth
+# review, the minor): the file may grow, its shape may not.
+
+SQL_049 = MIG_DIR.joinpath("049_mirror_fidelity.sql")
+
+
+def _sql_049() -> str:
+    return SQL_049.read_text()
+
+
+def test_049_exists_and_sorts_after_047_with_only_the_reserved_048_between():
+    assert SQL_049.exists()
+    files = [p.name for p in sorted(MIG_DIR.glob("*.sql"))]
+    i = files.index("047_mirror_live.sql")
+    j = files.index("049_mirror_fidelity.sql")
+    assert j > i
+    # whatever sits between is Phase 0b's reserved 048 and nothing else
+    assert all(f.startswith("048_") for f in files[i + 1:j]), files[i:j + 1]
+    assert sum(1 for f in files if f.startswith("049_")) == 1
+    # and no 048 file in the tree claims trades.taker
+    for f in files[i + 1:j]:
+        assert "taker" not in MIG_DIR.joinpath(f).read_text()
+    assert not MIG_DIR.joinpath("048_mirror_fidelity.sql").exists()
+
+
+def test_049_header_is_in_the_house_style():
+    head = _sql_049().splitlines()[0]
+    assert head.startswith("-- 049: MIRROR FIDELITY COLUMNS (owner order 2026-09-02")
+
+
+def test_049_is_alter_add_column_if_not_exists_only():
+    """The ALTER, never a CREATE: 047's tables keep their shape and
+    every statement is re-runnable. Every column nullable, none with
+    a DEFAULT — an unwritten row reads NULL ('unknown'), never a
+    guess. The count is not pinned: Phase 4 grows this file."""
+    sql = _sql_049()
+    # judged on the statements, comments stripped: the header PROSE
+    # names what the chain decoders drop and what a NULL means
+    up = " ".join(_statements(sql)).upper()
+    assert "CREATE " not in up and "DROP " not in up
+    assert "DEFAULT" not in up and "NOT NULL" not in up
+    stmts = _statements(sql)
+    assert len(stmts) >= 4, stmts
+    for s in stmts:
+        assert re.fullmatch(
+            r"ALTER TABLE \w+ ADD COLUMN IF NOT EXISTS \w+ .+ NULL( REFERENCES \w+ \(\w+\))?",
+            s), s
+    # never the 047 indexes, never a bare migration number
+    assert "047" not in "".join(stmts) and "048" not in "".join(stmts)
+
+
+PHASE_8_STATEMENTS = [
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS taker BOOLEAN NULL",
+    "ALTER TABLE mirror_orders ADD COLUMN IF NOT EXISTS trigger_trade_id BIGINT NULL "
+    "REFERENCES trades (id)",
+    "ALTER TABLE mirror_orders ADD COLUMN IF NOT EXISTS his_fill_ts TIMESTAMPTZ NULL",
+    "ALTER TABLE mirror_orders ADD COLUMN IF NOT EXISTS first_fill_at TIMESTAMPTZ NULL",
+]
+
+
+def _is_subsequence(needles: list, hay: list) -> bool:
+    it = iter(hay)
+    return all(any(n == h for h in it) for n in needles)
+
+
+def test_049_carries_the_four_phase_8_columns():
+    """Contains these four, in this order, each exactly once; anything
+    Phase 4 appends beside them is its own business (and the shape pin
+    above still holds it to ALTER ... ADD COLUMN IF NOT EXISTS
+    nullable)."""
+    stmts = _statements(_sql_049())
+    for s in PHASE_8_STATEMENTS:
+        assert stmts.count(s) == 1, s
+    assert _is_subsequence(PHASE_8_STATEMENTS, stmts)
+
+
+def test_049_trigger_trade_id_is_the_trades_id_type():
+    """trades.id is BIGSERIAL (001), so the FK column is BIGINT."""
+    init = MIG_DIR.joinpath("001_init.sql").read_text()
+    body = re.search(r"CREATE TABLE IF NOT EXISTS trades\s*\((.*?)\n\);", init, re.S).group(1)
+    assert re.search(r"^\s*id\s+BIGSERIAL PRIMARY KEY", body, re.M)
+    assert "trigger_trade_id BIGINT NULL REFERENCES trades (id)" in _flat(_sql_049())
+
+
+def test_049_leaves_047_exactly_as_pinned():
+    """Additive by construction: 047's statement list is the eleven
+    CREATEs the pins above enumerate, and 049 names none of 047's
+    indexes."""
+    stmts_047 = _statements(_sql())
+    assert len(stmts_047) == 11
+    assert all(s.startswith("CREATE ") for s in stmts_047)
+    for s in stmts_047:
+        if s.startswith(("CREATE UNIQUE INDEX IF NOT EXISTS ", "CREATE INDEX IF NOT EXISTS ")):
+            name = s.split("IF NOT EXISTS ", 1)[1].split(" ", 1)[0]
+            assert name not in _sql_049(), name
+
+
+def test_049_parses_as_postgres_sql_and_the_tree_agrees_with_the_text():
+    pglast = pytest.importorskip("pglast")
+    from pglast.enums import AlterTableType, ConstrType
+
+    stmts = pglast.parse_sql(_sql_049())
+    assert len(stmts) >= 4
+    assert all(type(s.stmt).__name__ == "AlterTableStmt" for s in stmts)
+    seen = []
+    for s in stmts:
+        n = s.stmt
+        assert len(n.cmds) == 1
+        cmd = n.cmds[0]
+        assert cmd.subtype == AlterTableType.AT_AddColumn
+        assert cmd.missing_ok is True, "IF NOT EXISTS"
+        col = cmd.def_
+        types = {c.contype for c in (col.constraints or [])}
+        assert ConstrType.CONSTR_NULL in types
+        assert ConstrType.CONSTR_NOTNULL not in types
+        assert ConstrType.CONSTR_DEFAULT not in types
+        seen.append((n.relation.relname, col.colname,
+                     [x.sval for x in col.typeName.names][-1],
+                     ConstrType.CONSTR_FOREIGN in types))
+    # the four Phase 8 columns are in the tree, in order, once each;
+    # the file may carry more (the register's Phase 4 columns)
+    phase_8 = [
+        ("trades", "taker", "bool", False),
+        ("mirror_orders", "trigger_trade_id", "int8", True),
+        ("mirror_orders", "his_fill_ts", "timestamptz", False),
+        ("mirror_orders", "first_fill_at", "timestamptz", False),
+    ]
+    for col in phase_8:
+        assert seen.count(col) == 1, col
+    assert _is_subsequence(phase_8, seen)
+    trig = seen.index(phase_8[1])
+    fk = [c for c in stmts[trig].stmt.cmds[0].def_.constraints
+          if c.contype == ConstrType.CONSTR_FOREIGN][0]
+    assert fk.pktable.relname == "trades"
+    assert [a.sval for a in fk.pk_attrs] == ["id"]
