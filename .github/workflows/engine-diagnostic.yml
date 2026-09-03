@@ -1928,7 +1928,7 @@ jobs:
             hz=$(curl -sS --max-time 8 "$BASE/healthz" 2>/dev/null) && code=0 || code=$?
             ts=$(date -u +%H:%M:%S)
             if [ $code -eq 0 ] && echo "$hz" | jq -e .ok >/dev/null 2>&1; then
-              echo "  $ts  $(echo "$hz" | jq -c '{rss_mb, db_ok, commit}')"
+              echo "  $ts  $(echo "$hz" | jq -c '{rss_mb, db_ok, commit, boot_id, uptime_s}')"
             else
               echo "  $ts  DOWN"
             fi

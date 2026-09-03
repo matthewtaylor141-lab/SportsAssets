@@ -570,22 +570,46 @@ def _fetch_week_activities_sync(oldest_day: str) -> list[dict]:
 _acts_cache: dict[str, tuple[float, list]] = {}
 _ACTS_TTL = 600.0
 _acts_lock = asyncio.Lock()
+# Slot cap (2026-09-03 API restarts behind the 502s): a slot is up to
+# 8,000 verbatim venue rows, 95-170 MB at production's 10.6 KB/row, and
+# the old sweep ran only past eight keys -- so up to eight slots sat on
+# the resident floor uncounted by the memory census (five keys per probe
+# run, one new key per day from venue-truth's rolling since-day), 0.4-0.7
+# GB of the 1.2-1.7 GB floor the per-request transients then landed on
+# in a 2 GB container. Three live slots cover the callers that alternate
+# (breakdown attribution, weekly report, export share one key each) and
+# keep the 2026-08-23 single-slot thrash out.
+_ACTS_MAX_SLOTS = 3
 
 
 async def _week_activities(since_day: str, timeout: float = 240) -> list:
     async with _acts_lock:
         now = time.time()
+        # Expired slots go on EVERY call, hit or miss, so a dead 170 MB
+        # list never waits for a ninth key to be freed.
+        for k in [k for k, (t0, _) in _acts_cache.items()
+                  if now - t0 >= _ACTS_TTL]:
+            _acts_cache.pop(k, None)
         hit = _acts_cache.get(since_day)
         if hit is not None and now - hit[0] < _ACTS_TTL:
             return hit[1]
         acts = await asyncio.wait_for(
             asyncio.to_thread(_fetch_week_activities_sync, since_day),
             timeout=timeout)
+        # Room is made AFTER the crawl lands, so a crawl that fails leaves
+        # the cache exactly as it was. The first cut evicted before the
+        # crawl to hold the peak at the cap, and the hotfix review
+        # (2026-09-03 API restarts) showed what that costs: three missed
+        # keys inside one rate-limited window emptied the live slots, and
+        # every call after re-crawled 80 pages against a venue already
+        # limiting. Restoring the evicted slot on failure would have to
+        # hold it in a local for the whole crawl anyway -- the same peak,
+        # more code -- so the honest form is this one: the crawl-time peak
+        # is one slot over the cap, the per-request transient the memory
+        # census already accounts for, and the cap holds at rest.
         _acts_cache[since_day] = (now, acts)
-        if len(_acts_cache) > 8:  # bounded: sweep expired slots
-            for k in [k for k, (t0, _) in _acts_cache.items()
-                      if now - t0 >= _ACTS_TTL]:
-                _acts_cache.pop(k, None)
+        while len(_acts_cache) > _ACTS_MAX_SLOTS:
+            _acts_cache.pop(min(_acts_cache, key=lambda k: _acts_cache[k][0]))
         return acts
 
 

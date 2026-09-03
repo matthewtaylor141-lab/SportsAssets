@@ -7,7 +7,10 @@ reportlab — no external services.
 
 from __future__ import annotations
 
+import asyncio
 import io
+import os
+import time as _clock
 from datetime import date, datetime, time, timedelta, timezone
 
 from reportlab.lib import colors
@@ -165,15 +168,33 @@ def _table(headers: list[str], rows: list[list[str]], widths: list[float],
     return t
 
 
-async def settled_bets(whale_id: int) -> list[dict]:
-    """Every settled bet in the whale's imported history, sportsbook-labeled.
-
-    One row per (market, outcome token) position that has fully settled —
-    resolved by the market, or completely cashed out before resolution.
-    """
-    pool = await get_pool()
-    trades = await pool.fetch(
-        """
+# The whale-day drill-down was the API's proven killer (2026-09-03 API
+# restarts behind the 502s). settled_bets fetched a whale's ENTIRE
+# trades-join-markets ledger per call and api_whale_day filtered by day
+# afterwards: swisstony is 889,154 fills, +0.7 to +1.1 GB per call held as
+# asyncpg Records, and the diagnostic probe fires /api/whales/{id}/day/{d}
+# 56 times at --max-time 20 plus a retry lane. curl abandons at 20 s, the
+# handler does not, so whole-ledger fetches stacked on a 1.2-1.7 GB
+# resident floor in a 2 GB container and Render replaced the process --
+# 5 of 5 probes today died inside that burst, every route including
+# /healthz answering Render's page for 10-55 s. Two bounds fix it:
+#
+#   * the ledger streams through a server-side cursor in _BETS_CHUNK-row
+#     chunks (the shape track_record._hydrate_all already uses) and is
+#     folded per asset as it arrives, keeping ten scalar fields per asset
+#     instead of the Record: on a synthetic 889,154-row ledger the peak is
+#     +152 MB against +968 MB for the list, and the loop yields every
+#     chunk (longest stall 0.2 s, a cyclic-GC pass) instead of one
+#     multi-second synchronous replay;
+#   * the finished bet list is memoized per whale, so seven day calls (and
+#     the PDF builders) read the ledger once: TTL 600 s, single-flight per
+#     whale so a burst of abandoned calls cannot stack readers, at most
+#     _BETS_MAX_WHALES lists resident (the oldest is evicted).
+#
+# WHALE_DAY_STREAM=0 keeps the batch fetch for one deploy if the cursor
+# misbehaves on production Postgres -- a rollback that is a variable, not
+# a deploy. The cache stays either way.
+_LEDGER_SQL = """
         SELECT t.asset, t.condition_id, t.outcome, t.outcome_index, t.side,
                t.size::float8 AS size, t.price::float8 AS price,
                t.notional::float8 AS notional, t.sport AS t_sport, t.ts,
@@ -183,38 +204,88 @@ async def settled_bets(whale_id: int) -> list[dict]:
         FROM trades t LEFT JOIN markets m USING (condition_id)
         WHERE t.whale_id = $1
         ORDER BY t.ts, t.id
-        """,
-        whale_id,
-    )
+        """
+_BETS_CHUNK = 5000
+_BETS_CHUNK_TIMEOUT_S = 60.0
+_SETTLE_YIELD_EVERY = 1000
+_BETS_TTL = 600.0
+_BETS_MAX_WHALES = 3
+_bets_cache: dict[int, tuple[float, list[dict]]] = {}
+_bets_locks: dict[int, asyncio.Lock] = {}
 
-    class Agg:
-        def __init__(self) -> None:
-            self.pos = Position()
-            self.bought_shares = 0.0
-            self.first = None
-            self.last = None
-            self.meta = None
 
-    by_asset: dict[str, Agg] = {}
-    for t in trades:
-        a = by_asset.setdefault(t["asset"], Agg())
+def _stream_enabled() -> bool:
+    return os.environ.get("WHALE_DAY_STREAM", "1").strip() != "0"
+
+
+class _Agg:
+    """Per-asset fold state. `meta` is the ten fields the bet needs from
+    the last row carrying a market title (else the first row), as a
+    tuple: (outcome, outcome_index, t_sport, t_title, m_title,
+    event_title, m_sport, resolved, resolved_prices, resolved_at)."""
+
+    __slots__ = ("pos", "bought_shares", "first", "last", "meta")
+
+    def __init__(self) -> None:
+        self.pos = Position()
+        self.bought_shares = 0.0
+        self.first = None
+        self.last = None
+        self.meta = None
+
+
+def _fold(by_asset: dict[str, _Agg], rows) -> None:
+    for t in rows:
+        a = by_asset.get(t["asset"])
+        if a is None:
+            a = by_asset[t["asset"]] = _Agg()
         a.pos.apply(Fill(side=t["side"], size=t["size"], price=t["price"]))
         if t["side"] == "BUY":
             a.bought_shares += t["size"]
         a.first = a.first or t["ts"]
         a.last = t["ts"]
         if a.meta is None or t["m_title"]:
-            a.meta = t
+            a.meta = (t["outcome"], t["outcome_index"], t["t_sport"], t["t_title"],
+                      t["m_title"], t["event_title"], t["m_sport"], t["resolved"],
+                      t["resolved_prices"], t["resolved_at"])
 
+
+async def _replay_ledger(pool, whale_id: int) -> dict[str, _Agg]:
+    by_asset: dict[str, _Agg] = {}
+    if not _stream_enabled():
+        _fold(by_asset, await pool.fetch(_LEDGER_SQL, whale_id))
+        return by_asset
+    async with pool.acquire() as con:
+        async with con.transaction():
+            cur = await con.cursor(_LEDGER_SQL, whale_id)
+            while True:
+                rows = await asyncio.wait_for(cur.fetch(_BETS_CHUNK),
+                                              timeout=_BETS_CHUNK_TIMEOUT_S)
+                if not rows:
+                    break
+                _fold(by_asset, rows)
+                del rows
+    return by_asset
+
+
+async def _settle(by_asset: dict[str, _Agg]) -> list[dict]:
     bets: list[dict] = []
-    for asset, a in by_asset.items():
-        t = a.meta
-        resolved = bool(t["resolved"])
+    n = 0
+    for a in by_asset.values():
+        n += 1
+        if n % _SETTLE_YIELD_EVERY == 0:
+            # The label regexes over 100k+ assets are the other synchronous
+            # stretch on the loop (about 30 us an asset): yield every
+            # thousand so no stretch outlasts a health check's patience.
+            await asyncio.sleep(0)
+        (outcome, outcome_index, t_sport, t_title, m_title, event_title,
+         m_sport, m_resolved, resolved_prices, resolved_at) = a.meta
+        resolved = bool(m_resolved)
         if resolved and not a.pos.resolved:
-            prices = t["resolved_prices"]
+            prices = resolved_prices
             if isinstance(prices, str):
                 prices = json.loads(prices)
-            idx = t["outcome_index"]
+            idx = outcome_index
             if prices and idx is not None and 0 <= idx < len(prices):
                 a.pos.resolve(float(prices[idx]))
         fully_cashed = a.pos.shares <= EPS and a.pos.fills > 0
@@ -222,13 +293,13 @@ async def settled_bets(whale_id: int) -> list[dict]:
             continue  # still open — not a settled bet
         stake = a.pos.notional_in
         avg_price = stake / a.bought_shares if a.bought_shares > EPS else None
-        settled_at = (t["resolved_at"] if a.pos.resolved and t["resolved_at"] else a.last)
+        settled_at = (resolved_at if a.pos.resolved and resolved_at else a.last)
         bets.append({
             "settled_at": settled_at,
-            "sport": (t["m_sport"] if t["m_sport"] and t["m_sport"] != "unclassified"
-                      else t["t_sport"]),
-            "label": bet_label(t["outcome"], t["m_title"] or t["t_title"], t["event_title"]),
-            "bet_type": bet_type(t["outcome"], t["m_title"] or t["t_title"], t["event_title"]),
+            "sport": (m_sport if m_sport and m_sport != "unclassified"
+                      else t_sport),
+            "label": bet_label(outcome, m_title or t_title, event_title),
+            "bet_type": bet_type(outcome, m_title or t_title, event_title),
             "odds": american_odds(avg_price),
             "stake": round(stake, 2),
             "result": result_word(a.pos.realized_pnl, a.pos.resolved),
@@ -236,6 +307,56 @@ async def settled_bets(whale_id: int) -> list[dict]:
         })
     bets.sort(key=lambda b: b["settled_at"])
     return bets
+
+
+def _remember(whale_id: int, bets: list[dict]) -> None:
+    _bets_cache[whale_id] = (_clock.time(), bets)
+    while len(_bets_cache) > _BETS_MAX_WHALES:
+        _bets_cache.pop(min(_bets_cache, key=lambda k: _bets_cache[k][0]))
+    # A lock outlives its whale only while a flight holds it: the ids come
+    # off the URL, so an unbounded lock table would be one more thing a
+    # scan could grow.
+    for k in [k for k, lk in _bets_locks.items()
+              if k not in _bets_cache and not lk.locked()]:
+        _bets_locks.pop(k, None)
+
+
+async def settled_bets(whale_id: int) -> list[dict]:
+    """Every settled bet in the whale's imported history, sportsbook-labeled.
+
+    One row per (market, outcome token) position that has fully settled —
+    resolved by the market, or completely cashed out before resolution.
+    Memoized per whale (see above); callers get their own list.
+    """
+    hit = _bets_cache.get(whale_id)
+    if hit is not None and _clock.time() - hit[0] < _BETS_TTL:
+        return list(hit[1])
+    lock = _bets_locks.get(whale_id)
+    if lock is None:
+        lock = _bets_locks[whale_id] = asyncio.Lock()
+    try:
+        async with lock:
+            # Single-flight: whoever waited here reads what the leader built.
+            hit = _bets_cache.get(whale_id)
+            if hit is not None and _clock.time() - hit[0] < _BETS_TTL:
+                return list(hit[1])
+            pool = await get_pool()
+            by_asset = await _replay_ledger(pool, whale_id)
+            bets = await _settle(by_asset)
+            del by_asset
+            _remember(whale_id, bets)
+            return list(bets)
+    finally:
+        # _remember prunes locks only after a build lands, so a failed
+        # read (hotfix review, 2026-09-03 API restarts: a DB outage under
+        # the probe's whale-id scan) left one Lock per distinct id behind
+        # -- the same unbounded table the prune exists to prevent. Drop
+        # this whale's lock on the way out whenever nothing holds it and
+        # no entry vouches for it; a waiter that still references it
+        # simply finishes its own flight on the object it has.
+        if (not lock.locked() and whale_id not in _bets_cache
+                and _bets_locks.get(whale_id) is lock):
+            _bets_locks.pop(whale_id, None)
 
 
 def _tint(pnl: float, max_abs: float) -> colors.Color:

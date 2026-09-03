@@ -394,6 +394,20 @@ def check_engine_token(supplied: str | None) -> None:
 # ── Health & config ─────────────────────────────────────────────────
 
 
+# Boot marker (2026-09-03 API restarts behind the 502s): every 502 in the
+# probes was Render's own page for 10-55 s on every route, after which the
+# same `commit` answered from an RSS 0.6-0.8 GB lower -- a replaced
+# process, yet unprovable, because `commit` is the deploy's
+# RENDER_GIT_COMMIT and survives any restart of that deploy, and the
+# MEMORY WATCH samples every 5-13 s so a 200 MB boot reading is missed by
+# construction. A per-process id and an uptime turn "DOWN" into
+# "restarted at rss X" or "unresponsive, same boot" on the next probe.
+import uuid  # noqa: E402
+
+_BOOT_ID = uuid.uuid4().hex[:8]
+_BOOT_TS = time.time()
+
+
 @app.get("/healthz")
 async def healthz() -> dict:
     import os
@@ -403,12 +417,30 @@ async def healthz() -> dict:
     # degraded product into a dead one (observed 2026-08-03: continuous
     # platform 502s because every boot died before serving).
     db_ok = False
-    try:
-        pool = await get_pool()
-        await pool.fetchval("SELECT 1")
-        db_ok = True
-    except Exception:  # noqa: BLE001
-        pass
+    # The probe reads the pool the process already has, never get_pool()
+    # (hotfix review, 2026-09-03 API restarts): with the DB down at boot
+    # the lifespan's get_pool() fails and leaves db._pool None, and every
+    # /healthz call through get_pool() would then start a fresh
+    # create_pool and, under the ceiling below, cancel it mid-connect --
+    # a stranded half-open connection per check until GC, on a platform
+    # that checks every few seconds. No pool is simply db_ok false; the
+    # next real request still builds one through get_pool() as before.
+    from .. import db as _db
+
+    pool = _db._pool
+    if pool is not None:
+        try:
+            # 2 s ceiling (2026-09-03): with the ten pool connections held
+            # by stacked ledger fetches this await hung, and a hanging
+            # health check reads as a dead process to the platform's
+            # checker (render.yaml healthCheckPath) -- the one field meant
+            # to be informational was able to take the process down. A
+            # saturated pool now reports db_ok false; the check itself
+            # always answers.
+            await asyncio.wait_for(pool.fetchval("SELECT 1"), timeout=2.0)
+            db_ok = True
+        except Exception:  # noqa: BLE001
+            pass
     # Current RSS from /proc: after a night of OOM archaeology-by-email,
     # memory is a number the probes can track, not a timeline to argue.
     rss_mb = None
@@ -423,7 +455,9 @@ async def healthz() -> dict:
     # Render injects the deployed commit — lets anyone confirm which build is live.
     return {"ok": True, "db_ok": db_ok,
             "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7],
-            "rss_mb": rss_mb}
+            "rss_mb": rss_mb,
+            "boot_id": _BOOT_ID,
+            "uptime_s": round(max(0.0, time.time() - _BOOT_TS), 1)}
 
 
 # HEARTBEAT DETAIL SANITIZER.
