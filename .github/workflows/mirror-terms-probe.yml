@@ -1,0 +1,226 @@
+# MIRRORTERMS probe (critic round 1, gap 2 — venue contract terms).
+# Read-only: public venue endpoints + the admin mirror-shadow read.
+# Places nothing. Lives on a scratch branch; never merged.
+name: mirror-terms-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      slugs:
+        description: "Fallback comma list of US market slugs (added to the shadow's mapped set)"
+        required: false
+        default: ""
+      hours:
+        description: "Shadow window in hours"
+        required: false
+        default: "24"
+
+permissions:
+  contents: read
+
+jobs:
+  terms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: MIRRORTERMS census
+        env:
+          BASE: https://sportsassets-api.onrender.com
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          SLUGS: ${{ inputs.slugs }}
+          HOURS: ${{ inputs.hours }}
+        run: |
+          set +e
+          pip install --quiet polymarket-us 2>/dev/null || pip install polymarket-us
+          python -c "import importlib.metadata as m; print('MIRRORTERMS sdk polymarket-us', m.version('polymarket-us'))"
+          code=$(curl -sS --max-time 120 -H "X-Admin-Token: $ADMIN_TOKEN" -w '%{http_code}' \
+                 -o /tmp/mirror.json "$BASE/api/admin/mirror-shadow?hours=$HOURS&whale=rn1" 2>/dev/null || echo 000)
+          echo "MIRRORTERMS admin http=$code bytes=$(wc -c < /tmp/mirror.json 2>/dev/null || echo 0)"
+          python - <<'PY'
+          import json, os, time, collections, urllib.request
+          from datetime import datetime, timezone
+          from polymarket_us import PolymarketUS
+
+          PACE = 0.35
+          HOURS = float(os.environ.get("HOURS") or 24)
+          NOW = time.time()
+          client = PolymarketUS()
+
+          def fam(slug):
+              k = (slug or "").split("-")[0]
+              return {"atc": "moneyline", "aec": "moneyline", "asc": "spread",
+                      "tsc": "total", "cpc": "crypto"}.get(k, "other:" + k)
+
+          def num(v):
+              try:
+                  if isinstance(v, dict):
+                      v = v.get("value")
+                  return float(v)
+              except Exception:
+                  return None
+
+          def on_grid(v, step):
+              if v is None:
+                  return None
+              q = v / step
+              return abs(q - round(q)) < 1e-6
+
+          def half(v):
+              return None if v is None else (bool(on_grid(v, 0.005)) and not bool(on_grid(v, 0.01)))
+
+          # ---- 1. the shadow's mapped RN1 markets (admin read) ----
+          rows = []
+          try:
+              j = json.load(open("/tmp/mirror.json"))
+              rows = [r for r in (j.get("latest") or [])
+                      if r.get("us_market_slug") and str(r.get("whale") or "").lower() == "rn1"]
+              print(f"MIRRORTERMS shadow rows={j.get('rows')} markets={j.get('markets')} mapped_markets={j.get('mapped_markets')} latest_mapped_rn1={len(rows)} error={j.get('error')} | {j.get('reading')}")
+          except Exception as e:
+              print(f"MIRRORTERMS shadow unreadable {type(e).__name__}: {str(e)[:120]}")
+          slugs, seen, by_slug = [], set(), {}
+          for r in rows:
+              s = r["us_market_slug"]
+              if s not in seen:
+                  seen.add(s); slugs.append(s)
+              by_slug.setdefault(s, []).append(r)
+          n_fb = 0
+          for s in [x.strip() for x in (os.environ.get("SLUGS") or "").split(",") if x.strip()]:
+              if s not in seen:
+                  seen.add(s); slugs.append(s); n_fb += 1
+          print(f"MIRRORTERMS slugs from_shadow={len(slugs) - n_fb} from_fallback_input={n_fb} total={len(slugs)}")
+
+          # ---- 2. his dollars per conditionId in the window (on-chain activity) ----
+          D = "https://data-api.polymarket.com/activity"
+          ADDR = "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
+          cut = NOW - HOURS * 3600
+          usd_all, usd_buy = collections.Counter(), collections.Counter()
+          n_tr = pages = off = 0; crawl_err = None
+          try:
+              for _ in range(80):
+                  with urllib.request.urlopen(f"{D}?user={ADDR}&limit=500&offset={off}", timeout=25) as fh:
+                      data = json.load(fh)
+                  if not data:
+                      break
+                  pages += 1
+                  for a in data:
+                      if a.get("type") != "TRADE":
+                          continue
+                      ts = float(a.get("timestamp") or 0)
+                      if ts < cut:
+                          continue
+                      cid = str(a.get("conditionId") or "")
+                      u = float(a.get("usdcSize") or 0.0)
+                      usd_all[cid] += u; n_tr += 1
+                      if str(a.get("side") or "").upper() == "BUY":
+                          usd_buy[cid] += u
+                  oldest = min(float(a.get("timestamp") or 0) for a in data)
+                  off += len(data)
+                  if oldest < cut:
+                      break
+                  time.sleep(0.4)
+          except Exception as e:
+              crawl_err = f"{type(e).__name__}:{str(e)[:120]}"
+          print(f"MIRRORTERMS rn1_activity pages={pages} trades_in_window={n_tr} conditions={len(usd_all)} usd_all={sum(usd_all.values()):.2f} usd_buy={sum(usd_buy.values()):.2f} err={crawl_err}")
+
+          # ---- 3. per-market contract terms + BBO (paced 0.35 s per call) ----
+          recs = []
+          for i, s in enumerate(slugs):
+              m, err = {}, None
+              try:
+                  m = (client.markets.retrieve_by_slug(s) or {}).get("market") or {}
+              except Exception as e:
+                  err = f"{type(e).__name__}:{str(e)[:100]}"
+              time.sleep(PACE)
+              bid = ask = None; bbo_err = None
+              try:
+                  d = (client.markets.bbo(s) or {}).get("marketData") or {}
+                  bid, ask = num(d.get("bestBid")), num(d.get("bestAsk"))
+              except Exception as e:
+                  bbo_err = f"{type(e).__name__}:{str(e)[:60]}"
+              time.sleep(PACE)
+              tick = num(m.get("orderPriceMinTickSize"))
+              sides = [x for x in (m.get("marketSides") or []) if isinstance(x, dict)]
+              idents = [str(x.get("identifier") or "") for x in sides]
+              sameid = len(sides) > 1 and len(set(idents)) < len(sides)
+              cids = {r.get("condition_id") for r in by_slug.get(s, [])}
+              his_usd = sum(usd_all.get(c, 0.0) for c in cids)
+              his_buy = sum(usd_buy.get(c, 0.0) for c in cids)
+              tick_cls = ("unreadable" if tick is None else "0.01" if abs(tick - 0.01) < 1e-9
+                          else "0.005" if abs(tick - 0.005) < 1e-9 else f"other:{tick}")
+              gs = m.get("gameStartTime"); hrs_to_start = None
+              try:
+                  if gs:
+                      g = datetime.fromisoformat(str(gs).replace("Z", "+00:00"))
+                      hrs_to_start = round((g.timestamp() - NOW) / 3600.0, 2)
+              except Exception:
+                  hrs_to_start = "unparsed"
+              rec = dict(slug=s, fam=fam(s), tick=tick, tick_cls=tick_cls,
+                         minqty=m.get("minimumTradeQty"), fee=m.get("feeCoefficient"),
+                         status=m.get("status"), ep3=m.get("ep3Status"), active=m.get("active"),
+                         closed=m.get("closed"), game_start=gs, h_to_start=hrs_to_start,
+                         mtype=m.get("marketType"), smt=m.get("sportsMarketType"),
+                         smt2=m.get("sportsMarketTypeV2"), nsides=len(sides), sameid=sameid,
+                         bid=bid, ask=ask, bid_half=half(bid), ask_half=half(ask),
+                         rec_bidq=num(m.get("bestBidQuote")), rec_askq=num(m.get("bestAskQuote")),
+                         his_usd=round(his_usd, 2), his_buy=round(his_buy, 2), n_cid=len(cids),
+                         shadow_reason=(by_slug.get(s) or [{}])[0].get("reason"),
+                         err=err, bbo_err=bbo_err)
+              recs.append(rec)
+              print("MIRRORTERMS mkt " + " ".join(f"{k}={v}" for k, v in rec.items()))
+              if i < 3:
+                  print("MIRRORTERMS raw " + json.dumps(m, default=str)[:1800])
+
+          # ---- 4. summaries ----
+          tot_n = len(recs); tot_usd = sum(r["his_usd"] for r in recs) or 0.0
+          print(f"MIRRORTERMS total markets={tot_n} his_usd={tot_usd:.2f} his_buy_usd={sum(r['his_buy'] for r in recs):.2f} read_ok={sum(1 for r in recs if not r['err'])} read_err={sum(1 for r in recs if r['err'])} tick_readable={sum(1 for r in recs if r['tick'] is not None)}")
+
+          def bucket(label, keyf):
+              c = collections.defaultdict(lambda: [0, 0.0])
+              for r in recs:
+                  k = keyf(r); c[k][0] += 1; c[k][1] += r["his_usd"]
+              for k, (n, u) in sorted(c.items(), key=lambda kv: str(kv[0])):
+                  print(f"MIRRORTERMS {label} {k} n={n} share_n={n / tot_n:.3f} usd={u:.2f} share_usd={(u / tot_usd) if tot_usd else 0:.3f}")
+
+          bucket("tick", lambda r: r["tick_cls"])
+          bucket("tick_by_fam", lambda r: f"fam={r['fam']} tick={r['tick_cls']}")
+          bucket("minqty", lambda r: f"minqty={r['minqty']}")
+          bucket("fee_by_fam", lambda r: f"fam={r['fam']} fee={r['fee']}")
+          bucket("status", lambda r: f"status={r['status']} ep3={r['ep3']} active={r['active']} closed={r['closed']}")
+          bucket("sameid_by_fam", lambda r: f"fam={r['fam']} sameid={r['sameid']} nsides={r['nsides']}")
+          bucket("bbo_half_by_tick", lambda r: f"tick={r['tick_cls']} bid_half={r['bid_half']} ask_half={r['ask_half']}")
+          bucket("started", lambda r: "in_play_or_past" if isinstance(r["h_to_start"], float) and r["h_to_start"] < 0 else ("future" if isinstance(r["h_to_start"], float) else f"unknown:{r['h_to_start']}"))
+          quotes = [v for r in recs for v in (r["bid"], r["ask"]) if v is not None]
+          print(f"MIRRORTERMS bbo_grid quotes={len(quotes)} on_half_cent={sum(1 for v in quotes if half(v))} on_cent={sum(1 for v in quotes if on_grid(v, 0.01))} off_both={sum(1 for v in quotes if not on_grid(v, 0.005))}")
+
+          # ---- 5. venue-wide sample: upcoming events' markets, terms by family ----
+          wide = collections.Counter(); wide_fee = collections.Counter(); wide_mq = collections.Counter()
+          nmk = 0; ev_err = None; nev = 0
+          today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+          try:
+              for page in range(3):
+                  resp = client.events.list({"active": True, "closed": False, "limit": 100,
+                                             "offset": page * 100, "startDateMin": today}) or {}
+                  evs = resp.get("events") or resp.get("data") or []
+                  if not evs:
+                      break
+                  for e in evs:
+                      nev += 1
+                      for m in (e.get("markets") or []):
+                          nmk += 1
+                          t = num(m.get("orderPriceMinTickSize")); f = fam(m.get("slug"))
+                          wide[(f, "unreadable" if t is None else str(t))] += 1
+                          wide_fee[(f, str(m.get("feeCoefficient")))] += 1
+                          wide_mq[(f, str(m.get("minimumTradeQty")))] += 1
+                  time.sleep(PACE)
+          except Exception as e:
+              ev_err = f"{type(e).__name__}:{str(e)[:100]}"
+          print(f"MIRRORTERMS wide events={nev} markets={nmk} err={ev_err}")
+          for (f, t), n in sorted(wide.items()):
+              print(f"MIRRORTERMS wide_tick fam={f} tick={t} n={n}")
+          for (f, t), n in sorted(wide_fee.items()):
+              print(f"MIRRORTERMS wide_fee fam={f} fee={t} n={n}")
+          for (f, t), n in sorted(wide_mq.items()):
+              print(f"MIRRORTERMS wide_minqty fam={f} minqty={t} n={n}")
+          print("MIRRORTERMS done")
+          PY
