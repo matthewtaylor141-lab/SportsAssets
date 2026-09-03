@@ -100,8 +100,17 @@ jobs:
           n_tr = pages = off = 0; crawl_err = None
           try:
               for _ in range(80):
-                  with urllib.request.urlopen(f"{D}?user={ADDR}&limit=500&offset={off}", timeout=25) as fh:
-                      data = json.load(fh)
+                  url = f"{D}?user={ADDR}&limit=500&offset={off}"
+                  try:
+                      req = urllib.request.Request(url, headers={"User-Agent": "curl/8.5.0", "Accept": "application/json"})
+                      with urllib.request.urlopen(req, timeout=25) as fh:
+                          data = json.load(fh)
+                  except Exception as e1:
+                      import subprocess
+                      cp = subprocess.run(["curl", "-sS", "--max-time", "25", url], capture_output=True, text=True)
+                      data = json.loads(cp.stdout or "[]")
+                      if not data:
+                          print(f"MIRRORTERMS crawl_page_err urllib={type(e1).__name__}:{str(e1)[:60]} curl_rc={cp.returncode} body={cp.stdout[:80]!r}")
                   if not data:
                       break
                   pages += 1
@@ -148,6 +157,12 @@ jobs:
               cids = {r.get("condition_id") for r in by_slug.get(s, [])}
               his_usd = sum(usd_all.get(c, 0.0) for c in cids)
               his_buy = sum(usd_buy.get(c, 0.0) for c in cids)
+              usd_mark = 0.0; his_net_s = None; mark_s = None
+              for r in by_slug.get(s, []):
+                  hn = num(r.get("his_net")); mk = num(r.get("mark")) or num(r.get("his_last_px"))
+                  if hn is not None and mk is not None:
+                      usd_mark += abs(hn) * mk
+                  his_net_s, mark_s = hn, mk
               tick_cls = ("unreadable" if tick is None else "0.01" if abs(tick - 0.01) < 1e-9
                           else "0.005" if abs(tick - 0.005) < 1e-9 else f"other:{tick}")
               gs = m.get("gameStartTime"); hrs_to_start = None
@@ -166,6 +181,7 @@ jobs:
                          bid=bid, ask=ask, bid_half=half(bid), ask_half=half(ask),
                          rec_bidq=num(m.get("bestBidQuote")), rec_askq=num(m.get("bestAskQuote")),
                          his_usd=round(his_usd, 2), his_buy=round(his_buy, 2), n_cid=len(cids),
+                         usd_mark=round(usd_mark, 2), his_net=his_net_s, mark=mark_s,
                          shadow_reason=(by_slug.get(s) or [{}])[0].get("reason"),
                          err=err, bbo_err=bbo_err)
               recs.append(rec)
@@ -177,12 +193,23 @@ jobs:
           tot_n = len(recs); tot_usd = sum(r["his_usd"] for r in recs) or 0.0
           print(f"MIRRORTERMS total markets={tot_n} his_usd={tot_usd:.2f} his_buy_usd={sum(r['his_buy'] for r in recs):.2f} read_ok={sum(1 for r in recs if not r['err'])} read_err={sum(1 for r in recs if r['err'])} tick_readable={sum(1 for r in recs if r['tick'] is not None)}")
 
-          def bucket(label, keyf):
-              c = collections.defaultdict(lambda: [0, 0.0])
-              for r in recs:
-                  k = keyf(r); c[k][0] += 1; c[k][1] += r["his_usd"]
-              for k, (n, u) in sorted(c.items(), key=lambda kv: str(kv[0])):
-                  print(f"MIRRORTERMS {label} {k} n={n} share_n={n / tot_n:.3f} usd={u:.2f} share_usd={(u / tot_usd) if tot_usd else 0:.3f}")
+          tot_mark = sum(r["usd_mark"] for r in recs) or 0.0
+          print(f"MIRRORTERMS total_mark usd_at_mark={tot_mark:.2f} (|his_net| x mark, latest shadow row per market)")
+
+          def bucket(label, keyf, rows=None):
+              rows = recs if rows is None else rows
+              tn = len(rows) or 1; tu = sum(r["his_usd"] for r in rows) or 0.0; tm = sum(r["usd_mark"] for r in rows) or 0.0
+              c = collections.defaultdict(lambda: [0, 0.0, 0.0])
+              for r in rows:
+                  k = keyf(r); c[k][0] += 1; c[k][1] += r["his_usd"]; c[k][2] += r["usd_mark"]
+              for k, (n, u, m) in sorted(c.items(), key=lambda kv: str(kv[0])):
+                  print(f"MIRRORTERMS {label} {k} n={n} share_n={n / tn:.3f} usd={u:.2f} share_usd={(u / tu) if tu else 0:.3f} usd_mark={m:.2f} share_mark={(m / tm) if tm else 0:.3f}")
+
+          open_recs = [r for r in recs if r["status"] == "MARKET_STATUS_OPEN"]
+          print(f"MIRRORTERMS open_only n={len(open_recs)} of {tot_n}")
+          bucket("open_tick", lambda r: r["tick_cls"], open_recs)
+          bucket("open_tick_by_fam", lambda r: f"fam={r['fam']} tick={r['tick_cls']}", open_recs)
+          bucket("smt_by_tick", lambda r: f"smt={r['smt']} tick={r['tick_cls']}")
 
           bucket("tick", lambda r: r["tick_cls"])
           bucket("tick_by_fam", lambda r: f"fam={r['fam']} tick={r['tick_cls']}")
