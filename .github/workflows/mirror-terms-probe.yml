@@ -4,6 +4,8 @@
 name: mirror-terms-probe
 
 on:
+  push:
+    branches: ["probe/mirror-terms-**"]
   workflow_dispatch:
     inputs:
       slugs:
@@ -28,8 +30,8 @@ jobs:
         env:
           BASE: https://sportsassets-api.onrender.com
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
-          SLUGS: ${{ inputs.slugs }}
-          HOURS: ${{ inputs.hours }}
+          SLUGS: ${{ inputs.slugs || 'aec-atp-andgue-alemin-2026-08-30,aec-atp-benshe-hubhur-2026-09-02,aec-atp-densha-lucass-2026-08-31,aec-atp-fabmar-miczhe-2026-08-30,aec-atp-jirleh-tobsam-2026-09-02,aec-atp-llohar-stetsi-2026-09-01,aec-atp-rafjod-yunbu-2026-09-01,aec-atp-tometc-jacfea-2026-09-02,aec-atp-zacsva-danalt-2026-08-30,aec-itfme-emidem-karben-2026-09-02,aec-itfwo-biaber-maalar-2026-09-02,aec-mlb-ath-tex-2026-09-02,aec-mlb-atl-wsh-2026-09-02,aec-mlb-bal-col-2026-09-02,aec-mlb-nym-tb-2026-09-02,aec-mlb-phi-az-2026-09-02,aec-mlb-tor-cle-2026-09-02,aec-wta-emmnav-catmcn-2026-09-02,aec-wta-maglin-frajon-2026-08-30,aec-wta-okssel-kamrak-2026-09-01,atc-dfb-osn-fcb-2026-09-02-osn,atc-ecu1-cue-gua-2026-09-02-cue,atc-ecu1-mac-man-2026-09-02-mac,atc-eflch-bur-mid-2026-09-02-bur,atc-eflch-qpr-car-2026-09-02-qpr,atc-eflch-wba-cha-2026-09-02-wba,atc-scp-dfc-joh-2026-09-02-dfc,atc-swsl-gcz-stg-2026-09-02-gcz,tsc-mlb-atl-wsh-2026-09-02-10pt5,tsc-mlb-atl-wsh-2026-09-02-8pt5,tsc-mlb-atl-wsh-2026-09-02-9pt5,tsc-mlb-bal-col-2026-09-02-10pt5,tsc-mlb-bal-col-2026-09-02-12pt5,tsc-mlb-nym-tb-2026-09-02-7pt5,tsc-mlb-sea-bos-2026-09-02-7pt5,tsc-mlb-sea-bos-2026-09-02-8pt5,tsc-mlb-sea-bos-2026-09-02-9pt5,tsc-mlb-sf-pit-2026-09-02-8pt5' }}
+          HOURS: ${{ inputs.hours || '24' }}
         run: |
           set +e
           pip install --quiet polymarket-us 2>/dev/null || pip install polymarket-us
