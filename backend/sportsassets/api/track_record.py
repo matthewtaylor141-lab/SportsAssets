@@ -8,9 +8,16 @@ resolution activities. Nothing is inferred from our bookkeeping; our ledger
 only ANNOTATES rows (edge, band) where it recognizes the market.
 
 Windowed from `since` (default 2026-08-01, the account's first full day) on
-ENTRY time — the first trade the venue reports for the market. A row
-without a venue-reported entry inside the window is excluded rather than
-guessed into it.
+the venue's own times: a row is dated and windowed on its ENTRY time —
+the first trade the venue reports for the market — when the venue
+reports one, else on the venue's own SETTLEMENT time (the resolution's
+time, or the closing sale's last time). A row with neither is excluded
+rather than guessed into a date, and so is a timed row the record
+cannot read safely without an entry: a money-less resolution, a
+zero-realized sale (what a short's opening sell looks like), an open
+short. Every such exclusion is counted in the payload
+(`excluded_undatable`) so the reader can see what the record could not
+place.
 """
 
 from __future__ import annotations
@@ -425,6 +432,34 @@ def build(positions: dict[str, dict], activities: list[dict],
                 else "unattributed" if bucket is unattributed
                 else "over_limit")
 
+    # THE DAY ANCHOR DOES NOT MOVE WITH THE VENUE (owner order 2026-09-02,
+    # "go for it, let's get this working"; read-only investigation the
+    # same afternoon). A settlement used to be datable ONLY through its
+    # ENTRY trade. The venue's fresh activity window is ~8 h deep and
+    # the archive layer is frozen per process, so every settlement whose
+    # entry had scrolled out was dropped as 'undatable' (577 -> 544 over
+    # one afternoon) and the record read "settled 6, pnl -39.59" for four
+    # hours while the venue resolved markets all afternoon and its own
+    # realized climbed 445 -> 1399. A short can NEVER be dated that way:
+    # its opening trade is a venue SELL, which the ledger above routes to
+    # `sold`, never to `entries`. The settlement facts do not need the
+    # entry: a POSITION_RESOLUTION carries its own time, realized and
+    # cost, and a cash-out carries the sale's last time and realized. So
+    # a row with no entry is KEPT when it has a settlement time, dated
+    # and windowed on that time; only a row with NEITHER an entry nor a
+    # settlement time stays undatable. Rows that have an entry are not
+    # touched by this: their window, dating and figures are as before.
+    def _settlement_anchor(res: dict | None, s: dict | None,
+                           cashed_out: bool) -> float:
+        """The venue's own settlement time for a row: the resolution's
+        time, else the closing sale's, else 0.0 (unknown, never
+        guessed)."""
+        if res and res["ts"]:
+            return res["ts"]
+        if cashed_out and s and s["last_ts"]:
+            return s["last_ts"]
+        return 0.0
+
     seen: set[str] = set()
     for slug, p in (positions or {}).items():
         seen.add(slug)
@@ -433,33 +468,76 @@ def build(positions: dict[str, dict], activities: list[dict],
         settled = bool(p.get("expired")) or qty <= 0
         e = entries.get(slug) or {}
         entry_ts = e.get("first_ts") or 0.0
+        res = resolutions.get(slug)
+        s = sold.get(slug)
+        # The sale is the settlement only when it closed the position
+        # (settled, no resolution, market not expired). Computed here,
+        # before the window check, because a row with no entry is
+        # windowed on this settlement time.
+        cashed_out = bool(settled and not res and not p.get("expired") and s)
+        # ONE anchor for the whole row, computed once (adversarial review
+        # of the settlement-dating change, 2026-09-02): the window gate
+        # and the unattributed daily tally must read the same time, or a
+        # row can pass the gate on one clock and be day-bucketed on
+        # another. A netPosition below zero with no resolution is an OPEN
+        # short (its opening SELL is the only trade we have), not a
+        # cash-out: the venue's cumulative realized is still 0 for it and
+        # dating it by the opening sell would file a live position as a
+        # push, so the guard leaves that anchor at 0.0.
+        anchor = _settlement_anchor(res, s, cashed_out and not qty < 0)
+        if not entry_ts and cashed_out and not qty < 0 \
+                and not s["realized"] and not _amt(p.get("realized")):
+            # THE SAME RULE AS THE SOLD-ONLY LOOP (third adversarial
+            # review, 2026-09-02): a zero-realized sale with no entry is
+            # what a short's opening sell looks like, and the venue
+            # stamps a non-zero realized on a sale that closed a lot. A
+            # netPosition-0 row beside it does not change what the sale
+            # was, and dating it here while the sold-only loop refuses
+            # the same sale when the positions walk drops the row would
+            # make the settled count flip between refreshes.
+            anchor = 0.0
         if not entry_ts:
-            # The venue reported no datable trade for this position in the
-            # activity pages we fetched. A row that cannot be windowed is
+            # No datable entry trade in the activities we hold. Date the
+            # row by its settlement instead; a row with no settlement
+            # time at all (or an open short, above) stays undatable:
             # excluded and COUNTED, never guessed into a date.
-            undatable += 1
-            continue
-        if entry_ts < since_ts:
+            if not anchor:
+                undatable += 1
+                continue
+            if anchor < since_ts:
+                continue      # pre-window settlement: excluded, not re-dated
+        elif entry_ts < since_ts:
             continue          # pre-window entry: excluded, not re-dated
         cost = _amt(p.get("cost"))
         value = _amt(p.get("cashValue"))
         realized = _amt(p.get("realized"))
-        res = resolutions.get(slug)
         if res:
             # The resolution activity is the settlement record; the position
             # row can lag it (realized still 0 after the market resolves).
             settled = True
             realized = res["realized"] or realized
             cost = cost or res["cost"]
-        s = sold.get(slug)
-        cashed_out = bool(settled and not res and not p.get("expired") and s)
+            if not entry_ts and cost == 0 and realized == 0:
+                # A resolution with no entry AND no money (cost 0,
+                # realized 0) is a row the record knows nothing about:
+                # kept, it would be a settled push at stake 0 that
+                # dilutes win_rate and says nothing (adversarial review
+                # 2026-09-02). Treated as undatable: excluded, counted.
+                undatable += 1
+                continue
         if cashed_out:
             # Sold to zero before resolution: the sale IS the settlement.
             # The venue's own cumulative realized is authoritative when it
             # has caught up; the sell trades' realizedPnl covers the lag.
+            # With no entry there is no known cost, so proceeds-minus-cost
+            # would book the whole sale as profit: the sells' own realized
+            # is the only P&L we can read, and the proceeds stand in for
+            # the stake.
             realized = realized or s["realized"] \
-                or (s["proceeds"] - e.get("notional", 0.0))
-            cost = cost or e.get("notional", 0.0)
+                or ((s["proceeds"] - e.get("notional", 0.0))
+                    if entry_ts else 0.0)
+            cost = cost or e.get("notional", 0.0) \
+                or (s["proceeds"] if not entry_ts else 0.0)
         stake_now = cost if cost > 0 else e.get("notional", 0.0)
         unreal = (value - cost) if not settled else 0.0
         is_manual = manual_slugs is not None and slug in manual_slugs
@@ -483,7 +561,7 @@ def build(positions: dict[str, dict], activities: list[dict],
                 if bucket is unattributed:
                     _tally_unattributed_day(
                         settled, realized,
-                        (res["ts"] if res else None) or entry_ts)
+                        (res["ts"] if res else None) or entry_ts or anchor)
                 # OWNER DIRECTIVE 2026-08-08 (final): the headline is the
                 # AI's trading ONLY — engine, copies, underdog sleeve and
                 # their cash-outs. Manual/owner rows are tallied for the
@@ -524,9 +602,27 @@ def build(positions: dict[str, dict], activities: list[dict],
         e = entries.get(slug) or {}
         entry_ts = e.get("first_ts") or 0.0
         if not entry_ts:
-            undatable += 1
-            continue
-        if entry_ts < since_ts:
+            # No entry in hand (scrolled out, or a short whose opening
+            # trade was a SELL): the resolution is the settlement record
+            # and dates the row by itself (owner order 2026-09-02).
+            if not res["ts"]:
+                undatable += 1
+                continue
+            if res["ts"] < since_ts:
+                continue
+            if not res["cost"] and not res["realized"]:
+                # No entry and no money: a stake-0 push that would only
+                # dilute win_rate (adversarial review 2026-09-02).
+                # Undatable-equivalent: excluded, counted. A sale ledger
+                # on the same slug goes with it on purpose (the sold loop
+                # below skips resolved slugs): a resolution after a full
+                # cash-out carries the cumulative realized, so a money-
+                # less one beside a sale is a shape the venue does not
+                # produce, and guessing which figure to trust is not a
+                # record (second adversarial review, 2026-09-02).
+                undatable += 1
+                continue
+        elif entry_ts < since_ts:
             continue
         cost = res["cost"] or e.get("notional", 0.0)
         is_manual = manual_slugs is not None and slug in manual_slugs
@@ -556,9 +652,10 @@ def build(positions: dict[str, dict], activities: list[dict],
             "title": res.get("title") or slug,
             "outcome": None,
             **classify_slug(slug),
-            "entry_ts": entry_ts,
-            "entry_date": max(datetime.fromtimestamp(entry_ts, tz)
-                              .strftime("%Y-%m-%d"), first_day),
+            "entry_ts": entry_ts or None,
+            "entry_date": (max(datetime.fromtimestamp(entry_ts, tz)
+                               .strftime("%Y-%m-%d"), first_day)
+                           if entry_ts else None),
             "entry_price": round(vwap, 4) if vwap else None,
             "fills": e.get("fills", 0),
             "qty": e.get("qty", 0.0),
@@ -580,12 +677,34 @@ def build(positions: dict[str, dict], activities: list[dict],
         e = entries.get(slug) or {}
         entry_ts = e.get("first_ts") or 0.0
         if not entry_ts:
-            undatable += 1
+            # No entry in hand: the sale's last time dates the row by
+            # itself (owner order 2026-09-02). Its cost is unknown, so
+            # the P&L is the sells' own realized only — proceeds minus a
+            # zero cost would book the whole sale as profit — and the
+            # proceeds stand in for the stake.
+            #
+            # ONLY A SALE THAT CLOSED SOMETHING IS A CASH-OUT (second
+            # adversarial review, 2026-09-02). With no position row in
+            # hand this ledger cannot tell a closing sale from a short's
+            # OPENING sell: the positions walk runs before the activities
+            # walk and is capped at 40 pages, so a live short can be
+            # absent from `positions` for a refresh or for good, and
+            # dating it here would file a live position as a settled
+            # push. The venue stamps realizedPnl 0 on an opening sell and
+            # a non-zero figure on a sale that closed a lot, so a zero
+            # realized with no entry is undatable, never a push. A sale
+            # at exactly average cost pays the same price; fail closed.
+            if not s["last_ts"] or not s["realized"]:
+                undatable += 1
+                continue
+            if s["last_ts"] < since_ts:
+                continue
+        elif entry_ts < since_ts:
             continue
-        if entry_ts < since_ts:
-            continue
-        cost = e.get("notional", 0.0)
-        realized = s["realized"] or (s["proceeds"] - cost)
+        cost = e.get("notional", 0.0) \
+            or (s["proceeds"] if not entry_ts else 0.0)
+        realized = s["realized"] \
+            or ((s["proceeds"] - cost) if entry_ts else 0.0)
         is_manual = manual_slugs is not None and slug in manual_slugs
         sleeve = _sleeve_of(slug)
         cohort = "record"
@@ -612,9 +731,10 @@ def build(positions: dict[str, dict], activities: list[dict],
             "title": slug,
             "outcome": None,
             **classify_slug(slug),
-            "entry_ts": entry_ts,
-            "entry_date": max(datetime.fromtimestamp(entry_ts, tz)
-                              .strftime("%Y-%m-%d"), first_day),
+            "entry_ts": entry_ts or None,
+            "entry_date": (max(datetime.fromtimestamp(entry_ts, tz)
+                               .strftime("%Y-%m-%d"), first_day)
+                           if entry_ts else None),
             "entry_price": round(vwap, 4) if vwap else None,
             "fills": e.get("fills", 0),
             "qty": e.get("qty", 0.0),
@@ -626,7 +746,9 @@ def build(positions: dict[str, dict], activities: list[dict],
             "pnl": round(realized, 4),
             "unrealized": None,
         })
-    rows.sort(key=lambda r: -(r["entry_ts"] or 0))
+    # Newest first. A row dated only by its settlement takes its place
+    # in the tape by that time; rows with an entry keep their order.
+    rows.sort(key=lambda r: -(r["entry_ts"] or r.get("settled_ts") or 0))
 
     settled_rows = [r for r in rows if r["settled"]]
     wins = [r for r in settled_rows if (r["pnl"] or 0) > 0]
@@ -635,15 +757,25 @@ def build(positions: dict[str, dict], activities: list[dict],
     settled_stake = sum(r["stake"] for r in settled_rows)
     net = sum(r["pnl"] or 0 for r in settled_rows)
 
-    # Daily series. Deployment buckets on entry day (always known inside the
-    # window); realized P&L buckets on the venue's resolution day where it
-    # gave one, else the entry day, FLAGGED — never silently "today".
+    # Daily series. Deployment buckets on entry day, else on the settlement
+    # day for a row dated only by its settlement; realized P&L buckets on
+    # the venue's resolution day where it gave one, else the entry day,
+    # FLAGGED — never silently "today".
     daily: dict[str, dict] = {}
     for r in rows:
-        if not r["entry_date"]:
+        # A row dated only by its settlement files its stake and its
+        # count under the settlement day (second adversarial review,
+        # 2026-09-02): the summary sums every row, so a day series that
+        # skipped these rows stopped footing to its own headline by
+        # exactly their stakes, and the report prints both.
+        day = r["entry_date"]
+        if not day and r.get("settled_ts"):
+            day = max(datetime.fromtimestamp(r["settled_ts"], tz)
+                      .strftime("%Y-%m-%d"), first_day)
+        if not day:
             continue
-        d = daily.setdefault(r["entry_date"], {
-            "date": r["entry_date"], "deployed": 0.0, "trades": 0, "open": 0,
+        d = daily.setdefault(day, {
+            "date": day, "deployed": 0.0, "trades": 0, "open": 0,
             "pnl": 0.0, "settled": 0, "wins": 0, "pnl_estimated": False})
         d["deployed"] += r["stake"]
         d["trades"] += 1
@@ -940,7 +1072,21 @@ def _slim(a: dict) -> dict:
     field dependency, add it here — the equivalence test will catch a
     miss.
     """
-    ts = _act_ts(a)
+    # _any_ts, NOT _act_ts (adversarial review of the settlement-dating
+    # change, owner order 2026-09-02 "go for it, let's get this
+    # working"). Everything build() receives in production is slimmed:
+    # every raw refresh runs through _archive_and_union, and the request
+    # path takes the archive twin over the raw window row. The venue puts
+    # a resolution's time ONLY at the nested positionResolution.createTime
+    # (established 2026-09-02), and the slim row drops that nesting — so
+    # a top-level-only read here left every slimmed resolution timeless,
+    # and the dating path that keeps a settlement without its entry never
+    # fired live (raw: excluded_undatable 0; slimmed twin: 1). The time
+    # is lifted to the top level, where build()'s _any_ts read finds it
+    # first. For a trade this is exactly the `_act_ts(a) or _act_ts(t)`
+    # value build() reads, so nothing else moves; the equivalence test
+    # proves both.
+    ts = _any_ts(a)
     out: dict = {"id": _i(a.get("id")), "type": _i(a.get("type")),
                  "timestamp": ts or None}
     if a.get("type") == "ACTIVITY_TYPE_TRADE":
@@ -1009,7 +1155,20 @@ _hydrate_err: dict = {"err": None, "at": 0.0, "chunks": 0}
 # next save writes a snapshot that means what its key says. If
 # ARCHIVE_TYPES ever changes again, bump this too — test_archive_types
 # pins the pairing.
-_SNAP_KEY = "track_record_slim_archive_v2"
+#
+# v2 -> v3 (2026-09-02, settlement dating): the slim SHAPE changed —
+# _slim now lifts a resolution's nested time to the top level. A v2
+# snapshot holds resolution rows with no time at all, and nothing can
+# recover it from the slim row: the union appends only ids the archive
+# has never seen, and the rolling 6-hour save re-persists the same rows,
+# so the snapshot never ages past the 24-hour cutoff and never
+# re-hydrates from the table. Every resolution archived before the
+# dating fix would have stayed undatable for good, and the rows the
+# owner looks at (DISPLAY_EPOCH onward) are exactly those. The bump
+# retires the v2 snapshot on deploy and forces one filtered re-hydrate
+# from the full-fidelity table, the same road as v1 -> v2 (second
+# adversarial review, 2026-09-02); test_archive_types pins the suffix.
+_SNAP_KEY = "track_record_slim_archive_v3"
 _snap_state: dict = {"at": 0.0}
 _SNAP_REFRESH_S = 6 * 3600.0
 _SNAP_MAX_AGE_S = 24 * 3600.0   # window union covers ~2 days; stay well under
@@ -1636,15 +1795,28 @@ async def track_record(since: str | None = None,
         if done >= max(len(_archived_ids), 1) * 0.98:
             archive = _hydrate_progress["rows"]
             # A promoted buffer is snapshot-worthy: persist it so the
-            # NEXT boot is one small read, not another grind.
+            # NEXT boot is one small read, not another grind -- AS A
+            # CHECKPOINT, never as a completion (third adversarial
+            # review of the settlement dating, 2026-09-02). The 98%
+            # gate above was written when _archived_ids held every id;
+            # since the bounded seed it holds a week of ids across all
+            # types while the grind reads the whole filtered table, so
+            # the gate is met a third of the way through. A partial
+            # buffer saved complete=True would be served by the next
+            # boot's short-circuit and re-persisted by the rolling save
+            # for good: a silently truncated archive, the exact shape
+            # the v1 -> v2 note above describes. The checkpoint carries
+            # the grind's cursor, so the next boot resumes from it.
             if time.time() - _snap_state["at"] > _SNAP_REFRESH_S:
                 _snap_state["at"] = time.time()
                 from ..db import get_pool as _gp
+                _resume_from = _hydrate_progress["last"]
 
                 async def _snap_bg() -> None:
                     try:
                         await _save_snapshot(await _gp(), archive,
-                                             complete=True)
+                                             complete=False,
+                                             last=_resume_from)
                     except Exception:  # noqa: BLE001
                         pass
                 asyncio.get_running_loop().create_task(_snap_bg())

@@ -83,6 +83,192 @@ def test_pre_window_entries_are_excluded_not_redated():
 def test_a_position_with_no_venue_trades_is_excluded_not_guessed():
     out = build({"aec-mlb-mystery-2026-08-02": _pos(2, 1.0, 1.1)}, [], TS_AUG1)
     assert out["trades"] == []
+    assert out["excluded_undatable"] == 1
+
+
+# ── Settlements dated without their entry (owner order 2026-09-02) ─────
+# The core cases (a resolution with no entry, a short, neither time) live
+# in tests/test_settlement_dating.py; these pin the window and the
+# fail-closed edges.
+
+
+def _nested_res(slug, ts, realized, cost):
+    """A resolution the way the venue sends it: time nested only."""
+    iso = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+            "positionResolution": {
+                "marketSlug": slug, "createTime": iso,
+                "afterPosition": {"realized": {"value": realized}},
+                "beforePosition": {"cost": {"value": cost}}}}
+
+
+def test_a_resolution_before_the_window_with_no_entry_is_excluded_not_redated():
+    """The since floor moves to the settlement time for a row with no
+    entry: a pre-window resolution is out (not undatable, not re-dated),
+    an in-window one is in."""
+    acts = [_nested_res("old", TS_JUL30, 1.0, 1.0),
+            _nested_res("new", TS_AUG2, 1.0, 1.0)]
+    out = build({}, acts, TS_AUG1)
+    assert [r["market_slug"] for r in out["trades"]] == ["new"]
+    assert out["excluded_undatable"] == 0
+    # ...and through the position path too.
+    positions = {"old": _pos(0, 1.0, 0.0, realized=1.0, expired=True),
+                 "new": _pos(0, 1.0, 0.0, realized=1.0, expired=True)}
+    out = build(positions, acts, TS_AUG1)
+    assert [r["market_slug"] for r in out["trades"]] == ["new"]
+    assert out["excluded_undatable"] == 0
+
+
+def test_a_resolution_before_the_window_still_counts_in_the_venue_totals():
+    """The VENUE-BASIS headline never windowed on anything; that must not
+    change. Only the dated-row machinery moved its floor."""
+    out = build({}, [_nested_res("old", TS_JUL30, 1.0, 1.0)], TS_AUG1)
+    assert out["trades"] == []
+    assert out["venue_totals"]["settled"] == 1
+    assert out["venue_totals"]["net_pnl"] == 1.0
+
+
+def test_a_cash_out_with_no_entry_is_dated_by_the_sale():
+    """Sold to zero, entry scrolled out, no resolution: the sale's last
+    time dates the row. With no known cost the P&L is the sells' own
+    realized only (proceeds minus a zero cost would book the whole sale
+    as profit) and the proceeds stand in for the stake."""
+    acts = [_sell("g", TS_AUG2 + 3600, 10, 0.44, realized=-0.6)]
+    out = build({}, acts, TS_AUG1)
+    assert out["excluded_undatable"] == 0
+    r = out["trades"][0]
+    assert r["settled"] and r["cashed_out"]
+    assert r["entry_ts"] is None and r["settled_ts"] == TS_AUG2 + 3600
+    assert r["pnl"] == -0.6 and r["stake"] == 4.4
+    assert out["summary"]["losses"] == 1
+    day = next(d for d in out["daily"] if d["settled"])
+    assert day["date"] == "2026-08-02" and day["pnl"] == -0.6
+    # The position-row path agrees when the venue still carries the row.
+    positions = {"g": _pos(0, 0.0, 0.0, realized=0.0)}
+    out = build(positions, acts, TS_AUG1)
+    r = out["trades"][0]
+    assert r["cashed_out"] and r["pnl"] == -0.6 and r["stake"] == 4.4
+    assert r["settled_ts"] == TS_AUG2 + 3600
+
+
+def test_a_sale_with_no_entry_and_no_realized_is_undatable_not_a_push():
+    """A sale with realizedPnl 0 and no entry in hand is what a short's
+    OPENING sell looks like when the positions walk has not (yet) listed
+    it. The sold ledger alone cannot tell it from a closing sale, so it
+    is undatable, never a settled push (second adversarial review,
+    2026-09-02)."""
+    acts = [_sell("g", TS_AUG2 + 3600, 10, 0.44)]     # realizedPnl 0
+    out = build({}, acts, TS_AUG1)
+    assert out["trades"] == [] and out["excluded_undatable"] == 1
+    assert out["summary"]["settled"] == 0
+
+
+def test_an_opening_sell_stays_undatable_across_refreshes_until_it_resolves():
+    """The two-refresh case: the positions walk runs before the
+    activities walk and is capped, so a fresh short is absent from
+    `positions` on one refresh and present (netPosition -10) on the
+    next. Both readings must say the same thing -- undatable -- or the
+    settled count would drop by one between refreshes and the monotonic
+    guard would refuse the fresh build. The resolution dates it."""
+    opening = TestSoldLedgerClassification._deep_trade(
+        "sh", TS_AUG2, 10, 0.40, "ORDER_SIDE_SELL", rp=0.0)
+    absent = build({}, [opening], TS_AUG1)
+    assert absent["trades"] == [] and absent["excluded_undatable"] == 1
+    present = build({"sh": _pos(-10, 6.0, 5.5, realized=0.0)}, [opening], TS_AUG1)
+    assert present["trades"] == [] and present["excluded_undatable"] == 1
+    assert absent["summary"]["settled"] == present["summary"]["settled"] == 0
+    resolved = build({"sh": _pos(-10, 6.0, 0.0, realized=4.0, expired=True)},
+                     [opening, _nested_res("sh", TS_AUG2 + 86_400, 4.0, 6.0)],
+                     TS_AUG1)
+    assert resolved["excluded_undatable"] == 0
+    assert resolved["trades"][0]["settled_ts"] == TS_AUG2 + 86_400
+
+
+def test_a_zero_realized_sale_reads_the_same_with_or_without_its_position_row():
+    """Symmetry with the sold-only loop (third adversarial review,
+    2026-09-02): a netPosition-0 row beside a zero-realized sale with no
+    entry does not turn the sale into a cash-out, so the settled count
+    cannot flip when the positions walk drops the row. A non-zero
+    realized on the position row is money the venue reports, and dates."""
+    sale = TestSoldLedgerClassification._deep_trade(
+        "z", TS_AUG2 + 3600, 10, 0.44, "ORDER_SIDE_SELL", rp=0.0)
+    without = build({}, [sale], TS_AUG1)
+    with_row = build({"z": _pos(0, 0.0, 0.0, realized=0.0)}, [sale], TS_AUG1)
+    assert without["trades"] == [] and without["excluded_undatable"] == 1
+    assert with_row["trades"] == [] and with_row["excluded_undatable"] == 1
+    money = build({"z": _pos(0, 0.0, 0.0, realized=0.7)}, [sale], TS_AUG1)
+    assert money["excluded_undatable"] == 0
+    assert money["trades"][0]["pnl"] == 0.7 and money["trades"][0]["cashed_out"] is True
+
+
+def test_a_closing_sale_with_no_entry_is_still_dated_by_the_sale():
+    """A non-zero realizedPnl is the venue saying the sale CLOSED a lot:
+    that row is a cash-out dated on the sale, stake = proceeds."""
+    acts = [TestSoldLedgerClassification._deep_trade(
+        "c", TS_AUG2 + 3600, 10, 0.44, "ORDER_SIDE_SELL", rp=0.7)]
+    out = build({}, acts, TS_AUG1)
+    assert out["excluded_undatable"] == 0
+    r = out["trades"][0]
+    assert r["cashed_out"] is True and r["pnl"] == 0.7
+    assert r["settled_ts"] == TS_AUG2 + 3600 and r["entry_ts"] is None
+
+
+def test_a_settlement_dated_row_files_its_stake_under_its_settlement_day():
+    """The day series foots to the summary: a row with no entry day
+    files deployed/trades under its settlement day, so sum(daily.deployed)
+    == summary.deployed (second adversarial review, 2026-09-02)."""
+    out = build({}, [_nested_res("r", TS_AUG2 + 7200, 1.0, 3.0)], TS_AUG1)
+    assert out["excluded_undatable"] == 0 and out["summary"]["deployed"] == 3.0
+    assert sum(d["deployed"] for d in out["daily"]) == out["summary"]["deployed"]
+    assert sum(d["trades"] for d in out["daily"]) == out["summary"]["trades"] == 1
+    day = [d for d in out["daily"] if d["trades"] == 1][0]
+    assert day["settled"] == 1 and day["pnl"] == 1.0 and day["pnl_estimated"] is False
+
+
+def test_an_open_short_with_no_entry_is_not_a_settlement():
+    """netPosition below zero with no resolution is a LIVE short whose
+    only trade is its opening SELL. Dating it by that sell would file a
+    live position as a push; it stays undatable until it resolves."""
+    positions = {"sh": _pos(-10, 6.0, 5.5, realized=0.0)}
+    opening = TestSoldLedgerClassification._deep_trade(
+        "sh", TS_AUG2, 10, 0.40, "ORDER_SIDE_SELL", rp=0.0)
+    out = build(positions, [opening], TS_AUG1)
+    assert out["trades"] == [] and out["excluded_undatable"] == 1
+    # Once it resolves, the resolution dates it.
+    out = build({"sh": _pos(-10, 6.0, 0.0, realized=4.0, expired=True)},
+                [opening, _nested_res("sh", TS_AUG2 + 86_400, 4.0, 6.0)],
+                TS_AUG1)
+    assert out["excluded_undatable"] == 0
+    r = out["trades"][0]
+    assert r["pnl"] == 4.0 and r["settled_ts"] == TS_AUG2 + 86_400
+
+
+def test_rows_with_an_entry_are_untouched_by_settlement_dating():
+    """A row that has an entry keeps its entry-window rule: a pre-window
+    entry resolved inside the window is still excluded, not re-dated on
+    its resolution."""
+    positions = {"old": _pos(0, 1.0, 0.0, realized=1.0, expired=True)}
+    acts = [_trade("old", TS_JUL30, 2, 0.5), _nested_res("old", TS_AUG2, 1.0, 1.0)]
+    out = build(positions, acts, TS_AUG1)
+    assert out["trades"] == [] and out["excluded_undatable"] == 0
+
+
+def test_settlement_dated_rows_take_their_place_in_the_tape_by_that_time():
+    acts = [_trade("early", TS_AUG2, 2, 0.5),
+            _nested_res("late", TS_AUG2 + 7200, 1.0, 1.0),
+            _trade("latest", TS_AUG2 + 10_000, 2, 0.5)]
+    positions = {"early": _pos(2, 1.0, 1.1), "latest": _pos(2, 1.0, 1.1)}
+    out = build(positions, acts, TS_AUG1)
+    assert [r["market_slug"] for r in out["trades"]] == ["latest", "late", "early"]
+
+
+def test_a_settlement_dated_row_reaches_the_unattributed_daily_slice():
+    acts = [_sell("stray", TS_AUG2 + 3600, 10, 0.44, realized=-0.6)]
+    out = build({}, acts, TS_AUG1, attributed={"something-else"})
+    assert out["trades"] == []
+    ex = out["excluded_unattributed"]
+    assert ex["count"] == 1 and ex["net_pnl"] == -0.6
+    assert [d["date"] for d in ex["daily"]] == ["2026-08-02"]
 
 
 def test_entry_price_is_the_venues_own_vwap():
@@ -524,6 +710,13 @@ def test_slimmed_activities_build_the_identical_record():
         # archived cash-outs back into buys (found live 2026-08-08).
         _sell("tsc-atp-x-y-2026-08-02-tg-21pt5", TS_AUG2 + 90, 1, 0.30,
               realized=0.05),
+        # A resolution the way the venue actually sends it — time NESTED
+        # only, no top-level timestamp — with no entry trade in hand. The
+        # slim row used to drop that time, so this row was undatable
+        # after slimming and dated before it (adversarial review
+        # 2026-09-02): the equivalence held only because the old test
+        # never carried a nested-only resolution.
+        _nested_res("aec-mlb-late-2026-08-02", TS_AUG2 + 7200, 0.7, 3.0),
     ]
     # Give the resolution settlement facts + metadata like the venue does.
     acts[2]["positionResolution"].update({
@@ -541,6 +734,44 @@ def test_slimmed_activities_build_the_identical_record():
     full.pop("generated_at", None)
     slim.pop("generated_at", None)
     assert full == slim
+    # Not vacuously equal: the nested-only resolution is DATED on both
+    # sides, not undatable on both.
+    assert full["excluded_undatable"] == 0
+    assert "aec-mlb-late-2026-08-02" in {r["market_slug"] for r in full["trades"]}
+
+
+def test_slim_lifts_the_time_build_reads_and_nothing_else_moves():
+    """The slim row's top-level timestamp is exactly the value build()
+    reads: for a trade `_act_ts(act) or _act_ts(trade)` (top level first,
+    so a trade carrying both keeps the top-level one), for a resolution
+    `_any_ts(act)`. Proven for every placement the venue has used."""
+    from sportsassets.api.track_record import _slim
+    from sportsassets.api.pmus_account import _act_ts, _any_ts
+
+    nested_only = _trade("m", TS_AUG2, 1, 0.5)
+    top_only = {"type": "ACTIVITY_TYPE_TRADE", "timestamp": TS_AUG2 * 1000,
+                "trade": {"marketSlug": "m", "qty": 1, "price": {"value": 0.5}}}
+    both = {"type": "ACTIVITY_TYPE_TRADE", "timestamp": TS_AUG2 * 1000,
+            "trade": {"marketSlug": "m", "qty": 1, "price": {"value": 0.5},
+                      "createTime": (TS_AUG2 + 999) * 1000}}
+    for a in (nested_only, top_only, both):
+        want = _act_ts(a) or _act_ts(a["trade"])
+        s = _slim(a)
+        assert s["timestamp"] == want
+        assert (_act_ts(s) or _act_ts(s["trade"])) == want
+    assert _slim(both)["timestamp"] == TS_AUG2       # top level wins
+    assert _slim(both)["trade"]["createTime"] == TS_AUG2 + 999
+
+    res = _nested_res("r", TS_AUG2 + 60, 1.0, 1.0)
+    assert _slim(res)["timestamp"] == _any_ts(res) == TS_AUG2 + 60
+    assert _any_ts(_slim(res)) == _any_ts(res)
+    top_res = _resolution("r", TS_AUG2 + 61)
+    assert _slim(top_res)["timestamp"] == _any_ts(top_res) == TS_AUG2 + 61
+    # A resolution with no time anywhere stays timeless after slimming:
+    # unknown is carried, never invented.
+    timeless = {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+                "positionResolution": {"marketSlug": "t"}}
+    assert _slim(timeless)["timestamp"] is None
 
 
 def test_account_block_reconciles_cohort_plus_every_exclusion():

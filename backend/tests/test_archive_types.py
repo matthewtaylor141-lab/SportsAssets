@@ -106,10 +106,13 @@ class TestTheSnapshotIsVersionedWithTheFilter:
     execution never arrives.
     """
 
-    def test_the_key_is_v2(self):
-        assert tr._SNAP_KEY.endswith("_v2"), (
+    def test_the_key_is_v3(self):
+        # v2 retired the pre-filter snapshots; v3 (2026-09-02) retires the
+        # snapshots whose slim rows carry no resolution time, so the
+        # settlement-dating fix reaches the rows already on the page.
+        assert tr._SNAP_KEY.endswith("_v3"), (
             "bumping the key is what retires snapshots written before "
-            "the type filter existed")
+            "the slim shape carried a resolution's time")
 
     def test_the_key_carries_a_version_at_all(self):
         import re
