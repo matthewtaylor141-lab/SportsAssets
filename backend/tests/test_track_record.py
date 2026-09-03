@@ -558,11 +558,13 @@ def test_no_attribution_sets_means_the_old_behavior_exactly():
 
 # ── archive refresh: warm path must not re-read the table ──────────────
 
-def test_warm_archive_refresh_appends_without_rereading_the_table(monkeypatch):
+def test_warm_archive_refresh_folds_in_place_without_rereading_the_table(monkeypatch):
     """Re-parsing the whole archive every ~30s refresh was the API's memory
     ratchet (glibc thread arenas keep freed parse pages; RSS climbed to the
     2 GB kill line three times on 2026-08-03). Warm refreshes must touch
-    only the NEW rows; the full table read happens once, at cold boot."""
+    only the NEW rows; the full table read happens once, at cold boot.
+    Since design D (2026-09-03) the archive is the folded ledgers and a
+    warm refresh folds the new rows INTO it, in place."""
     import asyncio
 
     from sportsassets.api import track_record as tr
@@ -620,16 +622,26 @@ def test_warm_archive_refresh_appends_without_rereading_the_table(monkeypatch):
     monkeypatch.setattr(db, "get_pool", fake_get_pool)
     monkeypatch.setattr(tr, "_archive_ready", True)
     monkeypatch.setattr(tr, "_archived_ids", {"a1"})
-    monkeypatch.setitem(tr._archive_cache, "data", [{"id": "a1"}])
+    monkeypatch.setitem(tr._snap_state, "at", 9e12)   # no rolling save here
 
     # Activities carry a real type: the union keeps only what build()
     # reads (memory fix 2026-08-25), so an untyped fixture would be
-    # filtered out and prove nothing about the append.
+    # filtered out and prove nothing about the fold.
     _T = "ACTIVITY_TYPE_TRADE"
-    out = asyncio.run(tr._archive_and_union(
-        [{"id": "a1", "type": _T}, {"id": "a2", "type": _T}]))
 
-    assert [a["id"] for a in out] == ["a1", "a2"]
+    def _fill(aid, qty):
+        return {"id": aid, "type": _T,
+                "trade": {"marketSlug": "s", "qty": qty,
+                          "price": {"value": 0.5}, "createTime": TS_AUG2 * 1000}}
+
+    led = tr._ArchiveLedgers()
+    led.fold(_fill("a1", 2))
+    monkeypatch.setitem(tr._archive_cache, "data", led)
+    out = asyncio.run(tr._archive_and_union([_fill("a1", 2), _fill("a2", 3)]))
+
+    assert out is led, "the warm path folds into the SAME archive object"
+    assert led.rows == 2 and set(led.ids) == {"a1", "a2"}
+    assert led.entries["s"]["qty"] == 5.0 and led.entries["s"]["fills"] == 2
     assert pool.fetches == []                      # no full-table re-read
     inserted = [r for q, r in pool.execs if isinstance(r, list)]
     assert len(inserted) == 1 and len(inserted[0]) == 1  # only a2 upserted
@@ -637,21 +649,33 @@ def test_warm_archive_refresh_appends_without_rereading_the_table(monkeypatch):
     # The refresh union must ALSO drop unread types, or the boot-time
     # saving evaporates within a day as the venue window re-adds them
     # at ~15k/day — the memory ratchet, returning by another door.
-    monkeypatch.setattr(tr, "_archived_ids", {"a1"})
-    monkeypatch.setitem(tr._archive_cache, "data", [{"id": "a1"}])
+    monkeypatch.setattr(tr, "_archived_ids", {"a1", "a2"})
     out2 = asyncio.run(tr._archive_and_union([
-        {"id": "a2", "type": _T},
+        _fill("a2", 3),
         {"id": "a3", "type": "ACTIVITY_TYPE_DEPOSIT"},
     ]))
-    assert [a["id"] for a in out2] == ["a1", "a2"], \
+    assert out2 is led and led.rows == 2 and "a3" not in led.ids, \
         "a deposit is never read by build() and must not be retained"
+
+    # A DEEP_SWEEP can re-show a row the week-deep _archived_ids has
+    # forgotten but the ledgers already hold. The row form appended it
+    # again (a second fill on the same market); the ledgers refuse the
+    # repeat id, so the archive cannot inflate through this door.
+    monkeypatch.setattr(tr, "_archived_ids", set())
+    asyncio.run(tr._archive_and_union([_fill("a1", 2)]))
+    assert led.rows == 2 and led.entries["s"]["qty"] == 5.0
 
     # Cold boot (empty in-process cache) DOES hydrate from the table —
     # via one streaming cursor scan, never repeated all-rows fetches.
     monkeypatch.setitem(tr._archive_cache, "data", None)
-    asyncio.run(tr._archive_and_union([{"id": "a1"}]))
+    monkeypatch.setitem(tr._hydrate_progress, "ledgers", None)
+    monkeypatch.setitem(tr._hydrate_progress, "last", "")
+    monkeypatch.setitem(tr._hydrate_progress, "running", False)
+    cold = asyncio.run(tr._archive_and_union([{"id": "a1"}]))
     assert any("payload FROM pmus_activity_archive" in q
                and "ORDER BY id" in q for q in pool.fetches)
+    assert isinstance(cold, tr._ArchiveLedgers) and cold.rows == 0
+    assert tr._hydrate_progress["ledgers"] is None, "completion clears the buffer"
 
 
 def test_failed_hydrate_serves_the_window_and_arms_a_retry(monkeypatch):
@@ -681,14 +705,18 @@ def test_failed_hydrate_serves_the_window_and_arms_a_retry(monkeypatch):
     monkeypatch.setattr(tr, "_archived_ids", set())
     monkeypatch.setattr(tr, "_hydrate_task", None)
     monkeypatch.setitem(tr._archive_cache, "data", None)
+    monkeypatch.setitem(tr._hydrate_progress, "ledgers", None)
+    monkeypatch.setitem(tr._hydrate_progress, "last", "")
+    monkeypatch.setitem(tr._hydrate_progress, "running", False)
 
     async def run():
         out = await tr._archive_and_union(
             [{"id": "w1", "type": "ACTIVITY_TYPE_TRADE"},
              {"id": "w2", "type": "ACTIVITY_TYPE_TRADE"}])
-        # Serves the window acts it was given, does NOT cache them as
-        # the archive, and a retry task is armed.
-        assert [a["id"] for a in out] == ["w1", "w2"]
+        # No archive is available: nothing is cached as the archive (the
+        # request path then serves the venue window it holds itself),
+        # and a retry task is armed.
+        assert out is None
         assert tr._archive_cache["data"] is None
         assert tr._hydrate_task is not None and not tr._hydrate_task.done()
         tr._hydrate_task.cancel()

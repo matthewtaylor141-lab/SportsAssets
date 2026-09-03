@@ -7910,6 +7910,55 @@ async def api_memory_census() -> dict:
                 n += _deep(v, seen, depth + 1)
         return n
 
+    def _measure_ledgers(led: Any, sample: int = 200) -> dict:
+        """The archive is the folded ledgers, not a row list (design D,
+        owner order 2026-09-02 and the 2026-09-03 rollback). A census
+        that only sized lists reported rows=0 / est_mb=0 for both the
+        archive and the grind under that form, and the 55-115 MB they
+        hold landed in unaccounted_mb -- the instrument blind to its
+        subject again (review of the archive ledgers change,
+        2026-09-03). Each holder inside the ledgers is sampled the same
+        way rows are (a bounded, strided sample; never a copy of the
+        dict), sized per item and scaled to its length; `rows` is the
+        rows the ledgers REPRESENT so the CI MEMCENSUS line keeps its
+        meaning, and bytes_per_row is the total over that count.
+        """
+        from itertools import islice
+
+        parts: dict = {}
+        total_b = 0.0
+        naive_b = 0.0
+        for name in ("entries", "sold", "resolutions", "ids"):
+            d = getattr(led, name, None) or {}
+            n_items = len(d)
+            if not n_items:
+                parts[name] = {"n": 0, "bytes_per_item": 0, "est_mb": 0.0}
+                continue
+            step = max(1, n_items // sample)
+            taken = list(islice(d.items(), 0, None, step))[:sample]
+            k = max(1, len(taken))
+            naive = sum(_deep(kv) for kv in taken) / k
+            shared: set = set()
+            marginal = sum(_deep(kv, shared) for kv in taken) / k
+            parts[name] = {"n": n_items, "bytes_per_item": round(marginal),
+                           "est_mb": round(marginal * n_items / 1048576, 1)}
+            total_b += marginal * n_items
+            naive_b += naive * n_items
+        left = _measure(getattr(led, "leftover", None), sample)
+        parts["leftover"] = {"n": left["rows"],
+                             "bytes_per_item": left["bytes_per_row"],
+                             "est_mb": left["est_mb"]}
+        total_b += left["bytes_per_row"] * left["rows"]
+        naive_b += left["bytes_per_row_naive"] * left["rows"]
+        n_rows = int(getattr(led, "rows", 0) or 0)
+        return {"rows": n_rows, "form": "ledgers_v4",
+                "slugs": led.slugs(),
+                "bytes_per_row": round(total_b / n_rows) if n_rows else 0,
+                "bytes_per_row_naive": (round(naive_b / n_rows)
+                                        if n_rows else 0),
+                "est_mb": round(total_b / 1048576, 1),
+                "parts": parts}
+
     def _measure(rows: Any, sample: int = 200) -> dict:
         """Report BOTH costs, because they answer different questions.
 
@@ -7919,6 +7968,8 @@ async def api_memory_census() -> dict:
                  objects are paid for once. This is the number that
                  scales to the row count.
         """
+        if isinstance(rows, tr._ArchiveLedgers):
+            return _measure_ledgers(rows, sample)
         if not isinstance(rows, list) or not rows:
             return {"rows": 0, "est_mb": 0.0, "bytes_per_row": 0,
                     "bytes_per_row_naive": 0}
@@ -7986,8 +8037,11 @@ async def api_memory_census() -> dict:
     except Exception as exc:  # noqa: BLE001 — glibc 2.33+ only
         malloc_info = {"unavailable": type(exc).__name__}
 
+    # Both holders are _ArchiveLedgers under the v4 form; the grind's
+    # buffer lives under "ledgers" (the "rows" list is gone with the
+    # row form). _measure sizes either form.
     cache = _measure(tr._archive_cache.get("data"))
-    grind = _measure(tr._hydrate_progress.get("rows"))
+    grind = _measure(tr._hydrate_progress.get("ledgers"))
     raw = tr._raw_cache.get("data")
     raw_acts = (raw or {}).get("activities") if isinstance(raw, dict) else None
     rawm = _measure(raw_acts)

@@ -170,13 +170,158 @@ def classify_slug(slug: str) -> dict:
     return {"sport": sport, "icon": icon, "category": cat, "league": league}
 
 
+# ── THE FOLD: build()'s own per-slug ledgers, lifted out of build()
+# (owner order 2026-09-02 "go for it, let's get this working"; the
+# 2026-09-03 rollback of the v3 snapshot key; design review of the
+# memory-safe archive, 2026-09-03) ──────────────────────────────────
+#
+# build() derives exactly three per-slug dicts from the activity list
+# -- entries, sold, resolutions -- and every figure it serves reads
+# those dicts, never the rows again. The in-memory archive therefore
+# holds the DICTS, folded once at hydrate, instead of the 531,313 slim
+# rows that put the API at 1.25-1.75 GB against the 2 GB kill line and
+# forced the rollback to the truncated 302,901-row v2 snapshot (3,393
+# settled on the homepage instead of 3,700). The two functions below
+# are the ONLY place a row becomes a ledger entry: build() calls them
+# for the rows it is handed, _ArchiveLedgers calls them at hydrate and
+# at every refresh, so the archive's fold cannot drift from build()'s.
+# Change one and both move. The fold is since-independent on purpose:
+# `since` is applied by build()'s row walks AFTER the fold, so the
+# folded archive serves ?since=2026-08-01, the reports and the two
+# AUDIT_SINCE builders unchanged. test_archive_ledgers pins the
+# equivalence on randomized fixtures; _FOLD_VERSION travels with every
+# snapshot and must bump whenever the fold's OUTPUT changes, so a
+# persisted archive can never be read by a fold that did not write it.
+#
+# THE FOLD IDENTITY IS DERIVED FROM THE CODE, NOT DECLARED (review of
+# the archive ledgers change, 2026-09-03). A hand-bumped version is a
+# promise nobody enforces: from_rows checked only the key SET of each
+# ledger entry, so a change to the VALUES a fold writes -- exactly the
+# 2026-08-19 nested-side fix and the 2026-09-02 _any_ts resolution-time
+# fix, both of which kept every key and changed what went into it --
+# would have read the old ledgers as valid, the rolling save would have
+# re-persisted them every 6 h, and no re-grind would ever fire: new
+# rows on the new fold, the 531,313 archived rows on the old one,
+# silently and for good. So every snapshot also carries a sha256 of
+# the SOURCE of the two fold functions, the slimming they read through
+# and the pmus_account helpers they call (_FOLD_SOURCES), and from_rows
+# returns None (=> re-grind from the table) when either the version or
+# the digest differs. Raw source, dedented, on purpose: a normaliser
+# that strips comments would have to agree byte-for-byte between the
+# Python that pinned the digest in CI and the Python that boots, and a
+# comment-only edit costing one resumable grind is the cheaper failure.
+# test_archive_ledgers records the digest so a fold edit is seen in
+# review, with the re-grind named as the consequence.
+_FOLD_VERSION = 1
+_FOLD_SOURCES: tuple[str, ...] = ("_fold_trade", "_fold_resolution", "_slim",
+                                  "_slim_relevant", "_any_ts", "_act_ts",
+                                  "_amt")
+
+
+def _fold_digest() -> str:
+    """sha256 over the current source of every function in
+    _FOLD_SOURCES, as bound in this module right now (a monkeypatched
+    helper changes it, which is how the test proves it tracks the
+    code). Computed once at import into _FOLD_DIGEST, after the last
+    of those functions is defined."""
+    import inspect
+    import textwrap
+
+    h = hashlib.sha256()
+    for name in _FOLD_SOURCES:
+        fn = globals()[name]
+        h.update(name.encode())
+        h.update(b"\0")
+        h.update(textwrap.dedent(inspect.getsource(fn)).encode())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _fold_trade(act: dict, entries: dict, sold: dict) -> bool:
+    """One TRADE activity into the entry and sell ledgers (build()'s
+    first row walk, verbatim). Returns False when the row carries no
+    market slug: nothing to fold, the caller keeps the row raw."""
+    t = act.get("trade") or {}
+    slug = t.get("marketSlug")
+    if not slug:
+        return False
+    ts = _act_ts(act) or _act_ts(t)
+    qty, price = _amt(t.get("qty")), _amt(t.get("price"))
+    rp = _amt(t.get("realizedPnl"))
+    # Side truth, in order of reliability (raw-feed audit 2026-08-19,
+    # 6,747 trades): the top-level side is ALWAYS None in the venue
+    # feed; the definitive side lives on the nested execution order.
+    # The rp!=0 fallback alone misread 444 zero-P&L sells as buys
+    # (inflated entry VWAPs) and booked 23 short-CLOSING BUYS as
+    # sales — their qty*price padded "proceeds" with cash that never
+    # came in, while their realized loss is real and must count.
+    side = str(t.get("side") or "").upper()
+    if not side:
+        for k in ("aggressorExecution", "passiveExecution"):
+            o = ((t.get(k) or {}).get("order") or {})
+            if o.get("side"):
+                side = str(o["side"]).upper()
+                break
+    is_sell = ("SELL" in side) if side else rp != 0
+    closes_position = is_sell or rp != 0
+    if closes_position:
+        if qty > 0 and 0 < price < 1:
+            s = sold.setdefault(slug, {"qty": 0.0, "proceeds": 0.0,
+                                       "realized": 0.0, "last_ts": 0.0})
+            if is_sell:            # only actual sales are cash in
+                s["qty"] += qty
+                s["proceeds"] += qty * price
+            s["realized"] += rp
+            if ts:
+                s["last_ts"] = max(s["last_ts"], ts)
+        return True
+    e = entries.setdefault(slug, {"first_ts": ts, "qty": 0.0,
+                                  "notional": 0.0, "fills": 0})
+    if ts and (not e["first_ts"] or ts < e["first_ts"]):
+        e["first_ts"] = ts
+    if qty > 0 and 0 < price < 1:
+        e["qty"] += qty
+        e["notional"] += qty * price
+        e["fills"] += 1
+    return True
+
+
+def _fold_resolution(act: dict, resolutions: dict) -> bool:
+    """One POSITION_RESOLUTION activity into the resolution ledger
+    (build()'s second row walk, verbatim; the last resolution for a
+    slug in list order wins). Returns False when the row carries no
+    market slug."""
+    res = act.get("positionResolution") or {}
+    slug = res.get("marketSlug")
+    if not slug:
+        return False
+    after = res.get("afterPosition") or {}
+    before = res.get("beforePosition") or {}
+    resolutions[slug] = {
+        # _any_ts, NOT _act_ts: the resolution's time is nested under
+        # positionResolution, and the top-level reader returned 0 here
+        # long after the archive writer was fixed (2026-08-25). A zero
+        # made settled_ts fall through to entry_ts, so the day P&L
+        # filed every long on the day it was BOUGHT and the day recon
+        # ran a $458 residual on money that tied to the cent
+        # (2026-09-02).
+        "ts": _any_ts(act),
+        "realized": _amt(after.get("realized")) or _amt(before.get("realized")),
+        "cost": _amt(before.get("cost")),
+        "title": (after.get("marketMetadata") or {}).get("title")
+                 or (before.get("marketMetadata") or {}).get("title"),
+    }
+    return True
+
+
 def build(positions: dict[str, dict], activities: list[dict],
           since_ts: float, max_stake: float | None = None,
           attributed: set[str] | None = None,
           copy_slugs: set[str] | None = None,
           max_abs_pnl: float | None = None,
           manual_slugs: set[str] | None = None,
-          tz: ZoneInfo = RECORD_TZ) -> dict:
+          tz: ZoneInfo = RECORD_TZ,
+          ledgers: _ArchiveLedgers | None = None) -> dict:
     """Pure builder (unit-tested): venue payloads -> the track record.
 
     `max_stake` caps what the RECORD presents: positions whose cost exceeds
@@ -197,6 +342,18 @@ def build(positions: dict[str, dict], activities: list[dict],
     precedence of the exclusions (a $100+ swing is out no matter which
     cohort it belongs to, copy sleeve included) and disclosed like the
     others, in `excluded_over_pnl`.
+
+    `ledgers` (design D, 2026-09-03): the in-memory archive, already
+    folded into the three per-slug dicts below. Without it (every
+    external caller, every test) this function behaves exactly as it
+    always has: the dicts start empty and `activities` is the whole
+    history. With it the dicts start as per-slug COPIES of the archive
+    and `activities` is only what the archive does not represent (its
+    raw leftover plus the venue window's remainder), folded on top in
+    list order — the same dicts, in the same insertion order, that the
+    row form would have produced from archive rows + remainder. The
+    archive itself is never mutated by a build; the request path can
+    hold one archive across concurrent requests and ?since= values.
     """
     # The record's first calendar day is the UTC date the window opens
     # (2026-08-01), even though that instant is 8pm ET July 31: the
@@ -214,83 +371,34 @@ def build(positions: dict[str, dict], activities: list[dict],
     # is the cash-out's settlement record. A trade is a sell when the
     # venue says so or — enum-spelling-proof — when it carries realized
     # P&L, which a buy under average-cost accounting never does.
-    entries: dict[str, dict] = {}
-    sold: dict[str, dict] = {}
+    #
+    # The fold itself lives in _fold_trade / _fold_resolution above, so
+    # the archive folds rows with build()'s own code (design D,
+    # 2026-09-03). Per-slug copies, never the archive's dicts: the
+    # window remainder is folded ON TOP, in place, and the archive must
+    # come out of every build exactly as it went in.
+    if ledgers is not None:
+        entries: dict[str, dict] = {k: dict(v)
+                                    for k, v in ledgers.entries.items()}
+        sold: dict[str, dict] = {k: dict(v) for k, v in ledgers.sold.items()}
+        resolutions: dict[str, dict] = {k: dict(v) for k, v
+                                        in ledgers.resolutions.items()}
+    else:
+        entries, sold, resolutions = {}, {}, {}
     for act in activities or []:
         if act.get("type") != "ACTIVITY_TYPE_TRADE":
             continue
-        t = act.get("trade") or {}
-        slug = t.get("marketSlug")
-        if not slug:
-            continue
-        ts = _act_ts(act) or _act_ts(t)
-        qty, price = _amt(t.get("qty")), _amt(t.get("price"))
-        rp = _amt(t.get("realizedPnl"))
-        # Side truth, in order of reliability (raw-feed audit 2026-08-19,
-        # 6,747 trades): the top-level side is ALWAYS None in the venue
-        # feed; the definitive side lives on the nested execution order.
-        # The rp!=0 fallback alone misread 444 zero-P&L sells as buys
-        # (inflated entry VWAPs) and booked 23 short-CLOSING BUYS as
-        # sales — their qty*price padded "proceeds" with cash that never
-        # came in, while their realized loss is real and must count.
-        side = str(t.get("side") or "").upper()
-        if not side:
-            for k in ("aggressorExecution", "passiveExecution"):
-                o = ((t.get(k) or {}).get("order") or {})
-                if o.get("side"):
-                    side = str(o["side"]).upper()
-                    break
-        is_sell = ("SELL" in side) if side else rp != 0
-        closes_position = is_sell or rp != 0
-        if closes_position:
-            if qty > 0 and 0 < price < 1:
-                s = sold.setdefault(slug, {"qty": 0.0, "proceeds": 0.0,
-                                           "realized": 0.0, "last_ts": 0.0})
-                if is_sell:            # only actual sales are cash in
-                    s["qty"] += qty
-                    s["proceeds"] += qty * price
-                s["realized"] += rp
-                if ts:
-                    s["last_ts"] = max(s["last_ts"], ts)
-            continue
-        e = entries.setdefault(slug, {"first_ts": ts, "qty": 0.0,
-                                      "notional": 0.0, "fills": 0})
-        if ts and (not e["first_ts"] or ts < e["first_ts"]):
-            e["first_ts"] = ts
-        if qty > 0 and 0 < price < 1:
-            e["qty"] += qty
-            e["notional"] += qty * price
-            e["fills"] += 1
+        _fold_trade(act, entries, sold)
 
     # Resolutions carry the settlement FACTS, not just the timestamp: the
     # venue REMOVES resolved markets from the positions payload, so for a
     # settled trade the resolution activity is often the only record of its
     # cost and realized P&L. Missing this is how a record shows "$0 settled"
     # while the account has realized money — observed live 2026-08-02.
-    resolutions: dict[str, dict] = {}
     for act in activities or []:
         if act.get("type") != "ACTIVITY_TYPE_POSITION_RESOLUTION":
             continue
-        res = act.get("positionResolution") or {}
-        slug = res.get("marketSlug")
-        if not slug:
-            continue
-        after = res.get("afterPosition") or {}
-        before = res.get("beforePosition") or {}
-        resolutions[slug] = {
-            # _any_ts, NOT _act_ts: the resolution's time is nested under
-            # positionResolution, and the top-level reader returned 0 here
-            # long after the archive writer was fixed (2026-08-25). A zero
-            # made settled_ts fall through to entry_ts, so the day P&L
-            # filed every long on the day it was BOUGHT and the day recon
-            # ran a $458 residual on money that tied to the cent
-            # (2026-09-02).
-            "ts": _any_ts(act),
-            "realized": _amt(after.get("realized")) or _amt(before.get("realized")),
-            "cost": _amt(before.get("cost")),
-            "title": (after.get("marketMetadata") or {}).get("title")
-                     or (before.get("marketMetadata") or {}).get("title"),
-        }
+        _fold_resolution(act, resolutions)
 
     # VENUE-BASIS totals (owner directive 2026-08-08, second report: the
     # headline must match the venue app's own number). The venue stamps
@@ -1130,6 +1238,228 @@ def _slim(a: dict) -> dict:
     return out
 
 
+# ── THE IN-MEMORY ARCHIVE IS THE LEDGERS, NOT THE ROWS (design D,
+# 2026-09-03; owner order 2026-09-02 "let's get this working" and the
+# 2026-09-03 rollback) ────────────────────────────────────────────────
+#
+# Measured on a synthetic 531,313-row archive in the real slim shape:
+# the list of slim dicts is 782 MB RSS (1,544 B/row) and a 2.16 s
+# synchronous build per request -- the form that 502d the API at
+# 1.25-1.75 GB against the 2 GB kill line and forced the key back to
+# the truncated v2 row. Four alternatives were measured before this
+# one: (A) dropping pre-window rows gives wrong venue_totals and a
+# wrong ?since= at any floor that saves memory; (B) compact tuples or
+# struct-of-arrays cut 3-6x but keep O(rows) growth and the 2.16 s
+# build; (C) both, same objections; (D without the id memory)
+# double-folds a window row the archive already folded. D holds
+# exactly the three per-slug dicts build() derives from the rows --
+# 48.7 MB at 3,000 slugs (96 B/row, build 0.065 s including the
+# per-slug copy), 77.7 MB at a 50,000-slug stress case -- and grows
+# with SLUGS, not rows.
+#
+# What it holds, and why each part:
+#   entries / sold / resolutions  build()'s own dicts, folded by
+#                                 build()'s own _fold_* code in list
+#                                 order, so insertion order (which the
+#                                 tape's stable sort and sold_markets
+#                                 depend on) matches the row form.
+#   ids                           id -> ts, BOUNDED, for the request
+#                                 path's window dedupe: a window row the
+#                                 archive already folded must not be
+#                                 folded again on top of it. Kept while
+#                                 ts >= now - _ARCHIVED_ID_WINDOW_S, or
+#                                 among the newest _ID_MEMORY_NEWEST by
+#                                 ts regardless of age (the account can
+#                                 go quiet for a week and the next boot
+#                                 still DEEP_SWEEPs 8,000 rows), or
+#                                 with ts unknown (fail closed: an id
+#                                 that cannot be placed in time is kept
+#                                 and COUNTED in unknown_ts).
+#   leftover                      rows the fold cannot classify (no
+#                                 type, a type outside ARCHIVE_TYPES, no
+#                                 market slug), kept raw and handed to
+#                                 build() unchanged, so the row form and
+#                                 this form see the same inputs.
+#   rows                          history rows represented; archive_rows
+#                                 in the payload keeps its meaning.
+#
+# Folds run ON THE EVENT-LOOP THREAD only: build() takes its per-slug
+# copies synchronously, the request path reads ids and leftover in the
+# same synchronous block, and the packer thread only ever sees the
+# materialised to_rows() list. Nothing else may touch the dicts from a
+# worker thread.
+_ID_MEMORY_NEWEST = 25_000     # 3x the deepest (8,000-row) DEEP_SWEEP window
+_LEDGER_SHAPES: dict[str, dict[str, type]] = {
+    "e": {"first_ts": float, "qty": float, "notional": float, "fills": int},
+    "s": {"qty": float, "proceeds": float, "realized": float,
+          "last_ts": float},
+    "r": {"ts": float, "realized": float, "cost": float, "title": object},
+}
+_IDS_PER_RECORD = 500
+
+
+class _ArchiveLedgers:
+    """The folded archive. See the block comment above."""
+
+    __slots__ = ("entries", "sold", "resolutions", "ids", "leftover",
+                 "rows", "unknown_ts")
+
+    def __init__(self) -> None:
+        self.entries: dict = {}
+        self.sold: dict = {}
+        self.resolutions: dict = {}
+        self.ids: dict[str, float] = {}
+        self.leftover: list[dict] = []
+        self.rows = 0
+        self.unknown_ts = 0
+
+    def __bool__(self) -> bool:
+        # An archive representing no rows reads as "no archive", the way
+        # the empty row list did: the request path then serves the bare
+        # window and says so in activities_source.
+        return self.rows > 0
+
+    def fold(self, act: dict) -> None:
+        """One history row, in list order. A repeat of an id already
+        represented is refused rather than folded twice: the row form
+        would have double-counted it, and a silently inflated ledger
+        is the one outcome worse than a missing row. An id-less row is
+        always folded (nothing identifies it as a repeat) and records
+        the empty key, exactly as the row form's seen_ids did."""
+        aid = str(act.get("id") or "")
+        if aid and aid in self.ids:
+            return
+        self.rows += 1
+        ts = _any_ts(act)
+        if ts:
+            self.ids[aid] = ts
+        elif aid not in self.ids:
+            self.ids[aid] = 0.0
+            self.unknown_ts += 1
+        typ = act.get("type")
+        if typ == "ACTIVITY_TYPE_TRADE":
+            if _fold_trade(act, self.entries, self.sold):
+                return
+        elif typ == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+            if _fold_resolution(act, self.resolutions):
+                return
+        self.leftover.append(act)
+
+    def fold_many(self, acts) -> None:
+        for a in acts:
+            self.fold(a)
+
+    def slugs(self) -> int:
+        return len(self.entries.keys() | self.sold.keys()
+                   | self.resolutions.keys())
+
+    def prune_ids(self, now: float) -> int:
+        """Drop ids that can no longer reappear in the venue window.
+        Returns how many were dropped. Kept: anything inside the id
+        window, the newest _ID_MEMORY_NEWEST by time whatever their
+        age, every id whose time is unknown, and the empty key (an
+        id-less row cannot be told from the next one)."""
+        if len(self.ids) <= _ID_MEMORY_NEWEST:
+            return 0
+        floor = now - _ARCHIVED_ID_WINDOW_S
+        ranked = sorted(self.ids.items(), key=lambda kv: -kv[1])
+        keep: dict[str, float] = {}
+        for i, (aid, ts) in enumerate(ranked):
+            if not aid or not ts or ts >= floor or i < _ID_MEMORY_NEWEST:
+                keep[aid] = ts
+        dropped = len(self.ids) - len(keep)
+        self.ids = keep
+        return dropped
+
+    def to_rows(self) -> list[dict]:
+        """The snapshot records, materialised: a meta record first, then
+        the three ledgers in their own insertion order, the id memory in
+        chunks, the leftover rows. Per-slug dicts are copied so the
+        packer thread never shares a dict the loop may still fold into.
+        Packed by the unchanged _pack_rows; the record count is
+        O(slugs + ids/500 + leftover), never O(rows). The meta record
+        carries the fold identity (version AND source digest) and the
+        record COUNT, so from_rows can refuse a foreign fold and a
+        truncated write alike."""
+        out: list[dict] = [{"k": "meta", "form": "ledgers",
+                            "fold_version": _FOLD_VERSION,
+                            "fold_digest": _FOLD_DIGEST,
+                            "rows": self.rows, "unknown_ts": self.unknown_ts,
+                            "records": 0}]
+        out.extend({"k": "e", "s": s, "v": dict(v)}
+                   for s, v in self.entries.items())
+        out.extend({"k": "s", "s": s, "v": dict(v)}
+                   for s, v in self.sold.items())
+        out.extend({"k": "r", "s": s, "v": dict(v)}
+                   for s, v in self.resolutions.items())
+        pairs = list(self.ids.items())
+        for i in range(0, len(pairs), _IDS_PER_RECORD):
+            out.append({"k": "i", "v": pairs[i:i + _IDS_PER_RECORD]})
+        out.extend({"k": "l", "v": r} for r in self.leftover)
+        out[0]["records"] = len(out)
+        return out
+
+    @classmethod
+    def from_rows(cls, rows: Any) -> _ArchiveLedgers | None:
+        """Rebuild from to_rows() output. None for ANY foreign shape --
+        a v2/v3 row list, a truncated write, another fold_version or
+        fold_digest, a record kind or ledger key set this fold does not
+        produce -- so the caller re-grinds from the table instead of
+        serving a misread archive. Fail closed; never guess."""
+        if not isinstance(rows, list) or not rows:
+            return None
+        meta = rows[0]
+        if (not isinstance(meta, dict) or meta.get("k") != "meta"
+                or meta.get("form") != "ledgers"
+                or meta.get("fold_version") != _FOLD_VERSION
+                or meta.get("fold_digest") != _FOLD_DIGEST):
+            return None
+        led = cls()
+        targets = {"e": led.entries, "s": led.sold, "r": led.resolutions}
+        try:
+            for field in ("rows", "unknown_ts"):
+                n = meta[field]
+                if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+                    return None
+                setattr(led, field, n)
+            # The meta's own row count feeds the 98% promotion gate and
+            # archive_rows, and it used to be trusted against however
+            # many records followed: a snapshot cut off after three of
+            # its records read back as a complete archive of every row
+            # (review, 2026-09-03). The list length must match the
+            # count the writer stamped, or this is a truncated write.
+            n = meta["records"]
+            if isinstance(n, bool) or not isinstance(n, int) \
+                    or n != len(rows):
+                return None
+            for rec in rows[1:]:
+                k = rec["k"]
+                if k in targets:
+                    v = rec["v"]
+                    shape = _LEDGER_SHAPES[k]
+                    if not isinstance(v, dict) or set(v) != set(shape):
+                        return None
+                    for key, typ in shape.items():
+                        if typ is object:
+                            continue
+                        if isinstance(v[key], bool) \
+                                or not isinstance(v[key], typ):
+                            return None
+                    targets[k][_i(rec["s"])] = v
+                elif k == "i":
+                    for aid, ts in rec["v"]:
+                        led.ids[str(aid)] = float(ts)
+                elif k == "l":
+                    if not isinstance(rec["v"], dict):
+                        return None
+                    led.leftover.append(rec["v"])
+                else:
+                    return None
+        except (KeyError, TypeError, ValueError):
+            return None
+        return led
+
+
 _hydrate_err: dict = {"err": None, "at": 0.0, "chunks": 0}
 
 # ── Compact archive snapshot (owner 2026-08-09: "I really don't
@@ -1183,7 +1513,21 @@ _hydrate_err: dict = {"err": None, "at": 0.0, "chunks": 0}
 # the full table in a compact form (a memory-safe archive is the
 # follow-up, reviewed before it ships). Bumping to v3 again without
 # that work re-creates the 502s.
-_SNAP_KEY = "track_record_slim_archive_v2"
+#
+# v2 -> v4 (2026-09-03, design D: the memory-safe archive the rollback
+# note asks for). The snapshot no longer holds rows at all: it holds
+# the folded ledgers (_ArchiveLedgers.to_rows), under a NEW key so no
+# v2 row and no partial v3 checkpoint -- both lists of slim rows -- can
+# ever be read as ledgers. from_rows returns None for any foreign shape
+# or fold_version, and the boot then grinds the filtered table once
+# (531k rows in 2,500-row chunks, a checkpoint every 20 chunks) and
+# serves the ledgers from there. The full table fits again -- 48.7 MB
+# at 3,000 slugs against the 782 MB the row form needed -- so the
+# homepage counts move back to the 02:04Z figures (3,700 settled, net
+# +$3,684, archive_rows 531,313). The v2 row stays in ingestion_state,
+# orphaned: nothing reads it, nothing deletes it. The v4 record is
+# still packed by the unchanged _pack_rows, one record per json.dumps.
+_SNAP_KEY = "track_record_archive_ledgers_v4"
 _snap_state: dict = {"at": 0.0}
 _SNAP_REFRESH_S = 6 * 3600.0
 _SNAP_MAX_AGE_S = 24 * 3600.0   # window union covers ~2 days; stay well under
@@ -1252,15 +1596,22 @@ def _unpack_rows(gz: str) -> list[dict]:
         del plain
 
 
-async def _save_snapshot(pool: Any, rows: list[dict], *, complete: bool,
+async def _save_snapshot(pool: Any, records: list[dict], *, complete: bool,
                          last: str = "") -> None:
-    """Best-effort; a failed save just means the next boot grinds more."""
+    """Best-effort; a failed save just means the next boot grinds more.
+
+    `records` is a MATERIALISED _ArchiveLedgers.to_rows() list, taken
+    on the loop thread by the caller: the packer runs in a worker and
+    must never iterate a structure the loop is still folding into."""
     try:
-        gz = await asyncio.to_thread(_pack_rows, rows)
+        gz = await asyncio.to_thread(_pack_rows, records)
+        meta = records[0] if records else {}
         await pool.execute(
             "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
             "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
-            _SNAP_KEY, json.dumps({"at": time.time(), "n": len(rows),
+            _SNAP_KEY, json.dumps({"at": time.time(), "n": len(records),
+                                   "form": "ledgers_v4",
+                                   "rows": meta.get("rows", 0),
                                    "complete": complete, "last": last,
                                    "gz": gz}))
         if complete:
@@ -1279,8 +1630,12 @@ async def _load_snapshot(pool: Any) -> dict | None:
         if not val:
             return None
         obj = json.loads(val) if isinstance(val, str) else val
-        rows = await asyncio.to_thread(_unpack_rows, obj.get("gz") or "")
-        return {"rows": rows, "at": float(obj.get("at") or 0),
+        gz = obj.get("gz") or ""
+        # Unpack AND rebuild in the worker: the rebuilt object is not
+        # shared with anything until it is returned here.
+        ledgers = await asyncio.to_thread(
+            lambda: _ArchiveLedgers.from_rows(_unpack_rows(gz)))
+        return {"ledgers": ledgers, "at": float(obj.get("at") or 0),
                 "complete": bool(obj.get("complete")),
                 "last": str(obj.get("last") or "")}
     except Exception:  # noqa: BLE001
@@ -1292,21 +1647,34 @@ async def _load_snapshot(pool: Any) -> dict | None:
 # under steady DB load it NEVER completed (the true root cause of the
 # 2026-08-08 21:35Z freeze). Progress survives across retries; each
 # attempt advances at least one chunk, so completion is guaranteed.
-_hydrate_progress: dict = {"last": "", "rows": []}
+# `ledgers` is the archive being folded (design D: the ledgers, not a
+# row list), `running` guards against two grinds folding into it at
+# once -- the retry loop and a refresh's cold path could both reach
+# _hydrate_all while the cache is still None, and two cursors folding
+# the same table in place would double-count every row one of them
+# reached after the other's id memory was pruned.
+_hydrate_progress: dict = {"last": "", "ledgers": None, "running": False}
 
 
-async def _hydrate_all(pool: Any) -> list[dict]:
+async def _hydrate_all(pool: Any) -> _ArchiveLedgers:
     """Stream the archive out of Postgres in id-keyed chunks, slimming
-    each chunk before fetching the next. The single all-rows fetch held
-    ~172k FULL venue payloads in RAM at once — a transient spike measured
-    in hundreds of MB, fired on every cold boot and every 15s retry,
-    against a 2 GB kill line. Chunks cap the high-water at ~10k payloads,
-    and the trim hands the parse arenas back to the OS."""
-    out: list[dict] = _hydrate_progress["rows"]
+    each chunk in a worker and FOLDING it into the ledgers on the loop
+    thread before fetching the next (design D, 2026-09-03). The
+    high-water is one 2,500-row chunk plus the ledgers -- never the
+    531,313-row list the row form had to assemble before it could serve
+    a request, which is the list that 502d the API. The single all-rows
+    fetch before that held ~172k FULL venue payloads at once. The trim
+    hands the parse arenas back to the OS."""
+    if _hydrate_progress["running"]:
+        raise RuntimeError("archive hydrate already running in this process")
+    led: _ArchiveLedgers | None = _hydrate_progress["ledgers"]
     last: str = _hydrate_progress["last"]
-    if not out:
+    if not led:
+        # Nothing folded yet in this process (no attempt, or an attempt
+        # that died before its first chunk): the snapshot is consulted
+        # again, as the row form did while its buffer was empty.
         snap = await _load_snapshot(pool)
-        if snap:
+        if snap and snap["ledgers"] is not None:
             age = time.time() - snap["at"]
             if snap["complete"] and age < _SNAP_MAX_AGE_S:
                 # One small read IS the hydrate; the window union covers
@@ -1314,13 +1682,22 @@ async def _hydrate_all(pool: Any) -> list[dict]:
                 _hydrate_err.update(err=None, at=time.time())
                 _snap_state["at"] = snap["at"]
                 _malloc_trim()
-                return snap["rows"]
-            if snap["rows"]:
+                return snap["ledgers"]
+            if snap["ledgers"].rows and not snap["complete"]:
                 # Partial checkpoint from a previous process: resume the
-                # grind from where IT died instead of from zero.
-                out = snap["rows"]
+                # grind from where IT died instead of from zero. A
+                # COMPLETE snapshot past the age cutoff is not a
+                # checkpoint: its cursor is empty, and resuming from ""
+                # on top of it would fold the whole table a second time
+                # (the row form appended every row again in that case).
+                # The window cannot cover a gap that old, so it is
+                # discarded and the table is ground from the start.
+                led = snap["ledgers"]
                 last = snap["last"]
-                _hydrate_progress.update(last=last, rows=out)
+        if led is None:
+            led = _ArchiveLedgers()
+        _hydrate_progress.update(last=last, ledgers=led)
+    _hydrate_progress["running"] = True
     try:
         # ONE streaming server-side cursor, not repeated LIMIT queries:
         # the planner answered "WHERE id > $1 ORDER BY id LIMIT n" with a
@@ -1348,22 +1725,30 @@ async def _hydrate_all(pool: Any) -> list[dict]:
                                       else r["payload"])
                                 for r in chunk]
 
-                    out.extend(await asyncio.to_thread(_parse))
-                    _hydrate_progress.update(last=last, rows=out)
+                    # Parsed in the worker, folded HERE on the loop: the
+                    # chunk is garbage as soon as it is folded, and the
+                    # loop is the only thread that ever touches the
+                    # ledgers (a request may be copying them).
+                    led.fold_many(await asyncio.to_thread(_parse))
+                    _hydrate_progress["last"] = last
                     if _hydrate_err["chunks"] % 20 == 0:
-                        await _save_snapshot(pool, out, complete=False,
-                                             last=last)
+                        led.prune_ids(time.time())
+                        await _save_snapshot(pool, led.to_rows(),
+                                             complete=False, last=last)
     except Exception as exc:  # noqa: BLE001 — record + keep progress
         # Probe-readable failure, resumable next attempt from `last`.
         _hydrate_err.update(err=f"{type(exc).__name__}: {str(exc)[:200]}",
                             at=time.time())
         raise
+    finally:
+        _hydrate_progress["running"] = False
     _hydrate_err.update(err=None, at=time.time())
-    # Complete: checkpoint the finished archive, hand the rows over.
-    await _save_snapshot(pool, out, complete=True)
-    _hydrate_progress.update(last="", rows=[])
+    # Complete: checkpoint the finished archive, hand the ledgers over.
+    led.prune_ids(time.time())
+    await _save_snapshot(pool, led.to_rows(), complete=True)
+    _hydrate_progress.update(last="", ledgers=None)
     _malloc_trim()
-    return out
+    return led
 
 
 _hydrate_task: asyncio.Task | None = None
@@ -1384,13 +1769,24 @@ def _ensure_hydrate_retry() -> None:
 
         while _archive_cache["data"] is None:
             await asyncio.sleep(15)
+            if _hydrate_progress["running"]:
+                # A grind is already folding (a refresh's cold path, or
+                # this loop's own previous tick): _hydrate_all would
+                # refuse it with the single-flight RuntimeError, and
+                # this loop used to log that as a full traceback every
+                # 15 s for as long as the grind ran -- minutes, on the
+                # first v4 boot, exactly when someone reads the log
+                # (review of the archive ledgers change, 2026-09-03).
+                # Wait it out quietly; the cache check above ends the
+                # loop once the grind hands its ledgers over.
+                continue
             try:
                 pool = await get_pool()
                 parsed = await _hydrate_all(pool)
                 _archive_cache["data"] = parsed
                 _archive_cache["ts"] = time.time()
                 logging.getLogger(__name__).warning(
-                    "archive hydrated on retry: %s rows", len(parsed))
+                    "archive hydrated on retry: %s rows", parsed.rows)
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).exception(
                     "archive hydrate retry failed; retrying in 15s")
@@ -1411,8 +1807,15 @@ def _slim_relevant(acts: list) -> list[dict]:
             if (a or {}).get("type") in ARCHIVE_TYPES]
 
 
-async def _archive_and_union(acts: list[dict]) -> list[dict]:
-    """Persist every venue activity ever seen; return the full archive.
+# Computed here, after the last function in _FOLD_SOURCES is defined:
+# every snapshot writes it, from_rows refuses a snapshot that carries
+# any other value. See the note above _FOLD_VERSION.
+_FOLD_DIGEST = _fold_digest()
+
+
+async def _archive_and_union(acts: list[dict]) -> _ArchiveLedgers | None:
+    """Persist every venue activity ever seen; return the in-memory
+    archive (the folded ledgers), or None while it is unavailable.
 
     The venue's activity feed is a sliding window (we page ~1,200 rows,
     newest first). As trading accelerates, older TRADE and RESOLUTION
@@ -1507,39 +1910,53 @@ async def _archive_and_union(acts: list[dict]) -> list[dict]:
         # background task retries every 15s until the history is back, and
         # the request path unions archive+window so the page keeps serving
         # the freshest data meanwhile.
-        parsed = None
-        for wait in (0.0, 1.0, 4.0):
-            if wait:
-                await asyncio.sleep(wait)
-            try:
-                parsed = await _hydrate_all(pool)
-                break
-            except Exception:  # noqa: BLE001
-                logging.getLogger(__name__).exception("archive hydrate retry")
+        parsed: _ArchiveLedgers | None = None
+        # A grind already running (the retry loop's) owns the ledgers;
+        # a second cursor folding into them would double-count. Leave
+        # it to finish and serve the window meanwhile.
+        if not _hydrate_progress["running"]:
+            for wait in (0.0, 1.0, 4.0):
+                if wait:
+                    await asyncio.sleep(wait)
+                try:
+                    parsed = await _hydrate_all(pool)
+                    break
+                except Exception:  # noqa: BLE001
+                    logging.getLogger(__name__).exception(
+                        "archive hydrate retry")
         if parsed is None:
             _ensure_hydrate_retry()
-            return _slim_relevant([a for _, _, _, a in new])
+            return None
     else:
         # Warm: the cache IS the archive (first-seen versions, exactly what
-        # the table holds under ON CONFLICT DO NOTHING), so append only this
+        # the table holds under ON CONFLICT DO NOTHING), so fold only this
         # refresh's genuinely-new activities. Re-reading and re-parsing the
         # WHOLE table here on every refresh was the API's memory ratchet:
         # each multi-MB parse landed in a fresh worker thread whose malloc
         # arena kept the freed pages, so RSS only ever went up (995 MB ->
         # 1,336 MB baseline over one morning, spikes to the 2 GB kill line
         # — observed 2026-08-03, three OOM restarts on the Standard
-        # instance). A new list, not in-place append: readers hold
-        # references to the old one mid-request.
-        parsed = _archive_cache["data"] + _slim_relevant(
-            [a for _, _, _, a in new])
+        # instance). IN PLACE, in `new` order (design D): the row form
+        # built a new list because readers held the old one mid-request;
+        # the ledgers can be folded in place because every reader takes
+        # its copy in one synchronous block on this same thread, so no
+        # request ever sees a half-folded refresh. fold() refuses an id
+        # the archive already represents -- _archived_ids is a week
+        # deep, so a DEEP_SWEEP can hand this path a row the table and
+        # the ledgers both already hold; the row form appended it again.
+        parsed = _archive_cache["data"]
+        parsed.fold_many(_slim_relevant([a for _, _, _, a in new]))
+        parsed.prune_ids(time.time())
 
     _archive_cache["data"], _archive_cache["ts"] = parsed, time.time()
     # Rolling snapshot refresh: keeps the one-read boot path fresh so the
-    # window union always covers the gap since it was written.
+    # window union always covers the gap since it was written. The
+    # records are materialised HERE, on the loop, before the packer
+    # thread is handed anything.
     if time.time() - _snap_state["at"] > _SNAP_REFRESH_S:
         _snap_state["at"] = time.time()   # claim before the slow save
         asyncio.get_running_loop().create_task(
-            _save_snapshot(pool, parsed, complete=True))
+            _save_snapshot(pool, parsed.to_rows(), complete=True))
     return parsed
 
 
@@ -1796,8 +2213,8 @@ async def track_record(since: str | None = None,
     # history until the retry task restores it — the fresh window always
     # serves, and nothing that ever settled can be pushed off the page by
     # an infrastructure hiccup.
-    archive = _archive_cache["data"] or []
-    if not archive and _hydrate_progress["rows"]:
+    archive: _ArchiveLedgers | None = _archive_cache["data"]
+    if not archive and _hydrate_progress["ledgers"]:
         # EMERGENCY PROMOTION (owner 2026-08-09 ~16:00Z: "front end still
         # stuck. Please fix it immediately"): the resumable hydrate had
         # read ~187k rows — the whole archive — but the crawling DB kept
@@ -1805,10 +2222,13 @@ async def track_record(since: str | None = None,
         # sat unused while the page served a thin window build. Progress
         # covering >=98% of known history IS the archive for serving
         # purposes; the fresh window union covers any tail, and the next
-        # completed pass replaces it wholesale.
-        done = len(_hydrate_progress["rows"])
+        # completed pass replaces it wholesale. `rows` is rows
+        # REPRESENTED by the ledgers being folded (design D), the same
+        # count the row list's length was.
+        progress: _ArchiveLedgers = _hydrate_progress["ledgers"]
+        done = progress.rows
         if done >= max(len(_archived_ids), 1) * 0.98:
-            archive = _hydrate_progress["rows"]
+            archive = progress
             # A promoted buffer is snapshot-worthy: persist it so the
             # NEXT boot is one small read, not another grind -- AS A
             # CHECKPOINT, never as a completion (third adversarial
@@ -1821,15 +2241,19 @@ async def track_record(since: str | None = None,
             # boot's short-circuit and re-persisted by the rolling save
             # for good: a silently truncated archive, the exact shape
             # the v1 -> v2 note above describes. The checkpoint carries
-            # the grind's cursor, so the next boot resumes from it.
+            # the grind's cursor, so the next boot resumes from it. The
+            # records are materialised here, on the loop, so the packer
+            # never iterates ledgers the grind is still folding into.
             if time.time() - _snap_state["at"] > _SNAP_REFRESH_S:
                 _snap_state["at"] = time.time()
                 from ..db import get_pool as _gp
                 _resume_from = _hydrate_progress["last"]
+                progress.prune_ids(time.time())
+                _records = progress.to_rows()
 
                 async def _snap_bg() -> None:
                     try:
-                        await _save_snapshot(await _gp(), archive,
+                        await _save_snapshot(await _gp(), _records,
                                              complete=False,
                                              last=_resume_from)
                     except Exception:  # noqa: BLE001
@@ -1866,20 +2290,22 @@ async def track_record(since: str | None = None,
                 "error": (f"history hydrating ({known_history} archived "
                           "activities not yet loaded); refusing to serve a "
                           "shrunken record — retry shortly")}
-    if archive:
-        seen_ids = {str(a.get("id") or "") for a in archive}
-        acts = archive + [a for a in window
-                          if str(a.get("id") or "") not in seen_ids]
-    else:
-        acts = window
     # Self-describing provenance: which activity source built this payload.
     # When the archive is unavailable the record silently loses everything
     # older than the venue's sliding window — that state must be visible in
-    # one curl, not deduced from shrunken totals.
+    # one curl, not deduced from shrunken totals. archive_rows is rows
+    # REPRESENTED (>= 531,313 after the v4 grind; the probe field keeps
+    # its meaning); the archive_* fields beside it are the ledgers'
+    # own sizes, the numbers memory actually scales with.
     source = {
         "activities_source": "archive+window" if archive else "venue_window",
-        "archive_rows": len(archive),
+        "archive_rows": archive.rows if archive else 0,
         "window_rows": len(window),
+        "archive_form": "ledgers_v4" if archive else None,
+        "archive_slugs": archive.slugs() if archive else 0,
+        "archive_ids": len(archive.ids) if archive else 0,
+        "archive_leftover": len(archive.leftover) if archive else 0,
+        "archive_unknown_ts": archive.unknown_ts if archive else 0,
     }
     attributed = copy_slugs = manual_slugs = None
     provenance = "live"
@@ -1965,12 +2391,29 @@ async def track_record(since: str | None = None,
             return out
         # Nothing persisted either (first boot against a dead DB):
         # size-cap-only is the only basis available; disclose it.
+    # ONE SYNCHRONOUS BLOCK from the id dedupe to build()'s copy of the
+    # ledgers, with no await between (design D, 2026-09-03). The
+    # archive is folded IN PLACE on this thread -- by the grind's
+    # chunks while a promoted buffer is being served, by every refresh
+    # once it is warm. A window row not yet in the id memory at this
+    # line is folded on top of the copy inside build(); had an await
+    # sat between the two, the grind could fold that same row into the
+    # archive first and the build would count it twice. The row form
+    # built its `acts` list in one synchronous step for the same
+    # reason. `activities` handed to build() is the archive's raw
+    # leftover plus the window remainder, in that order.
+    if archive:
+        acts = archive.leftover + [w for w in window
+                                   if str(w.get("id") or "") not in archive.ids]
+    else:
+        acts = window
     payload = {"configured": True, **source, "snapshot": snapshot,
                "provenance": provenance,
                **build(raw["positions"], acts, since_ts,
                        max_stake=max_stake, attributed=attributed,
                        copy_slugs=copy_slugs, max_abs_pnl=PNL_DISPLAY_CAP,
-                       manual_slugs=manual_slugs)}
+                       manual_slugs=manual_slugs,
+                       ledgers=archive or None)}
     # Monotonic guards: a fresh build thinner than the persisted
     # high-water (post-boot window still catching up) must not show the
     # owner fewer settled trades than he already saw — and a build whose

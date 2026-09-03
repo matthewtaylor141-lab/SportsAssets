@@ -106,17 +106,32 @@ class TestTheSnapshotIsVersionedWithTheFilter:
     execution never arrives.
     """
 
-    def test_the_key_is_v2(self):
+    def test_the_key_is_the_ledgers_v4_key(self):
         # v2 retired the pre-filter snapshots. v3 (2026-09-02) retired the
         # snapshots whose slim rows carry no resolution time, and was
         # ROLLED BACK on 2026-09-03: the full re-hydrate (531,313 rows vs
         # the v2 snapshot's 302,901) put the API process in the memory
-        # band where its heavy endpoints answer 502. The key returns to
-        # v3 only with a memory-safe archive (see the comment above
-        # _SNAP_KEY).
-        assert tr._SNAP_KEY.endswith("_v2"), (
-            "the v3 re-hydrate does not fit the API process; see the "
-            "rollback note above _SNAP_KEY before bumping again")
+        # band where its heavy endpoints answer 502. v4 (2026-09-03,
+        # design D) is the memory-safe archive that rollback note asked
+        # for: the snapshot holds the folded per-slug ledgers, not rows,
+        # under a NEW key NAME so that neither the v2 row nor a partial
+        # v3 checkpoint -- both lists of slim rows -- can ever be read
+        # as ledgers. The v2 row stays in ingestion_state, orphaned.
+        assert tr._SNAP_KEY == "track_record_archive_ledgers_v4"
+        assert not tr._SNAP_KEY.startswith("track_record_slim_archive"), (
+            "a ledgers snapshot must not share its key family with the "
+            "row-list snapshots it replaces; see the v2 -> v4 note above "
+            "_SNAP_KEY")
+
+    def test_a_row_list_snapshot_is_refused_as_ledgers(self):
+        """Belt and braces under the new key: even if a row-list
+        snapshot were written under it, the reader returns None and
+        the boot re-grinds rather than serving a misread archive."""
+        v2_rows = [tr._slim(
+            {"id": "a", "type": "ACTIVITY_TYPE_TRADE", "timestamp": 1,
+             "trade": {"marketSlug": "s", "qty": 2, "price": 0.5}})]
+        assert tr._ArchiveLedgers.from_rows(v2_rows) is None
+        assert tr._ArchiveLedgers.from_rows([]) is None
 
     def test_the_key_carries_a_version_at_all(self):
         import re
