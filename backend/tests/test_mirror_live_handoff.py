@@ -49,6 +49,7 @@ import re
 import sys
 import textwrap
 import types
+from pathlib import Path
 
 import pytest
 
@@ -198,7 +199,17 @@ class TestTheWakeHelperCannotRaiseOrTrade:
     def test_the_worker_is_never_imported_at_module_load(self):
         head = inspect.getsource(le).split("\ndef ", 1)[0]
         assert "mirror_live" not in head
-        assert MIRROR_LIVE not in sys.modules or sys.modules[MIRROR_LIVE] is None
+        # Once step 9 landed, sys.modules in THIS process says nothing:
+        # workers/all.py and the worker's own tests import it. The pin
+        # is that importing the executor alone does not, so it is asked
+        # of a fresh interpreter.
+        import subprocess
+        probe = ("import sys, sportsassets.live_executor; "
+                 f"sys.exit(0 if {MIRROR_LIVE!r} not in sys.modules else 3)")
+        rc = subprocess.run([sys.executable, "-c", probe],
+                            cwd=str(Path(__file__).resolve().parents[1]),
+                            capture_output=True, text=True, timeout=120)
+        assert rc.returncode == 0, (rc.returncode, rc.stderr[-800:])
 
     def test_it_touches_no_pool_and_no_venue(self):
         tree = ast.parse(textwrap.dedent(inspect.getsource(le._mirror_notify)))
@@ -282,20 +293,33 @@ class TestTheWakeHelperBehaviour:
         assert le._mirror_notify("0xc") is None
         assert calls == []
 
-    def test_real_absence_is_quiet(self, monkeypatch, caplog):
-        """No file, no package attribute, no sys.modules entry -- the
-        state of this tree before step 9 lands: no log line at all. The
-        from-import form used to raise a plain ImportError here and log
-        a traceback on every fill of a mirrored whale."""
-        import importlib.util
+    def test_the_real_worker_is_woken_quietly(self, monkeypatch, caplog):
+        """Step 9 has landed: with nothing patched, the gate's wake
+        reaches the REAL worker's notify (the condition lands in its
+        woken set and its event is set) and logs nothing; a wake with no
+        condition is a quiet no-op too. Before step 9 this test pinned
+        the quiet ABSENCE (no file, no attribute, no sys.modules entry);
+        that shape is now simulated by test_no_worker_module_is_a_no_op."""
+        import importlib
         import sportsassets.workers as _wpkg
-        assert importlib.util.find_spec(MIRROR_LIVE) is None, "step 9 has landed; retarget"
         monkeypatch.delitem(sys.modules, MIRROR_LIVE, raising=False)
         monkeypatch.delattr(_wpkg, "mirror_live", raising=False)
-        with caplog.at_level(logging.WARNING, logger="sportsassets.live_executor"):
-            assert le._mirror_notify("0xc") is None
-            assert le._mirror_notify(None) is None
-        assert caplog.records == []
+        ml = importlib.import_module(MIRROR_LIVE)
+        ml._WOKEN.clear()
+        ml._WAKE.clear()
+        try:
+            with caplog.at_level(logging.WARNING, logger="sportsassets.live_executor"):
+                assert le._mirror_notify("0xc") is None
+                assert "0xc" in ml._WOKEN and ml._WAKE.is_set()
+                ml._WOKEN.clear()
+                ml._WAKE.clear()
+                assert le._mirror_notify(None) is None
+                assert le._mirror_notify("") is None
+            assert caplog.records == []
+            assert ml._WOKEN == set()
+        finally:
+            ml._WOKEN.clear()
+            ml._WAKE.clear()
 
     def test_a_missing_dependency_inside_the_worker_is_named(self, monkeypatch, tmp_path, caplog):
         """ModuleNotFoundError for ANOTHER name is a bad deploy of the

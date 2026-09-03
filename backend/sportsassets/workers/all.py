@@ -18,8 +18,8 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from . import (analytics, chain_listener, copy_sweep, dispatcher, edge_marks,
-               metadata_refresher, mirror_shadow, poller, premap, price_path,
-               reconciler, roster, roster_auto, underdog, whale_exits)
+               metadata_refresher, mirror_live, mirror_shadow, poller, premap,
+               price_path, reconciler, roster, roster_auto, underdog, whale_exits)
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +62,16 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # writes it to mirror_shadow. NO ORDERS. Thirty games of shadow gate
     # phase P1 (long-only live) by the numbers.
     ("mirror_shadow", mirror_shadow.main),
+    # MONEY. POSITION MIRRORING, PHASE P1 (owner order 2026-09-02, "go for
+    # it, let's get this working"): the live reconciler behind
+    # mirror_shadow's plan -- long-only, post-only rests at his level,
+    # one standing live_orders row per book, every existing breaker
+    # honoured. Registered whatever PMUS_MIRROR says: with the flag off
+    # (the default) this is a CANCEL-ONLY loop that places nothing and
+    # reconciles whatever a previous process left resting, so a deploy
+    # that drops the flag cannot orphan a bid (spec section 3.7). The
+    # DB switch 'mirror_live' must read true before it increases.
+    ("mirror_live", mirror_live.main),
 ]
 
 
