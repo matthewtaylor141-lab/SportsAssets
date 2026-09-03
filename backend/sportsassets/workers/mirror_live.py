@@ -53,7 +53,12 @@ the rest of the tick cancel-only. The reviews that shaped this file are
 the P1 panel synthesis (critics C14-C16), the addendum's second-critic
 amendments (sections 7-11), the step-5/6a/rules reviews it carries and
 the step-9 worker review (owner order 2026-09-02, "go for it, let's get
-this working": thirteen findings, each pinned in the worker tests).
+this working": thirteen findings, each pinned in the worker tests) with
+its re-review (six minors: a lost order clears the take arm, the first
+post-only refusal starts the take clock, the first rest of a vanish
+starts the slippage clock, a candidate's unreadable market is named as
+such, a lost close is sized off this tick's walk, a closed book's rest
+is cancelled 'closed'; each pinned in the worker tests' section 13).
 """
 from __future__ import annotations
 
@@ -351,14 +356,20 @@ _SQL_REPLACES = """
 SELECT count(*) FROM mirror_orders
  WHERE book_id = $1 AND reason = 'replace' AND done_at > now() - interval '1 hour' /* ml-replaces */
 """
-# The flatten rest that starts the slippage clock is the NEWEST one of
+# The flatten rest that starts the slippage clock is the FIRST one of
 # the CURRENT vanish: still standing, or placed at or after the tick
-# the book entered the vanish (the plan's vanish_since). A min() over
-# every flatten rest the book ever placed let a rest cancelled two
-# hours ago -- he came back, the book went on -- send a fresh vanish
-# straight to close_position with no rest first (step-9 review).
+# the book entered the vanish (the plan's vanish_since). The predicate
+# bounds it to this vanish -- an unbounded min() over every flatten
+# rest the book ever placed let a rest cancelled two hours ago (he
+# came back, the book went on) send a fresh vanish straight to
+# close_position with no rest first (step-9 review). Within the vanish
+# the FIRST rest is the clock: a max() restarted the wait on every
+# re-quote, so a rest re-priced at +200 s reached the slippage path at
+# +500 s instead of +300 s, and a book he had LEFT sat at his level
+# for as long as the market kept moving (step-9 re-review; critic C16;
+# owner order 2026-09-02, "go for it, let's get this working").
 _SQL_FLATTEN_REST_SINCE = """
-SELECT max(extract(epoch FROM placed_at))::float8 FROM mirror_orders
+SELECT min(extract(epoch FROM placed_at))::float8 FROM mirror_orders
  WHERE book_id = $1 AND kind = 'flatten_vanished' AND tif IN ('GTC', 'GTD')
    AND (state IN ('placing', 'open', 'unknown')
         OR placed_at >= to_timestamp($2)) /* ml-flatten-since */
@@ -493,8 +504,15 @@ UPDATE mirror_books SET state = $2, last_reason = $3,
  WHERE id = $1 /* ml-book-state */
 """
 _SQL_BOOK_OPEN_ORDER = "UPDATE mirror_books SET open_order_id = $2, updated_at = now() WHERE id = $1 /* ml-book-open-order */"
+# THE FIRST REFUSAL STARTS THE TAKE CLOCK: an arm already set is kept,
+# never re-stamped. Every post-only 400 once wrote now(), and _act reads
+# the arm BEFORE it re-places, so at the 30 s poll a book that kept
+# crossing carried a 30-second-old arm on every tick and never took
+# (twelve refusals over 330 s, no IOC; step-9 re-review). An accepted
+# rest, a finished order or a lost one still clears it (_disarm_take).
 _SQL_BOOK_ARM = """
-UPDATE mirror_books SET take_armed_at = CASE WHEN $2 THEN now() ELSE NULL END, updated_at = now()
+UPDATE mirror_books SET take_armed_at = CASE WHEN $2 THEN COALESCE(take_armed_at, now()) ELSE NULL END,
+       updated_at = now()
  WHERE id = $1 /* ml-book-arm */
 """
 _SQL_BOOK_LEDGER_BUY = """
@@ -1175,17 +1193,26 @@ async def _reconcile_lost_close(t: _Tick, o: dict, book: dict) -> None:
     unreadable position or log leaves the row for the next tick; a
     delta the log cannot account for, or more than one seller on a
     sole-held slug, stays frozen by name for a human, never booked at
-    a guessed price."""
+    a guessed price.
+
+    The position is THIS TICK'S paced walk (step R, t.positions), the
+    one reading of the account the tick has: a le._pm_held here was a
+    second whole-account walk, up to fifty pages, outside venue_pace,
+    on every tick the lost row stood (step-9 re-review). A tick with
+    no walk -- SAFE and every cancel-only tick reconcile orders before
+    step R -- refuses by name and leaves the row: nothing is booked off
+    a position nobody read. The slippage flatten keeps its own
+    le._pm_held, as the spec writes it (section 2 F)."""
     t.nonterminal.add(book["id"])
     placed = float(o.get("placed_ts") or t.now)
     age = t.now - placed
     slug = o["us_market_slug"]
-    try:
-        held, _avg = await le._pm_held(slug)
-    except Exception as exc:  # noqa: BLE001 — unreadable: the row is left
-        log.warning("mirror_live: venue position for %s unreadable (%s); lost close on row %s "
-                    "left for the next tick", slug, type(exc).__name__, o["id"])
+    if t.positions is None:
+        _mirror_stop("positions_unreadable", o["whale"])
+        log.warning("mirror_live: no positions walk this tick; lost close on row %s left for "
+                    "the next tick", o["id"])
         return
+    held = float(t.positions.get(slug.lower(), 0.0))
     qty = int(o["qty"])
     sold = qty - int(held)
     if sold < 1:
@@ -1229,6 +1256,14 @@ async def _mark_lost(t: _Tick, o: dict, book: dict) -> None:
     await t.pool.execute(_SQL_BOOK_OPEN_ORDER, book["id"], None)
     o["state"] = "lost"
     t.nonterminal.discard(book["id"])
+    # A LOST ORDER FINISHES THE SAME WAY A FILLED OR CANCELLED ONE DOES:
+    # the take arm goes with it. The lost path once kept the arm a
+    # post-only 400 had set before the placement, so the book thawed
+    # (venue == ledger) with no rest standing and an hour-old arm, and
+    # the next tick fired one IOC the moment the ask touched the wire
+    # -- IOC-first, past the rest-first wait (step-9 re-review; critic
+    # C15; owner order 2026-09-02, "go for it, let's get this working")
+    await _disarm_take(t, book)
     _mirror_stop("order_lost", o["whale"])
     _recent(book["id"], "order_lost", order_row=o["id"])
 
@@ -1360,9 +1395,16 @@ async def _reconcile_open(t: _Tick, o: dict, book: dict, cancel_reason: str | No
             cancel_reason = t.cancel_all
         elif o["side"] == BUY and _increases_refusal(t, o["whale"]):
             cancel_reason = _increases_refusal(t, o["whale"])
-        elif book.get("state") in ("frozen", "closing", "closed"):
+        elif book.get("state") == "closed":
             # a CLOSED book's order is a rest nobody plans for: its
-            # fill would land on a retired row (step-9 review)
+            # fill would land on a retired row (step-9 review). Named
+            # 'closed' whatever the book was before: the settle and the
+            # episode close never clear frozen_reason, so a book frozen
+            # venue_ledger_disagree and then closed cancelled its rest
+            # under the stale freeze, and the ops reader saw a live
+            # disagreement on a book that had ended (step-9 re-review)
+            cancel_reason = "closed"
+        elif book.get("state") in ("frozen", "closing"):
             cancel_reason = book.get("frozen_reason") or book.get("state")
         elif t.now - float(o.get("placed_ts") or t.now) >= float(rules.MIRROR_REST_TTL_S):
             cancel_reason = "ttl"
@@ -2143,8 +2185,11 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
         await t.pool.execute(_SQL_ORDER_REASON, o["id"], f"post_only_rejected:{code}")
         _mirror_stop("post_only_rejected", w)
         if rules.take_arms(code):
+            # the statement's COALESCE: the first arm of this crossing
+            # spell stands, so the clock the take rule reads is the
+            # first refusal's, not this tick's
             await t.pool.execute(_SQL_BOOK_ARM, book["id"], True)
-            book["take_armed_ts"] = t.now
+            book["take_armed_ts"] = book.get("take_armed_ts") or t.now
         if code == 429 or "429" in str((raw or {}).get("error") or ""):
             _mirror_stop("rate_limited", w)
             _abandon(t, "rate_limited")
@@ -2415,6 +2460,19 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
         _mirror_stop("no_price", w)
         return
     mk = r.market
+    if mk is None:
+        # A MARKETS ROW THAT IS ABSENT OR COULD NOT BE READ IS THE NAMED
+        # REFUSAL, decided here: rules.admission fails closed on a None
+        # closed/resolved fact, but under its own name, `market_closed`,
+        # and an unreadable read once counted as a closed market on the
+        # census -- the reader could not tell a database blip from a
+        # settled game. The existing-book path names the same reading
+        # `market_unreadable` (step M) and the candidate now does too;
+        # the rules module is not this worker's to change (step-9
+        # re-review; owner order 2026-09-02, "go for it, let's get this
+        # working")
+        _mirror_stop("market_unreadable", w)
+        return
     ok, why = await le._mapping_admitted(t.pool, w, m.get("source"), slug)
     edge_ok, edge_why = edge_gate.verdict(w)
     his_slug = next((f.get("market_slug") for f in fills if f.get("market_slug")), None)
@@ -2461,8 +2519,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
         increases_refusal=_increases_refusal(t, w) or "mode_env_off",
         per_fill_usd=clip, family=copy_sports.market_type_of(slug),
         per_side=bool(m.get("per_side", False)),
-        market_closed=(None if mk is None else mk["closed"]),
-        market_resolved=(None if mk is None else mk["resolved"]),
+        market_closed=mk["closed"], market_resolved=mk["resolved"],
         game_too_far_out=le._game_too_far_out(slug),
         mapping_ok=bool(ok), mapping_why=why, edge_ok=bool(edge_ok), edge_why=edge_why,
         cell_ok=clause is None, cell_clause=clause, legacy_row=legacy,

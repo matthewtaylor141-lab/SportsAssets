@@ -47,7 +47,14 @@ SELL wire is priced off his unrounded equivalent; a lost CLOSE is
 reconciled from the venue's position; every venue read is paced; a
 live legacy row of any age refuses admission; a flat book closes on a
 confirmed vanish; a refused resting BUY is cancelled under the
-refusal's name.
+refusal's name. The same section pins the re-review's six minors: a
+lost order clears the take arm; the first post-only refusal starts
+the take clock (the fake's arm keeps the tick's clock and the
+worker's COALESCE); the first rest of a vanish starts the slippage
+clock through a re-quote; a candidate's unreadable market is
+`market_unreadable`; a lost CLOSE is sized off this tick's walk and
+refused by name without one; a closed book's rest is cancelled
+'closed' whatever froze it.
 """
 import asyncio
 import copy
@@ -347,12 +354,12 @@ class _Pool(_ShadowPool):
             return sum(1 for o in self.orders.values()
                        if o["book_id"] == a[0] and o["reason"] == "replace" and o["done_at"])
         if "ml-flatten-since" in s:
-            # the worker's predicate: the NEWEST flatten rest still standing
-            # or placed at/after the vanish began ($2)
+            # the worker's predicate: the FIRST flatten rest of THIS vanish
+            # -- still standing or placed at/after the vanish began ($2)
             ts = [o["placed_ts"] for o in self.orders.values()
                   if o["book_id"] == a[0] and o["kind"] == "flatten_vanished" and o["tif"] in ("GTC", "GTD")
                   and (o["state"] in ("placing", "open", "unknown") or o["placed_ts"] >= a[1])]
-            return max(ts) if ts else None
+            return min(ts) if ts else None
         if "ml-order-insert" in s:
             if self._nonterminal(a[0]):
                 raise _Unique('duplicate key value violates unique constraint '
@@ -480,7 +487,12 @@ class _Pool(_ShadowPool):
             self.books[a[0]]["open_order_id"] = a[1]
             return "UPDATE 1"
         if "ml-book-arm" in s:
-            self.books[a[0]]["take_armed_ts"] = NOW if a[1] else None
+            # the worker's COALESCE: an arm already set is kept; a new
+            # one is stamped with the tick's clock (the real now()). The
+            # fake once stamped the fixture NOW on every arm, which hid
+            # the re-stamping the re-review's minor 2 found
+            b = self.books[a[0]]
+            b["take_armed_ts"] = (b["take_armed_ts"] or self.clock) if a[1] else None
             return "UPDATE 1"
         if "ml-book-ledger-buy" in s:
             self.books[a[0]].update(ledger_net=a[1], avg_cost=a[2], gross_buy_usd=a[3],
@@ -1990,6 +2002,26 @@ def test_an_open_order_on_a_closed_book_is_cancelled_and_an_ops_capped_cancel_ne
     # market is a candidate again (episode 2), which is its own business
     assert b["state"] == "closed" and not [x for x in p.orders.values()
                                            if x["book_id"] == b["id"] and x["state"] != "cancelled"]
+    # frozen, then closed (the re-review's minor 6): the settle and the
+    # episode close never clear frozen_reason, so the cancel's name is
+    # the book's state, never the stale freeze
+    p = _pool()
+    b = p.add_book(ledger=0, state="closed", standing_status="cashed_out",
+                   frozen_reason="venue_ledger_disagree", frozen_ts=NOW - 600, frozen_ticks=4)
+    o = p.add_order(b)
+    v = _Venue()
+    v.rest("oid-1")
+    _tick(p, v)
+    assert _cancels(v) == [("cancel", "oid-1", SLUG)]
+    assert p.orders[o["id"]]["state"] == "cancelled" and p.orders[o["id"]]["reason"] == "closed"
+    # a book still FROZEN cancels under the freeze's name, as before
+    p = _pool()
+    b = p.add_book(ledger=0, state="frozen", frozen_reason="placement_lost", frozen_ts=NOW - 60)
+    o = p.add_order(b)
+    v = _Venue()
+    v.rest("oid-1")
+    _tick(p, v)
+    assert p.orders[o["id"]]["state"] == "cancelled" and p.orders[o["id"]]["reason"] == "placement_lost"
     monkeypatch.setattr(rules, "MIRROR_MAX_ORDER_OPS_PER_TICK", 1)
     p = _pool()
     a = p.add_book(ledger=0, updated_ts=NOW - 100)
@@ -2040,35 +2072,99 @@ def test_a_stale_take_arm_never_takes_a_fresh_rest_and_is_cleared_by_a_rest_or_a
     v4.rest("oid-1")
     _tick(p3, v4)
     assert p3.orders[o3["id"]]["state"] == "filled" and b3["take_armed_ts"] is None
+    # a LOST placement clears the arm too (the re-review's minor 1): an
+    # hour-old arm and a 'placing' row past the window with nothing on
+    # the book -> 'lost', the book thaws, a GTC rest goes out at the
+    # wire the ask sits on, never an IOC
+    p4 = _pool()
+    b4 = p4.add_book(ledger=0, take_armed_ts=NOW - 3600)
+    o4 = p4.add_order(b4, order_id=None, state="placing", placed_ts=NOW - le._LOST_FILL_WINDOW_S - 61)
+    v5 = _Venue(bid=0.30, ask=0.30, ioc_fill=300)
+    st5 = _tick(p4, v5)
+    assert p4.orders[o4["id"]]["state"] == "lost" and _census(st5, "order_lost") == 1
+    assert b4["take_armed_ts"] is None and b4["state"] == "live"
+    assert [c[5] for c in _places(v5)] == ["TIME_IN_FORCE_GOOD_TILL_CANCEL"] and _places(v5)[0][2] == 0.30
+    assert _census(st5, "take_placed") == 0 and _census(st5, "rest_placed") == 1 and b4["ledger_net"] == 0
+
+
+def test_the_first_post_only_refusal_starts_the_take_clock_under_the_thirty_second_poll():
+    """re-review minor 2. A book that keeps crossing at the 30 s poll:
+    every post-only 400 once re-stamped the arm, and _act reads the
+    arm before it re-places, so the arm was always 30 s old and the
+    take never fired. The FIRST refusal starts the clock: no IOC
+    before MIRROR_TAKE_AFTER_S of it, then exactly one, at the same
+    wire, and the book is on target."""
+    def _reject(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
+        if tif == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL":
+            return {"ok": True, "order_id": oid, "status": "filled", "fill_price": price,
+                    "filled_shares": float(qty), "raw": {}}
+        return {"ok": False, "order_id": None, "status": "post_only_rejected", "fill_price": None,
+                "filled_shares": 0.0, "raw": {"status_code": 400, "error": "400 crossing"}}
+    p = _pool()
+    b = p.add_book(ledger=0)
+    wait = float(rules.MIRROR_TAKE_AFTER_S)
+    iocs = []
+    for i in range(int(wait // 30) + 3):
+        now = NOW + 30 * i
+        # the venue holds what the ledger holds (venue == ledger after
+        # the take fills, so the last ticks read on_target, not a freeze)
+        v = _Venue(bid=0.30, ask=0.30, place=_reject, held={SLUG: int(b["ledger_net"])})
+        st = _tick(p, v, now=now)
+        ioc = [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
+        if now - NOW < wait:
+            assert not ioc and b["take_armed_ts"] == NOW and b["ledger_net"] == 0, i
+            assert _census(st, "post_only_rejected") == 1 and _census(st, "take_placed") == 0, i
+        iocs += [(now, c) for c in ioc]
+    assert len(iocs) == 1
+    at, c = iocs[0]
+    assert at - NOW >= wait and c[2] == 0.30 and c[3] == 300
+    assert b["ledger_net"] == 300 and b["take_armed_ts"] is None
+    assert _census(st, "on_target") == 1 and not _places(v)
+    sql = _flat(ml._SQL_BOOK_ARM)
+    assert "take_armed_at = CASE WHEN $2 THEN COALESCE(take_armed_at, now()) ELSE NULL END" in sql
 
 
 def test_a_flatten_rest_from_an_earlier_vanish_never_skips_the_rest_first_rule():
     """minor 3. A flatten rest cancelled two hours ago (he came back)
     is not this vanish's rest: a fresh rest first, close_position only
     after MIRROR_FLATTEN_REST_S of it; the plan carries the vanish
-    clock."""
+    clock. And within THIS vanish the FIRST rest is the clock (the
+    re-review's minor 3): a re-quote at +200 s does not restart it, so
+    the slippage path runs at +301 s, not +501 s."""
     p = _pool(fills=_his(300, sold=300), snap=None)
     b = p.add_book(ledger=300)
     p.add_order(b, side=SELL, wire=0.32, qty=300, kind="flatten_vanished", state="cancelled",
                 placed_ts=NOW - 7200, done_at=NOW - 7000, order_id=None)
     gone = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0}])
-    v = _Venue(held={SLUG: 300})
+    v = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32)
     st = _tick(p, v, http=gone)
     assert "close" not in _kinds(v) and _census(st, "flatten_rested") == 1
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][4] is True and pl[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL"
+    assert len(pl) == 1 and pl[0][4] is True and pl[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL" and pl[0][2] == 0.32
     assert b["last_plan"]["vanish_since"] == NOW and b["last_plan"]["kind"] == "flatten_vanished"
-    v2 = _Venue(held={SLUG: 300})
-    v2.orders = v.orders
-    _tick(p, v2, now=NOW + rules.MIRROR_FLATTEN_REST_S - 1, http=gone)
-    assert "close" not in _kinds(v2) and not _cancels(v2) and b["last_plan"]["vanish_since"] == NOW
-    v3 = _Venue(held={SLUG: 300})
+    # the ask moved: the rest is re-quoted at +200 (a second rest of
+    # this vanish, placed at +200), the vanish clock unchanged
+    v2 = _Venue(held={SLUG: 300}, bid=0.33, ask=0.34)
+    v2.orders, v2.n = v.orders, v.n            # the same book, the id counter carried
+    st2 = _tick(p, v2, now=NOW + 200, http=gone)
+    assert ("cancel", "oid-1", SLUG) in v2.calls and "close" not in _kinds(v2) and st2["requotes"] == 1
+    pl2 = _places(v2)
+    assert len(pl2) == 1 and pl2[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL" and pl2[0][2] == 0.34
+    assert b["last_plan"]["vanish_since"] == NOW
+    rests = sorted(o["placed_ts"] for o in p.orders.values()
+                   if o["kind"] == "flatten_vanished" and o["tif"] == "GTC" and o["placed_ts"] >= NOW)
+    assert rests == [NOW, NOW + 200]
+    v3 = _Venue(held={SLUG: 300}, bid=0.33, ask=0.34)
     v3.orders = v.orders
-    st3 = _tick(p, v3, now=NOW + rules.MIRROR_FLATTEN_REST_S + 1, http=gone)
-    assert ("cancel", "oid-1", SLUG) in v3.calls and ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v3.calls
-    assert b["ledger_net"] == 0 and st3["flattened"] == 1
+    _tick(p, v3, now=NOW + rules.MIRROR_FLATTEN_REST_S - 1, http=gone)
+    assert "close" not in _kinds(v3) and not _cancels(v3) and b["last_plan"]["vanish_since"] == NOW
+    v4 = _Venue(held={SLUG: 300}, bid=0.33, ask=0.34)
+    v4.orders = v.orders
+    st4 = _tick(p, v4, now=NOW + rules.MIRROR_FLATTEN_REST_S + 1, http=gone)
+    assert ("cancel", "oid-2", SLUG) in v4.calls and ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v4.calls
+    assert b["ledger_net"] == 0 and st4["flattened"] == 1
     sql = _flat(ml._SQL_FLATTEN_REST_SINCE)
-    assert "max(extract(epoch FROM placed_at))" in sql and "min(" not in sql
+    assert "min(extract(epoch FROM placed_at))" in sql and "max(" not in sql
     assert "state IN ('placing', 'open', 'unknown') OR placed_at >= to_timestamp($2)" in sql
 
 
@@ -2307,6 +2403,79 @@ def test_a_refused_resting_buy_is_cancelled_under_the_refusals_name(monkeypatch)
     v3.rest("oid-1")
     _tick(p3, v3)
     assert p3.orders[o3["id"]]["state"] == "cancelled" and p3.orders[o3["id"]]["reason"] == "edge_gate:unfunded"
+
+
+def test_a_candidate_with_no_readable_markets_row_is_named_market_unreadable():
+    """re-review minor 4. A candidate whose markets row is absent or
+    could not be read is `market_unreadable`, the name the existing-
+    book path gives the same reading -- never `market_closed`, the
+    rules module's fail-closed default, which read as a settled game.
+    No book, no order."""
+    for shape in ("absent", "raises"):
+        p = _pool()
+        if shape == "absent":
+            del p.markets[CID]
+        else:
+            p.raise_on.append(("ml-market", RuntimeError("blip")))
+        v = _Venue()
+        st = _tick(p, v)
+        assert _census(st, "market_unreadable") == 1 and _census(st, "market_closed") == 0, shape
+        assert not p.books and not p.orders and not _places(v), shape
+    # a readable closed row is still market_closed, by the rules module
+    p = _pool()
+    p.markets[CID] = {"closed": True, "resolved": False, "resolved_prices": None}
+    st = _tick(p, _Venue())
+    assert _census(st, "market_closed") == 1 and _census(st, "market_unreadable") == 0 and not p.books
+
+
+def test_a_lost_close_is_sized_off_this_ticks_positions_walk_never_a_second_one(monkeypatch):
+    """re-review minor 5. The lost CLOSE row reads the sold shares from
+    the tick's ONE paced positions walk (step R): no le._pm_held -- a
+    whole-account walk outside venue_pace -- on any tick the row
+    stands. A tick with no walk (SAFE reconciles orders before step R)
+    refuses by name and leaves the row: nothing booked, nothing
+    placed."""
+    held_calls = []
+
+    async def _never(slug):
+        held_calls.append(slug)
+        raise AssertionError("a second positions walk")
+    monkeypatch.setattr(le, "_pm_held", _never)
+    gone = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0}])
+    sell = {"side": "SELL", "ts": NOW - 80, "order_id": "close-9", "order_qty": None, "order_price": None}
+
+    def _shape():
+        p = _pool(fills=_his(300, sold=300), snap=None)
+        b = p.add_book(ledger=300, state="frozen", frozen_reason="placement_lost", frozen_ts=NOW - 100)
+        o = p.add_order(b, side=SELL, wire=0.0, qty=300, kind="flatten_vanished", tif="CLOSE",
+                        order_id=None, state="placing", placed_ts=NOW - 90)
+        v = _Venue(held={SLUG: 0}, trades=[{**sell, "qty": 300.0, "price": 0.29}])
+        walks = []
+        orig = v.portfolio.positions
+        v.portfolio.positions = lambda q: walks.append(q) or orig(q)
+        return p, b, o, v, walks
+    p, b, o, v, walks = _shape()
+    st = _tick(p, v, http=gone)
+    assert not held_calls and len(walks) == 1 and _census(st, "book_error") == 0
+    assert o["state"] == "filled" and o["order_id"] == "close-9" and o["booked_filled"] == 300.0
+    assert b["ledger_net"] == 0 and b["state"] == "closed" and _census(st, "closed_cashed_out") == 1
+    # the venue still holds the shares: nothing sold, frozen by name,
+    # still off this tick's walk
+    p, b, o, v, walks = _shape()
+    v.portfolio.held = {SLUG: 300}
+    st = _tick(p, v, http=gone)
+    assert not held_calls and len(walks) == 1 and o["state"] == "placing" and b["ledger_net"] == 300
+    assert b["frozen_reason"] == "placement_lost" and "trades" not in _kinds(v)
+    # no walk this tick: SAFE
+    monkeypatch.delenv("PMUS_MIRROR")
+    p, b, o, v, walks = _shape()
+    st = _tick(p, v, http=gone)
+    assert st["mode"] == "safe" and not walks and not held_calls
+    assert _census(st, "positions_unreadable") == 1 and _census(st, "book_error") == 0
+    assert o["state"] == "placing" and b["ledger_net"] == 300 and b["state"] == "frozen"
+    assert not _places(v) and "trades" not in _kinds(v)
+    src = inspect.getsource(ml._reconcile_lost_close)
+    assert "le._pm_held(" not in src and "t.positions.get(slug.lower()" in src
 
 
 # ------------------------------------------------ 12. the census coverage
