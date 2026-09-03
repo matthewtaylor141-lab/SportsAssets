@@ -54,7 +54,14 @@ worker's COALESCE); the first rest of a vanish starts the slippage
 clock through a re-quote; a candidate's unreadable market is
 `market_unreadable`; a lost CLOSE is sized off this tick's walk and
 refused by name without one; a closed book's rest is cancelled
-'closed' whatever froze it.
+'closed' whatever froze it. Section 14 pins the residuals that
+re-review left (task 7) and the to-a-tee program's Phase 7 rung 1
+seam: the take arm's evidence is bounded -- cleared when the book
+leaves his level with no rest standing, refused by name past twice
+the wait so the book rests first; a CLOSING book's residual rest is
+cancelled 'closing', never under its stale freeze; _place hands
+take_arms the raw dict, so the venue's 200-REJECTED refusal shape arms
+the take and every earlier shape reads as it did.
 """
 import asyncio
 import copy
@@ -2476,6 +2483,191 @@ def test_a_lost_close_is_sized_off_this_ticks_positions_walk_never_a_second_one(
     assert not _places(v) and "trades" not in _kinds(v)
     src = inspect.getsource(ml._reconcile_lost_close)
     assert "le._pm_held(" not in src and "t.positions.get(slug.lower()" in src
+
+
+# ------------------ 14. the minors re-review's residuals and the Phase 7 seam
+
+def _refusal(raw, order_id=None):
+    """A venue whose every rest is a post-only refusal carrying `raw`
+    (the adapter's `post_only_rejected` with the facts in raw), and
+    whose every IOC fills at the wire."""
+    def _place(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
+        if tif == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL":
+            return {"ok": True, "order_id": oid, "status": "filled", "fill_price": price,
+                    "filled_shares": float(qty), "raw": {}}
+        return {"ok": False, "order_id": (oid if order_id else None), "status": "post_only_rejected",
+                "fill_price": None, "filled_shares": 0.0, "raw": dict(raw)}
+    return _place
+
+
+_SHAPE_200 = {"status_code": 200, "order_state": "ORDER_STATE_REJECTED",
+              "execution_type": "EXECUTION_TYPE_REJECTED", "post_only_cross": True,
+              "reject_reason": "post_only_cross", "text": None}
+
+
+def _room_holder(monkeypatch, day):
+    """The sleeve's day room, adjustable between ticks: 0.1 is a room
+    the clip cannot fit (over_room), a large one fits everything."""
+    room = {"day": day}
+
+    async def _room(pool, cfg):
+        return room["day"], 1e9
+    monkeypatch.setattr(le, "_copy_day_room", _room)
+    return room
+
+
+def test_the_venues_200_refusal_shape_arms_the_take_and_the_400_shapes_read_as_before():
+    """The worker seam of the to-a-tee program's Phase 7 rung 1: _place
+    hands take_arms the RAW DICT, so the venue's second post-only
+    refusal shape (a 200 whose order came back REJECTED with an
+    execution of type REJECTED; the adapter's _post_only_cross) arms
+    the take, and the rejected row names the order the venue minted.
+    Every shape the adapter produced before reads as it did: a 400
+    dict arms, a 429 dict does not, an empty raw does not (None did
+    not), a 200 dict without the flag does not (the bare 200 did not)."""
+    src = inspect.getsource(ml._place)
+    assert "rules.take_arms(raw if isinstance(raw, dict) else code)" in src
+    p = _pool()
+    b = p.add_book(ledger=0)
+    st = _tick(p, _Venue(bid=0.30, ask=0.30, place=_refusal(_SHAPE_200, order_id=True)))
+    assert _census(st, "post_only_rejected") == 1 and b["take_armed_ts"] == NOW
+    o = next(iter(p.orders.values()))
+    assert o["state"] == "rejected" and o["reason"] == "post_only_rejected:200"
+    assert o["order_id"] == "oid-1", "the 200 shape minted an order; the row names it"
+    assert not st["abandoned"] and _census(st, "take_placed") == 0
+    # the armed take fires after the wait, at or through, as ONE IOC
+    v = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
+    st2 = _tick(p, v, now=NOW + rules.MIRROR_TAKE_AFTER_S + 1)
+    pl = _places(v)
+    assert len(pl) == 1 and pl[0][5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" and pl[0][2] == 0.30
+    assert _census(st2, "take_placed") == 1 and b["take_armed_ts"] is None and b["ledger_net"] == 300
+    # the shapes the adapter produced before, exactly as before
+    for raw, arms, oid in (({"status_code": 400, "error": "400 crossing"}, True, None),
+                           ({"status_code": 429, "error": "429 slow down"}, False, None),
+                           ({}, False, None),
+                           ({"status_code": 200}, False, None),
+                           ({"status_code": 200, "post_only_cross": True}, False, None),
+                           ({"status_code": "400"}, False, None)):
+        p2 = _pool()
+        b2 = p2.add_book(ledger=0)
+        st3 = _tick(p2, _Venue(bid=0.30, ask=0.30, place=_refusal(raw)))
+        assert _census(st3, "post_only_rejected") == 1, raw
+        assert (b2["take_armed_ts"] == NOW) is arms, raw
+        o2 = next(iter(p2.orders.values()))
+        assert o2["state"] == "rejected" and o2["order_id"] is oid, raw
+        assert o2["reason"] == f"post_only_rejected:{raw.get('status_code')}", raw
+
+
+def test_a_take_arm_older_than_twice_the_wait_is_refused_by_name_and_the_book_rests_first(monkeypatch):
+    """Task 7, residual 1. The arm is read in _act BEFORE the room and
+    the clip, so it survived every tick where _act never reached
+    _place: armed at T0 by a crossing refusal, three ticks the room
+    refused (over_room, no placement), and at +3600 -- the book still
+    crossing, the room back -- one IOC went out with no rest ever at
+    the level. Now: within twice the wait the arm stands through the
+    refused ticks (the take window), past it the arm is stale by name
+    (`take_arm_stale`), the book RESTS FIRST as a post-only GTC at the
+    wire and no IOC is placed."""
+    room = _room_holder(monkeypatch, 1e9)
+    p = _pool()
+    b = p.add_book(ledger=0)
+    st = _tick(p, _Venue(bid=0.30, ask=0.30, place=_refusal({"status_code": 400})))
+    assert b["take_armed_ts"] == NOW and _census(st, "post_only_rejected") == 1
+    room["day"] = 0.1
+    for dt in (30, rules.MIRROR_TAKE_AFTER_S + 30, 2 * rules.MIRROR_TAKE_AFTER_S):
+        v = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
+        st = _tick(p, v, now=NOW + dt)
+        assert not _places(v) and _census(st, "over_room") == 1, dt
+        assert b["take_armed_ts"] == NOW and _census(st, "take_arm_stale") == 0, dt
+    room["day"] = 1e9
+    p.snap_at = NOW + 3600 - 40
+    v = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
+    st = _tick(p, v, now=NOW + 3600)
+    pl = _places(v)
+    assert [c[5] for c in pl] == ["TIME_IN_FORCE_GOOD_TILL_CANCEL"], pl
+    assert pl[0][2] == 0.30 and pl[0][7] is True, "a post-only rest at the wire, never an IOC"
+    assert _census(st, "take_arm_stale") == 1 and _census(st, "take_placed") == 0
+    assert _census(st, "rest_placed") == 1 and b["take_armed_ts"] is None and b["ledger_net"] == 0
+    assert any(x["what"] == "take_disarmed" and x.get("why") == "take_arm_stale" for x in ml._RECENT)
+    # the bound is a multiplier of the rules' wait, never a wait of its own
+    assert ml.TAKE_ARM_STALE_WAITS == 2
+    src = inspect.getsource(ml._act)
+    assert "float(TAKE_ARM_STALE_WAITS) * float(rules.MIRROR_TAKE_AFTER_S)" in src
+
+
+def test_a_take_arm_is_cleared_when_the_book_leaves_his_level_and_the_next_refusal_restarts_the_clock(monkeypatch):
+    """Task 7, residual 1, the other bound. Armed at T0 by a crossing
+    refusal; at +30 the ask has left the wire and the room refuses the
+    clip (nothing placed): the arm is cleared, because the crossing it
+    witnessed has ended. At +60 the book crosses again and the venue
+    refuses again: the arm is stamped +60 (the COALESCE has nothing to
+    keep), so no IOC goes out at +120 off the T0 clock, and exactly one
+    at +60 plus the wait."""
+    room = _room_holder(monkeypatch, 1e9)
+    p = _pool()
+    b = p.add_book(ledger=0)
+    _tick(p, _Venue(bid=0.30, ask=0.30, place=_refusal({"status_code": 400})))
+    assert b["take_armed_ts"] == NOW
+    room["day"] = 0.1
+    v = _Venue(bid=0.30, ask=0.32, ioc_fill=300.0)
+    st = _tick(p, v, now=NOW + 30)
+    assert not _places(v) and _census(st, "over_room") == 1
+    assert b["take_armed_ts"] is None and _census(st, "take_arm_stale") == 0
+    assert any(x["what"] == "take_disarmed" and x.get("why") == "market_away" for x in ml._RECENT)
+    room["day"] = 1e9
+    wait = float(rules.MIRROR_TAKE_AFTER_S)
+    st = _tick(p, _Venue(bid=0.30, ask=0.30, place=_refusal({"status_code": 400})), now=NOW + 60)
+    assert b["take_armed_ts"] == NOW + 60 and _census(st, "post_only_rejected") == 1
+    v = _Venue(bid=0.30, ask=0.30, place=_refusal({"status_code": 400}))
+    st = _tick(p, v, now=NOW + wait + 1)
+    assert not [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
+    assert b["take_armed_ts"] == NOW + 60 and b["ledger_net"] == 0
+    v = _Venue(bid=0.30, ask=0.30, place=_refusal({"status_code": 400}))
+    st = _tick(p, v, now=NOW + 60 + wait + 1)
+    ioc = [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
+    assert len(ioc) == 1 and ioc[0][2] == 0.30 and _census(st, "take_placed") == 1
+    assert b["ledger_net"] == 300 and b["take_armed_ts"] is None
+    # a standing rest is never touched by either bound: the rest's own
+    # age is the wait, as before
+    p2 = _pool()
+    b2 = p2.add_book(ledger=0, take_armed_ts=NOW - 3600)
+    o2 = p2.add_order(b2, placed_ts=NOW - 5)
+    v2 = _Venue(bid=0.30, ask=0.32)
+    v2.rest("oid-1")
+    st2 = _tick(p2, v2)
+    assert not _places(v2) and not _cancels(v2) and _census(st2, "open_order_pending") == 1
+    assert p2.orders[o2["id"]]["state"] == "open" and b2["take_armed_ts"] == NOW - 3600
+
+
+def test_a_closing_books_rest_is_cancelled_closing_never_under_its_stale_freeze():
+    """Task 7, residual 2 (the minor-6 pin extended to 'closing'). A
+    book frozen venue_ledger_disagree whose market then closed is
+    'closing' with the freeze's name still on it (step M's write never
+    clears frozen_reason); its residual rest -- the cancel step M sent
+    was ops-capped, and this tick's step O is the one that lands -- is
+    cancelled under the book's STATE, never the stale freeze. A book
+    still FROZEN cancels under the freeze's name, as before."""
+    p = _pool()
+    b = p.add_book(ledger=0, state="closing", frozen_reason="venue_ledger_disagree",
+                   frozen_ts=NOW - 600, frozen_ticks=4)
+    o = p.add_order(b)
+    v = _Venue()
+    v.rest("oid-1")
+    st = _tick(p, v)
+    assert _cancels(v) == [("cancel", "oid-1", SLUG)]
+    assert p.orders[o["id"]]["state"] == "cancelled" and p.orders[o["id"]]["reason"] == "closing"
+    assert b["state"] == "closing" and not _places(v) and _census(st, "market_closed") == 0
+    p = _pool()
+    b = p.add_book(ledger=0, state="frozen", frozen_reason="venue_ledger_disagree",
+                   frozen_ts=NOW - 600, frozen_ticks=4)
+    o = p.add_order(b)
+    v = _Venue()
+    v.rest("oid-1")
+    _tick(p, v)
+    assert p.orders[o["id"]]["state"] == "cancelled"
+    assert p.orders[o["id"]]["reason"] == "venue_ledger_disagree"
+    src = inspect.getsource(ml._reconcile_open)
+    assert 'in ("closed", "closing")' in src and 'cancel_reason = str(book["state"])' in src
 
 
 # ------------------------------------------------ 12. the census coverage

@@ -21,6 +21,7 @@ thread. No function is reachable unless PMUS_KEY_ID/PMUS_SECRET_KEY are set.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import unicodedata
 from difflib import SequenceMatcher
@@ -2114,6 +2115,153 @@ def _post_only_refusal(exc: BaseException, prev_order: dict) -> dict | None:
                     "body": body}}
 
 
+# The SDK's enum strings for the second refusal shape, quoted from the
+# installed polymarket_us package, types/orders.py: OrderState line 31
+# is "ORDER_STATE_REJECTED", ExecutionType line 40 is
+# "EXECUTION_TYPE_REJECTED". Named once here so the reader
+# (_post_only_cross) and the rules side (mirror_live_rules.take_arms,
+# which compares raw["execution_type"] against the same literal) can
+# never drift on a typo.
+_ORDER_STATE_REJECTED = "ORDER_STATE_REJECTED"
+_EXECUTION_TYPE_REJECTED = "EXECUTION_TYPE_REJECTED"
+
+
+def _commission_fields(rec: Any) -> tuple[float | None, float | None]:
+    """(commission_usd, commission_spread_px) as the venue stated them
+    on one execution or order record; None for each the venue did not
+    state, never a guess.
+
+    Phase 7 rung 10 of the to-a-tee program (owner order 2026-09-02,
+    "I want us to match everything ... mirror the whales to a tee"):
+    the fee formula behind feeCoefficient 0.06 is unread and no
+    commission VALUE has ever been observed, only the keys (the
+    2026-09-02 21:52Z probe printed every execution with keys
+    commissionNotionalCollected and commissionSpreadPx and no value).
+    The SDK types commissionNotionalCollected as an Amount on the
+    Execution and commissionNotionalTotalCollected as an Amount on the
+    Order (types/orders.py:90,:108); commissionSpreadPx is in the
+    venue's wire but not in the SDK type, so its shape is unobserved
+    and it is read as an Amount or a bare scalar and nothing else. A
+    bool is refused: True is not one dollar. Both keys are additive
+    logging for the M17 metric ("commission non-null on 100% of mirror
+    executions"); no rule keys on them (D14).
+
+    A non-finite reading ("nan", "inf", "Infinity", "1e400", or the
+    float itself) is refused as None too (the pmus re-review): the
+    record goes into the order row through json.dumps, which writes
+    those floats as the bare tokens NaN / Infinity that the row's jsonb
+    column rejects, so one such value from the venue would fail the
+    whole row write. Unknown is None, never a poison float."""
+    if not isinstance(rec, dict):
+        return None, None
+    usd_raw = rec.get("commissionNotionalCollected")
+    if usd_raw is None:
+        usd_raw = rec.get("commissionNotionalTotalCollected")
+    spread_raw = rec.get("commissionSpreadPx")
+
+    def _read(v: Any) -> float | None:
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, dict) and isinstance(v.get("value"), bool):
+            return None
+        f = _opt_float(v)
+        if f is None or not math.isfinite(f):
+            return None
+        return f
+
+    return _read(usd_raw), _read(spread_raw)
+
+
+def _execution_record(ex: Any) -> dict:
+    """One venue execution -> the mirror's execution record: the fields
+    the fill reader already uses (type, price, shares, the order's
+    state) plus the venue's commission fields (Phase 7 rung 10). The
+    raw execution stays in raw["response"] untouched; this record is
+    the parsed, JSON-safe view beside it."""
+    if not isinstance(ex, dict):
+        ex = {}
+    order = ex.get("order") if isinstance(ex.get("order"), dict) else {}
+    usd, spread = _commission_fields(ex)
+    return {
+        "id": ex.get("id"),
+        "type": ex.get("type"),
+        "order_state": order.get("state"),
+        "last_px": _opt_float(ex.get("lastPx")),
+        "last_shares": _opt_float(ex.get("lastShares")),
+        "trade_id": ex.get("tradeId"),
+        "aggressor": (ex.get("aggressor")
+                      if isinstance(ex.get("aggressor"), bool) else None),
+        "transact_time": ex.get("transactTime"),
+        "reject_reason": ex.get("orderRejectReason"),
+        "text": ex.get("text"),
+        "commission_usd": usd,
+        "commission_spread_px": spread,
+    }
+
+
+def _post_only_cross(resp: Any, prev_order: dict, records: list[dict],
+                     filled: float) -> dict | None:
+    """The venue's refusal of a post-only order delivered as a 200
+    (the second refusal shape), or None when the response is anything
+    else and the normal fill reading stands.
+
+    Phase 7 rung 1 of the to-a-tee program (owner order 2026-09-02):
+    the first live post-only rest must print BOTH refusal shapes from
+    the venue, because the venue can answer a crossing post-only order
+    either with an HTTP 400 (today's path, _post_only_refusal) or with
+    a 200 whose order comes back in state ORDER_STATE_REJECTED carrying
+    an execution of type EXECUTION_TYPE_REJECTED (the SDK names both,
+    types/orders.py:31 and :40; the venue has never yet been observed
+    sending either on a post-only order, so this reader is the probe's
+    instrument, not a guess at which one it uses). The rules side
+    (take_arms) arms a take on either shape and on nothing else.
+
+    Fail closed toward "not a refusal": this returns the refusal dict
+    only when an execution of the REJECTED type sits on an order in
+    the REJECTED state AND the filled share count is exactly zero. A
+    response that filled anything is a fill whatever its last state
+    says (the 2026-08-21 audit: shares that executed ARE the fill), so
+    it goes back to the caller as one and never as a refusal. A share
+    count the venue printed as NaN or negative is not "nothing filled"
+    either, it is unreadable, and unreadable never becomes a refusal
+    (the pmus re-review): the normal fill reading stands and the row
+    records what the venue said, exactly as it does for every caller
+    without the flag. The order_id
+    rides in the result and in raw, because unlike the 400 shape the
+    venue did mint an order here and the row must be able to name it.
+    post_only_cross is True by construction, exactly as every 4xx under
+    the flag counts as a refusal (D15: no venue refusal text exists in
+    any log to classify on); orderRejectReason and text ride beside it
+    for the refusal_text census that will read them."""
+    # `filled != 0` and not `filled > 0`: NaN compares False to
+    # everything, so a `> 0` gate would let an unreadable count through
+    # as a refusal, and a negative count is not zero either.
+    if not isinstance(resp, dict) or filled != 0:
+        return None
+    hit = None
+    for rec in records:
+        if rec.get("type") == _EXECUTION_TYPE_REJECTED \
+                and rec.get("order_state") == _ORDER_STATE_REJECTED:
+            hit = rec
+            break
+    if hit is None:
+        return None
+    order_id = resp.get("id")
+    return {"ok": False, "order_id": order_id,
+            "status": "post_only_rejected",
+            "fill_price": None, "filled_shares": 0.0,
+            "raw": {"preview": prev_order,
+                    "status_code": 200,
+                    "order_state": _ORDER_STATE_REJECTED,
+                    "execution_type": _EXECUTION_TYPE_REJECTED,
+                    "post_only_cross": True,
+                    "order_id": order_id,
+                    "reject_reason": hit.get("reject_reason"),
+                    "text": hit.get("text"),
+                    "response": resp,
+                    "executions": records}}
+
+
 def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
                sell: bool = False,
                tif: str = "TIME_IN_FORCE_FILL_OR_KILL",
@@ -2291,6 +2439,31 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
     # 2026-08-21). The edge adapter has always used filled > 0 alone.
     ok = filled > 0
     fill_price = round(notional / filled, 4) if filled > 0 else None
+    if post_only:
+        # Everything Phase 7 adds to the return rides ONLY under the
+        # flag (owner order 2026-09-02; the pmus re-review's
+        # parallel-safe rule: a submit_fok return-shape change is felt
+        # by every caller). The mirror lane is the only post_only
+        # caller and the only one the M17 metric reads, so the parsed
+        # execution records with the commission fields are built and
+        # attached here alone, and the second refusal shape is read
+        # here alone, exactly like the 4xx above: a 200 + REJECTED for
+        # any other caller keeps today's reading ('rejected', ok False,
+        # the order_id). raw["response"] and every existing key are
+        # untouched under the flag too.
+        records = [_execution_record(ex) for ex in executions]
+        cross = _post_only_cross(resp, prev_order, records, filled)
+        if cross is not None:
+            return cross
+        return {"ok": ok, "order_id": order_id,
+                "status": state.replace("ORDER_STATE_", "").lower() or "unknown",
+                "fill_price": fill_price, "filled_shares": filled,
+                "raw": {"preview": prev_order, "response": resp,
+                        "executions": records}}
+    # The flag-off return is byte-for-byte the pre-Phase-7 literal (the
+    # same keys in the same order, so str(raw) and json.dumps(raw), which
+    # live_executor persists as the error column, never move); the
+    # fixtures in tests/test_pmus_commission.py pin it as literals.
     return {"ok": ok, "order_id": order_id,
             "status": state.replace("ORDER_STATE_", "").lower() or "unknown",
             "fill_price": fill_price, "filled_shares": filled,
@@ -2540,11 +2713,30 @@ def recent_trades(us_market_slug: str, since_ts: float,
 
 
 def order_status(order_id: str) -> dict | None:
-    """One order by id, normalized; None if the venue has no record."""
+    """One order by id, normalized; None if the venue has no record.
+
+    Additive since Phase 7 rung 10 (owner order 2026-09-02): the
+    order's own commission fields (the SDK types
+    commissionNotionalTotalCollected on the Order, types/orders.py:90)
+    as commission_usd / commission_spread_px, None when the venue did
+    not state them, and "executions": the parsed records when the
+    venue's read-back carries an executions list (GetOrderResponse
+    types only `order`, types/orders.py:177-180, so the list is read
+    when present and reported as None, not [], when absent: "the venue
+    sent no list" is not "the venue sent an empty one"). _norm_order
+    itself is unchanged so the desk's open-orders rows keep their
+    shape."""
     client = _get_client()
     resp = client.orders.retrieve(order_id) or {}
     o = resp.get("order")
-    return _norm_order(o) if isinstance(o, dict) else None
+    if not isinstance(o, dict):
+        return None
+    row = _norm_order(o)
+    row["commission_usd"], row["commission_spread_px"] = _commission_fields(o)
+    execs = resp.get("executions") if isinstance(resp, dict) else None
+    row["executions"] = ([_execution_record(ex) for ex in execs]
+                         if isinstance(execs, list) else None)
+    return row
 
 
 def cancel_order(order_id: str, us_market_slug: str) -> dict:

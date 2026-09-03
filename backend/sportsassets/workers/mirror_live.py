@@ -58,7 +58,13 @@ its re-review (six minors: a lost order clears the take arm, the first
 post-only refusal starts the take clock, the first rest of a vanish
 starts the slippage clock, a candidate's unreadable market is named as
 such, a lost close is sized off this tick's walk, a closed book's rest
-is cancelled 'closed'; each pinned in the worker tests' section 13).
+is cancelled 'closed'; each pinned in the worker tests' section 13),
+and the residuals that re-review left (section 14: the take arm's
+evidence is bounded -- cleared when the book leaves his level with no
+rest standing, refused by name past twice the wait so the book rests
+first; a closing book's rest is cancelled 'closing', never under its
+stale freeze; the take arm reads both of the venue's post-only refusal
+shapes, the to-a-tee program's Phase 7 rung 1 seam).
 """
 from __future__ import annotations
 
@@ -103,6 +109,12 @@ SERVICE = "mirror_live"
 # response was lost with the process (step O); younger, the placement
 # may still be the one in flight under this very tick's lock.
 PLACING_ORPHAN_S = 60.0
+# A take arm older than this many MIRROR_TAKE_AFTER_S waits is stale
+# evidence of a crossing (the arm is read in _act before the room and
+# the clip, so nothing else bounds its age): the take is refused by
+# name and the book rests first. A multiplier of the rules' wait, never
+# a wait of its own, so lengthening the wait lengthens the bound.
+TAKE_ARM_STALE_WAITS = 2
 # The cancel/read discipline of the rest lane (_rest_cycle): two cancel
 # attempts, then up to three reads a short gap apart until terminal.
 CANCEL_ATTEMPTS = 2
@@ -143,7 +155,7 @@ CENSUS_KEYS: tuple[str, ...] = (
     "no_price", "venue_ledger_disagree", "wrong_sign_trip", "order_state_unknown",
     "placement_lost", "lost_ambiguous", "order_lost", "cancel_pending",
     "replace_capped", "ops_capped", "over_room", "open_order_pending", "rest_placed",
-    "take_placed", "post_only_rejected", "post_only_ignored", "place_refused",
+    "take_placed", "take_arm_stale", "post_only_rejected", "post_only_ignored", "place_refused",
     "filled_rest", "filled_take", "partial_fill", "cancelled_unfilled", "expired",
     "resting_above_level", "reduce_unfilled", "flatten_rested", "flatten_vanished",
     "vanish_unconfirmed", "no_bid_for_flatten", "overfill", "closed_cashed_out",
@@ -1395,17 +1407,21 @@ async def _reconcile_open(t: _Tick, o: dict, book: dict, cancel_reason: str | No
             cancel_reason = t.cancel_all
         elif o["side"] == BUY and _increases_refusal(t, o["whale"]):
             cancel_reason = _increases_refusal(t, o["whale"])
-        elif book.get("state") == "closed":
-            # a CLOSED book's order is a rest nobody plans for: its
-            # fill would land on a retired row (step-9 review). Named
-            # 'closed' whatever the book was before: the settle and the
-            # episode close never clear frozen_reason, so a book frozen
-            # venue_ledger_disagree and then closed cancelled its rest
-            # under the stale freeze, and the ops reader saw a live
-            # disagreement on a book that had ended (step-9 re-review)
-            cancel_reason = "closed"
-        elif book.get("state") in ("frozen", "closing"):
-            cancel_reason = book.get("frozen_reason") or book.get("state")
+        elif book.get("state") in ("closed", "closing"):
+            # a CLOSED or CLOSING book's order is a rest nobody plans
+            # for: its fill would land on a retired row, or on a market
+            # that has ended (step-9 review). Named by the book's STATE
+            # whatever the book was before: the settle, the episode
+            # close and step M's 'closing' write never clear
+            # frozen_reason, so a book frozen venue_ledger_disagree and
+            # then closed -- or closing, when the cancel step M sent was
+            # ops-capped and this step's cancel is the one that lands --
+            # cancelled its rest under the stale freeze, and the ops
+            # reader saw a live disagreement on a book that had ended
+            # (step-9 re-review minor 6; its residual, task 7)
+            cancel_reason = str(book["state"])
+        elif book.get("state") == "frozen":
+            cancel_reason = book.get("frozen_reason") or "frozen"
         elif t.now - float(o.get("placed_ts") or t.now) >= float(rules.MIRROR_REST_TTL_S):
             cancel_reason = "ttl"
     if cancel_reason:
@@ -2042,13 +2058,36 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
     if wire is None:
         _mirror_stop("no_price", w)
         return "no_price"
-    # the take armed by a post-only rejection, with no rest standing
-    if (book.get("take_armed_ts") and book["id"] not in t.open_by_book
-            and rules.take_allowed(None, book.get("take_armed_ts"), t.now, r.bid, r.ask, wire, p.side)):
-        qty = p.qty if p.side == SELL else _room_qty(t, p.qty, wire)
-        qty = min(qty, int(book.get("ledger_net") or 0)) if p.side == SELL else qty
-        if qty >= 1:
-            return await _place(t, book, r, "take", p.side, wire, qty, his_px, p, plan, tif="IOC")
+    # the take armed by a post-only rejection, with no rest standing.
+    # THE ARM'S EVIDENCE IS BOUNDED: the arm says "the book was
+    # crossing when the rest was refused", and it is read here BEFORE
+    # the room and the clip, so it once survived every tick where this
+    # step never reached _place (the room refused the clip, the
+    # increase refused by name) and fired one IOC an hour later with
+    # no rest ever at the level -- IOC-first, past the rest-first wait
+    # (critic C15; the residual the step-9 minors re-review left, task
+    # 7; owner order 2026-09-02, "mirror the whales to a tee"). Two
+    # bounds: a book NOT at or through his level now has left the
+    # crossing spell the arm witnessed, so the arm is cleared and the
+    # next refusal starts its own clock; an arm older than
+    # TAKE_ARM_STALE_WAITS waits is stale evidence, the take is refused
+    # by name and the book RESTS FIRST (a rest the venue accepts clears
+    # the arm; a rest it refuses arms afresh from this tick).
+    if book.get("take_armed_ts") and book["id"] not in t.open_by_book:
+        armed = _num(book.get("take_armed_ts"))
+        age = None if armed is None else t.now - armed
+        if not rules.at_or_through(p.side, r.bid, r.ask, wire):
+            await _disarm_take(t, book)
+            _recent(book["id"], "take_disarmed", why="market_away", armed_for=age)
+        elif age is None or age > float(TAKE_ARM_STALE_WAITS) * float(rules.MIRROR_TAKE_AFTER_S):
+            await _disarm_take(t, book)
+            _mirror_stop("take_arm_stale", w)
+            _recent(book["id"], "take_disarmed", why="take_arm_stale", armed_for=age)
+        elif rules.take_allowed(None, armed, t.now, r.bid, r.ask, wire, p.side):
+            qty = p.qty if p.side == SELL else _room_qty(t, p.qty, wire)
+            qty = min(qty, int(book.get("ledger_net") or 0)) if p.side == SELL else qty
+            if qty >= 1:
+                return await _place(t, book, r, "take", p.side, wire, qty, his_px, p, plan, tif="IOC")
     if p.side == BUY:
         qty = _room_qty(t, p.qty, wire)
         if qty < 1:
@@ -2180,11 +2219,22 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
     raw = resp.get("raw") or {}
     if status == "post_only_rejected":
         code = (raw or {}).get("status_code")
+        # the venue's SECOND refusal shape is a 200 whose order came
+        # back REJECTED (the adapter's _post_only_cross): the venue
+        # minted an order there, so the rejected row names it -- the
+        # 400 shape has none and the row keeps NULL, as before
         await t.pool.execute(_SQL_ORDER_STATE, o["id"], "rejected", status, "post_only_rejected",
-                             None, None)
+                             None, (str(oid) if oid else None))
         await t.pool.execute(_SQL_ORDER_REASON, o["id"], f"post_only_rejected:{code}")
         _mirror_stop("post_only_rejected", w)
-        if rules.take_arms(code):
+        # THE RULE READS THE WHOLE RAW DICT, never the bare code alone:
+        # the crossing refusal comes in two shapes (an HTTP 400; a 200
+        # with post_only_cross True and execution_type REJECTED), and
+        # only the dict carries the second one's facts. A raw that is
+        # not a dict is read as the bare code it always was (to-a-tee
+        # program Phase 7 rung 1, owner order 2026-09-02 "mirror the
+        # whales to a tee"; wave 2b, the worker seam)
+        if rules.take_arms(raw if isinstance(raw, dict) else code):
             # the statement's COALESCE: the first arm of this crossing
             # spell stands, so the clock the take rule reads is the
             # first refusal's, not this tick's
@@ -2193,7 +2243,7 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
         if code == 429 or "429" in str((raw or {}).get("error") or ""):
             _mirror_stop("rate_limited", w)
             _abandon(t, "rate_limited")
-        _recent(book["id"], "post_only_rejected", code=code)
+        _recent(book["id"], "post_only_rejected", code=code, order=(str(oid) if oid else None))
         return "post_only_rejected"
     if not oid:
         await t.pool.execute(_SQL_ORDER_STATE, o["id"], "rejected", status,

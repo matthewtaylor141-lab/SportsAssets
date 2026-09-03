@@ -415,3 +415,210 @@ def test_the_helper_refuses_only_a_4xx_status_error():
     assert out["status"] == "post_only_rejected"
     assert out["raw"]["preview"] == {"quantity": 1}
     assert isinstance(out["raw"]["body"], str)  # JSON-safe for the row
+
+
+# ── 5. the second refusal shape: a 200 whose order is REJECTED ───────
+#
+# Phase 7 rung 1 of the to-a-tee program (owner order 2026-09-02): the
+# venue may answer a crossing post-only order with a 200 whose order
+# comes back ORDER_STATE_REJECTED carrying an EXECUTION_TYPE_REJECTED
+# execution, instead of the HTTP 400 section 4 pins. Under the flag both
+# are the same refusal dict; the 200 shape also carries the order the
+# venue minted. Without the flag the 200 shape keeps today's reading.
+
+REJ_STATE = "ORDER_STATE_REJECTED"
+REJ_EXEC = "EXECUTION_TYPE_REJECTED"
+
+
+def _rejected_200(order_id="o9", reason="POST_ONLY_WOULD_CROSS",
+                  text="post only would cross", state=REJ_STATE,
+                  etype=REJ_EXEC):
+    return {"id": order_id, "executions": [{
+        "id": "x9", "type": etype, "text": text,
+        "orderRejectReason": reason, "lastShares": "0",
+        "lastPx": {"value": "0", "currency": "USD"},
+        "order": {"id": order_id, "state": state}}]}
+
+
+def _returning(resp):
+    def _create(_params):
+        return resp
+    return _create
+
+
+def test_the_enum_strings_are_the_installed_sdks():
+    """The two literals are quoted from polymarket_us types/orders.py;
+    if the SDK renames either, this fails before a probe does."""
+    from typing import get_args
+
+    from polymarket_us.types import orders as sdk_orders
+
+    assert pmus._ORDER_STATE_REJECTED == REJ_STATE
+    assert pmus._EXECUTION_TYPE_REJECTED == REJ_EXEC
+    assert REJ_STATE in get_args(sdk_orders.OrderState)
+    assert REJ_EXEC in get_args(sdk_orders.ExecutionType)
+
+
+def test_a_200_rejected_under_post_only_is_the_named_refusal(monkeypatch):
+    orders = _Orders(create=_returning(_rejected_200()))
+    _install(monkeypatch, orders)
+    r = pmus.submit_fok(SLUG, 0.30, 100, False, GTC,
+                        "ORDER_INTENT_BUY_LONG", post_only=True)
+    raw = r.pop("raw")
+    assert r == {"ok": False, "order_id": "o9",
+                 "status": "post_only_rejected",
+                 "fill_price": None, "filled_shares": 0}
+    # The contract the rules side reads: the int 200, both exact enum
+    # strings, the cross flag, and the order the venue minted.
+    assert raw["status_code"] == 200 and isinstance(raw["status_code"], int)
+    assert raw["order_state"] == REJ_STATE
+    assert raw["execution_type"] == REJ_EXEC
+    assert raw["post_only_cross"] is True
+    assert raw["order_id"] == "o9"
+    assert raw["reject_reason"] == "POST_ONLY_WOULD_CROSS"
+    assert raw["text"] == "post only would cross"
+    assert raw["preview"] == _agreeing_preview(None)["order"]
+    assert raw["response"] == _rejected_200()
+    assert raw["executions"][0]["type"] == REJ_EXEC
+    assert raw["executions"][0]["order_state"] == REJ_STATE
+    assert len(orders.created) == 1
+    assert orders.created[0][FLAG] is True
+
+
+def test_both_refusal_shapes_are_one_dict_apart_from_raw(monkeypatch):
+    """Shape (a), the 400, and shape (b), the 200 + REJECTED, differ
+    only in raw: the caller reads status alone, the rules side reads
+    raw. The 400 has no order to name; the 200 does."""
+    orders_a = _Orders(create=_raising(_status_error(400)))
+    _install(monkeypatch, orders_a)
+    a = pmus.submit_fok(SLUG, 0.30, 100, False, GTC,
+                        "ORDER_INTENT_BUY_LONG", post_only=True)
+    orders_b = _Orders(create=_returning(_rejected_200()))
+    _install(monkeypatch, orders_b)
+    b = pmus.submit_fok(SLUG, 0.30, 100, False, GTC,
+                        "ORDER_INTENT_BUY_LONG", post_only=True)
+    raw_a, raw_b = a.pop("raw"), b.pop("raw")
+    assert a["status"] == b["status"] == "post_only_rejected"
+    assert a["ok"] is False and b["ok"] is False
+    assert a["order_id"] is None and b["order_id"] == "o9"
+    assert raw_a["status_code"] == 400 and "post_only_cross" not in raw_a
+    assert raw_b["status_code"] == 200 and raw_b["post_only_cross"] is True
+
+
+@pytest.mark.parametrize("kwargs", [dict(), dict(post_only=False)])
+def test_a_200_rejected_without_post_only_is_unchanged(monkeypatch, kwargs):
+    """Every existing caller keeps today's reading of a rejected
+    order: status 'rejected', ok False, the order_id, no refusal keys.
+    (Pinned from the pre-change code path: the state loop lower-cases
+    the last execution's order state.)"""
+    orders = _Orders(create=_returning(_rejected_200()))
+    _install(monkeypatch, orders)
+    r = pmus.submit_fok(SLUG, 0.30, 100, False, GTC,
+                        "ORDER_INTENT_BUY_LONG", **kwargs)
+    raw = r.pop("raw")
+    assert r == {"ok": False, "order_id": "o9", "status": "rejected",
+                 "fill_price": None, "filled_shares": 0}
+    assert raw["preview"] == _agreeing_preview(None)["order"]
+    assert raw["response"] == _rejected_200()
+    # HEAD's raw exactly: the two keys, in that order, and nothing
+    # Phase 7 added (the records ride only under the flag).
+    assert list(raw) == ["preview", "response"]
+    for key in ("status_code", "order_state", "execution_type",
+                "post_only_cross", "order_id", "executions"):
+        assert key not in raw
+    assert len(orders.created) == 1 and FLAG not in orders.created[0]
+
+
+@pytest.mark.parametrize("state, etype, status", [
+    # a REJECTED state without the REJECTED execution: not the shape
+    (REJ_STATE, "EXECUTION_TYPE_NEW", "rejected"),
+    # a REJECTED execution on an order in another state: not the shape
+    ("ORDER_STATE_CANCELED", REJ_EXEC, "canceled"),
+    ("ORDER_STATE_EXPIRED", REJ_EXEC, "expired"),
+    # neither
+    ("ORDER_STATE_NEW", "EXECUTION_TYPE_NEW", "new"),
+])
+def test_only_the_exact_pair_is_the_second_shape(monkeypatch, state,
+                                                  etype, status):
+    """Fail closed toward 'not a refusal': both the order state and
+    the execution type must be the exact REJECTED strings."""
+    orders = _Orders(create=_returning(_rejected_200(state=state,
+                                                     etype=etype)))
+    _install(monkeypatch, orders)
+    r = pmus.submit_fok(SLUG, 0.30, 100, False, GTC,
+                        "ORDER_INTENT_BUY_LONG", post_only=True)
+    assert r["status"] == status
+    assert "post_only_cross" not in r["raw"]
+
+
+def test_a_fill_beside_a_rejected_execution_is_a_fill(monkeypatch):
+    """Shares that executed ARE the fill (audit 2026-08-21), whatever
+    the terminal state says; a refusal never hides a fill."""
+    resp = _rejected_200()
+    resp["executions"].insert(0, {
+        "type": "EXECUTION_TYPE_PARTIAL_FILL", "lastShares": "10",
+        "lastPx": {"value": "0.30", "currency": "USD"},
+        "order": {"id": "o9", "state": "ORDER_STATE_PARTIALLY_FILLED"}})
+    orders = _Orders(create=_returning(resp))
+    _install(monkeypatch, orders)
+    r = pmus.submit_fok(SLUG, 0.30, 100, False, GTC,
+                        "ORDER_INTENT_BUY_LONG", post_only=True)
+    assert r["ok"] is True and r["filled_shares"] == 10.0
+    assert r["status"] == "rejected"  # the last state, as today
+    assert "post_only_cross" not in r["raw"]
+
+
+@pytest.mark.parametrize("shares", ["nan", "-10"])
+def test_an_unreadable_share_count_beside_a_rejected_execution_is_not_a_refusal(
+        monkeypatch, shares):
+    """A NaN or negative lastShares is an unreadable count, not
+    'nothing filled': the refusal is never minted on it, the normal
+    reading stands (status 'rejected', filled as the venue said), so
+    take_arms has nothing to arm on. The flag-off reading of the same
+    response is the same apart from raw (pinned in the commission
+    file's HEAD literals)."""
+    import math
+
+    resp = _rejected_200()
+    resp["executions"].insert(0, {
+        "type": "EXECUTION_TYPE_FILL", "lastShares": shares,
+        "lastPx": {"value": "0.30", "currency": "USD"},
+        "order": {"id": "o9", "state": "ORDER_STATE_PARTIALLY_FILLED"}})
+    orders = _Orders(create=_returning(resp))
+    _install(monkeypatch, orders)
+    r = pmus.submit_fok(SLUG, 0.30, 100, False, GTC,
+                        "ORDER_INTENT_BUY_LONG", post_only=True)
+    assert r["status"] == "rejected" and r["ok"] is False
+    assert r["order_id"] == "o9"
+    if shares == "nan":
+        assert math.isnan(r["filled_shares"])
+    else:
+        assert r["filled_shares"] == -10.0
+    assert "post_only_cross" not in r["raw"]
+    assert "status_code" not in r["raw"]
+
+
+def test_the_cross_reader_truth_table():
+    """Direct truth table for the seam submit_fok relies on: None
+    means 'the normal fill reading stands'."""
+    rec = pmus._execution_record(_rejected_200()["executions"][0])
+    assert pmus._post_only_cross(None, {}, [rec], 0.0) is None
+    assert pmus._post_only_cross([], {}, [rec], 0.0) is None
+    assert pmus._post_only_cross({"id": "o9"}, {}, [], 0.0) is None
+    assert pmus._post_only_cross({"id": "o9"}, {}, [rec], 1.0) is None
+    # only the exact zero is 'nothing filled': NaN and a negative
+    # count are unreadable and never become a refusal; -0.0 is zero
+    assert pmus._post_only_cross({"id": "o9"}, {}, [rec], float("nan")) is None
+    assert pmus._post_only_cross({"id": "o9"}, {}, [rec], -1.0) is None
+    assert pmus._post_only_cross({"id": "o9"}, {}, [rec], float("inf")) is None
+    assert pmus._post_only_cross({"id": "o9"}, {}, [rec], -0.0)["status"] \
+        == "post_only_rejected"
+    out = pmus._post_only_cross({"id": "o9"}, {"quantity": 1}, [rec], 0.0)
+    assert out["status"] == "post_only_rejected"
+    assert out["order_id"] == "o9" and out["raw"]["order_id"] == "o9"
+    assert out["raw"]["preview"] == {"quantity": 1}
+    assert out["raw"]["status_code"] == 200
+    assert out["raw"]["post_only_cross"] is True
+    # an order the venue did not name stays None, never invented
+    out = pmus._post_only_cross({}, {}, [rec], 0.0)
+    assert out["order_id"] is None and out["raw"]["order_id"] is None
