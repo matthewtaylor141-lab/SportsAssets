@@ -223,6 +223,41 @@ def kalshi_first(asset: str) -> bool:
 _DATE_RE = _re.compile(r"^\d{4}$")
 _TOTAL_RE = _re.compile(r"^[ou]\d+(pt\d)?$")
 _LINE_RE = _re.compile(r"^(pos|neg)?\d+(pt\d)?$")
+# Post-date tokens that name a SEGMENT of the game (see market_type_of).
+# Exact tokens only — 'first' catches 'first-half' and 'first-quarter',
+# the abbreviations are the feed's own ('1h', 'fh', 'q1'); nothing here
+# is a stem, so a team code can only collide by being one of these
+# literal strings, and that collision refuses in the safe direction.
+# The word list is the feed's ATTESTED vocabulary, not a guess: the
+# coverage lens's 2026-09-02 capture (scratchpad/tee, the RN1 probe)
+# spells 'itc-udi-ven-2026-09-02-first-half-total-0pt5',
+# 'elc-qpr-car-2026-09-02-halftime-result' and '...-halftime-result-
+# home'; 'halftime' was missing from the first cut and its sibling
+# shape '...-halftime-total-o0pt5' typed as the GAME total (review of
+# the mapping unit, 2026-09-03, major). 'ht' is the same word in the
+# pinned 'epl-x-…-ht-over-1pt5' shape; that pin read it as the game
+# total and deferred the reading to its own review — this is that
+# review, and it reads prop.
+#
+# The second line is the NATURAL SIBLINGS of the attested words, not
+# attested themselves (re-review of the mapping unit, 2026-09-03,
+# minor): '1sthalf'/'h1', '1q', 'f5'/'innings', 'p1', 'sets' each typed
+# as the GAME market one spelling over from a word already in the set
+# ('...-h1-total-110pt5' -> total, '...-p1-moneyline' -> moneyline,
+# '...-sets-2-0' -> spread). The re-review deferred them to census
+# attestation; they are added now instead, because the two errors are
+# not symmetric on a money path: a token the feed never uses costs
+# nothing, a token the feed uses and this set lacks is a wrong-market
+# copy at full size, and a team code that happens to spell one of these
+# refuses (prop) rather than trades — the safe direction, exactly as
+# the lone-token rule below. Every entry is a literal token; no stems.
+_SEGMENT_TOKENS = frozenset({"first", "half", "halftime", "ht", "1h",
+                             "2h", "fh", "sh", "quarter", "q1", "q2",
+                             "q3", "q4", "period", "set",
+                             "1sthalf", "2ndhalf", "firsthalf",
+                             "secondhalf", "h1", "h2", "1q", "2q", "3q",
+                             "4q", "f5", "inning", "innings", "p1", "p2",
+                             "p3", "sets"})
 
 
 def _post_date_tokens(parts: list[str]) -> list[str] | None:
@@ -289,6 +324,33 @@ def market_type_of(slug: str) -> str:
     if "player" in suffix or "corners" in suffix or "cards" in suffix:
         return "prop"
     if "team" in suffix and ("total" in suffix or "totals" in suffix):
+        return "prop"
+    # A SEGMENT MARKET IS NEVER THE GAME MARKET (to-a-tee program Phase
+    # 2, owner order 2026-09-02 "I want us to match everything ...
+    # mirror the whales to a tee"; the coverage lens's §4(d) finding and
+    # its engineering refutation). The feed spells a first-half total as
+    # 'itc-udi-ven-2026-09-02-first-half-total-0pt5', and the word
+    # 'total' in that suffix typed it as the GAME total: PREFIX_FOR_TYPE
+    # then offered the full-game tsc- rows, and a 1H over 0.5 could
+    # resolve onto a game total at the same line — a different bet at
+    # score 1.0, the wrong-market class, not a refusal. A suffix that
+    # names a segment (a half, a quarter, a period, a set) is a
+    # derivative of the game market, which is prop class here: prop is
+    # blocked for everyone (BLOCKED_TYPES) and PREFIX_FOR_TYPE carries no
+    # entry for it, so the pick refuses instead of mis-routing. Placed
+    # BEFORE the moneyline/spread/total word tests so a segment
+    # moneyline ('period-1-moneyline') or spread ('q1-spread-neg-2pt5')
+    # is caught the same way. A LONE segment token is a segment too:
+    # 'lmx-ame-san-2026-08-29-fh' typed as the team-code pick side, and
+    # premap.resolve then mapped that first-half pick onto the game's
+    # aec- moneyline row with source 'premap' (reproduced 2026-09-03
+    # against the sweep's own row builder) — the wrong-market copy the
+    # exact lanes refuse by their suffix gates and the premap lane did
+    # not. 'ht' and 'halftime' joined the set on the mapping unit's
+    # review (2026-09-03): the feed attests 'halftime' outright and the
+    # old 'ht-over-1pt5 is the game total' pin was the same wrong-market
+    # reading one abbreviation over.
+    if any(t in _SEGMENT_TOKENS for t in suffix):
         return "prop"
     # SPELLED MONEYLINE. A bare team code types as moneyline, but the
     # feed also spells it out — and 'moneyline' is nine characters, so
@@ -444,3 +506,147 @@ def kalshi_min_ask(whale: str, slug: str) -> float:
     0.0 = no extra constraint."""
     return KALSHI_MIN_ASK.get(((whale or "").strip().lower(),
                                sport_of(slug)), 0.0)
+
+
+# ── THE VENUE CANDIDATE GRAMMAR (moved here from live_executor
+# 2026-09-03; to-a-tee program Phase 2, owner order 2026-09-02 "mirror
+# the whales to a tee"; the coverage lens's §4(b) recommendation).
+#
+# The copy lane, the underdog sleeve, the mirror's coverage report and
+# the runner-side MIRRORCOVER job all need ONE feed-slug -> US-slug
+# candidate grammar, and live_executor imports asyncpg and settings at
+# module level, so a runner could not import the grammar without
+# installing the whole backend — which is how the mirror came to run
+# only premap plus the ledger and never the exact lane the copy lane
+# trades under quarantine. This module is pure (re, hashlib and the
+# unicode fold below); live_executor re-exports every name so each
+# existing import site and every source pin keeps working. The bodies
+# are verbatim — only the lazy `league_of` import became the local
+# name, because the definition now lives in the same file.
+
+# Tennis league code translation, feed -> US venue. The US venue splits
+# ITF by tour ('itfwo' women / 'itfme' men) where the feed says 'itf';
+# unknown codes are enumerated (a wrong guess is a 404, never a trade).
+_TENNIS_LEAGUES = {"atp", "wta", "itf", "itfwo", "itfme", "chal"}
+_TENNIS_US_CODES = {"itf": ["itfwo", "itfme", "itf"],
+                    "chal": ["chal", "atpchal"]}
+
+
+def _abbrev_player(name: str) -> str | None:
+    """US-venue tennis token: first 3 of first name + first 3 of last.
+    Proven against live fills — 'Dusan Lajovic' is 'duslaj' in
+    aec-atp-duslaj-benbon-2026-08-11, 'Rafael Jodar' is 'rafjod',
+    'Sinja Kraus' is 'sinkra'. Unicode folds ('João' -> 'joa');
+    single-token names refuse (no grammar evidence for them)."""
+    import unicodedata as _ud
+
+    folded = _ud.normalize("NFKD", name or "").encode(
+        "ascii", "ignore").decode().lower()
+    toks = _re.findall(r"[a-z]+", folded)
+    if len(toks) < 2 or len(toks[0]) < 3 or len(toks[-1]) < 3:
+        return None
+    return toks[0][:3] + toks[-1][:3]
+
+
+def _tennis_candidates(title: str | None, global_slug: str) -> list[str]:
+    """US aec- candidates for a tennis match, built from the PLAYER
+    NAMES in the title — the feed's slug uses surnames while the US
+    grammar abbreviates 'First Last' to 6 chars, so slug-to-slug
+    translation cannot work for tennis (1,730 ITF + 1,249 ATP + 623
+    WTA moneylines dead in the funnel, 2026-08-13). Both player orders
+    are generated (home/away order is the venue's choice, not the
+    title's) and the outcome-similarity floor downstream remains the
+    side authority — a colliding abbreviation still has to present the
+    right player NAME to be ordered."""
+    s = (global_slug or "").lower()
+    m = _re.search(r"\d{4}-\d{2}-\d{2}", s)
+    if not m:
+        return []
+    # THE LEAGUE IS NOT THE FIRST SEGMENT (2026-08-26).
+    #
+    # This read head[0] and compared it against _TENNIS_LEAGUES. The
+    # first segment of one of these slugs is the KIND prefix -- aec,
+    # atc, tsc, asc, cpc, astatc -- and the league is the segment AFTER
+    # it. league_of has always known that; this function carried a
+    # second, wrong copy of the same decision.
+    #
+    # So for every real tennis slug head[0] was 'aec', the gate refused
+    # it, and the function returned NO CANDIDATES:
+    #
+    #   aec-atp-harwen-stetra-2026-08-24  ->  head[0]='aec'  ->  0
+    #   atp-harwen-stetra-2026-08-24      ->  head[0]='atp'  ->  2
+    #
+    # Only the second shape ever worked and the feed does not produce
+    # it. resolve_market_exact was therefore NEVER CALLED for tennis:
+    # every tennis copy fell straight through to the fuzzy resolver, and
+    # fuzzy output is exactly what the quarantine refuses. Tennis is 48%
+    # of the recent unmapped funnel -- 4,919 ATP, 2,425 WTA and 2,168
+    # ITF rows in seven days -- and all of it died on this line.
+    #
+    # league_of is now the single definition. A slug with no kind prefix
+    # still resolves, so the shape that used to work still does.
+    lg = league_of(s)
+    if lg not in _TENNIS_LEAGUES:
+        return []
+    date = m.group(0)
+    # LAST colon: 'Tennis: ATP Cincinnati: A vs B' keeps only the
+    # matchup (review 2026-08-13 — a first-colon split swallowed the
+    # tournament word into the first player's token).
+    body = (title or "").rsplit(":", 1)[-1]
+    # Doubles refuse outright: 'A / B vs C / D' has no singles grammar,
+    # and a fabricated token is a live probe into the 6-char slug space.
+    if "/" in body:
+        return []
+    players = _re.split(r"\s+vs\.?\s+", body, flags=_re.I)
+    if len(players) != 2:
+        return []
+    a, b = (_abbrev_player(p) for p in players)
+    if not a or not b or a == b:
+        return []
+    codes = list(_TENNIS_US_CODES.get(lg, [lg]))
+    if lg == "itf":
+        # Tour hint from the title ('ITF W15 ...' / 'Women' vs 'M25' /
+        # 'Men') puts the likelier code first; both are still tried.
+        tl = (title or "").lower()
+        if _re.search(r"\bm\d{2}\b|\bmen\b", tl) and "women" not in tl:
+            codes = ["itfme", "itfwo", "itf"]
+    out: list[str] = []
+    for lg in codes:
+        out.append(f"aec-{lg}-{a}-{b}-{date}")
+        out.append(f"aec-{lg}-{b}-{a}-{date}")
+    return out
+
+
+def _us_slug_candidates(global_slug: str, outcome: str) -> list[str]:
+    """US-venue slug candidates for a global market, most exact first.
+
+    The global feed's slugs are kindless and league-led
+    ('atp-ruud-fonseca-2026-08-07'); the US venue keys the same game as
+    'atc-<league>-<a>-<b>-<date>-<side>' (per-side team contract) and
+    'aec-<league>-<a>-<b>-<date>' (the two-outcome event contract). The
+    side code is chosen only when exactly ONE of the slug's two codes
+    matches the outcome name — ambiguity falls through to the aec form,
+    whose own outcome-similarity floor disambiguates."""
+    out: list[str] = []
+    s = (global_slug or "").lower()
+    m = _re.search(r"\d{4}-\d{2}-\d{2}", s)
+    if m:
+        head = [t for t in s[:m.start()].strip("-").split("-") if t]
+        if len(head) == 3:
+            lg, a, b = head
+            date = m.group(0)
+            ol = (outcome or "").lower()
+            words = ol.split()
+
+            def _hits(code: str) -> bool:
+                return code in ol or any(w.startswith(code)
+                                         or code.startswith(w)
+                                         for w in words)
+
+            sides = [c for c in (a, b) if _hits(c)]
+            if len(sides) == 1:
+                out.append(f"atc-{lg}-{a}-{b}-{date}-{sides[0]}")
+            out.append(f"aec-{lg}-{a}-{b}-{date}")
+    if s:
+        out.append(s)
+    return out

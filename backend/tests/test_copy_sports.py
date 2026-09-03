@@ -203,3 +203,130 @@ def test_soccer_price_floor_governs_the_resume():
     # Non-soccer flow needs no price:
     assert copy_allowed("rn1", "aec-atp-rafjod-cormou-2026-08-06")
     assert copy_allowed("rn1", "mlb-nyy-bos-2026-07-22-o8pt5")
+
+
+# ── to-a-tee program Phase 2 (owner order 2026-09-02) ────────────────
+
+def test_segment_markets_are_props_not_the_game_market():
+    """A first-half total typed as the GAME total (coverage lens §4(d):
+    'itc-udi-ven-2026-09-02-first-half-total-0pt5' -> total) is a
+    wrong-market hazard, not a refusal. A suffix naming a segment is a
+    derivative of the game market: prop class, blocked for everyone,
+    no premap prefix — it refuses instead of mis-routing."""
+    assert market_type_of(
+        "itc-udi-ven-2026-09-02-first-half-total-0pt5") == "prop"
+    assert market_type_of("nba-lal-bos-2026-11-01-1h-total-110pt5") == "prop"
+    assert market_type_of("epl-ars-che-2026-08-15-2h-over-0pt5") == "prop"
+    assert market_type_of("nba-a-b-2026-11-01-q1-spread-neg-2pt5") == "prop"
+    assert market_type_of("nhl-a-b-2026-10-01-period-1-moneyline") == "prop"
+    assert market_type_of("atp-a-b-2026-09-03-set-1-winner") == "prop"
+    assert market_type_of("cfb-a-b-2026-09-06-quarter-1-total-o7pt5") == "prop"
+    # the feed's own attested spellings (coverage lens capture,
+    # 2026-09-02, elc-qpr-car): 'halftime' outright, and the sibling
+    # total shape that typed as the GAME total until the mapping unit's
+    # review (2026-09-03) put the word in the set
+    assert market_type_of("elc-qpr-car-2026-09-02-halftime-result") == "prop"
+    assert market_type_of(
+        "elc-qpr-car-2026-09-02-halftime-result-home") == "prop"
+    assert market_type_of(
+        "elc-qpr-car-2026-09-02-halftime-total-o0pt5") == "prop"
+    assert market_type_of("epl-x-2026-08-24-ht-over-1pt5") == "prop"
+    # and prop is refused for everyone, UNRESTRICTED whales included
+    from sportsassets.copy_sports import copy_verdict
+
+    assert copy_verdict(
+        "rn1", "itc-udi-ven-2026-09-02-first-half-total-0pt5") \
+        == "market_type_blocked"
+
+
+def test_natural_sibling_spellings_are_segments_too():
+    """The mapping unit's re-review (2026-09-03, minor): the set held
+    the attested spellings only, and each natural sibling typed as the
+    GAME market one spelling over ('h1' -> total, 'p1' -> moneyline,
+    'sets-2-0' -> spread). The re-review deferred them to attestation;
+    on a money path the missing token is the expensive error, so they
+    are in the set now, and a team code that spells one refuses."""
+    for s in ("nba-lal-bos-2026-11-01-1sthalf-total-110pt5",
+              "nba-lal-bos-2026-11-01-h1-total-110pt5",
+              "nba-lal-bos-2026-11-01-h2-total-110pt5",
+              "nba-lal-bos-2026-11-01-1q-total-30pt5",
+              "nba-lal-bos-2026-11-01-4q-spread-neg-2pt5",
+              "epl-ars-che-2026-08-15-firsthalf-over-0pt5",
+              "epl-ars-che-2026-08-15-secondhalf-over-0pt5",
+              "epl-ars-che-2026-08-15-2ndhalf-result",
+              "mlb-a-b-2026-09-06-f5-total-4pt5",
+              "mlb-a-b-2026-09-06-1st-5-innings-total-4pt5",
+              "mlb-a-b-2026-09-06-innings-1-5-total-4pt5",
+              "mlb-a-b-2026-09-06-3rd-inning-total-0pt5",
+              "nhl-a-b-2026-10-01-p1-moneyline",
+              "nhl-a-b-2026-10-01-p3-total-1pt5",
+              "atp-a-b-2026-09-03-total-sets-o2pt5",
+              "atp-a-b-2026-09-03-sets-2-0",
+              "lmx-ame-san-2026-08-29-h1"):
+        assert market_type_of(s) == "prop", s
+    # and the game-market readings beside them are untouched
+    assert market_type_of("nba-lal-bos-2026-11-01-total-220pt5") == "total"
+    assert market_type_of("nhl-a-b-2026-10-01-h2h") == "moneyline"
+    assert market_type_of("atp-a-b-2026-09-03-o22pt5") == "total"
+    assert market_type_of("mlb-a-b-2026-09-06-spread-neg-1pt5") == "spread"
+    assert market_type_of("mlb-a-b-2026-09-06-o8pt5") == "total"
+
+
+def test_a_lone_segment_token_is_a_segment_too():
+    """'lmx-ame-san-2026-08-29-fh' typed as the team-code pick side, so
+    premap.resolve mapped a first-half pick onto the game's moneyline
+    with source 'premap' (reproduced 2026-09-03; the premap round-2
+    tests pin the resolve side). Fail closed: a team whose code happens
+    to be one of these literal tokens becomes an honest refusal."""
+    assert market_type_of("lmx-ame-san-2026-08-29-fh") == "prop"
+    assert market_type_of("lmx-ame-san-2026-08-29-sh") == "prop"
+    assert market_type_of("itf-koyama-castelnuovo-2026-08-27-set") == "prop"
+
+
+def test_the_family_table_is_otherwise_unchanged():
+    """Every existing reading that is not a segment stays exactly as
+    it was. ('ht' WAS pinned here as the game total on the first cut;
+    the mapping unit's review, 2026-09-03, read it as the segment it
+    is — see test_segment_markets_are_props_not_the_game_market.)"""
+    assert market_type_of("mlb-sd-cin-2026-09-02-total-9pt5") == "total"
+    assert market_type_of("epl-x-2026-08-24-over-1pt5") == "total"
+    assert market_type_of("epl-x-2026-08-24-home-over-3pt5") == "prop"
+    assert market_type_of("mlb-nyy-bos-2026-07-22") == "moneyline"
+    assert market_type_of("csl-shs-bjg-2026-09-03-shs") == "moneyline"
+    assert market_type_of("spl-sha-riy-2026-08-25-spread-away-1pt5") == "spread"
+    assert market_type_of("nba-bos-mia-2026-08-24-bos-neg-10") == "spread"
+    assert market_type_of("epl-ars-che-2026-08-15-es-2-0") == "exact_score"
+    assert market_type_of("lgscup-tol-sea-2026-08-05-ftts-sea") == "btts"
+    assert market_type_of("atc-nba-lal-bos-2026-11-01-lal") == "moneyline"
+    assert market_type_of("tsc-mlb-tor-hou-2026-08-08-o8pt5") == "total"
+    assert market_type_of("mlb-tor-hou-2026-08-08-weird-99x") == "unknown"
+
+
+def test_the_candidate_grammar_lives_here_and_is_pure():
+    """One feed-slug -> US-slug grammar for the copy lane, the underdog
+    sleeve, the mirror and the runner: it lives in this module, which
+    imports nothing from the backend, and live_executor re-exports the
+    same objects so every existing import keeps working."""
+    import inspect
+
+    from sportsassets import copy_sports as cs
+    from sportsassets import live_executor as le
+
+    for name in ("_abbrev_player", "_tennis_candidates",
+                 "_us_slug_candidates", "_TENNIS_LEAGUES",
+                 "_TENNIS_US_CODES"):
+        assert getattr(le, name) is getattr(cs, name), name
+    assert inspect.getmodule(le._tennis_candidates) is cs
+    for line in inspect.getsource(cs).splitlines():
+        s = line.strip()
+        assert not s.startswith(("from .", "from sportsassets",
+                                 "import sportsassets", "import asyncpg")), s
+    # the grammar still answers the shapes the copy lane relies on
+    assert cs._tennis_candidates(
+        "US Open ATP: Brandon Nakashima vs. Alex Michelsen",
+        "atp-nakashi-michels-2026-09-02") == [
+            "aec-atp-branak-alemic-2026-09-02",
+            "aec-atp-alemic-branak-2026-09-02"]
+    assert cs._us_slug_candidates("elc-qpr-car-2026-09-02-car", "Yes") == [
+        "aec-elc-qpr-car-2026-09-02", "elc-qpr-car-2026-09-02-car"]
+    assert cs._abbrev_player("João Sousa") == "joasou"

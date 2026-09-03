@@ -327,9 +327,21 @@ class TestWordFormTotalsAreNotSpreads:
 
         for slug in ("epl-ars-che-2026-08-24-over-2pt5",
                      "epl-ars-che-2026-08-24-under-2pt5",
-                     "epl-ars-che-2026-08-24-ou-2pt5",
-                     "epl-x-2026-08-24-ht-over-1pt5"):
+                     "epl-ars-che-2026-08-24-ou-2pt5"):
             assert market_type_of(slug) == "total", slug
+
+    def test_a_half_time_over_is_a_segment_not_the_game_total(self):
+        """'epl-x-2026-08-24-ht-over-1pt5' was pinned here as the game
+        total and deferred to its own review; that review (the mapping
+        unit, 2026-09-03, to-a-tee Phase 2) found the feed spelling the
+        same segment 'halftime' and typing its total as the GAME total
+        — the §4(d) wrong-market class. A half-time over is a segment:
+        prop class, no premap prefix, an honest refusal."""
+        from sportsassets.copy_sports import market_type_of
+
+        assert market_type_of("epl-x-2026-08-24-ht-over-1pt5") == "prop"
+        assert market_type_of(
+            "elc-qpr-car-2026-09-02-halftime-total-o0pt5") == "prop"
 
     def test_a_team_qualified_over_is_a_prop_not_the_game_total(self):
         from sportsassets.copy_sports import market_type_of
@@ -719,3 +731,167 @@ class TestRealLineNeverAuthenticatesAsClock:
              "signed": "", "question": "Game total? Tips 9:30 PM",
              "intent": "BUY_LONG"}
         assert not premap._clock_artifact("30", r)
+
+
+class TestHisTitleDateIsNeverALineOrASign:
+    """To-a-tee program Phase 2 (owner order 2026-09-02 "mirror the
+    whales to a tee"; the coverage lens's §2.f reproduction). The venue
+    side has stripped dates before reading lines since round 28
+    (TestQuestionLineSurvivesDates above); the whale side never did, so
+    'Will NEOM SC win on 2026-09-03?' read as the lines {'03','09'} and
+    the sign '-09', and _yn_line_ok refused every unlined per-team row
+    against a phantom — probe UNMAPEG: his_lines=['03','09']. Same
+    regex, both sides, and before signed_line too."""
+
+    T = "Will NEOM SC win on 2026-09-03?"
+    S = "spl-neo-kha-2026-09-03-neo"
+
+    def _rows(self, q=T, line="", signed="", ident=None):
+        return [{"identifier": ident or "atc-" + self.S, "side_norm": s,
+                 "line": line, "signed": signed, "question": q,
+                 "intent": i}
+                for s, i in (("yes", "ORDER_INTENT_BUY_LONG"),
+                             ("no", "ORDER_INTENT_BUY_SHORT"))]
+
+    def test_the_bug_as_arithmetic(self):
+        """The helpers themselves are untouched — the strip lives in
+        the matcher, where the venue side's does."""
+        assert premap._lines_of(self.T) == {"03", "09"}
+        assert premap.signed_line(self.T) == "-09"
+        assert premap._lines_of(premap._QDATE_RE.sub(" ", self.T)) == set()
+        assert premap.signed_line(premap._QDATE_RE.sub(" ", self.T)) == ""
+
+    def test_an_agreeing_question_on_a_dated_title_now_resolves(self):
+        """No switch: this is the bug fix. The wording agrees (the row
+        carries his own question) and the date alone used to refuse."""
+        hit = premap.match_side(self._rows(), "Yes", self.T, self.S)
+        assert hit is not None and hit["side_norm"] == "yes"
+        hit = premap.match_side(self._rows(), "No", self.T, self.S)
+        assert hit is not None and hit["side_norm"] == "no"
+
+    def test_stripping_only_the_lines_would_not_have_been_enough(self):
+        """The sign is the second phantom: an unlined row against a
+        title that states a sign still refuses, so the strip must run
+        before signed_line as well."""
+        assert premap.match_side(self._rows(), "Yes",
+                                 "Will NEOM SC win -09?", self.S) is None
+
+    def test_a_real_handicap_in_a_dated_title_still_reads(self):
+        q = "Will NEOM SC cover -1.5 on 2026-09-03?"
+        # the venue keys a handicap under its asc- kind (a spread slug
+        # never reaches an atc- row through PREFIX_FOR_TYPE), and since
+        # the mapping unit's review (2026-09-03) a yes/no hit on an
+        # atc- row must BE 'atc-' + his slug — so the fixture carries
+        # the kind the real row would, not the per-team one
+        rows = self._rows(q=q, line="1.5", signed="-1.5",
+                          ident="asc-spl-neo-kha-2026-09-03-neo-1pt5")
+        s = "spl-neo-kha-2026-09-03-spread-home-1pt5"
+        hit = premap.match_side(rows, "Yes", q, s)
+        assert hit is not None and hit["signed"] == "-1.5"
+        assert premap.match_side(
+            rows, "Yes", "Will NEOM SC cover -2.5 on 2026-09-03?",
+            "spl-neo-kha-2026-09-03-spread-home-2pt5") is None
+
+    def test_the_named_arm_reads_no_sign_from_a_date(self):
+        rows = [{"identifier": "atc-x", "side_norm": "neom sc", "line": "",
+                 "signed": "", "question": "NEOM SC 2026-09-03",
+                 "intent": "ORDER_INTENT_BUY_LONG"}]
+        hit = premap.match_side(rows, "NEOM SC", "NEOM SC 2026-09-03",
+                                "spl-neo-kha-2026-09-03-neo")
+        assert hit is not None, "the date read as the sign '-09'"
+
+    def test_one_regex_both_sides(self):
+        import inspect
+
+        assert "_QDATE_RE.sub" in inspect.getsource(premap._question_line)
+        assert "_QDATE_RE.sub" in inspect.getsource(premap.match_side)
+        src = inspect.getsource(premap.match_side)
+        assert src.index("his_title_nodate = _QDATE_RE.sub") < \
+            src.index("signed_line(his_title_nodate)")
+        # CODE only: the 2026-08-25 comment quotes the old form on
+        # purpose, to record what the line used to say.
+        code = "\n".join(l for l in src.splitlines()
+                         if not l.strip().startswith("#"))
+        assert "_lines_of(his_title)" not in code, \
+            "a bare _lines_of(his_title) would read the date again"
+        # the yes/no sign SOURCE stays the pinned literal (the market's
+        # sign, never a side's — test_spread_sign_attribution); the
+        # date strip is the statement after it, in both arms
+        pinned = "his_signed_yn = signed_line(outcome) or signed_line(his_title)"
+        assert pinned in code
+        assert code.index(pinned) < code.index(
+            "his_signed_yn = signed_line(his_title_nodate)")
+        assert "his_signed = signed_line(his_title_nodate)" in code
+        # and the helpers themselves stay raw: the bridge pins them
+        assert "_QDATE_RE" not in inspect.getsource(premap.signed_line)
+        assert "_QDATE_RE" not in inspect.getsource(premap._lines_of)
+
+
+class TestSegmentSuffixNeverReachesTheGameMarket:
+    """The coverage lens's §4(d): 'itc-udi-ven-2026-09-02-first-half-
+    total-0pt5' typed as the GAME total, so PREFIX_FOR_TYPE offered the
+    full-game tsc- rows and a 1H over 0.5 could resolve onto the game
+    total at the same line. And a LONE segment token typed as the
+    team-code pick side: 'lmx-ame-san-2026-08-29-fh' resolved onto the
+    game's aec- moneyline with source 'premap' (reproduced 2026-09-03).
+    Segment suffixes are prop class now, and prop has no premap
+    prefix, so both refuse at unknown_market_type."""
+
+    def _pool(self, rows):
+        class _P:
+            async def fetch(self, sql, *a):
+                k = set(a[0])
+                return [r for r in rows if set(r["event_keys"]) & k]
+        return _P()
+
+    def _game_rows(self, ev, m):
+        rows = premap._market_rows(ev, m)
+        keys = premap.event_keys_for(ev["title"], ev["slug"])
+        for r in rows:
+            r["event_keys"] = keys
+        return rows
+
+    def test_a_first_half_total_never_takes_the_game_total(self):
+        ev = {"slug": "aec-itc-udi-ven-2026-09-02",
+              "title": "Udinese vs. Venezia"}
+        m = {"slug": "tsc-itc-udi-ven-2026-09-02-0pt5",
+             "question": "Udinese vs Venezia: total goals over/under 0.5",
+             "marketSides": [
+                 {"identifier": "tsc-itc-udi-ven-2026-09-02-0pt5",
+                  "description": "Over", "long": True},
+                 {"identifier": "tsc-itc-udi-ven-2026-09-02-0pt5",
+                  "description": "Under", "long": False}]}
+        rows = self._game_rows(ev, m)
+        slug = "itc-udi-ven-2026-09-02-first-half-total-0pt5"
+        assert asyncio.run(premap.resolve(
+            self._pool(rows), "Udinese vs Venezia", None, "Over",
+            slug)) is None
+        ex = asyncio.run(premap.resolve_explain(
+            self._pool(rows), "Udinese vs Venezia", None, "Over", slug))
+        assert ex["step"] == "unknown_market_type"
+        # the GAME total on the same line still resolves for the whale
+        # who actually bet the game total
+        hit = asyncio.run(premap.resolve(
+            self._pool(rows), "Udinese vs Venezia", None, "Over",
+            "itc-udi-ven-2026-09-02-total-0pt5"))
+        assert hit is not None and hit["outcome"] == "over"
+
+    def test_a_lone_first_half_token_never_takes_the_game_moneyline(self):
+        ev = {"slug": "aec-lmx-ame-san-2026-08-29",
+              "title": "CF America vs. Santos Laguna"}
+        m = {"slug": "aec-lmx-ame-san-2026-08-29",
+             "question": "CF America vs. Santos Laguna",
+             "marketSides": [
+                 {"identifier": "aec-lmx-ame-san-2026-08-29",
+                  "description": "CF America", "long": True},
+                 {"identifier": "aec-lmx-ame-san-2026-08-29",
+                  "description": "Santos Laguna", "long": False}]}
+        rows = self._game_rows(ev, m)
+        assert asyncio.run(premap.resolve(
+            self._pool(rows), "CF America vs. Santos Laguna", None,
+            "CF America", "lmx-ame-san-2026-08-29-fh")) is None
+        # his full-game pick on the same rows still maps
+        hit = asyncio.run(premap.resolve(
+            self._pool(rows), "CF America vs. Santos Laguna", None,
+            "CF America", "lmx-ame-san-2026-08-29-ame"))
+        assert hit is not None and hit["outcome"] == "cf america"

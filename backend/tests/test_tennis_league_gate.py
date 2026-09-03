@@ -144,3 +144,38 @@ class TestTheGrammarDownstreamWasNeverTheProblem:
                      "aec-itfme-a-b-2026-08-26", "aec-chal-a-b-2026-08-26"):
             assert league_of(slug) in _TENNIS_LEAGUES
             assert _tennis_candidates(TITLE, slug)
+
+
+class TestTheGrammarMovedWithoutMoving:
+    """To-a-tee program Phase 2 (owner order 2026-09-02): the grammar
+    lives in copy_sports so the mirror and the runner can import it
+    without the executor's asyncpg/settings; live_executor re-exports
+    the SAME objects, so this file's imports and the source pin above
+    keep reading the one definition."""
+
+    def test_live_executor_re_exports_the_same_objects(self):
+        from sportsassets import copy_sports as cs
+
+        assert _tennis_candidates is cs._tennis_candidates
+        assert _abbrev_player is cs._abbrev_player
+        assert _TENNIS_LEAGUES is cs._TENNIS_LEAGUES
+
+    def test_the_pin_reads_the_body_where_it_now_lives(self):
+        import inspect
+
+        assert inspect.getsourcefile(_tennis_candidates).endswith(
+            "copy_sports.py")
+        code = "\n".join(l for l in inspect.getsource(
+            _tennis_candidates).splitlines()
+            if not l.strip().startswith("#"))
+        assert "league_of(" in code and "head[0]" not in code
+
+    def test_the_body_no_longer_lives_in_live_executor(self):
+        import pathlib
+
+        src = (pathlib.Path(__file__).resolve().parents[1] / "sportsassets"
+               / "live_executor.py").read_text()
+        assert "def _tennis_candidates(" not in src
+        assert "def _abbrev_player(" not in src
+        assert "def _us_slug_candidates(" not in src
+        assert "from .copy_sports import (_TENNIS_LEAGUES" in src

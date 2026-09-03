@@ -280,9 +280,22 @@ class TestDerivativeSiblings:
         """B9f: a '-set' post-date suffix that does not build from
         his outcome refuses slug_pick_mismatch."""
         # Named 1.1 refuses EARLIER: the suffix must BE one of his
-        # slug's codes before any building is consulted.
+        # slug's codes before any building is consulted. Since
+        # 2026-09-03 (to-a-tee Phase 2) a segment token types prop in
+        # market_type_of, so the bridge's TYPE gate refuses a '-set'
+        # slug before the suffix gate is ever reached; the refusal is
+        # the same, the reason moved one gate earlier.
         h, w, _ = run([K, C], "Hiromasa Koyama", WT,
                       "itf-koyama-castelnuovo-2026-08-27-set", WE)
+        assert h is None and w == "wrong_type"
+
+    def test_a_non_segment_alpha_suffix_still_dies_at_the_suffix_gate(self):
+        """The suffix gate stays covered on its own: an alpha suffix
+        that is neither a segment word nor one of his slug's codes
+        types moneyline upstream and refuses HERE, slug_suffix_not_code
+        — the Named 1.1 law is unchanged by the segment typing."""
+        h, w, _ = run([K, C], "Hiromasa Koyama", WT,
+                      "itf-koyama-castelnuovo-2026-08-27-xyz", WE)
         assert h is None and w == "slug_suffix_not_code"
 
     def test_derivative_marker_in_title_prefix_refuses(self):
@@ -573,6 +586,18 @@ class TestImplementationFleetKills:
                   ev_title="Aldin Setkic vs. Dustin Brown")
         h, w, _ = run([s1, s2], "Aldin Setkic", "Setkic vs Brown",
                       "itf-setkic-brown-2026-08-27-set",
+                      "Aldin Setkic vs Dustin Brown")
+        # Since 2026-09-03 (to-a-tee Phase 2) 'set' is a segment token
+        # and market_type_of types the slug prop, so the bridge's type
+        # gate refuses before the suffix gate; the laundering is dead
+        # one gate earlier and the suffix gate's own law is pinned by
+        # test_a_non_segment_alpha_suffix_still_dies_at_the_suffix_gate.
+        assert h is None and w == "wrong_type"
+        # and the laundering shape itself — a name-prefix collision
+        # ('setk' is a DP prefix of 'Setkic') on a non-segment alpha
+        # suffix — still dies at the suffix gate
+        h, w, _ = run([s1, s2], "Aldin Setkic", "Setkic vs Brown",
+                      "itf-setkic-brown-2026-08-27-setk",
                       "Aldin Setkic vs Dustin Brown")
         assert h is None and w == "slug_suffix_not_code"
         # (A code-valued suffix would pass this gate; upstream

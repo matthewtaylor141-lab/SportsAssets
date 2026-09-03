@@ -1808,9 +1808,193 @@ def named_ml_bridge_explain(rows_kept: list[dict], rows_all: list[dict],
     return sel, "ok"
 
 
+# ── THE YES/NO IDENTITY BRANCH (to-a-tee program Phase 2, owner order
+# 2026-09-02 "I want us to match everything ... mirror the whales to a
+# tee"; the coverage lens's §2.f / §4(c) finding, its market refutation
+# F2 and its engineering refutation) ──────────────────────────────────
+#
+# The venue lists RN1's soccer per-team markets — probe NAMEDML-Q shows
+# the yes and the no row of atc-spl-neo-kha-2026-09-03-neo — and premap
+# refused every one of them twice over: the title-date phantom line
+# (fixed in match_side below) and _questions_agree, which needs the two
+# feeds to WORD the proposition alike ('Will NEOM SC win on
+# 2026-09-03?' against 'Will NEOM SC win against Al Khaleej Saudi Club
+# in the Saudi Pro League match scheduled for Sep 3, 2026?'). The copy
+# lane's own answer, pmus.resolve_team_yesno_exact, maps them — under
+# mapping_src 'yesno_exact', a class live_executor.QUARANTINE_RESUME_SRC
+# does not admit, so P1's admission would refuse every one of them
+# (refutation F2): zero dollars of coverage until that class certifies.
+#
+# This branch admits the row on IDENTITY, not wording. His slug names
+# the contract outright — <lg>-<a>-<b>-<date>-<t> is the venue's own
+# atc- identifier minus the kind prefix — so the row whose identifier
+# is byte-for-byte "atc-" + his slug IS his market, on his date, on his
+# side token. Three conjuncts, each reused verbatim from a reviewed
+# gate elsewhere in this repository and none re-implemented:
+#   1. identifier == "atc-" + his_slug, byte-for-byte. No normalising:
+#      a slug that needs normalising is not the identifier.
+#   2. the row's question fullmatches pmus._YN_Q_PATTERNS — the one
+#      measured per-team template — with a date clause equal to his
+#      slug's date (pmus._yn_date_ok) and every free slot scope-screened
+#      (pmus._yn_slot_bad), so a reserves/half/aggregate qualifier in
+#      the venue's wording refuses.
+#   3. _bridge_title_subject(his_title, his_slug) names a subject whose
+#      dated win-title agrees with his slug's date, and that subject
+#      names the question's subject (pmus._yn_name_match) — a title
+#      naming the OTHER team is metadata shear and refuses.
+# Yes takes the yes row and it must carry the venue's own BUY_LONG; No
+# takes the no row and it must carry BUY_SHORT (his No token is draw
+# plus opponent, the venue's SHORT on the same identifier — equal
+# payoff, refutation F2); any other intent is a shape the census has
+# never seen and refuses. No opponent witness is needed: the identifier
+# already carries both team codes and his side, which is what
+# resolve_team_yesno_exact's witness gates reconstruct from names when
+# no identifier is at hand. The evidence floor on raw tokens
+# (pmus._yn_thin) is likewise not applied — it guards name-derived game
+# identity, and here the game identity is the identifier. The line
+# guard still applies in match_side, so a lined row never takes an
+# unlined pick; exactly one row may pass, two is ambiguity and refuses.
+#
+# The hit keeps source 'premap' — the class the quarantine admits and
+# the class P1 admission reads — and resolve labels it matched_by
+# 'premap_identity' so fills stay attributable and the branch can be
+# killed on its own. DARK BY DEFAULT: PREMAP_YN_IDENTITY=on is the
+# owner's flip, exactly like PREMAP_NAMED_LANE, so enabling is a config
+# change and rollback needs no deploy; with the switch off every
+# caller's answer is byte-identical to before this branch existed.
+PREMAP_YN_IDENTITY_ENV = "PREMAP_YN_IDENTITY"
+_YN_IDENTITY_INTENT = {"yes": "ORDER_INTENT_BUY_LONG",
+                       "no": "ORDER_INTENT_BUY_SHORT"}
+
+
+def yn_identity_on() -> bool:
+    """The owner's flip for the identity branch: off unless 'on'."""
+    return os.getenv(PREMAP_YN_IDENTITY_ENV, "").strip().lower() == "on"
+
+
+def _yn_his_identifiers(his_slug: str) -> frozenset:
+    """The venue identifiers that ARE his slug, byte-for-byte.
+
+    His feed slug is kindless — <lg>-<a>-<b>-<date>-<t> — and the
+    venue's per-team contract is that slug under the atc- kind prefix.
+    When his slug already carries the prefix it IS the venue's own
+    identifier (the copy lane's candidate grammar hands the slug itself
+    through as its last candidate, copy_sports._us_slug_candidates) and
+    'atc-atc-…' names nothing. ONE answer for both arms: the wording
+    arm's veto and the identity branch read this set and nothing else
+    (re-review of the mapping unit, 2026-09-03, minor: the identity
+    branch demanded 'atc-' + his slug only, so the venue slug the
+    wording veto accepted was refused one arm over — fail-closed, but
+    two readings of 'his identifier' where the veto's comment promised
+    one). No normalising: a slug that needs normalising is not the
+    identifier."""
+    if his_slug.startswith("atc-"):
+        return frozenset({his_slug})
+    return frozenset({"atc-" + his_slug})
+
+
+def _yn_title_is_his_game(his_title: str | None,
+                          his_slug: str | None) -> bool:
+    """Is his title HIS OWN GAME — the dated 'Will X win on <date>?' on
+    his slug's date, or the bare 'Will X win?' — and nothing else?
+
+    (Re-review of the mapping unit, 2026-09-03, major.) The date strip
+    in match_side made the wording arm reach dated per-team titles for
+    the first time, and that arm's question test is containment: 'will
+    neom sc win' sits inside 'will neom sc win the 1st half on 2026 09
+    03', so a title asking about the first half, the reserves, the
+    aggregate or a two-goal margin took the venue's FULL-GAME atc-
+    contract with source 'premap' and no switch — a wrong-market trade
+    the identity branch refused by design (title_not_win_shape) and the
+    wording arm never looked at. At HEAD the phantom '-09' refused the
+    ISO forms by accident; only their non-ISO forms were live. So the
+    wording arm answers to the bridge's own title gate, the one the
+    identity branch already answers to: the title must be his dated
+    win-question on his slug's date (_bridge_title_subject names a
+    subject) or the dateless bare form (title_undated — HEAD admitted
+    it, and test_a_bare_win_question_was_always_the_wording_branchs
+    holds it there). Everything else refuses, the safe direction: a
+    qualifier, a margin, an aggregate, a title dated another day than
+    his slug, a subject carrying a digit, and a title whose fold erases
+    content (_folds_away — a non-Latin qualifier the whole gate stack
+    is blind to). Three deliberate departures from HEAD, all refusals,
+    each measured against HEAD's own tree (scratchpad rr3_probe):
+    'Will X win on 9/3/2026?' resolved at HEAD and refuses now (the
+    grammar reads ISO and month-name dates only, and a date it cannot
+    read is a date it cannot hold against his slug); a DATELESS title
+    carrying a qualifier ('Will X win? (Aggregate)', '... the 1st
+    half?', '... (Παράταση)?') resolved at HEAD against a terse venue
+    row and refuses now — the same wrong-market trade with the date
+    left off; and a month-name title dated ANOTHER DAY than his slug
+    ('Will X win on Sep 4, 2026?' on a 2026-09-03 slug) resolved at
+    HEAD and refuses now — the wrong game outright."""
+    if _folds_away(his_title):
+        return False
+    anchor, why = _bridge_title_subject(his_title, his_slug)
+    return anchor is not None or why == "title_undated"
+
+
+def yn_identity_rows(rows: list[dict], outcome: str | None,
+                     his_title: str | None,
+                     his_slug: str | None) -> list[dict]:
+    """Every row that IS his own per-team contract on his literal
+    Yes/No side — normally one; the caller demands exactly one. Pure:
+    no network, no table, nothing but the rows it is handed."""
+    on = _norm(outcome)
+    want_intent = _YN_IDENTITY_INTENT.get(on)
+    if not want_intent or not his_slug:
+        return []
+    d = date_of(his_slug)
+    if not d:
+        return []
+    # the bridge's own title gate consumes his date clause and refuses
+    # any title that is not his dated win-question; a title whose fold
+    # erases content is blind and refuses first (pmus yn:title-folds)
+    if _folds_away(his_title):
+        return []
+    anchor, _why = _bridge_title_subject(his_title, his_slug)
+    if anchor is None:
+        return []
+    want_ids = _yn_his_identifiers(his_slug)
+    out: list[dict] = []
+    for r in rows:
+        ident = r.get("identifier")
+        if not isinstance(ident, str) or ident not in want_ids:
+            continue
+        if _norm(r.get("side_norm")) != on:
+            continue
+        if r.get("intent") != want_intent:
+            continue
+        q = r.get("question")
+        if not q or _folds_away(q):
+            continue
+        n = " ".join(_norm(str(q)).split())
+        gm = None
+        for pat in pmus._YN_Q_PATTERNS:
+            gm = pat.fullmatch(n)
+            if gm:
+                break
+        if gm is None:
+            continue
+        gd = gm.groupdict()
+        if not pmus._yn_date_ok(gd, d):
+            continue
+        subj = " ".join((gd.get("subj") or "").split())
+        opp = " ".join((gd.get("opp") or "").split())
+        lgq = " ".join((gd.get("lg") or "").split())
+        if (pmus._yn_slot_bad(subj) or pmus._yn_slot_bad(opp)
+                or pmus._yn_slot_bad(lgq)):
+            continue
+        if not pmus._yn_name_match(subj, anchor):
+            continue
+        out.append(r)
+    return out
+
+
 def match_side(rows: list[dict], outcome: str | None,
                his_title: str | None,
-               his_slug: str | None = None) -> dict | None:
+               his_slug: str | None = None, *,
+               yn_identity: bool = False) -> dict | None:
     """Pick the unique premap row that IS the whale's outcome.
 
     Precision rules (each one is a shipped incident):
@@ -1823,14 +2007,36 @@ def match_side(rows: list[dict], outcome: str | None,
       ambiguity, and ambiguity refuses — a tie must never fall to
       venue ordering (incident 2026-08-23).
     - A lined row never matches an unlined pick and vice versa.
+    - A date in his title is never a line and never a sign (to-a-tee
+      Phase 2, 2026-09-03; see his_title_nodate below).
+    - yn_identity=False by default: the yes/no identity branch
+      (yn_identity_rows above) is consulted only when the caller asks,
+      and then only after wording found nothing.
     """
     on = _norm(outcome)
     if not on:
         return None
+    # HIS TITLE'S DATE IS NEVER A LINE AND NEVER A SIGN (to-a-tee
+    # program Phase 2, owner order 2026-09-02 "I want us to match
+    # everything ... mirror the whales to a tee"; the coverage lens's
+    # §2.f reproduction, confirmed by both refutations). 'Will NEOM SC
+    # win on 2026-09-03?' read as the lines {'03','09'} through
+    # _LINE_CTX's '-' context and as the sign '-09' through signed_line,
+    # so _yn_line_ok refused every unlined per-team row against a
+    # phantom (probe UNMAPEG: his_lines=['03','09']) — every dated
+    # yes/no title in the feed, twice over. The venue side has stripped
+    # dates before reading lines since round 28 (_question_line); the
+    # whale side never did. One regex, both sides — applied HERE, in the
+    # matcher, because _lines_of and signed_line themselves are pinned
+    # raw by the Phase-0 yes/no tests (those grammars consume the date
+    # and never call them) — and the title's sign is read through the
+    # same strip in both arms below. A real handicap in a dated title
+    # ('cover -1.5 on 2026-09-03') still reads as its line and its sign.
+    his_title_nodate = _QDATE_RE.sub(" ", his_title or "")
     # the whale's line may live in his title, his outcome ("Over 3.5")
     # OR — for most of the feed — only in his slug (`total-4pt5`), which
     # nothing read until 2026-08-25. See slug_lines above.
-    his_lines = (_lines_of(his_title) | _lines_of(outcome)
+    his_lines = (_lines_of(his_title_nodate) | _lines_of(outcome)
                  | slug_lines(his_slug))
 
     def line_ok(r: dict) -> bool:
@@ -1863,6 +2069,16 @@ def match_side(rows: list[dict], outcome: str | None,
         # that is emergent, not guaranteed. A yes/no pick on a lined
         # market states a line and a sign; both must agree outright.
         his_signed_yn = signed_line(outcome) or signed_line(his_title)
+        if not signed_line(outcome):
+            # HIS TITLE'S DATE IS NOT A SIGN EITHER: the title's sign is
+            # re-read through the same date strip his lines go through
+            # (his_title_nodate above) — '-09' out of '2026-09-03' was
+            # the second phantom that refused every dated yes/no title.
+            # The line above stays verbatim on purpose: the yes/no sign
+            # source is the market's, never a side's, and a pin holds
+            # it to that (test_spread_sign_attribution); the strip is a
+            # second statement, not a different source.
+            his_signed_yn = signed_line(his_title_nodate)
 
         def _yn_line_ok(r: dict) -> bool:
             rs = (r.get("signed") or "").strip()
@@ -1877,10 +2093,69 @@ def match_side(rows: list[dict], outcome: str | None,
                 return False
             return not rl or rl in his_lines
 
+        # A PER-TEAM CONTRACT THAT IS NOT HIS OWN IDENTIFIER IS SHEAR
+        # (review of the mapping unit, 2026-09-03, blocking). The date
+        # strip above made the wording arm reach dated per-team titles
+        # for the first time — at HEAD the phantom '-09' refused every
+        # one of them by accident — and the wording arm filtered on
+        # side, question containment and the line guard, never on the
+        # identifier. So a whale whose slug says '-kha' with a title
+        # asking about NEOM, against a venue row worded tersely 'Will
+        # NEOM SC win?', resolved atc-spl-neo-kha-2026-09-03-NEO with
+        # source 'premap' and no switch: his slug bet Al Khaleej, the
+        # mapping traded NEOM. The identity branch below refuses exactly
+        # this shear (test_a_title_naming_the_other_team_is_shear_and_
+        # refuses: never let one outvote the other); the wording arm
+        # must too. His slug names the venue's own atc- identifier minus
+        # the kind prefix, so a yes/no hit on an atc- row is his only
+        # when that identifier IS 'atc-' + his slug byte-for-byte (or
+        # his slug is already the venue's own identifier). A bare event
+        # slug or a draw token therefore refuses every atc- row — the
+        # safe direction; aec-/astatc- yes/no rows carry no side token
+        # to contradict and are untouched. A dateless title on the same
+        # sheared slug resolved -neo at HEAD as well (probe_shear, case
+        # 4): that was the same wrong-market trade and now refuses too.
+        #
+        # AND HIS OWN IDENTIFIER IS HIS ONLY WHEN HIS TITLE IS HIS GAME
+        # (re-review of the mapping unit, 2026-09-03, major). The
+        # identifier veto alone was scope-blind: 'Will NEOM SC win the
+        # 1st half on 2026-09-03?' on his own -neo slug passed it,
+        # passed containment and passed the line guard ('1st' is not a
+        # line), and traded the full game. The row that IS his
+        # identifier is admitted only when _yn_title_is_his_game reads
+        # his title as his dated win-question or the bare one — the
+        # gate the identity branch already answers to, so both arms
+        # answer to one title reading and one identifier reading
+        # (_yn_his_identifiers).
+        title_is_his_game = (_yn_title_is_his_game(his_title, his_slug)
+                             if his_slug else True)
+
+        def _yn_identity_ok(r: dict) -> bool:
+            if not his_slug:
+                return True
+            ident = str(r.get("identifier") or "")
+            if not ident.startswith("atc-"):
+                return True
+            if ident not in _yn_his_identifiers(his_slug):
+                return False
+            return title_is_his_game
+
         cands = [r for r in rows
                  if _norm(r.get("side_norm")) == on
                  and _questions_agree(want_q, _norm(r.get("question")))
-                 and _yn_line_ok(r)]
+                 and _yn_line_ok(r)
+                 and _yn_identity_ok(r)]
+        if not cands and yn_identity:
+            # THE IDENTITY BRANCH (yn_identity_rows above), consulted
+            # ONLY when wording found nothing: an existing wording hit
+            # keeps its row, two agreeing rows stay ambiguous, and the
+            # line guard applies to the identity row exactly as it does
+            # to a wording row. Its rows are his identifier by
+            # construction; the veto is applied all the same so both
+            # arms answer to one gate.
+            cands = [r for r in yn_identity_rows(rows, outcome,
+                                                 his_title, his_slug)
+                     if _yn_line_ok(r) and _yn_identity_ok(r)]
     elif on.split()[:1] and on.split()[0] in ("over", "under"):
         want = on.split()[0]
         # side descriptions carry their line ("Over 2.5" → "over 2 5");
@@ -1909,7 +2184,7 @@ def match_side(rows: list[dict], outcome: str | None,
         # only when it names ONE subject and that subject is his pick.
         his_signed = signed_line(outcome)
         if not his_signed and _title_sign_is_his(his_title, outcome):
-            his_signed = signed_line(his_title)
+            his_signed = signed_line(his_title_nodate)
 
         def _lined_ok(r: dict) -> bool:
             # SIGN AGREEMENT WHEN HE STATED ONE (leak-hunt round 3):
@@ -2653,10 +2928,18 @@ async def resolve_explain(pool, market_title: str | None,
                          f"{sorted(want)} prefix")
         return out
     hit = match_side(kept, outcome, market_title, global_slug)
+    if hit is None and yn_identity_on():
+        # the same second call resolve makes, so the census attributes
+        # exactly what production does once the owner's flip is on
+        hit = match_side(kept, outcome, market_title, global_slug,
+                         yn_identity=True)
     if hit is None:
         out["step"] = "no_side_match"
-        _hl = sorted(_lines_of(market_title) | _lines_of(outcome)
-                     | slug_lines(global_slug))
+        # printed through the same date strip the matcher applies, so
+        # the census shows the lines the matcher saw (it printed the
+        # phantom ['03','09'] before, probe UNMAPEG)
+        _hl = sorted(_lines_of(_QDATE_RE.sub(" ", market_title or ""))
+                     | _lines_of(outcome) | slug_lines(global_slug))
         out["detail"] = (f"outcome {outcome!r} matched none of "
                          f"{[(r.get('side_norm'), r.get('line') or '-') for r in kept][:6]}"
                          f" his_lines={_hl[:4]}")
@@ -2892,6 +3175,23 @@ async def resolve_explain(pool, market_title: str | None,
                     }
             except Exception as exc:  # noqa: BLE001 — a probe never breaks
                 out["named_ml"] = {"error": type(exc).__name__}
+        # THE IDENTITY BRANCH, MEASURED DARK (to-a-tee Phase 2): what
+        # PREMAP_YN_IDENTITY=on would do with this row set, printed
+        # whether or not the owner has flipped it, so the census counts
+        # the recoverable per-team class before a dollar rides it — the
+        # way named_ml is measured above. Reads only.
+        try:
+            _ih = match_side(kept, outcome, market_title, global_slug,
+                             yn_identity=True)
+            out["yn_identity"] = {
+                "on": yn_identity_on(),
+                "would_resolve": _ih is not None,
+                "identifier": _ih.get("identifier") if _ih else None,
+                "side_norm": _ih.get("side_norm") if _ih else None,
+                "intent": _ih.get("intent") if _ih else None,
+            }
+        except Exception as exc:  # noqa: BLE001 — a probe never breaks
+            out["yn_identity"] = {"error": type(exc).__name__}
         return out
     if not hit.get("intent"):
         out["step"] = "side_has_no_intent"
@@ -2981,6 +3281,23 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
         return None
     hit = match_side(kept, outcome, market_title, global_slug)
     matched_by = "premap"
+    if hit is None and yn_identity_on():
+        # THE YES/NO IDENTITY BRANCH (yn_identity_rows above; to-a-tee
+        # program Phase 2, owner order 2026-09-02). Consulted ONLY
+        # after wording found nothing, so no existing mapping changes
+        # source or side, and DARK by default: PREMAP_YN_IDENTITY=on is
+        # the owner's flip — a config change, no deploy to roll back —
+        # exactly like the named lane below. A hit is source 'premap',
+        # the class the quarantine admits, labelled matched_by
+        # 'premap_identity' so its fills stay attributable and the
+        # branch can be killed on its own. This is the literal call
+        # above with the branch armed; the branch runs only when the
+        # wording filter found nothing, so one call's answer is the
+        # other's.
+        hit = match_side(kept, outcome, market_title, global_slug,
+                         yn_identity=True)
+        if hit is not None:
+            matched_by = "premap_identity"
     if hit is None and os.getenv("PREMAP_NAMED_LANE",
                                  "").strip().lower() == "on":
         # NAMED-TENNIS LANE, Phase 1 wiring (mapper-fail diagnosis
