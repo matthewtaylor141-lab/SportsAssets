@@ -521,6 +521,116 @@ async def _confirm_gone(http: httpx.AsyncClient, pool, address: str,
         return False
 
 
+async def market_positions(http: httpx.AsyncClient, address: str,
+                           condition_id: str, *,
+                           long_asset: str | None = None) -> dict | None:
+    """ONE per-market read of what a whale holds on BOTH tokens of a
+    condition (to-a-tee Phase 1, owner order 2026-09-02: "I want us to
+    match everything ... mirror the whales to a tee").
+
+    The whole-book snapshot beside `_RAW_KEY` is partial on every probe
+    (a mapped row with one token `n/a` on every read; truncated_books=2
+    of 7), so the mirror's admission refused `snapshot_stale` on every
+    RN1 candidate and P1 as specified could open no book. This is the
+    position source that replaces it: the same `/positions` call
+    `_confirm_gone` already makes, narrowed to one condition with
+    sizeThreshold=0 so a token he has merged down to nothing still
+    arrives as a row of size 0 rather than as an absence. It answers
+    for THIS market only, fresh and complete, and the caller measures
+    drift on the NET of the two sizes it returns.
+
+    Shape on success -- every key always present, never conditionally:
+      {"by_asset":  {asset_id: size},      # float >= 0, both tokens
+       "avg_price": {asset_id: float|None}, # venue avgPrice, None when
+                                            #   unreadable (M21 only,
+                                            #   never a money-path input)
+       "long":      size of `long_asset` (0.0 when the venue answered
+                    for this market and the leg is not among its rows,
+                    exactly as `_confirm_gone` reads that absence), or
+                    None when the caller passed no long asset,
+       "complete":  True,
+       "ts":        time.time() -- the same clock as the raw snapshot's
+                    "at", so one freshness rule serves both reads}
+
+    Fails CLOSED to None -- never a partial dict -- on everything a
+    reader could otherwise mistake for a size: a non-200, a timeout or
+    any transport error, a body that is not a list of dicts (or the
+    {"data"|"positions": [...]} wrapper `_confirm_gone` also accepts),
+    an EMPTY list (the transient empty 200 `EmptyPositions` documents;
+    a merged-out market still carries size-0 rows under sizeThreshold=0,
+    so empty is a failure mode here too), a row from a DIFFERENT
+    condition (the unfiltered first page `_confirm_gone` refuses), a
+    row without an asset id, two rows for one asset, and a size that is
+    absent, a bool, negative, NaN or infinite. An unreadable read yields
+    None and the caller keeps `snapshot_stale`; it never guesses.
+
+    Pacing: `_confirm_gone` does not call venue_pace.pace and neither
+    does this -- that pacer bounds MEASUREMENT reads of the trading
+    venue's client, and this is the data API, which has its own
+    process-wide budget (config.data_api_max_rps, ratelimit.Throttle).
+    The mirror will make this call once per book per tick, a load
+    `_confirm_gone` (vanish-only) never put on that budget, so the read
+    waits on that throttle first. `_confirm_gone` is left byte-identical.
+    """
+    from ..ratelimit import data_api_throttle
+
+    try:
+        await data_api_throttle().wait()
+        resp = await http.get("/positions", params={
+            "user": address, "market": condition_id, "limit": 100,
+            "sizeThreshold": 0})
+        if resp.status_code != 200:
+            return None
+        body = resp.json()
+        if isinstance(body, list):
+            rows = body
+        elif isinstance(body, dict):
+            rows = body.get("data") or body.get("positions") or []
+        else:
+            return None
+        if not isinstance(rows, list) or not rows:
+            return None
+        by_asset: dict[str, float] = {}
+        avg_price: dict[str, float | None] = {}
+        for p in rows:
+            if not isinstance(p, dict):
+                return None
+            row_cid = str(p.get("conditionId") or p.get("market") or "")
+            if row_cid and row_cid != str(condition_id):
+                return None         # unfiltered response -- refuse
+            asset = str(p.get("asset") or p.get("tokenId") or "")
+            if not asset or asset in by_asset:
+                return None
+            sz = _finite_size(p.get("size"))
+            if sz is None:
+                return None
+            by_asset[asset] = sz
+            avg_price[asset] = _finite_size(p.get("avgPrice"))
+        long_size: float | None = None
+        if long_asset is not None:
+            long_size = by_asset.get(str(long_asset), 0.0)
+        return {"by_asset": by_asset, "avg_price": avg_price,
+                "long": long_size, "complete": True, "ts": time.time()}
+    except Exception:  # noqa: BLE001 -- unknown is not a position
+        return None
+
+
+def _finite_size(raw: Any) -> float | None:
+    """A venue size or price as a finite float >= 0, else None. A bool
+    is refused because float(True) is 1.0 and a share count of one is
+    not what `true` means; NaN and inf are refused because both survive
+    float() and neither can be a holding."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v in (float("inf"), float("-inf")) or v < 0:
+        return None
+    return v
+
+
 async def _cycle(http: httpx.AsyncClient, pool) -> dict:
     from ..api.copies_record import COPY_WHALES
     from ..live_executor import EXIT_PENDING_REASONS, execute_copy

@@ -128,6 +128,102 @@ def test_the_ratio_reports_the_dollar_weighted_anchor_beside_the_median():
     assert few["ratio"] is None and few["ratio_weighted"] is None and "why" in few
 
 
+def test_the_bankroll_ratio_is_bankroll_over_his_deployed_dollars():
+    """The account's buying power against the MERGEPNL denominator (the
+    two figures the program reads at probe:77 and probe:1843): r is
+    0.126%, reported beside the two burst anchors and sizing nowhere."""
+    out = mi.mirror_ratio([900.0] * 12, deployed_usd=25_086_278.0, bankroll_usd=31_502.13)
+    assert out["ratio_bankroll"] == round(31_502.13 / 25_086_278.0, 6) == 0.001256
+    assert out["deployed_usd"] == 25_086_278.0 and "why_bankroll" not in out
+    # the burst anchors are untouched by the new inputs
+    assert out["ratio"] == round(50.0 / 900.0, 6) and out["ratio_weighted"] == out["ratio"]
+    # plain B/D, no weighting: ints read as dollars too
+    assert mi.mirror_ratio([900.0] * 12, deployed_usd=200, bankroll_usd=50)["ratio_bankroll"] == 0.25
+    assert mi.bankroll_ratio(200, 50) == (200.0, 0.25, None)
+
+
+def test_the_bankroll_ratio_clamps_like_the_burst_ratio():
+    # a bankroll larger than his book never maps above one-for-one
+    assert mi.mirror_ratio([900.0] * 12, deployed_usd=10.0, bankroll_usd=1e6)["ratio_bankroll"] == mi.RATIO_MAX
+    # a bankroll vanishingly small against him floors at RATIO_MIN, not 0
+    assert mi.mirror_ratio([900.0] * 12, deployed_usd=1e12, bankroll_usd=1.0)["ratio_bankroll"] == mi.RATIO_MIN
+    assert mi.RATIO_MAX == 1.0 and mi.RATIO_MIN == 1e-4
+
+
+def test_the_bankroll_ratio_is_none_and_named_on_a_zero_or_unreadable_figure():
+    def read(**kw):
+        out = mi.mirror_ratio([900.0] * 12, **kw)
+        return out["ratio_bankroll"], out["why_bankroll"], out["deployed_usd"]
+
+    # nothing passed: the existing caller's dict reads deployed_unreadable
+    assert read() == (None, "deployed_unreadable", None)
+    assert read(bankroll_usd=100.0) == (None, "deployed_unreadable", None)
+    # deployed refused first, then bankroll; a zero echoes the figure that refused it
+    assert read(deployed_usd=0.0, bankroll_usd=100.0) == (None, "deployed_zero", 0.0)
+    assert read(deployed_usd=-5.0, bankroll_usd=100.0) == (None, "deployed_zero", -5.0)
+    assert read(deployed_usd=100.0) == (None, "bankroll_unreadable", 100.0)
+    assert read(deployed_usd=100.0, bankroll_usd=0) == (None, "bankroll_zero", 100.0)
+    assert read(deployed_usd=100.0, bankroll_usd=-1.0) == (None, "bankroll_zero", 100.0)
+    # NaN, the infinities, a bool and a string (even a numeric one) are
+    # not dollar figures: refused as unreadable, never coerced
+    nan, inf = float("nan"), float("inf")
+    for bad in (nan, inf, -inf, True, False, "100", "100.0", "", [100.0], {"usd": 100.0}):
+        assert read(deployed_usd=bad, bankroll_usd=100.0) == (None, "deployed_unreadable", None), bad
+        assert read(deployed_usd=100.0, bankroll_usd=bad) == (None, "bankroll_unreadable", 100.0), bad
+    # the pure helper says the same
+    assert mi.bankroll_ratio(None, 100.0) == (None, None, "deployed_unreadable")
+    assert mi.bankroll_ratio(100.0, nan) == (100.0, None, "bankroll_unreadable")
+
+
+def test_the_bankroll_ratio_fails_closed_under_min_markets_too():
+    # a readable bankroll and deployed figure on a whale with too few
+    # anchored markets: all three readings are None, and why says so
+    few = mi.mirror_ratio([900.0] * 9, deployed_usd=1000.0, bankroll_usd=100.0)
+    assert few["ratio"] is None and few["ratio_weighted"] is None and few["ratio_bankroll"] is None
+    assert few["why_bankroll"] == few["why"] == "fewer than 10 markets with an opening burst"
+    assert few["deployed_usd"] == 1000.0
+    # an unreadable figure keeps its own, more specific, name there
+    assert mi.mirror_ratio([900.0] * 9, deployed_usd=None, bankroll_usd=100.0)["why_bankroll"] == "deployed_unreadable"
+    assert mi.mirror_ratio([900.0] * 9, deployed_usd=0.0, bankroll_usd=100.0)["why_bankroll"] == "deployed_zero"
+
+
+def test_mirror_ratio_keeps_every_existing_key_and_value_for_existing_callers():
+    """Pinned against the values the function returned before the
+    bankroll inputs existed (git show HEAD:...mirror.py, d402e1d), on
+    every fixture the older tests use. The new keys sit beside them;
+    the shadow's `compute_ratio` passes no keyword and reads `ratio`."""
+    why = "fewer than 10 markets with an opening burst"
+    head = {
+        ((900.0,) * 12, 50.0): {"n": 12, "anchor_usd": 900.0, "ratio": 0.055556, "clip_usd": 50.0,
+                                "anchor_usd_weighted": 900.0, "ratio_weighted": 0.055556},
+        ((900.0,) * 9, 50.0): {"n": 9, "anchor_usd": None, "ratio": None, "clip_usd": 50.0,
+                               "anchor_usd_weighted": None, "ratio_weighted": None, "why": why},
+        ((1.0,) * 12, 50.0): {"n": 12, "anchor_usd": 1.0, "ratio": 1.0, "clip_usd": 50.0,
+                              "anchor_usd_weighted": 1.0, "ratio_weighted": 1.0},
+        ((0, None, 900.0) * 4, 50.0): {"n": 4, "anchor_usd": None, "ratio": None, "clip_usd": 50.0,
+                                       "anchor_usd_weighted": None, "ratio_weighted": None, "why": why},
+        ((861.8,) * 12, 50.0): {"n": 12, "anchor_usd": 861.8, "ratio": 0.058018, "clip_usd": 50.0,
+                                "anchor_usd_weighted": 861.8, "ratio_weighted": 0.058018},
+        ((10.0,) * 9 + (1000.0,) + (10.0,) * 2, 50.0): {
+            "n": 12, "anchor_usd": 10.0, "ratio": 1.0, "clip_usd": 50.0,
+            "anchor_usd_weighted": 1000.0, "ratio_weighted": 0.05},
+    }
+    for (bursts, clip), expect in head.items():
+        out = mi.mirror_ratio(list(bursts), clip_usd=clip)
+        got = {k: out[k] for k in expect}
+        assert got == expect, (bursts, got)
+        assert all(type(got[k]) is type(expect[k]) for k in expect), bursts
+        assert set(out) - set(expect) == {"deployed_usd", "ratio_bankroll", "why_bankroll"}
+    # the new inputs are keyword-only: the positional shape is unchanged
+    import inspect
+    params = inspect.signature(mi.mirror_ratio).parameters
+    assert [p.name for p in params.values() if p.kind is p.KEYWORD_ONLY] == ["deployed_usd", "bankroll_usd"]
+    assert params["deployed_usd"].default is None and params["bankroll_usd"].default is None
+    # the module still reads no environment
+    src = inspect.getsource(mi)
+    assert "os.environ" not in src and "getenv" not in src
+
+
 def test_venue_and_ledger_agree_within_one_share():
     from sportsassets.analytics import mirror as mi
     book = mi.Book(bid=0.30, ask=0.32)

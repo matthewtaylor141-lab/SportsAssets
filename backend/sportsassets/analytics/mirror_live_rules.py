@@ -34,13 +34,19 @@ What lives here, in the order the tick uses it:
   * keep_or_replace()   what to do with the order already resting
   * take_allowed()      the bounded take: only after the wait AND only
                         with the book at or through his level;
-                        take_arms() the one rejection that arms it
+                        take_arms() the one rejection that arms it, in
+                        the two shapes the venue refuses a post-only
+                        rest (an HTTP 400, or a 200 carrying a
+                        REJECTED order and a REJECTED execution)
   * select_flatten()    paired-out (rest at 1 - q, never marketed) vs
                         vanished (the one path that accepts slippage,
                         and only with every confirmation)
   * book_buy/book_sell  the ledger arithmetic per booked fill
   * drift_rule()        derived-vs-snapshot: increases refused on drift
-                        or a stale read, reductions from the smaller
+                        or a stale read, reductions from the smaller;
+                        drift_net_rule() the same disagreement read on
+                        the NET of both tokens, so a pair he merged
+                        on-chain is not a lifelong drift lock-out
   * episode_close()     cashed_out vs cancelled vs not yet, with
                         episode_close_reason() naming the "not yet"
   * p2_verdict()        the numbered P1 -> P2 gate, read from numbers,
@@ -76,6 +82,19 @@ from .roster_rules import MEASURE_CLIP_USD, MIN_N_DEMOTE, MIN_N_PROMOTE
 # executor's short gate until P2 (the spec's "P2's door").
 ORDER_INTENT = "ORDER_INTENT_BUY_LONG"
 BUY, SELL = "BUY_LONG", "SELL_LONG"
+# The venue's own names for a refused order, spelled exactly as the
+# SDK's Literal types spell them (polymarket_us/types/orders.py,
+# OrderState and ExecutionType). Restated here because this module
+# imports no venue adapter (the purity pin), and read by take_arms:
+# the second shape of a post-only refusal is a 200 whose order comes
+# back in this state with an execution of this type (to-a-tee program
+# Phase 7, owner order 2026-09-02 "I want us to match everything ...
+# mirror the whales to a tee"; the 1-share probe rungs read both
+# shapes from the venue before any default rides on them). The
+# adapter's contract is to carry them into raw verbatim; a spelling
+# that differs by a character is not the venue's and never arms.
+ORDER_STATE_REJECTED = "ORDER_STATE_REJECTED"
+EXECUTION_TYPE_REJECTED = "EXECUTION_TYPE_REJECTED"
 
 
 # --------------------------------------------------------------- readings
@@ -397,6 +416,18 @@ class AdmissionFacts:
     books_live: int | None = None
     opened_today: int | None = None
     first_fill_ok: bool | None = None
+    # A per-MARKET venue read of BOTH tokens of this condition, stamped
+    # fresh AND complete for that market (Phase 1 of the to-a-tee
+    # program, owner order 2026-09-02 "I want us to match everything
+    # ... mirror the whales to a tee"). It stands beside snap_fresh,
+    # the whole-book walk's flag, because RN1's walk is truncated on
+    # every probe (tee/lifecycle.refute.market.md: a mapped row with
+    # one token `n/a` every time), so `snap_fresh` is never True for
+    # him and P1 as specified opened no RN1 book. Appended LAST so a
+    # positional construction anywhere keeps its meaning; None (not
+    # read) is the fail-closed default, and nothing but the bool True
+    # admits.
+    snap_market_fresh: bool | None = None
 
 
 def _why(v: Any) -> str:
@@ -462,7 +493,12 @@ def admission(f: AdmissionFacts, increase: bool = False) -> str | None:
         return "kalshi_claimed"
     if f.side_band_hit is not False:
         return "side_band"
-    if f.snap_fresh is not True:
+    # either sight of him is a sight: the whole-book walk read fresh
+    # and complete, OR the per-market read of both tokens of this
+    # condition read fresh and complete (Phase 1). The name stays
+    # `snapshot_stale` so the census keeps its history; with neither
+    # flag the bool True the candidate is refused as before
+    if f.snap_fresh is not True and f.snap_market_fresh is not True:
         return "snapshot_stale"
     d = _num(f.drift)
     if d is None or d < 0.0 or d > float(MIRROR_DRIFT_MAX):
@@ -808,14 +844,53 @@ def take_allowed(rest_age_s: float | None, take_armed_at: float | None, now: flo
     return waited and at_or_through(side, bid, ask, wire)
 
 
-def take_arms(status_code: Any) -> bool:
-    """Does a post-only rejection ARM the take? Only a 400 -- the
-    venue's crossing refusal (addendum section 7). A 401/403/429/5xx
-    is the adapter's `post_only_rejected` too but says nothing about
-    the book, and nothing that is not the int 400 (a string '400', a
-    float, a bool, None) arms anything: arming is the aggressive
-    path."""
-    return isinstance(status_code, int) and not isinstance(status_code, bool) and status_code == 400
+def _int_code(v: Any) -> int | None:
+    """An HTTP status as the int it arrived as, or None: a bool, a
+    float 400.0, a string '400' or anything else is not a status the
+    adapter read from the venue."""
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def take_arms(refusal: Any) -> bool:
+    """Does a post-only rejection ARM the take? Only the venue's
+    crossing refusal (addendum section 7), which the venue voices in
+    TWO shapes; the adapter (pmus.submit_fok under post_only=True)
+    returns `post_only_rejected` for both and carries the facts in
+    `raw`, and this reads either the bare status code or that raw dict:
+
+      (a) an HTTP 400 from the SDK -- the int 400 (today's path, the
+          worker passes raw["status_code"]), or a dict whose
+          "status_code" is the int 400;
+      (b) a 200 whose order comes back REJECTED with an execution of
+          type REJECTED -- a dict whose "status_code" is the int 200
+          AND whose "post_only_cross" is the bool True AND whose
+          "execution_type" is exactly EXECUTION_TYPE_REJECTED, the
+          SDK's own spelling (polymarket_us/types/orders.py).
+
+    Nothing else arms. A 401/403/429/5xx is the adapter's
+    `post_only_rejected` too but says nothing about the book; a string
+    '400', a float, a bool, None, a list, a dict missing any of the
+    keys its shape needs, a "status_code" that is not an int, a 200
+    without post_only_cross, a post_only_cross that is not the bool
+    True, an execution type spelled any other way -- none of them is
+    the venue's crossing refusal, and arming is the aggressive path.
+    The truth table is pinned in the tests (to-a-tee program Phase 7,
+    owner order 2026-09-02 "I want us to match everything ... mirror
+    the whales to a tee": no default rides before the 1-share rungs
+    read both shapes from the venue; the market `state` read that
+    Phase 4 adds so a PREOPEN/SUSPENDED 400 never arms is not here yet
+    and is not assumed).
+    """
+    if isinstance(refusal, dict):
+        code = _int_code(refusal.get("status_code"))
+        if code == 400:
+            return True
+        if code != 200:
+            return False
+        return (refusal.get("post_only_cross") is True
+                and isinstance(refusal.get("execution_type"), str)
+                and refusal.get("execution_type") == EXECUTION_TYPE_REJECTED)
+    return _int_code(refusal) == 400
 
 
 # --------------------------------------------------------------- flatten
@@ -1134,6 +1209,51 @@ def drift_rule(his_long: float | None, snap_long: float | None, fresh: bool | No
     return DriftRule(True, "derived", None, d)
 
 
+def drift_net_rule(his_long: float | None, his_other: float | None,
+                   snap_long: float | None, snap_other: float | None) -> float | None:
+    """The derived-vs-snapshot disagreement read on the NET of both
+    tokens: |(his_long - his_other) - (snap_long - snap_other)| /
+    max(|net_fills|, |net_snap|), rounded to 6 places; 0.0 when both
+    nets are zero (nothing to disagree about); None when any of the
+    four readings is not a size (None, a bool, a string, NaN, an
+    infinity, a NEGATIVE) -- no number is made from a reading that
+    was not made, never a guess.
+
+    WHY THE NET AND NOT THE TOKEN (to-a-tee program Phase 1, owner
+    order 2026-09-02 "I want us to match everything ... mirror the
+    whales to a tee"): 42.8% of his shares since 08-01 are merged pair
+    legs (probe:1843). His fills say +5,000 Yes and +5,000 No; he
+    merges the pair on-chain and the venue then shows 0 and 0. The
+    per-token rule drift_of reads |5,000 - 0| / 5,000 = 1.0 on each
+    token and refuses every increase on that market for the life of
+    the book -- a lifelong drift lock-out on a position that is, in
+    truth, flat on both sides. On the net the same market reads
+    |0 - 0| = 0: drift 0. A one-sided add reads the same number under
+    both rules (his_long 1,000 vs snap 990 with nothing on the other
+    token is 0.01 here and in drift_of), so the net rule loosens
+    nothing where the per-token rule was right. Its inputs are still
+    held to the per-token rule's standard: the per-token rule refuses
+    negatives (_size), and so does this one, on all four -- a size
+    under zero is a reading nobody made, whatever it would net to.
+    The denominator is exactly the larger |net| (no share floor): a
+    sub-share net against a zero net reads as full disagreement, the
+    closed reading, and the worker's FLAT_TOL_SHARES dust never
+    reaches a target anyway. Beside drift_rule, which stays as
+    pinned; the worker that reads Phase 1's per-market read decides
+    which drift number rides in AdmissionFacts.drift.
+    """
+    hl, ho, sl, so = _size(his_long), _size(his_other), _size(snap_long), _size(snap_other)
+    if hl is None or ho is None or sl is None or so is None:
+        return None
+    net_fills = hl - ho
+    net_snap = sl - so
+    denom = max(abs(net_fills), abs(net_snap))
+    if denom == 0.0:
+        return 0.0
+    d = abs(net_fills - net_snap) / denom
+    return round(d, 6) if math.isfinite(d) else None
+
+
 # --------------------------------------------------------- episode close
 
 def episode_close_reason(state: BookState, market_closed_or_resolved: bool | None,
@@ -1369,7 +1489,8 @@ def p2_verdict(numbers: dict) -> tuple[bool, list[str]]:
 # none of them, and the test suite reads them through this module only
 # to pin that they are the same objects, never restated.
 __all__ = [
-    "ORDER_INTENT", "BUY", "SELL", "capped_env", "min_wait_env",
+    "ORDER_INTENT", "BUY", "SELL", "ORDER_STATE_REJECTED", "EXECUTION_TYPE_REJECTED",
+    "capped_env", "min_wait_env",
     "MIRROR_NET_CAP_FLOOR_USD",
     "MIRROR_NET_CAP_USD", "MIRROR_MAX_LIVE_BOOKS", "MIRROR_MAX_BOOKS_PER_DAY",
     "MIRROR_DAY_USD", "MIRROR_LOSS_STOP_USD", "MIRROR_MAX_ORDER_OPS_PER_TICK",
@@ -1383,6 +1504,7 @@ __all__ = [
     "OpenOrder", "plan_reason_key", "keep_or_replace",
     "at_or_through", "take_allowed", "take_arms", "select_flatten",
     "BookState", "Booking", "book_buy", "book_sell",
-    "DriftRule", "drift_of", "drift_rule", "episode_close", "episode_close_reason",
+    "DriftRule", "drift_of", "drift_rule", "drift_net_rule",
+    "episode_close", "episode_close_reason",
     "demotion_due", "capture_short", "p2_verdict",
 ]

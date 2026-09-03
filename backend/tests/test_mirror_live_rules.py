@@ -713,6 +713,126 @@ def test_take_arms_only_on_a_crossing_refusal():
         assert r.take_arms(code) is False, code
 
 
+# the two shapes of a post-only refusal (to-a-tee program Phase 7):
+# the adapter's raw dict for (a) an HTTP 400 and (b) a 200 carrying a
+# REJECTED order with a REJECTED execution
+REJ_STATE, REJ_EXEC = "ORDER_STATE_REJECTED", "EXECUTION_TYPE_REJECTED"
+_SHAPE_400 = {"status_code": 400, "error": "post-only order would cross",
+              "body": {"message": "would cross", "code": 7}, "preview": {}}
+_SHAPE_200 = {"status_code": 200, "order_state": REJ_STATE, "execution_type": REJ_EXEC,
+              "post_only_cross": True, "order_id": "ord-1", "preview": {}}
+
+
+def test_the_rejected_names_are_the_sdks_own_spelling():
+    # the rules module cannot import the venue SDK (the purity pin), so
+    # it restates the two enum strings; this pins them to the SDK's
+    # Literal types, character for character
+    import typing
+
+    from polymarket_us.types import orders as sdk_orders
+
+    assert r.ORDER_STATE_REJECTED == REJ_STATE
+    assert r.EXECUTION_TYPE_REJECTED == REJ_EXEC
+    assert r.ORDER_STATE_REJECTED in typing.get_args(sdk_orders.OrderState)
+    assert r.EXECUTION_TYPE_REJECTED in typing.get_args(sdk_orders.ExecutionType)
+    assert "ORDER_STATE_REJECTED" in r.__all__ and "EXECUTION_TYPE_REJECTED" in r.__all__
+
+
+def test_take_arms_on_both_refusal_shapes_and_on_nothing_else():
+    # shape (a): the bare int (today's path) and the adapter's dict
+    assert r.take_arms(400) is True
+    assert r.take_arms(dict(_SHAPE_400)) is True
+    assert r.take_arms({"status_code": 400}) is True
+    # a 400 arms whatever else rides in raw: the extra keys of the
+    # second shape do not un-arm the first
+    assert r.take_arms({"status_code": 400, "post_only_cross": False}) is True
+    assert r.take_arms({"status_code": 400, "post_only_cross": True, "execution_type": REJ_EXEC}) is True
+    assert r.take_arms({"status_code": 400, "execution_type": "EXECUTION_TYPE_NEW"}) is True
+    # shape (b): the 200 that carries the venue's refusal
+    assert r.take_arms(dict(_SHAPE_200)) is True
+    assert r.take_arms({"status_code": 200, "post_only_cross": True, "execution_type": REJ_EXEC}) is True
+    # order_state and order_id ride beside for the census; neither is
+    # a condition, so their absence does not un-arm a refusal the
+    # adapter stamped post_only_cross
+    assert r.take_arms({"status_code": 200, "post_only_cross": True, "execution_type": REJ_EXEC,
+                        "order_state": None, "order_id": None}) is True
+    # every non-arming input: other codes in both shapes
+    for code in (401, 403, 404, 409, 422, 429, 500, 503, 0, -400, 200, 201, 204):
+        assert r.take_arms(code) is False, code
+        assert r.take_arms({"status_code": code}) is False, code
+        assert r.take_arms({"status_code": code, "error": "no"}) is False, code
+    # a status that is not the int it arrived as
+    for bad in ("400", "200", 400.0, 200.0, True, False, None, Decimal("400"), [400], b"400"):
+        assert r.take_arms(bad) is False, bad
+        assert r.take_arms({"status_code": bad}) is False, bad
+        assert r.take_arms({"status_code": bad, "post_only_cross": True, "execution_type": REJ_EXEC}) is False, bad
+    # a dict missing a key its shape needs
+    assert r.take_arms({}) is False
+    assert r.take_arms({"post_only_cross": True, "execution_type": REJ_EXEC}) is False
+    assert r.take_arms({"status_code": 200}) is False
+    assert r.take_arms({"status_code": 200, "post_only_cross": True}) is False
+    assert r.take_arms({"status_code": 200, "execution_type": REJ_EXEC}) is False
+    assert r.take_arms({"status_code": 200, "order_state": REJ_STATE, "execution_type": REJ_EXEC}) is False
+    assert r.take_arms({"status_code": 200, "order_state": REJ_STATE, "post_only_cross": True}) is False
+    # a 200 whose post_only_cross is not the bool True
+    for flag in (False, None, 1, 1.0, "True", "true", [True], Decimal("1")):
+        assert r.take_arms({"status_code": 200, "post_only_cross": flag, "execution_type": REJ_EXEC}) is False, flag
+    # a 200 whose execution type is spelled any other way
+    for et in ("REJECTED", "rejected", "EXECUTION_TYPE_REJECTED ", " EXECUTION_TYPE_REJECTED",
+               "execution_type_rejected", "EXECUTION_TYPE_CANCELED", "EXECUTION_TYPE_NEW",
+               "EXECUTION_TYPE_EXPIRED", REJ_STATE, None, True, 1, b"EXECUTION_TYPE_REJECTED",
+               ["EXECUTION_TYPE_REJECTED"]):
+        assert r.take_arms({"status_code": 200, "post_only_cross": True, "execution_type": et}) is False, et
+    # containers that are not the adapter's dict
+    for junk in ([400], (400,), {400}, [_SHAPE_400], "post_only_rejected", object(), mi.Plan(None, 0, None, "x")):
+        assert r.take_arms(junk) is False, junk
+    # the inputs are never mutated by the reading
+    a, b = dict(_SHAPE_400), dict(_SHAPE_200)
+    r.take_arms(a)
+    r.take_arms(b)
+    assert a == _SHAPE_400 and b == _SHAPE_200
+
+
+def test_take_arms_truth_table_over_the_dict_keys():
+    # sweep every combination of the three keys over small pools: the
+    # only arming dicts are status 400 (any other keys) and status 200
+    # with post_only_cross True and the exact REJECTED execution type
+    codes = (400, 200, 429, "400", 400.0, True, None, "absent")
+    flags = (True, False, None, 1, "True", "absent")
+    types = (REJ_EXEC, "EXECUTION_TYPE_CANCELED", "REJECTED", None, "absent")
+    armed = 0
+    for code, flag, et in itertools.product(codes, flags, types):
+        d = {}
+        if code != "absent":
+            d["status_code"] = code
+        if flag != "absent":
+            d["post_only_cross"] = flag
+        if et != "absent":
+            d["execution_type"] = et
+        # the oracle reads the code as the rule must: the int it
+        # arrived as (400.0 == 400 in Python, and is not a status)
+        is_int = isinstance(code, int) and not isinstance(code, bool)
+        want = (is_int and code == 400) or (is_int and code == 200 and flag is True and et == REJ_EXEC)
+        got = r.take_arms(d)
+        assert got is want, (d, got)
+        armed += got
+    # 400 x every flag x every type, plus the one 200 row
+    assert armed == len(flags) * len(types) + 1
+    # a foreign __eq__ on the keys' values never runs: post_only_cross
+    # is read by identity and execution_type is compared only as a str
+
+    class Boom:
+        def __eq__(self, other):
+            raise RuntimeError("eq")
+
+        __hash__ = object.__hash__
+
+    assert r.take_arms({"status_code": 200, "post_only_cross": Boom(), "execution_type": REJ_EXEC}) is False
+    assert r.take_arms({"status_code": 200, "post_only_cross": True, "execution_type": Boom()}) is False
+    assert r.take_arms({"status_code": Boom()}) is False
+    assert r.take_arms(Boom()) is False
+
+
 def test_a_take_never_fires_on_a_non_quote():
     # a quote must be a cent on the ladder like the wire: 0.0 and -1.0
     # used to read as "the ask is under our cent" and fire the take,
@@ -1349,6 +1469,72 @@ def test_drift_readings_fail_closed_and_the_default_is_the_smaller():
     assert r.drift_of(0.0, 0.0) == 0.0 and r.drift_of(0.0, 0.5) == 0.5
 
 
+def test_drift_net_rule_reads_the_net_so_an_equal_leg_merge_is_no_drift():
+    # the program's case (Phase 1): his fills say +5,000 Yes / +5,000
+    # No, he merges the pair on-chain, the venue shows 0 / 0. Per
+    # token that is drift 1.0 on both sides -- a lifelong lock-out on
+    # increases for a position that is flat; on the net it is 0
+    assert r.drift_of(5000.0, 0.0) == 1.0
+    assert r.drift_net_rule(5000.0, 5000.0, 0.0, 0.0) == 0.0
+    # both nets zero: nothing to disagree about, 0.0 not a division
+    assert r.drift_net_rule(0.0, 0.0, 0.0, 0.0) == 0.0
+    assert r.drift_net_rule(0, 0, 0, 0) == 0.0
+    assert r.drift_net_rule(1200.0, 1200.0, 300.0, 300.0) == 0.0
+    # a partial merge: fills +1,000 / +200, venue 800 / 0 -- the same
+    # net 800 on both, drift 0
+    assert r.drift_net_rule(1000.0, 200.0, 800.0, 0.0) == 0.0
+    # a one-sided add reads the per-token number
+    assert r.drift_net_rule(1000.0, 0.0, 990.0, 0.0) == r.drift_of(1000.0, 990.0) == 0.01
+    assert r.drift_net_rule(1000.0, 0.0, 900.0, 0.0) == r.drift_of(1000.0, 900.0) == 0.1
+    assert r.drift_net_rule(990.0, 0.0, 1000.0, 0.0) == 0.01
+    # and on the OTHER token (his short of our long): the same number
+    assert r.drift_net_rule(0.0, 1000.0, 0.0, 990.0) == 0.01
+    assert r.drift_net_rule(0.0, 1000.0, 0.0, 900.0) == 0.1
+    # a sign disagreement is the full disagreement it is: fills net
+    # +100, venue net -100 -> |200| / 100 = 2.0
+    assert r.drift_net_rule(100.0, 0.0, 0.0, 100.0) == 2.0
+    # one side read, the other not: fills +1,000, venue flat -> 1.0
+    assert r.drift_net_rule(1000.0, 0.0, 0.0, 0.0) == 1.0
+    assert r.drift_net_rule(0.0, 0.0, 1000.0, 0.0) == 1.0
+    # exactly at the bound, and the 6-place rounding
+    assert r.drift_net_rule(1000.0, 0.0, 950.0, 0.0) == 0.05
+    assert r.drift_net_rule(3.0, 0.0, 1.0, 0.0) == round(2.0 / 3.0, 6)
+    # Decimal and whole-valued ints are readings
+    assert r.drift_net_rule(Decimal("1000"), Decimal("0"), Decimal("990"), 0) == 0.01
+    # the denominator is the larger |net| with no share floor: a
+    # sub-share net against a flat venue is full disagreement (the
+    # closed reading), where the per-token rule's 1-share floor reads
+    # 0.5 -- the integrating phase chooses which number rides
+    assert r.drift_net_rule(0.5, 0.0, 0.0, 0.0) == 1.0 and r.drift_of(0.5, 0.0) == 0.5
+    # every input by the per-token standard: None / bool / str / NaN /
+    # inf / a negative / an int too big for a float -> None, never a
+    # guess, in each of the four positions
+    good = [1000.0, 200.0, 800.0, 0.0]
+    for bad in (None, True, False, "1000", "", b"1", math.nan, math.inf, -math.inf,
+                -1.0, -0.001, -1, 10**400):
+        for i in range(4):
+            args = list(good)
+            args[i] = bad
+            assert r.drift_net_rule(*args) is None, (i, bad)
+        assert r.drift_net_rule(bad, bad, bad, bad) is None, bad
+    # negatives refused even where they would net to agreement
+    assert r.drift_net_rule(-5.0, -5.0, 0.0, 0.0) is None
+    assert r.drift_net_rule(100.0, 0.0, 100.0, -0.0) == 0.0     # a negative zero is a reading of nothing
+
+    class Boom:
+        def __float__(self):
+            raise RuntimeError("boom")
+
+    assert r.drift_net_rule(Boom(), 0.0, 0.0, 0.0) is None
+    assert r.drift_net_rule(0.0, 0.0, 0.0, Boom()) is None
+    # an overflow in the arithmetic is no number either
+    assert r.drift_net_rule(1e308, 0.0, 0.0, 1e308) is None
+    # the pinned per-token rule is untouched beside it
+    assert r.drift_rule(5000.0, 0.0, True, False).refusal == "drift"
+    assert r.drift_of(5000.0, 0.0) == 1.0
+    assert "drift_net_rule" in r.__all__
+
+
 # -------------------------------------------------------- episode close
 
 def test_episode_close_rules():
@@ -1569,6 +1755,54 @@ def test_increase_recheck_is_the_starred_clauses_only():
     assert r.admission(_admitted(mapping_ok=False, mapping_why="hold"), increase=True) == "mapping:hold"
     assert r.admission(_admitted(edge_ok=False), increase=True) == "edge_gate:unreadable"
     assert r.admission(_admitted(cell_ok=False, cell_clause="league"), increase=True) == "cell_gate_league"
+
+
+def test_a_per_market_fresh_read_admits_where_the_whole_book_walk_is_stale():
+    # Phase 1: RN1's positions walk is truncated on every probe, so
+    # snap_fresh is never True for him and `snapshot_stale` refused
+    # every RN1 candidate. A per-market read of both tokens, stamped
+    # fresh and complete for THAT market, is the second sight of him
+    import dataclasses
+
+    # the default is the fail-closed None, appended last so nothing
+    # built positionally changes meaning
+    assert r.AdmissionFacts().snap_market_fresh is None
+    assert dataclasses.fields(r.AdmissionFacts)[-1].name == "snap_market_fresh"
+    # the existing helper never sets it and still admits on snap_fresh
+    assert r.admission(_admitted()) is None
+    # the per-market read admits where the walk is stale or unread
+    for walk in (None, False):
+        assert r.admission(_admitted(snap_fresh=walk, snap_market_fresh=True)) is None, walk
+        # and the drift clause still rides after it: the name that
+        # follows is drift, not snapshot_stale
+        assert r.admission(_admitted(snap_fresh=walk, snap_market_fresh=True, drift=0.06)) == "drift", walk
+        assert r.admission(_admitted(snap_fresh=walk, snap_market_fresh=True, drift=None)) == "drift", walk
+    assert r.admission(_admitted(snap_fresh=True, snap_market_fresh=True)) is None
+    assert r.admission(_admitted(snap_fresh=True, snap_market_fresh=None)) is None
+    assert r.admission(_admitted(snap_fresh=True, snap_market_fresh=False)) is None
+    # neither sight: the existing name
+    for walk in (None, False):
+        for market in (None, False):
+            assert r.admission(_admitted(snap_fresh=walk, snap_market_fresh=market)) == "snapshot_stale", (walk, market)
+    # only the bool True admits: 1, 'True', 1.0, a list are unread
+    for bad in (1, 0, "True", "true", 1.0, [True], Decimal("1"), object()):
+        assert r.admission(_admitted(snap_fresh=None, snap_market_fresh=bad)) == "snapshot_stale", bad
+        assert r.admission(_admitted(snap_fresh=False, snap_market_fresh=bad)) == "snapshot_stale", bad
+        assert r.admission(_admitted(snap_fresh=bad, snap_market_fresh=bad)) == "snapshot_stale", bad
+        # a garbage walk flag beside a true market read still admits
+        assert r.admission(_admitted(snap_fresh=bad, snap_market_fresh=True)) is None, bad
+    # the clause keeps its place: side_band before it, drift after it
+    assert r.admission(_admitted(side_band_hit=True, snap_fresh=False, snap_market_fresh=True)) == "side_band"
+    assert r.admission(_admitted(snap_fresh=False, snap_market_fresh=False, drift=0.06)) == "snapshot_stale"
+    # not part of the increase re-check, like snap_fresh
+    assert r.admission(_admitted(snap_fresh=False, snap_market_fresh=False), increase=True) is None
+    # the worker's keyword construction is unaffected: every field the
+    # worker names today is still accepted and the new one is optional
+    kw = {f.name: getattr(_admitted(), f.name) for f in dataclasses.fields(r.AdmissionFacts)
+          if f.name != "snap_market_fresh"}
+    assert r.admission(r.AdmissionFacts(**kw)) is None
+    assert r.admission(r.AdmissionFacts(**{**kw, "snap_fresh": False})) == "snapshot_stale"
+    assert r.admission(r.AdmissionFacts(**{**kw, "snap_fresh": False, "snap_market_fresh": True})) is None
 
 
 # -------------------------------------------------------------- P2 gate

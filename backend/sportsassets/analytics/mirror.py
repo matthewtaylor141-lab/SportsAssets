@@ -25,6 +25,10 @@ without a venue or a database:
                             the anchor the ratio is set against
   * mirror_ratio(...)     -> MEASURE_CLIP_USD / median opening burst,
                             clamped to [RATIO_MIN, COPY_RATIO_MAX]
+  * bankroll_ratio(...)   -> bankroll / his deployed dollars, the same
+                            clamp; refused by name on an unreadable or
+                            non-positive figure (reported by mirror_ratio
+                            as ratio_bankroll, sized on nowhere yet)
   * target_shares(...)    -> ratio x his_net, capped by dollars at the
                             mark, whole shares, shorts optional
   * plan(...)             -> given target, ledger and venue positions:
@@ -128,18 +132,88 @@ def opening_burst(fills: Iterable[Fill | dict], burst_s: float = BURST_S) -> flo
     return round(sum(n for ts, n in buys if ts <= t0 + burst_s), 4)
 
 
-def mirror_ratio(bursts: Iterable[float], clip_usd: float = MEASURE_CLIP_USD) -> dict:
+def _usd_read(value: Any) -> float | None:
+    """A dollar figure the ratio may be set against: an int or a float
+    that is finite. Anything else -- None, a bool, a string (even a
+    numeric one), NaN, an infinity -- is unreadable and yields None, so
+    the caller names it rather than dividing by a guess."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    v = float(value)
+    if v != v or v in (float("inf"), float("-inf")):
+        return None
+    return v
+
+
+def bankroll_ratio(deployed_usd: Any, bankroll_usd: Any) -> tuple[float | None, float | None, str | None]:
+    """(deployed_usd as read, ratio_bankroll, why): the fraction of HIS
+    deployed dollars our bankroll can hold, clamped like the burst
+    ratio. Pure; the two dollar figures arrive from the caller (the
+    shadow's 30-day open-cost query and the promoted bankroll constant
+    -- this module reads no environment, test_mirror_live_rules.py:76
+    pins that the shared constants are never restated here).
+
+    The reading is refused by name, deployed first then bankroll:
+    `deployed_unreadable` / `bankroll_unreadable` when the figure is not
+    a finite number, `deployed_zero` / `bankroll_zero` when it is not
+    positive (a zero or negative scale is no scale). The deployed figure
+    is echoed as read whenever it IS a number, so a refused `_zero`
+    still shows the value that refused it."""
+    deployed = _usd_read(deployed_usd)
+    if deployed is None:
+        return None, None, "deployed_unreadable"
+    if deployed <= 0:
+        return deployed, None, "deployed_zero"
+    bankroll = _usd_read(bankroll_usd)
+    if bankroll is None:
+        return deployed, None, "bankroll_unreadable"
+    if bankroll <= 0:
+        return deployed, None, "bankroll_zero"
+    ratio = round(min(RATIO_MAX, max(RATIO_MIN, bankroll / deployed)), 6)
+    return deployed, ratio, None
+
+
+def mirror_ratio(bursts: Iterable[float], clip_usd: float = MEASURE_CLIP_USD, *,
+                 deployed_usd: float | None = None,
+                 bankroll_usd: float | None = None) -> dict:
     """ratio = clip / median opening burst over his recent markets, so
     his typical first move maps to the measuring clip. Needs at least
     MIN_MARKETS markets; otherwise the ratio is None and the mirror does
-    nothing (fail closed on an unknown scale)."""
+    nothing (fail closed on an unknown scale).
+
+    `deployed_usd` / `bankroll_usd` (keyword-only, default None) add a
+    THIRD reading, `ratio_bankroll`, beside the median and the weighted
+    anchor; see `bankroll_ratio` for its refusals. Without them the
+    reading is `deployed_unreadable`, and every key an existing caller
+    reads keeps HEAD's value."""
     xs = sorted(float(b) for b in bursts if b and float(b) > 0)
+    # THE BANKROLL RATIO (owner order 2026-09-02, "I want us to match
+    # everything ... mirror the whales to a tee"; the sizing lens and its
+    # engineering refutation, 2026-09-02, F1-F2): both burst anchors map
+    # his typical FIRST MOVE to the $50 measuring clip, so on the markets
+    # that carry his money the median ratio clamps to 1.0 and the $250
+    # cap does all the sizing (it binds on 68.7-85.1% of his long dollars
+    # at r=1.9%), which inverts his shape. The fraction that keeps his
+    # shape is bankroll / his deployed dollars: the 30-day open cost
+    # OVERSTATES him (resolved balances stay in the denominator), so this
+    # r errs small, never large. It is reported here and measured in the
+    # shadow before any live rule sizes on it.
+    deployed, ratio_bankroll, why_bankroll = bankroll_ratio(deployed_usd, bankroll_usd)
     out: dict[str, Any] = {"n": len(xs), "anchor_usd": None, "ratio": None,
                            "clip_usd": float(clip_usd), "anchor_usd_weighted": None,
-                           "ratio_weighted": None}
+                           "ratio_weighted": None, "deployed_usd": deployed,
+                           "ratio_bankroll": None}
+    if why_bankroll is not None:
+        out["why_bankroll"] = why_bankroll
     if len(xs) < MIN_MARKETS:
         out["why"] = f"fewer than {MIN_MARKETS} markets with an opening burst"
+        # The bankroll ratio needs no burst, but a whale with too few
+        # markets to anchor on is a scale we do not know yet; the third
+        # reading fails closed with the other two, and says so.
+        if why_bankroll is None:
+            out["why_bankroll"] = out["why"]
         return out
+    out["ratio_bankroll"] = ratio_bankroll
     anchor = statistics.median(xs)
     out["anchor_usd"] = round(anchor, 2)
     out["ratio"] = round(min(RATIO_MAX, max(RATIO_MIN, float(clip_usd) / anchor)), 6)
@@ -269,5 +343,6 @@ def plan(target: int, ledger: float, venue: float | None, book: Book,
 
 
 __all__ = ["Fill", "Book", "Plan", "net_positions", "his_net", "opening_burst",
-           "mirror_ratio", "target_shares", "plan", "BURST_S", "MARKET_NET_CAP_USD",
+           "mirror_ratio", "bankroll_ratio", "target_shares", "plan", "BURST_S",
+           "MARKET_NET_CAP_USD",
            "MIN_MOVE_USD", "MIN_MOVE_FRAC", "MIN_MARKETS", "VENUE_LEDGER_TOL_SHARES"]
