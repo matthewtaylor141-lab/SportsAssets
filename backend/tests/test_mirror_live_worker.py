@@ -2695,6 +2695,60 @@ def test_a_closing_books_rest_is_cancelled_closing_never_under_its_stale_freeze(
     assert 'in ("closed", "closing")' in src and 'cancel_reason = str(book["state"])' in src
 
 
+def test_the_whole_slug_close_needs_a_certain_sole_holding(monkeypatch):
+    """close_position closes the WHOLE slug and is the only order this
+    worker sends with no clamp to its own book, so "am I the sole holder"
+    must be certain. The old test was `ledger >= int(held)` -- and
+    _pm_held FLOORS the venue's number before the worker sees it, so a
+    foreign holding of any fraction under one share read as sole and our
+    close took it with us. The fraction is in the tick's own paced walk;
+    both readings must now agree. NOTE the fraction is faked on the VENUE
+    (the walk), not on _pm_held, which cannot return one."""
+    def _book():
+        p = _pool(fills=_his(300, sold=300), snap=None)
+        b = p.add_book(ledger=300, last_plan={"kind": "flatten_vanished", "vanish_since": NOW - 400})
+        p.add_order(b, side=SELL, wire=0.32, qty=300, kind="flatten_vanished", state="cancelled",
+                    placed_ts=NOW - 400, done_at=NOW - 10, order_id=None)
+        return p, b
+    gone = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0}])
+
+    # someone else holds half a share: the walk sees 300.5, _pm_held 300.
+    # No whole-slug close -- AND the book must still be able to leave, by
+    # the co-held IOC: refusing outright strands it (and the admin
+    # flatten, which lands in this same function) on every later tick too
+    p, b = _book()
+    v = _Venue(held={SLUG: 300.5})
+    st = _tick(p, v, http=gone)
+    assert not [c for c in v.calls if c[0] == "close"], "a fraction is not sole"
+    assert _census(st, "flatten_holding_disagrees") >= 1
+    assert [c for c in v.calls if c[0] == "place"], "a co-held slug still exits by IOC"
+
+    # the two sources disagree the other way: the fresh read is larger
+    async def _held301(slug):
+        return 301, 0.31
+    monkeypatch.setattr(le, "_pm_held", _held301)
+    p, b = _book()
+    v = _Venue(held={SLUG: 300})
+    st = _tick(p, v, http=gone)
+    assert not [c for c in v.calls if c[0] == "close"]
+    assert _census(st, "flatten_holding_disagrees") >= 1
+
+    # both readings at our own ledger: still the sole holder, one walk
+    async def _held300(slug):
+        return 300, 0.31
+    monkeypatch.setattr(le, "_pm_held", _held300)
+    p, b = _book()
+    v = _Venue(held={SLUG: 300})
+    st = _tick(p, v, http=gone)
+    assert [c for c in v.calls if c[0] == "close"], "an exact match is sole"
+    assert _census(st, "flatten_holding_disagrees") == 0
+    # ONE fresh whole-account read on this path, not two: the second was
+    # a 50-page walk outside the pacer, immediately before the most
+    # dangerous order the worker sends (round-one review)
+    src = inspect.getsource(ml._flatten_vanished)
+    assert src.count("le._pm_held(") == 1
+
+
 # ------------------------------------------------ 12. the census coverage
 
 def test_every_census_key_was_emitted_at_least_once_across_this_file():

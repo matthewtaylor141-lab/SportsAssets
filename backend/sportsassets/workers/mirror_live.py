@@ -158,7 +158,8 @@ CENSUS_KEYS: tuple[str, ...] = (
     "take_placed", "take_arm_stale", "post_only_rejected", "post_only_ignored", "place_refused",
     "filled_rest", "filled_take", "partial_fill", "cancelled_unfilled", "expired",
     "resting_above_level", "reduce_unfilled", "flatten_rested", "flatten_vanished",
-    "vanish_unconfirmed", "no_bid_for_flatten", "overfill", "closed_cashed_out",
+    "vanish_unconfirmed", "no_bid_for_flatten", "flatten_holding_disagrees",
+    "overfill", "closed_cashed_out",
     "closed_cancelled", "book_settle_disagree", "shadow_live_disagree",
     "reaper_touched_mirror", "demoted", "mirror_flatten", "row_not_live",
     "write_failed", "rate_limited", "book_error",
@@ -2404,7 +2405,45 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
         _mirror_stop("no_bid_for_flatten", w)
         log.warning("mirror_live: venue position for %s unreadable (%s)", r.slug, type(exc).__name__)
         return "no_bid_for_flatten"
-    sole = ledger >= int(held)
+    # THE ONE ORDER THIS WORKER SENDS WITH NO CLAMP TO ITS OWN BOOK.
+    # close_position closes the WHOLE slug, so "am I the sole holder" must
+    # be certain, and it was decided by `ledger >= int(held)`. Two things
+    # were wrong with that. _pm_held returns int(qty) -- it FLOORS the
+    # venue's number before we ever see it -- so a foreign holding of any
+    # fraction under one share read as sole and our close took it with us:
+    # deterministic, no race. And the unfloored number was already in
+    # hand: step R's paced walk keeps fractions (r.venue), so no second
+    # whole-account walk is needed to see it (the step-9 re-review removed
+    # exactly such a walk from the lost-close path; it is not coming back).
+    # Sole now needs BOTH readings to say so -- the tick's fractional walk
+    # and this fresh floored read -- and a disagreement between two
+    # independent sources is not a reading of the account.
+    venue_now = math.ceil(abs(float(r.venue)))
+    sole_walk = ledger >= venue_now
+    sole_read = ledger >= int(held)
+    if sole_walk != sole_read:
+        # Two readings that disagree are EVIDENCE OF CO-HOLDING, not an
+        # unreadable account: the walk keeps the fraction and the fresh
+        # read floors it away, so `ledger < venue < ledger + 1` -- exactly
+        # the sub-share case -- disagrees on every tick, deterministically
+        # and forever. Refusing here would leave the book unable to exit
+        # by any route (and the admin flatten inert, since it lands in
+        # this same function), so the disagreement means NOT SOLE and
+        # falls through to the co-held IOC below, which sells only our
+        # own quantity. Counted and logged because a standing
+        # disagreement is worth an operator's eye.
+        _mirror_stop("flatten_holding_disagrees", w)
+        log.warning("mirror_live: %s sole-holder reads disagree (walk %s, held %s, ledger %s): "
+                    "treating as co-held", r.slug, r.venue, held, ledger)
+    # What this gate does and does not close. The DETERMINISTIC hole is
+    # closed: _pm_held floors the venue's number before we see it, so it
+    # can never report a foreign fraction, while step R's paced walk keeps
+    # it -- the walk is what decides. The residual is that the walk is
+    # taken earlier in the tick, so a foreign fraction landing between the
+    # walk and here still reads sole; that window is one tick, and the
+    # close's own booking catches it afterwards (a fill above our ledger
+    # is `overfill`, which freezes the book and trips the live switch).
+    sole = sole_walk and sole_read
     if not sole:
         # a venue READ, behind the pacer like every other (step-9 review)
         bid = await asyncio.to_thread(_paced, t.pmus.slug_bid, r.slug, True)
