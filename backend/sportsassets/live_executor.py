@@ -5084,6 +5084,84 @@ async def _pm_long_leg(us_slug: str) -> bool | None:
     return net > 0
 
 
+# WHAT A DESK CASH-OUT ROW SAYS WHEN ITS REALIZED VALUE IS UNKNOWN.
+#
+# Written into the row's own `error` column — the same column, and the
+# same purpose, as `_reap_stale_exiting`'s "fill price and pnl on this
+# row were never captured". It states what the row SUBTRACTED, which is
+# a fact ($0.00 — a NULL is skipped by `sum()`), and never what the
+# sale was worth, which nothing in this process knows.
+#
+# THE FIRST SENTENCE CARRIES THE MEANING ON PURPOSE, because every
+# reader of this column truncates it: the desk blotter renders
+# `t.error.slice(0, 80)` and the status cell `slice(0, 40)`
+# (TradeDesk.tsx:2205, :2237), the day-detail admin read takes
+# `left(COALESCE(error,''), 200)` (app.py:4045), and migration 037's
+# NOTIFY trigger publishes `left(NEW.error, 120)`
+# (037_live_orders_notify.sql:24). At 120 characters the text still
+# carries "REALIZED NOT CAPTURED" and "$0.00"; at 80 it still carries
+# "this row subtr[acts]". That is the pin below.
+#
+# WHO ACTUALLY READS IT TODAY — checked at the consumers, not assumed
+# from the payload (adversarial review, 2026-09-04, corrected on a
+# second pass that found a surface the first one missed). TWO surfaces:
+#
+#   the desk BLOTTER   `t.error.slice(0, 80)` and the status cell's
+#                      `slice(0, 40)` (TradeDesk.tsx:2205, :2237).
+#   the AI TRADER page `/api/live-status`'s `recent` selects `lo.error`
+#                      with NO whale filter (app.py:3892-3905, `WHERE
+#                      lo.placed_at >= $1` only), so a `manual` desk row
+#                      is in that list, and AITrader.tsx:315-319 renders
+#                      a truthy `o.error` as a chip in `var(--critical)`.
+#
+# That second one is a NEW STATE on that page: a row whose status reads
+# `cashed_out` — a sale that SUCCEEDED — now carries a red chip. It is
+# not a mislabel. At 40 characters the chip reads "REALIZED NOT CAPTURED
+# — this sale's P&L" and the hazard is real, so red is the right colour
+# and surfacing it there is the point. It is recorded here because the
+# earlier version of this comment claimed the blotter was "the whole of
+# the disclosure's reach", and that was false.
+#
+# The order stream does NOT read it, even though the NOTIFY
+# payload carries the text: DeskOrderStream.tsx's `cashed_out` branch
+# builds its body from `e.pnl` alone and never touches `e.error`, so a
+# NULL pnl prints "Position closed" with no figure and no hazard. Wiring
+# that branch (and the desk's run panel, which reads neither `detail`
+# nor `pnl_unmeasured` on a successful sale) is U6's work in frontend
+# files no unit in this run owns — do not claim the stream.
+#
+# A third reader is Jarvis: jarvis/tools.ts:921 forwards the blotter's
+# `t.error` into the assistant's view of `/api/admin/manual-trades`, so
+# the sentence has to read as prose to a model as well as to a person.
+#
+# NOTHING BUCKETS OR RETRIES ON IT. The one query that pattern-matches
+# `lo.error` into reason classes — the unmapped-flow census, app.py
+# :7573-7605, `LIKE 'no-stack%'`, `'%0ev%'`, `'%sides:[%'` — is scoped
+# `WHERE lo.status = 'rejected'` (app.py:7658), which a `cashed_out` row
+# never satisfies, and the text matches none of those patterns anyway.
+# No query filters on `error IS NOT NULL`; no worker retries or alerts
+# on it. Every consumer found RENDERS it.
+#
+# WHY THE SECOND SENTENCE HEDGES THE COST. `_pm_held` returns no
+# average for two different reasons — the payload carried no cost, and
+# the cost was not positive (`:5050-5051`, `cost > 0`) — and a
+# genuine zero-cost position is the second, not the first. The row may
+# not claim the venue was silent when it was merely non-positive. What
+# is true under both is that there was no usable entry price, and that
+# what this row subtracted is $0.00.
+CASHOUT_PNL_UNMEASURED_TEXT = (
+    "REALIZED NOT CAPTURED — this sale's P&L is UNKNOWN, not zero, and "
+    "this row subtracts $0.00 from its market's settlement target. "
+    "The venue's positions payload gave no usable average cost for this "
+    "market at sale time (none carried, or not positive), so there was "
+    "no entry price to realize against and pnl was written NULL rather "
+    "than invented. The per-slug sum that nets cash-out dollars out of "
+    "the venue's cumulative realized skips NULLs, so this sale's "
+    "proceeds remain inside the figure the entry rows are graded "
+    "against. Attribute this row nothing: what it subtracted is $0.00."
+)
+
+
 async def execute_manual_sell(us_slug: str, qty: int | None = None,
                               min_price: float | None = None) -> dict:
     """Platform-side cash-out of a held Polymarket US position (owner
@@ -5148,6 +5226,43 @@ async def _execute_manual_sell(us_slug: str, qty: int | None,
     # production was four places encoding it and one of them converted.
     pnl = realized_pnl(avg_cost, fill_price, filled, None)
     status = "cashed_out" if result["ok"] and filled > 0 else "unfilled"
+    # A NULL REALIZED VALUE IS A HAZARD, AND THE ROW NOW SAYS SO
+    # (2026-09-04).
+    #
+    # `_pm_held` returns `(qty, None)` whenever the venue's positions
+    # payload gives no usable average cost — none carried, or not
+    # positive (its `cost > 0` guard covers both) — and `realized_pnl`
+    # correctly refuses to turn an unknown entry price into a zero, so
+    # this INSERT can write a `cashed_out` row with `pnl NULL`.
+    #
+    # That NULL is not inert. The settlement sweep nets cash-out
+    # dollars out of the venue's cumulative realized with
+    # `COALESCE(sum(pnl), 0)` per slug before allocating what is left
+    # to the entry rows (`analytics/engine.py`, `sold_by`), and SQL
+    # `sum()` SKIPS NULLs. So this row subtracts $0.00 while the sale's
+    # proceeds stay inside the figure the entry rows are graded
+    # against: the money is already booked once, on someone else's row.
+    #
+    # We cannot recover the number here — the venue told us no cost,
+    # and inventing one (a zero, the limit, the bid) would be a
+    # fabricated measurement on the money path. What we CAN do is stop
+    # the row from being silent about it: the disclosure below is
+    # written into the row's own `error` column, exactly as
+    # `_reap_stale_exiting` names its own uncaptured price, so that the
+    # census, any future attribution, and the desk blotter all read the
+    # same sentence off the same row. It states what this row
+    # SUBTRACTED ($0.00) — never what the sale was worth, which nobody
+    # here knows.
+    #
+    # This changes no stored figure and no served number: `pnl` is NULL
+    # before and after, `sold_by` subtracts 0.00 before and after. It
+    # is a guard on future writes only. Rows already written carry a
+    # NULL `error` and are U0's census population, not this unit's.
+    pnl_unmeasured = bool(status == "cashed_out" and pnl is None)
+    if result["ok"]:
+        err_text = CASHOUT_PNL_UNMEASURED_TEXT if pnl_unmeasured else None
+    else:
+        err_text = str(result.get("raw"))[:300]
     # The sale is recorded on the manual sleeve as its own terminal row
     # (the underdog sweep's 'cashed_out' contract): filled_usd carries
     # the PROCEEDS, pnl the realized gain vs the venue's own avg cost
@@ -5171,16 +5286,38 @@ async def _execute_manual_sell(us_slug: str, qty: int | None,
         float(qty), status, venue, us_slug, result.get("order_id"),
         filled, fill_price, proceeds,
         json.dumps(result.get("raw"), default=str),
-        None if result["ok"] else str(result.get("raw"))[:300], pnl)
-    log.info("MANUAL SELL %s: %.0f/%d @ %.2f (bid %.2f) proceeds %.2f",
-             status, filled, qty, fill_price or limit, bid, proceeds)
+        err_text, pnl)
+    log.info("MANUAL SELL %s: %.0f/%d @ %.2f (bid %.2f) proceeds %.2f%s",
+             status, filled, qty, fill_price or limit, bid, proceeds,
+             " — REALIZED NOT CAPTURED (no venue avg cost); this row "
+             "subtracts $0.00 from the slug's settlement target"
+             if pnl_unmeasured else "")
+    if filled <= 0:
+        detail = ("no fill at the protective limit — the bid moved; "
+                  "nothing was sold")
+    elif pnl_unmeasured:
+        detail = ("sold — but the venue gave no average cost for this "
+                  "position, so this sale's realized P&L was never "
+                  "captured and is recorded as unknown, not zero")
+    else:
+        detail = "sold"
     return {"ok": bool(result["ok"] and filled > 0), "row_id": row_id,
             "filled_shares": filled, "avg_price": fill_price,
             "proceeds_usd": proceeds, "quoted_bid": bid,
             "limit_price": limit, "pnl": pnl, "held": held,
-            "detail": ("sold" if filled > 0 else
-                       "no fill at the protective limit — the bid moved; "
-                       "nothing was sold")}
+            # THE RESPONSE CARRIES IT AT THE MOMENT OF THE SALE — but
+            # nothing on the desk reads it yet, and this comment used
+            # to say the operator was told, which was false. Checked:
+            # TradeDesk.tsx:845 takes the SUCCESS branch on a filled
+            # sale and reads neither `detail` nor `pnl_unmeasured`;
+            # `detail` is read only in the failure branch at :855. The
+            # operator learns of the hazard on the next loadBlotter(),
+            # off the row's `error`. This flag exists so the run panel
+            # can say it at the moment of the sale when U6 wires it —
+            # `pnl: None` alone reads as "not computed yet", and this
+            # says it will never be computed.
+            "pnl_unmeasured": pnl_unmeasured,
+            "detail": detail}
 
 
 # Strong refs for fire-and-forget echo tasks (a bare create_task can be

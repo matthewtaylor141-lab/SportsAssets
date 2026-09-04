@@ -465,8 +465,17 @@ async def _settle_pmus_from_venue(pool, *,
             "WHERE us_market_slug IS NOT NULL AND status = 'filled'")
         from_day = ((oldest - _td(days=1)).date().isoformat()
                     if oldest else None)
-    summary = {"settled": 0, "changed": 0, "delta": 0.0,
-               "slugs": 0, "no_truth": 0, "whales": {}}
+    # `changed` counts rows that were ALREADY 'settled' and got re-graded.
+    # `overwrote_filled` counts the other population that moves money:
+    # a row still 'filled' whose stored pnl was NOT zero — mirror_exit's
+    # partial branch and the mirror add-leg book both accumulate realized
+    # P&L onto such a row — and which this pass overwrites. Without it
+    # the two figures on one consent line describe different populations:
+    # `delta` counts those dollars (it must; the row's stored value moved)
+    # while `changed` reports zero rows restated. Named rather than folded
+    # into `changed`, whose meaning consumers already depend on.
+    summary = {"settled": 0, "changed": 0, "overwrote_filled": 0,
+               "delta": 0.0, "slugs": 0, "no_truth": 0, "whales": {}}
     if not rows or not from_day:
         return summary
 
@@ -563,7 +572,31 @@ async def _settle_pmus_from_venue(pool, *,
         summary["slugs"] += 1
         for r in grp:
             newp = alloc[r["id"]]
-            oldp = float(r["pnl"]) if r["status"] == "settled" else 0.0
+            # THE OLD VALUE IS READ UNCONDITIONALLY (2026-09-04).
+            #
+            # `oldp` was `float(r["pnl"]) if status == 'settled' else 0.0`,
+            # i.e. a `filled` row's stored pnl was treated as zero for
+            # reporting purposes. But a `filled` row CAN carry dollars:
+            # mirror_exit's partial branch accumulates realized P&L onto
+            # a row that stays `filled` (live_executor.py:1528-1532), and
+            # so does the mirror add-leg book. For such a row this
+            # counter reported the WHOLE new pnl as the move — and a
+            # write-DOWN of one (new 12.00 over an accumulated 18.00)
+            # reported delta 0.0 while erasing 6.00, because 12 - 0 and
+            # 18 - 0 are both "the delta" only if the old value is zero.
+            #
+            # `summary` is the only description a restatement gives of
+            # its own move (`/api/admin/rescore-summary`, and the
+            # `rescore_copies_v2` state key). A restatement that cannot
+            # state its own size cannot be reviewed, which is the whole
+            # gate the cash-out work hangs on.
+            #
+            # NOTHING WRITTEN CHANGES. `oldp` reaches exactly three
+            # places: the skip below (still gated on `status ==
+            # 'settled'`, where the old and new expressions are equal —
+            # the SELECT COALESCEs pnl, so it is never None), and the
+            # two counters. The UPDATE's parameters are untouched.
+            oldp = float(r["pnl"] or 0)
             if r["status"] == "settled" and abs(newp - oldp) < 0.005:
                 continue
             await pool.execute(
@@ -576,6 +609,8 @@ async def _settle_pmus_from_venue(pool, *,
             summary["settled"] += 1
             if r["status"] == "settled":
                 summary["changed"] += 1
+            elif abs(oldp) >= 0.005:
+                summary["overwrote_filled"] += 1
             summary["delta"] = round(summary["delta"] + newp - oldp, 4)
             w = _whale_acc(r["whale"])
             w["old"] = round(w["old"] + oldp, 4)
