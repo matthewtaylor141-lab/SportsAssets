@@ -70,7 +70,19 @@ def test_caps_carry_the_spec_defaults_and_reuse_the_shared_ones():
     assert r.Z95 is proof.Z95
     assert r.MIN_N_DEMOTE is roster_rules.MIN_N_DEMOTE
     assert r.MIN_N_PROMOTE is roster_rules.MIN_N_PROMOTE
-    assert r.MEASURE_CLIP_USD is roster_rules.MEASURE_CLIP_USD
+    # the mirror anchors on its OWN constant, deliberately not the
+    # per-fill lane's clip: that clip rose to $250 on 2026-09-04 and the
+    # mirror must not resize as a side effect of it
+    assert r.MIRROR_ANCHOR_CLIP_USD is roster_rules.MIRROR_ANCHOR_CLIP_USD
+    assert r.MIRROR_ANCHOR_CLIP_USD == 50.0
+    assert not hasattr(r, "MEASURE_CLIP_USD"), "the mirror must not read the per-fill clip"
+    # and neither may the worker: harmless while the two numbers agree,
+    # but it silently re-couples the mirror so the NEXT per-fill clip
+    # change rescales every target -- the hazard the anchor exists for
+    import inspect as _i
+    from sportsassets.workers import mirror_live as _ml
+    _src = _i.getsource(_ml)
+    assert "MEASURE_CLIP_USD" not in _src, "the mirror worker must not read the per-fill clip"
     src = inspect.getsource(r)
     for restated in ("MIN_PROOF_CLUSTERS =", "Z95 =", "MIN_N_DEMOTE =", "MIN_N_PROMOTE =",
                      "MEASURE_CLIP_USD =", "MIN_MOVE_USD =", "MIN_MOVE_FRAC =",
@@ -301,7 +313,7 @@ def test_an_unreadable_or_zero_clip_is_no_plan_never_a_flatten():
     # (scale 1), so a later clip cut never re-rates the book
     opened = r.mirror_target(0.1, 1000, 0.5, 25.0)
     assert opened["ratio_eff"] == 0.05 and opened["target"] == 50
-    later = r.mirror_target(opened["ratio_eff"], 1000, 0.5, r.MEASURE_CLIP_USD)
+    later = r.mirror_target(opened["ratio_eff"], 1000, 0.5, r.MIRROR_ANCHOR_CLIP_USD)
     assert later["ratio_eff"] == 0.05 and later["target"] == 50
     # and the increase re-check is where a later clip cut bites
     assert r.admission(_admitted(per_fill_usd=0.0), increase=True) == "clip_zero"

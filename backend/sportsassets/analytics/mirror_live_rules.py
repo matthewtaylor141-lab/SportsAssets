@@ -75,7 +75,7 @@ from typing import Any, NamedTuple
 from . import mirror as mi
 from .mirror import MARKET_NET_CAP_USD, MIN_MOVE_FRAC, RATIO_MAX, Plan
 from .proof import MIN_PROOF_CLUSTERS, Z95
-from .roster_rules import MEASURE_CLIP_USD, MIN_N_DEMOTE, MIN_N_PROMOTE
+from .roster_rules import MIRROR_ANCHOR_CLIP_USD, MIN_N_DEMOTE, MIN_N_PROMOTE
 
 # P1 is long-only. The standing row's raw.preview.intent and every
 # submit_fok call carry this one constant; BUY_SHORT stays behind the
@@ -298,17 +298,20 @@ def mirror_target(ratio: float | None, net: float | None, mark: float | None,
     """Our target in long-token shares for this book, or the reason
     there is no plan.
 
-    ratio_eff = shadow ratio x min(1, per_fill_usd / MEASURE_CLIP_USD):
-    the $50 measuring clip anchors the ratio, a smaller per-fill clip
-    scales it down, and nothing scales it UP in P1 (the anchor moves
-    only by the P4 promotion).
+    ratio_eff = shadow ratio x min(1, per_fill_usd / MIRROR_ANCHOR_CLIP_USD):
+    the $50 anchor sets the ratio, a smaller per-fill clip scales it
+    down, and nothing scales it UP in P1 (the anchor moves only by the
+    P4 promotion). THE ANCHOR IS NOT THE PER-FILL LANE'S CLIP: that clip
+    rose to $250 on 2026-09-04 and the mirror must not resize as a side
+    effect of it -- the shadow's evidence was gathered at the anchor and
+    the mirror moves when its own gate says so.
 
     THE CLIP SCALING APPLIES AT BOOK OPEN ONLY. A book's ratio is fixed
     at open (addendum section 7, mirror_books.ratio): the worker passes
     the live per-fill clip when it OPENS a book and stores the
     ratio_eff this returns; on every later tick it passes that stored
-    ratio with per_fill_usd=MEASURE_CLIP_USD (scale 1), never the live
-    clip. A clip cut after open stops INCREASES -- admission(
+    ratio with per_fill_usd=MIRROR_ANCHOR_CLIP_USD (scale 1), never the
+    live clip. A clip cut after open stops INCREASES -- admission(
     increase=True) names it `clip_zero` -- and never re-rates the book;
     a clip cut to 0 is not a flatten.
 
@@ -371,7 +374,7 @@ def mirror_target(ratio: float | None, net: float | None, mark: float | None,
     if clip is None:
         out["refusal"] = "clip_unreadable"
         return out
-    scale = min(1.0, max(0.0, clip) / float(MEASURE_CLIP_USD))
+    scale = min(1.0, max(0.0, clip) / float(MIRROR_ANCHOR_CLIP_USD))
     ratio_eff = rt * scale
     out["ratio_eff"] = round(ratio_eff, 6)
     if ratio_eff <= 0:
@@ -1484,7 +1487,7 @@ def p2_verdict(numbers: dict) -> tuple[bool, list[str]]:
 
 # Deliberately NOT here: the shared constants imported above
 # (MARKET_NET_CAP_USD, MIN_MOVE_FRAC, RATIO_MAX, MIN_PROOF_CLUSTERS,
-# Z95, MEASURE_CLIP_USD, MIN_N_DEMOTE, MIN_N_PROMOTE) and mi.Plan. Each
+# Z95, MIRROR_ANCHOR_CLIP_USD, MIN_N_DEMOTE, MIN_N_PROMOTE) and mi.Plan. Each
 # is USED here and belongs to its own module; this module re-exports
 # none of them, and the test suite reads them through this module only
 # to pin that they are the same objects, never restated.

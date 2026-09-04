@@ -15,7 +15,9 @@ WHAT IT WRITES, AND WHERE THE MONEY PATH READS IT.
                         exits keep mirroring via exitable_whales().
   live_clip_overrides   ingestion_state  -- {whale: usd}. per_fill_usd
                         reads it ahead of PER_FILL_BY_WHALE, so a
-                        measuring whale trades at MEASURE_CLIP_USD and a
+                        measuring whale trades at measuring_clip(whale)
+                        -- the owner's per-whale clip if he named one,
+                        else MEASURE_CLIP_USD -- and a
                         promoted one at PROMOTED_CLIP_USD.
   roster_state          ingestion_state  -- {whale: state}, the memory
                         the rules need (demotion sticks).
@@ -130,7 +132,10 @@ async def apply(pool, decisions: list[rules.Decision]) -> dict:
     # rostered whale as measuring and then decides measuring, so the
     # state never moved -- while his clip went from the hardcoded $250
     # to the $50 measurement clip, a 5x cut in deployment that read as
-    # "held". Compare against what actually bound before this pass: the
+    # "held". It fires in the raising direction too: the owner's per-
+    # whale clip (2026-09-04) moves rn1 and homerunhazard from a stored
+    # $50 to $250 on the first pass after that deploy, and that move is
+    # named. Compare against what actually bound before this pass: the
     # previously stored clip, else the hardcoded one.
     prev = await _read_state(pool, K_CLIPS, {})
     prev = prev if isinstance(prev, dict) else {}
@@ -200,7 +205,7 @@ async def owner_set(pool, whales: list[str]) -> dict:
         prev = state.get(w, "absent")
         if prev != "promoted":
             state[w] = "measuring"
-            clips[w] = rules.MEASURE_CLIP_USD
+            clips[w] = rules.measuring_clip(w)
         else:
             clips[w] = rules.PROMOTED_CLIP_USD
         if prev != state[w]:

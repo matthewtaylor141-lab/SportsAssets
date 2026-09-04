@@ -23,7 +23,7 @@ without a venue or a database:
   * opening_burst(...)    -> what his first move on a market amounts to
                             (all his buys inside BURST_S of the first),
                             the anchor the ratio is set against
-  * mirror_ratio(...)     -> MEASURE_CLIP_USD / median opening burst,
+  * mirror_ratio(...)     -> MIRROR_ANCHOR_CLIP_USD / median burst,
                             clamped to [RATIO_MIN, COPY_RATIO_MAX]
   * bankroll_ratio(...)   -> bankroll / his deployed dollars, the same
                             clamp; refused by name on an unreadable or
@@ -47,7 +47,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from .roster_rules import MEASURE_CLIP_USD
+from .roster_rules import MIRROR_ANCHOR_CLIP_USD
 
 # A whale's opening move is a BURST of fills, not one fill (RN1 loaded
 # 10,654 Michelsen across 12 fills in three minutes; 7 of them under $6).
@@ -173,7 +173,7 @@ def bankroll_ratio(deployed_usd: Any, bankroll_usd: Any) -> tuple[float | None, 
     return deployed, ratio, None
 
 
-def mirror_ratio(bursts: Iterable[float], clip_usd: float = MEASURE_CLIP_USD, *,
+def mirror_ratio(bursts: Iterable[float], clip_usd: float = MIRROR_ANCHOR_CLIP_USD, *,
                  deployed_usd: float | None = None,
                  bankroll_usd: float | None = None) -> dict:
     """ratio = clip / median opening burst over his recent markets, so

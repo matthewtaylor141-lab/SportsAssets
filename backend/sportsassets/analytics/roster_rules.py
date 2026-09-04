@@ -47,6 +47,40 @@ from typing import Any
 
 MEASURE_CLIP_USD = 50.0
 PROMOTED_CLIP_USD = 250.0
+# THE OWNER'S CLIP, PER WHALE (order 2026-09-04, "increase average trade
+# to $250 per trade"). The evidence is his, not ours: his own trades of
+# $250 and up are the only size band of his that is positive at 95% and
+# they carry the bulk of his money, and at $50 we mirrored roughly a
+# tenth of his dollars.
+#
+# It is a PER-WHALE map and not a raised MEASURE_CLIP_USD, which was the
+# first attempt and was wrong three ways. The measuring clip sits BELOW
+# every hardcoded clip on purpose, so the hourly pass can only ever cut
+# a whale's deployment; raised to $250 it sat at the ceiling and could
+# only ever raise one -- including a whale deliberately probe-sized down
+# to $100 on evidence of bleeding, who would have gone to $250 the hour
+# the edge gate funded him, and up to MAX_MEASURING of them at once. It
+# also erased the promotion gate (measuring and promoted becoming one
+# number, so thirty settled copies bought nothing) and made the
+# measurement budget five times what "measurement is meant to be cheap"
+# describes. Naming the two whales the owner actually measured keeps all
+# three properties.
+#
+# A whale here trades at this clip while MEASURING. Demotion still wins
+# and still writes 0; promotion still writes PROMOTED_CLIP_USD; the
+# executor's ceiling still binds.
+OWNER_CLIP_USD: dict[str, float] = {
+    "rn1": 250.0,
+    "homerunhazard": 250.0,
+}
+# THE MIRROR'S RATIO ANCHOR, DELIBERATELY NOT THE CLIP ABOVE. The
+# position mirror sizes from ratio = clip / his median opening burst, so
+# reusing the per-fill clip here would have scaled every mirror target
+# five-fold the moment the clip rose -- silently, and against a shadow
+# that has been measuring at the old anchor. The mirror is a separate
+# system with its own cap and its own rollout; it moves when its own
+# evidence says so, not as a side effect of the per-fill lane.
+MIRROR_ANCHOR_CLIP_USD = 50.0
 MIN_N_PROMOTE = 30
 MIN_CLUSTERS_PROMOTE = 20
 MIN_N_DEMOTE = 20
@@ -91,6 +125,13 @@ class Decision:
 
 def _pct(x: float | None) -> str:
     return "n/a" if x is None else f"{x:+.2%}"
+
+
+def measuring_clip(whale: str) -> float:
+    """What a MEASURING whale trades at: the owner's clip for him if he
+    has one, else the measuring clip. Never above the owner's own map --
+    this function cannot invent a size for a whale nobody named."""
+    return float(OWNER_CLIP_USD.get(str(whale or "").strip().lower(), MEASURE_CLIP_USD))
 
 
 def decide(whale: str, funded: bool, realized: dict | None,
@@ -146,13 +187,13 @@ def decide(whale: str, funded: bool, realized: dict | None,
                + ("unmeasured" if n == 0 else
                   f"undemonstrated: {_pct(roi)} [{_pct(lo)}, {_pct(hi)}] on n={n}"))
         return Decision(from_state=current_state, to_state="measuring",
-                        clip_usd=MEASURE_CLIP_USD, reason=why, **base)
+                        clip_usd=measuring_clip(whale), reason=why, **base)
 
     # Not funded. If we were measuring him, hold rather than flap on a
     # gate that flickers; if we never had him, leave him absent.
     if current_state == "measuring":
         return Decision(from_state="measuring", to_state="measuring",
-                        clip_usd=MEASURE_CLIP_USD,
+                        clip_usd=measuring_clip(whale),
                         reason="gate no longer funds his book; holding "
                                "measurement pending a realized verdict", **base)
     return Decision(from_state="absent", to_state="absent", clip_usd=None,

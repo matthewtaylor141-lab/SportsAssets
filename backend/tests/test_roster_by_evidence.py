@@ -141,10 +141,12 @@ def _no_hardcoded_cuts(monkeypatch):
 
 
 class _Pool:
-    def __init__(self, state=None, decisions_raise=False, roster=None):
+    def __init__(self, state=None, decisions_raise=False, roster=None, clips=None):
         self.kv = {W.K_STATE: state} if state is not None else {}
         if roster is not None:
             self.kv[W.K_ROSTER] = roster
+        if clips is not None:
+            self.kv[W.K_CLIPS] = clips
         self.written: dict = {}
         self.rows: list[tuple] = []
         self.decisions_raise = decisions_raise
@@ -214,20 +216,61 @@ def test_an_unreadable_gate_writes_nothing_that_moves_money():
     assert pool.written[W.K_LAST]["error"]          # the failure is published
 
 
-def test_the_first_pass_names_the_clip_cut_as_a_change():
-    """ROUND FOUR: rn1 seeded as measuring and decided measuring read as
-    'held' while his clip went from the hardcoded $250 to $50."""
+def test_the_first_pass_names_the_clip_move_as_a_change():
+    """ROUND FOUR: a whale seeded as measuring and decided measuring read
+    as 'held' while his clip moved off the stored value.
+
+    ROUND FIVE (2026-09-04): the owner raised rn1 and homerunhazard to
+    $250 each. The pass must NAME that move -- production stores $50 for
+    both, so the first pass after deploy writes $250 and logs it. A
+    fixture with no stored clips would fall through to the hardcoded map
+    and hide the move, which is exactly what the first version of this
+    test did."""
     from sportsassets.live_executor import PER_FILL_BY_WHALE
 
-    pool = _Pool(state={}, roster=["rn1"])
+    # production shape: the hourly pass has been storing the measuring
+    # clip all along, so the owner's raise is a real move
+    pool = _Pool(state={"rn1": "measuring"}, roster=["rn1"],
+                 clips={"rn1": 50.0})
     out = _run(pool, _snap(rn1=True), {})
     ch = {c["whale"]: c for c in out["changed"]}
     assert "rn1" in ch and ch["rn1"]["changed"] is True
-    assert f"clip ${PER_FILL_BY_WHALE['rn1']:.0f} -> ${R.MEASURE_CLIP_USD:.0f}" in ch["rn1"]["reason"]
+    assert f"clip $50 -> ${R.measuring_clip('rn1'):.0f}" in ch["rn1"]["reason"]
     assert pool.rows and any(r[-1] is True for r in pool.rows)     # audit changed=true
     # the second pass, same numbers: nothing changed
     out2 = _run(pool, _snap(rn1=True), {})
     assert out2["changed"] == []
+    # a whale the owner did NOT name keeps the measuring clip, and the
+    # hardcoded-clip compare still fires for him
+    pool2 = _Pool(state={}, roster=["kch123"])
+    out3 = _run(pool2, _snap(kch123=True), {})
+    ch3 = {c["whale"]: c for c in out3["changed"]}
+    assert "kch123" in ch3
+    assert f"clip ${PER_FILL_BY_WHALE['kch123']:.0f} -> ${R.MEASURE_CLIP_USD:.0f}" in ch3["kch123"]["reason"]
+
+
+def test_only_the_whales_the_owner_named_get_the_owner_clip():
+    """The measuring clip sits BELOW every hardcoded clip on purpose, so
+    the hourly pass can only ever CUT a whale's deployment. Raising the
+    measuring clip itself would have inverted that -- every whale the
+    edge gate funds would go to the ceiling on sight, including one
+    deliberately probe-sized down for bleeding -- and would have erased
+    the promotion gate by making measuring and promoted the same number."""
+    assert R.MEASURE_CLIP_USD == 50.0
+    assert R.MEASURE_CLIP_USD < R.PROMOTED_CLIP_USD, "promotion must still buy something"
+    assert set(R.OWNER_CLIP_USD) == {"rn1", "homerunhazard"}
+    for w in ("ferrarichampions2026", "kch123", "swisstony", "a_new_whale"):
+        assert R.measuring_clip(w) == R.MEASURE_CLIP_USD, w
+        d = R.decide(w, funded=True, realized={}, current_state="absent")
+        assert d.to_state == "measuring" and d.clip_usd == 50.0, w
+    for w in ("rn1", "homerunhazard", "RN1", " HomeRunHazard "):
+        assert R.measuring_clip(w) == 250.0, w
+    # demotion still wins over the owner's clip
+    lose = {"n": 25, "roi": -0.2, "ci95": [-0.3, -0.05], "clusters": 21}
+    assert R.decide("rn1", True, lose, "measuring").clip_usd == 0.0
+    # and promotion still writes the promoted clip
+    win = {"n": 40, "roi": 0.2, "ci95": [0.05, 0.3], "clusters": 25}
+    assert R.decide("rn1", True, win, "measuring").clip_usd == R.PROMOTED_CLIP_USD
 
 
 def test_a_whale_cut_in_code_is_never_re_admitted_by_a_funded_book(monkeypatch):

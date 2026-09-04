@@ -91,7 +91,7 @@ from ..analytics.decompose import payout_of
 # here at import would be the stale one (an AdmissionFacts the reloaded
 # admission() no longer recognises reads `facts_unreadable`).
 from ..analytics.mirror_live_rules import BUY, FLAT_TOL_SHARES, ORDER_INTENT, SELL
-from ..analytics.roster_rules import MEASURE_CLIP_USD
+from ..analytics.roster_rules import MIRROR_ANCHOR_CLIP_USD
 from ..config import settings
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
@@ -1862,7 +1862,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     if t.flatten_all:
         tg = {"target": 0, "raw": 0.0, "refusal": None}
     else:
-        tg = rules.mirror_target(book.get("ratio"), net, r.mark, MEASURE_CLIP_USD,
+        tg = rules.mirror_target(book.get("ratio"), net, r.mark, MIRROR_ANCHOR_CLIP_USD,
                                  cap_usd=rules.MIRROR_NET_CAP_USD)
     target = tg["target"]
     if target is not None and target > 0:
