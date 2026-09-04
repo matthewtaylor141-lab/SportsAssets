@@ -166,12 +166,16 @@ def test_map_market_names_the_long_token_from_our_ledger():
 def test_account_positions_walks_every_page_once_and_names_a_failure(monkeypatch):
     slept = _nosleep(monkeypatch)
     pm = _Pmus(pages=[{"A": {"netPosition": 10}, "B": {"netPosition": -3}},
-                      {"C": {"netPosition": "bad"}, "D": {"netPosition": 2.5}}])
+                      {"C": {"netPosition": 4}, "D": {"netPosition": 2.5}}])
     out = _run(ms.account_positions(pm))
-    assert out == {"a": 10.0, "b": -3.0, "d": 2.5}
+    assert out == {"a": 10.0, "b": -3.0, "c": 4.0, "d": 2.5}
     # two pages, two paced reads: every venue call goes through the gate
     assert pm.portfolio.calls == 2 and slept.count(ms.READ_PACING_S) == 2
     assert _run(ms.account_positions(_Pmus(raise_walk=True))) is None
+    # This test used to pass {"netPosition": "bad"} on the second page and
+    # assert the walk returned the OTHER three rows -- it pinned the defect
+    # (a skipped row in a walk that still called itself complete). The rule
+    # now matches the page cap's: see the unreadable-row test below.
 
 
 def test_shadow_market_reads_his_book_and_plans_a_buy_at_his_level_without_ordering(monkeypatch):
@@ -1195,3 +1199,45 @@ def test_the_src_pattern_is_compiled_with_the_module():
     assert "global " not in src and "import re" not in src and "_SRC_RE is None" not in src
     head = pathlib.Path(ms.__file__).read_text().split("\ndef ", 1)[0]
     assert "\nimport re\n" in head and "_SRC_RE = re.compile(" in pathlib.Path(ms.__file__).read_text()
+
+
+def test_an_unreadable_position_row_makes_the_whole_walk_unreadable(monkeypatch):
+    """A row we cannot parse used to be skipped while the walk still
+    reported itself COMPLETE. The caller then reads venue 0 for that
+    slug, the "the venue already holds this" admission clause passes,
+    and a BUY leaves into a market the account already holds. The page
+    cap already refuses a truncated walk for exactly this reason; an
+    unreadable row is the same defect one row at a time."""
+    _nosleep(monkeypatch)
+
+    # an unparseable netPosition
+    pm = _Pmus(pages=[{"A": {"netPosition": 1}, "B": {"netPosition": "not-a-number"}}])
+    assert _run(ms.account_positions(pm)) is None, "one bad row, no reading"
+
+    # a row whose slug is missing or blank
+    for bad in ("", "   ", None):
+        pm2 = _Pmus(pages=[{"A": {"netPosition": 1}, bad: {"netPosition": 2}}])
+        assert _run(ms.account_positions(pm2)) is None, f"slug {bad!r} is not a name"
+
+    # the clean walk is untouched, including a null netPosition (venue's zero)
+    pm3 = _Pmus(pages=[{"A": {"netPosition": 1}, "B": {"netPosition": None}, "C": {}}])
+    assert _run(ms.account_positions(pm3)) == {"a": 1.0, "b": 0.0, "c": 0.0}
+
+
+def test_a_non_finite_or_duplicate_position_row_is_also_unreadable(monkeypatch):
+    """Round-one review, folded: a NaN passes float() but wedges any book
+    on that slug (int(nan) raises every tick, so the book can never be
+    planned, frozen by name, or flattened), and a duplicate normalised key
+    is the walk's own defect by another route -- last-write-wins can
+    report 0 for a slug that IS held."""
+    _nosleep(monkeypatch)
+    for bad in ("nan", "inf", "-inf", float("nan")):
+        pm = _Pmus(pages=[{"A": {"netPosition": 1}, "B": {"netPosition": bad}}])
+        assert _run(ms.account_positions(pm)) is None, f"{bad!r} is not a reading"
+    # "AB" and "ab " normalise to the same name: which one is the truth?
+    pm2 = _Pmus(pages=[{"AB": {"netPosition": 1}, "ab ": {"netPosition": 0}}])
+    assert _run(ms.account_positions(pm2)) is None
+    # a non-string slug can never match us_market_slug, so it is no name
+    for bad_slug in (5, True):
+        pm3 = _Pmus(pages=[{"A": {"netPosition": 1}, bad_slug: {"netPosition": 2}}])
+        assert _run(ms.account_positions(pm3)) is None

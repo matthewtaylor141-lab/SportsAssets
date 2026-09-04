@@ -60,6 +60,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -360,10 +361,28 @@ async def account_positions(pmus) -> dict[str, float] | None:
             resp = client.portfolio.positions(
                 {"limit": 100, **({"cursor": cursor} if cursor else {})}) or {}
             for slug, p in (resp.get("positions") or {}).items():
+                key = slug.strip().lower() if isinstance(slug, str) else ""
+                if not key or key in out:
+                    # A ROW WE CANNOT NAME IS A ROW WE CANNOT PLACE AGAINST.
+                    # Skipping it used to leave the walk claiming to be a
+                    # COMPLETE reading of the account while a slug was
+                    # missing from it; the caller then reads venue 0 for
+                    # that market, the "the venue already holds this"
+                    # admission clause passes, and a BUY goes out into a
+                    # slug the account already holds. Unreadable row,
+                    # unreadable walk -- the same rule the page cap keeps.
+                    # A repeated key is the same defect by another route:
+                    # last-write-wins can report 0 for a slug that is held.
+                    raise RuntimeError("positions walk carries a row we cannot name uniquely")
                 try:
-                    out[str(slug).lower()] = float((p or {}).get("netPosition") or 0.0)
-                except (TypeError, ValueError):
-                    continue
+                    net = float((p or {}).get("netPosition") or 0.0)
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"positions walk carries an unreadable netPosition for {key}") from exc
+                if not math.isfinite(net):
+                    # a NaN reaches int() downstream and wedges the book
+                    raise RuntimeError(f"positions walk carries a non-finite netPosition for {key}")
+                out[key] = net
             cursor = resp.get("nextCursor") or ""
             if resp.get("eof") or not cursor:
                 complete = True
@@ -380,7 +399,11 @@ async def account_positions(pmus) -> dict[str, float] | None:
     try:
         return await asyncio.to_thread(_walk)
     except Exception as exc:  # noqa: BLE001 — a failed walk is named, never guessed
-        log.warning("mirror_shadow: positions walk failed (%s)", type(exc).__name__)
+        # the message names WHICH row or WHICH cap refused: three raise
+        # sites all carry RuntimeError, and a walk that fails every tick
+        # on one stuck row is otherwise indistinguishable from a 429
+        log.warning("mirror_shadow: positions walk failed (%s: %s)",
+                    type(exc).__name__, str(exc)[:200])
         return None
 
 

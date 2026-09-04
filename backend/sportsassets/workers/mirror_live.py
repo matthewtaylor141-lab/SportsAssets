@@ -826,6 +826,23 @@ def _abandon(t: _Tick, why: str) -> None:
         log.warning("mirror_live: tick abandoned (%s), backing off %ss", why, ms.BACKOFF_S)
 
 
+async def _abandon_reconciled(t: _Tick, why: str) -> None:
+    """Abandon a tick that cannot read, AFTER settling what is already at
+    the venue. The three unreadable-read returns used to sit ABOVE step O,
+    so a walk we could not read left our live rests standing: unbooked (no
+    fill recorded, no terminal state written) and un-TTL'd (no expiry
+    cancelled) for the whole backoff. Reconciling first books what filled
+    and cancels what should not stand; only then do we stop. A reconcile
+    that itself fails is named and the abandon still happens -- refusing to
+    plan is the point, and it must not depend on the settling succeeding."""
+    try:
+        await _reconcile_orders(t)
+    except Exception as exc:  # noqa: BLE001 — the abandon is not optional
+        t.stats["reconcile_skipped"] = type(exc).__name__
+        log.warning("mirror_live: reconcile before abandon failed (%s)", type(exc).__name__)
+    _abandon(t, why)
+
+
 async def _market(t: _Tick, cid: str) -> dict | None:
     """{closed, resolved, resolved_prices} or None when unreadable."""
     try:
@@ -2671,15 +2688,15 @@ async def _tick(t: _Tick, woken: list) -> None:
     t.positions = await ms.account_positions(t.pmus)
     if t.positions is None:
         _mirror_stop("positions_unreadable")
-        _abandon(t, "positions_unreadable")
+        await _abandon_reconciled(t, "positions_unreadable")
         return
     stats["venue_positions"] = len(t.positions)
     if await _read_open(t) is None:
-        _abandon(t, "open_orders_unreadable")
+        await _abandon_reconciled(t, "open_orders_unreadable")
         return
     await edge_gate.refresh(t.pool)
     if await _read_protected(t) is None:
-        _abandon(t, "protected_ids_unreadable")
+        await _abandon_reconciled(t, "protected_ids_unreadable")
         return
     # O: the orders first
     await _reconcile_orders(t)

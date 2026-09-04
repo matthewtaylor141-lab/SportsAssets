@@ -1064,6 +1064,31 @@ def test_positions_none_open_orders_raise_protected_none_abandon_with_nothing_pl
     assert st2["skipped_backoff"]
 
 
+def test_an_unreadable_read_settles_what_is_at_the_venue_before_it_abandons():
+    """The three unreadable-read returns used to sit ABOVE step O, so a
+    read we could not make left our own live rests standing: unbooked and
+    un-TTL'd for the whole backoff. The tick must reconcile first and
+    abandon second -- and the abandon must still happen when the
+    reconcile itself fails."""
+    for venue_kw, name in ((dict(raise_walk=True), "positions_unreadable"),
+                           (dict(open_raises=True), "open_orders_unreadable")):
+        p = _pool()
+        b = p.add_book(ledger=0)
+        p.add_order(b, side=BUY, wire=0.31, qty=100, state="open", order_id="oid-1",
+                    placed_ts=NOW - 5)
+        st = _tick(p, _Venue(**venue_kw))
+        assert st["abandoned"] and _census(st, name) >= 1
+        assert st.get("orders_open") == 1, "step O ran before the abandon"
+        assert "reconcile_skipped" not in st
+
+    # a reconcile that itself fails is named, and the tick still abandons
+    p = _pool()
+    p.raise_on.append(("ml-orders-open", RuntimeError("db")))
+    st = _tick(p, _Venue(raise_walk=True))
+    assert st["abandoned"] and _census(st, "positions_unreadable") >= 1
+    assert st.get("reconcile_skipped") == "RuntimeError"
+
+
 def test_tables_absent_refuses_by_name_and_never_crashes():
     p = _pool()
     p.tables_absent = True
