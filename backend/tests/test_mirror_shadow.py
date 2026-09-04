@@ -1241,3 +1241,85 @@ def test_a_non_finite_or_duplicate_position_row_is_also_unreadable(monkeypatch):
     for bad_slug in (5, True):
         pm3 = _Pmus(pages=[{"A": {"netPosition": 1}, bad_slug: {"netPosition": 2}}])
         assert _run(ms.account_positions(pm3)) is None
+
+
+def test_no_shadow_knob_can_be_loosened_from_a_shell(monkeypatch, request):
+    """Every dollar cap in the rules has been downward-only since they
+    were written; these were raw env reads. One of them is a money bound
+    in disguise: SNAP_MAX_AGE_S is the freshness gate on HIS position --
+    the live worker turns it into the admission fact that the drift
+    rule's increase clause and the snapshot resolution key on -- so a
+    shell could otherwise open new books and grow live ones on an
+    arbitrarily old reading of the whale, and loosen the very gate the
+    rollout is steered by, with no deploy and no review."""
+    import importlib
+    # whatever this test does to the module, the next test gets the
+    # module the ambient environment actually describes
+    request.addfinalizer(lambda: importlib.reload(ms))
+    knobs = {
+        "MIRROR_SNAP_MAX_AGE_S": ("SNAP_MAX_AGE_S", 300.0),
+        "MIRROR_JUDGE_TTL_S": ("JUDGE_TTL_S", 600.0),
+        "MIRROR_LOOKBACK_H": ("LOOKBACK_H", 6.0),
+        "MIRROR_RATIO_DAYS": ("RATIO_DAYS", 30),
+        "MIRROR_MAX_MARKETS": ("MAX_MARKETS_PER_TICK", 20),
+    }
+    for env, (attr, default) in knobs.items():
+        for huge in ("999999", "1e9", "inf"):
+            monkeypatch.setenv(env, huge)
+            mod = importlib.reload(ms)
+            assert getattr(mod, attr) == default, f"{env}={huge} loosened {attr}"
+            monkeypatch.delenv(env, raising=False)
+        # a garbage value is the code default, not a crash and not zero
+        monkeypatch.setenv(env, "not-a-number")
+        assert getattr(importlib.reload(ms), attr) == default
+        monkeypatch.delenv(env, raising=False)
+    # tightening still works without a deploy
+    monkeypatch.setenv("MIRROR_MAX_MARKETS", "3")
+    monkeypatch.setenv("MIRROR_JUDGE_TTL_S", "60")
+    mod = importlib.reload(ms)
+    assert mod.MAX_MARKETS_PER_TICK == 3 and mod.JUDGE_TTL_S == 60.0
+    monkeypatch.delenv("MIRROR_MAX_MARKETS", raising=False)
+    monkeypatch.delenv("MIRROR_JUDGE_TTL_S", raising=False)
+
+
+def test_the_two_sided_knobs_have_a_floor_that_means_something(monkeypatch, request):
+    """Not every knob is safe in both directions, and two here are not.
+
+    SNAP_MAX_AGE_S judges HIS position stale or fresh. Raised, new books
+    open on an old reading; LOWERED, a book whose snapshot reads stale
+    takes select_flatten's vanished path -- the only path that accepts
+    slippage -- so a short window deletes the paired-flatten guard for
+    every book. Its floor is the snapshot WRITER's own cadence, under
+    which every read is stale by construction.
+
+    POLL_S is an interval, so its aggressive direction is DOWN (more
+    venue reads on a key the live lane shares). It lengthens only, which
+    also keeps the operator's incident lever."""
+    import importlib
+    request.addfinalizer(lambda: importlib.reload(ms))
+    monkeypatch.setenv("MIRROR_SNAP_MAX_AGE_S", "1")
+    mod = importlib.reload(ms)
+    assert mod.SNAP_MAX_AGE_S == 120.0, "a window under the writer's cadence is always stale"
+    monkeypatch.delenv("MIRROR_SNAP_MAX_AGE_S", raising=False)
+    # the interval slows down from a shell but never speeds up
+    monkeypatch.setenv("MIRROR_SHADOW_POLL_S", "1")
+    assert importlib.reload(ms).POLL_S == 30.0
+    monkeypatch.setenv("MIRROR_SHADOW_POLL_S", "300")
+    assert importlib.reload(ms).POLL_S == 300.0, "the operator can still slow the shadow"
+    monkeypatch.delenv("MIRROR_SHADOW_POLL_S", raising=False)
+
+
+def test_the_snapshot_writers_own_cadence_cannot_be_stretched(monkeypatch, request):
+    """The freshness gate has two ends. The mirror reads an age; this
+    worker writes the snapshot that age is measured from, so a long
+    interval makes every snapshot stale without touching the mirror's
+    knob at all -- the same loosening from the far side."""
+    import importlib
+    from sportsassets.workers import whale_exits as wx
+    request.addfinalizer(lambda: importlib.reload(wx))
+    for huge in ("100000", "1e9", "inf"):
+        monkeypatch.setenv("WHALE_EXIT_INTERVAL_S", huge)
+        assert importlib.reload(wx).INTERVAL_S == 120.0, huge
+    monkeypatch.setenv("WHALE_EXIT_INTERVAL_S", "30")
+    assert importlib.reload(wx).INTERVAL_S == 30.0, "a faster writer is still allowed"
+    monkeypatch.delenv("WHALE_EXIT_INTERVAL_S", raising=False)

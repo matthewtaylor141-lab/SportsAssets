@@ -44,9 +44,16 @@ import httpx
 from ..config import settings
 from ..db import get_pool, heartbeat
 
+from ..analytics import mirror_live_rules as _rules
+
 log = logging.getLogger(__name__)
 
-INTERVAL_S = float(os.environ.get("WHALE_EXIT_INTERVAL_S", "120"))
+# THE OTHER END OF THE MIRROR'S FRESHNESS GATE. This worker writes the
+# snapshot the mirror reads, so its cadence sets the age the mirror
+# judges: a long interval makes every snapshot stale without touching
+# MIRROR_SNAP_MAX_AGE_S at all, which is the same loosening from the
+# far side. Downward-only, like the caps it feeds.
+INTERVAL_S = _rules.capped_env("WHALE_EXIT_INTERVAL_S", 120.0, floor=15.0)
 # A shrink smaller than this is noise — rounding in the venue's size
 # field, or a partial that is not worth a fee to follow.
 MIN_SHRINK = float(os.environ.get("WHALE_EXIT_MIN_SHRINK", "0.05"))

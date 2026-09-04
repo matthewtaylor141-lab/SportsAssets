@@ -67,27 +67,50 @@ import time
 from typing import Any
 
 from ..analytics import mirror as mi
+from ..analytics import mirror_live_rules as rules
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
 
 log = logging.getLogger(__name__)
 
-POLL_S = float(os.environ.get("MIRROR_SHADOW_POLL_S", "30"))
-LOOKBACK_H = float(os.environ.get("MIRROR_LOOKBACK_H", "6"))
-RATIO_DAYS = int(os.environ.get("MIRROR_RATIO_DAYS", "30"))
+# EVERY KNOB BELOW IS DOWNWARD-ONLY, through the rules' own helper.
+# These were raw env reads, and one of them is a money bound in
+# disguise: SNAP_MAX_AGE_S is the freshness gate on HIS position --
+# mirror_live reads it as fresh_read, which becomes the admission fact
+# the drift rule's increase clause and the snapshot resolution key on --
+# so a shell could open new books and grow live ones on an arbitrarily
+# old reading of the whale, and loosen the very gate the rollout is
+# steered by, without a deploy or a review. The dollar caps beside it
+# have been downward-only since the rules were written; these now match.
+# An operator can still make any of them TIGHTER (a shorter freshness
+# window, fewer markets, a shorter judge TTL) without a deploy.
+# an INTERVAL, not a cap: its aggressive direction is DOWN (more venue
+# reads on a key shared with the live lane), so it lengthens only --
+# which also keeps the operator's incident lever, slowing the shadow
+# during a venue event without a deploy
+POLL_S = rules.min_wait_env("MIRROR_SHADOW_POLL_S", 30.0)
+LOOKBACK_H = rules.capped_env("MIRROR_LOOKBACK_H", 6.0, floor=0.25)
+RATIO_DAYS = int(rules.capped_env("MIRROR_RATIO_DAYS", 30.0, floor=1.0))
 RATIO_REFRESH_S = 3600.0
 READ_PACING_S = 0.35
-MAX_MARKETS_PER_TICK = int(os.environ.get("MIRROR_MAX_MARKETS", "20"))
+MAX_MARKETS_PER_TICK = int(rules.capped_env("MIRROR_MAX_MARKETS", 20.0, floor=0.0))
 POSITIONS_PAGES_MAX = 5
 MISS_STREAK_ABANDON = 3
 BACKOFF_S = 60.0
 # a raw positions read older than this is not a reading of his book now
-SNAP_MAX_AGE_S = float(os.environ.get("MIRROR_SNAP_MAX_AGE_S", "300"))
+# TWO-SIDED, and the floor is the interesting half. Raising it lets new
+# books open on an arbitrarily old reading of him. LOWERING it is not
+# the safe direction either: a book whose snapshot reads stale takes
+# select_flatten's vanished path, the only path that accepts slippage,
+# so a short window would delete the paired-flatten guard for every
+# book. The floor is the SNAPSHOT WRITER'S own cadence (whale_exits
+# INTERVAL_S, 120 s): under it, every read is stale by construction.
+SNAP_MAX_AGE_S = rules.capped_env("MIRROR_SNAP_MAX_AGE_S", 300.0, floor=120.0)
 # a plan is a resting order with this life: it fills if the book reaches
 # its price inside it, and did not fill if it ages past it while the
 # market is still read (the live lane's rest TTL, review of the first
 # shadow hour)
-JUDGE_TTL_S = float(os.environ.get("MIRROR_JUDGE_TTL_S", "600"))
+JUDGE_TTL_S = rules.capped_env("MIRROR_JUDGE_TTL_S", 600.0, floor=30.0)  # the live rest TTL's own floor
 # a market that mapped to no venue market is not re-read every tick: the
 # per-tick cap goes to markets that can produce a plan (81% of RN1's
 # markets read unmapped in the first hour and took every slot)
