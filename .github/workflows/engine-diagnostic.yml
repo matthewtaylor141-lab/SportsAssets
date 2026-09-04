@@ -2011,9 +2011,22 @@ jobs:
           # raw side rows: label, orderable slug, price. If both sides
           # carry ~the same price, the wrongness is in the venue payload
           # or our side extraction — the raw rows say which.
+          # `|| true` IS LOAD-BEARING, and its absence cost a whole probe
+          # (run 33928795999, 2026-09-04). This step runs under `bash -e`.
+          # jq exits 5 on a body it cannot parse as JSON, and the API
+          # serves an HTML 502 page for the ~10 minutes Render takes to
+          # cycle after a push — which is exactly when a push-triggered
+          # probe runs. In a BARE `X=$(...)` assignment the command
+          # substitution's status IS the assignment's status, so that 5
+          # killed the step at this line and threw away every reading
+          # after it: PMBOARD, the soccer forensic, MIRRORMKT, PROOF2,
+          # the lot. Every other read here degrades to "(unavailable)";
+          # this one did not, only because the pipeline had no trailing
+          # `head` to swallow the status the way the sibling reads below
+          # and at :529/:2056 do by accident.
           GID=$(curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
             "$BASE/api/admin/market-search?q=pegula" 2>/dev/null | \
-            jq -r '.markets[0].event_slug // empty' 2>/dev/null)
+            jq -r '.markets[0].event_slug // empty' 2>/dev/null) || true
           echo "  PMBOARD event: ${GID:-not-found-via-search}"
           for Q in "pegula" "swiatek"; do
             curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" \
