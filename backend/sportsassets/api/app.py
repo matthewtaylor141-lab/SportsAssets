@@ -5962,6 +5962,1403 @@ async def admin_exit_census() -> dict:
     }
 
 
+# ───────────────────────── THE CASH-OUT CENSUS ─────────────────────────
+#
+# HOW MUCH MONEY DOES THE HAND-SALE PROBLEM MOVE? Nothing else answers
+# it. The five-lens investigation established the MECHANISM — a copy
+# sold by hand keeps sitting in live_orders as `filled`, the desk's
+# cash-out ticket wears `whale_username='manual'` which both halves of
+# the copy page ignore, and the settlement sweep then subtracts that
+# ticket's dollars from the market's target so they land nowhere — but
+# it could not state the SIZE, because there is no database in the
+# environment the plan was written in. Every figure in that document is
+# a synthetic probe input.
+#
+# So this endpoint is the gate. It changes no served number: it is a
+# new read-only admin route, it opens no transaction, it calls nothing
+# that writes, and no existing payload gains or loses a key because of
+# it. Its whole job is to put a magnitude on the restatement the owner
+# has not yet consented to, so that U3/U4/U5 — the units that DO move
+# headline figures — can be judged on numbers instead of on shape.
+#
+# THE DISCIPLINE, taken from this file's other censuses:
+#   * every read carries a LIMIT and a timeout, and the request carries
+#     one budget the reads spend down in order of value — the venue read
+#     is last precisely because it is the slowest and the likeliest to
+#     fail, and it must not be able to starve the dollar figures;
+#   * a figure that could not be computed is served as **null with a
+#     named reason**, never as zero. Zero is an answer; "unread" is not,
+#     and the two have been confused on this codebase before;
+#   * a census that hit its cap is UNREADABLE, not truncated. A floor
+#     served as a total is how a restatement gets under-sized;
+#   * anything the data cannot decide is REFUSED and counted, never
+#     allocated. Which of two co-held rows a partial sale closed is not
+#     a measurement, it is a policy invention.
+CASHOUT_CENSUS_ROW_CAP = 5000        # rows any one read may open
+CASHOUT_CENSUS_SLUG_CAP = 20000      # grouped slugs any one read may open
+CASHOUT_CENSUS_READ_TIMEOUT_S = 8.0  # per database read
+CASHOUT_CENSUS_VENUE_TIMEOUT_S = 30.0  # the positions page-through
+CASHOUT_CENSUS_BUDGET_S = 60.0       # the whole request
+CASHOUT_CENSUS_MIN_BUDGET_S = 0.25   # below this a read is not attempted
+# A shortfall smaller than one whole share is rounding, not a sale —
+# the same threshold `_reap_stale_exiting` uses for the opposite
+# direction (live_executor.py: `held - _explained < 1`).
+CASHOUT_CENSUS_SHARE_EPS = 1.0
+# The statuses in which one of our rows is holding, or has held, a
+# position. 'unfilled'/'rejected'/'error'/'submitting' never took one,
+# so they are not entry rows and cannot be what a sale closed.
+CASHOUT_POSITION_STATUSES = ("filled", "exiting", "settled",
+                             "cashed_out", "merged")
+# The cohort `/api/copies-record` actually SERVES: `_SETTLED_SQL` takes
+# `status IN ('settled','cashed_out') AND settled_at IS NOT NULL`. A copy
+# entry row outside this set has NO LINE on the scoreline, so a hand sale
+# attributed to it moves the published total by exactly nothing until the
+# market resolves. Kept separate from the holding statuses above because
+# conflating the two is what made the gate figure a ceiling.
+CASHOUT_SETTLED_STATUSES = ("settled", "cashed_out")
+# The venue's positions feed pages 50 x 100 (`pmus_account`). At exactly
+# this many entries the book may be short and nothing else says so.
+CASHOUT_CENSUS_VENUE_BOOK_CAP = 5000
+
+
+def _cc_cov(complete: bool, why: str | None = None, **extra) -> dict:
+    """One coverage block. `complete` false ALWAYS carries a why."""
+    return {"complete": bool(complete), "why": why, **extra}
+
+
+def _cc_blank(keys, reason: str) -> dict:
+    """A figure that could not be computed: every number null, the
+    reason named. Never zeros — a zero here reads as 'we looked and
+    there is nothing', which is the one thing this census must never
+    say when it did not look."""
+    out: dict = {k: None for k in keys}
+    out["coverage"] = _cc_cov(False, reason)
+    return out
+
+
+# Every figure this endpoint serves, with the keys that go null when it
+# cannot be computed. Held in ONE place so that a failure ABOVE the reads
+# — the pool, or the COPY_WHALES import — can null the whole payload with
+# a reason instead of raising, and so a new figure cannot be added without
+# declaring what its null looks like.
+_CC_FIGURE_KEYS: dict[str, tuple] = {
+    "desk_cashouts_on_copy_slugs": (
+        "rows", "realized_usd", "markets", "markets_with_realized_sale",
+        "pnl_null_rows", "unfilled_rows", "other_status_rows",
+        "rows_off_copy_slugs"),
+    "restatement_if_attributed": (
+        "copies_record_add_usd", "copies_record_add_rows",
+        "add_in_window_usd", "add_in_window_rows",
+        "add_before_window_usd", "add_before_window_rows",
+        "add_pending_resolution_usd", "add_pending_resolution_rows",
+        "copies_epoch", "refused_co_held_usd", "refused_co_held_rows",
+        "refused_sleeve_held_usd", "refused_sleeve_held_rows",
+        "unmeasurable_rows", "first_day", "last_day",
+        "entry_first_day", "entry_last_day",
+        "track_record_markets_returning_upper_bound",
+        "track_record_add_usd", "track_record_copy_ledger_proxy"),
+    "published_at_zero": (
+        "rows", "copy_rows", "copy_stake_usd", "copy_rows_in_window",
+        "copy_stake_usd_in_window", "copies_epoch", "reaper_retired",
+        "desk_manual", "first_day", "last_day"),
+    "rescore_delta_blind": ("rows", "pnl_usd", "copy_rows", "copy_pnl_usd"),
+    "kalshi_desk_cashouts": ("rows", "usd", "by_status"),
+    "stranded_copy_rows": (
+        "slugs", "rows", "rows_fully_short", "stake_usd",
+        "stake_usd_upper_bound", "shares_short", "sole_row_slugs",
+        "co_held_slugs", "sole_row_stake_usd", "co_held_stake_usd",
+        "mixed_side_slugs_refused"),
+    "unattributable_co_held": ("slugs", "rows", "stake_usd"),
+    "venue_silent_slugs": ("slugs", "rows", "stake_usd"),
+}
+
+
+def _cc_read_this_first() -> dict:
+    """The reading instructions, served whether or not the reads ran."""
+    return {
+        "the_question": "how much money do the owner's hand cash-outs "
+                        "move, and how much of it is attributable at all",
+        "gate": "nothing that changes a served number should ship before "
+                "these figures are read by a human — U3, U4 and U5 all "
+                "move published totals",
+        "already_wrong_vs_merely_unlabelled": (
+            "published_at_zero is money that was never MEASURED (a real "
+            "sale published as a $0.00 settled copy); "
+            "desk_cashouts_on_copy_slugs is money that was measured and "
+            "is wearing the wrong name. Different remedies, different "
+            "consent"),
+        "the_class_with_no_remedy": (
+            "unattributable_co_held plus kalshi_desk_cashouts — refused "
+            "and disclosed, never allocated"),
+        "nulls": "every null on this payload carries its own reason. A "
+                 "null is not a zero and must never be summed as one",
+        "which_number_is_the_move": (
+            "restatement_if_attributed.add_in_window_usd — NOT "
+            "copies_record_add_usd. The copy scoreline is served from "
+            "COPIES_EPOCH onward and grades only entry rows that have "
+            "SETTLED, so a lifetime, settle-agnostic sum is a CEILING on "
+            "the move, not the move. The three add_* figures partition "
+            "the lifetime total; only the in-window one changes a "
+            "published figure today"),
+        "which_numbers_are_ceilings": (
+            "stake_usd_upper_bound and rows on stranded_copy_rows (a "
+            "slug-level shortfall does not prove every row on the slug "
+            "was sold); "
+            "track_record_markets_returning_upper_bound (the record has "
+            "gates this census cannot see); and kalshi_desk_cashouts.usd "
+            "(notional written at QUEUE time on an append-only table, so "
+            "cancelled, reaped and unfilled tickets that never traded "
+            "still carry their full dollars — net them out with "
+            "by_status, which serves the dollars per status). Each "
+            "carries the evidence-bounded figure beside it or names its "
+            "gates"),
+    }
+
+
+class _CashoutBudget:
+    """One deadline for the whole request, spent down in order.
+
+    Each read gets the smaller of its own timeout and what is left. A
+    read that finds no budget left is not attempted and its figure says
+    so, rather than the endpoint hanging for a diagnostic.
+    """
+
+    def __init__(self, total: float = CASHOUT_CENSUS_BUDGET_S) -> None:
+        self.deadline = time.monotonic() + total
+
+    def left(self) -> float:
+        return max(0.0, self.deadline - time.monotonic())
+
+    def grant(self, want: float) -> float | None:
+        rem = self.left()
+        if rem < CASHOUT_CENSUS_MIN_BUDGET_S:
+            return None
+        return min(want, rem)
+
+
+async def _cc_fetch(pool, budget: _CashoutBudget, sql: str, *args,
+                    want: float = CASHOUT_CENSUS_READ_TIMEOUT_S):
+    """One bounded, timed, fail-closed read. -> (rows, None) | (None, why)."""
+    grant = budget.grant(want)
+    if grant is None:
+        return None, ("no request budget left — this read was not "
+                      "attempted rather than made to wait")
+    try:
+        rows = await asyncio.wait_for(pool.fetch(sql, *args), grant)
+    except asyncio.TimeoutError:
+        return None, (f"the read did not answer inside {grant:.1f}s and "
+                      "was abandoned (the database may still be working; "
+                      "the CALLER's wait is what is bounded here)")
+    except Exception as exc:  # noqa: BLE001 — a census never 500s
+        return None, f"{type(exc).__name__}: {str(exc)[:180]}"
+    return list(rows or []), None
+
+
+@app.get("/api/admin/cashout-census", dependencies=[Depends(require_admin)])
+async def api_cashout_census() -> dict:
+    """How much money do the owner's hand cash-outs move? — U0.
+
+    READ-ONLY, and the gate on everything downstream. Five questions,
+    each with its own coverage:
+
+      1. `stranded_copy_rows` — copy-lane rows we still call `filled`
+         that the venue no longer holds enough shares to explain. This
+         is `_reap_stale_exiting`'s reconciliation WITH THE INEQUALITY
+         REVERSED: the three existing reconcilers all ask "does the
+         venue hold MORE than we explain"; the hand-sale fingerprint is
+         the opposite direction. Their stake is phantom open exposure —
+         `/api/copies-record`'s `open.stake` counts it as money on the
+         table that is not on the table.
+
+      2. `desk_cashouts_on_copy_slugs` — the Route A population: desk
+         **Cash Out** tickets (`whale_username='manual'`, `side='SELL'`)
+         sitting on a slug a copy row also sits on. Their realized
+         dollars exist in the database exactly once already and are
+         already fenced by the settlement sweep's `sold_by` subtraction;
+         they are simply wearing a name no copy cohort reads.
+
+      3. `restatement_if_attributed` — what those dollars would ADD to
+         the copy scoreline, and how many markets would come back to the
+         track record, with the date range they fall in. This is the
+         magnitude the owner is owed before consenting to a restatement.
+
+         THE FIGURE THAT IS THE MOVE IS `add_in_window_usd`, NOT the
+         lifetime sum. Two gates stand between an attributable dollar
+         and the published total, and a census that ignores either
+         reports a ceiling as the move — in the UP direction, which is
+         the dangerous one for the number that authorises a restatement:
+           * THE WINDOW. `/api/copies-record` is served from
+             `COPIES_EPOCH` (defaulting to `DISPLAY_EPOCH`) onward and
+             `copies_record.build` drops every settled line dated before
+             it. Under U3 the sale's dollars land on the copy ENTRY
+             row's line, so it is the ENTRY's settled day — not the
+             sale's — that decides inclusion.
+           * THE SETTLED GATE. `_SETTLED_SQL` grades only
+             `status IN ('settled','cashed_out') AND settled_at IS NOT
+             NULL`. A desk cash-out never closes the copy row and the
+             settlement sweep only grades a `filled` row once the market
+             RESOLVES, so the normal state of a recent hand sale is an
+             entry row with no line to fold onto. Those dollars are real
+             and will be booked at resolution; they are not a
+             restatement of a number anyone has read.
+         So the lifetime total is served split three ways —
+         `add_in_window_usd` + `add_before_window_usd` +
+         `add_pending_resolution_usd` — with the epoch named on the
+         payload and the ENTRY-row day range beside the sale-day range.
+
+      4. `published_at_zero` — cash-outs ALREADY published as settled
+         copies worth $0.00, because the row carries `pnl IS NULL`
+         (`_reap_stale_exiting` never writes pnl; the desk writes NULL
+         when the venue gave no average cost). Counted separately
+         because it is a different remedy: those dollars are unmeasured,
+         not mis-labelled, and their stake sits in the ROI denominator.
+
+      5. `unattributable_co_held` — slugs carrying two or more of our
+         still-holding rows where the venue shows a PARTIAL sale. The
+         venue reports one signed net per slug for the whole account and
+         both sides of a market share one identifier, so which row that
+         sale closed is not knowable. This class is REFUSED and
+         disclosed. The owner needs its size, because it is the part of
+         the problem no amount of code can fix.
+
+    Plus `kalshi_desk_cashouts` (the route this repository cannot fix at
+    all — it never touches `live_orders`) and `rescore_delta_blind`, the
+    size of the population a restatement's own delta counter mis-reported
+    until commit d832e7e closed it (see below).
+
+    WHAT THIS ENDPOINT DELIBERATELY DOES NOT DO. It does not decide
+    which row a sale closed, it does not net anything, and it does not
+    reproduce the track record's own arithmetic — that is a fold over
+    the venue activity tape and this census reads `live_orders` and the
+    positions endpoint only, so the track-record dollar figure is served
+    as **null with its reason** beside a NAMED proxy taken from our own
+    ledger. A proxy that says what it is is worth more than a total that
+    does not.
+    """
+    budget = _CashoutBudget()
+    out: dict[str, Any] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "writes": "none — this endpoint opens no transaction and calls "
+                  "nothing that writes",
+        "bounds": {
+            "row_cap": CASHOUT_CENSUS_ROW_CAP,
+            "slug_cap": CASHOUT_CENSUS_SLUG_CAP,
+            "read_timeout_s": CASHOUT_CENSUS_READ_TIMEOUT_S,
+            "venue_timeout_s": CASHOUT_CENSUS_VENUE_TIMEOUT_S,
+            "request_budget_s": CASHOUT_CENSUS_BUDGET_S,
+            "share_epsilon": CASHOUT_CENSUS_SHARE_EPS,
+            "venue_book_cap": CASHOUT_CENSUS_VENUE_BOOK_CAP,
+            "note": "a read that hits its cap makes its figure NULL, not "
+                    "a floor — EVERY read, the Kalshi one included; the "
+                    "caps bound the rows opened, and the timeouts bound "
+                    "this request's wait rather than the database's work",
+        },
+    }
+    # FAIL CLOSED ABOVE THE READS TOO. `_cc_fetch` makes every read
+    # incapable of 500ing, but the pool acquisition and the COPY_WHALES
+    # import sat outside that envelope and would raise straight out of
+    # the handler — a census that answers with a stack trace instead of
+    # a payload of named nulls is inconsistent with its own contract.
+    try:
+        from .copies_record import COPY_WHALES
+        # ONE DEFINITION OF THE INTENT PATH. `live_executor.
+        # ORDER_INTENT_SQL` is the only place that expression is written
+        # down; every reader splices it in, never re-types it. Imported
+        # lazily inside the handler for the same reason every other
+        # caller in this module does — so an admin GET does not pull the
+        # executor in at module import — and INSIDE the fail-closed
+        # envelope, because two reads now splice it and an import that
+        # raised here would leave the handler answering with a stack
+        # trace instead of a payload of named nulls.
+        from ..live_executor import ORDER_INTENT_SQL
+
+        pool = await get_pool()
+        whales = sorted(COPY_WHALES)
+    except Exception as exc:  # noqa: BLE001 — a census never 500s
+        why = (f"the census could not open its own inputs: "
+               f"{type(exc).__name__}: {str(exc)[:180]}")
+        out["copy_whales"] = None
+        for _name, _keys in _CC_FIGURE_KEYS.items():
+            out[_name] = _cc_blank(_keys, why)
+        out["budget_left_s"] = round(budget.left(), 2)
+        out["read_this_first"] = _cc_read_this_first()
+        return out
+    out["copy_whales"] = whales
+    # THE EPOCH THE COPY SCORELINE IS SERVED FROM. It is defined further
+    # down this module, so it is read defensively: if it is not a string
+    # here the window split below is served as null with that reason,
+    # per this endpoint's own rule, rather than silently assuming one.
+    _epoch = globals().get("COPIES_EPOCH")
+    epoch = _epoch if isinstance(_epoch, str) and _epoch else None
+    epoch_why = None if epoch else (
+        "COPIES_EPOCH could not be read from this module, so the split "
+        "between dollars that would move the SERVED copy total and "
+        "dollars that fall before its window is not decidable here")
+
+    # ── (2)+(3) THE DESK CASH-OUTS. First, because they are the dollars
+    # the question is about and they must not be starved by the venue
+    # read below.
+    sells, why = await _cc_fetch(
+        pool,
+        budget,
+        """
+        SELECT lo.id,
+               lower(lo.us_market_slug) AS slug,
+               lo.status,
+               lo.pnl::float8 AS pnl,
+               to_char(lo.settled_at AT TIME ZONE 'America/New_York',
+                       'YYYY-MM-DD') AS day
+        FROM live_orders lo
+        WHERE lower(COALESCE(lo.whale_username, '')) = 'manual'
+          AND upper(COALESCE(lo.side, '')) = 'SELL'
+          AND lo.us_market_slug IS NOT NULL
+        ORDER BY lo.id DESC
+        LIMIT $1
+        """, CASHOUT_CENSUS_ROW_CAP)
+    route_a_keys = _CC_FIGURE_KEYS["desk_cashouts_on_copy_slugs"]
+    restate_keys = _CC_FIGURE_KEYS["restatement_if_attributed"]
+    if sells is None:
+        out["desk_cashouts_on_copy_slugs"] = _cc_blank(route_a_keys, why)
+        out["restatement_if_attributed"] = _cc_blank(
+            restate_keys, f"depends on the desk cash-out read: {why}")
+    elif len(sells) >= CASHOUT_CENSUS_ROW_CAP:
+        capped = (f"the desk cash-out read hit its {CASHOUT_CENSUS_ROW_CAP}-row "
+                  "cap, so every figure below it would be a floor rather "
+                  "than a total — refused")
+        out["desk_cashouts_on_copy_slugs"] = _cc_blank(route_a_keys, capped)
+        out["restatement_if_attributed"] = _cc_blank(restate_keys, capped)
+    else:
+        slugs = sorted({r["slug"] for r in sells if r["slug"]})
+        peers, why_p = await _cc_fetch(
+            pool,
+            budget,
+            """
+            SELECT lower(us_market_slug) AS slug,
+                   count(*) FILTER (
+                       WHERE lower(COALESCE(whale_username, '')) = ANY($2::text[])
+                         AND status = ANY($3::text[]))::int AS copy_entry_rows,
+                   -- THE RULE U4 WOULD ACTUALLY SHIP, not a proxy for it.
+                   -- track_record builds manual_slugs with NO status
+                   -- filter at all; U4 adds only `AND side <> 'SELL'`.
+                   -- Restricting this to holding statuses made a manual
+                   -- BUY that never filled invisible here while it still
+                   -- holds its market in the manual sleeve after U4 —
+                   -- i.e. it counted a market as returning that would
+                   -- not return.
+                   count(*) FILTER (
+                       WHERE lower(COALESCE(whale_username, '')) = 'manual'
+                         AND upper(COALESCE(side, '')) <> 'SELL')::int
+                       AS manual_buy_rows,
+                   -- WHOSE SHARES THE SALE COULD HAVE BEEN. A desk SELL
+                   -- on a slug the manual sleeve or underdog also HOLDS
+                   -- is very probably a sale of THOSE shares, not the
+                   -- copy row's — and attributing it to the copy row
+                   -- books the desk's own hand-sale onto the copy
+                   -- scoreline, in the UP direction, on the figure that
+                   -- authorises the restatement. So it is refused.
+                   -- An ENTRY leg is what counts, matched the way this
+                   -- codebase matches an intent everywhere else — a
+                   -- SUBSTRING, not a prefix (`is_short_intent`,
+                   -- live_executor.py:2894, is `"SHORT" in intent`).
+                   -- THE PREFIX FORM WAS WRONG AND SILENT: the venue
+                   -- stores `ORDER_INTENT_BUY_LONG` /
+                   -- `ORDER_INTENT_BUY_SHORT` (pmus.py:498, :1637), so
+                   -- `LIKE 'BUY%'` matched NO row that carried an
+                   -- intent, this counter stayed 0, and the refusal
+                   -- below never fired on exactly the rows it was
+                   -- written for. `%BUY%` cannot over-match: the only
+                   -- other literals are ORDER_INTENT_SELL_LONG and
+                   -- ORDER_INTENT_SELL_SHORT, neither containing BUY.
+                   -- The fallback to `side <> 'SELL'` stands for a row
+                   -- the venue named no intent for. A SELL leg must NOT
+                   -- count, or the desk
+                   -- cash-out ticket being attributed — itself a
+                   -- `manual` row in `cashed_out`, a holding status —
+                   -- would refuse every dollar on the payload.
+                   -- The mirror needs no term here: mirror rows carry
+                   -- the COPY whale's username, so a mirror leg beside
+                   -- a copy entry already reads as two copy_entry_rows
+                   -- and is refused by the co-held gate.
+                   count(*) FILTER (
+                       WHERE NOT (lower(COALESCE(whale_username, ''))
+                                  = ANY($2::text[]))
+                         AND status = ANY($3::text[])
+                         AND (upper(COALESCE(__INTENT__, '')) LIKE '%BUY%'
+                              OR (__INTENT__ IS NULL
+                                  AND upper(COALESCE(side, ''))
+                                      <> 'SELL')))::int
+                       AS non_copy_holding_rows,
+                   -- The copy entry rows that HAVE A LINE on the served
+                   -- scoreline (`_SETTLED_SQL`'s own population). A sale
+                   -- attributed to a row outside this set adds nothing
+                   -- to the published total until the market resolves.
+                   count(*) FILTER (
+                       WHERE lower(COALESCE(whale_username, '')) = ANY($2::text[])
+                         AND status = ANY($5::text[])
+                         AND settled_at IS NOT NULL)::int AS copy_settled_rows,
+                   -- THE DAY THE DOLLARS WOULD LAND ON, which is what the
+                   -- epoch window is applied against — the ENTRY row's
+                   -- settled day, never the sale's.
+                   min(to_char(settled_at AT TIME ZONE 'America/New_York',
+                               'YYYY-MM-DD')) FILTER (
+                       WHERE lower(COALESCE(whale_username, '')) = ANY($2::text[])
+                         AND status = ANY($5::text[])
+                         AND settled_at IS NOT NULL) AS copy_settled_day,
+                   COALESCE(sum(COALESCE(NULLIF(filled_usd, 0), requested_usd))
+                            FILTER (
+                       WHERE lower(COALESCE(whale_username, '')) = ANY($2::text[])
+                         AND status = ANY($3::text[])), 0)::float8 AS copy_stake,
+                   COALESCE(sum(COALESCE(pnl, 0)) FILTER (
+                       WHERE lower(COALESCE(whale_username, '')) = ANY($2::text[])
+                         AND status = ANY($3::text[])), 0)::float8 AS copy_pnl
+            FROM live_orders
+            WHERE lower(us_market_slug) = ANY($1::text[])
+            GROUP BY 1
+            LIMIT $4
+            """.replace("__INTENT__", ORDER_INTENT_SQL),
+            slugs, whales, list(CASHOUT_POSITION_STATUSES),
+            CASHOUT_CENSUS_SLUG_CAP, list(CASHOUT_SETTLED_STATUSES))
+        if peers is None:
+            dep = f"the copy-row lookup for those slugs failed: {why_p}"
+            out["desk_cashouts_on_copy_slugs"] = _cc_blank(route_a_keys, dep)
+            out["restatement_if_attributed"] = _cc_blank(restate_keys, dep)
+        else:
+            peer = {r["slug"]: r for r in peers}
+            on_copy = [r for r in sells
+                       if (peer.get(r["slug"]) or {}).get("copy_entry_rows")]
+            # A desk ticket that never filled ('unfilled') is not a sale
+            # and has no dollars; it is counted so the population is
+            # whole, and excluded from every dollar figure.
+            sold = [r for r in on_copy if r["status"] == "cashed_out"]
+            measured = [r for r in sold if r["pnl"] is not None]
+            # Attributable — U3's rule, stated per row, not per
+            # intention: EXACTLY ONE copy-lane entry row on the slug AND
+            # NO NON-COPY ROW HOLDING SHARES OF IT. Two copy rows and
+            # the sale is not allocatable; `pnl IS NULL` and the
+            # settlement sweep has ALREADY given that market's whole
+            # cumulative realization to the copy row, so attributing it
+            # again books the money twice.
+            #
+            # THE SECOND CONDITION IS NOT COSMETIC. Without it a desk
+            # sale of the desk's OWN hand-opened position — a `manual`
+            # BUY sitting on the same slug as one copy row — was
+            # attributed in full to the copy row, i.e. the census booked
+            # the owner's own sleeve onto the copy scoreline, UP, on the
+            # figure the docstring names THE MOVE and calls the
+            # dangerous direction. The same payload was simultaneously
+            # saying that market does NOT come back to the track record
+            # *because the desk hand-opened it*. This is the discipline
+            # the ledger path below already applies ("shares other rows
+            # explain are not these rows'"); the restatement path is now
+            # consistent with it.
+            def _noncopy(r) -> int:
+                return int(peer[r["slug"]]["non_copy_holding_rows"] or 0)
+
+            attributable = [r for r in measured
+                            if peer[r["slug"]]["copy_entry_rows"] == 1
+                            and not _noncopy(r)]
+            refused = [r for r in measured
+                       if peer[r["slug"]]["copy_entry_rows"] > 1]
+            # Its own refusal class, never folded into the co-held one:
+            # the two have different remedies. A co-held slug is
+            # PERMANENTLY unattributable (the venue nets both rows into
+            # one signed number); a slug sharing a sleeve is decidable
+            # from the activity tape this census does not read.
+            refused_sleeve = [r for r in measured
+                              if peer[r["slug"]]["copy_entry_rows"] == 1
+                              and _noncopy(r)]
+            days = sorted({r["day"] for r in attributable if r["day"]})
+            # ── THE THREE GATES BETWEEN AN ATTRIBUTABLE DOLLAR AND THE
+            # SERVED TOTAL. Partitioned, never summed into one figure:
+            #   pending  — the copy entry row has no line on the
+            #              scoreline yet (still `filled`; the market has
+            #              not resolved). Real money, booked at
+            #              resolution, restating nothing anyone has read.
+            #   before   — the entry row's line is dated before the epoch
+            #              the copy page is served from, so it is dropped
+            #              by `copies_record.build` before the scorecard
+            #              ever sees it.
+            #   in_window— the only dollars that move a published figure.
+            pending, before, in_window, undecided = [], [], [], []
+            entry_days = sorted({
+                d for d in (peer[r["slug"]]["copy_settled_day"]
+                            for r in attributable) if d})
+            for r in attributable:
+                p = peer[r["slug"]]
+                if not int(p["copy_settled_rows"] or 0):
+                    pending.append(r)
+                elif epoch is None:
+                    undecided.append(r)
+                elif (p["copy_settled_day"] or "") < epoch:
+                    before.append(r)
+                else:
+                    in_window.append(r)
+            # A window that could not be decided is NOT quietly counted
+            # as in-window: the split is served null with its reason and
+            # the lifetime total stands alone.
+            split_unknown = bool(undecided)
+            # The markets U4 would stop deleting from the track record:
+            # a manual SELL on the slug, NO manual BUY on it (a genuinely
+            # hand-OPENED position stays in the manual sleeve — the
+            # standing 2026-08-22 order is untouched), and a copy row
+            # present to come back.
+            #
+            # BUILT FROM `on_copy`, NOT `sold` — the mirror of the
+            # status-filter mismatch already fixed on the BUY side above.
+            # `track_record.manual_slugs` is `SELECT DISTINCT
+            # us_market_slug FROM live_orders WHERE whale_username =
+            # 'manual'`: no status filter at all, and U4 adds only
+            # `AND side <> 'SELL'`. So a slug whose only manual row is a
+            # SELL that never filled is in manual_slugs TODAY and leaves
+            # it under U4 — the market returns. Counting only
+            # `cashed_out` sales dropped exactly those slugs, making a
+            # figure named `..._upper_bound`, whose own coverage says
+            # "It is a CEILING", a FLOOR in that sub-population.
+            returning = sorted({
+                r["slug"] for r in on_copy
+                if not peer[r["slug"]]["manual_buy_rows"]})
+            out["desk_cashouts_on_copy_slugs"] = {
+                "rows": len(on_copy),
+                "realized_usd": round(sum(r["pnl"] for r in measured), 2),
+                # `markets` counts every slug a manual SELL ticket
+                # touched, INCLUDING tickets that never filled. The
+                # markets actually covered by a realized sale are the
+                # second figure — the first over-reaches as a label.
+                "markets": len({r["slug"] for r in on_copy}),
+                "markets_with_realized_sale": len({r["slug"]
+                                                   for r in measured}),
+                "pnl_null_rows": len([r for r in sold if r["pnl"] is None]),
+                # `unfilled` is the desk's own no-fill status. It was
+                # previously the name on a count of EVERY non-cashed_out
+                # status, which also swept up rejected/error/open/
+                # cancelled tickets.
+                "unfilled_rows": len([r for r in on_copy
+                                      if r["status"] == "unfilled"]),
+                "other_status_rows": len([
+                    r for r in on_copy
+                    if r["status"] not in ("cashed_out", "unfilled")]),
+                "rows_off_copy_slugs": len(sells) - len(on_copy),
+                "coverage": _cc_cov(
+                    True,
+                    None,
+                    scanned_manual_sell_rows=len(sells),
+                    markets_is=("slugs touched by a manual SELL ticket, "
+                                "filled or not; markets_with_realized_"
+                                "sale is the subset carrying dollars"),
+                    dollars_exclude=("rows that never filled, and rows "
+                                     "whose pnl is NULL — the venue gave "
+                                     "no average cost, so no dollar was "
+                                     "ever measured on them"),
+                    exit_commission=("not in data we hold for any sale but "
+                                     "the desk's own; every realized figure "
+                                     "here is an UPPER bound on net, the "
+                                     "same caveat a settled line already "
+                                     "carries")),
+            }
+            proxy = {
+                "rows": sum(peer[s]["copy_entry_rows"] for s in returning),
+                "stake_usd": round(
+                    sum(peer[s]["copy_stake"] for s in returning), 2),
+                "pnl_usd": round(
+                    sum(peer[s]["copy_pnl"] for s in returning), 2),
+                "what_this_is": ("our OWN ledger's copy rows on the markets "
+                                 "that would return — NOT the track "
+                                 "record's arithmetic, which folds the "
+                                 "venue activity tape"),
+            }
+            def _sum(rows) -> float:
+                return round(sum(r["pnl"] for r in rows), 2)
+
+            out["restatement_if_attributed"] = {
+                "copies_record_add_usd": _sum(attributable),
+                "copies_record_add_rows": len(attributable),
+                # THE MOVE. Null rather than zero when the epoch could
+                # not be read — an undecided split is not a split of $0.
+                "add_in_window_usd": (None if split_unknown
+                                      else _sum(in_window)),
+                "add_in_window_rows": (None if split_unknown
+                                       else len(in_window)),
+                "add_before_window_usd": (None if split_unknown
+                                          else _sum(before)),
+                "add_before_window_rows": (None if split_unknown
+                                           else len(before)),
+                "add_pending_resolution_usd": _sum(pending),
+                "add_pending_resolution_rows": len(pending),
+                "copies_epoch": epoch,
+                "refused_co_held_usd": _sum(refused),
+                "refused_co_held_rows": len(refused),
+                "refused_sleeve_held_usd": _sum(refused_sleeve),
+                "refused_sleeve_held_rows": len(refused_sleeve),
+                "unmeasurable_rows": len([r for r in sold
+                                          if r["pnl"] is None]),
+                "first_day": days[0] if days else None,
+                "last_day": days[-1] if days else None,
+                "entry_first_day": entry_days[0] if entry_days else None,
+                "entry_last_day": entry_days[-1] if entry_days else None,
+                "track_record_markets_returning_upper_bound": len(returning),
+                "track_record_add_usd": None,
+                "track_record_copy_ledger_proxy": proxy,
+                "coverage": _cc_cov(
+                    False,
+                    "the track-record dollar figure is NOT computed here: "
+                    "that record is a fold over the venue activity tape "
+                    "and this census reads live_orders and the positions "
+                    "endpoint only. Its magnitude is served as null with "
+                    "this reason beside a named ledger proxy, never as "
+                    "zero and never as a guess.",
+                    copies_record_add_is=(
+                        "the LIFETIME, settle-agnostic sum of realized "
+                        "dollars on desk cash-out tickets sitting on a "
+                        "slug with EXACTLY ONE copy entry row AND NO "
+                        "non-copy row holding shares of it. It is a "
+                        "CEILING on the move, not the move: see "
+                        "add_in_window_usd"),
+                    the_move_is=(
+                        "add_in_window_usd — the attributable dollars "
+                        "whose copy ENTRY row already has a settled line "
+                        "on the scoreline AND whose line is dated on or "
+                        "after copies_epoch. Only these change a figure "
+                        "the owner has already read"),
+                    add_before_window_is=(
+                        "attributable dollars landing on a settled line "
+                        "dated before copies_epoch. /api/copies-record "
+                        "drops those lines before the scorecard runs "
+                        "(and the master report is windowed from "
+                        "DISPLAY_EPOCH too), so they restate nothing "
+                        "served today"),
+                    add_pending_resolution_is=(
+                        "attributable dollars whose copy entry row is "
+                        "still `filled` — no line to fold onto. A desk "
+                        "cash-out never closes the copy row and the "
+                        "settlement sweep grades it only at RESOLUTION, "
+                        "so this is the normal state of a recent hand "
+                        "sale. Real money, booked later; not a "
+                        "restatement"),
+                    day_axes=(
+                        "first_day/last_day are the SALE days; "
+                        "entry_first_day/entry_last_day are the days the "
+                        "dollars would LAND on (the entry row's settled "
+                        "day), which is also the axis the epoch window is "
+                        "applied against"),
+                    epoch_why=epoch_why,
+                    refused_because=(
+                        "TWO refusal classes, counted apart because they "
+                        "have different remedies. (a) refused_co_held — "
+                        "two or more copy entry rows share the slug; "
+                        "which one the sale closed is not knowable from "
+                        "any feed and must never be allocated. (b) "
+                        "refused_sleeve_held — exactly one copy entry "
+                        "row, but a NON-COPY row (the manual sleeve, "
+                        "underdog) also holds shares of the slug, so the "
+                        "sale is very probably of THOSE shares. "
+                        "Attributing it to the copy row would book the "
+                        "desk's own hand-sale onto the copy scoreline, "
+                        "UP, on the figure that authorises the "
+                        "restatement — and on a market the same payload "
+                        "says does not come back to the track record "
+                        "BECAUSE the desk hand-opened it. Decidable from "
+                        "the venue activity tape, which this census does "
+                        "not read"),
+                    sleeve_held_residual=(
+                        "a non-copy row counts as HOLDING when its intent "
+                        "is an entry leg (BUY_LONG/BUY_SHORT), falling "
+                        "back to `side <> 'SELL'` where the venue named "
+                        "no intent. A SELL leg cannot count: the desk "
+                        "cash-out ticket being attributed is itself a "
+                        "`manual` row in `cashed_out`, a holding status, "
+                        "so counting SELL legs would refuse the whole "
+                        "payload. The residual is a non-copy SHORT ENTRY "
+                        "on a row carrying no intent in `raw`, which "
+                        "reads as `side = 'SELL'` and is not counted — "
+                        "that one shape can still leak UP"),
+                    markets_returning_is_an_upper_bound=(
+                        "a manual SELL ticket on the slug IN ANY STATUS "
+                        "and no manual BUY row on it, modelled on "
+                        "track_record's own manual_slugs predicate, which "
+                        "has no status filter at all (U4 adds only `AND "
+                        "side <> 'SELL'`) — so a SELL that never filled "
+                        "still takes its slug out of the manual sleeve "
+                        "under U4 and is counted here. It is a CEILING: "
+                        "track_record.build can still keep such a market "
+                        "out of the record via the `attributed` set "
+                        "(copy slugs are not added to it, so a market "
+                        "leaving `manual` can land in `unattributed`), "
+                        "PNL_DISPLAY_CAP, max_stake and its own since_ts "
+                        "window — none of which this census can see, "
+                        "because it reads live_orders and the record "
+                        "folds the venue tape. Slug case is another "
+                        "small gap: manual_slugs keys on the raw-case "
+                        "slug, this census lowercases"),
+                    direction=(
+                        "UP — this is money the copy scoreline currently "
+                        "books nowhere. The two refusal classes above are "
+                        "what keeps it from running FURTHER up: dollars "
+                        "the data cannot assign to a copy row are refused "
+                        "and disclosed, never added. The one residual "
+                        "that can still bias it up is named in "
+                        "sleeve_held_residual")),
+            }
+
+    # ── (4) THE CASH-OUTS ALREADY PUBLISHED AT $0.00.
+    zero_keys = _CC_FIGURE_KEYS["published_at_zero"]
+    zrows, why_z = await _cc_fetch(
+        pool,
+        budget,
+        """
+        SELECT count(*)::int AS rows,
+               count(*) FILTER (
+                   WHERE whale = ANY($1::text[]))::int AS copy_rows,
+               COALESCE(sum(stake) FILTER (
+                   WHERE whale = ANY($1::text[])), 0)::float8 AS copy_stake_usd,
+               -- THE PAIR U5 WOULD ACTUALLY REMOVE FROM A SERVED
+               -- DENOMINATOR. `copies_record.build` drops every settled
+               -- line dated before COPIES_EPOCH before `scorecard`
+               -- accrues anything, so a pre-epoch row is in NO ROI
+               -- denominator and has NO win-rate slot: removing it moves
+               -- nothing. The lifetime pair above was labelled as though
+               -- it were this one. `day` is the settled day in ET, the
+               -- same axis `build` compares against, and both are
+               -- YYYY-MM-DD so the string compare is the date compare.
+               count(*) FILTER (
+                   WHERE whale = ANY($1::text[])
+                     AND day >= $3)::int AS copy_rows_in_window,
+               COALESCE(sum(stake) FILTER (
+                   WHERE whale = ANY($1::text[])
+                     AND day >= $3), 0)::float8 AS copy_stake_usd_in_window,
+               count(*) FILTER (
+                   WHERE err LIKE 'exit completed but the process died%'
+               )::int AS reaper_retired,
+               count(*) FILTER (WHERE whale = 'manual')::int AS desk_manual,
+               min(day) AS first_day, max(day) AS last_day
+        FROM (
+            SELECT lower(COALESCE(whale_username, '')) AS whale,
+                   -- THE ROI DENOMINATOR, EXACTLY AS `scorecard` READS
+                   -- IT: `float(r.get('filled_usd') or 0)`. The
+                   -- COALESCE-to-requested_usd pattern is right for
+                   -- `open.stake`, which is what it was borrowed from,
+                   -- and wrong here: a row with filled_usd = 0
+                   -- contributes nothing to the denominator this figure
+                   -- names, so it must contribute nothing here either.
+                   COALESCE(filled_usd, 0)::float8 AS stake,
+                   COALESCE(error, '') AS err,
+                   to_char(settled_at AT TIME ZONE 'America/New_York',
+                           'YYYY-MM-DD') AS day
+            FROM live_orders
+            WHERE status = 'cashed_out'
+              AND pnl IS NULL
+              AND settled_at IS NOT NULL
+            LIMIT $2
+        ) s
+        """, whales, CASHOUT_CENSUS_ROW_CAP,
+        # An unreadable epoch must not make the windowed pair read as
+        # "the whole population": a date no row can reach makes the raw
+        # counters 0, and the served values are nulled with the reason
+        # below rather than served at all.
+        epoch or "9999-12-31")
+    if zrows is None:
+        out["published_at_zero"] = _cc_blank(zero_keys, why_z)
+    elif not zrows:
+        out["published_at_zero"] = _cc_blank(
+            zero_keys, "the aggregate returned no row at all — the read "
+                       "answered in a shape this census cannot read")
+    else:
+        z = zrows[0]
+        n = int(z["rows"] or 0)
+        if n >= CASHOUT_CENSUS_ROW_CAP:
+            out["published_at_zero"] = _cc_blank(
+                zero_keys,
+                f"the $0.00 population hit the {CASHOUT_CENSUS_ROW_CAP}-row "
+                "cap; the count would be a floor, which is worse than no "
+                "number for a population being removed from a denominator")
+        else:
+            out["published_at_zero"] = {
+                "rows": n,
+                "copy_rows": int(z["copy_rows"] or 0),
+                "copy_stake_usd": round(float(z["copy_stake_usd"] or 0.0), 2),
+                "copy_rows_in_window": (
+                    None if epoch is None
+                    else int(z["copy_rows_in_window"] or 0)),
+                "copy_stake_usd_in_window": (
+                    None if epoch is None
+                    else round(float(z["copy_stake_usd_in_window"] or 0.0), 2)),
+                "copies_epoch": epoch,
+                "reaper_retired": int(z["reaper_retired"] or 0),
+                "desk_manual": int(z["desk_manual"] or 0),
+                "first_day": z["first_day"],
+                "last_day": z["last_day"],
+                "coverage": _cc_cov(
+                    True, None,
+                    what_this_is=("every `cashed_out` row with pnl NULL "
+                                  "and a settled_at — INCLUDING `manual` "
+                                  "and `underdog` rows, which the copy "
+                                  "scoreline filters out. The headline "
+                                  "`rows` is the whole population, not "
+                                  "the scoreline's"),
+                    copy_rows_is=("the LIFETIME copy subset: every copy "
+                                  "row published as a settled trade worth "
+                                  "exactly $0.00, whatever day it settled "
+                                  "on. NOT the pair U5 would remove — see "
+                                  "copy_rows_in_window"),
+                    copy_rows_in_window_is=(
+                        "THE PAIR U5 WOULD REMOVE. The copy scoreline is "
+                        "served from copies_epoch and "
+                        "`copies_record.build` drops every settled line "
+                        "dated before it BEFORE `scorecard` accrues "
+                        "anything, so only these rows are in an ROI "
+                        "denominator and hold a win-rate slot today. The "
+                        "lifetime pair carried this sentence and was read "
+                        "as this figure; the difference between the two "
+                        "is a removal that would move nothing"),
+                    copy_stake_usd_is=("summed as `scorecard` reads the "
+                                       "denominator — bare filled_usd, "
+                                       "not coalesced to requested_usd"),
+                    window_axis=("the row's own settled day in ET, which "
+                                 "is the axis `build` compares against. "
+                                 "first_day/last_day span the WHOLE "
+                                 "population (manual and underdog "
+                                 "included), so they do not decompose "
+                                 "this split"),
+                    epoch_why=epoch_why,
+                    remedy="different from (2): these dollars were never "
+                           "measured, so they cannot be re-labelled — they "
+                           "must either be recovered from the venue tape "
+                           "or disclosed as unmeasured"),
+            }
+
+    # ── THE POPULATION THE RESTATEMENT'S DELTA COUNTER USED TO MISREAD.
+    #
+    # The boot-time restatement's delta counter USED TO take its OLD
+    # value only when the row was already 'settled' (`analytics/
+    # engine.py`, `oldp = float(r["pnl"]) if r["status"] == "settled"
+    # else 0.0`). A row still `filled` while carrying accumulated
+    # partial-sale dollars therefore reported its WHOLE new pnl as the
+    # delta, and a write-DOWN of one reported a delta of 0.0.
+    #
+    # THAT SHIPPED. Commit d832e7e reads `oldp = float(r["pnl"] or 0)`
+    # unconditionally and added an `overwrote_filled` counter to the
+    # summary for exactly this population, so the counter now states its
+    # own move. This block is NOT a fix request and must not be read as
+    # one — it is the SIZE of what that fix touches, which is the number
+    # a reviewer of the restatement needs: every `filled` row carrying a
+    # non-zero pnl is a row whose delta the old counter mis-stated and
+    # whose rescore the new `overwrote_filled` counter now names.
+    #
+    # It is measured from `live_orders` alone: this census imports
+    # nothing from `analytics/engine.py` and the count does not depend on
+    # which side of d832e7e that file is on.
+    blind_keys = _CC_FIGURE_KEYS["rescore_delta_blind"]
+    brows, why_b = await _cc_fetch(
+        pool,
+        budget,
+        """
+        SELECT count(*)::int AS rows,
+               COALESCE(sum(pnl), 0)::float8 AS pnl_usd,
+               count(*) FILTER (WHERE whale = ANY($1::text[]))::int
+                   AS copy_rows,
+               COALESCE(sum(pnl) FILTER (
+                   WHERE whale = ANY($1::text[])), 0)::float8 AS copy_pnl_usd
+        FROM (
+            SELECT lower(COALESCE(whale_username, '')) AS whale,
+                   pnl::float8 AS pnl
+            FROM live_orders
+            WHERE status = 'filled'
+              AND pnl IS NOT NULL
+              AND pnl <> 0
+            LIMIT $2
+        ) s
+        """, whales, CASHOUT_CENSUS_ROW_CAP)
+    if brows is None:
+        out["rescore_delta_blind"] = _cc_blank(blind_keys, why_b)
+    elif not brows:
+        out["rescore_delta_blind"] = _cc_blank(
+            blind_keys, "the aggregate returned no row at all")
+    elif int(brows[0]["rows"] or 0) >= CASHOUT_CENSUS_ROW_CAP:
+        out["rescore_delta_blind"] = _cc_blank(
+            blind_keys, f"hit the {CASHOUT_CENSUS_ROW_CAP}-row cap — a "
+                        "floor, refused")
+    else:
+        b = brows[0]
+        out["rescore_delta_blind"] = {
+            "rows": int(b["rows"] or 0),
+            "pnl_usd": round(float(b["pnl_usd"] or 0.0), 2),
+            "copy_rows": int(b["copy_rows"] or 0),
+            "copy_pnl_usd": round(float(b["copy_pnl_usd"] or 0.0), 2),
+            "coverage": _cc_cov(
+                True, None,
+                what_this_is=("`filled` rows carrying accumulated partial "
+                              "realization — the rows whose delta the "
+                              "restatement's counter USED TO read against "
+                              "an old value of 0.0, so it reported their "
+                              "whole new pnl as the move and a write-DOWN "
+                              "as no move at all"),
+                already_fixed=("commit d832e7e. analytics/engine.py now "
+                               "reads `oldp = float(r['pnl'] or 0)` "
+                               "unconditionally and its summary carries an "
+                               "`overwrote_filled` counter for exactly this "
+                               "population. DO NOT SCHEDULE THIS FIX — it "
+                               "has shipped; what is served here is the "
+                               "SIZE of what it touches"),
+                still_worth_reading=("the magnitude a reviewer of any "
+                                     "restatement needs: how many rows and "
+                                     "how many dollars `overwrote_filled` "
+                                     "is now reporting on, and by how much "
+                                     "a pre-d832e7e summary under-stated "
+                                     "its own move"),
+                measured_from=("live_orders alone — this census imports "
+                               "nothing from analytics/engine.py, so the "
+                               "count reads the same on either side of "
+                               "that commit"),
+                blast_radius="reporting only — the counter describes the "
+                             "restatement, it does not decide any write"),
+        }
+
+    # ── KALSHI: the route this repository cannot make count at all.
+    kalshi_keys = _CC_FIGURE_KEYS["kalshi_desk_cashouts"]
+    krows, why_k = await _cc_fetch(
+        pool,
+        budget,
+        """
+        SELECT count(*)::int AS rows,
+               COALESCE(sum(usd), 0)::float8 AS usd,
+               status
+        FROM (
+            SELECT status, usd
+            FROM manual_kalshi_queue
+            WHERE action = 'sell'
+            LIMIT $1
+        ) s
+        GROUP BY status
+        """, CASHOUT_CENSUS_ROW_CAP)
+    if krows is None:
+        out["kalshi_desk_cashouts"] = _cc_blank(kalshi_keys, why_k)
+    elif sum(int(r["rows"] or 0) for r in krows) >= CASHOUT_CENSUS_ROW_CAP:
+        # THE CAP REFUSAL THIS READ WAS MISSING. The LIMIT sits inside
+        # the subquery, so at the cap the GROUP BY counts a TRUNCATED
+        # population and both `rows` and `usd` become a silent floor
+        # served as a total — the exact failure the payload's own bounds
+        # note says cannot happen here. manual_kalshi_queue is
+        # append-only and accumulates every desk ticket ever queued, so
+        # the cap is reachable rather than theoretical.
+        out["kalshi_desk_cashouts"] = _cc_blank(
+            kalshi_keys,
+            f"the Kalshi queue read hit its {CASHOUT_CENSUS_ROW_CAP}-row "
+            "cap; the LIMIT is inside the subquery, so the counts and "
+            "dollars would be a floor of a truncated population served "
+            "as a total — refused")
+    else:
+        out["kalshi_desk_cashouts"] = {
+            "rows": sum(int(r["rows"] or 0) for r in krows),
+            "usd": round(sum(float(r["usd"] or 0.0) for r in krows), 2),
+            # PER-STATUS DOLLARS, not just per-status counts. `usd` is
+            # written at QUEUE time (`round(qty * limit, 2)`), before the
+            # relay touches the venue, and manual_kalshi_queue is
+            # append-only: a ticket the desk cancelled, one the stale
+            # reaper flipped to `error` with "nothing was sent to the
+            # venue", and one the relay reported `unfilled` all keep
+            # their notional and all accumulate. So the headline `usd` is
+            # a CEILING containing tickets that never traded, and the
+            # counts alone let a reader see THAT it is inflated but not
+            # BY HOW MUCH. The query already computed sum(usd) per
+            # status; it was being discarded.
+            "by_status": {str(r["status"]): {
+                "rows": int(r["rows"] or 0),
+                "usd": round(float(r["usd"] or 0.0), 2)} for r in krows},
+            "coverage": _cc_cov(
+                False,
+                "these can NEVER be made to count from this repository: a "
+                "Kalshi desk cash-out is queued here and placed by the "
+                "engine's relay, never writes to live_orders, and the "
+                "Kalshi copy P&L arrives pre-aggregated in a heartbeat. "
+                "The figure is the SIZE of a class that has no remedy "
+                "here, not a backlog.",
+                usd_is="the ticket's notional at the protective limit, "
+                       "not a realization — no realized figure for these "
+                       "sales exists in this database",
+                usd_is_a_ceiling=(
+                    "a CEILING, not a total. `usd` is written at queue "
+                    "time and this table is "
+                    "append-only, so every ticket that never reached the "
+                    "venue — cancelled by the desk, flipped to `error` by "
+                    "the stale-queue reaper, or reported `unfilled` by "
+                    "the relay — still carries its full notional in the "
+                    "headline sum. Net it out with by_status, which "
+                    "carries the dollars per status as well as the "
+                    "count; this census does not decide which statuses "
+                    "traded, because that is the relay's word and it is "
+                    "not in this database"),
+                by_status_is=("{status: {rows, usd}} — the dollars beside "
+                              "the count for every status present, so a "
+                              "reader can subtract the ones that never "
+                              "traded rather than guess their share")),
+        }
+
+    # ── (1)+(5) THE LEDGER AGAINST THE VENUE. Last: the venue read is
+    # the slowest and the likeliest to fail, and it must not be able to
+    # starve the dollar figures above.
+    stranded_keys = _CC_FIGURE_KEYS["stranded_copy_rows"]
+    coheld_keys = _CC_FIGURE_KEYS["unattributable_co_held"]
+    unknown_keys = _CC_FIGURE_KEYS["venue_silent_slugs"]
+    # `ORDER_INTENT_SQL` — the one definition of the intent path — was
+    # imported with COPY_WHALES above, inside the fail-closed envelope.
+    ledger, why_l = await _cc_fetch(
+        pool,
+        budget,
+        """
+        SELECT lower(us_market_slug) AS slug,
+               count(*)::int AS holding_rows,
+               COALESCE(sum(COALESCE(filled_shares, 0)), 0)::float8
+                   AS claimed_shares,
+               count(*) FILTER (
+                   WHERE lower(COALESCE(whale_username, '')) = ANY($1::text[])
+                     AND status = 'filled')::int AS copy_rows,
+               -- WHAT THE COPY ROWS THEMSELVES CLAIM. The slug-level
+               -- total above includes the manual sleeve, the mirror and
+               -- underdog; charging their sales to the copy rows is how
+               -- a fully-held copy position was reported stranded.
+               COALESCE(sum(COALESCE(filled_shares, 0)) FILTER (
+                   WHERE lower(COALESCE(whale_username, '')) = ANY($1::text[])
+                     AND status = 'filled'), 0)::float8
+                   AS copy_claimed_shares,
+               -- Copy rows mid-sale. Their shares are ours but in
+               -- flight, so they are excluded from copy_claimed_shares
+               -- above; a slug whose ONLY copy row is `exiting` reaches
+               -- no bucket at all, and this count discloses that.
+               count(*) FILTER (
+                   WHERE lower(COALESCE(whale_username, '')) = ANY($1::text[])
+                     AND status = 'exiting')::int AS copy_exiting_rows,
+               -- BOTH SIDES OF A MARKET SHARE ONE IDENTIFIER and the
+               -- venue reports ONE SIGNED net for the slug, so a slug
+               -- carrying a long and a short of ours nets at the venue
+               -- and abs() cannot separate them. Counted so such a slug
+               -- can be REFUSED rather than read as fully sold. The
+               -- intent expression has ONE definition in this
+               -- repository and is spliced in, never re-typed.
+               count(*) FILTER (
+                   WHERE COALESCE(__INTENT__, '') LIKE '%SHORT%')::int
+                   AS short_rows,
+               COALESCE(sum(COALESCE(NULLIF(filled_usd, 0), requested_usd))
+                        FILTER (
+                   WHERE lower(COALESCE(whale_username, '')) = ANY($1::text[])
+                     AND status = 'filled'), 0)::float8 AS copy_stake
+        FROM live_orders
+        WHERE us_market_slug IS NOT NULL
+          AND status IN ('filled', 'exiting')
+        GROUP BY 1
+        ORDER BY 1
+        LIMIT $2
+        """.replace("__INTENT__", ORDER_INTENT_SQL),
+        whales, CASHOUT_CENSUS_SLUG_CAP)
+    positions, why_v, venue_skipped = None, None, None
+    # THE VENUE READ IS NOT MADE WHEN IT CAN DECIDE NOTHING. It pages the
+    # whole book unthrottled on a rate-limited credential shared with the
+    # executor's `_pm_held`, which gates every mirror exit; with no
+    # `filled` copy row on any slug there is nothing for it to answer.
+    # This is a SKIP, not a refusal: the three figures below consult the
+    # book only for slugs carrying a copy row, so with none of those the
+    # answer is a measured zero rather than an unread null.
+    _ledger_has_copy = bool(ledger) and any(
+        int(r["copy_rows"] or 0) > 0 and r["slug"] for r in ledger)
+    if ledger is not None and not _ledger_has_copy:
+        positions = {}
+        venue_skipped = ("the ledger returned no `filled` copy row on any "
+                         "slug, so the venue book was not read at all — "
+                         "it could have decided nothing, and its rate "
+                         "budget is shared with the executor's own "
+                         "position reads")
+    elif ledger is not None and len(ledger) < CASHOUT_CENSUS_SLUG_CAP:
+        grant = budget.grant(CASHOUT_CENSUS_VENUE_TIMEOUT_S)
+        if grant is None:
+            why_v = ("no request budget left for the venue positions read "
+                     "— it was not attempted")
+        else:
+            try:
+                from .pmus_account import _fetch_all_positions_sync
+
+                positions = await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_all_positions_sync), grant)
+                # A SHAPE THIS CENSUS CANNOT READ IS UNREADABLE, not
+                # empty. An empty positions feed would make every copy
+                # row look sold; that is the one wrong answer here, so a
+                # feed that did not arrive as a mapping is refused.
+                if not isinstance(positions, dict):
+                    why_v = ("venue positions arrived as "
+                             f"{type(positions).__name__}, not a mapping — "
+                             "refused rather than read as an empty book, "
+                             "which would call every copy row sold")
+                    positions = None
+            except Exception as exc:  # noqa: BLE001 — unreadable decides nothing
+                why_v = (f"venue positions unreadable: {type(exc).__name__}: "
+                         f"{str(exc)[:160]}")
+                positions = None
+    if ledger is None:
+        blocked = why_l
+    elif len(ledger) >= CASHOUT_CENSUS_SLUG_CAP:
+        blocked = (f"the ledger read hit its {CASHOUT_CENSUS_SLUG_CAP}-slug "
+                   "cap — a floor, refused")
+    elif positions is None:
+        blocked = why_v or "venue positions unavailable"
+    else:
+        blocked = None
+    if blocked:
+        out["stranded_copy_rows"] = _cc_blank(stranded_keys, blocked)
+        out["unattributable_co_held"] = _cc_blank(coheld_keys, blocked)
+        out["venue_silent_slugs"] = _cc_blank(unknown_keys, blocked)
+    else:
+        from .pmus_account import _amt
+
+        held: dict[str, dict] = {}
+        collisions = 0
+        unreadable_entries = 0
+        for k, raw in (positions or {}).items():
+            # A POSITION WE CANNOT PARSE IS NOT A POSITION OF ZERO. An
+            # entry that did not arrive as an object is dropped, which
+            # sends its slug to `venue_silent_slugs` — undecidable —
+            # rather than reading as "the venue holds nothing", which is
+            # the hand-sale verdict.
+            if not isinstance(raw, dict):
+                unreadable_entries += 1
+                continue
+            # Our slug column is compared case-insensitively; the venue's
+            # keys are its own. A collision is counted and the LARGER
+            # magnitude kept, so a case fold can only make this census
+            # more conservative about calling a row stranded.
+            lk = str(k).lower()
+            if lk in held:
+                collisions += 1
+                if abs(_amt(raw.get("netPosition"))) <= \
+                        abs(_amt(held[lk].get("netPosition"))):
+                    continue
+            held[lk] = raw
+        st = {"slugs": 0, "rows": 0, "rows_fully_short": 0,
+              "stake_usd": 0.0, "stake_usd_upper_bound": 0.0,
+              "shares_short": 0.0, "sole_row_slugs": 0, "co_held_slugs": 0,
+              "sole_row_stake_usd": 0.0, "co_held_stake_usd": 0.0,
+              "mixed_side_slugs_refused": 0}
+        co = {"slugs": 0, "rows": 0, "stake_usd": 0.0}
+        unk = {"slugs": 0, "rows": 0, "stake_usd": 0.0}
+        expired_slugs = 0
+        exiting_only_slugs = 0
+        for r in ledger:
+            slug = r["slug"]
+            copy_rows = int(r["copy_rows"] or 0)
+            if not slug or copy_rows <= 0:
+                # A slug whose only copy row is `exiting` is our own sale
+                # in flight, not a hand sale — but it reaches none of the
+                # three buckets, so the omission is counted rather than
+                # silent.
+                if slug and int(r["copy_exiting_rows"] or 0) > 0:
+                    exiting_only_slugs += 1
+                continue
+            claimed = float(r["claimed_shares"] or 0.0)
+            copy_claimed = float(r["copy_claimed_shares"] or 0.0)
+            stake = round(float(r["copy_stake"] or 0.0), 2)
+            p = held.get(slug)
+            # ABSENT IS NOT SOLD. The positions endpoint prunes settled
+            # markets, so a market that RESOLVED and a market that was
+            # sold flat both vanish from it. Those two need opposite
+            # remedies — one is the settlement sweep's ordinary backlog,
+            # the other is a hand sale — and nothing in the positions
+            # feed separates them. Its own bucket, never folded in.
+            if p is None:
+                unk["slugs"] += 1
+                unk["rows"] += copy_rows
+                unk["stake_usd"] += stake
+                continue
+            # An EXPIRED position resolved; it was not sold. Excluding
+            # it is the difference between a hand-sale census and a
+            # settlement-backlog census.
+            if p.get("expired"):
+                expired_slugs += 1
+                continue
+            # A SLUG CARRYING BOTH A LONG AND A SHORT OF OURS NETS AT THE
+            # VENUE. One identifier, one signed number: `abs()` reads a
+            # perfectly-held pair as zero and would call the whole slug
+            # sold. Refused and counted, never measured.
+            short_rows = int(r["short_rows"] or 0)
+            if 0 < short_rows < int(r["holding_rows"] or 0):
+                st["mixed_side_slugs_refused"] += 1
+                continue
+            venue = abs(_amt(p.get("netPosition")))
+            # SHARES OTHER ROWS EXPLAIN ARE NOT THIS ROW'S — the
+            # reconciler's own refinement (`_reap_stale_exiting`), which
+            # a slug-level subtraction dropped. What is left at the venue
+            # is credited to the COPY rows first, so a hand sale of the
+            # manual sleeve's own shares on a slug the copy lane also
+            # holds can no longer be charged to the copy rows. Only the
+            # remainder the copy rows' own claim cannot cover decides.
+            short = copy_claimed - venue
+            if short < CASHOUT_CENSUS_SHARE_EPS:
+                continue
+            # AND THE DOLLARS ARE BOUNDED BY THE EVIDENCE. A shortfall is
+            # evidence that SOME shares left; it is not evidence that
+            # every copy row on the slug and its whole stake went with
+            # them. A one-share discrepancy on a 500-share position used
+            # to report 100% of the stake as phantom exposure — and
+            # `copy_exit_applied` partials taken before migration 040
+            # never reduced filled_shares, so those rows carry a
+            # permanent dust shortfall of exactly that shape.
+            frac = min(1.0, short / copy_claimed) if copy_claimed > 0 else 1.0
+            implied = round(stake * frac, 2)
+            fully = short >= copy_claimed - CASHOUT_CENSUS_SHARE_EPS
+            st["slugs"] += 1
+            st["rows"] += copy_rows
+            if fully:
+                st["rows_fully_short"] += copy_rows
+            st["stake_usd"] += implied
+            st["stake_usd_upper_bound"] += stake
+            st["shares_short"] += short
+            if int(r["holding_rows"] or 0) >= 2:
+                st["co_held_slugs"] += 1
+                st["co_held_stake_usd"] += implied
+                # A PARTIAL sale across co-held rows is the class that
+                # cannot be attributed: the venue still holds something,
+                # and which of our rows it belongs to is not in the
+                # data. A FULL flatten is decidable (everything on the
+                # slug closed), so it is NOT counted here.
+                if venue >= CASHOUT_CENSUS_SHARE_EPS:
+                    co["slugs"] += 1
+                    co["rows"] += copy_rows
+                    co["stake_usd"] += implied
+            else:
+                st["sole_row_slugs"] += 1
+                st["sole_row_stake_usd"] += implied
+        for _k in ("stake_usd", "stake_usd_upper_bound", "shares_short",
+                   "sole_row_stake_usd", "co_held_stake_usd"):
+            st[_k] = round(st[_k], 2)
+        co["stake_usd"] = round(co["stake_usd"], 2)
+        unk["stake_usd"] = round(unk["stake_usd"], 2)
+        # ── THE TWO WAYS THE VENUE BOOK CAN BE LESS THAN THE WHOLE BOOK,
+        # both of which make every figure derived from it incomplete. One
+        # bit, computed once, worn by BOTH ledger figures below — a
+        # coverage block that says "complete, no reason" beside a sibling
+        # field saying the book may be short is a payload arguing with
+        # itself, and the second of the two used to say exactly that.
+        #   * ENTRIES THAT DID NOT PARSE. Their slugs fall to
+        #     venue_silent_slugs instead of being decided.
+        #   * A BOOK AT THE PAGE-THROUGH CAP.
+        #     `pmus_account._fetch_all_positions_sync` loops
+        #     `for _ in range(50)` at 100 per page and returns with NO
+        #     eof signal, so a book past 5000 entries is silently
+        #     partial and this census cannot tell a complete book of
+        #     exactly 5000 from a truncated one. The endpoint's own
+        #     bounds note promises "a read that hits its cap makes its
+        #     figure NULL, not a floor — EVERY read"; the truncation was
+        #     disclosed as a sibling flag while `complete` stayed true.
+        # MEASURED ON THE RAW FEED, NOT THE FOLDED MAP. `held` is what
+        # survives the isinstance refusal and the case-fold, so a book that
+        # arrived exactly ON the venue's 50 x 100 page-through cap but
+        # carried one unparsable entry or one case collision folds to
+        # 4,999 — and a `>= cap` test on that reads a TRUNCATED book as
+        # complete, which is the bit this now gates. The raw count is the
+        # only one that answers "did the page-through stop early".
+        book_short = len(positions or {}) >= CASHOUT_CENSUS_VENUE_BOOK_CAP
+        venue_why = " ".join(w for w in (
+            (f"some venue entries did not parse ({unreadable_entries} of "
+             "them), so their slugs fell to venue_silent_slugs rather "
+             "than being decided.") if unreadable_entries else "",
+            (f"the venue book came back at exactly "
+             f"{CASHOUT_CENSUS_VENUE_BOOK_CAP} entries, which is its "
+             "page-through cap (50 pages x 100, no eof signal), so it "
+             "may be TRUNCATED — any slug past the cap is missing from "
+             "it and lands in venue_silent_slugs, and this census cannot "
+             "tell a whole book of that size from a short one.")
+            if book_short else "") if w) or None
+        venue_complete = not unreadable_entries and not book_short
+        venue_extras = dict(
+            venue_positions=len(held),
+            venue_book_may_be_short=book_short,
+            case_collisions=collisions,
+            unparsable_venue_entries=unreadable_entries,
+            expired_slugs_excluded=expired_slugs,
+            venue_read_skipped=venue_skipped,
+            exiting_only_copy_slugs_skipped=exiting_only_slugs)
+        out["stranded_copy_rows"] = dict(st, coverage=_cc_cov(
+            venue_complete,
+            venue_why,
+            **venue_extras,
+            what_this_is=("copy-lane rows we still call `filled` on a "
+                          "market the venue holds fewer shares of than "
+                          "THOSE ROWS claim — the hand-sale fingerprint, "
+                          "which is the existing reconcilers' inequality "
+                          "REVERSED. What the manual sleeve, the mirror "
+                          "and underdog hold on the same slug is "
+                          "subtracted first: shares other rows explain "
+                          "are not these rows'"),
+            stake_usd_is=("phantom open exposure BOUNDED BY THE EVIDENCE: "
+                          "each slug's copy stake scaled by the fraction "
+                          "of the copy rows' own claimed shares the venue "
+                          "cannot cover. /api/copies-record counts this "
+                          "in `open.stake` as money on the table"),
+            stake_usd_upper_bound_is=("the whole copy stake on every "
+                                      "short slug — what this figure used "
+                                      "to serve. A CEILING: a one-share "
+                                      "shortfall does not strand a "
+                                      "500-share position"),
+            rows_is=("copy rows sitting on a short slug — also a ceiling. "
+                     "rows_fully_short is the subset whose slug's entire "
+                     "copy claim is missing"),
+            not_proof=("a venue-short slug is evidence a sale happened, "
+                       "not proof of WHICH of our rows it closed, nor "
+                       "that the whole of any row went; see "
+                       "unattributable_co_held"),
+            netting=("both sides of a market share ONE identifier and the "
+                     "venue reports ONE SIGNED net, so a slug carrying a "
+                     "long and a short of ours nets there. Such slugs are "
+                     "REFUSED (mixed_side_slugs_refused), not measured")))
+        out["unattributable_co_held"] = dict(co, coverage=_cc_cov(
+            # THE SAME BIT AS stranded_copy_rows, and for the same
+            # reason: this figure is derived from the same venue book by
+            # the same loop. On the census's own tested input — a venue
+            # entry that is not a dict — the slug never reaches the
+            # `holding_rows >= 2` branch at all, so this block used to
+            # serve "0 slugs, $0.00, complete, why: null" beside a
+            # stranded block correctly reporting the book unreadable.
+            # Zero-with-a-stamp is the one thing read_this_first says
+            # "the class with no remedy" must never be.
+            venue_complete, venue_why,
+            **venue_extras,
+            what_this_is=("slugs with two or more of our still-holding "
+                          "rows where the venue shows a PARTIAL sale. The "
+                          "venue reports one signed net per slug for the "
+                          "whole account and both sides of a market share "
+                          "one identifier, so which row was sold is not "
+                          "knowable"),
+            remedy="REFUSE and disclose. FIFO, LIFO or pro-rata would be "
+                   "an invented policy, not a measurement",
+            stake_is="the same evidence-bounded dollars as "
+                     "stranded_copy_rows.co_held_stake_usd, and a SUBSET "
+                     "of stranded_copy_rows.stake_usd — the two figures "
+                     "overlap by construction and must never be added",
+            excludes="slugs fully flattened — everything on those closed, "
+                     "which IS decidable"))
+        out["venue_silent_slugs"] = dict(unk, coverage=_cc_cov(
+            False,
+            "the venue's positions feed does not list these slugs at all. "
+            "It prunes settled markets, so a resolved market and a "
+            "sold-flat one look identical here. Neither stranded nor "
+            "clean — undecidable from this feed, and separating them "
+            "needs the activity tape.",
+            what_to_do="read these against the activity tape before "
+                       "treating any of them as a hand sale"))
+
+    out["budget_left_s"] = round(budget.left(), 2)
+    out["read_this_first"] = dict(
+        _cc_read_this_first(),
+        two_definitions_of_co_held=(
+            "restatement_if_attributed counts a slug co-held when two or "
+            "more copy entry rows sit on it in ANY holding status, "
+            f"{list(CASHOUT_POSITION_STATUSES)} — which includes "
+            "`merged`, an add leg already booked onto its parent row "
+            "rather than a separate position, so a one-position slug can "
+            "read as co-held and push attributable dollars into "
+            "refused_co_held_usd. That direction UNDER-states the add and "
+            "OVER-states the class the owner is told cannot be fixed. "
+            "The ledger path's own co-held test counts only "
+            "filled/exiting rows. Two definitions, disclosed rather than "
+            "silently reconciled"))
+    return out
+
+
 @app.get("/api/admin/short-truth", dependencies=[Depends(require_admin)])
 async def api_short_truth(days: int = 7) -> dict:
     """Does the venue book a BUY_SHORT as a SELL? The receipts already know.
