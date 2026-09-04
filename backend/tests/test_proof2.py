@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from sportsassets.api.proof2 import (
     _phi, capture_from_rows, combine, kalshi_fee, thesis,
 )
@@ -33,7 +35,18 @@ def test_capture_is_exact_and_outcome_free():
     # entry notional at HIS prices: 50 + 20 = 70
     assert abs(c["entry_notional"] - 70.0) < 1e-9
     assert abs(c["drag_rate"] - 2.0 / 70.0) < 1e-12
-    assert c["fee_usd"] == 0.0, "PM legs carry no venue fee"
+    # DELIBERATE PIN CHANGE, 2026-09-04. This line used to read
+    # `assert c["fee_usd"] == 0.0, "PM legs carry no venue fee"` and it
+    # was the defect, pinned: PM-US legs carry the venue's taker fee,
+    # the lane is 100% taker, and charging zero overstated every
+    # published figure by exactly that fee. The venue states a fee
+    # coefficient on every one of its markets; the estimate now charged
+    # is 0.06 x shares x p x (1-p) per leg.
+    from sportsassets.api.proof2 import pmus_taker_fee
+    assert c["fee_usd"] > 0.0, "PM-US legs carry the venue's taker fee"
+    assert abs(c["fee_usd"] - round(pmus_taker_fee(100, 0.52)
+                                    + pmus_taker_fee(50, 0.40), 2)) < 5e-3
+    assert c["fee_rate_is_lower_bound"] is True
 
 
 def test_kalshi_legs_carry_the_published_fee():
@@ -60,9 +73,29 @@ def test_combine_weights_by_our_entry_mix_and_dilutes_unpublished():
     # mystery has no published CI: contributes 0 edge — dilution
     assert abs(e["whale_mix_edge"] - 0.9 * 0.02) < 1e-9
     assert e["unpublished_whales"] == ["mystery"]
-    # zero drag, zero fees here: sleeve edge = mix edge
-    assert abs(e["sleeve_edge"] - e["whale_mix_edge"]) < 1e-12
-    assert 0.5 < e["p_edge_positive"] < 1.0
+    # DELIBERATE PIN CHANGE, 2026-09-04. This used to assert
+    # `sleeve_edge == whale_mix_edge` on "zero drag, zero fees here" —
+    # true only because the PM-US fee was charged as zero. There is no
+    # drag in this fixture but there IS a fee, so the sleeve edge sits
+    # exactly one fee rate below the mix edge, and at these prices that
+    # is enough on its own to turn a positive whale edge negative.
+    assert abs(e["sleeve_edge"]
+               - (e["whale_mix_edge"] - e["fee_rate"])) < 1e-12
+    assert e["fee_rate"] > 0
+    assert e["sleeve_edge"] < e["whale_mix_edge"]
+    assert e["whale_mix_edge_basis"].startswith("pre_fee")
+    assert e["sleeve_edge_basis"].startswith("net of the entry-leg fee")
+    # RE-PINNED, 2026-09-04. The old pin (0.5 < p < 1.0) was DELETED
+    # when the fee turned this fixture's edge negative, and coverage on
+    # the single number the owner reads was removed rather than
+    # updated. The fixture's value is computable: mix edge 0.018, fee
+    # rate 0.03, se 0.0045918 -> phi(-2.6134).
+    assert e["sleeve_edge"] == pytest.approx(0.018 - 0.03)
+    assert e["p_edge_positive"] == pytest.approx(0.004483, abs=5e-6)
+    assert e["p_edge_positive"] < 0.01
+    # and the rate says what its own denominator was
+    assert e["fee_notional_share"] == 1.0
+    assert cap["fee_rate_basis"].startswith("the fee of the rows priced")
 
 
 def test_drag_subtracts_from_the_whale_edge():
@@ -195,3 +228,102 @@ def test_ledger_sql_carries_the_one_intent_expression():
     norm = " ".join(ORDER_INTENT_SQL.split())
     assert norm in " ".join(LEDGER_SQL.split()), \
         "one expression owns the intent read"
+
+
+# ── the fee, charged, and the labels that say what is still gross ────
+
+def test_the_payload_labels_every_figures_basis_and_prints_the_economics():
+    """Clause 3 of the fee unit: nothing on this payload may read as
+    net when it is gross, and the maker/taker reading rides beside it."""
+    import asyncio
+    import datetime as dt
+    import json as _json
+
+    from sportsassets.api import proof2 as p2
+
+    at = dt.datetime(2026, 8, 27, 12, 0, tzinfo=dt.timezone.utc)
+
+    class _Pool:
+        async def fetch(self, sql, *a, timeout=None):
+            if "live_orders lo" in sql and "$1::bigint[]" in sql:
+                # The empty placement list is the venue affirming that
+                # nothing filled at create: THAT is what makes the
+                # terminal fill a reading of a rest rather than an
+                # absence of evidence.
+                return [{"id": 1, "lane": "rest", "venue": "polymarket-us",
+                         "filled_shares": 100.0, "fill_price": 0.50,
+                         "orig_shares": 100.0,
+                         "pnl": 5.0, "stake": 50.0,
+                         "receipt": {"response_execs": [],
+                                     "final_execs": [
+                             {"type": "EXECUTION_TYPE_FILL",
+                              "last_shares": 100.0, "last_px": 0.50,
+                              "aggressor": False, "commission_usd": 0.20}]}}]
+            return [{"id": 1, "his_price": 0.50, "fill_price": 0.50,
+                     "shares": 100.0, "venue": "polymarket-us",
+                     "whale": "rn1", "placed_at": at}]
+
+        async def fetchval(self, sql, *a, timeout=None):
+            return _json.dumps({"per_whale": {"rn1": {
+                "edge_roi": 0.03, "edge_ci95": [0.02, 0.04]}},
+                "measured_at": "2026-08-28T00:00:00+00:00"})
+
+    out = asyncio.run(p2.proof2_payload(_Pool()))
+    # the venue's own value was charged, not the schedule's estimate
+    assert out["capture"]["fee_usd"] == 0.2
+    assert out["capture"]["fee_sources"] == {p2.FEE_VENUE: 1}
+    assert out["capture"]["fee_rate_is_lower_bound"] is True
+    # every basis is named
+    assert out["basis"]["pmus_fee_form_verified"] is False
+    assert out["basis"]["whale_mix_edge"] == "pre_fee"
+    assert out["basis"]["pmus_fee_coefficient"] == p2.PMUS_FEE_COEFFICIENT
+    # and the per-lane economics printed on our own fill
+    econ = out["economics"]
+    assert econ["receipt_census"] == "read"
+    lane = econ["by_lane"][0]
+    assert (lane["lane"], lane["role"]) == ("rest", "maker")
+    assert lane["rate_per_dollar"] == 0.004
+    assert lane["sufficient_n"] is False, "one fill authorises nothing"
+    assert econ["n_fills_stage_unknown"] == 0
+    # THE LANE COLUMN WAS READ (the census's full statement answered),
+    # so the maker/taker attribution on this payload is a reading.
+    assert econ["lane_column"] == "read"
+    assert econ["n_rows_lane_unreadable"] == 0
+    # AND THE MAKER-VS-TAKER COMPARISON IS WITHHELD, because there is no
+    # charged taker fill in this cohort to compare the maker side with.
+    assert econ["rate_comparison"]["comparable"] is False
+    assert "taker side" in econ["rate_comparison"]["verdict"]
+    assert "maker_rate_per_dollar" not in econ["rate_comparison"]
+    # THE RATE'S DENOMINATOR IS SERVED BESIDE IT: the fee came off the
+    # rows priced in full, not off the whole cohort's notional.
+    assert out["capture"]["fee_charged_notional"] == 50.0
+    assert out["capture"]["fee_notional_share"] == 1.0
+    assert out["capture"]["fee_rate"] == pytest.approx(0.004)
+
+
+def test_a_receipt_census_that_cannot_be_read_still_charges_the_schedule():
+    """CONTAINED. The census failing costs the venue's own value and
+    the maker/taker split — it never costs the fee and it never costs
+    the payload."""
+    import asyncio
+    import datetime as dt
+
+    from sportsassets.api import proof2 as p2
+
+    at = dt.datetime(2026, 8, 27, 12, 0, tzinfo=dt.timezone.utc)
+
+    class _Pool:
+        async def fetch(self, sql, *a, timeout=None):
+            if "$1::bigint[]" in sql:
+                raise RuntimeError("receipts unreadable")
+            return [{"id": 7, "his_price": 0.50, "fill_price": 0.50,
+                     "shares": 100.0, "venue": "polymarket-us",
+                     "whale": "rn1", "placed_at": at}]
+
+        async def fetchval(self, sql, *a, timeout=None):
+            return None
+
+    out = asyncio.run(p2.proof2_payload(_Pool()))
+    assert out["capture"]["fee_usd"] == 1.5, "the schedule still charged"
+    assert out["capture"]["fee_sources"] == {p2.FEE_SCHEDULE: 1}
+    assert out["economics"]["receipt_census"].startswith("unreadable")

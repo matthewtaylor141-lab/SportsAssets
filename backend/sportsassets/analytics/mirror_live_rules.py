@@ -1068,7 +1068,20 @@ def book_buy(state: BookState, delta_shares: float, px: float | None,
                          against a cost that is not a price in (0, 1):
                          no average can be carried
     A refusal returns the input state unchanged.
-    """
+
+    IT DOES NOT KNOW WHAT WE ASKED TO PAY, and that is deliberate: it
+    is handed a price, never the order's wire, so ANY finite price in
+    (0, 1) books. A rest that fills above its own cent therefore books
+    silently here, inflating avg_cost, gross_buy_usd and the day's
+    spend. THE WIRE COMPARISON IS THE CALLER'S and it exists: the
+    worker's `_book_delta` holds `o["wire"]`, compares the venue's
+    average against it for every BUY (a CLOSE row exempt by name, its
+    wire being 0.0 by construction), and trips the lane off under
+    `mirror_overspend`. Do not add the comparison here: this function is
+    pure arithmetic over one state, it has no wire, no census and no
+    trip, and an instrument that can refuse a booking would strand
+    shares the venue has already given us. Its refusal list above is
+    exhaustive and unchanged."""
     d = _num(delta_shares)
     if d is None:
         return Booking(state, 0.0, 0.0, None, False, "bad_delta")

@@ -11,6 +11,10 @@ import asyncio
 import inspect
 import json
 import pathlib
+import shutil
+import subprocess
+
+import pytest
 
 from sportsassets.analytics import mirror_report as mr
 from sportsassets.workers import mirror_shadow as ms
@@ -1262,6 +1266,10 @@ def test_no_shadow_knob_can_be_loosened_from_a_shell(monkeypatch, request):
         "MIRROR_LOOKBACK_H": ("LOOKBACK_H", 6.0),
         "MIRROR_RATIO_DAYS": ("RATIO_DAYS", 30),
         "MIRROR_MAX_MARKETS": ("MAX_MARKETS_PER_TICK", 20),
+        # the exit leg's own two bounds (A3): a longer window and a
+        # bigger market cap are both MORE reading, so both tighten only
+        "MIRROR_EXIT_WINDOW_H": ("EXIT_WINDOW_H", 24.0),
+        "MIRROR_EXIT_SUMMARY_MAX": ("EXIT_SUMMARY_MAX", 2000),
     }
     for env, (attr, default) in knobs.items():
         for huge in ("999999", "1e9", "inf"):
@@ -1307,6 +1315,33 @@ def test_the_two_sided_knobs_have_a_floor_that_means_something(monkeypatch, requ
     monkeypatch.setenv("MIRROR_SHADOW_POLL_S", "300")
     assert importlib.reload(ms).POLL_S == 300.0, "the operator can still slow the shadow"
     monkeypatch.delenv("MIRROR_SHADOW_POLL_S", raising=False)
+    # the exit census's interval is the same shape: its aggressive
+    # direction is DOWN (more database reads on the shadow's own table)
+    monkeypatch.setenv("MIRROR_EXIT_SUMMARY_S", "1")
+    assert importlib.reload(ms).EXIT_SUMMARY_S == 900.0
+    monkeypatch.setenv("MIRROR_EXIT_SUMMARY_S", "3600")
+    assert importlib.reload(ms).EXIT_SUMMARY_S == 3600.0, "the operator can still slow it"
+    monkeypatch.delenv("MIRROR_EXIT_SUMMARY_S", raising=False)
+    # and the exit window's floor is an hour: a window under it could
+    # not carry the 24 h reading the gate is defined over
+    monkeypatch.setenv("MIRROR_EXIT_WINDOW_H", "0.1")
+    assert importlib.reload(ms).EXIT_WINDOW_H == 1.0
+    monkeypatch.delenv("MIRROR_EXIT_WINDOW_H", raising=False)
+    # THE MARKET CAP'S FLOOR IS KEPT OFF THE GATE'S MINIMUM n. At
+    # floor=30 a shell could pin the census to exactly the n the gate
+    # reads at; every day busier than that then refuses (the truncation
+    # rule below), so the floor is what keeps the instrument usable at
+    # all. It sits far above both the minimum n and the mapped-market
+    # count the mirror programme records for a 24 h window.
+    for tight in ("5", "30", "499"):
+        monkeypatch.setenv("MIRROR_EXIT_SUMMARY_MAX", tight)
+        mod = importlib.reload(ms)
+        assert mod.EXIT_SUMMARY_MAX == 500, tight
+        assert mod.EXIT_SUMMARY_MAX > mod.EXIT_MIN_N
+    # and tightening within the range still works without a deploy
+    monkeypatch.setenv("MIRROR_EXIT_SUMMARY_MAX", "800")
+    assert importlib.reload(ms).EXIT_SUMMARY_MAX == 800
+    monkeypatch.delenv("MIRROR_EXIT_SUMMARY_MAX", raising=False)
 
 
 def test_the_snapshot_writers_own_cadence_cannot_be_stretched(monkeypatch, request):
@@ -1323,3 +1358,852 @@ def test_the_snapshot_writers_own_cadence_cannot_be_stretched(monkeypatch, reque
     monkeypatch.setenv("WHALE_EXIT_INTERVAL_S", "30")
     assert importlib.reload(wx).INTERVAL_S == 30.0, "a faster writer is still allowed"
     monkeypatch.delenv("WHALE_EXIT_INTERVAL_S", raising=False)
+
+
+# ------------------------------------------------ A3: MIRROREXIT, the exit leg
+#
+# The shadow judged ENTRIES and recorded nothing about exits. These pin
+# the other half: that he reduced or LEFT, when, at what price the
+# COMPLEMENT traded (he exits by buying it, not by selling), what our
+# own leg was, what the exit rule would have done, whether that plan
+# would have filled inside the same TTL against the book we read, and
+# the reason when there is no plan. Nothing here places, judges or
+# re-plans anything: the exit leg names the plan the row already
+# carries, and its verdict is that row's own would_fill.
+
+NOW = 1_788_000_000.0
+EXIT_SLUG = SLUG
+
+
+def _hisfill(asset, side, size, price, ts_offset, i=0):
+    return _fill(asset, side, size, price, NOW + ts_offset, id=i)
+
+
+# he opened 1,000 Michelsen an hour ago and completed 400 of the pair
+# two minutes ago at 0.68 -- his exit is a BUY, and only his net says so
+EXITFILLS = [_hisfill(M, "BUY", 1000, 0.30, -3600, 1),
+             _hisfill(N, "BUY", 400, 0.68, -120, 2)]
+
+
+def _at_now(monkeypatch):
+    monkeypatch.setattr(ms.time, "time", lambda: NOW)
+
+
+def _reset_exit_cache():
+    ms._exit_cache.update(at=0.0, value=None)
+
+
+@pytest.fixture(autouse=True)
+def _module_globals_are_not_load_bearing():
+    """`_exit_cache` and `_backoff_until` are MODULE GLOBALS that outlive
+    a test: several tests here reset them by hand and one leaves the
+    cache populated, so without a finalizer any later test that calls
+    `tick_once` inherits whichever of these ran before it. This is the
+    hazard R2's own review folded a reload finalizer for; the same rule,
+    applied to the two globals this unit added. Both ends, so an
+    ordering change cannot turn a green suite into a lie."""
+    _reset_exit_cache()
+    ms._backoff_until = 0.0
+    yield
+    _reset_exit_cache()
+    ms._backoff_until = 0.0
+
+
+class _ExitPool(_Pool):
+    """A pool that also answers the exit-leg census read."""
+
+    def __init__(self, *a, census=None, census_raise=False, census_hangs=False, **kw):
+        super().__init__(*a, **kw)
+        self.census, self.census_raise, self.census_hangs = census or [], census_raise, census_hangs
+        self.census_reads = 0
+
+    async def fetch(self, sql, *a):
+        if "/* exit-leg-census */" in " ".join(sql.split()):
+            self.census_reads += 1
+            self.queries.append((" ".join(sql.split()), a))
+            if self.census_raise:
+                raise RuntimeError('relation "mirror_shadow" does not exist')
+            if self.census_hangs:
+                await asyncio.sleep(30)
+            return list(self.census)
+        return await super().fetch(sql, *a)
+
+
+def test_the_exit_leg_records_his_reduction_and_what_the_rule_would_have_done(monkeypatch):
+    """One reading, per whale and per market: he reduced, when, the
+    complement's own price, our leg by both readings, and the plan the
+    exit rule would have rested -- at HIS equivalent, not at the book."""
+    _nosleep(monkeypatch)
+    _at_now(monkeypatch)
+    p = _Pool(fills=EXITFILLS, ledger_rows=[{"sh": 100.0, "intent": "ORDER_INTENT_BUY_LONG"}])
+    pm = _Pmus(bid=0.26, ask=0.29)
+    row = _run(ms.shadow_market(p, pm, "rn1", CID, RATIO, {}, positions={EXIT_SLUG: 100.0}))
+    d = row["detail"]
+    # THAT HE REDUCED, AND WHEN
+    assert d["exit_kind"] == "reduced" and d["exit_move"] == "bought_complement"
+    assert d["exit_at"] == NOW - 120 and d["exit_age_s"] == 120.0
+    assert d["exit_his_net_before"] == 1000.0 and d["exit_his_net_after"] == 600.0
+    # AT WHAT PRICE THE COMPLEMENT TRADED, and what that is in long terms
+    assert d["exit_complement_px"] == 0.68 and d["exit_his_px"] == 0.32
+    assert d["exit_size"] == 400.0
+    # WHAT OUR OWN LEG WAS -- both readings the plan is fail-closed on
+    assert d["exit_ledger"] == 100.0 and d["exit_venue"] == 100.0 and d["exit_target"] == 34
+    # WHAT THE EXIT RULE WOULD HAVE DONE: rest at his equivalent (0.32),
+    # above the ask (0.29) -- a maker rest, never a cross
+    assert d["exit_plan"] == "rest" and d["exit_side"] == "SELL_LONG"
+    assert d["exit_qty"] == 66 and d["exit_px"] == 0.32
+    assert d["exit_at_his_level"] is True and d["exit_marketable_now"] is False
+    # ... and it is the row's OWN plan, named -- not a second arithmetic
+    assert (row["would_side"], row["would_qty"], row["would_px"]) == ("SELL_LONG", 66, 0.32)
+    # the exit leg costs no venue read at all: one BBO for the market
+    assert pm.calls == [("bbo", EXIT_SLUG)]
+
+
+def test_the_exit_leg_reads_an_exit_as_a_buy_of_the_complement_and_expires_with_the_window():
+    """`he never sells` is true of the wire and false of the position:
+    a rule keyed on his SELLs sees almost nothing of him (decision 18
+    in the to-a-tee programme records how few sells he has ever made),
+    a rule keyed on his NET sees every exit. And an exit is only
+    current while
+    it is the last thing he did: an add behind it, or an age past the
+    window the shadow reads, is not an exit now."""
+    ev = ms.reduction_event(EXITFILLS, M, N, now_ts=NOW)
+    assert ev["move"] == "bought_complement" and ev["kind"] == "reduced"
+    assert not [f for f in EXITFILLS if f["side"] == "SELL"], "he sold nothing at all"
+    # completing the whole pair is LEFT, not reduced
+    left = ms.reduction_event(EXITFILLS[:1] + [_hisfill(N, "BUY", 1000, 0.68, -60, 3)],
+                              M, N, now_ts=NOW)
+    assert left["kind"] == "left" and left["net_after"] == 0.0 and left["left"] is True
+    # the other shape still reads: a plain SELL of the long leg
+    sold = ms.reduction_event(EXITFILLS[:1] + [_hisfill(M, "SELL", 400, 0.31, -60, 3)],
+                              M, N, now_ts=NOW)
+    assert sold["move"] == "sold_long" and sold["px_equiv"] == 0.31
+    assert sold["complement_px"] is None and sold["net_after"] == 600.0
+    # HE IS ADDING AGAIN: the reduction behind it is history, not an exit
+    assert ms.reduction_event(EXITFILLS + [_hisfill(M, "BUY", 50, 0.33, -30, 3)],
+                              M, N, now_ts=NOW) is None
+    # an ancient reduction on a market he has just re-entered is not one
+    old = [_hisfill(M, "BUY", 1000, 0.30, -100_000, 1),
+           _hisfill(N, "BUY", 400, 0.68, -90_000, 2)]
+    assert ms.reduction_event(old, M, N, now_ts=NOW) is None
+    assert ms._exit_max_age_s() == ms.LOOKBACK_H * 3600.0
+    # an unreadable price is a reduction we cannot price, not an absent one
+    bad = EXITFILLS[:1] + [_hisfill(N, "BUY", 400, None, -60, 3)]
+    ev_bad = ms.reduction_event(bad, M, N, now_ts=NOW)
+    assert ev_bad["px_equiv"] is None and ev_bad["complement_px"] is None
+    assert ev_bad["kind"] == "reduced"
+    # HE NEVER HELD THE LONG SIDE: buying the complement from flat opens a
+    # short of it, which is the short reading's question, not an exit
+    assert ms.reduction_event([_hisfill(N, "BUY", 400, 0.68, -60, 1)], M, N, now_ts=NOW) is None
+    # and a market whose long leg we could not name makes no exit claim
+    assert ms.reduction_event(EXITFILLS, None, N, now_ts=NOW) is None
+    # two fills on ONE timestamp keep the query's order (ts, id), never a
+    # lexicographic one: "10" must not sort before "9"
+    same = [_hisfill(M, "BUY", 1000, 0.30, -600, 9),
+            _hisfill(N, "BUY", 100, 0.60, -60, 9),
+            _hisfill(M, "BUY", 5, 0.31, -60, 10)]
+    assert ms.reduction_event(same, M, N, now_ts=NOW) is None, "the last fill on the tick is his add"
+
+
+def test_exit_leg_judges_the_sell_side_over_the_same_ttl(monkeypatch):
+    """The verdict on an exit rest is the row's own would_fill: judged
+    on the SELL side -- the bid came UP to our price -- inside the same
+    JUDGE_TTL_S the BUY judge uses. There is ONE judge and one verdict;
+    a second one could disagree with the first."""
+    _nosleep(monkeypatch)
+    _at_now(monkeypatch)
+    src = inspect.getsource(ms._resolve_previous)
+    assert "/* judge-sell */" in src and "would_side = 'SELL_LONG'" in src
+    assert "would_px <= $3" in src and "($4::float8 * interval '1 second')" in src
+    # the exit leg writes no verdict of its own and no second judge
+    assert "exit_fill" not in inspect.getsource(ms)
+    assert "judge-exit" not in inspect.getsource(ms)
+    assert "would_fill" in ms._SQL_EXIT_CENSUS, "the census reads the row's own verdict"
+    # and the row it labels is exactly the row that judge resolves
+    p = _Pool(fills=EXITFILLS, ledger_rows=[{"sh": 100.0, "intent": "ORDER_INTENT_BUY_LONG"}])
+    row = _run(ms.shadow_market(p, _Pmus(bid=0.26, ask=0.29), "rn1", CID, RATIO, {},
+                                positions={EXIT_SLUG: 100.0}))
+    assert row["detail"]["exit_px"] == row["would_px"] and row["would_side"] == "SELL_LONG"
+    assert row["would_fill"] is None, "unobserved is not unfilled"
+    # a bid that reached 0.32 inside the TTL fills it; the same reading
+    # past the TTL does not. Both are the SELL judge's own two writes.
+    counts = {"/* judge-sell */": 1}
+
+    class _P(_Pool):
+        async def execute(self, sql, *a):
+            await super().execute(sql, *a)
+            return f"UPDATE {counts.get(next((t for t in counts if t in sql), ''), 0)}"
+
+    q = _P(fills=EXITFILLS)
+    assert _run(ms._write(q, dict(row))) == (1, 1)
+    sell = [w for w in q.writes if "/* judge-sell */" in w[0]][0]
+    assert sell[1] == ("rn1", CID, 0.26, ms.JUDGE_TTL_S)
+
+
+def test_exit_leg_clusters_by_market_not_by_plan():
+    """§3b reads this gate MARKET-clustered over >= 30 markets. A market
+    read two hundred times is one market's worth of evidence: the census
+    returns ONE row per market, and even if two slipped through, the
+    interval is the cluster-robust one, never the binomial."""
+    sql = " ".join(ms._SQL_EXIT_CENSUS.split())
+    assert "DISTINCT ON (whale, condition_id)" in sql
+    # a judged rest wins the market, then any rest, then the newest --
+    # so a market whose newest tick says 'hold' does not erase the plan
+    # it rested an hour ago
+    assert ("ORDER BY whale, condition_id, (detail->>'exit_plan' = 'rest' AND "
+            "would_fill IS NOT NULL) DESC, (detail->>'exit_plan' = 'rest') DESC, at DESC") in sql
+    rows = []
+    for i in range(6):
+        rows.append({"whale": "rn1", "condition_id": f"0x{i % 2}", "exit_kind": "reduced",
+                     "exit_plan": "rest", "would_fill": i % 2 == 0, "would_qty": 10,
+                     "would_px": 0.3, "family": "moneyline", "touched_s": 12.0})
+    out = ms.summarize_exit_rows(rows)["whales"]["rn1"]
+    assert out["resolved"] == 6 and out["fills"] == 3
+    assert out["clusters"] == 2, "six readings of two markets are two clusters"
+    # and the gate's own n is that CLUSTER count, so re-reading a market
+    # cannot buy a second market's worth of evidence: six resolved
+    # readings of two markets are below the floor, and below the floor
+    # there is no rate and no lower bound to quote at all
+    assert out["ready"] is False and out["rate"] is None and out["lo"] is None
+    # and the reading is per whale, not pooled
+    rows2 = rows + [dict(rows[0], whale="homerunhazard", condition_id="0x9")]
+    both = ms.summarize_exit_rows(rows2)["whales"]
+    assert set(both) == {"rn1", "homerunhazard"} and both["homerunhazard"]["n"] == 1
+
+
+def test_exit_unjudged_is_counted(monkeypatch):
+    """A row it cannot judge is `unjudged`: never a fill, never a miss.
+    Two shapes -- a rest nobody read back, and a reading whose rule
+    could not decide at all (an unreadable venue, a frozen slug, no
+    ratio, no mark). Every market lands in exactly one bucket."""
+    _nosleep(monkeypatch)
+    _at_now(monkeypatch)
+    led = [{"sh": 100.0, "intent": "ORDER_INTENT_BUY_LONG"}]
+    # the venue walk failed: the plan cannot be formed, the exit is named
+    row = _run(ms.shadow_market(_Pool(fills=EXITFILLS, ledger_rows=led), _Pmus(bid=0.26, ask=0.29),
+                                "rn1", CID, RATIO, {}, positions=None))
+    assert row["detail"]["exit_plan"] == "none" and row["detail"]["exit_reason"] == "venue unreadable"
+    assert row["detail"]["exit_kind"] == "reduced"          # the evidence is still recorded
+    # and with nothing on our ledger -- the mirror's own state today --
+    # it is still a refusal, not a decision not to reduce
+    unread0 = _run(ms.shadow_market(_Pool(fills=EXITFILLS), _Pmus(bid=0.26, ask=0.29),
+                                    "rn1", CID, RATIO, {}, positions=None))
+    assert unread0["detail"]["exit_ledger"] == 0.0 and unread0["detail"]["exit_target"] == 34
+    assert unread0["detail"]["exit_plan"] == "none"
+    assert unread0["detail"]["exit_reason"] == "venue unreadable"
+    # a frozen slug is the same class: a reading that could not decide.
+    # BOTH SIGNS OF (target - ledger), because the bucket is decided by
+    # the REASON and never by that comparison: with our ledger at 100
+    # the target (34) sits below it, with our ledger at 0 -- the
+    # mirror's actual state, holding nothing -- it sits above, and a
+    # refusal is a refusal either way.
+    frozen = _run(ms.shadow_market(_Pool(fills=EXITFILLS, ledger_rows=led), _Pmus(bid=0.26, ask=0.29),
+                                   "rn1", CID, RATIO, {}, positions={EXIT_SLUG: 3.0}))
+    assert frozen["detail"]["exit_ledger"] == 100.0 and frozen["detail"]["exit_target"] == 34
+    assert frozen["detail"]["exit_plan"] == "none"
+    assert frozen["detail"]["exit_reason"].startswith("frozen")
+    froz0 = _run(ms.shadow_market(_Pool(fills=EXITFILLS), _Pmus(bid=0.26, ask=0.29),
+                                  "rn1", CID, RATIO, {}, positions={EXIT_SLUG: 3.0}))
+    assert froz0["detail"]["exit_ledger"] == 0.0 and froz0["detail"]["exit_target"] == 34
+    assert froz0["detail"]["exit_plan"] == "none", "target >= ledger does not make a refusal a hold"
+    assert froz0["detail"]["exit_reason"].startswith("frozen")
+    # an unreadable book: no mark, so no plan -- and the exit still counted
+    nomark = _run(ms.shadow_market(_Pool(fills=EXITFILLS, ledger_rows=led), _Pmus(raise_bbo=True),
+                                   "rn1", CID, RATIO, {}, positions={EXIT_SLUG: 100.0}))
+    assert nomark["detail"]["exit_plan"] == "none"
+    assert nomark["detail"]["exit_reason"].startswith("no mark")
+    assert nomark["detail"]["exit_complement_px"] == 0.68
+    # no ratio: the same
+    noratio = _run(ms.shadow_market(_Pool(fills=EXITFILLS, ledger_rows=led), _Pmus(bid=0.26, ask=0.29),
+                                    "rn1", CID, None, {}, positions={EXIT_SLUG: 100.0}))
+    assert noratio["detail"]["exit_plan"] == "none"
+    assert noratio["detail"]["exit_reason"].startswith("no ratio")
+    # in the census: one unresolved rest, one no-plan, one hold, one fill
+    rows = [{"whale": "rn1", "condition_id": "a", "exit_kind": "reduced", "exit_plan": "rest",
+             "would_fill": None, "would_qty": 10, "would_px": 0.3},
+            {"whale": "rn1", "condition_id": "b", "exit_kind": "left", "exit_plan": "none",
+             "exit_reason": "venue unreadable"},
+            {"whale": "rn1", "condition_id": "c", "exit_kind": "reduced", "exit_plan": "hold",
+             "exit_reason": "on target"},
+            {"whale": "rn1", "condition_id": "d", "exit_kind": "reduced", "exit_plan": "rest",
+             "would_fill": True, "would_qty": 10, "would_px": 0.3, "touched_s": 8.0}]
+    b = ms.summarize_exit_rows(rows)["whales"]["rn1"]
+    assert b["unjudged"] == 2 and b["unresolved"] == 1 and b["no_plan"] == 1
+    assert b["resolved"] == 1 and b["fills"] == 1 and b["misses"] == 0
+    assert b["n"] == b["resolved"] + b["unjudged"] + b["hold"] == 4
+    assert b["reduced"] == 3 and b["left"] == 1
+    # the COUNTS are facts and print at any n; the rate off one judged
+    # market is not a reading and is not computed at all
+    assert b["rate"] is None and b["lo"] is None and b["ready"] is False
+
+
+def test_the_exit_leg_holds_when_there_is_nothing_of_ours_to_reduce(monkeypatch):
+    """`hold` is a DECISION not to reduce and is not a miss: he trimmed,
+    and either our target is still at or above what we hold, or the move
+    is inside the bands the rules already refuse."""
+    _nosleep(monkeypatch)
+    _at_now(monkeypatch)
+    # we hold nothing: his reduction leaves the entry leg the only rule
+    row = _run(ms.shadow_market(_Pool(fills=EXITFILLS), _Pmus(bid=0.26, ask=0.29), "rn1", CID,
+                                RATIO, {}, positions={}))
+    assert row["would_side"] == "BUY_LONG"
+    assert row["detail"]["exit_plan"] == "hold"
+    assert "entry leg" in row["detail"]["exit_reason"]
+    # on target: he trimmed and we are already where the ratio wants us
+    led = [{"sh": 34.0, "intent": "ORDER_INTENT_BUY_LONG"}]
+    on_t = _run(ms.shadow_market(_Pool(fills=EXITFILLS, ledger_rows=led), _Pmus(bid=0.26, ask=0.29),
+                                 "rn1", CID, RATIO, {}, positions={EXIT_SLUG: 34.0}))
+    assert on_t["detail"]["exit_plan"] == "hold" and on_t["detail"]["exit_reason"] == "on target"
+    # the dollar dead band is a hold too, not an unjudged reading
+    p = ms.mi.Plan(None, 0, None, "under the dollar dead band", None, {})
+    ev = ms.reduction_event(EXITFILLS, M, N, now_ts=NOW)
+    assert ms.exit_leg(ev, 40.0, 40.0, 34, p, 0.32)["exit_plan"] == "hold"
+    # and no exit block at all on a market where he is not reducing
+    assert ms.exit_leg(None, 0.0, 0.0) == {}
+
+
+def test_the_exit_census_is_bounded_contained_and_never_costs_a_tick(monkeypatch):
+    """A money-path rule the measurement side inherits: the refusal must
+    be CONTAINED. This census is a read of our own rows -- bounded by a
+    window, a market cap and a wall-clock timeout -- and a failure of it
+    may not abandon a tick, spend venue budget or hammer the table."""
+    _nosleep(monkeypatch)
+    sql = " ".join(ms._SQL_EXIT_CENSUS.split())
+    assert "at >= now() - ($1::float8 * interval '1 hour')" in sql and "LIMIT $2" in sql
+    assert ms.EXIT_WINDOW_H == 24.0 and ms.EXIT_SUMMARY_MAX == 2000 and ms.EXIT_CENSUS_TIMEOUT_S == 15.0
+    _reset_exit_cache()
+    ms._backoff_until = 0.0
+    p = _ExitPool(fills=EXITFILLS, whales_ratio_fills=_ratio_fills(),
+                  census=[{"whale": "rn1", "condition_id": "a", "exit_kind": "left",
+                           "exit_plan": "rest", "would_fill": True, "would_qty": 4,
+                           "would_px": 0.5, "family": "moneyline", "touched_s": 30.0}])
+    stats = _run(ms.tick_once(p, _Pmus(bid=0.26, ask=0.29, held={EXIT_SLUG: 0.0})))
+    assert p.census_reads == 1
+    census_q = [q for q in p.queries if "/* exit-leg-census */" in q[0]]
+    # window and cap, both bound -- and the cap is asked for ONE ROW
+    # MORE than it allows, which is how a census that hit its cap is
+    # detectable at all
+    assert len(census_q) == 1 and census_q[0][1] == (24.0, 2001)
+    assert stats["exit_leg"]["rn1"]["fills"] == 1 and stats["exit_leg"]["rn1"]["n"] == 1
+    # the split is published and carries the COUNTS at any n; its touch
+    # times take its whale's floor, and one judged market is below it
+    fb = stats["exit_family"]["rn1/moneyline"]
+    assert fb["n"] == 1 and fb["fills"] == 1 and fb["touch_n"] == 1
+    assert fb["ready"] is False and fb["touch_p50"] is None and fb["touch_p90"] is None
+    assert stats["exit_census_age_s"] >= 0.0
+    # the interval holds: the next tick reads the cache, not the table
+    _run(ms.tick_once(p, _Pmus(bid=0.26, ask=0.29)))
+    assert p.census_reads == 1, "the census is not a per-tick read"
+    # A RAISING TABLE IS NAMED AND CONTAINED: no numbers, no abandon
+    _reset_exit_cache()
+    q = _ExitPool(fills=EXITFILLS, whales_ratio_fills=_ratio_fills(), census_raise=True)
+    st = _run(ms.tick_once(q, _Pmus(bid=0.26, ask=0.29)))
+    assert st["exit_leg"] == {"error": "RuntimeError"} and st["status"] == "ok"
+    assert not st.get("abandoned") and st["rows"] >= 1
+    # a slow one is the same, through the timeout, and the tick returns
+    _reset_exit_cache()
+    monkeypatch.setattr(ms, "EXIT_CENSUS_TIMEOUT_S", 0.01)
+    h = _ExitPool(fills=EXITFILLS, whales_ratio_fills=_ratio_fills(), census_hangs=True)
+    st2 = _run(ms.tick_once(h, _Pmus(bid=0.26, ask=0.29)))
+    assert st2["exit_leg"] == {"error": "TimeoutError"} and not st2.get("abandoned")
+    # and a failure takes the interval with it: no retry storm
+    _run(ms.tick_once(h, _Pmus(bid=0.26, ask=0.29)))
+    assert h.census_reads == 1
+
+
+def test_a_truncated_census_is_not_a_reading_and_the_window_travels_with_it(monkeypatch):
+    """Two bounds change what the number MEANS, so both travel with it.
+
+    The cap is applied after `ORDER BY whale, condition_id`, so a
+    census that hit it is not a sample: it is the alphabetically-first
+    slice, and whichever whale sorts first takes every slot while the
+    second reads n=0. This worker already holds the positions walk to
+    that standard three functions up -- a walk that hit the page cap is
+    not a reading of the account -- and a census is held to it here.
+
+    The window is shell-settable down to an hour, so a line that does
+    not name its window can serve a 1 h cohort in the shape of the 24 h
+    reading §3b and §4-S4 are defined over."""
+    _nosleep(monkeypatch)
+    rows = [{"whale": "rn1", "condition_id": f"m{i}", "exit_kind": "reduced",
+             "exit_plan": "rest", "would_fill": True, "would_qty": 10, "would_px": 0.4}
+            for i in range(4)]
+    p = _ExitPool(fills=EXITFILLS, census=rows)
+    # the caller reads limit+1 and the summary refuses when that row exists
+    val = _run(ms.exit_census(p, window_h=24.0, limit=3))
+    assert p.queries[-1][1] == (24.0, 4), "one row past the cap, to see the cap was hit"
+    assert val["truncated"] is True and val["whales"] == {} and val["families"] == {}
+    ms._exit_cache.update(at=NOW, value=val)
+    st: dict = {}
+    ms.attach_exit_census(st, NOW)
+    assert st["exit_leg"] == {"state": "truncated"}, "no numbers at all from a truncated census"
+    assert st["exit_markets"] is None and st["exit_window_h"] == 24.0
+    # exactly at the cap is a whole reading, not a truncated one
+    val = _run(ms.exit_census(_ExitPool(fills=EXITFILLS, census=rows), window_h=24.0, limit=4))
+    assert val["truncated"] is False and val["whales"]["rn1"]["n"] == 4
+    # THE WINDOW IS PUBLISHED BESIDE THE NUMBERS: a 1 h reading and a
+    # 24 h reading are not the same reading, and the line must say which
+    short = _run(ms.exit_census(_ExitPool(fills=EXITFILLS, census=rows), window_h=1.0, limit=10))
+    assert short["window_h"] == 1.0
+    ms._exit_cache.update(at=NOW, value=short)
+    st = {}
+    ms.attach_exit_census(st, NOW)
+    assert st["exit_window_h"] == 1.0
+    # and the published block is a COPY: the cache outlives the tick, so
+    # nothing downstream can edit the reading the next tick serves
+    st["exit_leg"]["rn1"]["n"] = 99
+    st["exit_family"].clear()
+    assert ms._exit_cache["value"]["whales"]["rn1"]["n"] == 4
+    assert ms._exit_cache["value"]["families"] != {}
+
+
+def test_the_exit_reading_is_readable_per_whale_and_prints_its_own_minimum_n(monkeypatch):
+    """The gate is that the line PRINTS at n >= 30 markets -- the VALUE
+    is owner decision 18's input, not a threshold this unit sets. The
+    block is scalars per whale so the public heartbeat serves it whole."""
+    from sportsassets.api.app import _sanitize_detail as san
+
+    def _rows(n):
+        return [{"whale": "rn1", "condition_id": f"m{i}", "exit_kind": "reduced",
+                 "exit_plan": "rest", "would_fill": i % 3 > 0, "would_qty": 20,
+                 "would_px": 0.4, "family": "moneyline", "touched_s": float(i)}
+                for i in range(n)]
+
+    assert ms.EXIT_MIN_N == 30
+    b29 = ms.summarize_exit_rows(_rows(29))["whales"]["rn1"]
+    assert b29["n"] == 29 and b29["ready"] is False and b29["n_min"] == 30
+    # below the floor the estimates are not computed at all -- only the
+    # counts they would come from, which are facts
+    assert b29["rate"] is None and b29["lo"] is None and b29["unfilled_usd_share"] is None
+    assert b29["resolved"] == 29 and b29["fills"] == 19 and b29["clusters"] == 29
+    # ...INCLUDING THE TOUCH-TIME PERCENTILES. §3b lists
+    # `.time_to_touch_p50/p90` in the same gate row as `sell_fill_lo`, so
+    # a line that is a gate obeys one floor in every field it serves: a
+    # descriptive median off two markets printed beside `below_min_n`
+    # siblings is still a number read off the gate row. The n behind
+    # them is a count and stays.
+    assert b29["touch_p50"] is None and b29["touch_p90"] is None
+    assert b29["touch_n"] == 19, "the count behind them is a fact and prints"
+    f29 = ms.summarize_exit_rows(_rows(29))["families"]["rn1/moneyline"]
+    assert f29["ready"] is False and f29["touch_p50"] is None and f29["touch_n"] == 19, (
+        "the split takes its whale's floor: otherwise it is the way to read "
+        "the number the gate line refused")
+    b30 = ms.summarize_exit_rows(_rows(30))["whales"]["rn1"]
+    assert b30["ready"] is True and b30["clusters"] == 30
+    # the clustered 95% LOWER bound, and it is below the point rate
+    assert 0.0 <= b30["lo"] <= b30["rate"] <= 1.0
+    # time to touch, and the dollars the exits would NOT have filled
+    assert b30["touch_p50"] is not None and b30["touch_p90"] >= b30["touch_p50"]
+    assert b30["touch_n"] == b30["fills"], "the percentiles print the n behind them"
+    f30 = ms.summarize_exit_rows(_rows(30))["families"]["rn1/moneyline"]
+    assert f30["ready"] is True and f30["touch_p50"] is not None
+    assert b30["unfilled_usd"] == round(10 * 20 * 0.4, 2)
+    assert b30["unfilled_usd_share"] == round(10 / 30, 4)
+    # the public heartbeat keeps every one of them a number
+    out = san({"exit_leg": {"rn1": b30}, "exit_family": {"rn1/moneyline": {"n": 30}}})
+    assert out["exit_leg"]["rn1"]["lo"] == b30["lo"] and out["exit_leg"]["rn1"]["ready"] is True
+    assert out["exit_family"]["rn1/moneyline"]["n"] == 30
+    # and it fits that endpoint's own caps: a block over them is not an
+    # error, it is a SILENTLY truncated one -- which is why both blocks
+    # are flat scalars keyed by whale (and by whale/family)
+    assert len(b30) < 40 and "_truncated_keys" not in out["exit_leg"]["rn1"]
+    assert san({"exit_family": {"k": {"deep": {"x": 1}}}})["exit_family"]["k"]["deep"] == "<dict depth>"
+    # a tick that has never read it says so rather than printing silence
+    _reset_exit_cache()
+    st = {}
+    ms.attach_exit_census(st, NOW)
+    assert st["exit_leg"] == {"state": "unread"}
+    # and a tick that SKIPPED the refresh says that instead: "we never
+    # read it" and "we did not read it on this tick" are different facts
+    # about the instrument, and a venue outage produces the second
+    for skipped in ("abandoned", "skipped_backoff", "switched_off"):
+        st2: dict = {skipped: True}
+        ms.attach_exit_census(st2, NOW)
+        assert st2["exit_leg"] == {"state": "suppressed"}, skipped
+
+
+def _exit_rows(hold=0, fills=0, misses=0, unjudged=0, whale="rn1"):
+    """A census cohort with each bucket set independently: `n` counts
+    all of them, the gate's own n counts only the judged ones."""
+    rows = [{"whale": whale, "condition_id": f"h{i}", "exit_kind": "reduced",
+             "exit_plan": "hold", "exit_reason": "on target"} for i in range(hold)]
+    rows += [{"whale": whale, "condition_id": f"u{i}", "exit_kind": "reduced",
+              "exit_plan": "none", "exit_reason": "frozen: venue and ledger disagree"}
+             for i in range(unjudged)]
+    rows += [{"whale": whale, "condition_id": f"f{i}", "exit_kind": "reduced",
+              "exit_plan": "rest", "would_fill": True, "would_qty": 20, "would_px": 0.4,
+              "family": "moneyline", "touched_s": 5.0} for i in range(fills)]
+    rows += [{"whale": whale, "condition_id": f"m{i}", "exit_kind": "reduced",
+              "exit_plan": "rest", "would_fill": False, "would_qty": 20, "would_px": 0.4,
+              "family": "moneyline"} for i in range(misses)]
+    return rows
+
+
+def test_ready_keys_on_the_judged_markets_never_on_the_count_of_his_reductions():
+    """§3b reads this gate as `proportion / market / >= 30`, so the 30 is
+    the PROPORTION'S OWN DENOMINATOR -- markets we actually judged --
+    not the number of markets he reduced in.
+
+    Keyed on the reduction count, the flag whose stated job is that a
+    reading below n=30 cannot be quoted as authorising anything went
+    true with no reading at all behind it. It is the expected day-one
+    shape, not a corner: the mirror is cancel-only and holds nothing, so
+    most markets plan BUY_LONG and land in `hold`, and every refusal
+    lands in `unjudged`."""
+    b = ms.summarize_exit_rows(_exit_rows(hold=28, fills=2))["whales"]["rn1"]
+    assert b["n"] == 30 and b["hold"] == 28 and b["resolved"] == 2 and b["clusters"] == 2
+    assert b["ready"] is False, "28 holds and two fills are not thirty judged markets"
+    assert b["rate"] is None and b["lo"] is None
+    # THE NUMBER THAT WOULD HAVE BEEN SERVED. Two 0/1 observations that
+    # both filled give a zero standard error, so the cluster-robust
+    # interval collapses onto the point estimate and the line would have
+    # asserted "at 95% confidence at least 100% of our exit rests fill"
+    # in the field decision 18 reads. The estimator still does it; the
+    # census no longer publishes it.
+    ci = mr.rate_with_ci([{"would_fill": True, "condition_id": "f0"},
+                          {"would_fill": True, "condition_id": "f1"}])
+    assert ci["ci95"] == [1.0, 1.0] and ci["clusters"] == 2
+    # thirty markets he reduced in, none of them judged
+    b = ms.summarize_exit_rows(_exit_rows(hold=30))["whales"]["rn1"]
+    assert b["n"] == 30 and b["ready"] is False and b["resolved"] == 0 and b["rate"] is None
+    b = ms.summarize_exit_rows(_exit_rows(unjudged=30))["whales"]["rn1"]
+    assert b["n"] == 30 and b["unjudged"] == 30 and b["ready"] is False
+    # one judged market inside thirty
+    b = ms.summarize_exit_rows(_exit_rows(hold=29, fills=1))["whales"]["rn1"]
+    assert b["ready"] is False and b["rate"] is None
+    # a busy day that is still one market short of the gate
+    b = ms.summarize_exit_rows(_exit_rows(hold=371, fills=20, misses=9))["whales"]["rn1"]
+    assert b["n"] == 400 and b["resolved"] == 29 and b["clusters"] == 29
+    assert b["ready"] is False and b["rate"] is None and b["lo"] is None
+    # and the gate funds on the thirtieth JUDGED market, whatever n is
+    b = ms.summarize_exit_rows(_exit_rows(hold=370, fills=20, misses=10))["whales"]["rn1"]
+    assert b["n"] == 400 and b["clusters"] == 30 and b["ready"] is True
+    assert b["rate"] == round(20 / 30, 4) and 0.0 <= b["lo"] < b["rate"]
+    assert b["unfilled_usd_share"] == round(10 / 30, 4)
+    # per whale, not pooled: his thirty do not fund the other whale
+    rows = _exit_rows(hold=370, fills=20, misses=10) + _exit_rows(fills=2, whale="hrh")
+    both = ms.summarize_exit_rows(rows)["whales"]
+    assert both["rn1"]["ready"] is True and both["hrh"]["ready"] is False
+    assert both["hrh"]["rate"] is None and both["hrh"]["lo"] is None
+
+
+def test_a_fail_closed_refusal_is_never_filed_as_a_decision_not_to_reduce():
+    """A3's unreadable contract: a row it cannot judge is `unjudged`,
+    never a fill and never a miss -- and never, either, a `hold`, which
+    the line serves as "the rule chose not to reduce".
+
+    `mi.plan` returns side=None for six reasons: four DECISIONS and two
+    FAIL-CLOSED REFUSALS. The bucket is decided by which of those it is
+    and by nothing else. An earlier version filed any side-None plan as
+    `hold` when `target >= ledger` -- a comparison, not a decision --
+    which swept `frozen` and `venue unreadable` into `hold` on exactly
+    the state the mirror is in today (holding nothing, so the target is
+    always at or above the ledger). Frozen is the most common reason
+    class in the shadow window the mirror programme records."""
+    import re
+    reasons = set(re.findall(r'Plan\(None, 0, None, "([^"]+)"',
+                             inspect.getsource(ms.mi.plan)))
+    refusals = {"venue unreadable", "frozen: venue and ledger disagree"}
+    assert reasons == set(ms._EXIT_HOLD_REASONS) | refusals, (
+        "a seventh side-None reason appeared upstream: name it a decision or a refusal")
+    ev = ms.reduction_event(EXITFILLS, M, N, now_ts=NOW)
+    assert ev is not None
+    for reason, venue in (("frozen: venue and ledger disagree", 3.0), ("venue unreadable", None)):
+        p = ms.mi.Plan(None, 0, None, reason, None, {})
+        # BOTH SIGNS of (target - ledger): a refusal is a refusal either way
+        for ledger, target in ((0.0, 34), (100.0, 34), (34.0, 34)):
+            out = ms.exit_leg(ev, ledger, venue, target, p, 0.32)
+            assert out["exit_plan"] == "none", (reason, ledger, target)
+            assert out["exit_reason"] == reason
+            assert out["exit_kind"] == "reduced", "the evidence is still recorded"
+    # the four DECISIONS are holds at both signs, unchanged
+    for reason in ms._EXIT_HOLD_REASONS:
+        p = ms.mi.Plan(None, 0, None, reason, None, {})
+        for ledger, target in ((0.0, 34), (100.0, 34)):
+            assert ms.exit_leg(ev, ledger, 100.0, target, p, 0.32)["exit_plan"] == "hold"
+    # and a BUY_LONG is still a decision: the entry leg has the market
+    buy = ms.mi.Plan("BUY_LONG", 34, 0.30, "increase toward target", None, {})
+    assert ms.exit_leg(ev, 0.0, 0.0, 34, buy, 0.32)["exit_plan"] == "hold"
+    # BUT THE PLAN'S OWN REASON IS NOT LOST. `mi.plan` returns a
+    # BUY_LONG with `no price to rest at` when the bid is unreadable: the
+    # BUCKET is right (the exit rule would not reduce here whatever the
+    # book says) and this clause writes its own text over `p.reason`, so
+    # without a second key the row would record only "the rule chose not
+    # to reduce" and forget that there was no price at all.
+    noprice = ms.mi.Plan("BUY_LONG", 34, None, "no price to rest at", None, {})
+    out = ms.exit_leg(ev, 0.0, 0.0, 34, noprice, 0.32)
+    assert out["exit_plan"] == "hold" and "entry leg" in out["exit_reason"]
+    assert out["exit_plan_reason"] == "no price to rest at"
+    # IT COMPOUNDS: a misfiled refusal lands in `hold`, `hold` lands in
+    # `n`, and keying the gate on `n` let the rows carrying the least
+    # information declare it funded. Both halves are closed, so 29
+    # judged markets beside 300 frozen ones is not a reading.
+    b = ms.summarize_exit_rows(_exit_rows(unjudged=300, fills=20, misses=9))["whales"]["rn1"]
+    assert b["unjudged"] == 300 and b["hold"] == 0 and b["clusters"] == 29
+    assert b["ready"] is False and b["rate"] is None
+
+
+def test_the_exit_leg_sizes_from_the_mirrors_own_anchor_not_the_per_fill_clip(monkeypatch):
+    """The mirror's sizing anchor is $50 and it is NOT the per-fill
+    lane's clip (which is $250 for two whales today). The exit leg takes
+    the ratio its caller was given and names no clip of its own, so a
+    clip change cannot rescale an exit target."""
+    from sportsassets.analytics import roster_rules
+
+    assert roster_rules.MIRROR_ANCHOR_CLIP_USD == 50.0
+    src = inspect.getsource(ms)
+    for banned in ("per_fill_usd", "PER_FILL", "live_clip_overrides", "PENNY_TRIAL"):
+        assert banned not in src, f"the mirror must not name the per-fill clip ({banned})"
+    _nosleep(monkeypatch)
+    _at_now(monkeypatch)
+    # THE REAL CLIP, not an environment name nothing reads: the per-fill
+    # lane's number is the hardcoded map plus the stored override the
+    # rules worker writes (ingestion_state.live_clip_overrides), and
+    # `per_fill_usd` reads the override ahead of the map. Sweeping both
+    # is the only sweep that could fail.
+    from sportsassets import live_executor as le
+
+    assert le.PER_FILL_BY_WHALE.get("rn1") == 250.00, "the owner's clip today"
+    assert le.per_fill_usd("rn1") == 250.00
+    led = [{"sh": 100.0, "intent": "ORDER_INTENT_BUY_LONG"}]
+    plans = []
+    for clip in (50.0, 250.0, 1000.0):
+        monkeypatch.setattr(le, "PER_FILL_BY_WHALE", dict(le.PER_FILL_BY_WHALE, rn1=clip))
+        monkeypatch.setattr(le, "_clip_override", {"rn1": clip})
+        # the executor's own ceiling still binds above $250; what
+        # matters here is that the number the lane sizes from MOVED
+        assert le.per_fill_usd("rn1") == min(clip, le.LIVE_MAX_CLIP_USD)
+        row = _run(ms.shadow_market(_Pool(fills=EXITFILLS, ledger_rows=led),
+                                    _Pmus(bid=0.26, ask=0.29), "rn1", CID, RATIO, {},
+                                    positions={EXIT_SLUG: 100.0}))
+        plans.append((row["detail"]["exit_qty"], row["detail"]["exit_px"], row["target"]))
+    assert len(set(plans)) == 1 and plans[0] == (66, 0.32, 34)
+
+
+def test_the_exit_leg_adds_no_venue_read_and_the_walk_stays_once_per_tick(monkeypatch):
+    """Every venue read stays behind the pacer and the positions walk
+    stays once per tick: the exit leg is read from fills we already
+    hold, so it adds no read of any kind."""
+    _nosleep(monkeypatch)
+    _at_now(monkeypatch)
+    _reset_exit_cache()
+    ms._backoff_until = 0.0
+    p = _ExitPool(fills=EXITFILLS, whales_ratio_fills=_ratio_fills(),
+                  ledger_rows=[{"sh": 100.0, "intent": "ORDER_INTENT_BUY_LONG"}])
+    pm = _Pmus(bid=0.26, ask=0.29, held={EXIT_SLUG: 100.0})
+    stats = _run(ms.tick_once(p, pm))
+    assert pm.portfolio.calls == 1, "one positions walk per tick"
+    assert pm.calls == [("bbo", EXIT_SLUG)], "one BBO for the one market, nothing else"
+    assert stats["exit_rows"] == 1 and stats["exit_rest"] == 1
+    assert stats["exit_hold"] == 0 and stats["exit_unjudged"] == 0 and stats["exit_left"] == 0
+    # and an unreadable walk still abandons the tick above every book read
+    pm2 = _Pmus(raise_walk=True)
+    ms._backoff_until = 0.0
+    _reset_exit_cache()
+    p2 = _ExitPool(fills=EXITFILLS)
+    st2 = _run(ms.tick_once(p2, pm2, now_ts=NOW))
+    assert st2["abandoned"] is True and st2["positions_unreadable"] is True and pm2.calls == []
+    # AN ABANDONED TICK ADDS NO READ OF ANY KIND, the census included:
+    # the tick has just told us the venue or the table is unwell and a
+    # census read is not the answer to that
+    assert p2.census_reads == 0
+    # ...and the line says the reading was SUPPRESSED, not that the
+    # instrument is silent
+    assert st2["exit_leg"] == {"state": "suppressed"}
+    # THE TWO ABANDONS THAT ACTUALLY REACH THE GUARD. `tick_once` has
+    # three abandon paths and the walk-unreadable one above RETURNS
+    # before `if not stats.get("abandoned"): await refresh_exit_census`
+    # is ever evaluated -- so an assertion on that path alone passes
+    # whether the guard exists or not, which is what the round-two
+    # review measured (delete the guard: 58 passed). The BBO miss streak
+    # and the write failure `break` out of the market loop and fall
+    # THROUGH to that line, so they are the paths that pin it.
+    for label, pool, pmus in (
+            # three consecutive unreadable books: the venue is saying no
+            ("miss_streak",
+             _ExitPool(fills=EXITFILLS, whales_ratio_fills=_ratio_fills(),
+                       conds=[f"c{i}" for i in range(5)]),
+             _Pmus(raise_bbo=True, held={EXIT_SLUG: 0.0})),
+            # the write raised: mirror_shadow itself is the suspect, and
+            # the census reads that same table
+            ("write_failed",
+             _ExitPool(fills=EXITFILLS, whales_ratio_fills=_ratio_fills(),
+                       conds=["c1", "c2", "c3"], write_raises=True),
+             _Pmus(bid=0.26, ask=0.29, held={EXIT_SLUG: 0.0}))):
+        ms._backoff_until = 0.0
+        _reset_exit_cache()
+        st = _run(ms.tick_once(pool, pmus, now_ts=NOW))
+        assert st["abandoned"] is True, label
+        assert pool.census_reads == 0, (
+            f"{label}: this abandon falls THROUGH to the census guard, and the "
+            "tick has just told us the venue or the table is unwell")
+        assert st["exit_leg"] == {"state": "suppressed"}, label
+    assert st["write_failed"] == "RuntimeError", "the write-failure path really ran"
+    ms._backoff_until = 0.0
+    _reset_exit_cache()
+    # a cached reading is still served on an abandoned tick, with an age
+    # that says how old it is
+    ms._exit_cache.update(at=NOW - 100.0, value=ms.summarize_exit_rows(_exit_rows(fills=1)))
+    ms._backoff_until = 0.0
+    st3 = _run(ms.tick_once(_ExitPool(fills=EXITFILLS), _Pmus(raise_walk=True), now_ts=NOW))
+    assert st3["abandoned"] is True and st3["exit_census_age_s"] == 100.0
+    assert st3["exit_leg"]["rn1"]["n"] == 1
+    ms._backoff_until = 0.0
+
+
+# the two probe lines, byte-identical to mm/A3_yml.patch (the workflow
+# is owned by nobody, so the patch is written beside this unit and the
+# text is pinned here as well as there)
+EXIT_PROBE = [
+    '[ -s /tmp/hb_ms.json ] && jq -r \'def ts: if (.[0] | not) then "below_min_n" '
+    'elif .[1] == null then "n/a" else "\\(.[1])s" end; '
+    '[.[]? | select(.service == "mirror_shadow")][0].detail as $d '
+    '| if $d == null then "  MIRROREXIT no heartbeat row — worker never completed a tick" '
+    'elif ($d.exit_leg.error // $d.exit_leg.state) then "  MIRROREXIT census \\($d.exit_leg.error // $d.exit_leg.state) '
+    '(age=\\([true, $d.exit_census_age_s] | ts))" '
+    'elif (($d.exit_leg // {}) | length) == 0 then "  MIRROREXIT no market with a reduction in the window" '
+    'else ($d.exit_leg | to_entries[] | "  MIRROREXIT \\(.key): mapped_markets_he_reduced=\\(.value.n // 0) '
+    'window=\\($d.exit_window_h // "n/a")h gate_n=\\(.value.clusters // 0)/\\(.value.n_min // 30) '
+    'ready=\\(.value.ready) reduced=\\(.value.reduced // 0) left=\\(.value.left // 0) rest=\\(.value.rest // 0) '
+    'hold=\\(.value.hold // 0) unjudged=\\(.value.unjudged // 0) resolved=\\(.value.resolved // 0) '
+    'fills=\\(.value.fills // 0) sell_fill=\\(if .value.ready then (.value.rate // "n/a") else "below_min_n" end) '
+    'sell_fill_lo=\\(if .value.ready then (.value.lo // "n/a") else "below_min_n" end) '
+    'time_to_touch_p50=\\([.value.ready, .value.touch_p50] | ts) '
+    'p90=\\([.value.ready, .value.touch_p90] | ts) '
+    'touch_n=\\(.value.touch_n // 0) '
+    'unfilled_usd_share=\\(if .value.ready then (.value.unfilled_usd_share // "n/a") else "below_min_n" end) '
+    'age=\\([true, $d.exit_census_age_s] | ts)") end\' '
+    '/tmp/hb_ms.json 2>/dev/null || echo "  MIRROREXIT unavailable"',
+    '[ -s /tmp/hb_ms.json ] && jq -r \'def ts: if (.[0] | not) then "below_min_n" '
+    'elif .[1] == null then "n/a" else "\\(.[1])s" end; '
+    '[.[]? | select(.service == "mirror_shadow")][0].detail as $d '
+    '| if $d == null then "  MIRROREXITFAM no heartbeat row — worker never completed a tick" '
+    'elif ($d.exit_leg.error // $d.exit_leg.state) then "  MIRROREXITFAM census \\($d.exit_leg.error // $d.exit_leg.state) '
+    '(age=\\([true, $d.exit_census_age_s] | ts))" '
+    'elif (($d.exit_family // {}) | length) == 0 then "  MIRROREXITFAM no judged family in the window" '
+    'else ($d.exit_family | to_entries[] | "  MIRROREXITFAM \\(.key): n=\\(.value.n // 0) '
+    'fills=\\(.value.fills // 0) '
+    'time_to_touch_p50=\\([.value.ready, .value.touch_p50] | ts) '
+    'p90=\\([.value.ready, .value.touch_p90] | ts) '
+    'touch_n=\\(.value.touch_n // 0)") end\' '
+    '/tmp/hb_ms.json 2>/dev/null || echo "  MIRROREXITFAM unavailable"',
+]
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+def test_the_exit_probe_lines_print_on_an_empty_endpoint_and_on_a_real_census(tmp_path):
+    """Every new jq line parses on an EMPTY endpoint (A3) and none of
+    them can print silence: an absent, empty or unreadable heartbeat
+    prints its own tag, because a silent instrument is indistinguishable
+    from a healthy quiet one."""
+    def _run_lines(text: str) -> str:
+        f = tmp_path / "hb.json"
+        f.write_text(text)
+        return "".join(
+            subprocess.run(["bash", "-c", s.replace("/tmp/hb_ms.json", str(f))],
+                           capture_output=True, text=True, timeout=30).stdout
+            for s in EXIT_PROBE)
+
+    assert "MIRROREXIT unavailable" in _run_lines("")
+    assert "MIRROREXIT no heartbeat row" in _run_lines("[]")
+    assert "MIRROREXIT census RuntimeError" in _run_lines(json.dumps(
+        [{"service": "mirror_shadow", "detail": {"exit_leg": {"error": "RuntimeError"}}}]))
+    assert "MIRROREXIT census unread" in _run_lines(json.dumps(
+        [{"service": "mirror_shadow", "detail": {"exit_leg": {"state": "unread"}}}]))
+    assert "no market with a reduction" in _run_lines(json.dumps(
+        [{"service": "mirror_shadow", "detail": {"exit_leg": {}, "exit_census_age_s": 4}}]))
+    assert "MIRROREXIT census truncated" in _run_lines(json.dumps(
+        [{"service": "mirror_shadow", "detail": {"exit_leg": {"state": "truncated"}}}]))
+    # NEITHER LINE MAY BE SILENT, and the FAM line used to be. It read
+    # `.detail.exit_family // {} | to_entries[]`, which on an empty
+    # object emits nothing AND EXITS 0, so the `|| echo ... unavailable`
+    # fallback could not fire: on a truncated, errored, unread or
+    # suppressed census the second line printed nothing at all while its
+    # sibling named the state. It now names the state itself.
+    for detail, want in (
+            ({"exit_leg": {"state": "truncated"}}, "MIRROREXITFAM census truncated"),
+            ({"exit_leg": {"error": "RuntimeError"}}, "MIRROREXITFAM census RuntimeError"),
+            ({"exit_leg": {"state": "unread"}}, "MIRROREXITFAM census unread"),
+            ({"exit_leg": {"state": "suppressed"}}, "MIRROREXITFAM census suppressed"),
+            # a census with markets in it but no JUDGED family yet
+            ({"exit_leg": {"rn1": {"n": 4}}, "exit_family": {}},
+             "MIRROREXITFAM no judged family in the window"),
+            ({"exit_leg": {}, "exit_census_age_s": 4}, "MIRROREXITFAM no judged family")):
+        got = _run_lines(json.dumps([{"service": "mirror_shadow", "detail": detail}]))
+        assert want in got, (detail, got)
+    assert "MIRROREXITFAM no heartbeat row" in _run_lines("[]")
+    assert "MIRROREXITFAM unavailable" in _run_lines("")
+    rows = [{"whale": "rn1", "condition_id": f"m{i}", "exit_kind": "left" if i else "reduced",
+             "exit_plan": "rest", "would_fill": i % 3 > 0, "would_qty": 20, "would_px": 0.4,
+             "family": "moneyline", "touched_s": float(i)} for i in range(30)]
+    census = ms.summarize_exit_rows(rows)
+
+    def _render(c, window=24.0):
+        return _run_lines(json.dumps([{"service": "mirror_shadow", "status": "ok",
+                                       "detail": {"exit_leg": c["whales"],
+                                                  "exit_family": c["families"],
+                                                  "exit_window_h": window,
+                                                  "exit_census_age_s": 12.0}}]))
+
+    out = _render(census)
+    # the field names are §3b's own (`sell_fill_lo`, `time_to_touch_*`),
+    # the gate's n is the JUDGED-market count against its floor, and the
+    # window the reading was taken over is on the line. The reduction
+    # count names BOTH halves of what it is keyed on -- markets HE
+    # reduced in, that we could MAP -- because M14's denominator is
+    # "planned reductions" and this is a strict subset of it.
+    assert ("MIRROREXIT rn1: mapped_markets_he_reduced=30 window=24.0h "
+            "gate_n=30/30 ready=true") in out, out
+    assert "resolved=30 fills=20 sell_fill=0.6667 sell_fill_lo=" in out
+    assert "time_to_touch_p50=" in out and "touch_n=20" in out
+    assert "MIRROREXITFAM rn1/moneyline: n=30 fills=20 time_to_touch_p50=" in out
+    assert " rate=" not in out, "no per-family rate: §3b asks this split for touch times"
+    # A SHORTER WINDOW IS A DIFFERENT READING and says so on the line
+    assert "window=1.0h" in _render(ms.summarize_exit_rows(rows, window_h=1.0), window=1.0)
+    # AND THE REVIEWER'S SCENARIO, RENDERED: 28 markets he reduced in
+    # where the rule held, plus two filled exit rests. Thirty rows, no
+    # reading -- and the line says so in every field that would have
+    # carried one, instead of "ready=true ... sell_fill_lo=1.0".
+    thin = _render(ms.summarize_exit_rows(_exit_rows(hold=28, fills=2)))
+    assert ("MIRROREXIT rn1: mapped_markets_he_reduced=30 window=24.0h "
+            "gate_n=2/30 ready=false") in thin, thin
+    assert "sell_fill=below_min_n sell_fill_lo=below_min_n" in thin
+    assert "unfilled_usd_share=below_min_n" in thin
+    # EVERY ESTIMATE ON THE GATE LINE OBEYS ONE FLOOR. The touch-time
+    # percentiles used to print at any n beside fields reading
+    # `below_min_n` -- §3b lists them in the same gate row as
+    # `sell_fill_lo` -- so a two-market median sat on the row decision 18
+    # reads. The COUNT behind them still prints, because a count is a
+    # fact; and the family split takes its whale's floor with it, or it
+    # would have become the way to read the number the gate refused.
+    assert "time_to_touch_p50=below_min_n p90=below_min_n touch_n=2" in thin, thin
+    assert "MIRROREXITFAM rn1/moneyline: n=2 fills=2 time_to_touch_p50=below_min_n" in thin
+    # once the patch lands, the workflow must carry the same text
+    wf = pathlib.Path(__file__).resolve().parents[2] / ".github/workflows/engine-diagnostic.yml"
+    body = wf.read_text() if wf.exists() else ""
+    if "MIRROREXIT" in body:
+        flat = " ".join(body.replace("\\\n", " ").split())
+        for line in EXIT_PROBE:
+            assert " ".join(line.split()) in flat, line
+        # AND THE WORKFLOW'S OWN TEXT MUST RUN. Matching after flattening
+        # is not enough to know the block works: a backslash continuation
+        # placed INSIDE the single-quoted jq program reaches jq as a
+        # literal backslash and is a syntax error, and the flattened
+        # comparison cannot tell that apart from the working form (a raw
+        # newline inside the quotes, which is what every other jq block
+        # in that workflow uses). This runs the lines as written.
+        lines = body.splitlines()
+        i0 = next(i for i, s in enumerate(lines) if "MIRROREXIT-LINES-BEGIN" in s)
+        i1 = next(i for i, s in enumerate(lines) if "MIRROREXIT-LINES-END" in s)
+        blk = "\n".join(s for s in lines[i0 + 1:i1] if not s.strip().startswith("#"))
+        f = tmp_path / "hb_wf.json"
+        f.write_text(json.dumps([{"service": "mirror_shadow", "status": "ok",
+                                  "detail": {"exit_leg": census["whales"],
+                                             "exit_family": census["families"],
+                                             "exit_window_h": 24.0,
+                                             "exit_census_age_s": 12.0}}]))
+        got = subprocess.run(["bash", "-c", blk.replace("/tmp/hb_ms.json", str(f))],
+                             capture_output=True, text=True, timeout=30)
+        assert ("MIRROREXIT rn1: mapped_markets_he_reduced=30 window=24.0h "
+                "gate_n=30/30") in got.stdout, (got.stdout, got.stderr)
+        assert "MIRROREXITFAM rn1/moneyline: n=30" in got.stdout

@@ -63,6 +63,7 @@ cancelled 'closing', never under its stale freeze; _place hands
 take_arms the raw dict, so the venue's 200-REJECTED refusal shape arms
 the take and every earlier shape reads as it did.
 """
+import ast
 import asyncio
 import copy
 import inspect
@@ -72,7 +73,7 @@ import time
 
 import pytest
 
-from sportsassets import copy_sports, edge_gate
+from sportsassets import copy_sports, edge_gate, ratelimit
 from sportsassets import live_executor as le
 from sportsassets.analytics import mirror_live_rules as rules
 from sportsassets.workers import mirror_live as ml
@@ -734,10 +735,21 @@ class _Venue:
 
 
 class _Http:
-    """The data API for _confirm_gone: the whale's rows on the market."""
+    """The data API's `/positions` for THIS market: the rows the whale
+    holds on the condition's two tokens. Two callers read it and they
+    must be handed one world, not two: `_confirm_gone` (is this leg
+    gone?) and, since Phase 1, `market_positions` (what does he hold on
+    both tokens?). The default is the fixture market's ordinary state --
+    300 of the long token, none of the other -- which is what
+    `_pool`'s default fills and default whole-book snapshot both say. A
+    test that needs him GONE says so with `_gone()`; one that needs a
+    pair says so with its own rows."""
 
     def __init__(self, rows=None, status=200):
-        self.rows, self.status = rows if rows is not None else [{"conditionId": CID, "asset": N, "size": 5}], status
+        self.rows = rows if rows is not None else [
+            {"conditionId": CID, "asset": M, "size": 300},
+            {"conditionId": CID, "asset": N, "size": 0}]
+        self.status = status
         self.calls = []
 
     async def get(self, path, params=None):
@@ -750,6 +762,29 @@ class _Http:
             def json(self):
                 return http.rows
         return _R()
+
+
+def _mkt(long_size=300.0, other_size=0.0, cid=CID):
+    """The data API answering FOR THIS MARKET with both tokens named.
+    `sizeThreshold=0`, so a leg he has merged down to nothing comes back
+    as a row of size 0 rather than as an absence."""
+    return _Http(rows=[{"conditionId": cid, "asset": M, "size": long_size},
+                       {"conditionId": cid, "asset": N, "size": other_size}])
+
+
+def _gone(other=0.0):
+    """The venue answering for this market with the long leg at zero:
+    what `_confirm_gone` reads as gone and what the per-market read
+    reads as a net of `-other`."""
+    return _Http(rows=[{"conditionId": CID, "asset": M, "size": 0},
+                       {"conditionId": CID, "asset": N, "size": other}])
+
+
+class _NoThrottle:
+    """ratelimit.Throttle with the wait taken out."""
+
+    async def wait(self):
+        return None
 
 
 def _kinds(v):
@@ -777,6 +812,10 @@ def _armed(monkeypatch):
     _RAN["n"] += 1
     _nosleep(monkeypatch)
     monkeypatch.setattr(ml, "pace", lambda s=ms.READ_PACING_S: 0.0)
+    # the per-market read waits on the process-wide data-API throttle
+    # (whale_exits.market_positions); the wait is real seconds and this
+    # file drives hundreds of ticks
+    monkeypatch.setattr(ratelimit, "_throttle", _NoThrottle())
 
     async def _s(s):
         _armed.slept.append(s)
@@ -1549,7 +1588,7 @@ def test_paired_out_target_zero_rests_at_max_one_minus_q_or_the_ask_and_never_ma
 def test_a_confirmed_vanish_rests_then_follows_the_sole_and_coheld_rules(monkeypatch):
     p = _pool(fills=_his(300, sold=300), snap=None)         # gone by fills; no snapshot
     b = p.add_book(ledger=300)
-    http = _Http()                                           # the data API: he holds N only
+    http = _gone()                                           # the data API: the long leg is 0
     v = _Venue(held={SLUG: 300})
     st = _tick(p, v, http=http)
     assert http.calls and http.calls[0][1]["market"] == CID
@@ -1577,7 +1616,7 @@ def test_a_confirmed_vanish_rests_then_follows_the_sole_and_coheld_rules(monkeyp
                  placed_ts=NOW - rules.MIRROR_FLATTEN_REST_S - 1)
     v3 = _Venue(held={SLUG: 500}, flatten_bid=0.29, ioc_fill=300.0)
     v3.rest("oid-1", "SELL", 0.32, 300, created=NOW - 400)
-    _tick(p3, v3, http=_Http())
+    _tick(p3, v3, http=_gone())
     assert "close" not in _kinds(v3) and ("slug_bid", SLUG, True) in v3.calls
     ioc = [c for c in _places(v3) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
     assert len(ioc) == 1 and ioc[0][2] == le.sell_limit_price(0.29) and ioc[0][3] == 300 and ioc[0][4] is True
@@ -1604,7 +1643,7 @@ def test_an_unreadable_bid_names_no_bid_for_flatten(monkeypatch):
                 placed_ts=NOW - rules.MIRROR_FLATTEN_REST_S - 1)
     v = _Venue(held={SLUG: 500}, flatten_bid=None)
     v.rest("oid-1", "SELL", 0.32, 300, created=NOW - 400)
-    st = _tick(p, v)
+    st = _tick(p, v, http=_gone())
     assert _census(st, "no_bid_for_flatten") == 1
     assert not [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
     assert "close" not in _kinds(v) and b["ledger_net"] == 300
@@ -1731,19 +1770,19 @@ def test_the_drift_rule_refuses_increases_and_reduces_from_the_smaller_reading()
     p = _pool(fills=_his(300), snap={M: 200.0, N: 0.0})
     p.add_book(ledger=100)
     v = _Venue(held={SLUG: 100})
-    st = _tick(p, v)
+    st = _tick(p, v, http=_Http(status=500))     # no per-market read: the walk carries it
     assert _census(st, "drift") >= 1 and not _places(v)
     # fresh and drifted, a reduction: sized from the SMALLER reading (200, not 300)
     p = _pool(fills=_his(300), snap={M: 200.0, N: 0.0})
     p.add_book(ledger=300)
     v = _Venue(held={SLUG: 300})
-    _tick(p, v)
+    _tick(p, v, http=_Http(status=500))           # again: the whole-book rule
     pl = _places(v)
     assert len(pl) == 1 and pl[0][4] is True and pl[0][3] == 100
     # stale: no increase; a reduce proceeds on derived data
     p2 = _pool(fills=_his(300), snap={M: 300.0, N: 0.0}, snap_at=NOW - 900)
     p2.add_book(ledger=0)
-    st2 = _tick(p2, _Venue())
+    st2 = _tick(p2, _Venue(), http=_Http(status=500))
     assert _census(st2, "snapshot_stale") >= 1 and not p2.orders
 
 
@@ -1840,7 +1879,15 @@ def test_every_admission_clause_refuses_a_new_book_by_name(monkeypatch, arm, nam
         p.raise_on.append(("INSERT INTO live_orders", _Unique("live_orders_one_fill_per_asset")))
     elif arm == "exists":
         p.raise_on.append(("INSERT INTO mirror_books", _Unique("mirror_books_one_open_per_market")))
-    st = _tick(p, v)
+    # THE TWO WHOLE-BOOK ARMS. `snapshot_stale` and `drift` are clauses
+    # about the WALK, and P1's admission clause reads either sight of him
+    # -- a fresh per-market read satisfies it on its own -- so these two
+    # arms are driven with the data API down. That is the clause working,
+    # not a hole: every other arm keeps the default fresh read.
+    http = _Http(status=500) if arm in ("stale", "drift") else None
+    if arm == "short":
+        http = _mkt(0.0, 300.0)                # the venue agrees: he is on the other side
+    st = _tick(p, v, http=http)
     assert _census(st, name) >= 1, (arm, st["census"])
     assert not [b for b in p.books.values() if b["state"] != "closed"] and not _places(v)
     if arm in ("asset", "exists"):
@@ -1873,11 +1920,11 @@ def test_step_m_runs_before_the_plan_so_a_closing_book_never_increases():
 def test_the_dead_bands_and_hysteresis_are_named():
     p = _pool(fills=_his(301), snap={M: 301.0, N: 0.0})
     p.add_book(ledger=300)
-    st = _tick(p, _Venue(held={SLUG: 300}))
+    st = _tick(p, _Venue(held={SLUG: 300}), http=_mkt(301.0, 0.0))
     assert _census(st, "dead_band") == 1
     p3 = _pool(fills=_his(600), snap={M: 600.0, N: 0.0})
     p3.add_book(ledger=0)
-    st3 = _tick(p3, _Venue(bid=None, ask=0.32))
+    st3 = _tick(p3, _Venue(bid=None, ask=0.32), http=_mkt(600.0, 0.0))
     assert _census(st3, "no_price") == 1 and not p3.orders
 
 
@@ -2206,19 +2253,20 @@ def test_flat_since_is_dropped_while_the_book_is_held_or_the_target_is_above_zer
     a re-flattened book waits the full MIRROR_FLAT_CLOSE_S again."""
     p = _pool(snap_at=NOW - 900)                       # stale: the increase is refused, nothing rests
     b = p.add_book(ledger=0, gross_buy=90.0, avg_cost=0.30, last_plan={"flat_since": NOW - 3 * 3600})
-    _tick(p, _Venue())
+    _tick(p, _Venue(), http=_Http(status=500))     # and no per-market read either
     assert "flat_since" not in b["last_plan"] and b["state"] == "live" and b["last_plan"]["target"] == 300
     p.fills, p.snap, p.snap_at = _his(300, other_size=300), {M: 300.0, N: 300.0}, NOW
-    st2 = _tick(p, _Venue(), now=NOW + 30)
+    pair = _mkt(300.0, 300.0)                          # the same pair at the venue
+    st2 = _tick(p, _Venue(), now=NOW + 30, http=pair)
     assert b["state"] == "live" and b["last_plan"]["flat_since"] == NOW + 30
     assert b["last_plan"]["close"] == "not_due" and _census(st2, "on_target") == 1
-    _tick(p, _Venue(), now=NOW + 30 + rules.MIRROR_FLAT_CLOSE_S - 1)
+    _tick(p, _Venue(), now=NOW + 30 + rules.MIRROR_FLAT_CLOSE_S - 1, http=pair)
     assert b["state"] == "live"
-    st4 = _tick(p, _Venue(), now=NOW + 30 + rules.MIRROR_FLAT_CLOSE_S + 1)
+    st4 = _tick(p, _Venue(), now=NOW + 30 + rules.MIRROR_FLAT_CLOSE_S + 1, http=pair)
     assert b["state"] == "closed" and _census(st4, "closed_cashed_out") == 1
     p5 = _pool(fills=_his(300, other_size=300), snap={M: 300.0, N: 300.0})
     b5 = p5.add_book(ledger=300, last_plan={"flat_since": NOW - 3 * 3600})
-    _tick(p5, _Venue(held={SLUG: 300}))
+    _tick(p5, _Venue(held={SLUG: 300}), http=_mkt(300.0, 300.0))
     assert "flat_since" not in b5["last_plan"] and b5["state"] == "live" and b5["last_plan"]["target"] == 0
 
 
@@ -2362,7 +2410,7 @@ def test_every_venue_read_goes_through_the_pacer(monkeypatch):
                  placed_ts=NOW - rules.MIRROR_FLATTEN_REST_S - 1)
     v3 = _Venue(held={SLUG: 500}, flatten_bid=0.29, ioc_fill=300.0)
     v3.rest("oid-1", "SELL", 0.32, 300, created=NOW - 400)
-    _tick(p3, v3, http=_Http())
+    _tick(p3, v3, http=_gone())
     assert ("slug_bid", SLUG, True) in v3.calls and b3["ledger_net"] == 0
     assert len(paced) == len([c for c in v3.calls if c[0] in reads])
     src = inspect.getsource(ml)
@@ -2417,7 +2465,7 @@ def test_a_refused_resting_buy_is_cancelled_under_the_refusals_name(monkeypatch)
     o = p.add_order(b)
     v = _Venue()
     v.rest("oid-1")
-    st = _tick(p, v)
+    st = _tick(p, v, http=_Http(status=500))     # no per-market read: the walk carries it
     assert p.orders[o["id"]]["state"] == "cancelled" and p.orders[o["id"]]["reason"] == "drift"
     assert _census(st, "drift") == 1 and not _places(v)
     p2 = _pool(snap_at=NOW - 900)
@@ -2425,7 +2473,7 @@ def test_a_refused_resting_buy_is_cancelled_under_the_refusals_name(monkeypatch)
     o2 = p2.add_order(b2)
     v2 = _Venue()
     v2.rest("oid-1")
-    _tick(p2, v2)
+    _tick(p2, v2, http=_Http(status=500))
     assert p2.orders[o2["id"]]["state"] == "cancelled" and p2.orders[o2["id"]]["reason"] == "snapshot_stale"
     monkeypatch.setattr(edge_gate, "verdict", lambda w: (False, "unfunded"))
     p3 = _pool()
@@ -2747,6 +2795,566 @@ def test_the_whole_slug_close_needs_a_certain_sole_holding(monkeypatch):
     # dangerous order the worker sends (round-one review)
     src = inspect.getsource(ml._flatten_vanished)
     assert src.count("le._pm_held(") == 1
+
+
+# ------------------------------------ 15. PHASE 1, WIRED, and one seam
+#
+# P1: the per-market position read (`whale_exits.market_positions`, which
+# existed with no caller anywhere in `sportsassets/` and is the single
+# reason the mirror opens no book), the drift fact from the NET rule, and
+# `last_fresh_agreed` asserted by the worker instead of hard-coded True.
+# Plus the fail-open seam in the same file and the same tick: a BUY that
+# fills above its own wire, booked silently, inflating avg_cost and the
+# day's spend.
+#
+# R7 -- WIDENING `_SQL_MANUAL_SHARES` TO EVERY NON-MIRROR LANE -- IS NOT
+# HERE, and its tests were deleted with it rather than left asserting a
+# behaviour the worker no longer has. Both shapes that were built were
+# driven into a defect (unsigned against a signed venue net; signed by
+# the two token ids and so dropping the desk's own `asset='slug:<slug>'`
+# rows, which is a REGRESSION that freezes a live book for ever). The
+# reason is written beside the query in the worker.
+
+def _reading(**kw):
+    """A _Reading with every field named, for the pure helpers."""
+    base = dict(whale="rn1", cid=CID, slug=SLUG, la=M, oa=N, fills=[], his_long=0.0,
+                his_other=0.0, snap={}, snap_age=None, snap_partial=False, fresh_read=False,
+                fresh=False, snap_long=None, snap_other=None, bid=0.30, ask=0.32, mark=0.31,
+                venue=0.0, manual=0.0, market={"closed": False, "resolved": False},
+                market_live=True)
+    base.update(kw)
+    return ml._Reading(**base)
+
+
+def _pos_calls(http):
+    return [c for c in http.calls if c[0] == "/positions"]
+
+
+def test_read_market_calls_market_positions_once_per_book_per_tick():
+    """One read per book and per candidate per tick. The candidate below
+    opens a book and the new book is planned in the SAME tick, so
+    `_read_market` runs twice for one market; the venue is asked once."""
+    now = time.time()
+    p = _pool(snap=None)              # the whole-book walk reads nothing of him
+    http, v = _mkt(300.0, 0.0), _Venue()
+    st = _tick(p, v, now=now, http=http)
+    assert len(p.books) == 1, "the per-market read is what opens a book at all"
+    calls = _pos_calls(http)
+    assert len(calls) == 1
+    assert calls[0][1]["market"] == CID and calls[0][1]["sizeThreshold"] == 0
+    assert calls[0][1]["user"] == "0xabc"
+    assert st["snap_market_reads"] == 1 and st["snap_market_fresh_reads"] == 1
+    assert st["snap_market_planned"] == 1
+
+
+def test_a_one_sided_holding_is_a_complete_reading_of_the_market():
+    """THE COMMON CASE, and the one 'both tokens came back' refused. A
+    whale who has only ever held the long token of a condition has ONE
+    row; `market_positions` calls that answer complete and reads the
+    absent leg as 0.0, and it can -- two tokens, limit=100, every row
+    from another condition refused by the callee, so an absent leg is a
+    zero and not an unknown. Refusing it left P1 opening books only where
+    he had touched BOTH tokens, which is the gate's own denominator."""
+    now = time.time()
+    one = _Http(rows=[{"conditionId": CID, "asset": M, "size": 300}])
+    p = _pool(snap=None)
+    st = _tick(p, _Venue(), now=now, http=one)
+    assert len(p.books) == 1, "a plain directional position opens a book"
+    plan = next(iter(p.books.values()))["last_plan"]
+    assert plan["snap_market_fresh"] is True and plan["drift"] == 0.0
+    assert plan["mkt_long"] == 300.0 and plan["mkt_other"] == 0.0
+    assert st["snap_market_fresh_reads"] == 1 and _census(st, "snapshot_stale") == 0
+
+    # the other side of the same coin: only the OTHER token came back,
+    # so the long leg is the zero and his net is negative
+    other = _Http(rows=[{"conditionId": CID, "asset": N, "size": 40}])
+    p2 = _pool(fills=[_fill(N, "BUY", 40.0, 0.72, NOW - 3000)], snap=None)
+    st2 = _tick(p2, _Venue(), now=now, http=other)
+    assert st2["snap_market_fresh_reads"] == 1
+    assert not p2.books and _census(st2, "short_side_refused") >= 1
+
+    # AND THE REFUSAL THAT STAYS: an answer naming NEITHER token of this
+    # condition is not a reading of this market. Reading it would say
+    # "he is flat" about a market we never saw.
+    neither = _Http(rows=[{"asset": "tok-elsewhere", "size": 900}])
+    p3 = _pool(snap=None)
+    st3 = _tick(p3, _Venue(), now=now, http=neither)
+    assert not p3.books and _census(st3, "snap_market_unreadable") >= 1
+    assert _census(st3, "snapshot_stale") >= 1 and st3["snap_market_fresh_reads"] == 0
+
+
+def test_snap_market_fresh_is_set_only_on_a_fresh_complete_read():
+    now = time.time()
+    p = _pool(snap=None)
+    st = _tick(p, _Venue(), now=now, http=_mkt(300.0, 0.0))
+    assert len(p.books) == 1 and _census(st, "snapshot_stale") == 0
+    b = next(iter(p.books.values()))
+    assert b["last_plan"]["snap_market_fresh"] is True
+
+    # a stamp outside the freshness window: no book, and the discarded
+    # read is COUNTED rather than falling silently out of every counter
+    p3 = _pool(snap=None)
+    st3 = _tick(p3, _Venue(), now=now - ms.SNAP_MAX_AGE_S - 100, http=_mkt(300.0, 0.0))
+    assert not p3.books and _census(st3, "snapshot_stale") >= 1
+    assert _census(st3, "snap_market_stale") >= 1 and st3["snap_market_stale"] >= 1
+    assert st3["snap_market_reads"] >= 1 and st3["snap_market_fresh_reads"] == 0
+    assert _census(st3, "snap_market_unreadable") == 0, "read, and not a refusal to read"
+
+
+def test_the_freshness_half_of_the_fact_is_our_own_clock_and_says_so():
+    """The window is `t.now - ts` where `ts` is `time.time()` taken
+    INSIDE `market_positions` as the read lands -- our clock, not the
+    venue's. So it bounds a tick that has been running longer than
+    SNAP_MAX_AGE_S, and a clock that jumped; it cannot catch venue-side
+    staleness, and in a normal tick the fact measures COMPLETENESS. This
+    is pinned so that nobody quotes `fresh_complete_share` against §0's
+    freshness baseline without reading it."""
+    doc = ml._market_snap.__doc__
+    assert "FRESHNESS HALF IS STRUCTURAL" in doc and "COMPLETENESS" in doc
+    now = time.time()
+    # forward and backward: the magnitude is what is tested, both ways
+    for skew in (-(ms.SNAP_MAX_AGE_S + 100), ms.SNAP_MAX_AGE_S + 100):
+        p = _pool(snap=None)
+        st = _tick(p, _Venue(), now=now + skew, http=_mkt(300.0, 0.0))
+        assert not p.books and st["snap_market_stale"] >= 1, skew
+
+
+def test_an_unreadable_market_read_refuses_that_market_and_not_the_tick():
+    """A None or raising read refuses THAT MARKET under its own name and
+    never abandons the tick -- no backoff, no miss streak, and every
+    other book in the tick unaffected."""
+    now = time.time()
+    for http in (_Http(status=500), _Http(rows=[])):
+        p = _pool(snap=None)
+        st = _tick(p, _Venue(), now=now, http=http)
+        assert not p.books
+        assert _census(st, "snap_market_unreadable") >= 1
+        assert _census(st, "snapshot_stale") >= 1
+        assert st["abandoned"] is False and st["status"] == "ok"
+
+    class _Boom:
+        calls: list = []
+
+        async def get(self, path, params=None):
+            raise RuntimeError("data api down")
+
+    p2 = _pool(snap=None)
+    b = p2.add_book(ledger=100)
+    v = _Venue(held={SLUG: 100})
+    st2 = _tick(p2, v, now=now, http=_Boom())
+    assert _census(st2, "snap_market_unreadable") >= 1
+    assert st2["abandoned"] is False, "a market we cannot see is not a tick we abandon"
+    assert b["state"] == "live" and not _places(v), "held, never increased on an unread market"
+
+
+def test_a_slow_market_read_is_bounded_named_and_refuses_only_that_market(monkeypatch):
+    """A data API that is SLOW rather than down raises nothing: with no
+    per-read timeout the tick simply took minutes, with nothing
+    reconciled, no TTL cancelled, live rests standing and no census name
+    anywhere. The client's 25 s timeout is per-request and shared with
+    `_confirm_gone`; it is not a bound on this read."""
+    now = time.time()
+    monkeypatch.setattr(ml, "_SNAP_READ_TIMEOUT_S", 0.01)
+
+    async def _slow(*a, **kw):
+        await asyncio.sleep(0.2)
+        return {"by_asset": {M: 300.0}, "long": 300.0, "complete": True, "ts": now}
+    monkeypatch.setattr(ml.whale_exits, "market_positions", _slow)
+    p = _pool(snap=None)
+    b = p.add_book(ledger=100)
+    v = _Venue(held={SLUG: 100})
+    st = _tick(p, v, now=now)
+    assert st["snap_market_slow"] == 1 and _census(st, "snap_market_unreadable") >= 1
+    assert st["abandoned"] is False and b["state"] == "live" and not _places(v)
+    assert ml._SNAP_READ_TIMEOUT_S == 0.01
+    src = inspect.getsource(ml._market_snap)
+    assert "asyncio.wait_for" in src and "_SNAP_READ_TIMEOUT_S" in src
+
+
+def test_the_per_market_read_has_its_own_budget_and_never_shortens_the_walk(monkeypatch):
+    """THE CAP COUNTS MARKETS. `t.reads` is what the candidate walk
+    breaks on and it was one BBO read per market, so charging a second
+    read per market to it silently halved the markets a tick considers --
+    and that number is the denominator of P1's own gate. Two read
+    classes, two budgets of the same bounded size."""
+    now = time.time()
+    p = _pool(snap=None)
+    http, v = _mkt(300.0, 0.0), _Venue()
+    st = _tick(p, v, now=now, http=http)
+    bbos = len([c for c in v.calls if c[0] == "bbo"])
+    assert st["reads"] == bbos, "t.reads is the venue quote budget and nothing else"
+    assert st["snap_market_reads"] == 1 and st["reads"] >= 1
+    assert "t.reads >= ms.MAX_MARKETS_PER_TICK" not in inspect.getsource(ml._market_snap)
+
+    # its own budget still binds, under its own name
+    monkeypatch.setattr(ms, "MAX_MARKETS_PER_TICK", 0)
+    p2 = _pool(snap=None)
+    b = p2.add_book(ledger=0)
+    http2, v2 = _mkt(300.0, 0.0), _Venue()
+    st2 = _tick(p2, v2, now=now, http=http2)
+    assert not _pos_calls(http2), "past the budget the market is refused, not read"
+    assert st2["snap_market_reads"] == 0 and st2["snap_market_capped"] >= 1
+    assert _census(st2, "snap_market_capped") >= 1
+    assert _census(st2, "snap_market_unreadable") == 0, "budget pressure is not unreadability"
+    assert b["state"] == "live" and not _places(v2), "no increase on a market we did not read"
+
+
+def test_the_snapshot_counters_carry_a_denominator_that_does_not_flatter_us(monkeypatch):
+    """`fresh / reads` excludes exactly the failures -- the budget cap, a
+    market whose ids we could not form, a skipped tick -- so it reads
+    HIGHER than the share §3b M4 gates on. `snap_market_planned` counts
+    every market the tick asked about, before any refusal."""
+    now = time.time()
+    for arm in ("ok", "capped", "no_address", "no_sibling"):
+        p = _pool(snap=None)
+        # a planned market whatever the walk does; the sibling id lives
+        # on the BOOK row, so that is where its absence is set
+        p.add_book(ledger=0, **({"other_asset": None} if arm == "no_sibling" else {}))
+        if arm == "capped":
+            monkeypatch.setattr(ms, "MAX_MARKETS_PER_TICK", 0)
+        else:
+            monkeypatch.setattr(ms, "MAX_MARKETS_PER_TICK", 20)
+        if arm == "no_address":
+            p.whale_address = {}
+        st = _tick(p, _Venue(), now=now, http=_mkt(300.0, 0.0))
+        planned = st["snap_market_planned"]
+        assert planned >= 1, arm
+        assert planned == (st["snap_market_reads"] + st["snap_market_capped"]
+                           + st["snap_market_no_ids"] + st["snap_market_skipped"]), (arm, st)
+        if arm == "ok":
+            assert st["snap_market_fresh_reads"] == 1
+        else:
+            assert st["snap_market_fresh_reads"] == 0, arm
+            assert _census(st, "snap_market_capped") + _census(st, "snap_market_no_ids") >= 1, arm
+
+
+def test_a_market_with_no_sibling_token_is_refused_before_the_read_is_spent():
+    """Without the sibling id the other leg is unknown, not zero, and no
+    net can be formed. It burned a budget slot and a data-API throttle
+    and returned with no name at all."""
+    now = time.time()
+    p = _pool(snap=None)
+    p.token_cid = {M: CID}                      # no sibling token id anywhere
+    http = _mkt(300.0, 0.0)
+    st = _tick(p, _Venue(), now=now, http=http)
+    assert not _pos_calls(http), "refused before the read"
+    assert st["snap_market_reads"] == 0 and st["snap_market_no_ids"] >= 1
+    assert _census(st, "snap_market_no_ids") >= 1 and not p.books
+
+
+def test_a_closed_market_and_an_abandoning_tick_spend_no_venue_read():
+    """Reads spent before the cheap refusals. A candidate on a resolved
+    market is refused by `market_closed` whatever the read says, and an
+    abandoning tick plans nothing -- both used to pay for a read first,
+    and the second returned with no counter and no name."""
+    now = time.time()
+    p = _pool(snap=None)
+    p.markets[CID]["closed"] = True
+    http = _mkt(300.0, 0.0)
+    st = _tick(p, _Venue(), now=now, http=http)
+    assert not _pos_calls(http) and st["snap_market_planned"] == 0
+    assert _census(st, "market_closed") >= 1
+
+    # the skipped return has a name of its own
+    t = ml._Tick(pool=p, pmus=_Venue(), http=None, now=now, stats=ml._new_stats())
+    out = _run(ml._market_snap(t, "rn1", CID, M, N))
+    assert out == (None, None, None, None)
+    assert t.stats["snap_market_skipped"] == 1 and t.stats["snap_market_planned"] == 1
+
+
+def test_the_whale_address_is_read_once_per_whale_per_tick():
+    now = time.time()
+    p = _pool(snap=None)
+    p.add_book(ledger=0)
+    _tick(p, _Venue(), now=now, http=_mkt(300.0, 0.0))
+    reads = [q for q in p.sent if "ml-whale-address" in q[1]]
+    assert len(reads) == 1, reads
+
+
+def test_drift_is_the_net_rule_so_a_merged_pair_reads_zero():
+    """His fills say +5,000 Yes and +4,700 No; he merged 4,700 pairs
+    on-chain and the venue shows 300 and 0. The per-token rule reads
+    |5,000 - 300| / 5,000 = 0.94 and refuses every increase on that
+    market for the life of the book; the net reads 0."""
+    now = time.time()
+    assert rules.drift_rule(5000.0, 300.0, True, False).refusal == "drift"
+    assert rules.drift_net_rule(5000.0, 4700.0, 300.0, 0.0) == 0.0
+
+    d, src = ml._drift_for(_reading(his_long=5000.0, his_other=4700.0, snap_market_fresh=True,
+                                    mkt_long=300.0, mkt_other=0.0, mkt_net=300.0))
+    assert src == "market" and d.drift == 0.0 and d.increase_ok is True
+    d2, src2 = ml._drift_for(_reading(his_long=5000.0, his_other=4700.0, snap_long=300.0,
+                                      snap_other=0.0, fresh_read=True, fresh=True))
+    assert src2 == "book" and d2.refusal == "drift" and d2.increase_ok is False
+
+    # end to end: the same market, the same numbers, a book that opens
+    p = _pool(fills=_his(5000, other_size=4700), snap={M: 300.0, N: 0.0}, snap_at=now - 40)
+    _tick(p, _Venue(), now=now, http=_mkt(300.0, 0.0))
+    assert len(p.books) == 1, "a merged pair leg is not a lifelong drift lock-out"
+    plan = next(iter(p.books.values()))["last_plan"]
+    assert plan["drift"] == 0.0 and plan["drift_src"] == "market"
+    assert plan["snap_net_book"] == 300.0, "the walk's reading is recorded beside it"
+    # and with the read refused, the fallback is the per-token rule
+    p2 = _pool(fills=_his(5000, other_size=4700), snap={M: 300.0, N: 0.0}, snap_at=now - 40)
+    st2 = _tick(p2, _Venue(), now=now, http=_Http(status=500))
+    assert not p2.books and _census(st2, "drift") >= 1
+
+
+def test_last_fresh_agreed_is_a_read_and_not_a_literal():
+    """`rules.drift_rule` says the WORKER must assert `last_fresh_agreed`
+    and the default is False -- the SMALLER of two disagreeing readings.
+    It was the literal True at both call sites."""
+    tree = ast.parse(inspect.getsource(ml))
+    sites = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+        if name in ("drift_rule", "drift_net_rule"):
+            sites += 1
+            for kw in node.keywords:
+                if kw.arg == "last_fresh_agreed":
+                    assert not isinstance(kw.value, ast.Constant), ast.dump(kw.value)
+    assert sites >= 1, "the drift rules are still called"
+    through = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+               and getattr(n.func, "id", "") == "_drift_for"]
+    assert len(through) == 2, "both former call sites go through the asserting helper"
+
+    # what it asserts: the per-market net against the fills-derived net
+    agreed = _reading(his_long=300.0, snap_market_fresh=True, mkt_long=300.0,
+                      mkt_other=0.0, mkt_net=300.0)
+    assert ml._fresh_agreed(agreed) is True
+    assert ml._fresh_agreed(_reading(his_long=300.0, snap_market_fresh=True, mkt_long=299.5,
+                                     mkt_other=0.0, mkt_net=299.5)) is True
+    assert ml._fresh_agreed(_reading(his_long=300.0, snap_market_fresh=True, mkt_long=298.0,
+                                     mkt_other=0.0, mkt_net=298.0)) is False
+    assert ml._fresh_agreed(_reading(his_long=300.0)) is False, "no read is not agreement"
+
+
+def test_the_fallback_asserts_the_agreement_it_read_and_it_is_false_by_construction(monkeypatch):
+    """THE PIN THAT AN AST SHAPE COULD NOT MAKE. The old pin asserted
+    only that the keyword was not an `ast.Constant`, which `(1 == 1)`
+    satisfies; nothing in the suite would have noticed the literal coming
+    back. This one reads the VALUE the worker passes, over every tick
+    shape this file drives.
+
+    And it records the truth about that value rather than the programme's
+    claim for it: `_market_snap` returns either (None, None, None, None)
+    or (True, lo, ot, net), so the fallback branch -- entered exactly when
+    `snap_market_fresh is not True` -- is entered exactly when there is no
+    per-market net, and `_fresh_agreed` is False there BY CONSTRUCTION.
+    The 'smaller of two disagreeing readings' the programme feared losing
+    is carried by `_drift_for`'s drifted arm and by `drift_rule` itself;
+    the test below drives that."""
+    seen = []
+    real = rules.drift_rule
+
+    def _spy(*a, **kw):
+        seen.append(kw.get("last_fresh_agreed", "ABSENT"))
+        return real(*a, **kw)
+    monkeypatch.setattr(rules, "drift_rule", _spy)
+    now = time.time()
+    for pool_kw, http in (
+            (dict(snap={M: 300.0, N: 0.0}), _Http(status=500)),
+            (dict(snap={M: 200.0, N: 0.0}), _Http(status=500)),
+            (dict(snap=None), _Http(status=500)),
+            (dict(snap={M: 300.0, N: 0.0}, snap_at=NOW - 900), _Http(status=500)),
+            (dict(snap={M: 300.0, N: 0.0}), _mkt(300.0, 0.0)),
+            (dict(snap={M: 300.0, N: 0.0}), _mkt(200.0, 0.0))):
+        p = _pool(**pool_kw)
+        p.add_book(ledger=300)
+        _tick(p, _Venue(held={SLUG: 300}), now=now, http=http)
+    assert seen, "the fallback is still reached"
+    assert set(seen) == {False}, seen
+
+
+def test_the_per_market_net_sizes_the_reduction_from_the_smaller_reading():
+    """The property the literal True would have deleted, driven where it
+    actually lives: the DRIFTED market arm. On a fresh disagreement the
+    SMALLER reading sizes the sale, so we never keep holding a position
+    he may already have left. Changing that `"smaller"` to `"derived"`
+    fails here, which the ast pin could never see."""
+    now = time.time()
+    d, src = ml._drift_for(_reading(his_long=300.0, snap_market_fresh=True, mkt_long=200.0,
+                                    mkt_other=0.0, mkt_net=200.0))
+    assert src == "market" and d.increase_ok is False and d.reduce_from == "smaller"
+    assert ml._net_for(_reading(his_long=300.0, snap_market_fresh=True, mkt_long=200.0,
+                                mkt_other=0.0, mkt_net=200.0), d) == (200.0, 200.0)
+
+    p = _pool(fills=_his(300), snap=None)
+    p.add_book(ledger=300)
+    v = _Venue(held={SLUG: 300})
+    _tick(p, v, now=now, http=_mkt(200.0, 0.0))
+    pl = _places(v)
+    assert len(pl) == 1 and pl[0][4] is True and pl[0][3] == 100, "300 down to 200, not held"
+
+
+def test_the_unusable_per_market_reading_answers_what_the_rules_answer():
+    """The `d is None` arm read `"derived" if agreed else "smaller"`,
+    while `drift_rule` returns `"smaller"` unconditionally for a reading
+    that is not a size -- before it ever looks at `last_fresh_agreed`.
+    Unreachable from the worker (`net_positions` floors every token at
+    0.0 and `_market_snap` refuses a negative leg), so the divergence was
+    never seen; two rules for one question is corrected, not guarded."""
+    # the arm where the two answers PARTED: a negative leg (no number can
+    # be made) whose net nonetheless agrees with the derived net inside a
+    # share, so the old `"derived" if agreed else "smaller"` said derived
+    assert rules.drift_net_rule(-5.0, 0.0, 0.0, 5.0) is None
+    forced = _reading(his_long=-5.0, his_other=0.0, snap_market_fresh=True, mkt_long=0.0,
+                      mkt_other=5.0, mkt_net=-5.0)
+    assert ml._fresh_agreed(forced) is True, "the agreement clause says yes here"
+    d, src = ml._drift_for(forced)
+    assert src == "market"
+    assert (d.increase_ok, d.reduce_from, d.refusal, d.drift) == (False, "smaller",
+                                                                  "snapshot_stale", None)
+    assert d == rules.drift_rule(-5.0, 0.0, True, False), "one answer, not two"
+    # and the worker cannot reach it: a negative leg never leaves _market_snap
+    now = time.time()
+    p = _pool(snap=None)
+    st = _tick(p, _Venue(), now=now,
+               http=_Http(rows=[{"conditionId": CID, "asset": M, "size": -5}]))
+    assert not p.books and _census(st, "snap_market_unreadable") >= 1
+
+
+def test_the_plan_row_carries_the_readings_the_target_was_sized_from():
+    """A book that cannot be audited back to the reading that sized it is
+    a book nobody can grade. The two legs, the whole-book net beside the
+    per-market one, and the agreement the drift rule was handed."""
+    now = time.time()
+    p = _pool(fills=_his(300), snap={M: 290.0, N: 0.0}, snap_at=now - 40)
+    p.add_book(ledger=0)
+    _tick(p, _Venue(), now=now, http=_mkt(300.0, 0.0))
+    plan = next(iter(p.books.values()))["last_plan"]
+    assert plan["mkt_long"] == 300.0 and plan["mkt_other"] == 0.0
+    assert plan["snap_net"] == 300.0 and plan["snap_net_book"] == 290.0
+    assert plan["fresh_agreed"] is True and plan["drift_src"] == "market"
+    assert plan["snap_market_fresh"] is True
+
+
+# --- seam 1: a fill above the wire -------------------------------------
+
+def test_a_fill_above_the_wire_trips_and_freezes():
+    p = _pool()
+    b = p.add_book(ledger=0)
+    p.add_order(b, wire=0.30, qty=300)
+    v = _Venue(fills={"oid-1": (300.0, 0.32)})
+    v.rest("oid-1", price=0.30, qty=300)
+    st = _tick(p, v)
+    assert _census(st, "mirror_overspend") >= 1
+    assert p.state["mirror_live"] is False
+    assert p.state["mirror_live_trip"]["why"] == "mirror_overspend"
+    assert b["state"] == "frozen" and b["frozen_reason"] == "mirror_overspend"
+    assert b["ledger_net"] == 300, "the shares are ours whatever the venue charged"
+    assert not _places(v)
+    # the line itself: half a tick of tolerance, and a whole cent is over it
+    row = {"side": BUY, "tif": "GTC", "wire": 0.30}
+    assert ml._overspend_of(row, {"avg_px": 0.30}) is False
+    assert ml._overspend_of(row, {"avg_px": 0.305}) is False, "the half-cent grid"
+    assert ml._overspend_of(row, {"avg_px": 0.31}) is True
+    # and the number it reads is the ORDER'S CUMULATIVE AVERAGE, which is
+    # what the venue gives us: a big tranche at the wire dilutes a later
+    # one above it. Said out loud because §3b M10 wants at_or_better at
+    # 1.00 EXACT and whoever computes it must use this predicate and
+    # print `overspend_uncheckable` beside it.
+    assert "CUMULATIVE" in ml._overspend_of.__doc__
+
+
+def test_a_fill_at_create_above_the_wire_trips_before_the_post_only_latch():
+    """A post-only order the venue crossed anyway is precisely the fill
+    most likely to be above the wire, and `_place` books it BEFORE the
+    latch runs -- so the check must run on that call."""
+    def _place(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
+        return {"ok": True, "order_id": oid, "status": "filled",
+                "fill_price": round(price + 0.02, 2), "filled_shares": float(qty), "raw": {}}
+    p = _pool()
+    st = _tick(p, _Venue(place=_place))
+    assert _census(st, "mirror_overspend") >= 1 and p.state["mirror_live"] is False
+    assert _census(st, "post_only_ignored") == 1
+    src = inspect.getsource(ml._place)
+    assert src.index("_book_delta") < src.index("_POST_ONLY_OK = False")
+
+
+def test_a_close_row_never_trips_overspend(monkeypatch):
+    """A CLOSE row's wire is deliberately 0.0, not None, so a naive
+    `avg_px > wire` is true for EVERY vanish flatten."""
+    assert ml._overspend_of({"side": SELL, "tif": "CLOSE", "wire": 0.0},
+                            {"avg_px": 0.29}) is False
+    assert ml._overspend_of({"side": BUY, "tif": "CLOSE", "wire": 0.0},
+                            {"avg_px": 0.29}) is False
+    p = _pool(fills=_his(300, sold=300), snap=None)
+    b = p.add_book(ledger=300, last_plan={"kind": "flatten_vanished", "vanish_since": NOW - 400})
+    p.add_order(b, side=SELL, wire=0.32, qty=300, kind="flatten_vanished", state="cancelled",
+                placed_ts=NOW - 400, done_at=NOW - 10, order_id=None)
+    v = _Venue(held={SLUG: 300})
+    st = _tick(p, v, http=_gone())
+    assert [c for c in v.calls if c[0] == "close"]
+    assert _census(st, "mirror_overspend") == 0 and p.state["mirror_live"] is True
+
+
+def test_an_unreadable_avg_px_counts_but_does_not_trip():
+    p = _pool()
+    b = p.add_book(ledger=0)
+    p.add_order(b, wire=0.30, qty=300)
+    v = _Venue(fills={"oid-1": (300.0, None)}, held={SLUG: 300})
+    v.rest("oid-1", price=0.30, qty=300)
+    st = _tick(p, v)
+    assert _census(st, "overspend_uncheckable") >= 1
+    assert p.state["mirror_live"] is True and b["state"] != "frozen"
+    assert b["ledger_net"] == 300 and b["avg_cost"] == 0.30, "booked at the wire, as before"
+    assert ml._overspend_of({"side": BUY, "tif": "GTC", "wire": None}, {"avg_px": 0.31}) is None
+    assert ml._overspend_of({"side": BUY, "tif": "GTC", "wire": 0.30}, {"avg_px": None}) is None
+
+
+# --- the gate's own instrument ------------------------------------------
+
+def test_the_gate_counters_survive_the_health_endpoints_sanitizer():
+    """The probe lines that grade this unit read `/api/health/services`,
+    and that endpoint publishes the heartbeat through `_sanitize_detail`,
+    which caps EVERY dict at 40 keys. `census` carries ~98, so
+    `.detail.census.<name>` is a REAL number for the first 40 names in
+    CENSUS_KEYS order and a STRUCTURAL ZERO for every name after them --
+    `snapshot_stale`, every `snap_market_*` name, `drift`,
+    `venue_ledger_disagree`, `wrong_sign_trip`, `order_lost`,
+    `post_only_ignored` and `mirror_flatten` are all past the cap. A gate
+    line that reads a counter it can never read anything but zero from
+    prints a pass that was never measured, which is worse than printing
+    nothing. `integ` is the projection that survives, and it is asserted
+    here against the REAL sanitizer, not a copy of it.
+
+    Driven on a tick that really freezes `venue_ledger_disagree`."""
+    from sportsassets.api import app as api_app
+    p = _pool()
+    b = p.add_book(ledger=100)
+    st = _tick(p, _Venue(held={SLUG: 400}))
+    assert b["state"] == "frozen" and b["frozen_reason"] == "venue_ledger_disagree"
+    assert _census(st, "venue_ledger_disagree") == 1
+    served = api_app._sanitize_detail(st)
+    # the defect, driven: the endpoint truncates the census and the name
+    # the gate stops on is one of the names it drops
+    assert served["census"]["_truncated_keys"] > 0
+    assert "venue_ledger_disagree" not in served["census"]
+    assert "snapshot_stale" not in served["census"]
+    # and the served block carries the same tick's real number
+    assert served["integ"]["venue_ledger_disagree"] == 1
+    assert served["integ"]["snap_market_planned"] == st["snap_market_planned"] >= 1
+    assert set(served["integ"]) == set(st["integ"]), "no key of it is dropped"
+    assert len(st["integ"]) < api_app._DETAIL_MAX_KEYS
+    # it is a PROJECTION of the counters, never a second place one is kept
+    assert "integ" not in ml.CENSUS_KEYS
+    assert all(k in ml.CENSUS_KEYS for k in ml._INTEG_CENSUS_KEYS)
+    zero = ml._new_stats()
+    assert set(zero["integ"]) == set(st["integ"]) and set(zero["integ"].values()) == {0}
+    # AND THE TOP LEVEL IS CAPPED AT 40 TOO. `integ` must never be the
+    # key that gets dropped. It is written in `_new_stats`, and every
+    # conditional key the tick adds later (`capped_tick`,
+    # `venue_positions`, `reaper_touched_error`, `abandon_reason`, ...)
+    # APPENDS after the base block, so `integ` can only be truncated if
+    # the base block itself grows past the cap. That is what is pinned.
+    order = list(ml._new_stats())
+    assert order.index("integ") < api_app._DETAIL_MAX_KEYS
+    assert len(order) <= api_app._DETAIL_MAX_KEYS, "the base block is over the cap"
+    assert "_truncated_keys" not in served, "the top level itself is not truncated"
 
 
 # ------------------------------------------------ 12. the census coverage

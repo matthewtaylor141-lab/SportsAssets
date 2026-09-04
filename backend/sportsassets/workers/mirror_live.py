@@ -105,6 +105,19 @@ log = logging.getLogger(__name__)
 POLL_S = 30.0
 WAKE_MIN_GAP_S = 5.0
 SERVICE = "mirror_live"
+# The per-market position read's wall-time bound. NOT an environment
+# read: it is a containment bound, not an operator dial. The shared
+# httpx client's 25 s timeout is not a per-read timeout -- it is
+# per-request and shared with `_confirm_gone` -- and a data API that is
+# merely SLOW raises nothing, so `ms.MAX_MARKETS_PER_TICK` (20) awaits
+# of up to 25 s inside a POLL_S of 30 s is a tick that runs for minutes
+# with nothing reconciled and no name for it. Five seconds is well clear
+# of the throttle's own pacing (data_api_max_rps 6.0 -> 0.17 s a read,
+# ~3.3 s for a whole tick's worth even if this worker had the budget to
+# itself), and 20 x 5 s bounds this read's contribution to a tick under
+# the floor of ms.SNAP_MAX_AGE_S, which is what the freshness clause
+# below is really measuring.
+_SNAP_READ_TIMEOUT_S = 5.0
 # A 'placing' row with no order id older than this is a placement whose
 # response was lost with the process (step O); younger, the placement
 # may still be the one in flight under this very tick's lock.
@@ -143,13 +156,16 @@ _OFF_VALUES = frozenset({"off", "0", "false", "no"})
 CENSUS_KEYS: tuple[str, ...] = (
     "mode_env_off", "mode_db_off", "mode_db_unreadable", "whales_unreadable",
     "tables_absent", "no_venue", "probe_disabled", "halted", "paused",
-    "overspend_halt", "loss_breaker", "loss_breaker_unreadable", "no_budget_room",
+    "overspend_halt", "mirror_overspend", "overspend_uncheckable",
+    "loss_breaker", "loss_breaker_unreadable", "no_budget_room",
     "mirror_day_cap", "mirror_loss_stop", "positions_unreadable",
     "open_orders_unreadable", "protected_ids_unreadable", "tick_abandoned",
     "no_ratio", "no_mark", "no_quote", "unmapped", "family", "per_side_unsupported",
     "market_closed", "market_unreadable", "game_too_far_out", "mapping", "edge_gate", "cell_gate",
     "clip_zero", "legacy_row", "slug_recent_copy", "underdog_coholds",
-    "venue_already_holds", "kalshi_claimed", "side_band", "snapshot_stale", "drift",
+    "venue_already_holds", "kalshi_claimed", "side_band", "snapshot_stale",
+    "snap_market_unreadable", "snap_market_capped", "snap_market_stale",
+    "snap_market_no_ids", "snap_market_skipped", "drift",
     "max_books", "first_fill_gate", "asset_claimed", "book_exists",
     "short_side_refused", "on_target", "under_one_share", "dead_band", "hysteresis",
     "no_price", "venue_ledger_disagree", "wrong_sign_trip", "order_state_unknown",
@@ -439,6 +455,38 @@ UPDATE live_orders SET raw = jsonb_set(COALESCE(raw, '{}'::jsonb), '{mirror,name
 _SQL_LEDGER_IDS = """
 SELECT order_id FROM live_orders WHERE us_market_slug = $1 AND order_id IS NOT NULL /* ml-ledger-ids */
 """
+# R7 -- WIDENING THIS QUERY TO EVERY NON-MIRROR LANE IS DEFERRED, and
+# the query below is deliberately unchanged. Two shapes were built and
+# both were driven into a defect, so the widening is left undone rather
+# than landed nearly-right:
+#
+#   * WIDENED AND UNSIGNED. `ms.account_positions` returns the slug's
+#     SIGNED netPosition -- the venue nets a condition's two tokens --
+#     so an unsigned sum of every foreign row is not an explanation: a
+#     per-fill PAIR (50 long-token shares and 50 other-token shares)
+#     nets to 0 at the venue and sums to 100 here, `explained` overshoots
+#     by 100 and the book freezes. That is the freeze R7 exists to
+#     remove, on the reversal path R7 itself names.
+#   * WIDENED AND SIGNED BY THE TWO TOKEN IDS. Signing by `asset = $2 /
+#     $3` fixes the pair and drops the DESK's own rows, because
+#     `live_executor._execute_manual_slug` writes a slug-direct buy as
+#     `asset = 'slug:<us_market_slug>'`, which is neither token. Shares
+#     this query explains TODAY would stop being explained, so a book
+#     that is live now would freeze for ever (`_thaw` needs venue ==
+#     explained, and there is no admin unfreeze) -- a REGRESSION, and on
+#     the desk's own positions.
+#
+# Signing such a row correctly means reading its side back out of
+# untyped JSON (`raw->'preview'->>'intent'`) on rows this worker does not
+# write, and that sign decides both a freeze and the number `mi.plan`
+# holds the ledger against -- get it backwards and the lane's venue
+# share reads too large and the sale is sized too big, the direction R3
+# exists to close. Not provable here, so not taken.
+#
+# What stands until it is: the desk's rows are explained, and a foreign
+# per-fill row on a slug a mirror book holds still freezes that book.
+# That freeze is HEAD's behaviour and it is contained (cancel-only,
+# named `venue_ledger_disagree`), where a wrong sign is not.
 _SQL_MANUAL_SHARES = """
 SELECT COALESCE(sum(filled_shares), 0)::float8 FROM live_orders
  WHERE us_market_slug = $1 AND COALESCE(whale_username, '') = 'manual'
@@ -580,9 +628,57 @@ class _Tick:
     misses: int = 0
     abandoned: bool = False
     snaps: dict = field(default_factory=dict)
+    # (whale, condition_id) -> the per-market read, taken at most once
+    # per market per tick (Phase 1); a refused or unreadable read is
+    # cached as the fail-closed tuple so it is not retried in the tick
+    mkts: dict = field(default_factory=dict)
+    addrs: dict = field(default_factory=dict)   # whale -> address, read once per tick
+    mkt_reads: int = 0                          # the per-market read's OWN budget
     open_by_book: dict = field(default_factory=dict)   # book_id -> (order row, status)
     nonterminal: set = field(default_factory=set)      # book ids with a non-terminal order
     books_seen: set = field(default_factory=set)       # (whale, condition_id)
+
+
+# THE COUNTERS AN OPERATOR SURFACE CAN ACTUALLY READ.
+# `/api/health/services` publishes this worker's stats through
+# `_sanitize_detail`, which caps EVERY dict at 40 keys and appends
+# `_truncated_keys` -- and `census` carries ~98. So `.detail.census.<name>`
+# reads a real number for the first 40 names in CENSUS_KEYS order and a
+# STRUCTURAL ZERO for every name after them: `snapshot_stale` (index 40),
+# every `snap_market_*` name, `drift`, `venue_ledger_disagree`,
+# `wrong_sign_trip`, `order_lost`, `post_only_ignored` and
+# `mirror_flatten` are all past the cap. A gate line reading those prints
+# a pass that was never measured, which is worse than printing nothing.
+#
+# `integ` is the fix that lives on THIS side of the wire: one extra
+# top-level key holding a small flat block of exactly the names the P1
+# and integrity gate lines quote, at depth 2 and far under the cap, so a
+# probe reads `.detail.integ.<name>` and gets the tick's real number. It
+# is a projection of `census` and the `snap_market_*` counters, never a
+# second place where a count is kept -- `_integ_block` reads them, it
+# never writes them. `api/app.py` needs no change and gets none.
+_INTEG_CENSUS_KEYS: tuple[str, ...] = (
+    "mirror_overspend", "overspend_uncheckable", "venue_ledger_disagree",
+    "wrong_sign_trip", "overfill", "order_lost", "post_only_ignored",
+    "mirror_flatten", "snapshot_stale", "drift", "snap_market_unreadable",
+    "snap_market_capped", "snap_market_stale", "snap_market_no_ids",
+    "snap_market_skipped",
+)
+_INTEG_STAT_KEYS: tuple[str, ...] = (
+    "snap_market_planned", "snap_market_reads", "snap_market_fresh_reads",
+    "snap_market_slow",
+)
+
+
+def _integ_block(stats: dict) -> dict:
+    """The served projection. Flat, numeric, and bounded by construction:
+    len(_INTEG_CENSUS_KEYS) + len(_INTEG_STAT_KEYS) keys, asserted under
+    the sanitizer's cap by this file's own test."""
+    census = stats.get("census") or {}
+    out = {k: int(census.get(k) or 0) for k in _INTEG_CENSUS_KEYS}
+    for k in _INTEG_STAT_KEYS:
+        out[k] = int(stats.get(k) or 0)
+    return out
 
 
 def _new_stats() -> dict:
@@ -592,7 +688,28 @@ def _new_stats() -> dict:
             "cancelled": 0, "flattened": 0, "closed_books": 0, "frozen_reasons": {},
             "census": {k: 0 for k in CENSUS_KEYS}, "recent": [], "abandoned": False,
             "skipped_backoff": False, "ops": 0, "reads": 0, "woken": [],
-            "reaper_touched_mirror": 0, "post_only": _POST_ONLY_OK}
+            "reaper_touched_mirror": 0, "post_only": _POST_ONLY_OK,
+            # MIRRORSNAP, always present so a reader can tell "never
+            # read" from "read and never fresh". THE DENOMINATOR IS
+            # `snap_market_planned` -- every distinct market this tick
+            # asked about, whatever became of the ask -- because
+            # fresh/reads would exclude exactly the failures (the budget
+            # cap, a market whose ids we could not form, a skipped tick)
+            # and so read HIGHER than the share §3b M4 gates on. The
+            # identity that must hold every tick is
+            #   planned = reads + capped + no_ids + skipped
+            # and `fresh_complete_share = snap_market_fresh_reads /
+            # snap_market_planned`. `snap_market_fresh_reads` is a COUNT
+            # here; the per-market bool of the same fact rides on the
+            # plan row as `snap_market_fresh` -- two surfaces, two
+            # names, never one name meaning two things.
+            "snap_market_planned": 0, "snap_market_reads": 0,
+            "snap_market_fresh_reads": 0, "snap_market_capped": 0,
+            "snap_market_no_ids": 0, "snap_market_skipped": 0,
+            "snap_market_stale": 0, "snap_market_slow": 0,
+            # present from the first tick, so a reader can tell "the
+            # worker has not run" from "it ran and every counter is 0"
+            "integ": {k: 0 for k in _INTEG_CENSUS_KEYS + _INTEG_STAT_KEYS}}
 
 
 def _increases_refusal(t: _Tick, whale: str) -> str | None:
@@ -1306,6 +1423,56 @@ async def _order_status(t: _Tick, oid: str) -> dict | None:
         return None
 
 
+# The venue's ladder. A BUY rest is FLOORED to it (rules.buy_wire), so
+# its own cent is the most it can ever pay in a book that behaved; half
+# a tick of tolerance covers the half-cent grid 42.9% of mapped markets
+# quote on, and 1e-4 covers float noise on a 4-place average. A fill a
+# whole cent above the wire is over that line and is the thing this
+# breaker exists to catch.
+_OVERSPEND_TICK = 0.01
+
+
+def _overspend_of(o: dict, st: dict) -> bool | None:
+    """Did this BUY fill above the cent we wired? True / False / None
+    (the comparison could not be made).
+
+    THE MIRROR HAD NO COUNTERPART TO THE PER-FILL LANE'S OVERSPEND
+    BREAKER. `rules.book_buy` accepts any finite price in (0,1) and is
+    never handed the order's wire, so a rest that filled above its own
+    cent inflated `avg_cost`, `gross_buy_usd` and the day's spend with
+    nothing anywhere to detect it -- and §4's `at_or_better = 1.00`
+    invariant had no instrument at all. `_book_delta` is the single
+    booking entry point for all three fill paths and it holds the wire.
+
+    A CLOSE ROW IS EXEMPT BY NAME. `close_position` has no cent of its
+    own and its wire is deliberately 0.0, not None, so `avg_px > wire`
+    is true for every vanish flatten; comparing it would trip the lane
+    off on the one order that is working correctly.
+
+    Only a BUY. A SELL filling above its wire is a better sale, and
+    refusing it would freeze books for making money.
+
+    THE NUMBER IT READS IS THE ORDER'S CUMULATIVE AVERAGE, and that is a
+    real limit on it, stated rather than hidden. `avg_px` is the venue's
+    average over the WHOLE order (`pmus._norm_order` maps `avgPx`), while
+    `inc` is one tranche: 300 shares at a 0.30 wire followed by 1 share
+    at 0.99 averages 0.3023 and does not trip. The venue gives no
+    per-tranche price and reconstructing one from the booked cash would
+    invent a number, so the check is what the venue reports. TWO
+    CONSEQUENCES FOR WHOEVER COMPUTES §3b M10's `at_or_better = 1.00
+    EXACT`: it must use THIS predicate (the half-tick tolerance
+    included, or the gate fails on the half-cent grid 42.9% of mapped
+    markets quote on while the breaker is correctly silent), and it must
+    print `overspend_uncheckable` beside it as the denominator, or a
+    venue that omits `avgPx` reads as a perfect score."""
+    if str(o.get("side") or "") != BUY or str(o.get("tif") or "") == "CLOSE":
+        return False
+    avg, wire = _num(st.get("avg_px")), _num(o.get("wire"))
+    if avg is None or not (0.0 < avg < 1.0) or wire is None or not (0.0 < wire < 1.0):
+        return None
+    return avg > wire + _OVERSPEND_TICK / 2.0 + 1e-4
+
+
 async def _book_delta(t: _Tick, o: dict, book: dict, st: dict, maker: bool,
                       taker_at_placement: bool = False) -> str | None:
     filled = _num(st.get("filled_shares"))
@@ -1327,6 +1494,23 @@ async def _book_delta(t: _Tick, o: dict, book: dict, st: dict, maker: bool,
                   "nothing booked", o["id"])
         await _freeze(t, book, "no_price")
         return "no_price"
+    over = _overspend_of(o, st)
+    if over is None:
+        # THE COMPARISON COULD NOT BE MADE, so it is counted and said
+        # out loud -- never a trip on an absent number, and never
+        # hidden. The fill still books at today's fallback.
+        _mirror_stop("overspend_uncheckable", o["whale"])
+    elif over:
+        # BEFORE the booking, so a booking that fails cannot lose the
+        # trip, and before `_place`'s post-only latch runs: a post-only
+        # order the venue crossed anyway is precisely the fill most
+        # likely to be above the wire. The shares are still booked
+        # below -- they are ours whatever we paid, and a ledger that
+        # does not hold them is a venue-vs-ledger freeze on top.
+        detail = {"book": book["id"], "order": o["id"], "avg_px": _num(st.get("avg_px")),
+                  "wire": _num(o.get("wire")), "shares": round(inc, 4)}
+        await _trip_live_off(t, "mirror_overspend", detail)
+        await _freeze(t, book, "mirror_overspend", detail)
     try:
         out = await _book_fill(t, o, book, inc, px, maker, taker_at_placement)
     except Exception as exc:  # noqa: BLE001 — a write failure is named; the cursor did not move
@@ -1557,6 +1741,18 @@ class _Reading:
     manual: float
     market: dict | None
     market_live: bool | None      # None: the markets row could not be read (never "closed")
+    # THE PER-MARKET READ (Phase 1). Appended last so a positional
+    # construction keeps its meaning. `snap_market_fresh` is True ONLY
+    # when the venue answered FOR THIS CONDITION -- naming at least one
+    # of its two tokens, the other leg then reading 0.0 per the callee's
+    # contract -- inside the freshness window; it is None otherwise --
+    # never False -- because admission and every consumer test
+    # `is not True`, so a fact that was not read refuses rather than
+    # admits.
+    snap_market_fresh: bool | None = None
+    mkt_long: float | None = None
+    mkt_other: float | None = None
+    mkt_net: float | None = None
 
 
 async def _read_market(t: _Tick, whale: str, cid: str, slug: str, la: str, oa: str | None,
@@ -1591,9 +1787,200 @@ async def _read_market(t: _Tick, whale: str, cid: str, slug: str, la: str, oa: s
         manual = 0.0
     mk = market if market is not None else await _market(t, cid)
     market_live = None if mk is None else bool(mk["closed"] is False and mk["resolved"] is False)
+    # THE MARKETS ROW FIRST, THEN THE VENUE READ. A candidate on a
+    # closed or resolved market is refused by `market_closed` whatever
+    # the per-market read says, so spending a data-API read and a budget
+    # slot on it before the cheap refusal buys nothing (a book on such a
+    # market never reaches here: `_tick_book` takes its closing branch
+    # above). `market_live is None` is an UNREADABLE row, not a closed
+    # one, and it still reads: the book must keep managing down.
+    if market_live is False:
+        mkf, ml_long, ml_other, mnet = None, None, None, None
+    else:
+        mkf, ml_long, ml_other, mnet = await _market_snap(t, whale, cid, la, oa)
     return _Reading(whale, cid, slug, la, oa, fills, his_long, his_other, snap, age,
                     bool(partial), fresh_read, fresh, _snap_of(la), _snap_of(oa), bid, ask,
-                    _mark_of(bid, ask), venue, manual, mk, market_live)
+                    _mark_of(bid, ask), venue, manual, mk, market_live,
+                    mkf, ml_long, ml_other, mnet)
+
+
+_MktSnap = tuple[bool | None, float | None, float | None, float | None]
+
+
+async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None) -> _MktSnap:
+    """ONE `whale_exits.market_positions` read of BOTH tokens of THIS
+    condition, once per book and per candidate per tick, on its own
+    bounded budget. Returns (snap_market_fresh, long, other, net).
+
+    THIS IS THE READ THE MIRROR HAD NO CALLER FOR. `market_positions`
+    has existed and been tested since Phase 1 was specified and nothing
+    in `sportsassets/` called it, which is the single reason the mirror
+    opens no book: the whole-book walk beside `_RAW_KEY` is truncated on
+    every probe of RN1 (one token `n/a` every read), so `snap_fresh` is
+    never True for him and admission refuses `snapshot_stale` on every
+    candidate. This read answers for ONE market and replaces that walk
+    as the position source for that market alone.
+
+    WHAT "COMPLETE" MEANS HERE, AND WHY IT IS NOT "BOTH TOKENS CAME
+    BACK". It was both-or-nothing, and that refused the ordinary
+    one-sided directional position: a whale who has only ever held the
+    long token of a condition has ONE row, so the read never read fresh
+    and admission kept refusing `snapshot_stale` -- P1's whole purpose,
+    unmet for the common case, and §3b M4's `fresh_complete_share >=
+    0.95` unreachable unless nearly all his markets were two-legged. The
+    CALLEE settles it and says the opposite about the same response:
+    `market_positions` returns `complete=True` and reads an absent long
+    leg as 0.0 ("exactly as `_confirm_gone` reads that absence"), and it
+    can: the query is per-condition with `limit=100` over a condition
+    that has exactly TWO tokens, so it cannot be truncated, and the
+    callee refuses a row from any other condition, an empty list, a
+    duplicate asset and a size that is not a finite number >= 0. An
+    absent leg in an answer like that is a ZERO, not an unknown.
+
+    So the test is: the answer must NAME AT LEAST ONE of this
+    condition's two tokens, and then the other leg reads 0.0. Naming
+    neither is not an answer about this market -- it is an unfiltered
+    response the callee did not catch, and reading it would say "he is
+    flat" about a market we never saw, so it refuses by name. Not
+    knowing the sibling token id refuses too, and before the read:
+    without it the other leg is unknown rather than zero, and no net can
+    be formed.
+
+    THE FRESHNESS HALF IS STRUCTURAL, AND THIS IS THE HONEST STATEMENT
+    OF IT. `ts` is `time.time()` taken inside `market_positions` as the
+    read completes -- OUR clock, not the venue's -- so `t.now - ts` is
+    the negative of the time this tick has been running when the read
+    landed. The window therefore bounds two things and no others: a tick
+    that has been running longer than `ms.SNAP_MAX_AGE_S` before it acts
+    on a market, and a clock that jumped (hence `abs`). It CANNOT catch
+    venue-side staleness, because the venue supplies no stamp. What the
+    fact measures in every normal tick is COMPLETENESS, and whoever
+    quotes `MIRRORSNAP.fresh_complete_share` against §0's baseline of 0
+    must say so: that baseline was a freshness-and-completeness reading
+    of a different instrument (the whole-book snapshot). The read that
+    is discarded on this clause is COUNTED (`snap_market_stale`), so it
+    is never invisible.
+
+    THE BUDGET AND THE TIMEOUT. This read has its OWN budget,
+    `t.mkt_reads` against `ms.MAX_MARKETS_PER_TICK`, and is NOT charged
+    to `t.reads`. Sharing them was measured and was wrong: `t.reads` is
+    what the candidate walk breaks on, one BBO read per market, so
+    charging a second read per market silently halved the number of
+    markets a tick considers -- and that number is the denominator of
+    P1's own gate. Two read classes, two budgets of the same bounded
+    size (`capped_env`, so no shell can widen either). Each read is
+    additionally bounded in WALL TIME by `_SNAP_READ_TIMEOUT_S`: a data
+    API that is merely SLOW raises nothing, and 20 unbounded awaits
+    against a 25 s client timeout inside a 30 s poll is a tick that
+    stretches to minutes with nothing reconciled, no TTL cancelled and
+    no name anywhere. A timed-out read is a refused market
+    (`snap_market_slow` beside `snap_market_unreadable`), never a
+    refused tick.
+
+    UNREADABLE CONTRACT: a None, raising or timed-out read refuses THAT
+    MARKET under `snap_market_unreadable` and NEVER abandons the tick --
+    no `_abandon`, no raise out of this function, no miss-streak. A
+    market we cannot see is a market we do not trade this tick; every
+    other book in the tick is unaffected. Anything short of True leaves
+    `snap_market_fresh` None, so admission refuses `snapshot_stale`
+    exactly as today and the drift fact falls back to the whole-book
+    rule. READ THE NAME PRECISELY WHEN GRADING IT: what is refused is
+    the READ, and an EXISTING book whose whole-book walk is fresh still
+    plans on that walk (nothing new is admitted, and increases stay
+    gated by the fallback drift rule). So `snap_market_unreadable` is a
+    count of refused readings, not of refused markets, and §3b's
+    "<= 5% of market-ticks" is a share of readings."""
+    key = (str(whale or "").lower(), str(cid))
+    if key in t.mkts:
+        return t.mkts[key]
+    out: _MktSnap = (None, None, None, None)
+    t.mkts[key] = out                     # cached before the read: one read per market per tick
+    # PLANNED: the honest denominator. Counted here, before every
+    # refusal below, so no failure can fall out of the share §3b M4
+    # gates on.
+    t.stats["snap_market_planned"] = int(t.stats.get("snap_market_planned") or 0) + 1
+    if not la or not oa:
+        # no sibling token id: the other leg is unknown, not zero, and
+        # no net can be formed. Refused BEFORE the read, so it costs no
+        # budget slot and no data-API throttle.
+        t.stats["snap_market_no_ids"] = int(t.stats.get("snap_market_no_ids") or 0) + 1
+        _mirror_stop("snap_market_no_ids", whale)
+        return out
+    if t.http is None or t.abandoned:
+        # an abandoning tick plans nothing: spend no read on it. Named,
+        # because a silent return is a market missing from every counter
+        t.stats["snap_market_skipped"] = int(t.stats.get("snap_market_skipped") or 0) + 1
+        _mirror_stop("snap_market_skipped", whale)
+        return out
+    if t.mkt_reads >= ms.MAX_MARKETS_PER_TICK:
+        # past the budget: REFUSE the market, do not read it. Its OWN
+        # census name -- budget pressure is not venue unreadability, and
+        # §3b grades `snap_market_unreadable` at <= 5% of market-ticks
+        t.stats["snap_market_capped"] = int(t.stats.get("snap_market_capped") or 0) + 1
+        _mirror_stop("snap_market_capped", whale)
+        return out
+    address = await _whale_address(t, whale)
+    if not address:
+        t.stats["snap_market_no_ids"] = int(t.stats.get("snap_market_no_ids") or 0) + 1
+        _mirror_stop("snap_market_no_ids", whale)
+        return out
+    t.mkt_reads += 1
+    t.stats["snap_market_reads"] = int(t.stats.get("snap_market_reads") or 0) + 1
+    raw = None
+    try:
+        raw = await asyncio.wait_for(
+            whale_exits.market_positions(t.http, str(address), str(cid), long_asset=la),
+            timeout=_SNAP_READ_TIMEOUT_S)
+    except (asyncio.TimeoutError, TimeoutError):
+        # SLOW IS A FAILURE MODE WITH A NAME. Without this the tick just
+        # takes longer, silently, with live rests standing.
+        t.stats["snap_market_slow"] = int(t.stats.get("snap_market_slow") or 0) + 1
+        log.warning("mirror_live: per-market read of %s for %s timed out at %ss",
+                    cid, whale, _SNAP_READ_TIMEOUT_S)
+        raw = None
+    except Exception as exc:  # noqa: BLE001 — a raising read is an unread market, not a tick
+        log.warning("mirror_live: per-market read of %s for %s raised (%s)",
+                    cid, whale, type(exc).__name__)
+        raw = None
+    by = raw.get("by_asset") if isinstance(raw, dict) else None
+    ts = _num(raw.get("ts")) if isinstance(raw, dict) else None
+    if not isinstance(by, dict) or ts is None or raw.get("complete") is not True:
+        _mirror_stop("snap_market_unreadable", whale)
+        return out
+    if str(la) not in by and str(oa) not in by:
+        # the answer names neither token of this condition: it is not a
+        # reading of this market, and reading it would say "flat"
+        _mirror_stop("snap_market_unreadable", whale)
+        return out
+    if abs(t.now - ts) > ms.SNAP_MAX_AGE_S:
+        t.stats["snap_market_stale"] = int(t.stats.get("snap_market_stale") or 0) + 1
+        _mirror_stop("snap_market_stale", whale)
+        return out                        # read, but not fresh: `snapshot_stale`, not unreadable
+    lo = _num(by.get(str(la), 0.0))
+    ot = _num(by.get(str(oa), 0.0))
+    if lo is None or ot is None or lo < 0 or ot < 0:
+        _mirror_stop("snap_market_unreadable", whale)
+        return out
+    out = (True, lo, ot, mi.his_net(lo, ot))
+    t.mkts[key] = out
+    t.stats["snap_market_fresh_reads"] = int(t.stats.get("snap_market_fresh_reads") or 0) + 1
+    return out
+
+
+async def _whale_address(t: _Tick, whale: str) -> str | None:
+    """The whale's venue address, read ONCE per whale per tick. It was
+    re-read per market, which is one database round trip per market per
+    tick for a value that cannot change inside a tick. An unreadable
+    read is cached as None too: it is a fact about this tick."""
+    key = str(whale or "").lower()
+    if key in t.addrs:
+        return t.addrs[key]
+    try:
+        address = await t.pool.fetchval(_SQL_WHALE_ADDRESS, key)
+    except Exception:  # noqa: BLE001 — no address is no read
+        address = None
+    t.addrs[key] = str(address) if address else None
+    return t.addrs[key]
 
 
 def _his_level(fills: list, long_asset: str | None, other_asset: str | None,
@@ -1632,14 +2019,133 @@ def _his_level(fills: list, long_asset: str | None, other_asset: str | None,
     return best[1] if best else None
 
 
+def _fresh_agreed(r: _Reading) -> bool:
+    """`last_fresh_agreed` for the drift rule: True ONLY when the
+    per-market net and the fills-derived net agree within one share.
+
+    IT WAS A HARD-CODED `True` AT BOTH CALL SITES while the rule's own
+    contract says the WORKER must assert it and the default is False --
+    the SMALLER of two disagreeing readings. One share is the tolerance
+    because it is the tolerance every other holding comparison in this
+    lane uses (`mi.VENUE_LEDGER_TOL_SHARES`) and because a sub-share
+    difference cannot change a whole-share target. No per-market net
+    (not read, not fresh, not complete) is not agreement: it is False.
+
+    WHAT THIS VALUE CAN AND CANNOT DO, MEASURED, BECAUSE THE PROGRAMME
+    OVERSTATES IT. Its ONE consumer is `drift_rule`'s `last_fresh_agreed`
+    keyword on `_drift_for`'s fallback branch. That branch is entered
+    exactly when `snap_market_fresh is not True`, and `_market_snap`
+    returns either (None, None, None, None) or (True, lo, ot, net), so on
+    that branch `r.mkt_net` is None and THIS FUNCTION IS FALSE BY
+    CONSTRUCTION -- not by accident, by the shape of the two returns. It
+    is still computed and still passed, because a literal there is the
+    shape that let the old defect survive a review, and because a future
+    reading that is fresh-but-not-per-market would make it live; it is
+    recorded on every plan row (`fresh_agreed`) so it can be graded
+    rather than asserted. `test_the_fallback_asserts_the_agreement_it_read`
+    pins the value actually passed, so restoring a literal -- `True`,
+    `(1 == 1)`, or anything else -- fails.
+
+    AND THE PROPERTY THE PROGRAMME FEARED LOSING IS CARRIED ELSEWHERE,
+    which is the honest statement of it. "Sell down to the smaller of two
+    disagreeing readings" is delivered on the market branch by
+    `_drift_for`'s `reduce_from="smaller"` when the net drift is over
+    `MIRROR_DRIFT_MAX`, and on the book branch by `drift_rule` itself;
+    `_net_for` consults `reduce_from` only when it HAS a snapshot, and on
+    the fallback branch it has none (`r.fresh` is False there by the same
+    predicate), so it returns the derived reading whatever this value
+    says. `test_the_per_market_net_sizes_the_reduction_from_the_smaller_reading`
+    drives that property end to end."""
+    if r.mkt_net is None:
+        return False
+    a, b = _num(mi.his_net(r.his_long, r.his_other)), _num(r.mkt_net)
+    if a is None or b is None:
+        return False
+    return abs(a - b) <= mi.VENUE_LEDGER_TOL_SHARES
+
+
+def _drift_for(r: _Reading) -> tuple[rules.DriftRule, str]:
+    """(the drift rule in force, the reading it was measured on).
+
+    THE NET, NOT THE TOKEN, whenever the per-market read is fresh and
+    complete. `drift_net_rule` has existed with no caller; the per-token
+    `drift_rule` reads a MERGED PAIR LEG as drift 1.0 on each token --
+    his fills say +5,000 Yes and +5,000 No, he merges the pair on-chain
+    and the venue shows 0 and 0 -- which locks every increase out of
+    that market for the life of the book against a true net of 0. Merged
+    pairs are a large share of his shares, so that is not a corner: it
+    is most of the mirror's refusals. On the net the same market reads
+    0. A one-sided add reads the same number under both rules, so this
+    loosens nothing where the per-token rule was right.
+
+    The number and the position source are the SAME reading by
+    construction: `_net_for` sizes from the per-market net exactly when
+    this returns 'market'. Mixing them -- drift measured against one
+    reading, the target sized off another -- is how "the smaller of two
+    disagreeing readings" stops meaning anything.
+
+    'book' is the fallback: the whole-book walk's per-token rule, with
+    `last_fresh_agreed` asserted by `_fresh_agreed`, never a literal.
+
+    THE UNUSABLE-READING ARM ANSWERS EXACTLY WHAT `drift_rule` ANSWERS.
+    It read `"derived" if agreed else "smaller"`, which is a DIVERGENCE
+    from the rule it stands in for: `drift_rule` returns `"smaller"`
+    unconditionally for a reading that is not a size, before it ever
+    looks at `last_fresh_agreed`. The arm is unreachable from this worker
+    (`mi.net_positions` floors every token at 0.0, `_num` rejects NaN and
+    infinities, and `_market_snap` refuses a negative leg, so
+    `drift_net_rule` cannot return None on a fresh per-market read) --
+    which is why the divergence was never seen and why it is corrected
+    rather than guarded. Two rules for one question is how the next
+    reader gets the wrong answer."""
+    if r.snap_market_fresh is True:
+        d = rules.drift_net_rule(r.his_long, r.his_other, r.mkt_long, r.mkt_other)
+        if d is None:
+            # a reading that is not a size (a negative net leg): the
+            # per-market read is no reading at all -- stale, and from the
+            # SMALLER, which is `drift_rule`'s own answer to the same
+            # question (rules: the `d is None` return, before the
+            # `last_fresh_agreed` branch)
+            return rules.DriftRule(False, "smaller", "snapshot_stale", None), "market"
+        if d > float(rules.MIRROR_DRIFT_MAX):
+            return rules.DriftRule(False, "smaller", "drift", d), "market"
+        return rules.DriftRule(True, "derived", None, d), "market"
+    return rules.drift_rule(r.his_long, r.snap_long, r.fresh_read, r.snap_partial,
+                            last_fresh_agreed=_fresh_agreed(r)), "book"
+
+
+def _book_net(r: _Reading) -> float | None:
+    """The WHOLE-BOOK walk's net for this market, or None when that walk
+    was not a fresh complete reading. Recorded beside the per-market net
+    on the plan row and used nowhere else: the rest of this lane refuses
+    to act until two independent readings agree, and the two venue
+    readings of the same market parting is exactly what MIRRORSNAP has
+    to be able to see. The per-market read outranks it (narrower, this
+    tick, complete for this market where the walk is truncated on every
+    probe of him) and that preference is deliberate -- but silent
+    preference with no record of the loser is not a reading, it is a
+    choice nobody can audit."""
+    if r.fresh and r.snap_long is not None and r.snap_other is not None:
+        return mi.his_net(r.snap_long, r.snap_other)
+    return None
+
+
 def _net_for(r: _Reading, drift: rules.DriftRule) -> tuple[float, float | None]:
     """(net used for the target, snapshot net). The POSITION is the
     exit worker's fresh complete snapshot (addendum section 1); on a
     fresh disagreement the smaller reading sizes the reduction; with
-    no fresh read the derived reading carries reductions only."""
+    no fresh read the derived reading carries reductions only.
+
+    Phase 1 adds the per-market read of both tokens ahead of the
+    whole-book walk: it is the same venue, narrower, complete for THIS
+    market and stamped this tick, where the walk is truncated on every
+    probe of him. It is preferred when it read fresh and complete so
+    that the drift number and the position come from one reading."""
     derived = mi.his_net(r.his_long, r.his_other)
     snap_net = None
-    if r.fresh and r.snap_long is not None and r.snap_other is not None:
+    if r.snap_market_fresh is True and r.mkt_net is not None:
+        snap_net = float(r.mkt_net)
+    elif r.fresh and r.snap_long is not None and r.snap_other is not None:
         snap_net = mi.his_net(r.snap_long, r.snap_other)
     if snap_net is None:
         return derived, None
@@ -1840,15 +2346,26 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     r = await _read_market(t, w, cid, slug, la, oa, fills, market=mk)
     if t.abandoned:
         return
-    drift = rules.drift_rule(r.his_long, r.snap_long, r.fresh_read, r.snap_partial,
-                             last_fresh_agreed=True)
-    net, snap_net = _net_for(r, drift)
     ledger = int(book.get("ledger_net") or 0)
+    drift, drift_src = _drift_for(r)
+    net, snap_net = _net_for(r, drift)
     venue_int = int(r.venue)
     # the plan's numbers, written whatever happens below
     plan: dict[str, Any] = {"bid": r.bid, "ask": r.ask, "mark": r.mark, "venue": r.venue,
                             "manual": r.manual, "ledger": ledger, "net": net,
                             "snap_net": snap_net, "fresh": r.fresh, "drift": drift.drift,
+                            # MIRRORSNAP reads these: the per-market
+                            # read's own verdict for THIS market, the two
+                            # legs it was formed from (so a merged-pair
+                            # diagnosis can be reconstructed from the row
+                            # alone), the whole-book walk's net beside it
+                            # where the two venue readings can be seen to
+                            # part, the drift measured on the net rather
+                            # than on one token, and the agreement the
+                            # drift rule was handed
+                            "snap_market_fresh": r.snap_market_fresh, "drift_src": drift_src,
+                            "mkt_long": r.mkt_long, "mkt_other": r.mkt_other,
+                            "snap_net_book": _book_net(r), "fresh_agreed": _fresh_agreed(r),
                             "at": t.now}
     prior_plan = _jsonish(book.get("last_plan")) or {}
     # the flat clock carries only while the book IS flat: a re-bought
@@ -2418,6 +2935,16 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
     # Sole now needs BOTH readings to say so -- the tick's fractional walk
     # and this fresh floored read -- and a disagreement between two
     # independent sources is not a reading of the account.
+    # AND THE EXPLAINED-SHARE QUERY IS DELIBERATELY NOT FED IN HERE.
+    # R7's text asks for it (`_SQL_MANUAL_SHARES`, widened or not); it
+    # must not be done, and this is written so that a later builder does
+    # not "complete" the unit. Both readings compare the ledger against
+    # the TOTAL venue holding, which already includes any foreign shares,
+    # so a foreign holding correctly reads NOT sole today. Subtracting
+    # the explained shares could only ever make `sole` MORE likely -- and
+    # `sole` is what sends `close_position`, the one order this worker
+    # sends with no clamp to its own book. That is the exact direction R3
+    # exists to close.
     venue_now = math.ceil(abs(float(r.venue)))
     sole_walk = ledger >= venue_now
     sole_read = ledger >= int(held)
@@ -2548,8 +3075,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     r = await _read_market(t, w, cid, slug, la, oa, fills)
     if t.abandoned:
         return
-    drift = rules.drift_rule(r.his_long, r.snap_long, r.fresh_read, r.snap_partial,
-                             last_fresh_agreed=True)
+    drift, _drift_src = _drift_for(r)
     net, _snap_net = _net_for(r, drift)
     ratio = (t.ratios.get(w) or {}).get("ratio")
     anchor = (t.ratios.get(w) or {}).get("anchor_usd")
@@ -2632,7 +3158,13 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
         slug_recent_copy=slug_recent, underdog_coholds=underdog,
         venue_net=(None if t.positions is None else r.venue), kalshi_claimed=kalshi,
         side_band_hit=side_band_hit, snap_fresh=r.fresh, drift=drift.drift,
-        books_live=books_live, opened_today=opened_today, first_fill_ok=first_fill_ok)
+        books_live=books_live, opened_today=opened_today, first_fill_ok=first_fill_ok,
+        # EITHER SIGHT OF HIM IS A SIGHT (rules: the clause already
+        # reads both). The whole-book walk is truncated on every probe
+        # of him, so this is the flag that lets a book open at all --
+        # and it is True only on a read this tick, for THIS condition,
+        # that named at least one of its two tokens.
+        snap_market_fresh=r.snap_market_fresh)
     refusal = rules.admission(facts)
     if refusal:
         _mirror_stop(refusal, w)
@@ -2688,6 +3220,9 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
             stats["ops"], stats["reads"] = t.ops, t.reads
             stats["recent"] = list(_RECENT)[-20:]
             stats["post_only"] = _POST_ONLY_OK
+            # last, and in the `finally`: an abandoned or raising tick
+            # publishes the counters it did reach, never a stale block
+            stats["integ"] = _integ_block(stats)
             _current_stats = None
     return stats
 

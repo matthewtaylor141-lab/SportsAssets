@@ -1300,6 +1300,30 @@ def test_booking_is_a_pure_function_and_idempotency_is_the_cursors():
     assert s0 == before
 
 
+def test_book_buy_never_sees_the_wire_and_its_refusal_list_is_unchanged():
+    """The mirror's overspend seam, stated where it lives. `book_buy` is
+    handed a PRICE, never the order's wire, so any finite price in (0,1)
+    books: a rest that fills above its own cent inflates avg_cost and
+    gross_buy_usd here with nothing anywhere to detect it. The
+    comparison belongs to the caller -- `mirror_live._book_delta` holds
+    `o["wire"]` and is the single booking entry point for all three fill
+    paths -- and this pins that it was NOT added here, because a
+    refusal in this function would strand shares the venue has already
+    given us."""
+    s = r.book_buy(r.BookState(), 100, 0.30).state
+    assert s.avg_cost == 0.30
+    over = r.book_buy(s, 100, 0.35)          # five cents above any cent we could wire
+    assert over.refusal is None and over.state.ledger_net == 200
+    assert round(over.state.avg_cost, 4) == 0.325 and over.state.gross_buy_usd == 65.0
+    assert "wire" not in inspect.signature(r.book_buy).parameters
+    tree = ast.parse(inspect.getsource(r.book_buy))
+    names = {n.value for n in ast.walk(tree)
+             if isinstance(n, ast.Constant) and isinstance(n.value, str) and "\n" not in n.value}
+    assert names == {"bad_delta", "nothing_to_book", "bad_price", "bad_usd", "bad_state",
+                     "avg_cost_unknown"}, sorted(names)
+    assert "mirror_overspend" in (r.book_buy.__doc__ or ""), "the contract names its caller"
+
+
 def test_booking_refuses_garbage_and_never_corrupts_the_ledger():
     s = r.book_buy(r.BookState(), 40, 0.50).state
     bad_nums = (math.nan, math.inf, -math.inf, True, False, "5", b"5", None, 10**400)
