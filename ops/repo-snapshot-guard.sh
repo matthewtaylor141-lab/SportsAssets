@@ -52,7 +52,15 @@ marker="/tmp/.repo-guard-${slug}-${head}"
 [[ -f "$marker" ]] && exit 0
 
 git -C "$root" fetch origin "$branch" --quiet 2>/dev/null
-remote=$(git -C "$root" rev-parse "origin/$branch" 2>/dev/null)
+# --verify -q, not a bare rev-parse (2026-09-05): on a branch with NO remote
+# counterpart -- every workflow worktree branch -- a bare `git rev-parse
+# origin/<branch>` exits 128 but still ECHOES the ref name to stdout, so
+# $remote held the literal string "origin/worktree-..." and both ancestor
+# checks below failed on a ref that does not exist. The guard then denied
+# every edit in every worktree as "diverged", and the no-remote branch on
+# the next line -- the one written for exactly this case -- never ran.
+# With --verify -q a missing ref yields an empty string, as intended.
+remote=$(git -C "$root" rev-parse --verify -q "origin/$branch" 2>/dev/null)
 if [[ -z "$remote" ]]; then : > "$marker"; exit 0; fi
 
 # At or ahead of origin — normal, including unpushed local commits. The Stop
