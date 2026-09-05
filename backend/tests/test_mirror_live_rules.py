@@ -58,13 +58,19 @@ def _p2_numbers(**over):
 def test_caps_carry_the_spec_defaults_and_reuse_the_shared_ones():
     assert r.MIRROR_NET_CAP_USD == mi.MARKET_NET_CAP_USD == 250.0
     assert (r.MIRROR_MAX_LIVE_BOOKS, r.MIRROR_MAX_BOOKS_PER_DAY) == (5, 5)
-    assert r.MIRROR_DAY_USD == 1250.0 and r.MIRROR_LOSS_STOP_USD == 250.0
+    # $250 -> $1,000 by owner decision, 2026-09-05
+    assert r.MIRROR_DAY_USD == 1250.0 and r.MIRROR_LOSS_STOP_USD == 1000.0
     assert r.MIRROR_MAX_ORDER_OPS_PER_TICK == 6 and r.MIRROR_MAX_REPLACES_PER_HOUR == 12
     assert r.MIRROR_REST_TTL_S == 600.0 and r.MIRROR_TAKE_AFTER_S == 120.0
     assert r.MIRROR_FLATTEN_REST_S == 300.0 and r.MIRROR_FLAT_CLOSE_S == 3600.0
     assert r.MIRROR_DRIFT_MAX == 0.05
     assert r.MIRROR_FROZEN_ALERT_S == 600.0 and r.MIRROR_FROZEN_NAME_TICKS == 3
-    assert r.MIRROR_FAMILIES == frozenset({"moneyline"})
+    # "everything he trades" (owner decision 2026-09-05): every sports
+    # family the grammar names; never crypto (another lane's venue),
+    # never unknown or blank (fail closed)
+    assert r.MIRROR_FAMILIES == frozenset({"moneyline", "spread", "total", "prop", "btts",
+                                           "exact_score"})
+    assert not ({"crypto", "unknown", ""} & r.MIRROR_FAMILIES)
     # the shared numbers are the shared objects, never restated
     assert r.MIN_PROOF_CLUSTERS is proof.MIN_PROOF_CLUSTERS
     assert r.Z95 is proof.Z95
@@ -1658,7 +1664,9 @@ def test_admission_admits_the_clean_candidate_and_names_the_first_refusal_in_ord
     expect = [
         ({"increases_ok": False, "increases_refusal": "mode_db_unreadable"}, "mode_db_unreadable"),
         ({"per_fill_usd": 0.0}, "clip_zero"),
-        ({"family": "total"}, "family"),
+        ({"family": "crypto"}, "family"),
+        ({"family": "unknown"}, "family"),
+        ({"family": ""}, "family"),
         ({"per_side": True}, "per_side_unsupported"),
         ({"market_closed": True}, "market_closed"),
         ({"market_resolved": True}, "market_closed"),

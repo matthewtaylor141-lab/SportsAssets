@@ -232,8 +232,14 @@ MIRROR_MAX_BOOKS_PER_DAY = int(capped_env("MIRROR_MAX_BOOKS_PER_DAY", 5))
 # Gross BUY dollars per rolling day on top of the sleeve's own caps.
 MIRROR_DAY_USD = capped_env("MIRROR_DAY_USD", 1250.0)
 # Mirror-own loss stop: 24 h realized including partial sales, which the
-# global breaker cannot see (it reads terminal rows only).
-MIRROR_LOSS_STOP_USD = capped_env("MIRROR_LOSS_STOP_USD", 250.0)
+# global breaker cannot see (it reads terminal rows only). $250 -> $1,000
+# by owner decision (2026-09-05 23:0xZ, asked as a multiple choice with
+# the program's own numbers beside each option: $250 is 20% of a
+# $1,250 day and trips on close to half of ordinary days at the copy
+# lane's measured daily ROI spread; he chose the program document's
+# figure). Still downward-only from the environment; still realized
+# only; still re-armed by hand (render-ops sql mirror-rearm).
+MIRROR_LOSS_STOP_USD = capped_env("MIRROR_LOSS_STOP_USD", 1000.0)
 # Venue writes per tick, replaces per book per hour: the venue 429s a
 # board walk above ~3 req/s and the copy lane shares the budget. The
 # ops budget floors at ONE (review finding): a SAFE or exits-only tick
@@ -269,9 +275,21 @@ MIRROR_DRIFT_MAX = capped_env("MIRROR_DRIFT_MAX", 0.05)
 # the gates endpoint after this many ticks (never as an `error` row).
 MIRROR_FROZEN_ALERT_S = capped_env("MIRROR_FROZEN_ALERT_S", 600.0)
 MIRROR_FROZEN_NAME_TICKS = int(capped_env("MIRROR_FROZEN_NAME_TICKS", 3))
-# Market families a book may open on (copy_sports.market_type_of);
-# derivatives are refused at admission by the name `family`.
-MIRROR_FAMILIES = frozenset({"moneyline"})
+# Market families a book may open on (copy_sports.market_type_of).
+# P1 opened on moneylines alone and refused derivatives at admission
+# by the name `family` (program decision 19: totals, spreads and props
+# were ~3% of his mapped dollars, to be admitted per family behind a
+# shadow week). OWNER DECISION 2026-09-05 (asked as a multiple choice
+# beside that recommendation): "everything he trades". So every sports
+# family the type function names is admitted; `crypto` is another
+# lane's venue and `unknown` (and blank) is the fail-closed reading of
+# a slug the grammar could not type -- neither is a book. The per-side
+# referee, the closed/resolved reads, the mapping quarantine and the
+# side band still stand in front of every one of these; this set only
+# stops refusing a derivative for BEING one. Its residuals (decision
+# 17's resolution-rule mismatches, decision 19's unmeasured fill
+# behaviour by family) are the owner's, accepted with the choice.
+MIRROR_FAMILIES = frozenset({"moneyline", "spread", "total", "prop", "btts", "exact_score"})
 # The flat tolerance in shares, ONE number for the ledger and the
 # bookings (addendum section 9): a fractional venue fill can leave a
 # ledger of 1e-8 that is not zero, and a book "held" by dust would never

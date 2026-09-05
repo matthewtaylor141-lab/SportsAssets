@@ -1099,7 +1099,9 @@ def test_every_increase_only_guard_refuses_by_name_cancels_buys_and_lets_a_reduc
     elif arm == "day":
         p.add_order(b, state="filled", cash_usd=2000.0, order_id="old")
     elif arm == "stop":
-        b["realized_pnl"] = -300.0
+        # one dollar past the stop, whatever the stop is ($1,000 since
+        # the owner's 2026-09-05 decision; $250 before)
+        b["realized_pnl"] = -(rules.MIRROR_LOSS_STOP_USD + 1.0)
     else:
         p.state["mirror_loss_stop"] = {"at": "x"}
     st = _tick(p, v)
@@ -1108,7 +1110,7 @@ def test_every_increase_only_guard_refuses_by_name_cancels_buys_and_lets_a_reduc
     pl = _places(v)
     assert len(pl) == 1 and pl[0][4] is True, pl                # the reduce still goes out
     if arm == "stop":
-        assert p.state["mirror_loss_stop"]["sum"] == -300.0
+        assert p.state["mirror_loss_stop"]["sum"] == -(rules.MIRROR_LOSS_STOP_USD + 1.0)
 
 
 def test_mirror_flatten_forces_the_vanish_path_on_every_live_book():
@@ -1864,7 +1866,10 @@ def test_every_admission_clause_refuses_a_new_book_by_name(monkeypatch, arm, nam
     kw = {}
     v = _Venue()
     if arm == "family":
-        kw["map_rows"] = [{"asset": M, "us_market_slug": "tsc-epl-ars-che-2026-09-02-o2pt5", "intent": INTENT}]
+        # a crypto-kind slug: the one family the grammar names that is
+        # never a book (owner decision 2026-09-05 admitted every SPORTS
+        # family, totals included -- a tsc- slug no longer refuses here)
+        kw["map_rows"] = [{"asset": M, "us_market_slug": "cpc-btc-100k-2026-09-02", "intent": INTENT}]
     elif arm == "per_side":
         kw["map_rows"] = [{"asset": M, "us_market_slug": "aec-atp-a-2026-09-02", "intent": INTENT},
                           {"asset": N, "us_market_slug": "aec-atp-b-2026-09-02", "intent": INTENT}]

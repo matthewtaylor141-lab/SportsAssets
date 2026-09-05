@@ -817,6 +817,25 @@ M1-total (all families) printed beside M1.
     RECOMMENDATION: one rest per book in P1; decide k after MIRRORLADDER prints the 30-day dollar share of
     ≥ 2-cent clusters; until then M11 charges the miss to queue and it is a §6 residual.
 
+### 5a. DECISIONS TAKEN 2026-09-05 (asked as multiple choice, the program's numbers beside each option)
+
+- SHORTS (decision 5): "longs first, shorts follow" — long books go live the moment the venue resumes
+  trading; the short side (P2: BUY_SHORT intent, short books, short exits) is built and reviewed now and
+  joins at the same rails once it passes. The owner's words: "we also need to make sure that we are
+  mirroring shorts".
+- LOSS STOP (decision 15): $1,000 at the full rails (was $250; MIRROR_LOSS_STOP_USD's code default).
+- THE SLEEVE (decisions 1 and 20): $10,000 of the account's $31,502 buying power is the mirror's pot.
+  Today the per-market ($250) and per-day ($1,250) caps size every order and the pot is not binding; it
+  becomes the ratio's denominator when Phase 3a reads his deployed capital (`why_bankroll` is still
+  `deployed_unreadable` in the mirror_ratio row).
+- FAMILIES (decisions 16 and 19): "everything he trades" — every sports family the slug grammar names
+  (moneyline, spread, total, prop, btts, exact_score) is admitted; crypto and unknown never are. The
+  per-side referee, the closed/resolved reads, the mapping quarantine and the side band still stand in
+  front of every family; decision 17's mismatch policy and 19's per-family fill behaviour are accepted
+  residuals.
+- RAMP: straight to the full size (5 books, $250 per market, $1,250 per day, the $1,000 stop) as soon
+  as the venue accepts the first order at the first rung (1 book, $25, $50).
+
 ## 6. WHAT "TO A TEE" CANNOT MEAN — the honest residuals, with numbers
 
 | residual | number | source |
