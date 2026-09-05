@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 from ..db import get_pool
 from ..sports import is_sport
@@ -28,13 +31,81 @@ log = logging.getLogger(__name__)
 WINDOWS: dict[str, timedelta | None] = {"7d": timedelta(days=7), "30d": timedelta(days=30), "all": None}
 
 
-@dataclass
-class Realization:
-    ts: datetime
-    amount: float
+def window_cutoffs(now: datetime) -> dict[str, datetime | None]:
+    """Inclusive lower bound of every window cut at `now` (None = all-time)."""
+    return {w: (now - span if span else None) for w, span in WINDOWS.items()}
 
 
-@dataclass
+# WHAT ONE POSITION RETAINS PER WINDOW: four doubles, UNBOXED, in one
+# array('d') per state — [realized, realized_c, notional, notional_c] for
+# each entry of WINDOWS, in WINDOWS order — plus one int whose bit i says
+# window i saw at least one realization event. These replace the per-fill
+# lists that OOM-killed the workers (see rebuild_positions). The first cut
+# of that fix (2026-09-05) kept the same numbers as a dict of three slotted
+# objects, ~690 B per position (the dict, three objects, twelve boxed
+# floats) against ~160 B for the array; the production position count is
+# not known from here and is plausibly six figures, so at the 2 GiB limit
+# that is hundreds of MB of headroom, not a nicety.
+_SLOTS_PER_WINDOW = 4
+_REALIZED, _NOTIONAL = 0, 2  # slot offsets; each one's compensation term sits at +1
+_WINDOW_INDEX: dict[str, int] = {w: i for i, w in enumerate(WINDOWS)}
+_ZERO_SUMS = array("d", [0.0]) * (_SLOTS_PER_WINDOW * len(WINDOWS))
+
+
+def _add_compensated(sums: array, at: int, x: float) -> None:
+    """sums[at] += x THE WAY builtin sum() ADDS A FLOAT. Until 2026-09-05
+    compute_rollups summed the retained events with `sum(...)`, which on
+    the production image (python:3.12-slim) is Neumaier-compensated: the
+    running total lives at sums[at], the compensation term at sums[at + 1],
+    updated exactly as CPython does. (On 3.11, where sum() is naive, the
+    old figure was itself the less accurate one.)"""
+    hi = sums[at]
+    t = hi + x
+    if abs(hi) >= abs(x):
+        sums[at + 1] += (hi - t) + x
+    else:
+        sums[at + 1] += (x - t) + hi
+    sums[at] = t
+
+
+def _compensated_total(sums: array, at: int) -> float:
+    """The total at sums[at] with its compensation folded in, as sum()
+    folds it on return — skipped when zero or non-finite, so an overflowed
+    sum stays inf instead of turning into nan."""
+    c = sums[at + 1]
+    return sums[at] + c if c and math.isfinite(c) else sums[at]
+
+
+class WindowAgg(NamedTuple):
+    """What ONE position contributes to ONE rollup window, READ BACK from
+    the state (PositionState.window) — a snapshot, not the storage.
+
+    `realized` sums the position's realization events (each sell at its
+    trade ts, the resolution at resolved_at) whose ts is at/after the
+    window's cutoff, in ledger order; `events` says there was at least
+    one; `notional` sums the BUY notional at/after the cutoff.
+
+    Both sums are the double builtin sum() returns over the same events in
+    the same order (see _add_compensated), so a market with ONE leg rolls
+    up to the same double the per-event sum did. A hedged market (several
+    legs) sums per-leg partials instead of one flat event sequence, which
+    can differ in the last ulp. After the 6-place rounding every consumer
+    applies the two agree except where the exact value is a decimal tie —
+    e.g. avg_position = notional / markets_traded with notional on the
+    6-dp grid (NUMERIC(24,6)), measured at ~1% of rows — or where a hedged
+    multi-event market nets exactly ±0.01 at market_result's tolerance and
+    the ulp decides scratch vs win/loss. On those knife edges the old
+    figure was itself interpreter-dependent (3.11 naive vs 3.12
+    compensated sum), so no ground truth moved; the new one is the more
+    deterministic of the two.
+    """
+
+    realized: float
+    events: bool
+    notional: float
+
+
+@dataclass(slots=True)
 class PositionState:
     whale_id: int
     condition_id: str | None
@@ -43,10 +114,64 @@ class PositionState:
     outcome_index: int | None
     sport: str
     position: Position
-    realizations: list[Realization] = field(default_factory=list)
-    buys: list[tuple[datetime, float]] = field(default_factory=list)  # (ts, notional)
+    # The instant the window buckets were cut at — the replay's reference
+    # time. compute_rollups must be handed this same instant.
+    as_of: datetime | None = None
     first_ts: datetime | None = None
     last_ts: datetime | None = None
+    # Per-window sums, unboxed (layout at _SLOTS_PER_WINDOW); bit i of
+    # _events flags window i as having a realization event.
+    _sums: array = field(default_factory=lambda: array("d", _ZERO_SUMS))
+    _events: int = 0
+
+    def _cutoffs(self, cutoffs: dict[str, datetime | None] | None) -> dict[str, datetime | None]:
+        if cutoffs is not None:
+            return cutoffs
+        if self.as_of is None:
+            raise ValueError("PositionState.as_of is unset: the windows have no cutoff")
+        return window_cutoffs(self.as_of)
+
+    def record_realization(
+        self, ts: datetime, amount: float,
+        cutoffs: dict[str, datetime | None] | None = None,
+    ) -> None:
+        """Book a realization of `amount` at `ts` into every window it falls
+        in (ts at/after the cutoff). Float dust (|amount| <= EPS) is not an
+        event — the same gate the per-event list had."""
+        if abs(amount) <= EPS:
+            return
+        sums = self._sums
+        for window, cutoff in self._cutoffs(cutoffs).items():
+            if cutoff is None or ts >= cutoff:
+                i = _WINDOW_INDEX[window]
+                _add_compensated(sums, i * _SLOTS_PER_WINDOW + _REALIZED, amount)
+                self._events |= 1 << i
+
+    def record_buy(
+        self, ts: datetime, notional: float,
+        cutoffs: dict[str, datetime | None] | None = None,
+    ) -> None:
+        """Book a BUY of `notional` at `ts` into every window it falls in."""
+        sums = self._sums
+        for window, cutoff in self._cutoffs(cutoffs).items():
+            if cutoff is None or ts >= cutoff:
+                _add_compensated(
+                    sums, _WINDOW_INDEX[window] * _SLOTS_PER_WINDOW + _NOTIONAL, notional)
+
+    def window(self, window: str) -> WindowAgg:
+        """This position's contribution to `window`, sums folded as sum() folds them."""
+        i = _WINDOW_INDEX[window]
+        at = i * _SLOTS_PER_WINDOW
+        return WindowAgg(
+            realized=_compensated_total(self._sums, at + _REALIZED),
+            events=bool(self._events >> i & 1),
+            notional=_compensated_total(self._sums, at + _NOTIONAL),
+        )
+
+    @property
+    def windows(self) -> dict[str, WindowAgg]:
+        """Every window's aggregate — a fresh read-back, not the storage."""
+        return {w: self.window(w) for w in WINDOWS}
 
 
 async def _load_resolutions() -> dict[str, tuple[list[float], datetime]]:
@@ -64,7 +189,7 @@ async def _load_resolutions() -> dict[str, tuple[list[float], datetime]]:
     return out
 
 
-async def rebuild_positions() -> list[PositionState]:
+async def rebuild_positions(now: datetime | None = None) -> list[PositionState]:
     """Replay the full trade ledger into per-(whale, token) position states.
 
     STREAMED, never fetched whole. `pool.fetch` materialized every trade row
@@ -74,9 +199,39 @@ async def rebuild_positions() -> list[PositionState]:
     (and so never heartbeat) from 2026-07-22 onward, freezing settlements,
     rollups and the site's return figures for 12 days while every OTHER
     loop beat normally between restarts. A server-side cursor keeps memory
-    flat no matter how large the ledger grows; the states dict is bounded
-    by distinct (whale, token) positions, not by fill count.
+    flat no matter how large the ledger grows.
+
+    RETAINED PER POSITION, NOT PER FILL. The previous version of this
+    docstring claimed the states dict was "bounded by distinct (whale,
+    token) positions, not by fill count". It was not: every state kept a
+    Realization object per realizing fill and a (ts, notional) tuple per
+    BUY for the WHOLE ledger — measured at ~160-215 bytes per row — so a
+    ledger of millions of fills (rn1 alone 806,085; the roster nearer 5M)
+    retained ~1 GB of Python objects on top of the process floor and the
+    other 17 loops' transients. The workers process was OOM-killed at its
+    2 GiB limit at 2026-09-05 17:59:41Z, four minutes into the replay.
+    Every kill restarted all 18 loops, no cycle ever completed, the whale
+    benchmark never published, and the edge gate refused every live copy
+    as edge-stat-stale. The lists had exactly one reader, compute_rollups,
+    which only ever needed per-window sums: each state now carries four
+    unboxed doubles (realized sum, BUY notional, their compensation terms)
+    per entry of WINDOWS plus an event bitmask, bucketed as the rows
+    stream past (layout at _SLOTS_PER_WINDOW). What a state holds no
+    longer depends on how many fills it has seen.
+
+    `now` IS THE REFERENCE TIME OF THE WINDOWS, fixed here before the first
+    row and stamped on every state as `as_of`; a window's cutoff is
+    `now - span`, an event is inside it when its ts is at/after the cutoff
+    (resolutions realize at resolved_at, as before). compute_rollups still
+    takes `now` for its own traded_in_window test and refuses any instant
+    other than the states' as_of — run_cycle reads the clock ONCE and
+    hands the same value to both. (Before, the cutoffs were cut when the
+    rollup ran, minutes after the replay started; the buckets are now cut
+    at its start, which only moves events sitting exactly on a window
+    edge by the replay's own duration.)
     """
+    now = now or datetime.now(tz=timezone.utc)
+    cutoffs = window_cutoffs(now)
     pool = await get_pool()
     resolutions = await _load_resolutions()
 
@@ -94,6 +249,7 @@ async def rebuild_positions() -> list[PositionState]:
                 outcome_index=t["outcome_index"],
                 sport=t["sport"],
                 position=Position(),
+                as_of=now,
             )
         # Later trades may carry enrichment the first one lacked.
         st.condition_id = st.condition_id or t["condition_id"]
@@ -104,11 +260,9 @@ async def rebuild_positions() -> list[PositionState]:
 
         before = st.position.realized_pnl
         st.position.apply(Fill(side=t["side"], size=t["size"], price=t["price"]))
-        delta = st.position.realized_pnl - before
-        if abs(delta) > EPS:
-            st.realizations.append(Realization(ts=t["ts"], amount=delta))
+        st.record_realization(t["ts"], st.position.realized_pnl - before, cutoffs)
         if t["side"] == "BUY":
-            st.buys.append((t["ts"], t["notional"]))
+            st.record_buy(t["ts"], t["notional"], cutoffs)
         st.first_ts = st.first_ts or t["ts"]
         st.last_ts = t["ts"]
 
@@ -133,9 +287,7 @@ async def rebuild_positions() -> list[PositionState]:
             if 0 <= idx < len(prices):
                 before = st.position.realized_pnl
                 st.position.resolve(float(prices[idx]))
-                delta = st.position.realized_pnl - before
-                if abs(delta) > EPS:
-                    st.realizations.append(Realization(ts=resolved_at, amount=delta))
+                st.record_realization(resolved_at, st.position.realized_pnl - before, cutoffs)
             # Unknown outcome index on a resolved market: leave open; the
             # enrichment backfill will fix outcome_index and the next rebuild
             # will resolve it.
@@ -203,8 +355,24 @@ async def _persist_positions(states: list[PositionState]) -> None:
 def compute_rollups(
     states: list[PositionState], now: datetime | None = None
 ) -> list[dict]:
-    """Pure aggregation of position states → whale × sport × window rows."""
-    now = now or datetime.now(tz=timezone.utc)
+    """Pure aggregation of position states → whale × sport × window rows.
+
+    The per-window realized sum, event flag and BUY notional were bucketed
+    DURING the replay at the states' `as_of` instant (rebuild_positions);
+    `now` must be that same instant — it still cuts traded_in_window here —
+    so the caller reads the clock once and hands it to both (run_cycle
+    does). Omitted, `now` defaults to the states' as_of; a different
+    instant is refused rather than silently mixing two cutoffs in one row.
+    """
+    as_of = next((st.as_of for st in states if st.as_of is not None), None)
+    if now is None:
+        now = as_of or datetime.now(tz=timezone.utc)
+    for st in states:
+        if st.as_of is not None and st.as_of != now:
+            raise ValueError(
+                f"compute_rollups now={now.isoformat()} but the replay bucketed "
+                f"its windows at {st.as_of.isoformat()}; pass the replay's time")
+    cutoffs = window_cutoffs(now)
     # Group token positions into markets first (W/L is per-market).
     by_market: dict[tuple[int, str, str], list[PositionState]] = defaultdict(list)
     for st in states:
@@ -213,24 +381,17 @@ def compute_rollups(
 
     rows: dict[tuple[int, str, str], dict] = {}
     for (whale_id, sport, _cid), legs in by_market.items():
-        for window, span in WINDOWS.items():
-            cutoff = now - span if span else None
-
-            realized = sum(
-                r.amount for st in legs for r in st.realizations if cutoff is None or r.ts >= cutoff
-            )
-            events_in_window = any(
-                (cutoff is None or r.ts >= cutoff) for st in legs for r in st.realizations
-            )
+        for window, cutoff in cutoffs.items():
+            aggs = [st.window(window) for st in legs]
+            realized = sum(a.realized for a in aggs)
+            events_in_window = any(a.events for a in aggs)
             traded_in_window = any(
                 st.last_ts and (cutoff is None or st.last_ts >= cutoff) for st in legs
             )
             if not events_in_window and not traded_in_window:
                 continue
 
-            notional = sum(
-                n for st in legs for (ts, n) in st.buys if cutoff is None or ts >= cutoff
-            )
+            notional = sum(a.notional for a in aggs)
             open_exposure = sum(st.position.open_exposure for st in legs)
             fully_resolved = all(st.position.resolved for st in legs)
 
@@ -661,14 +822,23 @@ async def pool_settle_live() -> int:
 
 
 async def run_cycle() -> dict:
-    """One full analytics pass: rebuild → rollups → drift check → engine settle."""
-    states = await rebuild_positions()
-    rollups = compute_rollups(states)
+    """One full analytics pass: rebuild → rollups → drift check → engine settle.
+
+    ONE clock reading for the replay and the rollup: the replay cuts its
+    window buckets at `now`, and compute_rollups refuses any other instant."""
+    now = datetime.now(tz=timezone.utc)
+    states = await rebuild_positions(now=now)
+    rollups = compute_rollups(states, now=now)
     await persist_rollups(rollups)
     alerts = await validate_against_leaderboard(states)
+    n_positions, n_rollups = len(states), len(rollups)
+    # The book has no reader past this point; release it before the settle
+    # passes rather than stack it under their own fetches (pool_settle_live
+    # pulls every pmus_activity_archive resolution row) on the 2 GiB box.
+    del states, rollups
     engine_settled = await settle_engine_fills()
     ai_settled = await settle_ai_trades()
     # LIVE beta orders settle with the same resolution data.
     await pool_settle_live()
-    return {"positions": len(states), "rollup_rows": len(rollups), "drift_alerts": alerts,
+    return {"positions": n_positions, "rollup_rows": n_rollups, "drift_alerts": alerts,
             "engine_settled": engine_settled, "ai_settled": ai_settled}
