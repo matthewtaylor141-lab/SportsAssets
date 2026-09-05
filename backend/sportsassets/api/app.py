@@ -27,6 +27,27 @@ from ..db import close_pool, get_pool
 from . import queries
 from .grading import grade_rows
 
+# THE API'S LOG HANDLER (2026-09-05). The API had none: uvicorn
+# configures its own loggers only, so every INFO record from
+# sportsassets.* fell through to Python's last-resort handler, which
+# prints WARNING and above, and the venue board sweeps' INFO lines
+# (pages, markets, seconds, RSS before and after) never reached the
+# log the instrument was built for. Same shape as workers/__init__.py.
+# httpx and httpcore are held to WARNING because the sweeps make dozens
+# of venue calls a minute and a line per call would bury the lines
+# that matter. This sits HERE, in uvicorn's entry module, and not in
+# api/__init__.py: the workers import api.copies_record at run time,
+# a package __init__ runs in whatever process imports it first, and
+# for a few hours that day this configuration silenced the workers'
+# per-call httpx lines, the ones venue outages are read from. Nothing
+# outside uvicorn imports this module (pinned by the logging test).
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+for _name in ("httpx", "httpcore"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
+
 log = logging.getLogger(__name__)
 
 
