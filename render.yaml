@@ -63,7 +63,23 @@ services:
   - type: web
     name: sportsassets-api
     runtime: docker
-    plan: starter
+    # THE BLUEPRINT OWNS THE PLAN, AND IT REVERTED THE OWNER'S UPGRADE
+    # (2026-09-05). The API's working set is well over 512 MB (start.sh:
+    # "995 MB -> 1.3+ GB baseline, OOM kills at 2 GB"; /healthz read
+    # rss 1.1-1.4 GB the same afternoon). It ran on a 2 GB instance the
+    # owner had set in the dashboard at 13:24Z. This file still said
+    # `starter` (512 MB), and the first blueprint sync that validated
+    # after the PostgreSQL 16->18 upgrade (15:35Z, commit 0bddea2)
+    # applied it: Render's events read `plan_changed plan-srv-032 ->
+    # plan-srv-006`, then a deploy that failed `oomKilled 512Mi`, then
+    # eight more OOM kills in twenty minutes after the next deploy and a
+    # Render 502 page on every request. A Blueprint-managed field is
+    # whatever this file says, so the plan a service NEEDS must be
+    # declared here, or every sync takes it away again.
+    #
+    # standard = 2 GB, the size the owner chose. Change it here, never
+    # in the dashboard.
+    plan: standard
     rootDir: backend
     dockerfilePath: ./Dockerfile
     dockerCommand: sh start.sh
@@ -130,7 +146,18 @@ services:
   - type: worker
     name: sportsassets-workers
     runtime: docker
-    plan: starter
+    # 512 MB -> 2 GB (2026-09-05). The workers run eighteen supervised
+    # loops in one process (workers/all.py) and were killed `used over
+    # 512MB` every 60-90 s through the recovery from the disk-full
+    # outage: a cold boot fires every loop's opening reads at once, and
+    # with the database starved those reads stay in flight together.
+    # Two known leaks on the dead-database path (per-restart Poller
+    # subtasks and clients; a get_pool race that builds a pool per
+    # caller) are being fixed in code; the headroom is what lets the
+    # service stay up while they land, and it is the same size the API
+    # needed. Revert to `starter` here once the workers have run a day
+    # under the fixes with room to spare -- and only here.
+    plan: standard
     rootDir: backend
     dockerfilePath: ./Dockerfile
     dockerCommand: python -m sportsassets.workers.all
