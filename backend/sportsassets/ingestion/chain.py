@@ -321,6 +321,154 @@ def _decode_v3_selected(logs, wallet):
         tx_hash=tx_hash, block_number=blk), "selected"
 
 
+def _wallet_1155_legs_by_token(logs, wallet):
+    """The same walk as `_wallet_1155_legs`, GROUPED PER TOKEN.
+
+    The aggregating version sums every one of the wallet's 1155 legs into
+    one (sh_in, sh_out) pair and a set of ids, which is why the selector
+    has to refuse `multi_token` and `mixed_direction`: two fills of one
+    wallet in one settlement are indistinguishable from one incoherent
+    fill once they have been added together. Grouping first keeps them
+    separable, so each token can be judged on its own.
+
+    Returns (per_token, tx_hash, block_number) where per_token maps
+    token_id -> [shares_in, shares_out]. Raises `_Malformed` on exactly
+    the inputs the aggregating walk rejects, so the two cannot disagree
+    about what is decodable.
+    """
+    per_token: dict[int, list[int]] = {}
+    tx_hash = ""
+    block_number = 0
+    for lg in logs:
+        tps = lg.get("topics") or []
+        if not tps:
+            continue
+        t0 = str(tps[0]).lower()
+        if t0 not in (TRANSFER_SINGLE_TOPIC, TRANSFER_BATCH_TOPIC):
+            continue
+        if len(tps) < 4:
+            if any(wallet == _topic_addr(str(t)) for t in tps[1:]):
+                raise _Malformed
+            continue
+        frm, to = _topic_addr(str(tps[2])), _topic_addr(str(tps[3]))
+        if wallet not in (frm, to):
+            continue
+        data = str(lg.get("data", "0x"))[2:]
+        if t0 == TRANSFER_SINGLE_TOPIC:
+            if len(data) < 2 * 64:
+                raise _Malformed
+            pairs = [(int(data[0:64], 16), int(data[64:128], 16))]
+        else:
+            pairs = _decode_batch_arrays(data)
+        for tid, val in pairs:
+            slot = per_token.setdefault(tid, [0, 0])
+            if val == 0:
+                continue            # id still counts, matching the walk above
+            if to == wallet:
+                slot[0] += val
+            else:
+                slot[1] += val
+        tx_hash = str(lg.get("transactionHash", tx_hash)).lower() or tx_hash
+        try:
+            block_number = int(str(lg.get("blockNumber", "0x0")), 16) \
+                or block_number
+        except ValueError:
+            pass
+    return per_token, tx_hash, block_number
+
+
+def decode_fills_v3_bundle(logs, wallet):
+    """EVERY fill this wallet has in one settlement receipt.
+
+    THE GAP THIS MEASURES. `_decode_v3_selected` returns at most ONE fill
+    and refuses outright when the wallet appears more than once in a
+    receipt -- `multi_token` when it traded two contracts, `multi_pass`
+    when two fill events match, `mixed_direction` when it bought one and
+    sold another. The venue batches settlements, so those refusals are
+    not corrupt data: they are several real fills we decline to read, and
+    chain.py's own audit comment names this as where HomeRunHazard's and
+    swisstony's chain lane dies.
+
+    Returns (fills, reasons): a list of DecodedFill -- one per token the
+    receipt resolves cleanly -- and a per-token refusal tally for the
+    ones it does not. An empty list with an empty tally means the wallet
+    has no 1155 flow here at all.
+
+    MEASUREMENT ONLY at this commit. Nothing calls this to place an
+    order; `_handle_v3` runs it alongside the single-fill decoder purely
+    to count what a bundle-aware lane WOULD have caught, because arming
+    it without that number first is the thing this codebase does not do.
+    """
+    wallet = wallet.lower()
+    reasons: dict[str, int] = {}
+    try:
+        per_token, tx_hash, blk = _wallet_1155_legs_by_token(logs, wallet)
+    except _Malformed:
+        return [], {"malformed_1155": 1}
+    if not per_token:
+        return [], {}
+
+    # Fill events, decoded once and indexed by the token they name, so a
+    # receipt with N of the wallet's fills costs one pass rather than N.
+    by_token: dict[int, list[tuple[int, int]]] = {}
+    malformed_fill = False
+    for lg in logs:
+        tps = lg.get("topics") or []
+        if not tps or str(tps[0]).lower() != FILL_V3_TOPIC:
+            continue
+        if wallet not in {_topic_addr(str(t)) for t in tps[1:4] if t}:
+            continue
+        data = str(lg.get("data", "0x"))[2:]
+        if len(data) < 4 * 64:
+            malformed_fill = True
+            continue
+        by_token.setdefault(int(data[64:128], 16), []).append(
+            (int(data[128:192], 16), int(data[192:256], 16)))
+        tx_hash = str(lg.get("transactionHash", tx_hash)).lower() or tx_hash
+        try:
+            blk = int(str(lg.get("blockNumber", "0x0")), 16) or blk
+        except ValueError:
+            pass
+    if malformed_fill and not by_token:
+        return [], {"malformed_fill": 1}
+
+    fills: list[DecodedFill] = []
+    for token, (sh_in, sh_out) in sorted(per_token.items()):
+        if sh_in == 0 and sh_out == 0:
+            continue                                   # id seen at value 0
+        if sh_in and sh_out:
+            # Both directions on ONE token in one receipt is a wash the
+            # net of which this decoder will not invent a side for.
+            reasons["mixed_direction"] = reasons.get("mixed_direction", 0) + 1
+            continue
+        shares = sh_in or sh_out
+        cands = by_token.get(token) or []
+        if not cands:
+            reasons["no_fill_events"] = reasons.get("no_fill_events", 0) + 1
+            continue
+        passes = [(w2, w3) for w2, w3 in cands
+                  if w2 > 0 and w3 > 0 and w3 == shares]
+        if not passes:
+            reasons["no_share_match"] = reasons.get("no_share_match", 0) + 1
+            continue
+        if len(passes) > 1:
+            # Two fill events on one token claiming the same share count:
+            # which one priced this leg is not decidable here.
+            reasons["multi_pass"] = reasons.get("multi_pass", 0) + 1
+            continue
+        w2, w3 = passes[0]
+        price = round(w2 / w3, 6)
+        if not (0 < price < 1):
+            reasons["px_oob"] = reasons.get("px_oob", 0) + 1
+            continue
+        fills.append(DecodedFill(
+            wallet=wallet, token_id=str(token),
+            side="BUY" if sh_in else "SELL",
+            size=round(shares / USDC_DECIMALS, 6), price=price,
+            tx_hash=tx_hash, block_number=blk))
+    return fills, reasons
+
+
 def decode_fill_v3_receipt_ex(logs, wallet):
     """(fill, reason). Legacy lane first; selector only on legacy refusal."""
     wallet = wallet.lower()
@@ -647,6 +795,37 @@ class ChainListener:
                 if ref is None:
                     ref = self.v3_ref = {}
                 ref[why] = ref.get(why, 0) + 1
+                # WHAT A BUNDLE-AWARE LANE WOULD HAVE CAUGHT (2026-09-05).
+                #
+                # The comment above has asserted since 2026-08-30 that
+                # these refusals are batched settlements rather than bad
+                # data, and asked for "a before/after number instead of a
+                # story". This is that number, and it is COUNTED ONLY:
+                # the fills below are not copied, not emitted, and reach
+                # no order path. Arming the bundle lane is a separate
+                # change that should be made against these counters, not
+                # against the argument.
+                #
+                # It cannot raise into the listener. A decoder fault here
+                # would cost the fill the single decoder already refused
+                # plus every fill after it in this receipt, which is a
+                # strictly worse lane than the one being measured.
+                try:
+                    _bundle, _why2 = decode_fills_v3_bundle(logs, wallet)
+                    if _bundle:
+                        self.v3_bundle_would = (
+                            getattr(self, "v3_bundle_would", 0) + len(_bundle))
+                        self.v3_bundle_tx = getattr(self, "v3_bundle_tx", 0) + 1
+                        if len(_bundle) > 1:
+                            self.v3_bundle_multi = (
+                                getattr(self, "v3_bundle_multi", 0) + 1)
+                    bref = getattr(self, "v3_bundle_ref", None)
+                    if bref is None:
+                        bref = self.v3_bundle_ref = {}
+                    for _r, _n in (_why2 or {}).items():
+                        bref[_r] = bref.get(_r, 0) + _n
+                except Exception:  # noqa: BLE001 — measurement never bites
+                    self.v3_bundle_err = getattr(self, "v3_bundle_err", 0) + 1
                 log.info("v3 fill undecodable for %s in %s (%s)",
                          wallet[:10], tx[:14], why)
                 claim_registry.finish(tx, wallet, "receipt", "refused")
