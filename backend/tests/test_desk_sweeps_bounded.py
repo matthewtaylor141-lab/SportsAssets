@@ -1119,14 +1119,25 @@ async def test_kalshi_all_feed_is_byte_identical_to_before(monkeypatch):
     assert after["counts"]["all"] == 12
 
 
-def test_the_warm_loop_and_ttl_are_untouched():
-    """The count of sweeps is bounded by the TTL already; the defect was
-    concurrency and blindness. 30 s and 25 s stay exactly as they were."""
+def test_the_warm_loop_and_ttl_move_together_and_only_lengthen():
+    """25 s / 30 s -> 120 s / 120 s (2026-09-05): the sweep's own log
+    line put ~65,000 raw markets through the allocator every 25 s and
+    the API at its 2 GiB kill line five times in an hour. The cadence
+    and the TTL are one number so a request between warm ticks reads
+    the cache; the environment can lengthen the cadence, never shorten
+    it below 120 s (the constant is read at import, so the floor is
+    pinned by the expression's text)."""
     import inspect
 
-    assert pmus._DESK_TTL_S == 30.0
+    assert pmus._DESK_TTL_S == 120.0
+    assert app_mod.DESK_WARM_S == 120.0 == pmus._DESK_TTL_S
     src = inspect.getsource(app_mod.lifespan)
-    assert "await asyncio.sleep(25)" in src.split("_desk_feed_warm_loop")[1]
+    assert "await asyncio.sleep(DESK_WARM_S)" in src.split("_desk_feed_warm_loop")[1]
+    assert "asyncio.sleep(25)" not in src
+    # the trim loop says what it returned, in the workers' grammar
+    assert '"api rss %s MB trim returned %s MB"' in src
+    module_src = inspect.getsource(app_mod)
+    assert 'DESK_WARM_S = max(120.0, float(os.environ.get("DESK_WARM_S", "120") or 120.0))' in module_src
 
 
 @pytest.mark.parametrize("name", ["_desk_sweep_lock", "_desk_warn_lock"])

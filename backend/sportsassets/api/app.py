@@ -160,6 +160,20 @@ async def lifespan(_: FastAPI):
     # paid a cold venue sweep on the request path. Keep it warm in the
     # background — one listing call per TTL — so the desk's first paint
     # always reads a hot cache. Failures just retry next tick.
+    # 25 s -> DESK_WARM_S (120 s) on 2026-09-05. The sweep's own log line
+    # (pmus 'desk sweep US: pages=13 events=1206/1206 markets=68746 19.5s
+    # rss 470.0->592.1 MB') showed what a warm tick costs: about 65,000
+    # raw markets parsed and freed per sweep, roughly 200 MB of Python
+    # objects through the allocator every 25 s, and RSS stepping up 100
+    # to 360 MB per sweep on the way to five OOM kills at 2 GiB between
+    # 20:42Z and 21:53Z. The retained board is ~40 MB; the churn is the
+    # cost, and its RATE is what the cadence sets. 120 s cuts the churn
+    # ~5x and leaves the 60 s trim below a quiet window between sweeps
+    # instead of racing the next one. Browse staleness up to two
+    # minutes is cosmetic: the ticket re-quotes at order time and the
+    # desk-game view re-quotes its moneyline live. The TTL in pmus
+    # (_DESK_TTL_S) moves with it, so a request between warm ticks reads
+    # the cache rather than starting a sweep of its own.
     async def _desk_feed_warm_loop() -> None:
         from .. import pmus as _pmus
 
@@ -168,7 +182,7 @@ async def lifespan(_: FastAPI):
                 await asyncio.to_thread(_pmus.list_desk_events)
             except Exception:  # noqa: BLE001 — venue blip, next tick
                 pass
-            await asyncio.sleep(25)
+            await asyncio.sleep(DESK_WARM_S)
 
     asyncio.get_running_loop().create_task(_desk_feed_warm_loop())
 
@@ -205,6 +219,13 @@ async def lifespan(_: FastAPI):
     # every arena and returns free pages to the OS, and it is cheap
     # when there is nothing to return — so it runs on a timer instead
     # of only after a snapshot save, which is roughly never.
+    # The trim SAYS what it returned (2026-09-05): the workers' trim
+    # line ('workers rss 656 MB (boot +39, peak 1271) trim returned
+    # 187 MB') is how that process's ratchet was read; this loop
+    # returned nothing to the log, so no line here could say whether
+    # the API's trim reclaims anything at all. One INFO line per trim
+    # with RSS before and after; '?' when RSS is unreadable, never an
+    # invented figure.
     async def _trim_loop():
         from .track_record import _malloc_trim
 
@@ -212,7 +233,14 @@ async def lifespan(_: FastAPI):
             await asyncio.sleep(
                 float(_os.environ.get("API_TRIM_INTERVAL_S", "60")))
             try:
+                before = _procmem.rss_mb()
                 await asyncio.to_thread(_malloc_trim)
+                after = _procmem.rss_mb()
+                freed = (before - after) if (before is not None and after is not None) else None
+                logging.getLogger(__name__).info(
+                    "api rss %s MB trim returned %s MB",
+                    _procmem.rss_label(after),
+                    "?" if freed is None else int(max(0.0, freed)))
             except Exception:  # noqa: BLE001 — never kill the loop
                 logging.getLogger(__name__).warning(
                     "periodic malloc_trim failed", exc_info=True)
@@ -296,6 +324,12 @@ def require_admin(x_admin_token: str = Header(default="")) -> None:
 # and rotated for free whenever the admin token rotates. Tokens are
 # never logged.
 DESK_TOKEN_TTL_S = 12 * 3600
+# The US board warm loop's cadence, seconds (see _desk_feed_warm_loop in
+# lifespan). Equal to pmus._DESK_TTL_S by construction: the loop's job
+# is to keep the cache warm, so a request between ticks never sweeps.
+# The environment may only LENGTHEN it (a shorter cadence is the
+# 2026-09-05 OOM shape and wants a review, not a shell).
+DESK_WARM_S = max(120.0, float(os.environ.get("DESK_WARM_S", "120") or 120.0))
 
 
 def mint_desk_token(now: float | None = None) -> tuple[str, int]:

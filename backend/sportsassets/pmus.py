@@ -357,7 +357,12 @@ def event_board(event_slug: str) -> list[dict]:
 # browse staleness is cosmetic.
 _desk_cache: dict = {"ts": 0.0, "events": [], "blind_at": 0.0,
                      "warned_at": 0.0}
-_DESK_TTL_S = 30.0
+# 30 -> 120 s on 2026-09-05, with the API's warm loop (app.DESK_WARM_S):
+# a sweep parses ~65,000 raw markets and the churn rate, not the
+# retained board, was walking the API into its 2 GiB kill line five
+# times in an hour. The two move together so a request between warm
+# ticks reads the cache instead of starting a sweep of its own.
+_DESK_TTL_S = 120.0
 # blind_at: when a sweep last ended with nothing to cache (no variant
 # answered, or no event carried a board) — the waiters queued behind
 # that sweep read it and do not each run the probe ladder again.
