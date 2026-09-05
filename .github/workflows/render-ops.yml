@@ -118,10 +118,10 @@ jobs:
               START=$(date -u -d "-${MIN} minutes" +%FT%TZ); END=$(date -u +%FT%TZ)
               RES=60; [ "$MIN" -gt 360 ] && RES=300
               echo "== memory for $SERVICE ($ID) $START .. $END, ${RES}s steps, MB =="
-              get "/metrics/memory?resource=$ID&startTime=$START&endTime=$END&resolution=$RES" > /tmp/mem.json
+              get "/metrics/memory?resource=$ID&startTime=$START&endTime=$END&resolutionSeconds=$RES" > /tmp/mem.json
               jq -r '.[]? | (.labels // [] | map(.value) | join(",")) as $l | .values[]? | "\(.timestamp)  \((.value / 1048576) | floor)  \($l)"' /tmp/mem.json || { echo "(memory not JSON)"; head -c 800 /tmp/mem.json; }
               echo "== cpu for $SERVICE ($ID), cores =="
-              get "/metrics/cpu?resource=$ID&startTime=$START&endTime=$END&resolution=$RES" > /tmp/cpu.json
+              get "/metrics/cpu?resource=$ID&startTime=$START&endTime=$END&resolutionSeconds=$RES" > /tmp/cpu.json
               jq -r '.[]? | .values[]? | "\(.timestamp)  \(.value)"' /tmp/cpu.json || { echo "(cpu not JSON)"; head -c 800 /tmp/cpu.json; }
               ;;
             logs)
