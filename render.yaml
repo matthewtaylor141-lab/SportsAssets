@@ -96,6 +96,13 @@ services:
     dockerCommand: sh start.sh
     healthCheckPath: /healthz
     envVars: &backend_env
+      # glibc's arena cap, for BOTH processes (2026-09-05). start.sh
+      # exports it for the API; the workers' dockerCommand runs python
+      # directly and had no cap, and that process was OOM-killed at
+      # 2 GiB fourteen times in four hours. workers/all.py also sets it
+      # at import (mallopt); the environment is the belt to that brace.
+      - key: MALLOC_ARENA_MAX
+        value: "2"
       - key: DATABASE_URL
         fromDatabase:
           name: sportsassets-db
