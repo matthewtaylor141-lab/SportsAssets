@@ -638,6 +638,110 @@ def _finite_size(raw: Any) -> float | None:
     return v
 
 
+# A BOOK IS WALKED ONLY WHILE WE HOLD ONE OF HIS ROWS (2026-09-05).
+#
+# sportsassets-workers was OOM-killed at 2 GiB about every twenty
+# minutes (14 kills today, the latest 21:30:07Z). Render's memory series
+# steps RSS up by 350-540 MB in single minutes -- 21:04, 21:09, 21:19 --
+# and each of those minutes is the minute a 24,000-position walk
+# finished: the "still returning full pages at 24000 positions" line
+# lands for RN1 and for ferrariChampions2026 every cycle, 48 pages of
+# 500 rows each, back to back (21:04:00 and 21:04:19, 21:09:39 and
+# 21:09:59 ...). What happens inside the walk is not pinned yet (a
+# separate unit watches RSS every 5 s). What IS pinned is that most of
+# those walks were WASTE. This detector exists to catch a whale reducing
+# a position WE HOLD a per-fill row on; it hands the exit to mirror_exit,
+# whose row query admits only a 'filled' row for that whale and asset
+# that is not the mirror's. Today the live roster is rn1 alone;
+# ferrariChampions2026 and the others are cut (clip 0) and we hold
+# nothing of theirs. A whale we hold nothing on needs no book walk:
+# there is no row an exit of his could reach.
+#
+# So the cycle reads ONCE which whales we hold a live NON-MIRROR row for
+# and walks only those. "Live" is the FOUR row shapes a row we still
+# hold can wear, read from live_executor rather than guessed: 'filled'
+# (the row mirror_exit sells), 'submitting' (an entry in flight --
+# _entry_in_flight makes mirror_exit PEND an exit behind it instead of
+# filing "no position"), 'exiting' (mirror_exit's atomic claim, which
+# _reap_stale_exiting releases back to 'filled' when the venue still
+# holds), and the REAPER-NAMED 'error' rows: status 'error' with an
+# error text starting "venue holds a POSITION" or "venue has no record
+# of order", placed inside live_executor's _NAMED_HORIZON (48 hours).
+# _entry_in_flight treats those as an entry in flight too, for the
+# reason given beside that horizon: the account holds shares the ledger
+# cannot yet name, and "the exit must wait for the reconcile, not be
+# dropped". mirror_exit then answers mx_entry_in_flight, which is in
+# EXIT_PENDING_REASONS, so the exit is pinned and retried every cycle
+# until the reaper books the fill and it sells. Leave that shape out of
+# the held set and a whale whose ONLY live row is such a row is unheld:
+# his baseline is deleted, the walk stops, the exit inside the
+# reconcile window is dropped, and when the reaper promotes the row to
+# 'filled' he is re-held with a first snapshot that already reflects
+# his post-exit book. A plain 'error' row (a rejection, an orphan) is
+# not held: nothing of ours stands behind it. The 48-hour literal is
+# written here rather than imported (live_executor is imported lazily
+# inside _cycle) and a test pins it against le._NAMED_HORIZON so the
+# two cannot drift. The lane clause is the predicate audit's one
+# spelling, COALESCE(lane,'') <> 'mirror' (a bare `lane <> 'mirror'`
+# would drop every NULL-lane row): a row placed before migration 041
+# (lane NULL) is held; a book's standing row is not. THE MIRROR LANE IS
+# NOT SERVED BY THIS DETECTOR: mirror_exit refuses its rows by that
+# same clause, and the mirror keeps its own account walk (mirror_live's
+# paced step-R walk of the account and its per-market
+# `market_positions` read; its reading of the raw snapshot beside our
+# baseline is stamped, and a stale one is refused as `snapshot_stale`).
+# A whale with only 'mirror' rows is therefore unheld here.
+#
+# An unheld whale's baseline is DELETED, not left behind. A snapshot
+# that stops being refreshed is a stale diff waiting to happen: the day
+# he is held again, every position he closed in between would read as
+# an exit against it. With the row gone his next walk is a first
+# snapshot (the "no previous state" branch below) and emits nothing.
+# If the delete itself fails he is walked as before -- a baseline we
+# cannot retire is one we must keep fresh. The unpinned raw read and
+# the retry cursor are left alone: the first is stamped and refused
+# stale by its readers, the second only orders a diff that no longer
+# exists.
+#
+# THE RE-HOLD BLIND WINDOW, documented rather than closed. The held
+# read is taken once, before the loop, so a whale who was unheld gets
+# his first snapshot only on the cycle AFTER his row appears, and that
+# first snapshot emits nothing. An exit between our first row on a
+# re-held whale and his first snapshot is therefore not detected --
+# up to one INTERVAL_S plus two walks per re-hold. Today that is
+# the roster's edge case (rn1 is held continuously), so it is left
+# open. The cheap closure, if the owner ever wants it: keep walking a
+# whale for one cycle after his last held row, so his baseline is
+# still fresh when the next row lands.
+#
+# FAIL CLOSED THE OLD WAY. If the held-set read raises, every roster
+# whale is walked exactly as before and the WARNING names the exception
+# class: an unreadable table must never stop exit detection for a whale
+# we do hold. Nothing past the walk changes -- the truncation rule,
+# diff_exits, the resolved/closed refusals, the retry list and
+# execute_copy are untouched.
+_HELD_SQL = (
+    "SELECT DISTINCT lower(whale_username) AS whale FROM live_orders\n"
+    " WHERE (status IN ('filled', 'submitting', 'exiting')\n"
+    "        OR (status = 'error'\n"
+    "            AND (error LIKE 'venue holds a POSITION%' "
+    "OR error LIKE 'venue has no record of order%')\n"
+    "            AND placed_at > now() - interval '48 hours'))\n"
+    "   AND COALESCE(lane,'') <> 'mirror'")
+
+
+async def _held_whales(pool) -> set[str] | None:
+    """Lower-cased usernames we hold a live non-mirror row for, or None
+    when the read failed -- the caller then walks every whale."""
+    try:
+        rows = await pool.fetch(_HELD_SQL)
+        return {str(r["whale"]).lower() for r in rows if r["whale"]}
+    except Exception as exc:  # noqa: BLE001 — unreadable means walk everyone
+        log.warning("whale-exit: held-whale read failed (%s); walking "
+                    "every roster book as before", type(exc).__name__)
+        return None
+
+
 async def _cycle(http: httpx.AsyncClient, pool) -> dict:
     from ..api.copies_record import COPY_WHALES
     from ..live_executor import EXIT_PENDING_REASONS, execute_copy
@@ -660,15 +764,39 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
              # attempted/fetch_failed are always present (fleet r29):
              # the heartbeat's status is judged from them, and an
              # absent key must never read as zero-by-luck.
-             "attempted": 0, "fetch_failed": 0}
+             "attempted": 0, "fetch_failed": 0,
+             # Roster whales we hold no live per-fill row for this
+             # cycle, so their books were not walked (2026-09-05).
+             # Always present, for the same reason as the pair above.
+             "unheld_skipped": 0}
     all_sibs: dict[str, str] = {}
     wanted = {w.lower() for w in COPY_WHALES}
     rows = await pool.fetch(
         "SELECT username, address FROM whales WHERE address IS NOT NULL")
+    # Once per cycle, before any walk. None means the read failed and
+    # every whale is walked as before -- see _HELD_SQL.
+    held = await _held_whales(pool)
+    unheld: list[str] = []
     for r in rows:
         uname = r["username"] or ""
         if uname.lower() not in wanted:
             continue
+        if held is not None and uname.lower() not in held:
+            # No row of his an exit could reach: no walk, no diff, and
+            # his baseline retired so that being held again starts from
+            # a first snapshot. A retire that fails walks him as before.
+            try:
+                await pool.execute(
+                    "DELETE FROM ingestion_state WHERE key = $1",
+                    _KEY % uname.lower())
+            except Exception as exc:  # noqa: BLE001 — keep it fresh instead
+                log.warning("whale-exit: could not retire %s's snapshot "
+                            "(%s); walking his book as before",
+                            uname, type(exc).__name__)
+            else:
+                stats["unheld_skipped"] += 1
+                unheld.append(uname)
+                continue
         partial = False
         stats["attempted"] += 1
         try:
@@ -981,6 +1109,11 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
         if attempted or tried:
             await _save_retry(pool, uname.lower(),
                               next_cursor(tried, attempted, set(pending)))
+    if unheld:
+        # One line per cycle, INFO: this is the roster's expected state
+        # for a cut whale, not a fault.
+        log.info("whale-exit: no live rows for %s; book not walked",
+                 ", ".join(sorted(unheld)))
     # PUBLISH THE SIBLING MAP, MERGED not replaced.
     #
     # A whale's positions payload only describes the markets he is in

@@ -27,6 +27,7 @@ this one reached production next to it.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -35,11 +36,14 @@ from sportsassets.workers import whale_exits as we
 
 
 class FakePool:
-    """ingestion_state as a dict, plus the two SELECTs _cycle issues."""
+    """ingestion_state as a dict, plus the SELECTs _cycle issues."""
 
     def __init__(self, resolved: set[str] | None = None,
                  unknown: set[str] | None = None,
-                 closed: set[str] | None = None):
+                 closed: set[str] | None = None,
+                 held=frozenset({"rn1"}),
+                 live_rows: list[dict] | None = None,
+                 roster: list[dict] | None = None):
         self.state: dict[str, str] = {}
         self.resolved = resolved or set()
         self.closed = closed or set()
@@ -48,10 +52,68 @@ class FakePool:
         # disappearance may be read as an exit.
         self.unknown = unknown or set()
         self.saves: list[dict[str, float]] = []
+        # THE HELD-WHALE READ (2026-09-05): a book is walked only while
+        # we hold a live non-mirror row of his. `held` is what the read
+        # answers -- rn1 by default, because every test in this file
+        # predates the gate and a held whale is walked exactly as it
+        # was -- or an exception instance to make the read raise.
+        # `live_rows`, when given, answers instead from live_orders
+        # rows filtered the way Postgres would, and ONLY by the clauses
+        # that stand in the statement's text, PARSED from it rather
+        # than matched as whole literals: a clause that goes missing
+        # admits the rows it was excluding. A row carries an optional
+        # `error` text and an optional `age_s` (seconds since
+        # placed_at, default 0).
+        self.held = held
+        self.live_rows = live_rows
+        self.roster = roster or [{"username": "rn1", "address": "0xrn1"}]
+        self.deletes: list[str] = []
+        self.sqls: list[str] = []
+        # every statement handed to execute, in order: (sql, args)
+        self.sqls_executed: list[tuple[str, tuple]] = []
+
+    def _held_answer(self, sql: str) -> list[dict]:
+        if self.live_rows is not None:
+            rows = [r for r in self.live_rows if self._row_is_held(r, sql)]
+            names = {(r.get("whale_username") or "").lower() or None
+                     for r in rows}
+            return [{"whale": n} for n in sorted(n for n in names if n)]
+        if isinstance(self.held, BaseException):
+            raise self.held
+        return [{"whale": w} for w in sorted(self.held)]
+
+    @staticmethod
+    def _row_is_held(r: dict, sql: str) -> bool:
+        """The statement's predicate, evaluated the way Postgres would,
+        clause by clause and only for the clauses the text carries:
+        (status-list OR named-error) AND lane."""
+        # status IN ('a', 'b', ...): allowed = the quoted names
+        m = re.search(r"status IN \(([^)]*)\)", sql)
+        has_list = m is not None
+        in_list = has_list and r.get("status") in set(
+            re.findall(r"'([^']*)'", m.group(1)))
+        # the reaper-named error rows, present iff status = 'error' is
+        has_named = "status = 'error'" in sql
+        named = False
+        if has_named and r.get("status") == "error":
+            prefixes = re.findall(r"error LIKE '([^%']*)%'", sql)
+            named = (not prefixes) or any(
+                (r.get("error") or "").startswith(p) for p in prefixes)
+            if named and "placed_at > now() - interval '48 hours'" in sql:
+                named = float(r.get("age_s", 0)) < 48 * 3600
+        # no status clause of either kind in the text: every row passes
+        status_ok = (in_list or named) if (has_list or has_named) else True
+        lane_ok = True
+        if "COALESCE(lane,'') <> 'mirror'" in sql:
+            lane_ok = (r.get("lane") or "") != "mirror"
+        return status_ok and lane_ok
 
     async def fetch(self, sql, *args):
+        self.sqls.append(sql)
         if "FROM whales" in sql:
-            return [{"username": "rn1", "address": "0xrn1"}]
+            return list(self.roster)
+        if "lower(whale_username)" in sql and "FROM live_orders" in sql:
+            return self._held_answer(sql)
         if "market_tokens" in sql:
             gone = args[0] if args else []
             return [{"token_id": a,
@@ -64,6 +126,17 @@ class FakePool:
         return self.state.get(args[0])
 
     async def execute(self, sql, *args):
+        self.sqls_executed.append((sql, args))
+        if sql.lstrip().upper().startswith("DELETE"):
+            # the unheld whale's baseline retired; recorded so a test
+            # can see WHICH row went. ONLY the one spelling: any other
+            # DELETE (a `key <> $1`, a bare table) is a statement this
+            # fake does not know how to answer, so it refuses.
+            if sql.strip() != "DELETE FROM ingestion_state WHERE key = $1":
+                raise AssertionError(sql)
+            self.deletes.append(args[0])
+            self.state.pop(args[0], None)
+            return
         # STORED THE WAY jsonb STORES IT. PostgreSQL normalises object
         # keys into sorted order on write, so a stub that preserved
         # insertion order would hide any code that depended on it —
