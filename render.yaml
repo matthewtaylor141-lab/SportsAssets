@@ -6,6 +6,30 @@ databases:
   - name: sportsassets-db
     plan: basic-256mb
     postgresMajorVersion: "16"
+    # STORAGE IS DECLARED HERE BECAUSE THE BLUEPRINT OWNS IT (2026-09-05).
+    #
+    # This field was absent, so the instance sat at its plan default and
+    # the dashboard refused to raise it by hand -- Render pins
+    # Blueprint-managed settings to what this file says. That is what
+    # made a full disk unfixable from the UI during the outage below.
+    #
+    # THE OUTAGE IT CAUSED. The database filled, Render degraded the
+    # instance, and its internal hostname stopped resolving: every
+    # service logged `DB connect failed ([Errno -2] Name or service not
+    # known)` while the processes themselves stayed healthy. From the
+    # outside that reads as a hang, not an error -- /healthz served
+    # {"ok": true, "db_ok": false}, every DB-backed endpoint timed out
+    # with zero bytes received, and venue reads kept working. The
+    # platform was down from roughly 23:15 UTC on 2026-09-04 until this
+    # was raised. `db_ok` false with a healthy process means READ THE
+    # DATABASE'S OWN LOGS FIRST; the edge symptoms cannot tell a full
+    # disk from a saturated pool, and a whole night went into that gap.
+    #
+    # Raise this number rather than editing storage in the dashboard.
+    # Render only ever grows a Postgres disk, so a value BELOW the
+    # current size is rejected at sync time -- harmless, but it means
+    # this must be set above whatever the instance is on today.
+    diskSizeGB: 10
 
 services:
   - type: keyvalue
