@@ -1,0 +1,43 @@
+# A twenty-second read of the API from the outside (2026-09-05).
+#
+# During the disk-full outage and the recovery after it, the only external
+# eyes on the platform were the 16-32 minute engine-diagnostic probe and the
+# gate-lever's two admin reads -- neither prints the HTTP status code, so
+# "UNAVAILABLE" could not tell a 502 (no healthy instance: a failed deploy,
+# a crash loop) from a hang (DB reads timing out) from a 200 with a broken
+# body. This job asks /healthz three times with the code and the timing,
+# then the heartbeat table, and prints exactly what came back. Nothing here
+# changes state; there is no token in the healthz read and the heartbeat
+# read is the same public one the probe makes.
+name: ping
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read /healthz and the service heartbeats
+        shell: bash
+        env:
+          BASE: https://sportsassets-api.onrender.com
+        run: |
+          set +e
+          set -u
+          for i in 1 2 3; do
+            rm -f /tmp/hz.json /tmp/hz.err
+            code=$(curl -sS --max-time 20 -o /tmp/hz.json -w '%{http_code} in %{time_total}s' "$BASE/healthz" 2>/tmp/hz.err)
+            echo "healthz #$i at $(date -u +%H:%M:%S)Z: HTTP ${code:-none}"
+            if [ -s /tmp/hz.json ]; then echo "  body: $(head -c 600 /tmp/hz.json)"; fi
+            if [ -s /tmp/hz.err ]; then echo "  curl: $(cat /tmp/hz.err)"; fi
+            sleep 5
+          done
+          rm -f /tmp/svc.json
+          code=$(curl -sS --max-time 30 -o /tmp/svc.json -w '%{http_code} in %{time_total}s' "$BASE/api/health/services" 2>/dev/null)
+          echo "services at $(date -u +%H:%M:%S)Z: HTTP ${code:-none}"
+          if [ -s /tmp/svc.json ]; then
+            jq -r '.[]? | "  \(.service) \(.status) beat=\(.beat_at)"' /tmp/svc.json 2>/dev/null \
+              || echo "  body (not JSON): $(head -c 400 /tmp/svc.json)"
+          fi
+          exit 0
