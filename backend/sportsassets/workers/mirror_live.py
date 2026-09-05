@@ -3268,6 +3268,13 @@ async def _tick(t: _Tick, woken: list) -> None:
     if await _read_open(t) is None:
         await _abandon_reconciled(t, "open_orders_unreadable")
         return
+    # THE ROSTER AND CLIPS, on the copy path's TTL (money-safety review
+    # 2026-09-05). The readers below (_mapping_admitted, per_fill_usd)
+    # refuse while the stored pair is UNREADABLE -- but nothing in this
+    # process refreshed the pair while the copy probe was off, so a
+    # rebooted worker sat on the code default with the hardcoded clips
+    # and never reached the closed state at all. Never raises.
+    await le.refresh_whale_overrides(t.pool)
     await edge_gate.refresh(t.pool)
     if await _read_protected(t) is None:
         await _abandon_reconciled(t, "protected_ids_unreadable")

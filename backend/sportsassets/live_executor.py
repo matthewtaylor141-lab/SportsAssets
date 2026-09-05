@@ -889,11 +889,17 @@ async def mirror_exit(payload: dict) -> str:
     # string: verified, cut, or carrying a clip entry. A username that
     # was never on the roster still refuses.
     # roster override refresh BEFORE the roster checks (owner order
-    # 2026-08-29): the DB-stored set must be what judges this exit
+    # 2026-08-29): the DB-stored set must be what judges this exit.
+    # No pool is a failed read (2026-09-05): CLOSED, not the fall-through.
     try:
-        await refresh_whale_overrides(await get_pool())
-    except Exception:  # noqa: BLE001 — env/default still stand
-        pass
+        _pool_for_roster = await get_pool()
+    except Exception as exc:  # noqa: BLE001
+        close_overrides(f"pool: {type(exc).__name__}: {str(exc)[:120]}")
+    else:
+        try:
+            await refresh_whale_overrides(_pool_for_roster)
+        except Exception:  # noqa: BLE001 — the refresh never raises; belt
+            pass
     if username not in exitable_whales():
         return _exit_done("mx_whale_not_verified", whale=username)
     if username not in _whale_set("LIVE_VERIFIED_WHALES"):
@@ -1764,11 +1770,60 @@ VERIFIED_PROFITABLE_DEFAULT = (
 # and must be updatable without a deploy or console access, so the
 # ingestion_state key 'live_verified_whales' now beats the env when
 # set (admin endpoint POST /api/admin/verified-whales). Refreshed with
-# a short TTL at the top of both money paths; a transient read failure
-# keeps the last adopted value — a DB blip is not a roster decision.
+# a short TTL at the top of both money paths.
+#
+# A READ THAT FAILS IS NOT A ROSTER (disk-full incident 2026-09-04
+# 23:15Z to 2026-09-05 ~14:30Z). sportsassets-db filled its disk, Render
+# degraded it and its hostname stopped resolving; every roster read
+# raised. The stored roster was intact and UNREADABLE, and this reader
+# fell through to the five-whale code default -- /api/admin/gates said
+# source=default and printed the hardcoded clips for three whales the
+# owner had cut to $0. Nothing traded only because the workers were
+# down too. "A DB blip is not a roster decision" was the reasoning for
+# keeping the last adopted value; it was wrong at boot (nothing adopted
+# yet, so 'keep last' fell to the default) and it was wrong for a long
+# outage (the last adopted roster may be hours stale, and the owner's
+# cuts since then live in the row we cannot read). So the three states
+# are now DISTINCT:
+#   (1) a row is stored           -> use it
+#   (2) no row is stored (None)   -> env, then the code default
+#   (3) the read FAILED           -> UNREADABLE: no whale verified, every
+#                                    clip 0.0, until a later read SUCCEEDS
+# State (3) is a value the readers below adopt (the UNREADABLE sentinel),
+# never a fall-through: it is cached like any other adopted value so the
+# hot path is not hammering a dead database, and the cached value is
+# CLOSED -- not the last good roster, not the default. Reads are retried
+# every _CLOSED_RETRY_S while closed, and the transitions (open->closed,
+# closed->open) are logged once each, not once per call.
 _ROSTER_DB_KEY = "live_verified_whales"
 _ROSTER_TTL_S = 30.0
-_roster_override: set[str] | None = None    # None = no stored override
+
+
+class _Unreadable:
+    """The adopted value of the overrides when a read FAILED.
+
+    A distinct object rather than None or {} so state (3) can never be
+    mistaken for (2) by an `is None` or an `or {}`: it is truthy and
+    not iterable, so any reader that reaches it without going through
+    the accessors below fails loudly instead of trading on it."""
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNREADABLE"
+
+    def __iter__(self):
+        raise TypeError("UNREADABLE is not a roster; ask "
+                        "overrides_unreadable() first")
+
+
+UNREADABLE = _Unreadable()
+# ONE closed state for BOTH reads, held here. The roster and the clips
+# are one owner decision (a whale is live only if he is verified AND his
+# clip is above zero), read by one call on one TTL; if EITHER read fails
+# the pair is unreadable and this holds UNREADABLE, whichever failed.
+# The clip map keeps its last value underneath, unread until a later
+# refresh reads both and puts a roster back here.
+_roster_override: set[str] | _Unreadable | None = None  # None = no row
 _roster_read_at = 0.0
 # THE RULES' CLIPS (owner order 2026-09-01: roster decisions are made by
 # the data). workers/roster_auto.py writes {whale: usd} here every pass;
@@ -1778,34 +1833,182 @@ _roster_read_at = 0.0
 # same TTL, by the same call at the top of both money paths.
 _CLIPS_DB_KEY = "live_clip_overrides"
 _clip_override: dict[str, float] | None = None   # None = no stored clips
+# The closed cache: while UNREADABLE the hot path retries no more often
+# than this. Failure does not start the 30 s TTL (fleet round 49: the
+# next event must retry soon), and this clock is what keeps 'soon' from
+# meaning 'every event' against a dead database.
+_CLOSED_RETRY_S = 5.0
+_closed_read_at = 0.0
+# When the gate closed and what the read said, for the gates payload.
+_closed_since = 0.0
+_closed_error: str | None = None
+# One bounded query per read: a primary-key lookup, LIMIT 1 and a
+# timeout, so a degraded database costs the money path seconds, not a
+# hang (the 2026-09-04 outage was a connect failure; a stalled
+# connection would have been worse).
+_OVERRIDE_READ_TIMEOUT_S = 5.0
+_OVERRIDE_READ_SQL = "SELECT value FROM ingestion_state WHERE key=$1 LIMIT 1"
+
+
+def overrides_unreadable() -> bool:
+    """State (3): the last refresh could not read the roster or the
+    clips, and no refresh has succeeded since. While true no whale is
+    verified and every effective clip is 0.0."""
+    return _roster_override is UNREADABLE
+
+
+def closed_state() -> dict:
+    """What the money paths will DO, for /api/admin/gates: the probe
+    must print the executor's decision, not a guess at it."""
+    closed = overrides_unreadable()
+    return {
+        "closed": closed,
+        "verified_effective": [] if closed else None,
+        "clips_effective": "all 0.0" if closed else None,
+        "since": (datetime.fromtimestamp(_closed_since, tz=timezone.utc)
+                  .isoformat() if closed and _closed_since else None),
+        "last_error": _closed_error if closed else None,
+        "retry_s": _CLOSED_RETRY_S,
+    }
+
+
+def _adopt_closed(err: str) -> None:
+    """ADOPT the closed value, synchronously. The open->closed edge is
+    logged once, decided from module state at the moment of adoption
+    rather than from a value captured before an await: several
+    refreshes can be in flight at the edge (four copy slots, the exit
+    mirror and mirror_live share one loop) and each would otherwise
+    log it and restamp `since` (containment review 2026-09-05 counted
+    four). `last_error` is the LATEST failure, so an outage whose
+    shape changes -- connect refused, then timeouts once the host
+    resolves -- is visible in the gates payload while it is on."""
+    global _roster_override, _closed_since, _closed_error
+    first = _closed_since == 0.0
+    # "boot": nothing was ever adopted -- decided BEFORE the overwrite
+    # (a forced re-read resets the TTL clock but not the adopted value)
+    boot = _roster_override is None and _roster_read_at == 0.0
+    _roster_override = UNREADABLE
+    _closed_error = err
+    if first:
+        _closed_since = time.time()
+        log.error("roster/clip overrides %s — money paths CLOSED (no "
+                  "whale verified, every clip 0.0) until a read "
+                  "succeeds: %s",
+                  "UNREAD at boot" if boot else "UNREADABLE", err)
+
+
+def _adopt_open(roster, clips, now: float) -> None:
+    """ADOPT the pair, synchronously, after BOTH reads returned. The
+    assignments here have no await between them, so no concurrent
+    task can see a roster without the clips that go with it."""
+    global _roster_override, _clip_override, _roster_read_at
+    global _closed_since, _closed_error
+    reopened = _closed_since != 0.0
+    if roster is not _KEEP:
+        _roster_override = roster
+    if clips is not _KEEP:
+        _clip_override = clips
+    _roster_read_at = now
+    if reopened:
+        _closed_since = 0.0
+        _closed_error = None
+        log.warning("roster/clip overrides readable again — money paths "
+                    "REOPENED on the stored roster and clips")
+
+
+def close_overrides(err: str) -> None:
+    """A refusal UPSTREAM of the read is a failed read. The two money
+    paths wrapped `refresh_whale_overrides(await get_pool())` in one
+    try, so when get_pool() itself raised (a worker booted while the
+    host did not resolve) the refresh never ran and the pre-incident
+    fall-through -- code default, hardcoded clips -- stood with no
+    closed state at all (containment review 2026-09-05)."""
+    global _closed_read_at
+    _closed_read_at = time.time()
+    _adopt_closed(err)
+
+
+async def _read_override(pool, key: str):
+    return await asyncio.wait_for(
+        pool.fetchval(_OVERRIDE_READ_SQL, key),
+        timeout=_OVERRIDE_READ_TIMEOUT_S)
+
+
+# "A row that reads but is not the expected shape": the reader answers
+# this and the adopter keeps the last adopted value (while OPEN; while
+# CLOSED the readers turn it into an error, because closed reopens only
+# onto a value we could read).
+_KEEP = object()
 
 
 async def refresh_whale_overrides(pool) -> None:
-    """Adopt the stored roster and the stored clips, on one TTL."""
+    """Adopt the stored roster and the stored clips, on one TTL.
+
+    While CLOSED the cadence is _CLOSED_RETRY_S from the last failed
+    attempt, so a dead database is asked again soon but not on every
+    event. Both reads must succeed for the pair to reopen; the clips
+    are not asked for when the roster already failed (half the traffic
+    against a database that is down).
+
+    THE PAIR IS ADOPTED ATOMICALLY (money-safety and containment
+    reviews, 2026-09-05, each reproduced on the real functions). The
+    first build published the roster -- and started the open TTL --
+    inside the roster read, before the clip read was attempted. Against
+    a half-alive database (roster row returns, clip read hangs, the
+    15:27 "refusing connections again" shape) that left the gate OPEN
+    for up to two read timeouts on a roster the database had just
+    served and whatever clip map sat underneath: None at boot, i.e. the
+    hardcoded $250/$100/$250 the incident printed. A concurrent event
+    in this process skipped its own refresh (the TTL was fresh),
+    admitted swisstony and sized him at $250; then the clip read timed
+    out and the pair snapped closed, after the order left. Now the two
+    reads return VALUES and write nothing; nothing is adopted until
+    both are in hand, in one synchronous step (_adopt_open /
+    _adopt_closed)."""
+    global _closed_read_at
     now = time.time()
-    if now - _roster_read_at < _ROSTER_TTL_S:
+    if overrides_unreadable():
+        if now - _closed_read_at < _CLOSED_RETRY_S:
+            return
+        _closed_read_at = now
+    elif now - _roster_read_at < _ROSTER_TTL_S:
         return
-    await _refresh_roster(pool, now)
-    await _refresh_clips(pool)
+    err, roster = await _refresh_roster(pool)
+    clips = _KEEP
+    if err is None:
+        err, clips = await _refresh_clips(pool)
+    if err is None and roster is _KEEP and overrides_unreadable():
+        err = "roster: nothing to reopen on"    # belt: closed reopens onto a roster only
+    # ---- ADOPT: no await from here to the return ----
+    if err is not None:
+        _closed_read_at = now
+        _adopt_closed(err)
+    else:
+        _adopt_open(roster, clips, now)
 
 
-async def _refresh_clips(pool) -> None:
-    """{whale: usd} from ingestion_state, or keep the last adopted map.
+async def _refresh_clips(pool) -> tuple[str | None, object]:
+    """READ {whale: usd} from ingestion_state: (None, value) or
+    (error, None). The value is None (no row), a map, or _KEEP (a row
+    that reads but is not a map: keep the last adopted map while OPEN;
+    while CLOSED that is an error, because closed reopens only onto a
+    map we could read -- otherwise a boot-closed process reopened onto
+    None, i.e. the hardcoded clips). Writes nothing: the caller adopts
+    the pair atomically.
 
     A stored cell that cannot be read as a number is dropped from the
     map for this pass, not zeroed and not guessed: the whale then falls
     to the hardcoded clip, which is what he traded at before the rules
-    existed. A read failure keeps the last adopted map, as the roster
-    does -- a DB blip is not a sizing decision."""
-    global _clip_override
+    existed. A read that FAILS closes the pair -- every clip is 0.0
+    until a later read succeeds (2026-09-05: the old 'keep the last
+    adopted map' printed the hardcoded fallbacks for three whales the
+    owner had cut to $0 while the database was down)."""
+    err: str | None = None
     for attempt in (1, 2):
         try:
-            raw = await pool.fetchval(
-                "SELECT value FROM ingestion_state WHERE key=$1",
-                _CLIPS_DB_KEY)
+            raw = await _read_override(pool, _CLIPS_DB_KEY)
             if raw is None:
-                _clip_override = None
-                return
+                return None, None
             val = json.loads(raw) if isinstance(raw, str) else raw
             if isinstance(val, dict):
                 out: dict[str, float] = {}
@@ -1814,55 +2017,59 @@ async def _refresh_clips(pool) -> None:
                         out[str(w).strip().lower()] = max(0.0, float(v))
                     except (TypeError, ValueError):
                         continue
-                _clip_override = out
-            # any other shape: keep last known — never guess a clip
-            return
-        except Exception:  # noqa: BLE001 — retry once, then keep last
-            if attempt == 2:
-                log.warning("clip override read failed; keeping the last "
-                            "adopted clips")
+                return None, out
+            if overrides_unreadable():
+                return "clips: stored value is not a map", None
+            # any other shape while OPEN: keep last known — never guess a clip
+            return None, _KEEP
+        except Exception as exc:  # noqa: BLE001 — retry once, then CLOSE
+            err = f"clips: {type(exc).__name__}: {str(exc)[:120]}"
+    return err, None
 
 
-async def _refresh_roster(pool, now: float) -> None:
-    global _roster_override, _roster_read_at
+async def _refresh_roster(pool) -> tuple[str | None, object]:
+    """READ the stored roster: (None, value) or (error, None). The
+    value is None (no row), a set, or _KEEP (a row that reads but is
+    not a roster: keep the last adopted set while OPEN; while CLOSED
+    that is an error). Writes nothing: the caller adopts the pair
+    atomically, and the TTL clock is started only by a full success."""
     # Two attempts per refresh (fleet round 49: a fresh worker whose
     # FIRST read hit a dead pooled connection fell to the env/default
     # roster in total silence — 'keep last adopted' is vacuous before
     # anything was adopted, and one retry usually lands on a healthy
-    # connection). Still-failing reads are LOGGED, loudest when nothing
-    # was ever adopted, so a fallback can never hide again.
+    # connection). A read that still fails CLOSES the gate.
+    err: str | None = None
     for attempt in (1, 2):
         try:
-            raw = await pool.fetchval(
-                "SELECT value FROM ingestion_state WHERE key=$1",
-                _ROSTER_DB_KEY)
-            _roster_read_at = now
+            raw = await _read_override(pool, _ROSTER_DB_KEY)
             if raw is None:
-                _roster_override = None
-                return
+                return None, None
             val = json.loads(raw) if isinstance(raw, str) else raw
             if isinstance(val, str):
                 val = [w for w in val.split(",")]
             if isinstance(val, list):
-                _roster_override = {str(w).strip().lower()
-                                    for w in val if str(w).strip()}
-            # any other shape: keep last known — never guess a roster
-            return
-        except Exception:  # noqa: BLE001 — retry once, then keep last
-            if attempt == 2:
-                if _roster_override is None and _roster_read_at == 0.0:
-                    log.error(
-                        "roster override UNREAD at boot — money paths "
-                        "are running on the ENV/DEFAULT roster until a "
-                        "read succeeds")
-                else:
-                    log.warning("roster override read failed; keeping "
-                                "the last adopted set")
+                return None, {str(w).strip().lower()
+                              for w in val if str(w).strip()}
+            if overrides_unreadable():
+                # a row that reads but is not a roster is not a roster:
+                # stay closed rather than guess (2026-09-05)
+                return "roster: stored value is not a list", None
+            # any other shape while OPEN: keep last known — never guess a roster
+            return None, _KEEP
+        except Exception as exc:  # noqa: BLE001 — retry once, then CLOSE
+            err = f"roster: {type(exc).__name__}: {str(exc)[:120]}"
+    return err, None
 
 
 def _whale_set(env_name: str) -> set[str]:
-    if env_name == "LIVE_VERIFIED_WHALES" and _roster_override is not None:
-        return set(_roster_override)
+    if env_name == "LIVE_VERIFIED_WHALES":
+        if overrides_unreadable():
+            # state (3): nobody. The entry gate does not read this as
+            # 'empty disables the gate' -- see _mapping_admitted, which
+            # asks overrides_unreadable() first.
+            return set()
+        if _roster_override is not None:
+            return set(_roster_override)
     raw = os.getenv(env_name, VERIFIED_PROFITABLE_DEFAULT)
     return {w.strip() for w in raw.lower().split(",") if w.strip()}
 
@@ -2148,9 +2355,15 @@ def exitable_whales() -> set[str]:
     matters for a DEMOTED whale: the rules take him off the entry roster
     and write his clip as 0, and that 0 is what keeps his exits
     mirroring here after he has left every other set.
+
+    UNREADABLE clips (2026-09-05) contribute nobody: the stored map is
+    the only thing that names a rules-only whale, and a map we cannot
+    read names no one. The hardcoded sets still stand, so a hardcoded
+    whale's exits keep mirroring through the outage.
     """
+    stored = set() if overrides_unreadable() else set(_clip_override or {})
     return (_whale_set("LIVE_VERIFIED_WHALES") | set(COPY_CUT_WHALES)
-            | set(PER_FILL_BY_WHALE) | set(_clip_override or {}))
+            | set(PER_FILL_BY_WHALE) | stored)
 ASK_TOLERANCE = 1.0 + float(os.getenv("LIVE_ASK_TOLERANCE_PCT", "0.08"))
 OVERSPEND_TOLERANCE = 1.01  # a cent of rounding on a whole-unit fill
 OVERSPEND_HALT_RATIO = max(
@@ -3170,7 +3383,14 @@ def per_fill_usd(whale_username: str | None,
     """Clip for this whale on this market: the (whale, sport) override
     wins, then the whale clip, then the default — scaled by the
     market-type multiplier (spreads x1.5 everywhere, owner go
-    2026-08-20). A 0.00 cell stays a block."""
+    2026-08-20). A 0.00 cell stays a block.
+
+    UNREADABLE stored clips are 0.0 for EVERY whale (disk-full incident
+    2026-09-05): while the rules' map cannot be read, the hardcoded
+    PER_FILL_BY_WHALE is not a fallback -- it named $250 and $100 for
+    whales the owner had cut to $0 in the row we could not read."""
+    if overrides_unreadable():
+        return 0.0
     w = (whale_username or "").lower()
     sport_cell = None
     if slug:
@@ -7269,6 +7489,16 @@ async def _mapping_admitted(pool, username: str | None,
     # swisstony is verified but HELD below, pending his paper cohort at
     # the new sub-second detection — the two gates answer different
     # questions and must stay separate.
+    # UNREADABLE ROSTER IS CLOSED, NOT OPEN (disk-full incident
+    # 2026-09-05). The empty-set-disables-the-gate rule below is for a
+    # DELIBERATE empty LIVE_VERIFIED_WHALES (a full resume); a roster we
+    # could not read is not that, and _whale_set answers it with the
+    # same empty set. Asked here first, with the same refusal prefix,
+    # so gate_edge files it under the verified gate.
+    if overrides_unreadable():
+        return False, ("not verified-profitable: the stored roster is "
+                       "UNREADABLE and the gate is CLOSED until a read "
+                       f"succeeds (slug={q_slug[:100]})")
     _verified = _whale_set("LIVE_VERIFIED_WHALES")
     if _verified and username not in _verified:
         return False, ("not verified-profitable: only whales certified by "
@@ -7548,11 +7778,17 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
     if venue is None:
         return _copy_stop("no_venue")
     # roster override refresh (owner order 2026-08-29): the DB-stored
-    # verified set must beat a stale env before ANY entry gate below
+    # verified set must beat a stale env before ANY entry gate below.
+    # No pool is a failed read (2026-09-05): CLOSED, not the fall-through.
     try:
-        await refresh_whale_overrides(await get_pool())
-    except Exception:  # noqa: BLE001 — env/default still stand
-        pass
+        _pool_for_roster = await get_pool()
+    except Exception as exc:  # noqa: BLE001
+        close_overrides(f"pool: {type(exc).__name__}: {str(exc)[:120]}")
+    else:
+        try:
+            await refresh_whale_overrides(_pool_for_roster)
+        except Exception:  # noqa: BLE001 — the refresh never raises; belt
+            pass
     username = (payload.get("whale_username") or "").lower()
     his_notional = float(payload.get("notional") or 0)
     his_price = float(payload.get("price") or 0)

@@ -9198,12 +9198,20 @@ async def api_gates() -> dict:
         proof = (json.loads(raw) if isinstance(raw, str) else raw)
     except Exception:  # noqa: BLE001
         proof = "unreadable"
+    # WHAT THE EXECUTOR WILL DO, NOT WHAT IT WOULD LIKE TO (disk-full
+    # incident 2026-09-04/05): while the database was unreadable this
+    # payload said source=default and printed the hardcoded clips,
+    # because the reader had fallen through to them. The reader now
+    # adopts UNREADABLE -- no whale verified, every clip 0.0 -- and the
+    # payload names that state so the probe prints the decision.
     return {
         "verified_effective": sorted(_le._whale_set("LIVE_VERIFIED_WHALES")),
-        "verified_source": ("db" if _le._roster_override is not None
+        "verified_source": ("unreadable_closed" if _le.overrides_unreadable()
+                            else "db" if _le._roster_override is not None
                             else "env" if os.getenv("LIVE_VERIFIED_WHALES")
                             else "default"),
         "verified_stored": stored,
+        "unreadable_closed": _le.closed_state(),
         "verified_env_set": os.getenv("LIVE_VERIFIED_WHALES") is not None,
         "hold_whales": sorted(_le._whale_set("LIVE_HOLD_WHALES")
                               if os.getenv("LIVE_HOLD_WHALES") else set()),
@@ -9227,7 +9235,9 @@ async def api_gates() -> dict:
             "per_fill_by_whale": dict(_le.PER_FILL_BY_WHALE),
             # WHAT ACTUALLY BINDS: the stored clips the rules wrote, and
             # the effective per-whale clip after they are applied.
-            "clip_overrides": dict(_le._clip_override or {}),
+            "clip_overrides": ("unreadable -> all clips 0.0"
+                               if _le.overrides_unreadable()
+                               else dict(_le._clip_override or {})),
             "per_fill_effective": {w: _le.per_fill_usd(w)
                                    for w in sorted(_le.exitable_whales())},
             "max_clip_usd": _le.LIVE_MAX_CLIP_USD,

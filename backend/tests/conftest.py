@@ -129,3 +129,26 @@ def _clear_module_caches():
     yield
     _le._SIBLING_CACHE.clear()
     _le._SIBLING_CACHE_AT = None
+
+
+@pytest.fixture(autouse=True)
+def _override_state_does_not_leak():
+    """The roster/clip overrides are module state, and since 2026-09-05
+    a read that FAILS adopts a CLOSED value (UNREADABLE) instead of
+    keeping the last one -- including a pool that cannot be obtained.
+    A test that drives a money path against an unreachable pool
+    (test_live_executor_mapping's staleness test) therefore left the
+    gate closed for every test after it: eleven sizing tests read a
+    0.0 clip and failed only in the suite, passing alone. Same stance
+    as the cache above: snapshot, then restore, so a test inherits
+    nothing and leaves nothing. The files that pin the closed state
+    (test_gate_fails_closed, test_verified_set, test_clips_follow_the_
+    rules) reset it themselves as well."""
+    from sportsassets import live_executor as _le
+
+    names = ("_roster_override", "_clip_override", "_roster_read_at",
+             "_closed_read_at", "_closed_since", "_closed_error")
+    saved = {n: getattr(_le, n) for n in names}
+    yield
+    for n, v in saved.items():
+        setattr(_le, n, v)

@@ -507,6 +507,23 @@ jobs:
                          else "complete" end)
                    end' /tmp/premap.json 2>/dev/null || true
           jq -r '"  WORKERS boot=\(.workers_boot // "none")  side_echo=\(.side_echo // "none")  TRIPPED=\(.side_echo_tripped // false)"' /tmp/premap.json 2>/dev/null || true
+          # RETENTION (2026-09-05, the full-disk outage): the hourly prune of
+          # ai_trades/copy_probes (workers/retention.py) writes its state row
+          # to ingestion_state['retention_last'] and the SAME payload to its
+          # 'retention' heartbeat. No endpoint serves that state key, so this
+          # reads the heartbeat copy via /api/health/services, fetching its own
+          # file so it does not depend on a later step. A refusal prints its
+          # reason; "no heartbeat row" means the worker never completed a
+          # cycle, which after this incident is a lead-with-this line.
+          curl -sS --max-time 30 -o /tmp/hb_ret.json "$BASE/api/health/services" 2>/dev/null || true
+          jq -r '[.[]? | select(.service == "retention")] as $r
+                 | if ($r | length) == 0
+                   then "  RETENTION no heartbeat row — worker never completed a cycle"
+                   else ($r[0] | "  RETENTION \(.status) beat=\(.beat_at) refused=\(.detail.refused // "none") capped=\(.detail.capped // false) deleted=\(.detail.deleted_total // 0) dur=\(.detail.duration_s // "?")s | "
+                         + ((.detail.tables // {}) | to_entries
+                            | map("\(.key): del=\(.value.deleted // 0) keep=\(.value.keep_days // "?")d oldest=\(.value.oldest_kept // "n/a") \(.value.error // "")")
+                            | join(" | ")))
+                   end' /tmp/hb_ret.json 2>/dev/null || echo "  RETENTION unreadable"
           # SLEEVE-OFF (owner order 2026-08-24: "only copies flow") —
           # the underdog worker's heartbeat states whether the sleeve is
           # off; anything but off is a lead-with-this alarm.

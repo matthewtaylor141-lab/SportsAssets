@@ -86,6 +86,9 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(le, "_clip_override", None)
     monkeypatch.setattr(le, "_roster_override", None)
     monkeypatch.setattr(le, "_roster_read_at", 0.0)
+    monkeypatch.setattr(le, "_closed_read_at", 0.0)   # closed cache (2026-09-05)
+    monkeypatch.setattr(le, "_closed_since", 0.0)
+    monkeypatch.setattr(le, "_closed_error", None)
 
 
 def test_the_clips_are_read_with_the_roster_and_a_bad_cell_is_dropped(monkeypatch):
@@ -97,13 +100,30 @@ def test_the_clips_are_read_with_the_roster_and_a_bad_cell_is_dropped(monkeypatc
     assert le._clip_override == {"rn1": 50.0, "x": 0.0}
 
 
-def test_a_clip_read_failure_keeps_the_last_adopted_map(monkeypatch):
+def test_a_clip_read_failure_closes_the_pair_rather_than_keeping_the_map(monkeypatch):
+    """The old pin here kept the last adopted map through a failed
+    read. The map is still held underneath -- and it is exactly what
+    the readers must NOT serve: while the pair is UNREADABLE every clip
+    is 0.0 and the stored map names nobody for exits (disk-full
+    incident 2026-09-04/05, when 'keep last' printed hardcoded clips
+    for whales the owner had cut to $0). A later read that succeeds
+    serves the map that is stored then."""
     _fresh(monkeypatch)
-    asyncio.run(le.refresh_whale_overrides(_Pool(clips=json.dumps({"rn1": 50}))))
-    assert le._clip_override == {"rn1": 50.0}
+    asyncio.run(le.refresh_whale_overrides(
+        _Pool(clips=json.dumps({"stranger": 50}))))
+    assert le.per_fill_usd("stranger") == 50.0
+    assert "stranger" in le.exitable_whales()
     monkeypatch.setattr(le, "_roster_read_at", 0.0)
     asyncio.run(le.refresh_whale_overrides(_Pool(clips_raise=True)))
-    assert le._clip_override == {"rn1": 50.0}
+    assert le.overrides_unreadable()
+    assert le.per_fill_usd("stranger") == 0.0, "an unreadable clip is 0.0"
+    assert "stranger" not in le.exitable_whales(), \
+        "a map we cannot read names nobody"
+    monkeypatch.setattr(le, "_closed_read_at", 0.0)    # past the retry window
+    asyncio.run(le.refresh_whale_overrides(
+        _Pool(clips=json.dumps({"stranger": 50}))))
+    assert not le.overrides_unreadable()
+    assert le.per_fill_usd("stranger") == 50.0
 
 
 def test_a_stored_nothing_clears_the_clips(monkeypatch):

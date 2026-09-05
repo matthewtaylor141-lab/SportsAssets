@@ -135,12 +135,18 @@ class _RosterPool:
     async def fetchval(self, sql, *a, timeout=None):
         if self.boom:
             raise RuntimeError("db blip")
-        return self.stored
+        # the roster key only; the clips key reads as no row (state 2).
+        # A fake that served the roster list AS the clip map kept a
+        # closed pair closed once a non-map clip row became a refusal.
+        return self.stored if a and a[0] == le._ROSTER_DB_KEY else None
 
 
 def _fresh_roster_state():
     le._roster_override = None
     le._roster_read_at = 0.0
+    le._closed_read_at = 0.0        # the closed cache's own clock (2026-09-05)
+    le._closed_since = 0.0
+    le._closed_error = None
 
 
 def test_db_roster_beats_the_env(monkeypatch):
@@ -174,15 +180,29 @@ def test_comma_string_and_case_are_normalized():
     _fresh_roster_state()
 
 
-def test_read_failure_keeps_the_last_adopted_roster():
+def test_read_failure_is_closed_not_the_last_adopted_roster():
+    """Disk-full incident 2026-09-04/05: the stored roster was intact
+    and UNREADABLE for ~15 hours. The old pin here -- "a DB blip is not
+    a roster decision" -- kept the LAST ADOPTED set through a failed
+    read, a set that can be hours stale while the owner's cuts since
+    then sit in the row we cannot read. A read that fails is now
+    CLOSED: nobody verified until a later read SUCCEEDS, and then the
+    stored value binds, not the remembered one."""
     _fresh_roster_state()
     asyncio.run(le.refresh_whale_overrides(
         _RosterPool(stored=_json.dumps(["rn1"]))))
     assert le._whale_set("LIVE_VERIFIED_WHALES") == {"rn1"}
     le._roster_read_at = 0.0            # force a re-read attempt
     asyncio.run(le.refresh_whale_overrides(_RosterPool(boom=True)))
-    assert le._whale_set("LIVE_VERIFIED_WHALES") == {"rn1"}, \
-        "a DB blip is not a roster decision"
+    assert le.overrides_unreadable()
+    assert le._whale_set("LIVE_VERIFIED_WHALES") == set(), \
+        "a roster we cannot read is not the roster we last read"
+    # the way back is a read that SUCCEEDS, on what is stored NOW
+    le._closed_read_at = 0.0            # past the closed retry window
+    asyncio.run(le.refresh_whale_overrides(
+        _RosterPool(stored=_json.dumps(["homerunhazard"]))))
+    assert not le.overrides_unreadable()
+    assert le._whale_set("LIVE_VERIFIED_WHALES") == {"homerunhazard"}
     _fresh_roster_state()
 
 
@@ -211,20 +231,26 @@ def test_other_env_sets_are_untouched_by_the_override(monkeypatch):
     _fresh_roster_state()
 
 
-def test_boot_read_failure_falls_to_env_and_screams(monkeypatch, caplog):
+def test_boot_read_failure_is_closed_and_screams(monkeypatch, caplog):
     """Fleet round 49: a fresh worker whose first roster read failed
     fell to the env/default in total silence while GATES (a different
-    process) reported 'db'. The fallback itself is unavoidable — a
-    roster we cannot read is not a roster — but it must be LOGGED at
-    error level and retried, and the TTL must stay unset so the very
-    next event retries the read."""
+    process) reported 'db'. That round made the fallback LOUD; the
+    disk-full incident (2026-09-04/05) made it CLOSED -- 'keep last'
+    with nothing adopted WAS the five-whale code default, printed with
+    hardcoded clips for whales the owner had cut to $0. Now the env is
+    not consulted, nobody is verified, the closure is logged at error
+    level, and the TTL stays unset so the next event retries the read."""
     import logging
 
     _fresh_roster_state()
+    monkeypatch.setenv("LIVE_VERIFIED_WHALES", "rn1")     # must NOT bind
     with caplog.at_level(logging.ERROR, logger="sportsassets.live_executor"):
         asyncio.run(le.refresh_whale_overrides(_RosterPool(boom=True)))
-    assert le._roster_override is None
+    assert le._roster_override is le.UNREADABLE
+    assert le._whale_set("LIVE_VERIFIED_WHALES") == set(), \
+        "the env is not a roster we could read either"
     assert le._roster_read_at == 0.0, "failure must not start the TTL"
-    assert any("UNREAD at boot" in r.message for r in caplog.records), \
-        "the boot fallback must be visible in the logs"
+    assert any("UNREAD at boot" in r.message and "CLOSED" in r.message
+               for r in caplog.records), \
+        "the boot closure must be visible in the logs"
     _fresh_roster_state()

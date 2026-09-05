@@ -19,7 +19,8 @@ from collections.abc import Awaitable, Callable
 
 from . import (analytics, chain_listener, copy_sweep, dispatcher, edge_marks,
                metadata_refresher, mirror_live, mirror_shadow, poller, premap,
-               price_path, reconciler, roster, roster_auto, underdog, whale_exits)
+               price_path, reconciler, retention, roster, roster_auto, underdog,
+               whale_exits)
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +73,13 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # that drops the flag cannot orphan a bid (spec section 3.7). The
     # DB switch 'mirror_live' must read true before it increases.
     ("mirror_live", mirror_live.main),
+    # RETENTION (2026-09-05, the full-disk outage): the paper trader's
+    # two measurement tables, ai_trades and copy_probes, filled the
+    # 15 GB disk and took the database's hostname with it for ~15
+    # hours. Hourly, bounded batches, a per-cycle cap, windows derived
+    # from what /api/ai-trader and /api/copy-report can ask for; touches
+    # exactly those two tables and nothing else. RETENTION=off stops it.
+    ("retention", retention.main),
 ]
 
 

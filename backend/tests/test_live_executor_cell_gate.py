@@ -19,6 +19,15 @@ class _FakePool:
         self.fetchval_calls = 0
 
     async def fetchval(self, *a, **k):
+        # The roster/clip override refresh reads the pool BEFORE any
+        # entry gate by design (owner order 2026-08-29) and is not the
+        # progress marker: answer "no row" (state 2) and do not count
+        # it. These pins passed only because the first test in this
+        # file started the refresh's 30 s TTL for the rest -- exposed
+        # 2026-09-05 when the suite began restoring override state
+        # between tests.
+        if a and a[0] == live_executor._OVERRIDE_READ_SQL:
+            return None
         self.fetchval_calls += 1
         return 1
 
@@ -226,6 +235,8 @@ def test_kalshi_claimed_position_is_taken(monkeypatch):
             self.queries = []
 
         async def fetchval(self, q, *a, **k):
+            if q == live_executor._OVERRIDE_READ_SQL:
+                return None          # the refresh, not a taken-check
             self.fetchval_calls += 1
             self.queries.append(q)
             if "live_orders" in q:
