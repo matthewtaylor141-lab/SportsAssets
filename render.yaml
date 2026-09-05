@@ -4,7 +4,18 @@
 
 databases:
   - name: sportsassets-db
-    plan: basic-256mb
+    # basic-256mb -> basic-4gb (owner decision 2026-09-05, "make those
+    # changes now and get us running"). The instance carried ~2 GB of
+    # indexes on the trades table alone (trades_whale_condition_ts_idx
+    # 747 MB, trades_dedupe_key_key 619 MB, read from pg_stat_user_indexes
+    # after the outage) on 256 MB of RAM and a tenth of a CPU: with the
+    # workers' loops running, pg_stat_activity showed a dozen queries
+    # each waiting on disk IO for 13-26 s, a 100-key unique-index lookup
+    # took 7.3 s, the API's 2 s health probe timed out (db_ok false),
+    # and a 15 s wait in the copy queue turned every copy into a
+    # stale-signal refusal. 4 GB holds the hot indexes in memory. The
+    # blueprint owns this field; change it here, never in the dashboard.
+    plan: basic-4gb
     # 16 -> 18 on 2026-09-05: the owner took Render's in-dashboard major
     # version upgrade during the disk outage. Render cannot downgrade a
     # major version, so a blueprint still saying "16" would fail every
