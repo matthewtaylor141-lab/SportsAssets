@@ -27,7 +27,27 @@
 #      vs MERGE vs REDEEM.
 name: whale-ledger-census
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      # ONE WHALE, DEEPER (management question 2026-09-05: "does he ever
+      # sell his positions or buy the other side to exit?"). The roster
+      # crawl is capped at 80 pages of 500 rows, which for a 37,000-buy
+      # month is the month and no more; a lifetime answer needs one
+      # wallet crawled to its first row. A single-whale run never
+      # publishes venue P&L (a one-wallet snapshot must not replace the
+      # roster's).
+      whale:
+        description: 'Only this username (case-insensitive); empty = whole roster'
+        required: false
+        default: ''
+      days:
+        description: 'How far back the activity crawl reaches, in days'
+        required: false
+        default: '30'
+      max_pages:
+        description: 'Activity pages of 500 rows per wallet (80 = the roster default)'
+        required: false
+        default: '80'
 
 jobs:
   ledger:
@@ -36,6 +56,9 @@ jobs:
     env:
       BASE: https://sportsassets-api.onrender.com
       ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+      WHALE: ${{ inputs.whale }}
+      DAYS: ${{ inputs.days || '30' }}
+      MAX_PAGES: ${{ inputs.max_pages || '80' }}
     steps:
       - name: Pull roster wallets, crawl the venue ledger, compute
         run: |
@@ -50,18 +73,26 @@ jobs:
             || echo "ROSTER FETCH FAILED"
           jq -r '.[] | select(.active) | "\(.username) \(.address)"' \
             /tmp/roster.json > /tmp/roster.txt 2>/dev/null
+          if [ -n "$WHALE" ]; then
+            grep -i "^${WHALE} " /tmp/roster.txt > /tmp/roster_one.txt
+            mv /tmp/roster_one.txt /tmp/roster.txt
+            echo "SINGLE-WHALE RUN: whale=$WHALE days=$DAYS max_pages=$MAX_PAGES (venue P&L not published)"
+          fi
           echo "ROSTER $(wc -l < /tmp/roster.txt) active whales"
           cat /tmp/roster.txt | sed 's/^/  R /'
 
-          # Crawl 30 days of activity per whale. The activity feed caps
-          # offset at 5000, so paging advances by rows returned and,
-          # when the cap nears, re-anchors with end=<oldest-1> at
-          # offset 0 -- depth via time windows, not offsets.
-          CUT=$(date -u -d '30 days ago' +%s)
+          # Crawl DAYS days of activity per whale, at most MAX_PAGES
+          # pages. The activity feed caps offset at 5000, so paging
+          # advances by rows returned and, when the cap nears,
+          # re-anchors with end=<oldest-1> at offset 0 -- depth via
+          # time windows, not offsets. The CRAWL line prints the oldest
+          # row reached, so a capped crawl says how far it got instead
+          # of wearing the window's label.
+          CUT=$(date -u -d "${DAYS} days ago" +%s)
           crawl () {  # $1 name  $2 address
-            local out="/tmp/act_$1.json" n=0 off=0 end="" rows cnt oldest
+            local out="/tmp/act_$1.json" n=0 off=0 end="" rows cnt oldest=0
             : > "$out"
-            while [ $n -lt 80 ]; do
+            while [ $n -lt "$MAX_PAGES" ]; do
               url="$D/activity?user=$2&limit=500&offset=$off"
               [ -n "$end" ] && url="$url&end=$end"
               rows=$(curl -sS --max-time 25 "$url")
@@ -74,7 +105,9 @@ jobs:
               if [ $off -ge 4500 ]; then end=$((oldest-1)); off=0; fi
               sleep 0.35
             done
-            echo "CRAWL $1 pages=$n rows=$(wc -l < "$out")"
+            local reached="?"
+            [ "$oldest" != "null" ] && [ "$oldest" -gt 0 ] 2>/dev/null && reached=$(date -u -d "@$oldest" +%FT%TZ)
+            echo "CRAWL $1 pages=$n rows=$(wc -l < "$out") oldest=$reached cut=$(date -u -d "@$CUT" +%FT%TZ) capped=$([ $n -ge "$MAX_PAGES" ] && echo yes || echo no)"
           }
           # Positions: the venue's own P&L per position.
           posget () {  # $1 name  $2 address
@@ -121,7 +154,9 @@ jobs:
           # PUBLISH into production (display/grading input only; the
           # order path never reads it). Failure is printed, not fatal:
           # the census's own output above remains the record.
-          if [ -s /tmp/venue_pnl.jsonl ]; then
+          if [ -n "$WHALE" ]; then
+            echo "VENUEPNL-POST skipped: single-whale run"
+          elif [ -s /tmp/venue_pnl.jsonl ]; then
             jq -s '{whales: ., source: "user-pnl-api via ledger-census"}' \
               /tmp/venue_pnl.jsonl > /tmp/venue_pnl.json
             HTTP=$(curl -sS --max-time 30 -o /tmp/vp_resp.json \
@@ -138,7 +173,12 @@ jobs:
           python3 - <<'PYEOF'
           import glob
           import json
+          import os
           import statistics as st
+
+          # The window label is the input, not a constant: a 150-day
+          # single-whale crawl must not print "30d".
+          W = f"{os.environ.get('DAYS', '30')}d"
 
           def f(x):
               try:
@@ -185,7 +225,7 @@ jobs:
               parts = "  ".join(
                   f"{k} n={n} ${v:,.0f}" for k, (n, v) in
                   sorted(agg.items(), key=lambda kv: -kv[1][1]))
-              print(f"WLV {name} ACT30d: {parts}")
+              print(f"WLV {name} ACT{W}: {parts}")
 
               # ---- 3. round trips per asset: entries matched to exits
               by_asset = {}
@@ -248,7 +288,7 @@ jobs:
                   mstr = " ".join(f"{k}={v:,.0f}sh"
                                   for k, v in sorted(mech_all.items()))
                   print(
-                      f"WLV {name} RT30d: bought={bought:,.0f}sh "
+                      f"WLV {name} RT{W}: bought={bought:,.0f}sh "
                       f"(${buy_usd:,.0f})  exited={exited:,.0f}sh "
                       f"({exited / bought:.1%})  pre_resolution="
                       f"{pre_resolution / bought:.1%}  "
@@ -257,7 +297,7 @@ jobs:
                       f"hold_med={st.median(holds):,.0f}min "
                       f"restake_med={st.median(restakes):,.0f}min"
                       if holds and restakes else
-                      f"WLV {name} RT30d: bought={bought:,.0f}sh "
+                      f"WLV {name} RT{W}: bought={bought:,.0f}sh "
                       f"exited={exited:,.0f}sh (insufficient timing data)")
                   print(f"WLV {name} EXITMECH: {mstr}")
 
