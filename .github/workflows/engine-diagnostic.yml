@@ -2009,7 +2009,7 @@ jobs:
           echo "#   SERVICE HEARTBEATS (which worker is dead, and why)       #"
           curl -sS --max-time 60 -o /tmp/hb.json "$BASE/api/health/services" || true
           jq -r '.[] | "  \(.service): \(.status)  \(.beat_at)  \(.error // "")"' \
-            /tmp/hb.json 2>/dev/null | head -15 || echo "  (endpoint not deployed yet)"
+            /tmp/hb.json 2>/dev/null | head -30 || echo "  (endpoint not deployed yet)"
           # The underdog sweep's per-gate stats live in its heartbeat
           # detail — the one line that says WHERE entries are dying.
           echo "  underdog detail: $(jq -c '.[] | select(.service == "underdog") | .detail' /tmp/hb.json 2>/dev/null)"
@@ -2023,6 +2023,11 @@ jobs:
           # should trend DOWN after the dead-token fix, dead_tokens is
           # the permanently-unknowable set being skipped.
           echo "  metadata detail: $(jq -c '.[] | select(.service == "metadata") | .detail | {re_enriched, unenriched_1k, dead_tokens, active_sports_markets}' /tmp/hb.json 2>/dev/null)"
+          # The workers' own memory reading (2026-09-05, thirteen OOM
+          # kills at 2 GiB): rss now, boot, peak, what the last trim
+          # returned, the raw move across it, jumps since boot, and
+          # whether the arena cap took. 'high' from 1536 MB up.
+          echo "  workers_memory detail: $(jq -c '.[] | select(.service == "workers_memory") | {status, beat_at, detail}' /tmp/hb.json 2>/dev/null)"
 
           echo ""
           echo "#   WHALE INGESTION RAW (shape + freshness, no jq guessing) #"

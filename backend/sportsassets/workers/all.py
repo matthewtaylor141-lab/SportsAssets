@@ -14,17 +14,238 @@ Use this on hosts where each background service is billed separately
 """
 
 import asyncio
+import concurrent.futures
 import logging
+import math
+import os
+import time
 from collections.abc import Awaitable, Callable
 
+from .. import procmem
+from ..db import heartbeat
 from . import (analytics, chain_listener, copy_sweep, dispatcher, edge_marks,
                metadata_refresher, mirror_live, mirror_shadow, poller, premap,
                price_path, reconciler, retention, roster, roster_auto, underdog,
                whale_exits)
 
+# THE ARENA CAP, AT IMPORT (2026-09-05). sportsassets-workers was
+# OOM-killed at 2 GiB thirteen times between 17:59:41 and 20:21:49:
+# every five to ten minutes until the analytics replay was bounded
+# (d18cc72, ebc24ce, live 19:01-19:06), every twenty to twenty-four
+# after, and the log lines in the seconds before each kill were only
+# the steady-state mix. The API measured the same ratchet in August
+# (api/app.py, the 2026-08-25 census): freed memory kept in glibc's
+# per-thread arenas, which every asyncio.to_thread venue call in this
+# process can grow, and answered it with this cap and a periodic trim.
+# M_ARENA_MAX only bounds arenas that do not exist yet, so this runs at
+# import, the API's placement. After the loop imports is early enough:
+# an arena is created when a thread first mallocs, and no loop module
+# starts a thread at import -- grep finds threading only in
+# venue_pace.py (a Lock, no thread), every to_thread/run_in_executor
+# sits inside a coroutine, and a fresh interpreter importing this
+# module counts one thread, MainThread (test_workers_memory_watch
+# measures that census). Above the imports it would cost a noqa on
+# every one of them for nothing. The status string rides every trim
+# line so the log says whether the cap took.
+_ARENA_STATUS = procmem.cap_malloc_arenas()
+
 log = logging.getLogger(__name__)
 
 RESTART_DELAY_SECONDS = 5
+
+# THE MEMORY WATCH (2026-09-05). Thirteen kills, and this process had no
+# reading of its own memory: the only figure was Render's kill line,
+# and the lines before each kill were the steady-state mix. This loop
+# is the instrument. Every WORKERS_MEM_SAMPLE_S it reads VmRSS; a
+# sample WORKERS_MEM_JUMP_MB above the previous one is ONE warning with
+# both readings and the seconds between them, so the loop whose lines
+# sit at that second in the log is the suspect -- the question the
+# kill log could not answer. Every WORKERS_TRIM_INTERVAL_S it runs
+# malloc_trim off the event loop (the API's periodic trim) on a thread
+# of its own -- the default executor is the one every venue call in
+# this process queues on, and a trim waiting behind a full pool would
+# hold the sampling with it -- reading RSS before and after IN THAT
+# THREAD, so the pair brackets the trim and nothing else: a jump that
+# lands during the trim is between the two readings and warned like
+# any other, never booked as a negative return. Every reading, the
+# cycle's sample and both sides of a trim, is judged against the last
+# one before it becomes the baseline. The trim line carries the
+# figures with the arena status so the log itself says whether the cap
+# took, and the loop beats 'workers_memory' (status 'high' from
+# WORKERS_MEM_HIGH_MB up) so /api/health/services carries them. A
+# figure that cannot be read is '?' in the line and None in the beat,
+# never a number. The knobs are read once per start: a value that does
+# not parse is the default, one below its floor is the floor, each
+# with a line. Nothing in a cycle raises out -- a watch that dies on
+# its own error is the instrument failing in the moment it is needed
+# -- and the clock is _now so a test can drive it without sleeping.
+_now = time.monotonic
+MEMORY_SERVICE = "workers_memory"
+
+
+def _env_float(name: str, default: float, *, floor: float | None = None) -> float:
+    """A knob from the env: the default when unset, blank or unparseable
+    (nan and inf included -- a nan interval never trims and an inf one
+    never samples), the floor when below it, each with a line."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value):
+        log.warning("memory watch: %s=%r does not parse; using %s", name, raw, default)
+        return default
+    if floor is not None and value < floor:
+        log.warning("memory watch: %s=%s is below the floor; using %s", name, value, floor)
+        return floor
+    return value
+
+
+def _mb(value: float | None, *, signed: bool = False) -> str:
+    """One figure for the trim line: whole MB, rounded (not truncated:
+    1250.7 is 1251), '?' when it could not be read -- never a number
+    the process did not measure."""
+    if value is None:
+        return "?"
+    return ("%+d" if signed else "%d") % round(value)
+
+
+async def _beat(status: str, detail: dict) -> None:
+    """One heartbeat: written when it can be, logged when it cannot,
+    never a raise. memory_watch runs this as a task it owns rather than
+    awaiting it in the cycle: db.heartbeat goes through get_pool, and
+    against a dead database get_pool walks 1+2+4+8+15x6 = 105 s of
+    backoff before it raises (tests/test_workers_survive_a_dead_db.py).
+    Awaited, that walk would hold the sampling for 105 s at every trim
+    -- and on exactly the night this watch is for, the database was
+    dead too. At most one beat is in flight; one still pending when the
+    next is due is skipped with a line, and the loop cancels a pending
+    beat on its way out."""
+    try:
+        await heartbeat(MEMORY_SERVICE, status, detail)
+    except Exception as exc:  # noqa: BLE001 -- the beat is telemetry
+        # the type is named because a TimeoutError's str() is empty
+        log.warning("workers_memory heartbeat %r not written: %s: %s",
+                    status, type(exc).__name__, exc)
+
+
+async def memory_watch() -> None:
+    sample_s = _env_float("WORKERS_MEM_SAMPLE_S", 5.0, floor=1.0)
+    # floor 1: at 0 (or below) every non-decreasing sample is a "jump"
+    jump_mb = _env_float("WORKERS_MEM_JUMP_MB", 64.0, floor=1.0)
+    trim_s = _env_float("WORKERS_TRIM_INTERVAL_S", 60.0, floor=5.0)
+    high_mb = _env_float("WORKERS_MEM_HIGH_MB", 1536.0)
+    boot: float | None = None          # the first readable reading
+    peak: float | None = None
+    prev: float | None = None          # the last readable reading ...
+    prev_at = _now()                   # ... and the clock when it was read
+    jumps = 0
+    last_trim = _now()
+    pending: asyncio.Task | None = None
+    warned_no_trim = False
+    # THE TRIM'S OWN THREAD (2026-09-05). asyncio.to_thread would queue
+    # the trim on the default executor, the pool every venue call in
+    # this process runs on (forty-odd asyncio.to_thread sites in
+    # live_executor.py alone, the slowest under a two-minute
+    # wait_for); with that pool full the trim waits its turn and the
+    # sampling waits with it. One thread of the watch's own, named so a
+    # thread census can tell it apart, shut down (without waiting on a
+    # trim in flight) the moment the loop leaves.
+    trim_pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="memory.trim")
+    loop = asyncio.get_running_loop()
+
+    def judge(reading: float | None, at: float) -> None:
+        """Every reading passes here -- the cycle's sample and both
+        sides of a trim -- and none becomes the baseline unjudged, so a
+        jump that lands while the trim thread runs is the step from
+        `before` to `after`, warned like any other. An unreadable
+        reading changes nothing: the baseline stays the last readable
+        one and the seconds on the next jump line count from it."""
+        nonlocal boot, peak, prev, prev_at, jumps
+        if reading is None:
+            return
+        if boot is None:
+            boot = reading
+        if peak is None or reading > peak:
+            peak = reading
+        if prev is not None:
+            # one-decimal readings: the step is rounded to one before it
+            # is judged and printed, so 1024.1 - 960.1 is 64, not
+            # 63.999999999999886; the figures are rounded, not truncated
+            step = round(reading - prev, 1)
+            if step >= jump_mb:
+                jumps += 1
+                log.warning("workers rss jump +%d MB in %.0fs: %d -> %d MB",
+                            round(step), at - prev_at, round(prev), round(reading))
+        prev, prev_at = reading, at
+
+    def trim_pair() -> tuple[float | None, float, bool, float | None, float]:
+        """In the trim thread: the reading before, the trim, the reading
+        after, each with the clock -- one thread and no event-loop
+        yield between them, so the pair brackets the trim and nothing
+        else. Read on the loop with the trim awaited in between, the
+        'before' was a sample taken before an unbounded yield, and a
+        jump landing in that yield came back as a negative return."""
+        before, before_at = procmem.rss_mb(), _now()
+        ran = procmem.malloc_trim()
+        after, after_at = procmem.rss_mb(), _now()
+        return before, before_at, ran, after, after_at
+
+    try:
+        while True:
+            try:
+                now = _now()
+                if now - last_trim < trim_s:
+                    judge(procmem.rss_mb(), now)          # a plain sample
+                else:
+                    last_trim = now
+                    before, before_at, ran, after, after_at = await loop.run_in_executor(
+                        trim_pool, trim_pair)
+                    judge(before, before_at)
+                    judge(after, after_at)
+                    if not ran:
+                        freed: float | None = 0.0
+                        if not warned_no_trim:
+                            warned_no_trim = True
+                            log.warning("workers malloc_trim unavailable: "
+                                        "nothing is returned to the OS")
+                    elif before is None or after is None:
+                        freed = None
+                    else:
+                        # what the trim gave back: another loop allocating
+                        # between the readings can only shrink it, never
+                        # make it negative -- the raw movement, sign and
+                        # all, rides the beat as rss_delta_mb
+                        freed = max(0.0, round(before - after, 1))
+                    delta = (None if before is None or after is None
+                             else round(after - before, 1))
+                    since_boot = (None if after is None or boot is None
+                                  else round(after - boot, 1))
+                    log.info("workers rss %s MB (boot %s, peak %s) trim returned %s MB arena=%s",
+                             _mb(after), _mb(since_boot, signed=True), _mb(peak),
+                             _mb(freed), _ARENA_STATUS)
+                    status = "high" if after is not None and after >= high_mb else "ok"
+                    detail = {"rss_mb": after, "boot_mb": boot, "peak_mb": peak,
+                              "trim_freed_mb": freed, "rss_delta_mb": delta,
+                              "jumps": jumps, "arena": _ARENA_STATUS}
+                    if pending is not None and not pending.done():
+                        log.warning("workers_memory heartbeat skipped: "
+                                    "the previous one is still in flight")
+                    else:
+                        pending = asyncio.create_task(_beat(status, detail),
+                                                      name="memory.beat")
+            except Exception:  # noqa: BLE001 -- the instrument outlives its own bugs
+                log.exception("workers memory watch cycle failed; next sample in %ss",
+                              sample_s)
+            await asyncio.sleep(sample_s)
+    finally:
+        trim_pool.shutdown(wait=False)
+        if pending is not None and not pending.done():
+            pending.cancel()
+
 
 # THE BOOT STAMPEDE (outage review 2026-09-05): gather() started every
 # loop in the same instant, so the loops' opening database reads hit
@@ -92,6 +313,13 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # from what /api/ai-trader and /api/copy-report can ask for; touches
     # exactly those two tables and nothing else. RETENTION=off stops it.
     ("retention", retention.main),
+    # THE MEMORY WATCH (2026-09-05, the thirteen OOM kills): samples
+    # VmRSS, names the second RSS jumps, trims on a timer and beats
+    # 'workers_memory'. LAST, so the poller stays index 0 and every
+    # existing loop's boot delay is unchanged; its first reading -- the
+    # 'boot' figure on its lines -- is taken about thirteen seconds into
+    # the process, after the other seventeen have started.
+    ("memory", memory_watch),
 ]
 
 
