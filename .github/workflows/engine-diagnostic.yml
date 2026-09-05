@@ -703,7 +703,41 @@ jobs:
           # its coverage is poor (no_truth > 100 markets unreachable —
           # the archive merge should leave a small remainder; 2026-08-24
           # the self-disable on ran=true alone masked a coverage failure).
-          if ! jq -e '(.ran == true) and ((.no_truth // 999999) <= 100)' /tmp/rescore.json >/dev/null 2>&1; then
+          # FAIL CLOSED WHEN THE SUMMARY CANNOT BE READ (2026-09-05).
+          #
+          # This block FIRES WRITES: three POSTs, each a full restatement
+          # pass over live_orders, each allowed 280 seconds. The old
+          # condition was `if ! jq -e '<needed>' /tmp/rescore.json`, and
+          # the GET that fills that file carries `|| true` — so when the
+          # API was slow enough for that GET to time out, the file was
+          # empty, `jq -e` failed on the parse, `!` made the condition
+          # TRUE, and the probe fired three heavy writes at an API that
+          # was already struggling. That is a loop with a positive sign:
+          # slow API -> unread summary -> three restatements -> slower
+          # API. It is what turned a 14-minute probe into three
+          # consecutive 32-minute cancellations on 2026-09-04, and with
+          # two runs overlapping it was up to six concurrent passes.
+          #
+          # An unreadable summary is NOT evidence the restatement is
+          # needed. It is evidence of nothing, and the money-path rule
+          # here is the same as everywhere else: no write on an absent
+          # reading. So the file must PARSE and must SAY it is needed.
+          if jq -e 'type == "object"' /tmp/rescore.json >/dev/null 2>&1; then
+            RESCORE_NEEDED=$(jq -r 'if ((.ran == true)
+                                        and ((.no_truth // 999999) <= 100))
+                                    then "no" else "yes" end' \
+                             /tmp/rescore.json 2>/dev/null) || RESCORE_NEEDED=unreadable
+          else
+            RESCORE_NEEDED=unreadable
+          fi
+          if [ "$RESCORE_NEEDED" = "unreadable" ]; then
+            echo "  RESCORE-POST SKIPPED: the summary did not parse, so"
+            echo "    whether a restatement is needed is UNKNOWN. Firing"
+            echo "    three 280s write passes on no reading is how this"
+            echo "    probe took the API down with it. Read the RESCORE"
+            echo "    line above: if it is absent the GET timed out."
+          fi
+          if [ "$RESCORE_NEEDED" = "yes" ]; then
             for SD in 2026-08-17 2026-08-10 2026-08-01; do
               echo "  RESCORE-POST since=$SD:"
               curl -sS --max-time 280 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
