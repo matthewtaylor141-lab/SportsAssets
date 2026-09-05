@@ -1,0 +1,51 @@
+# Read the venue's PUBLIC market-data endpoints from outside our own
+# services, so a "no quote" in the workers log can be told apart from a
+# market that has no book (2026-09-05: the mirror's first ON ticks were
+# abandoned on three consecutive empty BBO reads, and the workers' httpx
+# lines had gone quiet, so nothing in our logs said what the venue had
+# actually answered). No key, no account, no order path: the gateway's
+# market endpoints are the ones the SDK's keyless client reads.
+name: venue-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      slugs:
+        description: 'Comma-separated market slugs to read (bbo + book each)'
+        required: false
+        default: ''
+      list:
+        description: 'Also list N active markets and read their bbo (0 = skip)'
+        required: false
+        default: '3'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read
+        env:
+          SLUGS: ${{ inputs.slugs }}
+          LIST: ${{ inputs.list }}
+        run: |
+          set -u
+          G="https://gateway.polymarket.us/v1"
+          read_one() {
+            local s="$1"
+            for ep in bbo book; do
+              echo "== GET $G/markets/$s/$ep"
+              curl -sS --max-time 20 -w '\n-- HTTP %{http_code} in %{time_total}s\n' \
+                   -H "Accept: application/json" "$G/markets/$s/$ep" | head -c 1500
+              echo
+            done
+          }
+          for s in ${SLUGS//,/ }; do read_one "$s"; done
+          N="${LIST:-0}"
+          if [ "$N" != "0" ]; then
+            echo "== GET $G/markets?limit=$N&active=true"
+            curl -sS --max-time 20 -o /tmp/m.json -w 'HTTP %{http_code}\n' -H "Accept: application/json" "$G/markets?limit=$N&active=true"
+            jq -r '(.markets // .)[]? | "  \(.slug)  \(.title // "")  outcome=\(.outcome // "")  status=\(.status // .state // "")"' /tmp/m.json 2>/dev/null || head -c 800 /tmp/m.json
+            for s in $(jq -r '(.markets // .)[]? | .slug' /tmp/m.json 2>/dev/null | head -n "$N"); do read_one "$s"; done
+          fi
+          echo "done at $(date -u +%FT%TZ)"
