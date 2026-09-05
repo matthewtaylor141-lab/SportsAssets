@@ -18,6 +18,10 @@ on:
         description: 'Also list N active markets and read their bbo (0 = skip)'
         required: false
         default: '3'
+      events:
+        description: 'Also list N events starting between now-4h and now+8h and read the bbo of each first market (0 = skip)'
+        required: false
+        default: '0'
 
 jobs:
   probe:
@@ -28,6 +32,7 @@ jobs:
         env:
           SLUGS: ${{ inputs.slugs }}
           LIST: ${{ inputs.list }}
+          EVENTS: ${{ inputs.events }}
         run: |
           set -u
           G="https://gateway.polymarket.us/v1"
@@ -47,5 +52,17 @@ jobs:
             curl -sS --max-time 20 -o /tmp/m.json -w 'HTTP %{http_code}\n' -H "Accept: application/json" "$G/markets?limit=$N&active=true"
             jq -r '(.markets // .)[]? | "  \(.slug)  \(.title // "")  outcome=\(.outcome // "")  status=\(.status // .state // "")"' /tmp/m.json 2>/dev/null || head -c 800 /tmp/m.json
             for s in $(jq -r '(.markets // .)[]? | .slug' /tmp/m.json 2>/dev/null | head -n "$N"); do read_one "$s"; done
+          fi
+          E="${EVENTS:-0}"
+          if [ "$E" != "0" ]; then
+            # the window the API's own board sweep uses (events starting
+            # from a few hours ago to later tonight): what is in play or
+            # about to be, read the way the mirror reads it
+            MIN=$(date -u -d '-4 hours' +%FT%TZ); MAX=$(date -u -d '+8 hours' +%FT%TZ)
+            echo "== GET $G/events?limit=$E&active=true&closed=false&startTimeMin=$MIN&startTimeMax=$MAX"
+            curl -sS --max-time 20 -o /tmp/e.json -w 'HTTP %{http_code}\n' -H "Accept: application/json" \
+                 "$G/events?limit=$E&active=true&closed=false&startTimeMin=$MIN&startTimeMax=$MAX"
+            jq -r '(.events // .)[]? | "  \(.slug // "")  start=\(.startTime // .start_time // "")  \(.title // "")  markets=\((.markets // []) | length)"' /tmp/e.json 2>/dev/null || head -c 800 /tmp/e.json
+            for s in $(jq -r '(.events // .)[]? | (.markets // [])[0]? | .slug // empty' /tmp/e.json 2>/dev/null | head -n "$E"); do read_one "$s"; done
           fi
           echo "done at $(date -u +%FT%TZ)"
