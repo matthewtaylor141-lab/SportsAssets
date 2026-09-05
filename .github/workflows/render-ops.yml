@@ -37,6 +37,7 @@ on:
           - deploy        # confirm=DO: deploy the latest commit of the service's branch
           - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO)
           - env-keys      # the service's env var KEYS (never values)
+          - env-get       # arg = comma-separated OPERATOR FLAGS (LIVE_COPY_HALT, ...); values of flags only
           - env-set       # confirm=DO: arg = KEY=VALUE (value masked in the log; Render redeploys)
           - env-del       # confirm=DO: arg = KEY
       service:
@@ -170,6 +171,22 @@ jobs:
               ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
               echo "== env var keys on $SERVICE ($ID) =="
               get "/services/$ID/env-vars?limit=100" | jq -r '.[]? | .envVar | "  \(.key)  (\(.value | length) chars)"' || echo "(env read failed)"
+              ;;
+            env-get)
+              # VALUES of the operator FLAGS only -- never a key, token, URL or
+              # credential. The switches that decide whether money moves
+              # (LIVE_COPY_HALT: 'on'/'1'/'true'/'yes'/'halt'/'stop' halt) must
+              # be readable without a screenshot; everything else stays masked.
+              ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
+              FLAGS=" LIVE_COPY_HALT LIVE_TRADING_ENABLED AI_TRADER_ENABLED COPY_PROBE_ENABLED LIVE_PREMAP LIVE_ALLOW_SHORT LIVE_VERIFIED_WHALES LIVE_PREMAP_WHALES WHALE_EXIT_MAX_SIBLINGS RETENTION API_INGESTION_FALLBACK LIVE_COPY_CONCURRENCY "
+              get "/services/$ID/env-vars?limit=100" > /tmp/env.json
+              for k in ${ARG//,/ }; do
+                case "$FLAGS" in
+                  *" $k "*) v=$(jq -r --arg k "$k" '.[]? | .envVar | select(.key==$k) | .value' /tmp/env.json | head -1)
+                            if [ -n "$v" ]; then echo "  $k = '$v'"; else echo "  $k is not set on $SERVICE (code default applies)"; fi ;;
+                  *) echo "  $k is not an operator flag; refusing to print it" ;;
+                esac
+              done
               ;;
             env-set)
               need_confirm
