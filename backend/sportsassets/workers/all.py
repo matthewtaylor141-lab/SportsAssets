@@ -26,6 +26,18 @@ log = logging.getLogger(__name__)
 
 RESTART_DELAY_SECONDS = 5
 
+# THE BOOT STAMPEDE (outage review 2026-09-05): gather() started every
+# loop in the same instant, so the loops' opening database reads hit
+# this process's ten-connection pool together on every boot. get_pool is
+# single-flight now (db.py) -- one pool built once, not one per caller --
+# but the reads behind it still queue on it. The API's own /healthz read
+# its pool at size == max, idle == 0 at 01:06Z with nothing of note in
+# flight; this process, with more loops on the same pool size, is
+# inferred to do the same at every boot. Each loop's FIRST start is
+# offset by its LOOPS index times this, so the poller (index 0) starts
+# at once and the tail of the list about twelve seconds later.
+BOOT_STAGGER_S = 0.75
+
 LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     ("poller", poller.main),
     ("chain_listener", chain_listener.main),
@@ -83,7 +95,15 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
 ]
 
 
-async def supervise(name: str, factory: Callable[[], Awaitable[None]]) -> None:
+async def supervise(name: str, factory: Callable[[], Awaitable[None]], *,
+                    boot_delay: float = 0.0) -> None:
+    # The stagger belongs before the FIRST start and nowhere else
+    # (2026-09-05): a restart is one loop alone, its neighbours long
+    # since spread out, so re-applying boot_delay there would only hold
+    # a crashed loop -- the poller's Path B included -- out of service
+    # for nothing. RESTART_DELAY_SECONDS is the restart's whole wait.
+    if boot_delay > 0:
+        await asyncio.sleep(boot_delay)
     while True:
         try:
             log.info("starting loop: %s", name)
@@ -124,9 +144,12 @@ async def main() -> None:
     # The marker runs CONCURRENTLY with the loops (leak-hunt find
     # 2026-08-24): awaiting it first serialized a DB connect retry in
     # front of every worker — a slow DB would have delayed the chain
-    # listener itself for a status row.
+    # listener itself for a status row. The marker is not staggered
+    # either: it is the one write the probe waits on to learn which
+    # commit is booting.
     await asyncio.gather(_record_boot(),
-                         *(supervise(name, fn) for name, fn in LOOPS))
+                         *(supervise(name, fn, boot_delay=i * BOOT_STAGGER_S)
+                           for i, (name, fn) in enumerate(LOOPS)))
 
 
 if __name__ == "__main__":

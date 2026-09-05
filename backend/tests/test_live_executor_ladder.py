@@ -269,6 +269,9 @@ def test_stale_positions_snapshot_fails_closed(monkeypatch):
                         lambda: (_ for _ in ()).throw(RuntimeError("down")))
     monkeypatch.setitem(_pmus._pos_cache, "ts", _t.time() - 3600)
     monkeypatch.setitem(_pmus._pos_cache, "slugs", frozenset())
+    # The failed read below flips the first-failure flag; restore it so
+    # a later test's traceback expectation does not depend on ordering.
+    monkeypatch.setattr(_pmus, "_pos_read_failing", False)
     assert _pmus.account_holds("tsc-anything") is True
     monkeypatch.setitem(_pmus._pos_cache, "ts", _t.time() - 60)
     assert _pmus.account_holds("tsc-anything") is False,         "a fresh-enough snapshot still answers normally"

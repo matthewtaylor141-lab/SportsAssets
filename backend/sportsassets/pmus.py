@@ -43,6 +43,14 @@ PREVIEW_COST_TOLERANCE = 1.02  # venue-computed cost may exceed ours by ≤2%
 # outcome. The venue account is the one referee every sleeve can see:
 # before any autonomous buy, ask it whether the market is already held.
 _pos_cache: dict = {"ts": 0.0, "slugs": frozenset()}
+# True while positions reads are failing. The failed-read line carries
+# its traceback only on the flip from working to failing: during the
+# 2026-09-05 outage (api.polymarket.us 503 on every positions call from
+# 17:39:48Z, the public gateway 200 throughout) the unconditional
+# exc_info=True printed the same 15-line stack per attempt, per caller,
+# every 15-60s — ~50 log lines/s that buried the status code the
+# operator was looking for. A successful read re-arms it.
+_pos_read_failing = False
 _POS_TTL = 20.0
 # Fail-open was designed for 20-second blips; the 2026-08-11 venue
 # maintenance stretched "the last snapshot" to HOURS and the no-stack
@@ -88,6 +96,7 @@ def account_holds(us_market_slug: str) -> bool:
     the profitable copy sleeve) — but only within _POS_MAX_STALE_S: past
     that bound the answer is HELD (refuse), because a snapshot hours old
     is not truth, it is the 2026-08-11 stacking incident."""
+    global _pos_read_failing
     import time as _t
 
     now = _t.time()
@@ -110,15 +119,43 @@ def account_holds(us_market_slug: str) -> bool:
                 if resp.get("eof") or not cursor:
                     break
             _pos_cache.update(ts=now, slugs=frozenset(held))
-        except Exception:  # noqa: BLE001 — stale snapshot beats blindness
-            log.warning("account_holds: positions read failed; using "
-                        "stale snapshot", exc_info=True)
+            _pos_read_failing = False
+        except Exception as exc:  # noqa: BLE001 — stale snapshot beats blindness
+            # One line per attempt — class, the HTTP status when the
+            # SDK's APIStatusError carries one, message — and the stack
+            # only on the first failure after a success or since boot.
+            # The 2026-09-05 outage (see _pos_read_failing) had every
+            # caller reprinting one identical traceback every 15-60s
+            # while the "503" the operator needed appeared nowhere.
+            first = not _pos_read_failing
+            _pos_read_failing = True
+            what = type(exc).__name__
+            status = getattr(exc, "status_code", None)
+            if status is not None:
+                what = f"{what} HTTP {status}"
+            # One LINE means one line: the SDK's message is the raw
+            # response body when a gateway answers with a non-JSON 503
+            # page, newlines and all, so the text is flattened and
+            # bounded before it is logged (review finding, 2026-09-05).
+            detail = " ".join(str(exc).split())[:200]
+            log.warning("account_holds: positions read failed (%s: %s); "
+                        "using stale snapshot", what, detail, exc_info=first)
     if now - _pos_cache["ts"] > _POS_MAX_STALE_S:
         # Too stale to trust either answer: report HELD so the caller
         # refuses the buy. A venue we cannot read for 10+ minutes is an
         # outage, and an outage must starve the sleeve, not blind it.
-        log.warning("account_holds: snapshot %.0fs stale — failing "
-                    "CLOSED for %s", now - _pos_cache["ts"], us_market_slug)
+        if _pos_cache["ts"] == 0.0:
+            # The boot sentinel is not a snapshot: its age is the epoch
+            # itself, and every refusal of the 2026-09-05 outage logged
+            # "snapshot 1788637346s stale" — a number that reads as a
+            # corrupt clock, not as "nothing read since boot".
+            log.warning("account_holds: no positions snapshot since boot "
+                        "(venue unreadable) — failing CLOSED for %s",
+                        us_market_slug)
+        else:
+            log.warning("account_holds: snapshot %.0fs stale — failing "
+                        "CLOSED for %s", now - _pos_cache["ts"],
+                        us_market_slug)
         return True
     return us_market_slug in _pos_cache["slugs"]
 

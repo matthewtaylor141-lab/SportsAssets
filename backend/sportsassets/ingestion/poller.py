@@ -54,6 +54,30 @@ CANCEL_WAIT_S = 10.0
 # contains it like any other failed delivery.
 ALERT_TIMEOUT_S = 15.0
 
+# The roster read's ceiling (2026-09-05, the containment re-review that
+# bounded db.heartbeat the same day), on BOTH legs of the read: the
+# acquire and the statement. run() moved tracked_whales inside its try
+# that morning, so a roster read that RAISES is a paced retry with a
+# stage=roster heartbeat -- but a read that HANGS was still invisible.
+# It went through pool.fetch, which is asyncpg's `async with
+# self.acquire(): con.fetch(..., timeout=)` with no acquire timeout and
+# was given no statement timeout either, so against a SATURATED pool
+# (size == max, idle == 0, the shape /healthz read at 2026-09-05
+# 01:06Z, and what a stalled database turns a pool into once its
+# statements pile up) the read sat in acquire forever and run() sat
+# behind it: no beat, no log line, and nothing for supervise() to
+# restart, since run() had not ended -- Path B dead in silence, and
+# the fast lane with it, because it reads the same roster. The ceiling
+# now goes to pool.acquire(timeout=) AND to the connection's
+# fetch(timeout=); asyncpg raises TimeoutError at either, an Exception,
+# so run()'s roster except and the fast lane's own contain it like the
+# outage's ConnectionDoesNotExistError, and a release after a statement
+# cut off at its ceiling reuses the acquire timeout as its cancel-ack
+# budget (db.HEARTBEAT_TIMEOUT_S walks that third leg), so the worst
+# case ENDS. Ten seconds is generous for a handful of rows off a small
+# indexed table and short next to the poll pace it gates.
+ROSTER_TIMEOUT_S = 10.0
+
 
 def parse_data_api_trade(raw: dict[str, Any], whale_id: int, username: str | None) -> TradeEvent:
     """Map a data-api trade payload onto our TradeEvent."""
@@ -131,9 +155,17 @@ class Poller:
 
     async def tracked_whales(self) -> list[dict]:
         pool = await get_pool()
-        rows = await pool.fetch(
-            "SELECT id, address, username FROM whales WHERE active AND NOT banned ORDER BY id"
-        )
+        # bounded on both legs (see ROSTER_TIMEOUT_S): the acquire, so a
+        # saturated pool ends this with a TimeoutError instead of holding
+        # it in the queue, and the statement, so a stalled database does
+        # the same. Never pool.fetch(timeout=): that bounds only the
+        # statement and would sit in acquire forever, the hold that took
+        # db.heartbeat on 2026-09-05.
+        async with pool.acquire(timeout=ROSTER_TIMEOUT_S) as con:
+            rows = await con.fetch(
+                "SELECT id, address, username FROM whales WHERE active AND NOT banned ORDER BY id",
+                timeout=ROSTER_TIMEOUT_S,
+            )
         return [dict(r) for r in rows]
 
     async def poll_wallet(self, whale: dict) -> int:
@@ -539,11 +571,19 @@ class Poller:
                     # fully gone must reach Telegram, not only the
                     # heartbeat row it cannot write.
                     self._consecutive_failures += 1
+                    # TYPE AND MESSAGE, like _beat and _alert_degraded: the
+                    # bounded read's realistic failure is a bare
+                    # asyncio.TimeoutError whose str() is '' (asyncpg raises
+                    # it empty on both the acquire and the statement), and
+                    # a line reading "roster unreadable ()" with a beat whose
+                    # error is "" is the silence the ceiling was added to
+                    # end (review finding, 2026-09-05).
+                    reason = f"{type(exc).__name__}: {exc}"
                     log.warning("poll: roster unreadable (%s); retry in %ss",
-                                exc, self._interval)
+                                reason, self._interval)
                     await self._beat("error", {"stage": "roster",
                                                "failures": self._consecutive_failures,
-                                               "error": str(exc)})
+                                               "error": reason})
                     await self._alert_degraded()
                     await asyncio.sleep(self._interval)
                     continue

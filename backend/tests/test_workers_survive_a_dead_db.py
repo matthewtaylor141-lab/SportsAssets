@@ -34,6 +34,14 @@ against a SATURATED pool (size == max, idle == 0, what /healthz read at
 TimeoutError, no 'not written' line, run() stopped pacing. And
 _alert_degraded guarded the alert channel against a raise, not a hang.
 
+And the re-review's leftover (same day, later): the roster read itself.
+run() had put tracked_whales inside its try that morning, so a read
+that RAISED was a paced retry with a stage=roster beat -- but it went
+through pool.fetch, the same acquire-with-no-timeout shape, and was
+given no statement timeout either, so against the saturated pool a read
+that HUNG held run() before its first beat, with no line to show for it
+and nothing for supervise() to restart.
+
 Every pin here is against the REAL functions -- db.get_pool,
 db.heartbeat, db.pool_stats, Poller.run with the real _history_loop,
 _priority_loop, tracked_whales, _beat and _alert_degraded underneath --
@@ -59,6 +67,18 @@ the sleeps faked around them:
     stalled database ends it with one from the statement; neither
     holds the caller, and a write that went back to pool.execute would
     be held by the saturated pool exactly as the real one was
+  * Poller.tracked_whales bounds BOTH legs of the roster read with
+    ROSTER_TIMEOUT_S (10 s) -- pool.acquire(timeout=) and the
+    connection's fetch(timeout=) -- so a saturated pool ends the read
+    with a TimeoutError from the acquire, no statement ever sent, and a
+    stalled database ends it with one from the statement, the
+    connection released; a healthy pool hands back list[dict] rows with
+    id/address/username, built from Record-shaped rows off the
+    unchanged SQL; under run() that TimeoutError is the roster branch's
+    paced retry, stage=roster beats and the degraded alert at the
+    threshold, and the fast lane contains its own copy of it; a read
+    that went back to pool.fetch would be held by the saturated pool
+    exactly as the heartbeat was
   * pool_stats() is synchronous, {"size","idle","max","min"} from the
     pool's own counters, None without a pool, None (never a raise) when
     the counters cannot be read
@@ -291,41 +311,51 @@ def test_a_leader_cancelled_mid_walk_stamps_no_verdict_for_its_waiters(monkeypat
 
 # ---------------------------------------------------------- db.heartbeat
 
+class _Record:
+    """asyncpg's Record as dict() sees it -- keys() and [] -- so the
+    roster read's `dict(r)` runs on something that is NOT already a
+    dict, and the list[dict] its caller gets back is the read's doing."""
+
+    def __init__(self, row: dict):
+        self._row = row
+
+    def keys(self):
+        return self._row.keys()
+
+    def __getitem__(self, key):
+        return self._row[key]
+
+
 class _DbPool:
     """A pool as tracked_whales and db.heartbeat see it, in asyncpg's
-    shape. fetch serves the roster (or raises). acquire(timeout=) is
-    the async context manager that hands out a connection, and the
-    connection's execute is the heartbeat upsert; each records its
-    timeout and either lands, raises, or hangs: a SATURATED pool
-    (acquire_hangs -- size == max, idle == 0, what /healthz read at
-    2026-09-05 01:06Z) never hands out a connection, a STALLED database
-    (execute_hangs) never answers the statement. A hang is forever when
-    no timeout was given and timeout/1000 s when one was, then
-    TimeoutError the way asyncpg raises it at each ceiling. execute on
-    the pool itself is asyncpg's Pool.execute, shape for shape --
-    acquire with NO timeout, then the connection's execute with one --
-    so a heartbeat that goes back to it is held by the saturated pool
-    exactly as the real one was. Everything yields once, so a loop that
-    beats without pacing still lets the event loop turn."""
+    shape. acquire(timeout=) is the async context manager that hands
+    out a connection; the connection's fetch is the roster read (rows
+    off `roster`, or fetch_raises) and its execute the heartbeat
+    upsert; each records its timeout and either lands, raises, or
+    hangs: a SATURATED pool (acquire_hangs -- size == max, idle == 0,
+    what /healthz read at 2026-09-05 01:06Z) never hands out a
+    connection, a STALLED database (fetch_hangs, execute_hangs) never
+    answers the statement. A hang is forever when no timeout was given
+    and timeout/1000 s when one was, then TimeoutError the way asyncpg
+    raises it at each ceiling. fetch and execute on the pool itself are
+    asyncpg's Pool.fetch and Pool.execute, shape for shape -- acquire
+    with NO timeout, then the connection's call with one -- so a roster
+    read or a heartbeat that goes back to them is held by the saturated
+    pool exactly as the real heartbeat was. Everything yields once, so
+    a loop that beats without pacing still lets the event loop turn."""
 
     def __init__(self, roster=None, fetch_raises=None, execute_raises=None,
-                 execute_hangs=False, acquire_hangs=False):
+                 execute_hangs=False, acquire_hangs=False, fetch_hangs=False):
         self.roster = roster or []
         self.fetch_raises = fetch_raises
+        self.fetch_hangs = fetch_hangs
         self.execute_raises = execute_raises
         self.execute_hangs = execute_hangs
         self.acquire_hangs = acquire_hangs
-        self.fetches: list[str] = []
+        self.fetches: list[tuple[str, float | None]] = []   # (sql, timeout)
         self.acquires: list[float | None] = []   # the timeout each acquire got
         self.executes: list[tuple] = []          # (args, timeout)
         self.released = 0
-
-    async def fetch(self, sql, *args, **kw):
-        self.fetches.append(sql)
-        await _REAL_SLEEP(0)
-        if self.fetch_raises is not None:
-            raise self.fetch_raises
-        return [dict(r) for r in self.roster]
 
     @staticmethod
     async def _hang(timeout):
@@ -335,6 +365,11 @@ class _DbPool:
 
     def acquire(self, *, timeout=None):
         return _Acquire(self, timeout)
+
+    async def fetch(self, sql, *args, timeout=None):
+        # asyncpg's Pool.fetch: no acquire timeout, only the statement's
+        async with self.acquire() as con:
+            return await con.fetch(sql, *args, timeout=timeout)
 
     async def execute(self, sql, *args, timeout=None):
         # asyncpg's Pool.execute: no acquire timeout, only the statement's
@@ -363,11 +398,21 @@ class _Acquire:
 
 
 class _Conn:
-    """The connection an acquire hands out: execute is the heartbeat
-    upsert, and is where a stalled database holds the caller."""
+    """The connection an acquire hands out: fetch is the roster read,
+    execute the heartbeat upsert, and each is where a stalled database
+    holds the caller."""
 
     def __init__(self, pool: _DbPool):
         self.pool = pool
+
+    async def fetch(self, sql, *args, timeout=None):
+        self.pool.fetches.append((sql, timeout))
+        await _REAL_SLEEP(0)
+        if self.pool.fetch_hangs:
+            await self.pool._hang(timeout)
+        if self.pool.fetch_raises is not None:
+            raise self.pool.fetch_raises
+        return [_Record(r) for r in self.pool.roster]
 
     async def execute(self, sql, *args, timeout=None):
         self.pool.executes.append((args, timeout))
@@ -451,6 +496,102 @@ def test_heartbeat_bounds_the_acquire_so_a_saturated_pool_cannot_hold_it(monkeyp
     assert time.monotonic() - t0 >= 0.2
     assert pool.acquires == [db_mod.HEARTBEAT_TIMEOUT_S, None]
     assert pool.executes == []
+
+
+# --------------------------------------------------- Poller.tracked_whales
+
+# The roster SQL, byte for byte: the bound went around it, not into it.
+_ROSTER_SQL = ("SELECT id, address, username FROM whales "
+               "WHERE active AND NOT banned ORDER BY id")
+
+
+def _roster_read():
+    """The REAL tracked_whales on a Poller without __init__ (settings
+    plus a real client); the read needs neither."""
+    return Poller.__new__(Poller).tracked_whales()
+
+
+def test_the_roster_read_bounds_the_acquire_so_a_saturated_pool_cannot_hold_it(monkeypatch):
+    """The re-review's leftover (2026-09-05): run() had put the roster
+    read inside its try that morning, so a read that RAISED was a paced
+    retry -- but the read went through pool.fetch, asyncpg's `async
+    with self.acquire(): con.fetch(timeout=)` with no acquire timeout
+    and, as called, no statement timeout either, so against a saturated
+    pool (size == max, idle == 0, what /healthz read at 01:06Z) it sat
+    in acquire forever and run() sat behind it, nothing logged, nothing
+    for supervise() to restart. The REAL tracked_whales against a pool
+    whose acquire hangs unless given a timeout, ROSTER_TIMEOUT_S
+    shortened for the test: a TimeoutError well inside the 2 s guard,
+    the ceiling on the acquire, no statement ever sent. Then the fake's
+    own pool.fetch -- asyncpg's shape -- is shown to be exactly the
+    hold a read gone back to it would sit in: still in acquire, with no
+    ceiling, when the guard fires."""
+    pool = _live_db(monkeypatch, _DbPool(acquire_hangs=True))
+    assert poller_mod.ROSTER_TIMEOUT_S == 10.0
+    monkeypatch.setattr(poller_mod, "ROSTER_TIMEOUT_S", 0.05)
+    t0 = time.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(asyncio.wait_for(_roster_read(), 2.0))
+    assert time.monotonic() - t0 < 1.0, "the guard fired, not the acquire's own ceiling"
+    assert pool.acquires == [0.05]
+    assert pool.fetches == []
+    assert pool.released == 0
+    # the hold the old read sat in: the guard, not any ceiling, ends it
+    t0 = time.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(asyncio.wait_for(pool.fetch(_ROSTER_SQL, timeout=0.05), 0.2))
+    assert time.monotonic() - t0 >= 0.2
+    assert pool.acquires == [0.05, None]
+    assert pool.fetches == []
+
+
+def test_the_roster_read_bounds_the_statement_so_a_stalled_database_cannot_hold_it(
+        monkeypatch):
+    """The other leg: a database that ACCEPTS the connection and then
+    stalls (the full disk of 2026-09-04/05 did exactly that before it
+    started refusing). The REAL tracked_whales against a connection
+    whose fetch hangs unless given a timeout: a TimeoutError well
+    inside the 2 s guard, the ceiling on the statement AND on the
+    acquire it went through to get there, the unchanged SQL sent once,
+    and the connection released -- asyncpg cancels a statement cut off
+    at its ceiling and the release's cancel-ack wait reuses the acquire
+    timeout, so the worst case is three ceilings and ENDS."""
+    pool = _live_db(monkeypatch, _DbPool(fetch_hangs=True))
+    monkeypatch.setattr(poller_mod, "ROSTER_TIMEOUT_S", 0.05)
+    t0 = time.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(asyncio.wait_for(_roster_read(), 2.0))
+    assert time.monotonic() - t0 < 1.0, "the guard fired, not the statement's own ceiling"
+    assert pool.acquires == [0.05]
+    assert pool.fetches == [(_ROSTER_SQL, 0.05)]
+    assert pool.released == 1
+
+
+def test_a_healthy_roster_read_lands_bounded_on_both_legs(monkeypatch):
+    """The read that lands: list[dict] rows with id/address/username,
+    built by the read from Record-shaped rows (not dicts already) off
+    the unchanged SQL, with the REAL ROSTER_TIMEOUT_S (10 s) on the
+    acquire and on the statement, the connection released once. The
+    two timeouts are the assertion that catches a read gone back to the
+    unbounded pool.fetch: that path gives the acquire no timeout at
+    all, and gave the statement none either."""
+    pool = _live_db(monkeypatch, _DbPool(roster=_ROSTER))
+    rows = asyncio.run(asyncio.wait_for(_roster_read(), 2.0))
+    assert rows == _ROSTER
+    assert all(type(r) is dict for r in rows)
+    assert all(set(r) == {"id", "address", "username"} for r in rows)
+    assert poller_mod.ROSTER_TIMEOUT_S == 10.0
+    assert pool.acquires == [poller_mod.ROSTER_TIMEOUT_S]
+    assert pool.fetches == [(_ROSTER_SQL, poller_mod.ROSTER_TIMEOUT_S)]
+    assert pool.released == 1
+    # the shape the code relies on is asyncpg's own: acquire(*, timeout=)
+    # returning an async context manager, and Connection.fetch(*, timeout=)
+    for fn in (asyncpg.Pool.acquire, asyncpg.Connection.fetch):
+        assert inspect.signature(fn).parameters["timeout"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert hasattr(asyncpg.pool.PoolAcquireContext, "__aenter__")
+    # and TimeoutError is an Exception: run()'s roster except and the
+    # fast lane's own contain it like the outage's own error
+    assert issubclass(asyncio.TimeoutError, Exception)
 
 
 # ---------------------------------------------------------- db.pool_stats
@@ -719,7 +860,7 @@ def test_a_roster_read_that_raises_the_outages_exception_is_the_same_paced_retry
         with pytest.raises(_Stop):
             asyncio.run(_bounded(p.run(history=False)))
     assert state["n"] == 4
-    assert len(pool.fetches) == 4 and all("FROM whales" in s for s in pool.fetches)
+    assert len(pool.fetches) == 4 and all("FROM whales" in s for s, _ in pool.fetches)
     errs = [b for b in beats if b[0] == "poller" and b[1] == "error"]
     assert len(errs) == 4
     assert all(b[2]["stage"] == "roster" and _OUTAGE in b[2]["error"] for b in errs)
@@ -727,6 +868,58 @@ def test_a_roster_read_that_raises_the_outages_exception_is_the_same_paced_retry
     assert len(alerts) == 1 and "3×" in alerts[0]
     assert len([r for r in caplog.records if r.name == LOGGER
                 and "roster unreadable" in r.getMessage() and _OUTAGE in r.getMessage()]) == 4
+    assert p._http.aclosed == 1
+
+
+def test_a_roster_read_that_times_out_is_the_same_paced_retry_and_the_fast_lane_survives_it(
+        monkeypatch, caplog):
+    """The REAL tracked_whales under the REAL run() against the
+    saturated pool, the beat recorded: the read's TimeoutError is the
+    roster branch -- stage=roster 'error' beats counting failures,
+    paced retries at the interval, the 'Path B degraded' alert once at
+    the threshold -- with no statement ever sent; and the fast lane,
+    the other caller of the same read, contains its own copy of the
+    error and goes on, so run() ends with one cancelled side loop and
+    a closed client. A read with no ceiling would hold the main loop
+    before its first beat and _bounded's guard would be what ended
+    this test."""
+    pool = _live_db(monkeypatch, _DbPool(acquire_hangs=True))
+    beats = _record_beats(monkeypatch)
+    p = _poller(interval=3.5, priority=2.5)
+    alerts = _record_alerts(p)
+    state = _paced_stop(monkeypatch, 3.5, after=4)
+    t0 = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        with pytest.raises(_Stop):
+            asyncio.run(_bounded(p.run(history=False)))
+    assert time.monotonic() - t0 < 1.5
+    assert state["n"] == 4
+    errs = [b for b in beats if b[0] == "poller" and b[1] == "error"]
+    assert len(errs) == 4
+    assert all(b[2]["stage"] == "roster" for b in errs)
+    assert [b[2]["failures"] for b in errs] == [1, 2, 3, 4]
+    assert p._consecutive_failures == 4
+    assert len(alerts) == 1 and "3×" in alerts[0] and "Path B degraded" in alerts[0]
+    # every acquire -- the main loop's four and the fast lane's -- carried
+    # the ceiling, and none got as far as a statement
+    assert len(pool.acquires) >= 5
+    assert all(t == poller_mod.ROSTER_TIMEOUT_S for t in pool.acquires)
+    assert pool.fetches == []
+    assert pool.released == 0
+    unreadable = [r for r in caplog.records if r.name == LOGGER
+                  and "roster unreadable" in r.getMessage()]
+    assert len(unreadable) == 4
+    # A bare TimeoutError's str() is '' -- the line and the beat must
+    # NAME the type, or the saturated-pool failure reads as
+    # "roster unreadable ()" with an empty error in the heartbeat row
+    # (refute review, 2026-09-05).
+    assert all("(TimeoutError: )" in r.getMessage() for r in unreadable)
+    assert all(b[2]["error"] == "TimeoutError: " for b in errs)
+    fast = [r for r in caplog.records if r.name == LOGGER and r.levelno == logging.ERROR
+            and "fast-lane pass failed" in r.getMessage()]
+    assert fast, "the fast lane never contained its copy of the timeout"
+    assert all(r.exc_info and issubclass(r.exc_info[0], asyncio.TimeoutError) for r in fast)
+    assert len(p._subtasks) == 1 and p._subtasks[0].cancelled()
     assert p._http.aclosed == 1
 
 
@@ -980,16 +1173,24 @@ def test_a_heartbeat_that_hangs_ends_at_its_ceiling_and_run_goes_on(monkeypatch,
     assert p._http.aclosed == 1
 
 
-def test_a_heartbeat_against_a_saturated_pool_ends_at_its_ceiling_and_run_goes_on(
+def test_a_saturated_pool_ends_the_roster_read_and_the_beat_at_their_ceilings_and_run_goes_on(
         monkeypatch, caplog):
     """The saturated-pool shape through the whole stack: the REAL
-    db.heartbeat under the REAL _beat, against a pool whose acquire
-    hangs until its timeout. The acquire ends in a TimeoutError, the
-    beat logs it as not written, the paced loop continues, and no
-    statement was ever sent. With the ceiling on pool.execute alone
-    the first beat sat in acquire forever and _bounded's guard would
-    be what ended this test."""
+    tracked_whales and the REAL db.heartbeat under the REAL _beat,
+    against a pool whose acquire hangs until its timeout. Until the
+    roster read was bounded (2026-09-05, later the same day) this pin
+    read an empty roster and an 'idle' beat that ended at its ceiling
+    -- a shape one pool cannot produce, since the roster read goes
+    through the same acquire the beat does. Now the roster read is what
+    the saturated pool ends first, at ROSTER_TIMEOUT_S, and the
+    stage=roster 'error' beat behind it ends at HEARTBEAT_TIMEOUT_S,
+    logged as not written; no statement is ever sent on either leg and
+    the paced loop continues. ROSTER_TIMEOUT_S is shortened to a value
+    DISTINCT from the heartbeat's so the acquires say which leg each
+    ceiling went to. With either ceiling gone the first acquire would
+    sit forever and _bounded's guard would be what ended this test."""
     pool = _live_db(monkeypatch, _DbPool(roster=[], acquire_hangs=True))
+    monkeypatch.setattr(poller_mod, "ROSTER_TIMEOUT_S", 7.0)
     p = _poller(interval=3.5, priority=0)
     state = _paced_stop(monkeypatch, 3.5, after=2)
     t0 = time.monotonic()
@@ -998,12 +1199,17 @@ def test_a_heartbeat_against_a_saturated_pool_ends_at_its_ceiling_and_run_goes_o
             asyncio.run(_bounded(p.run(history=False)))
     assert time.monotonic() - t0 < 1.5
     assert state["n"] == 2
-    assert pool.acquires == [db_mod.HEARTBEAT_TIMEOUT_S] * 2
+    assert pool.acquires == [7.0, db_mod.HEARTBEAT_TIMEOUT_S] * 2
+    assert pool.fetches == []
     assert pool.executes == []
     assert pool.released == 0
-    idle = _not_written(caplog, "idle")
-    assert len(idle) == 2
-    assert all("TimeoutError" in r.getMessage() for r in idle)
+    assert p._consecutive_failures == 2
+    assert len([r for r in caplog.records if r.name == LOGGER
+                and "roster unreadable" in r.getMessage()]) == 2
+    err = _not_written(caplog, "error")
+    assert len(err) == 2
+    assert all("TimeoutError" in r.getMessage() for r in err)
+    assert _not_written(caplog, "idle") == []
     assert p._http.aclosed == 1
 
 
