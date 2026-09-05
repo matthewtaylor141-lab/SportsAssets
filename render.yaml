@@ -5,7 +5,13 @@
 databases:
   - name: sportsassets-db
     plan: basic-256mb
-    postgresMajorVersion: "16"
+    # 16 -> 18 on 2026-09-05: the owner took Render's in-dashboard major
+    # version upgrade during the disk outage. Render cannot downgrade a
+    # major version, so a blueprint still saying "16" would fail every
+    # sync from here on -- harmlessly, but blocking the diskSizeGB and
+    # any future change in this file. Keep this equal to what the
+    # instance actually runs; change it only by upgrading the instance.
+    postgresMajorVersion: "18"
     # STORAGE IS DECLARED HERE BECAUSE THE BLUEPRINT OWNS IT (2026-09-05).
     #
     # This field was absent, so the instance sat at its plan default and
