@@ -296,7 +296,15 @@ def snapshot() -> dict:
 async def main() -> None:
     if not ROSTER_AUTO:
         log.info("roster_auto disabled (ROSTER_AUTO=off); the roster is manual")
-        return
+        # PARK, do not return (2026-09-05, the first hour the flag was
+        # off): workers/all.py's supervise() restarts a loop that exits
+        # cleanly every RESTART_DELAY_SECONDS, so a return here wrote
+        # three lines every five seconds -- "starting loop", this line,
+        # "exited cleanly; restarting" -- for as long as the roster was
+        # manual, drowning the log the operator reads during a switch.
+        # An event nobody sets holds the loop out of service in silence;
+        # the flag is read at import, so only a deploy can re-enable it.
+        await asyncio.Event().wait()
     from .. import edge_gate
 
     pool = await get_pool()
