@@ -28,8 +28,25 @@ databases:
     # Raise this number rather than editing storage in the dashboard.
     # Render only ever grows a Postgres disk, so a value BELOW the
     # current size is rejected at sync time -- harmless, but it means
-    # this must be set above whatever the instance is on today.
-    diskSizeGB: 10
+    # this must be set above whatever the instance is on today. The
+    # first attempt here said 10 and Render answered "cannot shrink
+    # database disk from 15 GB to 10 GB", which is how the current size
+    # became known at all: the instance was ALREADY on 15 GB and full.
+    #
+    # 25 leaves roughly 10 GB of headroom on a database that filled 15.
+    # The growth is not the copy engine -- it is measurement. The paper
+    # account writes ~21,000 rows/day to ai_trades (83,815 in the four
+    # days to 2026-09-05) across all seven source+vetting whales,
+    # including the five funded at $0, and copy_probes takes a row per
+    # probe beside it. Neither needs unbounded history to do its job, so
+    # a retention policy on both is the actual fix; this number buys the
+    # time to measure and write one.
+    #
+    # A DISK CANNOT BE SHRUNK AFTERWARDS. Over-provisioning here is
+    # permanent and paid monthly, so raise it deliberately rather than
+    # reflexively -- but not so cautiously that a full disk takes the
+    # platform down for thirteen hours again.
+    diskSizeGB: 25
 
 services:
   - type: keyvalue
