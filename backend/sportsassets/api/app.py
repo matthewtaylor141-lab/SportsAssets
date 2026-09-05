@@ -11087,6 +11087,39 @@ async def ai_trader_report(days: int = Query(7, le=90)) -> dict:
     for k in ("reaction_p50", "slippage_p50"):
         if d.get(k) is not None:
             d[k] = round(float(d[k]), 3)
+    # WHAT `days` DOES NOT MEAN, and what `roi` does not include.
+    #
+    # Both reads above floor at `greatest(now() - days, display_epoch_start())`,
+    # so `days` is a REQUEST, not the window that was measured. Asked for 30
+    # days against a display epoch four days back, this payload described four
+    # days of trading under a "30d" heading -- which is how the probe's own
+    # panel came to be labelled 30d while showing a four-day figure. The
+    # effective floor and the first trade actually in the window are served
+    # here so no reader has to know about the epoch to size what they are
+    # looking at.
+    #
+    # And `roi` is GROSS. settle_ai_trades computes pnl as
+    # `(payout - fill_vwap) * shares` (analytics/engine.py) with no fee term at
+    # all, while the live sleeve pays the venue's real commission -- measured at
+    # 2.22 cents per dollar of cost on 2026-09-04, which is most of this
+    # account's headline return. Comparing this number with the live sleeve's
+    # NET edge reads as a gap in the live sleeve's favour that does not exist.
+    # The two are not comparable and the payload now says so rather than
+    # leaving it to whoever quotes it.
+    _epoch = display_epoch_start()
+    d["window_days_requested"] = days
+    d["window_floor"] = _epoch.isoformat()
+    d["window_is_floored_at_epoch"] = True
+    d["window_note"] = (
+        f"`days`={days} is the REQUEST; the reads floor at the display epoch "
+        f"({_epoch.date().isoformat()}), so the measured window is whichever "
+        "is shorter. Read `first_trade` for what this payload actually covers.")
+    d["roi_is_gross"] = True
+    d["roi_note"] = (
+        "GROSS: paper P&L is (payout - fill_vwap) x shares with NO fee term. "
+        "The live sleeve pays the venue commission (2.22c per dollar of cost, "
+        "measured 2026-09-04), so this ROI is not comparable to the live "
+        "sleeve's net edge without subtracting a fee of the same shape.")
     return {
         "source": cfg.ai_trader_source,
         "ratio": cfg.ai_trader_ratio,
