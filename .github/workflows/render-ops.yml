@@ -36,6 +36,9 @@ on:
           - restart       # confirm=DO
           - deploy        # confirm=DO: deploy the latest commit of the service's branch
           - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO)
+          - env-keys      # the service's env var KEYS (never values)
+          - env-set       # confirm=DO: arg = KEY=VALUE (value masked in the log; Render redeploys)
+          - env-del       # confirm=DO: arg = KEY
       service:
         description: 'Service or database name (sportsassets-api, sportsassets-workers, edge-shadow, sportsassets-db)'
         required: false
@@ -162,6 +165,33 @@ jobs:
               echo "== $SERVICE ($PG): $SQL  (statement_timeout ${TO}ms) =="
               PGOPTIONS="-c statement_timeout=$TO" timeout $(( TO / 1000 + 60 )) psql "$EXT" -X -v ON_ERROR_STOP=1 -c "$SQL" 2>&1 | grep -v -F "$PW" | head -300
               echo "psql exit=${PIPESTATUS[0]}"
+              ;;
+            env-keys)
+              ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
+              echo "== env var keys on $SERVICE ($ID) =="
+              get "/services/$ID/env-vars?limit=100" | jq -r '.[]? | .envVar | "  \(.key)  (\(.value | length) chars)"' || echo "(env read failed)"
+              ;;
+            env-set)
+              need_confirm
+              ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
+              K="${ARG%%=*}"; V="${ARG#*=}"
+              if [ -z "$K" ] || [ "$K" = "$ARG" ]; then echo "env-set: arg must be KEY=VALUE"; exit 1; fi
+              echo "::add-mask::$V"
+              echo "env-set $K on $SERVICE ($ID) (value: ${#V} chars, masked)"
+              CODE=$(curl -sS --max-time 45 -o /tmp/post.json -w '%{http_code}' -X PUT \
+                     -H "Authorization: Bearer $KEY" -H "Accept: application/json" -H "Content-Type: application/json" \
+                     -d "{\"value\":$(printf '%s' "$V" | jq -Rs .)}" "$API/services/$ID/env-vars/$K")
+              echo "HTTP $CODE"; jq -r '"  \(.key // "?") = (\((.value // "") | length) chars)"' /tmp/post.json 2>/dev/null || head -c 300 /tmp/post.json
+              echo "(Render redeploys the service on an env change; read 'deploys' to follow it)"
+              ;;
+            env-del)
+              need_confirm
+              ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
+              [ -z "$ARG" ] && { echo "env-del: arg must be KEY"; exit 1; }
+              echo "env-del $ARG on $SERVICE ($ID)"
+              CODE=$(curl -sS --max-time 45 -o /tmp/post.json -w '%{http_code}' -X DELETE \
+                     -H "Authorization: Bearer $KEY" -H "Accept: application/json" "$API/services/$ID/env-vars/$ARG")
+              echo "HTTP $CODE"; head -c 300 /tmp/post.json 2>/dev/null; echo
               ;;
             *) echo "unknown action $ACTION"; exit 1 ;;
           esac
