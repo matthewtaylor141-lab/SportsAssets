@@ -1,0 +1,160 @@
+# Render operations from the Actions tab (2026-09-05, the disk-full outage).
+#
+# The recovery ran on screenshots: this session cannot reach Render's API
+# or dashboard (egress policy), and the owner has no terminal. Every read
+# of a service's events, deploys and logs, and every resume / redeploy /
+# database maintenance step, went through a person. This job is the
+# bridge: one dispatch = one read or one guarded action, printed in full.
+#
+# THE KEY. Prefer the RENDER_API_KEY repository secret. Until it exists,
+# the key may be passed as the `render_key` input; it is masked before
+# anything else runs, so it never appears in the log. Rotate the key in
+# Render (Account Settings -> API Keys) when this incident is over.
+#
+# FAIL CLOSED. Reads print what came back or say the read failed; nothing
+# is inferred from silence. Every state-changing action (resume, suspend,
+# restart, deploy, the two maintenance statements) requires confirm=DO and
+# prints the resolved service id and name BEFORE it acts. The `sql` action
+# runs ONLY the statements named here -- there is no free-text SQL.
+name: render-ops
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'What to do'
+        required: true
+        type: choice
+        options:
+          - services      # every service and database, with plan/status
+          - events        # a service's recent events (deploys, crashes, OOM)
+          - deploys       # a service's recent deploys with status and commit
+          - logs          # a service's or database's log lines (arg = minutes back, or a text filter)
+          - db            # the database's status, plan, version, disk
+          - resume        # confirm=DO
+          - suspend       # confirm=DO
+          - restart       # confirm=DO
+          - deploy        # confirm=DO: deploy the latest commit of the service's branch
+          - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO)
+      service:
+        description: 'Service or database name (sportsassets-api, sportsassets-workers, edge-shadow, sportsassets-db)'
+        required: false
+        default: 'sportsassets-api'
+      arg:
+        description: 'logs: minutes back (default 30) or a text filter; sql: which statement'
+        required: false
+        default: ''
+      confirm:
+        description: 'Type DO to allow a state-changing action'
+        required: false
+        default: ''
+      render_key:
+        description: 'Render API key (only if the RENDER_API_KEY secret is not set)'
+        required: false
+        default: ''
+
+jobs:
+  ops:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run
+        shell: bash
+        env:
+          ACTION: ${{ inputs.action }}
+          SERVICE: ${{ inputs.service }}
+          ARG: ${{ inputs.arg }}
+          CONFIRM: ${{ inputs.confirm }}
+          KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
+          KEY_INPUT: ${{ inputs.render_key }}
+        run: |
+          set +e
+          set -u
+          KEY="$KEY_SECRET"; [ -z "$KEY" ] && KEY="$KEY_INPUT"
+          if [ -z "$KEY" ]; then echo "no Render key: set the RENDER_API_KEY secret or pass render_key"; exit 1; fi
+          echo "::add-mask::$KEY"
+          API=https://api.render.com/v1
+          get()  { curl -sS --max-time 45 -H "Authorization: Bearer $KEY" -H "Accept: application/json" "$API$1"; }
+          post() { local body="${2:-}"; [ -z "$body" ] && body='{}'
+                   curl -sS --max-time 45 -o /tmp/post.json -w '%{http_code}' -X POST \
+                        -H "Authorization: Bearer $KEY" -H "Accept: application/json" \
+                        -H "Content-Type: application/json" -d "$body" "$API$1"; }
+          svc_id() { get "/services?name=$1&limit=20" | jq -r --arg n "$1" '.[]? | select(.service.name==$n) | .service.id' 2>/dev/null | head -1; }
+          pg_id()  { get "/postgres?name=$1&limit=20"  | jq -r --arg n "$1" '.[]? | select(.postgres.name==$n) | .postgres.id' 2>/dev/null | head -1; }
+          need_confirm() { if [ "$CONFIRM" != "DO" ]; then echo "refused: $ACTION needs confirm=DO (got '$CONFIRM')"; exit 1; fi; }
+          echo "action=$ACTION service=$SERVICE arg='$ARG' at $(date -u +%FT%TZ)"
+
+          case "$ACTION" in
+            services)
+              echo "== services =="
+              get "/services?limit=50" | jq -r '.[]? | .service | "\(.id)  \(.name)  \(.type)  suspended=\(.suspended)  plan=\(.serviceDetails.plan // "?")  branch=\(.branch // "?")  autoDeploy=\(.autoDeploy // "?")"' || echo "(services read failed)"
+              echo "== databases =="
+              get "/postgres?limit=20" | jq -r '.[]? | .postgres | "\(.id)  \(.name)  status=\(.status)  plan=\(.plan)  v=\(.version)  disk=\(.diskSizeGB // "?")GB  suspended=\(.suspended // "?")"' || echo "(postgres read failed)"
+              ;;
+            events)
+              ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
+              echo "== events for $SERVICE ($ID), newest first =="
+              get "/services/$ID/events?limit=40" > /tmp/ev.json
+              jq -r '.[]? | .event | "\(.timestamp)  \(.type)  \(.details | tostring | .[0:220])"' /tmp/ev.json || { echo "(events not JSON)"; head -c 600 /tmp/ev.json; }
+              ;;
+            deploys)
+              ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
+              echo "== deploys for $SERVICE ($ID), newest first =="
+              get "/services/$ID/deploys?limit=12" > /tmp/dp.json
+              jq -r '.[]? | .deploy | "\(.createdAt) -> \(.finishedAt // "(running)")  \(.status)  \(.commit.id[0:7])  \(.trigger // "")  | \((.commit.message // "") | split("\n")[0] | .[0:80])"' /tmp/dp.json || { echo "(deploys not JSON)"; head -c 600 /tmp/dp.json; }
+              ;;
+            logs)
+              ID=$(svc_id "$SERVICE"); KIND=service
+              if [ -z "$ID" ]; then ID=$(pg_id "$SERVICE"); KIND=postgres; fi
+              [ -z "$ID" ] && { echo "no service or database named $SERVICE"; exit 1; }
+              if [ "$KIND" = service ]; then OWNER=$(get "/services/$ID" | jq -r '.ownerId // empty'); else OWNER=$(get "/postgres/$ID" | jq -r '.ownerId // empty'); fi
+              [ -z "$OWNER" ] && { echo "could not read ownerId for $ID"; exit 1; }
+              MIN=30; TEXT=""
+              if [ -n "$ARG" ]; then if [[ "$ARG" =~ ^[0-9]+$ ]]; then MIN="$ARG"; else TEXT="$ARG"; MIN=180; fi; fi
+              END=$(date -u +%FT%TZ); START=$(date -u -d "-${MIN} minutes" +%FT%TZ)
+              Q="/logs?ownerId=$OWNER&resource=$ID&startTime=$START&endTime=$END&limit=100&direction=backward"
+              [ -n "$TEXT" ] && Q="$Q&text=$(printf '%s' "$TEXT" | jq -sRr @uri)"
+              echo "== logs for $SERVICE ($ID) $START .. $END filter='$TEXT' (newest first, max 100) =="
+              get "$Q" > /tmp/lg.json
+              jq -r '.logs[]? | "\(.timestamp)  \(.message | .[0:400])"' /tmp/lg.json || { echo "(logs not JSON)"; head -c 800 /tmp/lg.json; }
+              jq -r '"hasMore=\(.hasMore // "?")"' /tmp/lg.json 2>/dev/null || true
+              ;;
+            db)
+              PG=$(pg_id "$SERVICE"); [ -z "$PG" ] && { echo "no database named $SERVICE"; exit 1; }
+              get "/postgres/$PG" | jq '{id, name, status, plan, version, diskSizeGB, highAvailabilityEnabled, suspended, createdAt, updatedAt, expiresAt, ipAllowList}' || echo "(db read failed)"
+              ;;
+            resume|suspend|restart)
+              need_confirm
+              ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
+              echo "$ACTION -> $SERVICE ($ID)"
+              CODE=$(post "/services/$ID/$ACTION"); echo "HTTP $CODE"; head -c 400 /tmp/post.json; echo
+              ;;
+            deploy)
+              need_confirm
+              ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
+              echo "deploy latest -> $SERVICE ($ID)"
+              CODE=$(post "/services/$ID/deploys" '{"clearCache":"do_not_clear"}'); echo "HTTP $CODE"
+              jq -r '"deploy \(.id // "?") status=\(.status // "?") commit=\(.commit.id // "?" | .[0:7])"' /tmp/post.json 2>/dev/null || head -c 400 /tmp/post.json
+              ;;
+            sql)
+              PG=$(pg_id "$SERVICE"); [ -z "$PG" ] && { echo "no database named $SERVICE"; exit 1; }
+              case "$ARG" in
+                activity) SQL="SELECT pid, state, wait_event_type, wait_event, now()-query_start AS age, left(query,90) AS q FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() ORDER BY query_start NULLS LAST;"; TO=30000 ;;
+                tables)   SQL="SELECT relname, n_live_tup, n_dead_tup, seq_scan, idx_scan, last_analyze, last_autoanalyze, last_autovacuum FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 30;"; TO=30000 ;;
+                sizes)    SQL="SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) AS total, pg_size_pretty(pg_relation_size(relid)) AS heap FROM pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 20;"; TO=60000 ;;
+                indexes)  SQL="SELECT i.relname AS tbl, i.indexrelname AS idx, i.idx_scan, pg_size_pretty(pg_relation_size(i.indexrelid)) AS size, ix.indisvalid FROM pg_stat_user_indexes i JOIN pg_index ix ON ix.indexrelid=i.indexrelid ORDER BY pg_relation_size(i.indexrelid) DESC LIMIT 40;"; TO=60000 ;;
+                analyze)  need_confirm; SQL="ANALYZE VERBOSE;"; TO=1500000 ;;
+                index053) need_confirm; SQL="CREATE INDEX CONCURRENTLY IF NOT EXISTS copy_probes_probe_at_idx ON copy_probes (probe_at);"; TO=2400000 ;;
+                *) echo "sql: arg must be one of activity|tables|sizes|indexes|analyze|index053 (got '$ARG')"; exit 1 ;;
+              esac
+              command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq >/dev/null 2>&1; sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }
+              get "/postgres/$PG/connection-info" > /tmp/ci.json
+              EXT=$(jq -r '.externalConnectionString // empty' /tmp/ci.json); PW=$(jq -r '.password // empty' /tmp/ci.json)
+              [ -n "$PW" ] && echo "::add-mask::$PW"; [ -n "$EXT" ] && echo "::add-mask::$EXT"
+              [ -z "$EXT" ] && { echo "no external connection string returned; body: $(jq -c 'keys' /tmp/ci.json 2>/dev/null)"; exit 1; }
+              echo "== $SERVICE ($PG): $SQL  (statement_timeout ${TO}ms) =="
+              PGOPTIONS="-c statement_timeout=$TO" timeout $(( TO / 1000 + 60 )) psql "$EXT" -X -v ON_ERROR_STOP=1 -c "$SQL" 2>&1 | grep -v -F "$PW" | head -300
+              echo "psql exit=${PIPESTATUS[0]}"
+              ;;
+            *) echo "unknown action $ACTION"; exit 1 ;;
+          esac
+          exit 0
