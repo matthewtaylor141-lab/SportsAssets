@@ -75,12 +75,12 @@ class TestTheCloseWindow:
         members -- and KXATPCHALLENGERMATCH does not start with
         KXATPMATCH, so every newly added board would have been handed
         the 7-day game-sport window this branch exists to avoid."""
-        src = inspect.getsource(app_mod._kalshi_fetch_boards)
+        src = inspect.getsource(app_mod._kalshi_board_sweep)
         assert "in _TENNIS_MATCH_SERIES" in src
         assert 'startswith(("KXATPMATCH"' not in src
 
     def test_the_membership_test_actually_covers_them(self):
-        src = inspect.getsource(app_mod._kalshi_fetch_boards)
+        src = inspect.getsource(app_mod._kalshi_board_sweep)
         ns = {"_TENNIS_MATCH_SERIES": app_mod._TENNIS_MATCH_SERIES}
         exec(compile(  # noqa: S102 -- the real line, run on real input
             "tennis = [x for x in series_list if x in "

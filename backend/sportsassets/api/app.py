@@ -19,6 +19,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from .. import procmem as _procmem
 from .. import roster as roster_svc
 from ..bus import CH_HEALTH, CH_TRADES_ENRICHED, CH_TRADES_NEW, get_redis
 from ..config import settings
@@ -1547,12 +1548,46 @@ def _kalshi_shape(m: dict, series: str) -> dict:
 
 
 
-async def _kalshi_fetch_boards(series_list: list[str]) -> list[dict]:
-    """Board fetch with per-sport close windows. Tennis carries the
-    TOURNAMENT'S close time (KDESKG-T forensics 2026-08-22: US Open
-    quali matches, played Aug 26, close Sep 6) — a game-time window
-    structurally hides every tennis market, so tennis series fetch
-    unwindowed while game sports keep the 7-day slate."""
+# ONE BOARD FETCH PER SERIES SET PER 20 S (2026-09-05, the API's three
+# OOM kills at 2 GiB). /api/admin/desk-feed?venue=kalshi had NO cache:
+# every poll from the wall client — every ~25 s — refetched twelve
+# series at limit=1000 concurrently, and a second client or a probe
+# landing in the same second doubled that. The venue answered 429 for
+# KXATPDOUBLES at 19:36:49Z and KXWTADOUBLES at 19:48:04Z. 20 s, not
+# longer: this is an owner-facing trading board and the wall polls
+# every ~25 s, so 20 s collapses concurrent clients onto one fetch
+# without two consecutive wall polls ever reading the same board.
+# Per key: the cached board, its stamp, a lock so one sweep is in
+# flight, and the background refresh task (held here so the loop does
+# not collect it mid-flight). A stale board is served as it is and
+# refreshed behind the request; only a caller with no board waits.
+_KALSHI_BOARD_TTL_S = 20.0
+_kalshi_board_cache: dict[tuple[str, ...], dict] = {}
+
+
+def _kalshi_dropped_text(series_list: list[str],
+                         dropped: dict[str, str]) -> str:
+    """'KXATPDOUBLES 429, KXWTADOUBLES 429' — in series_list order, not
+    completion order, so two lines about the same outage read alike."""
+    return ", ".join(f"{s} {dropped[s]}" for s in series_list
+                     if s in dropped)
+
+
+async def _kalshi_board_sweep(series_list: list[str]
+                              ) -> tuple[list[dict], dict[str, str]]:
+    """One venue visit for a board, with per-sport close windows. Tennis
+    carries the TOURNAMENT'S close time (KDESKG-T forensics 2026-08-22:
+    US Open quali matches, played Aug 26, close Sep 6) — a game-time
+    window structurally hides every tennis market, so tennis series
+    fetch unwindowed while game sports keep the 7-day slate.
+
+    Returns the board and the series the venue refused (status code, or
+    the exception that ate the call), aggregated over both partitions:
+    ONE warning and ONE 'desk sweep kalshi' line per board. The first
+    cut (2026-09-05) logged per partition, so league=all wrote two
+    lines, each with its own '2 of 7' denominator."""
+    t0 = time.monotonic()
+    rss0 = _procmem.rss_label()
     # Membership in the ONE list, not a startswith on two of its
     # members: KXATPCHALLENGERMATCH does not start with KXATPMATCH, so
     # the prefix test would have handed every newly-added tennis board
@@ -1561,16 +1596,127 @@ async def _kalshi_fetch_boards(series_list: list[str]) -> list[dict]:
     tennis = [x for x in series_list if x in _TENNIS_MATCH_SERIES]
     rest = [x for x in series_list if x not in tennis]
     out: list[dict] = []
+    dropped: dict[str, str] = {}
     if rest:
-        out += await _kalshi_fetch(rest, max_close_h=168, cap=None)
+        rows, refused = await _kalshi_sweep(rest, max_close_h=168, cap=None)
+        out += rows
+        dropped.update(refused)
     if tennis:
-        out += await _kalshi_fetch(tennis, max_close_h=None, cap=None)
-    return out
+        rows, refused = await _kalshi_sweep(tennis, max_close_h=None,
+                                            cap=None)
+        out += rows
+        dropped.update(refused)
+    if dropped:
+        log.warning("kalshi board: %d of %d series dropped: %s",
+                    len(dropped), len(series_list),
+                    _kalshi_dropped_text(series_list, dropped))
+    log.info("desk sweep kalshi: series=%d markets=%d %.1fs rss %s->%s MB",
+             len(series_list), len(out), time.monotonic() - t0, rss0,
+             _procmem.rss_label())
+    return out, dropped
+
+
+async def _kalshi_board_fill(series_list: list[str], slot: dict) -> None:
+    """One sweep into the slot. Runs under slot['lock'].
+
+    A BLIND SWEEP KEEPS THE BOARD (2026-09-05). The first cut let an
+    empty answer replace the cached board unconditionally, so one
+    refresh in which every series came back 429 — or the venue blipped
+    — blanked the owner-facing board for every caller for 20 s. An
+    empty answer that carries a refusal is not evidence the slate is
+    empty: the board it had stays, and the stamp still moves so the
+    venue gets its 20 s of back-off. An empty answer with NO refusal is
+    the slate, and clears the board as before.
+
+    THE STAMP IS TAKEN WHEN THE SWEEP LANDS, not when it begins
+    (re-review 2026-09-05). Stamped at the start, a sweep longer than
+    the TTL — five sequential rounds on a slow venue — landed already
+    stale, the very next caller started another refresh, and the venue
+    that had just been slow got no back-off at all."""
+    board, dropped = await _kalshi_board_sweep(series_list)
+    if slot["board"] and not board and dropped:
+        slot["ts"] = time.time()
+        return
+    slot["ts"], slot["board"] = time.time(), board
+
+
+async def _kalshi_board_refresh(series_list: list[str],
+                                slot: dict) -> None:
+    """The background half of stale-while-revalidate: one sweep under
+    the slot lock, skipped when another already brought the board
+    inside the TTL. A sweep that raises is a WARNING with its traceback
+    and the stamp still moves — a refresh that fails on every request
+    must not run on every request."""
+    try:
+        async with slot["lock"]:
+            if time.time() - slot["ts"] < _KALSHI_BOARD_TTL_S:
+                return
+            await _kalshi_board_fill(series_list, slot)
+    except Exception:  # noqa: BLE001
+        slot["ts"] = time.time()
+        log.warning("kalshi board: background refresh raised; serving "
+                    "the board it had for another %gs",
+                    _KALSHI_BOARD_TTL_S, exc_info=True)
+
+
+async def _kalshi_fetch_boards(series_list: list[str]) -> list[dict]:
+    """The desk's Kalshi board from the 20 s cache: fresh, served; stale,
+    served AS IT IS and refreshed once behind the request; absent, the
+    caller waits for the one sweep.
+
+    TRUE stale-while-revalidate (2026-09-05): with three live responses
+    at a time, league=all is five sequential rounds over the two
+    partitions, and the first cut awaited them on the request path
+    whenever the board was stale — the wall client aborts at 15 s
+    (frontend/src/lib/wall.ts) and the owner had already reported "the
+    desk takes forever to load" (2026-08-29). Only a caller with NO
+    board pays for a sweep now."""
+    key = tuple(series_list)
+    slot = _kalshi_board_cache.get(key)
+    if slot is None:
+        slot = _kalshi_board_cache[key] = {
+            "ts": 0.0, "board": None, "lock": asyncio.Lock(),
+            "refresh": None}
+    board = slot["board"]
+    if board is not None:
+        if time.time() - slot["ts"] < _KALSHI_BOARD_TTL_S:
+            return board
+        task = slot["refresh"]
+        if task is None or task.done():
+            slot["refresh"] = asyncio.create_task(
+                _kalshi_board_refresh(series_list, slot))
+        return board
+    async with slot["lock"]:
+        if slot["board"] is None:
+            await _kalshi_board_fill(series_list, slot)
+        return slot["board"]
+
 
 async def _kalshi_fetch(series_list: list[str], q: str = "",
                         max_close_h: int | None = None,
                         cap: int | None = 60) -> list[dict]:
-    """Kalshi's open markets for the given series, close-time sorted.
+    """Kalshi's open markets for the given series, close-time sorted —
+    the search path's entry (api_kalshi_markets). The board path calls
+    _kalshi_sweep itself because it needs to know which series the
+    venue refused; a search needs the rows, and says at DEBUG what it
+    did not get."""
+    out, dropped = await _kalshi_sweep(series_list, q=q,
+                                       max_close_h=max_close_h, cap=cap)
+    if dropped:
+        log.debug("kalshi search: %d of %d series dropped: %s",
+                  len(dropped), len(series_list),
+                  _kalshi_dropped_text(series_list, dropped))
+    return out
+
+
+async def _kalshi_sweep(series_list: list[str], q: str = "",
+                        max_close_h: int | None = None,
+                        cap: int | None = 60
+                        ) -> tuple[list[dict], dict[str, str]]:
+    """Kalshi's open markets for the given series, close-time sorted,
+    and the series the venue refused — by status code, or the name of
+    the exception that ate the call. A blind sweep and an empty slate
+    look the same on the board; the cache must tell them apart.
 
     limit=1000 (the venue max) per series: at 100 a big tournament board
     (ATP mid-major week is 400+ open markets) hid TODAY's matches behind
@@ -1586,6 +1732,16 @@ async def _kalshi_fetch(series_list: list[str], q: str = "",
 
     ql = q.strip()
     out: list[dict] = []
+    # THREE LIVE RESPONSES, NOT TWELVE (2026-09-05, the API's three OOM
+    # kills at 2 GiB). The gather below fired every series at once, so
+    # twelve 1000-market bodies were resident and parsed on the loop at
+    # the same moment, per request, per client. The gather stays — the
+    # semaphore caps how many of those bodies are alive together.
+    sem = _asyncio.Semaphore(3)
+    # Series the venue refused, by status code (or the exception that
+    # ate the call). Until 2026-09-05 a 429 on KXATPDOUBLES simply left
+    # doubles off the board and nothing said so.
+    dropped: dict[str, str] = {}
     # NO status param (owner report 2026-08-28 19:35 ET: "none of
     # the games for tonight are showing up — all 3 days out"): the
     # venue flips a game market's status from 'open' to 'ACTIVE' when
@@ -1602,26 +1758,30 @@ async def _kalshi_fetch(series_list: list[str], q: str = "",
     if max_close_h is not None:
         base_params["max_close_ts"] = int(_time.time()) + max_close_h * 3600
 
-    def _keep(m: dict, series: str) -> None:
+    def _keep(m: dict, series: str) -> bool:
         if (m.get("status") or "open") not in ("open", "active"):
-            return
+            return False
         title = m.get("title") or ""
         sub = m.get("yes_sub_title") or m.get("subtitle") or ""
         # Alias-aware: 'braves' finds the game Kalshi titles
         # 'Atlanta at ...' (owner report 2026-08-07).
         if ql and not _team_match(ql, [title, sub, m.get("ticker")]):
-            return
+            return False
         out.append(_kalshi_shape(m, series))
+        return True
 
     async def _series(client: httpx.AsyncClient, series: str) -> None:
         try:
-            resp = await client.get("/markets", params={
-                **base_params, "series_ticker": series})
-            if resp.status_code != 200:
-                return
-            for m in (resp.json().get("markets") or []):
-                _keep(m, series)
-        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            async with sem:
+                resp = await client.get("/markets", params={
+                    **base_params, "series_ticker": series})
+                if resp.status_code != 200:
+                    dropped[series] = str(resp.status_code)
+                    return
+                for m in (resp.json().get("markets") or []):
+                    _keep(m, series)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            dropped[series] = type(exc).__name__
             return
 
     async def _series_events(client: httpx.AsyncClient,
@@ -1634,28 +1794,40 @@ async def _kalshi_fetch(series_list: list[str], q: str = "",
         # must degrade to the call shape proven working, not to an
         # empty desk. Window/price filters re-applied client-side.
         try:
-            resp = await client.get("/events", params={
-                "series_ticker": series, "status": "open",
-                "with_nested_markets": "true", "limit": 200})
-            if resp.status_code != 200:
-                return
-            hi = base_params.get("max_close_ts")
-            for ev in (resp.json().get("events") or []):
-                for m in (ev.get("markets") or []):
-                    if m.get("status") not in (None, "open", "active"):
-                        continue
-                    ct = m.get("close_time") or ""
-                    if hi and ct:
-                        try:
-                            from datetime import datetime as _dt
-                            if _dt.fromisoformat(
-                                    ct.replace("Z", "+00:00")
-                            ).timestamp() > hi:
-                                continue
-                        except ValueError:
-                            pass
-                    _keep(m, series)
-        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            async with sem:
+                resp = await client.get("/events", params={
+                    "series_ticker": series, "status": "open",
+                    "with_nested_markets": "true", "limit": 200})
+                if resp.status_code != 200:
+                    dropped[series] = str(resp.status_code)
+                    return
+                hi = base_params.get("max_close_ts")
+                kept = 0
+                for ev in (resp.json().get("events") or []):
+                    for m in (ev.get("markets") or []):
+                        if m.get("status") not in (None, "open",
+                                                   "active"):
+                            continue
+                        ct = m.get("close_time") or ""
+                        if hi and ct:
+                            try:
+                                from datetime import datetime as _dt
+                                if _dt.fromisoformat(
+                                        ct.replace("Z", "+00:00")
+                                ).timestamp() > hi:
+                                    continue
+                            except ValueError:
+                                pass
+                        if _keep(m, series):
+                            kept += 1
+                # The venue put markets on the board from this surface:
+                # whatever /markets said about the series no longer
+                # decides it. A 200 with nothing in it does not — the
+                # /markets status is still why the series is missing.
+                if kept:
+                    dropped.pop(series, None)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            dropped[series] = type(exc).__name__
             return
 
     try:
@@ -1669,7 +1841,7 @@ async def _kalshi_fetch(series_list: list[str], q: str = "",
     except Exception:  # noqa: BLE001
         pass
     out.sort(key=lambda m: (m.get("close_time") or ""))
-    return out[:cap] if cap else out
+    return (out[:cap] if cap else out), dropped
 
 
 # ── Kalshi full universe (wave-2 2026-08-22: league=everything) ──────

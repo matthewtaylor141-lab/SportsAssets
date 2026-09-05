@@ -159,9 +159,9 @@ def _wire_kalshi_fetch(monkeypatch, shaped_rows):
     async def fake_fetch(series_list, q="", max_close_h=None, cap=60):
         return [r for r in shaped_rows
                 if any((r.get("ticker") or "").startswith(sr)
-                       for sr in series_list)]
+                       for sr in series_list)], {}
 
-    monkeypatch.setattr(app_mod, "_kalshi_fetch", fake_fetch)
+    monkeypatch.setattr(app_mod, "_kalshi_sweep", fake_fetch)
 
 
 async def test_kalshi_cards_group_sides_and_sum_volume(monkeypatch):
@@ -210,9 +210,9 @@ async def test_kalshi_league_param_picks_series(monkeypatch):
     async def fake_fetch(series_list, q="", max_close_h=None, cap=60):
         seen["series"] = series_list
         seen["max_close_h"] = max_close_h
-        return []
+        return [], {}
 
-    monkeypatch.setattr(app_mod, "_kalshi_fetch", fake_fetch)
+    monkeypatch.setattr(app_mod, "_kalshi_sweep", fake_fetch)
     out = await app_mod.api_desk_feed(venue="kalshi", league="tennis")
     # READ PRODUCTION'S LIST, do not restate it. The literal pair this
     # used to pin was the defect: KXATPMATCH and KXWTAMATCH both had
@@ -297,9 +297,9 @@ async def test_kalshi_everything_cap_60_nulls_last(monkeypatch):
 async def test_unknown_kalshi_league_is_empty_not_500(monkeypatch):
     async def fake_fetch(series_list, q="", max_close_h=None, cap=60):
         assert series_list == []
-        return []
+        return [], {}
 
-    monkeypatch.setattr(app_mod, "_kalshi_fetch", fake_fetch)
+    monkeypatch.setattr(app_mod, "_kalshi_sweep", fake_fetch)
     out = await app_mod.api_desk_feed(venue="kalshi", league="curling")
     assert out["cards"] == []
 
@@ -317,7 +317,7 @@ def test_active_in_play_markets_survive_and_tonight_sorts_first():
 
     # (1) the fetch sends no status param; _keep accepts open|active
     import inspect
-    src = inspect.getsource(app_mod._kalshi_fetch)
+    src = inspect.getsource(app_mod._kalshi_sweep)
     assert '"status": "open"' not in src.split("def _series_events")[0], \
         "the /markets param that deleted the live slate stays gone"
     assert '("open", "active")' in src

@@ -23,10 +23,12 @@ from __future__ import annotations
 import logging
 import math
 import re
+import threading
 import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
 
+from . import procmem as _procmem
 from .config import settings
 
 log = logging.getLogger(__name__)
@@ -353,8 +355,30 @@ def event_board(event_slug: str) -> list[dict]:
 # every event it lists, every market on each event, labeled with the
 # venue's own words. 30s cache: the desk re-quotes at order time, so
 # browse staleness is cosmetic.
-_desk_cache: dict = {"ts": 0.0, "events": []}
+_desk_cache: dict = {"ts": 0.0, "events": [], "blind_at": 0.0,
+                     "warned_at": 0.0}
 _DESK_TTL_S = 30.0
+# blind_at: when a sweep last ended with nothing to cache (no variant
+# answered, or no event carried a board) — the waiters queued behind
+# that sweep read it and do not each run the probe ladder again.
+# warned_at: the last 'held the lock' WARNING, so a pile of timed-out
+# callers is one line, not one per caller.
+# ONE SWEEP AT A TIME (2026-09-05: the API was OOM-killed at 2 GiB at
+# 19:11:36Z, 19:37:50Z and 19:48:41Z). The warm loop in the API calls
+# this every 25 s from a worker thread, and desk-feed, desk-games and
+# desk-game call it on the request path with no coordination — so a
+# wall client polling every 10-25 s, plus the loop, plus a probe, could
+# have two or three full sweeps running at once, each one up to
+# fourteen pages of a hundred events with full market boards held raw
+# while the slim rows are built. A memory watch on /healthz read rss
+# 1213 -> 1364 -> 1432 -> 1684 MB across one such overlap, then the
+# kill. The TTL already bounds how OFTEN the venue is swept; this lock
+# bounds how MANY sweeps can be alive. A threading primitive, not
+# asyncio: every caller runs in asyncio.to_thread.
+_desk_sweep_lock = threading.Lock()
+# Guards the warned_at compare-and-set: two waiters that time out in
+# the same instant both read 'due' otherwise, and write two lines.
+_desk_warn_lock = threading.Lock()
 
 
 def _ev_volume_usd(ev: dict) -> float | None:
@@ -383,12 +407,70 @@ def list_desk_events() -> list[dict]:
     spread, tsc total, astatc prop, ...) — the desk groups by it.
     volume_usd/close_time come straight off the venue's event row
     (null when absent) — the v8 feed sorts and labels cards with
-    them."""
+    them.
+
+    Single-flight (2026-09-05): a fresh cache answers at once; while a
+    sweep is running on another thread, a caller that holds a board
+    serves the board it has (stale-while-revalidate — the desk
+    re-quotes at order time, so browse staleness is cosmetic); only a
+    cold cache waits for the running sweep — for one TTL at most, then
+    it takes the cache as it is — and re-checks on waking, because that
+    sweep has usually just filled it, or has just found the venue
+    blind, in which case the waiter does not probe it again."""
     import time as _t
 
     now = _t.time()
     if now - _desk_cache["ts"] < _DESK_TTL_S and _desk_cache["events"]:
         return _desk_cache["events"]
+    waited = False
+    if not _desk_sweep_lock.acquire(blocking=False):
+        if _desk_cache["events"]:
+            return _desk_cache["events"]
+        # TIMED (2026-09-05). Untimed, one wedged sweep — the SDK's
+        # httpx timeout is 30 s and a sweep is up to eighteen calls —
+        # parked every cold caller's executor thread behind it with no
+        # log line: desk-feed, desk-games, desk-game and the warm loop.
+        if not _desk_sweep_lock.acquire(timeout=_DESK_TTL_S):
+            with _desk_warn_lock:
+                due = _t.time() - _desk_cache["warned_at"] >= _DESK_TTL_S
+                if due:
+                    _desk_cache["warned_at"] = _t.time()
+            if due:
+                log.warning("desk sweep US: a sweep has held the lock "
+                            "for more than %gs; serving the cache",
+                            _DESK_TTL_S)
+            return _desk_cache["events"]
+        waited = True
+    try:
+        now = _t.time()
+        if now - _desk_cache["ts"] < _DESK_TTL_S and _desk_cache["events"]:
+            return _desk_cache["events"]
+        # A waiter that wakes to an empty cache woke because the sweep
+        # ahead of it found the venue blind. Until 2026-09-05 each such
+        # waiter then ran the whole probe ladder itself, in turn.
+        if waited and now - _desk_cache["blind_at"] < _DESK_TTL_S:
+            return _desk_cache["events"]
+        return _desk_sweep()
+    finally:
+        _desk_sweep_lock.release()
+
+
+def _desk_sweep() -> list[dict]:
+    """The venue visit behind list_desk_events. Runs under
+    _desk_sweep_lock. One INFO line per visit with what it fetched and
+    what it cost in RSS, because on 2026-09-05 the only way to see a
+    sweep's cost was a probe polling /healthz beside the log.
+
+    The cache is stamped when the visit ENDS (re-review 2026-09-05).
+    Stamped with the clock the caller read before it began, a visit
+    longer than the TTL — eighteen calls at the SDK's 30 s timeout can
+    be minutes — landed already stale: the waiter behind a slow blind
+    sweep read a blind_at older than the TTL and ran the ladder again,
+    and a slow board was revalidated by its very next caller."""
+    import time as _t
+
+    t0 = _t.monotonic()
+    rss0 = _procmem.rss_label()
     client = _get_client()
 
     def _px(v) -> float | None:
@@ -414,6 +496,7 @@ def list_desk_events() -> list[dict]:
         {},
     )
     variant = None
+    probe = None
     for v in variants:
         try:
             probe = client.events.list({"limit": 100, **v}) or {}
@@ -422,9 +505,29 @@ def list_desk_events() -> list[dict]:
         if probe.get("events"):
             variant = v
             break
-    if variant is None:
-        return _desk_cache["events"]
+    # The probe page is a hundred raw events with their boards and is
+    # never read again — it must not sit alive under the paging below.
+    probe = None
     events: dict[str, dict] = {}
+    pages = 0
+
+    def _report() -> None:
+        took = _t.monotonic() - t0
+        log.info("desk sweep US: pages=%d events=%d/%d markets=%d %.1fs "
+                 "rss %s->%s MB", pages,
+                 sum(1 for e in events.values() if e["markets"]),
+                 len(events),
+                 sum(len(e["markets"]) for e in events.values()),
+                 took, rss0, _procmem.rss_label())
+        if took > _DESK_TTL_S:
+            log.warning("desk sweep US: the sweep took %.1fs, longer than "
+                        "the %gs TTL a cold caller waits on it",
+                        took, _DESK_TTL_S)
+
+    if variant is None:
+        _desk_cache["blind_at"] = _t.time()
+        _report()
+        return _desk_cache["events"]
     offset = 0
     for _ in range(14):                      # bounded paging
         try:
@@ -435,6 +538,7 @@ def list_desk_events() -> list[dict]:
         got = resp.get("events") or []
         if not got:
             break
+        pages += 1
         for ev in got:
             eslug = ev.get("slug") or ev.get("eventSlug") or ""
             if not eslug:
@@ -479,12 +583,21 @@ def list_desk_events() -> list[dict]:
                         "label": (f"{title} — {m['outcome']}"
                                   if m.get("outcome") else title),
                         "price": px})
-        if len(got) < 100:
+        n_got = len(got)
+        # Its slim rows are built: drop the raw page before the next one
+        # arrives. Rebinding `resp` on the next call would have kept
+        # this page alive across that call — two raw pages resident at
+        # every fetch, on top of the probe page (2026-09-05).
+        del resp, got
+        if n_got < 100:
             break
         offset += 100
+    _report()
     out = [e for e in events.values() if e["markets"]]
     if out:
-        _desk_cache.update(ts=now, events=out)
+        _desk_cache.update(ts=_t.time(), events=out)
+    else:
+        _desk_cache["blind_at"] = _t.time()
     return _desk_cache["events"] if _desk_cache["events"] else out
 
 

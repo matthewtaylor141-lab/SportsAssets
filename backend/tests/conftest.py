@@ -132,6 +132,31 @@ def _clear_module_caches():
 
 
 @pytest.fixture(autouse=True)
+def _clear_kalshi_board_cache():
+    """The Kalshi board cache (2026-09-05) is module state on the API
+    app: 20 s TTL, keyed by series set, holding an asyncio.Lock and
+    the background refresh task per key. Two tests that stub
+    _kalshi_sweep for the same league inside one 20 s window would
+    read each other's board, and a lock that once waited is bound to
+    that test's event loop -- the next loop cannot use it. Same stance
+    as the cache above: cleared before and after. Only when the app
+    module is already imported; importing it here would pull FastAPI
+    into every test that never touches it. A test that makes a board
+    stale awaits the refresh task it started before it returns."""
+    import sys
+
+    def _clear() -> None:
+        mod = sys.modules.get("sportsassets.api.app")
+        cache = getattr(mod, "_kalshi_board_cache", None)
+        if cache is not None:
+            cache.clear()
+
+    _clear()
+    yield
+    _clear()
+
+
+@pytest.fixture(autouse=True)
 def _override_state_does_not_leak():
     """The roster/clip overrides are module state, and since 2026-09-05
     a read that FAILS adopts a CLOSED value (UNREADABLE) instead of
