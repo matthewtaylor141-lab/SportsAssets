@@ -48,6 +48,10 @@ on:
         description: 'Activity pages of 500 rows per wallet (80 = the roster default)'
         required: false
         default: '80'
+      names:
+        description: 'Comma-separated names to search held positions and today rows for (e.g. swiatek,bouzkova)'
+        required: false
+        default: ''
 
 jobs:
   ledger:
@@ -59,6 +63,7 @@ jobs:
       WHALE: ${{ inputs.whale }}
       DAYS: ${{ inputs.days || '30' }}
       MAX_PAGES: ${{ inputs.max_pages || '80' }}
+      PAIR_NAMES: ${{ inputs.names }}
     steps:
       - name: Pull roster wallets, crawl the venue ledger, compute
         run: |
@@ -327,4 +332,100 @@ jobs:
               print(f"WLV {name} POS: n={len(pos)} realizedPnl=${rp:,.0f} "
                     f"cashPnl=${cp:,.0f} currentValue=${cur:,.0f} "
                     f"initialValue=${ini:,.0f}")
+
+              # ---- 4. BOTH SIDES OF ONE MATCH (owner question 2026-09-05:
+              # "does HomeRunHazard take both sides of the same match?").
+              # A match market is one conditionId with two outcome tokens,
+              # so holding both outcomes of one conditionId IS holding
+              # both sides. Read from the venue's positions (held now) and
+              # from today's ledger rows (bought today; settled today =
+              # REDEEM today). Every row is the venue's own; nothing here
+              # passes through our tables.
+              import datetime as dt
+              day0 = int(dt.datetime.now(dt.timezone.utc)
+                         .replace(hour=0, minute=0, second=0, microsecond=0)
+                         .timestamp())
+              def label(r):
+                  return (r.get("title") or r.get("slug") or r.get("eventSlug")
+                          or r.get("conditionId") or "?")
+              held = {}
+              for p in pos:
+                  cid = p.get("conditionId")
+                  if not cid or f(p.get("size")) <= 0:
+                      continue
+                  held.setdefault(cid, {"title": label(p), "sides": {}})
+                  held[cid]["sides"][str(p.get("outcome"))] = f(p.get("size"))
+              both_held = {c: v for c, v in held.items() if len(v["sides"]) >= 2}
+              print(f"WLV {name} PAIRS-HELD: conditions_held={len(held)} "
+                    f"both_sides_held={len(both_held)}")
+              for c, v in sorted(both_held.items(), key=lambda kv: kv[1]["title"])[:40]:
+                  sides = "  ".join(f"{o}={s:,.0f}sh" for o, s in sorted(v["sides"].items()))
+                  print(f"WLV {name} PAIR-HELD: {v['title']} | {sides}")
+              acts = []
+              apath = f"/tmp/act_{name}.json"
+              try:
+                  with open(apath) as fh:
+                      for line in fh:
+                          try:
+                              a = json.loads(line)
+                          except json.JSONDecodeError:
+                              continue
+                          if isinstance(a, dict):
+                              acts.append(a)
+              except OSError:
+                  pass
+              today = [a for a in acts if (a.get("timestamp") or 0) >= day0]
+              bought = {}
+              for a in today:
+                  if (a.get("type") or "").upper() != "TRADE" or (a.get("side") or "").upper() != "BUY":
+                      continue
+                  cid = a.get("conditionId")
+                  if not cid:
+                      continue
+                  bought.setdefault(cid, {"title": label(a), "sides": {}})
+                  o = str(a.get("outcome"))
+                  bought[cid]["sides"][o] = bought[cid]["sides"].get(o, 0.0) + f(a.get("size"))
+              both_bought = {c: v for c, v in bought.items() if len(v["sides"]) >= 2}
+              print(f"WLV {name} PAIRS-TODAY: buys={sum(1 for a in today if (a.get('type') or '').upper() == 'TRADE')} "
+                    f"conditions_bought={len(bought)} both_sides_bought={len(both_bought)}")
+              for c, v in sorted(both_bought.items(), key=lambda kv: kv[1]["title"])[:40]:
+                  sides = "  ".join(f"{o}={s:,.0f}sh" for o, s in sorted(v["sides"].items()))
+                  print(f"WLV {name} PAIR-TODAY: {v['title']} | {sides}")
+              # settled today = REDEEM rows today; for each, which sides
+              # did he ever BUY in the crawl window
+              all_bought = {}
+              for a in acts:
+                  if (a.get("type") or "").upper() == "TRADE" and (a.get("side") or "").upper() == "BUY" and a.get("conditionId"):
+                      all_bought.setdefault(a["conditionId"], set()).add(str(a.get("outcome")))
+              settled = {}
+              for a in today:
+                  if (a.get("type") or "").upper() == "REDEEM" and a.get("conditionId"):
+                      settled.setdefault(a["conditionId"], label(a))
+              settled_both = {c: t for c, t in settled.items() if len(all_bought.get(c, ())) >= 2}
+              print(f"WLV {name} PAIRS-SETTLED-TODAY: settled_conditions={len(settled)} "
+                    f"of_which_he_bought_both_sides={len(settled_both)} (sides judged over the crawl window)")
+              for c, t in sorted(settled_both.items(), key=lambda kv: kv[1])[:40]:
+                  print(f"WLV {name} PAIR-SETTLED: {t} | sides bought: {', '.join(sorted(all_bought[c]))}")
+              # NAME SEARCH (env PAIR_NAMES, comma-separated): every held
+              # position and every ledger row today whose title, slug,
+              # event or outcome carries the name.
+              names = [n.strip().lower() for n in os.environ.get("PAIR_NAMES", "").split(",") if n.strip()]
+              def hit(r):
+                  blob = " ".join(str(r.get(k) or "") for k in ("title", "slug", "eventSlug", "outcome")).lower()
+                  return [n for n in names if n in blob]
+              for p in pos:
+                  h = hit(p)
+                  if h:
+                      print(f"WLV {name} NAME-HELD [{','.join(h)}]: {label(p)} | outcome={p.get('outcome')} "
+                            f"size={f(p.get('size')):,.0f}sh avg={f(p.get('avgPrice')):.3f} cur={f(p.get('curPrice')):.3f} "
+                            f"end={p.get('endDate')} redeemable={p.get('redeemable')} cid={p.get('conditionId')}")
+              for a in sorted(today, key=lambda x: x.get("timestamp") or 0):
+                  h = hit(a)
+                  if h:
+                      ts = dt.datetime.fromtimestamp(a.get("timestamp") or 0, dt.timezone.utc).strftime("%H:%M:%SZ")
+                      print(f"WLV {name} NAME-TODAY [{','.join(h)}]: {ts} {a.get('type')} {a.get('side') or ''} "
+                            f"{label(a)} | outcome={a.get('outcome')} size={f(a.get('size')):,.0f}sh "
+                            f"usdc=${f(a.get('usdcSize')):,.0f} price={f(a.get('price')):.3f} cid={a.get('conditionId')}")
+              if names:
+                  print(f"WLV {name} NAME-SEARCH done: names={names} held_rows={len(pos)} today_rows={len(today)}")
           PYEOF
