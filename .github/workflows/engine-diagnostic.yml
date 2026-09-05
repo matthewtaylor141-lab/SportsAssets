@@ -43,6 +43,22 @@ on:
 permissions:
   contents: read
 
+# ONE PROBE AT A TIME (2026-09-05). Every push to the branch starts a
+# probe, a probe takes 16-32 minutes, and a recovery afternoon pushes
+# every few minutes -- so two to four probes ran against the API at
+# once, each walking whale-true-edge, merge-pnl and the weekly blobs
+# (the heaviest reads the API serves; one whale-true-edge answered in
+# 72 s and one probe request in 240 s that afternoon). Render's events
+# for sportsassets-api read `oomKilled memoryLimit 2Gi` at 17:06:24Z
+# and 17:33:43Z, both while two to four probes overlapped, and the
+# API had been stable at that size whenever only one ran. Queue them:
+# a new push waits for the running probe (GitHub keeps one pending run
+# per group and cancels the ones in between), and nothing is cancelled
+# mid-log, which is how a cancelled probe hides its tail.
+concurrency:
+  group: engine-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   probe:
     runs-on: ubuntu-latest
@@ -1982,7 +1998,7 @@ jobs:
             hz=$(curl -sS --max-time 8 "$BASE/healthz" 2>/dev/null) && code=0 || code=$?
             ts=$(date -u +%H:%M:%S)
             if [ $code -eq 0 ] && echo "$hz" | jq -e .ok >/dev/null 2>&1; then
-              echo "  $ts  $(echo "$hz" | jq -c '{rss_mb, db_ok, commit, boot_id, uptime_s}')"
+              echo "  $ts  $(echo "$hz" | jq -c '{rss_mb, db_ok, pool, commit, boot_id, uptime_s}')"
             else
               echo "  $ts  DOWN"
             fi

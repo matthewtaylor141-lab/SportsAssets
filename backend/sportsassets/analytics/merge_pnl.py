@@ -39,6 +39,7 @@ needs no venue model at all.
 
 from __future__ import annotations
 
+import heapq
 import math
 from typing import Any
 
@@ -218,6 +219,18 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None,
         "cf_ungraded_shares": 0.0,
         "cf_actual_on_graded": 0.0, "cf_hold_on_graded": 0.0,
     }
+    # THE TEN EXTREME MERGES, HELD AS TWO BOUNDED HEAPS (2026-09-05). Until
+    # then out["rows"] collected one dict per merge for the whole walk and
+    # finish() trimmed it to the 5 worst + 5 best: 400,000 dicts held at
+    # rn1's 806,085-fill book (+160 MB), 1,000,000 at the 2M cap (+350 MB)
+    # — inside the 2 GiB workers process, right after the analytics replay,
+    # and this after the docstring below said the walk held one batch plus
+    # per-condition state. Five per side hold the same ten rows for the
+    # cost of ten rows. Ranked on the ROUNDED pnl the old sort keyed on,
+    # ties broken by merge order exactly as the stable sort broke them.
+    worst: list[tuple[float, int, dict]] = []  # (-pnl, -seq, row): evicts the largest (pnl, seq)
+    best: list[tuple[float, int, dict]] = []   # (pnl, -seq, row): evicts the smallest pnl, latest seq
+    EXTREMES = 5
 
     def _payout(cid: str, leg: int) -> float | None:
         """The venue's payout for one leg, or None if unresolved."""
@@ -311,12 +324,20 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None,
             out["n_merges"] += 1
             bal[other] -= m
             cost[other] -= m * avg_other
-            out["rows"].append({
+            row = {
                 "condition_id": cid, "merged_shares": round(m, 4),
                 "held_avg": round(avg_other, 4),
                 "complement_price": round(price, 4),
                 "pnl": round(pnl, 2),
-            })
+            }
+            seq = out["n_merges"]  # unique and increasing: the tie-breaker
+            lo, hi = (-row["pnl"], -seq, row), (row["pnl"], -seq, row)
+            if len(worst) < EXTREMES:
+                heapq.heappush(worst, lo)
+                heapq.heappush(best, hi)
+            else:
+                heapq.heappushpop(worst, lo)
+                heapq.heappushpop(best, hi)
         entry = size - m
         if entry > DUST:
             bal[idx] += entry
@@ -417,8 +438,12 @@ def _replay_stepper(payouts: dict[str, list[float]] | None = None,
         out["roi_on_entries"] = (
             round(out["realized_total"] / out["entry_notional"], 4)
             if out["entry_notional"] > 0 else None)
-        out["rows"] = sorted(out["rows"], key=lambda r: r["pnl"])[:5] + \
-            sorted(out["rows"], key=lambda r: -r["pnl"])[:5]
+        # 5 worst (pnl ascending) then 5 best (pnl descending), ties in
+        # merge order: what sorted(rows, key=pnl)[:5] + sorted(rows,
+        # key=-pnl)[:5] produced over every merge of the walk.
+        out["rows"] = (
+            [r for _, _, r in sorted(worst, key=lambda e: e[:2], reverse=True)]
+            + [r for _, _, r in sorted(best, key=lambda e: e[:2], reverse=True)])
         return out
 
     return step, finish
@@ -484,8 +509,12 @@ async def whale_merge_pnl(pool: Any, whales: list[str],
     600,000-fill whole-book replay at ~23s (~26k fills/s), so 2,000,000
     is ~77s worst case per whale on an HOURLY job, and the real total
     across the roster is nearer 5M rows than 14M. Peak memory does not
-    move with this number at all since the walk became a true stream
-    (ab16d74) — it holds one 5,000-row batch plus per-condition state.
+    move with this number since the walk became a true stream (ab16d74)
+    AND the extreme-merge rows became bounded heaps (2026-09-05): it holds
+    one 5,000-row batch, the per-condition balances, the per-cluster lot
+    sums and ten rows. (Between those two dates it also held one dict per
+    merge until finish() — +160 MB at rn1's book, +350 MB at this cap —
+    while this paragraph said it did not.)
 
     The cap stays because a cap that never binds is still the thing
     that stops one unexpected ledger from hanging the job, and

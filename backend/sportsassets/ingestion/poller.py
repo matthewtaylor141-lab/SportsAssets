@@ -27,6 +27,33 @@ log = logging.getLogger(__name__)
 # hours, not minutes.
 STALE_INDEX_S = 1800
 
+# How long run()'s finally waits for its cancelled side loops to unwind
+# before abandoning them with an error line (2026-09-05). Cancellation
+# lands at the child's next await, so this is not "finish the work",
+# only "let the CancelledError propagate"; both loops catch Exception,
+# never BaseException, so it should land at once. The bound exists
+# because an open-ended wait here would be the one place a child that
+# swallowed its cancel could hang run() forever -- and a run() that
+# never returns is one supervise() never restarts, which is Path B
+# dead in silence.
+CANCEL_WAIT_S = 10.0
+
+# The 'Path B degraded' alert's ceiling (2026-09-05, the containment
+# re-review of the same day's fix). _alert_degraded guards the call so
+# a channel that RAISES is a log line and not the end of run() -- but
+# a channel that HANGS was still the end of run()'s pacing, with
+# nothing to log: an await with no ceiling is held for as long as the
+# carrier takes, and the alert fires at exactly the moment (a dead
+# database, a dead venue) the same bad night is likeliest to have
+# taken the carrier too. Fifteen seconds sits ABOVE telegram._send's
+# own httpx timeout of 10 s on purpose: a channel with its own ceiling
+# and its own error text (a 502, its own read timeout) gets to put
+# that text on the log line, and this ceiling only ever names a bare
+# TimeoutError for a channel that has no ceiling of its own.
+# asyncio.TimeoutError is an Exception, so the guard's existing except
+# contains it like any other failed delivery.
+ALERT_TIMEOUT_S = 15.0
+
 
 def parse_data_api_trade(raw: dict[str, Any], whale_id: int, username: str | None) -> TradeEvent:
     """Map a data-api trade payload onto our TradeEvent."""
@@ -98,6 +125,9 @@ class Poller:
         # process detected. The number that says whether copy latency is
         # ours to fix or the venue's publication lag.
         self.last_lag_s: float | None = None
+        # The side loops run() spawns, kept so run() can cancel them on
+        # its way out (2026-09-05; see run()). Empty until run() starts.
+        self._subtasks: list[asyncio.Task] = []
 
     async def tracked_whales(self) -> list[dict]:
         pool = await get_pool()
@@ -380,6 +410,81 @@ class Poller:
                 log.exception("history backfill pass failed; will retry")
             await asyncio.sleep(60)
 
+    async def _beat(self, status: str, detail: dict | None = None) -> None:
+        """heartbeat() for run(): written when it can be, logged when it
+        cannot, never a raise. The beat goes through the same pool the
+        poll just lost, so with the database unreadable it raises too
+        (get_pool's own backoff, then RuntimeError; or db.heartbeat's
+        own ceiling, TimeoutError, against a database that answers and
+        then stalls) -- and until 2026-09-05 that raise left the except
+        branch in run() and killed the loop. This makes the beat itself
+        non-fatal, nothing more: whether a dead database REACHES the
+        'Path B degraded' alert is run()'s failure accounting, which
+        counts the roster stage toward the same threshold as the wallet
+        stage (see _alert_degraded)."""
+        try:
+            await heartbeat("poller", status, detail)
+        except Exception as exc:  # noqa: BLE001 -- the beat is telemetry
+            # the type is named because a TimeoutError's str() is empty
+            log.warning("poller heartbeat %r not written: %s: %s",
+                        status, type(exc).__name__, exc)
+
+    async def _alert_degraded(self) -> None:
+        """The 'Path B degraded' admin alert: once per failure streak,
+        exactly at the threshold, from EITHER failing stage, and never
+        a raise out of run().
+
+        Until 2026-09-05 only the per-wallet branch counted toward the
+        threshold, so a database that was fully gone -- the roster read
+        failing every pace, no wallet ever polled -- produced paced
+        'error' beats and no Telegram line at all, while the docstring
+        promised one. The roster branch now increments the same
+        counter (a roster failure IS a failed poll cycle) and calls
+        this; a wallet success resets it, as before. A successful
+        roster read alone does NOT reset it: with a one- or two-wallet
+        roster and threshold 3, a reset at every pass boundary would
+        make a dead venue's streak structurally unable to reach 3 --
+        the exact 'alert unreachable' class of rounds 23, 24 and 36.
+        The call itself is guarded because the alert channel (Telegram)
+        is one more carrier that can be down on the same bad night, and
+        a raise here would end the loop the alert is about -- and
+        bounded (ALERT_TIMEOUT_S), because a carrier that hangs instead
+        of failing would end its pacing just as surely, with nothing
+        logged."""
+        if self._consecutive_failures != self._fail_threshold or not self.on_alert:
+            return
+        try:
+            # bounded (see ALERT_TIMEOUT_S): a channel that hangs must
+            # end in a TimeoutError the except below can log, never
+            # hold run() at the threshold
+            await asyncio.wait_for(
+                self.on_alert(
+                    f"⚠️ Poll cycle failed {self._consecutive_failures}× — Path B degraded"
+                ),
+                ALERT_TIMEOUT_S,
+            )
+        except Exception as exc:  # noqa: BLE001 -- the alert is telemetry too
+            log.warning("poller degraded-alert not delivered: %s: %s",
+                        type(exc).__name__, exc)
+
+    @staticmethod
+    def _side_loop_died(task: asyncio.Task) -> None:
+        """Done-callback on every side loop run() spawns (2026-09-05).
+        Both loops catch Exception and go on forever, so a side loop
+        that ENDS on its own is a bug in the loop's own containment
+        (its except path raising, a BaseException that is not a
+        cancel) -- and the first cut of run()'s finally retrieved that
+        exception and discarded it, which silenced the one signal that
+        the fast lane or the backfill had been dead for the rest of the
+        run. This logs it at the moment it happens, while run() is
+        still alive; the finally logs what it finds on the way out."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("poller side loop %s died on its own: %r",
+                      task.get_name(), exc)
+
     async def run(self, history: bool = True) -> None:
         """history=False: LIVE detection only — no deep-history backfill.
 
@@ -387,37 +492,110 @@ class Poller:
         reference account) and belongs on a worker with room to breathe.
         Run inside the API service's memory limit it OOM-cycled the whole
         API every ~10 minutes (observed 2026-08-02 23:30Z, minutes after
-        the ingestion fallback first deployed with it enabled)."""
+        the ingestion fallback first deployed with it enabled).
+
+        run() OWNS its side loops and its HTTP client and CONSUMES this
+        Poller: when it returns or raises, for any reason, the history
+        and fast-lane tasks are cancelled and awaited and the client is
+        closed. Build a new Poller for a new run (workers/poller.py and
+        the API's ingestion fallback both do)."""
         log.info("Path B poller starting (interval=%ss, fast lane=%ss)",
                  self._interval, self._priority_interval)
-        if history:
-            asyncio.get_running_loop().create_task(self._history_loop())
-        if self._priority_interval > 0:
-            asyncio.get_running_loop().create_task(self._priority_loop())
-        while True:
-            whales = await self.tracked_whales()
-            if not whales:
-                await heartbeat("poller", "idle", {"reason": "empty roster"})
-                await asyncio.sleep(self._interval)
-                continue
-            stagger = self._interval / len(whales)
-            for whale in whales:
+        # WHY THE HANDLES ARE KEPT AND THE ROSTER READ IS INSIDE THE TRY
+        # (2026-09-05, the workers dying during the full-disk outage of
+        # 2026-09-04/05). The two side loops used to be spawned with a
+        # bare create_task and their handles dropped, and the roster
+        # read sat outside any try. With the database unreadable the
+        # roster read raised out of run(); workers/all.py's supervise()
+        # restarted it 5 s later through workers/poller.py, which builds
+        # a NEW Poller -- while the two orphaned loops of the old one
+        # lived on forever (they catch Exception and loop), holding the
+        # old Poller and its never-closed httpx client. Every ~110 s of
+        # dead database: +1 Poller, +1 AsyncClient, +2 immortal tasks,
+        # for as long as the outage lasted. Now the roster read is a
+        # logged, paced retry inside the loop, and the finally below
+        # cancels and awaits whatever this run() spawned and closes the
+        # client, so a run() that does end takes everything it owns
+        # with it.
+        tasks: list[asyncio.Task] = []
+        self._subtasks = tasks
+        try:
+            if history:
+                t = asyncio.create_task(self._history_loop(), name="poller.history")
+                t.add_done_callback(self._side_loop_died)
+                tasks.append(t)
+            if self._priority_interval > 0:
+                t = asyncio.create_task(self._priority_loop(), name="poller.priority")
+                t.add_done_callback(self._side_loop_died)
+                tasks.append(t)
+            while True:
                 try:
-                    new = await self.poll_wallet(whale)
-                    self._consecutive_failures = 0
-                    await heartbeat("poller", "ok",
-                                    {"last_wallet": whale["address"],
-                                     "new": new,
-                                     "detect_lag_s": self.last_lag_s})
-                except Exception as exc:  # noqa: BLE001 — one bad wallet/payload
-                    # must never kill live detection for the others
+                    whales = await self.tracked_whales()
+                except Exception as exc:  # noqa: BLE001 -- the roster read
+                    # IS the database; unreadable is a paced retry, never
+                    # a raise that restarts run() and orphans the loops.
+                    # It counts as a failed cycle toward the degraded
+                    # alert (see _alert_degraded): a database that is
+                    # fully gone must reach Telegram, not only the
+                    # heartbeat row it cannot write.
                     self._consecutive_failures += 1
-                    log.warning("poll failed for %s: %s", whale["address"], exc)
-                    await heartbeat(
-                        "poller", "error", {"failures": self._consecutive_failures, "error": str(exc)}
-                    )
-                    if self._consecutive_failures == self._fail_threshold and self.on_alert:
-                        await self.on_alert(
-                            f"⚠️ Poll cycle failed {self._consecutive_failures}× — Path B degraded"
+                    log.warning("poll: roster unreadable (%s); retry in %ss",
+                                exc, self._interval)
+                    await self._beat("error", {"stage": "roster",
+                                               "failures": self._consecutive_failures,
+                                               "error": str(exc)})
+                    await self._alert_degraded()
+                    await asyncio.sleep(self._interval)
+                    continue
+                if not whales:
+                    await self._beat("idle", {"reason": "empty roster"})
+                    await asyncio.sleep(self._interval)
+                    continue
+                stagger = self._interval / len(whales)
+                for whale in whales:
+                    try:
+                        new = await self.poll_wallet(whale)
+                        self._consecutive_failures = 0
+                        await self._beat("ok",
+                                         {"last_wallet": whale["address"],
+                                          "new": new,
+                                          "detect_lag_s": self.last_lag_s})
+                    except Exception as exc:  # noqa: BLE001 — one bad wallet/payload
+                        # must never kill live detection for the others
+                        self._consecutive_failures += 1
+                        log.warning("poll failed for %s: %s", whale["address"], exc)
+                        await self._beat(
+                            "error", {"failures": self._consecutive_failures, "error": str(exc)}
                         )
-                await asyncio.sleep(stagger)
+                        await self._alert_degraded()
+                    await asyncio.sleep(stagger)
+        finally:
+            for t in tasks:
+                t.cancel()
+            try:
+                if tasks:
+                    # asyncio.wait, not gather: a child that crashed on
+                    # its own keeps its exception on the task instead of
+                    # raising it here, and the timeout bounds the wait
+                    # (see CANCEL_WAIT_S). Either way the client below
+                    # is closed.
+                    done, pending = await asyncio.wait(tasks, timeout=CANCEL_WAIT_S)
+                    for t in done:
+                        if t.cancelled():
+                            continue
+                        # retrieved either way (no GC-time warning), and
+                        # a loop that ended on its own is said so, not
+                        # swallowed: see _side_loop_died for the moment
+                        # it happened; this is what run() found leaving.
+                        exc = t.exception()
+                        if exc is not None:
+                            log.error("poller side loop %s died on its own: %r "
+                                      "(found dead when run() left)",
+                                      t.get_name(), exc)
+                    for t in pending:
+                        log.error("poller side loop %s ignored cancel for "
+                                  "%ss; abandoned", t.get_name(), CANCEL_WAIT_S)
+            finally:
+                http = self._http
+                if http is not None:
+                    await http.aclose()

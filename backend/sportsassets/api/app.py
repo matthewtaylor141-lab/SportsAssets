@@ -428,6 +428,19 @@ async def healthz() -> dict:
     from .. import db as _db
 
     pool = _db._pool
+    # The pool's own counters, next to db_ok (2026-09-05, after the
+    # night the payload below was read in anger): {"ok": true, "db_ok":
+    # false} on its own cannot tell a saturated pool from a slow
+    # database from a full disk at the edge, and each of those is fixed
+    # by a different hand. db.pool_stats() is the ONE reader of those
+    # counters (the first cut inlined the same four reads here and left
+    # the module function with no caller): synchronous, no acquire, no
+    # await, and closed to None on anything it cannot read -- see its
+    # docstring for how to read the numbers. It is read BEFORE the
+    # probe so it is the pool as the check found it, not as the probe
+    # left it, and it can never do what the SELECT 1 once did and hang
+    # the one check the platform restarts on.
+    pool_stats = _db.pool_stats()
     if pool is not None:
         try:
             # 2 s ceiling (2026-09-03): with the ten pool connections held
@@ -481,6 +494,7 @@ async def healthz() -> dict:
         pass
     # Render injects the deployed commit — lets anyone confirm which build is live.
     return {"ok": True, "db_ok": db_ok,
+            "pool": pool_stats,
             "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7],
             "rss_mb": rss_mb,
             "boot_id": _BOOT_ID,
