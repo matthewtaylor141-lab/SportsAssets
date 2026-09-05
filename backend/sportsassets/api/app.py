@@ -437,6 +437,33 @@ async def healthz() -> dict:
             # to be informational was able to take the process down. A
             # saturated pool now reports db_ok false; the check itself
             # always answers.
+            # WHAT `db_ok: false` ACTUALLY MEANS, from the one time it
+            # was read in anger (2026-09-05, 01:06Z). The payload was
+            # {"ok": true, "db_ok": false, "rss_mb": 865.9, "uptime_s":
+            # 5874.9} on a single boot_id -- a healthy process, no crash
+            # loop, and LESS memory than the same check reported while
+            # the platform was working fine three hours earlier (1,085
+            # MB, and 1,665 MB moments before a restart). So this field
+            # going false is not a memory verdict and not a dead
+            # database: it is THIS `SELECT 1` losing a 2-second race for
+            # a pooled connection, i.e. the pool is saturated by queries
+            # that are still running.
+            #
+            # The symptom at the edge is total: every DB-backed endpoint
+            # hangs with ZERO BYTES RECEIVED while venue reads (which
+            # need no pool) answer normally, and the diagnostic probe
+            # dies at its 32-minute job ceiling instead of reporting
+            # anything. Read `db_ok` FIRST when that pattern appears --
+            # four probes were spent on the wrong causes (a workflow
+            # fail-open, then memory) before this one field settled it.
+            #
+            # What saturated it that night: a fail-open guard in
+            # engine-diagnostic.yml fired up to six concurrent
+            # /api/admin/rescore-copies passes, each a full restatement
+            # over live_orders. A curl timeout does not stop the server
+            # side, so they went on holding connections long after the
+            # probe gave up. That guard now fails closed (9244ece); the
+            # passes already in flight had to be cleared by a restart.
             await asyncio.wait_for(pool.fetchval("SELECT 1"), timeout=2.0)
             db_ok = True
         except Exception:  # noqa: BLE001
