@@ -35,7 +35,8 @@ on:
           - suspend       # confirm=DO
           - restart       # confirm=DO
           - deploy        # confirm=DO: deploy the latest commit of the service's branch
-          - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO) | mirror-on (DO) | mirror-off (DO) | mirror-state
+          - metrics       # a service's memory (MB) and CPU per instance over the last N minutes (arg, default 120)
+          - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO) | mirror-on (DO) | mirror-off (DO) | mirror-state | mirror-preflight | mirror-rearm (DO)
           - env-keys      # the service's env var KEYS (never values)
           - env-get       # arg = comma-separated OPERATOR FLAGS (LIVE_COPY_HALT, ...); values of flags only
           - env-set       # confirm=DO: arg = KEY=VALUE (value masked in the log; Render redeploys)
@@ -106,6 +107,23 @@ jobs:
               get "/services/$ID/deploys?limit=12" > /tmp/dp.json
               jq -r '.[]? | .deploy | "\(.createdAt) -> \(.finishedAt // "(running)")  \(.status)  \(.commit.id[0:7])  \(.trigger // "")  | \((.commit.message // "") | split("\n")[0] | .[0:80])"' /tmp/dp.json || { echo "(deploys not JSON)"; head -c 600 /tmp/dp.json; }
               ;;
+            metrics)
+              # Render's metrics API, one point per step: memory in bytes
+              # and CPU in cores per instance. Added 2026-09-05 when the
+              # workers were OOM-killed thirteen times in four hours and
+              # the log lines before each kill were only the steady-state
+              # mix -- the log could not say whether RSS ramps or spikes.
+              ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
+              MIN=120; [[ "$ARG" =~ ^[0-9]+$ ]] && MIN="$ARG"
+              START=$(date -u -d "-${MIN} minutes" +%FT%TZ); END=$(date -u +%FT%TZ)
+              RES=60; [ "$MIN" -gt 360 ] && RES=300
+              echo "== memory for $SERVICE ($ID) $START .. $END, ${RES}s steps, MB =="
+              get "/metrics/memory?resource=$ID&startTime=$START&endTime=$END&resolution=$RES" > /tmp/mem.json
+              jq -r '.[]? | (.labels // [] | map(.value) | join(",")) as $l | .values[]? | "\(.timestamp)  \((.value / 1048576) | floor)  \($l)"' /tmp/mem.json || { echo "(memory not JSON)"; head -c 800 /tmp/mem.json; }
+              echo "== cpu for $SERVICE ($ID), cores =="
+              get "/metrics/cpu?resource=$ID&startTime=$START&endTime=$END&resolution=$RES" > /tmp/cpu.json
+              jq -r '.[]? | .values[]? | "\(.timestamp)  \(.value)"' /tmp/cpu.json || { echo "(cpu not JSON)"; head -c 800 /tmp/cpu.json; }
+              ;;
             logs)
               ID=$(svc_id "$SERVICE"); KIND=service
               if [ -z "$ID" ]; then ID=$(pg_id "$SERVICE"); KIND=postgres; fi
@@ -170,7 +188,20 @@ jobs:
                 mirror-on)  need_confirm; SQL="INSERT INTO ingestion_state (key, value) VALUES ('mirror_live', 'true'::jsonb) ON CONFLICT (key) DO UPDATE SET value = 'true'::jsonb; SELECT key, value FROM ingestion_state WHERE key LIKE 'mirror_%' ORDER BY key;"; TO=30000 ;;
                 mirror-off) need_confirm; SQL="INSERT INTO ingestion_state (key, value) VALUES ('mirror_live', 'false'::jsonb) ON CONFLICT (key) DO UPDATE SET value = 'false'::jsonb; SELECT key, value FROM ingestion_state WHERE key LIKE 'mirror_%' ORDER BY key;"; TO=30000 ;;
                 mirror-state) SQL="SELECT key, value FROM ingestion_state WHERE key LIKE 'mirror_%' ORDER BY key;"; TO=30000 ;;
-                *) echo "sql: arg must be one of activity|tables|sizes|indexes|analyze|index053|mirror-on|mirror-off|mirror-state (got '$ARG')"; exit 1 ;;
+                # THE PRE-FLIGHT READ (2026-09-05). The pre-flight review of
+                # the switch named the rows the first ON tick reads before a
+                # dollar moves: the mapping quarantine, the premap gate, the
+                # side-echo counter behind first_fill_gate, the loss stop,
+                # the pause and overspend halts, the roster and clips -- and
+                # the counts that show whether any lane is still placing.
+                # One statement, one row per fact, so the flip is decided
+                # from what the worker will read and not from memory.
+                mirror-preflight) SQL="SELECT what, value FROM (SELECT key AS what, left(value::text, 240) AS value FROM ingestion_state WHERE key IN ('mirror_live','mirror_live_whales','mirror_live_demoted','mirror_loss_stop','mapping_quarantine','premap_live','side_echo_last','live_trading_paused','copy_overspend_halt','live_verified_whales','live_clip_overrides','workers_boot','roster_auto_last') UNION ALL SELECT 'zz mirror_books live/24h', (SELECT count(*) FILTER (WHERE state <> 'closed') || '/' || count(*) FILTER (WHERE opened_at > now() - interval '24 hours') FROM mirror_books) UNION ALL SELECT 'zz mirror_orders by state', (SELECT COALESCE(string_agg(state || '=' || n, ' ' ORDER BY state), 'none') FROM (SELECT state, count(*) AS n FROM mirror_orders GROUP BY state) s) UNION ALL SELECT 'zz kalshi_claims rn1 24h', (SELECT count(*) FROM kalshi_claims WHERE lower(whale) = 'rn1' AND claimed_at > now() - interval '24 hours')::text UNION ALL SELECT 'zz live_orders 24h by status', (SELECT COALESCE(string_agg(status || '=' || n, ' ' ORDER BY status), 'none') FROM (SELECT status, count(*) AS n FROM live_orders WHERE placed_at > now() - interval '24 hours' GROUP BY status) s) UNION ALL SELECT 'zz live_orders last placed', (SELECT COALESCE(max(placed_at)::text, 'none') FROM live_orders)) t ORDER BY what;"; TO=30000 ;;
+                # The loss stop's only re-arm: nothing in the worker deletes
+                # 'mirror_loss_stop' once it trips (pre-flight 2026-09-05),
+                # so the operator does it here, on the record.
+                mirror-rearm) need_confirm; SQL="DELETE FROM ingestion_state WHERE key = 'mirror_loss_stop'; SELECT key, value FROM ingestion_state WHERE key LIKE 'mirror_%' ORDER BY key;"; TO=30000 ;;
+                *) echo "sql: arg must be one of activity|tables|sizes|indexes|analyze|index053|mirror-on|mirror-off|mirror-state|mirror-preflight|mirror-rearm (got '$ARG')"; exit 1 ;;
               esac
               command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq >/dev/null 2>&1; sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }
               get "/postgres/$PG/connection-info" > /tmp/ci.json

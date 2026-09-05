@@ -268,9 +268,15 @@ jobs:
               with open(path) as fh:
                   for line in fh:
                       try:
-                          pos.append(json.loads(line))
+                          row = json.loads(line)
                       except json.JSONDecodeError:
-                          pass
+                          continue
+                      # Run 4 (2026-09-05) died here on a whale whose
+                      # positions file held a bare JSON string (the
+                      # venue's error text) among the rows: a str has
+                      # no .get. Only objects are positions.
+                      if isinstance(row, dict):
+                          pos.append(row)
               if not pos:
                   print(f"WLV {name} POS: none returned")
                   continue
