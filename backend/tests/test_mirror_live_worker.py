@@ -69,6 +69,7 @@ import copy
 import inspect
 import json
 import pathlib
+import re
 import time
 
 import pytest
@@ -353,14 +354,52 @@ class _Pool(_ShadowPool):
             return {"live": sum(1 for b in self.books.values() if b["state"] != "closed"),
                     "today": sum(1 for b in self.books.values() if b["opened_ts"] > NOW - 86400)}
         if "ml-mirror-day" in s:
-            return sum(o["cash_usd"] for o in self.orders.values() if o["side"] == BUY)
+            # READ FROM THE STATEMENT, not restated: the side, the
+            # window and the states the CASE clause names are the
+            # statement's own text, so a test of the day cap proves the
+            # worker's SQL and a narrowed or widened predicate fails the
+            # test that pins it. Two columns, as the worker reads them:
+            # `filled`, the cash of every such row, and `open`, the
+            # unfilled remainder at the wire of the rows in the states
+            # the clause names. A CASE clause this fake does not model
+            # is an AssertionError, never a silent fall back to cash
+            # alone (the first cut's fake did that, and a test against
+            # it proved nothing about the clause)
+            side = re.search(r"\bside = '([^']*)'", s).group(1)
+            hours = int(re.search(r"placed_at > now\(\) - interval '(\d+) hours'", s).group(1))
+            rows = [o for o in self.orders.values()
+                    if o["side"] == side and o["placed_ts"] > self.clock - hours * 3600]
+            filled = sum(o["cash_usd"] for o in rows)
+            resting = 0.0
+            if "CASE" in s:
+                m = re.search(r"CASE WHEN state IN \(([^)]*)\) THEN "
+                              r"\(qty - COALESCE\(booked_filled, 0\)\) \* wire ELSE 0 END", s)
+                assert m, f"ml-mirror-day: a CASE clause this fake does not model: {s}"
+                live = {x.strip().strip("'") for x in m.group(1).split(",")}
+                resting = sum((o["qty"] - o["booked_filled"]) * o["wire"]
+                              for o in rows if o["state"] in live)
+            if kind == "fetchrow":
+                return {"filled": filled, "open": resting}
+            # fetchval is the FIRST column: `filled` when the statement
+            # names two, the one sum when it names one
+            return filled if " AS filled" in s else filled + resting
         if "ml-loss-sum" in s:
             return {"lost": sum(b["realized_pnl"] for b in self.books.values())
                     + sum(b["settled_pnl"] or 0.0 for b in self.books.values() if b["state"] == "closed"),
                     "books": len(self.books)}
         if "ml-replaces" in s:
+            # the reasons and the tifs the statement names, read from
+            # its text: `reason = 'replace'` was the original predicate,
+            # `reason IN ('replace', 'take') AND tif IN ('GTC', 'GTD')`
+            # the pre-flight's amendment
+            m = re.search(r"reason IN \(([^)]*)\)", s)
+            reasons = ({x.strip().strip("'") for x in m.group(1).split(",")} if m
+                       else {re.search(r"reason = '([^']*)'", s).group(1)})
+            m = re.search(r"tif IN \(([^)]*)\)", s)
+            tifs = {x.strip().strip("'") for x in m.group(1).split(",")} if m else None
             return sum(1 for o in self.orders.values()
-                       if o["book_id"] == a[0] and o["reason"] == "replace" and o["done_at"])
+                       if o["book_id"] == a[0] and o["reason"] in reasons and o["done_at"]
+                       and (tifs is None or o["tif"] in tifs))
         if "ml-flatten-since" in s:
             # the worker's predicate: the FIRST flatten rest of THIS vanish
             # -- still standing or placed at/after the vanish began ($2)
@@ -3355,6 +3394,110 @@ def test_the_gate_counters_survive_the_health_endpoints_sanitizer():
     assert order.index("integ") < api_app._DETAIL_MAX_KEYS
     assert len(order) <= api_app._DETAIL_MAX_KEYS, "the base block is over the cap"
     assert "_truncated_keys" not in served, "the top level itself is not truncated"
+
+
+# ---------------- 15. the pre-flight before "switch on the mirror system 100%"
+
+@pytest.mark.parametrize("tif", ["GTC", "GTD"])
+def test_the_takes_cancel_spends_the_replace_budget_and_the_take_is_refused_at_the_cap(tif):
+    """The adversarial pre-flight of 2026-09-05: _SQL_REPLACES counted
+    reason = 'replace' alone, the take arm cancels under reason 'take'
+    and then rests anew off the no-order path, so a book could cycle
+    rest -> wait -> take -> rest about thirty times an hour bounded
+    only by the ops budget. Now (1) MIRROR_MAX_REPLACES_PER_HOUR
+    cancels under reason 'take' refuse the next REPLACE decision
+    'replace_capped'; (2) the same count refuses the next TAKE
+    'take_capped' BEFORE its cancel, the rest kept standing -- the
+    take never passed through the replace branch, so widening the
+    count alone left the cycle unbounded; (3) the IOC a take places
+    is its own row under reason 'take' and does NOT count: counting
+    it would charge one re-quote twice. Under EITHER rest tif: a GTD
+    rest (the PMUS_MIRROR_GTD flag's) cancelled by a take is a
+    re-quote as much as a GTC one, so a count narrowed to GTC alone
+    must fail the GTD case here. tests/test_mirror_live_day_cap pins
+    the statement's text by its tag."""
+    cap = rules.MIRROR_MAX_REPLACES_PER_HOUR
+    # (1) a replace decision (the rest is a cent under the plan)
+    p = _pool()
+    b = p.add_book(ledger=0)
+    for _ in range(cap):
+        p.add_order(b, state="cancelled", reason="take", tif=tif, done_at=NOW - 100, order_id=None)
+    p.add_order(b, wire=0.28)
+    v = _Venue()
+    v.rest("oid-1", price=0.28)
+    st = _tick(p, v)
+    assert _census(st, "replace_capped") == 1 and not _cancels(v) and not _places(v)
+    # (2) a take decision: the rest has stood the wait and the ask is
+    # at the wire; at the cap the take is refused by name, nothing is
+    # cancelled, nothing placed, and the rest still stands
+    p = _pool()
+    b = p.add_book(ledger=0)
+    for _ in range(cap):
+        p.add_order(b, state="cancelled", reason="take", tif=tif, done_at=NOW - 100, order_id=None)
+    o = p.add_order(b, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S - 1)
+    v = _Venue(ask=0.30, ioc_fill=300.0)
+    v.rest("oid-1")
+    st = _tick(p, v)
+    assert _census(st, "take_capped") == 1 and _census(st, "take_placed") == 0
+    assert not _cancels(v) and not _places(v)
+    assert p.orders[o["id"]]["state"] == "open" and b["open_order_id"] == o["id"]
+    # one under the cap: the take goes out as before, and its cancel
+    # is the count's (cap)th row, so the NEXT take is the refused one
+    p = _pool()
+    b = p.add_book(ledger=0)
+    for _ in range(cap - 1):
+        p.add_order(b, state="cancelled", reason="take", tif=tif, done_at=NOW - 100, order_id=None)
+    p.add_order(b, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S - 1)
+    v = _Venue(ask=0.30, ioc_fill=300.0)
+    v.rest("oid-1")
+    st = _tick(p, v)
+    assert _census(st, "take_placed") == 1 and _census(st, "take_capped") == 0
+    assert _cancels(v) == [("cancel", "oid-1", SLUG)]
+    # (3) IOC rows under reason 'take' (the takes themselves) are not
+    # re-quotes: with `cap` of them and no cancel, the replace goes out
+    p = _pool()
+    b = p.add_book(ledger=0)
+    for _ in range(cap):
+        p.add_order(b, state="filled", reason="take", kind="take", tif="IOC", done_at=NOW - 100,
+                    order_id=None)
+    p.add_order(b, wire=0.28)
+    v = _Venue()
+    v.rest("oid-1", price=0.28)
+    st = _tick(p, v)
+    assert _census(st, "replace_capped") == 0 and _cancels(v) and _places(v)
+    assert "take_capped" in ml.CENSUS_KEYS
+
+
+def test_an_unreadable_requote_count_is_the_cap_for_the_replace_and_for_the_take():
+    """The fail-closed rail _requotes_this_hour carries (review of the
+    first cut, 2026-09-05: it moved into the helper and nothing pinned
+    it): a count the pool cannot read IS the cap, so the replace
+    decision is refused 'replace_capped' and the take 'take_capped',
+    nothing cancelled, nothing placed, the rest standing. A helper
+    that read an unreadable count as zero would let both go out."""
+    # the replace decision (the rest is a cent under the plan)
+    p = _pool()
+    b = p.add_book(ledger=0)
+    o = p.add_order(b, wire=0.28)
+    p.raise_on.append(("ml-replaces", RuntimeError("db down")))
+    v = _Venue()
+    v.rest("oid-1", price=0.28)
+    st = _tick(p, v)
+    assert _census(st, "replace_capped") == 1 and not _cancels(v) and not _places(v)
+    assert p.orders[o["id"]]["state"] == "open" and b["open_order_id"] == o["id"]
+    assert st["requotes"] == 0
+    # the take decision (the rest stood the wait, the ask at the wire)
+    p = _pool()
+    b = p.add_book(ledger=0)
+    o = p.add_order(b, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S - 1)
+    p.raise_on.append(("ml-replaces", RuntimeError("db down")))
+    v = _Venue(ask=0.30, ioc_fill=300.0)
+    v.rest("oid-1")
+    st = _tick(p, v)
+    assert _census(st, "take_capped") == 1 and _census(st, "take_placed") == 0
+    assert not _cancels(v) and not _places(v)
+    assert p.orders[o["id"]]["state"] == "open" and b["open_order_id"] == o["id"]
+    assert [x for x in p.sent if "ml-replaces" in x[1]], "the count was asked for"
 
 
 # ------------------------------------------------ 12. the census coverage

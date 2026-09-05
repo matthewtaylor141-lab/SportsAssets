@@ -475,7 +475,7 @@ fires on 100% of his fills on booked markets with the copy lane DISABLED (`wake_
 the chain-lane share, probe:1548); reduction wake-to-plan p50 ≤ 10 s; MIRRORFIDELITY by_usd ≥ 0.5 inside
 600 s on in-play fills with react_p50 ≤ 10 s, p90 ≤ 30 s (his clusters at 5 s: 21.6/h; a rest ≥ 30 s old is
 off his level for 20% of fills, ≥ 600 s for 70%); `off_tick` = 0 and rung 11 reads a half-cent rest back;
-`replace_capped` = 0 on in-play books over 24 h.
+`replace_capped + take_capped` = 0 on in-play books over 24 h.
 
 ### Phase 5 — SHORTS (P2): books in leg space, his other token as BUY_SHORT on the same slug
 Files: analytics/mirror_live_rules.py; live_executor.py; migrations/050_mirror_shorts.sql; analytics/engine.py;

@@ -247,10 +247,12 @@ steered by. Route it through `capped_env("MIRROR_SNAP_MAX_AGE_S", 300.0, floor=3
 through the same discipline. (b) `PMUS_MIRROR_POST_ONLY` (`ml:272`) becomes one-way: `on` is the only accepted
 value from the environment. With post-only off every mirror rest is a plain crossable GTD limit that can fill
 at placement in a locked book, which defeats `at_or_through`, `TAKE_ARM_STALE_WAITS`, the 120 s take floor and
-`P2_MAKER_SHARE_MIN` in one variable. (c) `_SQL_REPLACES` counts `reason = 'replace'` only, while a TTL expiry
-is cancelled under the name `ttl` and re-placed next tick — so *tightening* `MIRROR_REST_TTL_S` raises the
-venue write rate. Count `reason IN ('replace','ttl')` and floor the TTL at
-`3600 / MIRROR_MAX_REPLACES_PER_HOUR` so the two knobs cannot contradict each other.
+`P2_MAKER_SHARE_MIN` in one variable. (c) `_SQL_REPLACES` counts `reason IN ('replace','take') AND tif IN
+('GTC','GTD')` — the rest a replace cancels and the rest a take cancels, never the IOC the take places, since
+the 2026-09-05 pre-flight (before it the count read `reason = 'replace'` alone and the rest → take → rest cycle
+was bounded by nothing but the ops budget) — while a TTL expiry is still cancelled under the name `ttl` and
+re-placed next tick, so *tightening* `MIRROR_REST_TTL_S` raises the venue write rate. Add `'ttl'` to the set and
+floor the TTL at `3600 / MIRROR_MAX_REPLACES_PER_HOUR` so the two knobs cannot contradict each other.
 **Unreadable contract.** An unparseable env value is the code default, logged once, never the env value.
 **Tests.** `test_every_mirror_env_knob_is_downward_only` (table-driven, each name at a huge value and a tiny
 one); `test_snap_max_age_has_a_floor`; `test_post_only_cannot_be_turned_off_from_the_environment`;
@@ -1185,7 +1187,7 @@ state unread ⇒ refuse a NEW book by name; never open on an unread state.
 per tick carry **>= 80%** of his recent gross dollars. Live: `MIRRORFIDELITY` field `wake_source_fill_share`
 **passes at >= 0.85 with the copy lane DISABLED**; reduction wake-to-plan p50 **<= 10 s**;
 `by_usd` **>= 0.5** with react p50 **<= 10 s** and p90 **<= 30 s**, over **>= 30 books** (§3b M11,
-cluster = book); `off_tick = 0`; `replace_capped = 0` on in-play books over 24 h.
+cluster = book); `off_tick = 0`; `replace_capped + take_capped = 0` on in-play books over 24 h.
 
 #### L2 — soccer: per-condition books and the price floor by name (Phase 6)
 **Files:** `analytics/mirror_live_rules.py`; `workers/mirror_shadow.py`;
@@ -1325,7 +1327,7 @@ readings** — `MIRRORGRADE.rest_fill_lo >= 0.40` and `.maker_share >= 0.5` and 
 book-clustered over >= 30 closed books, `MIRRORFIDELITY.by_usd >= 0.5` with react p50/p90 over >= 30 books,
 `MIRRORTRACK` p90 <= 0.05, `MIRRORINTEG` all zero. That is 6+ days at five books a day plus a settlement
 tail. **A metric below its minimum n authorises nothing.**
-**REVERSES:** S6's list, plus `replace_capped > 0`, plus frozen ticks >= 1% — **step back one rung, never to
+**REVERSES:** S6's list, plus `replace_capped + take_capped > 0`, plus frozen ticks >= 1% — **step back one rung, never to
 zero**, because stepping to zero means the reversal lever, not the strand.
 
 **S8 — SHORTS ON THE PER-FILL LANE, ONE PROBATION SHORT AT A TIME.** Run V1 rung 5 (gated on SH1's collateral
@@ -1353,7 +1355,7 @@ that is not `short_reduce_unproven`.
 
 **S10 — LIFECYCLE AND RE-ENTRIES (L1), THEN SOCCER (L2), THEN THE SECOND WHALE.** Each its own deploy.
 **AUTHORISED BY:** L1's gate (`wake_source_fill_share >= 0.85` with the copy lane disabled, wake-to-plan p50
-<= 10 s, `off_tick = 0`, `replace_capped = 0`) and L2's (>= 30 closed soccer condition-books,
+<= 10 s, `off_tick = 0`, `replace_capped + take_capped = 0`) and L2's (>= 30 closed soccer condition-books,
 `book_settle_disagree = 0`, `game_cap` breaches 0).
 **REVERSES:** narrow the allowlist, or `MIRROR_SOCCER_FLOOR=inherit`, on any clause failing over 24 h.
 The second whale requires X3's operator surface and `p2_verdict` returning a verdict, not a build.

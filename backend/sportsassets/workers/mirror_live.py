@@ -138,6 +138,30 @@ SETTLE_DISAGREE_USD = 0.05
 # The shadow-vs-live instrument compares readings this close in time.
 SHADOW_AGREE_WINDOW_S = 60.0
 
+
+def _mode_line_every_ticks(default: int = 10) -> int:
+    """MIRROR_MODE_LINE_EVERY_TICKS as a whole number of ticks with a
+    floor of one. Absent, blank or unparseable is the default; under
+    one lands on one (a modulus of zero is no cadence at all)."""
+    raw = os.environ.get("MIRROR_MODE_LINE_EVERY_TICKS")
+    try:
+        n = int(str(raw).strip()) if raw is not None and str(raw).strip() else int(default)
+    except ValueError:
+        n = int(default)
+    return max(1, n)
+
+
+# THE OPERATOR CAN READ THE MODE ON A QUIET TICK. main() logs a tick's
+# stats only when it placed, cancelled or abandoned, so a reconciler
+# sitting in exits-only (the DB switch false after a trip, a dropped
+# env flag) wrote nothing to the workers log for as long as it was
+# quiet, and "which mode is the mirror in" had no answer short of the
+# heartbeat row (adversarial pre-flight 2026-09-05, before the owner's
+# "switch on the mirror system 100%" order). Every this many ticks one
+# INFO line names the mode, the whales, the live books, the open orders
+# and the day room, whatever the tick did (_mode_line).
+MODE_LINE_EVERY_TICKS = _mode_line_every_ticks()
+
 _STATE_LIVE = "mirror_live"
 _STATE_WHALES = "mirror_live_whales"
 _STATE_DEMOTED = "mirror_live_demoted"
@@ -170,7 +194,7 @@ CENSUS_KEYS: tuple[str, ...] = (
     "short_side_refused", "on_target", "under_one_share", "dead_band", "hysteresis",
     "no_price", "venue_ledger_disagree", "wrong_sign_trip", "order_state_unknown",
     "placement_lost", "lost_ambiguous", "order_lost", "cancel_pending",
-    "replace_capped", "ops_capped", "over_room", "open_order_pending", "rest_placed",
+    "replace_capped", "take_capped", "ops_capped", "over_room", "open_order_pending", "rest_placed",
     "take_placed", "take_arm_stale", "post_only_rejected", "post_only_ignored", "place_refused",
     "filled_rest", "filled_take", "partial_fill", "cancelled_unfilled", "expired",
     "resting_above_level", "reduce_unfilled", "flatten_rested", "flatten_vanished",
@@ -367,8 +391,44 @@ SELECT count(*) FILTER (WHERE state <> 'closed') AS live,
        count(*) FILTER (WHERE opened_at > now() - interval '24 hours') AS today
   FROM mirror_books /* ml-books-count */
 """
+# THE DAY READ COUNTS WHAT IS RESTING, not only what filled. cash_usd is
+# written on BOOKED FILLS alone (_SQL_ORDER_CASH, from _book_fill), and
+# _place takes a placement's notional off t.mirror_day for ITS tick only,
+# so an unfilled post-only rest counted against the day on no later
+# tick: with the room nearly spent, up to four more books could each
+# rest the same last dollars on later ticks, a worst-case gross BUY
+# notional standing in a rolling 24 h of MIRROR_DAY_USD + 4 x
+# LIVE_MAX_CLIP_USD ($2,250) against a rail the owner was told is $1,250
+# (adversarial pre-flight 2026-09-05, before the owner's "switch on the
+# mirror system 100%" order). TWO COLUMNS, read apart by _global_guards:
+# `filled`, the cash of every BUY_LONG row placed in the window, and
+# `open`, the unfilled remainder at the cent on the wire (the notional
+# _place reserves) of every such row that may still fill -- the
+# non-terminal states, exactly the set mirror_orders_one_open_per_book
+# and _SQL_ORDERS_OPEN name; 'lost' and 'rejected' are terminal and
+# nothing of theirs can fill. A partial fill is not counted twice: its
+# filled part is in cash_usd and its remainder is qty - booked_filled,
+# the cursor _book_fill advances in the transaction that writes the
+# cash. They are two columns and not one sum because the two readers
+# want different figures (review of the first cut, 2026-09-05): the
+# BLOCK (increase_block = 'mirror_day_cap') fires on `filled` alone,
+# money actually spent, because _reconcile_open answers a block by
+# cancelling every resting BUY -- a block that read the rests would
+# have cancelled the very rests it counted, every book alternating
+# cancel / re-rest every other tick for as long as the day stayed full
+# by rests, unbounded per hour (that cancel is not a replace and spends
+# no budget), each cycle restarting the take wait and the TTL, the
+# book absent from the venue half the time; the SIZING room
+# (t.mirror_day) is MIRROR_DAY_USD - filled - open, so a new rest can
+# never take room a standing rest already holds. The per-tick
+# decrement in _place stays: it protects within a tick, this read
+# protects across ticks.
 _SQL_MIRROR_DAY = """
-SELECT COALESCE(sum(cash_usd), 0)::float8 FROM mirror_orders
+SELECT COALESCE(sum(cash_usd), 0)::float8 AS filled,
+       COALESCE(sum(CASE WHEN state IN ('placing', 'open', 'unknown')
+                         THEN (qty - COALESCE(booked_filled, 0)) * wire
+                         ELSE 0 END), 0)::float8 AS open
+  FROM mirror_orders
  WHERE side = 'BUY_LONG' AND placed_at > now() - interval '24 hours' /* ml-mirror-day */
 """
 _SQL_LOSS_SUM = """
@@ -381,9 +441,21 @@ SELECT COALESCE((SELECT sum(realized_pnl) FROM mirror_books
        (SELECT count(*) FROM mirror_books
          WHERE updated_at > now() - interval '24 hours') AS books /* ml-loss-sum */
 """
+# A TAKE'S CANCEL IS A RE-QUOTE AND SPENDS THE REPLACE BUDGET. The count
+# read reason = 'replace' alone, but the take arm cancels the rest under
+# reason 'take' (_act's keep branch) and the book rests anew once the
+# IOC is done, so a book could cycle rest -> MIRROR_TAKE_AFTER_S -> take
+# -> new rest about thirty times an hour, bounded only by the per-tick
+# ops budget, while MIRROR_MAX_REPLACES_PER_HOUR was meant to bound
+# re-quotes (adversarial pre-flight 2026-09-05, before the owner's
+# "switch on the mirror system 100%" order). Both reasons count now, and
+# only the RESTS: the IOC a take places is its own row finished under
+# reason 'take' as well (_place finishes it under its kind), and
+# counting it would charge one re-quote twice.
 _SQL_REPLACES = """
 SELECT count(*) FROM mirror_orders
- WHERE book_id = $1 AND reason = 'replace' AND done_at > now() - interval '1 hour' /* ml-replaces */
+ WHERE book_id = $1 AND reason IN ('replace', 'take') AND tif IN ('GTC', 'GTD')
+   AND done_at > now() - interval '1 hour' /* ml-replaces */
 """
 # The flatten rest that starts the slippage clock is the FIRST one of
 # the CURRENT vanish: still standing, or placed at or after the tick
@@ -683,7 +755,11 @@ def _integ_block(stats: dict) -> dict:
 
 def _new_stats() -> dict:
     return {"status": "ok", "mode": MODE_SAFE, "whales": [], "books_live": 0,
-            "books_frozen": 0, "orders_open": 0, "placed_rest": 0, "placed_take": 0,
+            "books_frozen": 0, "orders_open": 0,
+            # the day room _global_guards read, in dollars (filled plus
+            # resting off MIRROR_DAY_USD); None on a tick that never
+            # read it (SAFE, exits, a cancel-only tick)
+            "mirror_day_room": None, "placed_rest": 0, "placed_take": 0,
             "filled_rest": 0, "filled_take": 0, "partial_fills": 0, "requotes": 0,
             "cancelled": 0, "flattened": 0, "closed_books": 0, "frozen_reasons": {},
             "census": {k: 0 for k in CENSUS_KEYS}, "recent": [], "abandoned": False,
@@ -841,13 +917,19 @@ async def _global_guards(t: _Tick) -> None:
                 t.increase_block = "no_budget_room"
     if t.increase_block is None:
         try:
-            spent = float(await t.pool.fetchval(_SQL_MIRROR_DAY) or 0.0)
-            t.mirror_day = float(rules.MIRROR_DAY_USD) - spent
+            row = await t.pool.fetchrow(_SQL_MIRROR_DAY)
+            filled = float((row or {})["filled"] or 0.0) if row else 0.0
+            resting = float((row or {})["open"] or 0.0) if row else 0.0
+            t.mirror_day = float(rules.MIRROR_DAY_USD) - filled - resting
         except Exception as exc:  # noqa: BLE001
             log.warning("mirror_live: mirror day spend unreadable (%s)", type(exc).__name__)
             t.increase_block = "mirror_day_cap"
         else:
-            if t.mirror_day <= 0:
+            # the block is on what FILLED and the room on what filled
+            # plus what rests (the paragraph over _SQL_MIRROR_DAY); the
+            # room is published for the quiet-tick mode line
+            t.stats["mirror_day_room"] = round(t.mirror_day, 2)
+            if filled >= float(rules.MIRROR_DAY_USD):
                 t.increase_block = "mirror_day_cap"
     if t.increase_block is None:
         stop, err = await _state(t.pool, _STATE_LOSS_STOP)
@@ -1561,6 +1643,24 @@ async def _finish_order(t: _Tick, o: dict, book: dict, st: dict, reason: str | N
                          reason, bool(maker), o.get("order_id"))
     await t.pool.execute(_SQL_BOOK_OPEN_ORDER, book["id"], None)
     o["state"] = state
+    if (state in ("cancelled", "expired") and o["side"] == BUY and o.get("tif") in ("GTC", "GTD")
+            and t.now - 86400.0 < float(o.get("placed_ts") or t.now) < t.now
+            and t.mirror_day is not None):
+        # THE GIVE-BACK. The tick's day read (_SQL_MIRROR_DAY) counted
+        # this rest's unfilled remainder as standing, which it was at
+        # the tick's start, and only _place adjusts the reading; so a
+        # replace, TTL or take cancel left the remainder inside
+        # t.mirror_day and the re-quote that followed in the SAME tick
+        # was under-sized by it whenever the day was within one rest
+        # of the cap -- then replaced up to size on the next tick, one
+        # extra replace per re-quote at high utilisation (review of
+        # the first cut, 2026-09-05). The window is the read's own
+        # (placed_at within 24 h): a rest placed THIS tick was never in
+        # the read (_place's decrement took it), and one older than the
+        # window fell out of the read already; giving either back would
+        # widen the day, so both stay on the safe side and give nothing.
+        t.mirror_day += (max(0.0, float(o["qty"]) - float(o.get("booked_filled") or 0.0))
+                         * float(_num(o.get("wire")) or 0.0))
     book["open_order_id"] = None
     t.open_by_book.pop(book["id"], None)
     t.nonterminal.discard(book["id"])
@@ -2538,6 +2638,20 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             # finished order clears it (_disarm_take)
             if (p is not None and rules.take_allowed(t.now - float(o["placed_ts"]), None, t.now,
                                                      r.bid, r.ask, wire, p.side)):
+                # THE TAKE SPENDS THE REPLACE BUDGET BEFORE IT CANCELS.
+                # Counting the take's cancel (_SQL_REPLACES) bounds the
+                # re-quotes that follow a take, but the take itself
+                # never passed through the replace branch: the rest it
+                # leaves behind is placed on the no-order path below,
+                # so rest -> wait -> take -> rest ran on with the
+                # budget spent and nothing refusing it. The same read
+                # the replace branch makes, refused under its own name
+                # and the rest kept standing, as replace_capped keeps
+                # it (adversarial pre-flight 2026-09-05, before the
+                # owner's "switch on the mirror system 100%" order)
+                if await _requotes_this_hour(t, book) >= rules.MIRROR_MAX_REPLACES_PER_HOUR:
+                    _mirror_stop("take_capped", w)
+                    return "take_capped"
                 await _cancel_and_settle(t, o, book, "take")
                 if book["id"] not in t.open_by_book and o["state"] in ("filled", "cancelled", "expired"):
                     left = int(min(p.qty, max(0.0, float(o["qty"]) - float(o.get("booked_filled") or 0.0))))
@@ -2552,11 +2666,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 _mirror_stop("resting_above_level", w)
             return "open_order_pending"
         if decision == "replace":
-            try:
-                n = int(await t.pool.fetchval(_SQL_REPLACES, book["id"]) or 0)
-            except Exception:  # noqa: BLE001 — an unreadable count is the cap
-                n = rules.MIRROR_MAX_REPLACES_PER_HOUR
-            if n >= rules.MIRROR_MAX_REPLACES_PER_HOUR:
+            if await _requotes_this_hour(t, book) >= rules.MIRROR_MAX_REPLACES_PER_HOUR:
                 _mirror_stop("replace_capped", w)
                 return "replace_capped"
             await _cancel_and_settle(t, o, book, "replace")
@@ -2634,6 +2744,16 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         _mirror_stop("under_one_share", w)
         return "under_one_share"
     return await _place(t, book, r, kind or "reduce", SELL, wire, qty, his_px, p, plan)
+
+
+async def _requotes_this_hour(t: _Tick, book: dict) -> int:
+    """The book's cancel-and-re-quote count for the hour (_SQL_REPLACES:
+    the replace's cancel and the take's), the figure the replace budget
+    is spent from. An unreadable count is the cap."""
+    try:
+        return int(await t.pool.fetchval(_SQL_REPLACES, book["id"]) or 0)
+    except Exception:  # noqa: BLE001 — an unreadable count is the cap
+        return int(rules.MIRROR_MAX_REPLACES_PER_HOUR)
 
 
 def _wire_for(p: mi.Plan | None, his_px: float | None, r: _Reading) -> float | None:
@@ -3354,6 +3474,22 @@ async def _instruments(t: _Tick) -> None:
 
 # ------------------------------------------------------------------- main
 
+def _mode_line(stats: dict, ticks: int) -> None:
+    """The quiet-tick line, on every MODE_LINE_EVERY_TICKS-th completed
+    tick. Built from the census the tick published: `mode`, `whales`,
+    `books_live`, `orders_open` and `mirror_day_room` (the day ROOM in
+    dollars, what _global_guards read off MIRROR_DAY_USD after what
+    filled and what rests; None on a tick that never read it) are its
+    own keys. `census` and `recent` are left out of the trailing dict,
+    as the ops line leaves them out."""
+    if ticks < 1 or ticks % MODE_LINE_EVERY_TICKS:
+        return
+    log.info("mirror_live mode=%s whales=%s books=%s open=%s day=%s stats=%s",
+             stats.get("mode"), stats.get("whales"), stats.get("books_live"),
+             stats.get("orders_open"), stats.get("mirror_day_room"),
+             {k: v for k, v in stats.items() if k not in ("census", "recent")})
+
+
 async def main() -> None:
     """The loop. PMUS_MIRROR=off is a running cancel-only loop, never an
     idle one: a deploy that drops the flag must still cancel what the
@@ -3367,9 +3503,11 @@ async def main() -> None:
     log.info("mirror_live up: PMUS_MIRROR=%s allowlist=%s poll=%ss",
              os.environ.get("PMUS_MIRROR", "off"), sorted(le.mirror_allowlist()), POLL_S)
     async with httpx.AsyncClient(base_url=cfg.data_api_base, timeout=25.0) as http:
+        ticks = 0
         while True:
             try:
                 stats = await tick_once(pool, pmus, http)
+                ticks += 1
                 try:
                     await heartbeat(SERVICE, str(stats.get("status") or "ok"), stats)
                 except Exception:  # noqa: BLE001
@@ -3377,6 +3515,7 @@ async def main() -> None:
                 if stats.get("ops") or stats.get("abandoned"):
                     log.info("mirror_live: %s", {k: v for k, v in stats.items()
                                                  if k not in ("census", "recent")})
+                _mode_line(stats, ticks)
             except Exception:  # noqa: BLE001 — the reconciler never dies
                 log.exception("mirror_live pass failed")
             try:
@@ -3388,5 +3527,5 @@ async def main() -> None:
                 await asyncio.sleep(WAKE_MIN_GAP_S - gap)
 
 
-__all__ = ["POLL_S", "WAKE_MIN_GAP_S", "SERVICE", "CENSUS_KEYS", "notify", "tick_once",
-           "mirror_census_snapshot", "main"]
+__all__ = ["POLL_S", "WAKE_MIN_GAP_S", "MODE_LINE_EVERY_TICKS", "SERVICE", "CENSUS_KEYS",
+           "notify", "tick_once", "mirror_census_snapshot", "main"]
