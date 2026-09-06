@@ -1332,8 +1332,9 @@ async def _bbo(t: _Tick, slug: str, book: bool = False) -> tuple[float | None, f
                 closes it once the markets row reads closed -- and an
                 abandon inside the book walk would skip every book
                 after it, un-managed for the tick and the backoff);
-                a terminal state (EXPIRED, CLOSED, TERMINATED) on any
-                read -- a market that has ended is a per-market fact,
+                a terminal state (EXPIRED, CLOSED, TERMINATED, the
+                closing MATCH_AND_CLOSE_AUCTION) on any read -- a
+                market that has ended is a per-market fact,
                 a venue cannot expire every market
       resets    a quoted read on an OPEN market, or one naming no state
 

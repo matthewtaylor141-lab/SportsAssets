@@ -472,6 +472,18 @@ def test_the_shadows_miss_streak_reads_by_the_live_workers_rule(monkeypatch, cap
     st, msgs = _once(_SeqPmus([_SH_H, _SH_H, {"bid": 0.01, "ask": 0.20, "state": "MARKET_STATE_CLOSED"},
                                _SH_H]))
     assert st["abandoned"] is True and st["markets"] == 4
+    # THE THREE SEQUENCES THE U10 REVIEW'S SURVIVING MUTANTS NEEDED
+    # (2026-09-06): an OPEN-empty read at streak 2 neither steps nor
+    # resets, so the next HALTED read abandons at four; a quoted read
+    # naming no state resets, so the same shape does not abandon; a
+    # market's closing auction is a per-market phase, never a miss
+    st, msgs = _once(_SeqPmus([_SH_H, _SH_H, _SH_E, _SH_H]))
+    assert st["abandoned"] is True and st["markets"] == 4, msgs
+    st, msgs = _once(_SeqPmus([_SH_H, _SH_H, {"bid": 0.30, "ask": 0.32}, _SH_H]))
+    assert not st.get("abandoned") and st["markets"] == 5, msgs
+    st, msgs = _once(_Pmus(bid=None, ask=None, state="MARKET_STATE_MATCH_AND_CLOSE_AUCTION"))
+    assert not st.get("abandoned") and st["markets"] == 5
+    assert not [m for m in msgs if "abandoning" in m], msgs
     ms._backoff_until = 0.0
 
 

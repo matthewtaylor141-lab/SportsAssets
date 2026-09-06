@@ -968,7 +968,8 @@ a non-terminal one (`MARKET_STATE_HALTED`, `MARKET_STATE_SUSPENDED`, `MARKET_STA
 NEW candidate: a read on an existing book never counts (the book's own handling names it `venue_halted`,
 cancels its rests, plans nothing and closes the book once the markets row reads closed; an abandon inside the
 book walk would skip every book after it), and a terminal state (`MARKET_STATE_EXPIRED`, `MARKET_STATE_CLOSED`,
-`MARKET_STATE_TERMINATED`; `mirror_shadow.STATE_TERMINAL`) counts nowhere, because a market that has ended is
+`MARKET_STATE_TERMINATED`, and since the U10 review `MARKET_STATE_MATCH_AND_CLOSE_AUCTION`, a market's own closing
+phase; `mirror_shadow.STATE_TERMINAL`) counts nowhere, because a market that has ended is
 a per-market fact and a venue cannot expire every market (the 12:32Z `tick abandoned (venue_halted:
 MARKET_STATE_EXPIRED)` between placements was one book on an ended market plus his morning's expired markets
 still inside the candidate lookback, not an outage). Every such read still counts `venue_halted` or `no_quote`

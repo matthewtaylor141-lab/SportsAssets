@@ -163,6 +163,10 @@ _STATE_OPEN = "MARKET_STATE_OPEN"
 # expired markets still inside LOOKBACK_H). Read by mirror_live too.
 STATE_TERMINAL: frozenset[str] = frozenset({
     "MARKET_STATE_EXPIRED", "MARKET_STATE_CLOSED", "MARKET_STATE_TERMINATED",
+    # the SDK's own MarketState names a market's closing phase too, and
+    # three candidates ending together read exactly like the 12:32Z
+    # expiries (U10 review, finding 1)
+    "MARKET_STATE_MATCH_AND_CLOSE_AUCTION",
 })
 _STATE_RATIO = "mirror_ratio"
 _STATE_SWITCH = "mirror_shadow"

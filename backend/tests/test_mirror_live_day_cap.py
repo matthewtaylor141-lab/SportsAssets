@@ -962,7 +962,8 @@ def test_a_terminal_state_counts_nowhere_and_a_non_terminal_one_still_abandons_t
     abandon. The same three SUSPENDED, or HALTED: the venue-wide
     reading, abandoned under the state's own word. The terminal set
     is one definition, the shadow's, read by both workers."""
-    assert ms.STATE_TERMINAL == {"MARKET_STATE_EXPIRED", "MARKET_STATE_CLOSED", "MARKET_STATE_TERMINATED"}
+    assert ms.STATE_TERMINAL == {"MARKET_STATE_EXPIRED", "MARKET_STATE_CLOSED", "MARKET_STATE_TERMINATED",
+                                 "MARKET_STATE_MATCH_AND_CLOSE_AUCTION"}
     assert "MARKET_STATE_OPEN" not in ms.STATE_TERMINAL and HALTED not in ms.STATE_TERMINAL
     for venue in (_Venue(bid=None, ask=None, state=EXPIRED),
                   _Venue(bid=0.01, ask=0.20, state="MARKET_STATE_CLOSED"),
