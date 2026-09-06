@@ -835,6 +835,13 @@ M1-total (all families) printed beside M1.
   residuals.
 - RAMP: straight to the full size (5 books, $250 per market, $1,250 per day, the $1,000 stop) as soon
   as the venue accepts the first order at the first rung (1 book, $25, $50).
+  DONE 2026-09-06. The venue reopened at ~00:40Z after a venue-wide halt (~17:38Z-00:40Z, every bbo read
+  MARKET_STATE_HALTED). The first order was accepted on the first ON tick: workers' log 00:40:38.048Z
+  "mirror book 1 opened for rn1 on aec-wta-yulsta-eleryb-2026-09-05: standing row 411040 (episode 1,
+  target 188 @ 0.12, ratio 1.0)", 00:40:43.552Z `POST api.polymarket.us/v1/orders "HTTP/1.1 200 OK"`,
+  mirror_orders open=1 at 00:42:43Z. The three rung keys (MIRROR_MAX_LIVE_BOOKS, MIRROR_NET_CAP_USD,
+  MIRROR_DAY_USD) were deleted from sportsassets-workers at 00:44:14-18Z (render-ops env-del, HTTP 204
+  each), so the code defaults now ride: 5 books, $250 per market, $1,250 per day, $1,000 stop.
 
 ## 6. WHAT "TO A TEE" CANNOT MEAN — the honest residuals, with numbers
 
