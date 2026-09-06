@@ -2627,9 +2627,37 @@ jobs:
           window = {"active": True, "closed": False,
                     "startTimeMin": _iso(_now - _td(hours=6)),
                     "startTimeMax": _iso(_now + _td(hours=72))}
+          # BOUNDED (2026-09-06). On 2026-09-05 the venue was HALTED
+          # venue-wide (every bbo read state=MARKET_STATE_HALTED with a
+          # null book), so nothing here ever counted as LIVE, the walk
+          # never broke out, and this one step ran 19 minutes before
+          # the job's timeout cancelled it (exit 143) and took the whole
+          # probe's log with it. Two caps now end the walk on their
+          # own: a wall-clock budget and a scanned-market cap. The bbo
+          # read is the slow call, so a market whose bbo reports a
+          # non-OPEN state is counted in a state census and skipped
+          # before the book read; the census prints at the end so a
+          # halted venue reads as "halted", not as "no live books".
+          import time as _time
+          _T0 = _time.monotonic()
+          _BUDGET_S = 120.0
+          _SCAN_CAP = 60
           shown, scanned = 0, 0
+          states = {}
+          stop_reason = "walk exhausted"
+
+          def _out_of_budget():
+              global stop_reason
+              if _time.monotonic() - _T0 > _BUDGET_S:
+                  stop_reason = f"wall-clock budget {int(_BUDGET_S)}s"
+                  return True
+              if scanned >= _SCAN_CAP:
+                  stop_reason = f"scan cap {_SCAN_CAP}"
+                  return True
+              return False
+
           for off in range(0, 200, 25):
-              if shown >= 3:
+              if shown >= 3 or _out_of_budget():
                   break
               try:
                   resp = pub.events.list({**window, "limit": 25,
@@ -2642,10 +2670,10 @@ jobs:
               if not evs:
                   break
               for ev in evs:
-                  if shown >= 3:
+                  if shown >= 3 or _out_of_budget():
                       break
                   for m in (ev.get("markets") or []):
-                      if shown >= 3:
+                      if shown >= 3 or _out_of_budget():
                           break
                       if not isinstance(m, dict):
                           continue
@@ -2655,9 +2683,15 @@ jobs:
                       scanned += 1
                       try:
                           bbo = pub.markets.bbo(slug)
-                      except Exception:
+                      except Exception as e:
+                          states[f"ERR:{type(e).__name__}"] = (
+                              states.get(f"ERR:{type(e).__name__}", 0) + 1)
                           continue
                       md = (bbo or {}).get("marketData") or {}
+                      st = md.get("state")
+                      states[str(st)] = states.get(str(st), 0) + 1
+                      if st is not None and st != "MARKET_STATE_OPEN":
+                          continue
                       bb, ba = md.get("bestBid"), md.get("bestAsk")
                       if bb is None and ba is None:
                           continue
@@ -2698,7 +2732,17 @@ jobs:
                       except Exception as e:
                           print(f"BIDGT   ATTRIB undecidable ({type(e).__name__})")
                       shown += 1
-          print(f"BIDGT done ({shown} live of {scanned} scanned)")
+          _census = " ".join(f"{k}={v}" for k, v in
+                             sorted(states.items(), key=lambda kv: -kv[1]))
+          print(f"BIDGT done ({shown} live of {scanned} scanned, "
+                f"{int(_time.monotonic() - _T0)}s, stopped: {stop_reason})")
+          print(f"BIDGT states {_census or 'none read'}")
+          if shown == 0 and states and all(
+                  k.startswith("ERR:") or k != "MARKET_STATE_OPEN"
+                  for k in states):
+              print("BIDGT VERDICT: no OPEN market in the window; the venue "
+                    "is not quoting (halted/closed/expired), not an auth "
+                    "or schema fault")
           PY
 
       - name: Premap ground truth (the sweep's exact reads, via public SDK)
