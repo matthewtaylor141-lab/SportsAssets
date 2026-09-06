@@ -4755,7 +4755,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     facts = rules.AdmissionFacts(
         increases_ok=_increases_refusal(t, w) is None,
         increases_refusal=_increases_refusal(t, w) or "mode_env_off",
-        per_fill_usd=clip, family=copy_sports.market_type_of(slug),
+        per_fill_usd=clip, family=copy_sports.mirror_family_of(slug),
         per_side=bool(m.get("per_side", False)),
         market_closed=mk["closed"], market_resolved=mk["resolved"],
         game_too_far_out=le._game_too_far_out(slug),

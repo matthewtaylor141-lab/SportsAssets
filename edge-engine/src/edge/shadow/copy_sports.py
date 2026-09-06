@@ -411,6 +411,104 @@ def market_type_of(slug: str) -> str:
     return "unknown"
 
 
+# ── THE FEED'S DERIVATIVE FAMILIES, READ FINER THAN market_type_of (C3,
+# 2026-09-06; owner: "I need more trades firing in the mirror sleeve").
+# market_type_of answers the COPY LANE's question -- which cell / block a
+# slug falls in -- and its answers are pinned (a first-half total is
+# 'prop' there, so the prop block refuses it). The identity mapper needs
+# a finer reading of the same suffix: WHICH family and WHICH segment, so
+# a 'first-half-total-0pt5' can be held against the venue's own
+# 'tsc-…-fh-0pt5' and nothing else. Two pure readers, no stems, every
+# word the feed's attested spelling (c3_rows_2039.log table 2):
+#   first-half-total-<line>   -> family 'total',    segment 'fh'
+#   halftime-result-draw      -> family 'halftime_result', segment 'ht'
+#   team-total-home-<line>    -> family 'team_total'
+#   exact-score-X-Y           -> family 'exact_score'
+#   btts                      -> family 'btts'
+#   spread-(home|away)-<line> -> family 'spread'
+#   total-<line>              -> family 'total'
+# Anything else answers market_type_of, unchanged.
+_SEGMENT_PHRASES = (("first", "half", "fh"), ("second", "half", "sh"),
+                    ("1st", "half", "fh"), ("2nd", "half", "sh"))
+_SEGMENT_SINGLE = {"halftime": "ht", "ht": "ht", "fh": "fh", "sh": "sh",
+                   "1h": "fh", "2h": "sh", "firsthalf": "fh",
+                   "secondhalf": "sh", "1sthalf": "fh", "2ndhalf": "sh",
+                   "h1": "fh", "h2": "sh"}
+
+
+def _split_segment(suffix: list[str]) -> tuple[str, list[str]]:
+    """(segment code, the tokens after it) for a feed suffix; '' when
+    the suffix names no segment up front."""
+    for a, b, code in _SEGMENT_PHRASES:
+        if suffix[:2] == [a, b]:
+            return code, suffix[2:]
+    if suffix and suffix[0] in _SEGMENT_SINGLE:
+        return _SEGMENT_SINGLE[suffix[0]], suffix[1:]
+    return "", list(suffix)
+
+
+def _feed_family(slug: str) -> tuple[str, str] | None:
+    """(family, segment) of a kindless feed slug by its attested word
+    forms; None when the slug is not that grammar (the caller falls
+    back to market_type_of)."""
+    s = (slug or "").lower()
+    parts = [p for p in s.split("-") if p]
+    if not parts or parts[0] in _KINDS:
+        return None
+    suffix = _post_date_tokens(parts)
+    if not suffix:
+        return None
+    seg, rest = _split_segment(suffix)
+    if rest == ["btts"]:
+        return "btts", seg
+    if len(rest) == 2 and rest[0] == "total" and _LINE_RE.match(rest[1]) \
+            and not rest[1].startswith(("pos", "neg")):
+        return "total", seg
+    if len(rest) == 3 and rest[0] == "spread" and rest[1] in ("home", "away") \
+            and _LINE_RE.match(rest[2]) and not rest[2].startswith(("pos", "neg")):
+        return "spread", seg
+    if rest[:2] == ["team", "total"]:
+        return "team_total", seg
+    if rest[:2] == ["exact", "score"]:
+        return "exact_score", seg
+    if seg == "ht" and rest[:1] == ["result"]:
+        return "halftime_result", seg
+    return None
+
+
+def family_of(slug: str) -> str:
+    """The market FAMILY the identity mapper holds a slug to: the feed's
+    attested word forms above, else market_type_of's answer. Never a
+    tradeable type for an unrecognised suffix (market_type_of's own
+    'unknown' passes through)."""
+    fam = _feed_family(slug)
+    if fam is not None:
+        return fam[0]
+    return market_type_of(slug)
+
+
+def segment_of(slug: str) -> str:
+    """The game SEGMENT a feed slug names ('fh', 'sh', 'ht'), or '' for
+    the full game. Read only from the attested word forms; a slug
+    market_type_of alone can read has no segment here."""
+    fam = _feed_family(slug)
+    return fam[1] if fam is not None else ""
+
+
+MIRROR_FAMILY_OF_C3 = frozenset({"spread", "total", "btts"})
+
+
+def mirror_family_of(slug: str) -> str:
+    """The family the MIRROR files a slug under (C3, review minor 5): a
+    first-half total is the 'total' family (segment 'fh' in its slug)
+    so the per-family census and any per-family cap read it as a total,
+    where market_type_of files it 'prop' for the copy lane's block --
+    which is unchanged: copy_verdict still refuses it. Every other slug
+    is market_type_of's answer."""
+    fam = family_of(slug)
+    return fam if fam in MIRROR_FAMILY_OF_C3 else market_type_of(slug)
+
+
 def league_of(slug: str) -> str:
     parts = [p for p in (slug or "").lower().split("-") if p]
     if not parts:

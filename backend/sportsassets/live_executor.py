@@ -5587,6 +5587,34 @@ async def _independent_check(us_slug: str, outcome: str | None,
                 "cross-check would replay the resolver that produced "
                 f"this mapping (src={mapping_src})")
 
+    # C3 FAMILIES (2026-09-06, review major 2b): a spread / total / btts
+    # mapping must not be cross-checked against the MONEYLINE candidates
+    # below -- his spread outcome is a club name, resolve_market_exact
+    # would find the aec-/atc- moneyline and its different identifier
+    # would read as a mismatch that re-arms the total quarantine off a
+    # correct order. The independent resolver for a spread or total is
+    # the copy lane's own derivative resolver; btts has none.
+    from .workers import premap as _premap
+
+    _c3 = _premap.c3_his(his_slug)
+    if _c3 is not None:
+        if _c3["family"] == "btts":
+            return "unverified", "no independent resolver for btts"
+        try:
+            alt = await asyncio.to_thread(
+                pmus.resolve_derivative_exact, his_slug, outcome, his_title)
+        except Exception as exc:  # noqa: BLE001
+            return "unverified", f"independent resolver error: {exc}"[:160]
+        if alt is None:
+            return "unverified", "independent derivative resolver found nothing"
+        if str(alt.get("market_slug", "")).lower() != us_slug.lower():
+            return "mismatch", (f"independent resolver chose "
+                                f"{alt.get('market_slug')}")
+        if intent and alt.get("intent") and alt["intent"] != intent:
+            return "mismatch", (f"independent resolver would order "
+                                f"{alt['intent']}, we sent {intent}")
+        return "ok", "independent derivative resolver agrees"
+
     cands = (_tennis_candidates(his_title, his_slug or "")
              + _us_slug_candidates(his_slug or "", outcome or ""))
     cands = [c for c in cands if c]
@@ -5694,8 +5722,24 @@ async def _side_echo_verify(pool, row_id: int, us_slug: str,
                 # it is not verifying production, it is verifying
                 # something else — the failure mode that has cost the
                 # most here.
-                hit = _premap.match_side(rows, outcome, his_title,
-                                         his_slug)
+                if _premap.c3_his(his_slug) is not None:
+                    # C3 (2026-09-06, review major 2b): a spread / fh
+                    # total / btts fill is re-derived through the same
+                    # identity pick that mapped it (premap.c3_pick --
+                    # identifier built from his slug, the venue's
+                    # question, his title's veto, the SEGMENT), on the
+                    # venue's LIVE rows of the market we bought; never
+                    # through match_side, which has no segment and would
+                    # certify a full-game row against a first-half slug.
+                    # The identifier AND the intent are then compared
+                    # exactly as for the wording arm: the complement
+                    # side of the same asc- proposition is an intent
+                    # mismatch.
+                    hit = _premap.c3_pick(rows, outcome, his_title,
+                                          his_slug)
+                else:
+                    hit = _premap.match_side(rows, outcome, his_title,
+                                             his_slug)
                 if hit is None:
                     detail = "no unique live match"
                 elif str(hit["identifier"]).lower() != us_slug.lower():

@@ -150,6 +150,52 @@ def code_hits(code: str, outcome: str | None) -> bool:
     return first.startswith(code) or (len(first) >= 3 and code.startswith(first))
 
 
+def shared_stem(a: str, b: str) -> str:
+    """The SHARED STEM of a slug's two team codes (C3, 2026-09-06): when
+    one code is a proper prefix of the other ('wash' of 'washst',
+    'mich' of 'michst', 'ohio' of 'ohiost') a first-word hit on the
+    SHORTER code names either team -- 'Washington' and 'Washington
+    State' both start with 'wash' -- so code_hits alone cannot decide a
+    side and its answer must not ground a conflict. Returns the shorter
+    code when the pair shares a stem, else ''."""
+    a, b = (a or "").lower(), (b or "").lower()
+    if len(a) >= 3 and len(b) > len(a) and b.startswith(a):
+        return a
+    if len(b) >= 3 and len(a) > len(b) and a.startswith(b):
+        return b
+    return ""
+
+
+def code_names(code: str, outcome: str | None, sibling: str) -> bool:
+    """code_hits, read against the SIBLING code (C3). Without a shared
+    stem this is code_hits exactly. With one, the LONGER code is named
+    when the outcome's first word starts with the whole code, or starts
+    with the stem and the outcome's SECOND word starts with the rest of
+    the code ('Washington State' -> 'wash' + 'st'); the SHORTER code is
+    named when the first word starts with it and the longer code is NOT
+    named ('Washington' -> 'wash', no second word). Nothing here is a
+    subsequence or a similarity: the residual of the longer code must
+    begin the outcome's own next word, so 'Washington Huskies' names
+    'wash' and never 'washst'. A stem hit that decides nothing is
+    neither a hit nor a conflict."""
+    code = (code or "").lower()
+    stem = shared_stem(code, sibling)
+    if not stem:
+        return code_hits(code, outcome)
+    words = _norm(outcome).split()
+    if not words:
+        return False
+    longer = code if len(code) > len(stem) else (sibling or "").lower()
+    rest = longer[len(stem):]
+    first = words[0]
+    longer_named = first.startswith(longer) or (
+        first.startswith(stem) and len(words) >= 2 and len(rest) >= 2
+        and words[1].startswith(rest))
+    if code == longer:
+        return longer_named
+    return (stem in words or first.startswith(stem)) and not longer_named
+
+
 def contract_slug(global_slug: str | None, i: int) -> str | None:
     """The venue's per-side contract for team i of his slug --
     atc-<lg>-<a>-<b>-<date>-<code_i> -- the copy lane's own atc-
@@ -211,7 +257,9 @@ def aec_code_side(global_slug: str | None, outcome: str | None, market: dict,
     lg, a, b, date, tail = parsed
     if a == b or len(tail) > 1 or (tail and tail[0] not in (a, b)):
         return None, REFUSE_CODE_SHAPE
-    hits = [i for i, c in enumerate((a, b)) if code_hits(c, outcome)]
+    # each code read against its sibling: a shared stem (wash/washst)
+    # decides by the outcome's own words, never by the stem alone (C3)
+    hits = [i for i, c in enumerate((a, b)) if code_names(c, outcome, (b, a)[i])]
     if not hits:
         return None, REFUSE_CODE_UNMATCHED
     if len(hits) != 1:
@@ -243,7 +291,8 @@ def aec_code_side(global_slug: str | None, outcome: str | None, market: dict,
         return None, REFUSE_CODE_SHAPE
     for j, s in enumerate(sides):
         desc = str(s.get("description") or "")
-        own, other = code_hits((a, b)[j], desc), code_hits((b, a)[j], desc)
+        own = code_names((a, b)[j], desc, (b, a)[j])
+        other = code_names((b, a)[j], desc, (a, b)[j])
         if other and not own:
             return None, REFUSE_CODE_CONFLICT
         if own and other:
@@ -254,8 +303,8 @@ def aec_code_side(global_slug: str | None, outcome: str | None, market: dict,
     # the other way round is a contradiction, a mascot title says nothing
     for text in (m.get("title"), m.get("question")):
         ts = _title_sides(text)
-        if ts and code_hits(b, ts[0]) and code_hits(a, ts[1]) \
-                and not (code_hits(a, ts[0]) or code_hits(b, ts[1])):
+        if ts and code_names(b, ts[0], a) and code_names(a, ts[1], b) \
+                and not (code_names(a, ts[0], b) or code_names(b, ts[1], a)):
             return None, REFUSE_CODE_CONFLICT
     side = sides[i]
     # the venue's own marker on the side: pmus.order_intent_for when the
@@ -289,7 +338,12 @@ def pair_agrees(global_slug: str | None, i: int, other_outcome: str | None,
         oi = None
     if oi != 1 - i:
         return REFUSE_CODE_PAIR
-    if code_hits((a, b)[i], other_outcome) and not code_hits((a, b)[1 - i], other_outcome):
+    # THE SHARED STEM (C3): 'Washington State' beside a mapped 'wash'
+    # names 'washst' by its own two words, not the mapped code -- no
+    # conflict; a sibling naming the mapped code and not its own, with
+    # no stem to share ('Baylor' beside a mapped 'bayl'), still refuses
+    mapped, own = (a, b)[i], (a, b)[1 - i]
+    if code_names(mapped, other_outcome, own) and not code_names(own, other_outcome, mapped):
         return REFUSE_CODE_CONFLICT
     return None
 
@@ -483,7 +537,7 @@ async def exact_lane(pool, pmus, ctx: dict, read: Read, *, diag: list | None = N
 
 
 __all__ = ["exact_lane", "aec_code_side", "pair_agrees", "grammar_truth", "grammar_fill_echo",
-           "contract_slug", "code_hits", "slug_head", "ReadsCapped",
+           "contract_slug", "code_hits", "code_names", "shared_stem", "slug_head", "ReadsCapped",
            "EXACT_BOX_S", "SRC_EXACT", "SRC_YESNO", "SRC_GRAMMAR", "PAIR_RESOLVABLE",
            "REFUSE_CODE_UNMATCHED", "REFUSE_CODE_AMBIGUOUS", "REFUSE_CODE_CONFLICT",
            "REFUSE_CODE_SHAPE", "REFUSE_CODE_NOINTENT", "REFUSE_CODE_NO_INDEX", "REFUSE_CODE_PAIR"]

@@ -178,6 +178,10 @@ def date_of(slug: str | None) -> str:
 # feed does not. Kept next to event_keys_for because that is the only
 # place the asymmetry has to be reconciled.
 _KIND_PREFIXES = frozenset({"aec", "atc", "asc", "tsc", "astatc"})
+# the feed's attested draw wording (C3): the matchup inside it is the
+# event, the rest is the question
+_DRAW_TITLE_MATCHUP_RE = re.compile(
+    r"^\s*will\s+(.+?\s+vs\.?\s+.+?)\s+end\s+in\s+a\s+draw\s*\??\s*$", re.I)
 
 
 def _key_norm(text: str | None) -> str:
@@ -240,6 +244,16 @@ def event_keys_for(title: str | None, slug: str | None = None) -> list[str]:
     # an ø/ł/đ club. Keys are a lookup, not a decision: what the rows
     # then answer to is unchanged.
     title = pmus.fold_latin(title) if title else title
+    # C3 (2026-09-06): the feed's draw question is 'Will A vs. B end in
+    # a draw?' and _clean_title keeps it whole, so its side split read
+    # 'will a' vs 'b end in a draw' and its surname key 'draw vs …' --
+    # keys no venue row carries (fl1-olm-pfc-…-draw: no_key_intersection
+    # while the venue listed lg1-olm-pfc). The attested wording is read
+    # down to its matchup before keying; a lookup, not a decision, and
+    # only that one wording -- never a wider key.
+    dm = _DRAW_TITLE_MATCHUP_RE.match(title or "")
+    if dm:
+        title = dm.group(1)
     t = pmus._clean_title(title)
     if t:
         # Every emission goes through _key_variants: raw _norm left
@@ -348,6 +362,21 @@ PREFIX_FOR_TYPE = {"moneyline": {"aec", "atc"},
 
 def _prefix_of(identifier: str | None) -> str:
     return ((identifier or "").split("-", 1)[0] or "").lower()
+
+
+def _want_prefixes(global_slug: str | None) -> set[str] | None:
+    """The venue prefixes his slug's family may match: a C3 family
+    (spread / total / btts, on any segment) names its own kind; every
+    other slug answers PREFIX_FOR_TYPE on market_type_of, unchanged."""
+    from ..copy_sports import market_type_of
+
+    # the C3 reading is behind the owner's identity switch (review
+    # major 1): off, a first-half total is 'prop' with no prefix, as
+    # before C3
+    his = c3_his(global_slug) if yn_identity_on() else None
+    if his is not None:
+        return {C3_PREFIX[his["family"]]}
+    return PREFIX_FOR_TYPE.get(market_type_of(global_slug or ""))
 
 
 class _SkipFallback(Exception):
@@ -2210,11 +2239,12 @@ def _yn_pick(rows: list[dict], outcome: str | None, his_title: str | None,
         return []
     parts = _yn_slug_parts(his_slug)
     if parts is not None and parts["t"] == "draw":
-        if identity_only:
-            _t(refusal="yn:draw-unwitnessed")
-            return []
+        # C3: the identity arm reads his own market title as the draw's
+        # witness (the feed's attested wording names both sides); with
+        # no event title and no such title it stays yn:draw-unwitnessed
         return _yn_draw_pick(rows, parts, on, want_intent, d, his_title,
-                             his_event_title, trace)
+                             None if identity_only else his_event_title,
+                             trace, identity_only=identity_only)
     # the bridge's own title gate consumes his date clause and refuses
     # any title that is not his dated win-question
     anchor, why = _bridge_title_subject(his_title, his_slug)
@@ -2289,15 +2319,52 @@ def _yn_alias_pick(rows: list[dict], parts: dict | None, on: str,
     return [dict(r, yn_branch="alias", league_alias=alias) for r in out]
 
 
+# THE DRAW'S TITLE WITNESS (C3, 2026-09-06). The feed's draw market
+# title is 'Will <A> vs. <B> end in a draw?' (c3_rows_2039.log table 2:
+# every draw row, 24 of them, that wording and no other), and the
+# markets table carried no event title for lal-esp-sev-…-draw ($5.5k,
+# refused yn:draw-unwitnessed) or bra-cru-cap-…-draw. That title NAMES
+# BOTH SIDES, which is all the witness ever certified: so when no event
+# title names two sides, his market title is read -- through exactly
+# this template, the attested wording and nothing else (a dated or
+# qualified variant is not it and stays unwitnessed, the C2 pin) -- and
+# the venue's draw row must then name both of those sides (yn:draw-
+# names) as before. matched_by 'premap_draw_title' says which witness
+# admitted it.
+_YN_DRAW_TITLE_SIDES_RE = re.compile(
+    r"^will (?P<a>[a-z0-9 ]+?) vs (?P<b>[a-z0-9 ]+?) end in a draw$")
+
+
+def _yn_draw_title_sides(his_title: str | None) -> list[str] | None:
+    """The two team names of his draw title in the attested wording,
+    folded and normalized, each past the club scope screen; else
+    None."""
+    if not his_title or _folds_away(his_title):
+        return None
+    n = " ".join(_norm(pmus.fold_latin(his_title)).split())
+    m = _YN_DRAW_TITLE_SIDES_RE.fullmatch(n)
+    if m is None:
+        return None
+    sides = [" ".join(m.group("a").split()), " ".join(m.group("b").split())]
+    if any(pmus._yn_slot_bad(s) for s in sides):
+        return None
+    return sides
+
+
 def _yn_draw_pick(rows: list[dict], parts: dict, on: str, want_intent: str,
                   d: str, his_title: str | None,
                   his_event_title: str | None,
-                  trace: dict | None) -> list[dict]:
+                  trace: dict | None, *,
+                  identity_only: bool = False) -> list[dict]:
     def _t(**kw):
         if trace is not None:
             trace.update(kw)
 
+    witness = "event"
     sides = _yn_event_sides(his_event_title)
+    if sides is None:
+        sides = _yn_draw_title_sides(his_title)
+        witness = "title"
     if sides is None:
         _t(refusal="yn:draw-unwitnessed")
         return []
@@ -2307,6 +2374,9 @@ def _yn_draw_pick(rows: list[dict], parts: dict, on: str, want_intent: str,
         return []
     suffix = f"{parts['a']}-{parts['b']}-{parts['date']}-draw"
     by_code = _yn_rows_by_code(rows, suffix)
+    if identity_only:
+        # the four-argument identity arm: his own league code only
+        by_code = {c: v for c, v in by_code.items() if c == parts["lg"]}
     if not by_code:
         _t(refusal="yn:no-row")
         return []
@@ -2320,12 +2390,454 @@ def _yn_draw_pick(rows: list[dict], parts: dict, on: str, want_intent: str,
         _t(refusal=refusal)
         return []
     admitted = frozenset(r["identifier"] for r in out)
+    label = "premap_draw_title" if witness == "title" else None
     if code == parts["lg"]:
-        _t(matched_by="premap_identity", admitted=admitted)
-        return [dict(r, yn_branch="draw") for r in out]
+        _t(matched_by=label or "premap_identity", admitted=admitted,
+           draw_witness=witness)
+        return [dict(r, yn_branch="draw", draw_witness=witness,
+                     **({"matched_by": label} if label else {})) for r in out]
     alias = f"{parts['lg']}->{code}"
-    _t(matched_by="premap_alias", league_alias=alias, admitted=admitted)
-    return [dict(r, yn_branch="draw", league_alias=alias) for r in out]
+    _t(matched_by=label or "premap_alias", league_alias=alias, admitted=admitted,
+       draw_witness=witness)
+    return [dict(r, yn_branch="draw", league_alias=alias, draw_witness=witness,
+                 **({"matched_by": label} if label else {})) for r in out]
+
+
+# ---------------------------------------------------------------- C3
+# THE DERIVATIVE FAMILIES BY IDENTITY (2026-09-06; owner 19:33Z: "I need
+# more trades firing in the mirror sleeve"). His last 3 h refused $20k
+# of spreads (no_side_match: the asc rows carried no side), $23k of
+# first-half totals (typed prop, no prefix), $10k of btts (his title is
+# not a win question) -- docs/mirror-coverage.md §9. Each family below
+# is admitted by IDENTITY, nothing else: the venue identifier is BUILT
+# from his slug's league (or the C2 alias: exactly one venue league code
+# carrying his <a>-<b>-<date> suffix), team codes, date, SEGMENT and
+# line, byte for byte after the pt5 fold; the venue's question is then
+# parsed by its attested grammar and must name his teams (his title's
+# two sides, or -- for a total, whose question names only the codes --
+# the identifier's own codes); his title must be the family's attested
+# wording on the same segment and line; the row's side_norm and intent
+# must be the venue's own for the side the table below names. No
+# similarity score, no nearest line, no home/away position: a team is a
+# or b only through its NAME in the venue's question. Every refusal is
+# named for the census ('spread:line-absent' …).
+#
+#   spreads  his <lg>-<a>-<b>-<date>-spread-(home|away)-<L>, title
+#            'Spread: <Team> (-L)', outcome <his team>; venue
+#            asc-<LG>-<a>-<b>-<date>[-<seg>]-(neg|pos)-<L> with yes/no
+#            sides, question 'Will the <A> cover -L vs the <B> in <A> vs.
+#            <B>?' -- a (the first slug team) is ALWAYS the subject.
+#            His signed line is the title's when the title names his
+#            outcome, else its negation. Then:
+#              his team is a, -L  -> neg-L  yes  BUY_LONG
+#              his team is a, +L  -> pos-L  yes  BUY_LONG
+#              his team is b, -L  -> pos-L  no   BUY_SHORT  (a covers +L
+#                                    is the complement of b covering -L)
+#              his team is b, +L  -> neg-L  no   BUY_SHORT
+#            Whole-number lines refuse (push lines are not listed).
+#   totals   his …-total-<L> / …-first-half-total-<L>, title '<A> vs.
+#            <B>: O/U L' / '…: 1st Half O/U L', outcome Over/Under;
+#            venue tsc-<LG>-<a>-<b>-<date>[-fh|-sh]-<L>, over/under
+#            sides, question 'Will the total in <A> vs <B> be more than
+#            L?' (identical across segments: the segment lives ONLY in
+#            the identifier, so his segment maps to that segment and
+#            nothing else).
+#   btts     his …-btts (…-first-half-btts), title '<A> vs. <B>: Both
+#            Teams to Score', outcome Yes/No; venue astatc-<LG>-<a>-<b>-
+#            <date>-btts / -fh-btts, question 'Will both teams score in
+#            the match|first half|second half between <A> and <B> on
+#            <date> …' -- the segment word must agree with the
+#            identifier's, the date with his.
+# Not on the venue tonight (c3_rows_2041.log lists none for these
+# events): exact score, halftime result, team totals -- refused by
+# family name, never mapped to a neighbour.
+C3_FAMILIES = frozenset({"spread", "total", "btts"})
+C3_PREFIX = {"spread": "asc", "total": "tsc", "btts": "astatc"}
+C3_ABSENT = {"exact_score": "exact:family-absent",
+             "halftime_result": "halftime:family-absent",
+             "team_total": "team_total:family-absent"}
+_C3_SEGMENTS = frozenset({"fh", "sh", "1h", "2h", "1q", "2q", "3q", "4q", "ht"})
+_C3_SEG_TITLE = {"fh": ("1st half", "first half"),
+                 "sh": ("2nd half", "second half"),
+                 "ht": ("halftime",)}
+_C3_IDENT_RE = re.compile(
+    r"^(?P<kind>[a-z]+)-(?P<lg>[a-z0-9]+)-(?P<a>[a-z0-9]+)-(?P<b>[a-z0-9]+)-"
+    r"(?P<date>\d{4}-\d{2}-\d{2})(?:-(?P<rest>[a-z0-9-]+))?$")
+_C3_SPREAD_TITLE_RE = re.compile(
+    r"^\s*(?:(?P<seg>1st half|first half|2nd half|second half)\s+)?spread\s*:\s*"
+    r"(?P<team>.+?)\s*\(\s*(?P<sign>[+-])\s*(?P<line>\d+(?:\.\d+)?)\s*\)\s*$", re.I)
+_C3_ASC_Q_RE = re.compile(
+    r"^\s*will the (?P<a>.+?) cover (?P<sign>[+-]?)(?P<line>\d+(?:\.\d+)?) vs the "
+    r"(?P<b>.+?) in (?P<a2>.+?) vs\.? (?P<b2>.+?)\s*\?\s*$", re.I)
+_C3_TSC_Q_RE = re.compile(
+    r"^\s*will the total in (?P<a>.+?) vs\.? (?P<b>.+?) be more than "
+    r"(?P<line>\d+(?:\.\d+)?)\s*\?\s*$", re.I)
+_C3_BTTS_Q_RE = re.compile(
+    r"^\s*will both teams score in the (?P<seg>match|first half|second half) between "
+    r"(?P<a>.+?) and (?P<b>.+?) on (?P<date>\d{4}-\d{2}-\d{2})\b", re.I)
+_C3_BTTS_SEG = {"match": "", "first half": "fh", "second half": "sh"}
+
+
+def _c3_line_tok(line: str) -> str:
+    """'19.5' -> '19pt5', '2' -> '2': the slug spelling of a line."""
+    return line.replace(".", "pt")
+
+
+def c3_his(his_slug: str | None) -> dict | None:
+    """His slug read as a C3 family: {family, seg, lg, a, b, date, line,
+    side} or None when it is not one (the caller keeps the old path).
+    `line` is canonical ('19.5'); spreads carry `side` home/away as the
+    feed wrote it (never read as a position -- his team is his outcome)."""
+    from ..copy_sports import family_of, segment_of
+
+    s = (his_slug or "").lower()
+    fam = family_of(s)
+    if fam not in C3_FAMILIES:
+        return None
+    m = _C3_IDENT_RE.match("x-" + s)
+    if m is None or m.group("a") == m.group("b"):
+        return None
+    seg = segment_of(s)
+    rest = [t for t in (m.group("rest") or "").split("-") if t]
+    if seg:
+        rest = rest[2:] if rest[:1] in (["first"], ["second"], ["1st"], ["2nd"]) else rest[1:]
+    out = {"family": fam, "seg": seg, "lg": m.group("lg"), "a": m.group("a"),
+           "b": m.group("b"), "date": m.group("date"), "line": "", "side": ""}
+    if fam == "btts":
+        if rest != ["btts"]:
+            return None
+        return out
+    lm = _SLUG_WHOLE_RE.match(rest[-1] if rest else "")
+    if lm is None or lm.group(1):
+        return None
+    out["line"] = _canon_line(f"{int(lm.group(2))}.{lm.group(3)}" if lm.group(3)
+                              else str(int(lm.group(2))))
+    if fam == "spread":
+        if len(rest) != 3 or rest[0] != "spread" or rest[1] not in ("home", "away"):
+            return None
+        out["side"] = rest[1]
+    elif len(rest) != 2 or rest[0] != "total":
+        return None
+    return out
+
+
+def _venue_segment(identifier: str | None) -> str | None:
+    """The segment token a venue identifier carries right after its
+    date ('fh', 'sh', '1h', '1q' …), '' for the full game, None when the
+    identifier is not the <kind>-<lg>-<a>-<b>-<date>… shape."""
+    m = _C3_IDENT_RE.match(str(identifier or "").lower())
+    if m is None:
+        return None
+    rest = [t for t in (m.group("rest") or "").split("-") if t]
+    return rest[0] if rest and rest[0] in _C3_SEGMENTS else ""
+
+
+def c3_same_segment(rows: list[dict], seg: str) -> list[dict]:
+    """Only the rows on HIS segment (a row whose identifier does not
+    parse is kept: the legacy shapes the older tests build). A
+    segmentless question never matches across segments (the venue's
+    total questions are identical on fh/sh/full)."""
+    return [r for r in rows if _venue_segment(r.get("identifier")) in (seg, None)]
+
+
+def _c3_norm(s: str | None) -> str:
+    return " ".join(_norm(pmus.fold_latin(str(s or ""))).split())
+
+
+def _c3_title_parts(his_title: str | None) -> tuple[list[str] | None, str]:
+    """(the two sides of his '<A> vs. <B>: <qualifier>' title, the
+    normalized qualifier) -- (None, '') when the title is not that
+    shape or a side fails the club scope screen."""
+    raw = str(his_title or "")
+    if not raw or _folds_away(raw):
+        return None, ""
+    parts = raw.split(":")
+    vs = [p for p in parts if re.search(r"\s+vs\.?\s+", p, re.I)]
+    if len(vs) != 1:
+        return None, ""
+    matchup = vs[0]
+    qual = " ".join(_c3_norm(p) for p in parts if p is not matchup).strip()
+    sides = [_c3_norm(x) for x in re.split(r"\s+vs\.?\s+", matchup.strip(), flags=re.I)]
+    if len(sides) != 2 or any(pmus._yn_slot_bad(x) for x in sides):
+        return None, ""
+    return sides, qual
+
+
+def _c3_names_agree(venue_a: str, venue_b: str, his: list[str]) -> bool:
+    nm = pmus._yn_name_match
+    return ((nm(venue_a, his[0]) and nm(venue_b, his[1]))
+            or (nm(venue_a, his[1]) and nm(venue_b, his[0])))
+
+
+def _c3_rows_by_code(rows: list[dict], kind: str, suffix: str) -> dict[str, list]:
+    """Rows whose identifier is '<kind>-<code>-<suffix>', by code."""
+    by_code: dict[str, list] = {}
+    head, tail = kind + "-", "-" + suffix
+    for r in rows:
+        ident = r.get("identifier")
+        if not isinstance(ident, str) or not ident.startswith(head) or not ident.endswith(tail):
+            continue
+        code = ident[len(head):-len(tail)]
+        if code and "-" not in code:
+            by_code.setdefault(code, []).append(r)
+    return by_code
+
+
+def _c3_code(rows: list[dict], his: dict, suffixes: list[str], fam: str,
+             trace: dict) -> tuple[str | None, list[dict]]:
+    """The venue league code for his family rows: his own when any row
+    carries it, else the ONE other code carrying his suffix (the C2
+    alias rule); two is ambiguous, none is absent."""
+    by_code: dict[str, list] = {}
+    for sfx in suffixes:
+        for code, rs in _c3_rows_by_code(rows, C3_PREFIX[fam], sfx).items():
+            by_code.setdefault(code, []).extend(rs)
+    if not by_code:
+        return None, []
+    if his["lg"] in by_code:
+        return his["lg"], by_code[his["lg"]]
+    if len(by_code) > 1:
+        trace["refusal"] = f"{fam}:league-ambiguous"
+        trace["league_codes"] = sorted(by_code)
+        return None, []
+    (code, rs), = by_code.items()
+    trace["league_alias"] = f"{his['lg']}->{code}"
+    return code, rs
+
+
+def _c3_seg_id(his: dict, code: str) -> str:
+    seg = f"-{his['seg']}" if his["seg"] else ""
+    return f"{C3_PREFIX[his['family']]}-{code}-{his['a']}-{his['b']}-{his['date']}{seg}"
+
+
+def _c3_pick_spread(rows: list[dict], his: dict, outcome: str | None,
+                    his_title: str | None, trace: dict) -> dict | None:
+    on = _c3_norm(outcome)
+    if not on or on in ("yes", "no"):
+        trace["refusal"] = "spread:outcome"
+        return None
+    if "." not in his["line"]:
+        trace["refusal"] = "spread:whole-number"
+        return None
+    tm = _C3_SPREAD_TITLE_RE.match(str(his_title or ""))
+    if tm is None or _folds_away(his_title):
+        trace["refusal"] = "spread:title-shape"
+        return None
+    if _canon_line(tm.group("line")) != his["line"]:
+        trace["refusal"] = "spread:title-shear"
+        return None
+    tseg = {"1st half": "fh", "first half": "fh", "2nd half": "sh",
+            "second half": "sh"}.get((tm.group("seg") or "").lower(), "")
+    if tseg != his["seg"]:
+        trace["refusal"] = "spread:title-segment"
+        return None
+    title_team = _c3_norm(tm.group("team"))
+    ltok = _c3_line_tok(his["line"])
+    seg = f"-{his['seg']}" if his["seg"] else ""
+    suffixes = [f"{his['a']}-{his['b']}-{his['date']}{seg}-{sg}-{ltok}" for sg in ("neg", "pos")]
+    code, cands = _c3_code(rows, his, suffixes, "spread", trace)
+    if code is None:
+        trace.setdefault("refusal", "spread:line-absent")
+        return None
+    # the names, from the venue's question on his line
+    names = None
+    for r in cands:
+        qm = _C3_ASC_Q_RE.match(pmus.fold_latin(str(r.get("question") or "")))
+        if qm is None:
+            continue
+        qa, qb = _c3_norm(qm.group("a")), _c3_norm(qm.group("b"))
+        # the trailing matchup restates the subjects: by name ('… in
+        # Bulldogs vs. Rattlers?') or by the identifier's own codes
+        # ('… in JUV vs MIL?'); anything else is not this grammar
+        tail = (_c3_norm(qm.group("a2")), _c3_norm(qm.group("b2")))
+        if tail not in ((qa, qb), (his["a"], his["b"])):
+            continue
+        if _canon_line(qm.group("line")) != his["line"]:
+            continue
+        names = (qa, qb)
+        break
+    if names is None:
+        trace["refusal"] = "spread:question-shape"
+        return None
+    nm = pmus._yn_name_match
+    mine = [i for i, n in enumerate(names) if nm(n, on)]
+    if len(mine) != 1:
+        trace["refusal"] = "spread:names-unreadable" if not mine else "spread:names-ambiguous"
+        trace["venue_names"] = list(names)
+        return None
+    titled = [i for i, n in enumerate(names) if nm(n, title_team)]
+    if len(titled) != 1:
+        trace["refusal"] = "spread:title-unreadable"
+        trace["venue_names"] = list(names)
+        return None
+    gives = tm.group("sign") == "-"
+    if titled[0] != mine[0]:
+        gives = not gives            # the title's sign is the other team's
+    # the table: a is the question's subject
+    if mine[0] == 0:
+        sign_tok, side = ("neg" if gives else "pos"), "yes"
+    else:
+        sign_tok, side = ("pos" if gives else "neg"), "no"
+    want_id = f"{_c3_seg_id(his, code)}-{sign_tok}-{ltok}"
+    want_intent = _YN_IDENTITY_INTENT[side]
+    hits = [r for r in cands if r.get("identifier") == want_id
+            and _norm(r.get("side_norm")) == side]
+    if not hits:
+        trace["refusal"] = "spread:line-absent"
+        trace["wanted"] = want_id
+        return None
+    if len(hits) > 1:
+        trace["refusal"] = "spread:ambiguous"
+        return None
+    r = hits[0]
+    if r.get("intent") != want_intent:
+        trace["refusal"] = "spread:intent"
+        return None
+    if _canon_line(str(r.get("line") or "")) != his["line"]:
+        trace["refusal"] = "spread:line-shear"
+        return None
+    qm = _C3_ASC_Q_RE.match(pmus.fold_latin(str(r.get("question") or "")))
+    if qm is None or (qm.group("sign") == "-") != (sign_tok == "neg") \
+            or _canon_line(qm.group("line")) != his["line"]:
+        trace["refusal"] = "spread:sign-shear"
+        return None
+    trace.update(matched_by="premap_spread", admitted=want_id, side=side,
+                 his_team=("a", "b")[mine[0]], his_signed=("-" if gives else "+") + his["line"])
+    return dict(r, matched_by="premap_spread",
+                **({"league_alias": trace["league_alias"]} if trace.get("league_alias") else {}))
+
+
+def _c3_pick_total(rows: list[dict], his: dict, outcome: str | None,
+                   his_title: str | None, trace: dict) -> dict | None:
+    on = _c3_norm(outcome)
+    if on not in ("over", "under"):
+        trace["refusal"] = "total:outcome"
+        return None
+    sides, qual = _c3_title_parts(his_title)
+    if sides is None:
+        trace["refusal"] = "total:title-shape"
+        return None
+    line_n = _c3_norm(his["line"])
+    want_q = {f"{w} o u {line_n}" for w in _C3_SEG_TITLE.get(his["seg"], ())} \
+        if his["seg"] else {f"o u {line_n}"}
+    if qual not in want_q:
+        trace["refusal"] = "total:title-shear"
+        return None
+    ltok = _c3_line_tok(his["line"])
+    seg = f"-{his['seg']}" if his["seg"] else ""
+    code, cands = _c3_code(rows, his, [f"{his['a']}-{his['b']}-{his['date']}{seg}-{ltok}"],
+                           "total", trace)
+    if code is None:
+        trace.setdefault("refusal", "total:line-absent")
+        return None
+    want_id = f"{_c3_seg_id(his, code)}-{ltok}"
+    hits = [r for r in cands if r.get("identifier") == want_id
+            and (r.get("side_norm") or "").split()[:1] == [on]]
+    if not hits:
+        trace["refusal"] = "total:side"
+        return None
+    if len(hits) > 1:
+        trace["refusal"] = "total:ambiguous"
+        return None
+    r = hits[0]
+    if _canon_line(str(r.get("line") or "")) != his["line"]:
+        trace["refusal"] = "total:line-shear"
+        return None
+    qm = _C3_TSC_Q_RE.match(pmus.fold_latin(str(r.get("question") or "")))
+    if qm is None or _canon_line(qm.group("line")) != his["line"]:
+        trace["refusal"] = "total:question-shape"
+        return None
+    qa, qb = _c3_norm(qm.group("a")), _c3_norm(qm.group("b"))
+    if not (_c3_names_agree(qa, qb, sides) or (qa, qb) == (his["a"], his["b"])):
+        trace["refusal"] = "total:names"
+        trace["venue_names"] = [qa, qb]
+        return None
+    want_intent = "ORDER_INTENT_BUY_LONG" if on == "over" else "ORDER_INTENT_BUY_SHORT"
+    if r.get("intent") != want_intent:
+        trace["refusal"] = "total:intent"
+        return None
+    label = f"premap_{his['seg']}_total" if his["seg"] else "premap_total"
+    trace.update(matched_by=label, admitted=want_id, side=on)
+    return dict(r, matched_by=label,
+                **({"league_alias": trace["league_alias"]} if trace.get("league_alias") else {}))
+
+
+def _c3_pick_btts(rows: list[dict], his: dict, outcome: str | None,
+                  his_title: str | None, trace: dict) -> dict | None:
+    on = _norm(outcome)
+    want_intent = _YN_IDENTITY_INTENT.get(on)
+    if not want_intent:
+        trace["refusal"] = "btts:outcome"
+        return None
+    sides, qual = _c3_title_parts(his_title)
+    if sides is None:
+        trace["refusal"] = "btts:title-shape"
+        return None
+    want_q = {f"{w} both teams to score" for w in _C3_SEG_TITLE.get(his["seg"], ())} \
+        if his["seg"] else {"both teams to score"}
+    if qual not in want_q:
+        trace["refusal"] = "btts:title-shear"
+        return None
+    seg = f"-{his['seg']}" if his["seg"] else ""
+    code, cands = _c3_code(rows, his, [f"{his['a']}-{his['b']}-{his['date']}{seg}-btts"],
+                           "btts", trace)
+    if code is None:
+        trace.setdefault("refusal", "btts:no-row")
+        return None
+    want_id = f"{_c3_seg_id(his, code)}-btts"
+    hits = [r for r in cands if r.get("identifier") == want_id
+            and _norm(r.get("side_norm")) == on]
+    if not hits:
+        trace["refusal"] = "btts:side"
+        return None
+    if len(hits) > 1:
+        trace["refusal"] = "btts:ambiguous"
+        return None
+    r = hits[0]
+    if r.get("intent") != want_intent:
+        trace["refusal"] = "btts:intent"
+        return None
+    qm = _C3_BTTS_Q_RE.match(pmus.fold_latin(str(r.get("question") or "")))
+    if qm is None:
+        trace["refusal"] = "btts:question-shape"
+        return None
+    if _C3_BTTS_SEG.get(qm.group("seg").lower()) != his["seg"]:
+        trace["refusal"] = "btts:segment-shear"
+        return None
+    if qm.group("date") != his["date"]:
+        trace["refusal"] = "btts:qdate"
+        return None
+    qa, qb = _c3_norm(qm.group("a")), _c3_norm(qm.group("b"))
+    if not _c3_names_agree(qa, qb, sides):
+        trace["refusal"] = "btts:names"
+        trace["venue_names"] = [qa, qb]
+        return None
+    label = f"premap_{his['seg']}_btts" if his["seg"] else "premap_btts"
+    trace.update(matched_by=label, admitted=want_id, side=on)
+    return dict(r, matched_by=label,
+                **({"league_alias": trace["league_alias"]} if trace.get("league_alias") else {}))
+
+
+def c3_pick(rows: list[dict], outcome: str | None, his_title: str | None,
+            his_slug: str | None, trace: dict | None = None) -> dict | None:
+    """The C3 families' identity pick over the prefix-kept rows: the
+    matched row (a COPY carrying matched_by and, under an alias,
+    league_alias) or None with the refusal named in `trace`. Pure."""
+    t: dict = {} if trace is None else trace
+    his = c3_his(his_slug)
+    if his is None:
+        t["refusal"] = "c3:not-a-family"
+        return None
+    t["family"], t["segment"] = his["family"], his["seg"]
+    rows = c3_same_segment(rows, his["seg"])
+    if his["seg"] and not rows:
+        t["refusal"] = f"{his['family']}:segment-absent"
+        return None
+    if his["family"] == "spread":
+        return _c3_pick_spread(rows, his, outcome, his_title, t)
+    if his["family"] == "total":
+        return _c3_pick_total(rows, his, outcome, his_title, t)
+    return _c3_pick_btts(rows, his, outcome, his_title, t)
 
 
 def match_side(rows: list[dict], outcome: str | None,
@@ -2754,6 +3266,42 @@ def _question_line(q: str) -> str:
     return ""
 
 
+def _explicit_marker(side: dict) -> str | None:
+    """The long/short marker the venue wrote ON this side, or None --
+    the first two readings of side_intent, without its unique-
+    identifier default."""
+    lg = side.get("long")
+    if isinstance(lg, bool):
+        return "ORDER_INTENT_BUY_LONG" if lg else "ORDER_INTENT_BUY_SHORT"
+    t = str(side.get("marketSideType") or "").upper()
+    if t.endswith("LONG"):
+        return "ORDER_INTENT_BUY_LONG"
+    if t.endswith("SHORT"):
+        return "ORDER_INTENT_BUY_SHORT"
+    return None
+
+
+def _asc_yes_no(m: dict, sides: list[dict]) -> dict | None:
+    """{id(side): (side_norm, intent)} for an asc- market whose two
+    sides share the market slug and describe themselves by the line
+    alone (no letters once normalised), each carrying an explicit
+    marker, exactly one long and one short. None for every other
+    shape (the rows are built as before)."""
+    slug = str(m.get("slug") or "").lower()
+    if not slug.startswith("asc-") or len(sides) != 2:
+        return None
+    if any(str(s.get("identifier") or "").lower() != slug for s in sides):
+        return None
+    if any(re.search(r"[a-z]", _norm(s.get("description"))) for s in sides):
+        return None
+    markers = [_explicit_marker(s) for s in sides]
+    if sorted(x or "" for x in markers) != ["ORDER_INTENT_BUY_LONG",
+                                            "ORDER_INTENT_BUY_SHORT"]:
+        return None
+    return {id(s): ("yes" if mk == "ORDER_INTENT_BUY_LONG" else "no", mk)
+            for s, mk in zip(sides, markers)}
+
+
 def _market_rows(ev: dict, m: dict) -> list[dict]:
     """Rows for one venue market: each side its own orderable row.
 
@@ -2776,7 +3324,40 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
     sides = [s for s in all_sides
              if s.get("identifier") and s.get("description")]
     if sides:
+        yn_by_marker = _asc_yes_no(m, sides)
         for s in sides:
+            if yn_by_marker is not None:
+                # THE asc- SIDE IS ITS MARKER (C3, 2026-09-06). The
+                # venue's spread market is ONE proposition ('Will the
+                # Bulldogs cover -10.5 vs the Rattlers …?') whose two
+                # sides share the identifier and describe themselves by
+                # the LINE ('10.50'), so every asc row normalised to the
+                # digits ('10 50'), both sides collided on the
+                # (identifier, side_norm) index and the short side's
+                # write won: 100+ rows in c3_rows_2038.log, all
+                # ORDER_INTENT_BUY_SHORT, none orderable. The side that
+                # says the proposition holds is the venue's own LONG
+                # marker, exactly as it reads on the astatc yes/no rows;
+                # so the long side is 'yes' and the short side 'no',
+                # read from the explicit marker on the side itself --
+                # never deduced from a sibling, never from ordering
+                # (see side_intent). A market whose markers do not
+                # name exactly one long and one short keeps the old
+                # rows, which nothing maps.
+                yn, intent = yn_by_marker[id(s)]
+                out.append({
+                    "identifier": str(s["identifier"]).lower(),
+                    "event_slug": ev_slug, "event_title": ev_title,
+                    "market_slug": (m.get("slug") or "").lower(),
+                    "question": q[:300], "kind": "side",
+                    "line": (next(iter(_lines_of(s["description"])))
+                             if len(_lines_of(s["description"])) == 1
+                             else line),
+                    "side_norm": yn,
+                    "signed": signed_line(s["description"]) or signed_line(q),
+                    "intent": intent,
+                })
+                continue
             out.append({
                 "identifier": str(s["identifier"]).lower(),
                 "event_slug": ev_slug, "event_title": ev_title,
@@ -3271,20 +3852,29 @@ async def resolve_explain(pool, market_title: str | None,
         except Exception as exc:  # noqa: BLE001 — diagnostics never
             out["league_alias_probe"] = {"error": type(exc).__name__}
         return out
+    from ..copy_sports import family_of
+
     mtype = market_type_of(global_slug or "")
-    want = PREFIX_FOR_TYPE.get(mtype)
+    want = _want_prefixes(global_slug)
+    his_c3 = c3_his(global_slug) if yn_identity_on() else None
+    out["family"] = family_of(global_slug or "")
+    out["c3_on"] = yn_identity_on()
     if not want:
         # THE SPLIT (C1 build step 5, measurement only): the step name
         # stays -- the copy lane's census buckets on it -- and `split`
         # says which of two different gaps this is: the slug grammar
         # named NO family ('unparsed', a parser gap) or it named one the
         # venue table carries no prefix for ('family_not_listed':
-        # prop / exact_score / btts / crypto, a venue-family gap).
+        # prop / exact_score / crypto, a venue-family gap). C3 names
+        # the family the venue does not list (`refusal`): exact score,
+        # halftime result, team totals -- c3_rows_2041.log lists none.
         out["step"] = "unknown_market_type"
         out["split"] = "unparsed" if mtype == "unknown" else "family_not_listed"
         out["detail"] = (f"market_type_of({global_slug!r}) is unrecognised" if mtype == "unknown"
                          else f"market_type_of({global_slug!r}) = {mtype!r}: no venue prefix "
                               f"for that family")
+        if out["family"] in C3_ABSENT:
+            out["refusal"] = C3_ABSENT[out["family"]]
         return out
     kept = [r for r in rows if _prefix_of(r.get("identifier")) in want]
     if not kept:
@@ -3292,14 +3882,38 @@ async def resolve_explain(pool, market_title: str | None,
         out["detail"] = (f"{len(rows)} rows on this event, none with a "
                          f"{sorted(want)} prefix")
         return out
-    hit = match_side(kept, outcome, market_title, global_slug)
+    if his_c3 is not None:
+        kept = c3_same_segment(kept, his_c3["seg"])
+        if not kept:
+            # the venue lists the family on this event but not on his
+            # segment: a family gap, named (total:segment-absent)
+            out["step"] = "unknown_market_type"
+            out["split"] = f"{his_c3['family']}:segment-absent"
+            out["refusal"] = out["split"]
+            out["detail"] = (f"no {C3_PREFIX[his_c3['family']]}- row on segment "
+                             f"{his_c3['seg']!r} for this event")
+            return out
+    wording = his_c3 is None or not his_c3["seg"]
+    hit = match_side(kept, outcome, market_title, global_slug) if wording else None
+    c3_trace: dict = {}
     if hit is None and yn_identity_on():
         # the same second call resolve makes, so the census attributes
         # exactly what production does once the owner's flip is on
-        hit = match_side(kept, outcome, market_title, global_slug,
-                         yn_identity=True, his_event_title=event_title)
+        if wording:
+            hit = match_side(kept, outcome, market_title, global_slug,
+                             yn_identity=True, his_event_title=event_title)
         if hit is not None and hit.get("league_alias"):
             out["league_alias"] = hit["league_alias"]
+        if hit is not None and hit.get("matched_by"):
+            out["matched_by"] = hit["matched_by"]
+        if hit is None and his_c3 is not None:
+            # the same C3 call resolve makes, inside the same switch
+            hit = c3_pick(kept, outcome, market_title, global_slug, c3_trace)
+            out["c3"] = c3_trace
+            if hit is not None:
+                out["matched_by"] = hit["matched_by"]
+                if hit.get("league_alias"):
+                    out["league_alias"] = hit["league_alias"]
     if hit is None:
         out["step"] = "no_side_match"
         # printed through the same date strip the matcher applies, so
@@ -3574,6 +4188,10 @@ async def resolve_explain(pool, market_title: str | None,
                     out["split"] = "yn:would-resolve"
         except Exception as exc:  # noqa: BLE001 — a probe never breaks
             out["yn_identity"] = {"error": type(exc).__name__}
+        if c3_trace.get("refusal"):
+            # C3: the family's own refusal name is the split the census
+            # counts (no_side_match:spread:line-absent …)
+            out["split"] = c3_trace["refusal"]
         return out
     if not hit.get("intent"):
         out["step"] = "side_has_no_intent"
@@ -3646,9 +4264,7 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     # the WHOLE board — a moneyline pick could land on a segment or a
     # prop whose side carries the same name. The venue names the type
     # in its slug prefix; an unrecognized type refuses (fail closed).
-    from ..copy_sports import market_type_of
-
-    want = PREFIX_FOR_TYPE.get(market_type_of(global_slug or ""))
+    want = _want_prefixes(global_slug)
     if not want:
         return None
     # `kept` beside `rows`, not instead of it: the named lane's
@@ -3661,7 +4277,19 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     kept = [r for r in rows if _prefix_of(r.get("identifier")) in want]
     if not kept:
         return None
-    hit = match_side(kept, outcome, market_title, global_slug)
+    # C3: a spread / total / btts pick sees only the rows on ITS
+    # segment (the venue's fh/sh totals share the full game's question
+    # word for word), and a segmented pick is read by the family's own
+    # identity pick alone -- its title veto and matched_by label. ALL
+    # of C3 sits behind PREMAP_YN_IDENTITY, the switch C2's identity
+    # arm answers to (review major 1): off, nothing here runs
+    his_c3 = c3_his(global_slug) if yn_identity_on() else None
+    if his_c3 is not None:
+        kept = c3_same_segment(kept, his_c3["seg"])
+        if not kept:
+            return None
+    wording = his_c3 is None or not his_c3["seg"]
+    hit = match_side(kept, outcome, market_title, global_slug) if wording else None
     matched_by = "premap"
     if hit is None and yn_identity_on():
         # THE YES/NO IDENTITY BRANCH (yn_identity_rows above; to-a-tee
@@ -3676,14 +4304,23 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
         # above with the branch armed; the branch runs only when the
         # wording filter found nothing, so one call's answer is the
         # other's.
-        hit = match_side(kept, outcome, market_title, global_slug,
-                         yn_identity=True, his_event_title=event_title)
+        if wording:
+            hit = match_side(kept, outcome, market_title, global_slug,
+                             yn_identity=True, his_event_title=event_title)
         if hit is not None:
             # C2: a row admitted through the league alias (or the draw
             # under an alias) is labelled 'premap_alias' and carries the
-            # alias it observed; source stays 'premap' either way
-            matched_by = ("premap_alias" if hit.get("league_alias")
-                          else "premap_identity")
+            # alias it observed; source stays 'premap' either way. C3:
+            # the draw witnessed by his own title says so on the row.
+            matched_by = hit.get("matched_by") or (
+                "premap_alias" if hit.get("league_alias") else "premap_identity")
+        if hit is None and his_c3 is not None:
+            # C3: the family's identity pick (spread / total / btts) --
+            # source 'premap', matched_by premap_spread / premap_total /
+            # premap_fh_total / premap_btts …; inside the same switch
+            hit = c3_pick(kept, outcome, market_title, global_slug)
+            if hit is not None:
+                matched_by = hit["matched_by"]
     if hit is None and os.getenv("PREMAP_NAMED_LANE",
                                  "").strip().lower() == "on":
         # NAMED-TENNIS LANE, Phase 1 wiring (mapper-fail diagnosis

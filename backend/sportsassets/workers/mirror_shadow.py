@@ -1048,8 +1048,9 @@ def _first_context(fills: list[dict]) -> dict:
 
 def _family_of(slug: str | None) -> str:
     try:
-        from ..copy_sports import market_type_of
-        return market_type_of(slug or "")
+        # C3: a first-half total is the mirror's 'total' family
+        from ..copy_sports import mirror_family_of
+        return mirror_family_of(slug or "")
     except Exception:  # noqa: BLE001
         return "unknown"
 
