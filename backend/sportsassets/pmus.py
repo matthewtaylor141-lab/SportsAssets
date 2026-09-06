@@ -181,6 +181,40 @@ def _norm(s: str | None) -> str:
     return re.sub(r"[^a-z0-9 ]+", " ", s.lower()).strip()
 
 
+# THE LATIN LETTERS NFKD DOES NOT DECOMPOSE (C2, 2026-09-06). _norm is
+# NFKD -> ascii-ignore, which carries 'é' to 'e' but DELETES the letters
+# that are not base+mark: 'Tromsø IL' folded to 'troms il' against the
+# venue's ASCII 'Tromso IL', 'Łódź' to 'odz'. A dropped letter is a
+# silently altered name, so each such letter is mapped EXPLICITLY here
+# to the base the venue writes; a letter outside this table still
+# refuses by name (premap._folds_away). Applied BEFORE _norm on the
+# yes/no name channels and the event keys only (fold_latin /
+# _norm_folded) -- never inside _norm itself, which also produces
+# side_norm, half of the us_premap unique index.
+_LATIN_FOLD = str.maketrans({
+    "ø": "o", "Ø": "O", "ǿ": "o", "Ǿ": "O",
+    "ł": "l", "Ł": "L", "đ": "d", "Đ": "D", "ð": "d", "Ð": "D",
+    "þ": "th", "Þ": "Th", "æ": "ae", "Æ": "Ae", "œ": "oe", "Œ": "Oe",
+    "ß": "ss", "ı": "i", "ħ": "h", "Ħ": "H", "ŧ": "t", "Ŧ": "T",
+    "ŋ": "ng", "Ŋ": "Ng",
+    # the apostrophe is DELETED, not spaced: _norm turns "Newell's"
+    # into "newell s", and the single-letter 's' then refuses the
+    # club's own name at every scope screen (the venue and his feed
+    # both write the apostrophe; event_keys_for's tight key variant
+    # already deletes it for the lookup)
+    "'": "", "’": ""})
+
+
+def fold_latin(s: str | None) -> str:
+    """The explicit map above, nothing else: NFKD and the rest of the
+    fold stay _norm's."""
+    return str(s or "").translate(_LATIN_FOLD)
+
+
+def _norm_folded(s: str | None) -> str:
+    return _norm(fold_latin(s))
+
+
 def _sim(a: str | None, b: str | None) -> float:
     na, nb = _norm(a), _norm(b)
     if not na or not nb:
@@ -1334,12 +1368,86 @@ _YN_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # the yn:twin floor below. A title-less row (whose ONLY prior shape
 # was the now-deleted P1) refuses at yn:shape.
 _YN_Q_PATTERNS = (
-    re.compile(r"^will (?:the )?(?P<subj>[a-z ]+?) win"
-               r" against (?P<opp>[a-z ]+?)"
-               r" in the (?P<lg>[a-z ]+?) match"
+    re.compile(r"^will (?:the )?(?P<subj>[a-z0-9 ]+?) win"
+               r" against (?P<opp>[a-z0-9 ]+?)"
+               r" in the (?P<lg>[a-z0-9 ]+?) match"
                r" scheduled for (?P<mon>[a-z]+) (?P<day>\d{1,2})"
                r" (?P<yr>\d{4})$"),
 )
+# C2 (2026-09-06): the three slots take DIGITS. '[a-z ]' made every
+# name carrying one structurally unmatchable -- 'Bologna FC 1909',
+# 'Mainz 05', '1899 Hoffenheim' -- and every league spelled with one
+# ('Ligue 1'). The digits stay IN the name and go through
+# _yn_name_match as tokens ('bologna fc 1909' == 'bologna fc 1909'),
+# so a digit is never dropped and never a wildcard; the whale-side
+# title gate (premap._bridge_title_subject, subject_has_digit) is
+# untouched and still refuses a digit in HIS subject.
+
+# THE VENUE'S DRAW CONTRACT (C2): 'Will the <league> match <A> vs <B>
+# scheduled for <Mon> <D>, <YYYY> end in a draw?' -- the one wording
+# on every -draw identifier in the 2026-09-06 us_premap dump (Serie A,
+# La Liga, Eliteserien, Liga Argentina). Fully anchored, dated, both
+# teams named. Kept OUT of _YN_Q_PATTERNS on purpose: that tuple is
+# the per-team template the copy lane's yes/no lane iterates, and a
+# draw row must never pass as a per-team row (no subj slot).
+_YN_DRAW_Q_RE = re.compile(
+    r"^will the (?P<lg>[a-z0-9 ]+?) match (?P<a>[a-z0-9 ]+?)"
+    r" vs (?P<b>[a-z0-9 ]+?) scheduled for (?P<mon>[a-z]+)"
+    r" (?P<day>\d{1,2}) (?P<yr>\d{4}) end in a draw$")
+
+# THE LEAGUE SLOT IS A LEAGUE NAME, NOT A CLUB (C2). _yn_slot_bad ran
+# the CLUB scope screen on it, and that screen's single-letter rule --
+# right for a club slot, where 'b' is a reserve side and 's o' a split
+# abbreviation -- refused 'serie a' outright: every Serie A market,
+# every night. A league slot answers to its own rule: non-empty, <= 5
+# tokens, at least one token of three letters, no token or stem that
+# names a different SCOPE (u21, women, reserves, b, ii, primavera,
+# esoccer ...), adjacent-run joins included; a single letter refuses
+# unless it is 'a' (Serie A) or the word before 'league' ('K League
+# 1', 'J League' -- the venue lists kl1 tonight); Liga F -- the
+# women's league -- refuses, Serie B refuses through 'b'; a lone digit
+# is a league number ('ligue 1'). Refusal-widening additions carry
+# GENERIC_CLUB_TOKENS-grade review.
+_YN_LEAGUE_SCOPE = frozenset({
+    "primavera", "youth", "junior", "juniors", "academy", "ladies",
+    "girls", "boys", "u16", "u17", "u18", "u19", "u20", "u21", "u23",
+    "sub16", "sub17", "sub18", "sub19", "sub20", "sub21", "sub23",
+    "esoccer", "esports", "esport", "virtual", "simulated", "cyber",
+    "srl", "gt", "ebattle", "battle", "friendly", "friendlies",
+    "amateur", "veterans", "legends",
+    # women's league NAMES that carry no scope token of their own (C2
+    # review, minor): a women's twin listed alone under another code with
+    # the same team codes, date and club names must not alias to the
+    # men's fixture; the men's twin listed beside it is ambiguous anyway
+    "femminile", "kvinner", "damer", "dames", "vrouwen", "kobiet",
+    "toppserien", "damallsvenskan", "wsl", "nwsl", "feminin", "feminine",
+    "femenil", "femenina", "feminina", "frauen", "women", "womens"})
+
+
+def _yn_league_slot_bad(norm_text: str) -> bool:
+    """The league-slot rule above. True = refuse."""
+    from .workers import premap as _pm
+
+    toks = (norm_text or "").split()
+    if not toks or len(toks) > _pm._BRIDGE_NAME_TOKEN_CAP:
+        return True
+    if not any(len(t) >= 3 and t.isalpha() for t in toks):
+        return True
+    for i, t in enumerate(toks):
+        if (t in _pm._BRIDGE_SCOPE_TOKENS or t in _YN_SCOPE_EXTRA
+                or t in _YN_LEAGUE_SCOPE
+                or t.startswith(_pm._BRIDGE_SCOPE_STEMS)):
+            return True
+        if (len(t) == 1 and t.isalpha() and t not in ("a", "y", "e")
+                and toks[i + 1:i + 2] != ["league"]):
+            return True
+    for n in (2, 3, 4):
+        for i in range(len(toks) - n + 1):
+            j = "".join(toks[i:i + n])
+            if (j in _pm._BRIDGE_SCOPE_TOKENS or j in _YN_SCOPE_EXTRA
+                    or j in _YN_LEAGUE_SCOPE):
+                return True
+    return False
 
 
 def _yn_slot_bad(norm_text: str) -> bool:
@@ -1481,7 +1589,9 @@ def resolve_team_yesno_exact(global_slug: str, outcome: str | None,
     if _pm._folds_away(outcome):
         _note("yn:outcome-folds")
         return None
-    pick = _norm(outcome)
+    # C2: the non-decomposing Latin letters are mapped, not dropped
+    # (fold_latin), on every name channel this lane reads
+    pick = _norm_folded(outcome)
     if not pick:
         _note("yn:outcome")
         return None
@@ -1578,7 +1688,7 @@ def resolve_team_yesno_exact(global_slug: str, outcome: str | None,
             # '-08' in '2026-08-29' is a date, not a handicap).
             _note("yn:title-line")
             return None
-        tn = " ".join(_norm(stripped).split())
+        tn = " ".join(_norm_folded(stripped).split())
         if not tn:
             continue
         sides = [" ".join(x.split())
@@ -1735,7 +1845,7 @@ def resolve_team_yesno_exact(global_slug: str, outcome: str | None,
         if re.search(r"\d+\.\d+", q_scan):
             _note("yn:decimal")
             return None
-        n = " ".join(_norm(q).split())
+        n = " ".join(_norm_folded(q).split())
         gm = None
         for pat in _YN_Q_PATTERNS:
             gm = pat.fullmatch(n)
@@ -1752,9 +1862,13 @@ def resolve_team_yesno_exact(global_slug: str, outcome: str | None,
         opp = " ".join((gd.get("opp") or "").split()) or None
         lgq = " ".join((gd.get("lg") or "").split()) or None
         if _yn_slot_bad(subj) or (opp is not None and
-                                  _yn_slot_bad(opp)) \
-                or (lgq is not None and _yn_slot_bad(lgq)):
+                                  _yn_slot_bad(opp)):
             _note("yn:scope")
+            return None
+        if lgq is not None and _yn_league_slot_bad(lgq):
+            # C2: the league slot answers to the league rule, not the
+            # club screen ('serie a' passes; 'serie a u21' refuses)
+            _note("yn:league-slot")
             return None
         # ROUND-3 AMENDMENT (yn:subj-thin): the question subject is a
         # corroboration-weight slot — the distinctive-set path lets a

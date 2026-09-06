@@ -122,6 +122,37 @@ JUDGE_TTL_S = rules.capped_env("MIRROR_JUDGE_TTL_S", 600.0, floor=30.0)  # the l
 # per-tick cap goes to markets that can produce a plan (81% of RN1's
 # markets read unmapped in the first hour and took every slot)
 UNMAPPED_TTL_S = 900.0
+# A MARKET UNLISTED AT FIRST SIGHT MAY BE LISTED A MINUTE LATER (C2,
+# 2026-09-06). lal-esp-sev-2026-09-06-esp / No maps offline to
+# atc-lal-esp-sev-2026-09-06-esp BUY_SHORT, and production judged it
+# no_side_match at 19:02:02Z: the venue listed the market ~18:59Z for a
+# 19:00Z kickoff, the premap poller had not written the rows yet, and
+# the 900 s memo held the verdict for the whole first half. The
+# poller's cadence (workers/premap.py): the full sweep every 1800 s
+# (REFRESH_SECONDS, now-12h..now+96h, 120 pages), the fast lane every
+# 180 s (FAST_REFRESH_SECONDS, now-3h..now+14h, 25 pages) and SKIPPED
+# while the full sweep holds _SWEEP_LOCK -- so a fresh listing is in
+# us_premap within one fast cycle, two when one is skipped. No kickoff
+# time is readable here (us_premap stores no start time and his feed
+# carries a date, not a clock), so the rule keys on the two facts the
+# tick does have: the verdict and first sight. A market's FIRST
+# unmapped verdict, when the verdict is one the poller can change
+# (no_key_intersection: no row yet; no_side_match: rows, but maybe not
+# this market's yet), is remembered for two fast cycles; every later
+# miss keeps the full memo. Cost: at most one extra read per new
+# market, ever.
+UNMAPPED_FRESH_TTL_S = 360.0
+_POLLER_CAN_CHANGE = ("no_key_intersection", "no_side_match")
+
+
+def unmapped_memo_s(explain: str | None, *, seen_before: bool) -> float:
+    """How long an unmapped verdict is remembered: the fresh memo on a
+    market's first sight when the premap poller may still list it,
+    the full memo otherwise. Pure."""
+    step = str(explain or "").split(":", 1)[0]
+    if not seen_before and step in _POLLER_CAN_CHANGE:
+        return UNMAPPED_FRESH_TTL_S
+    return UNMAPPED_TTL_S
 # THE EXIT LEG'S OWN BOUNDS (A3). The census is a READ of rows this
 # worker already wrote, so its cost is a query, not venue budget: it is
 # bounded three ways -- a window, a row cap and a wall-clock timeout --
@@ -2119,7 +2150,8 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
                 stats["mapped_by"][_d["map"]] += 1
             if str(row.get("reason") or "").startswith("unmapped"):
                 stats["unmapped"] += 1
-                _unmapped_until[(w, cid)] = now_ts + UNMAPPED_TTL_S
+                _unmapped_until[(w, cid)] = now_ts + unmapped_memo_s(
+                    _d.get("explain"), seen_before=(w, cid) in _unmapped_until)
             if row.get("would_side"):
                 stats["would_orders"] += 1
                 if (row.get("detail") or {}).get("marketable_now"):

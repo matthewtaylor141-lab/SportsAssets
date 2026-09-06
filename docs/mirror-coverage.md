@@ -261,3 +261,51 @@ reductions included (only the closing auction and `_maybe_close_episode` run bef
 a grammar book that cannot certify cannot follow his exit until the echo reads. To revisit when
 the first grammar book has opened (none has; college football is the class, and Sunday lists
 three games).
+
+
+## 8. C2 (2026-09-06) — the per-team yes/no identity branch maps his soccer
+
+Owner 18:25Z: "I need you to map more of his trades ... la liga should be very easy to map"; 18:57Z: "we need more volume". In the two hours to 19:04Z the shadow read 260 markets ($544k) and mapped 3; the bulk was soccer per-team yes/no. The venue's own rows for five of his events (preset `premap-rows`, 19:09Z; 216 `atc-` rows) reproduced every refusal offline. Patch C2 against 2dc3204 (C1 rounds 1-3 + the review fold); tests in `backend/tests/test_c2_yesno_alias.py` (the dump's per-team and draw rows are embedded verbatim). Every admission below is IDENTITY (byte-equal team codes, date and side token, plus name corroboration on both teams) — never fuzzy; `PREMAP_YN_IDENTITY=on` still gates all of it, and the wording arm is byte-identical.
+
+### 8.1 The four gates that refused the seven feed rows, and what each does now
+
+| gate | before | now | where |
+|---|---|---|---|
+| league slot | `_yn_slot_bad` ran the CLUB scope screen on the `lg` group: the single-letter rule refused `serie a` — every Serie A market | `pmus._yn_league_slot_bad`: non-empty, ≤ 5 tokens, one token of ≥ 3 letters, no scope token/stem (bridge list + `_YN_SCOPE_EXTRA` + `_YN_LEAGUE_SCOPE`: primavera, youth, u21, esoccer, srl, friendly …), adjacent-run joins; a single letter only as `a` or before `league` (`k league 1`); a lone digit is a league number | `pmus.py` (`_YN_LEAGUE_SCOPE`, `_yn_league_slot_bad`), used by `premap._yn_team_row/_yn_draw_row` AND the copy lane's `resolve_team_yesno_exact` (`yn:league-slot`) |
+| names with digits | `_YN_Q_PATTERNS` slots were `[a-z ]+?`: `Bologna FC 1909` never matched (Mainz 05, 1899 Hoffenheim …) | the three slots are `[a-z0-9 ]+?`; digits stay in the name and go through `_yn_name_match` as tokens (`1909 ≠ 1919`) | `pmus._YN_Q_PATTERNS` (still one template) |
+| diacritics | `_norm` is NFKD→ascii-ignore: `Tromsø` → `troms` (ø, ł, đ, ß have no decomposition) and `_folds_away` refused the title outright | `pmus.fold_latin` maps those letters explicitly (ø→o, ł→l, đ→d, ß→ss, æ→ae …) and deletes apostrophes (`Newell's` → `newells`, not `newell s`); applied before `_norm` on the yes/no name channels (his anchor `_bridge_title_subject`, the venue subject/opponent/draw slots, the copy lane's W2/W4/W7) and in `event_keys_for` on both sides; `_folds_away` reads through it, so a letter OUTSIDE the table still refuses by name. `_norm` itself is untouched (it produces `side_norm`, half of the `us_premap` unique index) | `pmus.py` (`_LATIN_FOLD`, `fold_latin`, `_norm_folded`), `premap.py` (`_folds_away`, `_bridge_title_subject`, `event_keys_for`) |
+| league code | `_yn_his_identifiers` = `atc-` + his slug byte for byte; his `nor`/`arg`/`pol`/`fl1`/`por` are the venue's `els`/`lpa`/`ekst`/`lg1`/`lpb` | the alias rule below (`premap._yn_alias_pick`) | `premap.py` |
+
+### 8.2 The alias rule (no table)
+
+`_yn_pick(rows, outcome, his_title, his_slug, his_event_title)`: identity first (unchanged); then, ONLY when no row carries his own identifier, a row `atc-<LG>-<a>-<b>-<date>-<t>` is his when ALL of: (i) his slug parses as `<lg>-<a>-<b>-<date>-<t>` with `t ∈ {a, b}` and the venue row carries exactly that suffix in that order; (ii) exactly ONE venue league code carries the suffix among the rows his keys fetched — two is `yn:league-ambiguous` (a same-day women's/youth/esoccer twin lands here even though its own league slot would refuse it); (iii) the question fullmatches the per-team template on his slug's date, its subject name-matches his title's anchor (`_bridge_title_subject`), its opponent name-matches the OTHER side of HIS event title (`_yn_event_sides`, the witness — no event title is `yn:alias-unwitnessed`, a title naming another game `yn:event-shear` / `yn:opp-witness`), the league slot passes the league rule; (iv) `side_norm`/intent are the venue's own for his Yes/No; the line guard and the identity veto of `match_side` apply as to every row. The alias observed rides the hit (`league_alias: "nor->els"`) and `resolve` labels it `matched_by 'premap_alias'`; source stays `'premap'`. His own identifier on the board and refused is never aliased around. The DRAW (`_yn_draw_pick`): his `<lg>-<a>-<b>-<date>-draw` + Yes/No → the `-draw` row under the same identity, its question the venue's dated draw template naming BOTH his event's teams in either order (`yn:draw-names`), his title a closed veto (`_yn_title_is_his_draw`: says `draw`, never `win`, any date his slug's, every non-furniture token one of his two teams' — the feed's draw wording is unattested, so no grammar is guessed); same league code → `premap_identity`, another → `premap_alias`.
+
+### 8.3 Refusal names (census: `resolve_explain` → `yn_c2.refusal`, and the step's `split`, so `explain_unmapped` prints `no_side_match:yn:…`)
+
+`yn:league-slot`, `yn:league-ambiguous`, `yn:name-digits` (a digit in HIS subject — the bridge's `subject_has_digit` pin, kept), `yn:no-row`, `yn:alias-unwitnessed`, `yn:event-shear`, `yn:opp-witness`, `yn:identity-refused`, `yn:shape`, `yn:qdate`, `yn:scope`, `yn:subj`, `yn:side`, `yn:intent`, `yn:folds`, `yn:title-folds`, `yn:title-<why>`, `yn:draw-unwitnessed`, `yn:draw-title-<why>`, `yn:draw-names`; dark, a would-resolve reads `yn:would-resolve`. `yn_identity`'s pinned dict is unchanged.
+
+### 8.4 The seven feed rows against the 19:09Z dump (flag on, offline)
+
+| his slug | outcome | venue identifier | intent | matched_by | note |
+|---|---|---|---|---|---|
+| `sea-juv-mil-2026-09-06-juv` | Yes | `atc-sea-juv-mil-2026-09-06-juv` | BUY_LONG | premap_identity | league slot `serie a` |
+| `sea-bol-sas-2026-09-06-sas` | Yes | `atc-sea-bol-sas-2026-09-06-sas` | BUY_LONG | premap_identity | + opponent `Bologna FC 1909` |
+| `lal-esp-sev-2026-09-06-esp` | No | `atc-lal-esp-sev-2026-09-06-esp` | BUY_SHORT | premap_identity | mapped before too; production's 19:02:02Z `no_side_match` was the memo (8.5) |
+| `nor-kbk-tro-2026-09-06-tro` | Yes | `atc-els-kbk-tro-2026-09-06-tro` | BUY_LONG | premap_alias `nor->els` | `Tromsø` → `tromso` |
+| `arg-ros-new-2026-09-06-new` | Yes | `atc-lpa-ros-new-2026-09-06-new` | BUY_LONG | premap_alias `arg->lpa` | `Newell's` → `newells` |
+| `fl1-olm-pfc-2026-09-06-olm` | Yes | — | — | `no_key_intersection` | the dump carries no `olm-pfc` rows (the query named five events); with the venue's wording under `lg1` (listed tonight, 3 games) it aliases `fl1->lg1` — pinned as an expectation |
+| `por-gui-cas-2026-09-06-gui` | Yes | — | — | `no_key_intersection` | same: under `lpb` (3 games tonight) it aliases `por->lpb` |
+
+Also pinned: `pol->ekst` (`Jagiellonia Białystok` / `Śląsk Wrocław`, Polish letters both sides), the draw on all five events (`sea-juv-mil-…-draw` → `atc-sea-juv-mil-…-draw`, `nor-…-draw` → `atc-els-…-draw`), and the refusals: a suffix under two league codes, the NEOM shear (a wrong-team title on the right suffix), a lined row, a swapped intent, another date, the reversed team order, no event title.
+
+### 8.5 The premap poller's cadence and the unmapped memo
+
+`workers/premap.py`: the full sweep runs every `REFRESH_SECONDS` = 1800 s over now-12h..now+96h (120 pages at 0.35 s), the fast lane every `FAST_REFRESH_SECONDS` = 180 s over now-3h..now+14h (25 pages), and the fast lane SKIPS a cycle while the full sweep holds `_SWEEP_LOCK` (~42 s per full sweep). A market the venue lists at 18:59Z for a 19:00Z kickoff is in `us_premap` within one fast cycle, two when one is skipped — and the shadow's `UNMAPPED_TTL_S` = 900 s memoised the 19:02:02Z `no_side_match` for the whole first half. No kickoff time is readable by the tick (`us_premap` stores no start time; his feed carries a date, not a clock), so the rule keys on what the tick has: `mirror_shadow.unmapped_memo_s(explain, seen_before)` — a market's FIRST unmapped verdict, when the verdict is one the poller can change (`no_key_intersection`, `no_side_match`), is remembered `UNMAPPED_FRESH_TTL_S` = 360 s (two fast cycles); every later miss, and every other verdict, keeps 900 s. Cost: at most one extra read per new market, ever. Applied in the shadow's `tick_once` (it carries the explain); `mirror_live._tick_candidate` computes no explain and is unchanged.
+
+### 8.6 What this does NOT do (left out)
+
+- A digit in HIS OWN title subject (`Will Mainz 05 win …`) still refuses at the bridge's `subject_has_digit` (pinned in `test_mapping_identity`); it is now counted as `yn:name-digits`.
+- The copy lane's yes/no lane (`resolve_team_yesno_exact`) keeps every gate of its own (`yn:title-code`, `yn:opp-title-code`, the thin/twin floors); it only gained the fold, the digit slots and the league rule — `Kristiansund BK` still refuses there because `kbk` does not prefix it.
+- No alias for derivative candidates (`tsc-`/`asc-` under another league code): the exact lane's candidate grammar is untouched.
+- `_norm` is not changed globally; `side_norm` and the unique index keep the old fold. Existing `event_keys` rows for ø/ł clubs re-key at the next sweep (30 min, 3 min in the fast window); until then the lookup, not the decision, is the old one.
+- The live worker's memo (`mirror_live`) is unchanged: it has no explain in reach at the refusal.

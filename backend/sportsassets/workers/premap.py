@@ -233,6 +233,13 @@ def event_keys_for(title: str | None, slug: str | None = None) -> list[str]:
     stamped keys whenever the whale's signal carries a date, so the game
     must agree. The bare keys remain for dateless signals."""
     keys: set[str] = set()
+    # C2 (2026-09-06): the title is read through the explicit Latin
+    # fold on BOTH sides (sweep time and copy time), so his
+    # 'Kristiansund BK vs. Tromsø IL' keys 'tromso il', the venue's
+    # ASCII, instead of 'troms il' -- the key sets could never meet on
+    # an ø/ł/đ club. Keys are a lookup, not a decision: what the rows
+    # then answer to is unchanged.
+    title = pmus.fold_latin(title) if title else title
     t = pmus._clean_title(title)
     if t:
         # Every emission goes through _key_variants: raw _norm left
@@ -712,7 +719,12 @@ def _folds_away(raw: str | None) -> bool:
     refuses."""
     import unicodedata as _ud
 
-    for ch in _ud.normalize("NFKD", str(raw or "")):
+    # C2 (2026-09-06): the Latin letters NFKD does not decompose (ø, ł,
+    # đ, ß ...) are MAPPED to their base first (pmus.fold_latin), so
+    # 'Tromsø IL' is read as 'tromso il' and no longer counts as
+    # erased content; any letter outside that explicit table is still
+    # erased content, and still refuses here.
+    for ch in _ud.normalize("NFKD", pmus.fold_latin(raw)):
         if ord(ch) > 127 and _ud.category(ch) not in ("Mn", "Cf"):
             # Round 2.6: letters-only was one category too narrow —
             # the sixth fleet erased a '(٢)' game-2 marker (category
@@ -769,7 +781,10 @@ def _bridge_title_subject(his_title: str | None,
     own date — never handed to _lines_of/signed_line, which today read
     'on 2026-08-27' as a line and a sign and refuse every dated yes/no
     title at _yn_line_ok."""
-    n = " ".join(_norm(his_title).split())
+    # C2: his anchor is read through the same explicit Latin fold the
+    # venue subject is (pmus.fold_latin) -- 'Tromsø' -> 'tromso', the
+    # venue's own ASCII -- never through a fold that drops the letter
+    n = " ".join(_norm(pmus.fold_latin(his_title)).split())
     m = _BRIDGE_TITLE_RE.fullmatch(n)
     if not m:
         return None, "title_not_win_shape"
@@ -1939,62 +1954,385 @@ def yn_identity_rows(rows: list[dict], outcome: str | None,
                      his_slug: str | None) -> list[dict]:
     """Every row that IS his own per-team contract on his literal
     Yes/No side — normally one; the caller demands exactly one. Pure:
-    no network, no table, nothing but the rows it is handed."""
-    on = _norm(outcome)
-    want_intent = _YN_IDENTITY_INTENT.get(on)
-    if not want_intent or not his_slug:
-        return []
-    d = date_of(his_slug)
-    if not d:
-        return []
-    # the bridge's own title gate consumes his date clause and refuses
-    # any title that is not his dated win-question; a title whose fold
-    # erases content is blind and refuses first (pmus yn:title-folds)
-    if _folds_away(his_title):
-        return []
-    anchor, _why = _bridge_title_subject(his_title, his_slug)
-    if anchor is None:
-        return []
-    want_ids = _yn_his_identifiers(his_slug)
-    out: list[dict] = []
+    no network, no table, nothing but the rows it is handed.
+
+    Since C2 (2026-09-06) the body lives in _yn_pick, which reads the
+    same two facts this branch always read — the anchor from
+    _bridge_title_subject(his_title, his_slug) and the identifier set
+    from _yn_his_identifiers(his_slug) — and then, when his own
+    identifier is not on the board at all, the league-alias and draw
+    readings documented there. This four-argument form is the
+    identity arm alone: no event title, so no alias and no draw."""
+    return _yn_pick(rows, outcome, his_title, his_slug, None, None,
+                    identity_only=True)
+
+
+# ---------------------------------------------------------------- C2
+# THE LEAGUE-CODE ALIAS AND THE DRAW (2026-09-06, owner: "I need you
+# to map more of his trades ... la liga should be very easy to map";
+# "we need more volume"). In the two hours to 19:04Z the shadow read
+# 260 of his markets and mapped 3; the bulk was soccer per-team yes/no
+# the identity branch above refused for four reasons the premap-rows
+# dump made exact (docs/mirror-coverage.md §8):
+#   * 'serie a' failed the CLUB scope screen on the LEAGUE slot
+#     (single-letter 'a') — every Serie A market;
+#   * a name with a digit ('Bologna FC 1909') never matched the
+#     '[a-z ]' slots — every such opponent;
+#   * 'Tromsø' folded to 'troms' and never matched the venue's ASCII
+#     'Tromso' — every ø/ł/đ club;
+#   * his league code is not the venue's ('nor' vs 'els', 'arg' vs
+#     'lpa', 'pol' vs 'ekst') while the team codes and the date are
+#     byte-identical — so 'atc-' + his slug names nothing.
+# The first three are fixed at their gates (pmus._yn_league_slot_bad,
+# the '[a-z0-9 ]' slots, pmus.fold_latin). The fourth is admitted by
+# _yn_alias_pick under IDENTITY, never a table: his slug
+# <lg>-<a>-<b>-<date>-<t> is read and a venue row is his only when
+#   (i)   NO row carries his own identifier ('atc-' + his slug): an
+#         identifier that IS his and refused stays refused;
+#   (ii)  exactly ONE venue league code carries his <a>-<b>-<date>-<t>
+#         suffix among the rows the keys fetched — two codes is
+#         yn:league-ambiguous and refuses (a same-day women's/youth/
+#         esoccer twin with the same team codes lands here);
+#   (iii) the row's question fullmatches the measured per-team
+#         template on his slug's date, its subject names his title's
+#         anchor and its opponent names the OTHER side of HIS event
+#         title (game agreement by NAMES on both teams — the witness
+#         the identity branch never needed because the identifier
+#         carried the league); the league slot passes the league rule;
+#   (iv)  side_norm / intent are the venue's own for his Yes/No.
+# The alias observed (his code -> venue code) rides the hit as
+# `league_alias` and resolve labels it matched_by 'premap_alias',
+# source 'premap'. The draw (_yn_draw_pick) is the same identity on the
+# '-draw' suffix: the venue's dated draw template naming BOTH his
+# event's teams in either order, his title a draw question naming
+# nothing but those teams, on his date. Every refusal is named
+# (trace['refusal']) so the census counts it.
+_YN_SLUG_RE = re.compile(
+    r"^(?P<lg>[a-z0-9]+)-(?P<a>[a-z0-9]+)-(?P<b>[a-z0-9]+)-"
+    r"(?P<date>\d{4}-\d{2}-\d{2})-(?P<t>[a-z0-9]+)$")
+
+# tokens the draw title may carry beside the two team names and 'draw'
+_YN_DRAW_TITLE_FURNITURE = frozenset({
+    "will", "the", "a", "an", "in", "end", "ends", "be", "there",
+    "match", "game", "draw", "on", "between", "and", "vs", "of", "v"})
+_YN_DRAW_MONTH_RE = re.compile(
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
+    r" (\d{1,2})(?:,? (\d{4}))?\b", re.I)
+
+
+def _yn_slug_parts(his_slug: str | None) -> dict | None:
+    """<lg>, <a>, <b>, <date>, <t> of his kindless slug, t one of a, b
+    or 'draw'; None for any other shape (a kind-prefixed slug is the
+    venue's own identifier and has no alias)."""
+    m = _YN_SLUG_RE.fullmatch(his_slug or "")
+    if not m:
+        return None
+    p = m.groupdict()
+    if p["a"] == p["b"] or p["t"] not in (p["a"], p["b"], "draw"):
+        return None
+    return p
+
+
+def _yn_event_sides(his_event_title: str | None) -> list[str] | None:
+    """The two team names of his event title ('A vs. B'), folded and
+    normalized, or None when it does not name exactly two."""
+    if not his_event_title or _folds_away(his_event_title):
+        return None
+    n = " ".join(_norm(pmus.fold_latin(his_event_title)).split())
+    sides = [" ".join(x.split()) for x in re.split(r"\s+vs\s+", n)
+             if x.strip()]
+    if len(sides) != 2 or any(pmus._yn_slot_bad(s) for s in sides):
+        return None
+    return sides
+
+
+def _yn_rows_by_code(rows: list[dict], suffix: str) -> dict[str, list]:
+    """The atc- rows whose identifier is 'atc-<code>-<suffix>', by
+    venue league code."""
+    by_code: dict[str, list] = {}
+    tail = "-" + suffix
     for r in rows:
         ident = r.get("identifier")
-        if not isinstance(ident, str) or ident not in want_ids:
+        if not isinstance(ident, str) or not ident.startswith("atc-"):
             continue
+        rest = ident[4:]
+        if not rest.endswith(tail):
+            continue
+        code = rest[:-len(tail)]
+        if not code or "-" in code:
+            continue
+        by_code.setdefault(code, []).append(r)
+    return by_code
+
+
+def _yn_team_row(r: dict, *, d: str, anchor: str,
+                 opp_witness: str | None) -> str | None:
+    """One per-team row against his date, his anchor and (alias only)
+    his opponent witness: the refusal name, or None when it passes.
+    The side and the intent are the caller's filter."""
+    q = r.get("question")
+    if not q or _folds_away(q):
+        return "yn:folds"
+    n = " ".join(_norm(pmus.fold_latin(str(q))).split())
+    gm = None
+    for pat in pmus._YN_Q_PATTERNS:
+        gm = pat.fullmatch(n)
+        if gm:
+            break
+    if gm is None:
+        return "yn:shape"
+    gd = gm.groupdict()
+    if not pmus._yn_date_ok(gd, d):
+        return "yn:qdate"
+    subj = " ".join((gd.get("subj") or "").split())
+    opp = " ".join((gd.get("opp") or "").split())
+    lgq = " ".join((gd.get("lg") or "").split())
+    if pmus._yn_slot_bad(subj) or pmus._yn_slot_bad(opp):
+        return "yn:scope"
+    if pmus._yn_league_slot_bad(lgq):
+        return "yn:league-slot"
+    if not pmus._yn_name_match(subj, anchor):
+        return "yn:subj"
+    if opp_witness is not None and not pmus._yn_name_match(opp, opp_witness):
+        return "yn:opp-witness"
+    return None
+
+
+def _yn_gate(cands: list[dict], on: str, want_intent: str,
+             judge) -> tuple[list[dict], str]:
+    """Rows on his literal side with the venue's own intent for it,
+    each through `judge`; returns (passing rows, the first refusal
+    name — 'yn:side' when no row is on his side at all)."""
+    out: list[dict] = []
+    refusal = "yn:side"
+    for r in cands:
         if _norm(r.get("side_norm")) != on:
             continue
         if r.get("intent") != want_intent:
+            if refusal == "yn:side":
+                refusal = "yn:intent"
             continue
-        q = r.get("question")
-        if not q or _folds_away(q):
-            continue
-        n = " ".join(_norm(str(q)).split())
-        gm = None
-        for pat in pmus._YN_Q_PATTERNS:
-            gm = pat.fullmatch(n)
-            if gm:
-                break
-        if gm is None:
-            continue
-        gd = gm.groupdict()
-        if not pmus._yn_date_ok(gd, d):
-            continue
-        subj = " ".join((gd.get("subj") or "").split())
-        opp = " ".join((gd.get("opp") or "").split())
-        lgq = " ".join((gd.get("lg") or "").split())
-        if (pmus._yn_slot_bad(subj) or pmus._yn_slot_bad(opp)
-                or pmus._yn_slot_bad(lgq)):
-            continue
-        if not pmus._yn_name_match(subj, anchor):
-            continue
-        out.append(r)
-    return out
+        why = judge(r)
+        if why is None:
+            out.append(r)
+        elif refusal in ("yn:side", "yn:intent"):
+            refusal = why
+    return out, refusal
+
+
+def _yn_title_is_his_draw(his_title: str | None, d: str,
+                          sides: list[str]) -> tuple[bool, str]:
+    """Is his title a DRAW question on his game and nothing else? A
+    closed VETO, not a grammar (the feed's draw wording is unattested):
+    the fold must not go blind; any date it carries must be his slug's
+    (ISO or month-name; a form the gate cannot read refuses); it must
+    say 'draw' and never 'win'; and every token that is not furniture
+    must belong to one of his event's two team names — a qualifier
+    (half, aggregate, margin, 'no bet') refuses."""
+    if not his_title or _folds_away(his_title):
+        return False, "folds"
+    raw = str(his_title)
+    iso = date_of(raw)
+    if iso and iso != d:
+        return False, "date_mismatch"
+    for mo, day, yr in _YN_DRAW_MONTH_RE.findall(raw):
+        m = _BRIDGE_MONTHS.get(mo.lower())
+        want = (int(d[0:4]), int(d[5:7]), int(d[8:10]))
+        if m is None or (int(yr) if yr else want[0], m, int(day)) != want:
+            return False, "date_mismatch"
+    if re.search(r"\b\d{1,2}/\d{1,2}", raw):
+        return False, "date_unreadable"
+    stripped = _YN_DRAW_MONTH_RE.sub(" ", re.sub(r"\d{4}-\d{2}-\d{2}", " ", raw))
+    toks = _norm(pmus.fold_latin(stripped)).split()
+    if "draw" not in toks:
+        return False, "not_draw_shape"
+    if any(t.startswith("win") for t in toks):
+        return False, "not_draw_shape"
+    team_toks = {t for s in sides for t in s.split()}
+    extra = [t for t in toks if t not in _YN_DRAW_TITLE_FURNITURE
+             and t not in team_toks]
+    if extra:
+        return False, "qualifier"
+    return True, "ok"
+
+
+def _yn_draw_row(r: dict, *, d: str, sides: list[str]) -> str | None:
+    """One draw row against his date and BOTH his teams, either order."""
+    q = r.get("question")
+    if not q or _folds_away(q):
+        return "yn:folds"
+    n = " ".join(_norm(pmus.fold_latin(str(q))).split())
+    gm = pmus._YN_DRAW_Q_RE.fullmatch(n)
+    if gm is None:
+        return "yn:shape"
+    gd = gm.groupdict()
+    if not pmus._yn_date_ok(gd, d):
+        return "yn:qdate"
+    qa = " ".join((gd.get("a") or "").split())
+    qb = " ".join((gd.get("b") or "").split())
+    lgq = " ".join((gd.get("lg") or "").split())
+    if pmus._yn_slot_bad(qa) or pmus._yn_slot_bad(qb):
+        return "yn:scope"
+    if pmus._yn_league_slot_bad(lgq):
+        return "yn:league-slot"
+    nm = pmus._yn_name_match
+    if not ((nm(qa, sides[0]) and nm(qb, sides[1]))
+            or (nm(qa, sides[1]) and nm(qb, sides[0]))):
+        return "yn:draw-names"
+    return None
+
+
+def _yn_pick(rows: list[dict], outcome: str | None, his_title: str | None,
+             his_slug: str | None, his_event_title: str | None,
+             trace: dict | None, *, identity_only: bool = False) -> list[dict]:
+    """The yes/no branch: identity, then the league alias, then the
+    draw — see the block comment above. Pure. Returns the passing rows
+    (alias and draw hits are COPIES carrying `yn_branch` and, for an
+    alias, `league_alias`); `trace` receives the refusal name or the
+    hit's labels."""
+    def _t(**kw):
+        if trace is not None:
+            trace.update(kw)
+
+    on = _norm(outcome)
+    want_intent = _YN_IDENTITY_INTENT.get(on)
+    if not want_intent or not his_slug:
+        _t(refusal="yn:outcome")
+        return []
+    d = date_of(his_slug)
+    if not d:
+        _t(refusal="yn:slug-date")
+        return []
+    # a title whose fold erases content is blind and refuses first
+    # (pmus yn:title-folds)
+    if _folds_away(his_title):
+        _t(refusal="yn:title-folds")
+        return []
+    parts = _yn_slug_parts(his_slug)
+    if parts is not None and parts["t"] == "draw":
+        if identity_only:
+            _t(refusal="yn:draw-unwitnessed")
+            return []
+        return _yn_draw_pick(rows, parts, on, want_intent, d, his_title,
+                             his_event_title, trace)
+    # the bridge's own title gate consumes his date clause and refuses
+    # any title that is not his dated win-question
+    anchor, why = _bridge_title_subject(his_title, his_slug)
+    if anchor is None:
+        _t(refusal=("yn:name-digits" if why == "subject_has_digit"
+                    else f"yn:title-{why}"))
+        return []
+    want_ids = _yn_his_identifiers(his_slug)
+    mine = [r for r in rows if isinstance(r.get("identifier"), str)
+            and r["identifier"] in want_ids]
+    out, refusal = _yn_gate(mine, on, want_intent,
+                            lambda r: _yn_team_row(r, d=d, anchor=anchor,
+                                                   opp_witness=None))
+    if out:
+        _t(matched_by="premap_identity", admitted=want_ids)
+        return out
+    if mine:
+        # his OWN identifier is on the board and refused: no other
+        # league's row may stand in for it
+        _t(refusal=refusal)
+        return []
+    if identity_only:
+        _t(refusal="yn:no-row")
+        return []
+    return _yn_alias_pick(rows, parts, on, want_intent, d, anchor,
+                          his_event_title, trace)
+
+
+def _yn_alias_pick(rows: list[dict], parts: dict | None, on: str,
+                   want_intent: str, d: str, anchor: str,
+                   his_event_title: str | None,
+                   trace: dict | None) -> list[dict]:
+    def _t(**kw):
+        if trace is not None:
+            trace.update(kw)
+
+    if parts is None:
+        _t(refusal="yn:no-row")
+        return []
+    suffix = f"{parts['a']}-{parts['b']}-{parts['date']}-{parts['t']}"
+    by_code = _yn_rows_by_code(rows, suffix)
+    if not by_code:
+        _t(refusal="yn:no-row")
+        return []
+    if len(by_code) > 1:
+        _t(refusal="yn:league-ambiguous", league_codes=sorted(by_code))
+        return []
+    (code, cands), = by_code.items()
+    if code == parts["lg"]:
+        # cannot happen past the identity arm (that IS his identifier);
+        # named so a future edit that reorders the arms is visible
+        _t(refusal="yn:identity-refused")
+        return []
+    sides = _yn_event_sides(his_event_title)
+    if sides is None:
+        _t(refusal="yn:alias-unwitnessed")
+        return []
+    hit = [s for s in sides if pmus._yn_name_match(s, anchor)]
+    if len(hit) != 1:
+        _t(refusal="yn:event-shear")
+        return []
+    other = sides[1] if hit[0] is sides[0] else sides[0]
+    out, refusal = _yn_gate(cands, on, want_intent,
+                            lambda r: _yn_team_row(r, d=d, anchor=anchor,
+                                                   opp_witness=other))
+    if not out:
+        _t(refusal=refusal)
+        return []
+    alias = f"{parts['lg']}->{code}"
+    _t(matched_by="premap_alias", league_alias=alias,
+       admitted=frozenset(r["identifier"] for r in out))
+    return [dict(r, yn_branch="alias", league_alias=alias) for r in out]
+
+
+def _yn_draw_pick(rows: list[dict], parts: dict, on: str, want_intent: str,
+                  d: str, his_title: str | None,
+                  his_event_title: str | None,
+                  trace: dict | None) -> list[dict]:
+    def _t(**kw):
+        if trace is not None:
+            trace.update(kw)
+
+    sides = _yn_event_sides(his_event_title)
+    if sides is None:
+        _t(refusal="yn:draw-unwitnessed")
+        return []
+    ok, why = _yn_title_is_his_draw(his_title, d, sides)
+    if not ok:
+        _t(refusal=f"yn:draw-title-{why}")
+        return []
+    suffix = f"{parts['a']}-{parts['b']}-{parts['date']}-draw"
+    by_code = _yn_rows_by_code(rows, suffix)
+    if not by_code:
+        _t(refusal="yn:no-row")
+        return []
+    if len(by_code) > 1:
+        _t(refusal="yn:league-ambiguous", league_codes=sorted(by_code))
+        return []
+    (code, cands), = by_code.items()
+    out, refusal = _yn_gate(cands, on, want_intent,
+                            lambda r: _yn_draw_row(r, d=d, sides=sides))
+    if not out:
+        _t(refusal=refusal)
+        return []
+    admitted = frozenset(r["identifier"] for r in out)
+    if code == parts["lg"]:
+        _t(matched_by="premap_identity", admitted=admitted)
+        return [dict(r, yn_branch="draw") for r in out]
+    alias = f"{parts['lg']}->{code}"
+    _t(matched_by="premap_alias", league_alias=alias, admitted=admitted)
+    return [dict(r, yn_branch="draw", league_alias=alias) for r in out]
 
 
 def match_side(rows: list[dict], outcome: str | None,
                his_title: str | None,
                his_slug: str | None = None, *,
-               yn_identity: bool = False) -> dict | None:
+               yn_identity: bool = False,
+               his_event_title: str | None = None) -> dict | None:
     """Pick the unique premap row that IS the whale's outcome.
 
     Precision rules (each one is a shipped incident):
@@ -2012,6 +2350,9 @@ def match_side(rows: list[dict], outcome: str | None,
     - yn_identity=False by default: the yes/no identity branch
       (yn_identity_rows above) is consulted only when the caller asks,
       and then only after wording found nothing.
+    - his_event_title (C2) feeds ONLY that armed branch: the league
+      alias and the draw need his event's two team names as the
+      witness (_yn_pick); the wording arm never reads it.
     """
     on = _norm(outcome)
     if not on:
@@ -2130,12 +2471,21 @@ def match_side(rows: list[dict], outcome: str | None,
         title_is_his_game = (_yn_title_is_his_game(his_title, his_slug)
                              if his_slug else True)
 
+        # C2: the armed arm sets `c2_ids` to the identifiers _yn_pick
+        # admitted -- his own, or the alias / draw identifier it derived
+        # from his slug (codes, date, side) and its own title gate --
+        # and the veto reads that set in place of his literal one; the
+        # wording arm never sets it, so it reads exactly as before
+        c2_ids: frozenset | None = None
+
         def _yn_identity_ok(r: dict) -> bool:
             if not his_slug:
                 return True
             ident = str(r.get("identifier") or "")
             if not ident.startswith("atc-"):
                 return True
+            if c2_ids is not None:
+                return ident in c2_ids
             if ident not in _yn_his_identifiers(his_slug):
                 return False
             return title_is_his_game
@@ -2152,9 +2502,14 @@ def match_side(rows: list[dict], outcome: str | None,
             # line guard applies to the identity row exactly as it does
             # to a wording row. Its rows are his identifier by
             # construction; the veto is applied all the same so both
-            # arms answer to one gate.
-            cands = [r for r in yn_identity_rows(rows, outcome,
-                                                 his_title, his_slug)
+            # arms answer to one gate. C2: _yn_pick is that branch plus
+            # the league alias and the draw (his event title is their
+            # witness); yn_identity_rows is its four-argument form.
+            c2_trace: dict = {}
+            picked = _yn_pick(rows, outcome, his_title, his_slug,
+                              his_event_title, c2_trace)
+            c2_ids = c2_trace.get("admitted")
+            cands = [r for r in picked
                      if _yn_line_ok(r) and _yn_identity_ok(r)]
     elif on.split()[:1] and on.split()[0] in ("over", "under"):
         want = on.split()[0]
@@ -2942,7 +3297,9 @@ async def resolve_explain(pool, market_title: str | None,
         # the same second call resolve makes, so the census attributes
         # exactly what production does once the owner's flip is on
         hit = match_side(kept, outcome, market_title, global_slug,
-                         yn_identity=True)
+                         yn_identity=True, his_event_title=event_title)
+        if hit is not None and hit.get("league_alias"):
+            out["league_alias"] = hit["league_alias"]
     if hit is None:
         out["step"] = "no_side_match"
         # printed through the same date strip the matcher applies, so
@@ -3190,9 +3547,15 @@ async def resolve_explain(pool, market_title: str | None,
         # whether or not the owner has flipped it, so the census counts
         # the recoverable per-team class before a dollar rides it — the
         # way named_ml is measured above. Reads only.
+        # C2: `yn_c2` names the branch's refusal (yn:league-slot,
+        # yn:league-ambiguous, yn:name-digits, yn:no-row ...) or its
+        # label (premap_identity / premap_alias + the alias seen), and
+        # the step's `split` carries that name so the mirror's census
+        # (explain_unmapped: 'no_side_match:yn:...') counts it; a dark
+        # would-resolve reads 'yn:would-resolve'.
         try:
             _ih = match_side(kept, outcome, market_title, global_slug,
-                             yn_identity=True)
+                             yn_identity=True, his_event_title=event_title)
             out["yn_identity"] = {
                 "on": yn_identity_on(),
                 "would_resolve": _ih is not None,
@@ -3200,6 +3563,15 @@ async def resolve_explain(pool, market_title: str | None,
                 "side_norm": _ih.get("side_norm") if _ih else None,
                 "intent": _ih.get("intent") if _ih else None,
             }
+            if _norm(outcome) in ("yes", "no"):
+                _tr: dict = {}
+                _yn_pick(kept, outcome, market_title, global_slug,
+                         event_title, _tr)
+                out["yn_c2"] = _tr
+                if _ih is None and _tr.get("refusal"):
+                    out["split"] = _tr["refusal"]
+                elif _ih is not None:
+                    out["split"] = "yn:would-resolve"
         except Exception as exc:  # noqa: BLE001 — a probe never breaks
             out["yn_identity"] = {"error": type(exc).__name__}
         return out
@@ -3305,9 +3677,13 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
         # wording filter found nothing, so one call's answer is the
         # other's.
         hit = match_side(kept, outcome, market_title, global_slug,
-                         yn_identity=True)
+                         yn_identity=True, his_event_title=event_title)
         if hit is not None:
-            matched_by = "premap_identity"
+            # C2: a row admitted through the league alias (or the draw
+            # under an alias) is labelled 'premap_alias' and carries the
+            # alias it observed; source stays 'premap' either way
+            matched_by = ("premap_alias" if hit.get("league_alias")
+                          else "premap_identity")
     if hit is None and os.getenv("PREMAP_NAMED_LANE",
                                  "").strip().lower() == "on":
         # NAMED-TENNIS LANE, Phase 1 wiring (mapper-fail diagnosis
@@ -3346,11 +3722,14 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
                     "identifier and the venue named no long/short)",
                     hit.get("identifier"))
         return None
-    return {"market_slug": hit["identifier"],
-            "title": hit.get("question") or hit.get("event_title"),
-            "outcome": hit.get("side_norm"),
-            "intent": intent,
-            "matched_by": matched_by, "score": 1.0}
+    out = {"market_slug": hit["identifier"],
+           "title": hit.get("question") or hit.get("event_title"),
+           "outcome": hit.get("side_norm"),
+           "intent": intent,
+           "matched_by": matched_by, "score": 1.0}
+    if hit.get("league_alias"):
+        out["league_alias"] = hit["league_alias"]
+    return out
 
 
 async def fast_refresh() -> dict:
