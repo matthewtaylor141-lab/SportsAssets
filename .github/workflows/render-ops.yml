@@ -214,7 +214,14 @@ jobs:
                 # in receipt; this prints the newest refused rows whole so a
                 # money guard is changed on the venue's numbers, never a guess.
                 mirror-refusals) SQL="SELECT o.id, o.placed_at, o.side, o.intent, o.wire, o.qty, o.reason, left(o.receipt::text, 1500) AS receipt FROM mirror_orders o WHERE o.state = 'rejected' ORDER BY o.placed_at DESC LIMIT 4;"; TO=30000 ;;
-                *) echo "sql: arg must be one of activity|tables|sizes|indexes|analyze|index053|mirror-on|mirror-off|mirror-state|mirror-preflight|mirror-rearm|mirror-tick|mirror-refusals (got '$ARG')"; exit 1 ;;
+                # THE MIRROR'S P&L TODAY (2026-09-06, owner question). Realized
+                # is every sale booked on a mirror book (partials included,
+                # mirror_books.realized_pnl), settled is the standing row's
+                # settlement copied onto the book, open is the cost basis still
+                # held (ledger_net x avg_cost). By book, then the day's totals;
+                # UTC day boundaries, and every figure is what the tables hold.
+                mirror-pnl) SQL="SELECT b.id, b.us_market_slug AS slug, b.state, b.intent, b.ratio, b.ledger_net AS held, round(b.avg_cost::numeric, 4) AS avg_cost, round((b.ledger_net * COALESCE(b.avg_cost, 0))::numeric, 2) AS open_cost, round(b.realized_pnl::numeric, 2) AS realized, round(b.settled_pnl::numeric, 2) AS settled, round(b.own_book_pnl::numeric, 2) AS own_book, b.opened_at::time(0) AS opened, b.closed_at::time(0) AS closed FROM mirror_books b WHERE b.opened_at >= date_trunc('day', now()) OR b.closed_at >= date_trunc('day', now()) OR b.state <> 'closed' ORDER BY b.id; SELECT 'today' AS what, count(*) AS books, round(sum(realized_pnl)::numeric, 2) AS realized, round(sum(settled_pnl)::numeric, 2) AS settled, round(sum(CASE WHEN state <> 'closed' THEN ledger_net * COALESCE(avg_cost, 0) ELSE 0 END)::numeric, 2) AS open_cost, round(sum(peak_exposure_usd)::numeric, 2) AS peak_stake FROM mirror_books WHERE opened_at >= date_trunc('day', now()) OR closed_at >= date_trunc('day', now()) OR state <> 'closed'; SELECT 'fills today' AS what, count(*) AS n, round(sum(CASE WHEN side LIKE 'BUY%' THEN cash_usd ELSE 0 END)::numeric, 2) AS bought_usd, round(sum(CASE WHEN side LIKE 'SELL%' THEN cash_usd ELSE 0 END)::numeric, 2) AS sold_usd, round(sum(realized)::numeric, 2) AS realized FROM mirror_orders WHERE filled > 0 AND placed_at >= date_trunc('day', now());"; TO=30000 ;;
+                *) echo "sql: arg must be one of activity|tables|sizes|indexes|analyze|index053|mirror-on|mirror-off|mirror-state|mirror-preflight|mirror-rearm|mirror-tick|mirror-refusals|mirror-pnl (got '$ARG')"; exit 1 ;;
               esac
               command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq >/dev/null 2>&1; sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }
               get "/postgres/$PG/connection-info" > /tmp/ci.json
