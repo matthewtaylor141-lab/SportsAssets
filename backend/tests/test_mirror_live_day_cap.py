@@ -598,15 +598,27 @@ def test_a_mixed_tick_two_halted_books_then_an_open_quoted_one_does_not_abandon(
     assert [(c[1], c[3]) for c in pl] == [(THIRD_SLUG, 300)], pl
     assert b3["open_order_id"] is not None
     assert b1["open_order_id"] is None and b2["open_order_id"] is None, "never placed on a halted market"
-    # the same three, all halted: the streak reaches three and abandons
+    # the same three, all halted: three EXISTING BOOKS, so the streak
+    # never moves (U10, 2026-09-06: a non-OPEN read on a book is the
+    # book's own to handle) -- every book is walked and held under its
+    # own name, nothing is placed, the tick goes on
     p, http = _three_markets()
-    p.add_book(ledger=0)
-    _other_book(p)
-    p.add_book(ledger=0, us_market_slug=THIRD_SLUG, condition_id=THIRD_CID, long_asset=M3, other_asset=N3)
+    books = [p.add_book(ledger=0), _other_book(p),
+             p.add_book(ledger=0, us_market_slug=THIRD_SLUG, condition_id=THIRD_CID,
+                        long_asset=M3, other_asset=N3)]
     v = _Venue(state=HALTED)
     st = _tick(p, v, http=http)
-    assert st["abandoned"] and st["abandon_reason"] == "venue_halted" and not _places(v)
-    assert _census(st, "venue_halted") == 3
+    assert not st["abandoned"] and "abandon_reason" not in st and not _places(v)
+    assert _census(st, "venue_halted") == 3 and _census(st, "tick_abandoned") == 0, st["census"]
+    assert [c[1] for c in v.calls if c[0] == "bbo"] == [SLUG, OTHER_SLUG, THIRD_SLUG], "every book read"
+    assert [b["last_reason"] for b in books] == ["no_mark"] * 3, "each held under the plan's own name"
+    assert st["venue_state"] == HALTED
+    # three halted CANDIDATES on the same clock: the venue-wide reading, as before
+    p2 = _pool(conds=["c1", "c2", "c3"])
+    v2 = _Venue(state=HALTED)
+    st2 = _tick(p2, v2)
+    assert st2["abandoned"] and st2["abandon_reason"] == "venue_halted" and not _places(v2)
+    assert _census(st2, "venue_halted") == 3 and st2["reads"] == 3
 
 
 class _SeqVenue(_Venue):
@@ -659,6 +671,192 @@ def test_a_quoted_read_resets_the_miss_streak_so_a_miss_after_it_starts_a_new_on
         seen.append(t.misses)
     assert seen == [1, 2, 0, 1] and t.reads == 4 and not t.abandoned
     assert t.stats["venue_state"] == HALTED and t.venue_states == {HALTED: 3, "MARKET_STATE_OPEN": 1}
+
+
+# ------------------------------------- 4. the miss streak counts venue-wide evidence only (U10)
+
+OPEN, EXPIRED = "MARKET_STATE_OPEN", "MARKET_STATE_EXPIRED"
+_E = {"state": OPEN}                  # OPEN, empty book: a thin market, the venue is up
+_X = {"state": EXPIRED}               # a market that has ended, empty
+_N = {}                               # the SDK-typed shape: no state, empty
+
+
+def _warnings(caplog):
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def _bbo_seq(answers, book=False):
+    """t.misses after each read of `answers`, at _bbo's own level; the
+    tick's census is the one _mirror_stop writes (tick_once's binding)."""
+    t = ml._Tick(pool=_pool(), pmus=_SeqVenue(answers), http=None, now=NOW, stats=ml._new_stats())
+    seen = []
+    prior = ml._current_stats
+    ml._current_stats = t.stats
+    try:
+        for _ in answers:
+            _run(ml._bbo(t, SLUG, book=book))
+            seen.append(t.misses)
+    finally:
+        ml._current_stats = prior
+    return t, seen
+
+
+def test_three_open_empty_candidates_are_refused_no_quote_and_the_walk_goes_on(caplog):
+    """U10 (2026-09-06, 00:40Z-00:47Z, deploy dd1ed77, venue OPEN):
+    every tick ended `tick abandoned (no_quote), backing off 60.0s`
+    while books opened between them -- the venue was quoting the
+    markets he is in, and three thin markets with empty books in a
+    row tripped the streak built for a venue-wide outage: the walk
+    broke, the next tick waited 60 s, one new book per ~90 s. With an
+    OPEN state, an empty book is a PER-MARKET refusal: c1..c3 are
+    refused `no_quote` by name, the streak stands at 0, the fourth
+    candidate (quoted) opens a book and rests in the SAME tick, nothing
+    abandons and nothing backs off (the next tick 30 s on runs)."""
+    assert ms.MISS_STREAK_ABANDON == 3
+    p = _pool(conds=["c1", "c2", "c3", CID])
+    v = _SeqVenue([_E, _E, _E, _Q])
+    with caplog.at_level(logging.WARNING, logger=ml.log.name):
+        st = _tick(p, v)
+    # five reads: c1..c3, the fourth candidate, and the book it opened
+    # planned in the same tick (its own read of the slug)
+    assert [c for c in v.calls if c[0] == "bbo"] == [("bbo", SLUG)] * 5 and st["reads"] == 5
+    assert not st["abandoned"] and "abandon_reason" not in st and st["status"] == "ok"
+    assert _census(st, "no_quote") == 3 and _census(st, "venue_halted") == 0, st["census"]
+    assert _census(st, "tick_abandoned") == 0 and _census(st, "no_mark") == 3, st["census"]
+    assert st["venue_state"] == OPEN
+    assert len(p.books) == 1 and next(iter(p.books.values()))["condition_id"] == CID
+    assert [(c[1], c[3]) for c in _places(v)] == [(SLUG, 300)], "the fourth candidate rested"
+    assert ml._backoff_until == 0.0 and not [w for w in _warnings(caplog) if "abandoned" in w]
+    # the next tick is not backed off
+    st2 = _tick(p, _Venue(), now=NOW + ml.POLL_S, keep_backoff=True)
+    assert not st2.get("skipped_backoff") and st2["reads"] >= 1
+    # an EXISTING book (quoted, rested) walked before three OPEN-empty
+    # candidates: planned as ever, and the tick goes on past them
+    p = _pool(conds=["c1", "c2", "c3"])
+    b = p.add_book(ledger=0)
+    v = _SeqVenue([_Q, _E, _E, _E])
+    st = _tick(p, v)
+    assert not st["abandoned"] and _census(st, "no_quote") == 3 and st["reads"] == 4
+    assert b["open_order_id"] is not None and st["books_live"] == 1
+    assert [(c[1], c[3]) for c in _places(v)] == [(SLUG, 300)]
+
+
+def test_an_open_empty_read_neither_steps_nor_resets_the_streak():
+    """The three sequences the brief pins, at the tick level and at
+    _bbo's own. OPEN-empty, HALTED x3: abandons `venue_halted` -- the
+    OPEN-empty read did not RESET the streak either (a thin market is
+    not evidence the venue is up, only a quote is). HALTED x2, quoted,
+    HALTED x2: no abandon (the quote reset). No state x3 (the
+    SDK-typed shape, which cannot be told from a halt): abandons
+    `no_quote` as before, the conservative default. At _bbo's level
+    the streak for [OPEN-empty, HALTED, quoted, HALTED, OPEN-empty]
+    reads 0, 1, 0, 1, 1."""
+    p = _pool(conds=["c1", "c2", "c3", "c4"])
+    v = _SeqVenue([_E, _H, _H, _H])
+    st = _tick(p, v)
+    assert st["abandoned"] and st["abandon_reason"] == "venue_halted" and st["reads"] == 4
+    assert _census(st, "no_quote") == 1 and _census(st, "venue_halted") == 3, st["census"]
+    assert ml._backoff_until == NOW + ms.BACKOFF_S
+    p = _pool(conds=["c1", "c2", "c3", "c4", "c5"])
+    v = _SeqVenue([_H, _H, _Q, _H, _H])
+    st = _tick(p, v)
+    assert not st["abandoned"] and st["reads"] == 5 and _census(st, "venue_halted") == 4
+    p = _pool(conds=["c1", "c2", "c3", "c4"])
+    v = _SeqVenue([_N, _N, _N, _Q])
+    st = _tick(p, v)
+    assert st["abandoned"] and st["abandon_reason"] == "no_quote" and st["reads"] == 3
+    assert _census(st, "no_quote") == 3 and st["venue_state"] is None
+    t, seen = _bbo_seq([_E, _H, _Q, _H, _E])
+    assert seen == [0, 1, 0, 1, 1] and not t.abandoned and t.reads == 5
+    assert t.stats["census"]["no_quote"] == 2 and t.stats["census"]["venue_halted"] == 2
+    # the census serves both names: `no_quote` sits under the endpoint's
+    # 40-key cap in CENSUS_KEYS order, `venue_halted` rides on `integ`
+    from sportsassets.api import app as api_app
+    assert ml.CENSUS_KEYS.index("no_quote") < api_app._DETAIL_MAX_KEYS
+    assert "venue_halted" in ml._INTEG_CENSUS_KEYS
+    t.stats["integ"] = ml._integ_block(t.stats)          # the projection tick_once writes last
+    served = api_app._sanitize_detail(t.stats)
+    assert served["census"]["no_quote"] == 2 and served["integ"]["venue_halted"] == 2
+
+
+def test_a_non_open_read_on_an_existing_book_never_counts_toward_the_streak(caplog):
+    """TODAY'S LOG (2026-09-06 12:32Z): `tick abandoned (venue_halted:
+    MARKET_STATE_EXPIRED), backing off 60.0s` between placements. One
+    open book whose market had ended at the venue (the markets row
+    still reading live), and his morning's expired markets still
+    inside the candidate lookback: the book's read and the expired
+    candidates' reads each counted a miss, the third abandoned the
+    tick before the quoted candidates were reached, and the loop
+    backed off. Neither is venue-outage evidence: a read on an
+    EXISTING book is the book's own to handle (`venue_halted` on the
+    census, held `no_mark`, its rests cancelled, closed once the
+    markets row reads closed) and a TERMINAL state (EXPIRED, CLOSED,
+    TERMINATED) is a per-market fact on any read. The tick goes on,
+    the quoted candidate opens a book and rests."""
+    p = _pool(conds=["c1", "c2", CID])
+    p.markets[OTHER_CID] = {"closed": False, "resolved": False, "resolved_prices": None}
+    b = _other_book(p)
+    v = _SeqVenue([_X, _X, _X, _Q])             # the book, c1, c2, then the fixture market
+    with caplog.at_level(logging.WARNING, logger=ml.log.name):
+        st = _tick(p, v)
+    # the book, c1, c2, the fixture candidate, and the book it opened planned in-tick
+    assert [c[1] for c in v.calls if c[0] == "bbo"] == [OTHER_SLUG, SLUG, SLUG, SLUG, SLUG]
+    assert not st["abandoned"] and "abandon_reason" not in st and st["status"] == "ok"
+    assert _census(st, "venue_halted") == 3 and _census(st, "no_quote") == 0, st["census"]
+    assert _census(st, "tick_abandoned") == 0 and ml._backoff_until == 0.0
+    assert st["venue_state"] == EXPIRED, "the state is still published"
+    assert b["last_reason"] == "no_mark" and b["open_order_id"] is None and b["state"] == "live"
+    opened = [x for x in p.books.values() if x["id"] != b["id"]]
+    assert len(opened) == 1 and opened[0]["condition_id"] == CID
+    assert [(c[1], c[3]) for c in _places(v)] == [(SLUG, 300)]
+    assert not [w for w in _warnings(caplog) if "abandoned" in w]
+    # the same book HALTED (an in-play halt, the venue's own shape for a
+    # fight in progress) three ticks running: the book is held, never
+    # the tick -- and the reset a quoted candidate gives is not needed
+    p = _pool(conds=["c1", "c2"])
+    p.markets[OTHER_CID] = {"closed": False, "resolved": False, "resolved_prices": None}
+    b = _other_book(p)
+    v = _Venue(states={OTHER_SLUG: HALTED}, bid=None, ask=None, state=None)
+    st = _tick(p, v)
+    assert not st["abandoned"], "one book read plus two no-state empties: 0, 1, 2"
+    assert _census(st, "venue_halted") == 1 and _census(st, "no_quote") == 2
+    assert b["last_reason"] == "no_mark"
+    # at _bbo's level, a book read: HALTED, EXPIRED and CLOSED-with-a-
+    # stale-book leave the streak where it stood, an unreadable read
+    # and a no-state empty read still count, a quote still resets
+    t, seen = _bbo_seq([_H, _X, {"bid": 0.01, "ask": 0.20, "state": "MARKET_STATE_CLOSED"},
+                        _N, {"error": "RuntimeError"}, _Q, _H], book=True)
+    assert seen == [0, 0, 0, 1, 2, 0, 0] and not t.abandoned
+    assert t.stats["census"]["venue_halted"] == 4 and t.stats["census"]["no_quote"] == 2
+    # the source: the book's read is the one that says so
+    src = inspect.getsource(ml._tick_book)
+    assert "book=True" in src and "book=True" not in inspect.getsource(ml._tick_candidate)
+
+
+def test_a_terminal_state_counts_nowhere_and_a_non_terminal_one_still_abandons_three_candidates(caplog):
+    """Three CANDIDATES on ended markets (the venue says EXPIRED, or
+    CLOSED with a settled market's stale rests -- the probe payloads
+    of 2026-09-05): each refused `venue_halted`, none a miss, no
+    abandon. The same three SUSPENDED, or HALTED: the venue-wide
+    reading, abandoned under the state's own word. The terminal set
+    is one definition, the shadow's, read by both workers."""
+    assert ms.STATE_TERMINAL == {"MARKET_STATE_EXPIRED", "MARKET_STATE_CLOSED", "MARKET_STATE_TERMINATED"}
+    assert "MARKET_STATE_OPEN" not in ms.STATE_TERMINAL and HALTED not in ms.STATE_TERMINAL
+    for venue in (_Venue(bid=None, ask=None, state=EXPIRED),
+                  _Venue(bid=0.01, ask=0.20, state="MARKET_STATE_CLOSED"),
+                  _Venue(bid=None, ask=None, state="MARKET_STATE_TERMINATED")):
+        p = _pool(conds=["c1", "c2", "c3", "c4"])
+        st = _tick(p, venue)
+        assert not st["abandoned"] and st["reads"] == 4, venue.state
+        assert _census(st, "venue_halted") == 4 and _census(st, "no_quote") == 0, st["census"]
+        assert st["venue_state"] == venue.state and not p.books and not _places(venue)
+    for state in ("MARKET_STATE_SUSPENDED", HALTED, "MARKET_STATE_PREOPEN"):
+        p = _pool(conds=["c1", "c2", "c3", "c4"])
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=ml.log.name):
+            st = _tick(p, _Venue(bid=None, ask=None, state=state))
+        assert st["abandoned"] and st["abandon_reason"] == "venue_halted" and st["reads"] == 3, state
+        assert f"mirror_live: tick abandoned (venue_halted: {state}), backing off 60.0s" in _warnings(caplog)
 
 
 def test_a_backed_off_tick_after_a_no_venue_safe_tick_prints_mode_safe(monkeypatch, caplog):

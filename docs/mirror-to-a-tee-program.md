@@ -873,6 +873,19 @@ sticky: the mirror resumes on its own, on the next tick after the backoff, the m
 `mode=<the mode the worker holds> ... backoff=<seconds left>` on the mode line, never `mode=safe` unless the
 mode is safe.
 
+2026-09-06: with the venue OPEN, an empty book is a per-market refusal (`no_quote`), not a venue miss; only
+non-OPEN states and unreadable reads count toward the three-miss abandon -- and of the non-OPEN states, only
+a non-terminal one (`MARKET_STATE_HALTED`, `MARKET_STATE_SUSPENDED`, `MARKET_STATE_PREOPEN`, ...) read on a
+NEW candidate: a read on an existing book never counts (the book's own handling names it `venue_halted`,
+cancels its rests, plans nothing and closes the book once the markets row reads closed; an abandon inside the
+book walk would skip every book after it), and a terminal state (`MARKET_STATE_EXPIRED`, `MARKET_STATE_CLOSED`,
+`MARKET_STATE_TERMINATED`; `mirror_shadow.STATE_TERMINAL`) counts nowhere, because a market that has ended is
+a per-market fact and a venue cannot expire every market (the 12:32Z `tick abandoned (venue_halted:
+MARKET_STATE_EXPIRED)` between placements was one book on an ended market plus his morning's expired markets
+still inside the candidate lookback, not an outage). Every such read still counts `venue_halted` or `no_quote`
+on the census and publishes the state; three HALTED candidates in a row still abandon under that name. The
+shadow's streak reads by the same rule.
+
 2026-09-06: a sale within one venue lot of the ledger is dust (census `ledger_dust`), booked to the ledger
 and never a trip; the trip stays for a sale more than a lot past the ledger. The standing row holds the
 venue's FRACTIONAL fills (book 1 on `aec-wta-yulsta-eleryb-2026-09-05`: 182.76 then `mirror row 411040

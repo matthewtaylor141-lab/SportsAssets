@@ -153,6 +153,17 @@ _unmapped_until: dict[tuple[str, str], float] = {}
 # the venue's word for a market open for trading (bbo_read's `state`);
 # an empty book under it is `no_quote`, never a halt
 _STATE_OPEN = "MARKET_STATE_OPEN"
+# THE VENUE'S TERMINAL STATES: a market that has ended -- settled,
+# expired, terminated (the SDK's MarketState literals plus CLOSED, seen
+# live on a settled market with a stale resting book). A PER-MARKET
+# fact, never a venue-wide one: a venue cannot expire every market, so
+# a read on one counts nowhere toward the miss streak (2026-09-06,
+# 12:32Z: `tick abandoned (venue_halted: MARKET_STATE_EXPIRED)` between
+# placements, off one book whose market had ended and his morning's
+# expired markets still inside LOOKBACK_H). Read by mirror_live too.
+STATE_TERMINAL: frozenset[str] = frozenset({
+    "MARKET_STATE_EXPIRED", "MARKET_STATE_CLOSED", "MARKET_STATE_TERMINATED",
+})
 _STATE_RATIO = "mirror_ratio"
 _STATE_SWITCH = "mirror_shadow"
 _SNAP_RAW_KEY = "whale_positions_raw:%s"
@@ -1683,26 +1694,46 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
             if "frozen" in str(row.get("reason") or ""):
                 stats["frozen"] += 1
             state = (row.get("detail") or {}).get("state")
+            state = str(state) if state is not None else None
             if state is not None:
-                venue_states[str(state)] += 1
+                venue_states[state] += 1
                 stats["venue_state"] = venue_states.most_common(1)[0][0]
-            if row.get("us_market_slug") and row.get("bid") is None and row.get("ask") is None:
+            # THE MISS STREAK COUNTS ONLY WHAT CAN BE A VENUE-WIDE
+            # OUTAGE -- the live worker's rule (mirror_live._bbo,
+            # 2026-09-06), so shadow and live agree on every read:
+            #   counts   an unreadable read (bbo_error, no state); an
+            #            empty read that names no state (the SDK-typed
+            #            shape: it cannot be told from a halt); a
+            #            non-OPEN, non-terminal state (HALTED,
+            #            SUSPENDED, PREOPEN, ...), quoted or not
+            #   neither  an OPEN market with an empty book (`no mark`
+            #            on the row: a per-market refusal, the venue is
+            #            up); a terminal state (STATE_TERMINAL) -- a
+            #            market that has ended is a per-market fact
+            #   resets   a quoted read on an OPEN market (or one that
+            #            names no state)
+            # A row with no slug made no read and leaves the streak
+            # where it stood. Three OPEN empty books never abandon; a
+            # halted venue abandons as before, under the state's name.
+            quoted = row.get("bid") is not None or row.get("ask") is not None
+            if not row.get("us_market_slug"):
+                pass
+            elif quoted and state in (None, _STATE_OPEN):
+                misses = 0
+            elif state == _STATE_OPEN or state in STATE_TERMINAL:
+                pass
+            else:
                 misses += 1
                 if misses >= MISS_STREAK_ABANDON:
                     _backoff_until = now_ts + BACKOFF_S
                     stats.update(abandoned=True, status="degraded")
                     # the venue's own word for the last miss -- a halted
-                    # market is not an unreadable one (2026-09-05). An
-                    # OPEN empty book, or a read with no state, is
-                    # `no_quote`: three OPEN empty books must not read
-                    # as if OPEN were the cause
+                    # market is not an unreadable one (2026-09-05); a
+                    # read with no state is `no_quote`
                     log.warning("mirror_shadow: %d consecutive venue misses (%s) — "
                                 "abandoning the tick, backing off %ss",
-                                misses, state if state not in (None, _STATE_OPEN) else "no_quote",
-                                BACKOFF_S)
+                                misses, state or "no_quote", BACKOFF_S)
                     break
-            else:
-                misses = 0
             try:
                 n_res, n_fill = await _write(pool, row, stats, pmus)
                 stats["rows"] += 1

@@ -374,29 +374,102 @@ def test_the_venues_market_state_rides_on_the_row_and_names_the_abandon(monkeypa
     ms._backoff_until = 0.0
 
 
-def test_three_open_empty_books_abandon_as_no_quote_never_as_if_open_were_the_cause(monkeypatch, caplog):
-    """The abandon line prints the state only when the state IS the
-    cause: three OPEN markets with empty books (and three reads with
-    no state at all, the SDK's typed shape) abandon `(no_quote)`, not
-    `(MARKET_STATE_OPEN)` -- the census still publishes the state it
-    read."""
+def test_three_open_empty_books_never_abandon_and_three_no_state_empties_abandon_as_no_quote(monkeypatch, caplog):
+    """U10 (2026-09-06): with the venue OPEN, an empty book is a
+    PER-MARKET refusal, not a venue miss -- five OPEN markets with
+    empty books are all read, each row named `no mark`, the streak
+    never moves and nothing abandons. Three reads with no state at all
+    (the SDK's typed shape, which cannot be told from a halt) still
+    abandon `(no_quote)` -- never `(None)` -- the conservative default;
+    the census publishes the state it read either way."""
     import logging
     _nosleep(monkeypatch)
     monkeypatch.setenv("MIRROR_WHALES", "rn1")
     ms._ratio_cache.update(at=0.0, by_whale={})
-    for pm, venue_state in ((_Pmus(bid=None, ask=None), "MARKET_STATE_OPEN"),
-                            (_Pmus(bid=None, ask=None, state=None), None)):
+    ms._backoff_until = 0.0
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=ms.log.name):
+        stats = _run(ms.tick_once(_Pool(fills=HIS, conds=[f"c{i}" for i in range(5)]),
+                                  _Pmus(bid=None, ask=None), now_ts=7000.0))
+    assert not stats.get("abandoned") and stats["markets"] == 5 and stats["rows"] == 5
+    assert stats["venue_state"] == "MARKET_STATE_OPEN" and stats["status"] == "ok"
+    assert ms._backoff_until == 0.0
+    assert not [r for r in caplog.records if "abandoning" in r.getMessage()]
+    ms._backoff_until = 0.0
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=ms.log.name):
+        stats = _run(ms.tick_once(_Pool(fills=HIS, conds=[f"c{i}" for i in range(5)]),
+                                  _Pmus(bid=None, ask=None, state=None), now_ts=7000.0))
+    msgs = [r.getMessage() for r in caplog.records]
+    assert stats["abandoned"] is True and stats["markets"] == 3 and stats["venue_state"] is None
+    assert (f"mirror_shadow: 3 consecutive venue misses (no_quote) — abandoning the tick, "
+            f"backing off {ms.BACKOFF_S}s") in msgs, msgs
+    assert not [m for m in msgs if "(MARKET_STATE_OPEN)" in m or "(None)" in m], msgs
+    ms._backoff_until = 0.0
+
+
+class _SeqPmus(_Pmus):
+    """A venue whose quote reads answer in ORDER, one bbo_read dict per
+    call (the last one repeats), so a miss can follow a quote."""
+
+    def __init__(self, answers, **kw):
+        super().__init__(**kw)
+        self.answers = list(answers)
+
+    def bbo_read(self, client, slug):
+        self.calls.append(("bbo", slug))
+        a = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        return {"bid": None, "ask": None, "state": None, "error": None, **a}
+
+
+_SH_H = {"state": "MARKET_STATE_HALTED"}
+_SH_E = {"state": "MARKET_STATE_OPEN"}
+_SH_Q = {"bid": 0.30, "ask": 0.32, "state": "MARKET_STATE_OPEN"}
+
+
+def test_the_shadows_miss_streak_reads_by_the_live_workers_rule(monkeypatch, caplog):
+    """The same rule as mirror_live._bbo (U10), so shadow and live
+    agree on every read: an OPEN empty book neither steps nor resets
+    the streak (OPEN-empty, HALTED x3 abandons under the halt's name --
+    the empty read did not reset); a quoted OPEN read resets it
+    (HALTED x2, quoted, HALTED x2: no abandon); a terminal state
+    (EXPIRED, CLOSED with a settled market's stale rests, TERMINATED)
+    counts nowhere -- five in a row and the tick goes on; a
+    non-terminal one (SUSPENDED) still abandons at three."""
+    import logging
+    _nosleep(monkeypatch)
+    monkeypatch.setenv("MIRROR_WHALES", "rn1")
+    ms._ratio_cache.update(at=0.0, by_whale={})
+
+    def _once(pm, n=5):
         ms._backoff_until = 0.0
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger=ms.log.name):
-            stats = _run(ms.tick_once(_Pool(fills=HIS, conds=[f"c{i}" for i in range(5)]), pm,
-                                      now_ts=7000.0))
-        msgs = [r.getMessage() for r in caplog.records]
-        assert stats["abandoned"] is True and stats["markets"] == 3, venue_state
-        assert stats["venue_state"] == venue_state, venue_state
-        assert (f"mirror_shadow: 3 consecutive venue misses (no_quote) — abandoning the tick, "
-                f"backing off {ms.BACKOFF_S}s") in msgs, msgs
-        assert not [m for m in msgs if "(MARKET_STATE_OPEN)" in m or "(None)" in m], msgs
+            st = _run(ms.tick_once(_Pool(fills=HIS, conds=[f"c{i}" for i in range(n)]), pm,
+                                   now_ts=7000.0))
+        return st, [r.getMessage() for r in caplog.records]
+
+    st, msgs = _once(_SeqPmus([_SH_E, _SH_H, _SH_H, _SH_H]))
+    assert st["abandoned"] is True and st["markets"] == 4
+    assert (f"mirror_shadow: 3 consecutive venue misses (MARKET_STATE_HALTED) — abandoning the "
+            f"tick, backing off {ms.BACKOFF_S}s") in msgs, msgs
+    st, msgs = _once(_SeqPmus([_SH_H, _SH_H, _SH_Q, _SH_H, _SH_H]))
+    assert not st.get("abandoned") and st["markets"] == 5 and st["venue_state"] == "MARKET_STATE_HALTED"
+    for pm in (_Pmus(bid=None, ask=None, state="MARKET_STATE_EXPIRED"),
+               _Pmus(bid=0.01, ask=0.20, state="MARKET_STATE_CLOSED"),
+               _Pmus(bid=None, ask=None, state="MARKET_STATE_TERMINATED")):
+        st, msgs = _once(pm)
+        assert not st.get("abandoned") and st["markets"] == 5 and st["venue_state"] == pm.state, pm.state
+        assert not [m for m in msgs if "abandoning" in m], msgs
+    st, msgs = _once(_Pmus(bid=None, ask=None, state="MARKET_STATE_SUSPENDED"))
+    assert st["abandoned"] is True and st["markets"] == 3
+    assert (f"mirror_shadow: 3 consecutive venue misses (MARKET_STATE_SUSPENDED) — abandoning the "
+            f"tick, backing off {ms.BACKOFF_S}s") in msgs, msgs
+    # a quoted read on a non-OPEN market is not the reset either: a
+    # settled market's stale rests say nothing about the venue
+    st, msgs = _once(_SeqPmus([_SH_H, _SH_H, {"bid": 0.01, "ask": 0.20, "state": "MARKET_STATE_CLOSED"},
+                               _SH_H]))
+    assert st["abandoned"] is True and st["markets"] == 4
     ms._backoff_until = 0.0
 
 

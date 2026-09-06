@@ -1040,16 +1040,21 @@ async def _snapshot(t: _Tick, whale: str) -> tuple[dict, float | None, bool]:
 _STATE_OPEN = "MARKET_STATE_OPEN"
 
 
-def _miss(t: _Tick, why: str, detail: str | None = None) -> None:
-    """One quote read that is not a quote to trade on, by name; the
-    MISS_STREAK_ABANDON-th in a row abandons the tick under that name."""
-    t.misses += 1
+def _miss(t: _Tick, why: str, detail: str | None = None, count: bool = True) -> None:
+    """One quote read that is not a quote to trade on, by name. `count`
+    says whether it is evidence of a VENUE-WIDE outage: the
+    MISS_STREAK_ABANDON-th counted miss in a row abandons the tick
+    under its name; an uncounted one is refused by name and leaves the
+    streak exactly where it stood -- neither a step nor a reset."""
     _mirror_stop(why)
+    if not count:
+        return
+    t.misses += 1
     if t.misses >= ms.MISS_STREAK_ABANDON:
         _abandon(t, why, detail)
 
 
-async def _bbo(t: _Tick, slug: str) -> tuple[float | None, float | None]:
+async def _bbo(t: _Tick, slug: str, book: bool = False) -> tuple[float | None, float | None]:
     """The quote read, and the venue's own word for the market it read.
     Three names, never one (2026-09-05, when five hours of a venue-wide
     MARKET_STATE_HALTED read as `no_quote`, the word for an unreadable
@@ -1067,8 +1072,43 @@ async def _bbo(t: _Tick, slug: str) -> tuple[float | None, float | None]:
                     stale rests -- is NOT a quote to trade on
       a quote       on an OPEN market: the miss streak resets
 
-    The mirror resumes on its own when the state reads OPEN and a quote
-    is present; nothing here is sticky."""
+    THE MISS STREAK (t.misses, ms.MISS_STREAK_ABANDON) COUNTS ONLY WHAT
+    CAN BE A VENUE-WIDE OUTAGE. It was built for one (every read empty)
+    and it abandons the tick and backs the loop off BACKOFF_S, so a
+    per-market fact that fed it cost the mirror its cadence twice on
+    2026-09-06: at 00:40Z-00:47Z, with the venue OPEN and quoting the
+    markets he was in, three thin markets with empty books in a row
+    abandoned every tick `no_quote` (one new book per ~90 s, exits on
+    the later books walked every ~90 s instead of every 30 s); at
+    12:32Z one open book whose market had EXPIRED, plus his morning's
+    expired markets still inside the candidate lookback, abandoned
+    ticks `(venue_halted: MARKET_STATE_EXPIRED)` between placements.
+
+      counts    an unreadable read (the error is named), on any read;
+                an empty read that names no state (the SDK-typed
+                shape: it cannot be told from a halt), on any read; a
+                non-OPEN, NON-TERMINAL state (HALTED, SUSPENDED,
+                PREOPEN, anything not in ms.STATE_TERMINAL), quoted or
+                not, on a CANDIDATE read (`book=False`)
+      neither   an OPEN market with an empty book (`no_quote`, the
+                per-market refusal: the walk goes on to the next
+                candidate); any non-OPEN state on an EXISTING BOOK's
+                read (`book=True`: the book's own handling names it
+                `venue_halted`, cancels its rests under `no_mark`,
+                plans nothing, refuses the flatten's slippage leg and
+                closes it once the markets row reads closed -- and an
+                abandon inside the book walk would skip every book
+                after it, un-managed for the tick and the backoff);
+                a terminal state (EXPIRED, CLOSED, TERMINATED) on any
+                read -- a market that has ended is a per-market fact,
+                a venue cannot expire every market
+      resets    a quoted read on an OPEN market, or one naming no state
+
+    A venue-wide halt reads as before: three HALTED candidates in a
+    row abandon `(venue_halted: MARKET_STATE_HALTED)`, and every read
+    still counts `venue_halted` or `no_quote` on the census and
+    publishes the state. The mirror resumes on its own when the state
+    reads OPEN and a quote is present; nothing here is sticky."""
     try:
         q = await asyncio.to_thread(ms._paced_bbo, t.pmus, slug)
     except Exception as exc:  # noqa: BLE001 — an unreadable book is no quote
@@ -1090,10 +1130,13 @@ async def _bbo(t: _Tick, slug: str) -> tuple[float | None, float | None]:
         t.venue_states[state] += 1
         t.stats["venue_state"] = t.venue_states.most_common(1)[0][0]
         if state != _STATE_OPEN:
-            _miss(t, "venue_halted", state)
+            _miss(t, "venue_halted", state,
+                  count=not book and state not in ms.STATE_TERMINAL)
             return None, None
     if bid is None and ask is None:
-        _miss(t, "no_quote")
+        # OPEN and empty: the venue is up and this market has no makers,
+        # a per-market refusal. Only a read that named no state counts
+        _miss(t, "no_quote", count=state is None)
     else:
         t.misses = 0
     return bid, ask
@@ -2021,12 +2064,15 @@ class _Reading:
 
 async def _read_market(t: _Tick, whale: str, cid: str, slug: str, la: str, oa: str | None,
                        fills: list, read_quote: bool = True,
-                       market: dict | None = None) -> _Reading:
+                       market: dict | None = None, book: bool = False) -> _Reading:
     """`market` is the caller's own step-M reading when it has one
     (_tick_book reads the row once, BEFORE the plan); read here only
     for a candidate. A second read that failed would otherwise turn a
     live market into a "closed" one for the close rule (step-9 review:
-    one unreadable read is the named refusal, never a fact)."""
+    one unreadable read is the named refusal, never a fact). `book`
+    says the read is an EXISTING book's, for the miss streak's rule
+    (_bbo): a non-OPEN state on one is the book's own to handle, never
+    venue-outage evidence."""
     pos = mi.net_positions(fills)
     his_long = float(pos.get(la, 0.0)) if la else 0.0
     his_other = float(pos.get(oa, 0.0)) if oa else 0.0
@@ -2043,7 +2089,7 @@ async def _read_market(t: _Tick, whale: str, cid: str, slug: str, la: str, oa: s
 
     bid = ask = None
     if read_quote:
-        bid, ask = await _bbo(t, slug)
+        bid, ask = await _bbo(t, slug, book=book)
     venue = float((t.positions or {}).get(slug.lower(), 0.0)) if t.positions is not None else 0.0
     try:
         manual = float(await t.pool.fetchval(_SQL_MANUAL_SHARES, slug) or 0.0)
@@ -2615,7 +2661,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
                           "market_unreadable", {"kind": "no_plan", "market_unreadable": True,
                                                 "at": t.now})
         return
-    r = await _read_market(t, w, cid, slug, la, oa, fills, market=mk)
+    r = await _read_market(t, w, cid, slug, la, oa, fills, market=mk, book=True)
     if t.abandoned:
         return
     ledger = int(book.get("ledger_net") or 0)
