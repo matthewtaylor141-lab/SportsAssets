@@ -5428,9 +5428,11 @@ def test_the_knob_off_on_an_open_short_book_is_the_reversal_path(monkeypatch):
 def test_a_sign_flip_on_a_short_book_flattens_by_close_position_under_its_name(monkeypatch):
     """B8, owner default Q5 (a): his net crossed to the LONG side while
     our short book is open. The book flattens under the name sign_flip
-    -- the one proven short exit when sole -- and the long side opens
-    as a NEW episode only after the flat close (test_mirror_short_sign_flip
-    drives both directions through the close)."""
+    -- the one proven short exit when sole -- and, flat with nothing
+    open and the venue read at 0, the flip IS the close (2026-09-06):
+    the episode closes on the next tick's venue read and the long side
+    opens as a NEW episode after it (test_mirror_short_sign_flip drives
+    both directions through it)."""
     _shorts_on(monkeypatch)
     p = _pool()                                   # his net +300: the default fixture
     b = _short_book(p, ledger=-300)
@@ -5440,7 +5442,9 @@ def test_a_sign_flip_on_a_short_book_flattens_by_close_position_under_its_name(m
     assert _census(st, "short_side_refused") == 0
     assert ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v.calls and "place" not in _kinds(v)
     assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
-    assert b["state"] == "live" and len(p.books) == 1
+    # the venue was read at -300 before the cover: the close waits for
+    # the venue's own 0 (next tick), never the fill report alone
+    assert b["state"] == "live" and _census(st, "closed_cashed_out") == 0 and len(p.books) == 1
     # the shadow is compared against the UNCLAMPED signed target: no disagreement by construction
     assert _census(st, "shadow_live_disagree") == 0
 

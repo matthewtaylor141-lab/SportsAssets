@@ -748,9 +748,11 @@ def sign_flip(intent: Any, target: Any) -> bool:
     target on a short book, a negative one on a long book (brief B8,
     owner default Q5 (a)). The worker then flattens the book (target 0)
     under the name `sign_flip` and opens the opposite side as a NEW
-    episode once this one has closed -- the one-open-per-market index
-    and the flat close decide when. A target that is not an int, or 0,
-    or a book whose intent cannot be read, never flips."""
+    episode once this one has closed -- and since 2026-09-06 the flip
+    IS that close once the book is flat with no order open and the
+    venue reads 0 (episode_close_reason; no flat wait). A target that
+    is not an int, or 0, or a book whose intent cannot be read, never
+    flips."""
     if isinstance(target, bool) or not isinstance(target, int) or target == 0:
         return False
     if intent is None or intent == ORDER_INTENT:
@@ -1763,9 +1765,16 @@ def episode_close_reason(state: BookState, market_closed_or_resolved: bool | Non
     bool True says his net has crossed zero against this book, so the
     book is flattening to open the opposite side as a NEW episode. It
     names the 'held' reading `sign_flip` while shares are still held;
-    once flat the episode closes by the SAME clauses as any other flat
-    book -- the flat wait is not shortened -- so the opposite book
-    waits the flat close. Anything but the bool True is not a flip.
+    once flat -- and with no order open -- the flip IS the close: the
+    episode closes now, without the flat wait, so the opposite side's
+    book can open on the next tick (2026-09-06, owner 19:33Z "I need
+    more trades firing in the mirror sleeve": his +$18.7k Medvedev
+    flip sat behind a flat short book for the hour the wait would
+    have cost). The flat wait exists so a book he may re-buy is not
+    closed and reopened for nothing; a flip is the opposite reading --
+    his net is materially the other sign at the ratio (sign_flip()
+    reads a NONZERO whole target), so the next episode is the other
+    side, never this one. Anything but the bool True is not a flip.
 
       'sign_flip'        NOT YET: shares still held on a book his net
                          has crossed against; the flatten is in flight
@@ -1792,8 +1801,10 @@ def episode_close_reason(state: BookState, market_closed_or_resolved: bool | Non
                          not closed by us -- settlement from the venue
                          closes that row
       'not_due'          flat, but none of: the market closed or
-                         resolved; he has LEFT (vanish confirmed); the
-                         book sat flat at target 0 for `flat_close_s`
+                         resolved; he has LEFT (vanish confirmed); his
+                         net has FLIPPED against this book (sign_flipped
+                         True); the book sat flat at target 0 for
+                         `flat_close_s`
 
     Only the first two are a close; episode_close() is this reduced
     to the verdict, for the tick that asks nothing more. `flat_close_s`
@@ -1812,7 +1823,8 @@ def episode_close_reason(state: BookState, market_closed_or_resolved: bool | Non
         return "bad_state"
     if abs(st.ledger_net) >= FLAT_TOL_SHARES:
         return "sign_flip" if sign_flipped is True else "held"
-    due = market_closed_or_resolved is True or vanished_confirmed is True
+    due = (market_closed_or_resolved is True or vanished_confirmed is True
+           or sign_flipped is True)
     if not due:
         flat, limit = _num(flat_for_s), _num(flat_close_s)
         if limit is not None:

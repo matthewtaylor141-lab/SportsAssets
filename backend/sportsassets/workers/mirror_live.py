@@ -3311,9 +3311,18 @@ async def _close_settled(t: _Tick, book: dict, standing: dict, status: str) -> N
 
 
 async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
-                               vanished: bool, target: int | None, plan: dict) -> str:
+                               vanished: bool, target: int | None, plan: dict,
+                               venue_flat: bool = False) -> str:
     """Step E: the episode close by the rules' verdict, only with no
-    non-terminal order on the book."""
+    non-terminal order on the book. `venue_flat` is this tick's OWN
+    venue reading of the slug at zero: the sign-flip close (rules,
+    2026-09-06) is handed the flip only with it, so a book flattened
+    by a fill booked inside the tick (close_position, an IOC take, a
+    rest found filled on re-quote) waits one tick for the venue to
+    read 0 before the episode ends -- the same read-back every other
+    close has (review M-1: a venue residual after a same-tick close
+    would be unmanaged, and the next candidate refused
+    venue_already_holds with nothing named)."""
     if (book["id"] in t.open_by_book or book["id"] in t.nonterminal
             or book.get("state") == "closed"):
         return "orders_open"
@@ -3326,7 +3335,7 @@ async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
         flat_for = t.now - since
     why = rules.episode_close_reason(_book_state(book), None if market_live is None else not market_live,
                                      vanished, flat_for, 0,
-                                     sign_flipped=plan.get("sign_flip") is True)
+                                     sign_flipped=plan.get("sign_flip") is True and venue_flat is True)
     if why not in ("cashed_out", "cancelled"):
         return why
     verdict = await le._close_mirror_episode(t.pool, book["standing_row_id"],
@@ -3493,8 +3502,10 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # zero against this book. The book flattens under that name -- a
     # plan from a short ledger toward a positive target would run PAST
     # zero, the one sale the leg-space clamps forbid -- and the opposite
-    # side opens as a NEW episode once this one has closed (the
-    # one-open-per-market index and the flat close decide when). The
+    # side opens as a NEW episode once this one has closed: flat, no
+    # order open and the venue read at 0, the flip IS the close
+    # (2026-09-06; no flat wait), and the one-open-per-market index
+    # lets the next tick's candidate open the other side. The
     # shadow is compared against the UNCLAMPED target: it computes the
     # same signed figure from the same knob (E5)
     raw_target = target
@@ -3647,7 +3658,8 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         else:
             reason = await _act(t, book, r, p, kind, his_px, plan, cancel_reason) or reason
     finally:
-        why = await _maybe_close_episode(t, book, r.market_live, vanished, target, plan)
+        why = await _maybe_close_episode(t, book, r.market_live, vanished, target, plan,
+                                         venue_flat=abs(float(r.venue or 0.0)) < FLAT_TOL_SHARES)
         plan["close"] = why
         await _write_plan(t, book, r, target, tg["raw"], drift.drift, his_px, reason, plan)
 

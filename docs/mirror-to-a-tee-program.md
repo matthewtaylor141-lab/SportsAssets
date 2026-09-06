@@ -860,6 +860,26 @@ M1-total (all families) printed beside M1.
   flattened), nothing is placed or cancelled on it by any lane, and the refusal is expected on
   every tick until the market settles. Recorded here so the next reader does not file the
   refusal as a defect.
+- SIGN-FLIP REOPEN, 2026-09-06 (owner 19:33Z "I need more trades firing in the mirror sleeve! We
+  need to be mirroring a larger percentage of RN1s positions"). Book 27 (aec-atp-medvedev-tiafoe):
+  he opened short, our short book followed, then he flipped to +$18.7k long; our book flattened to
+  0 under `sign_flip` and then sat FLAT behind the 3600 s flat close (MIRROR_FLAT_CLOSE_S), and the
+  one-open-per-market index kept the long book from opening for that hour. Q5 (a) had said "the
+  flat wait is not shortened". Amended: in `rules.episode_close_reason`, `sign_flipped=True` on a
+  FLAT book with ZERO open orders is a close clause beside "market closed" and "vanish confirmed"
+  -- the episode closes on that tick (`cashed_out` when it ever bought, else `cancelled`) and the
+  opposite side opens as episode 2 on the next tick under the ordinary admission. The worker
+  hands the flip to the close only on a tick whose OWN venue reading of the slug is 0
+  (`_maybe_close_episode(venue_flat=...)`): a book flattened by a fill booked inside the tick
+  (close_position, an IOC take) waits one more tick for the venue's read-back, so a venue
+  residual after a cover is frozen `venue_ledger_disagree` on the live book instead of orphaned
+  behind a closed one (review finding M-1). The flat wait
+  exists so a book he may re-buy is not closed and reopened for nothing; a flip is the opposite
+  reading -- `sign_flip()` needs a NONZERO whole target of the other sign at the ratio, so his net
+  is materially the other way and the next episode is the other side, never this one. While a
+  flatten rest is still open the reading stays `orders_open`; while shares are held it stays
+  `sign_flip`; nothing else about the close moved. Pinned in test_mirror_short_sign_flip (both
+  directions, end to end) and test_mirror_live_rules.
 - U12 / U12b / U12c, 2026-09-06 -- THREE OWNER ORDERS, verbatim, and the rails they leave.
   13:36Z: "I don't want to cap books opened at all. I want max trade on one side of an event to be $1000
   between all fills." ~14:00Z: "Let's remove those caps so we start copying his actual book. Just trade

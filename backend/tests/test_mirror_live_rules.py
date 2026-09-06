@@ -2496,10 +2496,18 @@ def test_episode_close_reason_names_the_sign_flip_while_held_and_never_bad_state
     assert r.episode_close_reason(held, False, False, None, 0, sign_flipped=True) == "sign_flip"
     for not_true in (None, False, 1, "yes"):
         assert r.episode_close_reason(held, False, False, None, 0, sign_flipped=not_true) == "held"
-    # flat: the flip does not shorten the wait -- the same clauses as any flat book
+    # flat with no order open: the flip IS the close (2026-09-06) -- no
+    # flat wait, so the opposite side's book can open on the next tick
     flat = _short(0.0, 0.32, gross_buy_usd=204.0)
-    assert r.episode_close_reason(flat, False, False, 10.0, 0, sign_flipped=True) == "not_due"
+    assert r.episode_close_reason(flat, False, False, 10.0, 0, sign_flipped=True) == "cashed_out"
+    assert r.episode_close_reason(flat, False, False, None, 0, sign_flipped=True) == "cashed_out"
     assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0, sign_flipped=True) == "cashed_out"
+    # a flip that never bought closes 'cancelled', like any flat book
+    assert r.episode_close_reason(_short(0.0, None), False, False, None, 0, sign_flipped=True) == "cancelled"
+    # only the bool True flips; an order still open holds the close
+    for not_true in (None, False, 1, "yes"):
+        assert r.episode_close_reason(flat, False, False, 10.0, 0, sign_flipped=not_true) == "not_due"
+    assert r.episode_close_reason(flat, False, False, 10.0, 1, sign_flipped=True) == "orders_open"
     assert r.episode_close_reason(flat, True, False, None, 0) == "cashed_out"
     assert r.episode_close_reason(_short(0.0, None), True, False, None, 0) == "cancelled"
     # a long book with a negative ledger is still bad_state
