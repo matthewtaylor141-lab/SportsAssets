@@ -2916,10 +2916,20 @@ async def resolve_explain(pool, market_title: str | None,
         except Exception as exc:  # noqa: BLE001 — diagnostics never
             out["league_alias_probe"] = {"error": type(exc).__name__}
         return out
-    want = PREFIX_FOR_TYPE.get(market_type_of(global_slug or ""))
+    mtype = market_type_of(global_slug or "")
+    want = PREFIX_FOR_TYPE.get(mtype)
     if not want:
+        # THE SPLIT (C1 build step 5, measurement only): the step name
+        # stays -- the copy lane's census buckets on it -- and `split`
+        # says which of two different gaps this is: the slug grammar
+        # named NO family ('unparsed', a parser gap) or it named one the
+        # venue table carries no prefix for ('family_not_listed':
+        # prop / exact_score / btts / crypto, a venue-family gap).
         out["step"] = "unknown_market_type"
-        out["detail"] = f"market_type_of({global_slug!r}) is unrecognised"
+        out["split"] = "unparsed" if mtype == "unknown" else "family_not_listed"
+        out["detail"] = (f"market_type_of({global_slug!r}) is unrecognised" if mtype == "unknown"
+                         else f"market_type_of({global_slug!r}) = {mtype!r}: no venue prefix "
+                              f"for that family")
         return out
     kept = [r for r in rows if _prefix_of(r.get("identifier")) in want]
     if not kept:

@@ -150,6 +150,39 @@ EXIT_CENSUS_TIMEOUT_S = 15.0
 # decision 18; this is the count under which there is no reading at all.
 EXIT_MIN_N = 30
 _unmapped_until: dict[tuple[str, str], float] = {}
+# THE MIRROR MAPS WHAT THE COPY LANE MAPS (C1, owner order 2026-09-06).
+# After premap says no, map_market runs the copy lane's exact steps
+# (map_lane.exact_lane: the slug grammar through resolve_market_exact /
+# resolve_derivative_exact, his slug verbatim, resolve_team_yesno_exact)
+# and the mirror-only aec code-order side. Those are VENUE reads, so
+# they are paced through the measurement pacer like every read here,
+# remembered per (whale, condition_id) for MAP_CACHE_TTL_S so the tick
+# that follows costs nothing, and bounded per tick: MAP_READS_PER_TICK
+# resolver calls, a capped_env (the environment may only LOWER it),
+# past which a market stays unmapped THIS tick under `map_reads_capped`
+# and is read again next tick -- never TTL-skipped, never a verdict.
+MAP_READS_PER_TICK = int(rules.capped_env("MIRROR_MAP_READS", 10.0, floor=0.0))
+MAP_CACHE_TTL_S = 900.0
+# (whale, condition_id) -> {"until", "tokens": {asset: (slug, intent, source) | None},
+#                           "refusal": name | None}; a venue slug the
+# exact resolver saw 404 is remembered under the same TTL so a lane the
+# budget cut resumes where it stopped instead of re-reading the 404s
+_map_cache: dict[tuple[str, str], dict] = {}
+_slug_404_until: dict[str, float] = {}
+# the sources map_market can answer with, least to most certified: the
+# market's source is its least certified token when the two differ
+MAP_SOURCE_RANK = ("ledger", "premap", "exact", "yesno", "grammar")
+
+
+class MapBudget:
+    """One tick's venue budget for mapping: `cap` resolver calls, counted
+    on `reads`; `hits` counts the cache answering instead."""
+
+    def __init__(self, cap: int | None = None) -> None:
+        self.cap = MAP_READS_PER_TICK if cap is None else int(cap)
+        self.reads = 0
+        self.hits = 0
+        self.capped = 0
 # the venue's word for a market open for trading (bbo_read's `state`);
 # an empty book under it is `no_quote`, never a halt
 _STATE_OPEN = "MARKET_STATE_OPEN"
@@ -270,18 +303,25 @@ async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:
     markets table, not on trades (review round two): without it the
     premap lookup builds its keys from one source instead of three and
     misses the markets the copy sleeve never traded -- the very ones
-    the mirror exists to add."""
+    the mirror exists to add. The OUTCOME is coalesced from the token
+    catalogue the way the copy lane's unmapped census reads it
+    (api/app.py, COALESCE(t.outcome, mt.outcome); C1 build step 3): a
+    chain row is inserted with outcome NULL and enriched later, and a
+    NULL outcome was filed as no_side_match -- our miss, not the
+    venue's."""
     rows = await pool.fetch(
         """
         SELECT t.id, t.asset, t.side, t.size::float8 AS size, t.price::float8 AS price,
                extract(epoch FROM t.ts)::float8 AS ts,
                COALESCE(t.market_title, m.title) AS market_title, t.event_slug,
                m.event_title, COALESCE(t.market_slug, m.slug) AS market_slug,
-               t.outcome, t.outcome_index,
+               COALESCE(t.outcome, mt.outcome) AS outcome,
+               COALESCE(t.outcome_index, mt.outcome_index) AS outcome_index,
                COALESCE(NULLIF(m.sport, 'unclassified'), NULLIF(t.sport, 'unclassified'),
                         'unclassified') AS sport
           FROM trades t JOIN whales w ON w.id = t.whale_id
           LEFT JOIN markets m ON m.condition_id = t.condition_id
+          LEFT JOIN market_tokens mt ON mt.token_id = t.asset
          WHERE lower(w.username) = $1 AND t.condition_id = $2
          ORDER BY t.ts, t.id
         """, whale, condition_id)
@@ -345,13 +385,109 @@ def _choose_long(assets: list[str], cands: dict[str, tuple[str, str]],
     return None
 
 
-async def map_market(pool, fills: list[dict]) -> dict | None:
+def _venue_reader(pmus, budget: MapBudget, out: dict | None):
+    """The paced, counted, bounded venue read the exact lane runs every
+    resolver call through: one measurement-pacer slot per call (the
+    _paced_bbo shape), one budget unit per call, the count on `out`."""
+    from ..map_lane import ReadsCapped
+
+    async def _read(fn, *args):
+        if budget.reads >= budget.cap:
+            raise ReadsCapped()
+        budget.reads += 1
+        if out is not None:
+            out["venue_reads"] = int(out.get("venue_reads") or 0) + 1
+
+        def _call():
+            pace(READ_PACING_S)
+            return fn(*args)
+
+        return await asyncio.to_thread(_call)
+    return _read
+
+
+def _lane_available(pmus) -> bool:
+    """The venue module carries the copy lane's resolvers (a test fake
+    that quotes but cannot resolve is a lane that is not there: named,
+    never an exception in the middle of a tick)."""
+    return all(callable(getattr(pmus, n, None)) for n in
+               ("resolve_market_exact", "resolve_derivative_exact",
+                "resolve_team_yesno_exact"))
+
+
+def _prune_maps(now_ts: float) -> None:
+    """Drop expired entries (review C): both memories are bounded by
+    the TTL, never by the number of markets he has ever traded."""
+    for k in [k for k, v in _map_cache.items() if float(v.get("until") or 0.0) <= now_ts]:
+        _map_cache.pop(k, None)
+    for k in [k for k, v in _slug_404_until.items() if float(v) <= now_ts]:
+        _slug_404_until.pop(k, None)
+
+
+async def _exact_for_token(pool, pmus, f: dict, read, now_ts: float,
+                           retrieve=None) -> tuple[dict | None, str | None]:
+    """The copy lane's exact steps for ONE of his tokens: ({slug, intent,
+    source[, side_index, outcome_desc]} | None, refusal). Candidates the
+    venue answered 404 inside the TTL are skipped without a read (the
+    resumable lane)."""
+    from .. import map_lane
+
+    diag: list[str] = []
+    cands: list[str] = []
+    ctx = {"market_slug": f.get("market_slug"), "event_slug": f.get("event_slug"),
+           "market_title": f.get("market_title"), "event_title": f.get("event_title"),
+           "outcome": f.get("outcome"), "outcome_index": f.get("outcome_index")}
+
+    async def _read(fn, *args):
+        # a single-candidate exact call on a slug the venue 404'd inside
+        # the TTL: the remembered answer, no venue call
+        if fn is getattr(pmus, "resolve_market_exact", None) and args and \
+                isinstance(args[0], list) and len(args[0]) == 1:
+            slug = str(args[0][0] or "").lower()
+            if _slug_404_until.get(slug, 0.0) > now_ts:
+                if len(args) > 2 and isinstance(args[2], list) and len(args[2]) < 24:
+                    args[2].append("404")
+                return None
+            n0 = len(diag)
+            res = await read(fn, *args)
+            if res is None and len(diag) > n0 and diag[n0] == "404":
+                _slug_404_until[slug] = now_ts + MAP_CACHE_TTL_S
+            return res
+        return await read(fn, *args)
+
+    mapping, source, refusal = await map_lane.exact_lane(
+        pool, pmus, ctx, _read, diag=diag, cands_out=cands, grammar=True, retrieve=retrieve)
+    if mapping and mapping.get("market_slug") and mapping.get("intent"):
+        v = {"slug": str(mapping["market_slug"]), "intent": str(mapping["intent"]),
+             "source": str(source)}
+        if source == map_lane.SRC_GRAMMAR:
+            v["side_index"] = mapping.get("side_index")
+            v["outcome_desc"] = mapping.get("outcome")
+            v["his_slug"] = str(ctx.get("market_slug") or ctx.get("event_slug") or "")
+        return v, None
+    return None, refusal
+
+
+async def map_market(pool, fills: list[dict], pmus=None, *, whale: str | None = None,
+                     condition_id: str | None = None, budget: MapBudget | None = None,
+                     out: dict | None = None) -> dict | None:
     """{us_slug, long_asset, other_asset, source[, per_side]} for the
     condition, or None. Our own ledger first: the newest live_orders row
     on EACH of his tokens carries the slug and the intent we actually
     traded on. Else the premap table with the trade's own context
-    (Postgres only). The long side is then chosen by shape, never by
-    which row or fill came first (_choose_long)."""
+    (Postgres only). Else -- when a venue module is given (C1) -- the
+    copy lane's exact steps per token through map_lane.exact_lane: paced,
+    remembered per (whale, condition_id) for MAP_CACHE_TTL_S, bounded by
+    `budget` (MAP_READS_PER_TICK a tick; past it the market stays
+    unmapped this tick, `out["refusal"] == "map_reads_capped"`). Without
+    a venue module the read is table-only, as before (the cover report).
+    The long side is then chosen by shape, never by which row or fill
+    came first (_choose_long).
+
+    `out`, when given, carries what happened: `cache_hit` (the exact
+    lane answered from memory), `venue_reads` (resolver calls made),
+    `refusal` (a step found his market and refused the side, by name --
+    side_code_unmatched and its siblings -- or the budget), `lane`."""
     assets = sorted({str(f.get("asset") or "") for f in fills if f.get("asset")})
     if not assets:
         return None
@@ -392,9 +528,193 @@ async def map_market(pool, fills: list[dict]) -> dict | None:
             m = None
         if m and m.get("market_slug") and m.get("intent"):
             cands[a] = (str(m["market_slug"]), str(m["intent"]))
-    if not cands:
+    if cands:
+        return _choose_long(assets, cands, pos, "premap")
+    if pmus is None:
         return None
-    return _choose_long(assets, cands, pos, "premap")
+    return await _map_exact(pool, pmus, assets, by_asset, pos, whale, condition_id, budget, out)
+
+
+async def _catalogue_pair(pool, condition_id: str | None, asset: str, v: dict) -> str | None:
+    """The pair rule read off the token catalogue for a single-token fill:
+    market_tokens must carry exactly the condition's two tokens, the
+    mapped token at the code's position and the sibling at the
+    complement with no claim on the mapped code (map_lane.pair_agrees).
+    Any absence or disagreement is side_code_pair -- fail closed."""
+    from .. import map_lane
+
+    if not condition_id:
+        return map_lane.REFUSE_CODE_PAIR
+    try:
+        rows = [dict(r) for r in await pool.fetch(
+            "SELECT token_id, outcome, outcome_index FROM market_tokens "
+            "WHERE condition_id = $1 /* map-catalogue-pair */", str(condition_id))]
+    except Exception:  # noqa: BLE001 — an unreadable catalogue corroborates nothing
+        return map_lane.REFUSE_CODE_PAIR
+    mine = [r for r in rows if str(r.get("token_id")) == str(asset)]
+    others = [r for r in rows if str(r.get("token_id")) != str(asset)]
+    if len(rows) != 2 or len(mine) != 1 or len(others) != 1:
+        return map_lane.REFUSE_CODE_PAIR
+    # THE SIBLING'S NAME IS THE ONLY THING THAT PINS THE ORDER (round-3
+    # review, major-conditional): the catalogue's indices come from the
+    # same feed as his fill's, so with the sibling's outcome NULL nothing
+    # says the feed's index order is the slug's team order, and
+    # pair_agrees would pass on the index complement alone -- a wrong
+    # side that opens a live book. An unnamed sibling corroborates
+    # nothing: side_code_pair.
+    if not str(others[0].get("outcome") or "").strip():
+        return map_lane.REFUSE_CODE_PAIR
+    i = v.get("side_index")
+    try:
+        if int(mine[0].get("outcome_index")) != int(i):
+            return map_lane.REFUSE_CODE_PAIR
+    except (TypeError, ValueError):
+        return map_lane.REFUSE_CODE_PAIR
+    return map_lane.pair_agrees(v.get("his_slug"), i, others[0].get("outcome"),
+                                others[0].get("outcome_index"))
+
+
+async def _map_exact(pool, pmus, assets: list[str], by_asset: dict[str, dict],
+                     pos: dict[str, float], whale: str | None, condition_id: str | None,
+                     budget: MapBudget | None, out: dict | None) -> dict | None:
+    """The exact lane over his tokens, larger position first, stopping
+    when one token's copy-lane answer names both sides (a shared-
+    identifier aec- side, or a yes/no contract: the other token is the
+    other side by construction, exactly what the per-fill copy lane
+    knows about the sibling it never maps). A per-side family (distinct
+    identifiers) reads both tokens so _choose_long can pick his
+    directional side.
+
+    THE GRAMMAR CLASS IS JUDGED ON BOTH TOKENS (review (3), E): a token
+    the aec code side mapped is a mapping only when its sibling in the
+    fills agrees by its own facts (map_lane.pair_agrees: complementary
+    outcome index, no claim on the mapped code) -- no venue read, the
+    sibling's lane never runs -- and ANY named refusal on any token that
+    the pair rule cannot resolve (ambiguous, conflict, no index, shape)
+    refuses the whole market. Verdicts are remembered per token; a
+    market the budget cut gets NO entry (review C)."""
+    from .. import map_lane
+    from ..map_lane import ReadsCapped
+
+    if out is None:
+        out = {}
+    if not _lane_available(pmus):
+        # not a refusal of HIS market: the market keeps premap's own
+        # explain, and the absence is named on the row's detail
+        out["lane"] = "unavailable"
+        return None
+    budget = budget if budget is not None else MapBudget()
+    now_ts = time.time()
+    _prune_maps(now_ts)
+    key = (str(whale or "").lower(), str(condition_id or ""))
+    ent = _map_cache.get(key)
+    tokens: dict = dict(ent["tokens"]) if ent else {}
+    refusals: dict = dict(ent.get("refusals") or {}) if ent else {}
+    read = _venue_reader(pmus, budget, out)
+    markets: dict[str, dict] = {}
+
+    def _fetch(slug: str) -> dict:
+        return (pmus._get_client().markets.retrieve_by_slug(slug) or {}).get("market") or {}
+
+    async def _retrieve(slug: str) -> dict:
+        # the aec payload read once per market per call, both tokens
+        if slug not in markets:
+            markets[slug] = await read(_fetch, slug)
+        return markets[slug]
+
+    def _remember() -> None:
+        if tokens:
+            _map_cache[key] = {"until": now_ts + MAP_CACHE_TTL_S, "tokens": dict(tokens),
+                               "refusals": dict(refusals)}
+
+    order = sorted(assets, key=lambda a: (-abs(float(pos.get(a, 0.0))), a))
+    for a in order:
+        if a in tokens:
+            budget.hits += 1
+            out["cache_hit"] = int(out.get("cache_hit") or 0) + 1
+            verdict = tokens[a]
+        else:
+            grammar_done = any(isinstance(v, dict) and v.get("source") == map_lane.SRC_GRAMMAR
+                               for v in tokens.values())
+            if grammar_done:
+                # the sibling of a grammar-mapped token: judged by the
+                # pair rule below from his own facts, never read
+                tokens[a] = {"pair": True}
+                continue
+            f = by_asset.get(a) or {}
+            try:
+                verdict, why = await _exact_for_token(pool, pmus, f, read, now_ts, _retrieve)
+            except ReadsCapped:
+                budget.capped += 1
+                out["refusal"] = "map_reads_capped"
+                _remember()
+                return None
+            except Exception as exc:  # noqa: BLE001 — one token's lane, named on the detail
+                log.warning("mirror_shadow: exact lane for %s raised (%s)", a, type(exc).__name__)
+                out["lane_error"] = type(exc).__name__
+                verdict, why = None, None
+            tokens[a] = verdict
+            if why:
+                refusals[a] = why
+        if isinstance(verdict, dict) and verdict.get("source") in (map_lane.SRC_EXACT,
+                                                                    map_lane.SRC_YESNO):
+            if verdict["slug"].startswith("aec-") or verdict["source"] == map_lane.SRC_YESNO:
+                break                   # the other token is the other side
+    _remember()
+    # ---- the verdict for the market
+    hard = [w for w in refusals.values() if w not in map_lane.PAIR_RESOLVABLE]
+    if hard:
+        out["refusal"] = hard[0]        # review E: a refused token refuses the market
+        return None
+    copy_lane = {a: v for a, v in tokens.items()
+                 if isinstance(v, dict) and v.get("source") in (map_lane.SRC_EXACT,
+                                                                 map_lane.SRC_YESNO)}
+    if copy_lane:
+        cands = {a: (v["slug"], v["intent"]) for a, v in copy_lane.items()}
+        sources = [v["source"] for v in copy_lane.values()]
+        source = max(sources, key=lambda s: MAP_SOURCE_RANK.index(s))
+        out["lane"] = source
+        return _choose_long(assets, cands, pos, source)
+    grammar = {a: v for a, v in tokens.items()
+               if isinstance(v, dict) and v.get("source") == map_lane.SRC_GRAMMAR}
+    if not grammar:
+        if refusals:
+            out["refusal"] = next(iter(refusals.values()))
+        return None
+    if len(grammar) == 2:
+        (a1, v1), (a2, v2) = list(grammar.items())
+        if v1["slug"] != v2["slug"] or v1["intent"] == v2["intent"]:
+            out["refusal"] = map_lane.REFUSE_CODE_PAIR
+            return None
+    else:
+        (a1, v1), = list(grammar.items())
+        siblings = [a2 for a2 in assets if a2 != a1]
+        if siblings:
+            for a2 in siblings:
+                f2 = by_asset.get(a2) or {}
+                why = map_lane.pair_agrees(v1.get("his_slug"), v1.get("side_index"),
+                                           f2.get("outcome"), f2.get("outcome_index"))
+                if why:
+                    out["refusal"] = why
+                    return None
+        else:
+            # A SINGLE-TOKEN FILL (round 3, review 1): nothing in his fills
+            # pins the feed's index order to the slug's team order, and a
+            # first-word collision would map the wrong side on the index
+            # alone. The market's own token catalogue (market_tokens) must
+            # corroborate BOTH tokens' indices against the slug order --
+            # the mapped token's own row at its position and the sibling's
+            # row as the pair rule reads it -- else side_code_pair
+            why = await _catalogue_pair(pool, condition_id, a1, v1)
+            if why:
+                out["refusal"] = why
+                return None
+    cands = {a: (v["slug"], v["intent"]) for a, v in grammar.items()}
+    out["lane"] = map_lane.SRC_GRAMMAR
+    out["grammar"] = {"his_slug": v1.get("his_slug"), "side_index": v1.get("side_index"),
+                      "outcome_desc": v1.get("outcome_desc"), "intent": v1.get("intent"),
+                      "slug": v1["slug"], "asset": a1}
+    return _choose_long(assets, cands, pos, map_lane.SRC_GRAMMAR)
 
 
 # --------------------------------------------------------------- ours
@@ -609,10 +929,18 @@ def _family_of(slug: str | None) -> str:
         return "unknown"
 
 
-async def explain_unmapped(pool, ctx: dict) -> str:
-    """WHY premap said no, as the resolver's own step name (the same
-    read-only resolve_explain the copy lane's unmapped census uses), or
-    a named failure -- never a guess."""
+async def explain_unmapped(pool, ctx: dict, refusal: str | None = None) -> str:
+    """WHY the market is unmapped: a REFUSAL the exact lane named
+    (side_code_unmatched and its siblings, the budget) when it found his
+    market and refused the side; else why premap said no, as the
+    resolver's own step name (the same read-only resolve_explain the
+    copy lane's unmapped census uses -- a market the exact steps also
+    fail keeps premap's name), or a named failure -- never a guess.
+    `unknown_market_type` carries its split (C1 build step 5):
+    `:unparsed` (the slug grammar named no family) or
+    `:family_not_listed` (a family the venue table has no prefix for)."""
+    if refusal:
+        return str(refusal)
     try:
         from . import premap as _premap
     except Exception:  # noqa: BLE001
@@ -622,7 +950,9 @@ async def explain_unmapped(pool, ctx: dict) -> str:
                                            ctx.get("outcome"), ctx.get("his_slug"))
     except Exception as exc:  # noqa: BLE001 — one market's why, named
         return f"explain_raised:{type(exc).__name__}"
-    return str((ex or {}).get("step") or "unknown")
+    step = str((ex or {}).get("step") or "unknown")
+    split = (ex or {}).get("split")
+    return f"{step}:{split}" if split else step
 
 
 # THE LIVE ROWS ARE NEVER TRUNCATED (Phase 0 review of the instruments,
@@ -1285,25 +1615,42 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
                         positions: dict[str, float] | None,
                         snap_age_s: float | None = None,
                         allow_short: bool = False,
-                        snap_partial: bool = False) -> dict:
+                        snap_partial: bool = False,
+                        map_budget: MapBudget | None = None) -> dict:
     """One (whale, market) reading. `positions` is this tick's account
     walk (None = the walk failed: venue unreadable, plan frozen). `snap`
     is the exit worker's raw positions read; a token ABSENT from a fresh
     and complete read is a position he no longer holds (0), which is the
     exact case drift exists to catch -- fills say he holds, the venue
     says he merged out (review round two). Absent from a PARTIAL read is
-    unknown (None). Returns the row that was written."""
+    unknown (None). `map_budget` is the tick's venue budget for the exact
+    mapping lane (C1); None is a fresh per-call budget. Returns the row
+    that was written."""
     fills = await his_fills(pool, whale, condition_id)
     pos = mi.net_positions(fills)
     row: dict[str, Any] = {"whale": whale, "condition_id": condition_id,
                            "ratio": ratio, "detail": {}}
-    m = await map_market(pool, fills)
+    mo: dict[str, Any] = {}
+    m = await map_market(pool, fills, pmus, whale=whale, condition_id=condition_id,
+                         budget=map_budget, out=mo)
+    if mo.get("cache_hit"):
+        row["detail"]["map_cache_hit"] = int(mo["cache_hit"])
+    if mo.get("venue_reads"):
+        row["detail"]["map_venue_reads"] = int(mo["venue_reads"])
+    if mo.get("lane") == "unavailable" or mo.get("lane_error"):
+        row["detail"]["map_lane"] = str(mo.get("lane_error") or "unavailable")
     if not m:
         assets = sorted(pos)
+        capped = mo.get("refusal") == "map_reads_capped"
         row.update(long_asset=assets[0] if assets else None,
                    other_asset=assets[1] if len(assets) > 1 else None,
                    his_long=None, his_other=None, his_net=None,
-                   reason="unmapped: no US market for his tokens")
+                   # a market past the tick's mapping budget has NO
+                   # verdict: its reason never starts with 'unmapped', so
+                   # the unmapped TTL never remembers it and next tick
+                   # reads it again
+                   reason=("map reads capped: no verdict this tick" if capped
+                           else "unmapped: no US market for his tokens"))
         # WHAT THE UNMAPPED MARKET IS (Phase 0): the row used to carry two
         # token ids and nothing else, so 81% of his markets were one
         # number with no family, no dollars and no reason. Each is now
@@ -1315,7 +1662,7 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
             his_slug=ctx["his_slug"], title=ctx["title"], event_title=ctx["event_title"],
             event_slug=ctx["event_slug"], sport=ctx["sport"],
             family=_family_of(ctx["his_slug"]),
-            explain=await explain_unmapped(pool, ctx),
+            explain=await explain_unmapped(pool, ctx, mo.get("refusal")),
             notional_6h=notional_in_window(fills, LOOKBACK_H),
             gross_sh=round(sum(pos.values()), 4),
             outcome_null=outcome_null_count(fills))
@@ -1693,7 +2040,14 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
                              "stale_snapshots": 0, "skipped_backoff": False, "ratio": {},
                              # the venue's own market state, the most common one
                              # read this tick (None: no read carried one)
-                             "venue_state": None}
+                             "venue_state": None,
+                             # THE MAPPING LANE'S CENSUS (C1): markets mapped by
+                             # source; the exact lane's venue reads, cache hits,
+                             # and markets left without a verdict by the budget
+                             "mapped_by": {"ledger": 0, "premap": 0, "exact": 0,
+                                           "grammar": 0, "yesno": 0},
+                             "map_venue_reads": 0, "map_cache_hit": 0, "map_reads_capped": 0}
+    map_budget = MapBudget()
     if knob_unreadable:
         stats.update(status="degraded", intent_guard_unreadable=knob_unreadable)
     if now_ts < _backoff_until:
@@ -1745,7 +2099,7 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
             try:
                 row = await shadow_market(pool, pmus, w, cid, r.get("ratio"), snap,
                                           positions, snap_age, allow_short=allow_short,
-                                          snap_partial=snap_partial)
+                                          snap_partial=snap_partial, map_budget=map_budget)
             except Exception as exc:  # noqa: BLE001 — one market, not the tick
                 log.warning("mirror_shadow: %s/%s failed (%s)", w, cid, type(exc).__name__)
                 continue
@@ -1756,6 +2110,13 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
                 if not isinstance(row.get("detail"), dict):
                     row["detail"] = {}
                 row["detail"]["target_unreadable"] = knob_unreadable
+            _d = row.get("detail") or {}
+            stats["map_venue_reads"] += int(_d.get("map_venue_reads") or 0)
+            stats["map_cache_hit"] += int(_d.get("map_cache_hit") or 0)
+            if str(row.get("reason") or "").startswith("map reads capped"):
+                stats["map_reads_capped"] += 1
+            if row.get("us_market_slug") and _d.get("map") in stats["mapped_by"]:
+                stats["mapped_by"][_d["map"]] += 1
             if str(row.get("reason") or "").startswith("unmapped"):
                 stats["unmapped"] += 1
                 _unmapped_until[(w, cid)] = now_ts + UNMAPPED_TTL_S

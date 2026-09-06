@@ -4478,10 +4478,16 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     assert keys.count("ledger_dust") == 1
     assert keys.index("ledger_dust") == keys.index("book_error") + 1
     # U12: `books_unreadable` appended after the short side's names; the
-    # U12c review's two names after it, LAST
+    # U12c review's two names after it; C1's four mapping-lane names
+    # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-4:] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
-    assert keys[-5] == "short_share_cap" and keys.count("books_unreadable") == 1
+    assert keys[-14:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+                          "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
+                          "map_venue_read", "map_cache_hit",
+                          # C1 round 2: the grammar class's certification names
+                          "grammar_echo_unreadable", "grammar_tripped", "grammar_probation",
+                          "grammar_echo_unverified", "grammar_echo_ok", "side_echo_mismatch")
+    assert keys[-15] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -4498,9 +4504,12 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # past the cap by construction, so it rides on the served `integ` block
     ik = ml._INTEG_CENSUS_KEYS
     assert ik.count("ledger_dust") == 1 and ik[ik.index("venue_halted") + 1] == "ledger_dust"
-    assert ik[ik.index("ledger_dust") + 1] == "short_reduce_unproven" and ik[-5] == "short_share_cap"
-    assert ik[-4:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
-                       "shadow_check_skipped"), "served on integ"
+    assert ik[ik.index("ledger_dust") + 1] == "short_reduce_unproven" and ik[-8] == "short_share_cap"
+    assert ik[-7:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+                       "shadow_check_skipped",
+                       # C1 round 2 (review D, (4)): three names, the block stays under 40
+                       "map_source_unverified", "map_reads_capped", "side_echo_mismatch"), \
+        "served on integ"
     # and `integ` itself stays inside the served 40-key top level
     from sportsassets.api import app as api_app
     order = list(ml._new_stats())
@@ -5883,6 +5892,126 @@ def test_a_sub_dollar_flatten_still_leaves_and_reaches_close_position(monkeypatc
     assert _census(st5, "under_min_notional") == 1 and not _places(v5)
     src = inspect.getsource(ml._place)
     assert 'kind in ("flatten_paired", "flatten_vanished")' in src and "not flattening and" in src
+
+
+# ------------------------------------------ 11d. the mapping lane (C1)
+
+def test_the_candidate_names_the_mapping_lanes_four_events(monkeypatch):
+    """C1: the shadow's mapper is called with the tick's venue budget and
+    what it reports is counted by name -- its venue reads and cache
+    answers as events, a source the live worker has not certified
+    (`grammar`) refused before admission and TTL-skipped, a candidate
+    past the mapping budget refused with NO verdict and never
+    TTL-skipped. Driven through _tick_candidate with the mapper faked
+    (tests/test_mirror_maps_the_copy_lane.py drives the mapper itself)."""
+    seen = []
+
+    async def _grammar(pool, fills, pmus=None, **kw):
+        seen.append(kw)
+        kw["out"]["venue_reads"] = 2
+        kw["out"]["cache_hit"] = 1
+        return {"us_slug": SLUG, "long_asset": M, "other_asset": N, "source": "grammar"}
+
+    monkeypatch.setattr(ms, "map_market", _grammar)
+    monkeypatch.setattr(ml, "_unmapped_until", {})
+    ml._current_stats = ml._new_stats()
+    t = ml._Tick(pool=_pool(), pmus=_Venue(), http=_Http(), now=NOW, stats=ml._current_stats)
+    _run(ml._tick_candidate(t, "rn1", CID))
+    c = ml._current_stats["census"]
+    # round 2: a grammar map goes to the class's own certification, which
+    # this map (no side facts) cannot pass -- refused by that name
+    assert c["grammar_echo_unverified"] == 1 and c["map_venue_read"] == 2 and c["map_cache_hit"] == 1
+    assert c["map_source_unverified"] == 0
+    assert ("rn1", CID) in ml._unmapped_until
+    assert seen and seen[0]["budget"] is t.map_budget and seen[0]["whale"] == "rn1"
+    assert seen[0]["condition_id"] == CID and isinstance(t.map_budget, ms.MapBudget)
+
+    async def _unknown(pool, fills, pmus=None, **kw):
+        return {"us_slug": SLUG, "long_asset": M, "other_asset": N, "source": "fuzzy"}
+
+    monkeypatch.setattr(ms, "map_market", _unknown)
+    monkeypatch.setattr(ml, "_unmapped_until", {})
+    ml._current_stats = ml._new_stats()
+    t = ml._Tick(pool=_pool(), pmus=_Venue(), http=_Http(), now=NOW, stats=ml._current_stats)
+    _run(ml._tick_candidate(t, "rn1", CID))
+    assert ml._current_stats["census"]["map_source_unverified"] == 1
+    assert ("rn1", CID) in ml._unmapped_until
+
+    async def _capped(pool, fills, pmus=None, **kw):
+        kw["out"]["refusal"] = "map_reads_capped"
+        return None
+
+    monkeypatch.setattr(ms, "map_market", _capped)
+    monkeypatch.setattr(ml, "_unmapped_until", {})
+    ml._current_stats = ml._new_stats()
+    t = ml._Tick(pool=_pool(), pmus=_Venue(), http=_Http(), now=NOW, stats=ml._current_stats)
+    _run(ml._tick_candidate(t, "rn1", CID))
+    assert ml._current_stats["census"]["map_reads_capped"] == 1
+    assert ml._unmapped_until == {}, "no verdict: read again next tick"
+    ml._current_stats = None
+
+
+def test_the_grammar_class_names_its_certification(monkeypatch):
+    """C1 round 2: every gate of the grammar class's own certification is
+    a census name (the venue-truth check unreadable / unverified / ok, the
+    trip, the probation, the first-fill mismatch); the mapper itself is
+    driven in tests/test_mirror_maps_the_copy_lane.py."""
+    g = {"his_slug": "cfb-bayl-aubrn-2026-09-05", "side_index": 0, "outcome_desc": "Bears",
+         "intent": INTENT, "slug": "aec-cfb-bayl-aubrn-2026-09-05", "asset": M}
+    aec = {"slug": g["slug"], "closed": False, "question": "Baylor vs. Auburn",
+           "marketSides": [{"identifier": g["slug"], "description": "Bears", "long": True},
+                           {"identifier": g["slug"], "description": "Tigers", "long": False}]}
+    con = {"slug": "atc-cfb-bayl-aubrn-2026-09-05-bayl", "outcome": "Bears", "title": "Bears"}
+
+    async def _grammar(pool, fills, pmus=None, **kw):
+        kw["out"]["grammar"] = dict(g)
+        return {"us_slug": g["slug"], "long_asset": M, "other_asset": N, "source": "grammar"}
+
+    monkeypatch.setattr(ms, "map_market", _grammar)
+    ml._current_stats = ml._new_stats()
+    p = _pool()
+
+    def _cand():
+        monkeypatch.setattr(ml, "_unmapped_until", {})
+        t = ml._Tick(pool=p, pmus=_Venue(), http=_Http(), now=NOW, stats=ml._current_stats)
+        _run(ml._tick_candidate(t, "rn1", CID))
+        return t
+
+    c = ml._current_stats["census"]
+    # unreadable state: refused by name, TTL-skipped
+    p.raise_on.append(("SELECT value FROM ingestion_state", RuntimeError("db down")))
+    _cand()
+    assert c["grammar_echo_unreadable"] == 1 and ("rn1", CID) in ml._unmapped_until
+    p.raise_on.clear()
+    # no contract listed: unverified
+    monkeypatch.setattr(ml, "_market_read", lambda pmus, slug: aec if slug == g["slug"] else None)
+    _cand()
+    assert c["grammar_echo_unverified"] == 1
+    # the contract names the side: ok, pending recorded, the candidate
+    # goes on to admission
+    monkeypatch.setattr(ml, "_market_read", lambda pmus, slug: aec if slug == g["slug"] else con)
+    t = _cand()
+    assert c["grammar_echo_ok"] == 1
+    assert p.state["mirror_grammar_echo"]["pending"][g["slug"]]["outcome_desc"] == "Bears"
+    # a grammar book awaiting its first fill: the next one waits, and is
+    # never TTL-skipped for it
+    b = dict(p.add_book(ledger=0, map_source="grammar", us_market_slug=g["slug"]))
+    _cand()
+    assert c["grammar_probation"] == 1 and ml._unmapped_until == {}
+    # its first fill echoes the other side: frozen, the class tripped
+    b["ledger_net"] = 40
+    monkeypatch.setattr(ml, "_position_echo", lambda pmus, slug: {"net": 40.0, "outcome": "Tigers"})
+    assert _run(ml._grammar_fill_check(t, b)) == "frozen"
+    assert b["state"] == "frozen" and b["frozen_reason"] == "side_echo_mismatch"
+    _cand()
+    assert c["grammar_tripped"] == 1 and c["side_echo_mismatch"] == 1
+    for k in ("grammar_echo_unreadable", "grammar_echo_unverified", "grammar_echo_ok",
+              "grammar_probation", "side_echo_mismatch", "grammar_tripped"):
+        assert c[k] >= 1, k
+    for k in ("map_source_unverified", "map_reads_capped", "side_echo_mismatch"):
+        assert k in ml._INTEG_CENSUS_KEYS
+    assert len(ml._integ_block(ml._new_stats())) < 40
+    ml._current_stats = None
 
 
 # ------------------------------------------------ 12. the census coverage

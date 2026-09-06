@@ -230,6 +230,21 @@ CENSUS_KEYS: tuple[str, ...] = (
     # FIX-3b: the shadow row lacked what a raw-arithmetic comparison
     # needs (never a disagree)
     "shadow_check_skipped",
+    # C1 (2026-09-06), the mirror maps what the copy lane maps: a
+    # candidate past the tick's mapping budget (no verdict, read again
+    # next tick), a mapping whose source the live worker does not admit
+    # (MIRROR_LIVE_MAP_SRC), and the exact lane's venue reads and cache
+    # answers, counted as events. Appended LAST: the served census is a
+    # 40-key prefix of this tuple and its order is pinned
+    "map_reads_capped", "map_source_unverified", "map_venue_read", "map_cache_hit",
+    # C1 round 2: the grammar class's own certification -- its state
+    # unreadable, the class tripped, another grammar book still awaiting
+    # its first-fill echo, the venue-truth check that could not run or
+    # passed, and the mismatch that trips (before an open or on the
+    # first fill: `side_echo_mismatch`, the name the copy lane's own
+    # circuit uses for the same fact)
+    "grammar_echo_unreadable", "grammar_tripped", "grammar_probation",
+    "grammar_echo_unverified", "grammar_echo_ok", "side_echo_mismatch",
 )
 _FAMILIES = (("mapping:", "mapping"), ("edge_gate:", "edge_gate"),
              ("cell_gate_", "cell_gate"), ("place_refused:", "place_refused"))
@@ -902,6 +917,288 @@ class _Tick:
     # per-tick guard; False sends the 047-shaped statements and keeps
     # the MIRROR_SHORTS knob effectively off (P2 rung S0)
     short_col: bool = False
+    # the tick's venue budget for the exact mapping lane (C1): the
+    # shadow's own MapBudget, ms.MAP_READS_PER_TICK resolver calls a
+    # tick across every candidate, past which a candidate is
+    # `map_reads_capped` -- no verdict, read again next tick
+    map_budget: Any = field(default_factory=lambda: ms.MapBudget())
+
+
+# THE SOURCES A LIVE BOOK MAY OPEN FROM (C1). map_market answers with
+# 'ledger' | 'premap' | 'exact' | 'yesno' | 'grammar'. The first four go
+# to le._mapping_admitted exactly as a copy fill's mapping_src does:
+# 'premap' and 'exact' ride QUARANTINE_RESUME_SRC (the copy lane's own
+# resume lane, same whale allowlist, same premap_live switch); 'yesno'
+# is the copy lane's yesno_exact -- refused by name while the mapping
+# quarantine holds (`quarantined: ... (src=yesno, ...)`), admitted the
+# day the owner lifts it, the same day the copy lane's is; 'ledger' is
+# the copy lane's own traded row and reads the same way.
+#
+# 'grammar' (the aec code side, map_lane.aec_code_side) is a MIRROR
+# class (C1 round 2, owner order 2026-09-06 18:25Z "college football
+# ... should be very easy to map"). The copy lane has no side rule it
+# could inherit -- its aec- rule is name similarity on the venue's side
+# descriptions plus the venue's long marker (pmus.resolve_market_exact),
+# which refuses mascots outright -- so the 2,012 side echoes on
+# side_echo_last certify nothing about a side chosen by team code. The
+# class opens live books ONLY through its own certification
+# (_grammar_admission), on the resume lane's switches:
+#   1. venue-only truth BEFORE the open (map_lane.grammar_truth): the
+#      venue's per-side contract for the chosen code
+#      (atc-<lg>-<a>-<b>-<date>-<code>) must name, in its own
+#      outcome/title/team fields, exactly the aec side description the
+#      rule chose -- no order assumption survives that check; a listed
+#      contract that names something else is a MISMATCH: refused and
+#      the class is TRIPPED; an unlisted contract is unverified: refused,
+#      nothing tripped;
+#   2. one grammar book at a time until its FIRST FILL is echoed
+#      (map_lane.grammar_fill_echo): the venue's positions payload must
+#      hold the side the rule chose (marketMetadata.outcome) with the
+#      book's sign, attributable to our own fill; a mismatch freezes the
+#      book `side_echo_mismatch` and trips the class; further grammar
+#      books are refused `grammar_tripped` until an admin clears the
+#      state key;
+#   3. the resume lane's own gates for the whale (le._mapping_admitted
+#      as for 'exact': the side-echo circuit, the verified set, the
+#      hold, LIVE_PREMAP_WHALES + premap_live) -- 'grammar' never joins
+#      QUARANTINE_RESUME_SRC itself.
+# Every count rides on the census and the served `integ` block.
+MIRROR_LIVE_MAP_SRC: frozenset[str] = frozenset({"ledger", "premap", "exact", "yesno"})
+GRAMMAR_STATE_KEY = "mirror_grammar_echo"
+_GRAMMAR_VERIFIED_MAX = 200
+
+
+def _position_echo(pmus, slug: str) -> dict | None:
+    """The venue's own echo of what we hold on `slug`: signed net and the
+    side its positions payload names (marketMetadata.outcome / title);
+    {"net": 0.0} when not held; None when unreadable. One paced walk,
+    pmus.position_side's own read with the metadata kept."""
+    pace(ms.READ_PACING_S)
+    try:
+        client = pmus._get_client()
+        cursor = ""
+        for _ in range(5):
+            resp = client.portfolio.positions(
+                {"limit": 100, **({"cursor": cursor} if cursor else {})}) or {}
+            for s, p in (resp.get("positions") or {}).items():
+                if str(s).lower() == slug.lower():
+                    meta = (p or {}).get("marketMetadata") or {}
+                    return {"net": float((p or {}).get("netPosition") or 0),
+                            "outcome": meta.get("outcome"), "title": meta.get("title")}
+            cursor = resp.get("nextCursor") or ""
+            if not cursor:
+                break
+    except Exception:  # noqa: BLE001 — unreadable is not a verdict
+        return None
+    return {"net": 0.0, "outcome": None, "title": None}
+
+
+def _market_read(pmus, slug: str) -> dict | None:
+    """One paced venue market read; None when unreadable or unlisted."""
+    pace(ms.READ_PACING_S)
+    try:
+        return (pmus._get_client().markets.retrieve_by_slug(slug) or {}).get("market") or None
+    except Exception:  # noqa: BLE001 — a 404 is an answer, an error is no answer
+        return None
+
+
+async def _grammar_state(t: _Tick) -> dict | None:
+    """The class's own state key: counts, the trip, the verified books,
+    the pending sides. None when unreadable (every reader refuses)."""
+    val, err = await _state(t.pool, GRAMMAR_STATE_KEY)
+    if err:
+        return None
+    st = dict(val) if isinstance(val, dict) else {}
+    st.setdefault("ok", 0)
+    st.setdefault("mismatch", 0)
+    st.setdefault("unverified", 0)
+    st.setdefault("tripped", False)
+    st.setdefault("verified", [])
+    st.setdefault("pending", {})
+    return st
+
+
+async def _grammar_write(t: _Tick, st: dict) -> None:
+    st["verified"] = list(st.get("verified") or [])[-_GRAMMAR_VERIFIED_MAX:]
+    try:
+        await _write_state(t.pool, GRAMMAR_STATE_KEY, st)
+    except Exception:  # noqa: BLE001 — bookkeeping never breaks a tick; the next read refuses
+        log.warning("mirror_live: grammar state write failed")
+
+
+async def _grammar_admission(t: _Tick, whale: str, slug: str, g: dict | None) -> str | None:
+    """The refusal name that keeps a grammar-mapped market from opening,
+    or None when the class may open THIS book: state readable and not
+    tripped, no other grammar book still awaiting its first-fill echo,
+    and the venue's per-side contract naming the chosen side."""
+    from .. import map_lane
+
+    st = await _grammar_state(t)
+    if st is None:
+        return "grammar_echo_unreadable"
+    if st.get("tripped") or int(st.get("mismatch") or 0) > 0:
+        return "grammar_tripped"
+    if not isinstance(g, dict) or g.get("side_index") not in (0, 1) or not g.get("his_slug"):
+        return "grammar_echo_unverified"
+    try:
+        books = [dict(b) for b in await t.pool.fetch(_SQL_BOOKS_OPEN)]
+    except Exception:  # noqa: BLE001 — unreadable books: the probation cannot be judged
+        return "grammar_echo_unreadable"
+    verified = {int(x) for x in (st.get("verified") or []) if str(x).isdigit()}
+    if any(str(b.get("map_source") or "") == "grammar" and int(b["id"]) not in verified
+           for b in books):
+        return "grammar_probation"
+    i = int(g["side_index"])
+    market = await asyncio.to_thread(_market_read, t.pmus, slug)
+    other_desc = ""
+    if isinstance(market, dict):
+        _m = market.get("market") if isinstance(market.get("market"), dict) else market
+        _sides = [x for x in ((_m or {}).get("marketSides") or []) if isinstance(x, dict)]
+        if len(_sides) == 2:
+            other_desc = str(_sides[1 - i].get("description") or "")
+    cands = await _contract_candidates(t.pool, g["his_slug"], i, str(g.get("outcome_desc") or ""),
+                                       other_desc)
+    if cands is None:
+        verdict, detail = "unverified", "per-side contract rows unreadable"
+    elif len(cands) != 1:
+        verdict, detail = "unverified", f"{len(cands)} per-side contracts fit the side: {cands[:3]}"
+    else:
+        con = await asyncio.to_thread(_market_read, t.pmus, cands[0])
+        verdict, detail = map_lane.grammar_truth(con, market, i)
+    st[verdict] = int(st.get(verdict) or 0) + 1
+    st["last"] = {"verdict": verdict, "slug": slug, "detail": detail, "at": t.now, "stage": "open"}
+    if verdict == "mismatch":
+        st["tripped"] = True
+        log.critical("mirror_live: GRAMMAR SIDE MISMATCH before open on %s: %s -- the class is "
+                     "tripped", slug, detail)
+        await _grammar_write(t, st)
+        return "side_echo_mismatch"
+    if verdict != "ok":
+        await _grammar_write(t, st)
+        return "grammar_echo_unverified"
+    st.setdefault("pending", {})[slug] = {"outcome_desc": g.get("outcome_desc"),
+                                         "intent": g.get("intent"), "side_index": i,
+                                         "his_slug": g.get("his_slug"), "at": t.now}
+    await _grammar_write(t, st)
+    _mirror_stop("grammar_echo_ok", whale)
+    return None
+
+
+async def _contract_candidates(pool, his_slug: str, i: int, desc: str,
+                               other_desc: str = "") -> list[str] | None:
+    """THE VENUE'S OWN PER-SIDE SUFFIX (round 3, review 3): the venue's
+    per-side contract for team i is atc-<lg>-<a>-<b>-<date>-<suffix>, and
+    the suffix is the VENUE'S code, not necessarily his (the probes carry
+    atc-cfb-hawaii-stan-2026-08-29-h). The event's atc- rows in us_premap
+    are listed and the one that fits the side is taken: a single-token
+    suffix that is his code, or a prefix of his code and of no other, or
+    a row whose question names the aec side description whole. Exactly
+    one distinct contract, else the caller reads it as unverified. When
+    the sweep lists none, his own code's slug is the one candidate -- a
+    guess the venue must confirm by naming the side. None: unreadable."""
+    from .. import map_lane
+
+    parsed = map_lane.slug_head(his_slug)
+    if parsed is None or i not in (0, 1):
+        return []
+    lg, a, b, date, _tail = parsed
+    base = f"atc-{lg}-{a}-{b}-{date}-"
+    code, other = (a, b)[i], (b, a)[i]
+    try:
+        rows = [dict(r) for r in await pool.fetch(
+            "SELECT DISTINCT identifier, market_slug, question FROM us_premap "
+            "WHERE identifier LIKE $1 OR market_slug LIKE $1 /* ml-grammar-contracts */",
+            base + "%")]
+    except Exception:  # noqa: BLE001
+        return None
+    want = map_lane._norm(desc)
+    # a question that names OUR side is the opponent's row when it names
+    # the opponent too ("Will Tigers win against Bears?", round-3 review):
+    # by_question fits only a question naming our side and not the other's
+    other_want = map_lane._norm(other_desc) if other_desc else ""
+    fits: list[str] = []
+    for r in rows:
+        for s in (r.get("market_slug"), r.get("identifier")):
+            s = str(s or "").lower()
+            if not s.startswith(base):
+                continue
+            suffix = s[len(base):]
+            if not suffix or "-" in suffix:
+                continue                    # a segment or prop row, never the contract
+            by_code = (suffix == code or (code.startswith(suffix) and not other.startswith(suffix)))
+            q_norm = map_lane._norm(r.get("question"))
+            by_question = (bool(want) and want in q_norm
+                           and not (other_want and other_want in q_norm))
+            if (by_code or by_question) and s not in fits:
+                fits.append(s)
+    if not rows:
+        c = map_lane.contract_slug(his_slug, i)
+        return [c] if c else []
+    return fits
+
+
+async def _admit_source(t: _Tick, whale: str, src: str | None, slug: str) -> tuple[bool, str | None]:
+    """The mapping gate for a book's source: le._mapping_admitted on the
+    source itself, except 'grammar', which rides the resume lane's
+    switches (the gates 'exact' clears) under its own certification
+    (_grammar_admission before an open, the trip on every increase)."""
+    if str(src or "") != "grammar":
+        return await le._mapping_admitted(t.pool, whale, src, slug)
+    st = await _grammar_state(t)
+    if st is None:
+        return False, "grammar_echo_unreadable"
+    if st.get("tripped") or int(st.get("mismatch") or 0) > 0:
+        return False, "grammar_tripped"
+    ok, why = await le._mapping_admitted(t.pool, whale, "exact", slug)
+    return ok, (why.replace("(src=exact,", "(src=grammar,") if why else why)
+
+
+async def _grammar_fill_check(t: _Tick, book: dict) -> str:
+    """THE FIRST FILL'S ECHO on a grammar book: 'ok' when the book may
+    plan this tick (verified, or nothing filled yet), 'wait' when it may
+    NOT plan but is not frozen (the certification state or the venue's
+    echo unreadable, the echo unattributable, the chosen side not on
+    record -- round 3, review 4: an unverified side is never traded
+    further on), 'frozen' when it was frozen `side_echo_mismatch`. Runs
+    every tick the book holds shares until the venue's echo verifies it
+    (then the book is on the verified list and the next grammar book
+    may open)."""
+    from .. import map_lane
+
+    st = await _grammar_state(t)
+    if st is None:
+        _mirror_stop("grammar_echo_unreadable", book.get("whale"))
+        return "wait"
+    verified = {int(x) for x in (st.get("verified") or []) if str(x).isdigit()}
+    if int(book["id"]) in verified:
+        return "ok"
+    if abs(float(book.get("ledger_net") or 0.0)) < FLAT_TOL_SHARES:
+        return "ok"                     # nothing filled yet: nothing to echo
+    pend = (st.get("pending") or {}).get(str(book.get("us_market_slug")) or "") or {}
+    echo = await asyncio.to_thread(_position_echo, t.pmus, str(book["us_market_slug"]))
+    verdict, detail = map_lane.grammar_fill_echo(
+        echo, pend.get("outcome_desc"), _book_intent(book),
+        abs(float(book.get("ledger_net") or 0.0)))
+    st[verdict] = int(st.get(verdict) or 0) + 1
+    st["last"] = {"verdict": verdict, "slug": book.get("us_market_slug"), "detail": detail,
+                  "at": t.now, "stage": "fill", "book": book["id"]}
+    if verdict == "ok":
+        st.setdefault("verified", []).append(int(book["id"]))
+        (st.get("pending") or {}).pop(str(book.get("us_market_slug")), None)
+        await _grammar_write(t, st)
+        _mirror_stop("grammar_echo_ok", book.get("whale"))
+        return "ok"
+    if verdict == "mismatch":
+        st["tripped"] = True
+        await _grammar_write(t, st)
+        log.critical("mirror_live: SIDE-ECHO MISMATCH on grammar book %s (%s): %s -- frozen, "
+                     "the class is tripped", book["id"], book.get("us_market_slug"), detail)
+        await _cancel_open_for(t, book, "side_echo_mismatch")
+        await _freeze(t, book, "side_echo_mismatch", {"detail": detail})
+        return "frozen"
+    await _grammar_write(t, st)
+    _mirror_stop("grammar_echo_unverified", book.get("whale"))
+    return "wait"
 
 
 # THE COUNTERS AN OPERATOR SURFACE CAN ACTUALLY READ.
@@ -948,6 +1245,10 @@ _INTEG_CENSUS_KEYS: tuple[str, ...] = (
     "books_unreadable",
     # review of U12c: both past the served cap, so they ride here too
     "ratio_stepped", "under_min_notional", "shadow_check_skipped",
+    # C1 round 2 (review D, (4)): the mapping lane's two refusals a gate
+    # line reads, and the grammar class's trip -- all past the served
+    # cap; three names, the block stays under it
+    "map_source_unverified", "map_reads_capped", "side_echo_mismatch",
 )
 _INTEG_STAT_KEYS: tuple[str, ...] = (
     "snap_market_planned", "snap_market_reads", "snap_market_fresh_reads",
@@ -3081,6 +3382,16 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     r = await _read_market(t, w, cid, slug, la, oa, fills, market=mk, book=True)
     if t.abandoned:
         return
+    if str(book.get("map_source") or "") == "grammar":
+        # the class's first-fill echo (C1 round 2): a frozen mismatch
+        # plans nothing this tick, and neither does a book whose side the
+        # venue has not yet confirmed (round 3: it WAITS, unfrozen)
+        fc = await _grammar_fill_check(t, book)
+        if fc != "ok":
+            why = "side_echo_mismatch" if fc == "frozen" else "grammar_echo_unverified"
+            await _write_plan(t, book, r, book.get("target"), None, None, book.get("his_level"),
+                              why, {"kind": "no_plan", "at": t.now, why: True})
+            return
     ledger = int(book.get("ledger_net") or 0)
     short = _book_short(book)
     shorts = _shorts_on(t)
@@ -3313,7 +3624,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
 async def _increase_recheck(t: _Tick, book: dict, r: _Reading) -> str | None:
     """The starred admission clauses on every INCREASE (spec A): clip,
     mapping, edge, cell -- read now, never remembered from open."""
-    ok, why = await le._mapping_admitted(t.pool, r.whale, book.get("map_source"), r.slug)
+    ok, why = await _admit_source(t, r.whale, book.get("map_source"), r.slug)
     edge_ok, edge_why = edge_gate.verdict(r.whale)
     his_slug = next((f.get("market_slug") for f in r.fills if f.get("market_slug")), None)
     clause = copy_sports.copy_verdict(r.whale, str(his_slug or ""), price=book.get("his_level"))
@@ -4203,12 +4514,43 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     by the first name, else open the book and plan it this tick."""
     w = whale
     fills = await ms.his_fills(t.pool, w, cid)
-    m = await ms.map_market(t.pool, fills)
+    # the shadow's own mapper, venue module and all (C1): ledger, premap,
+    # then the copy lane's exact steps -- paced, cached per market,
+    # bounded per tick by t.map_budget
+    mo: dict = {}
+    m = await ms.map_market(t.pool, fills, t.pmus, whale=w, condition_id=cid,
+                            budget=t.map_budget, out=mo)
+    for _ in range(int(mo.get("venue_reads") or 0)):
+        _mirror_stop("map_venue_read", w)
+    for _ in range(int(mo.get("cache_hit") or 0)):
+        _mirror_stop("map_cache_hit", w)
     if not m:
+        if mo.get("refusal") == "map_reads_capped":
+            # no verdict this tick: never TTL-skipped, read again next tick
+            _mirror_stop("map_reads_capped", w)
+            return
         _mirror_stop("unmapped", w)
         _unmapped_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
         return
+    src = str(m.get("source") or "")
+    if src not in MIRROR_LIVE_MAP_SRC and src != "grammar":
+        # a mapping class no lane has certified opens no book, whatever
+        # the quarantine says (MIRROR_LIVE_MAP_SRC); the shadow measures it
+        _mirror_stop("map_source_unverified", w)
+        _unmapped_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
+        return
     slug, la, oa = m["us_slug"], m["long_asset"], m.get("other_asset")
+    if src == "grammar":
+        # the class's own certification first (venue-only truth, the
+        # probation, the trip): a refusal here is named and, except the
+        # probation -- which is another book's wait, not this market's
+        # verdict -- TTL-skipped like an unmapped market
+        held = await _grammar_admission(t, w, slug, mo.get("grammar"))
+        if held:
+            _mirror_stop(held, w)
+            if held != "grammar_probation":
+                _unmapped_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
+            return
     if not la or (w, cid) in t.books_seen:
         return
     if not oa:
@@ -4277,7 +4619,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
         # working")
         _mirror_stop("market_unreadable", w)
         return
-    ok, why = await le._mapping_admitted(t.pool, w, m.get("source"), slug)
+    ok, why = await _admit_source(t, w, m.get("source"), slug)
     edge_ok, edge_why = edge_gate.verdict(w)
     his_slug = next((f.get("market_slug") for f in fills if f.get("market_slug")), None)
     clause = copy_sports.copy_verdict(w, str(his_slug or ""), price=his_px)
