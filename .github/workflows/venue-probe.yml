@@ -44,6 +44,14 @@ jobs:
                    -H "Accept: application/json" "$G/markets/$s/$ep" | head -c 1500
               echo
             done
+            # the market itself: its sides (names, LONG/SHORT intent,
+            # outcome index) as the venue states them -- the payload the
+            # premap poller parses, read verbatim (C3 review 2026-09-06:
+            # the asc side convention must be observed, never inferred)
+            echo "== GET $G/markets/$s"
+            curl -sS --max-time 20 -w '\n-- HTTP %{http_code} in %{time_total}s\n' \
+                 -H "Accept: application/json" "$G/markets/$s" | head -c 4000
+            echo
           }
           for s in ${SLUGS//,/ }; do read_one "$s"; done
           N="${LIST:-0}"
