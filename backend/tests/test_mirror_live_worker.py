@@ -4481,13 +4481,15 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-14:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-15:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
                           "grammar_echo_unreadable", "grammar_tripped", "grammar_probation",
-                          "grammar_echo_unverified", "grammar_echo_ok", "side_echo_mismatch")
-    assert keys[-15] == "short_share_cap" and keys.count("books_unreadable") == 1
+                          "grammar_echo_unverified", "grammar_echo_ok", "side_echo_mismatch",
+                          # the copy lane's soccer floor, lifted for the mirror (owner order)
+                          "soccer_floor_lifted")
+    assert keys[-16] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -6011,6 +6013,20 @@ def test_the_grammar_class_names_its_certification(monkeypatch):
     for k in ("map_source_unverified", "map_reads_capped", "side_echo_mismatch"):
         assert k in ml._INTEG_CENSUS_KEYS
     assert len(ml._integ_block(ml._new_stats())) < 40
+    ml._current_stats = None
+
+
+def test_the_soccer_floor_is_lifted_for_a_mirror_book_and_counted(monkeypatch):
+    """The copy lane's soccer/esports price floor does not bind the mirror
+    (owner order 2026-09-06: everything he takes): lifted by name, counted."""
+    c = ml._current_stats["census"] if ml._current_stats else None
+    ml._current_stats = ml._current_stats or {"census": {}}
+    c = ml._current_stats["census"]
+    monkeypatch.setattr(copy_sports, "copy_verdict", lambda *a, **k: "soccer_price_floor")
+    assert ml._mirror_cell("rn1", "sea-juv-mil-2026-09-06-juv", 0.2) is None
+    assert c.get("soccer_floor_lifted") == 1
+    monkeypatch.setattr(copy_sports, "copy_verdict", lambda *a, **k: "sport_halted")
+    assert ml._mirror_cell("rn1", "sea-juv-mil-2026-09-06-juv", 0.2) == "sport_halted"
     ml._current_stats = None
 
 

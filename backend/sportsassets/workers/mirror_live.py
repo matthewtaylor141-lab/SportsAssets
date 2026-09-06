@@ -245,6 +245,9 @@ CENSUS_KEYS: tuple[str, ...] = (
     # circuit uses for the same fact)
     "grammar_echo_unreadable", "grammar_tripped", "grammar_probation",
     "grammar_echo_unverified", "grammar_echo_ok", "side_echo_mismatch",
+    # the copy lane's soccer/esports price floor, lifted for a mirror
+    # book by owner order (2026-09-06, _mirror_cell): counted, never a refusal
+    "soccer_floor_lifted",
 )
 _FAMILIES = (("mapping:", "mapping"), ("edge_gate:", "edge_gate"),
              ("cell_gate_", "cell_gate"), ("place_refused:", "place_refused"))
@@ -3541,14 +3544,14 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     if inc_refusal is None and not drift.increase_ok:
         inc_refusal = drift.refusal or "snapshot_stale"
     increasing = (target < ledger) if short else (target > ledger)
-    if inc_refusal is None and increasing:
-        inc_refusal = await _increase_recheck(t, book, r)
-    if inc_refusal is None and short and increasing:
-        inc_refusal = await _short_open_refusal(t)
     # his net moving DOWN in long-token terms (the same signed compare
     # on either book; _his_level reads the fills for it)
     reducing = target <= ledger
     his_px = _his_level(fills, la, oa, reducing, short=short)
+    if inc_refusal is None and increasing:
+        inc_refusal = await _increase_recheck(t, book, r, his_px)
+    if inc_refusal is None and short and increasing:
+        inc_refusal = await _short_open_refusal(t)
     # A CAPPED SHORT TARGET IS THE WHOLE PROBE: the plan's $5 dead band
     # stops churn on a book sized by his net, and a target clamped to
     # rules.MIRROR_SHORT_MAX_SHARES (ONE until rung S5) is under it by
@@ -3621,13 +3624,49 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         await _write_plan(t, book, r, target, tg["raw"], drift.drift, his_px, reason, plan)
 
 
-async def _increase_recheck(t: _Tick, book: dict, r: _Reading) -> str | None:
+# THE MIRROR LANE'S CELL VERDICT (2026-09-06 20:0xZ). The copy lane's
+# cell gate (copy_sports.copy_verdict) carries a SOCCER/ESPORTS PRICE
+# FLOOR (SOCCER_PRICE_FLOOR 0.40: the copy lane never copied a soccer
+# or esports pick under 0.40). The mirror is a different lane under a
+# different order -- Matt, 2026-09-06 ~14:00Z: "Just trade 10% of what
+# he puts on everything he takes ... this limitation should never force
+# us to decline any of the possible copies"; 19:33Z: "I need more trades
+# firing in the mirror sleeve! We need to be mirroring a larger
+# percentage of RN1s positions" -- so the floor does not bind a mirror
+# book: it is lifted here BY NAME and counted (`soccer_floor_lifted`),
+# and every other clause (no_whale, whale_paused, sport_halted,
+# market_type_blocked, the cells, the entry band) refuses exactly as
+# before. Found because the first four soccer books C1 opened (23-26,
+# 19:42Z) were refused `cell_gate_soccer_price_floor` on every tick.
+_CELL_LIFTED = frozenset({"soccer_price_floor", "soccer_price_unreadable"})
+
+
+def _mirror_cell(whale: str, his_slug: str | None, price: float | None) -> str | None:
+    """copy_sports.copy_verdict for the mirror lane: the soccer/esports
+    price floor is lifted by name (owner order above), all else stands."""
+    clause = copy_sports.copy_verdict(whale, str(his_slug or ""), price=price)
+    if clause in _CELL_LIFTED:
+        _mirror_stop("soccer_floor_lifted", whale)
+        return None
+    return clause
+
+
+async def _increase_recheck(t: _Tick, book: dict, r: _Reading,
+                            his_px: float | None = None) -> str | None:
     """The starred admission clauses on every INCREASE (spec A): clip,
-    mapping, edge, cell -- read now, never remembered from open."""
+    mapping, edge, cell -- read now, never remembered from open.
+
+    THE PRICE THE CELL READS IS THE TICK'S OWN LEVEL (2026-09-06): the
+    recheck read `book["his_level"]`, a column _SQL_BOOK_COLS never
+    selects, so the cell gate saw price None on every increase and
+    refused every soccer and esports book `soccer_price_floor` for the
+    life of the book (books 20, 23-26). The caller hands the level it
+    just read from his fills; None stays None (and the floor is lifted
+    for the mirror anyway, _mirror_cell)."""
     ok, why = await _admit_source(t, r.whale, book.get("map_source"), r.slug)
     edge_ok, edge_why = edge_gate.verdict(r.whale)
     his_slug = next((f.get("market_slug") for f in r.fills if f.get("market_slug")), None)
-    clause = copy_sports.copy_verdict(r.whale, str(his_slug or ""), price=book.get("his_level"))
+    clause = _mirror_cell(r.whale, his_slug, his_px)
     facts = rules.AdmissionFacts(increases_ok=True, per_fill_usd=le.per_fill_usd(r.whale, r.slug),
                            mapping_ok=bool(ok), mapping_why=why, edge_ok=bool(edge_ok),
                            edge_why=edge_why, cell_ok=clause is None, cell_clause=clause)
@@ -4622,7 +4661,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     ok, why = await _admit_source(t, w, m.get("source"), slug)
     edge_ok, edge_why = edge_gate.verdict(w)
     his_slug = next((f.get("market_slug") for f in fills if f.get("market_slug")), None)
-    clause = copy_sports.copy_verdict(w, str(his_slug or ""), price=his_px)
+    clause = _mirror_cell(w, his_slug, his_px)
     game_key = le._us_game_key(slug)
     legacy = slug_recent = underdog = kalshi = None
     try:
