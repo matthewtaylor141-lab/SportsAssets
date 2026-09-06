@@ -6589,15 +6589,23 @@ _MIRROR_SELL_READ_SQL = (
 async def _book_mirror_sell(pool, standing_row_id: int, shares: float,
                             price: float | None, ledger_net: float) -> dict:
     """Book a SELL fill of `shares` @ `price` against the standing row.
-    Returns {booked, pnl, overfill, written, refusal}.
+    Returns {booked, pnl, overfill, dust, held, written, refusal}.
 
     booked = min(shares, ledger_net, the row's own shares): the venue
     can report a sale past what the ledger held (on a signed-net venue
     that is a SHORT we never meant to hold), and the ledger books only
     what it had and flags `overfill` -- the reconciler freezes the book
     and trips mirror_live off with the receipt; the primitive never
-    writes a negative ledger. pnl is realized_pnl(row.fill_price, price,
-    booked, BUY_LONG), accumulated onto the row like every exit leg.
+    writes a negative ledger. A sale past the ceiling by at most
+    SELL_DUST_SHARES (one venue lot) is NOT an overfill but `dust`
+    (2026-09-06 01:11:57Z: the row held 413.76 fractional shares, the
+    book's integer ledger read 414, the flatten sold 414.0 and the
+    0.24-share rounding gap tripped the lane off): the ceiling books,
+    `dust` carries the gap, the log line says DUST, and the reconciler
+    counts it without a freeze or a trip. `held` is the row's shares
+    read under the same guard BEFORE the sale, for the trip receipt.
+    pnl is realized_pnl(row.fill_price, price, booked, BUY_LONG),
+    accumulated onto the row like every exit leg.
 
     NEVER 'cashed_out' HERE: a book sold to zero on a live market stays
     'filled' at 0 shares, holding the asset claim, so his re-lean re-buys
@@ -6610,8 +6618,14 @@ async def _book_mirror_sell(pool, standing_row_id: int, shares: float,
     its own entry: refused 'no_entry_price', nothing written, rather
     than booking a $0 pnl the record would then carry as truth.
     """
-    out = {"booked": 0.0, "pnl": None, "overfill": False, "written": False,
-           "refusal": None}
+    # THE ONE DUST CONSTANT lives with the rules (analytics.mirror_live_rules,
+    # pure: no venue, no pool, no clock), read at call time so this module's
+    # load stays free of every mirror_live name (the hand-off pin: the
+    # worker is never imported at module load) and so a reloaded rules
+    # module is the one read
+    from .analytics.mirror_live_rules import SELL_DUST_SHARES
+    out = {"booked": 0.0, "pnl": None, "overfill": False, "dust": 0.0, "held": None,
+           "written": False, "refusal": None}
     qp = _mirror_qty_px(shares, price)
     if qp is None:
         out["refusal"] = "bad_fill"
@@ -6629,8 +6643,12 @@ async def _book_mirror_sell(pool, standing_row_id: int, shares: float,
         out["refusal"] = "row_not_live"
         return out
     held = float(_row_get(row, "filled_shares") or 0.0)
+    out["held"] = held
     ceiling = min(net, held if held > 0.0 else 0.0)
-    out["overfill"] = q > ceiling + 1e-9
+    over = q - ceiling
+    out["overfill"] = over > SELL_DUST_SHARES
+    if 0.0 < over <= SELL_DUST_SHARES:
+        out["dust"] = round(over, 6)
     booked = min(q, ceiling)
     if booked <= 0.0:
         out["refusal"] = "nothing_to_book"
@@ -6647,10 +6665,14 @@ async def _book_mirror_sell(pool, standing_row_id: int, shares: float,
         out["refusal"] = "row_not_live"
         return out
     out.update(booked=float(booked), pnl=pnl, written=True)
+    if out["overfill"]:
+        past = ", OVERFILL: venue sold %s" % q
+    elif out["dust"]:
+        past = ", DUST: venue sold %s, ledger held %s" % (q, ceiling)
+    else:
+        past = ""
     log.info("mirror row %s booked SELL %s @ %s (entry %s, pnl %+.4f%s): now %s shares",
-             sid, booked, px, entry, pnl,
-             ", OVERFILL: venue sold %s" % q if out["overfill"] else "",
-             _row_get(r, "filled_shares"))
+             sid, booked, px, entry, pnl, past, _row_get(r, "filled_shares"))
     return out
 
 
@@ -8146,8 +8168,6 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
         return _copy_stop("no_budget_room", username)
 
     if COPY_MODE == "penny_trial":
-        import math
-
         # SAME-OR-BETTER (owner order 2026-08-12, superseding the
         # 2026-08-04 his+2% tolerance): "every trade... copied as long
         # as the price available at the time of execution is the same

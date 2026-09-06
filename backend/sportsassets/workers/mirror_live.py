@@ -203,6 +203,12 @@ CENSUS_KEYS: tuple[str, ...] = (
     "closed_cancelled", "book_settle_disagree", "shadow_live_disagree",
     "reaper_touched_mirror", "demoted", "mirror_flatten", "row_not_live",
     "write_failed", "rate_limited", "book_error",
+    # APPENDED AT THE END (2026-09-06): the served census is a 40-key
+    # prefix of this tuple (see _INTEG_CENSUS_KEYS), so a name inserted
+    # anywhere earlier moves every index after it. `ledger_dust`: a SELL
+    # the venue filled within one lot past the ledger (rules
+    # SELL_DUST_SHARES) -- booked to the ledger, counted, never a trip
+    "ledger_dust",
 )
 _FAMILIES = (("mapping:", "mapping"), ("edge_gate:", "edge_gate"),
              ("cell_gate_", "cell_gate"), ("place_refused:", "place_refused"))
@@ -373,11 +379,23 @@ SELECT o.id, o.book_id, o.whale, o.us_market_slug, o.kind, o.side, o.tif, o.post
        o.his_level::float8 AS his_level, o.price::float8 AS price, o.wire::float8 AS wire,
        o.qty, o.order_id, o.state, o.venue_state, o.filled::float8 AS filled,
        o.booked_filled::float8 AS booked_filled, o.avg_px::float8 AS avg_px,
-       o.taker_at_placement, o.pre_ids, o.reason,
+       o.taker_at_placement, o.pre_ids, o.reason, o.receipt,
        extract(epoch FROM o.placed_at)::float8 AS placed_ts
   FROM mirror_orders o
  WHERE o.state IN ('placing', 'open', 'unknown')
  ORDER BY o.placed_at, o.id /* ml-orders-open */
+"""
+# The order's cumulative SELL dust (rules.SELL_DUST_SHARES), kept on the
+# row's own receipt JSON so it survives the poll: the worker re-reads
+# every open order from the table each tick, and a per-poll delta that
+# read the row flat would otherwise start from zero on every read
+# (2026-09-06 fix review, money-path minor 1). No column, no migration:
+# the receipt is the venue's placement response and this rides beside it.
+_SQL_ORDER_DUST = """
+UPDATE mirror_orders
+   SET receipt = COALESCE(receipt, '{}'::jsonb) || jsonb_build_object('dust_total', $2::float8),
+       updated_at = now()
+ WHERE id = $1 /* ml-order-dust */
 """
 _SQL_BOOK_COLS = """
 SELECT b.id, b.whale, b.condition_id, b.us_market_slug, b.game_key, b.long_asset,
@@ -757,6 +775,10 @@ _INTEG_CENSUS_KEYS: tuple[str, ...] = (
     "mirror_flatten", "snapshot_stale", "drift", "snap_market_unreadable",
     "snap_market_capped", "snap_market_stale", "snap_market_no_ids",
     "snap_market_skipped", "side_band", "venue_halted",
+    # `ledger_dust` sits LAST in CENSUS_KEYS (past the served cap), so it
+    # rides here too: an operator reading the dust count reads it off
+    # `integ` (2026-09-06 fix review)
+    "ledger_dust",
 )
 _INTEG_STAT_KEYS: tuple[str, ...] = (
     "snap_market_planned", "snap_market_reads", "snap_market_fresh_reads",
@@ -1163,13 +1185,32 @@ async def _book_fill(t: _Tick, o: dict, book: dict, inc: float, px: float | None
     exactly once on the next tick. Returns 'booked' | 'rebooked' |
     'duplicate' | 'row_not_live' | 'overfill' | 'refused:<why>'; a
     write failure PROPAGATES with the transaction rolled back (addendum
-    section 8)."""
+    section 8).
+
+    A SELL past the ledger by MORE than rules.SELL_DUST_SHARES is the
+    overfill (freeze, trip, receipt). A SELL past it by up to that one
+    lot is DUST -- the rounding between a fractional standing row and
+    the whole-share ledger column (2026-09-06 01:11:57Z: row 413.76,
+    ledger 414, venue sold 414.0, tripped as an overfill) -- counted
+    `ledger_dust`, noted in _recent, booked to the ledger, and the
+    return is 'booked': no freeze, no trip.
+
+    DUST ACCUMULATES PER ORDER. A partial fill arrives one delta per
+    poll, and a row read flat on every poll would pass each delta as
+    dust on its own: 1.0 then 1.0 is two lots the ledger never held.
+    So the order's `dust_total` (kept on its receipt JSON, re-read with
+    the row each tick) is the figure judged: the first delta that takes
+    it past SELL_DUST_SHARES is the overfill, frozen and tripped with
+    `dust_total` on the receipt; a single 0.24 never is."""
     expected = float(o.get("booked_filled") or 0.0)
     new_filled = expected + inc
     side = o["side"]
     sid = book["standing_row_id"]
     booking = None
     overfill = False
+    dust = 0.0
+    dust_total = _dust_total(o)
+    held = None
     try:
         async with t.pool.acquire() as conn:
             async with conn.transaction():
@@ -1206,10 +1247,13 @@ async def _book_fill(t: _Tick, o: dict, book: dict, inc: float, px: float | None
                     if res.get("refusal") == "row_not_live":
                         raise _RowNotLive()
                     overfill = bool(res.get("overfill"))
+                    dust = float(_num(res.get("dust")) or 0.0)
+                    held = _num(res.get("held"))
                     if res.get("refusal") in ("bad_fill", "no_entry_price"):
                         raise _Refused(str(res["refusal"]))
                     booking = rules.book_sell(_book_state(book), inc, px)
                     overfill = overfill or booking.overfill
+                    dust = max(dust, float(_num(booking.dust) or 0.0))
                     if booking.refusal:
                         raise _Refused(booking.refusal)
                     ns = booking.state
@@ -1217,6 +1261,13 @@ async def _book_fill(t: _Tick, o: dict, book: dict, inc: float, px: float | None
                                        ns.gross_sell_usd, ns.realized_pnl)
                     await conn.execute(_SQL_ORDER_CASH, o["id"], booking.usd,
                                        booking.realized or 0.0, bool(taker_at_placement))
+                    if dust > 0.0:
+                        # the order's cumulative dust, written with the
+                        # booking it belongs to: more than a lot on one
+                        # order is the overfill, whatever each delta read
+                        dust_total = round(dust_total + dust, 6)
+                        await conn.execute(_SQL_ORDER_DUST, o["id"], dust_total)
+                        overfill = overfill or dust_total > rules.SELL_DUST_SHARES
     except _Rebook:
         return "rebooked"
     except _RowNotLive:
@@ -1235,19 +1286,52 @@ async def _book_fill(t: _Tick, o: dict, book: dict, inc: float, px: float | None
         book.update(ledger_net=int(round(ns.ledger_net)), avg_cost=ns.avg_cost,
                     gross_buy_usd=ns.gross_buy_usd, gross_sell_usd=ns.gross_sell_usd,
                     peak_exposure_usd=ns.peak_exposure_usd, realized_pnl=ns.realized_pnl)
+    if dust > 0.0:
+        o["dust_total"] = dust_total
     if 0.0 < new_filled < float(o["qty"]) - FLAT_TOL_SHARES:
         _mirror_stop("partial_fill", o["whale"])
         t.stats["partial_fills"] += 1
     _recent(book["id"], "fill", side=side, shares=round(inc, 4), px=px, maker=maker)
     if overfill:
-        # a SELL past what the ledger held is a SHORT on a signed-net
-        # venue: freeze (which names it), and trip the DB switch off
-        # with the receipt
+        # a SELL MORE than a lot past what the ledger held -- on this
+        # delta, or summed over the order's deltas -- is a SHORT on a
+        # signed-net venue: freeze (which names it), and trip the DB
+        # switch off with the receipt -- sold, the ledger after the
+        # booking, the standing row's shares before the sale, and the
+        # order's cumulative dust
+        if dust > 0.0 and dust_total > rules.SELL_DUST_SHARES:
+            log.error("mirror_live: book %s SELL on order %s: dust_total %s on the order is past "
+                      "SELL_DUST_SHARES (%s) -- the overfill, not dust",
+                      book["id"], o["id"], dust_total, rules.SELL_DUST_SHARES)
         await _freeze(t, book, "overfill")
         await _trip_live_off(t, "overfill", {"book": book["id"], "order": o["id"],
-                                             "sold": inc, "ledger": book.get("ledger_net")})
+                                             "sold": inc, "ledger": book.get("ledger_net"),
+                                             "held": held, "dust_total": dust_total})
         return "overfill"
+    if dust > 0.0:
+        # within a lot of the ledger, on this order so far: rounding
+        # between the fractional row and the whole-share ledger column,
+        # booked to the ledger and counted -- no freeze, no trip
+        # (2026-09-06)
+        _mirror_stop("ledger_dust", o["whale"])
+        _recent(book["id"], "dust", shares=dust, sold=round(inc, 4), held=held,
+                ledger=book.get("ledger_net"), dust_total=dust_total)
+        log.info("mirror_live: book %s SELL on order %s is %s shares past the ledger (venue sold %s, "
+                 "row held %s): dust, booked to the ledger, no trip; dust_total %s on the order",
+                 book["id"], o["id"], dust, round(inc, 4), held, dust_total)
     return "booked"
+
+
+def _dust_total(o: dict) -> float:
+    """The order's cumulative SELL dust so far: the tick's own figure
+    when this tick already booked dust on it, else the receipt's
+    `dust_total` as the open-orders read carried it, else 0.0."""
+    own = _num(o.get("dust_total"))
+    if own is not None:
+        return max(own, 0.0)
+    rec = _jsonish(o.get("receipt"))
+    kept = _num(rec.get("dust_total")) if isinstance(rec, dict) else None
+    return max(kept, 0.0) if kept is not None else 0.0
 
 
 async def _trip_live_off(t: _Tick, why: str, receipt: dict) -> None:
@@ -2491,6 +2575,13 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         await _cancel_open_for(t, book, "row_not_live")
         await _freeze(t, book, "row_not_live")
         return
+    # the row's FRACTIONAL shares as read this tick (the same read, no
+    # second query), carried on the tick's book dict so a SELL is sized
+    # at min(plan, ledger, ceil(held)), never from the rounded ledger
+    # alone (_sell_qty; 2026-09-06). None when the column is unreadable:
+    # the sizing then stands on the ledger as before. This is the ONE
+    # write of it: a fill booked later in the tick does not move it
+    book["_held"] = _num(standing.get("filled_shares"))
     fills = await ms.his_fills(t.pool, w, cid)
     # STEP M BEFORE ANY PLAN (addendum section 10): a closed or
     # resolved market, or a closing book, cancels and never increases.
@@ -2810,8 +2901,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             _mirror_stop("take_arm_stale", w)
             _recent(book["id"], "take_disarmed", why="take_arm_stale", armed_for=age)
         elif rules.take_allowed(None, armed, t.now, r.bid, r.ask, wire, p.side):
-            qty = p.qty if p.side == SELL else _room_qty(t, p.qty, wire)
-            qty = min(qty, int(book.get("ledger_net") or 0)) if p.side == SELL else qty
+            qty = _sell_qty(book, p.qty) if p.side == SELL else _room_qty(t, p.qty, wire)
             if qty >= 1:
                 return await _place(t, book, r, "take", p.side, wire, qty, his_px, p, plan, tif="IOC")
     if p.side == BUY:
@@ -2820,7 +2910,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             _mirror_stop("over_room", w)
             return "over_room"
         return await _place(t, book, r, "increase", BUY, wire, qty, his_px, p, plan)
-    qty = min(int(p.qty), int(book.get("ledger_net") or 0))
+    qty = _sell_qty(book, p.qty)
     if qty < 1:
         _mirror_stop("under_one_share", w)
         return "under_one_share"
@@ -2856,6 +2946,38 @@ def _wire_for(p: mi.Plan | None, his_px: float | None, r: _Reading) -> float | N
 def _room_qty(t: _Tick, qty: int, wire: float | None) -> int:
     return rules.room_scale(int(qty), wire, le.LIVE_MAX_CLIP_USD, t.day_room, t.total_room,
                             t.mirror_day)
+
+
+def _sell_qty(book: dict, qty: int) -> int:
+    """The SELL quantity this tick may place against the book for the
+    IOC, rest, take and reduce legs: min(plan qty, ledger, ceil(held))
+    when the standing row was readable this tick (book["_held"],
+    stashed ONCE by _tick_book off the same row read it already makes
+    -- the standing row as the tick read it, not as a fill later in
+    the tick left it), else min(plan qty, ledger) as before.
+
+    mirror_books.ledger_net is an integer column written as
+    int(round(...)); the standing row is fractional (a venue fill of
+    182.76 + 231.0 = 413.76 shares reads 414 on the ledger). NOT
+    floored: floor(413.76) = 413 leaves ledger 1 / row 0.76 / venue
+    0.76 that nothing can sell -- under_one_share on every tick and
+    never a flat close (the withdrawn first cut). At ceil(held) the
+    order is 414 on 413.76 held: a one-lot overrun onto a fractional
+    row is exactly what _book_fill books as dust (rules
+    SELL_DUST_SHARES), so the extra lot books, never trips, and the
+    book reaches flat (ledger 0, row 0.0) after one flatten. The
+    ceiling never exceeds the ledger, so a row holding more than the
+    ledger says still sells the ledger. The sole-holder close_position
+    (_flatten_vanished) does NOT size here: it closes the whole slug,
+    fraction included, unclamped. With the row unreadable this tick
+    (None) the sizing stands on the ledger as before -- fail closed on
+    the trip, which still exists for a sale more than a lot past the
+    ledger."""
+    ledger = int(book.get("ledger_net") or 0)
+    held = _num(book.get("_held"))
+    if held is None:
+        return min(int(qty), ledger)
+    return min(int(qty), ledger, int(math.ceil(max(held, 0.0))))
 
 
 async def _guarded(t: _Tick, row_id: int, fn, *args, **kwargs):
@@ -3190,7 +3312,21 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
     # close's own booking catches it afterwards (a fill above our ledger
     # is `overfill`, which freezes the book and trips the live switch).
     sole = sole_walk and sole_read
+    # THE QUANTITY, decided BELOW `sole`. The sole close is
+    # close_position: it closes the WHOLE slug, fraction included, so it
+    # is never clamped to the row and never gated under_one_share -- a
+    # sole holder at ledger 1 / row 0.76 sends the close (the withdrawn
+    # first cut sat the gate above this decision, and that book could
+    # never leave). Its mirror_orders row keeps qty = ledger, so
+    # _reconcile_lost_close's `sold = qty - int(held)` is the whole
+    # ledger. The co-held IOC sells OUR quantity only: min(ledger,
+    # ceil(held)) (_sell_qty), refused under one share by name.
+    qty = ledger
     if not sole:
+        qty = _sell_qty(book, ledger)
+        if qty < 1:
+            _mirror_stop("under_one_share", w)
+            return "under_one_share"
         # a venue READ, behind the pacer like every other (step-9 review)
         bid = await asyncio.to_thread(_paced, t.pmus.slug_bid, r.slug, True)
         if bid is None or not (0.0 < float(bid) < 1.0):
@@ -3208,7 +3344,7 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
         row_id = await t.pool.fetchval(
             _SQL_ORDER_INSERT, book["id"], w, r.slug, "flatten_vanished", SELL, tif_rec, False,
             None, his_px, (None if sole else limit) or 0.0, (None if sole else limit) or 0.0,
-            ledger, json.dumps(pre_ids), 0, ledger, r.bid, r.ask, "flatten_vanished")
+            qty, json.dumps(pre_ids), 0, ledger, r.bid, r.ask, "flatten_vanished")
     except Exception as exc:  # noqa: BLE001 — the unique index: one open order per book
         if le._names_constraint(exc, "mirror_orders_one_open_per_book"):
             _mirror_stop("open_order_pending", w)
@@ -3221,7 +3357,7 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
     o = {"id": int(row_id), "book_id": book["id"], "whale": w, "us_market_slug": r.slug,
          "kind": "flatten_vanished", "side": SELL, "tif": tif_rec, "post_only": False,
          "his_level": his_px, "price": 0.0 if sole else limit, "wire": 0.0 if sole else limit,
-         "qty": ledger, "order_id": None, "state": "placing", "filled": 0.0, "booked_filled": 0.0,
+         "qty": qty, "order_id": None, "state": "placing", "filled": 0.0, "booked_filled": 0.0,
          "avg_px": None, "taker_at_placement": True, "pre_ids": pre_ids, "placed_ts": t.now,
          "reason": "flatten_vanished"}
     try:
@@ -3229,7 +3365,7 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
             resp = await _guarded(t, o["id"], t.pmus.close_position, r.slug,
                                   slippage_bips=le.EXIT_SLIPPAGE_BIPS)
         else:
-            resp = await _guarded(t, o["id"], t.pmus.submit_fok, r.slug, limit, ledger, True,
+            resp = await _guarded(t, o["id"], t.pmus.submit_fok, r.slug, limit, qty, True,
                                   "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL", ORDER_INTENT)
     except asyncio.CancelledError:
         raise
@@ -3248,7 +3384,7 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
         await _book_delta(t, o, book, {"state": status, "filled_shares": filled,
                                        "avg_px": resp.get("fill_price")}, maker=False,
                           taker_at_placement=True)
-    st = {"state": status or ("filled" if filled >= ledger else "cancelled"),
+    st = {"state": status or ("filled" if filled >= qty else "cancelled"),
           "filled_shares": filled, "avg_px": resp.get("fill_price")}
     if not oid:
         if sole and status == "close_failed":

@@ -1265,6 +1265,47 @@ def test_overfill_books_only_the_ledger_and_is_flagged():
     nothing = r.book_sell(over.state, 5, 0.50)
     assert nothing.overfill is True and nothing.booked == 0 and nothing.realized is None
     assert nothing.state == over.state
+    assert over.dust == 0.0 and nothing.dust == 0.0, "an overfill carries no dust"
+
+
+def test_a_sale_within_one_lot_past_the_ledger_is_dust_not_overfill():
+    """2026-09-06 01:11:57Z: a float ledger of 413.76 (the standing row's
+    fractional fills) sold 414 by a flatten sized off the INTEGER column
+    that read 414. The 0.24 is rounding, not a short: booked stays
+    min(d, net0), `dust` carries the gap, overfill is False. A sale more
+    than SELL_DUST_SHARES past the ledger is the overfill as before; an
+    exact sale is neither."""
+    s = r.BookState(ledger_net=413.76, avg_cost=0.12)
+    dust = r.book_sell(s, 414, 0.12)
+    assert dust.refusal is None and dust.overfill is False
+    assert dust.booked == pytest.approx(413.76) and dust.dust == pytest.approx(0.24)
+    assert dust.dust == round(414 - 413.76, 6)
+    assert dust.state.ledger_net == pytest.approx(0.0) and dust.realized == pytest.approx(0.0)
+    assert dust.usd == pytest.approx(round(413.76 * 0.12, 4))
+    over = r.book_sell(s, 415, 0.12)
+    assert over.overfill is True and over.dust == 0.0 and over.booked == pytest.approx(413.76)
+    exact = r.book_sell(s, 413.76, 0.12)
+    assert exact.overfill is False and exact.dust == 0.0 and exact.booked == pytest.approx(413.76)
+    # the boundary is inclusive: exactly one lot past is still dust
+    edge = r.book_sell(s, 414.76, 0.12)
+    assert edge.overfill is False and edge.dust == pytest.approx(1.0)
+    # a flat ledger sold a fraction of a lot is dust too, nothing books
+    flat = r.book_sell(dust.state, 0.5, 0.12)
+    assert flat.booked == 0 and flat.overfill is False and flat.dust == pytest.approx(0.5)
+    # the field defaults so every earlier positional Booking still reads
+    assert r.Booking(s, 0.0, 0.0, None, False, None).dust == 0.0
+    assert r.Booking._fields[-1] == "dust"
+    # ONE constant, one venue lot, exported, and NOT an environment dial in
+    # either direction: a wider tolerance is room for a real short to hide
+    assert r.SELL_DUST_SHARES == 1.0 and "SELL_DUST_SHARES" in r.__all__
+    src = inspect.getsource(r)
+    assert "SELL_DUST_SHARES = 1.0\n" in src
+    assert 'capped_env("SELL_DUST_SHARES"' not in src and 'min_wait_env("SELL_DUST_SHARES"' not in src
+    assert '_env_float("SELL_DUST_SHARES"' not in src
+    assert src.index("FLAT_TOL_SHARES = 1e-6") < src.index("SELL_DUST_SHARES = 1.0")
+    # the sale rule reads it, not FLAT_TOL_SHARES, for the overfill line
+    sell_src = inspect.getsource(r.book_sell)
+    assert "overfill = over > SELL_DUST_SHARES" in sell_src
 
 
 def test_booking_refuses_what_it_cannot_read():
@@ -1443,7 +1484,12 @@ def test_dust_never_books_and_a_dust_ledger_is_flat():
     assert sale.booked == 0.0 and sale.refusal is None and sale.overfill is True and sale.state is dusty
     held = r.BookState(ledger_net=40.0, avg_cost=0.5)
     assert r.book_sell(held, 40.0 + 5e-7, 0.5).overfill is False
-    assert r.book_sell(held, 40.0 + 2e-6, 0.5).overfill is True
+    # a sale past the ledger by under a lot is DUST since 2026-09-06 (the
+    # overfill line is SELL_DUST_SHARES, not FLAT_TOL_SHARES): flagged as
+    # dust, never as the short
+    near = r.book_sell(held, 40.0 + 2e-6, 0.5)
+    assert near.overfill is False and near.dust == pytest.approx(2e-6) and near.booked == 40.0
+    assert r.book_sell(held, 40.0 + r.SELL_DUST_SHARES + 1e-6, 0.5).overfill is True
     # the episode: a ledger under the tolerance is flat, at or over it is held
     assert r.episode_close(r.BookState(ledger_net=1e-8, gross_buy_usd=10.0), True, False, None, 0) == "cashed_out"
     assert r.episode_close_reason(r.BookState(ledger_net=9e-7, gross_buy_usd=10.0), True, False, None, 0) == "cashed_out"

@@ -873,6 +873,37 @@ sticky: the mirror resumes on its own, on the next tick after the backoff, the m
 `mode=<the mode the worker holds> ... backoff=<seconds left>` on the mode line, never `mode=safe` unless the
 mode is safe.
 
+2026-09-06: a sale within one venue lot of the ledger is dust (census `ledger_dust`), booked to the ledger
+and never a trip; the trip stays for a sale more than a lot past the ledger. The standing row holds the
+venue's FRACTIONAL fills (book 1 on `aec-wta-yulsta-eleryb-2026-09-05`: 182.76 then `mirror row 411040
+booked BUY 231.0 @ 0.12 ($27.72, order CAM68KQR8PMV seq 0): now 413.76 shares`) while
+`mirror_books.ledger_net` is an integer column and read 414; the flatten sized its SELL off the integer,
+the venue sold 414.0, and the 0.24-share rounding gap was booked and tripped as an overfill:
+`01:11:57Z mirror row 411040 booked SELL 413.76 @ 0.12 (entry 0.12, pnl +0.0000, OVERFILL: venue sold
+414.0)` then `MIRROR LIVE TRIPPED OFF: overfill {'book': 1, 'order': 33, 'sold': 414.0, 'ledger': 0}`, and
+the mirror was exits-only from 01:13Z on a number that is neither a short nor a wrong sign. Now
+(`SELL_DUST_SHARES = 1.0` in the rules module, one venue lot, not an env dial): the executor's line reads
+`..., DUST: venue sold 414.0, ledger held 413.76` and books the ceiling, the rules booking carries
+`dust=0.24` with `overfill=False`, the worker counts `ledger_dust` (appended LAST in `CENSUS_KEYS`, so no
+served index moved) and notes a `dust` entry in `recent`, the book stays live and `mirror_live` is not
+written. A sale MORE than a lot past the ledger (415.5 on 413.76) is the overfill exactly as before --
+frozen, tripped, and the receipt now carries all three numbers: `sold`, `ledger` (after the booking) and
+`held` (the standing row's shares before the sale). The SELL is also sized from the row now, for the IOC,
+rest, take and reduce legs: `qty = min(plan, ledger, ceil(held))` off the same standing-row read
+`_tick_book` already makes, taken once per tick (414 with 413.76 held places 414, and the one-lot overrun
+onto the fractional row is exactly the dust above, so the book reaches flat -- ledger 0, row 0.0 -- after
+one flatten and takes its flat close); NOT floored (the first cut's floor(413.76) = 413 left ledger 1 /
+row 0.76 / venue 0.76 that nothing could sell: `under_one_share` every tick, no flat close). With the row
+unreadable that tick the sizing stands on the ledger as before. The sole-holder `close_position` is never
+clamped and never gated: it closes the whole slug, fraction included, and its `mirror_orders` row keeps
+`qty = ledger` so a lost close reconstructs `sold = qty - int(held)` as the whole ledger. Dust ACCUMULATES
+per order: each SELL delta's dust is added to the order's `dust_total` (kept on its `receipt` JSON, re-read
+with the row each poll, no column), and the delta that takes one order's total past `SELL_DUST_SHARES` is
+the overfill -- a flat row taking 1.0-share deltas per poll trips on the second delta, 0.6 then 0.6 trips
+on the second, a single 0.24 never -- with `dust_total` on the trip receipt beside `sold`, `ledger` and
+`held`. `ledger_dust` also rides on the served `integ` block (`_INTEG_CENSUS_KEYS`), since it sits past
+the sanitizer's 40-key cap in `CENSUS_KEYS`.
+
 ## 6. WHAT "TO A TEE" CANNOT MEAN — the honest residuals, with numbers
 
 | residual | number | source |

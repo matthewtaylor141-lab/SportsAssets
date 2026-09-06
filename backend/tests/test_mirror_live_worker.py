@@ -455,6 +455,12 @@ class _Pool(_ShadowPool):
         if "ml-order-reason" in s:
             self.orders[a[0]]["reason"] = a[1]
             return "UPDATE 1"
+        if "ml-order-dust" in s:
+            # the worker's statement: the receipt JSON merged with the
+            # order's cumulative dust, never a column of its own
+            o = self.orders[a[0]]
+            o["receipt"] = {**(o.get("receipt") or {}), "dust_total": a[1]}
+            return "UPDATE 1"
         if "ml-adds-seq" in s:
             r = self.rows.get(a[0]) or {}
             return sum(1 for x in (r.get("raw") or {}).get("adds", []) if x.get("order_id") == a[1])
@@ -3423,6 +3429,10 @@ def test_the_gate_counters_survive_the_health_endpoints_sanitizer():
     assert served["integ"]["side_band"] == 0 and served["integ"]["venue_halted"] == 0
     assert "side_band" in ml._INTEG_CENSUS_KEYS and "venue_halted" in ml._INTEG_CENSUS_KEYS
     assert isinstance(served["integ"]["side_band"], int) and isinstance(served["integ"]["venue_halted"], int)
+    # `ledger_dust` (2026-09-06) was appended LAST in CENSUS_KEYS, past
+    # the cap by construction, so it rides on `integ` the same way
+    assert "ledger_dust" not in served["census"] and "ledger_dust" in ml._INTEG_CENSUS_KEYS
+    assert served["integ"]["ledger_dust"] == 0 and isinstance(served["integ"]["ledger_dust"], int)
     # AND THE TOP LEVEL IS CAPPED AT 40 TOO. `integ` must never be the
     # key that gets dropped. It is written in `_new_stats`, and every
     # conditional key the tick adds later (`capped_tick`,
@@ -3738,6 +3748,339 @@ def test_the_flattens_slippage_leg_refuses_a_non_open_slug_before_it_reads_a_bid
     i_refuse = src.index('_mirror_stop("venue_halted", w)')
     assert i_refuse < src.index("le._pm_held(") < src.index("t.pmus.slug_bid")
     assert 'r.venue_state is not None and r.venue_state != _STATE_OPEN' in src
+
+
+# ------------------------------- 11b. U11: sub-share ledger dust is not an overfill
+
+def _dust_book(p, ledger=414, held=413.76):
+    """The 2026-09-06 01:11:57Z book: the standing row holds the venue's
+    FRACTIONAL fills (182.76 + 231.0 = 413.76) while the integer ledger
+    column read 414."""
+    b = p.add_book(ledger=ledger, avg_cost=0.12)
+    p.rows[b["standing_row_id"]]["filled_shares"] = held
+    return b
+
+
+def test_a_sale_within_a_lot_of_the_ledger_is_dust_booked_counted_and_never_a_trip(monkeypatch, caplog):
+    """The flatten sold 414.0 on a row holding 413.76: 0.24 of rounding
+    between a fractional fill and a whole-share ledger, not a short. It
+    books to the ledger, counts `ledger_dust`, notes a `dust` entry, and
+    the book stays live with the DB switch untouched."""
+    monkeypatch.setenv("PMUS_MIRROR", "exits")          # no increase after the flat: the fill alone
+    caplog.set_level(logging.INFO)
+    p = _pool(fills=_his(300, sold=300), snap={M: 0.0, N: 0.0})
+    b = _dust_book(p)
+    row = p.rows[b["standing_row_id"]]
+    o = p.add_order(b, side=SELL, wire=0.12, qty=414, kind="flatten_paired")
+    v = _Venue(held={SLUG: 0}, fills={"oid-1": (414.0, 0.12)})
+    v.rest("oid-1", "SELL", 0.12, 414)
+    st = _tick(p, v)
+    assert _census(st, "ledger_dust") == 1 and _census(st, "overfill") == 0, st["census"]
+    assert b["state"] == "live" and b["frozen_reason"] is None and b["ledger_net"] == 0
+    assert st["frozen_reasons"] == {} and st["books_frozen"] == 0
+    # the DB switch was NOT written, false or otherwise, and no receipt exists
+    assert p.state["mirror_live"] is True and "mirror_live_trip" not in p.state
+    assert not [a for k, s, a in p.sent if "ml-state-write" in s and a[0] in ("mirror_live", "mirror_live_trip")]
+    assert row["filled_shares"] == 0.0 and row["status"] == "filled"
+    assert p.orders[o["id"]]["booked_filled"] == 414.0 and p.orders[o["id"]]["state"] == "filled"
+    assert p.orders[o["id"]]["realized"] == pytest.approx(0.0)          # sold at the entry
+    # the order's cumulative dust rides on its receipt JSON (no column)
+    assert p.orders[o["id"]]["receipt"]["dust_total"] == pytest.approx(0.24)
+    assert [a[1] for k, s, a in p.sent if "ml-order-dust" in s] == [pytest.approx(0.24)]
+    ent = [x for x in ml._RECENT if x["what"] == "dust"]
+    assert len(ent) == 1 and ent[0]["book"] == b["id"] and ent[0]["shares"] == pytest.approx(0.24)
+    assert ent[0]["held"] == 413.76 and ent[0]["sold"] == 414.0 and ent[0]["ledger"] == 0
+    assert ent[0]["dust_total"] == pytest.approx(0.24)
+    lines = [r.getMessage() for r in caplog.records]
+    sell = [x for x in lines if "booked SELL" in x][-1]
+    assert sell == ("mirror row %s booked SELL 413.76 @ 0.12 (entry 0.12, pnl +0.0000, "
+                    "DUST: venue sold 414.0, ledger held 413.76): now 0.0 shares" % b["standing_row_id"])
+    assert not any("TRIPPED OFF" in x or "OVERFILL" in x for x in lines)
+    assert ("mirror_live: book %s SELL on order %s is 0.24 shares past the ledger (venue sold 414.0, "
+            "row held 413.76): dust, booked to the ledger, no trip; dust_total 0.24 on the order"
+            % (b["id"], o["id"])) in lines
+    # and the count is on the served surface
+    from sportsassets.api import app as api_app
+    assert api_app._sanitize_detail(st)["integ"]["ledger_dust"] == 1
+
+
+def test_a_sale_more_than_a_lot_past_the_ledger_is_still_the_overfill_with_held_on_the_receipt(monkeypatch):
+    monkeypatch.setenv("PMUS_MIRROR", "exits")
+    p = _pool(fills=_his(300, sold=300), snap={M: 0.0, N: 0.0})
+    b = _dust_book(p)
+    o = p.add_order(b, side=SELL, wire=0.12, qty=416, kind="flatten_paired")
+    v = _Venue(held={SLUG: 0}, fills={"oid-1": (416.0, 0.12)})
+    v.rest("oid-1", "SELL", 0.12, 416)
+    st = _tick(p, v)
+    assert _census(st, "overfill") == 1 and _census(st, "ledger_dust") == 0, st["census"]
+    assert b["state"] == "frozen" and b["frozen_reason"] == "overfill" and b["ledger_net"] == 0
+    assert p.state["mirror_live"] is False
+    rec = p.state["mirror_live_trip"]
+    assert rec["why"] == "overfill" and rec["book"] == b["id"] and rec["order"] == o["id"]
+    assert (rec["sold"], rec["ledger"], rec["held"], rec["dust_total"]) == (416.0, 0, 413.76, 0.0)
+    assert not [x for x in ml._RECENT if x["what"] == "dust"]
+    assert p.rows[b["standing_row_id"]]["filled_shares"] == 0.0, "the row never goes negative"
+
+
+def test_the_incident_book_flattens_at_the_ledger_books_the_dust_and_reaches_the_flat_close():
+    """(a) The incident book: ledger 414, row 413.76. The flatten's SELL
+    is sized min(plan, ledger, ceil(held)) = 414 -- NOT floored to 413,
+    which left ledger 1 / row 0.76 that nothing could sell (under_one_share
+    on every tick, never a flat close: the withdrawn first cut). The venue
+    fills 414: dust 0.24 booked, ledger 0, row 0.0, the book takes its
+    flat_since on the next tick and closes cashed_out after
+    MIRROR_FLAT_CLOSE_S. NO under_one_share, ever."""
+    p = _pool()
+    p.state["mirror_flatten"] = True
+    b = _dust_book(p)
+    row = p.rows[b["standing_row_id"]]
+    v = _Venue(held={SLUG: 413.76})
+    st = _tick(p, v)
+    assert _census(st, "flatten_vanished") >= 1 and _census(st, "under_one_share") == 0
+    pl = _places(v)
+    assert len(pl) == 1 and pl[0][4] is True and pl[0][3] == 414
+    o = [o for o in p.orders.values() if o["book_id"] == b["id"]][0]
+    assert o["qty"] == 414 and o["side"] == SELL and o["kind"] == "flatten_vanished"
+    assert b["ledger_net"] == 414, "the ledger is not touched by the sizing"
+    # the venue fills the whole 414 on a row of 413.76: dust, booked, flat
+    v2 = _Venue(held={SLUG: 0}, fills={"oid-1": (414.0, pl[0][2])})
+    v2.orders = v.orders
+    st2 = _tick(p, v2, now=NOW + 30)
+    assert _census(st2, "ledger_dust") == 1 and _census(st2, "overfill") == 0, st2["census"]
+    assert _census(st2, "under_one_share") == 0 and _census(st2, "partial_fill") == 0
+    assert b["ledger_net"] == 0 and row["filled_shares"] == 0.0 and row["status"] == "filled"
+    assert b["state"] == "live" and p.state["mirror_live"] is True and "mirror_live_trip" not in p.state
+    assert o["state"] == "filled" and o["booked_filled"] == 414.0 and o["receipt"]["dust_total"] == pytest.approx(0.24)
+    assert b["last_plan"]["flat_since"] == NOW + 30 and b["last_plan"]["close"] == "not_due"
+    # the flat close, on its clock
+    st3 = _tick(p, _Venue(held={SLUG: 0}), now=NOW + 30 + rules.MIRROR_FLAT_CLOSE_S + 1)
+    assert b["state"] == "closed" and row["status"] == "cashed_out" and _census(st3, "closed_cashed_out") == 1
+    assert _census(st3, "under_one_share") == 0 and not _places(v2)
+    # the column unreadable: the ledger sizes it (fail closed on the trip, which stands)
+    p2 = _pool()
+    p2.state["mirror_flatten"] = True
+    _dust_book(p2, held=None)
+    v4 = _Venue(held={SLUG: 414})
+    _tick(p2, v4)
+    assert _places(v4)[0][3] == 414
+    # the rule itself, on the book dict the tick carries
+    assert ml._sell_qty({"ledger_net": 414, "_held": 413.76}, 414) == 414
+    assert ml._sell_qty({"ledger_net": 414, "_held": 413.76}, 200) == 200
+    assert ml._sell_qty({"ledger_net": 414}, 414) == 414
+    assert ml._sell_qty({"ledger_net": 414, "_held": None}, 414) == 414
+    assert ml._sell_qty({"ledger_net": 414, "_held": "413.76"}, 414) == 414     # a string is no reading
+    assert ml._sell_qty({"ledger_net": 414, "_held": 500.0}, 414) == 414       # never above the ledger
+    assert ml._sell_qty({"ledger_net": 413, "_held": 413.76}, 414) == 413      # nor above the ledger's read
+    assert ml._sell_qty({"ledger_net": 414, "_held": 412.5}, 414) == 413       # a row a lot under: its ceil
+    assert ml._sell_qty({"ledger_net": 1, "_held": 0.76}, 1) == 1              # the sub-share row sells its lot
+    assert ml._sell_qty({"ledger_net": 1, "_held": 0.0}, 1) == 0               # a row at zero sells nothing
+    assert ml._sell_qty({"ledger_net": 1, "_held": -3.0}, 1) == 0
+    # the stash is the row read _tick_book already makes, not a second
+    # query, and it is written ONCE: _book_fill's upkeep of it is gone
+    # (the sizing reads the standing row as the tick read it)
+    src = inspect.getsource(ml._tick_book)
+    assert src.count("_SQL_STANDING_READ") == 1
+    assert src.index("_SQL_STANDING_READ") < src.index('book["_held"] = _num(standing.get("filled_shares"))')
+    assert "_held" not in inspect.getsource(ml._book_fill)
+    assert inspect.getsource(ml).count('book["_held"] =') == 1
+    act = inspect.getsource(ml._act)
+    assert act.count("_sell_qty(book, p.qty)") == 2 and 'int(book.get("ledger_net") or 0)) if p.side == SELL' not in act
+    assert "math.floor" not in inspect.getsource(ml._sell_qty)
+
+
+def _sub_share_vanish(held_venue, pm_held, monkeypatch, manual=0.0, **venue_kw):
+    """A sole or co-held book at ledger 1 / row 0.76 on a vanished market,
+    its flatten rest stood and cancelled, the slippage leg due."""
+    async def _held(slug):
+        return pm_held, 0.12
+    monkeypatch.setattr(le, "_pm_held", _held)
+    p = _pool(fills=_his(300, sold=300), snap=None)
+    if manual:
+        p.manual_shares[SLUG] = manual
+    b = p.add_book(ledger=1, avg_cost=0.12, last_plan={"kind": "flatten_vanished", "vanish_since": NOW - 400})
+    p.rows[b["standing_row_id"]]["filled_shares"] = 0.76
+    p.add_order(b, side=SELL, wire=0.32, qty=1, kind="flatten_vanished", state="cancelled",
+                placed_ts=NOW - 400, done_at=NOW - 10, order_id=None)
+    v = _Venue(held={SLUG: held_venue}, **venue_kw)
+    return p, b, v
+
+
+def test_a_sole_holder_at_ledger_one_row_a_fraction_sends_close_position_unclamped(monkeypatch):
+    """(b) ledger 1 / row 0.76, the venue holds our 0.76 and nobody
+    else's: close_position, the whole slug, fraction included -- never
+    sized to the row, never under_one_share. The row's qty is the
+    ledger (1) so a lost close reconstructs `sold = qty - int(held)` as
+    the whole ledger."""
+    close = {"ok": True, "order_id": "close-1", "status": "filled", "fill_price": 0.29,
+             "filled_shares": 0.76, "raw": {}}
+    p, b, v = _sub_share_vanish(0.76, 0, monkeypatch, close=close)
+    row = p.rows[b["standing_row_id"]]
+    st = _tick(p, v, http=_gone())
+    assert ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v.calls and "slug_bid" not in _kinds(v)
+    assert _census(st, "under_one_share") == 0 and _census(st, "flatten_vanished") == 1, st["census"]
+    assert _census(st, "overfill") == 0 and _census(st, "ledger_dust") == 0
+    o = next(x for x in p.orders.values() if x["tif"] == "CLOSE")
+    assert o["qty"] == 1 and o["wire"] == 0.0 and o["booked_filled"] == 0.76
+    assert row["filled_shares"] == 0.0 and b["ledger_net"] == 0 and b["state"] != "frozen"
+    assert p.state["mirror_live"] is True
+    # the gate sits BELOW the sole decision and inside the co-held arm only
+    src = inspect.getsource(ml._flatten_vanished)
+    i_sole = src.index("sole = sole_walk and sole_read")
+    i_gate = src.index('_mirror_stop("under_one_share", w)')
+    assert i_sole < src.index("qty = _sell_qty(book, ledger)") < i_gate < src.index("t.pmus.slug_bid")
+    assert src.count('_mirror_stop("under_one_share", w)') == 1
+    assert "qty = ledger\n    if not sole:\n        qty = _sell_qty(book, ledger)" in src
+
+
+def test_a_coheld_ioc_at_ledger_one_row_a_fraction_sends_one_share(monkeypatch):
+    """(c) the same numbers co-held (the desk's 200 beside our 0.76):
+    the IOC sells min(ledger 1, ceil(0.76)) = 1, the venue fills 1.0 on
+    a row of 0.76 -- dust 0.24, booked, flat, no trip."""
+    p, b, v = _sub_share_vanish(200.76, 200, monkeypatch, manual=200.0, flatten_bid=0.29, ioc_fill=1.0)
+    row = p.rows[b["standing_row_id"]]
+    st = _tick(p, v, http=_gone())
+    assert "close" not in _kinds(v) and ("slug_bid", SLUG, True) in v.calls
+    ioc = [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
+    assert len(ioc) == 1 and ioc[0][3] == 1 and ioc[0][4] is True and ioc[0][2] == le.sell_limit_price(0.29)
+    assert _census(st, "under_one_share") == 0 and _census(st, "ledger_dust") == 1, st["census"]
+    assert _census(st, "overfill") == 0 and b["ledger_net"] == 0 and row["filled_shares"] == 0.0
+    o = next(x for x in p.orders.values() if x["tif"] == "IOC")
+    assert o["qty"] == 1 and o["state"] == "filled" and o["receipt"]["dust_total"] == pytest.approx(0.24)
+    assert p.state["mirror_live"] is True and b["state"] != "frozen"
+    # a row at ZERO under a ledger of 1 is the one co-held case the gate still refuses
+    p2, b2, v2 = _sub_share_vanish(200.0, 200, monkeypatch, manual=200.0, flatten_bid=0.29, ioc_fill=1.0)
+    p2.rows[b2["standing_row_id"]]["filled_shares"] = 0.0
+    st2 = _tick(p2, v2, http=_gone())
+    assert _census(st2, "under_one_share") == 1 and not _places(v2) and "slug_bid" not in _kinds(v2)
+    assert b2["ledger_net"] == 1
+
+
+def test_a_lost_close_on_a_fractional_row_books_the_row_with_sold_the_whole_ledger(monkeypatch):
+    """(d) the CLOSE row of a sole close kept qty = ledger (414) on a row
+    of 413.76; the response was lost. The venue's position went to 0:
+    sold = 414 - 0 = 414, the trade log's one seller sold 413.76, and
+    that is what books: row 0.0, ledger 0, no trip."""
+    async def _never(slug):
+        raise AssertionError("a second positions walk")
+    monkeypatch.setattr(le, "_pm_held", _never)
+    gone = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0}])
+    sell = {"side": "SELL", "ts": NOW - 80, "order_id": "close-9", "order_qty": None, "order_price": None}
+    p = _pool(fills=_his(300, sold=300), snap=None)
+    b = p.add_book(ledger=414, avg_cost=0.12, state="frozen", frozen_reason="placement_lost",
+                   frozen_ts=NOW - 100)
+    row = p.rows[b["standing_row_id"]]
+    row["filled_shares"] = 413.76
+    o = p.add_order(b, side=SELL, wire=0.0, qty=414, kind="flatten_vanished", tif="CLOSE",
+                    order_id=None, state="placing", placed_ts=NOW - 90)
+    v = _Venue(held={SLUG: 0}, trades=[{**sell, "qty": 413.76, "price": 0.29}])
+    st = _tick(p, v, http=gone)
+    ent = [x for x in ml._RECENT if x["what"] == "adopted"]
+    assert len(ent) == 1 and ent[0]["sold"] == 414 and ent[0]["order"] == "close-9"
+    assert o["order_id"] == "close-9" and o["booked_filled"] == pytest.approx(413.76)
+    assert row["filled_shares"] == 0.0 and b["ledger_net"] == 0
+    assert _census(st, "overfill") == 0 and _census(st, "ledger_dust") == 0 and _census(st, "book_error") == 0
+    assert p.state["mirror_live"] is True and b["state"] == "closed" and _census(st, "closed_cashed_out") == 1
+    # the log naming the whole 414 (the venue rounds the close up): dust, booked, no trip
+    p2 = _pool(fills=_his(300, sold=300), snap=None)
+    b2 = p2.add_book(ledger=414, avg_cost=0.12, state="frozen", frozen_reason="placement_lost",
+                     frozen_ts=NOW - 100)
+    p2.rows[b2["standing_row_id"]]["filled_shares"] = 413.76
+    o2 = p2.add_order(b2, side=SELL, wire=0.0, qty=414, kind="flatten_vanished", tif="CLOSE",
+                      order_id=None, state="placing", placed_ts=NOW - 90)
+    st2 = _tick(p2, _Venue(held={SLUG: 0}, trades=[{**sell, "qty": 414.0, "price": 0.29}]), http=gone)
+    assert o2["booked_filled"] == 414.0 and o2["state"] == "filled" and o2["receipt"]["dust_total"] == pytest.approx(0.24)
+    assert _census(st2, "ledger_dust") == 1 and _census(st2, "overfill") == 0 and b2["ledger_net"] == 0
+    assert p2.rows[b2["standing_row_id"]]["filled_shares"] == 0.0 and p2.state["mirror_live"] is True
+
+
+@pytest.mark.parametrize("deltas, trips_on", [
+    ([1.0, 1.0], 2),        # the reviewer's scenario: a flat row taking one-lot deltas per poll
+    ([0.6, 0.6], 2),        # two sub-lot deltas summing past a lot
+    ([0.24], None),         # the incident's single 0.24: never
+    ([0.3, 0.3, 0.3], None),  # under a lot in total: never
+])
+def test_dust_accumulates_per_order_and_trips_when_the_total_passes_a_lot(deltas, trips_on, monkeypatch, caplog):
+    """A flat row (ledger 0, row 0.0) with a resting SELL the venue fills
+    a delta at a time: each delta on its own is within SELL_DUST_SHARES,
+    so a per-delta reading would pass a short of any size one lot at a
+    time. The order's dust_total is what is judged, kept on the receipt
+    JSON so it survives the poll (the worker re-reads the row each
+    tick): the delta that takes it past a lot is the overfill -- frozen,
+    tripped, dust_total on the receipt."""
+    caplog.set_level(logging.INFO)
+    p = _pool()
+    b = p.add_book(ledger=0, gross_buy=50.0, avg_cost=0.12)
+    row = p.rows[b["standing_row_id"]]
+    assert row["filled_shares"] == 0.0
+    o = p.add_order(b, side=SELL, wire=0.12, qty=3, kind="reduce")
+    t = ml._Tick(pool=p, pmus=_Venue(), http=None, now=NOW, stats=ml._new_stats())
+    monkeypatch.setattr(ml, "_current_stats", t.stats)       # the census the tick would carry
+    bk = dict(b)                                             # the tick's own copy of the row, as the read makes it
+    filled = 0.0
+    for i, d in enumerate(deltas, start=1):
+        filled += d
+        # the row as the NEXT poll reads it: a fresh dict off the table,
+        # the tick's own dust_total gone, the receipt's kept
+        o_poll = dict(p.orders[o["id"]])
+        assert "dust_total" not in o_poll
+        out = _run(ml._book_delta(t, o_poll, bk, {"state": "open", "filled_shares": filled, "avg_px": 0.12},
+                                  maker=False))
+        total = round(sum(deltas[:i]), 6)
+        assert p.orders[o["id"]]["receipt"]["dust_total"] == pytest.approx(total)
+        assert o_poll["dust_total"] == pytest.approx(total) and p.orders[o["id"]]["booked_filled"] == pytest.approx(filled)
+        if trips_on is not None and i >= trips_on:
+            assert out == "overfill" and bk["state"] == "frozen" and bk["frozen_reason"] == "overfill"
+            assert b["state"] == "frozen" and b["frozen_reason"] == "overfill"
+            assert p.state["mirror_live"] is False
+            rec = p.state["mirror_live_trip"]
+            assert rec["why"] == "overfill" and rec["dust_total"] == pytest.approx(total)
+            assert (rec["sold"], rec["ledger"], rec["held"], rec["order"]) == (pytest.approx(d), 0, 0.0, o["id"])
+            assert t.stats["census"]["overfill"] == 1
+            assert ("mirror_live: book %s SELL on order %s: dust_total %s on the order is past "
+                    "SELL_DUST_SHARES (1.0) -- the overfill, not dust" % (b["id"], o["id"], total)
+                    in [r.getMessage() for r in caplog.records])
+            assert "MIRROR LIVE TRIPPED OFF: overfill" in caplog.text and "'dust_total': %s" % total in caplog.text
+            break
+        assert out == "booked" and bk["state"] == "live" and b["state"] == "live" and p.state["mirror_live"] is True
+        assert t.stats["census"]["ledger_dust"] == i and t.stats["census"]["overfill"] == 0
+        assert ml._RECENT[-1]["what"] == "dust" and ml._RECENT[-1]["dust_total"] == pytest.approx(total)
+        assert "TRIPPED OFF" not in caplog.text
+    else:
+        assert trips_on is None and "mirror_live_trip" not in p.state and b["state"] == "live"
+    assert row["filled_shares"] == 0.0 and b["ledger_net"] == 0, "the row never goes negative"
+    # the receipt is the place, and the open-orders read carries it back
+    assert "receipt" in ml._SQL_ORDERS_OPEN and "ml-order-dust" in ml._SQL_ORDER_DUST
+    assert "jsonb_build_object('dust_total', $2::float8)" in ml._SQL_ORDER_DUST
+    assert ml._dust_total({"receipt": json.dumps({"dust_total": 0.7})}) == 0.7
+    assert ml._dust_total({"receipt": {"dust_total": 0.7}, "dust_total": 0.9}) == 0.9
+    assert ml._dust_total({"receipt": None}) == 0.0 and ml._dust_total({"receipt": "nope"}) == 0.0
+    assert ml._dust_total({"receipt": {"dust_total": -1.0}}) == 0.0
+
+
+def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
+    """The served census is the first 40 names of CENSUS_KEYS (the
+    sanitizer's cap); a name added anywhere but the END moves every index
+    after it. `venue_halted` (24) and `side_band` (40) are pinned as the
+    U9 cap test pinned them, and the whole served prefix is spelled out."""
+    from sportsassets.api import app as api_app
+    keys = ml.CENSUS_KEYS
+    assert keys[-1] == "ledger_dust" and keys.count("ledger_dust") == 1
+    assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
+    assert keys.index("book_error") == len(keys) - 2 and keys.index("overfill") < keys.index("ledger_dust")
+    assert keys[:api_app._DETAIL_MAX_KEYS] == (
+        "mode_env_off", "mode_db_off", "mode_db_unreadable", "whales_unreadable",
+        "tables_absent", "no_venue", "probe_disabled", "halted", "paused",
+        "overspend_halt", "mirror_overspend", "overspend_uncheckable",
+        "loss_breaker", "loss_breaker_unreadable", "no_budget_room",
+        "mirror_day_cap", "mirror_loss_stop", "positions_unreadable",
+        "open_orders_unreadable", "protected_ids_unreadable", "tick_abandoned",
+        "no_ratio", "no_mark", "no_quote", "venue_halted", "unmapped", "family", "per_side_unsupported",
+        "market_closed", "market_unreadable", "game_too_far_out", "mapping", "edge_gate", "cell_gate",
+        "clip_zero", "legacy_row", "slug_recent_copy", "underdog_coholds",
+        "venue_already_holds", "kalshi_claimed")
+    # past the cap by construction, so it rides on the served `integ` block
+    assert ml._INTEG_CENSUS_KEYS[-1] == "ledger_dust" and ml._INTEG_CENSUS_KEYS.count("ledger_dust") == 1
+    assert ml._new_stats()["census"]["ledger_dust"] == 0 and ml._new_stats()["integ"]["ledger_dust"] == 0
 
 
 # ------------------------------------------------ 12. the census coverage

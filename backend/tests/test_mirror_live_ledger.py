@@ -27,6 +27,7 @@ What is pinned and why (P1 spec sections 1b, 1c, 1e and 8.5):
 import asyncio
 import inspect
 import json
+import logging
 import pathlib
 import re
 import time
@@ -34,6 +35,7 @@ import time
 import pytest
 
 from sportsassets import live_executor as le
+from sportsassets.analytics import mirror_live_rules as rules
 from sportsassets.scripts import migrate
 from tests.test_mirror_live_migration import _table_columns
 from tests.test_mirror_shadow import _Pool as _ShadowPool
@@ -578,8 +580,8 @@ def test_sell_never_writes_cashed_out_and_never_goes_negative():
     # the flat row on a live market: another sale books nothing, flags, writes nothing
     n = len(p.sent)
     out = _sell(p, 5, 0.35, 0)
-    assert out == {"booked": 0.0, "pnl": None, "overfill": True, "written": False,
-                   "refusal": "nothing_to_book"}
+    assert out == {"booked": 0.0, "pnl": None, "overfill": True, "dust": 0.0, "held": 0.0,
+                   "written": False, "refusal": "nothing_to_book"}
     assert [s for k, s, _ in p.sent[n:] if "UPDATE" in s] == []
     assert row["filled_shares"] == 0.0 and row["status"] == "filled"
     # the belt in the statement itself
@@ -603,6 +605,60 @@ def test_sell_overfill_books_the_ledger_only_and_flags_it():
     out = _sell(p, 12, 0.35, 12)            # book says 12, the row holds 10
     assert out["booked"] == 10.0 and out["overfill"] is True
     assert p.rows[900]["filled_shares"] == 0.0
+
+
+@pytest.mark.parametrize("held,net,q,expect", [
+    # the 2026-09-06 01:11:57Z sale: the row holds 413.76 fractional
+    # shares, the integer ledger reads 414, the flatten sold 414.0
+    (413.76, 414, 414.0, "dust"),
+    # a full lot past the row is still dust (the constant is inclusive)
+    (413.76, 414, 414.76, "dust"),
+    # more than a lot past what the row holds: the overfill, as before
+    (413.76, 414, 415.5, "overfill"),
+    # a sale inside the holding is neither
+    (413.76, 414, 413.0, "neither"),
+    # the ledger, not the row, is the smaller reading: dust off the ledger
+    (414.0, 413, 413.5, "dust"),
+])
+def test_sell_within_one_lot_past_the_ceiling_is_dust_not_overfill(held, net, q, expect, caplog):
+    """A fractional venue fill under a whole-share ledger leaves a
+    sub-lot gap the sizing cannot see; a sale into that gap books the
+    ceiling, says DUST on the line and never flags overfill. The trip
+    stays for a sale MORE than SELL_DUST_SHARES past the ceiling."""
+    caplog.set_level(logging.INFO, logger="sportsassets.live_executor")
+    p = _Ledger()
+    assert _open(p)["ok"]
+    _buy(p, "o1", 0, held, 0.12)
+    row = p.rows[900]
+    assert row["filled_shares"] == pytest.approx(held)
+    out = _sell(p, q, 0.12, net)
+    ceiling = min(held, net)
+    assert out["written"] is True and out["held"] == pytest.approx(held)
+    assert out["pnl"] == pytest.approx(0.0)                 # sold at the entry
+    line = [r.getMessage() for r in caplog.records if "booked SELL" in r.getMessage()][-1]
+    if expect == "dust":
+        assert out["overfill"] is False and out["dust"] == pytest.approx(q - ceiling, abs=1e-6)
+        assert out["dust"] == round(q - ceiling, 6) and 0.0 < out["dust"] <= rules.SELL_DUST_SHARES
+        assert out["booked"] == pytest.approx(ceiling)
+        assert ", DUST: venue sold %s, ledger held %s" % (q, ceiling) in line and "OVERFILL" not in line
+    elif expect == "overfill":
+        assert out["overfill"] is True and out["dust"] == 0.0 and out["booked"] == pytest.approx(ceiling)
+        assert ", OVERFILL: venue sold %s" % q in line and "DUST" not in line
+    else:
+        assert out["overfill"] is False and out["dust"] == 0.0 and out["booked"] == pytest.approx(q)
+        assert "OVERFILL" not in line and "DUST" not in line
+    # the row never goes negative, and the ledger is handed the booked figure
+    assert row["filled_shares"] == pytest.approx(max(held - out["booked"], 0.0))
+    _, a = [(s, a) for k, s, a in p.sent if "GREATEST(filled_shares" in s][-1]
+    assert a[1] == pytest.approx(out["booked"])
+    # ONE constant: the executor reads the rules module's AT CALL TIME (its
+    # module load carries no mirror_live name, the hand-off pin) and never
+    # restates it
+    assert rules.SELL_DUST_SHARES == 1.0
+    sell_src = inspect.getsource(le._book_mirror_sell)
+    assert "from .analytics.mirror_live_rules import SELL_DUST_SHARES" in sell_src
+    assert "SELL_DUST_SHARES =" not in pathlib.Path(le.__file__).read_text()
+    assert "1e-9" not in sell_src, "the old sub-share overfill line is gone"
 
 
 def test_sell_pnl_is_the_long_formula_against_the_rows_average_accumulated():

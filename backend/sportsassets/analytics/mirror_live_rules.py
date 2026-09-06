@@ -297,6 +297,22 @@ MIRROR_FAMILIES = frozenset({"moneyline", "spread", "total", "prop", "btts", "ex
 # never books (a 1e-12 sale would otherwise book 1e-12 shares for $0).
 # mirror_orders.qty is an integer, so real fills are never this small.
 FLAT_TOL_SHARES = 1e-6
+# A SELL the venue filled within ONE VENUE LOT past the ledger is DUST,
+# not an overfill (2026-09-06 01:11:57Z, deploy dd1ed77: the standing
+# row held 413.76 shares of fractional fills, mirror_books.ledger_net is
+# an INTEGER column and read 414, the flatten sized its SELL off the
+# integer, the venue sold 414.0, and the 0.24-share gap between a
+# fractional fill and a whole-share ledger tripped the lane off as an
+# overfill -- exits-only from 01:13Z on rounding). The gap between a
+# fractional row and its rounded ledger is bounded by one lot, so a
+# sale up to one lot past the ledger books the ledger, is counted
+# (census `ledger_dust`) and never trips; a sale MORE than a lot past
+# the ledger is still the overfill -- the short a signed-net venue
+# would then hold -- and still freezes the book and trips the switch.
+# NOT read from the environment, in either direction: a wider
+# tolerance is exactly the room a real short could hide under, and
+# widening it is a code change that wants a review.
+SELL_DUST_SHARES = 1.0
 
 # The P2 gate's own thresholds (spec section 6). The 30-game floor and
 # the 95% standard are imported above, never restated.
@@ -1014,9 +1030,12 @@ class Booking(NamedTuple):
     booked: float            # shares actually booked
     usd: float               # cash of the booked shares
     realized: float | None   # SELL only; None when nothing was booked
-    overfill: bool           # a SELL past what the ledger held
+    overfill: bool           # a SELL MORE than SELL_DUST_SHARES past what the ledger held
     refusal: str | None      # 'bad_delta' | 'nothing_to_book' | 'bad_price' | 'bad_usd'
     #                          | 'bad_state' | 'avg_cost_unknown'
+    dust: float = 0.0        # SELL only: the shares sold past the ledger when that gap is
+    #                          within SELL_DUST_SHARES (rounding between a fractional fill
+    #                          and a whole-share ledger); 0.0 otherwise, and 0.0 on an overfill
 
 
 def _px(px: Any) -> float | None:
@@ -1142,14 +1161,20 @@ def book_sell(state: BookState, delta_shares: float, px: float | None) -> Bookin
 
     booked = min(delta, ledger_net); realized = (px - avg_cost) x
     booked, the long formula (le.realized_pnl for BUY_LONG). An
-    OVERFILL -- the venue sold more than the ledger held, by more than
-    FLAT_TOL_SHARES -- books the ledger and flags it: a sale past zero
+    OVERFILL -- the venue sold more than the ledger held, by MORE THAN
+    SELL_DUST_SHARES -- books the ledger and flags it: a sale past zero
     on a signed-net venue is a SHORT, and the worker freezes the book
-    and trips mirror_live off with the receipt. A ledger under
+    and trips mirror_live off with the receipt. A sale past the ledger
+    by up to SELL_DUST_SHARES is DUST (2026-09-06): the ledger column
+    is whole shares and the standing row is fractional, so a flatten
+    sized off the ledger can sell a fraction of a lot more than the
+    ledger holds; `dust` carries that gap, booked stays min(delta,
+    ledger_net), overfill stays False, and the worker counts it under
+    `ledger_dust` with no freeze and no trip. A ledger under
     FLAT_TOL_SHARES is flat: nothing books onto it (booked 0, no
-    refusal, the overfill flag still set when the sale was real). The
-    average cost is untouched by a sale; a book sold to zero keeps it
-    until the next buy resets it.
+    refusal, the overfill or dust reading still made when the sale
+    was real). The average cost is untouched by a sale; a book sold
+    to zero keeps it until the next buy resets it.
 
     Refusals as book_buy's ('bad_delta', 'nothing_to_book' for a
     delta under FLAT_TOL_SHARES, 'bad_price', 'bad_state'), and
@@ -1169,19 +1194,21 @@ def book_sell(state: BookState, delta_shares: float, px: float | None) -> Bookin
         return Booking(state, 0.0, 0.0, None, False, "bad_state")
     net0 = st.ledger_net
     booked = min(d, net0)
-    overfill = d > net0 + FLAT_TOL_SHARES
+    over = d - net0
+    overfill = over > SELL_DUST_SHARES
+    dust = round(over, 6) if 0.0 < over <= SELL_DUST_SHARES else 0.0
     if booked < FLAT_TOL_SHARES:
-        return Booking(state, 0.0, 0.0, None, overfill, None)
+        return Booking(state, 0.0, 0.0, None, overfill, None, dust)
     if st.avg_cost is None:
-        return Booking(state, 0.0, 0.0, None, overfill, "avg_cost_unknown")
+        return Booking(state, 0.0, 0.0, None, overfill, "avg_cost_unknown", dust)
     realized = round((p - st.avg_cost) * booked, 4)
     cash = round(booked * p, 4)
     new = replace(st, ledger_net=net0 - booked,
                   gross_sell_usd=round(st.gross_sell_usd + cash, 4),
                   realized_pnl=round(st.realized_pnl + realized, 4))
     if _state_nums(new) is None or not math.isfinite(realized) or not math.isfinite(cash):
-        return Booking(state, 0.0, 0.0, None, overfill, "bad_state")
-    return Booking(new, booked, cash, realized, overfill, None)
+        return Booking(state, 0.0, 0.0, None, overfill, "bad_state", dust)
+    return Booking(new, booked, cash, realized, overfill, None, dust)
 
 
 # ----------------------------------------------------------------- drift
@@ -1531,6 +1558,7 @@ __all__ = [
     "MIRROR_MAX_REPLACES_PER_HOUR", "MIRROR_REST_TTL_S", "MIRROR_TAKE_AFTER_S",
     "MIRROR_FLATTEN_REST_S", "MIRROR_FLAT_CLOSE_S", "MIRROR_DRIFT_MAX",
     "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FAMILIES", "FLAT_TOL_SHARES",
+    "SELL_DUST_SHARES",
     "P2_MAKER_SHARE_MIN", "P2_TAKE_SLIP_MAX", "P2_FROZEN_TICK_FRAC_MAX", "P2_CAPTURE_MIN",
     "P2_INTEGRITY_COUNTERS",
     "mirror_target", "AdmissionFacts", "admission",
