@@ -233,3 +233,92 @@ def test_venue_and_ledger_agree_within_one_share():
     # more than a share apart is a real disagreement
     assert mi.plan(400, 322.0, 324.0, book, 0.3, 0.31).reason.startswith("frozen")
     assert mi.VENUE_LEDGER_TOL_SHARES == 1.0
+
+
+# ---------------------------------------------------------- P2 rung S0
+# The short side's arithmetic (owner order 2026-09-05, "we need to make
+# sure we are mirroring shorts"): the target's sign, cap and truncation
+# with allow_short=True, and the sign-blind plan on either sign of the
+# ledger. No code changed here; these pin what the live lane now rides.
+
+def test_target_shares_allow_short_sign_cap_and_truncation_table():
+    # (ratio, net, mark) -> (target, capped): the cap prices a short at
+    # 1 - mark, whole shares toward zero on either sign
+    table = [
+        ((1.0, 100000.0, 0.9), (int(250.0 / 0.9), True)),        # +277: the long leg at 0.90
+        ((1.0, -100000.0, 0.9), (-int(250.0 / 0.1), True)),      # -2500: the short leg at 0.10
+        ((1.0, -100000.0, 0.1), (-int(250.0 / 0.9), True)),      # -277 the other way round
+        ((0.5, -300.0, 0.31), (-150, False)),
+        ((0.5, 300.0, 0.31), (150, False)),
+        ((0.05, -24423.06, 0.4574), (-int(250.0 / (1 - 0.4574)), True)),
+        ((0.3, -7.5, 0.5), (-2, False)),                          # -2.25 truncates toward zero
+        ((0.3, 7.5, 0.5), (2, False)),
+        ((1.0, 0.0, 0.5), (0, False)),
+    ]
+    for (ratio, net, mark), (target, capped) in table:
+        t = mi.target_shares(ratio, net, mark, allow_short=True)
+        assert (t["target"], t["capped"]) == (target, capped), (ratio, net, mark, t)
+        assert t["why"] is None
+        assert isinstance(t["target"], int)
+    assert mi.target_shares(1.0, 100000.0, 0.9, allow_short=True)["target"] == 277
+    assert mi.target_shares(1.0, -100000.0, 0.9, allow_short=True)["target"] == -2500
+    # both $250 on their own leg
+    assert 277 * 0.9 <= 250.0 < 278 * 0.9 and 2500 * 0.1 <= 250.0 < 2501 * 0.1
+    # the door shut: the same negative raw is 0, named
+    t0 = mi.target_shares(1.0, -100000.0, 0.9)
+    assert t0["target"] == 0 and t0["why"] == "short side not admitted" and t0["raw"] < 0
+
+
+def test_plan_from_flat_to_a_short_target_sells_the_long_leg_at_his_equivalent_or_the_ask():
+    book = mi.Book(bid=0.53, ask=0.55)
+    # ledger 0 toward -N: SELL_LONG N at max(his equivalent, ask) -- the
+    # shadow's would_px_short; his 0.54 (= 1 - 0.46) is under the ask
+    p = mi.plan(-300, 0.0, 0.0, book, 0.54, 0.54)
+    assert (p.side, p.qty, p.price, p.reason) == ("SELL_LONG", 300, 0.55, "reduce toward target")
+    assert p.would_fill is False                       # bid 0.53 < 0.55
+    # his equivalent above the ask rests at his level
+    p2 = mi.plan(-300, 0.0, 0.0, book, 0.60, 0.54)
+    assert (p2.side, p2.qty, p2.price) == ("SELL_LONG", 300, 0.60)
+    # adding to a short: from -100 toward -300 is a SELL of 200 more
+    p3 = mi.plan(-300, -100.0, -100.0, book, 0.54, 0.54)
+    assert (p3.side, p3.qty, p3.reason) == ("SELL_LONG", 200, "reduce toward target")
+
+
+def test_the_dead_band_on_a_short_is_priced_at_the_legs_own_price():
+    """Brief C6 (review, sign lens): a move on a SHORT ledger commits
+    collateral at 1 - mark a share. 12 shares of a 0.70 leg are $8.40
+    -- not "under $5" because the long token trades at 0.30 -- and 40
+    shares of a 0.10 leg are $4 whatever 40 x 0.90 says. A long book's
+    band is what it was."""
+    book = mi.Book(bid=0.29, ask=0.31)
+    p = mi.plan(-312, -300.0, -300.0, book, 0.30, 0.30)
+    assert (p.side, p.qty, p.price, p.reason) == ("SELL_LONG", 12, 0.31, "reduce toward target")
+    # the same 12 shares on a LONG ledger at mark 0.30 are $3.60: banded
+    assert mi.plan(312, 300.0, 300.0, book, 0.30, 0.30).reason == "under the dollar dead band"
+    hi = mi.Book(bid=0.89, ask=0.91)
+    p2 = mi.plan(-340, -300.0, -300.0, hi, 0.90, 0.90)
+    assert (p2.side, p2.reason, p2.detail) == (None, "under the dollar dead band", {"delta": -40})
+    assert mi.plan(340, 300.0, 300.0, hi, 0.90, 0.90).side == "BUY_LONG"
+    # from flat toward a short target the leg is the short one too
+    assert mi.plan(-40, 0.0, 0.0, hi, 0.90, 0.90).reason == "under the dollar dead band"
+    assert mi.plan(-12, 0.0, 0.0, book, 0.30, 0.30).side == "SELL_LONG"
+    # a flatten never reads the band, on either sign; no mark, no band
+    assert mi.plan(0, -3.0, -3.0, book, 0.30, 0.30).reason == "flatten"
+    assert mi.plan(-312, -300.0, -300.0, book, 0.30, None).side == "SELL_LONG"
+
+
+def test_plan_from_a_short_ledger_to_zero_is_a_buy_long_flatten_at_his_level_or_the_bid():
+    book = mi.Book(bid=0.53, ask=0.55)
+    p = mi.plan(0, -300.0, -300.0, book, 0.50, 0.54)
+    assert (p.side, p.qty, p.price, p.reason) == ("BUY_LONG", 300, 0.50, "flatten")
+    assert p.would_fill is False                       # ask 0.55 > 0.50
+    # with no level of his, the bid alone
+    p2 = mi.plan(0, -300.0, -300.0, book, None, 0.54)
+    assert (p2.side, p2.qty, p2.price, p2.reason) == ("BUY_LONG", 300, 0.53, "flatten")
+    # a partial cover from -300 toward -100 is a BUY of 200, a reduce
+    p3 = mi.plan(-100, -300.0, -300.0, book, 0.50, 0.54)
+    assert (p3.side, p3.qty, p3.reason) == ("BUY_LONG", 200, "increase toward target")
+    # the venue/ledger tolerance is one signed subtraction on either sign
+    assert mi.plan(0, -300.0, -300.6, book, 0.50, 0.54).side == "BUY_LONG"
+    assert mi.plan(0, -300.0, -302.0, book, 0.50, 0.54).reason.startswith("frozen")
+    assert mi.plan(0, -300.0, 300.0, book, 0.50, 0.54).reason.startswith("frozen")

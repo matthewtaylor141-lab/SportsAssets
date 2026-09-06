@@ -1,0 +1,23 @@
+-- 050: MIRROR SHORTS, PHASE P2 (owner order 2026-09-05, "we need to make
+-- sure we are mirroring shorts"; rung S0 of the P2 build brief). P1 (047)
+-- held a long-only fraction of a whale's net position; P2 lets a book
+-- follow his SHORT side too -- his net negative on the mapped market,
+-- ours a BUY_SHORT on the same slug -- behind ONE switch (MIRROR_SHORTS,
+-- off by default in analytics/mirror_live_rules).
+--
+-- ONE column, additive, re-runnable. mirror_orders.side keeps the PLAN
+-- spelling (BUY_LONG / SELL_LONG, sign-blind: the side of the long-space
+-- plan mi.plan computes, which every existing census statement reads by
+-- that name), and its CHECK is NOT widened. The sign of the wire rides in
+-- `intent`: the WIRE intent the venue was sent, exactly as the SDK spells
+-- it (polymarket_us/types/orders.py OrderIntent, four values), defaulting
+-- to BUY_LONG so every row written before this file -- and every row a
+-- worker writes before it has been applied -- reads as the long leg it
+-- was. `wire` is stored AS SENT and `avg_px` AS RETURNED; on a short the
+-- collateral is (1 - wire) x qty, which the day cap and the overspend
+-- tripwire read through this column. mirror_books.intent (047) already
+-- carries the book's own intent and is untouched. The workers never run
+-- migrations: mirror_live reads this column through a per-tick guard and
+-- treats it as "the switch is off" while it is absent, never as a raise.
+ALTER TABLE mirror_orders ADD COLUMN IF NOT EXISTS intent TEXT NOT NULL DEFAULT 'ORDER_INTENT_BUY_LONG'
+    CHECK (intent IN ('ORDER_INTENT_BUY_LONG','ORDER_INTENT_SELL_LONG','ORDER_INTENT_BUY_SHORT','ORDER_INTENT_SELL_SHORT'));

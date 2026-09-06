@@ -2586,7 +2586,24 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
     # and referencing it unbound AFTER orders.create would raise with a real
     # sell already executed at the venue (audit 2026-08-21 — the cash-out
     # sweep sold, crashed, left the row 'filled', and retried the sell).
-    expected_cost = limit_price * quantity
+    #
+    # IN COLLATERAL SPACE (SH1, the to-a-tee program's wave SH; owner
+    # order 2026-09-05 "we need to make sure we are mirroring shorts").
+    # `limit_price * quantity` is the LONG formula. On a BUY_SHORT the
+    # price on the wire is the CONTRACT price (live_executor.wire_limit:
+    # "sell at >= 0.78 means pay <= 0.22") while what the venue takes is
+    # the collateral, (1 - price) x qty -- so the one pre-trade money
+    # bound this adapter has was void in the loose direction on a short
+    # of a longshot (a 0.78 wire "expected" 0.78 x qty against a venue
+    # cost of 0.22 x qty: passes by 3.5x) and INVERTED above 0.50,
+    # refusing a correctly priced short of a favourite as
+    # `preview_mismatch`. The expectation is now the collateral the
+    # intent commits: byte-identical for every long caller (the long
+    # formula, the same float), (1 - limit) x qty for a short buy. The
+    # sell branch still skips the preview, as before.
+    expected_cost = (((1.0 - limit_price) * quantity)
+                     if params["intent"] == "ORDER_INTENT_BUY_SHORT"
+                     else limit_price * quantity)
     prev_order: dict = {}
     if not sell:
         preview = client.orders.preview(

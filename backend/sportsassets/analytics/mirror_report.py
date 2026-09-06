@@ -78,7 +78,14 @@ def is_legacy_plan(r: dict, d: dict | None = None, short: bool = False) -> bool 
     ledger = _num(r.get("ledger_net"))
     if ledger is None:
         return None
-    if ledger < 0:
+    # THE SHORT READING'S COHORT IS CUT BY SLUG, NOT BY SIGN (P2 rung
+    # S0, Q9 (c)): a negative ledger on the LONG reading is a legacy
+    # per-fill BUY_SHORT of ours (P1 could never have placed it); on the
+    # short reading it is exactly what a P2 book holds, so the ledger's
+    # own verdict above (`ledger_legacy`, the per-fill row on the slug)
+    # is the only legacy reading, and a negative ledger it does not
+    # name is decided by the same clauses as a positive one
+    if ledger < 0 and not short:
         return True
     if ledger == 0:
         return False

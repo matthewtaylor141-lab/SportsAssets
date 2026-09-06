@@ -380,6 +380,38 @@ def test_mirror_cover_report_serves_candidates_dollars_class_and_source(monkeypa
 # ------------------------------------------ Phase 0 review of the instruments
 # (owner order 2026-09-02 "mirror the whales to a tee")
 
+def test_the_short_cohort_is_cut_by_slug_not_by_sign_and_the_short_stake_is_the_collateral():
+    """P2 rung S0, Q9 (c): the shadow gate reads the pooled short cohort
+    with the legacy slugs excluded BY SLUG (the ledger's own verdict on
+    the slug), never by `ledger_net < 0` -- once the mirror holds shorts
+    a negative ledger is exactly what a P2 book is."""
+    # a negative ledger the ledger names legacy: out of the short cohort
+    assert mr.is_legacy_plan(_row("a", "s", ledger_net=-3, detail={"ledger_legacy": True}), short=True) is True
+    # a negative ledger the ledger names NOT legacy (a P2 book): in it
+    assert mr.is_legacy_plan(_row("b", "s", ledger_net=-3, detail={"ledger_legacy": False}), short=True) is False
+    # unread: unknown, excluded from both and counted
+    assert mr.is_legacy_plan(_row("c", "s", ledger_net=-3, detail={}), short=True) is None
+    # the LONG reading keeps its P1 verdict on a negative ledger (legacy per-fill short)
+    assert mr.is_legacy_plan(_row("b", "s", ledger_net=-3, detail={"ledger_legacy": False})) is True
+    # the .short block: pooled beside nonlegacy, the P2 book's plan in both
+    rows = [_row("a", "s1", ledger_net=-3, would_side="BUY_LONG", would_fill=True,
+                 detail={"ledger_legacy": True, "would_side_short": "SELL_LONG", "would_fill_short": True}),
+            _row("b", "s2", ledger_net=-3, would_side="BUY_LONG", would_fill=False,
+                 detail={"ledger_legacy": False, "would_side_short": "SELL_LONG", "would_fill_short": False}),
+            _row("c", "s3", ledger_net=0, would_side="SELL_LONG", would_fill=True,
+                 detail={"ledger_legacy": False, "would_side_short": "SELL_LONG", "would_fill_short": True})]
+    sh = mr.summarize(rows, rows, {})["short"]
+    assert (sh["orders"], sh["resolved"], sh["fills"]) == (3, 3, 2)
+    assert (sh["nonlegacy"]["orders"], sh["nonlegacy"]["resolved"], sh["nonlegacy"]["fills"]) == (2, 2, 1)
+    # settle_would_pnl(short=True): the SELL side stakes the collateral (1 - px) x qty
+    srows = [dict(rows[2], payout=0.0, detail=json.dumps({"would_side_short": "SELL_LONG", "would_px_short": 0.60,
+                                                          "would_qty_short": 30, "would_fill_short": True,
+                                                          "ledger_legacy": False}))]
+    s = mr.settle_would_pnl(srows, short=True)
+    assert s["lots"] == 1 and round(s["staked"], 4) == round((1 - 0.60) * 30, 4)
+    assert round(s["pnl"], 4) == round((0.60 - 0.0) * 30, 4)
+
+
 def test_the_ledgers_own_verdict_is_read_before_the_flat_ledger_shortcut():
     # a per-fill row EXITING on the slug: ledger_net 0 (exiting rows net to
     # the ledger read but the position is being closed), yet P1's legacy_row

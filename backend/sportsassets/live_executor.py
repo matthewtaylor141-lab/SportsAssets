@@ -6324,10 +6324,15 @@ async def _merge_add_leg(pool, leg_id: int, standing_id: int, shares: float,
 
 MIRROR_LANE = "mirror"
 MIRROR_VENUE = "polymarket-us"
-# P1 is long-only (the P1 panel synthesis, section 1). realized_pnl and
-# fill_cash both branch on this constant, so a book of any other intent
-# would be mis-booked on every sale; the open refuses it by name.
+# P1 was long-only (the P1 panel synthesis, section 1): this constant is
+# the LONG book's intent and the default of every primitive below. P2
+# rung S0 (owner order 2026-09-05, "we need to make sure we are mirroring
+# shorts") admits the SHORT book beside it: realized_pnl and fill_cash
+# branch on the intent the caller hands them, which is the BOOK's own
+# (mirror_books.intent), never this constant; any other spelling is
+# refused by name at the open.
 MIRROR_INTENT = "ORDER_INTENT_BUY_LONG"
+MIRROR_INTENT_SHORT = "ORDER_INTENT_BUY_SHORT"
 # The one error text a mirror row ever carries, written on the terminal
 # 'cancelled' row of a never-filled book. It must never match a named-row
 # LIKE pattern (test_mirror_live_ledger pins it against every one).
@@ -6405,9 +6410,18 @@ async def _open_mirror_book(pool, whale: str, cid: str, slug: str,
     """
     out = {"ok": False, "book_id": None, "standing_row_id": None,
            "refusal": None}
-    if intent != MIRROR_INTENT:
-        # P2's door (the _short_gate) stays shut in the ledger too
+    short = intent == MIRROR_INTENT_SHORT
+    if intent != MIRROR_INTENT and not short:
+        # anything but the two book intents stays behind P2's door
         out["refusal"] = "short_side_refused"
+        return out
+    if short and not short_model_confirmed():
+        # THE SHORT MODEL DISARMED IS A REFUSAL, NEVER AN INHERITANCE
+        # (P2 rung S0, brief H2; tee R7): LIVE_SHORT_COST_MODEL=off
+        # silently inverts wire_limit, fill_cash and realized_pnl at
+        # once, so a short book opened under it would be mis-priced
+        # and mis-booked on every fill. Named, nothing written.
+        out["refusal"] = "short_model_disarmed"
         return out
     try:
         w = str(whale or "").strip().lower()
@@ -6418,8 +6432,16 @@ async def _open_mirror_book(pool, whale: str, cid: str, slug: str,
         if not (0.0 < lvl < 1.0):
             raise ValueError("his level must be a price inside (0, 1)")
         tgt = int(target)
-        if tgt < 0:
+        # the target is SIGNED (P2 rung S0, brief 3.1): at or above zero
+        # on a long book, at or below zero on a short one
+        if tgt < 0 and not short:
             raise ValueError("target shares cannot be negative")
+        if tgt > 0 and short:
+            raise ValueError("a short book's target cannot be positive")
+        if short and not str(other_asset or "").strip():
+            # the token we are ON is his other token: the standing row
+            # claims it (045's one_fill_per_asset), the referees read it
+            raise ValueError("a short book needs the other asset")
         r = float(ratio) if ratio is not None else None
         anchor = float(anchor_usd) if anchor_usd is not None else None
         # a NaN ratio would reach json.dumps as the bare token NaN and be
@@ -6441,13 +6463,20 @@ async def _open_mirror_book(pool, whale: str, cid: str, slug: str,
                     _MIRROR_BOOK_INSERT_SQL, w, c, s, gk, la, oa, intent, src,
                     r, anchor, lvl, tgt)
                 book_id, episode = int(book["id"]), int(book["episode"])
+                # raw.preview.intent is the one side-aware field the
+                # ledger's readers (ORDER_INTENT_SQL: ms.ledger_net,
+                # short-truth, _exit_intent) read the sign from -- a
+                # short book's standing row names BUY_SHORT there (P2
+                # rung S0, brief A7), and claims the token we are ON,
+                # his OTHER token, so a per-fill short of the same leg
+                # collides with it in the database (brief Q12 (c))
                 raw = {"lane": MIRROR_LANE,
                        "preview": {"intent": intent},
                        "mirror": {"book_id": book_id, "episode": episode,
                                   "ratio": r, "opened_at": time.time()},
                        "adds": []}
                 row_id = int(await conn.fetchval(
-                    _MIRROR_ROW_INSERT_SQL, w, la, c, s, lvl, tgt,
+                    _MIRROR_ROW_INSERT_SQL, w, (oa if short else la), c, s, lvl, abs(tgt),
                     json.dumps(raw)))
                 await conn.execute(_MIRROR_BOOK_BACKFILL_SQL, book_id, row_id)
     except Exception as exc:  # noqa: BLE001 — every failure is named; the
@@ -6587,25 +6616,30 @@ _MIRROR_SELL_READ_SQL = (
 
 
 async def _book_mirror_sell(pool, standing_row_id: int, shares: float,
-                            price: float | None, ledger_net: float) -> dict:
+                            price: float | None, ledger_net: float,
+                            intent: str = MIRROR_INTENT) -> dict:
     """Book a SELL fill of `shares` @ `price` against the standing row.
     Returns {booked, pnl, overfill, dust, held, written, refusal}.
 
-    booked = min(shares, ledger_net, the row's own shares): the venue
-    can report a sale past what the ledger held (on a signed-net venue
-    that is a SHORT we never meant to hold), and the ledger books only
-    what it had and flags `overfill` -- the reconciler freezes the book
-    and trips mirror_live off with the receipt; the primitive never
-    writes a negative ledger. A sale past the ceiling by at most
-    SELL_DUST_SHARES (one venue lot) is NOT an overfill but `dust`
-    (2026-09-06 01:11:57Z: the row held 413.76 fractional shares, the
-    book's integer ledger read 414, the flatten sold 414.0 and the
-    0.24-share rounding gap tripped the lane off): the ceiling books,
-    `dust` carries the gap, the log line says DUST, and the reconciler
-    counts it without a freeze or a trip. `held` is the row's shares
-    read under the same guard BEFORE the sale, for the trip receipt.
-    pnl is realized_pnl(row.fill_price, price, booked, BUY_LONG),
-    accumulated onto the row like every exit leg.
+    booked = min(shares, the LEG, the row's own shares): the venue can
+    report a sale past what the ledger held (on a signed-net venue that
+    is the OTHER sign, a leg we never meant to hold), and the ledger
+    books only what it had and flags `overfill` -- the reconciler
+    freezes the book and trips mirror_live off with the receipt; the
+    primitive never writes a negative row. A sale past the ceiling by
+    at most SELL_DUST_SHARES (one venue lot) is NOT an overfill but
+    `dust` (2026-09-06 01:11:57Z: the row held 413.76 fractional
+    shares, the book's integer ledger read 414, the flatten sold 414.0
+    and the 0.24-share rounding gap tripped the lane off): the ceiling
+    books, `dust` carries the gap, the log line says DUST, and the
+    reconciler counts it without a freeze or a trip. `held` is the
+    row's shares read under the same guard BEFORE the sale, for the
+    trip receipt. pnl is realized_pnl(row.fill_price, price, booked,
+    intent), accumulated onto the row like every exit leg. `intent` is
+    the BOOK's own (P2 rung S0, brief B4 / E2): on a short book
+    `ledger_net` arrives SIGNED (negative) and the leg is its
+    magnitude, and realized_pnl flips the sign itself (le:3194); the
+    default keeps every P1 caller byte-identical.
 
     NEVER 'cashed_out' HERE: a book sold to zero on a live market stays
     'filled' at 0 shares, holding the asset claim, so his re-lean re-buys
@@ -6637,6 +6671,8 @@ async def _book_mirror_sell(pool, standing_row_id: int, shares: float,
     except (TypeError, ValueError):
         out["refusal"] = "bad_fill"
         return out
+    if intent == MIRROR_INTENT_SHORT:
+        net = abs(net)              # the leg: a short book's ledger is signed negative
     net = net if net > 0.0 else 0.0
     row = await pool.fetchrow(_MIRROR_SELL_READ_SQL, sid)
     if row is None:
@@ -6654,7 +6690,7 @@ async def _book_mirror_sell(pool, standing_row_id: int, shares: float,
         out["refusal"] = "nothing_to_book"
         return out
     entry = _row_get(row, "fill_price")
-    pnl = realized_pnl(entry, px, booked, MIRROR_INTENT)
+    pnl = realized_pnl(entry, px, booked, intent)
     if pnl is None:
         out["refusal"] = "no_entry_price"
         log.error("mirror row %s: SELL %s @ %s cannot be priced (fill_price %r); "

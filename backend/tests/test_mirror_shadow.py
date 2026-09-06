@@ -1297,6 +1297,191 @@ def test_tick_once_carries_the_short_census_beside_the_long_one(monkeypatch):
     ms._unmapped_until.clear()
 
 
+# ------------------------------------------------ P2 rung S0: the shadow coupling
+#
+# The live lane admits shorts by ONE knob, mirror_live_rules.MIRROR_SHORTS,
+# and the shadow's tick_once computes its live-compared target column
+# with the SAME knob (brief E5) -- else every negative-net book would trip
+# shadow_live_disagree by construction. The parallel short reading is
+# written either way.
+
+class _ColumnPool(_Pool):
+    """The shadow's pool answering the 050 column probe: `column` False
+    is the database before migration 050 (UndefinedColumnError, as
+    Postgres answers it), an exception is the probe failing."""
+
+    def __init__(self, *a, column=True, **kw):
+        super().__init__(*a, **kw)
+        self.column = column
+        self.probes = 0
+
+    async def fetch(self, sql, *a):
+        if "ml-intent-guard" in sql:
+            self.probes += 1
+            if isinstance(self.column, BaseException):
+                raise self.column
+            if not self.column:
+                exc = type("UndefinedColumnError", (Exception,), {})('column "intent" does not exist')
+                raise exc
+            return []
+        return await super().fetch(sql, *a)
+
+
+def _short_row(monkeypatch, allow_short, knob=None, column=True):
+    _nosleep(monkeypatch)
+    monkeypatch.setenv("MIRROR_WHALES", "rn1")
+    ms._ratio_cache.update(at=0.0, by_whale={})
+    ms._backoff_until = 0.0
+    ms._unmapped_until.clear()
+    from sportsassets.analytics import mirror_live_rules as rules
+    # the knob pinned for every reading: hermetic against the runner's environment
+    monkeypatch.setattr(rules, "MIRROR_SHORTS", bool(knob))
+    fills = HIS + [_fill(N, "BUY", 20000, 0.46, 3300)]      # his net NEGATIVE
+    p = _ColumnPool(fills=fills, whales_ratio_fills=_ratio_fills(), column=column)
+    kw = {} if allow_short is None else {"allow_short": allow_short}
+    stats = _run(ms.tick_once(p, _Pmus(bid=0.53, ask=0.55), now_ts=5000.0, **kw))
+    ins = [w for w in p.writes if "INSERT INTO mirror_shadow" in w[0]]
+    assert len(ins) == 1 and stats["rows"] == 1
+    cols = [c.strip() for c in ins[0][0].split("(", 1)[1].split(")")[0].split(",")]
+    row = dict(zip(cols, ins[0][1]))
+    row["detail"] = json.loads(row["detail"]) if isinstance(row["detail"], str) else row["detail"]
+    row["_probes"] = p.probes
+    row["_stats"] = stats
+    ms._unmapped_until.clear()
+    return row
+
+
+def test_tick_once_flips_the_target_column_with_allow_short_and_keeps_the_short_detail_equal(monkeypatch):
+    on = _short_row(monkeypatch, True)
+    assert on["target"] < 0 and on["target"] == on["detail"]["target_short"]
+    assert on["would_side"] == "SELL_LONG" == on["detail"]["would_side_short"]
+    assert on["would_px"] == on["detail"]["would_px_short"] == 0.55
+    assert on["would_qty"] == on["detail"]["would_qty_short"] == -on["target"]
+    assert not str(on["reason"]).startswith("short side not admitted")
+    off = _short_row(monkeypatch, False)
+    assert off["target"] == 0 and off["detail"]["target_short"] == on["target"]
+    assert off["reason"] == "short side not admitted; on target" and off["would_side"] is None
+    # an explicit allow_short never probes the column
+    assert on["_probes"] == 0 and off["_probes"] == 0
+    # None reads the knob: off with it off, on when the environment turns it on
+    assert _short_row(monkeypatch, None, knob=False)["target"] == 0
+    assert _short_row(monkeypatch, None, knob=True)["target"] == on["target"]
+    src = inspect.getsource(ms.tick_once)
+    assert "allow_short=True" not in src and "_rules.shorts_effective(" in src
+    assert "intent_column_present(pool)" in src
+
+
+def test_tick_once_reads_the_effective_knob_so_the_env_on_with_050_unapplied_stays_long_only(monkeypatch):
+    """E5, the deploy window: the env on before migration 050 is
+    applied. The live lane reads the knob as off (short_column_absent)
+    and so must the shadow's live-compared target column, else every
+    negative-net book trips shadow_live_disagree by construction (all
+    three review lenses). One probe, the live lane's own statement; a
+    probe failing for any other reason is no column either."""
+    absent = _short_row(monkeypatch, None, knob=True, column=False)
+    assert absent["_probes"] == 1 and absent["target"] == 0 and absent["would_side"] is None
+    assert absent["detail"]["target_short"] < 0, "the parallel short reading is written either way"
+    present = _short_row(monkeypatch, None, knob=True, column=True)
+    assert present["_probes"] == 1 and present["target"] == absent["detail"]["target_short"] < 0
+    # a probe failing for any OTHER reason is a blip on the shadow's side,
+    # not a schema fact: the tick runs long-only, is marked degraded
+    # under the live lane's own name, and its live-compared target is
+    # NULL -- never the long-only 0 the live lane (whose probe answered)
+    # would then disagree with (P2 rung S0 re-review)
+    blip = _short_row(monkeypatch, None, knob=True, column=RuntimeError("connection reset by peer"))
+    assert blip["target"] is None and blip["would_side"] is None
+    assert blip["detail"]["target_unreadable"] == "RuntimeError" and blip["detail"]["target_short"] < 0
+    assert blip["_stats"]["status"] == "degraded" and blip["_stats"]["intent_guard_unreadable"] == "RuntimeError"
+    assert "intent_guard_unreadable" not in present["_stats"] and present["_stats"]["status"] == "ok"
+    assert "intent_guard_unreadable" not in absent["_stats"], "the column absent is a fact, not a blip"
+    # the helper itself: True, False on the column's error alone, a raise on anything else
+    assert _run(ms.intent_column_present(_ColumnPool(column=True))) is True
+    assert _run(ms.intent_column_present(_ColumnPool(column=False))) is False
+    with pytest.raises(RuntimeError):
+        _run(ms.intent_column_present(_ColumnPool(column=RuntimeError("boom"))))
+    assert ms.INTENT_GUARD_SQL == "SELECT intent FROM mirror_orders LIMIT 0 /* ml-intent-guard */"
+
+
+def test_a_short_cover_reading_is_a_buy_long_at_his_level_or_the_bid_judged_against_the_ask(monkeypatch):
+    _nosleep(monkeypatch)
+    # our ledger holds a SHORT of 300 (a BUY_SHORT row of ours); his net is 0
+    led = [{"sh": 300.0, "intent": "ORDER_INTENT_BUY_SHORT"}]
+    fills = [_fill(M, "BUY", 400, 0.31, 1000), _fill(N, "BUY", 400, 0.70, 1100)]
+    p = _Pool(fills=fills, ledger_rows=led)
+    row = _run(ms.shadow_market(p, _Pmus(bid=0.30, ask=0.32), "rn1", CID, RATIO, {}, positions={SLUG: -300.0},
+                                allow_short=True))
+    assert row["ledger_net"] == -300 and row["his_net"] == 0.0 and row["target"] == 0
+    # a BUY_LONG of the whole leg at min(his long BUY 0.31, bid 0.30): the flatten
+    assert (row["would_side"], row["would_qty"], row["would_px"]) == ("BUY_LONG", 300, 0.30)
+    assert row["reason"] == "flatten" and row["detail"]["marketable_now"] is False       # ask 0.32 > 0.30
+    d = row["detail"]
+    assert d["would_side_short"] == "BUY_LONG" and d["would_px_short"] == 0.30 and d["reason_short"] == "flatten"
+    # the judge reads that side against the ASK (judge-short-buy)
+    src = inspect.getsource(ms)
+    assert "detail->>'would_side_short' = 'BUY_LONG'" in src
+    assert "(detail->>'would_px_short')::float8 >= $3" in src and "/* judge-short-buy */" in src
+
+
+@pytest.fixture
+def _live_world(monkeypatch):
+    """The live worker's own fakes and its autouse arming, for the one
+    test here that drives BOTH lanes. Imported lazily (that module
+    imports this one at load); the arming fixture's function is called
+    through its definition, as pytest keeps it."""
+    from tests import test_mirror_live_worker as lw
+    arming = lw._armed.__wrapped__(monkeypatch)       # a yield fixture: drive it
+    next(arming)
+    yield lw
+    next(arming, None)
+
+
+def test_a_shadow_side_probe_blip_never_trips_the_live_compare(monkeypatch, _live_world):
+    """The re-review's scratch test, kept: the shadow's probe blips (a
+    connection reset, not a missing column) on the tick that writes the
+    row, and the live lane -- whose own probe answers on the next tick
+    -- computes the short target -300 against it. Before the fix the
+    shadow wrote the long-only 0 and shadow_live_disagree tripped on a
+    DB blip nobody's arithmetic caused; now the row's target is NULL and
+    the live compare skips it. The control tick, no blip: the shadow
+    writes -300 and nothing disagrees. Driven through the live worker's
+    own fakes (_live_world)."""
+    lw = _live_world
+    NOW, SLUG, _Venue, _census, _tick = lw.NOW, lw.SLUG, lw._Venue, lw._census, lw._tick
+    _run_live, _short_http, _short_world = lw._run, lw._short_http, lw._short_world
+    lw._shorts_on(monkeypatch)
+    p = _short_world()
+    p.add_book(ledger=300)
+    p.raise_on.append(("ml-intent-guard", RuntimeError("connection reset")))
+    sh = _run_live(ms.tick_once(p, _Venue(held={SLUG: 300}), now_ts=NOW))
+    assert sh["status"] == "degraded" and sh["intent_guard_unreadable"] == "RuntimeError"
+    a = [a for k, s, a in p.sent if "INSERT INTO mirror_shadow" in s][-1]
+    assert a[11] is None, "the live-compared target is NULL on a blip"
+    p.shadow.append({"whale": a[0], "condition_id": a[1], "his_net": a[7], "ratio": a[10],
+                     "target": a[11], "at_ts": NOW})
+    p.raise_on.clear()
+    st = _tick(p, _Venue(held={SLUG: 300}), now=NOW + 30, http=_short_http())
+    assert _census(st, "sign_flip") == 1, "the live lane read -300 on its own answered probe"
+    assert _census(st, "shadow_live_disagree") == 0
+    # control: no blip -> the shadow writes -300 and nothing disagrees
+    p2 = _short_world()
+    p2.add_book(ledger=300)
+    sh2 = _run_live(ms.tick_once(p2, _Venue(held={SLUG: 300}), now_ts=NOW))
+    assert sh2["status"] == "ok" and "intent_guard_unreadable" not in sh2
+    a2 = [a for k, s, a in p2.sent if "INSERT INTO mirror_shadow" in s][-1]
+    assert a2[11] == -300
+    p2.shadow.append({"whale": a2[0], "condition_id": a2[1], "his_net": a2[7], "ratio": a2[10],
+                      "target": a2[11], "at_ts": NOW})
+    st2 = _tick(p2, _Venue(held={SLUG: 300}), now=NOW + 30, http=_short_http())
+    assert _census(st2, "shadow_live_disagree") == 0
+    # and a shadow row that DID disagree still trips: the instrument is intact
+    p3 = _short_world()
+    p3.add_book(ledger=300)
+    p3.shadow.append({"whale": a2[0], "condition_id": a2[1], "his_net": a2[7], "ratio": a2[10],
+                      "target": 300, "at_ts": NOW})
+    st3 = _tick(p3, _Venue(held={SLUG: 300}), now=NOW + 30, http=_short_http())
+    assert _census(st3, "shadow_live_disagree") == 1
+
+
 # ------------------------------------------ Phase 0 review of the instruments
 # (owner order 2026-09-02 "mirror the whales to a tee"): the ledger-facts read
 # and the module-level pattern. Additive only.

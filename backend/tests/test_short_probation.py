@@ -289,3 +289,42 @@ class TestPlacementPath:
         gate = src[src.index("_short_gate(pool)"):]
         gate = gate[:gate.index("_short_probation_held = True")]
         assert gate.index("return") < gate.index("_SHORT_LOCK.acquire()")
+
+
+class TestTheMirrorReadsTheSameGate:
+    """P2 rung S0 (brief H1): the mirror's short open goes through this
+    same gate and records its own position-sign read into the same
+    tally -- so one wrong sign, on either lane, shuts both."""
+
+    @pytest.mark.asyncio
+    async def test_the_mirror_refuses_on_a_mismatch_an_unreadable_tally_and_a_held_lock(self):
+        from sportsassets.workers import mirror_live as ml
+
+        class _T:
+            def __init__(self, pool):
+                self.pool = pool
+
+        assert await ml._short_open_refusal(_T(FakePool())) is None
+        assert await ml._short_open_refusal(_T(FakePool({le.SHORT_PROOF_KEY: {
+            "ok": 9, "mismatch": 1}}))) == "short_gate_refused"
+        assert await ml._short_open_refusal(_T(FakePool(raise_on_read=True))) == "short_gate_refused"
+        await le._SHORT_LOCK.acquire()
+        try:
+            assert await ml._short_open_refusal(_T(FakePool())) == "short_gate_refused"
+        finally:
+            le._SHORT_LOCK.release()
+        # and the mirror never takes the lock: it has no echo to release it
+        assert "_SHORT_LOCK" not in inspect.getsource(ml)
+        assert "_record_short_proof" in inspect.getsource(ml._tick_book)
+
+    @pytest.mark.asyncio
+    async def test_the_disarmed_model_is_refused_before_the_gate_is_read(self, monkeypatch):
+        from sportsassets.workers import mirror_live as ml
+
+        class _T:
+            def __init__(self, pool):
+                self.pool = pool
+
+        monkeypatch.setenv("LIVE_SHORT_COST_MODEL", "off")
+        pool = FakePool(raise_on_read=True)
+        assert await ml._short_open_refusal(_T(pool)) == "short_model_disarmed"

@@ -1618,8 +1618,11 @@ def test_the_migration_number_is_unique_and_not_one_the_register_reserves():
     assert num not in reserved, (num, reserved)
     names = [p.name for p in MIGRATIONS.glob("*.sql")]
     assert sum(1 for f in names if f.startswith(f"{num:03d}_")) == 1
-    assert not [f for f in names
-                if f.startswith("050_") or f.startswith("051_")]
+    # 050 is the register's own file (P2 rung S0 landed
+    # migrations/050_mirror_shorts.sql, the name doc:481 reserves it
+    # for) and nothing else may take that prefix; 051 stays reserved
+    assert [f for f in names if f.startswith("050_")] in ([], ["050_mirror_shorts.sql"])
+    assert not [f for f in names if f.startswith("051_")]
 
 
 def test_the_migration_is_rerunnable():

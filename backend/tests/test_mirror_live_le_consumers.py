@@ -756,3 +756,44 @@ class TestTheExitPathLeavesABookToTheMirror:
     def test_both_reasons_are_settled_for_the_exit_worker(self):
         for r in ("mx_mirror_owns_market", "mx_no_position_of_ours"):
             assert r not in le.EXIT_PENDING_REASONS
+
+
+# ------------------------------------------------ P2 rung S0: the short book
+#
+# The executor's primitives on a short book, read through the executor's
+# own sign functions (owner order 2026-09-05, "we need to make sure we
+# are mirroring shorts"): realized_pnl flips the sign on BUY_SHORT,
+# _book_mirror_sell is handed the BOOK's intent and its default is the
+# P1 constant, the open admits exactly the two book intents, and the
+# standing row's asset is the token the book is on.
+
+class TestTheShortBookPrimitives:
+    SHORT = "ORDER_INTENT_BUY_SHORT"
+
+    def test_realized_pnl_flips_the_sign_on_a_short_and_keeps_the_long_formula(self):
+        assert le.realized_pnl(0.32, 0.29, 300, self.SHORT) == pytest.approx(9.0)
+        assert le.realized_pnl(0.32, 0.29, 300, "ORDER_INTENT_BUY_LONG") == pytest.approx(-9.0)
+        assert le.realized_pnl(0.32, 0.40, 300, self.SHORT) == pytest.approx(-24.0)
+        assert le.realized_pnl(None, 0.29, 300, self.SHORT) is None
+        # and the collateral a share on either sign
+        assert le.cost_per_share(0.32, self.SHORT) == pytest.approx(0.68)
+        assert le.cost_per_share(0.32, "ORDER_INTENT_BUY_LONG") == pytest.approx(0.32)
+        assert le.fill_cash(300, 0.32, self.SHORT) == pytest.approx(204.0)
+
+    def test_the_sell_primitive_takes_the_books_intent_with_the_p1_default(self):
+        sig = inspect.signature(le._book_mirror_sell)
+        assert sig.parameters["intent"].default == le.MIRROR_INTENT == "ORDER_INTENT_BUY_LONG"
+        src = _src(le._book_mirror_sell)
+        assert "realized_pnl(entry, px, booked, intent)" in src
+        assert "net = abs(net)" in src and "MIRROR_INTENT_SHORT" in src
+        assert le.MIRROR_INTENT_SHORT == self.SHORT
+
+    def test_the_open_admits_exactly_the_two_book_intents_and_reads_the_model(self):
+        src = _src(le._open_mirror_book)
+        assert 'out["refusal"] = "short_side_refused"' in src
+        assert 'out["refusal"] = "short_model_disarmed"' in src
+        assert "short_model_confirmed()" in src
+        # the standing row claims the token the book is ON
+        assert "(oa if short else la)" in src and "abs(tgt)" in src
+        sig = inspect.signature(le._open_mirror_book)
+        assert sig.parameters["intent"].default == le.MIRROR_INTENT

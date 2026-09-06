@@ -90,7 +90,7 @@ from ..analytics.decompose import payout_of
 # its own tests under lowered environments, and a class or cap bound
 # here at import would be the stale one (an AdmissionFacts the reloaded
 # admission() no longer recognises reads `facts_unreadable`).
-from ..analytics.mirror_live_rules import BUY, FLAT_TOL_SHARES, ORDER_INTENT, SELL
+from ..analytics.mirror_live_rules import BUY, FLAT_TOL_SHARES, ORDER_INTENT, ORDER_INTENT_SHORT, SELL
 from ..analytics.roster_rules import MIRROR_ANCHOR_CLIP_USD
 from ..config import settings
 from ..db import get_pool, heartbeat
@@ -209,6 +209,15 @@ CENSUS_KEYS: tuple[str, ...] = (
     # the venue filled within one lot past the ledger (rules
     # SELL_DUST_SHARES) -- booked to the ledger, counted, never a trip
     "ledger_dust",
+    # P2 rung S0 (brief G4): the short side's placements, its one proven
+    # exit, its named refusals, and the sign flip. Appended AFTER
+    # ledger_dust so the first-40 projection the health endpoint serves
+    # keeps its order; the ones a gate reads ride in `integ` below
+    "short_open", "short_add", "short_flatten_close", "short_reduce_unproven",
+    "sign_flip", "short_model_disarmed", "short_gate_refused", "short_column_absent",
+    # the probe of the 050 column failing for any reason but absence
+    # (the tick is refused), and the short side's share cap biting
+    "intent_guard_unreadable", "short_share_cap",
 )
 _FAMILIES = (("mapping:", "mapping"), ("edge_gate:", "edge_gate"),
              ("cell_gate_", "cell_gate"), ("place_refused:", "place_refused"))
@@ -374,7 +383,24 @@ def _paced(fn, *args):
 # ------------------------------------------------------------------- SQL
 
 _SQL_TABLE_GUARD = "SELECT 1 FROM mirror_books LIMIT 0 /* ml-table-guard */"
-_SQL_ORDERS_OPEN = """
+# THE 050 COLUMN, READ THE WAY THE WORKERS READ A COLUMN THAT MAY NOT
+# EXIST YET (live_executor._position_row's orig_shares fallback): the
+# workers never run migrations, so this code can reach production ahead
+# of mirror_orders.intent. One probe per tick, before any statement that
+# names the column; ABSENT (rules.column_missing: the driver's
+# UndefinedColumnError or its text, and nothing else), the tick sends
+# the 047-shaped statements below (`_SQL_*_047`), reads every order's
+# intent off the book and the plan side, and the MIRROR_SHORTS knob is
+# EFFECTIVELY OFF, named `short_column_absent` when the environment has
+# it on -- never a raise. Any OTHER failure of the probe refuses the
+# tick by name (`intent_guard_unreadable`, status degraded) exactly as
+# the table guard does: a timeout on this one SELECT read as "absent"
+# would turn the knob off for the tick and market-close every sole
+# short book on a database blip (P2 rung S0 review). The text is the
+# shadow's (ms.INTENT_GUARD_SQL, tag ml-intent-guard): both lanes probe
+# with one statement and read one effective knob.
+_SQL_INTENT_GUARD = ms.INTENT_GUARD_SQL
+_SQL_ORDERS_OPEN_047 = """
 SELECT o.id, o.book_id, o.whale, o.us_market_slug, o.kind, o.side, o.tif, o.post_only,
        o.his_level::float8 AS his_level, o.price::float8 AS price, o.wire::float8 AS wire,
        o.qty, o.order_id, o.state, o.venue_state, o.filled::float8 AS filled,
@@ -385,6 +411,11 @@ SELECT o.id, o.book_id, o.whale, o.us_market_slug, o.kind, o.side, o.tif, o.post
  WHERE o.state IN ('placing', 'open', 'unknown')
  ORDER BY o.placed_at, o.id /* ml-orders-open */
 """
+# the 047 read plus the 050 column: o.receipt (U11, the order's dust_total
+# rides on it) stays in its place and o.intent is appended after it
+_SQL_ORDERS_OPEN = _SQL_ORDERS_OPEN_047.replace(
+    "o.taker_at_placement, o.pre_ids, o.reason, o.receipt,",
+    "o.taker_at_placement, o.pre_ids, o.reason, o.receipt, o.intent,")
 # The order's cumulative SELL dust (rules.SELL_DUST_SHARES), kept on the
 # row's own receipt JSON so it survives the poll: the worker re-reads
 # every open order from the table each tick, and a per-poll delta that
@@ -451,13 +482,34 @@ SELECT count(*) FILTER (WHERE state <> 'closed') AS live,
 # never take room a standing rest already holds. The per-tick
 # decrement in _place stays: it protects within a tick, this read
 # protects across ticks.
-_SQL_MIRROR_DAY = """
+_SQL_MIRROR_DAY_047 = """
 SELECT COALESCE(sum(cash_usd), 0)::float8 AS filled,
        COALESCE(sum(CASE WHEN state IN ('placing', 'open', 'unknown')
                          THEN (qty - COALESCE(booked_filled, 0)) * wire
                          ELSE 0 END), 0)::float8 AS open
   FROM mirror_orders
  WHERE side = 'BUY_LONG' AND placed_at > now() - interval '24 hours' /* ml-mirror-day */
+"""
+# THE DAY READ IN COLLATERAL SPACE (P2 rung S0, brief D1 / 3.5). A row
+# that GROWS a leg is a long BUY (plan side BUY_LONG carrying the wire
+# intent BUY_LONG -- every row written before 050 reads as one through
+# the column's DEFAULT) or a short OPEN / ADD (wire intent BUY_SHORT,
+# whose plan side is SELL_LONG); a short book's cover rows (plan side
+# BUY_LONG, wire intent SELL_SHORT) and a long book's sells are exits
+# and count nothing. The resting remainder is priced at the cost a
+# share the wire commits: the wire on a long, ONE MINUS the wire on a
+# short (the wire is the CONTRACT price the venue is sent; the
+# collateral is its complement, le.wire_limit). `filled` reads cash_usd,
+# which _book_fill already writes as le.fill_cash on either sign.
+_SQL_MIRROR_DAY = """
+SELECT COALESCE(sum(cash_usd), 0)::float8 AS filled,
+       COALESCE(sum(CASE WHEN state IN ('placing', 'open', 'unknown')
+                         THEN (qty - COALESCE(booked_filled, 0))
+                              * (CASE WHEN intent = 'ORDER_INTENT_BUY_SHORT' THEN 1 - wire ELSE wire END)
+                         ELSE 0 END), 0)::float8 AS open
+  FROM mirror_orders
+ WHERE ((side = 'BUY_LONG' AND intent = 'ORDER_INTENT_BUY_LONG') OR intent = 'ORDER_INTENT_BUY_SHORT')
+   AND placed_at > now() - interval '24 hours' /* ml-mirror-day */
 """
 _SQL_LOSS_SUM = """
 SELECT COALESCE((SELECT sum(realized_pnl) FROM mirror_books
@@ -503,13 +555,24 @@ SELECT min(extract(epoch FROM placed_at))::float8 FROM mirror_orders
    AND (state IN ('placing', 'open', 'unknown')
         OR placed_at >= to_timestamp($2)) /* ml-flatten-since */
 """
-_SQL_ORDER_INSERT = """
+_SQL_ORDER_INSERT_047 = """
 INSERT INTO mirror_orders (book_id, whale, us_market_slug, kind, side, tif, post_only,
                            good_till, his_level, price, wire, qty, state, pre_ids,
                            target_at_place, ledger_at_place, bid_at_place, ask_at_place,
                            reason)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'placing', $13::jsonb,
         $14, $15, $16, $17, $18)
+RETURNING id /* ml-order-insert */
+"""
+# the 050 shape: the wire intent as the LAST parameter, so every
+# positional reader of the 047 statement keeps its meaning
+_SQL_ORDER_INSERT = """
+INSERT INTO mirror_orders (book_id, whale, us_market_slug, kind, side, tif, post_only,
+                           good_till, his_level, price, wire, qty, state, pre_ids,
+                           target_at_place, ledger_at_place, bid_at_place, ask_at_place,
+                           reason, intent)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'placing', $13::jsonb,
+        $14, $15, $16, $17, $18, $19)
 RETURNING id /* ml-order-insert */
 """
 _SQL_ORDER_PERSIST_ID = """
@@ -744,6 +807,10 @@ class _Tick:
     open_by_book: dict = field(default_factory=dict)   # book_id -> (order row, status)
     nonterminal: set = field(default_factory=set)      # book ids with a non-terminal order
     books_seen: set = field(default_factory=set)       # (whale, condition_id)
+    # mirror_orders.intent (migration 050) exists this tick: read by the
+    # per-tick guard; False sends the 047-shaped statements and keeps
+    # the MIRROR_SHORTS knob effectively off (P2 rung S0)
+    short_col: bool = False
 
 
 # THE COUNTERS AN OPERATOR SURFACE CAN ACTUALLY READ.
@@ -775,15 +842,36 @@ _INTEG_CENSUS_KEYS: tuple[str, ...] = (
     "mirror_flatten", "snapshot_stale", "drift", "snap_market_unreadable",
     "snap_market_capped", "snap_market_stale", "snap_market_no_ids",
     "snap_market_skipped", "side_band", "venue_halted",
-    # `ledger_dust` sits LAST in CENSUS_KEYS (past the served cap), so it
+    # `ledger_dust` sits past the served cap in CENSUS_KEYS, so it
     # rides here too: an operator reading the dust count reads it off
     # `integ` (2026-09-06 fix review)
     "ledger_dust",
+    # P2 rung S0: what the short rungs' gates read (S3: wrong_sign_trip
+    # and overfill are above; the short refusals and the flip are here)
+    "short_reduce_unproven", "sign_flip", "short_model_disarmed",
+    "short_gate_refused", "short_column_absent", "intent_guard_unreadable",
+    "short_share_cap",
 )
 _INTEG_STAT_KEYS: tuple[str, ...] = (
     "snap_market_planned", "snap_market_reads", "snap_market_fresh_reads",
     "snap_market_slow",
+    # the short leg's at_or_better producer (brief G4): every BUY_SHORT
+    # fill booked, how many paid at or under the wire's collateral by
+    # _overspend_of's own predicate, and how many could not be checked
+    # -- the denominator the gate line must print beside the share
+    "short_fills", "short_fills_at_or_better", "short_fills_uncheckable",
 )
+# The short counters live in ONE nested block on the stats (`short`, see
+# _new_stats) and are projected onto `integ` under the flat names above:
+# the top level of the heartbeat is capped at 40 keys by the health
+# endpoint's sanitizer, and four flat short keys beside U9's
+# `venue_state` would have filled the base block to the cap and dropped
+# every key a tick appends after it (`venue_positions`,
+# `abandon_reason`, ...) from the served surface (P2 fold, 2026-09-06)
+_INTEG_SHORT_STATS: dict[str, str] = {
+    "short_fills": "fills", "short_fills_at_or_better": "at_or_better",
+    "short_fills_uncheckable": "uncheckable",
+}
 
 
 def _integ_block(stats: dict) -> dict:
@@ -792,8 +880,10 @@ def _integ_block(stats: dict) -> dict:
     the sanitizer's cap by this file's own test."""
     census = stats.get("census") or {}
     out = {k: int(census.get(k) or 0) for k in _INTEG_CENSUS_KEYS}
+    short = stats.get("short") or {}
     for k in _INTEG_STAT_KEYS:
-        out[k] = int(stats.get(k) or 0)
+        sub = _INTEG_SHORT_STATS.get(k)
+        out[k] = int((short.get(sub) if sub else stats.get(k)) or 0)
     return out
 
 
@@ -830,9 +920,28 @@ def _new_stats() -> dict:
             "snap_market_fresh_reads": 0, "snap_market_capped": 0,
             "snap_market_no_ids": 0, "snap_market_skipped": 0,
             "snap_market_stale": 0, "snap_market_slow": 0,
+            # P2 rung S0, ONE nested block (the top level is capped at 40
+            # keys by the health endpoint's sanitizer; see
+            # _INTEG_SHORT_STATS): `on`, the knob as this tick read it
+            # (the environment AND the 050 column), and the short leg's
+            # at_or_better producer -- fills booked, fills at or under
+            # the wire's collateral, fills that could not be checked --
+            # served flat on `integ` as short_fills, short_fills_at_or_better,
+            # short_fills_uncheckable
+            "short": {"on": False, "fills": 0, "at_or_better": 0, "uncheckable": 0},
             # present from the first tick, so a reader can tell "the
             # worker has not run" from "it ran and every counter is 0"
             "integ": {k: 0 for k in _INTEG_CENSUS_KEYS + _INTEG_STAT_KEYS}}
+
+
+def _shorts_on(t: _Tick) -> bool:
+    """The ONE knob, as this tick may act on it: the environment's
+    MIRROR_SHORTS (read through the rules module at call time) AND the
+    050 column present. Read at every site that admits a short (the
+    target's sign door, the candidate's open, the shadow's target
+    column through its own read of the same constant); never cached
+    across ticks."""
+    return bool(rules.MIRROR_SHORTS) and bool(t.short_col)
 
 
 def _increases_refusal(t: _Tick, whale: str) -> str | None:
@@ -964,7 +1073,11 @@ async def _global_guards(t: _Tick) -> None:
                 t.increase_block = "no_budget_room"
     if t.increase_block is None:
         try:
-            row = await t.pool.fetchrow(_SQL_MIRROR_DAY)
+            # the day read is switched on the per-tick 050 guard exactly
+            # as the open-orders read and the INSERT are: the 050 text
+            # names the column, and against a database without it every
+            # tick read `mirror_day_cap` for good (P2 rung S0 review)
+            row = await t.pool.fetchrow(_SQL_MIRROR_DAY if t.short_col else _SQL_MIRROR_DAY_047)
             filled = float((row or {})["filled"] or 0.0) if row else 0.0
             resting = float((row or {})["open"] or 0.0) if row else 0.0
             t.mirror_day = float(rules.MIRROR_DAY_USD) - filled - resting
@@ -1216,7 +1329,71 @@ def _book_state(book: dict) -> rules.BookState:
                      gross_buy_usd=float(book.get("gross_buy_usd") or 0.0),
                      gross_sell_usd=float(book.get("gross_sell_usd") or 0.0),
                      peak_exposure_usd=float(book.get("peak_exposure_usd") or 0.0),
-                     realized_pnl=float(book.get("realized_pnl") or 0.0))
+                     realized_pnl=float(book.get("realized_pnl") or 0.0),
+                     intent=book.get("intent"))
+
+
+# ---------------------------------------------------- P2: the sign helpers
+#
+# The book's intent (mirror_books.intent, fixed at open) decides what a
+# plan side and an order row MEAN (brief 3.3): on a long book a BUY_LONG
+# row grows the leg and a SELL_LONG row shrinks it; on a short book the
+# other way round. Every site that used to branch on `side == BUY` for
+# "does this grow what we hold" branches on the LEG ACTION now, and on a
+# long book the two are the same predicate (rules.leg_action).
+
+def _book_short(book: dict) -> bool:
+    return rules.is_short(book.get("intent"))
+
+
+def _book_intent(book: dict) -> str:
+    """The book's BUY intent: BUY_SHORT on a short book, BUY_LONG on any
+    other (P1 rows carry the column at its default)."""
+    return ORDER_INTENT_SHORT if _book_short(book) else ORDER_INTENT
+
+
+def _order_action(o: dict, book: dict) -> str:
+    """'add' when this row GROWS the leg the book holds, 'reduce' when
+    it shrinks it. A book whose intent cannot be read is read as the
+    long book it was in P1: BUY grows, SELL shrinks."""
+    a = rules.leg_action(book.get("intent"), o.get("side"))
+    if a is None:
+        a = "add" if o.get("side") == BUY else "reduce"
+    return a
+
+
+def _order_intent(o: dict, book: dict) -> str | None:
+    """The WIRE intent of an order row. On a LONG book the plan side
+    decides it alone (BUY_LONG grows, SELL_LONG shrinks) and the 050
+    column adds nothing -- and must not be consulted: 050's DEFAULT
+    back-fills BUY_LONG onto every pre-050 row, a resting SELL_LONG
+    included, and a reader that trusted it would compare BUY_LONG to
+    the plan's SELL_LONG and REPLACE every such rest on the first tick
+    after the migration (P2 rung S0 review). On a SHORT book the column
+    is read only when it carries one of the two short spellings; any
+    other value (a row written before 050, the 047 projection while the
+    column is absent) derives from the book and the plan side."""
+    if _book_short(book):
+        v = o.get("intent")
+        if v in (ORDER_INTENT_SHORT, "ORDER_INTENT_SELL_SHORT"):
+            return v
+    w = rules.wire_side(book.get("intent"), o.get("side"))
+    return None if w is None else w[0]
+
+
+def _leg_of(book: dict) -> int:
+    """The LEG the book holds, whole shares: |ledger_net| on a short
+    book, the ledger itself on a long one (never negative there)."""
+    ledger = int(book.get("ledger_net") or 0)
+    return abs(ledger) if _book_short(book) else ledger
+
+
+def _cost_px(px: float, book: dict) -> float:
+    """The cost of one share at contract price `px` for this book: the
+    executor's own formula (le.cost_per_share), so the day cap, the
+    reserve and the row's requested_usd all read the collateral a short
+    ties up rather than the contract price."""
+    return float(le.cost_per_share(float(px), _book_intent(book)))
 
 
 async def _book_fill(t: _Tick, o: dict, book: dict, inc: float, px: float | None,
@@ -1254,6 +1431,13 @@ async def _book_fill(t: _Tick, o: dict, book: dict, inc: float, px: float | None
     dust = 0.0
     dust_total = _dust_total(o)
     held = None
+    # THE LEG DECIDES THE BOOKING (P2 rung S0, brief A5 / B3): a row
+    # that grows the leg books as a buy -- the cash it cost is
+    # le.fill_cash on the BOOK's intent, (1 - px) x q on a short -- and
+    # a row that shrinks it books as a sale in leg space; on a long
+    # book that is exactly `side == BUY`, as before
+    action = _order_action(o, book)
+    intent = _book_intent(book)
     try:
         async with t.pool.acquire() as conn:
             async with conn.transaction():
@@ -1261,12 +1445,13 @@ async def _book_fill(t: _Tick, o: dict, book: dict, inc: float, px: float | None
                                          expected)
                 if _rowcount(tag) == 0:
                     raise _Rebook()
-                if side == BUY:
-                    usd = float(le.fill_cash(inc, px, ORDER_INTENT))
+                if action == "add":
+                    usd = float(le.fill_cash(inc, px, intent))
                     seq = int(await conn.fetchval(_SQL_ADDS_SEQ, sid, str(o["order_id"])) or 0)
                     row = await le._book_mirror_buy(
                         conn, sid, str(o["order_id"]), seq, inc, px, usd,
-                        inc * float(o.get("wire") or 0.0), o.get("his_level"), maker)
+                        inc * _cost_px(float(o.get("wire") or 0.0), book), o.get("his_level"),
+                        maker)
                     if row is None:
                         st = await conn.fetchrow(_SQL_STANDING_READ, sid)
                         if st is not None and st["status"] == "filled" and st["lane"] == "mirror":
@@ -1286,7 +1471,8 @@ async def _book_fill(t: _Tick, o: dict, book: dict, inc: float, px: float | None
                                        bool(taker_at_placement))
                 else:
                     res = await le._book_mirror_sell(conn, sid, inc, px,
-                                                     float(book.get("ledger_net") or 0.0))
+                                                     float(book.get("ledger_net") or 0.0),
+                                                     intent=intent)
                     if res.get("refusal") == "row_not_live":
                         raise _RowNotLive()
                     overfill = bool(res.get("overfill"))
@@ -1643,6 +1829,8 @@ async def _reconcile_lost_close(t: _Tick, o: dict, book: dict) -> None:
                     "the next tick", o["id"])
         return
     held = float(t.positions.get(slug.lower(), 0.0))
+    if _book_short(book):
+        held = abs(held)             # a short book's slug reads negative: the leg is its magnitude
     qty = int(o["qty"])
     sold = qty - int(held)
     if sold < 1:
@@ -1715,9 +1903,17 @@ async def _order_status(t: _Tick, oid: str) -> dict | None:
 _OVERSPEND_TICK = 0.01
 
 
-def _overspend_of(o: dict, st: dict) -> bool | None:
+def _overspend_of(o: dict, st: dict, intent: str | None = None) -> bool | None:
     """Did this BUY fill above the cent we wired? True / False / None
     (the comparison could not be made).
+
+    `intent` is the BOOK's (P2 rung S0, brief D4): on a short book the
+    rows that grow the leg carry the plan side SELL_LONG, their wire is
+    the CONTRACT price the venue was sent and the venue's avg_px is the
+    contract price it filled at, so the comparison is made in COST
+    space -- what we paid a share, 1 - avg_px, against what the wire
+    authorised, 1 - wire, with the same half-tick tolerance. A None
+    intent is the long book it always was, byte for byte.
 
     THE MIRROR HAD NO COUNTERPART TO THE PER-FILL LANE'S OVERSPEND
     BREAKER. `rules.book_buy` accepts any finite price in (0,1) and is
@@ -1748,11 +1944,16 @@ def _overspend_of(o: dict, st: dict) -> bool | None:
     markets quote on while the breaker is correctly silent), and it must
     print `overspend_uncheckable` beside it as the denominator, or a
     venue that omits `avgPx` reads as a perfect score."""
-    if str(o.get("side") or "") != BUY or str(o.get("tif") or "") == "CLOSE":
+    action = rules.leg_action(intent, o.get("side"))
+    if action is None:
+        action = "add" if str(o.get("side") or "") == BUY else "reduce"
+    if action != "add" or str(o.get("tif") or "") == "CLOSE":
         return False
     avg, wire = _num(st.get("avg_px")), _num(o.get("wire"))
     if avg is None or not (0.0 < avg < 1.0) or wire is None or not (0.0 < wire < 1.0):
         return None
+    if rules.is_short(intent):
+        return (1.0 - avg) > (1.0 - wire) + _OVERSPEND_TICK / 2.0 + 1e-4
     return avg > wire + _OVERSPEND_TICK / 2.0 + 1e-4
 
 
@@ -1777,7 +1978,16 @@ async def _book_delta(t: _Tick, o: dict, book: dict, st: dict, maker: bool,
                   "nothing booked", o["id"])
         await _freeze(t, book, "no_price")
         return "no_price"
-    over = _overspend_of(o, st)
+    over = _overspend_of(o, st, book.get("intent"))
+    if _book_short(book) and _order_action(o, book) == "add":
+        # the short leg's at_or_better producer (P2 rung S0, brief G4):
+        # the same predicate, counted with its denominator
+        short = t.stats.setdefault("short", {})
+        short["fills"] = int(short.get("fills") or 0) + 1
+        key = ("uncheckable" if over is None
+               else "at_or_better" if not over else None)
+        if key:
+            short[key] = int(short.get(key) or 0) + 1
     if over is None:
         # THE COMPARISON COULD NOT BE MADE, so it is counted and said
         # out loud -- never a trip on an absent number, and never
@@ -1844,7 +2054,8 @@ async def _finish_order(t: _Tick, o: dict, book: dict, st: dict, reason: str | N
                          reason, bool(maker), o.get("order_id"))
     await t.pool.execute(_SQL_BOOK_OPEN_ORDER, book["id"], None)
     o["state"] = state
-    if (state in ("cancelled", "expired") and o["side"] == BUY and o.get("tif") in ("GTC", "GTD")
+    if (state in ("cancelled", "expired") and _order_action(o, book) == "add"
+            and o.get("tif") in ("GTC", "GTD")
             and t.now - 86400.0 < float(o.get("placed_ts") or t.now) < t.now
             and t.mirror_day is not None):
         # THE GIVE-BACK. The tick's day read (_SQL_MIRROR_DAY) counted
@@ -1861,7 +2072,7 @@ async def _finish_order(t: _Tick, o: dict, book: dict, st: dict, reason: str | N
         # window fell out of the read already; giving either back would
         # widen the day, so both stay on the safe side and give nothing.
         t.mirror_day += (max(0.0, float(o["qty"]) - float(o.get("booked_filled") or 0.0))
-                         * float(_num(o.get("wire")) or 0.0))
+                         * _cost_px(float(_num(o.get("wire")) or 0.0), book))
     book["open_order_id"] = None
     t.open_by_book.pop(book["id"], None)
     t.nonterminal.discard(book["id"])
@@ -1908,7 +2119,7 @@ async def _reconcile_open(t: _Tick, o: dict, book: dict, cancel_reason: str | No
     if cancel_reason is None:
         if t.cancel_all:
             cancel_reason = t.cancel_all
-        elif o["side"] == BUY and _increases_refusal(t, o["whale"]):
+        elif _order_action(o, book) == "add" and _increases_refusal(t, o["whale"]):
             cancel_reason = _increases_refusal(t, o["whale"])
         elif book.get("state") in ("closed", "closing"):
             # a CLOSED or CLOSING book's order is a rest nobody plans
@@ -1990,7 +2201,8 @@ async def _reconcile_orders(t: _Tick, count: bool = True) -> None:
     _tick after a mid-tick trip (`count` False keeps the first pass's
     figure): every order the first pass KEPT is cancelled under the
     trip's name, since t.cancel_all is now set."""
-    rows = [dict(r) for r in await t.pool.fetch(_SQL_ORDERS_OPEN)]
+    rows = [dict(r) for r in await t.pool.fetch(_SQL_ORDERS_OPEN if t.short_col
+                                                else _SQL_ORDERS_OPEN_047)]
     if count:
         t.stats["orders_open"] = len(rows)
     for o in rows:
@@ -2295,7 +2507,7 @@ async def _whale_address(t: _Tick, whale: str) -> str | None:
 
 
 def _his_level(fills: list, long_asset: str | None, other_asset: str | None,
-               reducing: bool) -> float | None:
+               reducing: bool, short: bool = False) -> float | None:
     """His level for the WIRE, unrounded. The shadow's his_level picks
     the same fill -- his most recent move in the direction we follow,
     by timestamp (mirror_shadow.his_level) -- but hands back the
@@ -2306,7 +2518,17 @@ def _his_level(fills: list, long_asset: str | None, other_asset: str | None,
     rested a cent UNDER him, the one case the rule forbids; step-9
     review). The selection is restated from the shadow only because
     its figure is rounded at source; the worker tests pin the two
-    agree to four places on every fixture."""
+    agree to four places on every fixture.
+
+    `reducing` is "his net is moving DOWN in long-token terms" -- the
+    caller's `target <= ledger`, signed -- so on a SHORT book (P2 rung
+    S0, brief C3) an INCREASE of the short reads the same fills a long
+    book's reduce reads (his SELL of the long token at p, his BUY of
+    the other token at 1 - p: the shadow's short reading, pinned at
+    0.54 = 1 - 0.46), and a REDUCE of the short (his net moving UP)
+    reads his BUY of the long token at p and, on a short book only,
+    his SELL of the other token at 1 - p -- a clause a long book never
+    reads, so its levels are byte-identical."""
     best: tuple[float, float] | None = None
     for f in fills:
         a, side = str(f.get("asset") or ""), str(f.get("side") or "").upper()
@@ -2321,6 +2543,8 @@ def _his_level(fills: list, long_asset: str | None, other_asset: str | None,
         if not reducing:
             if long_asset and a == long_asset and side == "BUY":
                 lvl = p
+            elif short and other_asset and a == other_asset and side == "SELL":
+                lvl = 1.0 - p
         elif long_asset and a == long_asset and side == "SELL":
             lvl = p
         elif other_asset and a == other_asset and side == "BUY":
@@ -2441,7 +2665,8 @@ def _book_net(r: _Reading) -> float | None:
     return None
 
 
-def _net_for(r: _Reading, drift: rules.DriftRule) -> tuple[float, float | None]:
+def _net_for(r: _Reading, drift: rules.DriftRule,
+             short: bool = False) -> tuple[float, float | None]:
     """(net used for the target, snapshot net). The POSITION is the
     exit worker's fresh complete snapshot (addendum section 1); on a
     fresh disagreement the smaller reading sizes the reduction; with
@@ -2451,7 +2676,14 @@ def _net_for(r: _Reading, drift: rules.DriftRule) -> tuple[float, float | None]:
     whole-book walk: it is the same venue, narrower, complete for THIS
     market and stamped this tick, where the walk is truncated on every
     probe of him. It is preferred when it read fresh and complete so
-    that the drift number and the position come from one reading."""
+    that the drift number and the position come from one reading.
+
+    `short` (P2 rung S0, brief F2) is the MIRROR_SHORTS knob as the
+    tick read it: "the smaller reading" is then the one TOWARD ZERO --
+    sign x min(|derived|, |snapshot|) when the two agree on the sign,
+    0 when they do not (readings that disagree on which side he is on
+    justify holding neither) -- because on a negative net `min` picks
+    the LARGER short. Off, `min` stands as it did."""
     derived = mi.his_net(r.his_long, r.his_other)
     snap_net = None
     if r.snap_market_fresh is True and r.mkt_net is not None:
@@ -2463,6 +2695,11 @@ def _net_for(r: _Reading, drift: rules.DriftRule) -> tuple[float, float | None]:
     if drift.increase_ok:
         return snap_net, snap_net
     if drift.reduce_from == "smaller":
+        if short:
+            if (derived < 0) != (snap_net < 0) and derived != 0 and snap_net != 0:
+                return 0.0, snap_net
+            sign = -1.0 if min(derived, snap_net) < 0 else 1.0
+            return sign * min(abs(derived), abs(snap_net)), snap_net
         return min(derived, snap_net), snap_net
     return derived, snap_net
 
@@ -2548,8 +2785,12 @@ async def _close_settled(t: _Tick, book: dict, standing: dict, status: str) -> N
         if mk is not None:
             payout = payout_of(mk.get("resolved_prices"), idx)
         ac = _num(book.get("avg_cost"))
+        # SIGNED (P2 rung S0, brief E3): a short book's ledger is
+        # negative, so `shares x (payout - avg)` IS `leg x (avg -
+        # payout_long)` -- the short leg's own figure -- with no
+        # branch; only the flat test reads the magnitude
         shares = float(book.get("ledger_net") or 0.0)
-        if payout is not None and (ac is not None or shares <= FLAT_TOL_SHARES):
+        if payout is not None and (ac is not None or abs(shares) <= FLAT_TOL_SHARES):
             own = round(float(book.get("realized_pnl") or 0.0)
                         + shares * (payout - (ac or 0.0)), 4)
         if settled_pnl is not None and own is not None:
@@ -2578,7 +2819,8 @@ async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
         plan["flat_since"] = since
         flat_for = t.now - since
     why = rules.episode_close_reason(_book_state(book), None if market_live is None else not market_live,
-                                     vanished, flat_for, 0)
+                                     vanished, flat_for, 0,
+                                     sign_flipped=plan.get("sign_flip") is True)
     if why not in ("cashed_out", "cancelled"):
         return why
     verdict = await le._close_mirror_episode(t.pool, book["standing_row_id"],
@@ -2665,8 +2907,10 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     if t.abandoned:
         return
     ledger = int(book.get("ledger_net") or 0)
+    short = _book_short(book)
+    shorts = _shorts_on(t)
     drift, drift_src = _drift_for(r)
-    net, snap_net = _net_for(r, drift)
+    net, snap_net = _net_for(r, drift, short=shorts)
     venue_int = int(r.venue)
     # the plan's numbers, written whatever happens below
     plan: dict[str, Any] = {"bid": r.bid, "ask": r.ask, "mark": r.mark, "venue": r.venue,
@@ -2697,11 +2941,14 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     if t.flatten_all:
         tg = {"target": 0, "raw": 0.0, "refusal": None}
     else:
+        # THE SIGN DOOR IS THE KNOB (P2 rung S0): with MIRROR_SHORTS on
+        # a negative net is a signed target; off, `short_side_refused`
+        # and target 0 as in P1 -- which on a SHORT book left open when
+        # the knob went off is the reversal path, a flatten by
+        # close_position when sole (brief section 6)
         tg = rules.mirror_target(book.get("ratio"), net, r.mark, MIRROR_ANCHOR_CLIP_USD,
-                                 cap_usd=rules.MIRROR_NET_CAP_USD)
+                                 cap_usd=rules.MIRROR_NET_CAP_USD, allow_short=shorts)
     target = tg["target"]
-    if target is not None and target > 0:
-        plan.pop("flat_since", None)
     if tg.get("refusal") == "short_side_refused":
         _mirror_stop("short_side_refused", w)
     elif tg.get("refusal"):
@@ -2712,13 +2959,45 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         await _write_plan(t, book, r, None, None, drift.drift, book.get("his_level"),
                           tg["refusal"], {**plan, "kind": "no_plan"})
         return
+    # THE SIGN FLIP (brief B8, owner default Q5 (a)): his net has crossed
+    # zero against this book. The book flattens under that name -- a
+    # plan from a short ledger toward a positive target would run PAST
+    # zero, the one sale the leg-space clamps forbid -- and the opposite
+    # side opens as a NEW episode once this one has closed (the
+    # one-open-per-market index and the flat close decide when). The
+    # shadow is compared against the UNCLAMPED target: it computes the
+    # same signed figure from the same knob (E5)
+    raw_target = target
+    if rules.sign_flip(book.get("intent"), target):
+        target = 0
+        plan["sign_flip"] = True
+        _mirror_stop("sign_flip", w)
+    # THE SHORT SIDE'S SHARE CAP, after the flip and after the shadow's
+    # figure is taken: the shadow computes the uncapped target
+    target = _short_capped(t, target, w, plan)
+    if target is not None and target != 0:
+        plan.pop("flat_since", None)
     plan.update(target=target, target_raw=tg["raw"])
-    await _shadow_check(t, book, target, net)
-    # THE FREEZE: venue vs ledger + the desk's explained shares
+    await _shadow_check(t, book, raw_target, net)
+    # THE FREEZE: venue vs ledger + the desk's explained shares, one
+    # signed subtraction on either sign (brief 3.1)
     explained = ledger + r.manual
     if abs(venue_int - explained) > mi.VENUE_LEDGER_TOL_SHARES:
         detail = {"venue": venue_int, "ledger": ledger, "manual": r.manual}
-        if r.venue < 0 and ledger > 0:
+        if r.venue != 0 and ledger != 0 and (r.venue < 0) != (ledger < 0):
+            # SYMMETRIC (brief B5): the venue holds the OTHER sign of
+            # what the book booked, on either book. On a short book it
+            # is also the position-sign proof's negative verdict -- the
+            # same tally the per-fill lane's echo writes, so one wrong
+            # sign re-arms the short gate for every lane (H1) -- but
+            # ONLY when the venue's magnitude is the leg's: that is the
+            # genuine inversion (our BUY_SHORT booked as the long side).
+            # Any other sign disagreement is a co-hold the ledger cannot
+            # explain; it keeps the trip and the freeze here and never
+            # touches the shared tally (P2 rung S0 review, sign lens)
+            if short and abs(abs(r.venue) - abs(ledger)) <= mi.VENUE_LEDGER_TOL_SHARES:
+                await le._record_short_proof(t.pool, ok=False, net=r.venue, slug=slug)
+                plan["short_proof"] = "mismatch"
             await _trip_live_off(t, "wrong_sign_trip", {"book": book["id"], **detail})
             await _cancel_open_for(t, book, "wrong_sign_trip")
             await _freeze(t, book, "wrong_sign_trip", detail)
@@ -2744,21 +3023,49 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             await _write_plan(t, book, r, target, tg["raw"], drift.drift, book.get("his_level"),
                               book["frozen_reason"], {**plan, "kind": "frozen"})
             return
-    # INCREASES: mode, allowlist, the drift rule, the starred re-checks
+    # THE POSITION-SIGN PROOF (brief H1): venue == ledger on a short
+    # book with both negative and nothing of the desk's beside them is
+    # the venue saying our BUY_SHORT holds the short side -- the same
+    # reading the per-fill lane's echo tallies, recorded ONCE per
+    # episode into the same key the short gate reads
+    if (short and ledger < 0 and r.venue < 0 and r.manual == 0
+            and prior_plan.get("short_proof") is None):
+        await le._record_short_proof(t.pool, ok=True, net=r.venue, slug=slug)
+        plan["short_proof"] = "ok"
+    elif prior_plan.get("short_proof") is not None:
+        plan["short_proof"] = prior_plan["short_proof"]
+    # INCREASES: mode, allowlist, the drift rule, the starred re-checks.
+    # An increase is a move AWAY from zero on the book's own leg (P2
+    # rung S0, brief C3 / G1): above the ledger on a long book, below it
+    # on a short one
     inc_refusal = _increases_refusal(t, w)
     if inc_refusal is None and not drift.increase_ok:
         inc_refusal = drift.refusal or "snapshot_stale"
-    if inc_refusal is None and target > ledger:
+    increasing = (target < ledger) if short else (target > ledger)
+    if inc_refusal is None and increasing:
         inc_refusal = await _increase_recheck(t, book, r)
+    if inc_refusal is None and short and increasing:
+        inc_refusal = await _short_open_refusal(t)
+    # his net moving DOWN in long-token terms (the same signed compare
+    # on either book; _his_level reads the fills for it)
     reducing = target <= ledger
-    his_px = _his_level(fills, la, oa, reducing)
+    his_px = _his_level(fills, la, oa, reducing, short=short)
+    # A CAPPED SHORT TARGET IS THE WHOLE PROBE: the plan's $5 dead band
+    # stops churn on a book sized by his net, and a target clamped to
+    # rules.MIRROR_SHORT_MAX_SHARES (ONE until rung S5) is under it by
+    # construction; the band is not read on it, else the S3 probe could
+    # never rest. mi.plan reads the mark for the band alone
     p = mi.plan(target, float(ledger), float(venue_int - r.manual), mi.Book(r.bid, r.ask),
-                his_px, r.mark)
+                his_px, None if plan.get("short_share_cap") is not None else r.mark)
     kind = None
     confirm_gone = None
     cancel_reason = None
     vanished = False
-    if p.side == BUY:
+    # the token carrying his net: the OTHER token on a short book
+    # (brief F3 / F5), so his leaving is confirmed on the leg we follow
+    his_token = oa if (short and oa) else la
+    action = rules.leg_action(book.get("intent"), p.side) if p.side else None
+    if action == "add":
         kind = "increase"
         if inc_refusal:
             # the refusal is the name a resting order is cancelled
@@ -2767,14 +3074,14 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             _mirror_stop(inc_refusal, w)
             cancel_reason = inc_refusal
             p = None
-    elif p.side == SELL:
-        if target > 0:
+    elif action == "reduce":
+        if target != 0:
             kind = "reduce"
         elif t.flatten_all:
             kind = "flatten_vanished"
         else:
             if r.his_long <= 0 and r.his_other <= 0:
-                confirm_gone = await _confirm_gone(t, w, la)
+                confirm_gone = await _confirm_gone(t, w, his_token)
             kind = rules.select_flatten(target, r.his_long, r.his_other, r.fresh_read,
                                         r.snap_long, r.snap_other, r.market_live, confirm_gone,
                                         r.snap_partial)
@@ -2789,7 +3096,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             # is confirmed by the same rule the SELL tick used, so the
             # episode closes on it (spec 1c) instead of waiting out the
             # flat hour (step-9 review); unconfirmed is not vanished
-            confirm_gone = await _confirm_gone(t, w, la)
+            confirm_gone = await _confirm_gone(t, w, his_token)
             vanished = rules.select_flatten(target, r.his_long, r.his_other, r.fresh_read,
                                             r.snap_long, r.snap_other, r.market_live,
                                             confirm_gone, r.snap_partial) == "flatten_vanished"
@@ -2828,6 +3135,48 @@ async def _increase_recheck(t: _Tick, book: dict, r: _Reading) -> str | None:
     return rules.admission(facts, increase=True)
 
 
+def _short_capped(t: _Tick, target: int | None, whale: str, plan: dict | None = None) -> int | None:
+    """rules.MIRROR_SHORT_MAX_SHARES on a NEGATIVE target (P2 rung S0,
+    S3 expressibility): the target is clamped toward zero at the cap
+    and `short_share_cap` is named when it bites -- a cap of 0 makes
+    every short target 0, the P1 reading under this name. A target at
+    or above zero is never touched, so a long book is byte-identical."""
+    if target is None or target >= 0:
+        return target
+    cap = max(0, int(rules.MIRROR_SHORT_MAX_SHARES))
+    if -target <= cap:
+        return target
+    _mirror_stop("short_share_cap", whale)
+    if plan is not None:
+        plan["short_share_cap"] = cap
+    return -cap
+
+
+async def _short_open_refusal(t: _Tick) -> str | None:
+    """The two doors in front of EVERY short open -- a new book, an
+    add, a take (P2 rung S0, brief H1 / H2) -- read now, never
+    remembered: `short_model_disarmed` when the executor's short cost
+    model is switched off (LIVE_SHORT_COST_MODEL=off silently inverts
+    the wire, the cash and the P&L sign at once; the mirror refuses
+    rather than inherit it), then the executor's own `_short_gate`
+    (fails closed on an unreadable tally, refuses on one mismatch, and
+    on a probation short still in flight on the per-fill lane) as
+    `short_gate_refused`. The gate's serialising lock is NOT taken: the
+    mirror has no echo to release it, and a lock that leaks is the ban
+    by another name; the mirror's own sign read is recorded into the
+    same tally by _tick_book."""
+    if not le.short_model_confirmed():
+        return "short_model_disarmed"
+    try:
+        ok, why, _probation = await le._short_gate(t.pool)
+    except Exception:  # noqa: BLE001 — an unreadable gate is a shut one
+        ok, why = False, "short gate unreadable"
+    if not ok:
+        log.warning("mirror_live: short open held: %s", why)
+        return "short_gate_refused"
+    return None
+
+
 async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str | None,
                his_px: float | None, plan: dict, cancel_reason: str | None = None) -> str | None:
     """Step X for a live book: keep / cancel-replace the resting
@@ -2836,7 +3185,9 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
     tripped mid-way (t.cancel_all) cancels the resting order under the
     trip's name and places nothing."""
     w = r.whale
-    wire = _wire_for(p, his_px, r)
+    short = _book_short(book)
+    intent = _book_intent(book)
+    wire = _wire_for(p, his_px, r, book.get("intent"))
     ent = t.open_by_book.get(book["id"])
     if ent is not None:
         o, st = ent
@@ -2844,9 +3195,10 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         if leaves is None:
             leaves = float(o["qty"]) - float(o.get("booked_filled") or 0.0)
         oo = rules.OpenOrder(o["side"], _num(o.get("wire")), int(o["qty"]), leaves,
-                       _num(o.get("placed_ts")))
+                       _num(o.get("placed_ts")), _order_intent(o, book))
+        want = rules.wire_side(book.get("intent"), p.side) if p is not None else None
         decision = rules.keep_or_replace(oo, p, t.now, cancel_reason=(t.cancel_all or cancel_reason),
-                                         wire=wire)
+                                         wire=wire, intent=(want[0] if want else None))
         if decision == "keep":
             _mirror_stop("open_order_pending", w)
             plan["open_order"] = o["id"]
@@ -2894,12 +3246,14 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             ledger = int(book.get("ledger_net") or 0)
             target = int(plan.get("target") or 0)
             p = mi.plan(target, float(ledger), float(int(r.venue) - r.manual),
-                        mi.Book(r.bid, r.ask), his_px, r.mark)
+                        mi.Book(r.bid, r.ask), his_px,
+                        None if plan.get("short_share_cap") is not None else r.mark)
             if p.side is None:
                 _mirror_stop(rules.plan_reason_key(p.reason), w)
                 return p.reason
-            wire = _wire_for(p, his_px, r)
-            if p.side == BUY and (kind != "increase" or _increases_refusal(t, w)):
+            wire = _wire_for(p, his_px, r, book.get("intent"))
+            if (rules.leg_action(book.get("intent"), p.side) == "add"
+                    and (kind != "increase" or _increases_refusal(t, w))):
                 return "no plan after replace"
         else:
             # a named cancel: the plan is no order, or has no price, or
@@ -2947,15 +3301,35 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             _mirror_stop("take_arm_stale", w)
             _recent(book["id"], "take_disarmed", why="take_arm_stale", armed_for=age)
         elif rules.take_allowed(None, armed, t.now, r.bid, r.ask, wire, p.side):
-            qty = _sell_qty(book, p.qty) if p.side == SELL else _room_qty(t, p.qty, wire)
+            adding = rules.leg_action(book.get("intent"), p.side) == "add"
+            if adding:
+                qty = _room_qty(t, p.qty, wire, intent)
+            elif short:
+                # a short REDUCE take is a SELL_SHORT IOC -- unproven
+                # before rung S4 (brief G2): the reduce path below decides
+                qty = 0
+            else:
+                qty = _sell_qty(book, p.qty)
             if qty >= 1:
                 return await _place(t, book, r, "take", p.side, wire, qty, his_px, p, plan, tif="IOC")
-    if p.side == BUY:
-        qty = _room_qty(t, p.qty, wire)
+    if rules.leg_action(book.get("intent"), p.side) == "add":
+        qty = _room_qty(t, p.qty, wire, intent)
         if qty < 1:
             _mirror_stop("over_room", w)
             return "over_room"
-        return await _place(t, book, r, "increase", BUY, wire, qty, his_px, p, plan)
+        return await _place(t, book, r, "increase", p.side, wire, qty, his_px, p, plan)
+    if short:
+        # A SHORT BOOK MAY ONLY FLATTEN BEFORE RUNG S4, and only by
+        # close_position when we are the slug's sole holder (brief 3.4,
+        # G1): the venue has never read a resting SELL_SHORT back in a
+        # stated denomination, so a partial reduce -- and a flatten
+        # while co-held -- is `short_reduce_unproven`: counted, the
+        # book held, nothing sent, no freeze
+        if kind in ("flatten_paired", "flatten_vanished"):
+            return await _flatten_vanished(t, book, r, p, his_px, plan, kind=kind)
+        _mirror_stop("short_reduce_unproven", w)
+        plan["short_reduce"] = "unproven"
+        return "short_reduce_unproven"
     qty = _sell_qty(book, p.qty)
     if qty < 1:
         _mirror_stop("under_one_share", w)
@@ -2973,7 +3347,8 @@ async def _requotes_this_hour(t: _Tick, book: dict) -> int:
         return int(rules.MIRROR_MAX_REPLACES_PER_HOUR)
 
 
-def _wire_for(p: mi.Plan | None, his_px: float | None, r: _Reading) -> float | None:
+def _wire_for(p: mi.Plan | None, his_px: float | None, r: _Reading,
+              intent: str | None = None) -> float | None:
     """The cent on the wire from the UNROUNDED facts (addendum section
     10: never plan.price). A BUY joins HIS level: with no level there is
     nothing to join and buy_price says so. A SELL is a reduction of
@@ -2981,17 +3356,69 @@ def _wire_for(p: mi.Plan | None, his_px: float | None, r: _Reading) -> float | N
     and the ask alone is the plan's price when he gave none (mi.plan's
     cands) -- the admin flatten and a snapshot-driven reduction have no
     fill of his to price off, and the ask is a read fact, never a guess
-    under it."""
+    under it.
+
+    ON A SHORT BOOK (P2 rung S0, brief C4, Q6 (a)) the SELL_LONG plan
+    is an ADD to the short and its wire is the BUY_SHORT wire
+    (_short_wire); the BUY_LONG plan is a cover, whose SELL_SHORT wire
+    is unproven before rung S4 -- the cent it WOULD rest at, in
+    contract space, is returned for the record only and nothing sends
+    it (the reduce path refuses by name)."""
     if p is None or p.side is None:
         return None
+    if rules.is_short(intent):
+        if p.side == SELL:
+            return _short_wire(his_px, r.ask)
+        return rules.buy_price(his_px, r.bid)
     if p.side == BUY:
         return rules.buy_price(his_px, r.bid)
     return rules.sell_price(his_px if his_px is not None else r.ask, r.ask)
 
 
-def _room_qty(t: _Tick, qty: int, wire: float | None) -> int:
+def _short_wire(his_px: float | None, ask: float | None) -> float | None:
+    """The cent a BUY_SHORT rests at, from the UNROUNDED facts, in the
+    denomination the venue reads (P2 rung S0, brief 3.2 step 4; Q6 (a)
+    pinned on the 19-cent table).
+
+    THE ORDER, IN HIS TERMS: we bid for the other side at his price or
+    better. `his_px` is his level in LONG space -- one minus what he
+    paid for the other token (_his_level) -- and the plan's price is
+    max(his level, ask) in long space, exactly the shadow's
+    `would_px_short`; so the most we pay a share for the short leg is
+    `cost = 1 - max(his, ask) = min(his other-token price, 1 - ask)`,
+    his level in the short leg's own price, at or under the short
+    leg's bid (1 - bestAsk).
+
+    THE NUMBER ON THE WIRE is the executor's own for that cost, the one
+    every per-fill BUY_SHORT has been sent since 2026-08-25 (386 fills
+    side-verified, 0 mismatch): `rest_tick(wire_limit(cost, BUY_SHORT))`
+    = ceil(1 - cost) to the cent = the CONTRACT price the contract is
+    sold at or above ("sell at >= 0.78 means pay <= 0.22", le.wire_limit).
+    Stored AS SENT; the collateral it commits is 1 - wire a share
+    (le.cost_per_share), which the day cap, the room, the reserve and
+    the overspend tripwire all read. It differs from rules.sell_price's
+    ceiling at 19 of 98 exact cents (float noise a hair above the cent
+    steps sell_price UP; the executor's round(..., 6) reads it as the
+    cent) and the executor's rounding is the one pinned. None when the
+    short model is disarmed (le.wire_limit would then return the cost
+    unchanged -- a limit in the wrong space, tee R7), when the ask is
+    not a price, or when the cent is off the ladder."""
+    if not le.short_model_confirmed():
+        return None
+    h, a = _num(his_px), _num(ask)
+    if a is None or not (0.0 < a < 1.0):
+        return None
+    px_long = a if (h is None or not (0.0 < h < 1.0)) else max(h, a)
+    cost = round(1.0 - px_long, 6)
+    if not (0.0 < cost < 1.0):
+        return None
+    w = le.rest_tick(le.wire_limit(cost, ORDER_INTENT_SHORT), ORDER_INTENT_SHORT)
+    return w if 0.01 <= w <= 0.99 else None
+
+
+def _room_qty(t: _Tick, qty: int, wire: float | None, intent: str | None = None) -> int:
     return rules.room_scale(int(qty), wire, le.LIVE_MAX_CLIP_USD, t.day_room, t.total_room,
-                            t.mirror_day)
+                            t.mirror_day, intent=intent)
 
 
 def _sell_qty(book: dict, qty: int) -> int:
@@ -3073,6 +3500,31 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
     if t.ops >= rules.MIRROR_MAX_ORDER_OPS_PER_TICK:
         _mirror_stop("ops_capped", w)
         return "ops_capped"
+    # THE WIRE-SIDE MAP (P2 rung S0, brief 3.3): the book's intent and
+    # the plan side name the wire intent the row records, the sell flag
+    # the adapter is handed beside the book's BUY intent, and whether
+    # this row grows the leg (the reserve, the room, the day cap)
+    ws = rules.wire_side(book.get("intent"), side)
+    if ws is None:
+        _mirror_stop("book_error", w)
+        log.error("mirror_live: book %s carries an intent this lane cannot wire (%r)",
+                  book["id"], book.get("intent"))
+        return "book_error"
+    wire_intent, sell, action = ws
+    intent = _book_intent(book)
+    if wire_intent in (ORDER_INTENT_SHORT, "ORDER_INTENT_SELL_SHORT") and not t.short_col:
+        # a short row is never written through the 047 INSERT: the
+        # column would read BUY_LONG for a row whose wire intent is a
+        # short one (the flatten path refuses the same way)
+        _mirror_stop("short_column_absent", w)
+        return "short_column_absent"
+    if wire_intent == ORDER_INTENT_SHORT:
+        # every short open -- a new book, an add, a take -- passes the
+        # two doors (H1, H2), read now; a cover never reaches _place
+        held = await _short_open_refusal(t)
+        if held:
+            _mirror_stop(held, w)
+            return held
     orders = await _read_open(t)
     if orders is None:
         return "open_orders_unreadable"
@@ -3084,12 +3536,15 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
     tif_rec = "IOC" if is_take else ("GTD" if good_till else "GTC")
     venue_tif = ("TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" if is_take
                  else "TIME_IN_FORCE_GOOD_TILL_CANCEL")
-    try:
-        row_id = await t.pool.fetchval(
-            _SQL_ORDER_INSERT, book["id"], w, slug, kind, side, tif_rec, post_only, good_till,
+    args = [book["id"], w, slug, kind, side, tif_rec, post_only, good_till,
             his_px, (p.price if p is not None else wire), wire, int(qty), json.dumps(pre_ids),
             int(_num(plan.get("target")) or 0), int(book.get("ledger_net") or 0), r.bid, r.ask,
-            kind)
+            kind]
+    try:
+        if t.short_col:
+            row_id = await t.pool.fetchval(_SQL_ORDER_INSERT, *args, wire_intent)
+        else:
+            row_id = await t.pool.fetchval(_SQL_ORDER_INSERT_047, *args)
     except Exception as exc:  # noqa: BLE001 — the unique index: one open order per book
         if le._names_constraint(exc, "mirror_orders_one_open_per_book"):
             _mirror_stop("open_order_pending", w)
@@ -3101,15 +3556,16 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
          "his_level": his_px, "price": (p.price if p is not None else wire), "wire": wire,
          "qty": int(qty), "order_id": None, "state": "placing", "filled": 0.0,
          "booked_filled": 0.0, "avg_px": None, "taker_at_placement": False,
-         "pre_ids": pre_ids, "placed_ts": t.now, "reason": kind}
-    sell = side == SELL
-    est = float(qty) * float(wire) if side == BUY else 0.0
+         "pre_ids": pre_ids, "placed_ts": t.now, "reason": kind, "intent": wire_intent}
+    # the reserve is the COLLATERAL the row commits: the wire a share on
+    # a long, one minus it on a short (brief D2)
+    est = float(qty) * _cost_px(wire, book) if action == "add" else 0.0
     if est:
         le._REST_RESERVED_USD = float(le._REST_RESERVED_USD or 0.0) + est
     try:
         try:
             resp = await _guarded(t, o["id"], t.pmus.submit_fok, slug, wire, int(qty), sell,
-                                  venue_tif, ORDER_INTENT, post_only, good_till)
+                                  venue_tif, intent, post_only, good_till)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — the RESPONSE is lost, not the order
@@ -3171,17 +3627,23 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
         _mirror_stop("flatten_rested" if kind in ("flatten_paired", "flatten_vanished")
                      else "rest_placed", w)
         t.stats["placed_rest"] += 1
+    if wire_intent == ORDER_INTENT_SHORT:
+        # the short side's own names beside the lane's (brief G4): an
+        # OPEN onto a flat book, an ADD onto a held one
+        _mirror_stop("short_open" if _leg_of(book) < 1 else "short_add", w)
     # the take's arm is consumed by the IOC and contradicted by a rest
     # the venue accepted (the book was not crossing after all)
     await _disarm_take(t, book)
-    if side == BUY:
+    if action == "add":
         # this tick's own placements come off this tick's room readings,
         # so two books in one tick cannot each spend the last clip
         for attr in ("day_room", "total_room", "mirror_day"):
             v = getattr(t, attr)
             if v is not None:
                 setattr(t, attr, v - est)
-    _recent(book["id"], "placed", kind=kind, side=side, wire=wire, qty=int(qty), tif=tif_rec)
+    _recent(book["id"], "placed", kind=kind, side=side, wire=wire, qty=int(qty), tif=tif_rec,
+            intent=(wire_intent if wire_intent in (ORDER_INTENT_SHORT, "ORDER_INTENT_SELL_SHORT")
+                    else None))
     filled = float(_num(resp.get("filled_shares")) or 0.0)
     if filled > 0:
         st = {"state": status, "filled_shares": filled, "avg_px": resp.get("fill_price")}
@@ -3251,40 +3713,76 @@ async def _lost_response(t: _Tick, o: dict, book: dict, r: _Reading, exc: BaseEx
     return "placement_lost"
 
 
-async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_px, plan: dict) -> str:
+async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_px, plan: dict,
+                            kind: str = "flatten_vanished") -> str:
     """Step F: he has LEFT the market (or the admin forced it). Rest
     the SELL at his equivalent for rules.MIRROR_FLATTEN_REST_S first; then
     mirror_exit's rules verbatim: sole holder -> close_position with
     EXIT_SLIPPAGE_BIPS; co-held -> one IOC at sell_limit_price(bid),
-    refused by name when the bid is unreadable."""
+    refused by name when the bid is unreadable.
+
+    ON A SHORT BOOK (P2 rung S0, brief 3.4 / G3) there is no rest to
+    stand: a resting SELL_SHORT has never been read back from the
+    venue, so the ONE proven short exit is close_position, sign-agnostic
+    on the venue's side, sent when we are the slug's sole holder --
+    for a vanish AND, with `kind='flatten_paired'`, for the paired-out
+    flatten a long book would rest for (his net gone to zero while he
+    still holds a token) and the sign flip. Co-held, the flatten is
+    `short_reduce_unproven`: counted, the book held, nothing sent."""
     w = r.whale
-    _mirror_stop("flatten_vanished", w)
-    plan["flatten"] = "vanished"
+    short = _book_short(book)
+    if kind == "flatten_vanished":
+        _mirror_stop("flatten_vanished", w)
+        plan["flatten"] = "vanished"
+    else:
+        plan["flatten"] = "paired"
     ledger = int(book.get("ledger_net") or 0)
-    if ledger < 1:
-        return "flatten_vanished: flat"
-    # the reference rest is one of THIS vanish (the plan's vanish_since,
-    # set by _tick_book): with none, the vanish begins now and rests
-    vanish_since = _num(plan.get("vanish_since"))
-    vanish_since = t.now if vanish_since is None else vanish_since
-    try:
-        since = _num(await t.pool.fetchval(_SQL_FLATTEN_REST_SINCE, book["id"], vanish_since))
-    except Exception:  # noqa: BLE001 — unreadable: rest again, never slip
-        since = t.now
-    if since is None or t.now - since < float(rules.MIRROR_FLATTEN_REST_S):
-        return await _act(t, book, r, p, "flatten_vanished", his_px, plan) or "flatten_rested"
-    # the rest stood its wait: cancel it, then the slippage path
-    await _cancel_open_for(t, book, "flatten_vanished")
-    if book["id"] in t.open_by_book:
-        return "cancel_pending"
-    if t.cancel_all:
-        return t.cancel_all          # the cancel's booking tripped the tick: nothing more
+    if _leg_of(book) < 1:
+        return f"{kind}: flat"
+    if short:
+        # THE ROW A SHORT'S CLOSE WRITES NAMES SELL_SHORT, and only the
+        # 050 INSERT can carry it: through the 047 statement the column
+        # would read its DEFAULT, BUY_LONG, and the next day read would
+        # count the cover's proceeds as a long BUY against the day rail
+        # (P2 rung S0 review). While the column is absent the flatten is
+        # refused by name and the book held, never mislabelled
+        if not t.short_col:
+            _mirror_stop("short_column_absent", w)
+            plan["short_column"] = "absent"
+            return "short_column_absent"
+        # a resting BUY_SHORT add is cancelled first: the close takes
+        # the WHOLE slug, and a rest that filled after it would reopen
+        # the leg the book has just closed
+        await _cancel_open_for(t, book, kind)
+        if book["id"] in t.open_by_book:
+            return "cancel_pending"
+        if t.cancel_all:
+            return t.cancel_all
+    else:
+        # the reference rest is one of THIS vanish (the plan's vanish_since,
+        # set by _tick_book): with none, the vanish begins now and rests
+        vanish_since = _num(plan.get("vanish_since"))
+        vanish_since = t.now if vanish_since is None else vanish_since
+        try:
+            since = _num(await t.pool.fetchval(_SQL_FLATTEN_REST_SINCE, book["id"], vanish_since))
+        except Exception:  # noqa: BLE001 — unreadable: rest again, never slip
+            since = t.now
+        if since is None or t.now - since < float(rules.MIRROR_FLATTEN_REST_S):
+            return await _act(t, book, r, p, "flatten_vanished", his_px, plan) or "flatten_rested"
+        # the rest stood its wait: cancel it, then the slippage path
+        await _cancel_open_for(t, book, "flatten_vanished")
+        if book["id"] in t.open_by_book:
+            return "cancel_pending"
+        if t.cancel_all:
+            return t.cancel_all          # the cancel's booking tripped the tick: nothing more
     if t.ops >= rules.MIRROR_MAX_ORDER_OPS_PER_TICK:
         _mirror_stop("ops_capped", w)
         return "ops_capped"
-    ledger = int(book.get("ledger_net") or 0)
+    # the LEG, whole shares, after the cancel's booking: what a close
+    # must account for on either sign
+    ledger = _leg_of(book)
     if ledger < 1:
-        return "flatten_vanished: flat"
+        return f"{kind}: flat"
     # THE SLIPPAGE LEG READS THE VENUE'S STATE BEFORE IT READS A BID.
     # The co-held IOC prices off slug_bid, which reads through
     # _bbo_quotes -- a feed that carries no market state -- so a CLOSED
@@ -3335,7 +3833,19 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
     venue_now = math.ceil(abs(float(r.venue)))
     sole_walk = ledger >= venue_now
     sole_read = ledger >= int(held)
-    if sole_walk != sole_read:
+    # ON A SHORT BOOK, SOLE ALSO NEEDS THE SIGN AND NOBODY BESIDE US.
+    # The two readings above compare MAGNITUDES, so a MIXED-SIGN co-hold
+    # -- the desk long 100 (explained by _SQL_MANUAL_SHARES) beside our
+    # short 300, the venue net -200 -- read "sole" and close_position
+    # closed the NET: 200 of our 300 covered, the desk's long netted
+    # away, the book left at -100 against a venue of 0 with nothing
+    # named (P2 rung S0 review, sign lens). Fewer closes is the safe
+    # direction R7's comment permits: the desk's shares must be zero
+    # and the venue must read our side, else the flatten is
+    # `short_reduce_unproven` below
+    if short and (r.manual != 0 or not (float(r.venue) < 0)):
+        sole_walk = sole_read = False
+    elif sole_walk != sole_read:
         # Two readings that disagree are EVIDENCE OF CO-HOLDING, not an
         # unreadable account: the walk keeps the fraction and the fresh
         # read floors it away, so `ledger < venue < ledger + 1` -- exactly
@@ -3369,6 +3879,13 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
     # ceil(held)) (_sell_qty), refused under one share by name.
     qty = ledger
     if not sole:
+        if short:
+            # co-held: the only exit would be a SELL_SHORT IOC in a
+            # denomination nobody has read back (brief 3.4): held,
+            # named, nothing sent
+            _mirror_stop("short_reduce_unproven", w)
+            plan["short_reduce"] = "unproven"
+            return "short_reduce_unproven"
         qty = _sell_qty(book, ledger)
         if qty < 1:
             _mirror_stop("under_one_share", w)
@@ -3386,11 +3903,25 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
     if book["id"] in t.nonterminal:
         _mirror_stop("open_order_pending", w)
         return "open_order_pending"
-    try:
-        row_id = await t.pool.fetchval(
-            _SQL_ORDER_INSERT, book["id"], w, r.slug, "flatten_vanished", SELL, tif_rec, False,
+    # the row: the PLAN side of a reduce on this book (SELL_LONG on a
+    # long book, BUY_LONG on a short one) and the WIRE intent the exit
+    # maps to (brief 3.3); a CLOSE carries no cent of its own
+    side = BUY if short else SELL
+    ws = rules.wire_side(book.get("intent"), side)
+    if ws is None:
+        _mirror_stop("book_error", w)
+        log.error("mirror_live: book %s carries an intent this lane cannot wire (%r)",
+                  book["id"], book.get("intent"))
+        return "book_error"
+    wire_intent = ws[0]
+    args = [book["id"], w, r.slug, kind, side, tif_rec, False,
             None, his_px, (None if sole else limit) or 0.0, (None if sole else limit) or 0.0,
-            qty, json.dumps(pre_ids), 0, ledger, r.bid, r.ask, "flatten_vanished")
+            qty, json.dumps(pre_ids), 0, int(book.get("ledger_net") or 0), r.bid, r.ask, kind]
+    try:
+        if t.short_col:
+            row_id = await t.pool.fetchval(_SQL_ORDER_INSERT, *args, wire_intent)
+        else:
+            row_id = await t.pool.fetchval(_SQL_ORDER_INSERT_047, *args)
     except Exception as exc:  # noqa: BLE001 — the unique index: one open order per book
         if le._names_constraint(exc, "mirror_orders_one_open_per_book"):
             _mirror_stop("open_order_pending", w)
@@ -3401,11 +3932,11 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
     # wire and the column holds 0.0, never None (step-9 review: a None
     # here was a TypeError in the lost-placement search)
     o = {"id": int(row_id), "book_id": book["id"], "whale": w, "us_market_slug": r.slug,
-         "kind": "flatten_vanished", "side": SELL, "tif": tif_rec, "post_only": False,
+         "kind": kind, "side": side, "tif": tif_rec, "post_only": False,
          "his_level": his_px, "price": 0.0 if sole else limit, "wire": 0.0 if sole else limit,
          "qty": qty, "order_id": None, "state": "placing", "filled": 0.0, "booked_filled": 0.0,
          "avg_px": None, "taker_at_placement": True, "pre_ids": pre_ids, "placed_ts": t.now,
-         "reason": "flatten_vanished"}
+         "reason": kind, "intent": wire_intent}
     try:
         if sole:
             resp = await _guarded(t, o["id"], t.pmus.close_position, r.slug,
@@ -3444,9 +3975,11 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
                              f"place_refused:{status or 'no_id'}", None, None)
         _mirror_stop(f"place_refused:{status or 'no_id'}", w)
         return f"place_refused:{status}"
-    await _finish_order(t, o, book, st, "flatten_vanished")
+    await _finish_order(t, o, book, st, kind)
+    if short:
+        _mirror_stop("short_flatten_close", w)
     _recent(book["id"], "flattened", how="close_position" if sole else "ioc", filled=filled)
-    return "flatten_vanished"
+    return kind
 
 
 # ----------------------------------------------------- step A: admission
@@ -3476,19 +4009,33 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     r = await _read_market(t, w, cid, slug, la, oa, fills)
     if t.abandoned:
         return
+    shorts = _shorts_on(t)
     drift, _drift_src = _drift_for(r)
-    net, _snap_net = _net_for(r, drift)
+    net, _snap_net = _net_for(r, drift, short=shorts)
     ratio = (t.ratios.get(w) or {}).get("ratio")
     anchor = (t.ratios.get(w) or {}).get("anchor_usd")
     clip = le.per_fill_usd(w, slug)
-    tg = rules.mirror_target(ratio, net, r.mark, clip, cap_usd=rules.MIRROR_NET_CAP_USD)
+    tg = rules.mirror_target(ratio, net, r.mark, clip, cap_usd=rules.MIRROR_NET_CAP_USD,
+                             allow_short=shorts)
     if tg.get("refusal"):
         _mirror_stop(tg["refusal"], w)
         return
     target = int(tg["target"])
-    if target <= 0:
+    # the short side's share cap (rules.MIRROR_SHORT_MAX_SHARES, ONE
+    # until rung S5): a negative target is clamped toward zero and named
+    target = _short_capped(t, target, w)
+    if target == 0:
         return                       # nothing to hold: no book
-    his_px = _his_level(fills, la, oa, reducing=False)
+    # A NEGATIVE TARGET IS A SHORT BOOK (P2 rung S0, brief 3.2): his
+    # net is negative on the mapped market and the knob is on. Its
+    # level is his most recent move DOWN in long-token terms -- his
+    # other-token BUY at 1 - p, or his long-token SELL at p -- read the
+    # way a long book's reduce reads it; the model must be armed
+    short = target < 0
+    if short and not le.short_model_confirmed():
+        _mirror_stop("short_model_disarmed", w)
+        return
+    his_px = _his_level(fills, la, oa, reducing=short, short=short)
     if his_px is None or not (0.0 < his_px < 1.0):
         _mirror_stop("no_price", w)
         return
@@ -3519,8 +4066,14 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
         underdog = bool(await t.pool.fetchval(_SQL_UNDERDOG, [a for a in (la, oa) if a]))
     except Exception as exc:  # noqa: BLE001 — unreadable referees refuse by name
         log.warning("mirror_live: admission referees for %s unreadable (%s)", slug, type(exc).__name__)
+    # the KALSHI claim reads the token we are ON: his other token on a
+    # short book (brief F5); a short book with no sibling id cannot
+    # name it, so the claim reads as unreadable and refuses
     try:
-        kalshi = bool(await t.pool.fetchval(_SQL_KALSHI, la))
+        if short and not oa:
+            kalshi = None
+        else:
+            kalshi = bool(await t.pool.fetchval(_SQL_KALSHI, oa if short else la))
     except Exception:  # noqa: BLE001 — unreadable: claimed
         kalshi = None
     # the executor's own band (live_executor reads the same env with
@@ -3570,8 +4123,16 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     if refusal:
         _mirror_stop(refusal, w)
         return
+    intent = ORDER_INTENT_SHORT if short else ORDER_INTENT
+    if short:
+        # the two doors in front of every short open (H1, H2), after
+        # admission so the census names the earlier gate first
+        held = await _short_open_refusal(t)
+        if held:
+            _mirror_stop(held, w)
+            return
     opened = await le._open_mirror_book(t.pool, w, cid, slug, la, oa, tg["ratio_eff"], anchor,
-                                        his_px, target, m.get("source"), game_key)
+                                        his_px, target, m.get("source"), game_key, intent=intent)
     if not opened.get("ok"):
         _mirror_stop(str(opened.get("refusal") or "open_failed"), w)
         return
@@ -3581,7 +4142,8 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     book = dict(book)
     if int(book.get("episode") or 1) > 1:
         await t.pool.execute(_SQL_BOOK_REOPENS, book["id"], int(book["episode"]) - 1)
-    _recent(book["id"], "opened", whale=w, slug=slug, target=target, ratio=tg["ratio_eff"])
+    _recent(book["id"], "opened", whale=w, slug=slug, target=target, ratio=tg["ratio_eff"],
+            intent=(intent if short else None))
     log.info("mirror_live: book %s opened for %s on %s (target %s @ %s)", book["id"], w, slug,
              target, his_px)
     async with _lock_for(book["id"]):
@@ -3650,6 +4212,34 @@ async def _tick(t: _Tick, woken: list) -> None:
         stats.update(status="degraded", tables_absent=type(exc).__name__)
         log.warning("mirror_live: mirror tables unreadable (%s); refusing", type(exc).__name__)
         return
+    # the 050 column (P2 rung S0): present, the tick sends the
+    # intent-carrying statements; ABSENT -- the driver's own
+    # undefined-column error and nothing else (rules.column_missing) --
+    # the 047 ones and the knob is effectively off, named when the
+    # environment has it on, never a raise (the workers never run
+    # migrations). Any other failure of the probe is the probe failing,
+    # not the column missing: the tick is REFUSED by name like the table
+    # guard's, because a knob read off for one tick on a transient error
+    # is the reversal path -- every sole short book market-closed at
+    # EXIT_SLIPPAGE_BIPS on a database blip (review, migration and
+    # sign/money lenses)
+    try:
+        await t.pool.fetch(_SQL_INTENT_GUARD)
+        t.short_col = True
+    except Exception as exc:  # noqa: BLE001 — a column that is not there is a fact; a blip is not
+        if not rules.column_missing(exc, "intent"):
+            _mirror_stop("intent_guard_unreadable")
+            stats.update(status="degraded", intent_guard_unreadable=type(exc).__name__)
+            log.warning("mirror_live: mirror_orders.intent probe failed (%s); refusing the tick",
+                        type(exc).__name__)
+            return
+        t.short_col = False
+        if rules.MIRROR_SHORTS:
+            _mirror_stop("short_column_absent")
+            stats["short_column_absent"] = type(exc).__name__
+            log.warning("mirror_live: MIRROR_SHORTS is on but mirror_orders.intent is absent "
+                        "(migration 050 not applied yet: %s); shorts stay off", type(exc).__name__)
+    stats.setdefault("short", {})["on"] = _shorts_on(t)
     await _read_mode(t)
     if t.mode != MODE_SAFE and le.active_venue() != "polymarket-us":
         _mirror_stop("no_venue")

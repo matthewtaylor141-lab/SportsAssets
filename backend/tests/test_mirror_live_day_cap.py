@@ -432,19 +432,36 @@ def test_the_statements_are_pinned_by_tag():
     this pins the text the worker sends, and the fake's own contract:
     a CASE clause it does not model raises, it never falls back to
     cash alone."""
-    day = _flat(ml._SQL_MIRROR_DAY)
-    assert day.endswith("/* ml-mirror-day */")
+    # the 047 shape, sent while migration 050's column is absent, is the
+    # statement as first pinned; the 050 shape (P2 rung S0) names the
+    # wire intent beside the plan side and prices a BUY_SHORT row's
+    # remainder at its collateral, 1 - wire -- a long BUY row reads the
+    # same figure through either
+    day047 = _flat(ml._SQL_MIRROR_DAY_047)
+    assert day047.endswith("/* ml-mirror-day */")
     assert ("SELECT COALESCE(sum(cash_usd), 0)::float8 AS filled, "
             "COALESCE(sum(CASE WHEN state IN ('placing', 'open', 'unknown') "
             "THEN (qty - COALESCE(booked_filled, 0)) * wire ELSE 0 END), 0)::float8 AS open "
             "FROM mirror_orders WHERE side = 'BUY_LONG' "
+            "AND placed_at > now() - interval '24 hours'") in day047
+    day = _flat(ml._SQL_MIRROR_DAY)
+    assert day.endswith("/* ml-mirror-day */")
+    assert ("SELECT COALESCE(sum(cash_usd), 0)::float8 AS filled, "
+            "COALESCE(sum(CASE WHEN state IN ('placing', 'open', 'unknown') "
+            "THEN (qty - COALESCE(booked_filled, 0)) "
+            "* (CASE WHEN intent = 'ORDER_INTENT_BUY_SHORT' THEN 1 - wire ELSE wire END) "
+            "ELSE 0 END), 0)::float8 AS open "
+            "FROM mirror_orders WHERE ((side = 'BUY_LONG' AND intent = 'ORDER_INTENT_BUY_LONG') "
+            "OR intent = 'ORDER_INTENT_BUY_SHORT') "
             "AND placed_at > now() - interval '24 hours'") in day
     assert "state IN ('placing', 'open', 'unknown')" in _flat(ml._SQL_ORDERS_OPEN)
+    assert "state IN ('placing', 'open', 'unknown')" in _flat(ml._SQL_ORDERS_OPEN_047)
     p = _pool()
     b = p.add_book(ledger=0)
     p.add_order(b, wire=0.50, qty=100)
     p.clock = NOW
     assert p._run("fetchrow", ml._SQL_MIRROR_DAY, ()) == {"filled": 0.0, "open": 50.0}
+    assert p._run("fetchrow", ml._SQL_MIRROR_DAY_047, ()) == {"filled": 0.0, "open": 50.0}
     with pytest.raises(AssertionError, match="CASE clause"):
         p._run("fetchrow", day.replace("state IN ('placing', 'open', 'unknown')", "state = 'open'"), ())
     rep = _flat(ml._SQL_REPLACES)
@@ -453,6 +470,111 @@ def test_the_statements_are_pinned_by_tag():
             "AND done_at > now() - interval '1 hour'") in rep
     assert "take_capped" in ml.CENSUS_KEYS and "replace_capped" in ml.CENSUS_KEYS
     assert BUY == "BUY_LONG" and SLUG        # the fixture's names, as the statements spell them
+
+
+# ------------------------------------ 4. P2 rung S0: the short side of the day
+#
+# A BUY_SHORT row (the plan side SELL_LONG carrying the wire intent
+# BUY_SHORT) counts against the day at its COLLATERAL, (1 - wire) x qty
+# resting and fill_cash filled; a short book's cover rows and a long
+# book's sells count nothing; every long row reads as it did.
+
+def test_a_buy_short_row_counts_against_the_day_at_its_collateral_and_long_rows_are_unchanged():
+    from sportsassets import live_executor as le
+    p = _pool()
+    b = p.add_book(ledger=0)
+    s = p.add_book(ledger=-300, intent="ORDER_INTENT_BUY_SHORT", avg_cost=0.32, gross_buy=204.0)
+    p.clock = NOW
+    # a long rest of 100 @ 0.50 and a short add of 100 @ contract 0.32 (0.68 collateral)
+    p.add_order(b, wire=0.50, qty=100)
+    p.add_order(s, side=SELL, wire=0.32, qty=100, kind="increase")
+    day = p._run("fetchrow", ml._SQL_MIRROR_DAY, ())
+    assert day == {"filled": 0.0, "open": pytest.approx(50.0 + 68.0)}
+    # the 047 shape, sent while the column is absent, reads the long row alone
+    assert p._run("fetchrow", ml._SQL_MIRROR_DAY_047, ()) == {"filled": 0.0, "open": 50.0}
+    # a short cover (plan BUY_LONG, wire SELL_SHORT) and a long sell count nothing
+    p.add_order(s, side=BUY, wire=0.30, qty=50, kind="reduce", state="open", order_id="oid-c")
+    p.add_order(b, side=SELL, wire=0.55, qty=50, kind="reduce", state="open", order_id="oid-d")
+    assert p._run("fetchrow", ml._SQL_MIRROR_DAY, ())["open"] == pytest.approx(118.0)
+    # filled: the cash the fills cost, as _book_fill writes it on either sign
+    for o in p.orders.values():
+        if o["intent"] == "ORDER_INTENT_BUY_SHORT":
+            o.update(state="filled", booked_filled=100.0, cash_usd=le.fill_cash(100, 0.32, o["intent"]))
+    day = p._run("fetchrow", ml._SQL_MIRROR_DAY, ())
+    assert day == {"filled": pytest.approx(68.0), "open": pytest.approx(50.0)}
+    # a row written before 050 reads the column's DEFAULT: a long BUY counts, a long SELL does not
+    old_buy = p.add_order(b, wire=0.40, qty=10, order_id="oid-e")
+    old_sell = p.add_order(b, side=SELL, wire=0.60, qty=10, order_id="oid-f", kind="reduce")
+    del old_buy["intent"], old_sell["intent"]
+    assert p._run("fetchrow", ml._SQL_MIRROR_DAY, ())["open"] == pytest.approx(54.0)
+
+
+def test_a_resting_buy_short_consumes_the_day_room_and_gives_its_collateral_back_on_cancel(monkeypatch):
+    from tests.test_mirror_live_worker import _mkt, _shorts_on
+    _shorts_on(monkeypatch)
+    p = _pool(fills=_his(100, other_size=400, other_px=0.72), snap={M: 100.0, N: 400.0})
+    v = _Venue()
+    st = _tick(p, v, http=_mkt(100.0, 400.0))
+    assert _census(st, "short_open") == 1 and _places(v)[0][3] == 300
+    o = next(iter(p.orders.values()))
+    assert o["intent"] == "ORDER_INTENT_BUY_SHORT" and o["wire"] == 0.32
+    # the day room the tick read before the rest was placed
+    assert st["mirror_day_room"] == pytest.approx(rules.MIRROR_DAY_USD)
+    # the next tick's read counts the resting remainder at its collateral, 300 x 0.68
+    v2 = _Venue(held={})
+    v2.orders = v.orders
+    st2 = _tick(p, v2, now=NOW + 30, http=_mkt(100.0, 400.0))
+    assert st2["mirror_day_room"] == pytest.approx(rules.MIRROR_DAY_USD - 300 * 0.68)
+    assert o["state"] == "open"
+    # a TTL cancel gives the remainder back at the collateral, and the
+    # re-quote that follows in the same tick is at full size
+    v3 = _Venue(held={})
+    v3.orders = v.orders
+    st3 = _tick(p, v3, now=NOW + rules.MIRROR_REST_TTL_S + 1, http=_mkt(100.0, 400.0))
+    assert _census(st3, "cancelled_unfilled") == 1 and o["state"] == "cancelled"
+    requote = [x for x in _places(v3)]
+    assert len(requote) == 1 and requote[0][3] == 300 and requote[0][6] == "ORDER_INTENT_BUY_SHORT"
+
+
+def test_a_second_short_book_in_the_same_tick_is_sized_off_the_room_net_of_the_firsts_collateral(monkeypatch):
+    """The within-tick half of the rail on the SHORT side (mutation
+    lens, mutant h3): _place takes the first short rest's COLLATERAL
+    (300 x 0.68 = $204) off t.mirror_day, not its contract notional
+    (300 x 0.32 = $96), so with $250 of day room the second short book
+    on a second market is sized off $46 -- 67 shares of a 0.68 leg --
+    not off $154."""
+    from tests.test_mirror_live_worker import _short_book, _shorts_on
+    _shorts_on(monkeypatch)
+    monkeypatch.setattr(rules, "MIRROR_DAY_USD", 250.0)
+    fills = _his(100, other_size=400, other_px=0.72) + [
+        _fill(M2, "BUY", 100.0, 0.31, NOW - 2400), _fill(N2, "BUY", 400.0, 0.72, NOW - 2300)]
+    p = _pool(fills=fills, snap={M: 100.0, N: 400.0, M2: 100.0, N2: 400.0})
+    p.markets[OTHER_CID] = {"closed": False, "resolved": False, "resolved_prices": None}
+    p.token_index.update({M2: 1, N2: 0})
+    p.token_cid.update({M2: OTHER_CID, N2: OTHER_CID})
+    # two open short books, flat, one on each market (his net -300 on both)
+    b1 = _short_book(p, ledger=0)
+    b2 = _short_book(p, ledger=0, us_market_slug=OTHER_SLUG, condition_id=OTHER_CID,
+                     long_asset=M2, other_asset=N2)
+    http = _ByMarket({
+        CID: [{"conditionId": CID, "asset": M, "size": 100},
+              {"conditionId": CID, "asset": N, "size": 400}],
+        OTHER_CID: [{"conditionId": OTHER_CID, "asset": M2, "size": 100},
+                    {"conditionId": OTHER_CID, "asset": N2, "size": 400}]})
+    v = _Venue(bid=0.30, ask=0.32)
+    st = _tick(p, v, http=http)
+    assert (b1["target"], b2["target"]) == (-300, -300)
+    pl = _places(v)
+    assert len(pl) == 2 and [x[6] for x in pl] == ["ORDER_INTENT_BUY_SHORT"] * 2, pl
+    assert [x[1] for x in pl] == [SLUG, OTHER_SLUG]
+    assert [x[3] for x in pl] == [300, int((250.0 - 300 * 0.68) / 0.68)] == [300, 67], pl
+    assert _census(st, "short_open") == 2 and _census(st, "rest_placed") == 2
+    assert st["mirror_day_room"] == pytest.approx(250.0)
+    # and the next tick's read counts both rests at their collateral
+    v2 = _Venue(bid=0.30, ask=0.32)
+    v2.orders = v.orders
+    st2 = _tick(p, v2, now=NOW + 30, http=http)
+    assert st2["mirror_day_room"] == pytest.approx(250.0 - (300 + 67) * 0.68)
 
 
 # ---------------------------------------------------------- 3. the mode line

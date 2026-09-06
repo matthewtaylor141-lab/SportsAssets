@@ -256,7 +256,13 @@ def test_negative_target_is_zero_and_the_intent_is_buy_long():
     t = r.mirror_target(0.05, -24423.06, 0.4574, 50.0)
     assert t["target"] == 0 and t["refusal"] == "short_side_refused" and t["intent"] == INTENT
     assert t["raw"] < 0
-    assert "BUY_SHORT" not in inspect.getsource(r.mirror_target)
+    # P2 rung S0: the short intent is reachable ONLY through the bool
+    # True of allow_short (the MIRROR_SHORTS knob, off by default); the
+    # default call and every other value keep the P1 door above
+    for not_true in (False, None, 1, "on", "true"):
+        t2 = r.mirror_target(0.05, -24423.06, 0.4574, 50.0, allow_short=not_true)
+        assert (t2["target"], t2["refusal"], t2["intent"]) == (0, "short_side_refused", INTENT), not_true
+    assert "allow_short=allow_short is True" in inspect.getsource(r.mirror_target)
     # no ratio / no mark is NO PLAN, never "target zero, flatten"
     assert r.mirror_target(None, 1000, 0.5, 50.0)["target"] is None
     assert r.mirror_target(None, 1000, 0.5, 50.0)["refusal"] == "no_ratio"
@@ -2080,3 +2086,275 @@ def test_an_env_name_that_is_not_a_string_reads_as_absent(monkeypatch):
     assert r._env_float("MIRROR_TEST_FLOAT") == 0.5
     for bad in (None, 1, b"MIRROR_TEST_FLOAT", ["MIRROR_TEST_FLOAT"]):
         assert r._env_float(bad) is None
+
+
+# ---------------------------------------------------------------- P2 rung S0
+# The live mirror follows his SHORT side (owner order 2026-09-05, "we
+# need to make sure we are mirroring shorts"), behind ONE knob. With the
+# knob off every rule above is byte-identical (the whole file runs with
+# it off); these pin the knob, the wire-side map, and what each rule
+# does on a short book when it is on.
+
+SHORT = "ORDER_INTENT_BUY_SHORT"
+
+
+def _short(ledger=-300.0, avg=0.32, **over):
+    return r.BookState(ledger_net=ledger, avg_cost=avg, intent=SHORT, **over)
+
+
+def test_the_knob_is_off_by_default_and_read_like_the_other_dials(monkeypatch):
+    # the DEFAULT is pinned through the reader with the variable unset,
+    # never through the import-time constant (the runner's environment
+    # may have the knob on in this rung; the mirror set stays green)
+    monkeypatch.delenv("MIRROR_SHORTS", raising=False)
+    assert r.env_switch("MIRROR_SHORTS", False) is False
+    assert isinstance(r.MIRROR_SHORTS, bool)
+    assert r.ORDER_INTENT_SHORT == SHORT and r.ORDER_INTENT == INTENT
+    assert r.WIRE_INTENTS == {"ORDER_INTENT_BUY_LONG", "ORDER_INTENT_SELL_LONG",
+                              "ORDER_INTENT_BUY_SHORT", "ORDER_INTENT_SELL_SHORT"}
+    words = ("on", "1", "true", "yes", "off", "0", "false", "no")
+    for raw, want in (("on", True), ("1", True), ("true", True), ("YES", True), (" On ", True),
+                      ("off", False), ("0", False), ("false", False), ("no", False),
+                      ("", False), ("maybe", False), ("2", False)):
+        monkeypatch.setenv("MIRROR_SHORTS", raw)
+        assert r.env_switch("MIRROR_SHORTS", False) is want, raw
+        named = raw.strip().lower() in words
+        assert r.env_switch("MIRROR_SHORTS", True) is (want if named else True), raw
+    monkeypatch.delenv("MIRROR_SHORTS", raising=False)
+    assert r.env_switch("MIRROR_SHORTS") is False
+    assert r.env_switch(None) is False and r.env_switch(5, True) is True
+    # the module reads it at import like every cap; the default is the
+    # code's, and flips to True only by a code change (rung S5)
+    src = inspect.getsource(r)
+    assert 'MIRROR_SHORTS = env_switch("MIRROR_SHORTS", False)' in src
+    assert "rung S5" in src
+
+
+def test_the_effective_knob_is_the_env_and_the_050_column_and_absence_is_the_columns_error_alone(monkeypatch):
+    """Both lanes read one effective knob (shorts_effective): the
+    environment AND the column present -- only the bool True of the
+    probe is presence. And absence is asyncpg's UndefinedColumnError or
+    the driver's text for it, never any other failure of the probe."""
+    monkeypatch.setattr(r, "MIRROR_SHORTS", True)
+    assert r.shorts_effective(True) is True
+    for not_present in (False, None, 1, "yes", 0):
+        assert r.shorts_effective(not_present) is False, not_present
+    monkeypatch.setattr(r, "MIRROR_SHORTS", False)
+    assert r.shorts_effective(True) is False
+
+    class UndefinedColumnError(Exception):
+        pass
+
+    class UndefinedTableError(Exception):
+        pass
+
+    assert r.column_missing(UndefinedColumnError("whatever"), "intent") is True
+    assert r.column_missing(UndefinedTableError('column "intent" does not exist'), "intent") is True
+    assert r.column_missing(RuntimeError('column "intent" does not exist'), "intent") is True
+    assert r.column_missing(RuntimeError("connection reset by peer"), "intent") is False
+    assert r.column_missing(TimeoutError("statement timeout"), "intent") is False
+    assert r.column_missing(RuntimeError("intent timed out"), "intent") is False
+    assert r.column_missing(UndefinedTableError('relation "mirror_orders" does not exist'), "intent") is False
+    assert r.column_missing(RuntimeError('column "side" does not exist'), "intent") is False
+
+
+def test_the_short_share_cap_is_one_until_s5_and_the_env_may_only_lower_it(monkeypatch):
+    monkeypatch.delenv("MIRROR_SHORT_MAX_SHARES", raising=False)
+    assert r.capped_env("MIRROR_SHORT_MAX_SHARES", 1) == 1.0
+    assert isinstance(r.MIRROR_SHORT_MAX_SHARES, int) and 0 <= r.MIRROR_SHORT_MAX_SHARES <= 1
+    monkeypatch.setenv("MIRROR_SHORT_MAX_SHARES", "50")
+    assert r.capped_env("MIRROR_SHORT_MAX_SHARES", 1) == 1.0, "a shell never raises it"
+    monkeypatch.setenv("MIRROR_SHORT_MAX_SHARES", "0")
+    assert r.capped_env("MIRROR_SHORT_MAX_SHARES", 1) == 0.0, "zero refuses every short"
+    monkeypatch.setenv("MIRROR_SHORT_MAX_SHARES", "-3")
+    assert r.capped_env("MIRROR_SHORT_MAX_SHARES", 1) == 0.0
+    monkeypatch.setenv("MIRROR_SHORT_MAX_SHARES", "lots")
+    assert r.capped_env("MIRROR_SHORT_MAX_SHARES", 1) == 1.0
+    # the module reads it through capped_env with the code default 1
+    src = inspect.getsource(r)
+    assert 'MIRROR_SHORT_MAX_SHARES = int(capped_env("MIRROR_SHORT_MAX_SHARES", 1))' in src
+    assert "MIRROR_SHORT_MAX_SHARES" in r.__all__ and "shorts_effective" in r.__all__
+    assert "column_missing" in r.__all__
+
+
+def test_mirror_target_admits_a_signed_short_only_by_the_knob_and_names_its_intent():
+    t = r.mirror_target(1.0, -300.0, 0.31, 50.0, allow_short=True)
+    assert t["target"] == -300 and t["refusal"] is None and t["intent"] == SHORT
+    assert t["raw"] == -300.0 and t["capped"] is False
+    # capped on the SHORT leg's price, 1 - mark
+    big = r.mirror_target(1.0, -100000.0, 0.9, 50.0, allow_short=True)
+    assert big["target"] == -int(250.0 / 0.1) == -2500 and big["capped"] is True
+    lng = r.mirror_target(1.0, 100000.0, 0.9, 50.0, allow_short=True)
+    assert lng["target"] == 277 and lng["intent"] == INTENT
+    # a positive target keeps the long intent under either knob; zero is zero
+    assert r.mirror_target(1.0, 0.0, 0.5, 50.0, allow_short=True)["target"] == 0
+    assert r.mirror_target(1.0, 0.0, 0.5, 50.0, allow_short=True)["intent"] == INTENT
+    # the reversal path: the knob off restores short_side_refused alone,
+    # every other refusal reads the same on either setting
+    off = r.mirror_target(1.0, -300.0, 0.31, 50.0)
+    assert (off["target"], off["refusal"], off["intent"]) == (0, "short_side_refused", INTENT)
+    for kw in ({}, {"allow_short": True}):
+        assert r.mirror_target(None, -300.0, 0.31, 50.0, **kw)["refusal"] == "no_ratio"
+        assert r.mirror_target(1.0, None, 0.31, 50.0, **kw)["refusal"] == "no_position"
+        assert r.mirror_target(1.0, -300.0, 0.31, 0.0, **kw)["refusal"] == "clip_zero"
+
+
+def test_the_wire_side_map_is_the_table_of_section_3_3():
+    # book, plan side -> (wire intent, sell flag, leg action)
+    assert r.wire_side(INTENT, r.BUY) == ("ORDER_INTENT_BUY_LONG", False, "add")
+    assert r.wire_side(INTENT, r.SELL) == ("ORDER_INTENT_SELL_LONG", True, "reduce")
+    assert r.wire_side(None, r.BUY) == ("ORDER_INTENT_BUY_LONG", False, "add")
+    assert r.wire_side(None, r.SELL) == ("ORDER_INTENT_SELL_LONG", True, "reduce")
+    assert r.wire_side(SHORT, r.SELL) == ("ORDER_INTENT_BUY_SHORT", False, "add")
+    assert r.wire_side(SHORT, r.BUY) == ("ORDER_INTENT_SELL_SHORT", True, "reduce")
+    for bad_intent in ("ORDER_INTENT_SELL_SHORT", "BUY_SHORT", "", 1, True):
+        assert r.wire_side(bad_intent, r.BUY) is None and r.wire_side(bad_intent, r.SELL) is None
+    for bad_side in (None, "", "BUY", "SELL", 1, True):
+        assert r.wire_side(INTENT, bad_side) is None and r.wire_side(SHORT, bad_side) is None
+    assert r.leg_action(SHORT, r.SELL) == "add" and r.leg_action(SHORT, r.BUY) == "reduce"
+    assert r.leg_action(INTENT, r.BUY) == "add" and r.leg_action(INTENT, r.SELL) == "reduce"
+    assert r.leg_action("junk", r.BUY) is None
+    assert r.is_short(SHORT) and not r.is_short(INTENT) and not r.is_short(None)
+    assert not r.is_short("ORDER_INTENT_SELL_SHORT") and not r.is_short(True)
+
+
+def test_state_nums_admits_a_negative_ledger_only_on_a_short_book_and_refuses_a_sign_mismatch():
+    assert r._state_nums(r.BookState(ledger_net=-1.0)) is None               # a long book (B1, as before)
+    assert r._state_nums(r.BookState(ledger_net=-1.0, intent=INTENT)) is None
+    st = r._state_nums(_short(-1.0))
+    assert st is not None and st.ledger_net == -1.0 and st.intent == SHORT
+    assert r._state_nums(_short(0.0)) is not None
+    assert r._state_nums(_short(1.0)) is None                                # a long leg on a short book
+    assert r._state_nums(r.BookState(ledger_net=5.0, intent="ORDER_INTENT_SELL_SHORT")) is None
+    assert r._state_nums(r.BookState(ledger_net=5.0, intent="short")) is None
+    # the booking names it
+    assert r.book_buy(_short(1.0), 5, 0.5).refusal == "bad_state"
+    assert r.book_sell(r.BookState(ledger_net=-1.0), 5, 0.5).refusal == "bad_state"
+    # the dataclass field is appended last: a positional P1 construction keeps its meaning
+    s = r.BookState(10.0, 0.3, 3.0, 0.0, 3.0, 0.0)
+    assert s.intent is None and s.ledger_net == 10.0
+
+
+def test_book_buy_on_a_short_grows_the_leg_below_zero_in_contract_price_and_collateral():
+    b = r.book_buy(_short(0.0, None), 300, 0.32)
+    assert b.refusal is None and b.booked == 300 and b.usd == pytest.approx(300 * 0.68)
+    s = b.state
+    assert s.ledger_net == -300 and s.avg_cost == 0.32 and s.intent == SHORT
+    assert s.gross_buy_usd == pytest.approx(204.0) and s.peak_exposure_usd == pytest.approx(204.0)
+    # the venue's own cash figure is taken as given (fill_cash, BUY_SHORT)
+    b2 = r.book_buy(s, 100, 0.40, usd=60.0)
+    s2 = b2.state
+    assert s2.ledger_net == -400 and s2.avg_cost == pytest.approx((300 * 0.32 + 100 * 0.40) / 400)
+    assert s2.gross_buy_usd == pytest.approx(264.0)
+    assert s2.peak_exposure_usd == pytest.approx(round(400 * (1 - s2.avg_cost), 4))
+    # a flat short book restarts its average
+    assert r.book_buy(_short(0.0, 0.9), 10, 0.2).state.avg_cost == 0.2
+    # held shares without a cost still cannot carry an average
+    assert r.book_buy(_short(-10.0, None), 5, 0.5).refusal == "avg_cost_unknown"
+
+
+def test_book_sell_on_a_short_covers_toward_zero_and_realizes_avg_minus_px():
+    s = _short(-300.0, 0.32, gross_buy_usd=204.0)
+    b = r.book_sell(s, 100, 0.29)
+    assert b.refusal is None and b.booked == 100 and b.overfill is False
+    assert b.realized == pytest.approx((0.32 - 0.29) * 100)          # the long formula, sign flipped
+    assert b.usd == pytest.approx(100 * 0.71)                         # the leg's proceeds a share
+    assert b.state.ledger_net == -200 and b.state.realized_pnl == pytest.approx(3.0)
+    assert b.state.avg_cost == 0.32
+    lose = r.book_sell(s, 100, 0.40)
+    assert lose.realized == pytest.approx(-8.0)
+    # OVERFILL is past zero OF THE LEG by more than SELL_DUST_SHARES: a
+    # cover of 302 onto -300; the one lot past (301) is dust on the short
+    # leg exactly as on the long one (U11), the leg books to zero
+    over = r.book_sell(s, 301 + r.SELL_DUST_SHARES, 0.29)
+    assert over.overfill is True and over.dust == 0.0 and over.booked == 300 and over.state.ledger_net == 0
+    dust = r.book_sell(s, 301, 0.29)
+    assert dust.overfill is False and dust.dust == pytest.approx(1.0) and dust.booked == 300
+    assert dust.state.ledger_net == 0
+    # a flat short book: nothing books, the overfill flag still set
+    flat = r.book_sell(_short(0.0, 0.32), 5, 0.29)
+    assert flat.booked == 0.0 and flat.overfill is True and flat.refusal is None
+    # the long book is what it was
+    lb = r.book_sell(r.BookState(ledger_net=300, avg_cost=0.32), 100, 0.29)
+    assert lb.realized == pytest.approx(-3.0) and lb.usd == pytest.approx(29.0) and lb.state.ledger_net == 200
+
+
+def test_episode_close_reason_names_the_sign_flip_while_held_and_never_bad_state_on_a_short():
+    held = _short(-300.0, 0.32)
+    assert r.episode_close_reason(held, False, False, None, 0) == "held"
+    assert r.episode_close_reason(held, False, False, None, 0, sign_flipped=True) == "sign_flip"
+    for not_true in (None, False, 1, "yes"):
+        assert r.episode_close_reason(held, False, False, None, 0, sign_flipped=not_true) == "held"
+    # flat: the flip does not shorten the wait -- the same clauses as any flat book
+    flat = _short(0.0, 0.32, gross_buy_usd=204.0)
+    assert r.episode_close_reason(flat, False, False, 10.0, 0, sign_flipped=True) == "not_due"
+    assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0, sign_flipped=True) == "cashed_out"
+    assert r.episode_close_reason(flat, True, False, None, 0) == "cashed_out"
+    assert r.episode_close_reason(_short(0.0, None), True, False, None, 0) == "cancelled"
+    # a long book with a negative ledger is still bad_state
+    assert r.episode_close_reason(r.BookState(ledger_net=-1.0), True, True, None, 0) == "bad_state"
+    assert r.sign_flip(SHORT, 5) and r.sign_flip(INTENT, -5) and r.sign_flip(None, -5)
+    assert not r.sign_flip(SHORT, -5) and not r.sign_flip(INTENT, 5)
+    for no in (0, None, True, 5.0, "5"):
+        assert not r.sign_flip(SHORT, no) and not r.sign_flip(INTENT, no)
+    assert not r.sign_flip("junk", 5)
+
+
+def test_keep_or_replace_compares_the_wire_intent_when_both_are_read():
+    now = 1000.0
+    plan = mi.Plan(r.SELL, 300, 0.32, "reduce toward target")
+    rest = r.OpenOrder(r.SELL, 0.32, 300, 300.0, now - 30, SHORT)
+    assert r.keep_or_replace(rest, plan, now, wire=0.32, intent=SHORT) == "keep"
+    # a resting SELL_LONG exit on a book whose plan now wants a BUY_SHORT add: replace
+    assert r.keep_or_replace(r.OpenOrder(r.SELL, 0.32, 300, 300.0, now - 30, "ORDER_INTENT_SELL_LONG"),
+                             plan, now, wire=0.32, intent=SHORT) == "replace"
+    # either side unread is not compared (every P1 caller)
+    assert r.keep_or_replace(r.OpenOrder(r.SELL, 0.32, 300, 300.0, now - 30), plan, now,
+                             wire=0.32, intent=SHORT) == "keep"
+    assert r.keep_or_replace(rest, plan, now, wire=0.32) == "keep"
+    # OpenOrder.intent is appended last: the positional P1 shape reads None
+    assert r.OpenOrder(r.BUY, 0.30, 300, 300.0, now - 30).intent is None
+
+
+def test_at_or_through_on_the_plan_side_is_the_short_legs_marketability():
+    # a BUY_SHORT rest at contract price 0.32 (the SELL_LONG plan) is
+    # marketable when the bid reaches it -- in the short leg's terms,
+    # short_ask = 1 - bid <= 1 - wire -- the shadow's judge-short-sell
+    for bid in (0.32, 0.33, 0.50):
+        assert r.at_or_through(r.SELL, bid, 0.55, 0.32) is True
+        assert (1 - bid) <= (1 - 0.32)
+    for bid in (0.31, 0.30):
+        assert r.at_or_through(r.SELL, bid, 0.55, 0.32) is False
+        assert (1 - bid) > (1 - 0.32)
+    # a cover (the BUY_LONG plan, SELL_SHORT on the wire) when the ask comes down to it
+    assert r.at_or_through(r.BUY, 0.28, 0.30, 0.30) is True
+    assert r.at_or_through(r.BUY, 0.28, 0.31, 0.30) is False
+
+
+def test_room_scale_divides_by_the_collateral_on_a_short():
+    # $50 of room at a 0.83 contract wire: 60 shares by the wire, 294 by the true 0.17 cost
+    assert r.room_scale(1000, 0.83, 50.0, 1250.0, 1e6, 1250.0) == 60
+    assert r.room_scale(1000, 0.83, 50.0, 1250.0, 1e6, 1250.0, intent=SHORT) == 294
+    assert r.room_scale(1000, 0.83, 50.0, 1250.0, 1e6, 1250.0, intent=INTENT) == 60
+    assert r.room_scale(1000, 0.50, 50.0, 1250.0, 1e6, 1250.0, intent=SHORT) == 100
+    # the wire must still be a cent on the ladder; the quantity still caps
+    assert r.room_scale(1000, 0.005, 50.0, 1250.0, 1e6, 1250.0, intent=SHORT) == 0
+    assert r.room_scale(10, 0.83, 50.0, 1250.0, 1e6, 1250.0, intent=SHORT) == 10
+    assert r.room_scale(1000, 0.83, 0.0, 1250.0, 1e6, 1250.0, intent=SHORT) == 0
+
+
+def test_select_flatten_is_unchanged_on_a_short_book():
+    # token-symmetric and sign-blind: the same truth table, whatever the book
+    assert r.select_flatten(0, 0.0, 300.0, True, 0.0, 300.0, True, True) == "flatten_paired"
+    assert r.select_flatten(0, 0.0, 0.0, None, None, None, True, True) == "flatten_vanished"
+    assert r.select_flatten(0, 0.0, 0.0, True, 0.0, 0.0, True, True, False) == "flatten_vanished"
+    assert r.select_flatten(0, 0.0, 0.0, True, 0.0, 0.0, True, None) == "vanish_unconfirmed"
+    assert r.select_flatten(-300, 0.0, 300.0, True, 0.0, 300.0, True, True) is None
+    assert "intent" not in inspect.signature(r.select_flatten).parameters
+
+
+def test_p2_integrity_counters_are_unchanged_in_count():
+    assert len(r.P2_INTEGRITY_COUNTERS) == 7
+    assert r.P2_INTEGRITY_COUNTERS == ("frozen_unresolved", "wrong_sign_trip", "order_lost", "overfill",
+                                       "reaper_touched_mirror", "book_settle_disagree",
+                                       "shadow_live_disagree")

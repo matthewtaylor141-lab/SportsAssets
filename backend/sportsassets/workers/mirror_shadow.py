@@ -1596,12 +1596,79 @@ async def _write(pool, row: dict, census: dict | None = None, pmus=None) -> tupl
     return verdict
 
 
-async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
+# THE 050 COLUMN'S PROBE (P2 rung S0), shared by both lanes: the live
+# worker runs it once per tick before any statement that names
+# mirror_orders.intent, and tick_once below runs it to read the same
+# EFFECTIVE knob (rules.shorts_effective) for its live-compared target
+# column. The workers never run migrations, so the column may be absent
+# in production for a deploy window, and the two lanes must read one
+# answer through that window or shadow_live_disagree trips by
+# construction on every negative-net book (brief E5).
+INTENT_GUARD_SQL = "SELECT intent FROM mirror_orders LIMIT 0 /* ml-intent-guard */"
+
+
+async def intent_column_present(pool) -> bool:
+    """True when mirror_orders.intent answers, False when the database
+    says the COLUMN does not exist (rules.column_missing: asyncpg's
+    UndefinedColumnError or its text). Any other failure of the probe
+    is re-raised: a timeout or a dropped connection is not a fact about
+    the schema, and a caller must not read it as one."""
+    from ..analytics import mirror_live_rules as _rules
+    try:
+        await pool.fetch(INTENT_GUARD_SQL)
+    except Exception as exc:  # noqa: BLE001 — the column absent is a fact; anything else is not
+        if _rules.column_missing(exc, "intent"):
+            return False
+        raise
+    return True
+
+
+async def tick_once(pool, pmus, now_ts: float | None = None,
+                    allow_short: bool | None = None) -> dict:
     """One pass over the newest MAX_MARKETS_PER_TICK markets of every
     mirrored whale. Returns the census the heartbeat carries; its
-    `status` is what the heartbeat reports."""
+    `status` is what the heartbeat reports.
+
+    `allow_short` (P2 rung S0, brief E5) is the ONE knob the live lane
+    admits shorts by, read here when the caller passes None as the
+    live lane reads it: mirror_live_rules.MIRROR_SHORTS AND the 050
+    column present (intent_column_present, rules.shorts_effective).
+    The live-compared `target` column then flips to the signed target
+    in the same deploy AND the same schema state as the live lane's
+    admission, so `shadow_live_disagree` keeps comparing like with
+    like -- every negative-net book would trip the P2 integrity counter
+    by construction if only one side flipped, and the env on with 050
+    unapplied is exactly that state. A probe that fails for any OTHER
+    reason (a timeout, a dropped connection: a blip on the shadow's
+    side, not a fact about the schema) is `intent_guard_unreadable`,
+    the live lane's own name for it: the tick still runs long-only and
+    is marked degraded under that key, and the live-compared `target`
+    column is written NULL on every row of the tick -- the live lane
+    skips a NULL target (_shadow_check), so a blip here never trips
+    shadow_live_disagree on the live tick that follows against a
+    long-only figure the live lane (whose own probe answered) never
+    computed (P2 rung S0 re-review). The parallel short reading
+    (`detail.target_short`) is written either way, so the report's
+    `.short` block is continuous across the flip."""
     global _backoff_until
     now_ts = time.time() if now_ts is None else now_ts
+    knob_unreadable: str | None = None
+    if allow_short is None:
+        from ..analytics import mirror_live_rules as _rules
+        if not _rules.MIRROR_SHORTS:
+            # the knob is off: shorts_effective is False whatever the
+            # column says, so the probe buys nothing and a blip on it
+            # must not degrade the tick (fold review, finding 3)
+            allow_short = False
+        else:
+            try:
+                present = await intent_column_present(pool)
+            except Exception as exc:  # noqa: BLE001 — an unreadable probe is not a column
+                log.warning("mirror_shadow: intent column probe failed (%s); shorts off this "
+                            "tick, its live-compared target written NULL", type(exc).__name__)
+                present = None
+                knob_unreadable = type(exc).__name__
+            allow_short = _rules.shorts_effective(present)
     # would_orders: plans this tick; marketable_now: of those, the book
     # was already at or through the resting price; resolved /
     # resolved_filled: previous plans judged against this tick's book
@@ -1623,6 +1690,8 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
                              # the venue's own market state, the most common one
                              # read this tick (None: no read carried one)
                              "venue_state": None}
+    if knob_unreadable:
+        stats.update(status="degraded", intent_guard_unreadable=knob_unreadable)
     if now_ts < _backoff_until:
         stats["skipped_backoff"] = True
         attach_exit_census(stats, now_ts)
@@ -1671,10 +1740,18 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
             stats["markets"] += 1
             try:
                 row = await shadow_market(pool, pmus, w, cid, r.get("ratio"), snap,
-                                          positions, snap_age, snap_partial=snap_partial)
+                                          positions, snap_age, allow_short=allow_short,
+                                          snap_partial=snap_partial)
             except Exception as exc:  # noqa: BLE001 — one market, not the tick
                 log.warning("mirror_shadow: %s/%s failed (%s)", w, cid, type(exc).__name__)
                 continue
+            if knob_unreadable:
+                # the knob this tick planned by is a guess, not the live
+                # lane's: the compared column carries no figure
+                row["target"] = None
+                if not isinstance(row.get("detail"), dict):
+                    row["detail"] = {}
+                row["detail"]["target_unreadable"] = knob_unreadable
             if str(row.get("reason") or "").startswith("unmapped"):
                 stats["unmapped"] += 1
                 _unmapped_until[(w, cid)] = now_ts + UNMAPPED_TTL_S

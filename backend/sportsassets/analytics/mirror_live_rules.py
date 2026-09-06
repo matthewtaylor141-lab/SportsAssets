@@ -77,11 +77,81 @@ from .mirror import MARKET_NET_CAP_USD, MIN_MOVE_FRAC, RATIO_MAX, Plan
 from .proof import MIN_PROOF_CLUSTERS, Z95
 from .roster_rules import MIRROR_ANCHOR_CLIP_USD, MIN_N_DEMOTE, MIN_N_PROMOTE
 
-# P1 is long-only. The standing row's raw.preview.intent and every
-# submit_fok call carry this one constant; BUY_SHORT stays behind the
-# executor's short gate until P2 (the spec's "P2's door").
+# P1 is long-only: the standing row's raw.preview.intent and every
+# submit_fok call carried this one constant. P2 (rung S0, owner order
+# 2026-09-05 "we need to make sure we are mirroring shorts") keeps it as
+# the LONG book's intent and the default everywhere, and adds the short
+# book's beside it; a book's intent is fixed at open (mirror_books.intent)
+# and every rule that needs the sign reads it from the book, never from
+# a module constant. BUY / SELL stay the PLAN-side names in LONG space
+# (mi.plan is sign-blind); the wire-side map below turns (book intent,
+# plan side) into the intent the venue is sent.
 ORDER_INTENT = "ORDER_INTENT_BUY_LONG"
+ORDER_INTENT_SHORT = "ORDER_INTENT_BUY_SHORT"
 BUY, SELL = "BUY_LONG", "SELL_LONG"
+# The four WIRE intents, spelled as the SDK's Literal spells them
+# (polymarket_us/types/orders.py OrderIntent): what mirror_orders.intent
+# (migration 050) may carry.
+WIRE_INTENTS = frozenset({"ORDER_INTENT_BUY_LONG", "ORDER_INTENT_SELL_LONG",
+                          "ORDER_INTENT_BUY_SHORT", "ORDER_INTENT_SELL_SHORT"})
+
+
+def env_switch(name: str, default: bool = False) -> bool:
+    """A boolean switch read from the environment, the way the mirror's
+    other on/off dials are read (PMUS_MIRROR_POST_ONLY, PMUS_MIRROR_GTD:
+    the words on/1/true/yes turn it on, off/0/false/no turn it off,
+    anything else -- absent, blank, a typo -- is the default). The
+    environment holds strings, so this is the one place one is parsed."""
+    if not isinstance(name, str):
+        return bool(default)
+    raw = str(os.environ.get(name) or "").strip().lower()
+    if raw in ("on", "1", "true", "yes"):
+        return True
+    if raw in ("off", "0", "false", "no"):
+        return False
+    return bool(default)
+
+
+# THE ONE KNOB OF P2 RUNG S0. Off, every rule in this module and every
+# statement the live worker sends is what P1 shipped: a negative target
+# is `short_side_refused`, a book is long-only, the shadow's target
+# column is long-only. On, the live lane follows the whale's SHORT side
+# (mirror_target admits a negative target as a BUY_SHORT book on the same
+# slug) AND the shadow's tick_once computes its target column with the
+# same allow_short, in the same deploy, so shadow_live_disagree compares
+# like with like (brief E5). The environment may turn it ON in this
+# rung; the DEFAULT flips to True by a code change at rung S5 (the rails
+# rung), never from a shell -- the same discipline as capped_env: a
+# wider door is a code change that wants a review. Read through the
+# module at call time (rules.MIRROR_SHORTS), like every cap.
+MIRROR_SHORTS = env_switch("MIRROR_SHORTS", False)
+
+
+def column_missing(exc: BaseException, column: str) -> bool:
+    """The driver's UndefinedColumnError (by type name, so this module
+    imports no driver), or any driver's text for it -- the one reading
+    under which a column the workers reach production
+    ahead of (mirror_orders.intent, migration 050) is ABSENT. Every
+    other error on the same statement is the statement failing, not
+    the column missing, and a caller that read it as absence would act
+    on a database blip (P2 rung S0 review, the intent guard)."""
+    if type(exc).__name__ == "UndefinedColumnError":
+        return True
+    msg = str(exc)
+    return column in msg and "does not exist" in msg
+
+
+def shorts_effective(column_present: bool | None) -> bool:
+    """THE EFFECTIVE KNOB, the one reading both lanes make: the
+    environment's MIRROR_SHORTS (this module at call time) AND the 050
+    column present this tick. The live lane admits a short by it and
+    the shadow computes its live-compared target column by it, so the
+    two never part while the column is on its way (brief E5). Only the
+    bool True of `column_present` is presence: an unreadable probe is
+    not a column."""
+    return bool(MIRROR_SHORTS) and column_present is True
+
+
 # The venue's own names for a refused order, spelled exactly as the
 # SDK's Literal types spell them (polymarket_us/types/orders.py,
 # OrderState and ExecutionType). Restated here because this module
@@ -229,6 +299,16 @@ MIRROR_NET_CAP_USD = capped_env("MIRROR_NET_CAP_USD", MARKET_NET_CAP_USD,
 # so the worst case is books x net cap (5 x $250 = $1,250).
 MIRROR_MAX_LIVE_BOOKS = int(capped_env("MIRROR_MAX_LIVE_BOOKS", 5))
 MIRROR_MAX_BOOKS_PER_DAY = int(capped_env("MIRROR_MAX_BOOKS_PER_DAY", 5))
+# THE SHORT SIDE'S SHARE CAP (P2 rung S0, S3 expressibility). The most
+# shares a SHORT book may target, whatever his net says: ONE until rung
+# S5 -- the 1-share venue probe S3 runs is expressible only with a door
+# this narrow, and the knob alone would open every admitted short at
+# the full net cap. Read at the two sites that admit a short target
+# (the candidate's open and the open book's tick) and named
+# `short_share_cap` when it bites. capped_env: the environment may
+# only LOWER it (0 refuses every short by that name); the default
+# rises by a code change at rung S5, never from a shell.
+MIRROR_SHORT_MAX_SHARES = int(capped_env("MIRROR_SHORT_MAX_SHARES", 1))
 # Gross BUY dollars per rolling day on top of the sleeve's own caps.
 MIRROR_DAY_USD = capped_env("MIRROR_DAY_USD", 1250.0)
 # Mirror-own loss stop: 24 h realized including partial sales, which the
@@ -328,9 +408,19 @@ P2_INTEGRITY_COUNTERS = ("frozen_unresolved", "wrong_sign_trip", "order_lost", "
 
 def mirror_target(ratio: float | None, net: float | None, mark: float | None,
                   per_fill_usd: float | None,
-                  cap_usd: float = MIRROR_NET_CAP_USD) -> dict[str, Any]:
+                  cap_usd: float = MIRROR_NET_CAP_USD,
+                  allow_short: bool = False) -> dict[str, Any]:
     """Our target in long-token shares for this book, or the reason
     there is no plan.
+
+    `allow_short` (P2 rung S0, default False: byte-identical to P1) is
+    the MIRROR_SHORTS knob as the worker read it. Only the bool True
+    admits: a negative raw target is then a SHORT of the long token,
+    returned SIGNED (negative), capped at $cap on the SHORT leg's price
+    1 - mark by mi.target_shares, and `intent` names the book that
+    holds it, ORDER_INTENT_BUY_SHORT. Anything else keeps the P1 door:
+    target 0, `short_side_refused` -- the reversal path the rung plan
+    keeps (knob off restores it alone).
 
     ratio_eff = shadow ratio x min(1, per_fill_usd / MIRROR_ANCHOR_CLIP_USD):
     the $50 anchor sets the ratio, a smaller per-fill clip scales it
@@ -414,11 +504,85 @@ def mirror_target(ratio: float | None, net: float | None, mark: float | None,
     if ratio_eff <= 0:
         out["refusal"] = "clip_zero"
         return out
-    t = mi.target_shares(ratio_eff, n, m, allow_short=False, cap_usd=cap)
+    t = mi.target_shares(ratio_eff, n, m, allow_short=allow_short is True, cap_usd=cap)
     out.update({"target": int(t["target"]), "raw": t["raw"], "capped": bool(t["capped"])})
     if t["why"] == "short side not admitted":
         out["refusal"] = "short_side_refused"
+    elif out["target"] < 0:
+        out["intent"] = ORDER_INTENT_SHORT
     return out
+
+
+# --------------------------------------------------------- the wire map
+#
+# P2 rung S0: the plan frame and the wire-side map (brief section 3.3).
+# mi.plan stays sign-blind in LONG space -- a short book's ledger is
+# NEGATIVE (long-token shares by our booking, signed), so a plan to hold
+# MORE of a short is a SELL_LONG plan and a plan to cover it is a
+# BUY_LONG plan. The lane maps (book intent, plan side) to what the venue
+# is sent:
+#
+#   book   plan side  meaning                  wire intent  sell  leg
+#   long   BUY_LONG   increase                 BUY_LONG     no    add
+#   long   SELL_LONG  reduce / flatten         SELL_LONG    yes   reduce
+#   short  SELL_LONG  increase (add to short)  BUY_SHORT    no    add
+#   short  BUY_LONG   reduce / flatten         SELL_SHORT   yes   reduce
+#
+# The `sell` flag is what submit_fok is passed beside the book's BUY
+# intent (the adapter maps a sell to the exit intent itself); the wire
+# intent is what mirror_orders.intent records. A short REDUCE is
+# `short_reduce_unproven` before rung S4 -- the venue has never read a
+# resting SELL_SHORT back in a stated denomination -- except the whole
+# book flattened by close_position when we are the slug's sole holder;
+# the worker holds that rule, this map only names the wire.
+
+def is_short(intent: Any) -> bool:
+    """Is this the short book's intent? Only the exact SDK spelling of
+    BUY_SHORT; anything else (None, a bool, SELL_SHORT, a typo) is not
+    a short book -- and never a long one by default either: the callers
+    below refuse an intent they cannot name."""
+    return isinstance(intent, str) and intent == ORDER_INTENT_SHORT
+
+
+def wire_side(intent: Any, side: Any) -> tuple[str, bool, str] | None:
+    """(wire intent, sell flag, leg action 'add' | 'reduce') for a plan
+    side on a book of this intent, per the table above; None when the
+    intent is not one of the two book intents or the side is not one
+    of the two plan sides."""
+    if not isinstance(side, str) or side not in (BUY, SELL):
+        return None
+    if intent is None or intent == ORDER_INTENT:
+        return (ORDER_INTENT, False, "add") if side == BUY else ("ORDER_INTENT_SELL_LONG", True, "reduce")
+    if is_short(intent):
+        return (ORDER_INTENT_SHORT, False, "add") if side == SELL else ("ORDER_INTENT_SELL_SHORT", True, "reduce")
+    return None
+
+
+def leg_action(intent: Any, side: Any) -> str | None:
+    """'add' when this plan side GROWS the leg the book holds, 'reduce'
+    when it shrinks it, None when either cannot be read. The booking,
+    the day cap, the increase refusals and the give-back all key on the
+    LEG, never on the long-space plan side alone."""
+    w = wire_side(intent, side)
+    return None if w is None else w[2]
+
+
+def sign_flip(intent: Any, target: Any) -> bool:
+    """Has his net crossed zero against this book? True when a NONZERO
+    whole target carries the opposite sign to the book's leg: a positive
+    target on a short book, a negative one on a long book (brief B8,
+    owner default Q5 (a)). The worker then flattens the book (target 0)
+    under the name `sign_flip` and opens the opposite side as a NEW
+    episode once this one has closed -- the one-open-per-market index
+    and the flat close decide when. A target that is not an int, or 0,
+    or a book whose intent cannot be read, never flips."""
+    if isinstance(target, bool) or not isinstance(target, int) or target == 0:
+        return False
+    if intent is None or intent == ORDER_INTENT:
+        return target < 0
+    if is_short(intent):
+        return target > 0
+    return False
 
 
 # ------------------------------------------------------------- admission
@@ -678,15 +842,27 @@ def plan_wire(p: Plan | None) -> float | None:
 
 def room_scale(qty: int, wire: float | None, clip_usd: float | None,
                day_room: float | None, total_room: float | None,
-               mirror_day: float | None) -> int:
+               mirror_day: float | None, intent: str | None = None) -> int:
     """The BUY quantity the room allows: min(qty, floor(min(per-order
-    clip, sleeve day room, sleeve total room, mirror day room) / wire)).
-    Under one share is 0, which the worker names `over_room`. Any room,
-    quantity or wire that could not be read as a finite number (a
-    bool, a string, NaN, an infinity) is no room, the wire must be a
-    cent on the ladder (0.01 to 0.99: a sub-cent wire divides a room
-    into an infinity of shares), and a quotient that is not finite is
-    no room: 0, never a raise."""
+    clip, sleeve day room, sleeve total room, mirror day room) / cost
+    per share)). Under one share is 0, which the worker names
+    `over_room`. Any room, quantity or wire that could not be read as a
+    finite number (a bool, a string, NaN, an infinity) is no room, the
+    wire must be a cent on the ladder (0.01 to 0.99: a sub-cent wire
+    divides a room into an infinity of shares), and a quotient that is
+    not finite is no room: 0, never a raise.
+
+    THE COST PER SHARE IS THE WIRE ON A LONG AND ONE MINUS IT ON A
+    SHORT (P2 rung S0, brief D3): a BUY_SHORT's wire is the CONTRACT
+    price the venue is sent (le.wire_limit: "sell at >= 0.78 means pay
+    <= 0.22"), and the collateral it ties up is (1 - wire) a share.
+    Dividing a short's room by the wire under-sized it ~30x against
+    its collateral on a longshot (60 shares for $50 at a 0.83 wire,
+    where the true 0.17 cost buys 294). `intent` is the BOOK's intent;
+    anything but the exact BUY_SHORT spelling is the long formula, so
+    every existing caller is byte-identical. Pure arithmetic: the
+    executor's short model being disarmed is refused upstream by name
+    (`short_model_disarmed`), never inherited here."""
     q = _count(qty)
     if q is None or q < 1:
         return 0
@@ -699,6 +875,8 @@ def room_scale(qty: int, wire: float | None, clip_usd: float | None,
     w = _num(wire)
     if w is None or not (0.01 <= w <= 0.99):
         return 0
+    if is_short(intent):
+        w = round(1.0 - w, 6)
     cash = min(rooms)
     if cash <= 0:
         return 0
@@ -713,11 +891,15 @@ def room_scale(qty: int, wire: float | None, clip_usd: float | None,
 
 @dataclass
 class OpenOrder:
-    side: str                    # BUY_LONG / SELL_LONG
+    side: str                    # BUY_LONG / SELL_LONG (the PLAN side, long space)
     wire: float | None
     qty: int
     leaves: float | None         # qty - filled, by the last order_status read
     placed_at: float | None      # epoch seconds
+    # the WIRE intent the order was sent with (mirror_orders.intent, P2
+    # rung S0). Appended LAST so a positional construction keeps its
+    # meaning; None is "not read" and compares as nothing (doc:491)
+    intent: str | None = None
 
 
 _PLAN_REASON_KEYS = {
@@ -759,8 +941,15 @@ def plan_reason_key(reason: str | None) -> str:
 def keep_or_replace(order: OpenOrder, p: Plan | None, now: float,
                     ttl_s: float = MIRROR_REST_TTL_S,
                     cancel_reason: str | None = None,
-                    wire: float | None | object = _FROM_PLAN) -> str:
+                    wire: float | None | object = _FROM_PLAN,
+                    intent: str | None = None) -> str:
     """What to do with the order already resting on this book.
+
+    `intent` (P2 rung S0, brief B6) is the WIRE intent the plan would
+    be sent with now -- wire_side(book intent, plan side)[0] -- and is
+    compared to the resting order's own (OpenOrder.intent) when BOTH
+    were read: a rest carrying another intent is not this plan's rest,
+    'replace'. Either side None is not compared (every P1 caller).
 
       'keep'      same side, same cent, leaves within a share (or within
                   MIN_MOVE_FRAC of the plan's quantity), younger than
@@ -808,6 +997,9 @@ def keep_or_replace(order: OpenOrder, p: Plan | None, now: float,
     if (not isinstance(p.side, str) or not isinstance(order.side, str)
             or p.side not in (BUY, SELL) or p.side != order.side):
         return "replace"
+    oi = getattr(order, "intent", None)
+    if isinstance(intent, str) and isinstance(oi, str) and intent != oi:
+        return "replace"
     pw = _cent(plan_wire(p) if wire is _FROM_PLAN else wire)
     if pw is None:
         return "no_price"
@@ -833,7 +1025,16 @@ def at_or_through(side: str, bid: float | None, ask: float | None,
     (0.01 to 0.99, a number, not a bool) and so must the quote: a
     missing, unreadable or impossible quote (0.0, -0.0, 1e-12, 1.0,
     1.5, 1e308) is not at anything, so a take never fires on a
-    non-quote."""
+    non-quote.
+
+    ON A SHORT BOOK THE PLAN SIDE IS THE WIRE'S SIDE IN THE WIRE'S OWN
+    SPACE (P2 rung S0, brief B6 / 3.3): a BUY_SHORT rest is the SELL_LONG
+    plan's cent in contract space -- the contract sold at or above it --
+    so it is marketable when the bid is at or over it, which in the
+    short leg's own terms is `short_ask = 1 - bid <= 1 - wire`, the
+    shadow's judge-short-sell rule (mirror_shadow, `/* judge-short-sell
+    */`); a SELL_SHORT (a cover, the BUY_LONG plan) when the ask is at
+    or under it. No conversion, no second rule: `side` is the plan side."""
     w = _num(wire)
     if w is None or not (0.01 <= w <= 0.99):
         return False
@@ -1013,16 +1214,26 @@ def select_flatten(target: int, his_long: float | None, his_other: float | None,
 @dataclass
 class BookState:
     """mirror_books' arithmetic columns. ledger_net is long-token shares
-    BY OUR BOOKING; avg_cost the weighted average of the buys behind
-    it; peak_exposure_usd the STAKE the record grades against (max over
-    life of ledger_net x avg_cost); realized_pnl every sale, partials
-    included, which the global breaker cannot see."""
+    BY OUR BOOKING, SIGNED (P2 rung S0, brief 3.1): positive on a long
+    book, negative on a short one -- the same sign the shadow's
+    ledger_net and the venue's netPosition carry, so venue - ledger
+    stays one signed subtraction. avg_cost the weighted average of the
+    buys behind it, in CONTRACT price on either sign (what the venue
+    returns; le:3212); peak_exposure_usd the STAKE the record grades
+    against (max over life of the LEG x its cost a share: avg on a
+    long, 1 - avg on a short); realized_pnl every sale, partials
+    included, which the global breaker cannot see. `intent` is the
+    book's own (mirror_books.intent), fixed at open: None or BUY_LONG
+    is a long book, BUY_SHORT a short one. Leg space is a VIEW --
+    leg = |ledger_net|, sign = -1 on a short -- produced by _state_nums;
+    everything that clamps a quantity clamps on the leg."""
     ledger_net: float = 0.0
     avg_cost: float | None = None
     gross_buy_usd: float = 0.0
     gross_sell_usd: float = 0.0
     peak_exposure_usd: float = 0.0
     realized_pnl: float = 0.0
+    intent: str | None = None
 
 
 class Booking(NamedTuple):
@@ -1046,14 +1257,19 @@ def _px(px: Any) -> float | None:
 def _state_nums(state: BookState) -> BookState | None:
     """The state's columns as finite numbers (None as 0 for the sums,
     None kept for avg_cost), or None when any column is not a number
-    or the ledger is negative: a long-only book cannot be short, and
-    a NaN ledger is not a ledger. avg_cost that is not a PRICE in
-    (0, 1) -- a long token never cost 5.0 or -0.5 -- reads as unknown
-    (None), which the booking names `avg_cost_unknown` wherever
-    shares are held against it. Something that is not a BookState at
-    all (None, a dict, a number) is no book -- never an EMPTY one
-    (review finding: book_buy(None, 5, 0.5) booked 5)."""
+    or the ledger's sign is not the book's: a long book cannot be
+    short, a short book (intent BUY_SHORT, P2 rung S0, brief B1) cannot
+    be long, and a NaN ledger is not a ledger. avg_cost that is not a
+    PRICE in (0, 1) -- a token never cost 5.0 or -0.5 -- reads as
+    unknown (None), which the booking names `avg_cost_unknown`
+    wherever shares are held against it. Something that is not a
+    BookState at all (None, a dict, a number) is no book -- never an
+    EMPTY one (review finding: book_buy(None, 5, 0.5) booked 5). An
+    intent that is neither None, BUY_LONG nor BUY_SHORT is no book."""
     if not isinstance(state, BookState):
+        return None
+    intent = getattr(state, "intent", None)
+    if intent is not None and intent != ORDER_INTENT and not is_short(intent):
         return None
     vals: dict[str, float] = {}
     for k in ("ledger_net", "gross_buy_usd", "gross_sell_usd", "peak_exposure_usd", "realized_pnl"):
@@ -1062,10 +1278,30 @@ def _state_nums(state: BookState) -> BookState | None:
         if n is None:
             return None
         vals[k] = n
-    if vals["ledger_net"] < 0:
+    if is_short(intent):
+        if vals["ledger_net"] > 0:
+            return None
+    elif vals["ledger_net"] < 0:
         return None
     ac = getattr(state, "avg_cost", None)
-    return BookState(avg_cost=None if ac is None else _px(ac), **vals)
+    return BookState(avg_cost=None if ac is None else _px(ac), intent=intent, **vals)
+
+
+def _leg(st: BookState) -> tuple[float, float]:
+    """(sign, leg) of a _state_nums state: the leg is |ledger_net|, the
+    sign -1 on a short book and +1 on a long one, so ledger = sign x
+    leg. The one place leg space is produced from the signed ledger."""
+    sign = -1.0 if is_short(getattr(st, "intent", None)) else 1.0
+    return sign, abs(st.ledger_net)
+
+
+def _cost_px(px: float, intent: Any) -> float:
+    """The cost of ONE share at contract price `px` for a book of this
+    intent: px on a long, 1 - px on a short (le.cost_per_share, restated
+    as arithmetic because this module imports no executor; the
+    executor's disarm switch is refused upstream by name, never
+    inherited here)."""
+    return round(1.0 - px, 6) if is_short(intent) else px
 
 
 def book_buy(state: BookState, delta_shares: float, px: float | None,
@@ -1127,9 +1363,8 @@ def book_buy(state: BookState, delta_shares: float, px: float | None,
     p = _px(px)
     if p is None:
         return Booking(state, 0.0, 0.0, None, False, "bad_price")
-    if usd is None:
-        cash = d * p
-    else:
+    cash: float | None = None
+    if usd is not None:
         c = _num(usd)
         if c is None or c < 0:
             return Booking(state, 0.0, 0.0, None, False, "bad_usd")
@@ -1137,17 +1372,26 @@ def book_buy(state: BookState, delta_shares: float, px: float | None,
     st = _state_nums(state)
     if st is None:
         return Booking(state, 0.0, 0.0, None, False, "bad_state")
-    net0 = st.ledger_net
-    net1 = net0 + d
-    if net0 > 0:
+    if cash is None:
+        # the identity: the leg's cost a share (the contract price on
+        # a long, one minus it on a short -- P2 rung S0, brief A5)
+        cash = d * _cost_px(p, st.intent)
+    # LEG SPACE (P2 rung S0, brief B1-B2): a buy GROWS the leg the book
+    # holds -- more long-token shares on a long book, more short-leg
+    # shares on a short one, whose ledger goes further NEGATIVE. The
+    # average is the contract price on either sign; the peak is the
+    # leg's stake, leg x its cost a share
+    sign, leg0 = _leg(st)
+    leg1 = leg0 + d
+    if leg0 > 0:
         if st.avg_cost is None:
             return Booking(state, 0.0, 0.0, None, False, "avg_cost_unknown")
-        prior = st.avg_cost * net0
+        prior = st.avg_cost * leg0
     else:
         prior = 0.0
-    avg = round((prior + p * d) / net1, 6)
-    peak = max(st.peak_exposure_usd, round(net1 * avg, 4))
-    new = replace(st, ledger_net=net1, avg_cost=avg,
+    avg = round((prior + p * d) / leg1, 6)
+    peak = max(st.peak_exposure_usd, round(leg1 * _cost_px(avg, st.intent), 4))
+    new = replace(st, ledger_net=sign * leg1, avg_cost=avg,
                   gross_buy_usd=round(st.gross_buy_usd + cash, 4),
                   peak_exposure_usd=peak)
     if _state_nums(new) is None or _px(avg) is None or not math.isfinite(cash):
@@ -1160,7 +1404,10 @@ def book_sell(state: BookState, delta_shares: float, px: float | None) -> Bookin
     and the same purity as book_buy.
 
     booked = min(delta, ledger_net); realized = (px - avg_cost) x
-    booked, the long formula (le.realized_pnl for BUY_LONG). An
+    booked, the long formula (le.realized_pnl for BUY_LONG). On a SHORT
+    book (P2 rung S0) the same in LEG space: the ledger is signed, the
+    leg is its magnitude, realized is (avg_cost - px) x booked and the
+    cash is the leg's proceeds a share (_cost_px). An
     OVERFILL -- the venue sold more than the ledger held, by MORE THAN
     SELL_DUST_SHARES -- books the ledger and flags it: a sale past zero
     on a signed-net venue is a SHORT, and the worker freezes the book
@@ -1192,18 +1439,27 @@ def book_sell(state: BookState, delta_shares: float, px: float | None) -> Bookin
     st = _state_nums(state)
     if st is None:
         return Booking(state, 0.0, 0.0, None, False, "bad_state")
-    net0 = st.ledger_net
-    booked = min(d, net0)
-    over = d - net0
+    # LEG SPACE (P2 rung S0, brief B2, E1): a sale SHRINKS the leg the
+    # book holds toward zero -- from above on a long book, from below
+    # on a short one -- and an overfill is a sale past zero OF THE LEG
+    # (|booked| > |ledger|) by more than SELL_DUST_SHARES; a gap of up
+    # to SELL_DUST_SHARES is dust (U11), on either leg. Realized on a
+    # short is the long formula with the sign flipped, (avg - px) x
+    # booked (le.realized_pnl: "e - x"); the cash is the leg's proceeds
+    # a share
+    sign, leg0 = _leg(st)
+    booked = min(d, leg0)
+    over = d - leg0
     overfill = over > SELL_DUST_SHARES
     dust = round(over, 6) if 0.0 < over <= SELL_DUST_SHARES else 0.0
     if booked < FLAT_TOL_SHARES:
         return Booking(state, 0.0, 0.0, None, overfill, None, dust)
     if st.avg_cost is None:
         return Booking(state, 0.0, 0.0, None, overfill, "avg_cost_unknown", dust)
-    realized = round((p - st.avg_cost) * booked, 4)
-    cash = round(booked * p, 4)
-    new = replace(st, ledger_net=net0 - booked,
+    per = (st.avg_cost - p) if is_short(st.intent) else (p - st.avg_cost)
+    realized = round(per * booked, 4)
+    cash = round(booked * _cost_px(p, st.intent), 4)
+    new = replace(st, ledger_net=sign * (leg0 - booked),
                   gross_sell_usd=round(st.gross_sell_usd + cash, 4),
                   realized_pnl=round(st.realized_pnl + realized, 4))
     if _state_nums(new) is None or not math.isfinite(realized) or not math.isfinite(cash):
@@ -1320,8 +1576,20 @@ def drift_net_rule(his_long: float | None, his_other: float | None,
 def episode_close_reason(state: BookState, market_closed_or_resolved: bool | None,
                          vanished_confirmed: bool | None, flat_for_s: float | None,
                          open_orders: int | None,
-                         flat_close_s: float = MIRROR_FLAT_CLOSE_S) -> str:
+                         flat_close_s: float = MIRROR_FLAT_CLOSE_S,
+                         sign_flipped: bool | None = None) -> str:
     """Whether this episode closes now and how -- or, by name, why not.
+
+    `sign_flipped` (P2 rung S0, brief B8; owner default Q5 (a)): the
+    bool True says his net has crossed zero against this book, so the
+    book is flattening to open the opposite side as a NEW episode. It
+    names the 'held' reading `sign_flip` while shares are still held;
+    once flat the episode closes by the SAME clauses as any other flat
+    book -- the flat wait is not shortened -- so the opposite book
+    waits the flat close. Anything but the bool True is not a flip.
+
+      'sign_flip'        NOT YET: shares still held on a book his net
+                         has crossed against; the flatten is in flight
 
       'cashed_out'       CLOSES: gross_buy_usd > 0, the row closes with
                          its realized sales as pnl (the mirror_exit
@@ -1364,7 +1632,7 @@ def episode_close_reason(state: BookState, market_closed_or_resolved: bool | Non
     if st is None:
         return "bad_state"
     if abs(st.ledger_net) >= FLAT_TOL_SHARES:
-        return "held"
+        return "sign_flip" if sign_flipped is True else "held"
     due = market_closed_or_resolved is True or vanished_confirmed is True
     if not due:
         flat, limit = _num(flat_for_s), _num(flat_close_s)
@@ -1550,8 +1818,11 @@ def p2_verdict(numbers: dict) -> tuple[bool, list[str]]:
 # none of them, and the test suite reads them through this module only
 # to pin that they are the same objects, never restated.
 __all__ = [
-    "ORDER_INTENT", "BUY", "SELL", "ORDER_STATE_REJECTED", "EXECUTION_TYPE_REJECTED",
-    "capped_env", "min_wait_env",
+    "ORDER_INTENT", "ORDER_INTENT_SHORT", "WIRE_INTENTS", "BUY", "SELL",
+    "ORDER_STATE_REJECTED", "EXECUTION_TYPE_REJECTED",
+    "capped_env", "min_wait_env", "env_switch", "MIRROR_SHORTS",
+    "column_missing", "shorts_effective", "MIRROR_SHORT_MAX_SHARES",
+    "is_short", "wire_side", "leg_action", "sign_flip",
     "MIRROR_NET_CAP_FLOOR_USD",
     "MIRROR_NET_CAP_USD", "MIRROR_MAX_LIVE_BOOKS", "MIRROR_MAX_BOOKS_PER_DAY",
     "MIRROR_DAY_USD", "MIRROR_LOSS_STOP_USD", "MIRROR_MAX_ORDER_OPS_PER_TICK",

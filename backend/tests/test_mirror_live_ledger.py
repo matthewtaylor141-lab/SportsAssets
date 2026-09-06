@@ -418,7 +418,12 @@ def test_a_crash_between_the_two_inserts_or_before_the_backfill_writes_nothing()
 
 
 def test_open_refuses_before_touching_the_pool_on_unusable_inputs():
-    cases = [({"intent": "ORDER_INTENT_BUY_SHORT"}, "short_side_refused"),
+    # P2 rung S0: BUY_SHORT is a book intent now (its own tests below);
+    # a positive target on it is the sign refusal, a third spelling
+    # (SELL_SHORT, a typo) stays behind the door by the P1 name
+    cases = [({"intent": "ORDER_INTENT_BUY_SHORT"}, "open_failed:ValueError"),
+             ({"intent": "ORDER_INTENT_SELL_SHORT"}, "short_side_refused"),
+             ({"intent": "BUY_LONG"}, "short_side_refused"),
              ({"his_level": None}, "open_failed:TypeError"),
              ({"his_level": 1.2}, "open_failed:ValueError"),
              ({"his_level": 0.0}, "open_failed:ValueError"),
@@ -676,9 +681,11 @@ def test_sell_pnl_is_the_long_formula_against_the_rows_average_accumulated():
     assert kinds[0].startswith("SELECT fill_price::float8 AS fill_price")
     assert "WHERE id = $1 AND status = 'filled' AND lane = 'mirror'" in kinds[0]
     assert "GREATEST(" in kinds[1]
-    # long-only: the intent handed to realized_pnl is the P1 constant
+    # the intent handed to realized_pnl is the BOOK's (P2 rung S0), and
+    # its default is the P1 constant, so every caller above is long-only
     src = inspect.getsource(le._book_mirror_sell)
-    assert "realized_pnl(entry, px, booked, MIRROR_INTENT)" in src
+    assert "realized_pnl(entry, px, booked, intent)" in src
+    assert inspect.signature(le._book_mirror_sell).parameters["intent"].default == le.MIRROR_INTENT
 
 
 def test_sell_fragments_equal_mirror_exits():
@@ -887,3 +894,83 @@ def test_the_primitives_sit_beside_merge_add_leg_and_touch_no_existing_function(
     assert i_merge < i_open < i_tx
     for name in ("_book_mirror_buy", "_book_mirror_sell", "_close_mirror_episode"):
         assert i_open < src.index(f"async def {name}(") < i_tx
+
+
+# ------------------------------------------------ P2 rung S0: the short book
+#
+# The same primitives on a SHORT book (owner order 2026-09-05, "we need
+# to make sure we are mirroring shorts"): the open admits BUY_SHORT,
+# claims the token we are ON and names the intent where the ledger's
+# readers read it; the buy books the leg as a magnitude with the cash
+# fill_cash names; the sell clamps on the leg and realizes with the
+# short sign; the disarmed model refuses by name. Every long call above
+# is byte-identical (its intent defaults to the P1 constant).
+
+SHORT = "ORDER_INTENT_BUY_SHORT"
+
+
+def _open_short(pool, **over):
+    return _open(pool, **{"intent": SHORT, "target": -30, **over})
+
+
+def test_a_short_book_opens_with_its_intent_on_the_row_and_claims_the_other_token():
+    p = _Ledger()
+    out = _open_short(p)
+    assert out == {"ok": True, "book_id": 41, "standing_row_id": 900, "refusal": None}
+    assert p.books[41]["intent"] == SHORT and p.books[41]["target"] == -30
+    assert p.books[41]["long_asset"] == "tok-long" and p.books[41]["other_asset"] == "tok-other"
+    row = p.rows[900]
+    assert row["asset"] == "tok-other" and row["raw"]["preview"]["intent"] == SHORT
+    assert row["requested_shares"] == 30.0 and row["lane"] == "mirror" and row["status"] == "filled"
+    # the long open is what it was: the long token, BUY_LONG, the signed target as given
+    q = _Ledger()
+    assert _open(q)["ok"] and q.rows[900]["asset"] == "tok-long"
+    assert q.rows[900]["raw"]["preview"]["intent"] == INTENT and q.books[41]["intent"] == INTENT
+
+
+def test_a_short_book_refuses_a_positive_target_a_missing_other_token_and_a_disarmed_model(monkeypatch):
+    for over, refusal in (({"target": 30}, "open_failed:ValueError"),
+                          ({"other_asset": None}, "open_failed:ValueError"),
+                          ({"other_asset": " "}, "open_failed:ValueError")):
+        p = _Ledger()
+        out = _open_short(p, **over)
+        assert out["refusal"] == refusal and out["ok"] is False, over
+        assert p.acquired == 0 and p.sent == [] and p.committed == [], over
+    assert _open_short(_Ledger(), target=0)["ok"]
+    monkeypatch.setenv("LIVE_SHORT_COST_MODEL", "off")
+    assert le.short_model_confirmed() is False
+    p = _Ledger()
+    out = _open_short(p)
+    assert out["refusal"] == "short_model_disarmed" and out["ok"] is False
+    assert p.acquired == 0 and p.sent == []
+    # the long open does not read the model at all
+    assert _open(_Ledger())["ok"]
+
+
+def test_a_short_buy_books_the_leg_and_the_collateral_and_a_short_sell_realizes_avg_minus_px():
+    p = _Ledger()
+    assert _open_short(p)["ok"]
+    usd = le.fill_cash(10, 0.30, SHORT)
+    assert usd == pytest.approx(7.0)
+    row = _run(le._book_mirror_buy(p, 900, "o1", 0, 10, 0.30, usd, 10 * (1 - 0.30), 0.31, True))
+    assert row is not None and p.rows[900]["filled_shares"] == 10.0
+    assert p.rows[900]["fill_price"] == pytest.approx(0.30) and p.rows[900]["filled_usd"] == pytest.approx(7.0)
+    assert p.rows[900]["requested_usd"] == pytest.approx(7.0)
+    # a cover of 4 @ 0.25 against a signed ledger of -10: booked 4, realized (0.30 - 0.25) x 4
+    out = _run(le._book_mirror_sell(p, 900, 4, 0.25, -10.0, intent=SHORT))
+    assert out["booked"] == 4.0 and out["overfill"] is False and out["written"] is True
+    assert out["pnl"] == pytest.approx(le.realized_pnl(0.30, 0.25, 4, SHORT)) == pytest.approx(0.2)
+    assert p.rows[900]["filled_shares"] == 6.0 and p.rows[900]["pnl"] == pytest.approx(0.2)
+    # a cover above the entry loses
+    out2 = _run(le._book_mirror_sell(p, 900, 2, 0.40, -6.0, intent=SHORT))
+    assert out2["pnl"] == pytest.approx(-0.2) and p.rows[900]["pnl"] == pytest.approx(0.0)
+    # the clamp is on the LEG: a cover of 10 onto -4 books 4 and flags the overfill
+    out3 = _run(le._book_mirror_sell(p, 900, 10, 0.25, -4.0, intent=SHORT))
+    assert out3["booked"] == 4.0 and out3["overfill"] is True and p.rows[900]["filled_shares"] == 0.0
+    _, a = [(s, a) for k, s, a in p.sent if "GREATEST(filled_shares" in s][-1]
+    assert a[1] == 4.0
+    # the same statement, unchanged: the belt against a negative row stands
+    assert "GREATEST(filled_shares - $2::float8, 0)" in le._MIRROR_SELL_SQL
+    # a long sale handed a negative ledger still books nothing (never a short by accident)
+    q = _booked()
+    assert _run(le._book_mirror_sell(q, 900, 5, 0.35, -20.0))["refusal"] == "nothing_to_book"

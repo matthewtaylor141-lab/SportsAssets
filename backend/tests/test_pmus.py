@@ -323,3 +323,59 @@ def test_submit_ioc_partial_fill(monkeypatch):
     assert r["filled_shares"] == 37.0
     assert r["fill_price"] == pytest.approx(0.53)
     assert orders.created[0]["tif"] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+
+
+# ── SH1: the preview bound in COLLATERAL space (owner order 2026-09-05,
+# "we need to make sure we are mirroring shorts") ────────────────────
+
+def _short_stub(monkeypatch, venue_cost, create_resp=None):
+    orders = _StubOrders(
+        preview_order={"cashOrderQty": {"value": f"{venue_cost:.2f}", "currency": "USD"}},
+        create_resp=create_resp or {"id": "ord-s", "executions": []},
+    )
+    monkeypatch.setattr(pmus, "_get_client", lambda: type("C", (), {"orders": orders,
+                                                    "markets": _SideLookupStub()})())
+    return orders
+
+
+@pytest.mark.parametrize("wire,qty", [(0.78, 20), (0.89, 1086), (0.65, 675), (0.52, 100),
+                                      (0.50, 40), (0.28, 20), (0.11, 50), (0.05, 10)])
+def test_expected_cost_is_collateral_on_a_short(monkeypatch, wire, qty):
+    """A BUY_SHORT at contract price `wire` ties up (1 - wire) x qty; a
+    venue preview stating exactly that is agreement, from a longshot's
+    short (0.05: collateral 0.95 a share) to a favourite's (0.89: 0.11)."""
+    orders = _short_stub(monkeypatch, (1.0 - wire) * qty)
+    r = pmus.submit_fok("m", wire, qty, intent="ORDER_INTENT_BUY_SHORT")
+    assert r["status"] != "preview_mismatch", r
+    assert orders.created and orders.created[0]["intent"] == "ORDER_INTENT_BUY_SHORT"
+    # the same venue figure held to the LONG formula would have refused
+    # every short of a favourite and passed every short of a longshot by
+    # (1 - wire) / wire: the void-and-inverted guard SH1 replaces
+    long_expected = wire * qty
+    assert ((1.0 - wire) * qty > long_expected * pmus.PREVIEW_COST_TOLERANCE) == (wire < 0.495)
+
+
+def test_a_correctly_priced_short_of_a_favourite_is_not_a_preview_mismatch(monkeypatch):
+    # his 0.72 leg: the contract sells at 0.28, the collateral is 0.72 x 20 = 14.40
+    orders = _short_stub(monkeypatch, 14.40)
+    r = pmus.submit_fok("m", 0.28, 20, intent="ORDER_INTENT_BUY_SHORT")
+    assert r["status"] != "preview_mismatch" and orders.created
+
+
+def test_a_short_whose_venue_cost_exceeds_the_collateral_still_refuses(monkeypatch):
+    # collateral 0.22 x 20 = 4.40; the venue says 4.60 (4.5% over): refused, nothing placed
+    orders = _short_stub(monkeypatch, 4.60)
+    r = pmus.submit_fok("m", 0.78, 20, intent="ORDER_INTENT_BUY_SHORT")
+    assert r["ok"] is False and r["status"] == "preview_mismatch"
+    assert r["raw"]["expected_cost"] == pytest.approx(4.40) and orders.created == []
+
+
+def test_the_long_expectation_is_byte_identical(monkeypatch):
+    """Every existing long caller: the same formula, the same float."""
+    orders = _short_stub(monkeypatch, 17.00)
+    r = pmus.submit_fok("m", 0.50, 20)                    # our cost: $10, as before
+    assert r["status"] == "preview_mismatch" and r["raw"]["expected_cost"] == 0.50 * 20
+    assert orders.created == []
+    orders = _short_stub(monkeypatch, 10.00)
+    assert pmus.submit_fok("m", 0.50, 20, intent="ORDER_INTENT_BUY_LONG")["status"] != "preview_mismatch"
+    assert orders.created[0]["intent"] == "ORDER_INTENT_BUY_LONG"

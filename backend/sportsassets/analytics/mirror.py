@@ -311,9 +311,16 @@ def plan(target: int, ledger: float, venue: float | None, book: Book,
     flatten = int(target) == 0
     if abs(delta) < 1:
         return Plan(None, 0, None, "under one share")
-    if mark is not None and abs(delta) * float(mark) < MIN_MOVE_USD and not flatten:
-        return Plan(None, 0, None, "under the dollar dead band",
-                    detail={"delta": delta})
+    # THE BAND IS PRICED AT THE LEG'S OWN PRICE (P2 rung S0, brief C6):
+    # a move on a SHORT ledger commits collateral at 1 - mark a share,
+    # so 12 shares of a 0.70 leg ($8.40) are not "under $5" because the
+    # long token trades at 0.30, and 40 shares of a 0.10 leg ($4) are,
+    # whatever 40 x 0.90 says. A long book's band is unchanged
+    if mark is not None and not flatten:
+        leg_px = float(mark) if (int(target) >= 0 and ledger >= 0) else 1.0 - float(mark)
+        if abs(delta) * leg_px < MIN_MOVE_USD:
+            return Plan(None, 0, None, "under the dollar dead band",
+                        detail={"delta": delta})
     if target != 0 and abs(delta) < MIN_MOVE_FRAC * abs(int(target)) and not flatten:
         return Plan(None, 0, None, "inside hysteresis", detail={"delta": delta})
     # THE BOOK SIDE WE JOIN IS REQUIRED (review round one): a buy rests
@@ -330,7 +337,11 @@ def plan(target: int, ledger: float, venue: float | None, book: Book,
         cands = [p for p in (his_last_px, book.bid) if p is not None and 0.0 < p < 1.0]
         px = round(min(cands), 4)
         wf = (book.ask is not None and book.ask <= px)
-        return Plan("BUY_LONG", delta, px, "increase toward target", wf,
+        # a BUY that takes a SHORT ledger to zero is the flatten of that
+        # leg (P2 rung S0): named as the SELL side names its own, so the
+        # live lane's flatten rules read one word on either sign. A long
+        # book never plans a BUY toward zero, so its reasons are unchanged
+        return Plan("BUY_LONG", delta, px, "flatten" if flatten else "increase toward target", wf,
                     {"delta": delta})
     # decrease: sell the long leg at his equivalent price or better
     if book.ask is None or not (0.0 < book.ask < 1.0):

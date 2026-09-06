@@ -543,3 +543,103 @@ def test_049_parses_as_postgres_sql_and_the_tree_agrees_with_the_text():
           if c.contype == ConstrType.CONSTR_FOREIGN][0]
     assert fk.pktable.relname == "trades"
     assert [a.sval for a in fk.pk_attrs] == ["id"]
+
+
+# ------------------------------------------------- 050 (P2 rung S0, shorts)
+#
+# 050 is the number the program register reserves for Phase 5 (shorts).
+# Decision Q2 (c): mirror_orders.side KEEPS the plan spelling and its
+# CHECK is not widened; ONE column, `intent`, carries the wire intent
+# with a DEFAULT so every existing row -- and every row a worker writes
+# before the migration lands -- reads as the long leg it was. The
+# workers never run migrations: mirror_live probes the column per tick
+# and degrades to the 047 statements while it is absent.
+
+SQL_050 = MIG_DIR.joinpath("050_mirror_shorts.sql")
+INTENTS_050 = ["ORDER_INTENT_BUY_LONG", "ORDER_INTENT_SELL_LONG",
+               "ORDER_INTENT_BUY_SHORT", "ORDER_INTENT_SELL_SHORT"]
+
+
+def _sql_050() -> str:
+    return SQL_050.read_text()
+
+
+def test_050_exists_and_sorts_directly_after_049():
+    assert SQL_050.exists()
+    files = [p.name for p in sorted(MIG_DIR.glob("*.sql"))]
+    i = files.index("049_mirror_fidelity.sql")
+    assert files[i + 1] == "050_mirror_shorts.sql", files[i:i + 3]
+    assert sum(1 for f in files if f.startswith("050_")) == 1
+    # 047 and 049 keep their pins: 050 sits after both
+    assert files.index("047_mirror_live.sql") < i
+
+
+def test_050_header_is_in_the_house_style():
+    head = _sql_050().splitlines()[0]
+    assert head.startswith("-- 050: MIRROR SHORTS, PHASE P2 (owner order 2026-09-05")
+
+
+def test_050_is_one_additive_alter_that_admits_the_four_wire_intents_and_rejects_a_fifth():
+    stmts = _statements(_sql_050())
+    assert len(stmts) == 1, stmts
+    s = stmts[0]
+    assert s.startswith("ALTER TABLE mirror_orders ADD COLUMN IF NOT EXISTS intent TEXT NOT NULL "
+                        "DEFAULT 'ORDER_INTENT_BUY_LONG' CHECK (intent IN (")
+    assert _check_list("intent " + s.split("intent TEXT", 1)[1]) == INTENTS_050
+    for fifth in ("BUY_SHORT", "ORDER_INTENT_BUY", "ORDER_INTENT_SHORT_SELL", ""):
+        assert fifth not in INTENTS_050
+    up = s.upper()
+    assert "DROP " not in up and "CREATE " not in up and "UPDATE " not in up
+    # the plan-side CHECK is NOT widened: 047's two spellings stand, and
+    # 050 never names the side column, the state lists or an index
+    assert _check_list(_table_columns(_sql(), "mirror_orders")["side"]) == ["BUY_LONG", "SELL_LONG"]
+    assert "side" not in s and "CHECK (side" not in _sql_050()
+    for name in ("mirror_orders_one_open_per_book", "mirror_orders_order_id", "mirror_orders_live_idx",
+                 "mirror_books", "live_orders"):
+        assert name not in s, name
+    # existing rows are unaffected: NOT NULL rides on a DEFAULT, so the
+    # ALTER back-fills every 047 row with the long intent
+    assert "NOT NULL DEFAULT 'ORDER_INTENT_BUY_LONG'" in s
+
+
+def test_050_leaves_047_and_049_exactly_as_pinned():
+    assert len(_statements(_sql())) == 11
+    assert all(s.startswith("CREATE ") for s in _statements(_sql()))
+    assert "DEFAULT 'ORDER_INTENT_BUY_LONG'" in _table_columns(_sql(), "mirror_books")["intent"]
+    assert "050" not in _sql() and "050" not in _sql_049()
+
+
+def test_050_parses_as_postgres_sql_and_the_tree_agrees_with_the_text():
+    pglast = pytest.importorskip("pglast")
+    from pglast.enums import AlterTableType, ConstrType
+
+    stmts = pglast.parse_sql(_sql_050())
+    assert len(stmts) == 1 and type(stmts[0].stmt).__name__ == "AlterTableStmt"
+    n = stmts[0].stmt
+    assert n.relation.relname == "mirror_orders" and len(n.cmds) == 1
+    cmd = n.cmds[0]
+    assert cmd.subtype == AlterTableType.AT_AddColumn and cmd.missing_ok is True
+    col = cmd.def_
+    assert col.colname == "intent" and [x.sval for x in col.typeName.names][-1] == "text"
+    types = {c.contype for c in (col.constraints or [])}
+    assert ConstrType.CONSTR_NOTNULL in types and ConstrType.CONSTR_DEFAULT in types
+    assert ConstrType.CONSTR_CHECK in types and ConstrType.CONSTR_FOREIGN not in types
+
+
+def test_the_worker_degrades_by_name_when_050_is_unapplied():
+    """The orig_shares pattern (live_executor._position_row): a column the
+    worker reaches production ahead of is read through a guard, never a
+    bare reference; absent, the 047 statements go out and the knob is
+    off by name."""
+    ml = pytest.importorskip("sportsassets.workers.mirror_live")
+    ms = pytest.importorskip("sportsassets.workers.mirror_shadow")
+    src = pathlib.Path(ml.__file__).read_text()
+    # the probe is ONE statement for both lanes (the shadow's), and its
+    # failure for any reason but the column's absence refuses the tick
+    assert ml._SQL_INTENT_GUARD == ms.INTENT_GUARD_SQL and "ml-intent-guard" in ms.INTENT_GUARD_SQL
+    assert "short_column_absent" in src and "intent_guard_unreadable" in src
+    assert "rules.column_missing(exc" in src
+    assert "_SQL_ORDERS_OPEN_047" in src and "_SQL_ORDER_INSERT_047" in src and "_SQL_MIRROR_DAY_047" in src
+    assert "intent" not in ml._SQL_ORDERS_OPEN_047 and "intent" in ml._SQL_ORDERS_OPEN
+    assert "intent" not in ml._SQL_ORDER_INSERT_047 and "$19" in ml._SQL_ORDER_INSERT
+    assert "intent" not in ml._SQL_MIRROR_DAY_047 and "intent" in ml._SQL_MIRROR_DAY
